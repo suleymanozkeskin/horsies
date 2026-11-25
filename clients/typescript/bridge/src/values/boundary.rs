@@ -5,6 +5,14 @@
 //!   napi-rs maps `i64` to a number, which loses digits.
 //! - An instant crosses as a `BigInt` of epoch microseconds, the stored
 //!   precision.
+//! - A 32-bit integer argument crosses as a JavaScript number (`f64`) and is
+//!   checked here ([`u32_of_number`]). A `u32` argument of napi-rs would cut
+//!   a fraction (3.9 gives 3), wrap a value out of range (2^32 + 7 gives 7)
+//!   and read `NaN` as 0, with no error.
+//! - Bytes cross as lower-case hexadecimal text ([`bytes_of_hex`]): a
+//!   `Uint8Array` points into JavaScript memory, which only the JavaScript
+//!   thread may read, and an operation can move its argument to a core
+//!   thread.
 //! - A UUID crosses as text in lower-case hyphenated form.
 //! - Text crosses as a string. napi-rs replaces a lone surrogate with U+FFFD
 //!   and gives no error, so the package checks `isWellFormed()` before each
@@ -31,6 +39,12 @@ const INSTANT_RULE: &str =
 /// The rule of a UUID text.
 const UUID_RULE: &str = "a UUID in lower-case hyphenated form, for example \
                          01890a5d-ac96-774b-bcce-b302099a8057";
+
+/// The rule of a number that must hold a `u32`.
+const U32_RULE: &str = "a whole number from 0 to 4294967295";
+
+/// The rule of bytes as text.
+const HEX_RULE: &str = "lower-case hexadecimal text of whole bytes, for example 0af7";
 
 /// A value that the package passed breaks a boundary rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +90,42 @@ pub fn i64_of_bigint(subject: &str, value: &BigInt) -> Result<i64, BoundaryRefus
     match (lossless, i64::try_from(read)) {
         (true, Ok(narrowed)) => Ok(narrowed),
         (true, Err(_)) | (false, _) => Err(BoundaryRefusal::new(subject, I64_RULE)),
+    }
+}
+
+/// The `u32` that the number `value` holds, or the refusal of `subject`: a
+/// fraction, a value out of range, `NaN` and an infinity are refused. Pure.
+pub fn u32_of_number(subject: &str, value: f64) -> Result<u32, BoundaryRefusal> {
+    let whole = value.is_finite() && value.fract() == 0.0;
+    match (whole, value >= 0.0 && value <= f64::from(u32::MAX)) {
+        // The value is whole and in range, so the conversion is exact.
+        (true, true) => Ok(value as u32),
+        (true, false) | (false, _) => Err(BoundaryRefusal::new(subject, U32_RULE)),
+    }
+}
+
+/// The bytes of lower-case hexadecimal text, or the refusal of `subject`.
+/// Pure.
+pub fn bytes_of_hex(subject: &str, text: &str) -> Result<Vec<u8>, BoundaryRefusal> {
+    let digits = text.as_bytes();
+    if digits.len() % 2 != 0 {
+        return Err(BoundaryRefusal::new(subject, HEX_RULE));
+    }
+    digits
+        .chunks_exact(2)
+        .map(|pair| match (hex_digit(pair[0]), hex_digit(pair[1])) {
+            (Some(high), Some(low)) => Ok(high * 16 + low),
+            (None, _) | (_, None) => Err(BoundaryRefusal::new(subject, HEX_RULE)),
+        })
+        .collect()
+}
+
+/// The value of one lower-case hexadecimal digit. Pure.
+fn hex_digit(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        _other => None,
     }
 }
 
@@ -182,6 +232,47 @@ mod tests {
             instant_of_epoch_micros("sentAt", &bigint_of_i64(i64::MAX)),
             Err(BoundaryRefusal::new("sentAt", INSTANT_RULE))
         );
+    }
+
+    #[test]
+    fn a_whole_number_in_range_is_a_u32() {
+        for (number, expected) in [(0.0, 0_u32), (7.0, 7), (4_294_967_295.0, u32::MAX)] {
+            assert_eq!(u32_of_number("days", number), Ok(expected), "{number}");
+        }
+    }
+
+    #[test]
+    fn a_number_that_napi_would_cut_or_wrap_is_refused_as_a_u32() {
+        for refused in [3.9, -1.0, 4_294_967_303.0, f64::NAN, f64::INFINITY, -0.5] {
+            assert_eq!(
+                u32_of_number("days", refused),
+                Err(BoundaryRefusal::new("days", U32_RULE)),
+                "{refused}"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_case_hexadecimal_text_is_read_as_bytes() {
+        assert_eq!(
+            bytes_of_hex("traceIdHex", "0af7651916cd43dd8448eb211c80319c"),
+            Ok(vec![
+                0x0a, 0xf7, 0x65, 0x19, 0x16, 0xcd, 0x43, 0xdd, 0x84, 0x48, 0xeb, 0x21, 0x1c, 0x80,
+                0x31, 0x9c
+            ])
+        );
+        assert_eq!(bytes_of_hex("traceIdHex", ""), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn hexadecimal_text_in_another_form_is_refused() {
+        for refused in ["0AF7", "0af", "0g", "0a f7"] {
+            assert_eq!(
+                bytes_of_hex("traceIdHex", refused),
+                Err(BoundaryRefusal::new("traceIdHex", HEX_RULE)),
+                "{refused}"
+            );
+        }
     }
 
     #[test]

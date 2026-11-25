@@ -30,8 +30,16 @@ impl<T: ToNapiValue> ToNapiValue for Outcome<T> {
     /// `{ kind: "done", record }` or `{ kind: "failed", error }`.
     unsafe fn to_napi_value(env: sys::napi_env, outcome: Self) -> napi::Result<sys::napi_value> {
         match outcome {
-            Self::Done(record) => unsafe { tagged_object(env, "done", "record", record) },
-            Self::Failed(error) => unsafe { tagged_object(env, "failed", "error", error) },
+            Self::Done(record) => {
+                // SAFETY: `env` is the live environment of the JavaScript thread
+                // that calls `to_napi_value`, as `tagged_object` requires.
+                unsafe { tagged_object(env, "done", "record", record) }
+            }
+            Self::Failed(error) => {
+                // SAFETY: `env` is the live environment of the JavaScript thread
+                // that calls `to_napi_value`, as `tagged_object` requires.
+                unsafe { tagged_object(env, "failed", "error", error) }
+            }
         }
     }
 }
@@ -48,10 +56,10 @@ pub unsafe fn tagged_object<V: ToNapiValue>(
     value: V,
 ) -> napi::Result<sys::napi_value> {
     let mut raw = std::ptr::null_mut();
-    check_status!(
-        unsafe { sys::napi_create_object(env, &mut raw) },
-        "creating the object of an outcome failed"
-    )?;
+    // SAFETY: `env` is the environment of the calling JavaScript thread (the
+    // contract of this function), and `raw` is a valid place for the result.
+    let created = unsafe { sys::napi_create_object(env, &mut raw) };
+    check_status!(created, "creating the object of an outcome failed")?;
     let mut object = Object::from_raw(env, raw);
     object.set("kind", kind)?;
     object.set(field, value)?;

@@ -37,12 +37,17 @@ export interface RawRecordField {
   readonly value: RawRecordValue;
 }
 
-/** The value of one record field. An optional field with no value is `absent`. */
+/**
+ * The value of one record field. An optional field with no value is `absent`. The retention class
+ * key has its own value `retainForever`: its default is the 30-day class, so `absent` would read as
+ * the default.
+ */
 export type RawRecordValue =
   | { readonly kind: "text"; readonly text: string }
   | { readonly kind: "integer"; readonly value: bigint }
   | { readonly kind: "instant"; readonly epochMicros: bigint }
-  | { readonly kind: "absent" };
+  | { readonly kind: "absent" }
+  | { readonly kind: "retainForever" };
 
 /** The exception of an `exception` slot. */
 export type ExceptionRecord =
@@ -79,12 +84,13 @@ export type CauseRecord =
 
 /**
  * The trace argument of a send, a workflow start or a rerun: no carrier, or the map that the
- * propagator injected into and the 16-byte trace id of the propagated span.
+ * propagator injected into and the trace id of the propagated span as lower-case hexadecimal text
+ * (32 characters for a valid id).
  */
 export type TraceArgument =
   | { readonly kind: "noCarrier" }
   | {
       readonly kind: "carrier";
       readonly carrier: Readonly<Record<string, string>>;
-      readonly traceId: Uint8Array;
+      readonly traceIdHex: string;
     };

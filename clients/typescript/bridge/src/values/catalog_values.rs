@@ -84,7 +84,9 @@ pub struct RawRecordField {
 }
 
 /// The value of one record field. An optional field with no value is
-/// `absent`.
+/// `absent`. The retention class key has its own value for "retain
+/// forever": in that field the core's `None` means forever, and the field's
+/// default is the 30-day class, so `absent` would read as the default.
 #[napi(discriminant = "kind", discriminant_case = "camelCase")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RawRecordValue {
@@ -99,6 +101,8 @@ pub enum RawRecordValue {
         epoch_micros: BigInt,
     },
     Absent,
+    /// The retention class key `None`: the task is kept forever.
+    RetainForever,
 }
 
 /// The exception of an `exception` slot.
@@ -214,9 +218,10 @@ fn record_value(value: RecordValue<'_>) -> RawRecordValue {
                 epoch_micros: epoch_micros_of(instant),
             })
         }
-        RecordValue::OptionalRetentionClassKey(key) => {
-            key.map_or(RawRecordValue::Absent, |text| RawRecordValue::Text { text })
-        }
+        RecordValue::OptionalRetentionClassKey(key) => key
+            .map_or(RawRecordValue::RetainForever, |text| RawRecordValue::Text {
+                text,
+            }),
     }
 }
 
@@ -349,7 +354,15 @@ mod tests {
         );
         assert_eq!(
             record_value(RecordValue::OptionalRetentionClassKey(None)),
-            RawRecordValue::Absent
+            RawRecordValue::RetainForever
+        );
+        assert_eq!(
+            record_value(RecordValue::OptionalRetentionClassKey(Some(
+                "audit-90".to_owned()
+            ))),
+            RawRecordValue::Text {
+                text: "audit-90".to_owned()
+            }
         );
         let instant = Utc
             .with_ymd_and_hms(2026, 11, 18, 12, 0, 0)

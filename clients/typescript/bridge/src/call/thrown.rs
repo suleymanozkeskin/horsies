@@ -95,8 +95,16 @@ impl<T: ToNapiValue> ToNapiValue for Envelope<T> {
     /// `{ kind: "value", value }` or `{ kind: "thrown", thrown }`.
     unsafe fn to_napi_value(env: sys::napi_env, envelope: Self) -> napi::Result<sys::napi_value> {
         match envelope {
-            Self::Value(value) => unsafe { tagged_object(env, "value", "value", value) },
-            Self::Thrown(thrown) => unsafe { tagged_object(env, "thrown", "thrown", thrown) },
+            Self::Value(value) => {
+                // SAFETY: `env` is the live environment of the JavaScript thread
+                // that calls `to_napi_value`, as `tagged_object` requires.
+                unsafe { tagged_object(env, "value", "value", value) }
+            }
+            Self::Thrown(thrown) => {
+                // SAFETY: `env` is the live environment of the JavaScript thread
+                // that calls `to_napi_value`, as `tagged_object` requires.
+                unsafe { tagged_object(env, "thrown", "thrown", thrown) }
+            }
         }
     }
 }

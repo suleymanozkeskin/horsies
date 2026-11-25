@@ -7,9 +7,13 @@
 //!   never loads it.
 //! - Every operation runs on the core's process runtime.
 //! - Each area is one folder with one owner. This file holds one `mod` line
-//!   per area and the musl allocator, and no other item; an area adds its own
-//!   submodules in its `mod.rs`.
+//!   per area, the musl allocator, the link line of the `napi` crate, and the
+//!   crate-level lint attributes; an area adds its own submodules in its
+//!   `mod.rs`.
+//! - Every `unsafe` block states why it is sound in a `// SAFETY:` note; the
+//!   lint `clippy::undocumented_unsafe_blocks` refuses one without it.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
 // napi-derive registers an export only outside `cfg(test)`. In a test build,
 // an export that no Rust test calls has no use; the library build checks
 // dead code with the registrations in place.

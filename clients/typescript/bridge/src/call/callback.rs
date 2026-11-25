@@ -233,10 +233,10 @@ fn read_answer<Answer: FromNapiValue>(
     env: sys::napi_env,
     value: sys::napi_value,
 ) -> Result<Answer, CallbackFailure> {
-    // SAFETY: `env` and `value` come from the settle call that runs now, on
-    // the JavaScript thread of `env`.
-    let read = std::panic::catch_unwind(AssertUnwindSafe(|| unsafe {
-        Answer::from_napi_value(env, value)
+    let read = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: `env` and `value` come from the settle call that runs now,
+        // on the JavaScript thread of `env`.
+        unsafe { Answer::from_napi_value(env, value) }
     }));
     match read {
         Ok(Ok(answer)) => Ok(answer),
