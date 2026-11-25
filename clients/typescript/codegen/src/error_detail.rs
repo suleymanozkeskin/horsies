@@ -305,6 +305,24 @@ mod tests {
     use super::*;
     use crate::ts_text::GENERATED_HEADER;
 
+    /// A new client class of the core fails this match: list it in
+    /// `CLIENT_EXCEPTION_CLASSES` and add its arm here.
+    #[test]
+    fn the_client_class_list_holds_every_client_class() {
+        let every_class = [
+            ClientExceptionClass::ValueError,
+            ClientExceptionClass::SerializationError,
+        ];
+        for class in every_class {
+            match class {
+                ClientExceptionClass::ValueError | ClientExceptionClass::SerializationError => {
+                    assert!(CLIENT_EXCEPTION_CLASSES.contains(&class), "{class:?}");
+                }
+            }
+        }
+        assert_eq!(CLIENT_EXCEPTION_CLASSES.len(), every_class.len());
+    }
+
     const PROBE_ERROR: ExceptionClass = ExceptionClass {
         python_module: "probe_errors",
         python_class: "ProbeReadError",
