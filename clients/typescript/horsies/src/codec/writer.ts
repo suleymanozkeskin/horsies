@@ -2,7 +2,8 @@
 // calls `JSON.stringify` for one string at a time only.
 //
 // Rules:
-// - Object members are written in declaration order, records in the value's own key order (`Object.keys`).
+// - Object members are written in the order of the kind's member list, never in the value's key order; records in
+//   the value's own key order (`Object.keys`).
 // - A key that the value leaves out is left out of the text; `null` is written only for a nullable kind; a key whose
 //   value is `undefined` is refused. A default is never written by the sender.
 // - An undeclared key, a key that only the engine writes, and a value deeper than the core's bound are refused.
