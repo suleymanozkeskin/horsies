@@ -13,6 +13,8 @@ import { closeSync, openSync, readSync } from "node:fs";
 import { createRequire } from "node:module";
 import { isMainThread, threadId } from "node:worker_threads";
 
+import { impossibleValueDefect } from "./call/impossible-value.ts";
+
 /** The environment variable that names an addon file to load in place of the platform package. */
 export const ADDON_PATH_VARIABLE = "HORSIES_NATIVE_ADDON_PATH";
 
@@ -289,6 +291,7 @@ function describeThrown(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
 
+/** Throw the defect of an impossible value. The loader has no addon to report it to, so it throws. */
 function unreachable(value: never): never {
-  throw new Error(`unreachable value: ${JSON.stringify(value)}`);
+  throw impossibleValueDefect(value);
 }

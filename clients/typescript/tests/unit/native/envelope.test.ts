@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { envelopeValue, nativeValue, nativeValueAsync, thrownError } from "../../../horsies/src/native/call/envelope.ts";
+import { impossibleValueDefect } from "../../../horsies/src/native/call/impossible-value.ts";
 import { unreachable } from "../../../horsies/src/native/call/never.ts";
 import type { NativeThrown } from "../../../horsies/src/native/call/envelope.ts";
 import { CoreError } from "../../../horsies/src/thrown-errors.ts";
@@ -196,5 +197,18 @@ describe("unreachable", () => {
       subject: "exhaustive switch",
       rule: 'a value outside its declared type reached it: {"kind":"unknown kind"}',
     });
+  });
+
+  test("a value with no JSON is named by its text and the JSON failure, with no throw", () => {
+    const cyclic: { self?: object } = {};
+
+    cyclic.self = cyclic;
+
+    // SAFETY: the test passes a value that the types make impossible, as an addon of another
+    // build could.
+    const defect = impossibleValueDefect(cyclic as never);
+
+    assert.equal(defect.name, "ClientDefect");
+    assert.match(defect.rule, /^a value outside its declared type reached it: .+ \(no JSON: .+\)$/u);
   });
 });
