@@ -114,7 +114,11 @@ pub fn derive_error_class_values(item: TokenStream) -> TokenStream {
 /// A struct of named fields is a frozen dataclass; an enum with a serde
 /// `tag` is one dataclass per variant and a union alias; an enum of unit
 /// variants is a `Literal` alias. Each field type implements
-/// `horsies_core::manifest_schema::ManifestValue`.
+/// `horsies_core::manifest_schema::ManifestValue`, or the field names its
+/// integer bound with `#[manifest_schema(int_bound = <IntBound constant>)]`.
+/// A generic type lists its uses with `#[manifest_schema(uses(A, B))]` and
+/// is recorded once per use. See the `manifest_schema` module for the serde
+/// attributes that the derive reads.
 ///
 /// ```ignore
 /// /// Where the session pool connects.
@@ -128,7 +132,7 @@ pub fn derive_error_class_values(item: TokenStream) -> TokenStream {
 ///
 /// Emits `impl horsies_core::manifest_schema::ManifestValue` and
 /// `impl horsies_core::manifest_schema::ManifestItem` for the type.
-#[proc_macro_derive(ManifestSchema)]
+#[proc_macro_derive(ManifestSchema, attributes(manifest_schema))]
 pub fn derive_manifest_schema(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
     match manifest_schema::derive_manifest_schema(input) {

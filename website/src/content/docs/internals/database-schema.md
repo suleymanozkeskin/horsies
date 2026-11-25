@@ -38,16 +38,23 @@ enqueue, result wait, task info read, workflow start or scheduler start):
 
 1. It reads the state of the current schema, with no lock.
 2. A database with no `horsies_` table: it takes the schema advisory lock on a direct connection to the
-   session URL, reads the state again, and runs the migration with its bookkeeping row in
-   `horsies_migrations` and the row `PYTHON` in `horsies_client_family`, in one transaction. Then it
-   publishes the history readers (`horsies_task_lookup_staged`, `horsies_task_provenance_staged`,
-   `horsies_task_detail_staged`, `horsies_task_result_staged`, `horsies_task_history_duplicate_staged`)
-   from the leaf catalog, in a second transaction, before it returns.
+   session URL, reads the state again, and runs migration 1000 with its bookkeeping row in
+   `horsies_migrations` and the row `PYTHON` in `horsies_client_family`, in one transaction. The same
+   transaction publishes the history readers (`horsies_task_lookup_staged`, `horsies_task_provenance_staged`,
+   `horsies_task_detail_staged`, `horsies_task_result_staged`, `horsies_task_history_duplicate_staged`) from the
+   leaf catalog. Then it runs each later migration in its own transaction, with its bookkeeping row. The family
+   row is written in the transaction of the first migration whose `CHECK` `horsies_client_family_family_known`
+   admits the value: migration 1000 for `PYTHON` and `RUST`, migration 1006 for `TYPESCRIPT`. A `TYPESCRIPT`
+   install writes its row in the transaction of migration 1006, after the text of the migration.
 3. A database that holds the whole chain with this build's checksums, the `PYTHON` family row and every
-   history reader: nothing to do, no lock. A database that holds the start of the chain (version 1000 only)
-   gets the rest of the chain under the lock, each migration in its own transaction. A missing family row or a missing reader (an install that
-   stopped between its two transactions): it takes the lock, publishes the readers and writes the family
-   row.
+   history reader: nothing to do, no lock. A database that holds the start of the chain gets the rest of the
+   chain under the lock, each migration in its own transaction. A `PYTHON` or `RUST` install that stops after
+   migration 1000 commits leaves the database to the family that started it: the install of another family is
+   refused. A `TYPESCRIPT` install that stops before migration 1006 commits leaves no family row. No handle writes
+   into a database with no family row; the next install, of any client family, applies the rest of the chain and
+   records its own family. A database that holds the whole chain with no family row or a missing reader (removed
+   out of band, or an install that stopped before the publication): it takes the lock, publishes the readers and
+   writes the family row.
 4. Any other database is refused with `SCHEMA_INIT_FAILED`, and nothing is changed. The refusal names what the
    database holds: a horsies 0.x schema, `horsies_` tables with no bookkeeping, a newer version, a migration
    recorded as failed, a migration applied from another text (checksum), migration versions this build does not
@@ -138,8 +145,9 @@ Upgrade from version 1005 to version 1006 (also from an earlier version, after t
   `RUST` and `TYPESCRIPT`, also when the database held no `CHECK` of that name or one with another predicate. The
   new `CHECK` reads the one family row, under `ACCESS EXCLUSIVE` until the migration commits. A family row that
   the new `CHECK` refuses stops the migration, and nothing changes.
-- The migration does not change the family row. `TYPESCRIPT` is reserved for a TypeScript client; the Python and
-  Rust clients never write it, and refuse a database that records it.
+- The text of the migration does not change the family row. In the install of a `TYPESCRIPT` client, its
+  transaction writes the row `TYPESCRIPT` when the database has none. `TYPESCRIPT` is reserved for a TypeScript
+  client; the Python and Rust clients never write it, and refuse a database that records it.
 
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
 (SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never

@@ -14,8 +14,9 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use horsies_core::{
-    run_child_host, ChildApp, ChildHookFailure, ChildLogSetup, ChildStartFuture, ChildStartHook,
-    ClientFamily, HandlerChildApp, NamedChildStartHook,
+    run_child_host, ChildApp, ChildHookFailure, ChildLogSetup, ChildStartFacts, ChildStartFuture,
+    ChildStartHook, ClientFamily, EventLoopWatch, HandlerChildApp, NamedChildStartHook,
+    ProcessExit,
 };
 
 pub use horsies_core::{
@@ -97,6 +98,12 @@ impl Horsies {
                 start_hook: start_hook_of(parts.handler_child_start_hooks),
                 ended_spans: crate::telemetry::ended_span_scope(parts.worker_ended_spans),
             },
+            // The Rust tasks run on the child's runtime: the poll watch sees
+            // a blocked poll; there is no other loop to watch.
+            event_loop: EventLoopWatch::RuntimeOnly,
+            // The child's exits run the exit handlers of the process, as
+            // before.
+            exit: ProcessExit::Standard,
         };
         ExitCode::from(exit_byte(run_child_host(app, args).code()))
     }
@@ -104,7 +111,8 @@ impl Horsies {
 
 /// The start hook of `hook`, named by its type name (for a closure, the path
 /// of the function that defines it), whose error's text is the cause of a
-/// failure. Pure.
+/// failure. The facts of the child are not read: a Rust hook takes no
+/// argument. Pure.
 pub(crate) fn named_start_hook<F, Fut, E>(hook: F) -> NamedChildStartHook
 where
     F: FnOnce() -> Fut + Send + Sync + 'static,
@@ -113,7 +121,7 @@ where
 {
     NamedChildStartHook {
         name: std::any::type_name::<F>().to_owned(),
-        start: Box::new(move || -> ChildStartFuture {
+        start: Box::new(move |_facts: ChildStartFacts| -> ChildStartFuture {
             Box::pin(async move {
                 hook().await.map_err(|error| ChildHookFailure {
                     cause: error.to_string(),
@@ -170,7 +178,7 @@ mod tests {
         let calls = Arc::clone(calls);
         NamedChildStartHook {
             name: name.to_owned(),
-            start: Box::new(move || -> ChildStartFuture {
+            start: Box::new(move |_facts| -> ChildStartFuture {
                 Box::pin(async move {
                     calls.lock().unwrap().push(name);
                     Ok(())
@@ -194,7 +202,7 @@ mod tests {
         let names: Vec<&str> = hooks.iter().map(|hook| hook.name.as_str()).collect();
         assert_eq!(names, vec!["first", "second"]);
         for hook in hooks {
-            (hook.start)().await.unwrap();
+            (hook.start)(ChildStartFacts::Isolated).await.unwrap();
         }
         assert_eq!(*calls.lock().unwrap(), vec!["first", "second"]);
     }
@@ -212,11 +220,11 @@ mod tests {
         let mut hooks = core_hooks(app.into_child_parts().start_hooks).into_iter();
         let first = hooks.next().unwrap();
         assert!(first.name.ends_with("::cache_hook"), "{}", first.name);
-        let failure = (first.start)().await.unwrap_err();
+        let failure = (first.start)(ChildStartFacts::Isolated).await.unwrap_err();
         assert_eq!(failure.cause, "the cache did not open");
         let second = hooks.next().unwrap();
         assert!(second.name.contains("{{closure}}"), "{}", second.name);
-        (second.start)().await.unwrap();
+        (second.start)(ChildStartFacts::Isolated).await.unwrap();
     }
 
     #[test]

@@ -805,7 +805,9 @@ fn render_record_reader(class: &str, fields: &[EventField], role: RecordRole) ->
 mod tests {
     use std::collections::BTreeSet;
 
-    use horsies_core::catalog::{CatalogMember, CodeCatalog, PythonEnumBase, TerminalStates};
+    use horsies_core::catalog::{
+        CallForms, CatalogMember, CodeCatalog, PythonEnumBase, TerminalStates,
+    };
     use horsies_core::events::{ChoiceValue, EventType, VariantType, EVENT_CONTRACT};
 
     use super::*;
@@ -819,6 +821,7 @@ mod tests {
             name: "TASK_TIMEOUT",
             value: "TASK_TIMEOUT",
             doc: "",
+            forms: CallForms::AnyForm,
         }],
         terminal_states: TerminalStates::NotALifecycle,
     };
