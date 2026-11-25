@@ -86,14 +86,12 @@ const TYPED_REFUSAL_KIND: Readonly<Record<string, DecodeRefusalKind>> = {
 
 describe("task_input.json typed refused texts", () => {
   for (const row of taskInput.typed_refused_texts) {
-    const expected = TYPED_REFUSAL_KIND[row.name];
-
-    if (expected === undefined) {
-      continue;
-    }
-
     for (const parameterCase of parameterCases(row.parameters)) {
-      test(`${row.name} [${parameterCase.label}] is refused with ${expected}`, () => {
+      test(`${row.name} [${parameterCase.label}] is refused with its named kind`, () => {
+        const expected = TYPED_REFUSAL_KIND[row.name];
+
+        assert(expected !== undefined, `the row ${row.name} has no expected refusal kind in this test`);
+
         const decoded = decodeParameters(kindOfCase(parameterCase), jsonTextCheckedByCore(row.text), "worker");
 
         assert(!decoded.ok, "decoded a refused text");
@@ -102,7 +100,6 @@ describe("task_input.json typed refused texts", () => {
     }
   }
 });
-
 
 describe("the scope of this client's vector tests", () => {
   test("the core alone writes the task options and the trace carrier: those files are not read here", () => {
