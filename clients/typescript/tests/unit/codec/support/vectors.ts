@@ -75,7 +75,7 @@ function isSafeIntegerText(notation: Notation | undefined): boolean {
 }
 
 /**
- * The wire types that a TypeScript user declares for a vector type (the wire-type table of the task model). An
+ * The wire types that a TypeScript user declares for a vector type. An
  * integer in the safe range has two: `h.int()` and `h.bigint()` store the same text. An empty list: the type has no
  * wire type in this package yet.
  */
