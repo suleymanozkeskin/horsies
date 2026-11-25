@@ -103,7 +103,7 @@ where
 }
 
 /// An operation that may run: its core, its slot, and its future.
-pub struct Started<Operation> {
+struct Started<Operation> {
     core: &'static Core,
     slot: CallSlot,
     operation: Operation,
@@ -192,20 +192,51 @@ mod tests {
         }
     }
 
+    /// The child test to run, set in the environment of a child process. The
+    /// count of slots is per process and other tests reserve slots too, so
+    /// the tests that count it from a known start run alone in a child.
+    const CHILD_TEST_ENV: &str = "HORSIES_TYPESCRIPT_OPERATION_CHILD_TEST";
+
+    fn in_child(test: &str) -> bool {
+        std::env::var(CHILD_TEST_ENV).is_ok_and(|name| name == test)
+    }
+
+    /// Run one test of this binary in a child process and check that it
+    /// passed.
+    fn assert_child_passed(test: &str) {
+        let binary = std::env::current_exe().expect("the test binary has a path");
+        let output = std::process::Command::new(binary)
+            .args([test, "--exact", "--nocapture", "--test-threads=1"])
+            .env(CHILD_TEST_ENV, test)
+            .output()
+            .expect("the child test process runs");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(stdout.contains(&format!("test {test} ... ok")), "{stdout}");
+    }
+
     #[test]
-    fn a_slot_of_a_start_that_panics_is_freed() {
-        let before = CALLS_IN_FLIGHT.load(Ordering::Acquire);
+    fn panicked_start_child() {
+        if !in_child("call::operation::tests::panicked_start_child") {
+            return;
+        }
         let ended = guarded_start::<u32>("ping_database", || {
             let _slot = reserve_slot("ping_database")?;
             panic!("planned panic after the slot")
         });
         assert!(matches!(ended, Err(NativeThrown::CorePanic { .. })));
-        assert_eq!(CALLS_IN_FLIGHT.load(Ordering::Acquire), before);
+        assert_eq!(CALLS_IN_FLIGHT.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn a_slot_of_a_start_that_panics_is_freed() {
+        assert_child_passed("call::operation::tests::panicked_start_child");
     }
 
     #[test]
     fn slot_bound_child() {
-        if std::env::var(SLOT_BOUND_CHILD_ENV).is_err() {
+        if !in_child("call::operation::tests::slot_bound_child") {
             return;
         }
         let slots: Vec<CallSlot> = (0..MAX_CALLS_IN_FLIGHT)
@@ -222,21 +253,8 @@ mod tests {
         assert!(reserve_slot("ping_database").is_ok());
     }
 
-    /// The child test of the bound runs alone in a child process: the count
-    /// of slots is per process, and other tests reserve slots too.
-    const SLOT_BOUND_CHILD_ENV: &str = "HORSIES_TYPESCRIPT_SLOT_BOUND_CHILD";
-
     #[test]
     fn the_slot_past_the_bound_is_refused_with_too_many_pending_calls() {
-        let binary = std::env::current_exe().expect("the test binary has a path");
-        let test = "call::operation::tests::slot_bound_child";
-        let output = std::process::Command::new(binary)
-            .args([test, "--exact", "--nocapture", "--test-threads=1"])
-            .env(SLOT_BOUND_CHILD_ENV, "1")
-            .output()
-            .expect("the child test process runs");
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(output.status.success(), "{stdout}");
-        assert!(stdout.contains(&format!("test {test} ... ok")), "{stdout}");
+        assert_child_passed("call::operation::tests::slot_bound_child");
     }
 }
