@@ -6,9 +6,14 @@
 //!   and every later call and every call in flight ends with `CoreStopped`.
 //!   A defect of the package throws.
 //! - `ABORT_PROCESS`, the rule of a worker process: the panic or the defect
-//!   goes to stderr and to the log sink, the log drains for at most
+//!   goes to stderr first, then to the log sink; the log drains for at most
 //!   [`ABORT_LOG_DRAIN_BOUND`], and the process aborts; its supervisor
 //!   restarts it.
+//! - A defect of the package is found on the JavaScript thread, which runs
+//!   the JavaScript log sink, so its report has two steps: `reportDefect`
+//!   writes the stderr line and gives the record; the package gives the
+//!   record to its sink on its own thread; `abortForDefect` sends the records
+//!   still in the channel to stderr, drains, and aborts.
 //!
 //! The entry point sets the rule once, before the first core call. The start
 //! of the core fixes it.
@@ -26,8 +31,10 @@ use napi_derive::napi;
 
 use crate::call::guard::sync_call;
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::logging::bridge::{running_log, DrainOutcome, LogBridge};
-use crate::logging::levels::RecordLevel;
+use crate::logging::bridge::{running_log, CoreLogRecord, DrainOutcome, LogBridge};
+use crate::logging::js_sink::LogRecordOut;
+use crate::logging::levels::{RecordLevel, LEVELS};
+use crate::logging::names::LoggerName;
 
 /// How long an aborting process waits for the log forwarder to hand the
 /// records in the channel to the sink. A full channel is 8,192 records in
@@ -70,6 +77,38 @@ pub enum AbortingThread {
     /// records.
     Core,
 }
+
+/// How the package goes on after a defect report.
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_from_js = false
+)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum DefectAnswer {
+    /// `STOP_CORE`: the package throws the defect.
+    Throw,
+    /// `ABORT_PROCESS`: the stderr line is written. The package gives
+    /// `record` to its JavaScript log sink, then calls `abortForDefect`.
+    AbortWithRecord { record: LogRecordOut },
+    /// `ABORT_PROCESS`, and the threshold of the bridge logger refuses an
+    /// ERROR record: the package calls `abortForDefect` at once.
+    AbortWithNoRecord,
+}
+
+/// Whether the package gave the defect record to its JavaScript log sink.
+#[napi(string_enum = "camelCase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordHandoff {
+    GivenToSink,
+    /// No JavaScript sink is set, or the sink did not take the record: the
+    /// abort puts the record in the channel, which goes to stderr.
+    NotGiven,
+}
+
+/// The text of the first defect that `reportDefect` reported under
+/// `ABORT_PROCESS`; `abortForDefect` ends the process with it.
+static REPORTED_DEFECT: OnceLock<String> = OnceLock::new();
 
 /// The process panic rule: set once by the entry point, or fixed at
 /// `StopCore` by the start of the core.
@@ -121,22 +160,52 @@ pub fn set_panic_rule_export(rule: PanicRule) -> Envelope<()> {
 }
 
 /// The package found a defect of its own (a thrown `CoreDefect`). Under
-/// `ABORT_PROCESS` the defect goes to stderr and to the log sink, the log
-/// drains, and the process aborts: this call does not return. Under
-/// `STOP_CORE` it returns at once, and the package throws the defect.
-/// Starts nothing.
-#[napi(ts_return_type = "NativeEnvelope<undefined>")]
+/// `STOP_CORE` the answer is `throw`. Under `ABORT_PROCESS` the defect goes
+/// to stderr at once, and the answer gives the record for the package's log
+/// sink; the package then calls `abortForDefect`. Starts nothing.
+#[napi(ts_return_type = "NativeEnvelope<DefectAnswer>")]
 #[allow(
     clippy::needless_pass_by_value,
     reason = "napi-rs passes the arguments of a JavaScript call by value"
 )]
-pub fn report_defect(code: String, message: String) -> Envelope<()> {
+pub fn report_defect(code: String, message: String) -> Envelope<DefectAnswer> {
     sync_call("report_defect", || match panic_rule() {
-        PanicRule::StopCore => Envelope::Value(()),
-        PanicRule::AbortProcess => abort_process(
-            &format!("defect {code} of the horsies package: {message}"),
-            AbortingThread::JavaScript,
-        ),
+        PanicRule::StopCore => Envelope::Value(DefectAnswer::Throw),
+        PanicRule::AbortProcess => {
+            let what = format!("defect {code} of the horsies package: {message}");
+            write_abort_line(&what);
+            let answer = match LEVELS.enabled(LoggerName::Bridge, RecordLevel::Error) {
+                true => DefectAnswer::AbortWithRecord {
+                    record: LogRecordOut::of(&abort_record(&what)),
+                },
+                false => DefectAnswer::AbortWithNoRecord,
+            };
+            // The first report wins: the process aborts at the next call.
+            let _first_defect_kept = REPORTED_DEFECT.set(what);
+            Envelope::Value(answer)
+        }
+    })
+}
+
+/// End the process after `reportDefect` answered an abort: the records still
+/// in the channel go to stderr, the log drains for at most
+/// [`ABORT_LOG_DRAIN_BOUND`], and the process aborts. Under `NotGiven` the
+/// defect record goes into the channel first. With no abort answer before,
+/// it throws `CLIENT_DEFECT`.
+#[napi(ts_return_type = "NativeEnvelope<undefined>")]
+pub fn abort_for_defect(handoff: RecordHandoff) -> Envelope<()> {
+    sync_call("abort_for_defect", || {
+        match (panic_rule(), REPORTED_DEFECT.get()) {
+            (PanicRule::AbortProcess, Some(what)) => {
+                abort_after_line(what, AbortingThread::JavaScript, handoff)
+            }
+            (PanicRule::AbortProcess, None) | (PanicRule::StopCore, _) => {
+                Envelope::Thrown(NativeThrown::ClientDefect {
+                    subject: "abortForDefect".to_owned(),
+                    rule: "it follows a defect report that answered an abort".to_owned(),
+                })
+            }
+        }
     })
 }
 
@@ -145,39 +214,54 @@ pub fn report_defect(code: String, message: String) -> Envelope<()> {
 pub fn background_task_panicked(report: PanicReport) {
     match panic_rule() {
         PanicRule::StopCore => crate::process_core::runtime::stop_after_background_panic(report),
-        PanicRule::AbortProcess => abort_process(
-            &format!(
+        PanicRule::AbortProcess => {
+            let what = format!(
                 "panic in core background task {}: {}",
                 report.subject, report.cause
-            ),
-            AbortingThread::Core,
-        ),
+            );
+            write_abort_line(&what);
+            abort_after_line(&what, AbortingThread::Core, RecordHandoff::NotGiven)
+        }
     }
 }
 
-/// Write `what` to stderr, push one ERROR record, wait for the forwarder
-/// within [`ABORT_LOG_DRAIN_BOUND`], and abort the process.
-fn abort_process(what: &str, thread: AbortingThread) -> ! {
+/// The first step of an abort: one line on stderr.
+fn write_abort_line(what: &str) {
     let _write_failure_ignored = writeln!(
         std::io::stderr(),
         "horsies: worker process {} aborts: {what}",
         std::process::id()
     );
+}
+
+/// The ERROR record of an abort, for the log sink.
+fn abort_record(what: &str) -> CoreLogRecord {
+    CoreLogRecord::bridge(
+        RecordLevel::Error,
+        format!("the worker process aborts: {what}"),
+    )
+}
+
+/// The steps of an abort after the stderr line: the record (unless the
+/// package gave it to its sink), the drain within [`ABORT_LOG_DRAIN_BOUND`],
+/// and the abort. On the JavaScript thread the forwarder switches to stderr
+/// first: that thread cannot run the sink while it waits.
+fn abort_after_line(what: &str, thread: AbortingThread, handoff: RecordHandoff) -> ! {
     if let Some(log) = running_log() {
         match thread {
             AbortingThread::JavaScript => log.sink().switch_to_stderr(),
             AbortingThread::Core => {}
         }
-        flush_log_before_abort(log, what);
+        match handoff {
+            RecordHandoff::NotGiven => log.push_record(abort_record(what)),
+            RecordHandoff::GivenToSink => {}
+        }
+        flush_log_before_abort(log);
     }
     std::process::abort()
 }
 
-fn flush_log_before_abort(log: &LogBridge, what: &str) {
-    log.push_bridge_record(
-        RecordLevel::Error,
-        format!("the worker process aborts: {what}"),
-    );
+fn flush_log_before_abort(log: &LogBridge) {
     let unsent = match log.wait_for_drain(ABORT_LOG_DRAIN_BOUND) {
         DrainOutcome::Drained => return,
         DrainOutcome::ForwarderStopped { left } => {
@@ -356,7 +440,16 @@ mod tests {
         }
         assert_eq!(set_panic_rule(PanicRule::AbortProcess), Ok(()));
         start_core();
-        let _never = report_defect("CLIENT_DEFECT".to_owned(), "taskId: a UUID".to_owned());
+        let answer = report_defect("CLIENT_DEFECT".to_owned(), "taskId: a UUID".to_owned());
+        assert!(
+            matches!(
+                answer,
+                Envelope::Value(DefectAnswer::AbortWithRecord { ref record })
+                    if record.message.contains("defect CLIENT_DEFECT")
+            ),
+            "{answer:?}"
+        );
+        let _never = abort_for_defect(RecordHandoff::NotGiven);
     }
 
     #[test]
@@ -380,7 +473,7 @@ mod tests {
         }
         assert_eq!(
             report_defect("CLIENT_DEFECT".to_owned(), "taskId: a UUID".to_owned()),
-            Envelope::Value(())
+            Envelope::Value(DefectAnswer::Throw)
         );
         start_core();
         assert_eq!(panic_rule(), PanicRule::StopCore);
@@ -411,6 +504,14 @@ mod tests {
             stdout.contains("test process_core::panic_rule::tests::stop_rule_child ... ok"),
             "{stdout}"
         );
+    }
+
+    #[test]
+    fn an_abort_with_no_defect_report_before_is_a_client_defect() {
+        assert!(matches!(
+            abort_for_defect(RecordHandoff::GivenToSink),
+            Envelope::Thrown(NativeThrown::ClientDefect { ref subject, .. }) if subject == "abortForDefect"
+        ));
     }
 
     #[test]

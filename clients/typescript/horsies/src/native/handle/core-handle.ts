@@ -1,6 +1,6 @@
 // The build of a core handle.
 
-import { envelopeValue } from "../call/envelope.ts";
+import { nativeValue } from "../call/envelope.ts";
 import { handleAddon } from "./addon.ts";
 import type { HandleProfile, NativeCoreHandle } from "./addon.ts";
 
@@ -9,5 +9,5 @@ import type { HandleProfile, NativeCoreHandle } from "./addon.ts";
  * Starts nothing. Throws `ManifestRefused` for a manifest that the core refuses.
  */
 export function buildCoreHandle(manifestJson: string, profile: HandleProfile): NativeCoreHandle {
-  return envelopeValue(handleAddon().buildCoreHandle(manifestJson, profile));
+  return nativeValue("buildCoreHandle", () => handleAddon().buildCoreHandle(manifestJson, profile));
 }

@@ -16,9 +16,9 @@ import {
   TooManyPendingCalls,
 } from "../../thrown-errors.ts";
 import type { CoreDefect, PanicRule, StateAfter } from "../../thrown-errors.ts";
-import { loadAddon } from "../load.ts";
-import { processCoreView } from "../process-core/addon.ts";
+import { raiseDefect } from "./defect.ts";
 import { unreachable } from "./never.ts";
+import { thrownFacts } from "./thrown-facts.ts";
 
 /** Why an addon call threw, with the facts of the cause. */
 export type NativeThrown =
@@ -66,11 +66,8 @@ export function thrownError(thrown: NativeThrown): CoreError | CoreDefect {
 }
 
 /**
- * The value of an envelope. Throws the class of the thrown code when the call threw.
- *
- * A defect is reported to the addon first. Under the panic rule `ABORT_PROCESS` (a worker process)
- * the addon writes it to stderr and to the log sink, drains the log for a bounded time, and aborts
- * the process: the throw is not reached. Under `STOP_CORE` the defect is thrown.
+ * The value of an envelope. Throws the class of the thrown code when the call threw. A defect follows
+ * the defect rule first (`raiseDefect`): in a worker process the throw is not reached.
  */
 export function envelopeValue<T>(envelope: NativeEnvelope<T>): T {
   switch (envelope.kind) {
@@ -79,11 +76,11 @@ export function envelopeValue<T>(envelope: NativeEnvelope<T>): T {
     case "thrown": {
       const error = thrownError(envelope.thrown);
 
-      if (!(error instanceof CoreError)) {
-        reportDefect(error);
+      if (error instanceof CoreError) {
+        throw error;
       }
 
-      throw error;
+      return raiseDefect(error);
     }
 
     default:
@@ -91,22 +88,41 @@ export function envelopeValue<T>(envelope: NativeEnvelope<T>): T {
   }
 }
 
-/** Report a defect to the loaded addon. Without a loaded addon there is no rule to apply. */
-function reportDefect(defect: CoreDefect): void {
-  const load = loadAddon();
+/**
+ * The value of one sync addon call. A throw of the call itself (a Node-API `TypeError` of an argument
+ * of the wrong type) is a defect of the package: `ClientDefect` with `subject`, under the defect rule.
+ */
+export function nativeValue<T>(subject: string, call: () => NativeEnvelope<T>): T {
+  let envelope: NativeEnvelope<T>;
 
-  switch (load.kind) {
-    case "loaded":
-      // The answer is not read: under `ABORT_PROCESS` the call does not return, and under
-      // `STOP_CORE` the caller throws the defect in every case.
-      processCoreView(load.exports).reportDefect(defect.code, defect.message);
-
-      return;
-    case "outsideMainThread":
-    case "platformUnsupported":
-    case "loadFailed":
-      return;
-    default:
-      unreachable(load);
+  try {
+    envelope = call();
+  } catch (cause) {
+    return raiseDefect(callDefect(subject, cause));
   }
+
+  return envelopeValue(envelope);
+}
+
+/**
+ * The value of one async addon call. A throw or a rejection of the call (a Promise that Node-API
+ * rejects) is a defect of the package: `ClientDefect` with `subject`, under the defect rule.
+ */
+export async function nativeValueAsync<T>(subject: string, call: () => Promise<NativeEnvelope<T>>): Promise<T> {
+  let envelope: NativeEnvelope<T>;
+
+  try {
+    envelope = await call();
+  } catch (cause) {
+    return raiseDefect(callDefect(subject, cause));
+  }
+
+  return envelopeValue(envelope);
+}
+
+/** The defect of an addon call that threw or rejected. */
+function callDefect(subject: string, cause: unknown): CoreDefect {
+  const facts = thrownFacts(cause);
+
+  return new ClientDefect({ subject, rule: `the addon call threw ${facts.name}: ${facts.message}` });
 }

@@ -26,6 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use horsies_core::process_runtime::{
     process_runtime, shape_process_runtime, ProcessRuntime, RuntimeShape, ShapeOutcome, ThreadStart,
 };
+use napi_derive::napi;
 use tokio::sync::watch;
 
 use crate::call::thrown::{NativeThrown, StateAfter};
@@ -33,9 +34,9 @@ use crate::logging::bridge::{make_thread_default, started_log, LogBridge};
 use crate::process_core::panic_rule::{fix_panic_rule, install_panic_hook, PanicReport};
 
 /// Worker threads of the runtime of a producer process and of a worker
-/// parent. Two workers gave the same single-call latency as eight in the
-/// bridge measurement of the Python client, and an idle producer keeps one
-/// OS thread per worker.
+/// parent. A call waits on one connection, so two workers give the latency
+/// of one call that eight give, and an idle producer keeps one OS thread per
+/// worker.
 pub const RUNTIME_WORKER_THREADS: NonZeroUsize = match NonZeroUsize::new(2) {
     Some(threads) => threads,
     None => panic!("2 is not zero"),
@@ -107,7 +108,9 @@ impl CallRefusal {
     }
 }
 
-/// The state of the core in this process.
+/// The state of the core in this process. JavaScript reads it as
+/// `CoreState` (`coreState()`).
+#[napi(string_enum = "snake_case", js_name = "CoreState")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CoreStatus {
     NotStarted,

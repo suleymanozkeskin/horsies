@@ -3,7 +3,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { envelopeValue, thrownError } from "../../../horsies/src/native/call/envelope.ts";
+import { envelopeValue, nativeValue, nativeValueAsync, thrownError } from "../../../horsies/src/native/call/envelope.ts";
+import { unreachable } from "../../../horsies/src/native/call/never.ts";
 import type { NativeThrown } from "../../../horsies/src/native/call/envelope.ts";
 import { CoreError } from "../../../horsies/src/thrown-errors.ts";
 
@@ -141,6 +142,59 @@ describe("thrownError", () => {
       },
       message: "a defect of the horsies package: taskId: a UUID",
       base: "CoreDefect",
+    });
+  });
+});
+
+describe("nativeValue", () => {
+  test("gives the value of the call", () => {
+    assert.equal(nativeValue("coreState", () => ({ kind: "value", value: "not_started" })), "not_started");
+  });
+
+  test("a call that throws is a ClientDefect with the subject", () => {
+    assert.throws(
+      () =>
+        nativeValue("setPanicRule", () => {
+          throw new TypeError("Expect value to be String, but received Number");
+        }),
+      {
+        name: "ClientDefect",
+        subject: "setPanicRule",
+        rule: "the addon call threw TypeError: Expect value to be String, but received Number",
+      },
+    );
+  });
+});
+
+describe("nativeValueAsync", () => {
+  test("gives the value that the call resolves with", async () => {
+    assert.equal(await nativeValueAsync("pingDatabase", async () => ({ kind: "value", value: 3 })), 3);
+  });
+
+  test("a rejected call is a ClientDefect with the subject", async () => {
+    await assert.rejects(
+      nativeValueAsync("pingDatabase", async () => {
+        throw new Error("JsDeferred was dropped without being settled");
+      }),
+      {
+        name: "ClientDefect",
+        subject: "pingDatabase",
+        rule: "the addon call threw Error: JsDeferred was dropped without being settled",
+      },
+    );
+  });
+});
+
+describe("unreachable", () => {
+  test("a value outside its type is a ClientDefect that names the value", () => {
+    // SAFETY: the test passes a value that the types make impossible, as an addon of another
+    // build could.
+    const outside = { kind: "unknown kind" } as never;
+
+    assert.throws(() => unreachable(outside), {
+      name: "ClientDefect",
+      subject: "exhaustive switch",
+      rule: 'a value outside its declared type reached it: {"kind":"unknown kind"}',
     });
   });
 });

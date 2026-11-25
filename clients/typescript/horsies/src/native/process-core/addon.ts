@@ -2,6 +2,7 @@
 
 import type { PanicRule } from "../../thrown-errors.ts";
 import { requireAddon } from "../call/addon.ts";
+import type { DefectAddon } from "../call/defect.ts";
 import type { NativeEnvelope } from "../call/envelope.ts";
 
 /** The state of the core in this process. `inherited`: this process is a fork of the process where the core started. */
@@ -19,13 +20,15 @@ export interface MigrationSqlFile {
   readonly text: string;
 }
 
-/** The functions of the `process_core` area. None of them starts the core. */
-export interface ProcessCoreAddon {
+/**
+ * The functions of the `process_core` area, with the two steps of the defect rule. None of them
+ * starts the core.
+ */
+export interface ProcessCoreAddon extends DefectAddon {
   coreState(): NativeEnvelope<CoreState>;
   mintTaskId(): NativeEnvelope<MintOutcome>;
   migrationSqlFiles(): NativeEnvelope<MigrationSqlFile[]>;
   setPanicRule(rule: PanicRule): NativeEnvelope<undefined>;
-  reportDefect(code: string, message: string): NativeEnvelope<undefined>;
   environmentCount(): NativeEnvelope<number>;
 }
 

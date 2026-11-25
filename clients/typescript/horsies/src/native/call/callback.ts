@@ -8,9 +8,14 @@
 // - A thrown value stays in this module, keyed by the call id. The core gets its name and message;
 //   when the operation ends, the package takes the value back (`takeThrown`) and throws it again.
 
+import { ClientDefect, CoreError } from "../../thrown-errors.ts";
+import type { CoreDefect } from "../../thrown-errors.ts";
 import { requireAddon } from "./addon.ts";
+import { reportDefect } from "./defect.ts";
+import { thrownError } from "./envelope.ts";
 import type { NativeEnvelope } from "./envelope.ts";
 import { unreachable } from "./never.ts";
+import { thrownFacts } from "./thrown-facts.ts";
 
 /** How a settle call ended: `unknownCall` when the core no longer waits for the call. */
 export type SettleOutcome = "settled" | "unknownCall";
@@ -67,72 +72,78 @@ export function settlingCallback<Argument, Answer>(
   };
 }
 
-/** The settlement through the addon, with the thrown values kept in this module. */
-export const addonSettlement: CallbackSettlement = {
-  returned(callId, value) {
-    settleSafely(() => callAddon().settleCallbackReturned(callId, value));
-  },
-  threw(callId, cause) {
-    keepThrown(callId, cause);
+/** The settle calls of the addon. */
+export type SettleAddon = Pick<CallAddon, "settleCallbackReturned" | "settleCallbackThrew">;
 
-    const facts = thrownFacts(cause);
-    const outcome = settleSafely(() => callAddon().settleCallbackThrew(callId, facts.name, facts.message));
+/** How a settle call ended for the wrapper. `notSettled`: the settle call failed, a defect. */
+export type SettleEnd = SettleOutcome | "notSettled";
 
-    switch (outcome) {
-      case "unknownCall":
-      case "notSettled":
-        // Nobody will ask for the value: the core no longer waits for the call.
-        dropThrown(callId);
+/**
+ * The settlement through the addon that `addon` gives, with the thrown values kept in this module.
+ * A settle call that throws, or that answers a thrown code, is a defect of the package: `onDefect`
+ * gets it, with no throw (in a worker process the defect rule aborts). A thrown value that no core
+ * call waits for any more (`unknownCall`, `notSettled`) is dropped.
+ */
+export function settlementVia(addon: () => SettleAddon, onDefect: (defect: CoreDefect) => void): CallbackSettlement {
+  return {
+    returned(callId, value) {
+      settleSafely(() => addon().settleCallbackReturned(callId, value), onDefect);
+    },
+    threw(callId, cause) {
+      keepThrown(callId, cause);
 
-        return;
-      case "settled":
-        return;
-      default:
-        unreachable(outcome);
-    }
-  },
-};
+      const facts = thrownFacts(cause);
+      const end = settleSafely(() => addon().settleCallbackThrew(callId, facts.name, facts.message), onDefect);
 
-/** Run one settle call; never throw. A failure goes to stderr as one line. */
-function settleSafely(settle: () => NativeEnvelope<SettleOutcome>): SettleOutcome | "notSettled" {
+      switch (end) {
+        case "unknownCall":
+        case "notSettled":
+          dropThrown(callId);
+
+          return;
+        case "settled":
+          return;
+        default:
+          unreachable(end);
+      }
+    },
+  };
+}
+
+/** The settlement of the registrations of the package: the addon, and the defect rule. */
+export const addonSettlement: CallbackSettlement = settlementVia(callAddon, reportDefect);
+
+/** Run one settle call; never throw. A failure is a defect, which goes to `onDefect`. */
+function settleSafely(settle: () => NativeEnvelope<SettleOutcome>, onDefect: (defect: CoreDefect) => void): SettleEnd {
+  let envelope: NativeEnvelope<SettleOutcome>;
+
   try {
-    const envelope = settle();
-
-    switch (envelope.kind) {
-      case "value":
-        return envelope.value;
-      case "thrown":
-        writeStderrSafely(`horsies: a settle call of a callback threw ${envelope.thrown.code}\n`);
-
-        return "notSettled";
-      default:
-        return unreachable(envelope);
-    }
+    envelope = settle();
   } catch (cause) {
-    writeStderrSafely(`horsies: a settle call of a callback failed: ${thrownFacts(cause).message}\n`);
+    const facts = thrownFacts(cause);
+
+    onDefect(new ClientDefect({ subject: "settleCallback", rule: `the settle call threw ${facts.name}: ${facts.message}` }));
 
     return "notSettled";
   }
-}
 
-function writeStderrSafely(line: string): void {
-  try {
-    process.stderr.write(line);
-  } catch {
-    // Nothing more can report it; the wrapper must not throw into the addon.
-  }
-}
+  switch (envelope.kind) {
+    case "value":
+      return envelope.value;
+    case "thrown": {
+      const error = thrownError(envelope.thrown);
 
-/** The name and the message of a thrown value. A value that is not an `Error` has the name `NotAnError`. */
-export function thrownFacts(cause: unknown): { readonly name: string; readonly message: string } {
-  if (cause instanceof Error) {
-    return { name: cause.name, message: cause.message };
-  }
+      onDefect(
+        error instanceof CoreError
+          ? new ClientDefect({ subject: "settleCallback", rule: `the settle call answered ${error.code}: ${error.message}` })
+          : error,
+      );
 
-  try {
-    return { name: "NotAnError", message: String(cause) };
-  } catch {
-    return { name: "NotAnError", message: "a thrown value with no text" };
+      return "notSettled";
+    }
+
+    default:
+      return unreachable(envelope);
   }
 }
 

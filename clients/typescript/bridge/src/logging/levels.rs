@@ -60,14 +60,22 @@ impl RecordLevel {
         }
     }
 
-    /// Whether a record of this level waits for space in a full channel
-    /// instead of being dropped.
-    pub const fn waits_when_full(self) -> bool {
+    /// What a record of this level does in a full channel.
+    pub const fn when_full(self) -> WhenFull {
         match self {
-            Self::Trace | Self::Debug | Self::Info => false,
-            Self::Warning | Self::Error => true,
+            Self::Trace | Self::Debug | Self::Info => WhenFull::Drop,
+            Self::Warning | Self::Error => WhenFull::WaitThenSpill,
         }
     }
+}
+
+/// What a record does in a full channel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WhenFull {
+    /// The record is dropped and counted.
+    Drop,
+    /// The record waits for space, then goes to stderr.
+    WaitThenSpill,
 }
 
 /// The lowest level that a logger forwards. `CRITICAL` forwards no core
@@ -214,11 +222,11 @@ mod tests {
 
     #[test]
     fn only_warning_and_error_wait_in_a_full_channel() {
-        assert!(!RecordLevel::Trace.waits_when_full());
-        assert!(!RecordLevel::Debug.waits_when_full());
-        assert!(!RecordLevel::Info.waits_when_full());
-        assert!(RecordLevel::Warning.waits_when_full());
-        assert!(RecordLevel::Error.waits_when_full());
+        assert_eq!(RecordLevel::Trace.when_full(), WhenFull::Drop);
+        assert_eq!(RecordLevel::Debug.when_full(), WhenFull::Drop);
+        assert_eq!(RecordLevel::Info.when_full(), WhenFull::Drop);
+        assert_eq!(RecordLevel::Warning.when_full(), WhenFull::WaitThenSpill);
+        assert_eq!(RecordLevel::Error.when_full(), WhenFull::WaitThenSpill);
     }
 
     #[test]

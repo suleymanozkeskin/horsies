@@ -16,6 +16,7 @@ pub mod callback;
 #[cfg(feature = "test-probes")]
 pub mod callback_probe;
 pub mod guard;
+pub mod node_api;
 pub mod operation;
 pub mod service_run;
 pub mod thrown;

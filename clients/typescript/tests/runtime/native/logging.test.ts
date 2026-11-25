@@ -1,5 +1,7 @@
 // The JavaScript log sink with a built addon and a database: the statement log of a ping reaches
-// the sink at the thresholds that the package set, and a sink that throws does not end the process.
+// the sink at the thresholds that the package set; a sink that throws does not end the process; a
+// set sink does not keep an idle process alive; a defect in a worker process reaches the sink
+// before the abort.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -8,7 +10,17 @@ import { configureLogging } from "../../../horsies/src/logging.ts";
 import type { LogRecord } from "../../../horsies/src/logging.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
+import { runChildCase } from "./child-process.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+
+/** The longest time a child case may take. */
+const CHILD_CASE_BOUND_MS = 30_000;
+
+/** The longest time a process with an empty loop may take to exit. */
+const IDLE_EXIT_BOUND_MS = 10_000;
+
+/** The levels that the default threshold WARNING lets through. */
+const WARNING_AND_ABOVE: ReadonlySet<string> = new Set(["WARNING", "ERROR"]);
 
 /** The longest wait for a record to reach the sink. */
 const RECORD_WAIT_MS = 5_000;
@@ -49,29 +61,36 @@ describe("the JavaScript log sink", () => {
     assert.ok(statement !== undefined, `records: ${records.map((record) => record.logger).join(", ")}`);
     assert.equal(statement.level, "INFO");
     assert.ok(statement.fields.some((field) => field.name === "statement"));
-    assert.ok(records.every((record) => record.logger === "horsies.sql" || record.level !== "INFO"));
+    assert.ok(
+      records.every((record) => record.logger === "horsies.sql" || WARNING_AND_ABOVE.has(record.level)),
+      records.map((record) => `${record.level} ${record.logger}`).join(", "),
+    );
     envelopeValue(await handle.close());
     configureLogging({ sink: "stderr" });
   });
 
-  test("a sink that throws sends the batch to stderr and the process goes on", async () => {
-    let calls = 0;
+  test("a sink that throws sends the batch to stderr and the process goes on", () => {
+    const child = runChildCase("logging-child.ts", "throwing-sink", CHILD_CASE_BOUND_MS);
 
-    configureLogging({
-      levels: { default: "WARNING", loggers: { "horsies.sql": "INFO" } },
-      sink: () => {
-        calls += 1;
+    assert.equal(child.stdout, "pinged done; sink calls some", child.stderr);
+    assert.match(child.stderr, /horsies: the log sink threw: planned sink failure/u);
+    assert.match(child.stderr, /horsies: \d+ log records go to stderr: the JavaScript sink threw/u);
+    assert.match(child.stderr, / INFO horsies\.sql /u);
+  });
 
-        throw new Error("planned sink failure");
-      },
-    });
+  test("a process with a sink set and a started core exits when its loop is empty", () => {
+    const child = runChildCase("logging-child.ts", "idle-exit-with-sink", IDLE_EXIT_BOUND_MS);
 
-    const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), true), "PRODUCER");
-    const ping = envelopeValue(await handle.pingDatabase());
+    assert.equal(child.signal, null, `killed at the bound: ${child.stderr}`);
+    assert.equal(child.status, 0, child.stderr);
+    assert.equal(child.stdout, "probed answered");
+  });
 
-    assert.equal(ping.kind, "done");
-    assert.ok(await waitUntil(() => calls > 0));
-    envelopeValue(await handle.close());
-    configureLogging({ sink: "stderr" });
+  test("a defect in a worker process goes to stderr, then to the sink, then the process aborts", () => {
+    const child = runChildCase("logging-child.ts", "defect-record-to-sink", CHILD_CASE_BOUND_MS);
+
+    assert.equal(child.signal, "SIGABRT", child.stderr);
+    assert.match(child.stderr, /horsies: worker process \d+ aborts: defect CLIENT_DEFECT of the horsies package/u);
+    assert.match(child.stdout, /^SINK ERROR horsies\.bridge the worker process aborts: defect CLIENT_DEFECT/u);
   });
 });

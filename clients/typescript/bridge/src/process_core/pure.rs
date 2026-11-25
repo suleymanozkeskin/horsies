@@ -9,32 +9,10 @@ use crate::call::thrown::Envelope;
 use crate::process_core::runtime::{core_status, pure_call_refusal, CoreStatus};
 use crate::values::boundary::{bigint_of_i64, text_of_uuid};
 
-/// The state of the core in this process.
-#[napi(string_enum = "snake_case")]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CoreState {
-    NotStarted,
-    Running,
-    Stopped,
-    /// The core started in a parent process and this process is its fork.
-    Inherited,
-}
-
-impl From<CoreStatus> for CoreState {
-    fn from(status: CoreStatus) -> Self {
-        match status {
-            CoreStatus::NotStarted => Self::NotStarted,
-            CoreStatus::Running => Self::Running,
-            CoreStatus::Stopped => Self::Stopped,
-            CoreStatus::Inherited => Self::Inherited,
-        }
-    }
-}
-
 /// The state of the core in this process. Starts nothing.
 #[napi(ts_return_type = "NativeEnvelope<CoreState>")]
-pub fn core_state() -> Envelope<CoreState> {
-    sync_call("core_state", || Envelope::Value(core_status().into()))
+pub fn core_state() -> Envelope<CoreStatus> {
+    sync_call("core_state", || Envelope::Value(core_status()))
 }
 
 /// A minted task id, or the refusal of the core's UUIDv7 source.
@@ -106,17 +84,6 @@ pub fn migration_sql_files() -> Envelope<Vec<MigrationSqlFile>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn each_core_status_has_its_state() {
-        assert_eq!(
-            CoreState::from(CoreStatus::NotStarted),
-            CoreState::NotStarted
-        );
-        assert_eq!(CoreState::from(CoreStatus::Running), CoreState::Running);
-        assert_eq!(CoreState::from(CoreStatus::Stopped), CoreState::Stopped);
-        assert_eq!(CoreState::from(CoreStatus::Inherited), CoreState::Inherited);
-    }
 
     #[test]
     fn the_migration_files_start_with_the_baseline_in_order() {

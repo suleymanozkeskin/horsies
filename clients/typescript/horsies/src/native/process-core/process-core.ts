@@ -2,13 +2,13 @@
 // task id source, the migration files and the environment count. None of them starts the core.
 
 import type { PanicRule } from "../../thrown-errors.ts";
-import { envelopeValue } from "../call/envelope.ts";
+import { nativeValue } from "../call/envelope.ts";
 import { processCoreAddon } from "./addon.ts";
 import type { CoreState, MigrationSqlFile, MintOutcome } from "./addon.ts";
 
 /** The state of the core in this process. */
 export function coreState(): CoreState {
-  return envelopeValue(processCoreAddon().coreState());
+  return nativeValue("coreState", () => processCoreAddon().coreState());
 }
 
 /**
@@ -16,20 +16,20 @@ export function coreState(): CoreState {
  * nothing; another rule throws `PanicRuleFixed`.
  */
 export function setPanicRule(rule: PanicRule): void {
-  envelopeValue(processCoreAddon().setPanicRule(rule));
+  nativeValue("setPanicRule", () => processCoreAddon().setPanicRule(rule));
 }
 
 /** Mint a new task id (UUIDv7). Throws `CoreStopped` in a process whose core stopped. */
 export function mintTaskId(): MintOutcome {
-  return envelopeValue(processCoreAddon().mintTaskId());
+  return nativeValue("mintTaskId", () => processCoreAddon().mintTaskId());
 }
 
 /** Every SQL file of the migration chain, in the order they run. */
 export function migrationSqlFiles(): readonly MigrationSqlFile[] {
-  return envelopeValue(processCoreAddon().migrationSqlFiles());
+  return nativeValue("migrationSqlFiles", () => processCoreAddon().migrationSqlFiles());
 }
 
 /** The count of Node-API environments that registered the addon in this process. */
 export function environmentCount(): number {
-  return envelopeValue(processCoreAddon().environmentCount());
+  return nativeValue("environmentCount", () => processCoreAddon().environmentCount());
 }

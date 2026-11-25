@@ -7,11 +7,14 @@ import { describe, test } from "node:test";
 import {
   MAX_KEPT_THROWN,
   keepThrown,
+  settlementVia,
   settlingCallback,
   takeThrown,
-  thrownFacts,
 } from "../../../horsies/src/native/call/callback.ts";
-import type { CallbackSettlement } from "../../../horsies/src/native/call/callback.ts";
+import type { CallbackSettlement, SettleAddon } from "../../../horsies/src/native/call/callback.ts";
+import type { NativeEnvelope } from "../../../horsies/src/native/call/envelope.ts";
+import { thrownFacts } from "../../../horsies/src/native/call/thrown-facts.ts";
+import type { CoreDefect } from "../../../horsies/src/thrown-errors.ts";
 
 /** A settlement that records each settle call. */
 function recordingSettlement(): { readonly settlement: CallbackSettlement; readonly settled: string[] } {
@@ -86,6 +89,33 @@ describe("thrownFacts", () => {
     assert.deepEqual(thrownFacts("plain text"), { name: "NotAnError", message: "plain text" });
   });
 
+  test("an Error whose message getter throws gives a fixed text, with no throw", () => {
+    const error = new Error("hidden");
+
+    Object.defineProperty(error, "message", {
+      get(): string {
+        throw new Error("no message");
+      },
+    });
+
+    assert.deepEqual(thrownFacts(error), { name: "Error", message: "a thrown value with no readable text" });
+  });
+
+  test("an Error whose message is a number gives the text of the number", () => {
+    const error = new Error("replaced");
+
+    Object.defineProperty(error, "message", { value: 42 });
+
+    assert.deepEqual(thrownFacts(error), { name: "Error", message: "42" });
+  });
+
+  test("a revoked Proxy gives a fixed text, with no throw", () => {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+
+    revoke();
+    assert.deepEqual(thrownFacts(proxy), { name: "NotAnError", message: "a thrown value with no readable text" });
+  });
+
   test("a value whose text throws gives a fixed text", () => {
     const value = {
       toString(): string {
@@ -93,7 +123,7 @@ describe("thrownFacts", () => {
       },
     };
 
-    assert.deepEqual(thrownFacts(value), { name: "NotAnError", message: "a thrown value with no text" });
+    assert.deepEqual(thrownFacts(value), { name: "NotAnError", message: "a thrown value with no readable text" });
   });
 });
 
@@ -122,5 +152,73 @@ describe("the kept thrown values", () => {
     for (let offset = 1n; offset < BigInt(MAX_KEPT_THROWN); offset += 1n) {
       takeThrown(first + offset);
     }
+  });
+});
+
+/** A settle addon whose two calls answer `answer`, or throw it when it is an `Error`. */
+function fakeSettleAddon(answer: NativeEnvelope<"settled" | "unknownCall"> | Error): SettleAddon {
+  const settle = (): NativeEnvelope<"settled" | "unknownCall"> => {
+    if (answer instanceof Error) {
+      throw answer;
+    }
+
+    return answer;
+  };
+
+  return { settleCallbackReturned: settle, settleCallbackThrew: settle };
+}
+
+describe("settlementVia", () => {
+  test("a settled throw keeps its value for the operation", () => {
+    const defects: CoreDefect[] = [];
+
+    const settlement = settlementVia(() => fakeSettleAddon({ kind: "value", value: "settled" }), (defect) => {
+      defects.push(defect);
+    });
+
+    const thrown = new Error("kept for the operation");
+
+    settlement.threw(21n, thrown);
+    assert.deepEqual(takeThrown(21n), { kind: "kept", value: thrown });
+    assert.deepEqual(defects, []);
+  });
+
+  test("a throw that no core call waits for any more is dropped", () => {
+    const settlement = settlementVia(() => fakeSettleAddon({ kind: "value", value: "unknownCall" }), () => {});
+
+    settlement.threw(22n, new Error("late"));
+    assert.deepEqual(takeThrown(22n), { kind: "missing" });
+  });
+
+  test("a settle call that answers a thrown code is a defect, and the value is dropped", () => {
+    const defects: CoreDefect[] = [];
+
+    const settlement = settlementVia(
+      () => fakeSettleAddon({ kind: "thrown", thrown: { code: "CLIENT_DEFECT", subject: "callId", rule: "a u64" } }),
+      (defect) => {
+        defects.push(defect);
+      },
+    );
+
+    settlement.threw(23n, new Error("x"));
+    assert.deepEqual(takeThrown(23n), { kind: "missing" });
+    assert.deepEqual(
+      defects.map((defect) => defect.code),
+      ["CLIENT_DEFECT"],
+    );
+  });
+
+  test("a settle call that throws is a ClientDefect, with no throw out of the settlement", () => {
+    const defects: CoreDefect[] = [];
+
+    const settlement = settlementVia(() => fakeSettleAddon(new TypeError("A bigint was expected")), (defect) => {
+      defects.push(defect);
+    });
+
+    settlement.returned(24n, "answer");
+    assert.deepEqual(
+      defects.map((defect) => [defect.code, defect.message]),
+      [["CLIENT_DEFECT", "a defect of the horsies package: settleCallback: the settle call threw TypeError: A bigint was expected"]],
+    );
   });
 });

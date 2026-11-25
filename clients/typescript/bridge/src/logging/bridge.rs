@@ -31,7 +31,7 @@ use horsies_core::frame_protocol::ChildLogLevel;
 use horsies_core::ChildLogSetup;
 
 use super::forwarder;
-use super::levels::{LogThreshold, RecordLevel, LEVELS};
+use super::levels::{LogThreshold, RecordLevel, WhenFull, LEVELS};
 use super::names::LoggerName;
 use super::subscriber::CoreSubscriber;
 
@@ -174,13 +174,16 @@ pub fn current_thread_name() -> String {
     }
 }
 
-/// Records lost to a full channel since the last report.
+/// Records lost since the last report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DropCounts {
-    /// TRACE, DEBUG and INFO records dropped.
+    /// TRACE, DEBUG and INFO records dropped in a full channel.
     pub dropped_low: u64,
-    /// WARNING and ERROR records written to stderr instead.
+    /// WARNING and ERROR records written to stderr in place of the channel.
     pub spilled_high: u64,
+    /// Records of batches that the JavaScript sink did not take within the
+    /// answer bound.
+    pub abandoned: u64,
 }
 
 /// How a wait for the forwarder to empty the channel ended.
@@ -201,6 +204,7 @@ pub struct LogSink {
     sender: SyncSender<CoreLogRecord>,
     dropped_low: AtomicU64,
     spilled_high: AtomicU64,
+    abandoned: AtomicU64,
     /// Records in the channel that the forwarder has not handled yet. A push
     /// counts a record before it sends it and uncounts it when the send
     /// fails, so the forwarder never uncounts a record that was not counted.
@@ -222,6 +226,7 @@ impl LogSink {
             sender,
             dropped_low: AtomicU64::new(0),
             spilled_high: AtomicU64::new(0),
+            abandoned: AtomicU64::new(0),
             in_channel: AtomicU64::new(0),
             forwarder_running: AtomicBool::new(false),
             stderr_only: AtomicBool::new(false),
@@ -235,11 +240,11 @@ impl LogSink {
         match self.try_enqueue(record) {
             Ok(()) => {}
             Err(refused) => match *refused {
-                TrySendError::Full(record) => match record.level.waits_when_full() {
-                    false => {
+                TrySendError::Full(record) => match record.level.when_full() {
+                    WhenFull::Drop => {
                         let _previous = self.dropped_low.fetch_add(1, Ordering::Relaxed);
                     }
-                    true => self.push_waiting(record),
+                    WhenFull::WaitThenSpill => self.push_waiting(record),
                 },
                 TrySendError::Disconnected(record) => self.spill(&record),
             },
@@ -333,11 +338,18 @@ impl LogSink {
         );
     }
 
+    /// Count `count` records of a batch that the JavaScript sink did not
+    /// take within the answer bound.
+    pub fn records_abandoned(&self, count: usize) {
+        let _previous = self.abandoned.fetch_add(count as u64, Ordering::Relaxed);
+    }
+
     /// Take the counts since the last report, and reset them.
     pub fn take_drop_counts(&self) -> DropCounts {
         DropCounts {
             dropped_low: self.dropped_low.swap(0, Ordering::Relaxed),
             spilled_high: self.spilled_high.swap(0, Ordering::Relaxed),
+            abandoned: self.abandoned.swap(0, Ordering::Relaxed),
         }
     }
 }
@@ -370,8 +382,13 @@ impl LogBridge {
     /// Push a record of the bridge itself, if the threshold of the bridge
     /// logger lets it through.
     pub fn push_bridge_record(&self, level: RecordLevel, message: String) {
-        if LEVELS.enabled(LoggerName::Bridge, level) {
-            self.sink.push(CoreLogRecord::bridge(level, message));
+        self.push_record(CoreLogRecord::bridge(level, message));
+    }
+
+    /// Push `record`, if the threshold of its logger lets it through.
+    pub fn push_record(&self, record: CoreLogRecord) {
+        if LEVELS.enabled(record.logger, record.level) {
+            self.sink.push(record);
         }
     }
 
@@ -532,14 +549,16 @@ mod tests {
             sink.take_drop_counts(),
             DropCounts {
                 dropped_low: 1,
-                spilled_high: 0
+                spilled_high: 0,
+                abandoned: 0
             }
         );
         assert_eq!(
             sink.take_drop_counts(),
             DropCounts {
                 dropped_low: 0,
-                spilled_high: 0
+                spilled_high: 0,
+                abandoned: 0
             }
         );
     }
@@ -555,7 +574,8 @@ mod tests {
             sink.take_drop_counts(),
             DropCounts {
                 dropped_low: 0,
-                spilled_high: 1
+                spilled_high: 1,
+                abandoned: 0
             }
         );
         assert_eq!(

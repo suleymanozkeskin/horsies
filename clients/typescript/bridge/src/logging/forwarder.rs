@@ -6,8 +6,9 @@
 //!   stderr.
 //! - It counts every record it handles, so that an abort can wait for the
 //!   channel to empty.
-//! - After a batch it reports the records that a full channel lost, as one
-//!   WARNING record of the bridge logger.
+//! - After a batch it reports the records that were lost (a full channel, or
+//!   a sink that did not answer within its bound), as one WARNING record of
+//!   the bridge logger, when the bridge logger's threshold lets it through.
 //! - A panic in the forwarder is a panic in a core background task: the
 //!   process panic rule applies. The batch and the records still in the
 //!   channel go to stderr first.
@@ -20,8 +21,9 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use std::sync::Arc;
 
 use super::bridge::{CoreLogRecord, DropCounts, LogSink, LOG_CHANNEL_CAPACITY};
-use super::js_sink::{self, Handed};
-use super::levels::RecordLevel;
+use super::js_sink::{self, Handed, SINK_ANSWER_BOUND};
+use super::levels::{RecordLevel, LEVELS};
+use super::names::LoggerName;
 use crate::process_core::panic_rule::{background_task_panicked, take_panic_cause, PanicReport};
 
 /// Most records handed to the sink at a time.
@@ -98,17 +100,24 @@ fn receive(records: &Receiver<CoreLogRecord>) -> Option<Vec<CoreLogRecord>> {
     Some(batch)
 }
 
-/// Hand one batch to the sink in force. A batch that the JavaScript sink
-/// does not take goes to stderr, with one line that says why.
+/// Hand one batch to the sink in force, and act on how it ended.
 fn deliver(sink: &LogSink, batch: &[CoreLogRecord]) {
     let handed = match sink.stderr_only() {
         true => Handed::NoJavaScriptSink,
         false => js_sink::hand_batch(sink, batch),
     };
+    settle_batch(sink, batch, handed);
+}
+
+/// Act on how the hand of `batch` ended: nothing for a batch that the sink
+/// has, a count for an abandoned batch, and stderr for the rest (with one
+/// line that says why the sink did not take it).
+fn settle_batch(sink: &LogSink, batch: &[CoreLogRecord], handed: Handed) {
     match handed {
-        Handed::Taken => {}
+        Handed::Taken | Handed::InSinkUnanswered => {}
+        Handed::Abandoned => sink.records_abandoned(batch.len()),
         Handed::NoJavaScriptSink => write_stderr(batch),
-        Handed::NotTaken { reason } => {
+        Handed::NotTaken(reason) => {
             let _write_failure_ignored = writeln!(
                 std::io::stderr(),
                 "horsies: {} log records go to stderr: {reason}",
@@ -127,24 +136,37 @@ fn write_stderr(batch: &[CoreLogRecord]) {
     }
 }
 
-/// Report the records that a full channel lost since the last report, as one
-/// WARNING record of the bridge logger.
+/// Report the records lost since the last report, as one WARNING record of
+/// the bridge logger.
 fn report_drop_counts(sink: &LogSink) {
+    if let Some(report) = drop_report(sink.take_drop_counts()) {
+        deliver(sink, std::slice::from_ref(&report));
+    }
+}
+
+/// The WARNING record of the lost records, or `None` when none was lost or
+/// the threshold of the bridge logger refuses a WARNING. Pure but for the
+/// read of the thresholds.
+fn drop_report(counts: DropCounts) -> Option<CoreLogRecord> {
     let DropCounts {
         dropped_low,
         spilled_high,
-    } = sink.take_drop_counts();
-    if dropped_low == 0 && spilled_high == 0 {
-        return;
+        abandoned,
+    } = counts;
+    let lost = dropped_low != 0 || spilled_high != 0 || abandoned != 0;
+    match lost && LEVELS.enabled(LoggerName::Bridge, RecordLevel::Warning) {
+        false => None,
+        true => Some(CoreLogRecord::bridge(
+            RecordLevel::Warning,
+            format!(
+                "core log records were lost: {dropped_low} TRACE/DEBUG/INFO records were \
+                 dropped in a full channel, {spilled_high} WARNING/ERROR records were written \
+                 to stderr, and {abandoned} records were dropped because the log sink did not \
+                 answer within {} ms",
+                SINK_ANSWER_BOUND.as_millis()
+            ),
+        )),
     }
-    let report = CoreLogRecord::bridge(
-        RecordLevel::Warning,
-        format!(
-            "the core log channel was full: {dropped_low} TRACE/DEBUG/INFO records were \
-             dropped and {spilled_high} WARNING/ERROR records were written to stderr"
-        ),
-    );
-    deliver(sink, std::slice::from_ref(&report));
 }
 
 /// Write `batch` and the records in the channel, at most one channel's
@@ -154,4 +176,92 @@ fn spill_all(batch: &[CoreLogRecord], records: &Receiver<CoreLogRecord>) -> usiz
     let left: Vec<CoreLogRecord> = records.try_iter().take(LOG_CHANNEL_CAPACITY).collect();
     write_stderr(&left);
     batch.len() + left.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::logging::js_sink::NotTaken;
+
+    fn record(message: &str) -> CoreLogRecord {
+        CoreLogRecord::bridge(RecordLevel::Error, message.to_owned())
+    }
+
+    #[test]
+    fn no_loss_has_no_report() {
+        assert_eq!(
+            drop_report(DropCounts {
+                dropped_low: 0,
+                spilled_high: 0,
+                abandoned: 0
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn a_loss_is_one_warning_of_the_bridge_logger_with_each_count() {
+        let report = drop_report(DropCounts {
+            dropped_low: 3,
+            spilled_high: 2,
+            abandoned: 7,
+        })
+        .expect("the default threshold lets a WARNING through");
+        assert_eq!(report.logger, LoggerName::Bridge);
+        assert_eq!(report.level, RecordLevel::Warning);
+        assert!(
+            report.message.contains("3 TRACE/DEBUG/INFO"),
+            "{}",
+            report.message
+        );
+        assert!(
+            report.message.contains("2 WARNING/ERROR"),
+            "{}",
+            report.message
+        );
+        assert!(
+            report.message.contains("7 records were dropped"),
+            "{}",
+            report.message
+        );
+    }
+
+    #[test]
+    fn an_abandoned_batch_counts_its_records_as_dropped() {
+        let (sink, _records) = LogSink::new(1);
+        settle_batch(&sink, &[record("a"), record("b")], Handed::Abandoned);
+        assert_eq!(sink.take_drop_counts().abandoned, 2);
+    }
+
+    #[test]
+    fn a_batch_that_the_sink_has_counts_nothing() {
+        let (sink, _records) = LogSink::new(1);
+        settle_batch(&sink, &[record("a")], Handed::Taken);
+        settle_batch(&sink, &[record("b")], Handed::InSinkUnanswered);
+        assert_eq!(
+            sink.take_drop_counts(),
+            DropCounts {
+                dropped_low: 0,
+                spilled_high: 0,
+                abandoned: 0
+            }
+        );
+    }
+
+    #[test]
+    fn a_batch_that_the_sink_did_not_take_counts_nothing() {
+        let (sink, _records) = LogSink::new(1);
+        settle_batch(&sink, &[record("a")], Handed::NotTaken(NotTaken::SinkThrew));
+        assert_eq!(sink.take_drop_counts().abandoned, 0);
+    }
+
+    #[test]
+    fn a_spill_takes_the_batch_and_the_records_in_the_channel() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(4);
+        for message in ["c", "d", "e"] {
+            sender.send(record(message)).expect("the channel has room");
+        }
+        assert_eq!(spill_all(&[record("a"), record("b")], &receiver), 5);
+        assert!(receiver.try_recv().is_err());
+    }
 }
