@@ -19,6 +19,17 @@
 //! The watch runs in a shared async child, next to the poll watch of its
 //! Rust futures, and in a shared thread child, for its main thread. An
 //! isolated child has no watch: the parent holds the deadline.
+//!
+//! Differences from Python's watchdog, both inside the 5.5 s rule of a
+//! blocked loop:
+//! - The watch reads the loop at each pass of the child's watch thread,
+//!   every 250 ms; Python reads every 100 ms. A block of 5 s gives about 19
+//!   samples (Python: about 48), and the report comes at most 5.25 s after
+//!   the last turn.
+//! - In a shared async child the poll watch of the Rust futures and this
+//!   watch can each send a `loop_blocked` frame in the same pass. The parent
+//!   kills the child at the first frame and takes no action at the second
+//!   (`AlreadyKilled`).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
