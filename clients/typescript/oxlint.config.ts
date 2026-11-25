@@ -1,14 +1,19 @@
-import cloudflare from "@cloudflare/oxlint-config";
 import { defineConfig } from "oxlint";
 
 // The lint rules of the client's own code. Every rule is an error.
-// - `@cloudflare/oxlint-config` gives the base set, type-aware through `tsrs`.
-// - `lint/anti-slop/` holds the anti-slop rules that the base set does not contain
-//   (vendored; provenance and the rule comparison in `lint/anti-slop/UPSTREAM.md`).
+// - Base set: the `correctness` category of Oxlint 1.93.0, with Oxlint's default plugins
+//   (`eslint`, `typescript`, `unicorn`, `oxc`). It is not type-aware.
+// - `lint/anti-slop/` holds the anti-slop rules that `@cloudflare/oxlint-config` does not
+//   contain (vendored; provenance and the rule comparison in `lint/anti-slop/UPSTREAM.md`).
+//
+// `@cloudflare/oxlint-config` (type-aware through `tsrs`) replaces the base set in #2354.
+// Its packages are newer than the 10-day `minimumReleaseAge` of the install. The change:
+// add `import cloudflare from "@cloudflare/oxlint-config";`, replace `categories` below with
+// `extends: [cloudflare]` and `env: cloudflare.env`, and put `...cloudflare.ignorePatterns`
+// first in `ignorePatterns`.
 export default defineConfig({
-  extends: [cloudflare],
-  env: cloudflare.env,
-  ignorePatterns: [...cloudflare.ignorePatterns, "lint/anti-slop/**"],
+  categories: { correctness: "error" },
+  ignorePatterns: ["lint/anti-slop/**"],
   jsPlugins: [{ name: "anti-slop", specifier: "./lint/anti-slop/index.ts" }],
   rules: {
     "anti-slop/no-runtime-typeof": "error",
