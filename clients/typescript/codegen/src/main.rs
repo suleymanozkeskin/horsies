@@ -16,6 +16,7 @@
 //! (`clients/typescript/horsies`). CI runs `check` and fails on a stale file.
 
 mod catalogs;
+mod constants;
 mod error_catalogs;
 mod error_detail;
 mod manifest;
