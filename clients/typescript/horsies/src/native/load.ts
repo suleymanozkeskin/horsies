@@ -246,6 +246,7 @@ export function linuxLibc(maps: ProcessMapsRead): LinuxLibc {
     case "read": {
       const lines = maps.text.split("\n");
       const musl = lines.some((line) => line.includes("/ld-musl-") || line.includes("/libc.musl-"));
+
       const glibc = lines.some(
         (line) => line.endsWith("/libc.so.6") || GLIBC_VERSIONED_FILE.test(line),
       );
