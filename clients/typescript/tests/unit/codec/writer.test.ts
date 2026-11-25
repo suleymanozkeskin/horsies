@@ -4,11 +4,15 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
+import { encodeWithReadBack } from "../../../horsies/src/codec/read-back.ts";
+import { decodeValue } from "../../../horsies/src/codec/reader.ts";
 import type { EncodeRefused } from "../../../horsies/src/codec/refusal.ts";
 import { encodeWire } from "../../../horsies/src/codec/typed.ts";
 import { encodeParameters, encodeValue } from "../../../horsies/src/codec/writer.ts";
 import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import type { AnyWire, RequiredWire } from "../../../horsies/src/wire/infer.ts";
+import { INT_KIND, objectKind, REQUIRED } from "../../../horsies/src/wire/kinds.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 
 function written<V>(wire: AnyWire, value: V): string {
@@ -270,5 +274,31 @@ describe("writer: the check in front of the reader", () => {
 
       assert(!result.ok, "the writer gave a text");
     }
+  });
+});
+
+describe("writer: the declared member list", () => {
+  // A kind with the members `b`, then `10`, in this order. An object literal cannot hold that order: JavaScript puts
+  // the integer-like key `10` first in `{ b: ..., "10": ... }`.
+  const declared = objectKind([
+    { name: "b", kind: INT_KIND, presence: REQUIRED },
+    { name: "10", kind: INT_KIND, presence: REQUIRED },
+  ]);
+
+  test("members are written in the declared order, never in the value's key order, integer-like names too", () => {
+    const value = { "10": 2, b: 1 };
+
+    assert.deepEqual(Object.keys(value), ["10", "b"]);
+    assert.deepEqual(encodeValue(declared, value), { ok: true, value: '{"b":1,"10":2}' });
+  });
+
+  test("the read-back keeps the values and the text of integer-like members", () => {
+    const written = encodeWithReadBack(declared, { b: 1, "10": 2 });
+
+    assert.deepEqual(written, { ok: true, value: '{"b":1,"10":2}' });
+
+    const read = decodeValue(declared, jsonTextCheckedByCore('{"b":1,"10":2}'), "worker");
+
+    assert.deepEqual(read, { ok: true, value: { b: 1, "10": 2 } });
   });
 });
