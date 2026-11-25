@@ -1,0 +1,4 @@
+[test]
+# `bun test` in this folder runs the files under tests/ only. The vendored
+# RuleTester files in lint/ need Node; tests/lint/ runs them there.
+root = "tests"

@@ -1,0 +1,22 @@
+{
+  "entries": [
+    {
+      "machine": {
+        "platform": "darwin",
+        "arch": "arm64",
+        "cpuModel": "Apple M2",
+        "logicalCores": 8,
+        "bun": "1.4.4+38afee6c8"
+      },
+      "projectSha256": "ebeb26884256ef3e1d8b61f7fe355773844f2e4125b8085c7b34b7f99c2e1202",
+      "runsPerSession": 9,
+      "sessionMedians": [
+        "PT0.029353S",
+        "PT0.029255S",
+        "PT0.029342S",
+        "PT0.026934S",
+        "PT0.027455S"
+      ]
+    }
+  ]
+}
