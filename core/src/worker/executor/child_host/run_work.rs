@@ -590,6 +590,23 @@ pub(super) enum Alive {
     },
 }
 
+/// The work alive in `work`, and the names of the first ones. Pure.
+fn alive_in(work: &ScopeWork) -> Alive {
+    let Some(count) = u64::try_from(work.alive.len())
+        .ok()
+        .and_then(NonZeroU64::new)
+    else {
+        return Alive::Nothing;
+    };
+    let names = work
+        .alive
+        .values()
+        .take(MAX_LEFTOVER_TASK_NAMES)
+        .map(|alive| alive.name.clone())
+        .collect();
+    Alive::Work { count, names }
+}
+
 /// The report of the work a run left after its body returned.
 pub(super) fn left_report(count: NonZeroU64, names: Vec<LeftoverName>) -> LoopHoldsTasks {
     LoopHoldsTasks::new(count, names).expect("the names are the first min(count, 10) alive")
@@ -775,20 +792,37 @@ impl RunScope {
 
     /// The work of the run that is alive, and the names of the first ones.
     pub(super) fn alive(&self) -> Alive {
-        let work = self.shared.lock();
-        let Some(count) = u64::try_from(work.alive.len())
-            .ok()
-            .and_then(NonZeroU64::new)
-        else {
-            return Alive::Nothing;
-        };
-        let names = work
-            .alive
-            .values()
-            .take(MAX_LEFTOVER_TASK_NAMES)
-            .map(|alive| alive.name.clone())
-            .collect();
-        Alive::Work { count, names }
+        alive_in(&self.shared.lock())
+    }
+
+    /// Close the run when no work of it is alive, under one lock with the
+    /// read: no host-held work can register between the read and the close,
+    /// so a late `register_host_work` gives `RunEnded`. With work alive the
+    /// run stays open, and the work is returned. A host registers from any
+    /// thread, so an end of a run reads and closes through this step, not
+    /// through [`Self::alive`] and then [`Self::close`].
+    pub(super) fn close_when_idle(&self) -> Alive {
+        let mut work = self.shared.lock();
+        let alive = alive_in(&work);
+        match alive {
+            Alive::Nothing => work.state = ScopeState::Closed,
+            Alive::Work { .. } => {}
+        }
+        alive
+    }
+
+    /// Wait until no work of the run is alive, at most `bound`, then close
+    /// the run with [`Self::close_when_idle`]. `Done`: the run is closed with
+    /// nothing alive. `StillAlive`: work was alive at the bound, or a piece
+    /// registered after the last end and before the close; the run is open.
+    pub(super) async fn wait_idle_then_close(&self, bound: Duration) -> WorkWait {
+        match self.wait_done(bound).await {
+            WorkWait::StillAlive => WorkWait::StillAlive,
+            WorkWait::Done => match self.close_when_idle() {
+                Alive::Nothing => WorkWait::Done,
+                Alive::Work { .. } => WorkWait::StillAlive,
+            },
+        }
     }
 
     /// Why a cancel round of this run asks its work to stop, read from the
@@ -1006,6 +1040,13 @@ impl HostStop {
 /// registers the work that it runs outside the Rust runtime through it from
 /// any thread. It stays valid after the run ended; each method then answers
 /// `RunEnded`.
+///
+/// The handle gives no cancel signal. A host whose work must see the
+/// deadline or an operator cancel when they fire reads
+/// [`run_cancel_signal`] in the async body too and keeps it next to the
+/// handle: the stop request of host-held work
+/// ([`HostWork::stop_requested`]) comes only at the cancel rounds, after the
+/// cancel grace, and at the stop of left work.
 #[derive(Clone)]
 pub struct RunHandle {
     scope: RunScope,
@@ -1698,6 +1739,80 @@ mod tests {
             .await
             .expect("the waiter wakes at the end")
             .expect("the waiter ends");
+    }
+
+    /// A run with nothing alive closes at the idle close: a later
+    /// registration of host-held work is `RunEnded`.
+    #[tokio::test]
+    async fn an_idle_run_closes_and_takes_no_later_host_work() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        assert_eq!(scope.close_when_idle(), Alive::Nothing);
+        assert_eq!(
+            handle.register_host_work("late").err(),
+            Some(HostWorkRefused::RunEnded)
+        );
+    }
+
+    /// A run with work alive stays open at the idle close, and the close
+    /// names that work.
+    #[tokio::test]
+    async fn a_run_with_work_alive_stays_open_at_the_idle_close() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        let first = handle
+            .register_host_work("host.promise")
+            .expect("an open run takes host-held work");
+        match scope.close_when_idle() {
+            Alive::Work { count, names } => {
+                assert_eq!(count.get(), 1);
+                assert_eq!(names[0].as_str(), "host.promise");
+            }
+            Alive::Nothing => panic!("the host-held work is alive"),
+        }
+        let second = handle
+            .register_host_work("host.later")
+            .expect("a run with work alive stays open");
+        first.end();
+        second.end();
+    }
+
+    /// The wait for an idle run closes it when the work ended within the
+    /// bound, and keeps it open when the work is alive at the bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_wait_for_an_idle_run_closes_it_only_when_nothing_is_alive() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        let work = handle
+            .register_host_work("host.promise")
+            .expect("an open run takes host-held work");
+        assert_eq!(
+            scope.wait_idle_then_close(Duration::from_millis(100)).await,
+            WorkWait::StillAlive
+        );
+        let more = handle
+            .register_host_work("host.more")
+            .expect("the run stays open while work is alive");
+        let ender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            work.end();
+            more.end();
+        });
+        assert_eq!(
+            scope.wait_idle_then_close(Duration::from_secs(2)).await,
+            WorkWait::Done
+        );
+        ender.join().expect("the host thread ends");
+        assert_eq!(
+            handle.register_host_work("late").err(),
+            Some(HostWorkRefused::RunEnded)
+        );
     }
 
     /// The signal that a blocking body reads is the signal of its run: a fire
