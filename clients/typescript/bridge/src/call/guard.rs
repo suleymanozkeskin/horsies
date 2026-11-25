@@ -159,6 +159,11 @@ mod tests {
         assert_eq!(CallKind::Write.state_after(), StateAfter::OutcomeUnknown);
     }
 
+    /// An operation body that panics, with the type of a value.
+    fn planned_operation_panic() -> u32 {
+        panic!("planned operation panic")
+    }
+
     #[test]
     fn an_operation_that_ends_gives_its_value() {
         let core = standalone_core_for_tests();
@@ -177,7 +182,7 @@ mod tests {
         let guarded: Guarded<u32> =
             core.runtime_handle()
                 .block_on(guard(core, "ping_database", async {
-                    panic!("planned operation panic")
+                    planned_operation_panic()
                 }));
         match guarded.envelope("ping_database", CallKind::Read) {
             Envelope::Thrown(NativeThrown::CorePanic { subject, cause }) => {

@@ -92,7 +92,7 @@ pub type CallbackFunction<Argument, const QUEUE: usize> = ThreadsafeFunction<
 
 /// One registration of a JavaScript function that the core calls with an
 /// `Argument` and that answers an `Answer`.
-pub struct JsCallback<Argument: 'static, Answer, const QUEUE: usize> {
+pub struct JsCallback<Argument: ToNapiValue + 'static, Answer, const QUEUE: usize> {
     function: CallbackFunction<Argument, QUEUE>,
     answer: PhantomData<fn() -> Answer>,
 }
