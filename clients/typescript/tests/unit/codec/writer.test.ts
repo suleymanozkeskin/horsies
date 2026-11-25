@@ -3,27 +3,53 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { EncodeRefusalKind } from "../../../horsies/src/codec/refusal.ts";
-import { encodeValue, encodeWire } from "../../../horsies/src/codec/writer.ts";
-import { h, kindOf } from "../../../horsies/src/wire/builders.ts";
-import type { AnyWire } from "../../../horsies/src/wire/infer.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import type { EncodeRefused } from "../../../horsies/src/codec/refusal.ts";
+import { encodeWire } from "../../../horsies/src/codec/typed.ts";
+import { encodeParameters, encodeValue } from "../../../horsies/src/codec/writer.ts";
+import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
+import type { AnyWire, RequiredWire } from "../../../horsies/src/wire/infer.ts";
+import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 
 function written<V>(wire: AnyWire, value: V): string {
   const result = encodeValue(kindOf(wire), value);
 
-  assert(result.ok, result.ok ? "" : `refused ${result.error.kind}`);
+  assert(result.ok, result.ok ? "" : `refused ${result.error.kind} at ${result.error.path}`);
 
   return result.value;
 }
 
-function refused<V>(wire: AnyWire, value: V): EncodeRefusalKind {
+function refused<V>(wire: AnyWire, value: V): EncodeRefused {
   const result = encodeValue(kindOf(wire), value);
 
   assert(!result.ok, "encoded a refused value");
   assert.equal(result.error.side, "encode");
-  assert.equal(result.error.path, "$");
 
-  return result.error.kind;
+  return result.error;
+}
+
+function nestedArrays(levels: number): RequiredWire {
+  let wire: RequiredWire = h.int();
+
+  for (let level = 0; level < levels; level += 1) {
+    wire = h.array(wire);
+  }
+
+  return wire;
+}
+
+function nestedValue(levels: number): readonly unknown[] | number {
+  let value: readonly unknown[] | number = 1;
+
+  for (let level = 0; level < levels; level += 1) {
+    value = [value];
+  }
+
+  return value;
+}
+
+class Point {
+  readonly x = 1;
 }
 
 describe("writer: each scalar kind to its text", () => {
@@ -64,40 +90,161 @@ describe("writer: each scalar kind to its text", () => {
   });
 });
 
+describe("writer: containers", () => {
+  test("object members in declaration order, not in the value's key order", () => {
+    const order = h.object({ id: h.int(), amount: h.float() });
+
+    assert.equal(written(order, { amount: 12.5, id: 7 }), '{"id":7,"amount":12.5}');
+  });
+
+  test("an omitted optional member is left out; null is written for a nullable value", () => {
+    const note = h.object({ a: h.int().optional(), b: h.int().nullable() });
+
+    assert.equal(written(note, { b: null }), '{"b":null}');
+    assert.equal(written(note, { a: 1, b: 2 }), '{"a":1,"b":2}');
+  });
+
+  test("the sender never writes a default", () => {
+    const retry = h.object({ count: h.int().default(3), name: h.string() });
+
+    assert.equal(written(retry, { name: "x" }), '{"name":"x"}');
+    assert.equal(written(retry, { count: 5, name: "x" }), '{"count":5,"name":"x"}');
+  });
+
+  test("arrays, tuples and an empty object", () => {
+    assert.equal(written(h.array(h.int()), [1, 2, 3]), "[1,2,3]");
+    assert.equal(written(h.array(h.int()), []), "[]");
+    assert.equal(written(h.tuple([h.string(), h.float()]), ["a", 1]), '["a",1.0]');
+    assert.equal(written(h.object({}), {}), "{}");
+  });
+
+  test("a record keeps the value's own key order, integer-like keys first", () => {
+    assert.equal(written(h.record(h.int()), { b: 1, a: 2 }), '{"b":1,"a":2}');
+    assert.equal(written(h.record(h.int()), { b: 1, "10": 2, "2": 3 }), '{"2":3,"10":2,"b":1}');
+  });
+
+  test("a record key __proto__ is written as data", () => {
+    const value: Record<string, number> = JSON.parse('{"__proto__":1,"a":2}');
+
+    assert.equal(written(h.record(h.int()), value), '{"__proto__":1,"a":2}');
+  });
+
+  test(`${MAX_VALUE_JSON_DEPTH} levels are written`, () => {
+    assert.equal(written(nestedArrays(MAX_VALUE_JSON_DEPTH), nestedValue(MAX_VALUE_JSON_DEPTH)).length, 401);
+  });
+
+  test("a task input: one member per given parameter, in declaration order; no parameters is {}", () => {
+    const parameters = parametersKind({ b: h.int(), a: h.string(), c: h.int().optional() });
+    const result = encodeParameters(parameters, { a: "x", b: 1 });
+
+    assert(result.ok);
+    assert.equal(result.value, '{"b":1,"a":"x"}');
+
+    const empty = encodeParameters(parametersKind({}), {});
+
+    assert(empty.ok);
+    assert.equal(empty.value, "{}");
+  });
+
+  test("each parameter starts at the top: a parameter of 200 levels is written", () => {
+    const parameters = parametersKind({ value: nestedArrays(MAX_VALUE_JSON_DEPTH) });
+
+    assert(encodeParameters(parameters, { value: nestedValue(MAX_VALUE_JSON_DEPTH) }).ok);
+  });
+});
+
 describe("writer: each refusal", () => {
-  test("ExplicitUndefined", () => {
+  test("ExplicitUndefined: a value, a member and an array hole", () => {
     for (const wire of [h.null(), h.boolean(), h.string(), h.int(), h.bigint(), h.float()]) {
-      assert.equal(refused(wire, undefined), "ExplicitUndefined");
+      assert.equal(refused(wire, undefined).kind, "ExplicitUndefined");
     }
+
+    const member = refused(h.object({ a: h.int().optional() }), { a: undefined });
+
+    assert.deepEqual([member.kind, member.path], ["ExplicitUndefined", "$.a"]);
+
+    const holes: number[] = [1];
+
+    holes[2] = 3;
+
+    assert.equal(refused(h.array(h.int()), holes).path, "$[1]");
   });
 
   test("WrongType: a value of another JavaScript type", () => {
-    assert.equal(refused(h.null(), 0), "WrongType");
-    assert.equal(refused(h.boolean(), "true"), "WrongType");
-    assert.equal(refused(h.string(), 1), "WrongType");
-    assert.equal(refused(h.int(), 7n), "WrongType");
-    assert.equal(refused(h.bigint(), 7), "WrongType");
-    assert.equal(refused(h.float(), 7n), "WrongType");
+    assert.equal(refused(h.null(), 0).kind, "WrongType");
+    assert.equal(refused(h.boolean(), "true").kind, "WrongType");
+    assert.equal(refused(h.string(), 1).kind, "WrongType");
+    assert.equal(refused(h.int(), 7n).kind, "WrongType");
+    assert.equal(refused(h.bigint(), 7).kind, "WrongType");
+    assert.equal(refused(h.float(), 7n).kind, "WrongType");
+    assert.equal(refused(h.object({}), []).kind, "WrongType");
+    assert.equal(refused(h.array(h.int()), {}).kind, "WrongType");
+    assert.equal(refused(h.record(h.int()), "a").kind, "WrongType");
+  });
+
+  test("WrongType: a tuple of another length", () => {
+    const error = refused(h.tuple([h.int(), h.int()]), [1]);
+
+    assert.deepEqual([error.kind, error.detail], ["WrongType", "expected an array of 2 items"]);
   });
 
   test("NotSafeInteger: a fraction, 2^53 and NaN under h.int()", () => {
-    assert.equal(refused(h.int(), 1.5), "NotSafeInteger");
-    assert.equal(refused(h.int(), 2 ** 53), "NotSafeInteger");
-    assert.equal(refused(h.int(), Number.NaN), "NotSafeInteger");
+    assert.equal(refused(h.int(), 1.5).kind, "NotSafeInteger");
+    assert.equal(refused(h.int(), 2 ** 53).kind, "NotSafeInteger");
+    assert.equal(refused(h.int(), Number.NaN).kind, "NotSafeInteger");
   });
 
   test("IntegerTooLong: an integer of 4,301 digits", () => {
-    assert.equal(refused(h.bigint(), 10n ** 4300n), "IntegerTooLong");
+    assert.equal(refused(h.bigint(), 10n ** 4300n).kind, "IntegerTooLong");
   });
 
   test("NonFiniteFloat: NaN and the infinities", () => {
     for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
-      assert.equal(refused(h.float(), value), "NonFiniteFloat");
+      assert.equal(refused(h.float(), value).kind, "NonFiniteFloat");
     }
   });
 
-  test("LoneSurrogate: a string that is not well formed", () => {
-    assert.equal(refused(h.string(), "a\ud800b"), "LoneSurrogate");
-    assert.equal(refused(h.string(), "\udc00"), "LoneSurrogate");
+  test("LoneSurrogate: a string and a record key that are not well formed", () => {
+    assert.equal(refused(h.string(), "a\ud800b").kind, "LoneSurrogate");
+    assert.equal(refused(h.string(), "\udc00").kind, "LoneSurrogate");
+    assert.equal(refused(h.record(h.int()), { "\ud800": 1 }).kind, "LoneSurrogate");
+  });
+
+  test("UnknownMember: a key that the type does not declare, at every depth; the key is not in the path", () => {
+    const top = refused(h.object({ a: h.int() }), { a: 1, b: 2 });
+
+    assert.deepEqual([top.kind, top.path], ["UnknownMember", "$.<input>"]);
+
+    const nested = refused(h.object({ inner: h.object({ a: h.int() }) }), { inner: { a: 1, secret: 2 } });
+
+    assert.deepEqual([nested.kind, nested.path], ["UnknownMember", "$.inner.<input>"]);
+  });
+
+  test("MissingMember: a required member that the value leaves out", () => {
+    const error = refused(h.object({ a: h.int(), b: h.int() }), { a: 1 });
+
+    assert.deepEqual([error.kind, error.path], ["MissingMember", "$.b"]);
+  });
+
+  test("EngineKey: a record key that only the engine writes, at any depth", () => {
+    for (const key of ["__h_task_result__", "__horsies_x", "__builtin_task_code__"]) {
+      assert.equal(refused(h.record(h.int()), { [key]: 1 }).kind, "EngineKey");
+    }
+
+    assert.equal(refused(h.array(h.record(h.int())), [{ __h_x: 1 }]).path, "$[0].<input>");
+  });
+
+  test(`TooDeep: more than ${MAX_VALUE_JSON_DEPTH} levels`, () => {
+    const levels = MAX_VALUE_JSON_DEPTH + 1;
+
+    assert.equal(refused(nestedArrays(levels), nestedValue(levels)).kind, "TooDeep");
+  });
+
+  test("NotJsonNative: a Date, a Map, a class instance, a function and a symbol key", () => {
+    assert.equal(refused(h.object({}), new Date(0)).kind, "NotJsonNative");
+    assert.equal(refused(h.record(h.int()), new Map()).kind, "NotJsonNative");
+    assert.equal(refused(h.object({ x: h.int() }), new Point()).kind, "NotJsonNative");
+    assert.equal(refused(h.object({}), () => 1).kind, "NotJsonNative");
+    assert.equal(refused(h.record(h.int()), { [Symbol("k")]: 1 }).kind, "NotJsonNative");
   });
 });

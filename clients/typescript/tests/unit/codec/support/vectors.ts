@@ -3,7 +3,7 @@
 
 import { readFileSync } from "node:fs";
 
-import { isBigint, isString } from "../../../../horsies/src/codec/values.ts";
+import { isArray, isBigint, isNumber, isPlainObject, isString } from "../../../../horsies/src/codec/values.ts";
 import { h } from "../../../../horsies/src/wire/builders.ts";
 import type { AnyWire } from "../../../../horsies/src/wire/infer.ts";
 import { STORED_FORMS_DIR } from "./files.ts";
@@ -87,6 +87,14 @@ export function declaredWires(type: string, notation: Notation | undefined): rea
       return [{ label: "float", wire: h.float() }];
     case "str":
       return [{ label: "string", wire: h.string() }];
+    case "optional_i64":
+      return [{ label: "int.nullable", wire: h.int().nullable() }];
+    case "list_i64":
+      return [{ label: "array(int)", wire: h.array(h.int()) }];
+    case "map_str_i64":
+      return [{ label: "record(int)", wire: h.record(h.int()) }];
+    case "record_order":
+      return [{ label: "object", wire: h.object({ id: h.int(), amount: h.float() }) }];
     default:
       return [];
   }
@@ -131,9 +139,48 @@ export function valueOf(type: string, declared: Declared, notation: Notation | u
       return declared.label === "int" ? Number(notationText(notation)) : BigInt(notationText(notation));
     case "f64":
       return floatOf(notation);
+    case "optional_i64":
+      return notation === null ? null : Number(notationText(notation));
+    case "list_i64":
+      return notationList(notation).map((item) => Number(notationText(item)));
+    case "map_str_i64":
+      return mapOf(notationObject(notation), (item) => Number(notationText(item)));
+    case "record_order": {
+      const order = notationObject(notation);
+
+      return { id: Number(notationText(order["id"])), amount: Number(notationText(order["amount"])) };
+    }
+
     default:
       throw new TypeError(`no value for the vector type ${type}`);
   }
+}
+
+function notationList(notation: Notation | undefined): readonly Notation[] {
+  if (!isArray(notation)) {
+    throw new TypeError(`expected a notation list, got ${JSON.stringify(notation)}`);
+  }
+
+  return notation;
+}
+
+function notationObject(notation: Notation | undefined): { readonly [key: string]: Notation } {
+  if (!isPlainObject(notation)) {
+    throw new TypeError(`expected a notation object, got ${JSON.stringify(notation)}`);
+  }
+
+  return notation;
+}
+
+/** A new object with the same keys, in the same order, and each value mapped. */
+function mapOf<T>(entries: { readonly [key: string]: Notation }, map: (item: Notation) => T): Record<string, T> {
+  const out: Record<string, T> = {};
+
+  for (const [key, item] of Object.entries(entries)) {
+    out[key] = map(item);
+  }
+
+  return out;
 }
 
 /** One case per choice of declared wire types of a parameter list; empty when a type has no wire type yet. */
@@ -181,9 +228,31 @@ export function parameterCases(parameters: readonly Parameter[]): readonly Param
   return cases;
 }
 
-/** Strict equality of decoded values: `-0`, `bigint`, and the class of each value. */
+/** Strict equality of decoded values: `-0`, `bigint`, key order, and the class of each value. */
 export function sameValue<A, E>(actual: A, expected: E): boolean {
-  return Object.is(actual, expected);
+  if (isNumber(expected) || !isArray(expected) && !isPlainObject(expected)) {
+    return Object.is(actual, expected);
+  }
+
+  if (isArray(expected)) {
+    return (
+      isArray(actual) &&
+      actual.length === expected.length &&
+      expected.every((item, index) => sameValue(actual[index], item))
+    );
+  }
+
+  if (!isPlainObject(actual)) {
+    return false;
+  }
+
+  const expectedKeys = Object.keys(expected);
+  const actualKeys = Object.keys(actual);
+
+  return (
+    expectedKeys.length === actualKeys.length &&
+    expectedKeys.every((key, index) => actualKeys[index] === key && sameValue(actual[key], expected[key]))
+  );
 }
 
 /** The text of a value for a failure message; a `bigint` is written with `n`. */

@@ -14,7 +14,17 @@ export type EncodeRefusalKind =
   /** A float is `NaN` or an infinity. */
   | "NonFiniteFloat"
   /** A string holds a lone UTF-16 surrogate. */
-  | "LoneSurrogate";
+  | "LoneSurrogate"
+  /** An object has a key that its declared type does not have. */
+  | "UnknownMember"
+  /** An object leaves out a member that is not `.optional()` and has no `.default()`. */
+  | "MissingMember"
+  /** A key that only the engine writes: it starts with `__h_` or `__horsies_`, or is `__builtin_task_code__`. */
+  | "EngineKey"
+  /** The value is nested deeper than the core's bound of a user value. */
+  | "TooDeep"
+  /** The value is not data: a `Date`, `Map`, `Set`, function, class instance, or an object with a symbol key. */
+  | "NotJsonNative";
 
 /** Why the reader refuses a stored text under the declared kind. */
 export type DecodeRefusalKind =
@@ -23,7 +33,15 @@ export type DecodeRefusalKind =
   /** An integer kind holds a float text (`7.0`). */
   | "FloatForInteger"
   /** An `h.int()` value is outside the safe integer range. */
-  | "IntegerOutOfRange";
+  | "IntegerOutOfRange"
+  /** An object has a key that its declared type does not have. */
+  | "UnknownMember"
+  /** An object leaves out a member that is not `.optional()` and has no `.default()`. */
+  | "MissingMember"
+  /** A key that only the engine writes. */
+  | "EngineKey"
+  /** The value is nested deeper than the core's bound of a user value. */
+  | "TooDeep";
 
 /** The writer refuses a value. */
 export type EncodeRefused = {
@@ -46,6 +64,24 @@ export type CodecRefused = EncodeRefused | DecodeRefused;
 
 /** The path of a whole value. */
 export const ROOT_PATH = "$";
+
+/** Written in place of a part of a path that comes from the value: a record key (as the Python and Rust clients). */
+export const INPUT_PLACEHOLDER = "<input>";
+
+/** The path of a declared member: its name is part of the type, not of the value. Pure. */
+export function memberPath(path: string, name: string): string {
+  return `${path}.${name}`;
+}
+
+/** The path of an array or tuple item. Pure. */
+export function itemPath(path: string, index: number): string {
+  return `${path}[${index}]`;
+}
+
+/** The path of a record entry or of an undeclared key: the key is part of the value, so it is not written. Pure. */
+export function entryPath(path: string): string {
+  return `${path}.${INPUT_PLACEHOLDER}`;
+}
 
 /** A refusal of the writer. Pure. */
 export function encodeRefused(kind: EncodeRefusalKind, path: string, detail: string): EncodeRefused {

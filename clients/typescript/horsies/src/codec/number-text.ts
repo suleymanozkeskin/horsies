@@ -134,7 +134,8 @@ class TreeReader {
 
   fail(cause: string): never {
     throw new TypeError(
-      `readTree: the JsonText is not JSON at offset ${this.at} (${cause}); the path that made it skipped the core's strict read rule`,
+      `readTree: the JsonText is not JSON at offset ${this.at} (${cause}); ` +
+        "the path that made it skipped the core's strict read rule",
     );
   }
 

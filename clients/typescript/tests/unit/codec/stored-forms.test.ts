@@ -5,71 +5,43 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
-import { isTreeObject, readTree, type TreeValue } from "../../../horsies/src/codec/number-text.ts";
-import { decodeNode } from "../../../horsies/src/codec/reader.ts";
+import { decodeParameters } from "../../../horsies/src/codec/reader.ts";
 import type { DecodeRefusalKind, EncodeRefusalKind } from "../../../horsies/src/codec/refusal.ts";
-import { encodeValue } from "../../../horsies/src/codec/writer.ts";
-import { kindOf } from "../../../horsies/src/wire/builders.ts";
+import { encodeParameters } from "../../../horsies/src/codec/writer.ts";
+import { parametersKind } from "../../../horsies/src/wire/builders.ts";
+import type { ObjectKind } from "../../../horsies/src/wire/kinds.ts";
 import { type ParameterCase, parameterCases, sameValue, show, taskInputFile } from "./support/vectors.ts";
 
 const taskInput = taskInputFile();
 
-/** The stored text of a parameter list: one member per parameter, in declaration order. */
-function encodeParameterCase(parameterCase: ParameterCase): string {
-  const members = parameterCase.parameters.map(({ name, wire }) => {
-    const written = encodeValue(kindOf(wire), parameterCase.value[name]);
-
-    assert(written.ok, written.ok ? "" : `${name}: ${written.error.kind} at ${written.error.path}`);
-
-    return `${JSON.stringify(name)}:${written.value}`;
-  });
-
-  return `{${members.join(",")}}`;
-}
-
-/** The value of each parameter of a stored text. */
-function decodeParameterCase(
-  parameterCase: ParameterCase,
-  text: string,
-): { readonly value: Readonly<Record<string, unknown>> } | { readonly refused: DecodeRefusalKind } {
-  const tree = readTree(jsonTextCheckedByCore(text));
-
-  assert(isTreeObject(tree), "the stored input is an object");
-
-  const value: Record<string, unknown> = {};
-
-  for (const { name, wire } of parameterCase.parameters) {
-    const member: TreeValue | undefined = tree[name];
-
-    assert(member !== undefined, `the stored input has the member ${name}`);
-
-    const decoded = decodeNode(kindOf(wire), member, `$.${name}`);
-
-    if (!decoded.ok) {
-      return { refused: decoded.error.kind };
-    }
-
-    value[name] = decoded.value;
-  }
-
-  return { value };
+function kindOfCase(parameterCase: ParameterCase): ObjectKind {
+  return parametersKind(Object.fromEntries(parameterCase.parameters.map(({ name, wire }) => [name, wire])));
 }
 
 describe("task_input.json vectors", () => {
   for (const vector of taskInput.vectors) {
+    if (vector.typescript_cannot_express !== undefined) {
+      continue;
+    }
+
+    // A `typescript_drift` row pins the text that this client writes in place of Python's; Python's text still reads.
+    const writtenText = vector.typescript_drift?.text ?? vector.text;
+
     for (const parameterCase of parameterCases(vector.parameters)) {
+      const parameters = kindOfCase(parameterCase);
+
       test(`${vector.name} [${parameterCase.label}] encodes to its text`, () => {
-        assert.equal(encodeParameterCase(parameterCase), vector.text);
+        const written = encodeParameters(parameters, parameterCase.value);
+
+        assert(written.ok, show(written));
+        assert.equal(written.value, writtenText);
       });
 
       test(`${vector.name} [${parameterCase.label}] decodes to its value`, () => {
-        const decoded = decodeParameterCase(parameterCase, vector.text);
+        const decoded = decodeParameters(parameters, jsonTextCheckedByCore(vector.text), "worker");
 
-        assert("value" in decoded, show(decoded));
-
-        for (const { name } of parameterCase.parameters) {
-          assert(sameValue(decoded.value[name], parameterCase.value[name]), name);
-        }
+        assert(decoded.ok, show(decoded));
+        assert(sameValue(decoded.value, parameterCase.value), show(decoded.value));
       });
     }
   }
@@ -85,11 +57,7 @@ describe("task_input.json refused values", () => {
   for (const row of taskInput.refused_values) {
     for (const parameterCase of parameterCases(row.parameters)) {
       test(`${row.name} [${parameterCase.label}] is refused`, () => {
-        const [parameter] = parameterCase.parameters;
-
-        assert(parameter !== undefined);
-
-        const written = encodeValue(kindOf(parameter.wire), parameterCase.value[parameter.name]);
+        const written = encodeParameters(kindOfCase(parameterCase), parameterCase.value);
 
         assert(!written.ok, "encoded a refused value");
         assert.equal(written.error.kind, REFUSED_VALUE_KIND[row.name]);
@@ -101,20 +69,39 @@ describe("task_input.json refused values", () => {
 const TYPED_REFUSAL_KIND: Readonly<Record<string, DecodeRefusalKind>> = {
   string_for_integer: "WrongType",
   float_for_integer: "FloatForInteger",
+  unknown_member: "UnknownMember",
 };
 
 describe("task_input.json typed refused texts", () => {
   for (const row of taskInput.typed_refused_texts) {
+    const expected = TYPED_REFUSAL_KIND[row.name];
+
+    if (expected === undefined) {
+      continue;
+    }
+
     for (const parameterCase of parameterCases(row.parameters)) {
-      const expected = TYPED_REFUSAL_KIND[row.name];
-
-      if (expected === undefined) {
-        continue;
-      }
-
       test(`${row.name} [${parameterCase.label}] is refused with ${expected}`, () => {
-        assert.deepEqual(decodeParameterCase(parameterCase, row.text), { refused: expected });
+        const decoded = decodeParameters(kindOfCase(parameterCase), jsonTextCheckedByCore(row.text), "worker");
+
+        assert(!decoded.ok, "decoded a refused text");
+        assert.equal(decoded.error.kind, expected);
       });
     }
   }
+});
+
+describe("task_input.json rows that this client does not express", () => {
+  test("each one names its reason", () => {
+    const skipped = taskInput.vectors.filter((vector) => vector.typescript_cannot_express !== undefined);
+
+    assert.deepEqual(
+      skipped.map((vector) => vector.name),
+      ["bytes_utf8"],
+    );
+
+    for (const vector of skipped) {
+      assert.notEqual(vector.typescript_cannot_express?.length ?? 0, 0, vector.name);
+    }
+  });
 });

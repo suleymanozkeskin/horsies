@@ -1,52 +1,29 @@
-// The `h.*` wire types. A wire type is the stored form of a value and its TypeScript types: `V`, the value that a
-// reader gives, and `S`, the value that a sender gives. At run time a wire type holds one node of the kind tree.
+// The `h.*` builders of the wire types.
 
-import type { AnyWire, ValueOf } from "./infer.ts";
+import type {
+  AnyWire,
+  ObjectSent,
+  ObjectValue,
+  RequiredWire,
+  SentOf,
+  TupleSent,
+  TupleValue,
+  ValueOf,
+  WireMembers,
+} from "./infer.ts";
 import {
   BIGINT_KIND,
   BOOLEAN_KIND,
   FLOAT_KIND,
   INT_KIND,
   type Kind,
+  type Member,
   NULL_KIND,
+  type ObjectKind,
+  objectKind,
   STRING_KIND,
 } from "./kinds.ts";
-
-/** Type-only key of the value type. It does not exist at run time. */
-export declare const wireValue: unique symbol;
-
-/** Type-only key of the sent type. It does not exist at run time. */
-export declare const wireSent: unique symbol;
-
-/** A wire type: `V` is the value that a reader gives, `S` the value that a sender gives. */
-export interface Wire<V, S = V> {
-  readonly [wireValue]: V;
-  readonly [wireSent]: S;
-}
-
-class WireType<V, S> implements Wire<V, S> {
-  declare readonly [wireValue]: V;
-  declare readonly [wireSent]: S;
-  readonly #kind: Kind;
-
-  constructor(kind: Kind) {
-    this.#kind = kind;
-    Object.freeze(this);
-  }
-
-  static kindOf(wire: AnyWire): Kind {
-    if (!(#kind in wire)) {
-      throw new TypeError("kindOf: the value is not a wire type of horsies (build it with h.*)");
-    }
-
-    return wire.#kind;
-  }
-}
-
-/** The kind tree of a wire type. A value that `h.*` did not build is a defect: `TypeError`. */
-export function kindOf(wire: AnyWire): Kind {
-  return WireType.kindOf(wire);
-}
+import { kindOf, presenceOf, type Wire, wireOf } from "./wire-type.ts";
 
 /** The builders of the wire types. */
 export interface WireBuilders {
@@ -62,15 +39,62 @@ export interface WireBuilders {
   bigint(): Wire<bigint>;
   /** A finite float, stored in Python's float text: `7.0`, `1e-05`, `1e+16`, `-0.0`. */
   float(): Wire<number>;
+  /** An object with declared members, stored in declaration order. An undeclared key is refused. */
+  object<const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>>;
+  /** A JSON array of one item type. */
+  array<W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]>;
+  /** A JSON array with one value per item type. */
+  tuple<const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>>;
+  /** A JSON object with any string keys, stored in the value's own key order (integer-like keys first). */
+  record<W extends RequiredWire>(
+    value: W,
+  ): Wire<Readonly<Record<string, ValueOf<W>>>, Readonly<Record<string, SentOf<W>>>>;
+}
+
+/** The kind of a wire type that must be present: an array, tuple or record item. Another one is a defect. */
+function requiredKindOf(wire: AnyWire, place: string): Kind {
+  if (presenceOf(wire).mode !== "required") {
+    throw new TypeError(`h.${place}: an item is always present; .optional() and .default() are for object members`);
+  }
+
+  return kindOf(wire);
+}
+
+/** The members of an object, in declaration order. Pure. */
+function membersOf(members: WireMembers): readonly Member[] {
+  return Object.keys(members).map((name) => {
+    const wire = members[name];
+
+    if (wire === undefined) {
+      throw new TypeError(`h.object: the member ${name} has no wire type`);
+    }
+
+    return { name, kind: kindOf(wire), presence: presenceOf(wire) };
+  });
+}
+
+/** The kind of a task input: one member per parameter, in declaration order. */
+export function parametersKind(parameters: WireMembers): ObjectKind {
+  return objectKind(membersOf(parameters));
 }
 
 export const h: WireBuilders = Object.freeze({
-  null: (): Wire<null> => new WireType<null, null>(NULL_KIND),
-  boolean: (): Wire<boolean> => new WireType<boolean, boolean>(BOOLEAN_KIND),
-  string: (): Wire<string> => new WireType<string, string>(STRING_KIND),
-  int: (): Wire<number> => new WireType<number, number>(INT_KIND),
-  bigint: (): Wire<bigint> => new WireType<bigint, bigint>(BIGINT_KIND),
-  float: (): Wire<number> => new WireType<number, number>(FLOAT_KIND),
+  null: (): Wire<null> => wireOf(NULL_KIND),
+  boolean: (): Wire<boolean> => wireOf(BOOLEAN_KIND),
+  string: (): Wire<string> => wireOf(STRING_KIND),
+  int: (): Wire<number> => wireOf(INT_KIND),
+  bigint: (): Wire<bigint> => wireOf(BIGINT_KIND),
+  float: (): Wire<number> => wireOf(FLOAT_KIND),
+  object: <const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>> =>
+    wireOf(objectKind(membersOf(members))),
+  array: <W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]> =>
+    wireOf(Object.freeze({ node: "array", item: requiredKindOf(item, "array") })),
+  tuple: <const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>> =>
+    wireOf(Object.freeze({ node: "tuple", items: Object.freeze(items.map((item) => requiredKindOf(item, "tuple"))) })),
+  record: <W extends RequiredWire>(
+    value: W,
+  ): Wire<Readonly<Record<string, ValueOf<W>>>, Readonly<Record<string, SentOf<W>>>> =>
+    wireOf(Object.freeze({ node: "record", value: requiredKindOf(value, "record") })),
 });
 
 // The static helpers of `h`. A namespace with types only: no code at run time.
