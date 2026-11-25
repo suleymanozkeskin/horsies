@@ -227,6 +227,22 @@ pub fn event_variant_type_name(variant: &VariantType) -> &'static str {
     variant.python_class
 }
 
+/// A variant of a closed event type whose interface is named `type_name`,
+/// for the samples of the renderer's tests. Pure.
+#[cfg(test)]
+pub const fn event_variant(
+    tag: &'static str,
+    type_name: &'static str,
+    fields: &'static [horsies_core::events::EventField],
+) -> VariantType {
+    VariantType {
+        tag,
+        python_class: type_name,
+        doc: "",
+        fields,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use horsies_core::catalog::{CodeEnum, CODE_CATALOGS};
@@ -417,5 +433,13 @@ mod tests {
             fields: &[],
         };
         assert_eq!(event_variant_type_name(&variant), "AttemptErrorCodeBuiltIn");
+    }
+
+    #[test]
+    fn a_sample_event_variant_has_its_tag_and_type_name() {
+        let variant = event_variant("BuiltIn", "AttemptErrorCodeBuiltIn", &[]);
+        assert_eq!(variant.tag, "BuiltIn");
+        assert_eq!(event_variant_type_name(&variant), "AttemptErrorCodeBuiltIn");
+        assert!(variant.fields.is_empty());
     }
 }

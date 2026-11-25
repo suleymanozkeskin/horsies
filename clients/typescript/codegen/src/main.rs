@@ -19,6 +19,7 @@ mod catalogs;
 mod constants;
 mod error_catalogs;
 mod error_detail;
+mod events;
 mod manifest;
 mod model;
 mod output;
