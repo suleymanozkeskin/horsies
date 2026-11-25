@@ -38,16 +38,21 @@ enqueue, result wait, task info read, workflow start or scheduler start):
 
 1. It reads the state of the current schema, with no lock.
 2. A database with no `horsies_` table: it takes the schema advisory lock on a direct connection to the
-   session URL, reads the state again, and runs the migration with its bookkeeping row in
-   `horsies_migrations` and the row `PYTHON` in `horsies_client_family`, in one transaction. Then it
-   publishes the history readers (`horsies_task_lookup_staged`, `horsies_task_provenance_staged`,
-   `horsies_task_detail_staged`, `horsies_task_result_staged`, `horsies_task_history_duplicate_staged`)
-   from the leaf catalog, in a second transaction, before it returns.
+   session URL, reads the state again, and runs each migration of the chain in its own transaction, with its
+   bookkeeping row in `horsies_migrations`. The transaction of migration 1000 also publishes the history readers
+   (`horsies_task_lookup_staged`, `horsies_task_provenance_staged`, `horsies_task_detail_staged`,
+   `horsies_task_result_staged`, `horsies_task_history_duplicate_staged`) from the leaf catalog. The transaction
+   of the last migration also writes the row `PYTHON` in `horsies_client_family`. The rule is the same for every
+   client family: the `CHECK` `horsies_client_family_family_known` admits `TYPESCRIPT` only from migration 1006
+   on, so the family row is written after the last migration.
 3. A database that holds the whole chain with this build's checksums, the `PYTHON` family row and every
-   history reader: nothing to do, no lock. A database that holds the start of the chain (version 1000 only)
-   gets the rest of the chain under the lock, each migration in its own transaction. A missing family row or a missing reader (an install that
-   stopped between its two transactions): it takes the lock, publishes the readers and writes the family
-   row.
+   history reader: nothing to do, no lock. A database that holds the start of the chain gets the rest of the
+   chain under the lock, each migration in its own transaction, and the family row with the last migration when
+   it has none. An install that stops before the last migration commits leaves no family row; no handle writes
+   into such a database, and the next install, of any client family, applies the rest of the chain and records
+   its own family. A database that holds the whole chain with no family row or a missing reader (removed out of
+   band, or an install that stopped before the publication): it takes the lock, publishes the readers and writes
+   the family row.
 4. Any other database is refused with `SCHEMA_INIT_FAILED`, and nothing is changed. The refusal names what the
    database holds: a horsies 0.x schema, `horsies_` tables with no bookkeeping, a newer version, a migration
    recorded as failed, a migration applied from another text (checksum), migration versions this build does not
