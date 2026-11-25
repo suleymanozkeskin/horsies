@@ -34,9 +34,10 @@ export default defineConfig({
       },
     },
     {
-      // The generated event decoder parses the wire items of an event: it tells
-      // the members of `WireJson` apart by their runtime type.
-      files: ["horsies/src/_catalog/events.ts"],
+      // The generated decoders of events and of monitoring read models parse
+      // wire values: they tell the members of `WireJson` apart by their runtime
+      // type.
+      files: ["horsies/src/_catalog/events.ts", "horsies/src/_catalog/monitoring_models.ts"],
       rules: {
         "anti-slop/no-runtime-typeof": "off",
       },
