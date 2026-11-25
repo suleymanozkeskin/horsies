@@ -9,7 +9,7 @@ import type {
   WorkerManifest,
   WorkerProfileManifest,
 } from "../../../horsies/src/_catalog/worker_manifest.ts";
-import { wireText } from "./wire-text.ts";
+import { wireText } from "./support/wire-text.ts";
 
 // The expected text is the text of Python's `dump_worker_manifest` for the
 // same manifest. Its two `bigint` fields hold the largest values of their

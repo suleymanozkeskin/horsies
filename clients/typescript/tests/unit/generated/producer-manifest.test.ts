@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { producerManifestToWire } from "../../../horsies/src/_catalog/manifest.ts";
 import type { ProducerManifest } from "../../../horsies/src/_catalog/manifest.ts";
-import { wireText } from "./wire-text.ts";
+import { wireText } from "./support/wire-text.ts";
 
 // Each expected text is the text of Python's `dump_producer_manifest` for the
 // same manifest. The two manifests hold every variant of every tagged type.

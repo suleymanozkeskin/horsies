@@ -11,7 +11,7 @@ import {
   HISTORY_CONTRACT,
   SERVER_FAILURE,
   TASK_ID,
-} from "./catalog_errors.ts";
+} from "./support/catalog-errors.ts";
 
 const MESSAGE = "the monitoring read failed";
 

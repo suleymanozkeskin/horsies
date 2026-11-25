@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { workflowStartCoreErrorFromNative } from "../../../horsies/src/_catalog/workflow_start_errors.ts";
-import { CONNECTION_FAILURE, expectConverted, NO_CAUSE, WORKFLOW_ID } from "./catalog_errors.ts";
+import { CONNECTION_FAILURE, expectConverted, NO_CAUSE, WORKFLOW_ID } from "./support/catalog-errors.ts";
 
 const MESSAGE = "the start failed";
 

@@ -1,4 +1,4 @@
-import type { WireJson } from "../../../horsies/src/_catalog/wire_json.ts";
+import type { WireJson } from "../../../../horsies/src/_catalog/wire_json.ts";
 
 /** The most nesting levels of a wire value that the writer follows. */
 const MAX_WIRE_DEPTH = 32;

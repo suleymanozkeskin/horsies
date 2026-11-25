@@ -33,5 +33,13 @@ export default defineConfig({
         "anti-slop/no-unknown-parameters": "off",
       },
     },
+    {
+      // A test writer of `WireJson` values: it tells the members of the union
+      // apart by their runtime type to write each one as JSON text.
+      files: ["tests/unit/generated/support/wire-text.ts"],
+      rules: {
+        "anti-slop/no-runtime-typeof": "off",
+      },
+    },
   ],
 });

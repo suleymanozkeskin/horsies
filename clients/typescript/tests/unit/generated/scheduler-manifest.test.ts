@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import { schedulerManifestToWire } from "../../../horsies/src/_catalog/scheduler_manifest.ts";
 import type { SchedulerManifest } from "../../../horsies/src/_catalog/scheduler_manifest.ts";
-import { wireText } from "./wire-text.ts";
+import { wireText } from "./support/wire-text.ts";
 
 // The expected text is the text of Python's `dump_scheduler_manifest` for the
 // same manifest. The manifest holds every variant of every tagged type.

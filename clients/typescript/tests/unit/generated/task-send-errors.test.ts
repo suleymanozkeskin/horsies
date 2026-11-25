@@ -17,7 +17,7 @@ import {
   OTHER_TASK_ID,
   RULE_REFUSED,
   TASK_ID,
-} from "./catalog_errors.ts";
+} from "./support/catalog-errors.ts";
 
 const MESSAGE = "the send failed";
 

@@ -1,14 +1,14 @@
 import { expect } from "bun:test";
 
-import type { BrokerCoreError } from "../../../horsies/src/_catalog/broker_errors.ts";
-import type { CoreCause, NoCause } from "../../../horsies/src/_catalog/error_detail.ts";
+import type { BrokerCoreError } from "../../../../horsies/src/_catalog/broker_errors.ts";
+import type { CoreCause, NoCause } from "../../../../horsies/src/_catalog/error_detail.ts";
 import type {
   MonitoringQueryCoreError,
   TaskActionCoreError,
-} from "../../../horsies/src/_catalog/monitoring_errors.ts";
-import type { TaskSendCoreError } from "../../../horsies/src/_catalog/task_send_errors.ts";
-import type { HandleCoreError } from "../../../horsies/src/_catalog/workflow_handle_errors.ts";
-import type { WorkflowStartCoreError } from "../../../horsies/src/_catalog/workflow_start_errors.ts";
+} from "../../../../horsies/src/_catalog/monitoring_errors.ts";
+import type { TaskSendCoreError } from "../../../../horsies/src/_catalog/task_send_errors.ts";
+import type { HandleCoreError } from "../../../../horsies/src/_catalog/workflow_handle_errors.ts";
+import type { WorkflowStartCoreError } from "../../../../horsies/src/_catalog/workflow_start_errors.ts";
 
 /** A value of any generated catalog error union. */
 export type CatalogError =

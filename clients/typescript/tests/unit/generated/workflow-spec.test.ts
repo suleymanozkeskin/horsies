@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test";
 import specDataVectors from "../../../../../core/tests/fixtures/stored_forms/workflow_spec_data.json" with { type: "json" };
 import { workflowSpecDataToWire } from "../../../horsies/src/_catalog/workflow_spec.ts";
 import type { SpecNode, WorkflowSpecData } from "../../../horsies/src/_catalog/workflow_spec.ts";
-import { wireText } from "./wire-text.ts";
+import { wireText } from "./support/wire-text.ts";
 
 // Each expected text is the text of a vector of the core's stored-form
 // fixture: Python's text of the same spec data. The two documents hold every

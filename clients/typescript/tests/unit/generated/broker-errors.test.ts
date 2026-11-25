@@ -10,7 +10,7 @@ import {
   OTHER_TASK_ID,
   RULE_REFUSED,
   SERVER_FAILURE,
-} from "./catalog_errors.ts";
+} from "./support/catalog-errors.ts";
 
 const MESSAGE = "the broker refused the call";
 

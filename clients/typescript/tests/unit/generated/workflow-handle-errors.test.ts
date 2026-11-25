@@ -7,7 +7,7 @@ import {
   expectConverted,
   SERVER_FAILURE,
   WORKFLOW_ID,
-} from "./catalog_errors.ts";
+} from "./support/catalog-errors.ts";
 
 const MESSAGE = "the workflow call failed";
 
