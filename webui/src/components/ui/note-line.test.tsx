@@ -4,13 +4,13 @@ import { describe, expect, it } from 'vitest';
 import { NoteLine } from '@/components/ui/note-line';
 
 describe('NoteLine', () => {
-  it('shows a warning as a note with the marked ink on its icon', () => {
+  it('shows a warning as a note with the warning ink on its icon', () => {
     render(<NoteLine view={{ tone: 'warning', text: 'Queue wait 7.2s.' }} />);
 
     const note = screen.getByRole('note');
     expect(note.textContent).toBe('Queue wait 7.2s.');
     expect(note.getAttribute('data-tone')).toBe('warning');
-    expect(note.querySelector('svg')?.getAttribute('style')).toContain('var(--marked-ink)');
+    expect(note.querySelector('svg')?.getAttribute('style')).toContain('var(--warning-dark)');
   });
 
   it('shows an info note in the quiet text color', () => {

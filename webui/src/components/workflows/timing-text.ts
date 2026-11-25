@@ -20,7 +20,7 @@ import type {
   WorkflowEventKind,
 } from '@/types/timing';
 
-import { LONG_ENGINE_STEP_MS, phaseLabel } from './phase';
+import { phaseLabel, segmentKind } from './phase';
 import type { NodeTime } from './run-timing';
 import { phaseComposition, type PhaseTotal } from './timeline-geometry';
 
@@ -143,9 +143,10 @@ export function runCoverageText(coverage: RunCoverage): string | null {
   }
 }
 
-/** The phase of a segment with what it holds: `slot wait · 2 earlier
- * claims`, `unknown · worker lost`. */
-export function segmentPhaseText(segment: TimingSegment): string {
+/** What a segment holds beyond its kind, or null when it holds nothing
+ * more: the count of earlier claims, when a child took the task of a slot
+ * wait, the reason of an unknown time. */
+export function segmentDetailText(segment: TimingSegment): string | null {
   const phase = segment.phase;
   switch (phase.kind) {
     case 'pending':
@@ -155,25 +156,30 @@ export function segmentPhaseText(segment: TimingSegment): string {
     case 'running':
     case 'finalizing':
     case 'advancing':
-      return phaseLabel(phase.kind);
-    case 'claimed': {
-      const detail = claimDetailText(phase.claim, segment);
-      return detail === null ? phaseLabel(phase.kind) : `${phaseLabel(phase.kind)} · ${detail}`;
-    }
+      return null;
+    case 'claimed':
+      return claimDetailText(phase.claim, segment);
     case 'unknown':
-      return `${phaseLabel(phase.kind)} · ${unknownReasonText(phase.reason)}`;
+      return phase.reason === 'WORKER_LOST' ? null : unknownReasonText(phase.reason);
     default:
       return assertNever(phase, 'segment phase');
   }
 }
 
-/** What a claim holds beyond its phase. The placement on a child is a few
- * hundred microseconds after the claim in the normal case, so it shows only
- * for a long slot wait: it tells which part of the wait was long. */
+/** The kind of a segment with what it holds: `earlier claims · 2 earlier
+ * claims`, `unknown · claims not counted`, `worker lost`. */
+export function segmentPhaseText(segment: TimingSegment): string {
+  const label = phaseLabel(segmentKind(segment.phase));
+  const detail = segmentDetailText(segment);
+  return detail === null ? label : `${label} · ${detail}`;
+}
+
+/** The count of earlier claims, or when a child took the task of the claim
+ * that ran the attempt. */
 function claimDetailText(claim: SegmentClaim, segment: TimingSegment): string | null {
   switch (claim.kind) {
     case 'earlier':
-      return claim.count === 1 ? '1 earlier claim' : `${claim.count} earlier claims`;
+      return earlierClaimsText(claim.count);
     case 'recorded':
       switch (claim.placement.kind) {
         case 'placed':
@@ -190,6 +196,10 @@ function claimDetailText(claim: SegmentClaim, segment: TimingSegment): string | 
   }
 }
 
+/** `1 earlier claim`, `3 earlier claims`. */
+export const earlierClaimsText = (count: number): string =>
+  count === 1 ? '1 earlier claim' : `${count} earlier claims`;
+
 /** The placement of a claim whose slot wait ended. A claim with no end yet
  * has no placement text: its wait is not over. */
 function placedClaimText(segment: TimingSegment, placedAtMs: number): string | null {
@@ -197,25 +207,17 @@ function placedClaimText(segment: TimingSegment, placedAtMs: number): string | n
     case 'open':
       return null;
     case 'ended':
-      return placementText(instantMs(segment.started_at), placedAtMs, instantMs(segment.end.at));
+      return placementText(instantMs(segment.started_at), placedAtMs);
     default:
       return assertNever(segment.end, 'segment end');
   }
 }
 
-/** The placement of a long slot wait in words: `a child took the task after
- * 273ms`. Null for a slot wait below the long step limit: there the
- * placement is a few hundred microseconds after the claim, and it tells
- * nothing. */
-export function placementText(
-  claimedAtMs: number,
-  placedAtMs: number,
-  startedAtMs: number
-): string | null {
-  return startedAtMs - claimedAtMs < LONG_ENGINE_STEP_MS
-    ? null
-    : `a child took the task after ${formatMilliseconds(placedAtMs - claimedAtMs)}`;
-}
+/** When a child of the worker took the task after its claim: `a child took
+ * the task after 273ms`. It tells which part of a slot wait was the wait for
+ * a child, and which part the start on the child. */
+export const placementText = (claimedAtMs: number, placedAtMs: number): string =>
+  `a child took the task after ${formatMilliseconds(placedAtMs - claimedAtMs)}`;
 
 /** What the segment describes: `node`, `task 2`, `task 1 · attempt 3`. */
 export function segmentSourceText(source: SegmentSource): string {

@@ -12,7 +12,6 @@ import type { NodeTiming } from '@/types/timing';
 import type { WorkflowStatus } from '@/types/workflows';
 
 import { NODE_H, NODE_W } from './layout';
-import { phaseLabel } from './phase';
 import type { ResidualState } from './residual';
 import { nodeFacts, nodeTime, type NodeFact } from './run-timing';
 import { nodeTimingIsOpen } from './timeline-geometry';
@@ -113,16 +112,15 @@ function cardDurationText(duration: CardDuration): string | null {
   }
 }
 
-/** One fact on a card, in words. `marked`: the reader must see it. */
+/** One fact on a card, in words. `warning`: the record of the node
+ * contradicts itself, and the reader must see it. */
 export interface CardFact {
-  tone: 'marked' | 'plain';
+  tone: 'warning' | 'plain';
   text: string;
 }
 
 function nodeFactText(fact: NodeFact): CardFact {
   switch (fact.kind) {
-    case 'long_step':
-      return { tone: 'marked', text: `${phaseLabel(fact.key)} ${formatMilliseconds(fact.ms)}` };
     case 'attempts':
       return { tone: 'plain', text: `${fact.count} attempts` };
     case 'tasks':
@@ -134,20 +132,19 @@ function nodeFactText(fact: NodeFact): CardFact {
 
 /**
  * The facts a card states in words: what the normal case does not have. A
- * node that ran once with no long engine step has none, so its card stays
- * quiet. The marked facts come first.
+ * node that ran once has none, so its card stays quiet.
  */
-export function cardFacts(timing: NodeTiming, drawAtMs: number): CardFact[] {
+export function cardFacts(timing: NodeTiming): CardFact[] {
   switch (timing.kind) {
     case 'unavailable':
       return [{ tone: 'plain', text: 'timing unavailable' }];
     case 'inconsistent':
-      return [{ tone: 'marked', text: 'timing inconsistent' }];
+      return [{ tone: 'warning', text: 'timing inconsistent' }];
     case 'exact':
-      return nodeFacts(timing.segments, drawAtMs).map(nodeFactText);
+      return nodeFacts(timing.segments).map(nodeFactText);
     case 'partial':
       return [
-        ...nodeFacts(timing.segments, drawAtMs).map(nodeFactText),
+        ...nodeFacts(timing.segments).map(nodeFactText),
         { tone: 'plain', text: 'partial timing' },
       ];
     default:
@@ -159,11 +156,11 @@ function FactsLine({ facts }: { facts: readonly CardFact[] }) {
   if (facts.length === 0) {
     return null;
   }
-  const marked = facts.some(fact => fact.tone === 'marked');
+  const warned = facts.some(fact => fact.tone === 'warning');
   return (
     <div data-card-facts className="flex min-w-0 items-center gap-1 pl-1.5 text-10 leading-tight">
-      {marked && (
-        <TriangleAlert className="size-3 shrink-0" style={{ color: 'var(--marked-ink)' }} aria-hidden />
+      {warned && (
+        <TriangleAlert className="size-3 shrink-0" style={{ color: 'var(--warning-dark)' }} aria-hidden />
       )}
       <span className="min-w-0 truncate">
         {facts.map((fact, index) => (
@@ -179,9 +176,9 @@ function FactsLine({ facts }: { facts: readonly CardFact[] }) {
 
 function FactText({ fact }: { fact: CardFact }) {
   switch (fact.tone) {
-    case 'marked':
+    case 'warning':
       return (
-        <span className="font-semibold" style={{ color: 'var(--marked-ink)' }}>
+        <span className="font-semibold" style={{ color: 'var(--warning-dark)' }}>
           {fact.text}
         </span>
       );
@@ -264,7 +261,7 @@ function WorkflowNodeCardImpl({ data, selected }: NodeProps<WorkflowFlowNode>) {
           <span className="ml-auto shrink-0 font-mono text-10 text-muted-foreground">{duration}</span>
         )}
       </div>
-      <FactsLine facts={cardFacts(data.timing, drawAtMs)} />
+      <FactsLine facts={cardFacts(data.timing)} />
       <Handle
         type="source"
         position={Position.Right}

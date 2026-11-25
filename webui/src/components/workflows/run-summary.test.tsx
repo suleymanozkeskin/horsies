@@ -1,8 +1,8 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { criticalPathText, RunTimingSummaryView } from '@/components/workflows/run-summary';
-import { criticalPath } from '@/components/workflows/run-timing';
+import { RunTimingSummaryView } from '@/components/workflows/run-summary';
+import { longestChain } from '@/components/workflows/run-timing';
 import { nodeStatusCounts } from '@/components/workflows/status';
 import { readClockOf } from '@/hooks/use-draw-time';
 import { instantMs } from '@/lib/time-text';
@@ -68,7 +68,8 @@ function normalRun(): WorkflowRunDetail {
 function renderSummary(
   detail: WorkflowRunDetail,
   onToggle = vi.fn(),
-  active: ReadonlySet<string> = new Set()
+  active: ReadonlySet<string> = new Set(),
+  onIsolate = vi.fn()
 ): ReturnType<typeof render> {
   return render(
     <RunTimingSummaryView
@@ -76,109 +77,88 @@ function renderSummary(
       readClock={readClockOf(detail.timing, READ_MS)}
       statusFilter={active}
       onToggleStatus={onToggle}
+      isolation={{ kind: 'all' }}
+      onIsolate={onIsolate}
     />
   );
 }
 
 const summary = (): HTMLElement => screen.getByRole('region', { name: 'Run summary' });
 
-const figureRows = (): string[] =>
-  [...summary().querySelectorAll<HTMLElement>('[data-figure]')].map(
-    figure => `${figure.textContent} ${figure.getAttribute('data-weight')}`
-  );
+/** The kinds of the key with their totals. */
+const keyRows = (): string[] =>
+  [...summary().querySelectorAll<HTMLElement>('[data-key-phase]')].map(item => item.textContent ?? '');
 
 describe('RunTimingSummaryView', () => {
-  it('shows the duration of the run in plain words', () => {
+  it('shows the duration of the run in plain words, with its date and its start → end', () => {
     renderSummary(normalRun());
 
-    expect(summary().textContent).toContain('Duration6.0s');
-    expect(summary().querySelector('[data-run-duration]')?.textContent).toBe('6.0s');
+    expect(summary().querySelector('[data-run-duration]')?.textContent).toBe('6.01s');
+    expect(summary().textContent).toContain('duration6.01s');
+    expect(summary().querySelector('[data-run-range]')?.textContent).toMatch(/^\d{4}-\d{2}-\d{2} · \d{2}:\d{2}:\d{2} → \d{2}:\d{2}:\d{2}$/);
     // No heading in capitals, and no word that needs a glossary.
     expect(summary().innerHTML).not.toContain('uppercase');
-    expect(summary().textContent).not.toMatch(/wall|where the time went/i);
+    expect(summary().textContent).not.toMatch(/wall|where the time went|to scale|critical/i);
   });
 
-  it('splits the duration into the phases of the critical path, which add up to it', () => {
+  it('splits the duration into the kinds of the longest chain, with their totals, which add up to it', () => {
     renderSummary(normalRun());
 
-    expect(figureRows()).toEqual([
-      'queue wait6ms quiet',
-      'slot wait4ms quiet',
-      'running6.0s main',
-      'finalizing2ms quiet',
-    ]);
-    const path = criticalPath(normalRun().nodes, normalRun().edges, READ_MS);
-    expect(path.kind === 'path' ? path.lengthMs : 0).toBe(6_012);
+    expect(keyRows()).toEqual(['queue wait6.00ms', 'slot wait4.00ms', 'running6.00s', 'finalizing2.00ms']);
+    const chain = longestChain(normalRun().nodes, normalRun().edges, READ_MS);
+    expect(chain.kind === 'chain' ? chain.lengthMs : 0).toBe(6_012);
   });
 
-  it('draws no bar and holds no legend: each view has the key to its own drawing', () => {
+  it('names the run, its chain and its phases in the tooltip of its duration', () => {
     renderSummary(cascadeRun(CLOSED_RUN));
 
-    expect(screen.queryByRole('img')).toBeNull();
-    expect(screen.queryByRole('list', { name: 'Legend' })).toBeNull();
+    fireEvent.pointerMove(summary().querySelector('[data-run-duration]') as Element, { clientX: 5, clientY: 5 });
+
+    const tooltip = screen.getByRole('tooltip');
+    expect(tooltip.textContent).toContain('run');
+    expect(tooltip.textContent).toContain('the phases along the longest chain: a → b → e');
+    expect(tooltip.textContent).toContain('queue wait2.00s');
   });
 
-  it('marks a long engine step of the critical path', () => {
-    renderSummary(cascadeRun(CLOSED_RUN));
+  it('lights the marks of a kind while its key entry is under the pointer', () => {
+    const onIsolate = vi.fn();
+    renderSummary(cascadeRun(CLOSED_RUN), vi.fn(), new Set(), onIsolate);
+    const running = summary().querySelector('[data-key-phase="running"]') as Element;
 
-    // The cascade has two queue waits of 1 s on its path.
-    expect(figureRows()).toEqual(['queue wait2.0s marked', 'running5.5s main', 'advancing500ms marked']);
+    fireEvent.pointerMove(running, { clientX: 5, clientY: 5 });
+    expect(onIsolate).toHaveBeenLastCalledWith({ kind: 'phase', phase: 'running' });
+
+    fireEvent.pointerLeave(running);
+    expect(onIsolate).toHaveBeenLastCalledWith({ kind: 'all' });
   });
 
-  it('explains the critical path and names its chain on its label', () => {
-    renderSummary(cascadeRun(CLOSED_RUN));
+  it('marks no long step: the kinds of the chain, and no line for the other nodes', () => {
+    // Off the chain of first → last: `slow` waits 7 s in the queue.
+    const timing = exactTiming;
+    const nodes = [
+      workflowNode(0, 'first', 'COMPLETED', timing([['running', 0, 2]], 'COMPLETED', 2)),
+      workflowNode(1, 'slow', 'COMPLETED', timing([['pending', 0, 2], ['enqueued', 2, 9], ['running', 9, 10]], 'COMPLETED', 10)),
+      workflowNode(2, 'last', 'COMPLETED', timing([['pending', 0, 2], ['running', 2, 20]], 'COMPLETED', 20)),
+    ];
+    renderSummary({ ...workflowRun('COMPLETED', nodes, CLOSED_RUN), edges: [1, 2].map(to => ({ from_index: 0, to_index: to })) });
 
-    const label = screen.getByText('critical path');
-    const text = label.closest('[aria-description]')?.getAttribute('aria-description') ?? '';
-    expect(text).toContain('the chain of nodes whose end times decided the end of the run: a → b → e.');
-    expect(text).toContain('queue wait 2.0s, running 5.5s, advancing 500ms');
-    expect(text).toBe(
-      criticalPathText(cascadeRun(CLOSED_RUN), criticalPath(CASCADE_NODES, CASCADE_EDGES, READ_MS))
-    );
+    expect(keyRows()).toEqual(['running20.0s']);
+    expect(summary().querySelector('[data-off-path]')).toBeNull();
+    expect(summary().textContent).not.toMatch(/other nodes|long step/);
   });
 
-  it('shows the pause time of a paused run as a plain time, and the duration so far', () => {
+  it('shows the pause time of a paused run, and the duration so far', () => {
     // An open run follows the clock of the browser: the read arrives now.
     vi.useFakeTimers();
     vi.setSystemTime(READ_MS);
     try {
       renderSummary(cascadeRun(OPEN_RUN_WITH_PAUSES));
 
-      expect(summary().querySelector('[data-run-duration]')?.textContent).toBe('1m 40s so far');
-      expect(figureRows()).toContain('paused1m 37s so far plain');
+      expect(summary().querySelector('[data-run-duration]')?.textContent).toBe('1m 40.0s so far');
+      expect(summary().querySelector('[data-run-paused]')?.textContent).toBe('paused1m 37.0s so far');
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('names the long engine steps of the nodes off the critical path', () => {
-    // Off the path of first → last: `slow` waits 7 s in the queue, `held`
-    // waits 3 s in the queue and 800 ms for a slot.
-    const timing = exactTiming;
-    const nodes = [
-      workflowNode(0, 'first', 'COMPLETED', timing([['running', 0, 2]], 'COMPLETED', 2)),
-      workflowNode(1, 'slow', 'COMPLETED', timing([['pending', 0, 2], ['enqueued', 2, 9], ['running', 9, 10]], 'COMPLETED', 10)),
-      workflowNode(2, 'held', 'COMPLETED', timing([['pending', 0, 2], ['enqueued', 2, 5], ['claimed', 5, 5.8], ['running', 5.8, 6]], 'COMPLETED', 6)),
-      workflowNode(3, 'last', 'COMPLETED', timing([['pending', 0, 2], ['running', 2, 20]], 'COMPLETED', 20)),
-    ];
-    renderSummary({
-      ...workflowRun('COMPLETED', nodes, CLOSED_RUN),
-      edges: [1, 2, 3].map(to => ({ from_index: 0, to_index: to })),
-    });
-
-    const other = summary().querySelector('[data-off-path]');
-    expect(other?.textContent).toBe('other nodesqueue waitup to 7.0sin 2 nodesslot wait800msin held');
-    const hint = screen.getByText('up to 7.0s').closest('[aria-description]')?.getAttribute('aria-description');
-    expect(hint).toContain('not on the critical path: slow 7.0s, held 3.0s.');
-    expect(hint).toContain('did not decide the end of the run');
-    // The split of the duration holds the path alone: no long step on it.
-    expect(figureRows()).toEqual(['running20.0s main']);
-  });
-
-  it('has no line for the other nodes when none of them has a long step', () => {
-    renderSummary(normalRun());
-
-    expect(summary().querySelector('[data-off-path]')).toBeNull();
   });
 
   it('shows the pause time alone for a paused run in which no node has timing', () => {
@@ -187,8 +167,8 @@ describe('RunTimingSummaryView', () => {
     try {
       renderSummary(workflowRun('PAUSED', [], OPEN_RUN_WITH_PAUSES));
 
-      expect(figureRows()).toEqual(['paused1m 37s so far plain']);
-      expect(screen.queryByText('critical path')).toBeNull();
+      expect(keyRows()).toEqual([]);
+      expect(summary().querySelector('[data-run-paused]')).not.toBeNull();
     } finally {
       vi.useRealTimers();
     }
@@ -197,16 +177,23 @@ describe('RunTimingSummaryView', () => {
   it('shows no pause time for a run with no pause', () => {
     renderSummary(normalRun());
 
-    expect(summary().querySelector('[data-figure="paused"]')).toBeNull();
+    expect(summary().querySelector('[data-run-paused]')).toBeNull();
   });
 
-  it('counts the nodes by status; a count toggles the status filter', () => {
+  it('counts the nodes by status with the sign of each; a count toggles the status filter', () => {
     const onToggle = vi.fn();
     renderSummary(cascadeRun(CLOSED_RUN), onToggle, new Set(['FAILED']));
 
+    expect(summary().textContent).toContain('6 nodes');
     const failed = screen.getByRole('button', { name: /1\s*failed/ });
     expect(failed.getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByRole('button', { name: /4\s*completed/ }).getAttribute('aria-pressed')).toBe('false');
+    expect(failed.querySelector('[data-outcome]')?.getAttribute('data-outcome')).toBe('failed');
+    expect(screen.getByRole('button', { name: /4\s*completed/ }).querySelector('[data-outcome]')?.getAttribute('data-outcome')).toBe(
+      'completed'
+    );
+    expect(screen.getByRole('button', { name: /1\s*skipped/ }).querySelector('[data-outcome]')?.getAttribute('data-outcome')).toBe(
+      'skipped'
+    );
     fireEvent.click(failed);
     expect(onToggle).toHaveBeenCalledWith('FAILED');
   });
@@ -216,7 +203,7 @@ describe('RunTimingSummaryView', () => {
 
     expect(summary().textContent).toContain('Timing unavailable. The run has more than 100,000 events.');
     expect(screen.getByRole('button', { name: /1\s*skipped/ })).not.toBeNull();
-    expect(summary().querySelector('[data-figure]')).toBeNull();
+    expect(summary().querySelector('[data-key-phase]')).toBeNull();
   });
 });
 

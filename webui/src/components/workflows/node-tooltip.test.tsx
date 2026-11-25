@@ -1,13 +1,14 @@
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 
+import { FloatingTooltip } from '@/components/workflows/mark-tip';
 import {
-  FloatingTooltip,
   nodeEndText,
   nodeEndWithCodeText,
   NodeTooltipBody,
   type NodeFocus,
 } from '@/components/workflows/node-tooltip';
+import type { NodeErrorCode } from '@/hooks/use-workflow-task';
 import { clockText } from '@/lib/clock-text';
 import { instantMs } from '@/lib/time-text';
 import {
@@ -26,17 +27,17 @@ const COMPLETED_AT = { kind: 'terminal', status: 'COMPLETED', at: at(12) } as co
 function renderBody(
   node: WorkflowNode,
   focus: NodeFocus,
-  options: { onPath?: boolean; facts?: string[] } = {}
+  options: { onChain?: boolean; facts?: string[]; failure?: NodeErrorCode } = {}
 ): ReturnType<typeof render> {
   return render(
     <NodeTooltipBody
       node={node}
       drawAtMs={READ_MS}
-      membership={options.onPath === true ? 'on_path' : 'off_path'}
+      membership={options.onChain === true ? 'on_chain' : 'off_chain'}
       focus={focus}
       pause={{ kind: 'not_in_pause' }}
       facts={options.facts ?? []}
-      failure={{ kind: 'none' }}
+      failure={options.failure ?? { kind: 'none' }}
     />
   );
 }
@@ -65,60 +66,95 @@ describe('nodeEndText', () => {
   });
 });
 
-describe('NodeTooltipBody', () => {
-  it('names the node, its status and its time without dependency wait', () => {
+describe('NodeTooltipBody on the node as a whole', () => {
+  it('names the node with its sign, its status and its time without dependency wait', () => {
     const { container } = renderBody(RETRIED, { kind: 'node' });
 
+    expect(container.querySelector('[data-outcome="completed"]')).not.toBeNull();
     expect(container.textContent).toContain('extract');
     expect(container.textContent).toContain('completed');
-    expect(container.textContent).toContain('node time 10.0s');
+    expect(container.textContent).toContain('10.0s');
   });
 
-  it('gives each phase of the node as a number and the end of the node', () => {
+  it('gives the time of each kind of the node, its count and its end', () => {
     const { container } = renderBody(RETRIED, { kind: 'node' });
 
-    const figures = screen.getByRole('list', { name: 'Time of extract by phase' });
-    expect(figures.querySelectorAll('li')).toHaveLength(8);
-    expect(container.textContent).toContain(`End of the node: completed at ${clockText(instantMs(at(12)))}.`);
+    expect(container.textContent).toContain('earlier claims1.00s');
+    expect(container.textContent).toContain('retry wait1.00s');
+    expect(container.textContent).toContain('2 attempts');
+    expect(container.textContent).toContain(`end: completed at ${clockText(instantMs(at(12)))}`);
     expect(container.querySelector('[data-focus]')).toBeNull();
   });
 
-  it('says that a node is on the critical path, and lists the facts of the view', () => {
+  it('says that a node is on the longest chain, and lists the facts of the view', () => {
     const { container } = renderBody(RETRIED, { kind: 'node' }, {
-      onPath: true,
+      onChain: true,
       facts: ['Tolerant join (dashed border): the node runs even when a dependency failed.'],
     });
 
-    expect(container.textContent).toContain('On the critical path');
+    expect(container.textContent).toContain('2 attempts · on the longest chain');
     expect(container.textContent).toContain('Tolerant join (dashed border)');
+    expect(container.textContent).not.toMatch(/critical/i);
   });
 
-  it('does not repeat the end or the critical path under the focus line that says it', () => {
-    const { container } = renderBody(RETRIED, { kind: 'endpoint' }, { onPath: true });
-    expect(container.textContent?.match(/End of the node/g)).toHaveLength(1);
-
-    const line = renderBody(RETRIED, { kind: 'critical_line' }, { onPath: true });
-    expect(line.container.textContent?.match(/On the critical path/g)).toHaveLength(1);
-  });
-
-  it('shows no focus line for a segment that a refetch removed', () => {
-    const { container } = renderBody(RETRIED, { kind: 'segment', segmentIndex: 99 });
-
-    expect(container.querySelector('[data-focus]')).toBeNull();
-  });
-
-  it('gives the coverage text of a node with no segments', () => {
+  it('gives the coverage text of a node with no segments, and a dash as its time', () => {
     const { container } = renderBody(workflowNode(3, 'broken', 'RUNNING', CLOCK_ORDER_NODE), { kind: 'node' });
 
     expect(container.textContent).toContain('timing inconsistent: Clock order: claim');
-    expect(container.textContent).toContain('node time —');
+    expect(container.textContent).toContain('—');
   });
 
   it('shows a dash as the time of a node that did not run', () => {
     const { container } = renderBody(nth(CASCADE_NODES, 3), { kind: 'node' });
 
-    expect(container.textContent).toContain('node time —');
+    expect(container.textContent).toContain('—');
     expect(container.textContent).toContain('skipped at');
+  });
+});
+
+describe('NodeTooltipBody on a mark', () => {
+  it('names a segment: its kind, its node and source, its time, its start → end and what it is', () => {
+    const { container } = renderBody(RETRIED, { kind: 'segment', segmentIndex: 3 });
+    const focus = container.querySelector('[data-focus="segment"]');
+
+    expect(focus?.textContent).toContain('earlier claims');
+    expect(focus?.textContent).toContain('extract · task 1 · attempt 1');
+    expect(focus?.textContent).toContain('1.00s');
+    expect(focus?.textContent).toContain(`${clockText(instantMs(at(3)))} → ${clockText(instantMs(at(4)))}`);
+    expect(focus?.textContent).toContain('first claim → the claim that ran the attempt');
+    expect(focus?.textContent).toContain('1 earlier claim');
+    // The mark alone: no summary of the node.
+    expect(container.textContent).not.toContain('2 attempts');
+  });
+
+  it('names the end marker: end of the node, its status, the time with milliseconds, the error code', () => {
+    const failed = { ...RETRIED, node_status: 'FAILED' };
+    const timing = { ...EXACT_RETRIED_NODE, endpoint: { kind: 'terminal', status: 'FAILED', at: at(12) } } as const;
+    const { container } = renderBody({ ...failed, timing }, { kind: 'endpoint' }, {
+      failure: { kind: 'code', code: 'TASK_TIMEOUT' },
+    });
+    const focus = container.querySelector('[data-focus="endpoint"]');
+
+    expect(focus?.textContent).toContain('end of extract');
+    expect(focus?.textContent).toContain('failed');
+    expect(focus?.textContent).toContain(clockText(instantMs(at(12))));
+    expect(focus?.textContent).toMatch(/\.\d{3}/);
+    expect(focus?.textContent).toContain('error code TASK_TIMEOUT');
+  });
+
+  it('names a bar of the log cell: its kind, its node, its total, its count and its longest interval', () => {
+    const { container } = renderBody(RETRIED, { kind: 'lane', phase: 'claimed' });
+    const focus = container.querySelector('[data-focus="lane"]');
+
+    expect(focus?.textContent).toContain('slot wait');
+    expect(focus?.textContent).toContain('3.00s');
+    expect(focus?.textContent).toContain('2 intervals · longest 2.00s');
+  });
+
+  it('shows nothing for a segment that a refetch removed', () => {
+    const { container } = renderBody(RETRIED, { kind: 'segment', segmentIndex: 99 });
+
+    expect(container.textContent).toBe('');
   });
 });
 

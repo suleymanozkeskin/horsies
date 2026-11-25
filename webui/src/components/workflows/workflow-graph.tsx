@@ -26,13 +26,14 @@ import type { WorkflowNode, WorkflowRunDetail } from '@/types/workflows';
 
 import { layoutWorkflow, NODE_H, NODE_W, type NodePosition } from './layout';
 import { TimingLegend, type LegendMark } from './legend';
-import { FloatingTooltip, NodeTooltip } from './node-tooltip';
+import { FloatingTooltip } from './mark-tip';
+import { NodeTooltip } from './node-tooltip';
 import { residualState } from './residual';
 import {
-  criticalMembership,
-  criticalPath,
+  chainMembership,
+  longestChain,
   longestNodeTime,
-  type CriticalPath,
+  type LongestChain,
   type LongestNodeTime,
 } from './run-timing';
 import { nodeTimingText } from './timing-text';
@@ -72,8 +73,8 @@ type GraphHover =
  * graph (the main graph), which then needs no copy on the card. */
 export type CountsPlacement = 'in_graph' | 'in_run_summary';
 
-/** The edges of the critical path: each joins two consecutive nodes of it. */
-function criticalEdgeIds(taskIndices: readonly number[]): Set<string> {
+/** The edges of the longest chain: each joins two consecutive nodes of it. */
+function chainEdgeIds(taskIndices: readonly number[]): Set<string> {
   const ids = new Set<string>();
   for (let index = 1; index < taskIndices.length; index += 1) {
     const from = taskIndices[index - 1];
@@ -244,20 +245,20 @@ export function WorkflowGraph({
       };
     });
 
-    const path = criticalPath(detail.nodes, detail.edges, readClock.asOfMs);
-    const critical = path.kind === 'path' ? criticalEdgeIds(path.taskIndices) : new Set<string>();
+    const chain = longestChain(detail.nodes, detail.edges, readClock.asOfMs);
+    const chainEdges = chain.kind === 'chain' ? chainEdgeIds(chain.taskIndices) : new Set<string>();
     const edges: Edge[] = detail.edges.map(edge => {
       const id = edgeId(edge.from_index, edge.to_index);
-      const onPath = critical.has(id);
+      const onChain = chainEdges.has(id);
       return {
         id,
         source: String(edge.from_index),
         target: String(edge.to_index),
         animated: statusByIndex.get(edge.to_index) === 'RUNNING',
-        style: onPath
-          ? { stroke: 'var(--critical-path)', strokeWidth: 2.5 }
+        style: onChain
+          ? { stroke: 'var(--longest-chain)', strokeWidth: 2.5 }
           : { stroke: 'var(--border)', strokeWidth: 1.5 },
-        ...(onPath ? { ariaLabel: 'critical path' } : {}),
+        ...(onChain ? { ariaLabel: 'longest chain' } : {}),
       };
     });
 
@@ -273,7 +274,7 @@ export function WorkflowGraph({
         failed: detail.failed_count,
         longest: longestNodeTime(detail.nodes, readClock.asOfMs),
         marks: [
-          ...(critical.size > 0 ? (['critical_edge'] as const) : []),
+          ...(chainEdges.size > 0 ? (['chain_edge'] as const) : []),
           ...(detail.nodes.some(node => node.allow_failed_deps) ? (['tolerant_join'] as const) : []),
         ],
       } satisfies RunMetrics,
@@ -427,7 +428,7 @@ export function WorkflowGraph({
             <div className="liquid-glass pointer-events-auto flex min-h-(--capsule-height) flex-col justify-center gap-1.5 rounded-2xl px-4 py-1.5 text-xs">
               <GraphCounts metrics={metrics} placement={countsPlacement} />
               <LongestNodeLine longest={metrics.longest} />
-              <TimingLegend phases={[]} marks={metrics.marks} />
+              <TimingLegend marks={metrics.marks} />
             </div>
           )}
           {failedIndices.length > 0 && (
@@ -551,8 +552,8 @@ function GraphTooltip({
             workflowId={detail.run.id}
             node={node}
             drawAtMs={drawAtMs}
-            membership={criticalMembership(
-              criticalPath(detail.nodes, detail.edges, drawAtMs),
+            membership={chainMembership(
+              longestChain(detail.nodes, detail.edges, drawAtMs),
               node.task_index
             )}
             focus={{ kind: 'node' }}
@@ -570,8 +571,8 @@ function GraphTooltip({
           <EdgeText
             from={nodeLabel(from)}
             to={nodeLabel(to)}
-            onPath={edgeOnPath(
-              criticalPath(detail.nodes, detail.edges, drawAtMs),
+            onChain={edgeOnChain(
+              longestChain(detail.nodes, detail.edges, drawAtMs),
               hover.fromIndex,
               hover.toIndex
             )}
@@ -584,21 +585,21 @@ function GraphTooltip({
   }
 }
 
-/** Whether the edge joins two consecutive nodes of the critical path. */
-function edgeOnPath(path: CriticalPath, fromIndex: number, toIndex: number): boolean {
-  switch (path.kind) {
+/** Whether the edge joins two consecutive nodes of the longest chain. */
+function edgeOnChain(chain: LongestChain, fromIndex: number, toIndex: number): boolean {
+  switch (chain.kind) {
     case 'no_timing':
       return false;
-    case 'path':
-      return criticalEdgeIds(path.taskIndices).has(edgeId(fromIndex, toIndex));
+    case 'chain':
+      return chainEdgeIds(chain.taskIndices).has(edgeId(fromIndex, toIndex));
     default:
-      return assertNever(path, 'critical path');
+      return assertNever(chain, 'longest chain');
   }
 }
 
 /** What an edge is: a dependency, and for a bold edge its part in the
- * critical path. */
-function EdgeText({ from, to, onPath }: { from: string; to: string; onPath: boolean }) {
+ * longest chain. */
+function EdgeText({ from, to, onChain }: { from: string; to: string; onChain: boolean }) {
   return (
     <>
       <p className="font-semibold">
@@ -607,9 +608,9 @@ function EdgeText({ from, to, onPath }: { from: string; to: string; onPath: bool
       <p>
         {to} waits for {from}.
       </p>
-      {onPath && (
+      {onChain && (
         <p className="text-muted-foreground">
-          Bold edge: on the critical path. {from} ended last of the dependencies of {to}, so its
+          Bold edge: on the longest chain. {from} ended last of the dependencies of {to}, so its
           end decided when {to} could start.
         </p>
       )}

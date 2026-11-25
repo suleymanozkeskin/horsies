@@ -1,50 +1,47 @@
-import type { ReactNode } from 'react';
-
-import { TriangleAlert } from 'lucide-react';
-import { createPortal } from 'react-dom';
-
 import { useNodeErrorCode, type NodeErrorCode } from '@/hooks/use-workflow-task';
 import { clockText } from '@/lib/clock-text';
 import { assertNever } from '@/lib/exhaustive';
+import { formatMilliseconds } from '@/lib/format-duration';
 import { statusColorVar, statusLabel } from '@/lib/status-utils';
 import { instantMs } from '@/lib/time-text';
 import type { NodeEndpoint, NodeTiming, PauseInterval, TimingSegment } from '@/types/timing';
 import type { WorkflowNode } from '@/types/workflows';
 
-import { phaseFill, phaseWeight } from './phase';
-import { nodeTime, timedSegments, type CriticalMembership } from './run-timing';
-import { phaseFigure, TimeFigures } from './time-figures';
-import { pauseSpan, phaseComposition, segmentSpan } from './timeline-geometry';
+import { PhaseSwatch, TipHead, TipNote, TipPhaseList, TipTimes } from './mark-tip';
+import { OutcomeCap } from './outcome-sign';
+import { phaseLabel, phaseMeaning, phaseTrack, segmentKind, type TimingKind } from './phase';
+import {
+  nodeRunCount,
+  nodeTime,
+  runCountText,
+  timedSegments,
+  type ChainMembership,
+} from './run-timing';
+import { pauseSpan, phaseComposition, segmentInterval, segmentSpan } from './timeline-geometry';
 import {
   durationText,
   nodeCoverageText,
   nodeTimeText,
-  segmentPhaseText,
+  segmentDetailText,
   segmentSourceText,
 } from './timing-text';
 
-/** Offset of a floating tooltip from the pointer, and its widest box. */
-const TOOLTIP_OFFSET_PX = 12;
-const TOOLTIP_MAX_WIDTH_PX = 320;
-/** Below this distance to the bottom of the window the tooltip opens above
- * the pointer. */
-const TOOLTIP_FLIP_HEIGHT_PX = 240;
-
-/** What of a node the pointer or the keyboard cursor is on. The tooltip names
- * it first, so each mark explains itself. */
+/** What of a node the pointer or the keyboard cursor is on. The tooltip shows
+ * that mark: what it is, its duration, and its start → end. */
 export type NodeFocus =
-  /** The node as a whole: a graph card, or the track of a row. */
+  /** The node as a whole: a graph card, the name or the time of a row, or
+   * the track of a row off its marks. */
   | { kind: 'node' }
   | { kind: 'segment'; segmentIndex: number }
-  /** The marker of the terminal status of the node. */
+  /** The diamond at the end of the node. */
   | { kind: 'endpoint' }
-  /** The line under a row of the critical path. */
-  | { kind: 'critical_line' };
+  /** The bar of one kind in the log cell of a row. */
+  | { kind: 'lane'; phase: TimingKind };
 
 /** A pause of the run under the pointer. */
 export type PauseFocus = { kind: 'in_pause'; pause: PauseInterval } | { kind: 'not_in_pause' };
 
-const nodeLabel = (node: WorkflowNode): string =>
+export const nodeLabel = (node: WorkflowNode): string =>
   node.node_id ?? node.task_name ?? `#${node.task_index}`;
 
 /** The end of a node in words: `completed at 09:54:36.528`, `not ended`. */
@@ -74,128 +71,132 @@ export function nodeEndWithCodeText(endpoint: NodeEndpoint, failure: NodeErrorCo
   }
 }
 
-const CRITICAL_PATH_TEXT =
-  'On the critical path: the chain of nodes whose end times decided the end of the run. A delay of this node delays the run.';
+/** Start → end of a time span; an open one ends `open`. */
+export const spanClockText = (startMs: number, endMs: number, open: boolean): string =>
+  `${clockText(startMs)} → ${open ? 'open' : clockText(endMs)}`;
 
-/** A box that follows the pointer. It stays in the window: it moves left at
- * the right edge and opens above the pointer near the bottom. It is a child
- * of the document body: a view inside a blurred panel is the containing
- * block of its fixed children, which would shift the box by the offset of
- * the panel. */
-export function FloatingTooltip({
-  id,
-  xPx,
-  yPx,
-  children,
+/** The tooltip of one segment of a node: its kind, its node and source, its
+ * time, its start → end, what it is, and what it holds beyond its kind. */
+export function SegmentTip({
+  owner,
+  segment,
+  drawAtMs,
 }: {
-  id: string;
-  xPx: number;
-  yPx: number;
-  children: ReactNode;
+  owner: string;
+  segment: TimingSegment;
+  drawAtMs: number;
 }) {
-  const maxLeft = window.innerWidth - TOOLTIP_MAX_WIDTH_PX - TOOLTIP_OFFSET_PX;
-  const left = Math.max(Math.min(xPx + TOOLTIP_OFFSET_PX, maxLeft), 0);
-  const above = yPx > window.innerHeight - TOOLTIP_FLIP_HEIGHT_PX;
-  return createPortal(
-    <div
-      id={id}
-      role="tooltip"
-      className="pointer-events-none fixed z-50 flex flex-col gap-1.5 rounded-md border border-hairline-strong bg-popover px-3 py-2 text-xs text-popover-foreground shadow-(--menu-shadow)"
-      style={{
-        left,
-        maxWidth: TOOLTIP_MAX_WIDTH_PX,
-        ...(above
-          ? { bottom: window.innerHeight - yPx + TOOLTIP_OFFSET_PX }
-          : { top: yPx + TOOLTIP_OFFSET_PX }),
-      }}
-    >
-      {children}
-    </div>,
-    document.body
-  );
-}
-
-/** The segment under the cursor: its phase and time, what a long time tells,
- * then its source and its time span. */
-function SegmentFocus({ segment, drawAtMs }: { segment: TimingSegment; drawAtMs: number }) {
   const span = segmentSpan(segment, drawAtMs);
-  const ms = span.endMs - span.startMs;
   const open = segment.end.kind === 'open';
-  const weight = phaseWeight(segment.phase.kind, ms);
+  const kind = segmentKind(segment.phase);
+  const detail = segmentDetailText(segment);
   return (
-    <div data-focus="segment" className="flex flex-col gap-0.5 border-l-2 border-border pl-2">
-      <div className="flex items-center gap-1.5 font-medium">
-        <span
-          className="inline-block h-2.5 w-3 shrink-0 rounded-sm"
-          style={{ background: phaseFill(segment.phase.kind) }}
-          aria-hidden
-        />
-        {segmentPhaseText(segment)}
-        <span className="ml-auto pl-3 font-mono">{durationText(ms, open)}</span>
-      </div>
-      <span className="flex flex-wrap gap-x-2 font-mono text-10 text-muted-foreground">
-        <span className="whitespace-nowrap">
-          {clockText(span.startMs)} → {open ? 'open' : clockText(span.endMs)}
-        </span>
-        <span className="whitespace-nowrap">{segmentSourceText(segment.source)}</span>
-      </span>
-      {weight.kind === 'marked' && (
-        <span className="flex items-start gap-1.5">
-          <TriangleAlert className="mt-px size-3 shrink-0" style={{ color: 'var(--marked-ink)' }} aria-hidden />
-          <span>{weight.tells}</span>
-        </span>
-      )}
+    <div data-focus="segment" className="flex flex-col gap-0.5">
+      <TipHead
+        mark={<PhaseSwatch kind={kind} thin={phaseTrack(kind) === 'thin'} />}
+        name={phaseLabel(kind)}
+        context={`${owner} · ${segmentSourceText(segment.source)}`}
+        value={durationText(span.endMs - span.startMs, open)}
+      />
+      <TipTimes text={spanClockText(span.startMs, span.endMs, open)} />
+      <TipNote text={phaseMeaning(kind)} />
+      {detail !== null && <TipNote text={detail} />}
     </div>
   );
 }
 
-function FocusBlock({
-  focus,
-  timing,
-  drawAtMs,
-  failure,
-}: {
-  focus: NodeFocus;
-  timing: NodeTiming;
-  drawAtMs: number;
-  failure: NodeErrorCode;
-}) {
-  switch (focus.kind) {
-    case 'node':
-      return null;
-    case 'segment': {
-      const segment = timedSegments(timing)[focus.segmentIndex];
-      // A refetch can remove the segment under the cursor.
-      return segment === undefined ? null : <SegmentFocus segment={segment} drawAtMs={drawAtMs} />;
-    }
-    case 'endpoint':
-      switch (timing.kind) {
-        case 'exact':
-        case 'partial':
+/** The diamond of a terminal node. */
+export function EndDiamond({ status }: { status: string }) {
+  return (
+    <span
+      className="mx-0.5 inline-block size-2.5 shrink-0 rotate-45 border border-card"
+      style={{ background: statusColorVar(status) }}
+      aria-hidden
+    />
+  );
+}
+
+/** The tooltip of the end marker: `end of <node>`, the status with the error
+ * code of a failed task, and the time with milliseconds. */
+function EndpointTip({ node, failure }: { node: WorkflowNode; failure: NodeErrorCode }) {
+  const timing = node.timing;
+  switch (timing.kind) {
+    case 'exact':
+    case 'partial':
+      switch (timing.endpoint.kind) {
+        case 'terminal':
           return (
-            <p data-focus="endpoint" className="border-l-2 border-border pl-2">
-              End of the node: {nodeEndWithCodeText(timing.endpoint, failure)}. The marker is a
-              point in time, in the color of the status.
-            </p>
+            <div data-focus="endpoint" className="flex flex-col gap-0.5">
+              <TipHead
+                mark={<EndDiamond status={timing.endpoint.status} />}
+                name={`end of ${nodeLabel(node)}`}
+                context={statusLabel(timing.endpoint.status)}
+              />
+              <TipTimes text={clockText(instantMs(timing.endpoint.at))} />
+              <EndCode failure={failure} />
+            </div>
           );
-        case 'unavailable':
-        case 'inconsistent':
+        case 'not_terminal':
           return null;
         default:
-          return assertNever(timing, 'node timing');
+          return assertNever(timing.endpoint, 'node endpoint');
       }
-    case 'critical_line':
-      return (
-        <p data-focus="critical_line" className="border-l-2 border-border pl-2">
-          {CRITICAL_PATH_TEXT} The line runs from the end of its dependency wait to its end.
-        </p>
-      );
+    case 'unavailable':
+    case 'inconsistent':
+      return null;
     default:
-      return assertNever(focus, 'node focus');
+      return assertNever(timing, 'node timing');
   }
 }
 
-function PauseLine({ pause, drawAtMs }: { pause: PauseFocus; drawAtMs: number }) {
+/** The error code of the task of a failed node, on a line of its own. */
+function EndCode({ failure }: { failure: NodeErrorCode }) {
+  switch (failure.kind) {
+    case 'code':
+      return <TipNote text={`error code ${failure.code}`} />;
+    case 'none':
+    case 'not_loaded':
+      return null;
+    default:
+      return assertNever(failure, 'node error code');
+  }
+}
+
+/** The time of one kind of a node, from its segments: the total, the
+ * interval count and the longest interval, or the span of the one
+ * interval. */
+function LaneTip({ node, phase, drawAtMs }: { node: WorkflowNode; phase: TimingKind; drawAtMs: number }) {
+  const intervals = timedSegments(node.timing)
+    .map(segment => segmentInterval(segment, drawAtMs))
+    .filter(interval => interval.key === phase);
+  const [first] = intervals;
+  if (first === undefined) {
+    return null;
+  }
+  const lengths = intervals.map(interval => Math.max(interval.endMs - interval.startMs, 0));
+  const total = lengths.reduce((sum, ms) => sum + ms, 0);
+  return (
+    <div data-focus="lane" className="flex flex-col gap-0.5">
+      <TipHead
+        mark={<PhaseSwatch kind={phase} />}
+        name={phaseLabel(phase)}
+        context={nodeLabel(node)}
+        value={durationText(total, intervals.some(interval => interval.open))}
+      />
+      <TipTimes
+        text={
+          intervals.length > 1
+            ? `${intervals.length} intervals · longest ${formatMilliseconds(Math.max(...lengths))}`
+            : spanClockText(first.startMs, first.endMs, first.open)
+        }
+      />
+      <TipNote text={phaseMeaning(phase)} />
+    </div>
+  );
+}
+
+/** The pause of the run at the cursor: its time and its start → end. */
+export function PauseLine({ pause, drawAtMs }: { pause: PauseFocus; drawAtMs: number }) {
   switch (pause.kind) {
     case 'not_in_pause':
       return null;
@@ -203,10 +204,10 @@ function PauseLine({ pause, drawAtMs }: { pause: PauseFocus; drawAtMs: number })
       const span = pauseSpan(pause.pause, drawAtMs);
       const open = pause.pause.end.kind === 'open';
       return (
-        <p data-focus="pause" className="border-l-2 border-border pl-2">
-          The run was paused here: {clockText(span.startMs)} → {open ? 'open' : clockText(span.endMs)} (
-          {durationText(span.endMs - span.startMs, open)}).
-        </p>
+        <div data-focus="pause" className="mt-0.5 flex flex-col gap-0.5 border-t border-hairline pt-1">
+          <TipHead name="run paused" value={durationText(span.endMs - span.startMs, open)} />
+          <TipTimes text={spanClockText(span.startMs, span.endMs, open)} />
+        </div>
       );
     }
     default:
@@ -214,26 +215,34 @@ function PauseLine({ pause, drawAtMs }: { pause: PauseFocus; drawAtMs: number })
   }
 }
 
-/** The times of the node by phase, or its coverage text when it has none. */
+/** What a node is beyond its times: that it is a sub-workflow, or its task
+ * or attempt count; and its place on the longest chain. */
+export function nodeCountText(node: WorkflowNode, membership: ChainMembership): string {
+  const count = node.is_subworkflow ? 'sub-workflow' : runCountText(nodeRunCount(timedSegments(node.timing)));
+  switch (membership) {
+    case 'on_chain':
+      return `${count} · on the longest chain`;
+    case 'off_chain':
+      return count;
+    default:
+      return assertNever(membership, 'chain membership');
+  }
+}
+
+/** The times of the node by kind, or its coverage text when it has none. */
 function NodeTimes({ node, drawAtMs }: { node: WorkflowNode; drawAtMs: number }) {
   const timing = node.timing;
   switch (timing.kind) {
     case 'unavailable':
     case 'inconsistent':
-      return <p>{nodeCoverageText(timing)}</p>;
+      return <TipNote text={nodeCoverageText(timing)} />;
     case 'exact':
     case 'partial': {
       const totals = phaseComposition(timing.segments, drawAtMs);
       return (
         <>
-          {totals.length > 0 && (
-            <TimeFigures
-              figures={totals.map(phaseFigure)}
-              layout="stacked"
-              label={`Time of ${nodeLabel(node)} by phase`}
-            />
-          )}
-          {timing.kind === 'partial' && <p className="text-muted-foreground">{nodeCoverageText(timing)}</p>}
+          {totals.length > 0 && <TipPhaseList items={totals.map(total => ({ kind: total.key, ms: total.ms }))} />}
+          {timing.kind === 'partial' && <TipNote text={nodeCoverageText(timing)} />}
         </>
       );
     }
@@ -255,36 +264,54 @@ function endLine(timing: NodeTiming, failure: NodeErrorCode): string | null {
   }
 }
 
-function membershipLine(membership: CriticalMembership): string | null {
-  switch (membership) {
-    case 'on_path':
-      return CRITICAL_PATH_TEXT;
-    case 'off_path':
-      return null;
-    default:
-      return assertNever(membership, 'critical membership');
-  }
+/** The tooltip of the node as a whole: its sign, name, status and time
+ * without dependency wait; the time of each kind; its counts, its end, and
+ * the facts of the view. */
+function NodeSummaryTip({
+  node,
+  drawAtMs,
+  membership,
+  facts,
+  failure,
+}: Omit<NodeTooltipProps, 'focus' | 'pause'> & { failure: NodeErrorCode }) {
+  const time = nodeTime(node.timing, drawAtMs);
+  const end = endLine(node.timing, failure);
+  return (
+    <>
+      <TipHead
+        mark={<OutcomeCap status={node.node_status} sizePx={12} />}
+        name={nodeLabel(node)}
+        context={statusLabel(node.node_status)}
+        value={nodeTimeText(time)}
+      />
+      <NodeTimes node={node} drawAtMs={drawAtMs} />
+      <TipNote text={nodeCountText(node, membership)} />
+      {end !== null && <TipNote text={`end: ${end}`} />}
+      {facts.map(fact => (
+        <TipNote key={fact} text={fact} />
+      ))}
+    </>
+  );
 }
 
 /**
  * What a node is, in one box, for the graph card and for the timeline row:
- * its status and its time without dependency wait, the mark under the cursor
- * (a segment, the end marker, the critical path line, a pause), each phase of
- * the node as a number, and the facts of the view (`facts`). A phase that is
- * too short to draw on the timeline is still a number here.
+ * the mark under the cursor (a segment, the end marker, a bar of the log
+ * cell), or the node as a whole, with the pause of the run at the cursor.
+ * `facts`: the facts that the view adds to the node as a whole, one line
+ * each.
  */
 export interface NodeTooltipProps {
   node: WorkflowNode;
   drawAtMs: number;
-  membership: CriticalMembership;
+  membership: ChainMembership;
   focus: NodeFocus;
   pause: PauseFocus;
-  /** Facts of the node that the view adds, one line each. */
   facts: readonly string[];
 }
 
 /** The tooltip of a node of the run `workflowId`. A failed node reads the
- * error code of its task for its end line; the other nodes read nothing. */
+ * error code of its task for its end; the other nodes read nothing. */
 export function NodeTooltip({ workflowId, ...props }: NodeTooltipProps & { workflowId: string }) {
   return props.node.node_status === 'FAILED' ? (
     <FailedNodeTooltip workflowId={workflowId} {...props} />
@@ -298,46 +325,35 @@ function FailedNodeTooltip({ workflowId, ...props }: NodeTooltipProps & { workfl
   return <NodeTooltipBody {...props} failure={failure} />;
 }
 
-export function NodeTooltipBody({
-  node,
-  drawAtMs,
-  membership,
+function FocusTip({
   focus,
-  pause,
-  facts,
   failure,
-}: NodeTooltipProps & { failure: NodeErrorCode }) {
-  const end = endLine(node.timing, failure);
-  const critical = membershipLine(membership);
+  ...props
+}: Omit<NodeTooltipProps, 'pause'> & { failure: NodeErrorCode }) {
+  switch (focus.kind) {
+    case 'node':
+      return <NodeSummaryTip {...props} failure={failure} />;
+    case 'segment': {
+      const segment = timedSegments(props.node.timing)[focus.segmentIndex];
+      // A refetch can remove the segment under the cursor.
+      return segment === undefined ? null : (
+        <SegmentTip owner={nodeLabel(props.node)} segment={segment} drawAtMs={props.drawAtMs} />
+      );
+    }
+    case 'endpoint':
+      return <EndpointTip node={props.node} failure={failure} />;
+    case 'lane':
+      return <LaneTip node={props.node} phase={focus.phase} drawAtMs={props.drawAtMs} />;
+    default:
+      return assertNever(focus, 'node focus');
+  }
+}
+
+export function NodeTooltipBody({ pause, ...props }: NodeTooltipProps & { failure: NodeErrorCode }) {
   return (
     <>
-      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-        <span className="inline-flex max-w-full items-baseline gap-2">
-          <span
-            className="size-2 shrink-0 self-center rounded-full"
-            style={{ background: statusColorVar(node.node_status) }}
-            aria-hidden
-          />
-          <span className="min-w-0 break-all font-semibold">{nodeLabel(node)}</span>
-        </span>
-        <span className="text-muted-foreground">{statusLabel(node.node_status)}</span>
-        <span className="ml-auto whitespace-nowrap pl-3">
-          <span className="text-muted-foreground">node time </span>
-          <span className="font-mono font-semibold">{nodeTimeText(nodeTime(node.timing, drawAtMs))}</span>
-        </span>
-      </div>
-      <FocusBlock focus={focus} timing={node.timing} drawAtMs={drawAtMs} failure={failure} />
-      <PauseLine pause={pause} drawAtMs={drawAtMs} />
-      <NodeTimes node={node} drawAtMs={drawAtMs} />
-      {(end !== null || critical !== null || facts.length > 0) && (
-        <ul className="flex flex-col gap-0.5 text-muted-foreground">
-          {end !== null && focus.kind !== 'endpoint' && <li>End of the node: {end}.</li>}
-          {critical !== null && focus.kind !== 'critical_line' && <li>{critical}</li>}
-          {facts.map(fact => (
-            <li key={fact}>{fact}</li>
-          ))}
-        </ul>
-      )}
+      <FocusTip {...props} />
+      <PauseLine pause={pause} drawAtMs={props.drawAtMs} />
     </>
   );
 }

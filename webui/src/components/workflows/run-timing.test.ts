@@ -2,17 +2,18 @@ import { describe, expect, it } from 'vitest';
 
 import {
   activeSpan,
-  criticalMembership,
-  criticalPath,
+  chainMembership,
   dependencyWait,
   lastDependency,
+  longestChain,
   longestNodeTime,
   nodeEnd,
   nodeFacts,
   nodeParts,
+  nodeRunCount,
   nodeTime,
-  offPathLongSteps,
   pausedTime,
+  runCountText,
 } from '@/components/workflows/run-timing';
 import { instantMs } from '@/lib/time-text';
 import { TIMING_EXAMPLES } from '@/test/timing-examples';
@@ -34,12 +35,12 @@ import type { ComposedRunTiming, RunTiming, TimingSegment } from '@/types/timing
 const ms = (seconds: number): number => instantMs(at(seconds));
 const READ_MS = instantMs('2026-11-22T12:01:40Z');
 
-describe('criticalPath', () => {
+describe('longestChain', () => {
   it('walks back from the node that ended last through the dependency that ended last', () => {
-    const path = criticalPath(CASCADE_NODES, CASCADE_EDGES, READ_MS);
+    const path = longestChain(CASCADE_NODES, CASCADE_EDGES, READ_MS);
 
-    expect(path.kind).toBe('path');
-    if (path.kind !== 'path') {
+    expect(path.kind).toBe('chain');
+    if (path.kind !== 'chain') {
       return;
     }
     // e ends last; d and b end at one instant (the skip cascade), and b ran.
@@ -53,11 +54,11 @@ describe('criticalPath', () => {
     ]);
   });
 
-  it('gives phases that add up to the length of the path: the split of the run duration', () => {
-    const path = criticalPath(CASCADE_NODES, CASCADE_EDGES, READ_MS);
+  it('gives phases that add up to the length of the chain: the split of the run duration', () => {
+    const path = longestChain(CASCADE_NODES, CASCADE_EDGES, READ_MS);
 
-    expect(path.kind === 'path' ? path.phases.reduce((sum, total) => sum + total.ms, 0) : 0).toBe(8_000);
-    // The run of the cascade ends at 8 s: the path covers it with no gap.
+    expect(path.kind === 'chain' ? path.phases.reduce((sum, total) => sum + total.ms, 0) : 0).toBe(8_000);
+    // The run of the cascade ends at 8 s: the chain covers it with no gap.
     expect(nodeEnd(nth(CASCADE_NODES, 4).timing, READ_MS)).toEqual({ kind: 'measured', endMs: ms(8) });
   });
 
@@ -67,7 +68,7 @@ describe('criticalPath', () => {
       workflowNode(1, 'right', 'COMPLETED', exactTiming([['running', 0, 2]], 'COMPLETED', 2)),
       workflowNode(2, 'join', 'COMPLETED', exactTiming([['pending', 0, 2], ['running', 2, 3]], 'COMPLETED', 3)),
     ];
-    const path = criticalPath(
+    const path = longestChain(
       twins,
       [
         { from_index: 1, to_index: 2 },
@@ -76,11 +77,11 @@ describe('criticalPath', () => {
       READ_MS
     );
 
-    expect(path.kind === 'path' ? path.taskIndices : []).toEqual([0, 2]);
+    expect(path.kind === 'chain' ? path.taskIndices : []).toEqual([0, 2]);
   });
 
   it('stops on a cycle in a malformed edge list instead of walking forever', () => {
-    const cyclic = criticalPath(
+    const cyclic = longestChain(
       CASCADE_NODES.slice(0, 2),
       [
         { from_index: 0, to_index: 1 },
@@ -89,21 +90,21 @@ describe('criticalPath', () => {
       READ_MS
     );
 
-    expect(cyclic.kind === 'path' ? cyclic.taskIndices : []).toEqual([0, 1]);
+    expect(cyclic.kind === 'chain' ? cyclic.taskIndices : []).toEqual([0, 1]);
   });
 
-  it('has no path when no node has timing', () => {
-    expect(criticalPath([workflowNode(0, 'x', 'COMPLETED', UNAVAILABLE_NODE)], [], READ_MS)).toEqual({
+  it('has no chain when no node has timing', () => {
+    expect(longestChain([workflowNode(0, 'x', 'COMPLETED', UNAVAILABLE_NODE)], [], READ_MS)).toEqual({
       kind: 'no_timing',
     });
   });
 
-  it('tells each node whether it is on the path', () => {
-    const path = criticalPath(CASCADE_NODES, CASCADE_EDGES, READ_MS);
+  it('tells each node whether it is on the chain', () => {
+    const path = longestChain(CASCADE_NODES, CASCADE_EDGES, READ_MS);
 
-    expect(criticalMembership(path, 1)).toBe('on_path');
-    expect(criticalMembership(path, 2)).toBe('off_path');
-    expect(criticalMembership({ kind: 'no_timing' }, 1)).toBe('off_path');
+    expect(chainMembership(path, 1)).toBe('on_chain');
+    expect(chainMembership(path, 2)).toBe('off_chain');
+    expect(chainMembership({ kind: 'no_timing' }, 1)).toBe('off_chain');
   });
 });
 
@@ -236,10 +237,10 @@ describe('pausedTime', () => {
 describe('nodeParts', () => {
   it('keeps the phases of the node itself and sums its task, with its attempt count', () => {
     expect(nodeParts(segmentsOf(EXACT_RETRIED_NODE), READ_MS)).toEqual([
-      { kind: 'phase', total: { key: 'pending', ms: 1_000, longestMs: 1_000, open: false } },
-      { kind: 'phase', total: { key: 'ready', ms: 1_000, longestMs: 1_000, open: false } },
+      { kind: 'phase', total: { key: 'pending', ms: 1_000, longestMs: 1_000, count: 1, open: false } },
+      { kind: 'phase', total: { key: 'ready', ms: 1_000, longestMs: 1_000, count: 1, open: false } },
       { kind: 'task', ms: 8_000, open: false, tasks: 1, attempts: 2 },
-      { kind: 'phase', total: { key: 'advancing', ms: 1_000, longestMs: 1_000, open: false } },
+      { kind: 'phase', total: { key: 'advancing', ms: 1_000, longestMs: 1_000, count: 1, open: false } },
     ]);
   });
 
@@ -254,7 +255,7 @@ describe('nodeParts', () => {
   });
 });
 
-describe('nodeFacts', () => {
+describe('nodeFacts and nodeRunCount', () => {
   const normal = exactTiming(
     [
       ['pending', 0, 5],
@@ -268,11 +269,12 @@ describe('nodeFacts', () => {
     8.007
   );
 
-  it('has no fact for a node that ran once with engine steps of milliseconds', () => {
-    expect(nodeFacts(segmentsOf(normal), READ_MS)).toEqual([]);
+  it('has no fact for a node that ran once', () => {
+    expect(nodeFacts(segmentsOf(normal))).toEqual([]);
+    expect(runCountText(nodeRunCount(segmentsOf(normal)))).toBe('1 attempt');
   });
 
-  it('names a long engine step with its time and what it tells', () => {
+  it('names no long step: a queue wait of 7.2s is not a fact of its own', () => {
     const queued = exactTiming(
       [
         ['enqueued', 0, 7.2],
@@ -283,102 +285,18 @@ describe('nodeFacts', () => {
       10.9
     );
 
-    const facts = nodeFacts(segmentsOf(queued), READ_MS);
-
-    expect(facts).toHaveLength(1);
-    expect(facts[0]).toMatchObject({ kind: 'long_step', key: 'enqueued', ms: 7_200 });
-    expect(facts[0]?.kind === 'long_step' ? facts[0].tells : '').toContain('concurrency limit');
+    expect(nodeFacts(segmentsOf(queued))).toEqual([]);
   });
 
-  it('does not call a sum of short steps a long step', () => {
-    // Three queue waits of 100 ms: 300 ms in all, each below the limit.
-    const segments: TimingSegment[] = [1, 2, 3].map(attempt => ({
-      phase: { kind: 'enqueued' },
-      started_at: at(attempt * 10),
-      end: { kind: 'ended', at: at(attempt * 10 + 0.1) },
-      source: { kind: 'attempt', generation: 1, task_id: 't', attempt },
-    }));
-
-    expect(nodeFacts(segments, READ_MS)).toEqual([{ kind: 'attempts', count: 3 }]);
+  it('counts the attempts of a retried node, and the tasks of a node that has more than one', () => {
+    expect(nodeFacts(segmentsOf(EXACT_RETRIED_NODE))).toEqual([{ kind: 'attempts', count: 2 }]);
+    expect(nodeFacts(segmentsOf(PARTIAL_OPEN_NODE))).toEqual([{ kind: 'tasks', count: 2 }]);
+    expect(runCountText(nodeRunCount(segmentsOf(EXACT_RETRIED_NODE)))).toBe('2 attempts');
+    expect(runCountText(nodeRunCount(segmentsOf(PARTIAL_OPEN_NODE)))).toBe('2 tasks');
   });
 
-  it('lists each long step in lifecycle order, then the attempt count of a retried node', () => {
-    expect(
-      nodeFacts(segmentsOf(EXACT_RETRIED_NODE), READ_MS).map(fact =>
-        fact.kind === 'long_step' ? `${fact.key} ${fact.ms}` : `${fact.kind} ${fact.count}`
-      )
-    ).toEqual([
-      'ready 1000',
-      'enqueued 1000',
-      'claimed 4000',
-      'finalizing 1000',
-      'advancing 1000',
-      'attempts 2',
-    ]);
-  });
-
-  it('counts the tasks of a node that has more than one, and marks a gap of the record', () => {
-    expect(
-      nodeFacts(segmentsOf(PARTIAL_OPEN_NODE), READ_MS).map(fact =>
-        fact.kind === 'long_step' ? `${fact.key} ${fact.ms}` : `${fact.kind} ${fact.count}`
-      )
-    ).toEqual(['unknown 100000', 'tasks 2']);
-  });
-});
-
-describe('offPathLongSteps', () => {
-  /** A fan-out: `slow` (queue wait 7 s) and `slower` (queue wait 2 s, then a
-   * long run) start after `first`; `slower` ends last, so it is on the path. */
-  const nodes = [
-    workflowNode(0, 'first', 'COMPLETED', exactTiming([['running', 0, 2]], 'COMPLETED', 2)),
-    workflowNode(
-      1,
-      'slow',
-      'COMPLETED',
-      exactTiming([['pending', 0, 2], ['enqueued', 2, 9], ['running', 9, 10]], 'COMPLETED', 10)
-    ),
-    workflowNode(
-      2,
-      'slower',
-      'COMPLETED',
-      exactTiming([['pending', 0, 2], ['enqueued', 2, 4], ['running', 4, 20]], 'COMPLETED', 20)
-    ),
-    workflowNode(
-      3,
-      'quick',
-      'COMPLETED',
-      exactTiming([['pending', 0, 2], ['enqueued', 2, 2.003], ['running', 2.003, 5]], 'COMPLETED', 5)
-    ),
-    workflowNode(
-      4,
-      'held',
-      'COMPLETED',
-      exactTiming([['pending', 0, 2], ['enqueued', 2, 5], ['claimed', 5, 5.8], ['running', 5.8, 6]], 'COMPLETED', 6)
-    ),
-  ];
-  const edges = [1, 2, 3, 4].map(to => ({ from_index: 0, to_index: to }));
-  const path = criticalPath(nodes, edges, READ_MS);
-
-  it('lists the long steps of the nodes off the path by phase, the longest node first', () => {
-    expect(path.kind === 'path' ? path.taskIndices : []).toEqual([0, 2]);
-
-    const steps = offPathLongSteps(nodes, path, READ_MS);
-
-    expect(steps.map(step => [step.key, step.nodes.map(entry => [entry.node.node_id, entry.longestMs])])).toEqual([
-      ['enqueued', [['slow', 7_000], ['held', 3_000]]],
-      ['claimed', [['held', 800]]],
-    ]);
-    expect(steps[0]?.tells).toContain('concurrency limit');
-  });
-
-  it('leaves out the nodes of the path: their steps are in the split of the duration', () => {
-    const steps = offPathLongSteps(nodes, path, READ_MS);
-
-    expect(steps.flatMap(step => step.nodes.map(entry => entry.node.node_id))).not.toContain('slower');
-  });
-
-  it('is empty when no node off the path has a long step', () => {
-    expect(offPathLongSteps(nodes.slice(0, 1).concat(nodes.slice(2, 4)), path, READ_MS)).toEqual([]);
-    expect(offPathLongSteps(nodes, { kind: 'no_timing' }, READ_MS)).toHaveLength(2);
+  it('has no task for a node with its dependency wait alone', () => {
+    expect(nodeRunCount(segmentsOf(nth(CASCADE_NODES, 3).timing))).toEqual({ kind: 'no_task' });
+    expect(runCountText({ kind: 'no_task' })).toBe('no task');
   });
 });

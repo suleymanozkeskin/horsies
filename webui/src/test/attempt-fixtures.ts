@@ -1,8 +1,8 @@
 // Attempt rows and task rows for the attempt timing tests. The example
 // attempts are on the times of the shared examples (test/timing-examples.ts):
-// due at 12:00:00, started at 12:00:04, recorded at 12:00:09. Their phases are
-// seconds long, so each engine step of them is a long step. The normal
-// attempts have the times of real attempts: engine steps of milliseconds.
+// due at 12:00:00, started at 12:00:04, recorded at 12:00:09: their phases
+// are seconds long. The normal attempts have the times of real attempts:
+// engine steps of milliseconds.
 
 import type { AttemptPhases } from '@/types/timing';
 import type { LeafTask, TaskAttempt } from '@/types/workflows';

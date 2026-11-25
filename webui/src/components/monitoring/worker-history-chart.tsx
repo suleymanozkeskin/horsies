@@ -18,7 +18,7 @@ import { assertNever } from '@/lib/exhaustive';
 import { statusColorVar } from '@/lib/status-utils';
 import type { WorkerHistoryPoint } from '@/types/workers';
 
-import { SeriesLegend, type LegendSeries } from './series-legend';
+import { ChartLegend, type LegendSeries } from './chart-legend';
 import {
   ALL_SERIES,
   isSeriesShown,
@@ -181,12 +181,13 @@ function SnapshotTooltip<Key extends ChartSeriesKey>({
 }
 
 /**
- * A titled chart slot of fixed height, with the legend of the chart beside
- * the title. The body holds that height whether it carries a chart or a
- * message, so focusing another worker — which starts a fresh query with
- * nothing cached — does not collapse the panel around it. Keeping the
- * previous worker's series would be the wrong repair: it would caption one
- * worker's data with another's name.
+ * A titled chart slot of fixed height, with the legend of the chart under
+ * the chart. The body holds that height whether it carries a chart or a
+ * message, and the legend stays under it in both cases, so focusing another
+ * worker — which starts a fresh query with nothing cached — does not
+ * collapse the panel around it. Keeping the previous worker's series would
+ * be the wrong repair: it would caption one worker's data with another's
+ * name.
  */
 function ChartSlot({
   title,
@@ -199,16 +200,14 @@ function ChartSlot({
   /** One line below the chart that says what the chart measures. */
   note?: string;
   children: ReactNode;
-}) {
+}): ReactNode {
   return (
     <div className="flex flex-col gap-1">
-      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
-        <span className="text-xs uppercase tracking-wide text-foreground">
-          {title}
-        </span>
-        {legend}
-      </div>
+      <span className="text-xs uppercase tracking-wide text-foreground">
+        {title}
+      </span>
       <div style={{ height: CHART_HEIGHT }}>{children}</div>
+      {legend}
       {note !== undefined && (
         <p className="text-10 text-muted-foreground">{note}</p>
       )}
@@ -332,7 +331,11 @@ function ProcessChart({
  * fits that series. The selection stays when the focus moves to another
  * worker.
  */
-export function WorkerHistoryChart({ workerId }: { workerId: string }) {
+export function WorkerHistoryChart({
+  workerId,
+}: {
+  workerId: string;
+}): ReactNode {
   const { history, isLoading } = useWorkerHistory(workerId);
   const [loadSelection, setLoadSelection] =
     useState<SeriesSelection<LoadSeriesKey>>(ALL_SERIES);
@@ -352,7 +355,7 @@ export function WorkerHistoryChart({ workerId }: { workerId: string }) {
       <ChartSlot
         title={LOAD_TITLE}
         legend={
-          <SeriesLegend
+          <ChartLegend
             chart={LOAD_TITLE}
             series={LOAD_SERIES}
             selection={loadSelection}
@@ -375,7 +378,7 @@ export function WorkerHistoryChart({ workerId }: { workerId: string }) {
         title={PROCESS_TITLE}
         note={PROCESS_NOTE}
         legend={
-          <SeriesLegend
+          <ChartLegend
             chart={PROCESS_TITLE}
             series={PROCESS_SERIES}
             selection={processSelection}

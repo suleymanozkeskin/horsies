@@ -1,14 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  attemptPhaseKind,
   attemptStory,
   liveAttempt,
   recordedAttempt,
-  storyTotals,
   type AttemptPhase,
-  type RecordedAttempt,
 } from '@/components/monitoring/attempt-story';
-import { LONG_ENGINE_STEP_MS } from '@/components/workflows/phase';
+import { instantMs } from '@/lib/time-text';
 import {
   at,
   CANCELLED,
@@ -22,7 +21,6 @@ import {
   RECOVERED,
   timedAttempt,
 } from '@/test/attempt-fixtures';
-import { instantMs } from '@/lib/time-text';
 
 const ms = (seconds: number): number => instantMs(at(seconds));
 
@@ -32,10 +30,6 @@ const phaseRows = (phases: readonly AttemptPhase[]): string[] =>
     phase =>
       `${phase.key} ${phase.detail.kind} ${(phase.startMs - ms(0)) / 1_000}-${(phase.endMs - ms(0)) / 1_000}`
   );
-
-/** Each note as its kind, with the phase of a long step. */
-const noteKinds = (attempt: RecordedAttempt): string[] =>
-  attempt.notes.map(note => (note.kind === 'long_step' ? `long_step ${note.key}` : note.kind));
 
 describe('recordedAttempt', () => {
   it('splits a placed attempt with an earlier claim into its phases, in record order', () => {
@@ -51,17 +45,10 @@ describe('recordedAttempt', () => {
     expect(attempt.span).toEqual({ kind: 'span', startMs: ms(0), endMs: ms(9) });
     expect(attempt.phases[1]?.detail).toEqual({ kind: 'earlier_claims', count: 1 });
     expect(attempt.phases[2]?.detail).toEqual({ kind: 'placed', placedAtMs: ms(3) });
-    // The example has phases of seconds: each engine step is a long step. The
-    // time of the earlier claim has the note of the claim count, not a second one.
-    expect(noteKinds(attempt)).toEqual([
-      'long_step enqueued',
-      'long_slot_wait',
-      'long_step finalizing',
-      'claimed_more_than_once',
-    ]);
+    expect(attempt.writer).toEqual({ kind: 'worker' });
   });
 
-  it('marks the time after the last sign of life of a lost worker as unknown', () => {
+  it('marks the time after the last sign of life of a lost worker, and names recovery as the writer', () => {
     const attempt = recordedAttempt(exampleAttempt(RECOVERED));
 
     expect(phaseRows(attempt.phases)).toEqual([
@@ -70,16 +57,10 @@ describe('recordedAttempt', () => {
       'running none 4-7',
       'unknown worker_lost 7-9',
     ]);
-    // The two gaps of the record have their own notes: claims not counted,
-    // worker lost. The slot wait of 2 s is a long step with no placement.
-    expect(attempt.notes).toEqual([
-      expect.objectContaining({ kind: 'long_slot_wait', ms: 2_000, childTook: { kind: 'not_recorded' } }),
-      { kind: 'claims_not_counted' },
-      { kind: 'worker_lost', lastSeenMs: ms(7) },
-    ]);
+    expect(attempt.writer).toEqual({ kind: 'recovery', lastSeenMs: ms(7) });
   });
 
-  it('runs to the record when no finalizing marker was written, and has no note for a missing placement alone', () => {
+  it('runs to the record when no finalizing marker was written', () => {
     const attempt = recordedAttempt(exampleAttempt(ONE_CLAIM_NOT_OBSERVED));
 
     expect(phaseRows(attempt.phases)).toEqual([
@@ -87,14 +68,9 @@ describe('recordedAttempt', () => {
       'claimed placement_not_observed 2-4',
       'running none 4-9',
     ]);
-    // The long slot wait says that the record does not show the placement.
-    expect(attempt.notes).toEqual([
-      expect.objectContaining({ kind: 'long_step', key: 'enqueued' }),
-      expect.objectContaining({ kind: 'long_slot_wait', childTook: { kind: 'not_recorded' } }),
-    ]);
   });
 
-  it('notes an attempt that an operator cancel recorded', () => {
+  it('names an operator cancel as the writer of the attempt row', () => {
     const attempt = recordedAttempt(exampleAttempt(CANCELLED));
 
     expect(phaseRows(attempt.phases)).toEqual([
@@ -103,67 +79,34 @@ describe('recordedAttempt', () => {
       'running none 4-7',
       'finalizing none 7-9',
     ]);
-    expect(noteKinds(attempt)).toEqual([
-      'long_step enqueued',
-      'long_slot_wait',
-      'long_step finalizing',
-      'cancelled',
-    ]);
+    expect(attempt.writer).toEqual({ kind: 'cancel' });
   });
 
-  it('has no phases for an attempt from before the lifecycle record, and keeps its row times', () => {
+  it('gives an attempt from before the lifecycle record one unknown phase over its row times', () => {
     const attempt = recordedAttempt(exampleAttempt(NOT_CAPTURED));
 
-    expect(attempt.phases).toEqual([]);
+    expect(phaseRows(attempt.phases)).toEqual(['unknown not_captured 4-9']);
     expect(attempt.span).toEqual({ kind: 'span', startMs: ms(4), endMs: ms(9) });
-    expect(attempt.notes).toEqual([{ kind: 'not_captured' }]);
+    expect(attempt.writer).toEqual({ kind: 'not_recorded' });
   });
 
-  it('has no note for a normal attempt: one claim, the worker, engine steps of milliseconds', () => {
-    const attempt = recordedAttempt(normalAttempt(1, 0, 'COMPLETED'));
+  it('has no phase for such an attempt with no row times', () => {
+    const attempt = recordedAttempt({ ...exampleAttempt(NOT_CAPTURED), started_at: null });
 
-    expect(attempt.notes).toEqual([]);
-    expect(phaseRows(attempt.phases)).toEqual([
-      'enqueued none 0-0.003',
-      'claimed placed 0.003-0.005',
-      'running none 0.005-3.005',
-      'finalizing none 3.005-3.006',
+    expect(attempt.phases).toEqual([]);
+    expect(attempt.span).toEqual({ kind: 'no_times' });
+  });
+
+  it('keeps every phase of an attempt with a long queue wait: no limit makes a note of it', () => {
+    const queued = recordedAttempt(timedAttempt(1, 0, { ...NORMAL_TIMES, queueMs: 7_200 }, 'COMPLETED'));
+
+    expect(phaseRows(queued.phases)).toEqual([
+      'enqueued none 0-7.2',
+      'claimed placed 7.2-7.202',
+      'running none 7.202-10.202',
+      'finalizing none 10.202-10.203',
     ]);
-  });
-
-  it('notes a long queue wait with what it tells, and keeps the steps below the limit quiet', () => {
-    const queued = recordedAttempt(
-      timedAttempt(1, 0, { ...NORMAL_TIMES, queueMs: 7_200 }, 'COMPLETED')
-    );
-    const justBelow = recordedAttempt(
-      timedAttempt(1, 0, { ...NORMAL_TIMES, queueMs: LONG_ENGINE_STEP_MS - 1 }, 'COMPLETED')
-    );
-
-    expect(queued.notes).toEqual([
-      expect.objectContaining({ kind: 'long_step', key: 'enqueued', ms: 7_200 }),
-    ]);
-    expect(queued.notes[0]?.kind === 'long_step' ? queued.notes[0].tells : '').toContain(
-      'concurrency limit'
-    );
-    expect(justBelow.notes).toEqual([]);
-  });
-
-  it('notes a long slot wait with the time after which a child took the task', () => {
-    const waited = recordedAttempt(
-      timedAttempt(1, 0, { ...NORMAL_TIMES, slotMs: 800, placedMs: 790 }, 'COMPLETED')
-    );
-
-    expect(waited.notes).toEqual([
-      expect.objectContaining({ kind: 'long_slot_wait', ms: 800, childTook: { kind: 'after', ms: 790 } }),
-    ]);
-  });
-
-  it('notes a long finalizing time', () => {
-    const slowRecord = recordedAttempt(
-      timedAttempt(1, 0, { ...NORMAL_TIMES, finalizingMs: 400 }, 'COMPLETED')
-    );
-
-    expect(noteKinds(slowRecord)).toEqual(['long_step finalizing']);
+    expect(Object.keys(queued)).not.toContain('notes');
   });
 
   it('carries the answer of the attempt: outcome, error code, message and host', () => {
@@ -179,6 +122,24 @@ describe('recordedAttempt', () => {
   });
 });
 
+describe('attemptPhaseKind', () => {
+  it('names the claims before the claim that ran the attempt and the time after a lost worker', () => {
+    expect(recordedAttempt(exampleAttempt(PLACED_TWO_CLAIMS)).phases.map(attemptPhaseKind)).toEqual([
+      'enqueued',
+      'earlier_claims',
+      'claimed',
+      'running',
+      'finalizing',
+    ]);
+    expect(recordedAttempt(exampleAttempt(RECOVERED)).phases.map(attemptPhaseKind)).toEqual([
+      'unknown',
+      'claimed',
+      'running',
+      'worker_lost',
+    ]);
+  });
+});
+
 describe('attemptStory', () => {
   it('puts the retry wait from each record to the next due time between the attempts, in attempt order', () => {
     const story = attemptStory(
@@ -191,10 +152,10 @@ describe('attemptStory', () => {
         item.kind === 'attempt'
           ? `attempt ${item.attempt.number}`
           : item.kind === 'retry_wait'
-            ? `retry wait ${(item.endMs - item.startMs) / 1_000}s`
+            ? `retry wait ${item.fromAttempt}→${item.toAttempt} ${(item.endMs - item.startMs) / 1_000}s`
             : 'live'
       )
-    ).toEqual(['attempt 1', 'retry wait 6.994s', 'attempt 2', 'retry wait 16.994s', 'attempt 3']);
+    ).toEqual(['attempt 1', 'retry wait 1→2 6.994s', 'attempt 2', 'retry wait 2→3 16.994s', 'attempt 3']);
     expect(story.attemptCount).toBe(3);
     expect(story.allowed).toEqual({ kind: 'limit', count: 5 });
   });
@@ -206,7 +167,7 @@ describe('attemptStory', () => {
     );
 
     expect(story.items.slice(1)).toEqual([
-      { kind: 'retry_wait', startMs: ms(3.006), endMs: ms(10) },
+      { kind: 'retry_wait', startMs: ms(3.006), endMs: ms(10), fromAttempt: 1, toAttempt: 2 },
       { kind: 'live', attempt: { kind: 'running', number: 2, startedMs: ms(12) } },
     ]);
     expect(story.attemptCount).toBe(2);
@@ -256,35 +217,5 @@ describe('liveAttempt', () => {
       attempt: { kind: 'no_times', number: 1, status: 'RUNNING' },
     });
     expect(liveAttempt(leafTask('EXPIRED', 0, 0, times))).toEqual({ kind: 'not_live' });
-  });
-});
-
-describe('storyTotals', () => {
-  it('sums each phase over the attempts and the retry waits, and spans the whole story', () => {
-    const story = attemptStory(
-      [normalAttempt(1, 0, 'FAILED'), normalAttempt(2, 10, 'COMPLETED')],
-      null
-    );
-    const totals = storyTotals(story.items);
-
-    expect(totals.kind).toBe('measured');
-    if (totals.kind !== 'measured') {
-      return;
-    }
-    // From the due time of attempt 1 to the record of attempt 2 at 13.006 s.
-    expect(totals.spanMs).toBe(13_006);
-    expect(totals.totals).toEqual([
-      { key: 'enqueued', ms: 6, longestMs: 3, open: false },
-      { key: 'retry_wait', ms: 6_994, longestMs: 6_994, open: false },
-      { key: 'claimed', ms: 4, longestMs: 2, open: false },
-      { key: 'running', ms: 6_000, longestMs: 3_000, open: false },
-      { key: 'finalizing', ms: 2, longestMs: 1, open: false },
-    ]);
-    // The phases of the story add up to its span.
-    expect(totals.totals.reduce((sum, total) => sum + total.ms, 0)).toBe(13_006);
-  });
-
-  it('has no times for a story with no recorded time', () => {
-    expect(storyTotals([])).toEqual({ kind: 'no_times' });
   });
 });

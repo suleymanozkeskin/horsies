@@ -20,7 +20,7 @@ export function NoteLine({ view }: { view: NoteView }) {
         <p className="flex items-start gap-1.5 text-xs" role="note" data-tone="warning">
           <TriangleAlert
             className="mt-px size-3.5 shrink-0"
-            style={{ color: 'var(--marked-ink)' }}
+            style={{ color: 'var(--warning-dark)' }}
             aria-hidden
           />
           <span>{view.text}</span>
