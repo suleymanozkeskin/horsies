@@ -42,237 +42,360 @@ Server-paginated, server-sorted, server-filtered task list, plus:
   which includes completed tasks that returned a domain error, so it is not a
   failure count.
 - A grouping pivot by worker, task name, or queue, with a `TOTAL` rollup row.
-- A per-task detail panel with the status, the error code, the queue and the
-  attempt timing of the task. See [Attempt timing](#attempt-timing).
+- The `Queued` and `Exec` columns write their durations with the rule in
+  [Durations and Times](#durations-and-times).
+- A task detail panel. It shows the [attempt panel](#attempt-panel) of the
+  task, and the task actions when actions are on.
 
 Filters, sort, pagination, and the open task are held in the URL, so a filtered
 view is shareable and survives a reload.
 
 ### Workflows
 
-Run picker plus two views of the selected run:
+The page has a run list and two views of the selected run: **Graph** and
+**Timeline**.
 
-- **Graph** — the run's DAG. Click a node for its detail, double-click a
-  subworkflow node to open the child run inside the same panel. Failure
-  navigation steps through failed nodes; node search jumps by name. Each node
-  card keeps its status color and shows the node time: the time of the node
-  without its dependency wait. A card states in words what the normal case
-  does not have: a long engine step (`queue wait 7.2s`), more than one attempt
-  (`3 attempts`), and timing that is not exact. The card over the canvas names
-  the node with the longest node time and holds the key to the marks of the
-  graph. The edges of the critical path are bold.
-- **Timeline** — one row per node, in task-index order, on one linear time
-  axis from the creation of the run. It shows when each node ran: the order,
-  the overlap, and the waits that are long at the scale of the run.
+- The run list has a filter by workflow name and a filter by status. The
+  newest run is first. Each run shows its name, its status, its duration and
+  its definition key. A button in the toolbar collapses the list.
+- The toolbar holds the switch between **Graph** and **Timeline**, and the
+  workflow actions when actions are on.
+- The selected run and the open node are URL search parameters
+  (`?run=&node=`).
 
-A run summary is above both views, in one line:
+The views use two terms:
 
-- The duration of the run: from its creation to its last recorded time.
-- The split of the duration: the time of each phase on the critical path.
-  The critical path is the chain of nodes whose end times decided the end of
+- **Node time**: the time of a node without its dependency wait, from the
+  time that the node could start to its end. The UI calls it `duration` in
+  the timeline column and in the node detail panel.
+- **Longest chain**: the chain of nodes whose end times decided the end of
   the run. The chain ends at the node that ended last. Each step goes back to
   the dependency that ended last, which is the dependency that released the
   node. On a tie (a skip cascade ends many nodes at one instant), the node
   with more time that is not dependency wait comes first, then the lower task
-  index. Each node of the chain starts when the node before it ends, so the
+  index. Each node of the chain starts when the node before it ends. Thus the
   phases of the chain without its dependency wait add up to the duration of a
-  run that had no pause. The label `critical path` names the chain on hover.
-- The pause time of a paused run.
-- The long engine steps of the nodes that are not on the critical path,
-  after the words `other nodes` (for example
-  `queue wait up to 7.0s in 2 nodes`). These nodes did not decide the end of
-  the run; the item is absent when no such step exists.
-- The node count of each status in the run. Click a count to fade the nodes of
-  the other statuses; click it again to clear the filter.
+  run that had no pause.
 
-The node detail panel shows the status, the task name, one node timing summary
-and the attempts of the task (see [Attempt timing](#attempt-timing)). The
-summary holds:
+#### Run summary
 
-- The node time, and the end of the node as a time of day.
-- The wall time of the node as named numbers: its dependency wait, its task
-  (`task`, `3 attempts` or `2 tasks`) or its child run, and its own engine
-  steps (for example `dependency wait 7.1s`, `3 attempts 32.1s`,
-  `advancing 1ms`). The attempts split the task.
-- The dependency at whose end the dependency wait ended.
-- A note for a long engine step of the node itself, and for coverage that is
-  not `exact`: its reasons or its conflict.
+The run summary is above the two views. Its first line shows:
 
-A node on the critical path has a "critical path" badge. A skipped node has no
-attempts section. A node error that an attempt shows as its message is shown
-once.
+- The status of the run, its date, and its start and end to the second. The
+  end of an open run is `now`.
+- The node count and the count of each node status. Click a count to fade the
+  nodes of the other statuses. Click it again to show all nodes.
 
-The selected run and open node are URL search parameters (`?run=&node=`).
+Its second line is a key with totals:
+
+- `duration`: the time from the creation of the run to its last recorded
+  time.
+- The time of each phase on the longest chain, with the fill of the phase.
+- `paused`: the pause time of a paused run.
+
+Each item has a tooltip. The tooltip of `duration` gives the status of the
+run, its start and end, the time of each phase on the longest chain, and the
+nodes of the chain (`validate_order → reserve_stock_1 → …`). Put the pointer
+on a phase item to highlight the marks of that phase on the timeline. The
+marks of the other phases fade.
+
+#### Graph
+
+The graph shows the DAG of the run.
+
+- Click a node to open its detail panel. Double-click a sub-workflow node to
+  open the child run in the same panel. The back button of the panel goes
+  back one step.
+- Failure navigation (`1 failed`, `1/1`) steps through the failed nodes.
+- Node search (`Find node…`) jumps to a node by name. Enter goes to the next
+  match, and Shift+Enter goes to the match before.
+- A card over the canvas shows the node count, the node with the longest node
+  time (`Longest node: generate_invoice 8.03s`), and the key to the marks of
+  the graph. The key has `longest chain` (bold edges) and `tolerant join`
+  (dashed border), each only when the graph has that mark. In a sub-workflow
+  graph, the card also counts the done nodes, and the running and failed
+  nodes when there are some.
+
+Each node card:
+
+- Has the color of its status: a bar on its left edge, a dot, and a tint.
+- Shows its name, its task name and its node time. A node with no phase
+  timing shows its execution time.
+- States in words what a node that ran once does not have: `3 attempts`,
+  `2 tasks`, `partial timing`, `timing unavailable` and `timing inconsistent`.
+  `timing inconsistent` has a warning icon and the warning color.
+- For a sub-workflow node: shows a layers icon and the count of its child
+  nodes. When child nodes failed, the count is `1/3 failed` in the error
+  color.
+- For a node that runs on under a cancelled or paused run: shows the badge
+  `draining` or `finishing` in place of its task name.
+
+The edges of the longest chain are bold.
+
+#### Timeline
+
+The timeline is a table. Its first row is the run, and then it has one row
+for each node, in task-index order. A banner above the table names the
+coverage of the run when it is not `exact` (see [Coverage](#coverage)). The
+key of the table is below the banner.
+
+| Column | Header | Content |
+|---|---|---|
+| Name | `node` | The node name. `sub` marks a sub-workflow node, `×3` marks three attempts, and `2 tasks` marks a node whose task was replaced |
+| Linear cell | `timeline` | The phases of the node on one linear time axis from the creation of the run. It shows the order, the overlap, and the waits that are long at the scale of the run |
+| Log cell | `phases · log scale` | One thin bar for the total time of each phase of the node, on a log axis of duration. It shows the size of each time: a phase of 3 ms and a task code of 4 s both get a visible bar |
+| Time | `duration` | The node time. A node that did not start shows `—` |
+
+The run row (`run`) shows the phases of the nodes on the longest chain, at
+their times, without their dependency wait. A thin line in the color of the
+window separates two nodes. Its log cell has the total of each phase along
+the chain. Its last column has the duration of the run.
+
+The linear cell of a node row has:
+
+- One segment for each phase interval of the node, in time order, as wide as
+  its time. The dependency wait is a thin line. A retry repeats the segments
+  of an attempt. A new task of the node after a pause abandon repeats them
+  again.
+- No segment for an interval narrower than one pixel. The log cell and the
+  tooltip of the row give its time.
+- A diamond at the time of the terminal status of the node, in the color of
+  that status. The diamond is a point in time, not a duration. A task that
+  runs on after a workflow cancel keeps its segments past the diamond.
+
+The log cell of a node row has one lane for each phase of the run, except
+dependency wait. The lanes are in the order of the key and at the same height
+in every row. A row draws a bar in the lane of each phase that it has. The
+axis starts at 0.1ms. Each labeled line is 10 times the line before it, up to
+10s, then 1m, 10m and 1h. The axis ends at the first labeled or minor line
+above the longest bar, and at 1s or later. The minor ticks between two labeled
+lines become closer toward the next labeled line.
+
+Over the rows, the table draws:
+
+- A grid line at each labeled time of the two axes.
+- A vertical line at the end of each node of the longest chain, from its row
+  to the row of the next node of the chain. The next node starts at that time.
+- A band over every row for each pause of the run: from the pause to the
+  resume, to the end of the run (a cancel or a paused expiry), or to now.
+
+The key of the table names what the table draws and the run summary does not
+name:
+
+- The phases that are not on the longest chain, with no totals.
+- `dependency wait` (the thin line).
+- `end of a node` (the diamond), `longest chain` (the vertical line) and
+  `run paused` (the band), each only when the table has that mark.
+- `wait` (a striped fill is a wait) and `work` (a solid fill is work).
+
+Click a row to open the node detail panel. The table renders only the rows in
+view and 8 rows above and below them, so a run of 10,000 nodes renders the
+same number of rows as a short run.
+
+#### Node detail panel
+
+The panel opens on the right. Drag its left edge, or use the left and right
+arrow keys on that edge, to change its width. It shows:
+
+- The status, a `longest chain` badge for a node on the longest chain, a
+  `draining` or `finishing` badge, and a `tolerant join` badge. The task
+  name is on this line when the panel has no attempt panel.
+- The node timing:
+  - `duration` and the node time. A node that ended with no time after its
+    dependency wait shows `did not run`. A node that did not start shows
+    `not started`. A node with no timing shows `no timing`.
+  - The end of the node: a diamond and `completed at 18:46:58.708`. Its hover
+    text gives the date and the time zone.
+  - The parts of the wall time of the node, each with its time: the
+    dependency wait, the task (`task`, `3 attempts` or `2 tasks`) or the child
+    run of a sub-workflow node (`running`), and the steps of the node itself
+    (for example `ready` and `advancing`). The attempt panel below splits the
+    task.
+  - `dependency wait ended with <node>`: the dependency at whose end the
+    dependency wait ended.
+  - A note for coverage that is not `exact`, with its reasons or its
+    conflict.
+- An `Open subworkflow` button for a sub-workflow node.
+- The node error, when no attempt shows the same text as its message.
+- The [attempt panel](#attempt-panel) of the task of the node. A node with no
+  task shows `no attempt recorded`. A sub-workflow node and a skipped node
+  with no attempt have no attempt panel.
 
 #### Phase timing
 
 The run read `GET /api/workflows/{id}` holds the phase timing of the run and
 of each node (the `timing` field). The core composes it from the lifecycle
-record; the UI draws it and does not compute phases of its own. The run
-summary, the critical path and the node time are sums and choices over these
+record. The UI draws it and does not compute phases of its own. The run
+summary, the longest chain and the node time are sums and choices over these
 phases.
 
-The UI names each phase by the time that it is:
+The UI names each phase by the time that it is. The keys, the lanes and the
+bars use the order of this table.
 
-| Phase in the API | Name in the UI | Measures | Drawing on the timeline |
+| Phase in the API | Name in the UI | Measures | Fill |
 |---|---|---|---|
-| `pending` | dependency wait | The node waits for its dependencies. A node also waits here while its run is paused | A thin track |
+| `pending` | dependency wait | The node waits for its dependencies. A node also waits here while its run is paused | A thin line |
 | `ready` | ready | The dependencies are met and the node has no task: after a pause or a recovery pass | Striped (a wait) |
 | `enqueued` | queue wait | From the due time of the attempt to its claim by a worker | Striped (a wait) |
-| `retry_wait` | retry wait | The delay of the retry policy: from the record of an attempt to the due time of the next | Striped (a wait) |
-| `claimed` | slot wait | From the claim to the start of the task code, with the placement on a child in it | Striped (a wait) |
+| `claimed` with an earlier claim | earlier claims | From the first claim of the attempt to the claim that ran it | Striped, the fill of slot wait |
+| `claimed` | slot wait | From the claim to the start of the task code | Striped (a wait) |
 | `running` | running | The task code runs. A sub-workflow node: the child run runs | Solid (work) |
 | `finalizing` | finalizing | From the end of the task code to the record of the attempt | Solid (work) |
-| `advancing` | advancing | From the end of the task, or of the child run, to the end of the node in the workflow | Solid (work) |
+| `advancing` | advancing | From the end of the task, or of the child run, to the end of the node | Solid (work) |
+| `unknown` with `WORKER_LOST` | worker lost | From the last sign of life of a lost worker to the record by recovery | Hatched |
 | `unknown` | unknown | A known interval whose phase the record does not show | Hatched |
+| `retry_wait` | retry wait | The delay of the retry policy: from the record of a failed attempt to the due time of the next | Striped (a wait) |
 
-The phases are of four kinds. The kinds differ in scale: an engine step is a
-few database round trips (milliseconds), and the task code and the planned
-waits are seconds or more. A proportional bar gives a phase of 3 ms beside a
-task code of 4 s less than one pixel. Thus the detail panels show each phase
-time as a named number, and the weight of the number follows its kind:
-
-| Kind | Phases | Controlled by | Weight of the number |
-|---|---|---|---|
-| Task code | `running` | The task | Bold |
-| Planned wait | `pending`, `retry_wait`, a pause | The workflow definition, the retry policy, the operator | Plain |
-| Engine step | `ready`, `enqueued`, `claimed`, `finalizing`, `advancing` | The queue, the workers and the workflow steps | Quiet below 250 ms; marked at 250 ms or more |
-| Record gap | `unknown` | The record | Quiet below 250 ms; marked at 250 ms or more |
-
-A marked number has a warning icon and its own color. A sum of phase times
-(a node, a run, all attempts of a task) is marked when one of its intervals is
-250 ms or more: three queue waits of 100 ms are not a long step. The UI says
-what a long time of each phase tells:
-
-| Phase | A time of 250 ms or more tells |
-|---|---|
-| queue wait | No worker claimed the task in this time. The usual cause is capacity: the queue is at its `max_concurrency`, or no worker has a free slot. The [Workers](#workers) surface shows the free capacity |
-| slot wait | A worker held the claim and the task code did not start: no child was free, or a child was starting. The attempt shows the time after which a child took the task, and the time of the start on the child |
-| finalizing | The outcome write waited for the database |
-| advancing | The worker did not apply the end of the task to the workflow at once, so a recovery pass did |
-| ready | A pause took the task of the node, or a recovery pass repaired the node |
-| unknown | The record does not show the phase: a lost worker, claims that were not counted, an attempt with no phase record, or a history row that retention removed |
-
-A dependency wait and a retry wait are never marked: the first is the shape of
-the workflow, and the second is the delay of the retry policy.
-
-The timeline keeps a linear axis, because it shows when each node ran. Two
-phases that touch on a row differ in hue and in lightness in both themes, and
-a wait is striped while work is solid. A reader who does not see the hues
+Two phases that touch on a row differ in hue and in lightness in both themes.
+A wait is striped and work is solid. Thus a reader who does not see the hues
 (protan, deutan or tritan color vision) still sees each boundary.
-
-The timeline draws, on each row:
-
-- One segment per phase interval of the node, in time order, as wide as its
-  time. Dependency wait is a thin track. A retry repeats the segments of an
-  attempt, and a new task of the node after a pause abandon repeats them
-  again. A segment below one pixel is not drawn: the tooltip of the row gives
-  its time. A marked segment keeps a width of 3 pixels. A segment that is wide
-  enough shows its duration in it.
-- A line under the active part of each node on the critical path, from the
-  end of its dependency wait to its end. The lines of the path form a chain of
-  steps across the rows.
-- The terminal status of the node as a marker at its completion time. The
-  marker is not a duration: a task that runs on after a workflow cancel keeps
-  its segments past the marker.
-- The node time in the right column.
-
-A pause of the run is a band over every row, from the pause to the resume,
-to the end of the run (a cancel or a paused expiry), or to now.
-
-The key above the rows lists the fill of each phase that the timeline draws at
-its scale, then its marks. The key of the graph is on the card over the
-canvas.
-
-Each node has a coverage label:
-
-| Label | Row on the timeline | Graph card |
-|---|---|---|
-| `exact` | Segments, marker and node time | The node time |
-| `partial` | The same; the `unknown` segments are hatched, and a banner names their reasons | The node time and the text `partial timing` |
-| `unavailable` | A hatched row with the text "Timing unavailable"; the tooltip of the row gives the reason | The text `timing unavailable`; the card shows the execution time |
-| `inconsistent` | A hatched error row with the text "Timing inconsistent"; the tooltip of the row names the two times in the wrong order, the missing record or the unexpected event | The marked text `timing inconsistent`; the card shows the execution time |
-
-A run that began before schema migration 1001, or that has more than 100,000
-events, is unavailable as a whole: a banner gives the reason and the start of
-the lifecycle record, and every row is hatched. A run with an inconsistent
-node or pause record shows a banner that names each conflict.
-
-Each mark explains itself on hover, with no wait:
-
-- The track of a row shows the tooltip of the node: its status, its node
-  time, each phase of the node as a number (also the phases too short to
-  draw), its end, and whether it is on the critical path.
-- The tooltip names the mark under the pointer first. A segment: its phase,
-  its time, its start and end as times of day, its task and attempt, its
-  claim (earlier claims, or the placement of a long slot wait), and what a
-  long time tells. The end marker: the status and the time of the end; a
-  failed node adds the error code of its task. The critical path line. A
-  pause of the run at that time.
-- A graph card has the same tooltip, with the meaning of its marks: the
-  dashed border of a tolerant join, the icon and the count of a sub-workflow
-  node. An edge names its two nodes, and a bold edge its part in the critical
-  path.
-- Each number and each item of a key gives its meaning on hover and as its
-  accessible description.
-
-The tooltip is shared by all rows. With the keyboard, the up and down arrows
-(and Home, End) move between rows, the left and right arrows step through the
-segments of the focused row in the same tooltip, and Escape closes it. The
-accessible name of each row and each graph card holds its status, coverage,
-time per phase, node time and end; a row on the critical path says so.
 
 An open segment or pause grows on a local clock of one second, from the read
 time of the database (`as_of`) plus the browser time since the response
 arrived. The clock runs only while a segment or a pause is open, and it sends
-no request: the next read replaces the timing.
+no request. The next read replaces the timing.
 
-The timeline renders only the rows in view and 8 rows above and below them,
-so a run of 10,000 nodes renders the same number of rows as a short run.
+#### Coverage
 
-#### Attempt timing
+Each node has a coverage label:
 
-The node detail panel and the task detail panel show the attempts of a task
-with one view. The view reads the attempt rows (`attempts` of
-`GET /api/workflows/{id}/tasks/{index}` and of `GET /api/tasks/{id}`) and the
-task row. It has no bar: it shows each phase time as a named number (see
-[Phase timing](#phase-timing)).
+| Label | Timeline row | Graph card |
+|---|---|---|
+| `exact` | Segments, diamond and node time | The node time |
+| `partial` | The same. The `unknown` segments are hatched, and the banner above the table names their reasons | The node time and the text `partial timing` |
+| `unavailable` | A hatched row with the text `Timing unavailable`. The tooltip of the row gives the reason | The text `timing unavailable`. The card shows the execution time |
+| `inconsistent` | A hatched row with the text `Timing inconsistent`. The tooltip of the row names the two times in the wrong order, the missing record or the unexpected event | The text `timing inconsistent` with a warning icon. The card shows the execution time |
 
-- A date line shows the date of the first attempt and the local time zone
-  once. Every other time is a time of day with milliseconds. A time on
-  another day has its day offset (`+1d`).
-- Each attempt starts with the answer: its number, its outcome, its error
-  code and its time (from its due time to its record).
-- The phases of the attempt follow in record order: queue wait, slot wait,
-  running, finalizing. The time from the first claim of an attempt to the
-  claim that ran it is `earlier claims`. The time after the last sign of life
-  of a lost worker is `worker lost`.
-- A long engine step has a note with its time and what it tells. The note of
-  a long slot wait gives the time after which a child took the task and the
-  time of the start on the child. A slot wait in its normal range shows no
-  placement.
-- The other facts that the normal case does not have show as notes: more than
-  one claim (a lease expired or a claim was released), claims not counted, a
-  worker lost (recovery recorded the attempt; the note gives the last sign of
-  life), a cancel of the running task (the end of the attempt is the time of
-  the cancel), and an attempt recorded before schema migration 1001 (its
-  phase times were not captured). One claim recorded by the worker shows no
-  note.
-- The error message of the attempt follows the notes.
-- The last line gives the time span of the attempt and its worker host. The
-  host wraps; it is not cut.
-- With more than one attempt, a box above the attempts gives the time from
-  the first due time to the last record, and the time of each phase over all
-  attempts and retry waits. Between two attempts, a retry wait row gives the
-  time from the record of one attempt to the due time of the next.
-- The count of attempts and the allowed count (`3 of 5 allowed`) are in the
-  section title.
-- A task that is not terminal ends with its attempt in progress: a retry that
-  is not due yet, a queue wait, a claim, or a run, with its time so far on a
-  one-second clock.
+A run that began before schema migration 1001, or that has more than 100,000
+events, is unavailable as a whole. The run summary and a banner give the
+reason, the banner gives the start of the lifecycle record, and every row is
+hatched. A run with an inconsistent node or pause record shows a banner that
+names each conflict.
+
+#### Tooltips and keyboard
+
+Each mark of the graph and the timeline has a tooltip. The tooltip opens when
+the pointer is on the mark, and when the mark has the keyboard focus. It names
+the mark first. The tooltip of a time also gives its duration, and its start
+and end as times of day with milliseconds.
+
+| Mark | Tooltip |
+|---|---|
+| Graph card, or a timeline row off its marks | The name, status and node time of the node; the time of each phase; its attempt or task count (or `sub-workflow`) and `on the longest chain`; its end (`end: completed at 18:46:58.708`), with the error code of the task of a failed node. A graph card adds its task name when the node has a name of its own, and the meaning of a tolerant join, a sub-workflow (`Double-click to open it.`) and the `draining` or `finishing` badge |
+| Graph edge | Its two nodes and `<node> waits for <node>.` A bold edge adds that the first node ended last of the dependencies of the second, so its end decided when the second could start |
+| Segment | Its phase, its node and source (`task 1 · attempt 2`), its duration, its start and end, and what the phase measures. Also what it holds beyond its phase: `2 earlier claims`, `a child took the task after 273ms`, or the reason of an `unknown` time |
+| Diamond | `end of <node>`, the status and the time. A failed node adds the error code of its task |
+| Bar of a log cell | The phase, the node and the total; its start and end for one interval, or the interval count and the longest interval for more than one; and what the phase measures |
+| Segment or bar of the run row | The same, along the longest chain. A segment highlights the row of its node |
+| Longest chain line | The two nodes, the time, and `<node> starts when <node> ends`. It highlights the two rows |
+| Pause band | `run paused`, its time, its start and end, under the tooltip of the mark below the pointer |
+| Column header | What the axis or the column shows |
+| Key item | The fill or the mark, its name, its total when it has one, and what it measures or means |
+
+One tooltip box serves all rows of the timeline. Each node row is a button.
+With the keyboard:
+
+- The up and down arrows, Home and End move between rows.
+- The left and right arrows step through the segments of the focused row in
+  the tooltip.
+- Escape closes the tooltip.
+
+The accessible name of a graph card holds its name, status, coverage and time
+per phase. The accessible name of a timeline row also holds its node time, its
+end, and `on the longest chain` for a node on the chain.
+
+#### Attempt panel
+
+The task detail and the node detail panel use one panel for a task: the
+attempt panel. It reads `GET /api/tasks/{id}`: the task row and its attempt
+rows. From top to bottom, it shows:
+
+1. The task name, the status, and the error code in the color of its
+   category. The task detail has its close button on this line.
+2. `queue`, `priority`, and `attempt n of m`, where m is the allowed attempt
+   count (`max_retries` + 1).
+3. The task actions, in the task detail. See [Actions](#actions).
+4. The errors, grouped by error code. Each message shows once, with the
+   attempts that had it (`attempt 1–4`, `attempt 1, 3`). A message longer than
+   3 lines is cut, and `more` opens it. The words
+   `Unhandled exception in task <name>:` are muted. A failure of the task that
+   no attempt shows (for example an expiry) shows under `task`.
+5. The timing: the duration, the strip, the key and the bars. See below.
+6. `details`, closed. It holds a table of exact times: each attempt with its
+   outcome or error code, then each of its intervals with its start, its end
+   and its duration, and the retry wait after the attempt. It also holds the
+   worker hosts, the task id, the trace id (a link when the server has a
+   trace link template), `good until` (the expiry of the task), and the date
+   and time zone of the times.
+
+The timing has two scales, each with one job. The linear strip shows the
+order and the share of each time. The log bars show the size of each time.
+
+- `duration`: the time from the first due time to the last record, with the
+  start and end to the second.
+- The strip: the task on a linear axis from the first due time. The attempts
+  and the retry waits are in time order. The width of each interval is its
+  share of the total. Above each attempt are its number, the sign of its
+  outcome, and a bracket over its part of the strip. An interval too narrow to
+  see is not drawn; the bars show its time.
+- The key: each phase of the task, the outcome signs, `wait` and `work`. With
+  more than one attempt, each phase has its total over all attempts. Its
+  tooltip names the interval count (`total of 4`).
+- The bars: one bar for each phase of each attempt, and one bar for each retry
+  wait, on a log axis of duration (`duration · log scale`). The duration is
+  written at the end of each bar. The axis follows the rule of the log cell of
+  the timeline.
+- The grouping switch of the bars:
+  - `by phase` (the default): one group for each phase, with a row for each
+    attempt (`1`, `2`) and for each retry wait (`1→2`).
+  - `by attempt`: one group for each attempt with its phases in time order,
+    then the retry wait to the next attempt.
+  - The browser keeps the choice for every task. With one attempt, the two
+    groupings show the same bars: the switch is off, and its tooltip says why.
+
+The phases of an attempt are, in record order: queue wait, earlier claims,
+slot wait, running, finalizing, and worker lost. An attempt row with no phase
+record (an attempt recorded before schema migration 1001) has one `unknown`
+interval from its start to its record. When the claims of an attempt were not
+counted, an `unknown` interval takes the place of its queue wait. A retry
+wait is between two attempts.
+
+A task that is not terminal ends with a line for its attempt in progress. The
+line changes on a one-second clock:
+
+- `attempt 3 · retry wait · due 09:14:26.244 · in 4.00s`
+- `attempt 3 · queue wait · since 09:14:26.244 · 1.20s so far`
+- `attempt 3 · claimed`
+- `attempt 3 · running · since 09:14:26.250 · 5.00s so far`
+
+A task with no recorded time shows `no attempt recorded` or
+`no time recorded`.
+
+The times of day in the tooltips, in the details and in the line of the
+attempt in progress have milliseconds. A time on another day than the first
+due time has its day offset (`+1d`).
+
+Each mark of the panel has a tooltip:
+
+- An interval (a segment of the strip or a bar): its phase, its attempt when
+  the task has more than one, its duration, its start and end, and what the
+  phase measures. Also what it holds beyond its phase: `2 earlier claims`,
+  `a child took the task after 273ms`, `claims not counted`, or
+  `attempt row with no phase record`.
+- An attempt (its number, its bracket, or its group label): its number, its
+  outcome and error code, its duration, its start and end, the time of each
+  of its phases, and its worker host. An attempt that the worker did not
+  record adds `recorded by recovery` or `ended by a cancel`.
+- `duration`, the two axes, and the grouping switch when it is off.
+
+The mark under the pointer highlights its related marks, and the other marks
+fade. An interval highlights itself. An attempt highlights its intervals. A
+phase item of the key highlights the intervals of that phase. Escape closes
+the tooltip.
 
 ### Workers
 
+- The page header counts the workers: `3 live`, or `1 live · 4 stale`.
 - Liveness banner: database reachability with round-trip latency, and the count
   of workers that answered the last ping. The ping is an active round trip over
   LISTEN/NOTIFY, so it runs on demand only — never on a timer — and the banner
@@ -321,10 +444,15 @@ task row. It has no bar: it shows each phase time as a named number (see
   - Worker process: the CPU and the memory of the worker process, in percent.
     The task children of the worker are not in these numbers. See
     [Snapshot Fields](/horsies/monitoring/worker-health/#snapshot-fields).
+  - The legend is under each chart. Each legend item has the mark of its
+    series: an area for `running` and `claimed`, and a line for `CPU` and
+    `memory`.
   - Each legend item is a button. A click draws that series alone, and the
     value axis then fits that series. A click on a series that is alone draws
-    the two series again. An item of a series that is not drawn has an empty
-    key and struck-through text.
+    the two series again. The icon of a series that is not drawn is dim, and
+    its name is struck through.
+  - The tooltip of a chart gives the time of the snapshot and one row for
+    each series that is drawn.
 - The schedule table: last run, next run, and run count per registered
   schedule. A click on a column header sorts the table by that column, and a
   second click reverses the order; Enter and Space do the same when the
@@ -332,6 +460,31 @@ task row. It has no bar: it shows each phase time as a named number (see
   direction. The first order is the soonest next run. Schedules with equal
   values are in name order. A schedule that has not run shows `never` and is
   last in a sort by last run, in the two directions.
+
+## Durations and Times
+
+Every duration in the UI follows one rule:
+
+| Duration | Text | Examples |
+|---|---|---|
+| Less than 1 s | Milliseconds with 3 significant digits | `0.821ms`, `7.05ms`, `482ms` |
+| 1 s to less than 1 min | Seconds with 3 significant digits | `4.82s`, `11.4s` |
+| 1 min or more | Minutes and seconds to 0.1 s. From 1 h, also hours | `1m 0.9s`, `2m 3.9s`, `1h 2m 3.4s` |
+
+- A value that rounds up to the next unit takes that unit: `999.6ms` is
+  `1.00s`, and `59.96s` is `1m 0.0s`.
+- Zero is `0ms`.
+- A time with no end yet has the suffix `so far` (`5m 43.9s so far`).
+- The monitoring API sends its durations (`queue_s`, `exec_s`, `wall_s`,
+  `uptime_s`, `snapshot_age_s`, `wait_s`) as seconds with microsecond
+  detail. The digits that the UI shows come from the record.
+- An axis label is a round time: `0`, `0.1ms`, `100ms`, `1s`, `30s`,
+  `1m 30s`, `1h`.
+- A relative time stays short: `5m ago`, `in 8s`. The `Enqueued` column of the
+  task list and the schedule table use relative times.
+- The timing views write a time of day in local time. The tooltips, the ends
+  of nodes and the details have milliseconds (`09:14:26.244`). The start and
+  end of the run summary and of the attempt panel have seconds (`09:14:26`).
 
 ## Freshness
 
@@ -422,10 +575,34 @@ Three rules govern how actions behave in the interface:
   server data says so.
 - **One action in flight per entity.** While an action is pending, every action
   button for that entity is disabled.
-- **Actions live in detail panels only.** Table rows carry no action buttons.
+- **Actions are on the selected entity only.** The task actions are in the
+  task detail panel. The workflow actions are in the toolbar of the selected
+  run. Table rows and list items carry no action buttons.
 
 When actions are disabled — by configuration, by the auth policy, or by a schema
 mismatch — the affordances are absent rather than shown-and-disabled.
+
+After the request, a message in the lower right corner gives the outcome. The
+HTTP answers are on
+[Action Semantics](/horsies/monitoring/action-semantics/#conflict-handling).
+
+| Answer | Message | Retry button | The UI then |
+|---|---|---|---|
+| Success | The result of the action, for example `Workflow paused. Executing nodes will finish.` | No | Changes the status when a read shows the change |
+| No answer (a network error) | The UI reads the entity first. `<Action> applied.` when the read shows the change. Else `<Action> could not be confirmed. Nothing appears to have changed.` | On the second message | — |
+| 400 | `This task is managed by its workflow; task-level actions do not apply.` | No | Reads the entity again |
+| 403 | `Not authorized to perform actions.` | No | Removes the action buttons |
+| 404 | `Task no longer exists (retention may have removed it).`, or the same for a workflow run | No | Closes the task detail of a task |
+| 409 | `Cannot <action>: the state is now <status>.` | No | Reads the entity again |
+| 409 `SCHEMA_INCOMPATIBLE` | `Actions are disabled: the database schema does not match this UI version.` | No | Removes the action buttons |
+| 500 | `<Action> failed: <detail>. A retry gives the same result.` | No | Reads the entity again |
+| 503, and every other status | `<Action> failed: <detail>. The broker may be unreachable.` | Yes | — |
+
+A 500 answer is a permanent failure: the same request gets the same answer
+until the stored row, the schema or the connection settings change. A 503
+answer is a failure that may clear, and the action may or may not have
+committed. A message with a Retry button and the message of a 500 answer stay
+until you close them. The other messages close after 6 seconds.
 
 ## Limits
 
