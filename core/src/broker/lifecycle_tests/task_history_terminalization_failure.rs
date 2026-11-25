@@ -30,6 +30,7 @@ fn failure(task_id: Uuid) -> FinishFailedAttempt {
             error_message: Some("boom".to_owned()),
             failed_reason: None,
         },
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 

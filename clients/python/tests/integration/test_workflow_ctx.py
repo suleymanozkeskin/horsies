@@ -79,7 +79,9 @@ class TestWorkflowCtx:
                     SET status = 'CLAIMED',
                         claimed_at = NOW(),
                         claimed_by_worker_id = :worker_id,
-                        claim_expires_at = NOW() + INTERVAL '1 hour'
+                        claim_expires_at = NOW() + INTERVAL '1 hour',
+                        attempt_claims = 1,
+                        first_claimed_at = NOW()
                     WHERE id = :task_id
                     RETURNING claimed_at
                 """),

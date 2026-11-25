@@ -19,12 +19,16 @@ const buttonVariants = cva(
           'bg-secondary text-secondary-foreground hover:bg-secondary-hover',
         ghost: 'hover:bg-accent-surface hover:text-foreground',
         link: 'text-primary underline-offset-4 hover:underline',
+        // A control directly inside a `Capsule`.
+        capsule: 'rounded-full text-foreground hover:bg-surface-hover',
       },
       size: {
         default: 'h-10 px-4 py-2',
         sm: 'h-9 rounded-md px-3',
         lg: 'h-11 rounded-md px-8',
         icon: 'size-10',
+        capsule: 'h-(--capsule-item) rounded-full px-3 text-13',
+        'capsule-icon': 'size-(--capsule-item) rounded-full',
       },
     },
     defaultVariants: {

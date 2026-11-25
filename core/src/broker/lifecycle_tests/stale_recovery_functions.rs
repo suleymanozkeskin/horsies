@@ -322,6 +322,59 @@ mod finish {
         cleanup_tasks(&pool, &[task_id]).await;
     }
 
+    /// The recovered attempt records who wrote it and when the attempt was
+    /// last known alive: `RECOVERY`, no placement, and `last_seen_at` = its
+    /// newest runner beat, which is newer than its start and has no
+    /// finalizing marker beside it. Read through the history archive.
+    #[tokio::test]
+    async fn the_recovered_attempt_records_its_newest_beat_as_last_seen() {
+        use crate::core::history::archive::attempts::{
+            ClaimRecord, Finalizing, PhaseRecord, RecordedBy,
+        };
+        let pool = pool().await;
+        let core = core_pool_for_test_url(pool.url());
+        let task_id = stale_task(&pool).await;
+        record_failed_first_attempt(&pool, task_id, "attempt one crashed").await;
+        beat(&pool, task_id, BeatRole::Runner, Duration::seconds(300)).await;
+        let newest_beat: chrono::DateTime<chrono::Utc> = sql::query_scalar(
+            "SELECT max(sent_at) FROM horsies_heartbeats WHERE task_id = $1 AND role = 'runner'",
+        )
+        .bind(task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the newest runner beat");
+
+        let outcome = recover(&core, &finish(task_id, StaleRetry::NoRetry)).await;
+
+        assert!(
+            matches!(outcome, StaleAttemptOutcome::FailureApplied { .. }),
+            "{outcome:?}"
+        );
+        let records = archived_attempt_records(&pool, task_id).await;
+        match records.as_slice() {
+            [first, recovered] => {
+                assert_eq!(first.phases(), PhaseRecord::NotCaptured);
+                match recovered.phases() {
+                    PhaseRecord::Captured(phases) => {
+                        assert_eq!(phases.claimed_at(), generation());
+                        assert_eq!(phases.claims(), ClaimRecord::NotCounted);
+                        assert_eq!(phases.finalizing(), Finalizing::NotMarked);
+                        assert_eq!(
+                            phases.recorded_by(),
+                            RecordedBy::Recovery {
+                                last_seen_at: newest_beat
+                            }
+                        );
+                    }
+                    PhaseRecord::NotCaptured => panic!("the recovery writes a phase record"),
+                }
+            }
+            other => panic!("two archived attempts, not {other:?}"),
+        }
+        core.close();
+        cleanup_tasks(&pool, &[task_id]).await;
+    }
+
     /// Case `stale attempt: a replay is already applied`.
     #[tokio::test]
     async fn a_replay_is_already_applied() {

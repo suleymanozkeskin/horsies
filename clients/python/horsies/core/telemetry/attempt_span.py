@@ -22,9 +22,11 @@ raises later is logged once per process. A span covers what the body of the
 run returned, or the timeout of a run whose deadline came first in its
 child: each body place gives the order of the two (`BodyEndOrder`), read
 when the steps return, and a `DeadlineFirst` ends the span with
-`RunTimedOut` (`TASK_TIMEOUT`), the end that the child reports. A run that
-the worker ends (an isolated timeout, a kill, a lost child) is not ended
-here: the handler child of the worker makes its span.
+`RunTimedOut` (`TASK_TIMEOUT`), the end that the child reports. An
+`OperatorCancelFirst` ends it with `RunCancelledByOperator`
+(`TASK_CANCELLED`): an operator cancelled the task while the steps ran. A
+run that the worker ends (an isolated timeout, a kill, a lost child) is not
+ended here: the handler child of the worker makes its span.
 
 `flush_attempt_spans_at_stop` flushes the spans of the child at its stop,
 within `ATTEMPT_SPAN_FLUSH_BOUND_S`.
@@ -109,7 +111,20 @@ class RunTimedOut:
 RUN_TIMED_OUT: Final = RunTimedOut()
 """The end of the span of a run whose deadline came first."""
 
-type AttemptEnd = ResultOutcome | BodyInterrupted | RunTimedOut | ScopeRaised
+
+@dataclass(frozen=True, slots=True)
+class RunCancelledByOperator:
+    """An operator cancelled the task while the steps of the run ran: the
+    run ends cancelled (`TASK_CANCELLED`), and what the body returned is
+    dropped."""
+
+
+RUN_CANCELLED_BY_OPERATOR: Final = RunCancelledByOperator()
+"""The end of the span of a run that an operator cancelled."""
+
+type AttemptEnd = (
+    ResultOutcome | BodyInterrupted | RunTimedOut | RunCancelledByOperator | ScopeRaised
+)
 """How the steps of a run ended, for its span."""
 
 
@@ -126,15 +141,21 @@ class BodyFirst:
     what the steps returned."""
 
 
-type BodyEndOrder = DeadlineFirst | BodyFirst
-"""Which came first in the child: the deadline of the run, or the end of its
-steps."""
+@dataclass(frozen=True, slots=True)
+class OperatorCancelFirst:
+    """An operator cancel reached the run before its steps returned: the
+    run ends cancelled."""
+
+
+type BodyEndOrder = DeadlineFirst | BodyFirst | OperatorCancelFirst
+"""Which came first in the child: the deadline of the run, an operator
+cancel, or the end of its steps."""
 
 
 def isolated_body_end() -> BodyEndOrder:
-    """The order of an isolated run: always `BodyFirst`. The deadline of an
-    isolated run is the worker's: it kills the child, and the span never
-    ends. Pure."""
+    """The order of an isolated run with no operator cancel: always
+    `BodyFirst`. The deadline of an isolated run is the worker's: it kills
+    the child, and the span never ends. Pure."""
     return BodyFirst()
 
 
@@ -404,6 +425,8 @@ def _span_end(ran: EncodedResult | BodyInterrupted, order: BodyEndOrder) -> Atte
     match order:
         case DeadlineFirst():
             return RUN_TIMED_OUT
+        case OperatorCancelFirst():
+            return RUN_CANCELLED_BY_OPERATOR
         case BodyFirst():
             return _end_of(ran)
         case _ as unreachable:

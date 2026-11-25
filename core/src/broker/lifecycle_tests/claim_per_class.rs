@@ -904,7 +904,7 @@ mod short_take {
             "UPDATE horsies_tasks
              SET status = 'CLAIMED',
                  claimed_by_worker_id = 'other-worker',
-                 claimed_at = now(),
+                 attempt_claims = 1, first_claimed_at = now(), claimed_at = now(),
                  claim_expires_at = now() + interval '1 hour'
              WHERE id = ANY($1)",
         )

@@ -52,11 +52,6 @@ fn with_field(meta: &Value, key: &str, value: Option<Value>) -> Value {
 // Version
 // ---------------------------------------------------------------------------
 
-#[test]
-fn this_build_speaks_version_three() {
-    assert_eq!(PROTOCOL_VERSION, 3);
-}
-
 /// A version-2 child: its ready frame is named as a mismatch.
 #[test]
 fn a_version_two_ready_frame_is_a_protocol_mismatch() {
@@ -702,7 +697,7 @@ fn the_init_frame_of_a_handler_child() {
         &ParentFrame::Init(handler_init()),
         &framed(
             concat!(
-                r#"{"kind":"init","protocol":3,"program":{"kind":"rust"},"log_level":"info","#,
+                r#"{"kind":"init","protocol":4,"program":{"kind":"rust"},"log_level":"info","#,
                 r#""database_url":"postgresql://u@h/db","#,
                 r#""connection":{"tcp_keepalives":{"kind":"on","idle_seconds":30,"#,
                 r#""interval_seconds":10,"probes":3},"tcp_user_timeout":{"kind":"after","#,

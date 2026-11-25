@@ -273,7 +273,7 @@ async fn remove_workflow(pool: &TestPool, workflow_id: Uuid) {
 }
 
 /// Lock the row of `task_id` on `connection` until its transaction ends.
-async fn lock_the_row(connection: &mut TestConnection, task_id: Uuid) {
+pub(super) async fn lock_the_row(connection: &mut TestConnection, task_id: Uuid) {
     sql::query("SELECT 1 FROM horsies_tasks WHERE id = $1 FOR UPDATE")
         .bind(task_id)
         .execute(connection)
@@ -293,7 +293,7 @@ async fn row_after_lock_waiters(pool: &TestPool, task_id: Uuid) -> (String, Opti
 }
 
 /// Return once a backend whose statement names `function` waits on a lock.
-async fn until_a_backend_waits_in(pool: &TestPool, function: &str) {
+pub(super) async fn until_a_backend_waits_in(pool: &TestPool, function: &str) {
     for _ in 0..WAIT_POLLS {
         let waiting: bool = sql::query_scalar(
             "SELECT EXISTS (

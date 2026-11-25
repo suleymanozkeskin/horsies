@@ -53,6 +53,10 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
   gets `LISTENER_DISABLED`.
 - `BoundedTaskList` is `Complete(rows)` or `Truncated { rows, bound }`, at
   most `TASK_LIST_BOUND` (10,000) rows.
+- `WorkerStateSnapshot::profile` is `SnapshotProfile::Named { name }` (the
+  worker profile that the worker runs) or `SnapshotProfile::NotRecorded` (a
+  worker of a build before schema migration 1004 wrote the snapshot). The web
+  model `WorkerStateInfo::profile` is `SnapshotProfileInfo`.
 - `app.blocking()` has the same reads, except `get_stale_tasks` and
   `get_expired_tasks`.
 - The meaning of each read is on the shared docs page
@@ -97,9 +101,31 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 | `get_task_detail(&app, task_id)` | `TaskDetailRead`: `Found(Box<TaskDetail>)` or `NotFound(TaskDetailNotFound { task_id, reason })` |
 | `list_workflow_names(&app)` | `Vec<String>`, at most `LIST_ROW_BOUND` (10,000) |
 | `list_workflow_runs(&app, &WorkflowRunsQuery)` | `Vec<WorkflowRunSummary>`, newest first |
-| `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: nodes and edges; `None` when no run has the id |
+| `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: nodes, edges and phase timing; `None` when no run has the id |
 | `get_workflow_node(&app, workflow_id, task_index)` | `Option<WorkflowTaskDetail>` |
 | `list_schedules(&app)` | `Vec<ScheduleStateInfo>`, soonest next run first, at most `LIST_ROW_BOUND` (10,000) |
+
+Phase timing (the lifecycle record of migration 1001; one statement reads a run, none per node):
+
+- `TaskAttemptInfo.phases`: `AttemptPhasesInfo::NotCaptured` (a row written before the record) or
+  `Captured { enqueued_at, claimed_at, claims, finalizing, recorded_by }`. `claims`: `Counted { count,
+  first_claimed_at }` or `NotCounted`; `finalizing`: `Marked { finalizing_at }` or `NotMarked`;
+  `recorded_by`: `Worker { placement: Placed { placed_at } | NotObserved }`, `Recovery { last_seen_at }` or
+  `Cancel` (the cancel of a RUNNING task wrote the row, outcome `Cancelled`, `finished_at` = the cancel time).
+- `WorkflowNodeInfo.timing`: `NodeTimingInfo::Exact { segments, endpoint }`, `Partial { reasons, segments,
+  endpoint }`, `Unavailable { reason }` or `Inconsistent { conflict }`. A segment is `TimingSegmentInfo {
+  phase, started_at, end: Ended { at } | Open, source: Node | Task { generation, task_id } | Attempt {
+  generation, task_id, attempt } }`. Phases: `Pending`, `Ready`, `Enqueued`, `RetryWait`, `Claimed { claim:
+  Earlier { count } | Recorded { placement } | NotRecorded }`, `Running`, `Finalizing`, `Advancing`,
+  `Unknown { reason }`. `endpoint` is `Terminal { status, at }` or `NotTerminal`; it can come before the end
+  of a task that ran on after a cancel or a failure.
+- `WorkflowRunDetail.timing`: `RunTimingInfo::Unavailable { as_of, captured_since, reason }`
+  (`RunBeforeCapture`, `TimingBoundExceeded`: more than 100,000 events) or `Composed { as_of, captured_since,
+  coverage: Exact | Partial { reasons } | Inconsistent { conflicts }, range_started_at, range_ended_at,
+  open_segments, pauses }`. A pause ends `Resumed { at }`, `RunEnded { at }` or `Open`.
+- Models hold times, not durations. An open segment ends at `as_of` for drawing. A conflict
+  (`ClockOrder`, `MissingRecord`, `UnexpectedEvent`) makes the node `Inconsistent`: the core does not
+  reorder or guess times.
 
 Query builders:
 
@@ -161,9 +187,14 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
 - One compare-and-set in one transaction. A committed `CANCELLED` is final:
   claim, finalize, retry and recovery cannot overwrite it.
 - PENDING and CLAIMED are cancelled. RUNNING is cancelled only with
-  `include_running = true`: the row becomes `CANCELLED`, but the task code
-  keeps running until it returns, its side effects still happen, and no
-  attempt row is recorded for that run.
+  `include_running = true`: one statement writes the attempt row with
+  outcome `Cancelled` (`recorded_by` `Cancel`), moves the task to history,
+  and sends a notice to the worker that holds the run. The worker gives the
+  cancel to the task code (`TaskRuntime::cancelled()`, `is_cancelled()`,
+  `cancel_state()`; see `tasks.md`). The code stops when it reads the cancel;
+  side effects made before then stay, and what it returns is dropped. No
+  kill by default: an `isolated` task with `cancel_grace_ms` is killed when
+  it has not stopped `cancel_grace_ms` after the cancel.
 - A waiting `TaskHandle::get` returns `Failed` with `TASK_CANCELLED`.
 - A workflow task is refused: use `WorkflowHandle::cancel`, `pause` and
   `resume`.
@@ -177,7 +208,7 @@ and `task_id`; `code()`, `message()`, `retryable()`, `task_id()` and
 | `NotFound` | 404 | No live or history row has the id. Nothing changed |
 | `NotCancellable { current_status, .. }` | 409 | Terminal, or RUNNING without `include_running`; `current_status` is the status found. Nothing changed |
 | `WorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed { retryable, cause, .. }` | 503 | The statement or the connect failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
+| `DbOperationFailed { retryable, cause, .. }` | 503 when `retryable`, else 500 | The statement or the connect failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
 | `StoredDataInvalid { cause, .. }` | 500 | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed |
 
 There is no manual retry action. Re-execution is a rerun (see `tasks.md`).
@@ -196,8 +227,10 @@ returns.
 | `cancel_workflow_action(&app, workflow_id)` | `POST /api/workflows/{id}/cancel` |
 
 `resume_workflow_action` builds the sub-workflow children that the resume
-owes from the workflow definitions registered on `app`. A failed connect is
-503 with the cause. The rules of each action are on the shared docs page
+owes from the workflow definitions registered on `app`. A database failure,
+and a failed connect, answer with the cause: 503 when the cause may clear
+(`retryable`), 500 when it stays (for example SQLSTATE 23514, a CHECK
+constraint). The rules of each action are on the shared docs page
 `monitoring/action-semantics`.
 
 ## Web UI: the Axum Mount (feature `web`)
@@ -222,7 +255,9 @@ read when the last read is 15 s old or more).
 
 - Building the router does no I/O. The core handler is built at the first
   request on the app's handle. A request whose broker cannot be built is
-  answered 503 with the cause; the next request tries again.
+  answered with the cause: 503 when the cause may clear, 500 when it stays
+  (a connection setting that the core refuses). The next request tries
+  again.
 - The mount runs no schema step. For a monitoring-only process, build the
   app with `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)`.
 - A workflow resume builds the children it owes from the workflow
@@ -437,8 +472,9 @@ blocking call.
 **Do not treat an unfiltered `TaskListPage.total` as an exact count.** It
 is an estimate.
 
-**Do not cancel a RUNNING task to stop its side effects.** The cancel
-changes the row; the task code runs on.
+**Do not cancel a RUNNING task to undo its side effects.** The cancel stops
+the task code when the code reads it; effects made before then stay. Code
+that does not read the cancel runs on until it returns, or until a kill.
 
 **Do not expose `AllowAll` without the host's own authentication.** It
 allows every read and every action.
@@ -449,9 +485,9 @@ allows every read and every action.
 use horsies::{
     // Health reads
     PingTarget, WorkerHistoryLimit, DatabasePing, WorkerPong, WorkerStateSnapshot,
-    StaleMinutes, StaleThresholdRefusal, StaleTaskRow, ExpiredTaskRow, BoundedTaskList,
-    ClassCoverage, ClassReport, BrokerOperationError, BrokerErrorCode, TASK_LIST_BOUND,
-    MAX_STALE_THRESHOLD_MINUTES,
+    SnapshotProfile, StaleMinutes, StaleThresholdRefusal, StaleTaskRow, ExpiredTaskRow,
+    BoundedTaskList, ClassCoverage, ClassReport, BrokerOperationError, BrokerErrorCode,
+    TASK_LIST_BOUND, MAX_STALE_THRESHOLD_MINUTES,
 };
 use horsies::monitoring::{
     // Queries
@@ -465,6 +501,12 @@ use horsies::monitoring::{
     MonitoringResult, MonitoringQueryError, MonitoringQueryErrorCode, StatusCount, Facets,
     Breakdown, TaskListPage, TaskSummary, TaskDetailRead, TaskDetail, TaskDetailNotFound,
     WorkflowRunSummary, WorkflowRunDetail, WorkflowTaskDetail, ScheduleStateInfo,
+    // Phase timing
+    AttemptPhasesInfo, AttemptClaimsInfo, AttemptFinalizingInfo, AttemptPlacementInfo,
+    AttemptRecordedByInfo, NodeTimingInfo, TimingSegmentInfo, SegmentPhaseInfo, SegmentClaimInfo,
+    SegmentEndInfo, SegmentSourceInfo, NodeEndpointInfo, TerminalNodeStatus, UnknownReason,
+    UnavailableReason, TimingConflictInfo, TimingBoundary, MissingRecord, WorkflowEventKind,
+    RunTimingInfo, RunCoverageInfo, RunConflictInfo, PauseIntervalInfo, PauseEndInfo,
     // Actions
     cancel_task, cancel_task_action, pause_workflow_action, resume_workflow_action,
     cancel_workflow_action, TaskCancelled, TaskActionError, TaskActionErrorCode,

@@ -446,12 +446,17 @@ FUSED_BATCH_MAX_ROWS: Final = 64
 _COMPLETE_TASKS_FUSED_SQL = text("""
     SELECT outcome FROM horsies_complete_tasks_fused(
         CAST(:task_ids AS uuid[]), CAST(:claimed_ats AS timestamptz[]),
-        CAST(:results AS text[]), CAST(:worker_id AS text), TRUE
+        CAST(:results AS text[]), CAST(:worker_id AS text), TRUE,
+        CAST(:placement_kinds AS text[]), CAST(:slot_waits_us AS bigint[])
     )
     ORDER BY ordinality
 """)
 """The batch of plain successes of the product: one completion per row, each
-under its own fence (``horsies_complete_tasks_fused``)."""
+under its own fence (``horsies_complete_tasks_fused``), each attempt with no
+observed placement."""
+
+_NOT_OBSERVED: Final = 'NOT_OBSERVED'
+"""The placement kind of an attempt row whose writer observed no child."""
 
 
 def seed_terminal_ballast(
@@ -486,6 +491,8 @@ def seed_terminal_ballast(
                 'claimed_ats': [CLAIMED_AT] * len(batch),
                 'results': [payload] * len(batch),
                 'worker_id': WORKER_ID,
+                'placement_kinds': [_NOT_OBSERVED] * len(batch),
+                'slot_waits_us': [None] * len(batch),
             },
         ).scalars().all()
         refused = [outcome for outcome in outcomes if outcome != 'APPLIED']

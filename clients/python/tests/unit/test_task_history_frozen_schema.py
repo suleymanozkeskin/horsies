@@ -13,7 +13,7 @@ import re
 
 import pytest
 
-from tests.baseline_sql import baseline_function_statements, baseline_sql, baseline_table
+from tests.baseline_sql import baseline_sql, baseline_table, installed_function_statements
 from tests.terminal_writer_scan import history_insert_columns
 
 pytestmark = [pytest.mark.unit]
@@ -158,7 +158,7 @@ class TestHistoryWriters:
     def test_every_history_insert_names_every_column(self) -> None:
         inserts = [
             (name, columns)
-            for name, body in baseline_function_statements()
+            for name, body in installed_function_statements()
             for columns in history_insert_columns(body)
         ]
         assert inserts

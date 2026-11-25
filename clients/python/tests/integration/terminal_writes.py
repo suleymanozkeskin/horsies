@@ -31,13 +31,16 @@ _CLAIM_OF_ROW: Final = (
 
 _COMPLETE_PLAIN_TASK_SQL: Final = text(
     'SELECT outcome FROM horsies_complete_task_fused('
-    f'CAST(:task_id AS uuid), :worker_id, {_CLAIM_OF_ROW}, :result, TRUE)'
+    f'CAST(:task_id AS uuid), :worker_id, {_CLAIM_OF_ROW}, :result, TRUE, '
+    "'NOT_OBSERVED', NULL)"
 )
-"""The worker's plain success, with the capacity wake."""
+"""The worker's plain success, with the capacity wake. The attempt row
+records no placement (``NOT_OBSERVED``)."""
 
 _COMPLETE_WORKFLOW_TASK_SQL: Final = text(
     'SELECT outcome FROM horsies_finish_workflow_success('
-    f'CAST(:task_id AS uuid), :worker_id, {_CLAIM_OF_ROW}, :result)'
+    f'CAST(:task_id AS uuid), :worker_id, {_CLAIM_OF_ROW}, :result, '
+    "'NOT_OBSERVED', NULL)"
 )
 """Phase 1 of a workflow task's success."""
 
@@ -45,7 +48,7 @@ _FAIL_RUNNING_TASK_SQL: Final = text(
     'SELECT outcome FROM horsies_finish_failed_attempt('
     f'CAST(:task_id AS uuid), :worker_id, {_CLAIM_OF_ROW}, '
     "'NONE', NULL, NULL, NULL, :result, :error_code, :failed_reason, "
-    "'FAILED', :attempt_message, :attempt_reason, 'REFUSE', TRUE)"
+    "'FAILED', :attempt_message, :attempt_reason, 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)"
 )
 """The worker's failure of a task whose child reported, with no retry."""
 

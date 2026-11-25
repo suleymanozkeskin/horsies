@@ -14,10 +14,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Skills ship in the wheel as one skill folder: `horsies/.agents/skills/horsies/` (a source checkout has it at `clients/python/horsies/.agents/skills/horsies/`)
 - `horsies skills install --target DIR` copies the folder to `DIR/horsies/` (for example `--target .claude/skills`); `--force` replaces a copy that differs
 - `SKILL.md` -> quick orientation and routing (the only file with frontmatter)
-- `tasks.md` -> task APIs, send/retry flows, serialization, error handling
+- `tasks.md` -> task APIs, send/retry flows, serialization, error handling, the cancel of a running task
 - `workflows.md` -> DAG construction, WorkflowHandle semantics, HRS-001-HRS-038 validation
 - `configs.md` -> AppConfig, queues, recovery/retention/resilience, scheduling, CLI/runtime settings
-- `monitoring.md` -> `horsies.monitoring` query API, task cancel action, `horsies[web]` dashboard, `create_monitoring_app`, `horsies web` CLI, `horsies metrics` and `GET /metrics`, authorization policies, schema-compatibility states
+- `monitoring.md` -> `horsies.monitoring` query API (with the phase timing of a run and its nodes, and the phase record of each attempt), task cancel action, `horsies[web]` dashboard, `create_monitoring_app`, `horsies web` CLI, `horsies metrics` and `GET /metrics`, authorization policies, schema-compatibility states
 - These are markdown guidance files (no bundled scripts) designed for on-demand agent loading
 
 ## Quick Reference
@@ -82,16 +82,17 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### Execution modes (Execution enum, @app.task(execution=...))
 - Guide: /horsies/workers/execution-modes/ ; details: /horsies/workers/shared-async-tasks/ and /horsies/workers/shared-thread-tasks/
-- Execution.ISOLATED (default): one task at a time in a child process of its own; def or async def; timeout_ms optional; at timeout_ms the worker kills the child and the subprocesses in its session, then writes TASK_TIMEOUT; a crash ends that task only
-- Execution.SHARED_ASYNC: async def only (HRS-107); timeout_ms required (HRS-109); cancel_grace_ms optional, 100-10000 ms, default 1000 (HRS-110, HRS-111); runs as a coroutine on a seat of a shared async child
-- Execution.SHARED_THREAD: def only (HRS-108); timeout_ms required (HRS-109); no cancel_grace_ms (a thread cannot be cancelled); runs on a seat thread of a shared thread child
+- Execution.ISOLATED (default): one task at a time in a child process of its own; def or async def; timeout_ms optional; at timeout_ms the worker kills the child and the subprocesses in its session, then writes TASK_TIMEOUT; a crash ends that task only; cancel_grace_ms optional, 100-10000 ms, no default: the worker kills the child that long after an operator cancel when the task has not stopped (no value: no kill for a cancel)
+- Execution.SHARED_ASYNC: async def only (HRS-107); timeout_ms required (HRS-109); cancel_grace_ms optional, 100-10000 ms, default 1000 (HRS-111); runs as a coroutine on a seat of a shared async child
+- Execution.SHARED_THREAD: def only (HRS-108); timeout_ms required (HRS-109); no cancel_grace_ms (HRS-110; a thread cannot be stopped); runs on a seat thread of a shared thread child
 - A worker never runs a task less isolated than its row: a worker with no children of a shared class runs that class in isolated children; the isolated children of a worker with children of a shared class never run that class; a worker with no isolated children claims no ISOLATED rows
 - SHARED_ASYNC timeout (T = timeout_ms, G = cancel_grace_ms): at T the child cancels the task; TASK_TIMEOUT is written after the coroutine and the work it started (asyncio tasks, default-executor calls) have ended; at T + G a second cancel, then 2 more rounds 0.1 s apart, and the child takes no new task; still alive 0.3 s after the second cancel = stuck; the worker kills the child when every task left in it is stuck; a value returned after T is still TASK_TIMEOUT
 - SHARED_ASYNC blocked loop: a loop that has not turned for 5 s (block limit) -> the worker kills the child at once; the task that held it: TASK_BLOCKED_LOOP; each other task before its deadline: NEIGHBOUR_BLOCKED_LOOP; a task past its deadline: TASK_TIMEOUT; backstop kill of a frozen child (C code holds the GIL) at timeout_ms + cancel_grace_ms + 10 s
-- SHARED_THREAD timeout: at timeout_ms the child reports the deadline and takes no new task; the task runs on; the worker kills the child (with its session) when no task in it has time left, then writes TASK_TIMEOUT; a task alone in its child is killed at its deadline; backstop kill of a frozen child at timeout_ms + 10 s
+- SHARED_THREAD timeout: at timeout_ms the child reports the deadline, sets the cancel state of the run to CancelRequested(cause=CancelCause.DEADLINE) when no operator cancel came first, and takes no new task; the task runs on; the worker kills the child (with its session) when no task in it has time left, then writes TASK_TIMEOUT; a task alone in its child is killed at its deadline; backstop kill of a frozen child at timeout_ms + 10 s
 - Shared modes: a crash or a kill of the child ends every task in it (WORKER_CRASHED, or a retry by policy); the task named as the cause of a kill or a stuck stop retries in an isolated child; in every mode the outcome is written after the attempt ended, so a retry never runs next to the attempt it replaces
 - Choose: waits on network/database/API with an async client -> SHARED_ASYNC; waits in a sync client -> SHARED_THREAD (not measured); C code that releases the GIL (zlib, hashlib) -> SHARED_THREAD (Linux, 4 CPUs, CPython 3.13/3.14: 4 threads 2.6-3.8x one thread, 0.89-1.13x 4 processes); pure-Python CPU work -> SHARED_THREAD only on free-threaded CPython 3.13t/3.14t (4 threads 1.9-3.6x one), else ISOLATED (standard build: 4 threads 0.56-1.02x one); more thread seats than CPUs added nothing; needs isolation or an exact kill at timeout_ms -> ISOLATED
 - Measured cancel (one shared async child, CPython 3.13, local network): healthy server: httpx, aiohttp, psycopg, asyncpg, SQLAlchemy ended within 16 ms of the first cancel; psycopg >= 3.3.6 against a server that stops answering: 10.0 s, or within 5 ms of the second cancel; asyncio.to_thread() and DNS lookup threads are never stopped by a cancel
+- Operator cancel of a RUNNING task (cancel_task(broker, task_id, include_running=True), or the web UI): one statement writes the attempt row with outcome CANCELLED (recorded_by CANCEL, finished_at = the cancel time), moves the task to history as CANCELLED (TASK_CANCELLED) and sends NOTIFY horsies_task_cancel; the worker that holds the run gives the cancel to the task code: async def body -> asyncio.CancelledError at the next await; def body -> runtime.cancel_state() (first parameter runtime: TaskRuntime) returns CancelRequested(cause=CancelCause.OPERATOR); a cancel before the body starts: the body does not run; what the task returns after the cancel is dropped; code that does not stop: ISOLATED runs until it returns or its timeout_ms kill (with cancel_grace_ms: killed that long after the cancel), SHARED_ASYNC gets the second cancel after cancel_grace_ms, SHARED_THREAD runs until it returns; a lost notice is found by one read after a listener reconnect or a runner heartbeat that does not land (at most runner_heartbeat_interval_ms, default 30 s)
 - SHARED_ASYNC author rules: let CancelledError propagate; a client timeout below timeout_ms on each call; open long-lived clients in @app.on_shared_async_child_start (async def hook, runs on the loop of each shared async child before its first task, 10 s bound); never block the loop; await what you start; send with send_async()
 - SHARED_THREAD author rules: lock module state that a task changes; a timeout below timeout_ms on each blocking call; no threads that outlive the task
 - Connections: each child opens one pool, sized by the pool of its kind (IsolatedChildren.pool, SharedAsyncChildren.pool, SharedThreadChildren.pool); the seats share it for the RUNNING update and the finalizing marker and wait up to 30 s for a connection (none in 30 s: the task is not run and its claim lease returns it); average connections in use = tasks per second of the child x 2 writes x time of one write; HRS-219 counts the resolved WorkerProfile.pool max_size + 2 listener + 1 runner heartbeat + children x resolved pool max_size, per mode; it states, not compares, children x task_send_pool per mode for task code that sends
@@ -202,16 +203,17 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - A child creates its event loop at boot, before it reports ready, when the app has an async def task (an app with none gets no loop); when it cannot be created (for example EMFILE, or an event loop policy that raises), the child fails its boot and no task reaches it; that cause can clear, so only that slot is down and boots again after a growing wait (1 s, 2 s, 4 s, up to 60 s); when every slot is down, the worker exits non-zero after three failed starts so its supervisor restarts it
 - Options: task_name, queue_name, retry_policy, exception_mapper, default_unhandled_error_code, timeout_ms, execution, cancel_grace_ms
 - execution: Execution.ISOLATED (default; def or async def, timeout_ms optional), Execution.SHARED_ASYNC (async def, timeout_ms required), Execution.SHARED_THREAD (def, timeout_ms required); every task row stores the class
-- cancel_grace_ms: SHARED_ASYNC only, 100 to 10000 ms, default 1000 ms; the stored options hold the value in effect at send
+- cancel_grace_ms: 100 to 10000 ms; SHARED_ASYNC: the time to the second cancel, default 1000 ms; ISOLATED: the time from an operator cancel to the kill of the child, no default (no kill); SHARED_THREAD: refused (HRS-110); the stored options hold the value in effect at send
+- A task reads the cancel of its run through its first parameter runtime: TaskRuntime: runtime.cancel_state() -> CancelNotRequested() | CancelRequested(cause: CancelCause); CancelCause: OPERATOR (an operator cancel of the running task), DEADLINE (the deadline of a SHARED_ASYNC or SHARED_THREAD run); the first cause stays; TaskRuntime.for_test(task_id=..., cancel_state=...) gives a runtime with a fixed cancel state for a direct call
 - good_until is NOT accepted at definition time (raises HRS-102) — use .with_options(good_until=...) at send time
 - Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function; with a first parameter runtime: TaskRuntime, RuntimeTaskFunction[P, T] / AsyncRuntimeTaskFunction[P, T] (P = the parameters after the runtime)
 
 ### TaskRuntime (first task parameter) and FencingToken
-- def f(runtime: TaskRuntime, *, x: int) -> TaskResult[T, TaskError]: the worker passes the runtime of each run as the first argument
+- def f(runtime: TaskRuntime, *, x: int) -> TaskResult[T, TaskError]: the worker passes the runtime of each run as the first argument; the runtime gives fencing_token and cancel_state()
 - Rules: first parameter, before the *; annotation exactly TaskRuntime (not | None); no default; any name; TaskRuntime in any other place raises HRS-105 at definition
 - Not part of the wire contract: .send(), .schedule(), .node()(), schedules and workflow nodes do not supply it; a kwarg with its name is refused
 - runtime.fencing_token -> FencingToken(task_id: uuid.UUID, value: int), frozen; same token for two reads in one attempt; strictly greater value for each later attempt of the task; no clock; today value = attempt number (1 to 21)
-- Direct call in a test: f(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=second_attempt), x=1); attempt is an AttemptNumber (default the first attempt); AttemptNumber.parse(2) -> Ok(AttemptNumber) | Err(AttemptNumberRefused) outside 1 to 2**31; for_test cannot fail
+- Direct call in a test: f(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=second_attempt), x=1); attempt is an AttemptNumber (default the first attempt); cancel_state is a RunCancelState (default CancelNotRequested()); AttemptNumber.parse(2) -> Ok(AttemptNumber) | Err(AttemptNumberRefused) outside 1 to 2**31; for_test cannot fail
 - Limits: a rerun or a workflow node started again after a pause gets a new task id (value from 1); a stale attempt with no later attempt is not refused
 
 ### TaskFunction[P, T] (decorated task)
@@ -342,7 +344,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .start_async(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - .retry_start(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, sync)
 - .retry_start_async(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, async)
-- retry_start: best-effort idempotent by workflow_id (not payload-verified); WorkflowStartRetryable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext; another variant fails an assertion; another workflow's error returns WorkflowStartValidationFailed
+- retry_start: builds the same spec again and starts with the error's workflow_id; a committed first attempt comes back as the existing handle; WorkflowStartRetryable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext; another variant fails an assertion; another workflow's error returns WorkflowStartValidationFailed
 - Validates DAG on construction (cycles, deps, args_from, node_ids, etc.)
 
 ### WorkflowHandle
@@ -447,9 +449,11 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(WorkflowHandle): workflow created and root tasks enqueued
 - Err(WorkflowStartError): start failed; match on the variant
 - WorkflowStartError is a union of frozen variants; every variant has code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str, the id this start used)
-- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (exception: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartEnqueueFailed (retryable = the core's classification, exception: BaseException); WorkflowStartAsyncContext
-- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, WORKFLOW_ID_CONFLICT, ENQUEUE_FAILED, ASYNC_CONTEXT
+- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (exception: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartCommandConflict; WorkflowStartEnqueueFailed (retryable = the core's classification, exception: BaseException); WorkflowStartAsyncContext
+- WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, WORKFLOW_ID_CONFLICT, WORKFLOW_COMMAND_CONFLICT, ENQUEUE_FAILED, ASYNC_CONTEXT
 - WORKFLOW_ID_CONFLICT: the workflow id exists for another workflow name; nothing was written; use another id
+- WORKFLOW_COMMAND_CONFLICT: the workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written; never retryable; retry_start refuses it; send the same start command or use another id
+- A start with an existing workflow_id: same name and same start command returns the existing handle; runs started before this release have no stored start command and are not checked
 - ENQUEUE_FAILED: schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates
 - retryable=True: transient (DB connection blip), retryable=False: permanent (validation, config error)
 - Use is_ok(result) / is_err(result) type guards, or result.ok_value to extract handle
@@ -641,7 +645,7 @@ Task definition (HRS-100-HRS-199):
 - HRS-107 TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF (execution=SHARED_ASYNC on a def function)
 - HRS-108 TASK_SHARED_THREAD_REQUIRES_DEF (execution=SHARED_THREAD on an async def function)
 - HRS-109 TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT (SHARED_ASYNC or SHARED_THREAD without timeout_ms)
-- HRS-110 TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC (cancel_grace_ms with a class other than SHARED_ASYNC)
+- HRS-110 TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC (cancel_grace_ms with execution=SHARED_THREAD)
 - HRS-111 TASK_CANCEL_GRACE_OUT_OF_RANGE (cancel_grace_ms outside 100 to 10000 ms)
 - HRS-112 TASK_INVALID_ERROR_CODE (an error_codes entry is empty, not UPPER_SNAKE_CASE, or an exception class name)
 - HRS-113 TASK_DUPLICATE_ERROR_CODE (an error_codes entry is given twice)
@@ -801,7 +805,7 @@ Each entry: Title -- summary -> URL
 - Subworkflows -- composing workflows with SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
 
 ### Guides
-- Start a Workflow Once per Entity -- deterministic workflow_id (uuid5) from an entity key, same-id behavior, retention limit -> /horsies/guides/start-workflow-once/
+- Start a Workflow Once per Entity -- deterministic workflow_id (uuid5) from an entity key, same-id behavior, the start command compare, retention limit -> /horsies/guides/start-workflow-once/
 - Async Frameworks -- FastAPI lifespan, broker close, async vs sync calls, event-loop limit -> /horsies/guides/async-frameworks/
 
 ### Configuration
@@ -842,7 +846,7 @@ Each entry: Title -- summary -> URL
 - Tracing Setup -- horsies[otel], AppConfig(tracing=OtelTracing()), the SDK of the sending process and of each worker child, the propagator, producer metrics -> /horsies/observability/tracing-setup/
 - Logs -- the task_id, attempt and trace_id fields of the worker's records, the log context of a task body, the JSON format of each client -> /horsies/observability/logs/
 - Log Setup -- AppConfig(log_format=JsonLogs()), TaskContextFilter, JsonLogsFormatter -> /horsies/observability/log-setup/
-- Lifecycle Events -- the event contract (version 6) and its types, best-effort delivery, the handler child, drops, stats and start hook -> /horsies/observability/events/
+- Lifecycle Events -- the event contract (version 7) and its types, best-effort delivery, the handler child, drops, stats and start hook -> /horsies/observability/events/
 - Dashboards and Alerts -- the Grafana dashboard and the Prometheus alert rules in deploy/, what each alert means -> /horsies/observability/dashboards-and-alerts/
 - OpenTelemetry Collector -- deploy/otel-collector/collector.yaml: scrape the endpoints, export OTLP -> /horsies/observability/opentelemetry-collector/
 - Observability Deployment -- Kubernetes and docker compose: workers with probes, one fleet collector, Prometheus, the Collector -> /horsies/observability/deployment/
@@ -966,7 +970,8 @@ web UI, dashboard -> /horsies/monitoring/web-ui-overview/
 horsies web, standalone dashboard -> /horsies/cli/
 trusted-header, authentication, mounted mode, standalone mode, schema state -> /horsies/monitoring/web-ui-deployment/
 horsies[web], create_monitoring_app, MonitoringAuthPolicy, MonitoringUIConfig, FastAPI mount -> /horsies/monitoring/web-ui-mount/
-cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actions -> /horsies/monitoring/action-semantics/
+cancel task, rerun task, pause workflow, resume workflow, cancel workflow, actions, include_running, horsies_task_cancel -> /horsies/monitoring/action-semantics/
+cancellation, TaskRuntime.cancel_state, CancelRequested, CancelNotRequested, CancelCause, RunCancelState -> /horsies/tasks/defining-tasks/#cancellation
 rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome, RerunEnqueued -> /horsies/operations/rerun-in-your-transaction/
 AliasChoices, renamed model field, task alias, deploy -> /horsies/operations/code-change-examples/
 autovacuum, vacuum, high-churn tables -> /horsies/operations/autovacuum-tuning/
@@ -987,7 +992,7 @@ Execution, execution mode, ISOLATED, SHARED_ASYNC, SHARED_THREAD, choose a mode,
 SharedAsyncChildren, SharedRecycle, cancel_grace_ms, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, on_shared_async_child_start -> /horsies/workers/shared-async-tasks/
 SharedThreadChildren, seat thread, SharedPool, thread pool sizing -> /horsies/workers/shared-thread-tasks/
 psycopg, libpq, cancel request, pg-binary -> /horsies/configuration/broker-config/
-start once, idempotent start, deterministic workflow_id, uuid5, WORKFLOW_ID_CONFLICT, WorkflowStartIdConflict -> /horsies/guides/start-workflow-once/
+start once, idempotent start, deterministic workflow_id, uuid5, start command, WORKFLOW_ID_CONFLICT, WorkflowStartIdConflict, WORKFLOW_COMMAND_CONFLICT, WorkflowStartCommandConflict -> /horsies/guides/start-workflow-once/
 FastAPI, lifespan, ASGI, async framework, close_async, ASYNC_CONTEXT -> /horsies/guides/async-frameworks/
 dynamic fan-out, runtime-built child, build_with, args_from, SubWorkflowNode -> /horsies/concepts/workflows/subworkflows/
 changelog, release notes, breaking changes -> /horsies/changelog/

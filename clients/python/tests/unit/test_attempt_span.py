@@ -63,9 +63,11 @@ from horsies.core.telemetry.attempt_span import (
     FlushRaised,
     FlushTimedOut,
     NothingToFlush,
+    OperatorCancelFirst,
     OtelAttemptSpans,
     ProviderFlush,
     ProviderHasNoFlush,
+    RunCancelledByOperator,
     RunTimedOut,
     ScopeRaised,
     SpansFlushed,
@@ -83,6 +85,7 @@ from horsies.core.worker.child_frames import (
     ThreadSeatWork,
 )
 from horsies.core.worker.child_runner import StartAllowed
+from horsies.core.worker.run_cancel import RunCancel
 from horsies.core.worker.run_return import (
     BodyInterrupted,
     EncodedResult,
@@ -294,6 +297,7 @@ def _run_isolated(
             ),
             init_frame(),
             task_loop,
+            RunCancel(),
         )
 
 
@@ -336,7 +340,7 @@ def _run_seat_in_order(
         patch.object(shared_runner, 'confirm_until_not_resumed', AsyncMock(return_value=started)),
         patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)),
     ):
-        return asyncio.run(shared_runner.run_seat_task(frame, body_end))
+        return asyncio.run(shared_runner.run_seat_task(frame, body_end, RunCancel()))
 
 
 def _thread_seat_work(frame: core.SharedRunFrame) -> ThreadSeatWork:
@@ -379,7 +383,7 @@ def _run_thread_seat_in_order(
 
     def seat() -> None:
         match thread_runner.run_thread_seat_task(
-            frame, _thread_seat_work(frame), StartAllowed, body_end,
+            frame, _thread_seat_work(frame), StartAllowed, body_end, RunCancel(),
         ):
             case SetRunning() as ran:
                 returned.append(ran)
@@ -966,6 +970,19 @@ class TestTheOrderAtTheEndOfTheSteps:
             use_attempt_spans(NO_ATTEMPT_SPANS)
 
         assert recorder.ends == [RunTimedOut()]
+        assert returned == ResultEnvelope('{"ok": 1}')
+
+    def test_an_operator_cancel_that_came_first_ends_the_span_with_the_cancel(
+        self,
+    ) -> None:
+        recorder = _EndRecorder()
+        use_attempt_spans(OtelAttemptSpans(recorder=recorder))
+        try:
+            returned = run_in_attempt_span(_subject(), _ok_steps, OperatorCancelFirst)
+        finally:
+            use_attempt_spans(NO_ATTEMPT_SPANS)
+
+        assert recorder.ends == [RunCancelledByOperator()]
         assert returned == ResultEnvelope('{"ok": 1}')
 
     def test_steps_that_came_first_end_the_span_with_their_outcome(self) -> None:

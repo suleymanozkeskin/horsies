@@ -1,7 +1,7 @@
 // Pure helpers for the execution class report: which pending streams no live
 // worker can run, and the text the panels show for streams and budgets.
 
-import { formatElapsed, formatRelative } from '@/lib/format-duration';
+import { formatDuration, formatRelative } from '@/lib/format-duration';
 import type {
   BudgetLoad,
   ClassReport,
@@ -55,7 +55,7 @@ export function coverageText(stream: PendingStream): string {
 export function waitText(wait: StreamWait): string {
   switch (wait.kind) {
     case 'waiting':
-      return formatElapsed(wait.wait_s);
+      return formatDuration(wait.wait_s);
     case 'none_due':
       return `next due ${formatRelative(wait.next_due_at)}`;
   }

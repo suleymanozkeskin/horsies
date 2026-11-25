@@ -8,6 +8,7 @@
 mod actions;
 mod errors;
 mod execution_classes;
+mod failure_status;
 pub mod fleet;
 mod function_rows;
 mod history_window;
@@ -15,6 +16,8 @@ mod models;
 mod queries;
 mod task_actions;
 mod time_text;
+mod timing;
+mod timing_models;
 
 pub use actions::{
     cancel_task_action, cancel_workflow_action, connect_failed_action, pause_workflow_action,
@@ -30,7 +33,8 @@ pub use errors::{
     HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorCode,
     MonitoringQueryErrorSource, MonitoringResult,
 };
-pub use execution_classes::{class_report_info, slot_health_info};
+pub use execution_classes::{class_report_info, slot_health_info, snapshot_profile_info};
+pub use failure_status::database_failure_status;
 pub use history_window::{
     resolve_monitoring_window, WindowRefused, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
 };
@@ -43,18 +47,25 @@ pub use models::{
 };
 pub use models::{
     BudgetLoadInfo, ClassReportInfo, DownSlotInfo, PendingStreamInfo, SlotHealthKind,
-    StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
+    SnapshotProfileInfo, StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
 };
 pub use queries::{
-    categorize_error_code, elapsed_s, get_task_detail, get_workflow_node, get_workflow_run,
+    categorize_error_code, elapsed, get_task_detail, get_workflow_node, get_workflow_run,
     list_schedules, list_tasks, list_workflow_names, list_workflow_runs, normalize_optional_text,
-    span_s, task_breakdown, task_facets, task_stats, PaginationRefused, SortDirection,
+    span, task_breakdown, task_facets, task_stats, PaginationRefused, SortDirection,
     TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskSortField,
     TaskStatsQuery, WorkflowRunsQuery, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
     MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT,
 };
 pub use task_actions::{
     cancel_task, TaskActionError, TaskActionErrorCode, TaskActionResult, TaskCancelled,
+};
+pub use timing_models::{
+    AttemptClaimsInfo, AttemptFinalizingInfo, AttemptPhasesInfo, AttemptPlacementInfo,
+    AttemptRecordedByInfo, MissingRecord, NodeEndpointInfo, NodeTimingInfo, PauseEndInfo,
+    PauseIntervalInfo, RunConflictInfo, RunCoverageInfo, RunTimingInfo, SegmentClaimInfo,
+    SegmentEndInfo, SegmentPhaseInfo, SegmentSourceInfo, TerminalNodeStatus, TimingBoundary,
+    TimingConflictInfo, TimingSegmentInfo, UnavailableReason, UnknownReason, WorkflowEventKind,
 };
 
 #[cfg(test)]
@@ -71,5 +82,9 @@ mod model_contract_tests;
 mod spec_support;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod timing_spec_tests;
+#[cfg(test)]
+mod timing_tests;
 #[cfg(test)]
 mod workflow_schedule_spec_tests;

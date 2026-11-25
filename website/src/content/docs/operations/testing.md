@@ -152,6 +152,7 @@ def test_task_runtime() -> None:
 | --------- | ---- | ----------- |
 | `task_id` | `uuid.UUID` | The task id of the token |
 | `attempt` | `AttemptNumber` | The attempt number. Default: the first attempt (1). A test of a retry passes 2 |
+| `cancel_state` | `RunCancelState` | The cancel state of the run for the whole call. Default: `CancelNotRequested()`. A test of the stop path passes `CancelRequested(cause=CancelCause.OPERATOR)`. See [Cancellation](/horsies/tasks/defining-tasks/#cancellation) |
 
 `AttemptNumber.parse(number)` returns `Ok(AttemptNumber)` for a number from 1 to `2**31`, and `Err(AttemptNumberRefused)` for another number. `AttemptNumberRefused.reason` names the number and the bounds. `for_test` cannot fail. `.send()` does not take the runtime; the worker passes it on each run.
 
@@ -171,7 +172,7 @@ def test_send_refuses_task_result() -> None:
     assert isinstance(sent.err_value, TaskSendValidationFailed)
 ```
 
-The same check applies to `workflow_ctx` and `workflow_meta`, and to the parameter that takes the `TaskRuntime`. The engine fills those parameters, and a producer must not send them.
+The same check applies to `workflow_ctx` and `workflow_meta`, and to the parameter that takes the `TaskRuntime`. The engine fills `workflow_ctx` and `workflow_meta`, and the worker passes the `TaskRuntime`. A producer must not send them.
 
 ## Suppress Sends
 

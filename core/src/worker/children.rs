@@ -593,7 +593,8 @@ impl WorkerChildren {
     /// `NotDispatched(NoChildOfItsKind)`; its claim goes back to the queue.
     #[cfg(test)]
     pub fn submit(&self, claimed: Claimed) -> Submitted {
-        self.submit_watched(claimed, PlacementWatch::Unwatched)
+        let (watch, _receipt) = crate::worker::executor::slots::watched_placement();
+        self.submit_watched(claimed, watch)
     }
 
     /// As `WorkerChildren::submit`; `watch` is told when a child takes the
@@ -613,9 +614,16 @@ impl WorkerChildren {
             &self.shared_async,
             &self.shared_thread,
         ) {
-            (DispatchRoute::Isolated { work, deadline }, Some(pool), _, _) => {
-                pool.submit_watched(&task, input, work, deadline, watch)
-            }
+            (
+                DispatchRoute::Isolated {
+                    work,
+                    deadline,
+                    cancel_stop,
+                },
+                Some(pool),
+                _,
+                _,
+            ) => pool.submit_watched(&task, input, work, deadline, cancel_stop, watch),
             (DispatchRoute::SharedAsync(work), _, Some(pool), _) => {
                 pool.submit_watched(&task, input, work, watch)
             }

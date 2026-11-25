@@ -864,12 +864,15 @@ static DELETE_EXPIRED_WORKER_STATES: TypedStatement = TypedStatement::new(
 // statistics object supplies the whole-table estimate only while the parsed
 // expression matches.
 //
-// `budgeted` keeps candidates while their running node total fits $2 (the
-// knob keeps its rows-per-statement meaning), always keeping the first
-// candidate so a workflow larger than the whole budget drains alone instead
-// of starving. Node rows are purged set-wise in `purged_nodes` (the
-// task_attempts pattern); the workflow_id FK cascade remains the correctness
-// net for non-retention deletes.
+// `budgeted` keeps candidates while their running total of owned rows (node
+// rows plus event rows of horsies_workflow_events, each counted through the
+// workflow_id prefix of its key) fits $2 (the knob keeps its
+// rows-per-statement meaning), always keeping the first candidate so a
+// workflow larger than the whole budget drains alone instead of starving.
+// Event rows and node rows are purged set-wise in `purged_events` and
+// `purged_nodes` (the task_attempts pattern); the foreign-key cascades (run
+// events by run_workflow_id, node events by their node, nodes by
+// workflow_id) remain the correctness net for non-retention deletes.
 //
 // The top-level DELETE's rowcount counts WORKFLOWS, which under the node
 // budget is routinely smaller than $2 while backlog remains — the workflow
@@ -887,7 +890,10 @@ doomed AS (
     SELECT w.id,
            (SELECT count(*)
             FROM horsies_workflow_tasks wt
-            WHERE wt.workflow_id = w.id) AS node_count
+            WHERE wt.workflow_id = w.id)
+           + (SELECT count(*)
+              FROM horsies_workflow_events e
+              WHERE e.workflow_id = w.id) AS owned_rows
     FROM horsies_workflows w
     WHERE w.status IN ('COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED')
       AND COALESCE(w.completed_at, w.updated_at, w.created_at) < NOW() - CAST($1 || ' hours' AS INTERVAL)
@@ -901,11 +907,15 @@ budgeted AS (
     SELECT id
     FROM (
         SELECT id,
-               SUM(node_count) OVER (ORDER BY id) AS nodes_running,
+               SUM(owned_rows) OVER (ORDER BY id) AS rows_running,
                ROW_NUMBER() OVER (ORDER BY id) AS position
         FROM doomed
     ) ranked
-    WHERE nodes_running <= $2 OR position = 1
+    WHERE rows_running <= $2 OR position = 1
+),
+purged_events AS (
+    DELETE FROM horsies_workflow_events
+    WHERE workflow_id IN (SELECT id FROM budgeted)
 ),
 purged_nodes AS (
     DELETE FROM horsies_workflow_tasks
@@ -2740,6 +2750,8 @@ mod tests {
         .unwrap();
 
         // A still-live (RUNNING) backing task row + its workflow_task linkage.
+        // The RUNNING row holds its claim generation (CHECK
+        // horsies_tasks_claim_generation_by_status).
         sql::query(
             "INSERT INTO horsies_tasks (
                 id, task_name, queue_name, priority, input, task_options, execution,
@@ -2754,7 +2766,7 @@ mod tests {
                 $1, 'ret_task', 'default', 100, 'null', NULL, 'ISOLATED',
                 'standard_30d', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
                 1, decode(repeat('00', 32), 'hex'), NULL,
-                'RUNNING', NOW() - INTERVAL '2 hours', NULL, NULL, NULL,
+                'RUNNING', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', NULL, NULL,
                 NOW() - INTERVAL '2 hours', NULL, NULL,
                 NULL, NULL, NULL,
                 0, 0, NULL, NULL, FALSE,
@@ -2977,6 +2989,150 @@ mod tests {
         assert_eq!(nodes_left, 0, "jumbo's nodes leave with it");
     }
 
+    /// One terminal workflow, two hours old, with one node and the given
+    /// events: `run_events` WORKFLOW_PAUSED rows and `node_events`
+    /// NODE_READY rows of its node. Returns its id.
+    async fn seed_workflow_with_events(pool: &TestPool, run_events: u32, node_events: u32) -> Uuid {
+        let workflow_id = Uuid::new_v4();
+        let node_id = Uuid::new_v4();
+        sql::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, definition_key, depth, root_workflow_id,
+                sent_at, created_at, started_at, updated_at, completed_at
+            ) VALUES (
+                $1, 'ret_events_wf', 'COMPLETED', 'fail', 'test.ret.v1', 0, $1,
+                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
+                NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours',
+                NOW() - INTERVAL '2 hours'
+            )",
+        )
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .expect("seed the workflow");
+        sql::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input, queue_name,
+                priority, dependencies, allow_failed_deps, join_type, status,
+                is_subworkflow, created_at, max_retries, execution,
+                retention_class_key
+            ) VALUES (
+                'NONE', $1, $2, 0, 'node_0', 'ret_events_task', 'null', 'default', 100,
+                '{}', FALSE, 'all', 'COMPLETED', FALSE, NOW() - INTERVAL '2 hours', 0,
+                'ISOLATED', 'standard_30d'
+            )",
+        )
+        .bind(node_id)
+        .bind(workflow_id)
+        .execute(pool)
+        .await
+        .expect("seed the node");
+        for _ in 0..run_events {
+            sql::query(
+                "INSERT INTO horsies_workflow_events (
+                    workflow_id, event_id, event_kind, occurred_at, workflow_node_row_id, task_id,
+                    history_class, terminalization_kind
+                ) VALUES (
+                    $1, nextval('horsies_workflow_event_id'), 'WORKFLOW_PAUSED', NOW() - INTERVAL '2 hours',
+                    NULL, NULL, NULL, NULL
+                )",
+            )
+            .bind(workflow_id)
+            .execute(pool)
+            .await
+            .expect("seed a run event");
+        }
+        for _ in 0..node_events {
+            sql::query(
+                "INSERT INTO horsies_workflow_events (
+                    workflow_id, event_id, event_kind, occurred_at, workflow_node_row_id, task_id,
+                    history_class, terminalization_kind
+                ) VALUES (
+                    $1, nextval('horsies_workflow_event_id'), 'NODE_READY', NOW() - INTERVAL '2 hours',
+                    $2, NULL, NULL, NULL
+                )",
+            )
+            .bind(workflow_id)
+            .bind(node_id)
+            .execute(pool)
+            .await
+            .expect("seed a node event");
+        }
+        workflow_id
+    }
+
+    /// The events of `workflow_ids`, run events and node events together.
+    async fn events_of(pool: &TestPool, workflow_ids: Vec<Uuid>) -> i64 {
+        sql::query_scalar(
+            "SELECT count(*) FROM horsies_workflow_events WHERE workflow_id = ANY($1)",
+        )
+        .bind(workflow_ids)
+        .fetch_one(pool)
+        .await
+        .expect("count the events")
+    }
+
+    /// The row budget counts the event rows of a workflow with its node
+    /// rows, and the statement deletes the events with their workflow: two
+    /// workflows of one node and two events (three rows each) against budget
+    /// 3 go one per statement (a budget of node rows alone takes both: the
+    /// revert-proof). A workflow of one node and five events against budget 4
+    /// drains alone, with every event.
+    #[tokio::test]
+    async fn workflow_retention_counts_events_and_deletes_them_with_the_run() {
+        let pool = test_pool().await;
+        drain_expired_workflows(&pool).await;
+
+        let first = seed_workflow_with_events(&pool, 1, 1).await;
+        let second = seed_workflow_with_events(&pool, 1, 1).await;
+        assert_eq!(events_of(&pool, vec![first, second]).await, 4);
+
+        let deleted = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+            .bind("0")
+            .bind(3_i64)
+            .execute(&pool)
+            .await
+            .expect("the first retention batch")
+            .rows_affected();
+        assert_eq!(
+            deleted, 1,
+            "budget 3 admits one workflow of three owned rows"
+        );
+        assert_eq!(
+            events_of(&pool, vec![first, second]).await,
+            2,
+            "the events of the deleted workflow leave with it; the others stay"
+        );
+
+        let deleted = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+            .bind("0")
+            .bind(3_i64)
+            .execute(&pool)
+            .await
+            .expect("the second retention batch")
+            .rows_affected();
+        assert_eq!(deleted, 1, "the second workflow goes in the next batch");
+        assert_eq!(events_of(&pool, vec![first, second]).await, 0);
+
+        let large = seed_workflow_with_events(&pool, 2, 3).await;
+        let deleted = sql::query(DELETE_EXPIRED_WORKFLOWS_SQL)
+            .bind("0")
+            .bind(4_i64)
+            .execute(&pool)
+            .await
+            .expect("the batch of the large workflow")
+            .rows_affected();
+        assert_eq!(deleted, 1, "a workflow over the budget drains alone");
+        assert_eq!(events_of(&pool, vec![large]).await, 0);
+        let nodes_left: i64 =
+            sql::query_scalar("SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = $1")
+                .bind(large)
+                .fetch_one(&pool)
+                .await
+                .expect("count the nodes of the large workflow");
+        assert_eq!(nodes_left, 0);
+    }
+
     /// The workflow retention DELETE must execute via
     /// idx_horsies_workflows_retention (migration 0028). EXPLAIN ANALYZE runs
     /// the exact production statement inside a rolled-back transaction, so
@@ -3065,6 +3221,10 @@ mod tests {
         assert!(
             plan.contains("Delete on horsies_workflow_tasks"),
             "node rows must be purged set-wise in the statement; plan:\n{plan}",
+        );
+        assert!(
+            plan.contains("Delete on horsies_workflow_events"),
+            "event rows must be purged set-wise in the statement; plan:\n{plan}",
         );
 
         sql::query("DELETE FROM horsies_workflows WHERE name = 'ret_explain_wf'")

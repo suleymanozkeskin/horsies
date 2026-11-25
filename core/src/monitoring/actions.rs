@@ -3,14 +3,16 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::broker::PostgresBroker;
+use crate::broker::{BrokerError, PostgresBroker};
 use crate::catalog::CodeEnum;
 use crate::core::workflow::handle_types::HandleOperationError;
 use crate::core::workflow::status::WorkflowStatus;
+use crate::db::Transience;
 use crate::workflow_engine::child_spec::{ChildSpecSource, ChildSpecUnavailable};
 use crate::workflow_engine::error::WorkflowError;
 use crate::workflow_engine::lifecycle::ResumeFailure;
 
+use super::failure_status::database_failure_status;
 use super::models::ActionResponse;
 use super::task_actions::{
     cancel_task, TaskActionError, TaskActionErrorCode, TaskActionResult, TaskCancelled,
@@ -129,11 +131,23 @@ fn detail(status_code: u16, message: impl Into<String>) -> ActionOutcome {
     }
 }
 
-/// The answer of an action that did not run because its client could not
-/// connect its broker: 503 with the cause, as a failed statement is
-/// answered (Python `_handle_failed` for `DB_OPERATION_FAILED`). Pure.
-pub fn connect_failed_action(cause: &str) -> ActionOutcome {
-    detail(503, cause)
+/// The answer of an action whose database operation failed: the status of
+/// the transience of the cause ([`database_failure_status`]), with `message`.
+fn database_failed(transience: Transience, message: impl Into<String>) -> ActionOutcome {
+    detail(database_failure_status(transience), message)
+}
+
+/// The answer of the action `subject` (for example `Workflow pause`) that did
+/// not run because its client could not connect its broker: `error`, answered
+/// as a failed statement is answered. The status follows the error's retry
+/// rule: 503 when the cause may clear, 500 when it stays (for example a
+/// connection setting that the core refuses). The detail is
+/// `<subject> failed: <error>`. Pure.
+pub fn connect_failed_action(subject: &str, error: &BrokerError) -> ActionOutcome {
+    database_failed(
+        Transience::of_retryable(error.is_retryable()),
+        format!("{subject} failed: {error}"),
+    )
 }
 
 fn workflow_not_found(workflow_id: Uuid) -> ActionOutcome {
@@ -153,7 +167,9 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
             ActionConflictCode::TaskNotCancellable,
             Some(current_status.to_string()),
         ),
-        TaskActionError::DbOperationFailed { message, .. } => detail(503, message),
+        TaskActionError::DbOperationFailed {
+            message, retryable, ..
+        } => database_failed(Transience::of_retryable(retryable), message),
         // The request was valid, and a repeat gives the same answer until the
         // stored row changes.
         TaskActionError::StoredDataInvalid { message, .. } => detail(500, message),
@@ -165,8 +181,14 @@ fn handle_failed(error: HandleOperationError) -> ActionOutcome {
         HandleOperationError::WorkflowNotFound { workflow_id, .. } => {
             workflow_not_found(workflow_id)
         }
-        HandleOperationError::DbOperationFailed { message, .. }
-        | HandleOperationError::ResumeRecoveryFailed { message, .. } => detail(503, message),
+        HandleOperationError::DbOperationFailed {
+            message, retryable, ..
+        } => database_failed(Transience::of_retryable(retryable), message),
+        // Only a resume returns it, and `resume_failure` answers it as resumed.
+        // Not retryable: the resume committed, and a repeat answers 409.
+        HandleOperationError::ResumeRecoveryFailed { message, .. } => {
+            database_failed(Transience::Permanent, message)
+        }
         // Stored data that does not parse: the request was valid, and a repeat gets the same
         // answer.
         HandleOperationError::StoredDataInvalid { message, .. } => detail(500, message),
@@ -180,6 +202,10 @@ fn handle_failed(error: HandleOperationError) -> ActionOutcome {
     }
 }
 
+/// The answer of a failed status read: a pause that changed nothing, and
+/// every cancel, read the workflow status after the write. The status follows
+/// the error's retry rule ([`WorkflowError::is_retryable`]): a stored status
+/// that does not parse never clears, so it is 500.
 fn status_failed(workflow_id: Uuid, error: &WorkflowError) -> ActionOutcome {
     match error {
         WorkflowError::WorkflowNotFound { .. } => workflow_not_found(workflow_id),
@@ -188,7 +214,10 @@ fn status_failed(workflow_id: Uuid, error: &WorkflowError) -> ActionOutcome {
         | WorkflowError::InvalidStatus(_)
         | WorkflowError::Validation(_)
         | WorkflowError::StepContract(_)
-        | WorkflowError::ChildSpecSource(_) => detail(503, error.to_string()),
+        | WorkflowError::ChildSpecSource(_) => database_failed(
+            Transience::of_retryable(error.is_retryable()),
+            error.to_string(),
+        ),
     }
 }
 
@@ -353,16 +382,107 @@ mod tests {
         }
     }
 
+    /// A connect that may clear is 503; a connection setting that the core
+    /// refuses stays, so it is 500. Both carry the cause.
     #[test]
-    fn a_connect_failure_is_503_with_its_cause() {
-        let outcome = connect_failed_action("workflow pause failed: connection refused");
-        assert_eq!(outcome.status_code(), 503);
+    fn a_connect_failure_answers_by_the_retry_rule_of_its_error() {
+        let transient = connect_failed_action(
+            "Workflow pause",
+            &BrokerError::ConnectionFailed("connection refused".to_owned()),
+        );
+        assert_eq!(transient.status_code(), 503);
         assert_eq!(
-            outcome.into_body(),
+            transient.into_body(),
             ActionBody::Detail {
-                detail: "workflow pause failed: connection refused".to_owned()
+                detail: "Workflow pause failed: connection failed: connection refused".to_owned()
             }
         );
+
+        let permanent = connect_failed_action(
+            "Workflow pause",
+            &BrokerError::InvalidConnectionSettings(
+                crate::core::config::PostgresConfigError::InvalidUrlScheme("mysql".to_owned()),
+            ),
+        );
+        assert_eq!(permanent.status_code(), 500);
+        assert!(
+            matches!(
+                permanent.body(),
+                ActionBody::Detail { detail } if detail.starts_with("Workflow pause failed: ")
+            ),
+            "{permanent:?}"
+        );
+    }
+
+    /// The status read after a pause or a cancel: a cause that may clear is
+    /// 503; a cause that stays (a statement refused by its SQLSTATE class, a
+    /// stored status that does not parse) is 500.
+    #[test]
+    fn a_failed_status_read_answers_by_the_retry_rule_of_its_error() {
+        let workflow_id = Uuid::nil();
+        let transient = WorkflowError::Broker(BrokerError::ConnectionFailed("refused".to_owned()));
+        assert_eq!(status_failed(workflow_id, &transient).status_code(), 503);
+
+        for permanent in [
+            WorkflowError::Broker(BrokerError::ClaimContract("row".to_owned())),
+            WorkflowError::InvalidStatus("NOT_KNOWN".to_owned()),
+            WorkflowError::Validation("node".to_owned()),
+        ] {
+            assert_eq!(
+                status_failed(workflow_id, &permanent).status_code(),
+                500,
+                "{permanent}"
+            );
+        }
+        assert_eq!(
+            status_failed(
+                workflow_id,
+                &WorkflowError::WorkflowNotFound { workflow_id }
+            )
+            .status_code(),
+            404
+        );
+    }
+
+    /// A statement that the server refused with `server_error`, as the
+    /// statement layer returns it.
+    fn refused_statement(server_error: &tokio_postgres::error::DbError) -> BrokerError {
+        BrokerError::Statement(crate::db::StatementFailure::StatementRefused {
+            statement: "test_statement",
+            cause: crate::db::RefusalCause::Server(Box::new(server_error.clone())),
+        })
+    }
+
+    /// A workflow action whose statement the server refused answers by the
+    /// SQLSTATE class: 40 (serialization), 55 (lock not available) and 57
+    /// (statement timeout) may clear, 503; 23 (a CHECK violation), 22, 42
+    /// and an internal error (XX) stay, 500.
+    #[tokio::test]
+    async fn a_refused_workflow_statement_answers_by_its_sqlstate_class() {
+        let workflow_id = Uuid::nil();
+        for (code, status_code) in [
+            ("40001", 503),
+            ("55P03", 503),
+            ("57014", 503),
+            ("23514", 500),
+            ("22023", 500),
+            ("42P01", 500),
+            ("XX000", 500),
+        ] {
+            let server_error = crate::test_support::raised_server_error(code, "test refusal").await;
+            for operation in [
+                crate::core::workflow::handle_types::HandleOperation::Pause,
+                crate::core::workflow::handle_types::HandleOperation::Resume,
+                crate::core::workflow::handle_types::HandleOperation::Cancel,
+            ] {
+                let error = HandleOperationError::connect_failed(
+                    &operation,
+                    workflow_id,
+                    refused_statement(&server_error),
+                );
+                assert_eq!(handle_failed(error).status_code(), status_code, "{code}");
+            }
+        }
     }
 
     #[test]
@@ -408,12 +528,14 @@ mod tests {
             handle_failed(error(HandleErrorCode::WorkflowNotFound)).status_code(),
             404
         );
-        for code in [
-            HandleErrorCode::DbOperationFailed,
-            HandleErrorCode::ResumeRecoveryFailed,
-        ] {
-            assert_eq!(handle_failed(error(code)).status_code(), 503);
-        }
+        assert_eq!(
+            handle_failed(error(HandleErrorCode::DbOperationFailed)).status_code(),
+            503
+        );
+        assert_eq!(
+            handle_failed(error(HandleErrorCode::ResumeRecoveryFailed)).status_code(),
+            500
+        );
         assert_eq!(
             handle_failed(error(HandleErrorCode::StoredDataInvalid)).status_code(),
             500

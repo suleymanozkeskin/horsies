@@ -311,7 +311,7 @@ With `auto_fail_stale_running` on, a worker that cannot write runner heartbeats 
 
 Raise `running_stale_threshold_ms`, for example to 600,000 (10 minutes).
 
-The [liveness lock](#worker-liveness-lock) does not recover the tasks of a paused worker: it keeps its lock. When the reaper retries such a task while the first attempt still runs, the [fencing token](/horsies/concepts/fencing-token/) lets your store refuse the late writes of the first attempt. With `auto_fail_stale_running=True`, it does not recover the tasks of a live worker either. A worker whose lock is not held for 60 seconds ends before a reaper can judge it gone. A worker that takes its lock again writes a new generation, so two losses of its lock do not count as one.
+The [liveness lock](#worker-liveness-lock) does not recover the tasks of a paused worker: it keeps its lock. When the reaper retries such a task while the first attempt still runs, the [fencing token](/horsies/concepts/fencing-token/) lets your store refuse the late writes of the first attempt. With `auto_fail_stale_running=True`, the lock does not recover the tasks of a live worker either. A worker whose lock is not held for 60 seconds ends before a reaper can judge it gone. A worker that takes its lock again writes a new generation, so two losses of its lock do not count as one.
 
 ### Worker Exits With Code 79
 

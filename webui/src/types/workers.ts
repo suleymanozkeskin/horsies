@@ -12,15 +12,24 @@ export interface DownSlot {
 
 export type SlotHealthKind = 'all_serving' | 'slots_down';
 
+/** The worker profile that a snapshot names. `not_recorded`: the snapshot
+ * holds no profile name, because a worker of a build before schema migration
+ * 1004 wrote it. */
+export type SnapshotProfile =
+  | { kind: 'named'; name: string }
+  | { kind: 'not_recorded' };
+
 /** Latest state snapshot for one worker. */
 export interface WorkerState {
   worker_id: string;
   hostname: string;
   pid: number;
   snapshot_at: string;
+  /** Seconds since `snapshot_at`, exact to the microsecond. */
   snapshot_age_s: number | null;
   stale: boolean;
   worker_started_at: string;
+  /** Seconds since `worker_started_at`, exact to the microsecond. */
   uptime_s: number | null;
   processes: number;
   queues: string[];
@@ -34,6 +43,8 @@ export interface WorkerState {
   slot_health: SlotHealthKind;
   /** Empty unless `slot_health` is `slots_down`; in slot order. */
   down_slots: DownSlot[];
+  /** The worker profile that the worker ran. */
+  profile: SnapshotProfile;
 }
 
 /** One worker's reply to an active liveness ping. */
@@ -96,7 +107,8 @@ export type StreamCoverage =
   | { kind: 'no_capacity'; workers: number }
   | { kind: 'unserved' };
 
-/** How long the stream's rows wait. `none_due`: every row is due later. */
+/** How long the stream's rows wait. `none_due`: every row is due later.
+ * `wait_s` is in seconds, exact to the microsecond. */
 export type StreamWait =
   | { kind: 'waiting'; oldest_due_at: string; wait_s: number }
   | { kind: 'none_due'; next_due_at: string };

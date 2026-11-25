@@ -89,6 +89,7 @@ For CPU work, give all the thread children of a machine together at most one sea
 Keep a task `ISOLATED` when one of these is true:
 
 - It must stop exactly at `timeout_ms`. An isolated task is killed at its deadline, with the subprocesses in its session. A shared task is not: see [Timeouts and Crashes](#timeouts-and-crashes).
+- It must stop within a known time after an operator cancel, also when its code does not read the cancel. Only an isolated task can have that kill: `cancel_grace_ms` on an `ISOLATED` task.
 - It runs native code that can crash the process. A crash of a shared child ends every task in it.
 - Its memory grows while it runs. The tasks of a shared child share one process and one memory limit.
 - It starts subprocesses or threads that must end with it.
@@ -104,6 +105,8 @@ Keep a task `ISOLATED` when one of these is true:
 | The task returns while asyncio tasks that it started are alive | `async def` only. The child waits up to 1 s for them, then cancels them in three rounds 0.1 s apart. The worker writes what the task returned after they ended, and replaces the child. Still alive after the rounds: the worker kills the child, and writes what the task returned after the exit | The child waits up to `cancel_grace_ms` for them, then cancels them in three rounds 0.1 s apart and takes no new task. The worker writes what the task returned after they ended. Still alive after the rounds: the task is stuck, and keeps what it returned | Does not apply: a `def` task has no event loop |
 | The task blocks the process | Nothing else is affected | A loop that has not turned for 5 s: the worker kills the child at once. The task fails with `TASK_BLOCKED_LOOP`, each other task before its deadline with `NEIGHBOUR_BLOCKED_LOOP` | C code that holds the GIL stops every thread. When the child has not reported the deadline by `timeout_ms + 10 s`, the worker kills it |
 | The child crashes | That task fails with `WORKER_CRASHED` | Every task in the child fails with `WORKER_CRASHED` | Every task in the child fails with `WORKER_CRASHED` |
+| An operator cancels the running task | The task code gets the cancel: an async body at its next `await` (Python `asyncio.CancelledError`, Rust `cancelled()`), a sync body through the cancel state of `TaskRuntime`. The task is `CANCELLED` at once | As `ISOLATED` for an async body | The task code gets the cancel state of `TaskRuntime`. The task is `CANCELLED` at once |
+| The cancelled code does not stop | It runs until it returns, or until its `timeout_ms` kill. With `cancel_grace_ms` on the task, the worker kills the child `cancel_grace_ms` after the cancel | After `cancel_grace_ms`: a second cancel and the cancel rounds, and the child takes no new task. Still alive: the task is stuck, and keeps its seat until no task in the child has time left | The thread runs until it returns |
 
 A task retries only when its `auto_retry_for` names the code. In every mode, the worker writes the outcome only after the attempt has ended, so a retry never runs next to the attempt that it replaces. A shared task that the worker names as the cause of a kill or of a stuck stop retries in an isolated child.
 
@@ -111,9 +114,14 @@ A task retries only when its `auto_retry_for` names the code. In every mode, the
 
 Each mode adds rules to [Defining Tasks](/horsies/tasks/defining-tasks/). The pages of the modes explain each rule.
 
+Every mode:
+
+- Read the cancel of an operator: let `asyncio.CancelledError` propagate in an async body, and read the cancel state of `TaskRuntime` between the steps of a sync body. See [Cancellation](/horsies/tasks/defining-tasks/#cancellation) (Python) and [Task Runtime](/horsies/rust/tasks/defining-tasks/#task-runtime) (Rust).
+
 `ISOLATED`:
 
 - Set `timeout_ms` as a hang backstop above the normal runtime.
+- Set `cancel_grace_ms` when an operator cancel must stop the task also when its code does not read the cancel.
 - In an `async def` task, await the asyncio tasks that it starts. Work left on the loop delays the outcome by up to 1.3 s and costs a child restart. See [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks).
 
 `SHARED_ASYNC` ([Rules for Task Authors](/horsies/workers/shared-async-tasks/#rules-for-task-authors)):

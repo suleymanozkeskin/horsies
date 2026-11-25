@@ -28,6 +28,8 @@ from horsies.core.models.health import (
     ClassBudget,
     ClassBudgets,
     DownSlot,
+    ProfileNamed,
+    ProfileNotRecorded,
     SlotsDown,
 )
 from horsies.core.models.tasks import Execution
@@ -286,6 +288,56 @@ async def test_an_unreadable_slot_health_fails_the_read(
         await session.execute(
             text('DELETE FROM horsies_worker_states WHERE worker_id = :wid'),
             {'wid': worker_id},
+        )
+        await session.commit()
+
+
+_INSERT_WORKER_STATE_WITH_PROFILE = text("""
+    INSERT INTO horsies_worker_states (
+        worker_id, snapshot_at, hostname, pid, processes,
+        max_claim_batch, max_claim_per_worker, queues,
+        queue_priorities, queue_max_concurrency, recovery_config,
+        tasks_running, tasks_claimed, worker_started_at, slots_down,
+        class_capacity, telemetry, profile_name
+    ) VALUES (
+        :worker_id, NOW(), 'itest-host', 4242, 2,
+        2, 2, ARRAY['default'],
+        '{}'::jsonb, '{}'::jsonb, '{}'::jsonb,
+        0, 0, NOW(), '[]'::jsonb,
+        '{}'::jsonb, jsonb_build_object('endpoint', jsonb_build_object('state', 'off')),
+        :profile_name
+    )
+""")
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_worker_state_reads_the_profile(
+    broker: PostgresBroker,
+    session: AsyncSession,
+) -> None:
+    """A row with a profile name reads as ``ProfileNamed``; a row with no
+    name (a worker of a build before schema migration 1004) reads as
+    ``ProfileNotRecorded``."""
+    prefix = f'itest-{uuid.uuid4().hex}'
+    for suffix, profile_name in (('named', 'batch'), ('unnamed', None)):
+        await session.execute(
+            _INSERT_WORKER_STATE_WITH_PROFILE,
+            {'worker_id': f'{prefix}-{suffix}', 'profile_name': profile_name},
+        )
+    await session.commit()
+    try:
+        named = await broker.get_worker_state_async(f'{prefix}-named')
+        unnamed = await broker.get_worker_state_async(f'{prefix}-unnamed')
+
+        assert is_ok(named) and named.ok_value is not None
+        assert named.ok_value.profile == ProfileNamed(name='batch')
+        assert is_ok(unnamed) and unnamed.ok_value is not None
+        assert unnamed.ok_value.profile == ProfileNotRecorded()
+    finally:
+        await session.execute(
+            text('DELETE FROM horsies_worker_states WHERE worker_id LIKE :p'),
+            {'p': f'{prefix}%'},
         )
         await session.commit()
 

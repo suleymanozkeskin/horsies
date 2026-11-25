@@ -72,6 +72,12 @@ class TaskAttemptOutcome(str, Enum):
     WORKER_FAILURE = 'WORKER_FAILURE'
     """Worker process crashed without producing a `TaskResult`."""
 
+    CANCELLED = 'CANCELLED'
+    """An operator cancelled the task while the attempt ran
+    (`cancel_task` with `include_running`). The cancel statement
+    records the attempt; it never retries.
+    """
+
 
 class WorkflowStatus(str, Enum):
     """Status of a workflow instance.

@@ -758,14 +758,17 @@ def _read_handler_frames(
     stopped: threading.Event,
 ) -> None:
     """Control thread body: route the events of each ``events`` frame, and
-    set ``stopped`` at the stop frame, then end. A parent that is gone ends
-    the process with ``PARENT_GONE_EXIT_CODE``; a frame of a task child,
-    or a second init frame, with ``BAD_PARENT_FRAME_EXIT_CODE``."""
+    set ``stopped`` at the stop frame, then end. A cancel frame is ignored:
+    the handler child runs no task. A parent that is gone ends the process
+    with ``PARENT_GONE_EXIT_CODE``; a run frame, or a second init frame,
+    with ``BAD_PARENT_FRAME_EXIT_CODE``."""
     try:
         while True:
             match reader.next_frame():
                 case core.EventsFrame(events=texts):
                     dispatch.dispatch(texts)
+                case core.CancelRunFrame():
+                    logger.debug('The handler child runs no task; a cancel frame is ignored')
                 case core.StopFrame():
                     stopped.set()
                     return

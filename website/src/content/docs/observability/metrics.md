@@ -106,7 +106,7 @@ At the stop, the endpoint serves until the drain of the worker ends, so the last
 | `horsies.worker.claim.passes` | At each pass of the claim loop |
 | `horsies.worker.seats`, `horsies.worker.seats.in_use`, `horsies.worker.slots.down`, `horsies.worker.memory.rss{process="parent"}`, `horsies.worker.memory.rss{process="children"}` | At each worker snapshot, from the values that the snapshot writes: once per `recovery.worker_state_snapshot_interval_ms` (30 seconds by default), not at a scrape |
 
-- `horsies.task.run.duration` runs from the placement of the attempt on a child to the end that the worker saw. It includes the transit of the run frame and the `RUNNING` write of the child.
+- `horsies.task.run.duration` runs from the placement of the attempt on a child to the end that the worker saw. It includes the transit of the run frame and the `RUNNING` write of the child. For an attempt that an operator cancelled (outcome `CANCELLED`), the end is when the task code stopped, not the time of the cancel.
 - A duration above one day counts only in the `+Inf` bucket of its histogram. The longest task timeout is about 49.7 days.
 - `horsies.worker.seats.in_use` counts, for the worker, the `RUNNING` rows and the `CLAIMED` rows with a live lease, at most the seats of the budget. It has no series after a count of the held rows that failed.
 - `horsies.worker.memory.rss{process="children"}` is the sum of the last RSS reading of each task child (its ready frame, then each result frame), the value of the `children_memory_mb` column of the same snapshot. A child whose last reading is unreadable is not in the sum: the `children_rss` member of the `telemetry` column names it. A snapshot in which no child read its size leaves the last value. A replaced child's reading leaves the sum.
@@ -147,9 +147,9 @@ The task metrics grow with the tasks of the worker. For a worker that runs `P` p
 
 | Metric | Series |
 |--------|--------|
-| `horsies.task.attempts` | `P × (1 + F + W)`: one `COMPLETED` series with no code, one per error code that ended an attempt `FAILED` (`F`) or `WORKER_FAILURE` (`W`) |
+| `horsies.task.attempts` | `P × (1 + F + W + C)`: one `COMPLETED` series with no code, one per error code that ended an attempt `FAILED` (`F`) or `WORKER_FAILURE` (`W`), and one `CANCELLED` series with the code `TASK_CANCELLED` when an operator cancelled a running attempt of the task (`C` is 0 or 1) |
 | `horsies.task.attempts.end_not_known` | `P` |
-| `horsies.task.run.duration` | `P × 3`: one per outcome |
+| `horsies.task.run.duration` | `P × 4`: one per outcome |
 | `horsies.task.retries` | `P × R`: `R` the error codes that scheduled a retry |
 | `horsies.task.queue.duration` | The queues × 3 |
 

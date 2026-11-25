@@ -26,6 +26,7 @@ from typing import Final
 
 
 from crossclient.parity.snapshot.catalog import (
+    ARCHIVE_ATTEMPT,
     ATTEMPT_ARCHIVE,
     BASELINE_CATALOG,
     KILL_REPORT_MEASURES,
@@ -36,7 +37,6 @@ from crossclient.parity.snapshot.normalize import NormalizedSnapshot
 from crossclient.parity.snapshot.rules import (
     ColumnRule,
     ColumnSpec,
-    EachItem,
     Ignored,
     Index,
     JsonPath,
@@ -75,12 +75,14 @@ _RUN_PROCESS_ID: Final = Ignored(
 )
 
 ARCHIVE_PROCESS_ID_POSITIONS: Final = (10, 11)
-"""The fields of an attempt of the attempt archive (version 1) that hold the
-process id of its worker child: ``worker_pid`` and ``worker_process_name``."""
+"""The fields of an attempt of the attempt archive (version 2, the fields of
+version 1 first) that hold the process id of its worker child:
+``worker_pid`` and ``worker_process_name``."""
 
 ARCHIVE_REPORT_POSITIONS: Final = (6, 7)
-"""The fields of an attempt of the attempt archive (version 1) that can hold a
-kill report: ``error_message`` and ``failed_reason``."""
+"""The fields of an attempt of the attempt archive (version 2, the fields of
+version 1 first) that can hold a kill report: ``error_message`` and
+``failed_reason``."""
 
 WHOLE_RUN_ATTEMPT_ARCHIVE: Final = StoredJson(
     storage=ATTEMPT_ARCHIVE.storage,
@@ -88,12 +90,12 @@ WHOLE_RUN_ATTEMPT_ARCHIVE: Final = StoredJson(
     paths=(
         *ATTEMPT_ARCHIVE.paths,
         *(
-            JsonPath(steps=(EachItem(), Index(position=position)), rule=_RUN_PROCESS_ID)
+            JsonPath(steps=(*ARCHIVE_ATTEMPT, Index(position=position)), rule=_RUN_PROCESS_ID)
             for position in ARCHIVE_PROCESS_ID_POSITIONS
         ),
         *(
             JsonPath(
-                steps=(EachItem(), Index(position=position)), rule=KILL_REPORT_MEASURES
+                steps=(*ARCHIVE_ATTEMPT, Index(position=position)), rule=KILL_REPORT_MEASURES
             )
             for position in ARCHIVE_REPORT_POSITIONS
         ),

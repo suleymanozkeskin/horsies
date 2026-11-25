@@ -371,6 +371,32 @@ class TestFrameReader:
         assert exited.value.code == child_main.PROTOCOL_MISMATCH_EXIT_CODE
         assert exited.value.code == core.protocol_numbers().protocol_mismatch_exit_code
 
+    def test_an_init_frame_of_version_three_exits_with_the_mismatch_code(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A version-3 worker sends no cancel of a run: the child of this
+        build refuses it before it reads any other field."""
+        monkeypatch.setattr(child_main.os, '_exit', _raise_exit)
+        reader = ParentFrameReader(
+            _ScriptedSocket(framed(init_meta(protocol=3)), 1 << 16),  # pyright: ignore[reportArgumentType]
+        )
+        with pytest.raises(_Exited) as exited:
+            reader.next_frame()
+        assert exited.value.code == child_main.PROTOCOL_MISMATCH_EXIT_CODE
+
+    def test_a_cancel_frame_reaches_the_reader_after_the_init_frame(self) -> None:
+        task_id = uuid.UUID(int=5)
+        data = framed(init_meta()) + framed(
+            {'kind': 'cancel_run', 'target': {'kind': 'isolated', 'task_id': str(task_id)}},
+        )
+        reader = ParentFrameReader(_ScriptedSocket(data, 1 << 16))  # pyright: ignore[reportArgumentType]
+        assert isinstance(reader.next_frame(), core.InitFrame)
+        cancel = reader.next_frame()
+        assert isinstance(cancel, core.CancelRunFrame), cancel
+        assert isinstance(cancel.target, core.IsolatedCancelTarget)
+        assert cancel.target.task_id == task_id
+
     def test_a_malformed_frame_exits_with_the_bad_frame_code(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1383,9 +1409,19 @@ class TestVersionThreeParentFrames:
         match _parent(init_meta(protocol=2)):
             case core.ParentProtocolMismatch(received=received, expected=expected):
                 assert received == 2
-                assert expected == 3
+                assert expected == 4
             case other:
                 pytest.fail(f'a version-2 init frame is a mismatch, got {other!r}')
+
+    def test_an_init_frame_of_version_three_is_a_named_mismatch(self) -> None:
+        """A version-3 parent sends no cancel of a run: the child and the
+        worker come from different builds."""
+        match _parent(init_meta(protocol=3)):
+            case core.ParentProtocolMismatch(received=received, expected=expected):
+                assert received == 3
+                assert expected == 4
+            case other:
+                pytest.fail(f'a version-3 init frame is a mismatch, got {other!r}')
 
 
 class TestATaskChildRefusesHandlerFrames:

@@ -70,6 +70,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` | Nothing ran |
 | `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` | Nothing written |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` | Nothing written |
+| `WorkflowStartCommandConflict` | `WORKFLOW_COMMAND_CONFLICT` | – | `False` | Nothing written |
 | `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | The core's classification of the cause | Rolled back, or the commit outcome is unknown |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing written |
 
@@ -83,6 +84,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
 | `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. `existing_workflow_name` names it. Use another id |
+| `WORKFLOW_COMMAND_CONFLICT` | No | The workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written. Send the same start command, or use another id. See [Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/) |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction is a defect and propagates |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
 
@@ -115,10 +117,14 @@ match spec.start():
         print(f"[{err.code}] {err.message}")
 ```
 
-> **Idempotency caveat:** `retry_start` is best-effort idempotent by `workflow_id`.
-> Unlike task send, workflow start does not verify payload identity on collision.
-> Safe for transient DB retries within the same deploy. Cross-version spec drift
-> on the same `workflow_id` will silently return the existing handle.
+> **Idempotency:** a start with an existing `workflow_id` compares its start command
+> with the stored one. The same command returns the existing handle. Another command
+> returns `WorkflowStartCommandConflict`, and nothing is written. `retry_start` builds
+> the same spec again, so a first attempt that committed comes back as the existing
+> handle. A spec that changed between the two starts (for example after a deploy) is
+> another command. A run started before this release has no stored start command:
+> the start returns its handle with no compare. See
+> [Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/).
 
 ### WorkflowHandle
 

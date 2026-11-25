@@ -10,9 +10,10 @@
 //! The host speaks the same frames as the Python child and gives the same
 //! guarantees: the start write and the finalizing marker through the core,
 //! a result envelope only after the body stopped, the deadline reports of
-//! each seat kind, the cancel signal of a shared async run at its deadline
-//! ([`run_cancel_signal`]), the reports of work a body left
-//! ([`spawn_in_run`]), and the protocol's exit codes.
+//! each seat kind, the cancel signal of a run ([`run_cancel_signal`],
+//! [`run_cancel_state`]) at the deadline of a shared run and at an operator
+//! cancel (`cancel_run`) in every child kind, the reports of work a body
+//! left ([`spawn_in_run`]), and the protocol's exit codes.
 //!
 //! A client that traces its task bodies gives the host a [`BodySpans`]: the
 //! host runs each body inside the `tracing` span that it opens for the run
@@ -42,6 +43,8 @@ mod run;
 mod run_work;
 mod seats;
 
+#[cfg(test)]
+mod cancel_tests;
 #[cfg(test)]
 mod ended_spans_tests;
 #[cfg(test)]
@@ -76,6 +79,6 @@ pub use host::{
 pub use producer::{child_producer, ChildProducer};
 pub use role::{process_role, thread_role, wait_inside_task_message, ProcessRole, ThreadRole};
 pub use run_work::{
-    run_cancel_signal, run_fencing_token, spawn_in_run, RunCancelSignal, RunSignalRefused,
-    RunSpawnRefused, MAX_RUN_WORK,
+    run_cancel_signal, run_cancel_state, run_fencing_token, spawn_in_run, CancelCause,
+    RunCancelSignal, RunCancelState, RunSignalRefused, RunSpawnRefused, MAX_RUN_WORK,
 };

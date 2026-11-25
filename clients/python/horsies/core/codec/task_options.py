@@ -25,8 +25,10 @@ def serialize_task_options(task_options: TaskOptions) -> SerdeResult[str]:
 
     `execution` holds the `Execution` value. `cancel_grace_ms` holds the
     resolved grace of a `SHARED_ASYNC` task (its declared value, else
-    `DEFAULT_CANCEL_GRACE_MS`), and null for the other classes. The task
-    decorator has checked the class rules and the bounds before this runs.
+    `DEFAULT_CANCEL_GRACE_MS`), the declared grace of an `ISOLATED` task or
+    null when it declares none (no hard stop), and null for `SHARED_THREAD`.
+    The task decorator has checked the class rules and the bounds before
+    this runs.
     """
     return dumps_json(
         {
@@ -49,8 +51,10 @@ def serialize_task_options(task_options: TaskOptions) -> SerdeResult[str]:
 def _stored_cancel_grace_ms(task_options: TaskOptions) -> int | None:
     """The cancel grace that the stored options hold for this class.
 
-    A `SHARED_ASYNC` task stores its declared grace, else the default. The
-    other classes have no cancel grace and store null.
+    A `SHARED_ASYNC` task stores its declared grace, else the default. An
+    `ISOLATED` task stores its declared grace (the hard stop after an
+    operator cancel), else null: no hard stop. `SHARED_THREAD` has no cancel
+    grace and stores null.
     """
     match task_options.execution:
         case Execution.SHARED_ASYNC:
@@ -59,7 +63,9 @@ def _stored_cancel_grace_ms(task_options: TaskOptions) -> int | None:
                     return DEFAULT_CANCEL_GRACE_MS
                 case declared:
                     return declared
-        case Execution.ISOLATED | Execution.SHARED_THREAD:
+        case Execution.ISOLATED:
+            return task_options.cancel_grace_ms
+        case Execution.SHARED_THREAD:
             return None
         case _ as unreachable:
             assert_never(unreachable)
@@ -84,9 +90,9 @@ def stored_execution(options: Json) -> Result[Execution, InvalidExecution]:
     `ISOLATED`: options written before the class existed have no key, and
     every such task ran isolated. A present `execution` must be one of the
     `Execution` values. `cancel_grace_ms` must then fit the class: an int
-    from MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS for `SHARED_ASYNC`, and
-    absent or null for the other classes. Other option fields are not
-    checked. Does no I/O.
+    from MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS for `SHARED_ASYNC`;
+    absent, null, or such an int for `ISOLATED`; absent or null for
+    `SHARED_THREAD`. Other option fields are not checked. Does no I/O.
     """
     match options:
         case None:
@@ -141,14 +147,20 @@ def _stored_grace_error(execution: Execution, raw: Json) -> str | None:
     match execution:
         case Execution.SHARED_ASYNC:
             return shared_async_grace_error(raw)
-        case Execution.ISOLATED | Execution.SHARED_THREAD:
+        case Execution.ISOLATED:
+            match raw:
+                case None:
+                    return None
+                case _:
+                    return _grace_value_error(raw)
+        case Execution.SHARED_THREAD:
             match raw:
                 case None:
                     return None
                 case _:
                     return (
-                        f'cancel_grace_ms is set for execution '
-                        f'{execution.value}; only SHARED_ASYNC has one'
+                        'cancel_grace_ms is set for execution SHARED_THREAD; '
+                        'only SHARED_ASYNC and ISOLATED have one'
                     )
         case _ as unreachable:
             assert_never(unreachable)
@@ -156,6 +168,16 @@ def _stored_grace_error(execution: Execution, raw: Json) -> str | None:
 
 def shared_async_grace_error(raw: Json) -> str | None:
     """The cause when a `SHARED_ASYNC` grace is not an int in the bounds."""
+    match raw:
+        case None:
+            return 'cancel_grace_ms is absent for execution SHARED_ASYNC'
+        case _:
+            return _grace_value_error(raw)
+
+
+def _grace_value_error(raw: Json) -> str | None:
+    """The cause when a grace that is present is not an int in the
+    bounds."""
     match raw:
         case bool():
             return 'cancel_grace_ms is a bool, not an int'
@@ -165,8 +187,6 @@ def shared_async_grace_error(raw: Json) -> str | None:
             return f'cancel_grace_ms is above {MAX_CANCEL_GRACE_MS} ms'
         case int():
             return None
-        case None:
-            return 'cancel_grace_ms is absent for execution SHARED_ASYNC'
         case other:
             return f'cancel_grace_ms is a JSON {type(other).__name__}, not an int'
 

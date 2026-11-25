@@ -29,6 +29,7 @@ from horsies.core.models.workflow.handle_types import (
 )
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
+    WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed,
     WorkflowStartIdConflict,
     WorkflowStartResult,
@@ -174,9 +175,15 @@ async def start_workflow_async(
             raised; the start rolled back.
 
     Notes:
-        If workflow_id is provided and already exists with the same name,
-        returns the existing handle (best-effort idempotent by workflow_id,
-        not payload-verified); with another name, ``WorkflowStartIdConflict``.
+        If workflow_id is provided and already exists, the core compares the
+        start command (the workflow settings and each node: task, input,
+        queue, priority, dependencies, ``args_from``, context, join and task
+        options; not the id, the call time or the trace). The same command
+        returns the existing handle; another command of the same name, or the
+        id of a sub-workflow, is ``WorkflowStartCommandConflict``; another
+        name is ``WorkflowStartIdConflict``. Both write nothing and are not
+        retryable. A run that an earlier horsies version started has no stored
+        start command: its handle comes back with no compare.
     """
     wf_id = workflow_id or str(uuid.uuid4())
     workflow_sent_at = sent_at or datetime.now(timezone.utc)
@@ -372,6 +379,7 @@ def _start_answer(
         WorkflowStarted
         | WorkflowExists
         | WorkflowStartIdConflict
+        | WorkflowStartCommandConflict
         | WorkflowStartEnqueueFailed
     ),
 ) -> WorkflowStartResult[WorkflowHandle[OutT]]:
@@ -381,7 +389,8 @@ def _start_answer(
     ``workflow_key``, the UUID that the start sent.
 
     A refused or failed start is the generated class that the core built
-    (``WorkflowStartIdConflict``, ``WorkflowStartEnqueueFailed``), returned
+    (``WorkflowStartIdConflict``, ``WorkflowStartCommandConflict``,
+    ``WorkflowStartEnqueueFailed``), returned
     as it is: its ``workflow_id`` is the canonical text of ``workflow_key``,
     and ``wf_id`` as given when the caller gave that text."""
     from horsies._core import (
@@ -394,7 +403,7 @@ def _start_answer(
             pass
         case WorkflowExists():
             logger.warning(f'Workflow {wf_id} already exists, returning existing handle')
-        case WorkflowStartIdConflict() | WorkflowStartEnqueueFailed():
+        case WorkflowStartIdConflict() | WorkflowStartCommandConflict() | WorkflowStartEnqueueFailed():
             return Err(outcome)
         case _ as unreachable:
             assert_never(unreachable)

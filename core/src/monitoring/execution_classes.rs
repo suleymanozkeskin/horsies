@@ -1,18 +1,29 @@
-//! Response models of the slot health and the execution class report.
+//! Response models of the slot health, the profile of a snapshot and the
+//! execution class report.
 //!
 //! The worker routes read the broker's typed worker-health methods; these
 //! functions turn their results into the wire models of the monitoring UI.
 //! Pure, no I/O.
 
 use crate::broker::{
-    ClassReport, PendingStream, SlotHealth, StreamCoverageState, StreamWait, WorkerClassLoad,
+    ClassReport, PendingStream, SlotHealth, SnapshotProfile, StreamCoverageState, StreamWait,
+    WorkerClassLoad,
 };
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 
 use super::models::{
     BudgetLoadInfo, ClassReportInfo, DownSlotInfo, PendingStreamInfo, SlotHealthKind,
-    StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
+    SnapshotProfileInfo, StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
 };
+
+/// The `profile` field of a worker state: the profile name of the snapshot,
+/// or `not_recorded`.
+pub fn snapshot_profile_info(profile: &SnapshotProfile) -> SnapshotProfileInfo {
+    match profile {
+        SnapshotProfile::Named { name } => SnapshotProfileInfo::Named { name: name.clone() },
+        SnapshotProfile::NotRecorded => SnapshotProfileInfo::NotRecorded,
+    }
+}
 
 /// The `slot_health` and `down_slots` fields of a worker state.
 pub fn slot_health_info(slot_health: &SlotHealth) -> (SlotHealthKind, Vec<DownSlotInfo>) {
@@ -58,7 +69,7 @@ fn stream_info(stream: &PendingStream) -> PendingStreamInfo {
     let wait = match stream.wait {
         StreamWait::OldestWaiting { enqueued_at, wait } => StreamWaitInfo::Waiting {
             oldest_due_at: enqueued_at,
-            wait_s: wait.num_seconds(),
+            wait_s: wait,
         },
         StreamWait::NoneDue { next_due_at } => StreamWaitInfo::NoneDue { next_due_at },
     };
@@ -166,7 +177,7 @@ mod tests {
                         "wait": {
                             "kind": "waiting",
                             "oldest_due_at": "2026-11-10T11:58:29.500000Z",
-                            "wait_s": 90,
+                            "wait_s": 90.5,
                         },
                     },
                     {

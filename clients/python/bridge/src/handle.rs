@@ -792,8 +792,9 @@ impl CoreHandle {
     }
 
     /// Start one workflow (`horsies_workflow_start`): `WorkflowStarted`,
-    /// `WorkflowExists`, or the generated `WorkflowStartIdConflict` or
-    /// `WorkflowStartEnqueueFailed` (`horsies._catalog.workflow_start_errors`). Writes;
+    /// `WorkflowExists`, or the generated `WorkflowStartIdConflict`,
+    /// `WorkflowStartCommandConflict` or `WorkflowStartEnqueueFailed`
+    /// (`horsies._catalog.workflow_start_errors`). Writes;
     /// a caller that leaves does not stop it. The children of its
     /// sub-workflow roots come from the child spec source, which runs on the
     /// callback thread while this thread waits with the GIL released. A

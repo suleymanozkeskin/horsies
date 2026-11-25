@@ -14,7 +14,7 @@ folder only when the task needs it:
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `#[horsies::task]`, the stored input, `TaskError<E>`, `TaskRuntime`, the cancel at the deadline, the fencing token, sends, `TaskOutcome` and `ReadError`, the blocking API, rerun |
+| `tasks.md` | `#[horsies::task]`, the stored input, `TaskError<E>`, `TaskRuntime`, the fencing token, the cancel signals (an operator cancel, the deadline), sends, `TaskOutcome` and `ReadError`, the blocking API, rerun |
 | `workflows.md` | `WorkflowDefinition`, `WorkflowSpecBuilder`, `TaskNode`, `arg_from`, the workflow context, sub-workflows, starts, `WorkflowHandle` |
 | `configs.md` | `Horsies::new`, `AppConfig`, queues, worker profiles, child start hooks, schedules, `check`, `horsies::cli::run`, the shipped `horsies` binary |
 | `monitoring.md` | `horsies::monitoring` queries, `cancel_task`, workflow actions, the axum mount `horsies::web::router`, `horsies web` |

@@ -43,7 +43,12 @@ from horsies.core.codec.kwargs import (
     task_runtime_parameter,
     underlying_task_fn,
 )
-from horsies.core.task_runtime import FencingToken, TaskRuntime
+from horsies.core.task_runtime import (
+    FencingToken,
+    RunCancelCell,
+    TaskRuntime,
+    run_task_runtime,
+)
 from horsies.core.codec.json_io import (
     loads_json,
     dumps_json,
@@ -105,6 +110,7 @@ from horsies.core.worker.run_return import (
     ResultFailed,
     ResultOutcome,
     ResultSucceeded,
+    RunCancelled,
     RunReturn,
     RunWorkflow,
     SetRunning,
@@ -112,8 +118,17 @@ from horsies.core.worker.run_return import (
     StoppedBeforeRunning,
     run_workflow_of,
 )
+from horsies.core.worker.run_cancel import (
+    EndCancelled,
+    EndNotCancelled,
+    RunCancel,
+    SkipTheBody,
+    StartTheBody,
+)
 from horsies.core.telemetry.attempt_span import (
     AttemptSubject,
+    BodyEndOrder,
+    OperatorCancelFirst,
     attempt_spans_of,
     isolated_body_end,
     run_in_attempt_span,
@@ -1234,14 +1249,17 @@ def _task_call_result(
     called: TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]],
     task_loop: TaskLoop,
     map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
+    cancel: RunCancel,
 ) -> TaskResult[Any, TaskError]:
     """The result of one call of a task wrapper.
 
     The call of a ``def`` task returns its result. The call of an
     ``async def`` task returns a coroutine, which runs on ``task_loop``; the
-    child opened that loop at boot. A ``CancelledError`` or a
-    ``GeneratorExit`` that leaves that coroutine goes through
-    ``map_exception``, the mapping of the task
+    child opened that loop at boot. Its asyncio task goes to ``cancel``
+    first, so an operator cancel from the control thread reaches the body
+    at its next ``await`` (``RunCancel.watch_body_task``). A
+    ``CancelledError`` or a ``GeneratorExit`` that leaves that coroutine
+    goes through ``map_exception``, the mapping of the task
     (``await_task_call_in_worker``). Other exceptions from that run
     propagate. The wrapper returns one of the two, so another value is a
     defect in the library: ``AssertionError``.
@@ -1250,18 +1268,22 @@ def _task_call_result(
         case TaskResult():
             return called
         case Coroutine():
-            return task_loop.run(await_task_call_in_worker(called, map_exception))
+            return task_loop.run_watched(
+                await_task_call_in_worker(called, map_exception),
+                cancel,
+            )
         case _:
             raise AssertionError(
                 f'task wrapper of {task_name!r} returned {type(called).__name__}',
             )
 
 
-def run_runtime(task_id: uuid.UUID, attempt: int) -> TaskRuntime:
+def run_runtime(task_id: uuid.UUID, attempt: int, cancel: RunCancelCell) -> TaskRuntime:
     """The ``TaskRuntime`` of attempt ``attempt`` of task ``task_id``, from
-    the run frame. The core holds the attempt of a frame to 1 to
-    ``MAX_ATTEMPT``. Pure."""
-    return TaskRuntime(fencing_token=FencingToken(task_id=task_id, value=attempt))
+    the run frame, whose ``cancel_state`` reads ``cancel``: the cell of the
+    run, which the child requests at an operator cancel or a deadline. The
+    core holds the attempt of a frame to 1 to ``MAX_ATTEMPT``. Pure."""
+    return run_task_runtime(FencingToken(task_id=task_id, value=attempt), cancel)
 
 
 def _prepare_task_call(
@@ -1673,6 +1695,40 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     attempt: int,
     trace: RunTrace,
 ) -> RunReturn:
+    """``run_isolated_task`` with a cancel that no operator cancel reaches:
+    a run in this process outside the frame loop of a child (the tests and
+    the integration callers). It never returns ``RunCancelled``."""
+    return run_isolated_task(
+        task_name,
+        input_json,
+        task_id,
+        master_worker_id,
+        work,
+        claimed_at=claimed_at,
+        task_loop=task_loop,
+        orphan_self_heal=orphan_self_heal,
+        queue_name=queue_name,
+        attempt=attempt,
+        trace=trace,
+        cancel=RunCancel(),
+    )
+
+
+def run_isolated_task(
+    task_name: str,
+    input_json: str,
+    task_id: uuid.UUID,
+    master_worker_id: str,
+    work: IsolatedWork,
+    *,
+    claimed_at: datetime,
+    task_loop: TaskLoop,
+    orphan_self_heal: bool,
+    queue_name: str,
+    attempt: int,
+    trace: RunTrace,
+    cancel: RunCancel,
+) -> RunReturn:
     """Run one task in an isolated child, up to its result.
 
     Returns ``SetRunning`` with the result envelope when the run set its row
@@ -1697,7 +1753,19 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
     (ORPHAN_CANCELLED).
 
     A task whose first parameter takes the ``TaskRuntime`` gets the runtime
-    of ``task_id`` and ``attempt`` (``run_runtime``).
+    of ``task_id`` and ``attempt`` (``run_runtime``), whose cancel state is
+    the cell of ``cancel``.
+
+    ``cancel`` is the operator cancel of the run, which the control thread
+    of the child requests (``child_main``):
+
+    - Before the body (the start write may still run): the body does not
+      start, and the run returns ``RunCancelled`` with ``NOT_STARTED``. A
+      start that ends the run another way returns that end.
+    - While the body runs: a ``def`` body reads ``cancel_state``; an
+      ``async def`` body gets ``CancelledError`` at its next ``await``.
+      Whatever the body then returns is dropped: the run returns
+      ``RunCancelled`` with ``RAN``.
 
     The envelope holds the task's success or its task error; the task's own
     outcome is in its ``ok`` and ``err`` members.
@@ -1732,6 +1800,9 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
         case StartedRunning() as started:
             pass
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
+            # A cancel kept before the start is dropped: the start ended the
+            # run, and that end is reported.
+            _ = cancel.fix_end()
             return ownership_result
         case DeadlineBeforeStart():
             raise AssertionError(
@@ -1739,26 +1810,59 @@ def _run_task_entry(  # pyright: ignore[reportUnusedFunction]
             )
         case _ as unreachable:
             assert_never(unreachable)
-    return set_running_or_end_child(
-        task_id_text,
-        started,
-        _run_isolated_after_running(
-            input_json,
-            work,
-            task_loop,
-            AttemptSubject(
-                task_id=task_id_text,
-                task_name=task_name,
-                queue_name=queue_name,
-                attempt=attempt,
-                worker_id=master_worker_id,
-                execution=Execution.ISOLATED,
-                workflow=started.workflow,
-                trace=trace,
-            ),
-            run_runtime(task_id, attempt),
+    match cancel.begin_body():
+        case SkipTheBody():
+            logger.info(
+                f'Task {task_name} ({task_id_text}) was cancelled before its body '
+                'started; the body does not run',
+            )
+            return _cancelled_end(cancel, started.started_at)
+        case StartTheBody():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    ran = _run_isolated_after_running(
+        input_json,
+        work,
+        task_loop,
+        AttemptSubject(
+            task_id=task_id_text,
+            task_name=task_name,
+            queue_name=queue_name,
+            attempt=attempt,
+            worker_id=master_worker_id,
+            execution=Execution.ISOLATED,
+            workflow=started.workflow,
+            trace=trace,
         ),
+        run_runtime(task_id, attempt, cancel.cell),
+        cancel,
     )
+    cancel.end_body()
+    returned = set_running_or_end_child(task_id_text, started, ran)
+    match cancel.fix_end():
+        case EndCancelled(body=body):
+            logger.info(
+                f'Task {task_name} ({task_id_text}) was cancelled by an operator; '
+                'what its body returned is dropped',
+            )
+            return RunCancelled(body=body, started_at=returned.started_at)
+        case EndNotCancelled():
+            return returned
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _cancelled_end(cancel: RunCancel, started_at: datetime) -> RunCancelled:
+    """The return of a run whose body an operator cancel skipped. The end is
+    fixed here, so a later cancel is ignored."""
+    match cancel.fix_end():
+        case EndCancelled(body=body):
+            return RunCancelled(body=body, started_at=started_at)
+        case EndNotCancelled():
+            raise AssertionError('a skipped body ended as not cancelled')
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _run_isolated_after_running(
@@ -1767,13 +1871,16 @@ def _run_isolated_after_running(
     task_loop: TaskLoop,
     attempt: AttemptSubject,
     runtime: TaskRuntime,
+    cancel: RunCancel,
 ) -> ResultEnvelope | BodyInterrupted:
     """The steps of an isolated run after its RUNNING update, inside the
     span and the log context of ``attempt`` (``run_in_attempt_span``). The
     span is current on this thread, so a ``def`` body and the coroutine of
     an ``async def`` body, which the task loop runs in a copy of this
     context, see it. The deadline of an isolated run is the worker's
-    (``isolated_body_end``): the span ends with what the steps returned."""
+    (``isolated_body_end``): the span ends with what the steps returned, or
+    with the cancel when an operator cancelled the run while the steps ran
+    (``_isolated_order``)."""
     return run_in_attempt_span(
         attempt,
         lambda: _isolated_steps(
@@ -1783,9 +1890,20 @@ def _run_isolated_after_running(
             work,
             task_loop,
             runtime,
+            cancel,
         ),
-        isolated_body_end,
+        lambda: _isolated_order(cancel),
     )
+
+
+def _isolated_order(cancel: RunCancel) -> BodyEndOrder:
+    """The order of an isolated run when its steps return: an operator
+    cancel came first, or the steps did (``isolated_body_end``)."""
+    match cancel.operator_requested():
+        case True:
+            return OperatorCancelFirst()
+        case False:
+            return isolated_body_end()
 
 
 def _isolated_steps(
@@ -1795,6 +1913,7 @@ def _isolated_steps(
     work: IsolatedWork,
     task_loop: TaskLoop,
     runtime: TaskRuntime,
+    cancel: RunCancel,
 ) -> EncodedResult | BodyInterrupted:
     """The steps of an isolated run after its RUNNING update: the stored
     options refusal, the resolve, the call and the result encode. Any
@@ -1828,6 +1947,7 @@ def _isolated_steps(
             task(*args, **kwargs),
             task_loop,
             task._map_exception,
+            cancel,
         )
         logger.info(f'Task execution completed: {task_name} ({task_id})')
         return encoded_body_end(task_name, task, out)

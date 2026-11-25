@@ -1,23 +1,33 @@
 //! Tests of the child host: the arguments, the exit codes, the result
-//! envelope, the deadline gate of thread seats, the poll watch, and the
-//! blocking frame read.
+//! envelope, the run gate of thread seats, the end of a run on a seat, the
+//! poll watch, and the blocking frame read.
 
 use std::ffi::OsString;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use uuid::Uuid;
 
-use super::link::{read_frame, ReadEnd};
+use super::link::{read_frame, FrameWriter, QueuedFrames, ReadEnd};
 use super::run::{refusal_end, result_end};
-use super::seats::{DeadlineGate, GateEnd, PollWatch};
+use super::seats::{
+    end_seat_run, end_seat_run_blocking, BodyStart, DeadlineFire, GateCancel, GateEnd,
+    InFlightRuns, PollWatch, RunGate,
+};
 use super::*;
 use crate::core::task::error::{OperationalErrorCode, TaskError};
 use crate::core::task::result::TaskResult;
+use crate::events::AttemptStart;
 use crate::worker::executor::protocol::{
-    encode_parent_frame, ChildFrame, DispatchNumber, FrameReader, LoopCulprit, ParentFrame,
-    RefusalReason, RunEnd, RunRef, StoredOptionsRefusal,
+    encode_parent_frame, ChildAfterFrame, ChildFrame, DispatchNumber, FrameReader, LoopCulprit,
+    ParentFrame, RefusalReason, RssReading, RunEnd, RunRef, SeatEnd, SharedResultFrame,
+    StoredOptionsRefusal,
 };
+
+/// The polls of a wait for a seat to free its run, and the time between two.
+const SEAT_FREE_POLLS: u32 = 400;
+const SEAT_FREE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 fn arguments(texts: &[&str]) -> Vec<OsString> {
     texts.iter().map(OsString::from).collect()
@@ -142,16 +152,139 @@ fn a_refusal_fails_the_task_with_its_reason() {
     );
 }
 
+/// The body of a thread run returns first: a later deadline and a later
+/// operator cancel change nothing.
 #[test]
-fn the_deadline_gate_lets_exactly_one_side_win() {
-    let returned_first = DeadlineGate::new();
-    assert_eq!(returned_first.finish(), GateEnd::Returned);
-    assert!(!returned_first.fire());
+fn a_thread_run_whose_body_returned_first_ignores_the_deadline_and_a_cancel() {
+    let gate = RunGate::new();
+    assert_eq!(gate.begin_body(), BodyStart::Start);
+    assert_eq!(gate.finish(), GateEnd::Returned);
+    assert_eq!(gate.fire_deadline(), DeadlineFire::Lost);
+    assert_eq!(gate.cancel(), GateCancel::RunEnded);
+}
 
-    let fired_first = DeadlineGate::new();
-    assert!(fired_first.fire());
-    assert_eq!(fired_first.finish(), GateEnd::Fired);
-    assert!(!fired_first.fire());
+/// The deadline of a thread run fires first: the return reads it, and a
+/// later operator cancel is ignored.
+#[test]
+fn a_thread_run_whose_deadline_fired_first_ignores_a_cancel() {
+    let gate = RunGate::new();
+    assert_eq!(gate.begin_body(), BodyStart::Start);
+    assert_eq!(gate.fire_deadline(), DeadlineFire::Won);
+    assert_eq!(gate.cancel(), GateCancel::RunEnded);
+    assert_eq!(gate.fire_deadline(), DeadlineFire::Lost);
+    assert_eq!(gate.finish(), GateEnd::DeadlineFired);
+}
+
+/// An operator cancel of a thread run whose body runs wins over a later
+/// deadline, and the return reads it.
+#[test]
+fn an_operator_cancel_while_the_thread_body_runs_wins_over_the_deadline() {
+    let gate = RunGate::new();
+    assert_eq!(gate.begin_body(), BodyStart::Start);
+    assert_eq!(gate.cancel(), GateCancel::BodyRunning);
+    assert_eq!(gate.cancel(), GateCancel::RunEnded);
+    assert_eq!(gate.fire_deadline(), DeadlineFire::Lost);
+    assert_eq!(gate.finish(), GateEnd::CancelFired);
+}
+
+/// An operator cancel before the body starts keeps the body from starting,
+/// also for a run that ends with no body.
+#[test]
+fn an_operator_cancel_before_the_thread_body_keeps_it_from_starting() {
+    let gate = RunGate::new();
+    assert_eq!(gate.cancel(), GateCancel::BeforeBody);
+    assert_eq!(gate.begin_body(), BodyStart::CancelledBeforeBody);
+
+    let no_body = RunGate::new();
+    assert_eq!(no_body.cancel(), GateCancel::BeforeBody);
+    assert_eq!(no_body.end_without_body(), BodyStart::CancelledBeforeBody);
+}
+
+/// A thread run that ends with no body closes its gate to a later cancel.
+#[test]
+fn a_thread_run_with_no_body_ignores_a_later_cancel() {
+    let gate = RunGate::new();
+    assert_eq!(gate.end_without_body(), BodyStart::Start);
+    assert_eq!(gate.cancel(), GateCancel::RunEnded);
+}
+
+fn seat_run(number: u64) -> RunRef {
+    RunRef {
+        dispatch: DispatchNumber::new(number).expect("a dispatch number"),
+        task_id: Uuid::from_u128(u128::from(number)),
+    }
+}
+
+/// The end of `run` on a seat.
+fn seat_end(run: RunRef) -> SharedResultFrame {
+    SharedResultFrame {
+        run,
+        end: SeatEnd::TimedOut,
+        started_at: AttemptStart::NotReported,
+        rss: RssReading::Unreadable,
+        child: ChildAfterFrame::ServesOn,
+    }
+}
+
+/// A writer whose queue of one frame holds a frame of the run `earlier`:
+/// the next send waits until the test takes that frame.
+async fn full_writer(earlier: RunRef) -> (FrameWriter, QueuedFrames) {
+    let (writer, queued) = FrameWriter::without_thread(1);
+    writer.send(ChildFrame::CancelFired(earlier)).await;
+    assert_eq!(queued.count(), 1, "the queue is full");
+    (writer, queued)
+}
+
+/// Return once no run is in flight.
+async fn until_no_run_in_flight(in_flight: &AtomicUsize) {
+    for _ in 0..SEAT_FREE_POLLS {
+        match in_flight.load(Ordering::Acquire) {
+            0 => return,
+            _ => tokio::time::sleep(SEAT_FREE_POLL_INTERVAL).await,
+        }
+    }
+    panic!("the seat was not freed while the end of its run waited to be queued");
+}
+
+/// #2296: the seat of a shared async run is free before the end of the run
+/// is queued. The parent frees the seat when it reads the end, and may send
+/// `stop` or a new run at once; a seat still taken made the child exit with
+/// the bad-parent-frame code. The queue is full, so the end waits to be
+/// queued while the test reads the count of runs in flight.
+#[tokio::test]
+async fn an_async_seat_is_free_before_the_end_of_its_run_is_queued() {
+    let (earlier, run) = (seat_run(1), seat_run(2));
+    let (writer, mut queued) = full_writer(earlier).await;
+    let in_flight = Arc::new(AtomicUsize::new(1));
+    let cancels: InFlightRuns<()> = InFlightRuns::new();
+    let seat_in_flight = Arc::clone(&in_flight);
+    let seat = tokio::spawn(async move {
+        end_seat_run(&writer, &seat_in_flight, &cancels, seat_end(run)).await;
+    });
+    until_no_run_in_flight(&in_flight).await;
+    assert_eq!(queued.count(), 1, "the end waits behind the full queue");
+    assert_eq!(queued.take().await, ChildFrame::CancelFired(earlier));
+    assert_eq!(queued.take().await, ChildFrame::SharedResult(seat_end(run)));
+    seat.await.expect("the seat task ends");
+}
+
+/// #2296: the seat of a shared thread run is free before the end of the run
+/// is queued, as for an async seat; the end goes out from the seat thread.
+#[tokio::test]
+async fn a_thread_seat_is_free_before_the_end_of_its_run_is_queued() {
+    let (earlier, run) = (seat_run(3), seat_run(4));
+    let (writer, mut queued) = full_writer(earlier).await;
+    let in_flight = Arc::new(AtomicUsize::new(1));
+    let cancels: InFlightRuns<()> = InFlightRuns::new();
+    let seat_in_flight = Arc::clone(&in_flight);
+    let seat = std::thread::spawn(move || {
+        end_seat_run_blocking(&writer, &seat_in_flight, &cancels, seat_end(run));
+    });
+    until_no_run_in_flight(&in_flight).await;
+    assert_eq!(queued.count(), 1, "the end waits behind the full queue");
+    assert_eq!(queued.take().await, ChildFrame::CancelFired(earlier));
+    assert_eq!(queued.take().await, ChildFrame::SharedResult(seat_end(run)));
+    seat.join().expect("the seat thread ends");
 }
 
 #[test]

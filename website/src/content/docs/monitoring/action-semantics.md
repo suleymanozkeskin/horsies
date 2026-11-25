@@ -8,8 +8,8 @@ tags: [monitoring, actions, cancel, rerun, pause, resume, workflow]
 
 Four actions are available from the web UI: task cancel, and workflow pause,
 resume and cancel. Each acts on database rows. Task rerun is a client call,
-not a web UI action. Two of them leave a process running afterwards, and this page
-states which and why.
+not a web UI action. Two of them can leave task code running afterwards, and this
+page states when and why.
 
 Every action is a compare-and-swap against the row's current status. Two
 operators acting at once do not corrupt anything: one CAS matches and the other
@@ -27,7 +27,7 @@ timestamp. Waiting result handles unblock and receive `TASK_CANCELLED`.
 |---|---|
 | `PENDING` | Cancelled. The task never runs |
 | `CLAIMED` | Cancelled. The child's pre-start ownership check fails, it aborts with `CLAIM_LOST`, and writes nothing |
-| `RUNNING` | Cancelled **only when the caller opts in**. See below |
+| `RUNNING` | Cancelled **only when the caller opts in**. The attempt is recorded as `CANCELLED`, and the worker gives the cancel to the task code. See below |
 | `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED` | Refused, 409 `TASK_NOT_CANCELLABLE` with the current status |
 | Row is a workflow node | Refused, 400 `TASK_IS_WORKFLOW_TASK` |
 | Stored row does not parse, for example a history status that is not a task status | Refused, 500 with a `detail` message. Nothing changes |
@@ -38,20 +38,60 @@ against a cancelled row and cannot overwrite it.
 
 ### Cancelling a RUNNING task
 
-**horsies does not kill running processes.** Cancelling a `RUNNING` task flips
-the row durably, and:
+With `include_running`, one statement does these steps in one transaction:
 
-- The task's code **keeps executing** on its worker until the function returns.
-- Its **side effects still happen** — writes, HTTP calls, file operations.
-- Its result is discarded. The row stays `CANCELLED`; finalize finds no
-  `RUNNING` row to update.
-- **No attempt row is recorded** for that run. Attempt history will show a gap
-  where this execution would have been.
-- A pool slot stays occupied until the function returns.
+- It writes one attempt row for the run: outcome `CANCELLED`, `will_retry`
+  false, the start time of the run, `finished_at` at the time of the cancel,
+  error code `TASK_CANCELLED`, and `recorded_by` `CANCEL` in its phase record.
+- It moves the task to history as `CANCELLED`, with that attempt in its
+  attempt archive. Waiting result handles receive `TASK_CANCELLED` at once.
+- It sends a notice on the channel `horsies_task_cancel` to the worker that
+  holds the run. PostgreSQL sends the notice only when the cancel commits.
 
-There is no safe cross-process kill, so the API offers none. The
-`include_running` flag exists so this is opted into rather than stumbled into;
-the UI gates it behind a checkbox stating the same facts.
+The worker then gives the cancel to the task code. The task code decides when
+to stop:
+
+| Execution and body | The task code gets | When the code does not stop |
+|---|---|---|
+| `ISOLATED`, async (Python `async def`, Rust `#[task]`) | Python: `asyncio.CancelledError` at its next `await`. Rust: `TaskRuntime::cancelled()` completes. Both: the cancel state of `TaskRuntime` | The code runs until it returns, or until its `timeout_ms` kill. With `cancel_grace_ms` on the task, the worker kills the child `cancel_grace_ms` after the cancel |
+| `ISOLATED`, sync (Python `def`, Rust `#[blocking_task]`) | The cancel state of `TaskRuntime`: the code reads it | As for an async body |
+| `SHARED_ASYNC` | As for an `ISOLATED` async body | After `cancel_grace_ms`, a second cancel and the cancel rounds, as at the deadline. A run that does not stop then keeps its seat; the worker kills the child only when no task in it has time left |
+| `SHARED_THREAD` | The cancel state of `TaskRuntime` | The thread runs until it returns: a thread cannot be stopped |
+
+- A cancel that comes after the start of the run and before the task code
+  starts: the code does not run.
+- What the code returns after the cancel is dropped. The task stays
+  `CANCELLED`, and no result is stored. A result that reached the worker
+  before the child got the cancel is dropped too: the row is in history.
+- The side effects that the code made before it stopped stay.
+- The seat or the child slot stays in use until the code stops.
+- An `ISOLATED` task with no `cancel_grace_ms` is never killed for a cancel:
+  the cancel is cooperative only. Its `timeout_ms` still kills it. A task
+  with no `timeout_ms` and no `cancel_grace_ms` that does not read the cancel
+  runs until it returns.
+- When no worker holds the run (the worker stopped or crashed), nothing
+  gets the notice. The attempt row is recorded in all cases.
+
+How the worker gets the cancel:
+
+- The notice comes on the listener connection of the worker, when the cancel
+  commits.
+- A notice can be lost: at a reconnect of the listener, or when the notice
+  queue of the worker is full. The worker then reads the cancels of the runs
+  that it holds, with one statement. It also does this read when a runner
+  heartbeat of a run that it holds does not land. So a lost notice reaches
+  the task code at most one `runner_heartbeat_interval_ms` (default 30 s)
+  later, while the heartbeat connection of the worker works.
+
+`finished_at` of the `CANCELLED` attempt is the time of the cancel: from then
+on, no write of the run lands. The time when the code stopped, and how it
+stopped, are in the `AttemptEnded` event, in the attempt span and in
+`horsies.task.run.duration`. See
+[Lifecycle Events](/horsies/observability/events/#the-end-of-an-attempt).
+
+The task API is on the client pages:
+[Cancellation](/horsies/tasks/defining-tasks/#cancellation) (Python) and
+[Task Runtime](/horsies/rust/tasks/defining-tasks/#task-runtime) (Rust).
 
 ```bash
 curl -X POST "$BASE/api/tasks/$TASK_ID/cancel" \
@@ -61,11 +101,13 @@ curl -X POST "$BASE/api/tasks/$TASK_ID/cancel" \
 ```
 
 Without `include_running`, a `RUNNING` task is refused with 409 like any other
-ineligible state.
+ineligible state. The flag keeps a cancel of running code deliberate; the UI
+gates it behind a checkbox.
 
-**Settled when:** the task reads `CANCELLED`. That is immediate. A worker
-process that was executing may keep running for arbitrarily long afterwards, and
-that is not a failure of the cancel.
+**Settled when:** the task reads `CANCELLED` with its `CANCELLED` attempt. That
+is immediate. The task code stops when it reads the cancel, or at the kill of an
+`ISOLATED` task with `cancel_grace_ms`. Code that does not read the cancel can
+run on up to its `timeout_ms`, and that is not a failure of the cancel.
 
 ## Task rerun
 
@@ -132,6 +174,11 @@ cleared. Those nodes get fresh task rows on resume.
 - Only `status` and `updated_at` change on the run row. `completed_at`,
   `result`, and `error` stay as they were.
 
+On the timeline, the pause is a band over every row, from the pause to the
+resume or to the end of the run. A node whose claimed task the pause cancelled
+shows `ready` from the move of that task to history until the resume; the
+task of the resume is a new task of the node (`task 2` in the tooltip).
+
 **Settled when:** the run reads `PAUSED` and no node is still executing with a
 claimed or running backing task. The status flip is immediate; the drain is not.
 
@@ -150,8 +197,9 @@ has still happened: `resume_workflow()` returns `HandleResumeRecoveryFailed`,
 and the response is 200 with `warning: "post_resume_recovery_failed"`. Treat
 that as *resumed, check worker logs* — not as a failed resume. The worker
 reaper runs the same recovery pass over all workflows. A database failure
-before the commit is 503: the resume rolled back, or its commit outcome is
-unknown.
+before the commit is 503 or 500, by its cause (see
+[Conflict handling](#conflict-handling)): the resume rolled back, or, on a
+503 only, its commit outcome is unknown.
 
 Resume does not clear a stale `error` left on the run by an `on_error=OnError.PAUSE`
 policy.
@@ -173,8 +221,9 @@ through every descendant workflow, in a single commit.
 Per node:
 
 - `PENDING` and `READY` nodes are **skipped**. The node vocabulary has no
-  cancelled state; cancel expresses as `SKIPPED`. Those nodes keep
-  `completed_at` null, so they show no duration.
+  cancelled state; cancel expresses as `SKIPPED`. The cancel sets their
+  `completed_at`: the timeline shows their `pending` or `ready` time up to
+  the cancel, then the `skipped` marker.
 - Backing tasks of enqueued nodes are cancelled, whether `PENDING`, `CLAIMED`,
   or `RUNNING`.
 - **Executing nodes keep running to completion.** As with task cancel, no
@@ -185,6 +234,8 @@ Per node:
 A node that was executing when its run was cancelled is *draining*: it finishes,
 its side effects happen, and its result does not advance the workflow. The UI
 badges it `draining` rather than treating it as an error, because it is not one.
+On the timeline, the task of a draining node keeps its segments after the end
+of the run, and the time axis grows with them.
 
 A draining node can persist indefinitely if the worker executing it crashed: the
 reaper ignores nodes under non-running workflows, so nothing reclaims it. That
@@ -232,8 +283,19 @@ concurrency control.
 | 400 | A task id in the path of a task route, or a workflow id in the path of a workflow action (`pause`, `resume`, `cancel`), is not a UUID (`INVALID_INPUT`, with a `detail`); nothing was read or changed | Send the id as UUID text |
 | 404 | The row no longer exists. On the workflow read routes also a workflow id that is not a UUID, and a node index outside the 32-bit node index column; nothing was read | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
-| 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a server defect | Check the server logs and re-read the entity. For `STORED_DATA_INVALID`, nothing was committed, and a repeat gets the same answer until the stored row changes |
-| 503 | Broker or database failure | The action may or may not have committed; re-read before retrying |
+| 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a database failure that stays (see below). Or a server defect | Check the server logs and re-read the entity. A repeat gets the same answer until the stored row, the schema or the connection settings change. For `STORED_DATA_INVALID`, nothing was committed |
+| 503 | A database failure that may clear (see below) | The action may or may not have committed; re-read before retrying |
+
+A failed database operation answers by the core's classification of its
+cause: the classification that sets `retryable` on the error types of both
+clients. The read routes answer by the same rule.
+
+| Cause | Status |
+|---|---|
+| A connect that the network refused or that did not answer; a connection that closed; a pool checkout that timed out; a statement whose reply was lost (its outcome is unknown) | 503 |
+| SQLSTATE class 08 (connection exception), 40 (serialization failure, deadlock), 53 (insufficient resources), 55 (object not in prerequisite state, for example 55P03 lock not available) or 57 (operator intervention, for example 57014 statement timeout) | 503 |
+| Every other SQLSTATE class, also a class that this list does not name: for example 22 (data exception), 23 (integrity violation, for example 23514 a CHECK constraint), 28 (a password that the server refuses), 42 (syntax error or undefined object, for example a database with no horsies schema) and XX (internal error) | 500 |
+| A connection setting that the core refuses; a server certificate that the client refuses; a broker with no listener (`/api/workers/ping`) | 500 |
 
 A failed request is not proof that nothing happened. A network error in
 particular leaves the outcome unknown — the request may have committed and the

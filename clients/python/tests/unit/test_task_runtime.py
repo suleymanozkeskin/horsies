@@ -24,7 +24,15 @@ import pytest
 from pydantic import BaseModel, SecretStr
 
 import horsies._core as core
-from horsies import AttemptNumber, AttemptNumberRefused, FencingToken, TaskRuntime
+from horsies import (
+    AttemptNumber,
+    AttemptNumberRefused,
+    CancelCause,
+    CancelNotRequested,
+    CancelRequested,
+    FencingToken,
+    TaskRuntime,
+)
 from horsies.core.app import Horsies
 from horsies.core.codec.json_io import loads_json
 from horsies.core.codec.json_value import StrictJsonError
@@ -46,11 +54,19 @@ from horsies.core.models.schedule import IntervalSchedule, TaskSchedule
 from horsies.core.models.tasks import Execution, TaskError, TaskResult
 from horsies.core.models.workflow import TaskNode, WorkflowSpec
 from horsies.core.scheduler.validation import _signature_error
-from horsies.core.task_runtime import FIRST_ATTEMPT, MAX_ATTEMPT
+from horsies.core.task_runtime import (
+    FIRST_ATTEMPT,
+    MAX_ATTEMPT,
+    CancelAlreadySet,
+    CancelSet,
+    RunCancelCell,
+    run_task_runtime,
+)
 from horsies.core.types.result import Err, Ok
 from horsies.core.worker import child_runner, shared_runner, thread_runner
 from horsies.core.worker.child_frames import NoTraceCarrier
 from horsies.core.worker.child_runner import RunTheTask
+from horsies.core.worker.run_cancel import RunCancel
 from horsies.core.worker.run_return import (
     EncodedResult,
     NotInWorkflow,
@@ -186,6 +202,34 @@ class TestForTest:
 
         assert result.unwrap() == FencingToken(task_id=TASK_ID, value=2)
 
+    def test_the_default_cancel_state_is_not_requested(self) -> None:
+        runtime = TaskRuntime.for_test(task_id=TASK_ID)
+
+        assert runtime.cancel_state() == CancelNotRequested()
+
+    @pytest.mark.parametrize('cause', list(CancelCause))
+    def test_the_runtime_gives_the_cancel_state_that_the_test_passes(
+        self,
+        cause: CancelCause,
+    ) -> None:
+        runtime = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            cancel_state=CancelRequested(cause=cause),
+        )
+
+        assert runtime.cancel_state() == CancelRequested(cause=cause)
+        assert runtime.cancel_state() == runtime.cancel_state()
+
+    def test_two_runtimes_with_one_token_are_equal_whatever_their_cancel_state(
+        self,
+    ) -> None:
+        cancelled = TaskRuntime.for_test(
+            task_id=TASK_ID,
+            cancel_state=CancelRequested(cause=CancelCause.OPERATOR),
+        )
+
+        assert cancelled == TaskRuntime.for_test(task_id=TASK_ID)
+
     def test_the_runtime_the_token_and_the_attempt_are_frozen(self) -> None:
         runtime = TaskRuntime.for_test(task_id=TASK_ID)
 
@@ -195,6 +239,36 @@ class TestForTest:
             setattr(runtime.fencing_token, 'value', 2)
         with pytest.raises(AttributeError):
             setattr(_attempt(1), 'value', 2)
+
+
+class TestRunCancelCell:
+    """The cancel state of one run: set once, by the first cause."""
+
+    def test_a_new_cell_holds_no_request(self) -> None:
+        assert RunCancelCell().state() == CancelNotRequested()
+
+    def test_the_first_request_sets_its_cause(self) -> None:
+        cell = RunCancelCell()
+
+        assert cell.request(CancelCause.OPERATOR) == CancelSet()
+        assert cell.state() == CancelRequested(cause=CancelCause.OPERATOR)
+
+    def test_a_later_request_keeps_the_first_cause(self) -> None:
+        cell = RunCancelCell()
+        _ = cell.request(CancelCause.DEADLINE)
+
+        assert cell.request(CancelCause.OPERATOR) == CancelAlreadySet(
+            cause=CancelCause.DEADLINE,
+        )
+        assert cell.state() == CancelRequested(cause=CancelCause.DEADLINE)
+
+    def test_the_runtime_of_a_run_reads_its_cell_as_it_changes(self) -> None:
+        cell = RunCancelCell()
+        runtime = run_task_runtime(FencingToken(task_id=TASK_ID, value=1), cell)
+
+        assert runtime.cancel_state() == CancelNotRequested()
+        _ = cell.request(CancelCause.OPERATOR)
+        assert runtime.cancel_state() == CancelRequested(cause=CancelCause.OPERATOR)
 
 
 # =============================================================================
@@ -474,7 +548,7 @@ class TestInjection:
         )
 
         with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
-            steps = asyncio.run(shared_runner._seat_steps(frame))
+            steps = asyncio.run(shared_runner._seat_steps(frame, RunCancel()))
 
         token = _ok_of(_encoded(steps), FencingToken)
         assert token == FencingToken(task_id=TASK_ID, value=2)
@@ -491,7 +565,7 @@ class TestInjection:
         assert isinstance(work, core.ThreadTaskWork), work
 
         with patch.object(child_runner, 'get_current_app', MagicMock(return_value=APP)):
-            steps = thread_runner._thread_steps(frame, work)
+            steps = thread_runner._thread_steps(frame, work, RunCancel())
 
         token = _ok_of(_encoded(steps), FencingToken)
         assert token == FencingToken(task_id=TASK_ID, value=4)

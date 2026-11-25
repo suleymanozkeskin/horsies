@@ -28,7 +28,7 @@ const OK_RESULT: &str = r#"{"__h_task_result__":true,"ok":7,"err":null}"#;
 /// The SQL of a direct call with the row's own claim generation (Python's
 /// `_DIRECT_SQL`).
 const DIRECT_SQL: &str = "SELECT * FROM horsies_finish_workflow_success(
-    $1, $2, (SELECT claimed_at FROM horsies_tasks WHERE id = $1), $3
+    $1, $2, (SELECT claimed_at FROM horsies_tasks WHERE id = $1), $3, 'NOT_OBSERVED', NULL
 )";
 
 /// A RUNNING row of `WORKER` with `retry_count`, `max_retries = 3`, in
@@ -58,6 +58,7 @@ fn success(task_id: Uuid) -> FinishWorkflowSuccess {
         task_id,
         fence: owned_claim(),
         result_json: OK_RESULT.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 

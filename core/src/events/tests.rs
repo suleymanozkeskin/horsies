@@ -666,6 +666,14 @@ fn a_worker_decision_names_the_code_of_its_attempt_row() {
             WorkerDecision::ChildLost,
             OperationalErrorCode::WorkerCrashed.into(),
         ),
+        (
+            WorkerDecision::KilledAfterCancel,
+            OutcomeCode::TaskCancelled.into(),
+        ),
+        (
+            WorkerDecision::LostAfterCancel,
+            OutcomeCode::TaskCancelled.into(),
+        ),
     ];
     for (decision, code) in codes {
         assert_eq!(decision.error_code(), code);

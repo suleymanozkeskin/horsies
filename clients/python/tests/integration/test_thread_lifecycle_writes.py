@@ -52,6 +52,7 @@ from horsies.core.models.worker_profile import ResolvedPool
 from horsies.core.telemetry.attempt_span import BodyFirst
 from horsies.core.worker.child_runner import StartAllowed
 from horsies.core.worker.current import set_current_app
+from horsies.core.worker.run_cancel import RunCancel
 from horsies.core.worker.run_return import ResultEnvelope
 from horsies.core.worker.shared_child import StoppedBeforeRunning
 from horsies.core.worker.thread_child import ThreadRunTable, ThreadSeats
@@ -212,8 +213,9 @@ def _run_on_seats(runs: list[_Run]) -> list[SeatEnd]:
     assert seats.start().is_ok()
     for frame in frames:
         work = _seat_work(frame)
-        table.add(frame, work)
-        seats.give(frame, work)
+        cancel = RunCancel()
+        table.add(frame, work, cancel)
+        seats.give(frame, work, cancel)
     deadline = time.monotonic() + JOIN_S
     while len(writer.results()) < len(frames):
         assert time.monotonic() < deadline, 'a seat did not end its run'
@@ -375,6 +377,7 @@ async def test_the_running_update_of_a_refusal_ends_at_the_bound_of_the_core(
                 lambda: StartAllowed(),
                 # The RUNNING update ends first: the steps never return.
                 lambda: BodyFirst(),
+                RunCancel(),
             ),
             ATTEMPT_END_S,
         )
@@ -421,11 +424,13 @@ async def test_a_seat_that_gets_its_connection_after_the_deadline_leaves_the_row
     with child_core_handle_for(broker.config.effective_session_database_url, one_connection):
         assert seats.start().is_ok()
         try:
-            table.add(blocker, blocker_work)
-            seats.give(blocker, blocker_work)
+            blocker_cancel = RunCancel()
+            table.add(blocker, blocker_work, blocker_cancel)
+            seats.give(blocker, blocker_work, blocker_cancel)
             await asyncio.sleep(LOCK_HELD_S)
-            table.add(frame, work)
-            seats.give(frame, work)
+            cancel = RunCancel()
+            table.add(frame, work, cancel)
+            seats.give(frame, work, cancel)
             # Past the deadline of the run (the smallest timeout_ms of a run
             # frame), while the seat still waits for the connection.
             await asyncio.sleep(MIN_TASK_TIMEOUT_MS / 1000 + 0.5)

@@ -40,7 +40,7 @@ use tokio::task::{JoinError, JoinSet};
 use uuid::Uuid;
 
 use crate::core::config::child_sizing::{FINALIZE_BATCH_FLUSHERS, PARENT_POOL_CLAIM_CONNECTIONS};
-use crate::core::lifecycle::TerminalizationOutcome;
+use crate::core::lifecycle::{AttemptPlacement, TerminalizationOutcome};
 use crate::db::{PoolSizing, StatementFailure, Transience};
 use crate::failure_cause::{FailureCause, ServerErrorFacts};
 
@@ -62,12 +62,14 @@ pub const FINALIZE_BATCH_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 const STEADY_FLUSHERS: usize = FINALIZE_BATCH_FLUSHERS as usize;
 
 /// One plain success to write: the task, the claim generation that fences
-/// the write, and the result envelope text that history stores.
+/// the write, the result envelope text that history stores, and the
+/// placement of the attempt that the phase record of its attempt row keeps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlainSuccess {
     pub task_id: Uuid,
     pub claimed_at: DateTime<Utc>,
     pub result_json: String,
+    pub placement: AttemptPlacement,
 }
 
 /// The rows of one statement, in input order: 1 to [`FUSED_BATCH_MAX_ROWS`]

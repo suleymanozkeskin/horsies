@@ -192,7 +192,9 @@ class ErrorCode(str, Enum):
     """`SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms`."""
 
     TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC = 'HRS-110'
-    """`cancel_grace_ms` with an execution class other than `SHARED_ASYNC`."""
+    """`cancel_grace_ms` with `execution=SHARED_THREAD`: only `SHARED_ASYNC`
+    and `ISOLATED` take one, since a thread cannot be stopped.
+    """
 
     TASK_CANCEL_GRACE_OUT_OF_RANGE = 'HRS-111'
     """`cancel_grace_ms` outside 100 to 10,000 ms."""

@@ -10,6 +10,61 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Added
 
+- **The cancel of a RUNNING task reaches its code, in both clients.**
+  `cancel_task` with `include_running` (and `POST /api/tasks/{id}/cancel`
+  with `{"include_running": true}`) keeps its signature, its answers and
+  its errors. The statement that moves the task to history as `CANCELLED`
+  now also writes the attempt row of the run and sends a notice on the
+  channel `horsies_task_cancel`. The worker that holds the run sends the
+  cancel to the child, and the child gives it to the task code:
+  - An async body (Python `async def`, isolated or shared async) gets
+    `asyncio.CancelledError` at its next `await`. A Rust async body sees
+    `TaskRuntime::cancelled()` complete.
+  - A sync body (Python `def`, Rust `#[blocking_task]`; isolated or shared
+    thread) reads the cancel state of its `TaskRuntime`.
+  - A cancel that comes after the start of the run and before the body
+    starts: the body does not run.
+  - What the body returns after the cancel is dropped; the task stays
+    `CANCELLED`. Side effects made before the code stopped stay.
+  - Code that does not stop: an isolated body runs until it returns or until
+    its `timeout_ms` kill, unless the task sets `cancel_grace_ms`; a shared
+    async body gets the second cancel and the cancel rounds after
+    `cancel_grace_ms`, as at the deadline, and a run that still does not stop
+    keeps its seat until no task in its child has time left; a shared thread
+    body runs until it returns.
+  - A lost notice (a listener reconnect, a full notice queue) is found by
+    one read of the cancels of the runs that the worker holds, after the
+    reconnect and when a runner heartbeat of a held run does not land: at
+    most one `runner_heartbeat_interval_ms` (default 30 s) later while the
+    heartbeat connection works.
+  - Workflow cancel and workflow pause do not change: the task of a node
+    that started runs on.
+- **The cancel state of a run, in both clients.**
+  - Python: `TaskRuntime.cancel_state()` returns `CancelNotRequested()` or
+    `CancelRequested(cause)`, with `CancelCause.OPERATOR` (an operator
+    cancel) or `CancelCause.DEADLINE` (the deadline of a `SHARED_ASYNC` or a
+    `SHARED_THREAD` run). The first cause stays. `TaskRuntime.for_test`
+    takes `cancel_state` (default `CancelNotRequested()`). `horsies` exports
+    `CancelCause`, `CancelNotRequested`, `CancelRequested` and
+    `RunCancelState`.
+  - Rust: `TaskRuntime::cancel_state()` returns `RunCancelState`:
+    `NotRequested`, `Requested { cause: CancelCause }` (`Operator`,
+    `Deadline`) or `NotInARun`. `TaskRuntime::cancelled()` and
+    `is_cancelled()` also fire at an operator cancel, in every execution
+    class, and at the deadline of a `shared_thread` run; `is_cancelled()`
+    and `cancel_state()` work in a blocking body. `horsies` and
+    `horsies::task` re-export `RunCancelState` and `CancelCause`;
+    `horsies-core` exports them with `run_cancel_state`.
+- **`cancel_grace_ms` on `ISOLATED` tasks: the kill after a cancel.** An
+  `ISOLATED` task can set `cancel_grace_ms` (100 to 10,000 ms). The worker
+  then kills the child, with the subprocesses in its session,
+  `cancel_grace_ms` after it sent an operator cancel, when the run has not
+  ended. With no value there is no such kill, and the stored options hold
+  no value. The deadline of an `ISOLATED` task still kills its child with no
+  grace. A `SHARED_ASYNC` row that runs in an isolated child uses its own
+  grace for the same kill. `SHARED_THREAD` keeps the refusal `HRS-110`; the
+  Python overloads and the Rust attribute accept `cancel_grace_ms` with
+  `ISOLATED`.
 - **A fencing token for task code, in both clients.** A task reads the
   fencing token of its run: the task id and a value. Two reads in one
   attempt give the same token. An attempt that runs after another attempt
@@ -47,9 +102,328 @@ and there is no migration contract between pre-1.0 versions.
     `tokio::spawn` and a thread that the body starts get
     `FencingTokenRefused::NotInARun`. `horsies-core` exports
     `run_fencing_token`, `FencingToken` and `FencingTokenRefused`.
+- **Each attempt row keeps the phase times of its attempt.** Schema
+  migration 1001 adds a phase record to `horsies_task_attempts`: the due
+  time (`enqueued_at`), the claim that ran the attempt (`claimed_at`), the
+  claim count and the first claim of the attempt (`attempt_claims`,
+  `first_claimed_at`), the time a child of the worker took the task
+  (`placed_at`, the claim time plus the slot wait that the worker
+  measured), the finalizing marker (`finalizing_at`), the writer
+  (`recorded_by`: `WORKER` or `RECOVERY`) and, for a stale recovery, the
+  last time the attempt was known alive (`last_seen_at`). `horsies_tasks`
+  counts the claims of the current attempt (`attempt_claims`,
+  `first_claimed_at`). The statements that already write these rows write
+  the new values: no statement is added per task. A row written before the
+  migration keeps NULL in each new column. The Python worker records no
+  placement (`placed_at` NULL).
+- **Each workflow run keeps a record of its node and pause events.**
+  Migration 1001 adds the table `horsies_workflow_events`. The statement
+  that changes the state writes the event: `NODE_READY` (a node goes back
+  to `READY` with no work), `NODE_ENQUEUED` (a sub-workflow node waits for
+  its child start), `TASK_MOVED` (a task of a node moves to history; the
+  event holds the locator of the history row: retention class, terminal
+  time and task id), `WORKFLOW_PAUSED` and `WORKFLOW_RESUMED` (one for
+  each workflow of the tree that the pause or the resume moves). No
+  statement is added: a plain task writes no event, and a workflow task
+  writes its event in the statement of its move. The events go with their
+  workflow: the workflow retention deletes them, and the foreign keys
+  delete them with a deleted node or workflow. The migration writes no
+  event for a run that began before it.
+- **The monitoring API shows the phase timing of a workflow run and the
+  phase record of each attempt.** Each `TaskAttemptInfo` (task detail, node
+  detail, `GET /api/tasks/{id}`, `GET /api/workflows/{id}/tasks/{index}`)
+  has `phases`: the phase record of its attempt row, or `not_captured` for a
+  row written before migration 1001. The run read (`get_workflow_run`,
+  `GET /api/workflows/{id}`) has `timing` on the run and on each node. The
+  core composes the timing of each node from the attempt rows and the run
+  events: segments in order (`pending`, `ready`, `enqueued`, `retry_wait`,
+  `claimed`, `running`, `finalizing`, `advancing`, `unknown`), each with its
+  start, its end or `open`, and its node, task or attempt; a coverage label
+  (`exact`, `partial` with the reasons of its `unknown` segments,
+  `unavailable`, or `inconsistent` with the conflict that it names); and an
+  endpoint marker. The run timing holds the read time, the capture start,
+  the range of the run, its pauses and its coverage. A run that began before
+  migration 1001, or that has more than 100,000 events, is `unavailable`.
+  Times that the record holds in the wrong order make the node
+  `inconsistent`; the core does not reorder or guess them. One statement
+  reads the run, the events and the task rows (live, or in history at the
+  locator of each `TASK_MOVED` event); no statement runs per node or per
+  task. The Python models and the Rust types are in `horsies.monitoring`
+  and `horsies::monitoring`.
+- **The web UI draws the phase timing of a workflow run.** The Timeline
+  view replaces its execution-time bars with one row per node, in
+  task-index order, on one time axis: the
+  phase segments of the node in time order (a retry and a new task of the
+  node repeat them), the terminal status as a marker, and the wall time of
+  the node. A pause is a band over every row. A shared tooltip gives the
+  phase, task, attempt, claim, start, end and duration of a segment; the
+  arrow keys move between rows and through the segments of a row. A node
+  with `unavailable` or `inconsistent` timing shows a hatched row with its
+  label and reason. An open segment grows on a local one-second clock with
+  no request per second. The timeline renders only the rows in view and 8
+  rows above and below them, whatever the node count. Each Graph card adds
+  its wall time and a
+  thin phase strip (the time of each phase as a part of the node total);
+  the node detail adds the time of each phase and the segments by task and
+  attempt; each attempt in a task or node detail shows its phase times, its
+  claim count and its writer. A read-only legend names each phase. The run
+  detail polls in fallback mode also while a segment or a pause is open.
+- **Each worker snapshot records the name of its worker profile.** Schema
+  migration 1004 adds `profile_name` to `horsies_worker_states`. The worker
+  writes the name of the profile that it runs (the `--profile` value of
+  `horsies worker`, the profile of `WorkerStart` in the Rust client) with
+  each snapshot, and the worker state reads return it:
+  - Python: `WorkerStateSnapshot.profile` is `ProfileNamed(name)` or
+    `ProfileNotRecorded()` (`SnapshotProfile`); `horsies` exports the three
+    names.
+  - Rust: `WorkerStateSnapshot::profile` is `SnapshotProfile::Named { name }`
+    or `SnapshotProfile::NotRecorded`; `horsies` and `horsies-core` export
+    `SnapshotProfile`.
+  - Web: each entry of `GET /api/workers` has `profile`, `{"kind": "named",
+    "name": ...}` or `{"kind": "not_recorded"}`: Python `ProfileNamedInfo`
+    and `ProfileNotRecordedInfo` (`SnapshotProfileInfo`) in
+    `horsies.monitoring`, Rust `horsies::monitoring::SnapshotProfileInfo`.
+    The web UI type `WorkerState` has `profile`.
+
+  A snapshot written before the migration holds no name: its profile is not
+  recorded. The worker history (`GET /api/workers/{id}/history`) does not
+  change.
+- **The Workers page of the web UI groups the live workers by worker
+  profile.** The page has one panel for each profile name of
+  `GET /api/workers`, in name order; the live workers whose snapshot holds no
+  profile name are one last panel. A panel shows the number of workers, the
+  seats in service and the down slots, the number of children per worker
+  and the budget classes of the profile, and for each budget a meter with
+  the rows in flight and the free capacity, summed over the workers of the
+  profile. It lists each shape when the workers of one profile do not have
+  the same number of children and the same budget classes. The focused
+  worker and the card of a stale worker name the profile. On the same page:
+  - Each column header of the schedule table sorts the table, on a click
+    and on Enter or Space with the keyboard focus. The header shows the
+    sorted column and its direction (`aria-sort`). A schedule that has not
+    run shows `never` and is last in a sort by last run.
+  - Each legend item of the two history charts is a button. A click draws
+    that series alone, and a click on a series that is alone draws the two
+    series again. The value axis fits the series that are drawn: the
+    percent axis of the second chart is no longer fixed at 0 to 100.
+  - The load chart draws `running` and `claimed` in the colors of the task
+    statuses. The second chart has the title "Worker process" and states
+    that the task children of the worker are not in its numbers.
 
 ### Changed
 
+- **The monitoring API sends exact durations.** Each duration of the
+  monitoring reads and of the web API is a JSON number of seconds, exact to
+  the microsecond (`"exec_s": 2.310417`). It was a whole number of seconds.
+  The field names stay; the type changes from integer to float:
+  - `queue_s` and `exec_s` of a task list row (`GET /api/tasks`) and of a
+    task leaf (`GET /api/tasks/{id}`, `GET /api/workflows/{id}/tasks/{index}`);
+  - `wall_s` of a workflow run (`GET /api/workflows`,
+    `GET /api/workflows/{id}`) and `exec_s` of a workflow node
+    (`GET /api/workflows/{id}`);
+  - `snapshot_age_s` and `uptime_s` of a worker state (`GET /api/workers`);
+  - `wait_s` of a waiting stream of the class report
+    (`GET /api/workers/classes`).
+
+  The core computes each value from the stored times, with no rounding. A
+  negative value keeps its sign. `live_window_s` stays a whole number of
+  seconds. `stale` of a worker state compares the exact snapshot age with
+  the live window of 120 s, the rule by which the fleet check counts a live
+  worker: a snapshot 120.5 s old is stale (it was stale from 121 s).
+  - Python: these fields of the `horsies.monitoring` models are
+    `float | None`, and `StreamWaitingInfo.wait_s` is `float`. The helpers
+    `elapsed_s` and `span_s` of `horsies.monitoring` return exact seconds as
+    `float | None`; they returned whole seconds as `int | None`.
+  - Rust: in `horsies-core` and `horsies::monitoring`, these fields are
+    `Option<chrono::TimeDelta>`, and `wait_s` of `StreamWaitInfo::Waiting`
+    is `TimeDelta`; each serializes as seconds. `monitoring::elapsed_s` and
+    `monitoring::span_s` are renamed `monitoring::elapsed` and
+    `monitoring::span`, and return `Option<TimeDelta>`. The old names are
+    removed.
+- **A cancel of a RUNNING task records its attempt.** The new attempt
+  outcome `CANCELLED` (`TaskAttemptOutcome.CANCELLED`,
+  `TaskAttemptOutcome::Cancelled`) has `will_retry` false, error code
+  `TASK_CANCELLED`, the start of the run, and `finished_at` at the time of
+  the cancel: from then on no write of the run lands. Its phase record has
+  the writer `CANCEL` (`recorded_by`), with no placement and no
+  `last_seen_at`; the monitoring models add `RecordedByCancelInfo()`
+  (Python) and `AttemptRecordedByInfo::Cancel` (Rust), and the web UI names
+  the cancel as the writer. A cancel of a `PENDING` or `CLAIMED` task writes
+  no attempt, as before. A Rust `match` on `TaskAttemptOutcome` needs the
+  new arm.
+- **Metrics and alerts: the outcome `CANCELLED`.** `horsies.task.attempts`
+  and `horsies.task.run.duration` take the `outcome` value `CANCELLED`
+  (`error_code` `TASK_CANCELLED`) when the worker sees the end of a
+  cancelled run; the run duration ends when the task code stopped. The
+  alert `HorsiesTaskFailureRatioHigh` and the dashboard panels of attempts
+  that did not complete count `FAILED` and `WORKER_FAILURE` only
+  (`outcome=~"FAILED|WORKER_FAILURE"`), so a cancel is not a failure.
+- **Lifecycle events: contract version 7.** `ChildResult::Cancelled { end }`
+  (Python `ChildResultCancelled`) with `end` `RETURNED_AFTER_SIGNAL`,
+  `DROPPED_AFTER_GRACE` or `BEFORE_BODY`; `WorkerDecision` gains
+  `KILLED_AFTER_CANCEL` and `LOST_AFTER_CANCEL` (error code
+  `TASK_CANCELLED`); `AttemptRecord::RecordedByCancel` (Python
+  `AttemptRecordRecordedByCancel`): the cancel statement wrote the attempt,
+  and the worker wrote nothing. A result that reached the worker before its
+  child got the cancel keeps `Completed` or `Failed` with the record
+  `NotHeld`. The snapshot is `core/tests/fixtures/event_contract/v7.txt`. A
+  Rust `match` on these enums needs the new arms.
+- **Schema migration 1003 and child protocol 4: stop every process and
+  upgrade together.** The first start of this build applies migration 1003
+  (`core/migrations/1003_attempt_cancelled.sql`) after migration 1002. It
+  replaces the CHECKs `horsies_task_attempts_outcome_known` and
+  `horsies_task_attempts_phase_record_shape`, replaces
+  `horsies_cancel_task` (same arguments and columns), and adds
+  `horsies_cancelled_runs`. Each CHECK reads `horsies_task_attempts`, which
+  holds the attempts of live tasks only, under `ACCESS EXCLUSIVE` until the
+  migration commits; no table is rewritten and no old row changes. A
+  process of an earlier build that starts after it is refused, because the
+  database holds a newer version; one that runs on fails when it reads a
+  `CANCELLED` attempt, and its workers do not get the cancel of a running
+  task. A database at 1003 does not go back to an earlier build. The child
+  protocol goes from version 3 to 4 (`cancel_run`, `cancel_fired`,
+  `run_cancelled`, the seat end `cancelled`); a parent and a child of one
+  build always match, and a mismatch is refused at the child start. The web
+  monitoring schema check expects version 1003.
+- **Schema migration 1004: stop every process and upgrade together.** The
+  first start of this build applies migration 1004
+  (`core/migrations/1004_worker_profile_name.sql`) after migration 1003. It
+  adds the nullable column `profile_name` (`varchar(64)`) and the CHECK
+  `horsies_worker_states_profile_name_shape` to `horsies_worker_states`,
+  under `ACCESS EXCLUSIVE` until it commits; no table is rewritten and no
+  old row changes. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version; a worker of an
+  earlier build that runs on writes its snapshots with no profile name. A
+  database at 1004 does not go back to an earlier build. The web monitoring
+  schema check expects version 1004.
+- **Schema migration 1005: a CLAIMED or RUNNING task row holds its claim
+  generation. Stop every process and upgrade together.** The first start of
+  this build applies migration 1005
+  (`core/migrations/1005_claim_generation_by_status.sql`) after migration
+  1004. It adds the CHECK `horsies_tasks_claim_generation_by_status` to
+  `horsies_tasks`: a row with the status `CLAIMED` or `RUNNING` has
+  `claimed_at`. No horsies writer makes a row that breaks the rule. A
+  statement written by hand (for example a test seed) that inserts such a
+  row, or that clears `claimed_at` of such a row, now fails at once with
+  SQLSTATE 23514 and the name of the CHECK. Before, the row was accepted,
+  and the attempt writer that copies `claimed_at` refused it later. The
+  CHECK reads the table once, under `ACCESS EXCLUSIVE` until the migration
+  commits; no table is rewritten and no row changes. A database that holds
+  such a row stops the migration with SQLSTATE 23514: the message names the
+  table, the CHECK, the row count and the query that finds the rows, the
+  database stays at 1004, and the process does not start. Correct or delete
+  each row, then start again. A process of an earlier build that starts
+  after the migration is refused, because the database holds a newer
+  version. A database at 1005 does not go back to an earlier build. The web
+  monitoring schema check expects version 1005.
+- **Schema migration 1006: the client family `TYPESCRIPT` is reserved.**
+  The first start of this build applies migration 1006
+  (`core/migrations/1006_typescript_client_family.sql`) after migration
+  1005. It replaces the CHECK `horsies_client_family_family_known`: the
+  family row can hold `TYPESCRIPT` in addition to `PYTHON` and `RUST`. No
+  TypeScript client is released yet. The Python and Rust clients never write
+  `TYPESCRIPT`, and the migration does not change the family row. The
+  migration holds `ACCESS EXCLUSIVE` on `horsies_client_family` (one row)
+  until it commits; no table is rewritten. A process of an earlier build
+  that starts after it is refused, because the database holds a newer
+  version; one that runs on keeps writing. A database at 1006 does not go
+  back to an earlier build. The web monitoring schema check expects version
+  1006.
+  - A Python or a Rust client refuses a database whose family row holds
+    `TYPESCRIPT` as it refuses a database of the other client: the install,
+    each write and a rerun fail with the same errors and write nothing. The
+    message names the `TYPESCRIPT` client.
+  - Rust: `ClientFamily` of `horsies-core` gains `TypeScript` (stored as
+    `TYPESCRIPT`). `horsies::rerun::RecordedFamily::Recorded` can carry it
+    in `CallerRerunError::ClientFamilyMismatch`. A `match` on
+    `ClientFamily` needs the new arm.
+  - The message of `UnknownStoredFamily` (a family row that holds no client
+    family) names `PYTHON`, `RUST` and `TYPESCRIPT`.
+- **`WorkerStateSnapshot` has the field `profile`.** Code that builds a
+  Python `WorkerStateSnapshot` passes `profile`; a Rust struct literal of
+  `WorkerStateSnapshot` sets `profile`.
+- **A worker refuses a profile name that breaks the name rule.** In
+  `horsies-core`, `Worker::from_plan` refuses a `WorkerPlan` whose profile
+  name is not 1 to 64 characters of letters, digits, `_`, `.` and `-` (the
+  first not `.` or `-`), with a config error, before any work. The profile
+  selection of both clients never gives such a name.
+- **A workflow start with a known `workflow_id` must carry the same start
+  command.** When the id exists, the start compares its start command with
+  the stored one, in the same statement:
+  - same workflow name, same start command: the existing handle, as before;
+    nothing is written;
+  - same workflow name, another start command: the new error
+    `WorkflowStartCommandConflict` (Python) or
+    `WorkflowStartError::CommandConflict` (Rust), code
+    `WORKFLOW_COMMAND_CONFLICT`; nothing is written;
+  - the id holds a sub-workflow: `WORKFLOW_COMMAND_CONFLICT`;
+  - another workflow name: `WORKFLOW_ID_CONFLICT`, as before.
+
+  The new error has `message`, `workflow_name` and `workflow_id`. It is
+  never retryable, and `retry_start` / `retry_start_async` refuse it. The
+  start command is the workflow name, definition key, `on_error`, output
+  node, success policy, and each node of the top-level workflow: index,
+  node id, task name, input (as the client encoded it), queue, priority,
+  dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join
+  rule, `min_success`, task options (with `good_until`), retention class
+  and the sub-workflow facts. The workflow id, the call time, the trace and
+  the pre-built child workflows are not in it. The core computes the
+  SHA-256 of the start command (version 1); no client computes it. This is
+  a breaking change for a repeat start with other inputs: it returned the
+  first workflow and dropped the new inputs; now it is refused. Runs
+  started before this release have no stored start command and are not
+  checked: a start with their id and their name returns their handle, and
+  the core logs one warning. In `horsies-core`, `ClientStartOutcome` is
+  `Started | Exists(ExistingRun) | IdHeld(IdHolder)`, with
+  `ExistingRun::{SameCommand, FingerprintNotStored}` and
+  `IdHolder::{OtherWorkflowName { existing_name }, OtherCommand,
+  SubWorkflow}`; `WorkflowStartError::id_held(workflow_name, workflow_id,
+  holder)` builds the error of a held id. `WorkflowStartErrorCode` gains
+  `WorkflowCommandConflict` after `WorkflowIdConflict`; the crate `horsies`
+  re-exports both enums with the new members.
+- **Schema migration 1001: stop every 0.8.0 process before the upgrade.**
+  The first start of this build applies migration 1001
+  (`core/migrations/1001_lifecycle_record.sql`) after migration 1000. A
+  0.8.0 process that runs on after it calls functions whose argument list
+  changed (SQLSTATE 42883); a 0.8.0 process that starts after it is
+  refused, because the database holds a newer version. A database at 1001
+  does not go back to 0.8.0. The migration rewrites no table; it holds
+  `ACCESS EXCLUSIVE` on `horsies_tasks` and `horsies_task_attempts`, and
+  `SHARE ROW EXCLUSIVE` on `horsies_workflows` and `horsies_workflow_tasks`
+  (the foreign keys of the new event table), until it commits.
+- **Schema migration 1002: stop every process before the upgrade.** The
+  first start of this build applies migration 1002
+  (`core/migrations/1002_workflow_start_command_fingerprint.sql`) after
+  migration 1001. It adds `command_fingerprint_version` and
+  `command_fingerprint` to `horsies_workflows`, with the CHECK
+  `horsies_workflows_command_fingerprint_by_origin`, and replaces
+  `horsies_workflow_start` (40 arguments), `horsies_workflow_start_top_row`,
+  `horsies_workflow_start_child_row` and `horsies_workflow_child_start`. Upgrade every process together. A
+  process of an earlier build that runs on after the migration fails every
+  workflow start (SQLSTATE 42883); one that starts after it is refused,
+  because the database holds a newer version. A database at 1002 does not
+  go back to an earlier build. The migration rewrites no table and writes
+  no value into old rows; the new CHECK reads `horsies_workflows` once. The
+  web monitoring schema check expects version 1002.
+- **Task history: attempt archive version 2.** Each move to history from
+  migration 1001 stores the attempts of the task with their phase records,
+  and the open attempt of a task that ended with no attempt row (a cancel,
+  an expiry or a pause abandon): its claim count, its first claim and its
+  finalizing marker. The live branch of the monitoring task detail reads
+  the same form. History rows of version 1 stay as they are; the core reads
+  both versions.
+- **Workflow retention: a batch counts the event rows.** A batch of the
+  workflow retention counts the node rows and the event rows of its
+  workflows against `retention_delete_batch_size` (it counted the node rows
+  only), and deletes the events with their workflows.
+- **Rust crates: the attempt writes carry the placement of the attempt.**
+  In `horsies-core`, `PlainSuccess`, `FinishFailedAttempt`,
+  `FinishWorkflowSuccess` and `core::lifecycle::TerminalizationCommand::CompleteTaskFused`
+  gain the field `placement: core::lifecycle::AttemptPlacement`
+  (`Placed { slot_wait }` or `NotObserved`). Code that builds one of these
+  values sets it; a caller with no placement passes
+  `AttemptPlacement::NotObserved`. `migration_sql_file_texts()` lists every
+  SQL file of the migration chain, in run order.
 - **Rust crates: a large payload of an error or read type is boxed.** The
   field or variant holds the value in a `Box`, so the types that hold it
   are small. `Display`, `Debug`, the serde form, the error codes and the
@@ -78,6 +452,36 @@ and there is no migration contract between pre-1.0 versions.
   `core::lifecycle::outcomes::decode_raw` and
   `HandleOperationError::connect_failed` take their first argument by
   reference.
+- **Web API: a database failure that stays answers 500.** A monitoring read
+  or action whose database operation failed answered 503 for every cause.
+  It now answers by the core's classification of the cause, the
+  classification that sets `retryable` on the error types of both clients:
+  - 503 when the cause may clear: a connect that the network refused or
+    that did not answer, a connection that closed, a pool checkout that
+    timed out, a statement whose reply was lost, and SQLSTATE classes 08,
+    40, 53, 55 and 57 (for example 40001, 55P03 and 57014).
+  - 500 when it stays: every other SQLSTATE class, also a class that the
+    core does not name (for example 23514 a CHECK constraint, 42P01 an
+    undefined table, XX000), a connection setting that the core refuses,
+    and a broker with no listener for `GET /api/workers/ping`.
+
+  The body stays `{"detail": ...}` with the same text. The rule applies to
+  the actions `POST /api/tasks/{id}/cancel` and
+  `POST /api/workflows/{id}/pause`, `/resume` and `/cancel` (also to the
+  status read after a workflow pause or cancel); to the reads
+  `GET /api/tasks`, `/api/tasks/{id}`, `/api/tasks/stats`,
+  `/api/tasks/facets`, `/api/tasks/breakdown`, `/api/workflows`,
+  `/api/workflows/names`, `/api/workflows/{id}`,
+  `/api/workflows/{id}/tasks/{index}` and `/api/workers/schedules`; to the
+  worker reads `GET /api/workers`, `/api/workers/{id}/history`,
+  `/api/workers/classes` and `/api/workers/ping`; and to the mount of each
+  client when its broker cannot be built (Python `create_monitoring_app`,
+  Rust `horsies::web::router`) and the workflow actions of
+  `horsies::monitoring` when the connect fails. In `horsies-core`,
+  `monitoring::connect_failed_action(subject, &error)` takes the subject
+  and the `BrokerError` in place of the cause text;
+  `monitoring::database_failure_status` and `db::Transience::of_retryable`
+  are new.
 
 ### Documentation
 
@@ -105,6 +509,16 @@ and there is no migration contract between pre-1.0 versions.
   is also the heartbeat window.** A heartbeat partition is dropped
   `heartbeat_leaf_horizon_hours` after its hour ends. The pages said that
   the setting controls only the partitions kept ahead.
+### Fixed
+
+- **A repeat workflow start no longer returns a handle to a deleted
+  workflow.** A start whose id existed inserted with `ON CONFLICT DO
+  NOTHING` and then read the stored name in a second statement. When
+  retention deleted the row between the two statements, the start returned
+  a handle to a workflow that no longer existed. The conflict now locks the
+  existing row (`ON CONFLICT (id) DO UPDATE ... WHERE false`), so the read
+  finds it. After retention deleted and committed the row, a start with the
+  same id starts a new workflow.
 
 ## [0.8.0] - 2026-11-21
 

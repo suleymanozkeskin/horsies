@@ -102,8 +102,9 @@ pub use crate::core::history::maintenance::coverage::{
 pub use crate::core::history::maintenance::pruning::{PrunePass, PruneReach};
 pub use crate::core::history::periods::RetentionDays;
 
-// The baseline SQL files, which horsies._core hands to the Python install.
-pub use crate::broker::migrations::BASELINE_SQL_FILE_TEXTS;
+// The baseline SQL files, which horsies._core hands to the Python install,
+// and every SQL file of the migration chain, for the test harnesses.
+pub use crate::broker::migrations::{migration_sql_file_texts, BASELINE_SQL_FILE_TEXTS};
 
 // lifecycle operations of a client handle (`PostgresBroker::release_claims`,
 // `PostgresBroker::requeue_stale_claimed`, `PostgresBroker::cancel_task`)
@@ -144,23 +145,25 @@ pub use crate::worker::finalize_batch::{
 // Child mode of a Rust worker binary: the entry checks `child_mode` first
 // and, in child mode, exits with the code of `run_child_host`. Task bodies
 // start work that belongs to their run with `spawn_in_run`, read the
-// cancel signal of their run with `run_cancel_signal`, and read the fencing
-// token of their run with `run_fencing_token`. A result wait reads
+// cancel signal of their run with `run_cancel_signal` and its cause with
+// `run_cancel_state`, and read the fencing token of their run with
+// `run_fencing_token`. A result wait reads
 // `process_role` first: a process that runs task bodies refuses it. The
 // event handlers of the app (`EventHandlerSet`) run in the handler child of
 // the same binary (`HandlerChildApp`), which also makes the span of each
 // attempt that the worker ended through the client's `EndedSpanMaker`.
 pub use crate::worker::executor::child_host::{
     child_command, child_handle_setup, child_mode, child_producer, process_role, run_cancel_signal,
-    run_child_host, run_fencing_token, spawn_in_run, thread_role, wait_inside_task_message,
-    BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans, ChildApp, ChildArgs, ChildArgsError,
-    ChildHandleSetup, ChildHookFailure, ChildHostExit, ChildLogSetup, ChildMode, ChildProducer,
-    ChildStartFuture, ChildStartHook, EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow,
-    EventHandlerRefused, EventHandlerSet, HandlerChildApp, HandlerChildHasNoHandle, HandlerError,
-    NamedChildStartHook, ProcessRole, RunCancelSignal, RunSignalRefused, RunSpawnRefused,
-    ThreadRole, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, HANDLER_DRAIN,
-    HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL, MAX_RUN_WORK, NODE_READER_STOP_BOUND, NODE_READ_QUEUE_SPANS,
+    run_cancel_state, run_child_host, run_fencing_token, spawn_in_run, thread_role,
+    wait_inside_task_message, BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans, CancelCause,
+    ChildApp, ChildArgs, ChildArgsError, ChildHandleSetup, ChildHookFailure, ChildHostExit,
+    ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture, ChildStartHook, EndedAttempt,
+    EndedSpanMaker, EndedSpanScope, EndedWorkflow, EventHandlerRefused, EventHandlerSet,
+    HandlerChildApp, HandlerChildHasNoHandle, HandlerError, NamedChildStartHook, ProcessRole,
+    RunCancelSignal, RunCancelState, RunSignalRefused, RunSpawnRefused, ThreadRole,
+    CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY,
+    HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL, MAX_RUN_WORK,
+    NODE_READER_STOP_BOUND, NODE_READ_QUEUE_SPANS,
 };
 // The fencing token of a run, which `run_fencing_token` gives.
 pub use crate::core::task::{FencingToken, FencingTokenRefused};
@@ -200,7 +203,7 @@ pub use crate::worker::{
 pub use crate::broker::{
     checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
     ping_timeout_refused, worker_history_limit_refused, ClassBudget, ClassBudgets,
-    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth,
+    ClearableBootCause, DownSlot, DownSlots, ShortageErrno, SlotHealth, SnapshotProfile,
     MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
@@ -244,7 +247,9 @@ pub use crate::core::history::rerun::{
 // The child spec source of a client that keeps its workflow DSL in its own
 // language, and the spec data it sends.
 pub use crate::broker::workflow_phase2::{NodeFinishForm, NodeFinished, ParentAdvanceStopped};
-pub use crate::broker::workflow_start::{ClientStartError, ClientStartOutcome};
+pub use crate::broker::workflow_start::{
+    ClientStartError, ClientStartOutcome, ExistingRun, IdHolder,
+};
 pub use crate::workflow_engine::child_spec::{
     ChildSpecFuture, ChildSpecRequest, ChildSpecSource, ChildSpecUnavailable, ChildStartSource,
     ClientChildSpec, ClientSpec,

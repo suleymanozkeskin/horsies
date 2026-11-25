@@ -13,7 +13,7 @@ reference files in this skill folder (open one only when the task needs it):
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `@app.task`, `TaskRuntime` and the fencing token, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization |
+| `tasks.md` | `@app.task`, `TaskRuntime` and the fencing token, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization, the cancel of a running task (`TaskRuntime.cancel_state()`) |
 | `workflows.md` | `WorkflowSpec`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
 | `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, child hooks, event handlers (`@app.on_event`), CLI commands |
 | `monitoring.md` | `horsies.monitoring` query API, `cancel_task`, the `horsies[web]` dashboard, `create_monitoring_app`, `horsies web`, auth policies, schema states |
@@ -206,7 +206,7 @@ match spec.start():
         ...
 ```
 
-`retry_start` is best-effort idempotent by `workflow_id` (not payload-verified).
+A start with an existing `workflow_id` compares its start command with the stored one. The same command returns the existing handle; another command is `WorkflowStartCommandConflict` (`WORKFLOW_COMMAND_CONFLICT`, never retryable, nothing written). `retry_start` builds the same spec again, so a first attempt that committed comes back as the existing handle. Runs started before this release are not checked.
 
 ### Auto-retry ( this is not execution retry, only for sending tasks / starting workflows, for task execution retry see `RetryPolicy` )
 
@@ -348,7 +348,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 ### Error Code Enums
 
 - `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`
-- `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `ENQUEUE_FAILED`, `ASYNC_CONTEXT`
+- `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `WORKFLOW_COMMAND_CONFLICT`, `ENQUEUE_FAILED`, `ASYNC_CONTEXT`
 - `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors only `TaskSendEnqueueFailed` has `retryable`.

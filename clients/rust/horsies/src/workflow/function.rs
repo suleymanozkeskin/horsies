@@ -82,11 +82,12 @@ where
     }
 
     /// Start the workflow with the id `workflow_id`. A workflow that already
-    /// has this id and this name is not started again: its handle is
-    /// returned.
+    /// has this id and this start command is not started again: its handle
+    /// is returned.
     ///
     /// Errors: the start errors; `WORKFLOW_ID_CONFLICT` for an id of another
-    /// workflow name.
+    /// workflow name; `WORKFLOW_COMMAND_CONFLICT` for an id of a run of this
+    /// name with another start command, or of a sub-workflow.
     pub async fn start_with_id(
         &self,
         workflow_id: Uuid,

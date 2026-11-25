@@ -21,7 +21,7 @@ Use a handler to send what a worker does to another system: your own metrics, an
 
 The core defines each event type once. The Python client generates its classes from the core, and the Rust client re-exports the core types, so both clients read the same events.
 
-- The contract has a version. This release has version 6: `core/tests/fixtures/event_contract/v6.txt` in the repository holds its text. A change of an event type, a field or a closed type of a field is a new version.
+- The contract has a version. This release has version 7: `core/tests/fixtures/event_contract/v7.txt` in the repository holds its text. Version 7 adds the variants of an operator cancel of a running task. A change of an event type, a field or a closed type of a field is a new version.
 - An event holds ids, names, codes, numbers and times. It never holds task input, a task result, a failed reason or an exception text.
 - Each field has a closed type or a bound. A duration is a duration type, a time is a UTC time, and a state that can be missing or not known is a named variant.
 - A handler takes the events of one type, never the union of the types. A later version can add an event type, and that changes no handler of another type.
@@ -56,13 +56,23 @@ Each event also has `at`: the wall-clock time of the worker at the step.
 
 | Variant | The attempt | Fields |
 |---------|-------------|--------|
-| `ReportedByChild` | The child reported the end in its result frame | `result`: `Completed`, `Failed` with its error code, `WorkerFailure`, or `TimedOut` (the child ended a shared run at its deadline); `start` |
-| `DecidedByWorker` | The worker ended it, with no result frame of the child | `reason`: `TIMED_OUT` (the worker killed the child at the deadline), `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP` or `CHILD_LOST` |
+| `ReportedByChild` | The child reported the end in its result frame | `result`: `Completed`, `Failed` with its error code, `WorkerFailure`, `TimedOut` (the child ended a shared run at its deadline), or `Cancelled` with its `end` (an operator cancelled the run, and the run ended); `start` |
+| `DecidedByWorker` | The worker ended it, with no result frame of the child | `reason`: `TIMED_OUT` (the worker killed the child at the deadline), `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`, `CHILD_LOST`, `KILLED_AFTER_CANCEL` (the worker killed the child after an operator cancel: the kill after `cancel_grace_ms` of an `ISOLATED` task, the deadline, a blocked loop or the stop of the worker) or `LOST_AFTER_CANCEL` (the child was lost after an operator cancel, with its exit seen) |
 | `NotKnown` | The worker killed the child and did not see its exit; recovery decides the row | `child_pid` |
 
 An error code is a built-in code, a user code of at most 128 characters, or `UserOverBound` for a longer user code. `start` is `Reported` with the time of the `RUNNING` write, or `NotReported`. `DecidedByWorker` also has internal fields for the span of the attempt; they are not part of the stable contract.
 
-`AttemptRecorded.record` is one of `Completed`, `Failed`, `RetryScheduled` (with `retry_count` and `next_retry_at`), `ClaimReleased`, `NothingOwed`, `NotHeld`, `LeftToRecovery`, `RetriesExhausted` and `WriteFailed`.
+The `end` of `Cancelled` tells how the run ended after the cancel:
+
+| `end` | The run |
+|-------|---------|
+| `RETURNED_AFTER_SIGNAL` | The task code got the cancel and ended: within `cancel_grace_ms` for a shared async run, at its return for the other runs |
+| `DROPPED_AFTER_GRACE` | A shared async run was alive `cancel_grace_ms` after the cancel: the child sent the second cancel |
+| `BEFORE_BODY` | The cancel came after the start of the run and before the task code started: the code did not run |
+
+`AttemptRecorded.record` is one of `Completed`, `Failed`, `RetryScheduled` (with `retry_count` and `next_retry_at`), `ClaimReleased`, `NothingOwed`, `NotHeld`, `LeftToRecovery`, `RetriesExhausted`, `WriteFailed` and `RecordedByCancel`. `RecordedByCancel`: the cancel statement wrote the `CANCELLED` attempt of the run, so the worker wrote nothing. An attempt whose end reached the worker before its child got the cancel keeps its `Completed` or `Failed` end, with the record `NotHeld`: the cancel had moved the row first.
+
+The error code of `KILLED_AFTER_CANCEL` and `LOST_AFTER_CANCEL` is `TASK_CANCELLED`, the code of the attempt row. The `run_duration` of a cancelled attempt runs from the placement to the end that the worker saw, so it tells when the task code stopped; the `finished_at` of the attempt row is the time of the cancel.
 
 `ClaimReleased.reason`, `AttemptNotStarted.reason`, `TaskRecovered.action` and `ChildReplaced.reason` take the values of the `reason` label of `horsies.task.claims.released`, the `reason` label of `horsies.task.starts.refused`, the `action` label of `horsies.recovery.tasks` and the `reason` label of `horsies.worker.children.replaced` on the [Metric Reference](/horsies/observability/metric-reference/), in upper case. `SlotDown.cause` is `ResourceShortage` with its errno (`EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN`), or `ThreadStartRefused`.
 

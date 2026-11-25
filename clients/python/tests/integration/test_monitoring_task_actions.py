@@ -367,9 +367,11 @@ class TestCancelTaskSucceeds:
         assert row.failed_at is not None
         assert row.completed_at is None
 
-    async def test_cancel_records_no_attempt(
+    async def test_cancel_of_a_running_task_records_its_attempt_as_cancelled(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
+        """The cancel statement writes the CANCELLED attempt of the run before
+        the move; the move archives it and leaves no live attempt row."""
         task = make_task(
             status=TaskStatus.RUNNING,
             worker_id=WORKER_ID,
@@ -382,6 +384,43 @@ class TestCancelTaskSucceeds:
 
         assert is_ok(result)
         assert await attempt_rows(session, task.id) == []
+        archive = (
+            await session.execute(
+                text("""
+                    SELECT convert_from(attempt_snapshot, 'UTF8')
+                    FROM horsies_task_history WHERE task_id = CAST(:id AS uuid)
+                """),
+                {'id': task.id},
+            )
+        ).scalar_one()
+        assert archive.startswith('[[[1,"CANCELLED",false,'), archive
+        assert '"TASK_CANCELLED","Cancelled via monitoring API",null' in archive
+        assert archive.endswith('"CANCEL",null]],null]'), archive
+
+    async def test_cancel_of_a_claimed_task_records_no_attempt(
+        self, broker: PostgresBroker, session: AsyncSession
+    ) -> None:
+        task = make_task(
+            status=TaskStatus.CLAIMED,
+            worker_id=WORKER_ID,
+            claimed_at=ago(20),
+        )
+        await persist(session, task)
+
+        result = await cancel_task(broker, uuid.UUID(task.id))
+
+        assert is_ok(result)
+        assert await attempt_rows(session, task.id) == []
+        archive = (
+            await session.execute(
+                text("""
+                    SELECT convert_from(attempt_snapshot, 'UTF8')
+                    FROM horsies_task_history WHERE task_id = CAST(:id AS uuid)
+                """),
+                {'id': task.id},
+            )
+        ).scalar_one()
+        assert archive.startswith('[[],'), archive
 
     async def test_cancel_fires_the_terminal_status_notification(
         self, broker: PostgresBroker, session: AsyncSession

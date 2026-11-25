@@ -1,17 +1,17 @@
 //! `TaskRuntime`: what a task body reads while it runs.
 //!
 //! A body that takes `TaskRuntime` as its first parameter gets the app's
-//! state, the cancel signal and the fencing token of its run, and a way to
-//! start work that belongs to its run. The app builds the runtime when the
-//! task registers, so every worker child, which runs `main` again, has its
-//! own.
+//! state, the cancel signal and the cancel state of its run, the fencing
+//! token of its run, and a way to start work that belongs to its run. The
+//! app builds the runtime when the task registers, so every worker child,
+//! which runs `main` again, has its own.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use horsies_core::{
-    run_cancel_signal, run_fencing_token, spawn_in_run, FencingToken, FencingTokenRefused,
-    RunSignalRefused, RunSpawnRefused,
+    run_cancel_signal, run_cancel_state, run_fencing_token, spawn_in_run, FencingToken,
+    FencingTokenRefused, RunCancelState, RunSignalRefused, RunSpawnRefused,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -78,11 +78,12 @@ impl TaskRuntime {
     }
 
     /// Start `spec` with the id `workflow_id`, as [`Self::start`]. A start
-    /// again with the same id, after a retry of the task, finds the
-    /// workflow and starts nothing.
+    /// again with the same id and the same start command, after a retry of
+    /// the task, finds the workflow and starts nothing.
     ///
     /// Errors: as [`Self::start`]; `WORKFLOW_ID_CONFLICT` for an id of
-    /// another workflow name.
+    /// another workflow name; `WORKFLOW_COMMAND_CONFLICT` for an id of a run
+    /// of this name with another start command, or of a sub-workflow.
     pub async fn start_with_id<T>(
         &self,
         spec: &WorkflowSpec,
@@ -123,17 +124,29 @@ impl TaskRuntime {
         self.state.get::<T>()
     }
 
-    /// Complete when the run is cancelled at its deadline.
+    /// Complete when a cancel of the run is requested.
     ///
-    /// The cancel signal fires only for a `SHARED_ASYNC` run, at its
-    /// `timeout_ms`. The run then ends as `TASK_TIMEOUT` whatever the body
-    /// returns, and the body and the work it started with [`Self::spawn`]
-    /// have the task's `cancel_grace_ms` to end before the child drops them.
+    /// The cancel signal of a run fires once, with the first cause
+    /// ([`Self::cancel_state`]):
+    ///
+    /// - An operator cancel, in every execution mode: `cancel_task` with
+    ///   `include_running` on a `RUNNING` task. The task is `CANCELLED`
+    ///   already, with its attempt recorded as `CANCELLED`; what the body
+    ///   returns is dropped. In a `SHARED_ASYNC` run the body and the work it
+    ///   started with [`Self::spawn`] have the task's `cancel_grace_ms` to
+    ///   end before the child drops them. In an `ISOLATED` run with a
+    ///   `cancel_grace_ms`, the worker kills the child that much later when
+    ///   the run has not ended; with none, nothing is killed.
+    /// - The deadline of a `SHARED_ASYNC` run, at its `timeout_ms`. The run
+    ///   then ends as `TASK_TIMEOUT` whatever the body returns, with the same
+    ///   grace. The deadline of a `SHARED_THREAD` run fires it too; its
+    ///   thread runs on.
     ///
     /// In an `ISOLATED` run the parent kills the child at the deadline, so
-    /// the signal never fires. Outside the async body of a run (a blocking
-    /// body, or a direct call of the function in a test) there is no run
-    /// deadline: the future never completes.
+    /// the deadline never fires the signal there. A blocking body cannot
+    /// await this future: it reads [`Self::is_cancelled`] or
+    /// [`Self::cancel_state`]. Outside a run (a direct call of the function
+    /// in a test, plain `tokio::spawn`) the future never completes.
     pub async fn cancelled(&self) {
         match run_cancel_signal() {
             Ok(signal) => signal.cancelled().await,
@@ -141,13 +154,43 @@ impl TaskRuntime {
         }
     }
 
-    /// Whether the run is cancelled at its deadline. See [`Self::cancelled`];
-    /// `false` outside the async body of a run.
+    /// Whether a cancel of the run is requested, for any cause. See
+    /// [`Self::cancelled`]. It works in the async body, in work started with
+    /// [`Self::spawn`], and on the thread of a blocking body; `false` outside
+    /// a run, which [`Self::cancel_state`] tells apart.
     pub fn is_cancelled(&self) -> bool {
         match run_cancel_signal() {
             Ok(signal) => signal.is_cancelled(),
             Err(RunSignalRefused::NotInARun) => false,
         }
+    }
+
+    /// The cancel state of the run: `NotRequested`, `Requested` with the
+    /// first cause (`Operator` or `Deadline`), or `NotInARun` outside a run
+    /// (a direct call of the function in a test, work started with plain
+    /// `tokio::spawn` or `spawn_blocking`, or a thread that a blocking body
+    /// starts). It works in the async body, in work started with
+    /// [`Self::spawn`], and on the thread of a blocking body.
+    ///
+    /// ```ignore
+    /// #[horsies::blocking_task("import_rows", timeout_ms = 600_000)]
+    /// fn import_rows(rt: TaskRuntime, file: RowFile) -> Result<u32, TaskError<ImportCode>> {
+    ///     let mut imported = 0;
+    ///     for row in file.rows() {
+    ///         match rt.cancel_state() {
+    ///             RunCancelState::Requested { .. } => {
+    ///                 return Err(TaskError::user(ImportCode::Stopped, "cancelled"))
+    ///             }
+    ///             RunCancelState::NotRequested | RunCancelState::NotInARun => {}
+    ///         }
+    ///         store(row)?;
+    ///         imported += 1;
+    ///     }
+    ///     Ok(imported)
+    /// }
+    /// ```
+    pub fn cancel_state(&self) -> RunCancelState {
+        run_cancel_state()
     }
 
     /// The fencing token of the current run: the task id and a value. Write
@@ -249,6 +292,12 @@ mod tests {
         let waited =
             tokio::time::timeout(std::time::Duration::from_millis(20), runtime.cancelled()).await;
         assert!(waited.is_err(), "cancelled() completed outside a run");
+    }
+
+    #[test]
+    fn outside_a_run_the_cancel_state_is_not_in_a_run() {
+        let runtime = app().task_runtime();
+        assert_eq!(runtime.cancel_state(), RunCancelState::NotInARun);
     }
 
     #[tokio::test]

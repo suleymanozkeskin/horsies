@@ -329,7 +329,8 @@ impl SharedPool {
     /// the pool's kind is a defect of the route: it crashes loud.
     #[cfg(test)]
     pub fn submit(&self, task: &ClaimedTask, input: TaskInputText, work: SharedWork) -> Submitted {
-        self.submit_watched(task, input, work, PlacementWatch::Unwatched)
+        let (watch, _receipt) = super::pool::watched_placement();
+        self.submit_watched(task, input, work, watch)
     }
 
     /// As `SharedPool::submit`; `watch` is told when a child takes the

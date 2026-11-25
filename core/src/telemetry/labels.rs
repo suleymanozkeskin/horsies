@@ -293,6 +293,7 @@ impl LabelValue for TaskAttemptOutcome {
             Self::Completed => 0,
             Self::Failed => 1,
             Self::WorkerFailure => 2,
+            Self::Cancelled => 3,
         }
     }
 }
@@ -946,6 +947,7 @@ mod tests {
             TaskAttemptOutcome::Completed,
             TaskAttemptOutcome::Failed,
             TaskAttemptOutcome::WorkerFailure,
+            TaskAttemptOutcome::Cancelled,
         ]);
         assert_positions(&[
             StopReason::ClaimLost,
@@ -993,6 +995,7 @@ mod tests {
             TaskAttemptOutcome::Completed,
             TaskAttemptOutcome::Failed,
             TaskAttemptOutcome::WorkerFailure,
+            TaskAttemptOutcome::Cancelled,
         ] {
             assert_eq!(text_of(outcome), outcome.to_string());
         }

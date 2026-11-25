@@ -262,6 +262,7 @@ fn read_init(socket: &UnixStream, reader: &mut FrameReader) -> Result<InitFrame,
         Ok(
             ParentFrame::Run(_)
             | ParentFrame::SharedRun(_)
+            | ParentFrame::CancelRun(_)
             | ParentFrame::Events(_)
             | ParentFrame::Stop,
         ) => {

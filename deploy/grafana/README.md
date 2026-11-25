@@ -9,7 +9,7 @@
 | Row | Source | Panels |
 |---|---|---|
 | Fleet | the fleet collector (`horsies metrics`) | live workers, unserved classes, oldest pending task, failing fleet queries, workers with telemetry down, schema version; oldest pending task age; live tasks by status; fleet seats; workers by state; workflows; time since the last run of each schedule; fleet query time and failures |
-| Tasks | the worker endpoints | attempts by outcome; not completed ratio; error codes; retries; run time; queue wait; slot wait and outcome write; attempts with an unknown end |
+| Tasks | the worker endpoints | attempts by outcome; failed ratio; error codes of failed attempts; retries; run time; queue wait; slot wait and outcome write; attempts with an unknown end |
 | Workers | the worker endpoints | seats; child slots down; children replaced; child boot time; claim passes; released claims and refused starts; memory; recovery; a table of the workers |
 | Telemetry | the worker endpoints | events dropped; samples dropped at the series bound; event handler errors and drops |
 

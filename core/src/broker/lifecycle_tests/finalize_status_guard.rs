@@ -41,6 +41,7 @@ fn failed_attempt(
             error_message: Some("attempt raised".to_owned()),
             failed_reason: None,
         },
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -250,6 +251,7 @@ async fn workflow_success_blocks_on_ownership_mismatch() {
             claimed_at: generation(),
         },
         result_json: r#"{"ok": 1}"#.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     };
 
     let refused = write_workflow_success(&pool, &success(WORKER))
@@ -285,13 +287,15 @@ async fn fused_finalize_null_fence_is_refused() {
     let task_id = seed_task(&pool, &TaskSeed::running()).await;
     let before = live_row(&pool, task_id).await;
 
-    let refused = sql::query("SELECT * FROM horsies_complete_task_fused($1, $2, NULL, $3, TRUE)")
-        .bind(task_id)
-        .bind(WORKER)
-        .bind(r#"{"ok": 2}"#)
-        .fetch_all(&pool)
-        .await
-        .map(|rows| rows.len());
+    let refused = sql::query(
+        "SELECT * FROM horsies_complete_task_fused($1, $2, NULL, $3, TRUE, 'NOT_OBSERVED', NULL)",
+    )
+    .bind(task_id)
+    .bind(WORKER)
+    .bind(r#"{"ok": 2}"#)
+    .fetch_all(&pool)
+    .await
+    .map(|rows| rows.len());
 
     assert_refused(refused, "22023", Constraint::Unnamed);
     assert_eq!(live_row(&pool, task_id).await, before);

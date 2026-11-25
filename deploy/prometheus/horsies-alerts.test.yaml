@@ -34,7 +34,7 @@ tests:
               summary: "The oldest pending task of queue reports (ISOLATED) waits 6m 40s."
               description: "A task of this queue and execution class is due and not claimed for more than 5 minutes. Check the workers that serve the class, their seats in use, and HorsiesUnservedClass."
 
-  - name: HorsiesTaskFailureRatioHigh fires for a task with more than 10% of at least 10 attempts not completed
+  - name: HorsiesTaskFailureRatioHigh fires for a task with more than 10% of at least 10 attempts failed
     interval: 1m
     input_series:
       # send_email: 5 completed and 5 failed attempts a minute.
@@ -47,6 +47,11 @@ tests:
         values: '0+10x20'
       - series: 'horsies_task_attempts_total{job="horsies-worker", instance="worker-1:9464", task="resize", queue="default", execution="ISOLATED", outcome="FAILED", error_code="TASK_EXCEPTION"}'
         values: '0x20'
+      # report: half of the attempts are cancelled; a cancel is not a failure.
+      - series: 'horsies_task_attempts_total{job="horsies-worker", instance="worker-1:9464", task="report", queue="default", execution="ISOLATED", outcome="COMPLETED"}'
+        values: '0+5x20'
+      - series: 'horsies_task_attempts_total{job="horsies-worker", instance="worker-1:9464", task="report", queue="default", execution="ISOLATED", outcome="CANCELLED", error_code="TASK_CANCELLED"}'
+        values: '0+5x20'
       # rare: every attempt fails, but fewer than 10 attempts in 10 minutes.
       - series: 'horsies_task_attempts_total{job="horsies-worker", instance="worker-1:9464", task="rare", queue="default", execution="ISOLATED", outcome="FAILED", error_code="TASK_EXCEPTION"}'
         values: '0+0.5x20'
@@ -63,8 +68,8 @@ tests:
               queue: default
               task: send_email
             exp_annotations:
-              summary: "50% of the attempts of task send_email on queue default did not complete in the last 10 minutes."
-              description: "More than 10% of at least 10 attempts ended FAILED or WORKER_FAILURE. horsies_task_attempts_total{outcome!=\"COMPLETED\"} by error_code shows the causes."
+              summary: "50% of the attempts of task send_email on queue default failed in the last 10 minutes."
+              description: "More than 10% of at least 10 attempts ended FAILED or WORKER_FAILURE; a CANCELLED attempt is not counted. horsies_task_attempts_total{outcome=~\"FAILED|WORKER_FAILURE\"} by error_code shows the causes."
 
   - name: HorsiesNoLiveWorker fires once when every fleet collector counts no live worker
     interval: 1m

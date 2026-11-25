@@ -2,7 +2,7 @@
 //!
 //! The install writes the one row of `horsies_client_family`; every handle
 //! checks it once before its first write. A handle writes only into a
-//! database of its own family; a database of the other family, or one with
+//! database of its own family; a database of another family, or one with
 //! no family row, is refused with [`BrokerError::ClientFamilyMismatch`], not
 //! retryable. A family row whose value is not a client family is corrupt
 //! stored data: it is refused with [`BrokerError::UnknownStoredFamily`], not
@@ -18,23 +18,29 @@ use crate::db::{ParameterType, StatementFailure, Transience, TypedStatement};
 pub enum ClientFamily {
     Python,
     Rust,
+    /// The TypeScript client. The schema admits its value from migration
+    /// 1006 on; the Python and the Rust clients never write it.
+    TypeScript,
 }
 
 impl ClientFamily {
-    /// The stored value: `PYTHON` or `RUST`.
+    /// The stored value: `PYTHON`, `RUST` or `TYPESCRIPT`.
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Python => "PYTHON",
             Self::Rust => "RUST",
+            Self::TypeScript => "TYPESCRIPT",
         }
     }
 
     /// Parse a stored value. The CHECK `horsies_client_family_family_known`
-    /// holds the column to these two values; `None` for any other text.
+    /// holds the column to these three values; `None` for any other text,
+    /// with no case folding.
     pub fn parse(stored: &str) -> Option<Self> {
         match stored {
             "PYTHON" => Some(Self::Python),
             "RUST" => Some(Self::Rust),
+            "TYPESCRIPT" => Some(Self::TypeScript),
             _ => None,
         }
     }
@@ -66,7 +72,7 @@ impl std::fmt::Display for RecordedFamily {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "the client family row of this database is corrupt: horsies_client_family.family holds \
-     {stored:?}, which is neither PYTHON nor RUST"
+     {stored:?}, which is not PYTHON, RUST or TYPESCRIPT"
 )]
 pub struct UnknownStoredFamily {
     /// The stored text of `horsies_client_family.family`.
@@ -162,8 +168,8 @@ pub(crate) static RECORD_CLIENT_FAMILY: TypedStatement = TypedStatement::new(
 
 /// The recorded family of the stored `family` value (`None`: no row). Pure.
 ///
-/// Errors: [`UnknownStoredFamily`] for a stored value that is neither
-/// `PYTHON` nor `RUST`.
+/// Errors: [`UnknownStoredFamily`] for a stored value that is not `PYTHON`,
+/// `RUST` or `TYPESCRIPT`.
 pub(crate) fn recorded_family_from(
     stored: Option<String>,
 ) -> Result<RecordedFamily, UnknownStoredFamily> {
@@ -194,24 +200,50 @@ pub(crate) fn admit_family(
 mod tests {
     use super::*;
 
+    /// Every client family. The `match` stops the build when a variant is
+    /// added without an entry in the list.
+    fn every_family() -> [ClientFamily; 3] {
+        let families = [
+            ClientFamily::Python,
+            ClientFamily::Rust,
+            ClientFamily::TypeScript,
+        ];
+        for family in families {
+            match family {
+                ClientFamily::Python | ClientFamily::Rust | ClientFamily::TypeScript => {}
+            }
+        }
+        families
+    }
+
+    /// Texts that are not a stored family: no case folding, no trim.
+    const NOT_A_FAMILY: [&str; 6] = ["GO", "rust", "typescript", "TypeScript", " RUST", ""];
+
     #[test]
     fn the_stored_names_round_trip() {
-        for family in [ClientFamily::Python, ClientFamily::Rust] {
+        for family in every_family() {
             assert_eq!(ClientFamily::parse(family.as_str()), Some(family));
         }
-        assert_eq!(ClientFamily::parse("rust"), None);
+        assert_eq!(ClientFamily::TypeScript.as_str(), "TYPESCRIPT");
+        for stored in NOT_A_FAMILY {
+            assert_eq!(ClientFamily::parse(stored), None, "{stored:?}");
+        }
     }
 
     #[test]
     fn a_stored_value_is_a_family_no_family_or_an_unknown_family() {
         assert_eq!(recorded_family_from(None), Ok(RecordedFamily::NotRecorded));
-        for family in [ClientFamily::Python, ClientFamily::Rust] {
+        for family in every_family() {
             assert_eq!(
                 recorded_family_from(Some(family.as_str().to_owned())),
                 Ok(RecordedFamily::Recorded(family))
             );
         }
-        for stored in ["GO", "rust", ""] {
+        assert_eq!(
+            recorded_family_from(Some("TYPESCRIPT".to_owned())),
+            Ok(RecordedFamily::Recorded(ClientFamily::TypeScript))
+        );
+        for stored in NOT_A_FAMILY {
             assert_eq!(
                 recorded_family_from(Some(stored.to_owned())),
                 Err(UnknownStoredFamily {
@@ -244,33 +276,53 @@ mod tests {
             message.contains("horsies_client_family.family holds \"GO\""),
             "{message}"
         );
+        for family in every_family() {
+            assert!(message.contains(family.as_str()), "{message}");
+        }
     }
 
+    /// A handle of each family admits a row of its own family and refuses a
+    /// row of each other family and no row: a Python and a Rust handle
+    /// refuse a `TYPESCRIPT` row, and a TypeScript handle refuses a
+    /// `PYTHON` and a `RUST` row.
     #[test]
     fn only_the_own_family_is_admitted() {
-        assert!(admit_family(
-            RecordedFamily::Recorded(ClientFamily::Rust),
-            ClientFamily::Rust
-        )
-        .is_ok());
-        for recorded in [
-            RecordedFamily::Recorded(ClientFamily::Python),
-            RecordedFamily::NotRecorded,
-        ] {
-            let refused = admit_family(recorded, ClientFamily::Rust).unwrap_err();
-            assert_eq!(
-                refused,
-                FamilyMismatch {
-                    stored: recorded,
-                    own: ClientFamily::Rust,
-                }
-            );
-            let broker_error = BrokerError::from(refused);
-            assert!(matches!(
-                broker_error,
-                BrokerError::ClientFamilyMismatch { stored, own: ClientFamily::Rust } if stored == recorded
-            ));
-            assert!(!broker_error.is_retryable());
+        for own in every_family() {
+            assert!(admit_family(RecordedFamily::Recorded(own), own).is_ok());
+            let others = every_family()
+                .into_iter()
+                .filter(|family| *family != own)
+                .map(RecordedFamily::Recorded);
+            for recorded in others.chain([RecordedFamily::NotRecorded]) {
+                let refused = admit_family(recorded, own).unwrap_err();
+                assert_eq!(
+                    refused,
+                    FamilyMismatch {
+                        stored: recorded,
+                        own
+                    }
+                );
+                let broker_error = BrokerError::from(refused);
+                assert!(matches!(
+                    broker_error,
+                    BrokerError::ClientFamilyMismatch { stored, own: refused_own }
+                        if stored == recorded && refused_own == own
+                ));
+                assert!(!broker_error.is_retryable());
+            }
+        }
+    }
+
+    /// The refusal of a `TYPESCRIPT` database names the family that it
+    /// records and the family of the handle.
+    #[test]
+    fn a_typescript_database_is_named_in_the_refusal_of_a_python_and_a_rust_handle() {
+        for own in [ClientFamily::Python, ClientFamily::Rust] {
+            let refused =
+                admit_family(RecordedFamily::Recorded(ClientFamily::TypeScript), own).unwrap_err();
+            let message = BrokerError::from(refused).to_string();
+            assert!(message.contains("the TYPESCRIPT client"), "{message}");
+            assert!(message.contains(own.as_str()), "{message}");
         }
     }
 

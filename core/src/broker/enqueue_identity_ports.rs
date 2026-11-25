@@ -131,7 +131,7 @@ async fn ensure_history_coverage(pool: &TestPool) {
 async fn move_to_history(pool: &TestPool, task_id: Uuid) {
     let started = sql::query(
         "UPDATE horsies_tasks
-         SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
+         SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = $2,
              started_at = NOW(), worker_pid = 4242, worker_hostname = 'port-host',
              worker_process_name = 'port-process', updated_at = NOW()
          WHERE id = $1 AND status = 'PENDING'",

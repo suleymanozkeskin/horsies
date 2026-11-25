@@ -136,13 +136,13 @@ def test_catalog_covers_every_column_of_a_fresh_install(
         )
     rows = {table.name: len(table.rows) for table in raw.tables}
     assert tuple(rows) == tuple(table.name for table in BASELINE_CATALOG.tables)
-    # The core install with the default retention: the classes forever,
-    # heartbeats and standard_30d; the forever leaf, 7 hourly heartbeat
-    # leaves (this hour and a horizon of 6) and 4 daily standard_30d leaves
-    # (today and a horizon of 3); the lookup manifest of the forever leaf and
-    # the 4 daily leaves.
+    # The core install with the default retention: one bookkeeping row per
+    # migration of the chain (1000 to 1006); the classes forever,
+    # heartbeats and standard_30d; the forever leaf, 7 hourly heartbeat leaves (this hour
+    # and a horizon of 6) and 4 daily standard_30d leaves (today and a horizon
+    # of 3); the lookup manifest of the forever leaf and the 4 daily leaves.
     assert {name: count for name, count in rows.items() if count} == {
-        'horsies_migrations': 1,
+        'horsies_migrations': 7,
         'horsies_schema_version': 1,
         'horsies_client_family': 1,
         'horsies_retention_classes': 3,
@@ -300,9 +300,12 @@ def test_table_over_the_row_limit_fails_the_capture(
     with psycopg.connect(database.url, autocommit=True) as connection:
         outcome = read_raw_snapshot(connection, BASELINE_CATALOG, row_limit=1)
 
-    # The first table of the catalog with more than one row after the install.
+    # The capture fails on the first table of the catalog over the limit.
+    # horsies_migrations is the first table, and the install writes one
+    # bookkeeping row per migration of the chain: more than one row from
+    # migration 1001 on.
     assert outcome == Err(
-        TableRowLimitExceeded(table='horsies_retention_classes', limit=1)
+        TableRowLimitExceeded(table='horsies_migrations', limit=1)
     )
 
 

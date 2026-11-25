@@ -1044,7 +1044,7 @@ pub(super) fn handle(pool: &TestPool, workflow_id: Uuid) -> WorkflowOps {
 async fn hold_running(pool: &TestPool, task_id: Uuid) {
     let held = sql::query(
         "UPDATE horsies_tasks
-         SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $2,
+         SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = $2,
              claim_expires_at = NULL, started_at = NOW(), worker_pid = $3,
              worker_hostname = $4, worker_process_name = $5, updated_at = NOW()
          WHERE id = $1 AND status IN ('PENDING', 'CLAIMED', 'RUNNING')",
@@ -1240,7 +1240,7 @@ pub(super) async fn run_node_task(
 ) -> RunningNodeTask {
     let (task_id, queue_name, claimed_at): (Uuid, String, DateTime<Utc>) = sql::query_as(
         "UPDATE horsies_tasks t
-         SET status = 'RUNNING', claimed_at = NOW(), claimed_by_worker_id = $3,
+         SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(), claimed_by_worker_id = $3,
              claim_expires_at = NULL, started_at = NOW(), worker_pid = $4,
              worker_hostname = $5, worker_process_name = $6, updated_at = NOW()
          FROM horsies_workflow_tasks n
@@ -1322,6 +1322,7 @@ pub(super) async fn worker_phase_one(
                 b"1",
                 fence,
                 true,
+                crate::core::lifecycle::AttemptPlacement::NotObserved,
             )
             .await
         }
@@ -1339,6 +1340,7 @@ pub(super) async fn worker_phase_one(
                     error_message: Some("boom".to_owned()),
                     failed_reason: None,
                 },
+                placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
             };
             persist_failed_attempt(broker, &failure, AttemptLog::FIRST_UNTRACED, true).await
         }

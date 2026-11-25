@@ -19,10 +19,7 @@ function StatsBarPlaceholder() {
       {TASK_STATUS_ORDER.map(status => (
         <div
           key={status}
-          className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 opacity-50"
-          style={{
-            background: `color-mix(in oklab, ${statusColorVar(status)} 6%, var(--card))`,
-          }}
+          className="content-surface flex min-w-32 items-center gap-2 rounded-xl px-3 py-2 opacity-50"
         >
           <span
             className="size-2.5 rounded-full"
@@ -41,7 +38,9 @@ function StatsBarPlaceholder() {
 /**
  * Clickable status overview cards — each toggles membership in the (multi-
  * select) status filter. Counts are scoped by every other active filter so they
- * stay coherent with the table.
+ * stay coherent with the table. An engaged card leaves `content-surface` for
+ * the accent surface and ring, so no two utilities set its background or its
+ * box shadow.
  *
  * The strip occupies its row unconditionally: the filters are part of the query
  * key, so every filter change starts a new query, and a strip that rendered
@@ -78,14 +77,11 @@ export function StatsBar({
             aria-pressed={isActive}
             onClick={() => onToggle(stat.status)}
             className={cn(
-              'flex items-center gap-2 rounded-lg border px-3 py-2 transition-colors',
+              'flex min-w-32 items-center gap-2 rounded-xl px-3 py-2 transition-colors',
               isActive
-                ? 'border-primary ring-1 ring-primary'
-                : 'border-border hover:bg-muted'
+                ? 'bg-accent-surface ring-1 ring-primary'
+                : 'content-surface hover:bg-surface-hover'
             )}
-            style={{
-              background: `color-mix(in oklab, ${statusColorVar(stat.status)} 6%, var(--card))`,
-            }}
           >
             <span
               className="size-2.5 rounded-full"

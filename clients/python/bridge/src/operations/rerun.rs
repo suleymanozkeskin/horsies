@@ -335,8 +335,9 @@ pub struct RerunClassNotRegistered {
     pub class_key: String,
 }
 
-/// The database records the other client family (`stored` is `RUST`) or
-/// none (`stored` is `None`). Nothing written. `message` names both.
+/// The database records another client family (`stored` is `RUST` or
+/// `TYPESCRIPT`) or none (`stored` is `None`). Nothing written. `message`
+/// names both.
 /// `exception` is the refusal, a `CorePreconditionFailed` with the subject
 /// `rerun_task`, not retryable.
 #[pyclass(module = "horsies._core", frozen, get_all)]
@@ -739,6 +740,17 @@ mod tests {
                 ref message,
                 ..
             }) if message.contains("the RUST client") && message.contains("PYTHON")
+        ));
+        assert!(matches!(
+            preparation_record(RerunPreparation::ClientFamilyMismatch {
+                stored: RecordedFamily::Recorded(ClientFamily::TypeScript),
+                own: ClientFamily::Python,
+            }),
+            PreparationRecord::ClientFamilyMismatch(RerunClientFamilyMismatch {
+                stored: Some("TYPESCRIPT"),
+                ref message,
+                ..
+            }) if message.contains("the TYPESCRIPT client") && message.contains("PYTHON")
         ));
         assert!(matches!(
             preparation_record(RerunPreparation::ClientFamilyMismatch {

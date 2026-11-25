@@ -33,16 +33,41 @@ const STATUS_INDEX_SCAN: &str = "Index Scan using horsies_tasks_status on horsie
 /// The baseline file of the claim functions.
 const LIFECYCLE_FUNCTIONS_SQL: &str =
     include_str!("../../../baseline/0004_lifecycle_functions.sql");
+/// The status index of the task table.
+const STATUS_INDEX: &str = "horsies_tasks_status";
 /// The RUNNING rows, for a bitmap scan of the status index.
 const RUNNING_ROWS: &str = "SELECT task_name FROM horsies_tasks WHERE status = 'RUNNING'";
-/// The polls of the wait for older transactions: at most 60 s.
-const OLDER_HOLDER_POLLS: u32 = 300;
-const OLDER_HOLDER_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// A table of one row that the delete transaction of the dead-entry test
+/// also deletes. An index scan marks the dead entry of this row only when
+/// that transaction is removable for the session of the scan: the same
+/// condition as for the dead RUNNING entries.
+const PROBE_SETUP: &str = "CREATE TABLE dead_entry_probe (id integer PRIMARY KEY)
+         WITH (autovacuum_enabled = off);
+     INSERT INTO dead_entry_probe VALUES (1);";
+/// The index of the probe row.
+const PROBE_INDEX: &str = "dead_entry_probe_pkey";
+/// The probe row, for a bitmap scan of [`PROBE_INDEX`].
+const PROBE_ROWS: &str = "SELECT id FROM dead_entry_probe WHERE id = 1";
+/// An index scan of the probe row (the sequential, bitmap and index-only
+/// scans off), rolled back.
+const PROBE_INDEX_SCAN: &str = "BEGIN;
+     SET LOCAL enable_seqscan = off;
+     SET LOCAL enable_bitmapscan = off;
+     SET LOCAL enable_indexonlyscan = off;
+     SELECT id FROM dead_entry_probe WHERE id = 1;
+     ROLLBACK;";
+/// The attempts of the wait until the delete is removable: at most 60 s
+/// plus the time of the attempts.
+const REMOVABLE_ATTEMPTS: u32 = 300;
+const REMOVABLE_ATTEMPT_INTERVAL: Duration = Duration::from_millis(200);
 /// Each holder of an xid or a snapshot xmin at or before the xid `$1`, in
-/// any database of the server. The wait covers the whole server: with a
-/// wait on the backends of this database only, the claim can run while the
-/// deleted entries cannot yet be marked dead, and the test fails. `age`
-/// compares the two xids: the older one has the larger age.
+/// any database of the server, that `pg_stat_activity`,
+/// `pg_prepared_xacts` and `pg_replication_slots` show: the report of a
+/// wait that ends with the delete not removable. A backend that is still
+/// starting up does not show, and on PostgreSQL 14 its xmin counts for the
+/// horizon of every database until the backend has a database
+/// (`ComputeXidHorizons` in `procarray.c`). `age` compares the two xids:
+/// the older one has the larger age.
 const OLDER_HOLDERS: &str = "
     SELECT format(
         'backend pid %s (database %s, state %s, transaction start %s, query %L)',
@@ -117,7 +142,7 @@ async fn start(client: &tokio_postgres::Client, rows: i64) {
     client
         .execute(
             "UPDATE horsies_tasks
-             SET status = 'RUNNING', claimed_at = NOW(),
+             SET status = 'RUNNING', attempt_claims = 1, first_claimed_at = NOW(), claimed_at = NOW(),
                  claimed_by_worker_id = $1, started_at = NOW()
              WHERE id IN (
                  SELECT id FROM horsies_tasks WHERE status = 'PENDING' ORDER BY id LIMIT $2
@@ -149,10 +174,20 @@ async fn nested_plans_of_a_claim(
     std::mem::take(&mut *notices.lock().unwrap_or_else(PoisonError::into_inner)).join("\n")
 }
 
-/// The entries that a bitmap scan of `horsies_tasks_status` returns for
-/// RUNNING. A bitmap scan skips the entries that are marked dead and marks
-/// none itself. Rolled back.
-async fn bitmap_running_entries(client: &tokio_postgres::Client) -> f64 {
+/// One claim of [`WORKER_ID`], rolled back.
+async fn claim_and_roll_back(client: &tokio_postgres::Client) {
+    client.batch_execute("BEGIN").await.expect("begin");
+    let _claimed = client
+        .query(CLAIM, &[&WORKER_ID])
+        .await
+        .expect("the claim statement");
+    client.batch_execute("ROLLBACK").await.expect("rollback");
+}
+
+/// The entries of `index` that a bitmap scan of the select `rows` returns.
+/// A bitmap scan skips the entries that are marked dead and marks none
+/// itself. Rolled back.
+async fn bitmap_index_entries(client: &tokio_postgres::Client, rows: &str, index: &str) -> f64 {
     client.batch_execute("BEGIN").await.expect("begin");
     client
         .batch_execute(
@@ -163,18 +198,15 @@ async fn bitmap_running_entries(client: &tokio_postgres::Client) -> f64 {
         .await
         .expect("force a bitmap scan");
     let plan: serde_json::Value = client
-        .query_one(
-            &format!("EXPLAIN (ANALYZE, FORMAT JSON) {RUNNING_ROWS}"),
-            &[],
-        )
+        .query_one(&format!("EXPLAIN (ANALYZE, FORMAT JSON) {rows}"), &[])
         .await
-        .expect("explain the RUNNING rows")
+        .unwrap_or_else(|error| panic!("explain {rows}: {error}"))
         .get(0);
     client.batch_execute("ROLLBACK").await.expect("rollback");
     let mut nodes = vec![plan[0]["Plan"].clone()];
     while let Some(node) = nodes.pop() {
         if node["Node Type"] == "Bitmap Index Scan" {
-            assert_eq!(node["Index Name"], "horsies_tasks_status", "{node}");
+            assert_eq!(node["Index Name"], index, "{node}");
             return node["Actual Rows"]
                 .as_f64()
                 .unwrap_or_else(|| panic!("a row count in {node}"));
@@ -186,27 +218,45 @@ async fn bitmap_running_entries(client: &tokio_postgres::Client) -> f64 {
     panic!("no bitmap index scan in {plan}");
 }
 
-/// Wait until no transaction on the server is as old as `delete_xid`.
-/// Fails the test with the holders when they remain: then no scan can mark
-/// the deleted entries.
-async fn wait_for_older_transactions(client: &tokio_postgres::Client, delete_xid: &str) {
-    let mut holders: Vec<String> = Vec::new();
-    for _ in 0..OLDER_HOLDER_POLLS {
-        holders = client
-            .query(OLDER_HOLDERS, &[&delete_xid])
+/// A new session on `database` in which the delete transaction (xid
+/// `delete_xid`) is removable: in that session, an index scan marks the
+/// dead entry of the probe row, which the same transaction deleted.
+///
+/// A session keeps the removal horizon that it computed last, and computes
+/// it again only when the xmin of its newest snapshot differs from the xmin
+/// at that computation (`GlobalVisTestShouldUpdate` in `procarray.c`). An
+/// older snapshot that ends with no xid does not change that xmin. So each
+/// attempt opens a new session, which computes the horizon at the attempt.
+///
+/// Fails the test after [`REMOVABLE_ATTEMPTS`] attempts, with the
+/// transactions from before the delete that the server shows.
+async fn session_where_the_delete_is_removable(
+    database: &TestDatabase,
+    delete_xid: &str,
+) -> tokio_postgres::Client {
+    for _ in 0..REMOVABLE_ATTEMPTS {
+        let session = database.connect().await;
+        session
+            .batch_execute(PROBE_INDEX_SCAN)
             .await
-            .expect("read the older transactions")
-            .iter()
-            .map(|row| row.get(0))
-            .collect();
-        if holders.is_empty() {
-            return;
+            .expect("scan the probe row through its index");
+        if bitmap_index_entries(&session, PROBE_ROWS, PROBE_INDEX).await == 0.0 {
+            return session;
         }
-        tokio::time::sleep(OLDER_HOLDER_POLL_INTERVAL).await;
+        drop(session);
+        tokio::time::sleep(REMOVABLE_ATTEMPT_INTERVAL).await;
     }
+    let holders: Vec<String> = database
+        .client()
+        .query(OLDER_HOLDERS, &[&delete_xid])
+        .await
+        .expect("read the older transactions")
+        .iter()
+        .map(|row| row.get(0))
+        .collect();
     panic!(
-        "transactions from before the delete (xid {delete_xid}) still run, so no scan can \
-         mark the deleted entries: {}",
+        "the delete (xid {delete_xid}) is not removable after {REMOVABLE_ATTEMPTS} attempts, \
+         so no scan can mark the deleted entries; older transactions that the server shows: [{}]",
         holders.join("; ")
     );
 }
@@ -261,43 +311,58 @@ async fn the_count_reads_the_status_index_when_most_rows_are_in_flight() {
 }
 
 /// Every task ran and was deleted, so each RUNNING entry of the status
-/// index is dead. Once no transaction from before the delete runs, one
-/// claim (rolled back) marks all of them: a later bitmap scan returns none.
+/// index is dead. Once the delete is removable for a session, one claim
+/// (rolled back) in that session marks all of them: a later bitmap scan
+/// returns none.
 #[tokio::test]
 async fn a_claim_marks_the_dead_running_entries() {
     let database = TestDatabase::create().await;
-    let (client, notices) = connect_collecting_notices(database.url()).await;
-    seed_pending(&client).await;
-    start(&client, ROWS).await;
+    let client = database.client();
+    seed_pending(client).await;
+    start(client, ROWS).await;
+    client
+        .batch_execute(PROBE_SETUP)
+        .await
+        .expect("create the probe row");
     client.batch_execute("BEGIN").await.expect("begin");
     client
-        .batch_execute("DELETE FROM horsies_tasks")
+        .batch_execute("DELETE FROM horsies_tasks; DELETE FROM dead_entry_probe;")
         .await
-        .expect("delete every task");
+        .expect("delete every task and the probe row");
     let delete_xid: String = client
         .query_one("SELECT pg_current_xact_id()::xid::text", &[])
         .await
         .expect("read the xid of the delete")
         .get(0);
     client.batch_execute("COMMIT").await.expect("commit");
-    let before = bitmap_running_entries(&client).await;
-    wait_for_older_transactions(&client, &delete_xid).await;
+    let before = bitmap_index_entries(client, RUNNING_ROWS, STATUS_INDEX).await;
+    let session = session_where_the_delete_is_removable(&database, &delete_xid).await;
 
-    let _plans = nested_plans_of_a_claim(&client, &notices, WORKER_ID, "SELECT 1").await;
+    claim_and_roll_back(&session).await;
 
     assert_eq!(before, 2_000.0);
-    assert_eq!(bitmap_running_entries(&client).await, 0.0);
-    drop(client);
+    assert_eq!(
+        bitmap_index_entries(client, RUNNING_ROWS, STATUS_INDEX).await,
+        0.0
+    );
+    drop(session);
     database.drop().await;
 }
 
 /// The live rows of the claim stream plan test: 500 RUNNING rows over
 /// five task names and a backlog of 2,000 PENDING rows, each with its own
-/// enqueue time, then sampled.
+/// enqueue time, then sampled. A RUNNING row holds its claim generation
+/// (CHECK `horsies_tasks_claim_generation_by_status`) and no owner.
 async fn seed_plan_population(client: &tokio_postgres::Client) {
-    for (status, task_name, started_at, rows) in [
-        ("RUNNING", "'plan_task_' || (g % 5)", "NOW()", 500_i32),
-        ("PENDING", "'plan_task_pending'", "NULL", 2_000_i32),
+    for (status, task_name, claimed_at, started_at, rows) in [
+        (
+            "RUNNING",
+            "'plan_task_' || (g % 5)",
+            "NOW()",
+            "NOW()",
+            500_i32,
+        ),
+        ("PENDING", "'plan_task_pending'", "NULL", "NULL", 2_000_i32),
     ] {
         client
             .batch_execute(&format!(
@@ -314,7 +379,7 @@ async fn seed_plan_population(client: &tokio_postgres::Client) {
                 SELECT gen_random_uuid(), {task_name}, 'default', 100, '{{}}', NULL,
                        'ISOLATED', 'standard_30d', NOW(), NOW(),
                        1, sha256(convert_to(gen_random_uuid()::text, 'UTF8')), NULL,
-                       '{status}', NOW() - make_interval(secs => g), NULL, NULL, NULL,
+                       '{status}', NOW() - make_interval(secs => g), {claimed_at}, NULL, NULL,
                        {started_at}, NULL, NULL,
                        NULL, NULL, NULL,
                        0, 0, NULL, NULL, FALSE,

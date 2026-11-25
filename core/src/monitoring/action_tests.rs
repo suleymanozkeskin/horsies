@@ -264,6 +264,16 @@ fn action_models_and_task_mapping_serialize_exactly() {
             r#"{"detail":"database"}"#,
         ),
         (
+            TaskActionError::DbOperationFailed {
+                message: "refused".to_owned(),
+                retryable: false,
+                task_id,
+                cause: Box::new(crate::broker::BrokerError::ClaimContract("row".to_owned())),
+            },
+            500,
+            r#"{"detail":"refused"}"#,
+        ),
+        (
             TaskActionError::StoredDataInvalid {
                 message: "stored".to_owned(),
                 task_id,
@@ -617,6 +627,42 @@ async fn task_cancel_takes_the_advisory_lock_before_the_row_lock() {
         .expect("the cancel applies");
     assert_eq!(cancelled.was_status, TaskStatus::Pending);
     clean_w3(&pool).await;
+}
+
+/// A task cancel whose statement the server refused answers by the SQLSTATE
+/// class: 40 (serialization), 55 (lock not available) and 57 (statement
+/// timeout) may clear, 503; 23 (a CHECK violation), 22, 42 and an internal
+/// error (XX) stay, 500. The detail is the error's message.
+#[tokio::test]
+async fn a_refused_cancel_statement_answers_by_its_sqlstate_class() {
+    for (code, status_code) in [
+        ("40001", 503),
+        ("55P03", 503),
+        ("57014", 503),
+        ("23514", 500),
+        ("22023", 500),
+        ("42P01", 500),
+        ("XX000", 500),
+    ] {
+        let server_error = crate::test_support::raised_server_error(code, "test refusal").await;
+        let error = TaskActionError::cancel_failed(
+            Uuid::nil(),
+            crate::broker::BrokerError::Statement(crate::db::StatementFailure::StatementRefused {
+                statement: "cancel_task",
+                cause: crate::db::RefusalCause::Server(Box::new(server_error)),
+            }),
+        );
+        let message = error.message().to_owned();
+
+        let outcome = task_action_outcome(Err(error));
+
+        assert_eq!(outcome.status_code(), status_code, "{code}");
+        assert_eq!(
+            outcome.into_body(),
+            ActionBody::Detail { detail: message },
+            "{code}"
+        );
+    }
 }
 
 /// Python `test_monitoring_task_actions.py::TestCancelTaskRefuses::

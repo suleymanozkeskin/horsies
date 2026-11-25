@@ -104,6 +104,8 @@ async def test_resume_injects_real_dependency_results(
                 claimed_at = NOW(),
                 claimed_by_worker_id = 'w-resume-test',
                 claim_expires_at = NOW() + INTERVAL '60 seconds',
+                attempt_claims = 1,
+                first_claimed_at = NOW(),
                 updated_at = NOW()
             WHERE id = (
                 SELECT task_id FROM horsies_workflow_tasks

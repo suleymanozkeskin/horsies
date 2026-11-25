@@ -21,6 +21,7 @@ from horsies.core.workflows.lifecycle import start_workflow_async
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,
+    WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed,
     WorkflowStartError,
     WorkflowStartErrorCode,
@@ -47,6 +48,7 @@ def _every_variant(cause: BaseException) -> list[WorkflowStartError]:
         WorkflowStartIdConflict(
             message=message, existing_workflow_name='other-wf', **ids,
         ),
+        WorkflowStartCommandConflict(message=message, **ids),
         WorkflowStartEnqueueFailed(
             message=message, retryable=True, exception=cause, **ids,
         ),

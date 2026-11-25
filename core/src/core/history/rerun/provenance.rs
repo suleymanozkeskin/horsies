@@ -11,7 +11,8 @@ pub enum FieldProvenance {
     FreshRuntimeState,
 }
 
-/// One entry per column of the baseline `horsies_tasks` table.
+/// One entry per column of the `horsies_tasks` table (migrations 1000 and
+/// 1001).
 pub const RERUN_FIELD_PROVENANCE: &[(&str, FieldProvenance)] = &[
     ("id", FieldProvenance::NewIdentity),
     ("created_at", FieldProvenance::NewIdentity),
@@ -56,6 +57,10 @@ pub const RERUN_FIELD_PROVENANCE: &[(&str, FieldProvenance)] = &[
     ("worker_pid", FieldProvenance::FreshRuntimeState),
     ("worker_hostname", FieldProvenance::FreshRuntimeState),
     ("worker_process_name", FieldProvenance::FreshRuntimeState),
+    // The claim count of the first attempt of the new row: 0 and NULL at the
+    // insert (`horsies_insert_task_rows`), never the source's.
+    ("attempt_claims", FieldProvenance::FreshRuntimeState),
+    ("first_claimed_at", FieldProvenance::FreshRuntimeState),
 ];
 
 pub fn field_provenance(field: &str) -> Option<FieldProvenance> {
