@@ -71,6 +71,8 @@ The Python helpers for terminal statuses are in [Status Enums](/horsies/concepts
 
 ## Retries and Crash Recovery
 
+To run several steps with effects so that a retry or a crash runs only the step that failed, see Crash-Safe Multi-Step Work ([Python](/horsies/guides/crash-safe-multi-step-work/), [Rust](/horsies/rust/guides/crash-safe-multi-step-work/)).
+
 ### Task retries inside workflows
 
 Workflow tasks use the same retry mechanism as standalone tasks:
