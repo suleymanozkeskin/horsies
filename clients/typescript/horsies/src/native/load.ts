@@ -198,6 +198,9 @@ export type ProcessMapsRead =
   | { readonly kind: "read"; readonly text: string }
   | { readonly kind: "readFailed"; readonly cause: string };
 
+/** The mapped file of a glibc before 2.34: `libc.so.6` links to it, and the map shows this name. */
+const GLIBC_VERSIONED_FILE = /\/libc-2\.\d+\.so$/u;
+
 /** The most bytes of `/proc/self/maps` that the C library check reads. */
 const PROCESS_MAPS_READ_BOUND_BYTES = 1_048_576;
 
@@ -231,7 +234,9 @@ function readProcessMaps(): ProcessMapsRead {
 
 /**
  * The C library of the process, from its memory map: `musl` when a mapped file is the musl loader
- * or library, `glibc` when a mapped file is `libc.so.6`. Neither, both, or a failed read give
+ * or library, `glibc` when a mapped file is the glibc library: `libc.so.6` (glibc 2.34 and later)
+ * or `libc-2.<minor>.so` (earlier glibc, where `libc.so.6` is a link to that file and the map shows
+ * the target). Neither, both, or a failed read give
  * `undetected`. Pure.
  */
 export function linuxLibc(maps: ProcessMapsRead): LinuxLibc {
@@ -241,7 +246,9 @@ export function linuxLibc(maps: ProcessMapsRead): LinuxLibc {
     case "read": {
       const lines = maps.text.split("\n");
       const musl = lines.some((line) => line.includes("/ld-musl-") || line.includes("/libc.musl-"));
-      const glibc = lines.some((line) => line.endsWith("/libc.so.6"));
+      const glibc = lines.some(
+        (line) => line.endsWith("/libc.so.6") || GLIBC_VERSIONED_FILE.test(line),
+      );
 
       if (musl === glibc) {
         return "undetected";

@@ -77,6 +77,24 @@ describe("linuxLibc", () => {
     assert.equal(linuxLibc({ kind: "read", text: GLIBC_MAPS }), "glibc");
   });
 
+  test("gives glibc when the versioned library of glibc 2.28 is mapped", () => {
+    assert.equal(
+      linuxLibc({ kind: "read", text: "7f1c2c000000-7f1c2c028000 r-xp 0 08:01 2 /usr/lib64/libc-2.28.so" }),
+      "glibc",
+    );
+  });
+
+  test("gives glibc when the versioned library of glibc 2.31 is mapped", () => {
+    assert.equal(
+      linuxLibc({ kind: "read", text: "7f1c2c000000-7f1c2c028000 r-xp 0 08:01 2 /usr/lib/x86_64-linux-gnu/libc-2.31.so" }),
+      "glibc",
+    );
+  });
+
+  test("a file that only starts like the versioned library is not glibc", () => {
+    assert.equal(linuxLibc({ kind: "read", text: "7f1c2c000000-7f1c2c028000 r-xp 0 08:01 2 /opt/libc-2.31.so.bak" }), "undetected");
+  });
+
   test("gives musl when the musl loader is mapped", () => {
     assert.equal(linuxLibc({ kind: "read", text: MUSL_MAPS }), "musl");
   });

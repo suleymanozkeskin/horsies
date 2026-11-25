@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build:dev": "napi build --platform --esm --features test-probes",
-    "test:native": "cd .. && for file in tests/runtime/native/*.test.ts; do bun test --path-ignore-patterns='node_modules/**' \"./$file\" || exit 1; done",
+    "test:native": "cd .. && failed=0; for file in tests/runtime/native/*.test.ts; do bun test --path-ignore-patterns='node_modules/**' \"./$file\" || failed=1; done; exit $failed",
     "test:native:node": "cd .. && node --test 'tests/runtime/native/**/*.test.ts'",
     "check:declarations": "cd ../tests/native-declarations && bun check"
   },
