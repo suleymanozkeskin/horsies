@@ -21,6 +21,7 @@ const UTC_DESIGNATOR = "Z";
 const DATE_PART = String.raw`(\d{4})-(\d{2})-(\d{2})`;
 const TIME_PART = String.raw`(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?`;
 const DATE_TEXT = new RegExp(`^${DATE_PART}$`);
+const TIME_TEXT = new RegExp(`^${TIME_PART}$`);
 const NAIVE_TEXT = new RegExp(`^${DATE_PART}T${TIME_PART}$`);
 const OFFSET_TEXT = new RegExp(`^${DATE_PART}T${TIME_PART}(Z|[+-]\\d{2}:\\d{2})$`);
 
@@ -104,6 +105,11 @@ function dateText(date: DateFields): Result<string, TemporalWriteRefused> {
 /** `YYYY-MM-DD`. Pure. */
 export function plainDateText(value: Temporal.PlainDate): Result<string, TemporalWriteRefused> {
   return value.calendarId === ISO_CALENDAR ? dateText(value) : err(CALENDAR_REFUSED);
+}
+
+/** `HH:MM:SS[.f]`, Pydantic's text of a naive `datetime.time`. A time of day has no failure. Pure. */
+export function plainTimeText(value: Temporal.PlainTime): string {
+  return clockText(value);
 }
 
 /** `YYYY-MM-DDTHH:MM:SS[.f]`. Pure. */
@@ -190,6 +196,19 @@ export function readPlainDate(text: string): Result<Temporal.PlainDate, Temporal
   return date === null ? err(READ_REFUSED) : built(() => Temporal.PlainDate.from(date, { overflow: "reject" }));
 }
 
+/** A time-of-day text `HH:MM:SS[.f]`, without an offset. Pure. */
+export function readPlainTime(text: string): Result<Temporal.PlainTime, TemporalReadRefused> {
+  const match = TIME_TEXT.exec(text);
+
+  if (match === null) {
+    return err(READ_REFUSED);
+  }
+
+  const fields = clockFields(match, 1);
+
+  return built(() => Temporal.PlainTime.from(fields, { overflow: "reject" }));
+}
+
 /** A date-time text without an offset. Pure. */
 export function readPlainDateTime(text: string): Result<Temporal.PlainDateTime, TemporalReadRefused> {
   const match = NAIVE_TEXT.exec(text);
@@ -243,6 +262,11 @@ export function isZonedDateTime(value: unknown): value is Temporal.ZonedDateTime
 /** Whether `value` is a `Temporal.PlainDateTime`. Pure. */
 export function isPlainDateTime(value: unknown): value is Temporal.PlainDateTime {
   return value instanceof Temporal.PlainDateTime;
+}
+
+/** Whether `value` is a `Temporal.PlainTime`. Pure. */
+export function isPlainTime(value: unknown): value is Temporal.PlainTime {
+  return value instanceof Temporal.PlainTime;
 }
 
 /** Whether `value` is a `Temporal.PlainDate`. Pure. */

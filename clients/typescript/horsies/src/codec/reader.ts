@@ -45,6 +45,7 @@ import {
   readOffsetDateTime,
   readPlainDate,
   readPlainDateTime,
+  readPlainTime,
   type TemporalReadRefused,
 } from "./temporal-text.ts";
 import { isLiteralType, unionRefusal } from "./union.ts";
@@ -123,6 +124,8 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
       return decodeText(node, path, readPlainDateTime);
     case "plainDate":
       return decodeText(node, path, readPlainDate);
+    case "plainTime":
+      return decodeText(node, path, readPlainTime);
     case "literal":
       return decodeLiteral(kind.members, node, path);
     case "union":

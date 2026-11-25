@@ -162,6 +162,62 @@ describe("date-time reader", () => {
   });
 });
 
+type TimeRow = { readonly h: number; readonly mi: number; readonly s: number; readonly us: number; readonly text: string };
+
+describe("time of day", () => {
+  test("the fraction: none, 6 digits for a microsecond or a millisecond, 9 below the microsecond", () => {
+    assert.equal(written(h.plainTime(), Temporal.PlainTime.from("09:10:12")), '"09:10:12"');
+    assert.equal(written(h.plainTime(), Temporal.PlainTime.from("09:10:12.5")), '"09:10:12.500000"');
+    assert.equal(written(h.plainTime(), Temporal.PlainTime.from("09:10:12.654321")), '"09:10:12.654321"');
+    assert.equal(written(h.plainTime(), Temporal.PlainTime.from("09:10:12.000000001")), '"09:10:12.000000001"');
+  });
+
+  test("each text form reads: 1 to 9 fraction digits", () => {
+    for (const text of ["09:10:12", "09:10:12.5", "09:10:12.500", "09:10:12.500000", "09:10:12.123456789"]) {
+      assert(sameValue(read(h.plainTime(), text), Temporal.PlainTime.from(text)), text);
+    }
+  });
+
+  test("BadTemporalText: hour 24, an offset, a date-time", () => {
+    for (const text of ["24:00:00", "09:10:12Z", "09:10:12+02:00", "2026-08-12T09:10:12", "9:10:12"]) {
+      assert.equal(readRefused(h.plainTime(), text).kind, "BadTemporalText", text);
+    }
+  });
+
+  test("WrongType: a value that is not a Temporal.PlainTime", () => {
+    assert.equal(writeRefused(h.plainTime(), "09:10:12").kind, "WrongType");
+    assert.equal(writeRefused(h.plainTime(), Temporal.PlainDateTime.from("2026-08-12T09:10:12")).kind, "WrongType");
+  });
+
+  test("corpus: 1,000 times of day against Pydantic's text, read back to the value", () => {
+    const mismatches: string[] = [];
+    const lines = corpusLines("times.jsonl");
+
+    assert.equal(lines.length, 1000);
+
+    for (const line of lines) {
+      const row: TimeRow = JSON.parse(line);
+
+      const value = Temporal.PlainTime.from({
+        hour: row.h,
+        minute: row.mi,
+        second: row.s,
+        millisecond: Math.floor(row.us / 1000),
+        microsecond: row.us % 1000,
+      });
+
+      const text = encodeValue(kindOf(h.plainTime()), value);
+      const back = decodeValue(kindOf(h.plainTime()), jsonTextCheckedByCore(row.text), "worker");
+
+      if (!text.ok || text.value !== row.text || !back.ok || !sameValue(back.value, value)) {
+        mismatches.push(line);
+      }
+    }
+
+    assert.deepEqual(mismatches, [], `${runtimeLabel()}: ${mismatches.length} mismatches`);
+  });
+});
+
 type DateTimeRow = {
   readonly y: number;
   readonly mo: number;

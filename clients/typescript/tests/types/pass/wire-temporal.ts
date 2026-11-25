@@ -13,6 +13,7 @@ const event = h.object({
   local: h.offsetDateTime(),
   wall: h.plainDateTime(),
   day: h.plainDate(),
+  time: h.plainTime(),
 });
 
 expectType<
@@ -23,6 +24,7 @@ expectType<
       local: Temporal.ZonedDateTime;
       wall: Temporal.PlainDateTime;
       day: Temporal.PlainDate;
+      time: Temporal.PlainTime;
     }
   >
 >();

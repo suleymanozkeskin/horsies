@@ -43,6 +43,9 @@ export type PlainDateTimeKind = { readonly node: "plainDateTime" };
 /** A `Temporal.PlainDate`, stored as `YYYY-MM-DD`. */
 export type PlainDateKind = { readonly node: "plainDate" };
 
+/** A `Temporal.PlainTime`, a time of day stored as `HH:MM:SS[.f]`. */
+export type PlainTimeKind = { readonly node: "plainTime" };
+
 /** A member of a literal kind: a string, a number (a safe integer), a boolean or `null`. */
 export type LiteralMember = string | number | boolean | null;
 
@@ -133,6 +136,7 @@ export type Kind =
   | OffsetDateTimeKind
   | PlainDateTimeKind
   | PlainDateKind
+  | PlainTimeKind
   | LiteralKind
   | UnionKind
   | TaggedUnionKind
@@ -158,6 +162,7 @@ export const INSTANT_KIND: InstantKind = Object.freeze({ node: "instant" });
 export const OFFSET_DATE_TIME_KIND: OffsetDateTimeKind = Object.freeze({ node: "offsetDateTime" });
 export const PLAIN_DATE_TIME_KIND: PlainDateTimeKind = Object.freeze({ node: "plainDateTime" });
 export const PLAIN_DATE_KIND: PlainDateKind = Object.freeze({ node: "plainDate" });
+export const PLAIN_TIME_KIND: PlainTimeKind = Object.freeze({ node: "plainTime" });
 export const JSON_KIND: JsonKind = Object.freeze({ node: "json" });
 export const REQUIRED: MemberPresence = Object.freeze({ mode: "required" });
 export const OPTIONAL: MemberPresence = Object.freeze({ mode: "optional" });

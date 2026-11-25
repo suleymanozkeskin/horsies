@@ -40,10 +40,12 @@ import {
   isInstant,
   isPlainDate,
   isPlainDateTime,
+  isPlainTime,
   isZonedDateTime,
   offsetDateTimeText,
   plainDateText,
   plainDateTimeText,
+  plainTimeText,
   type TemporalWriteRefused,
 } from "./temporal-text.ts";
 import {
@@ -146,6 +148,10 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
       return isPlainDate(value)
         ? writeTemporal(plainDateText(value), path, sink)
         : refuse("WrongType", path, "expected a Temporal.PlainDate");
+    case "plainTime":
+      return isPlainTime(value)
+        ? append(sink, `"${plainTimeText(value)}"`)
+        : refuse("WrongType", path, "expected a Temporal.PlainTime");
     case "literal":
       return writeLiteral(kind.members, value, path, sink);
     case "union":

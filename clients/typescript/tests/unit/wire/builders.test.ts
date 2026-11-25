@@ -20,6 +20,7 @@ describe("h.* builders", () => {
     assert.equal(kindOf(h.offsetDateTime()).node, "offsetDateTime");
     assert.equal(kindOf(h.plainDateTime()).node, "plainDateTime");
     assert.equal(kindOf(h.plainDate()).node, "plainDate");
+    assert.equal(kindOf(h.plainTime()).node, "plainTime");
   });
 
   test("h.object keeps the declaration order and the presence of each member", () => {

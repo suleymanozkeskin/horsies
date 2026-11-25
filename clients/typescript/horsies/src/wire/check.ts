@@ -93,6 +93,7 @@ function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]):
     case "offsetDateTime":
     case "plainDateTime":
     case "plainDate":
+    case "plainTime":
     case "json":
       return;
     case "literal":
@@ -219,6 +220,7 @@ function storedClasses(kind: Kind): readonly StoredClass[] {
     case "offsetDateTime":
     case "plainDateTime":
     case "plainDate":
+    case "plainTime":
       return ["string"];
     case "literal":
       return ["literal"];

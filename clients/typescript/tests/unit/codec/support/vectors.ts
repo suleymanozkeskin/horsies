@@ -7,6 +7,7 @@ import {
   isInstant,
   isPlainDate,
   isPlainDateTime,
+  isPlainTime,
   isZonedDateTime,
 } from "../../../../horsies/src/codec/temporal-text.ts";
 import {
@@ -90,6 +91,16 @@ export type ErrorDataFile = {
   }[];
 };
 
+export type SpecDataFile = {
+  readonly vectors: readonly { readonly name: string; readonly document: Notation; readonly text: string }[];
+  readonly refused_texts: readonly { readonly name: string; readonly text: string }[];
+};
+
+/** `workflow_spec_data.json`. */
+export function specDataFile(): SpecDataFile {
+  return JSON.parse(readFileSync(`${STORED_FORMS_DIR}workflow_spec_data.json`, "utf8"));
+}
+
 /** `result_envelope.json`. */
 export function resultEnvelopeFile(): ResultEnvelopeFile {
   return JSON.parse(readFileSync(`${STORED_FORMS_DIR}result_envelope.json`, "utf8"));
@@ -122,8 +133,8 @@ function isSafeIntegerText(notation: Notation | undefined): boolean {
 
 /**
  * The wire types that a TypeScript user declares for a vector type (the wire-type table of the task model). An
- * integer in the safe range has two: `h.int()` and `h.bigint()` store the same text. An empty list: the type has no
- * wire type in this package yet.
+ * integer in the safe range has two: `h.int()` and `h.bigint()` store the same text. A type with no wire type (only
+ * `bytes`, on rows marked `typescript_cannot_express`) is a failure of the test that asks for it.
  */
 export function declaredWires(type: string, notation: Notation | undefined): readonly Declared[] {
   switch (type) {
@@ -159,6 +170,8 @@ export function declaredWires(type: string, notation: Notation | undefined): rea
       return [{ label: "plainDateTime", wire: h.plainDateTime() }];
     case "date":
       return [{ label: "plainDate", wire: h.plainDate() }];
+    case "time":
+      return [{ label: "plainTime", wire: h.plainTime() }];
     case "str_enum":
       return [{ label: "enum", wire: h.enum(["red", "green"]) }];
     case "int_enum":
@@ -174,7 +187,7 @@ export function declaredWires(type: string, notation: Notation | undefined): rea
     case "json":
       return [{ label: "json", wire: h.json() }];
     default:
-      return [];
+      throw new TypeError(`the vector type ${type} has no declared wire type`);
   }
 }
 
@@ -232,6 +245,8 @@ export function valueOf(type: string, declared: Declared, notation: Notation | u
       return Temporal.PlainDateTime.from(notationText(notation));
     case "date":
       return Temporal.PlainDate.from(notationText(notation));
+    case "time":
+      return Temporal.PlainTime.from(notationText(notation));
     case "optional_i64":
       return notation === null ? null : Number(notationText(notation));
     case "list_i64":
@@ -291,7 +306,7 @@ function mapOf<T>(entries: { readonly [key: string]: Notation }, map: (item: Not
   return out;
 }
 
-/** One case per choice of declared wire types of a parameter list; empty when a type has no wire type yet. */
+/** One case per choice of declared wire types of a parameter list. */
 export type ParameterCase = {
   readonly label: string;
   readonly parameters: readonly { readonly name: string; readonly wire: AnyWire }[];
@@ -300,10 +315,6 @@ export type ParameterCase = {
 
 export function parameterCases(parameters: readonly Parameter[]): readonly ParameterCase[] {
   const choices = parameters.map((parameter) => declaredWires(parameter.type, parameter.value));
-
-  if (choices.some((choice) => choice.length === 0)) {
-    return [];
-  }
 
   const caseCount = Math.max(1, ...choices.map((choice) => choice.length));
   const cases: ParameterCase[] = [];
@@ -356,6 +367,10 @@ export function sameValue<A, E>(actual: A, expected: E): boolean {
 
   if (isPlainDate(expected)) {
     return isPlainDate(actual) && actual.equals(expected);
+  }
+
+  if (isPlainTime(expected)) {
+    return isPlainTime(actual) && actual.equals(expected);
   }
 
   if (isNumber(expected) || !isArray(expected) && !isPlainObject(expected)) {

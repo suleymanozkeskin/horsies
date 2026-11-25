@@ -31,6 +31,7 @@ import {
   OFFSET_DATE_TIME_KIND,
   PLAIN_DATE_KIND,
   PLAIN_DATE_TIME_KIND,
+  PLAIN_TIME_KIND,
   STRING_KIND,
   taggedUnionKind,
   UUID_KIND,
@@ -73,6 +74,8 @@ export interface WireBuilders {
   plainDateTime(): Wire<Temporal.PlainDateTime>;
   /** A `Temporal.PlainDate`, stored as `2026-08-12`. */
   plainDate(): Wire<Temporal.PlainDate>;
+  /** A `Temporal.PlainTime`, a time of day stored as `09:10:12.654321`. */
+  plainTime(): Wire<Temporal.PlainTime>;
   /** An object with declared members, stored in declaration order. An undeclared key is refused. */
   object<const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>>;
   /**
@@ -227,6 +230,7 @@ export const h: WireBuilders = Object.freeze({
   offsetDateTime: (): Wire<Temporal.ZonedDateTime> => wireOf(OFFSET_DATE_TIME_KIND),
   plainDateTime: (): Wire<Temporal.PlainDateTime> => wireOf(PLAIN_DATE_TIME_KIND),
   plainDate: (): Wire<Temporal.PlainDate> => wireOf(PLAIN_DATE_KIND),
+  plainTime: (): Wire<Temporal.PlainTime> => wireOf(PLAIN_TIME_KIND),
   json: (): Wire<JsonValue> => wireOf(JSON_KIND),
   literal: <const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]> => literalWire(members),
   enum: <const L extends NonEmpty<string>>(members: L): Wire<L[number]> => literalWire(members),
