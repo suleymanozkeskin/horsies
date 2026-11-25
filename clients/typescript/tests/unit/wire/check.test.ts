@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
-import { h } from "../../../horsies/src/wire/builders.ts";
-import { checkKind } from "../../../horsies/src/wire/check.ts";
+import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
+import { checkKind, checkParameters } from "../../../horsies/src/wire/check.ts";
+import { objectKind } from "../../../horsies/src/wire/kinds.ts";
 import type { RequiredWire } from "../../../horsies/src/wire/infer.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 
@@ -90,6 +91,43 @@ describe("checkKind", () => {
         ["UnionTagInvalid", "$[2]"],
         ["UnionTagInvalid", "$[3]"],
         ["UnionTagInvalid", "$[4]"],
+      ],
+    );
+  });
+
+  test("a task input may have an upstream outcome as a whole parameter, optional or nullable", () => {
+    const upstream = h.resultOf(h.object({ id: h.int() }));
+    const parameters = parametersKind({ a: upstream, b: upstream.optional(), c: upstream.nullable(), d: h.int() });
+
+    assert.deepEqual(checkParameters(parameters), []);
+  });
+
+  test("ResultOfPlacement: an upstream outcome as a value, or below a parameter", () => {
+    const upstream = kindOf(h.resultOf(h.int()));
+
+    assert.equal(checkKind(upstream)[0]?.rule, "ResultOfPlacement");
+
+    const nested = objectKind([
+      { name: "list", kind: { node: "array", item: upstream }, presence: { mode: "required" } },
+    ]);
+
+    assert.deepEqual(
+      checkParameters(nested).map((refusal) => [refusal.rule, refusal.path]),
+      [["ResultOfPlacement", "$.list[*]"]],
+    );
+  });
+
+  test("checkParameters checks the upstream output kind and the parameter names", () => {
+    const parameters = parametersKind({
+      __h_x: h.int(),
+      order: h.resultOf(h.union([h.int(), h.float()])),
+    });
+
+    assert.deepEqual(
+      checkParameters(parameters).map((refusal) => [refusal.rule, refusal.path]),
+      [
+        ["EngineKeyMember", "$.__h_x"],
+        ["AmbiguousUnion", "$.order"],
       ],
     );
   });

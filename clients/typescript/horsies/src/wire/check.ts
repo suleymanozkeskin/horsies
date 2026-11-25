@@ -34,18 +34,49 @@ export type KindRule =
   /** A member of `h.union([...])` is an array or an object; use `h.union(tag, [...])` for objects. */
   | "UnionMemberNotPrimitive"
   /** A member of `h.union(tag, [...])` has no required string-literal tag member, or repeats a tag value. */
-  | "UnionTagInvalid";
+  | "UnionTagInvalid"
+  /** `h.resultOf` anywhere but as a whole task input parameter (optional or nullable too). */
+  | "ResultOfPlacement";
 
 /** A refusal of a kind tree. `path` names the place in the type: `[*]` an array item, `.*` a record value. */
 export type KindRefused = { readonly rule: KindRule; readonly path: string; readonly detail: string };
 
-/** Every refusal of a kind tree, in walk order. An empty list: the kind is valid. Pure. */
+/** Every refusal of the kind tree of a value (an output, a member), in walk order. Empty: the kind is valid. Pure. */
 export function checkKind(kind: Kind): readonly KindRefused[] {
   const refusals: KindRefused[] = [];
 
   walk(kind, ROOT_PATH, 0, refusals);
 
   return refusals;
+}
+
+/**
+ * Every refusal of the kind of a task input, in walk order: a parameter may be an upstream outcome (`h.resultOf`),
+ * nothing below a parameter may. Pure.
+ */
+export function checkParameters(parameters: ObjectKind): readonly KindRefused[] {
+  const refusals: KindRefused[] = [];
+
+  for (const member of parameters.members) {
+    const at = memberPath(ROOT_PATH, member.name);
+
+    refusals.push(...memberRefusals(member, at));
+    walk(parameterValueKind(member.kind), at, 0, refusals);
+  }
+
+  return refusals;
+}
+
+/** The kind of the value of a parameter: the `ok` kind of an upstream outcome, or the parameter's own kind. */
+function parameterValueKind(kind: Kind): Kind {
+  switch (kind.node) {
+    case "resultOf":
+      return kind.inner;
+    case "nullable":
+      return kind.inner.node === "resultOf" ? kind.inner.inner : kind;
+    default:
+      return kind;
+  }
 }
 
 function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]): void {
@@ -70,6 +101,10 @@ function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]):
       return walkUnion(kind.members, path, level, refusals);
     case "taggedUnion":
       return walkTagged(kind.tag, kind.variants, path, level, refusals);
+    case "resultOf":
+      refusals.push({ rule: "ResultOfPlacement", path, detail: "h.resultOf is valid only as a whole task parameter" });
+
+      return walk(kind.inner, path, 0, refusals);
     case "nullable":
       return walk(kind.inner, path, level, refusals);
     case "array":
@@ -114,13 +149,18 @@ function walkMembers(members: readonly Member[], path: string, level: number, re
   for (const member of members) {
     const at = memberPath(path, member.name);
 
-    if (isEngineKey(member.name)) {
-      refusals.push({ rule: "EngineKeyMember", path: at, detail: "a member name that only the engine writes" });
-    }
-
-    refusals.push(...defaultRefusals(member.presence, at));
+    refusals.push(...memberRefusals(member, at));
     walk(member.kind, at, level + 1, refusals);
   }
+}
+
+/** The refusals of a member itself: its name and its default. */
+function memberRefusals(member: Member, path: string): readonly KindRefused[] {
+  const name: readonly KindRefused[] = isEngineKey(member.name)
+    ? [{ rule: "EngineKeyMember", path, detail: "a member name that only the engine writes" }]
+    : [];
+
+  return [...name, ...defaultRefusals(member.presence, path)];
 }
 
 /** The refusal of a default value that the writer refused. */
@@ -188,6 +228,7 @@ function storedClasses(kind: Kind): readonly StoredClass[] {
     case "object":
     case "taggedUnion":
     case "json":
+    case "resultOf":
       return ["container"];
     default:
       return unreachable(kind, "storedClasses");

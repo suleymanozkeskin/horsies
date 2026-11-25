@@ -62,6 +62,12 @@ export type TaggedUnionKind = {
 /** Untyped JSON that the type names explicitly: a `JsonValue`. */
 export type JsonKind = { readonly node: "json" };
 
+/**
+ * The outcome of an upstream task, which a workflow node gives to a whole input parameter: the stored result
+ * envelope, whose `ok` value has the kind `inner`.
+ */
+export type ResultOfKind = { readonly node: "resultOf"; readonly inner: Kind };
+
 /** `null`, or a value of `inner`. */
 export type NullableKind = { readonly node: "nullable"; readonly inner: Kind };
 
@@ -120,7 +126,8 @@ export type Kind =
   | TupleKind
   | RecordKind
   | ObjectKind
-  | JsonKind;
+  | JsonKind
+  | ResultOfKind;
 
 export const NULL_KIND: NullKind = Object.freeze({ node: "null" });
 export const BOOLEAN_KIND: BooleanKind = Object.freeze({ node: "boolean" });

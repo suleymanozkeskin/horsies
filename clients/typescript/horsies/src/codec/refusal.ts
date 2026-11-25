@@ -69,13 +69,53 @@ export type EncodeRefused = {
   readonly detail: string;
 };
 
-/** The reader refuses a stored text. */
-export type DecodeRefused = {
+/** The reader refuses a stored value under its declared kind. */
+export type ValueRefused = {
   readonly side: "decode";
   readonly kind: DecodeRefusalKind;
   readonly path: string;
   readonly detail: string;
 };
+
+/**
+ * The rules of a stored result envelope and of a stored task error (the core's `read_task_result_text` and
+ * `TaskError::from_stored_text`).
+ */
+export type EnvelopeRule =
+  /** The envelope is not a JSON object. */
+  | "NotAnObject"
+  /** The marker `__h_task_result__` is missing or is not `true`. */
+  | "MarkerMissing"
+  /** The envelope has a key other than the marker, `ok` and `err`. */
+  | "ExtraKey"
+  /** The `ok` or the `err` slot is missing. */
+  | "MissingSlot"
+  /** Both slots are set. */
+  | "BothSlotsSet"
+  /** The stored error is not a JSON object. */
+  | "ErrorNotAnObject"
+  /** The stored error has a key that its class does not have. */
+  | "ErrorUnknownKey"
+  /** The stored error leaves out a required key (`error_code`, or a sub-workflow field). */
+  | "ErrorMissingField"
+  /** A field of the stored error does not read as its type. */
+  | "ErrorFieldInvalid"
+  /** The tagged code names no library code. */
+  | "ErrorUnknownBuiltInCode"
+  /** The `data`, or the output of a sub-workflow summary, breaks the rules of a user value. */
+  | "ErrorDataRefused";
+
+/** A stored result envelope or task error breaks a rule of its form. */
+export type EnvelopeRefused = {
+  readonly side: "decode";
+  readonly kind: "EnvelopeRefused";
+  readonly rule: EnvelopeRule;
+  readonly path: string;
+  readonly detail: string;
+};
+
+/** The reader refuses a stored text: a value under its kind, or the form of a result envelope. */
+export type DecodeRefused = ValueRefused | EnvelopeRefused;
 
 /** A refusal of the codec. */
 export type CodecRefused = EncodeRefused | DecodeRefused;
@@ -107,6 +147,11 @@ export function encodeRefused(kind: EncodeRefusalKind, path: string, detail: str
 }
 
 /** A refusal of the reader. Pure. */
-export function decodeRefused(kind: DecodeRefusalKind, path: string, detail: string): DecodeRefused {
+export function decodeRefused(kind: DecodeRefusalKind, path: string, detail: string): ValueRefused {
   return Object.freeze({ side: "decode", kind, path, detail });
+}
+
+/** A refusal of the form of a result envelope or a stored task error. Pure. */
+export function envelopeRefused(rule: EnvelopeRule, path: string, detail: string): EnvelopeRefused {
+  return Object.freeze({ side: "decode", kind: "EnvelopeRefused", rule, path, detail });
 }

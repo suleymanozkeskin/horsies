@@ -5,6 +5,7 @@ import type { Decimal } from "./decimal.ts";
 import type {
   AnyWire,
   ObjectSent,
+  ParameterWires,
   ObjectValue,
   RequiredWire,
   SentOf,
@@ -34,6 +35,7 @@ import {
   taggedUnionKind,
   UUID_KIND,
 } from "./kinds.ts";
+import { isResultOfKind, type ResultOfWire, resultOfWire } from "./result-of.ts";
 import { kindOf, presenceOf, type Wire, wireOf } from "./wire-type.ts";
 
 /** A list with at least one item. */
@@ -95,6 +97,12 @@ export interface WireBuilders {
     tag: K,
     members: T,
   ): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
+  /**
+   * A task input parameter that a workflow node fills with the outcome of an upstream task: `{ kind: "succeeded",
+   * value }` or `{ kind: "failed", error }`. Valid only as a whole parameter (optional or nullable too); a sender
+   * never gives it.
+   */
+  resultOf<W extends RequiredWire>(inner: W): ResultOfWire<W>;
   /** A JSON array of one item type. */
   array<W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]>;
   /** A JSON array with one value per item type. */
@@ -105,17 +113,28 @@ export interface WireBuilders {
   ): Wire<Readonly<Record<string, ValueOf<W>>>, Readonly<Record<string, SentOf<W>>>>;
 }
 
+/** The kind of a plain value. An upstream outcome there is a defect that the static types refuse. */
+function valueKindOf(wire: AnyWire, place: string): Kind {
+  const kind = kindOf(wire);
+
+  if (isResultOfKind(kind)) {
+    throw new TypeError(`h.${place}: h.resultOf is valid only as a whole task input parameter`);
+  }
+
+  return kind;
+}
+
 /** The kind of a wire type that must be present: an array, tuple or record item. Another one is a defect. */
 function requiredKindOf(wire: AnyWire, place: string): Kind {
   if (presenceOf(wire).mode !== "required") {
     throw new TypeError(`h.${place}: an item is always present; .optional() and .default() are for object members`);
   }
 
-  return kindOf(wire);
+  return valueKindOf(wire, place);
 }
 
-/** The members of an object, in declaration order. Pure. */
-function membersOf(members: WireMembers): readonly Member[] {
+/** The members of an object or a task input, in declaration order. Pure. */
+function membersOf(members: ParameterWires, kindOfMember: (wire: AnyWire) => Kind): readonly Member[] {
   return Object.keys(members).map((name) => {
     const wire = members[name];
 
@@ -123,7 +142,7 @@ function membersOf(members: WireMembers): readonly Member[] {
       throw new TypeError(`h.object: the member ${name} has no wire type`);
     }
 
-    return { name, kind: kindOf(wire), presence: presenceOf(wire) };
+    return { name, kind: kindOfMember(wire), presence: presenceOf(wire) };
   });
 }
 
@@ -190,9 +209,9 @@ function literalWire<const L extends NonEmpty<LiteralMember>>(members: L): Wire<
   return wireOf(Object.freeze({ node: "literal", members: Object.freeze([...members]) }));
 }
 
-/** The kind of a task input: one member per parameter, in declaration order. */
-export function parametersKind(parameters: WireMembers): ObjectKind {
-  return objectKind(membersOf(parameters));
+/** The kind of a task input: one member per parameter, in declaration order. A parameter may be `h.resultOf`. */
+export function parametersKind(parameters: ParameterWires): ObjectKind {
+  return objectKind(membersOf(parameters, kindOf));
 }
 
 export const h: WireBuilders = Object.freeze({
@@ -212,8 +231,9 @@ export const h: WireBuilders = Object.freeze({
   literal: <const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]> => literalWire(members),
   enum: <const L extends NonEmpty<string>>(members: L): Wire<L[number]> => literalWire(members),
   union,
+  resultOf: <W extends RequiredWire>(inner: W): ResultOfWire<W> => resultOfWire(inner),
   object: <const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>> =>
-    wireOf(objectKind(membersOf(members))),
+    wireOf(objectKind(membersOf(members, (wire) => valueKindOf(wire, "object")))),
   array: <W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]> =>
     wireOf(Object.freeze({ node: "array", item: requiredKindOf(item, "array") })),
   tuple: <const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>> =>

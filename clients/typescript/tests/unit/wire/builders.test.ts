@@ -109,8 +109,28 @@ describe("h.* builders", () => {
     assert.throws(() => h.record(item), TypeError);
   });
 
+  test("h.resultOf holds the upstream output kind; it is a parameter only", () => {
+    const upstream = h.resultOf(h.object({ id: h.int() }));
+
+    assert.deepEqual(kindOf(upstream), {
+      node: "resultOf",
+      inner: kindOf(h.object({ id: h.int() })),
+    });
+    assert.equal(parametersKind({ order: upstream }).members[0]?.kind.node, "resultOf");
+
+    // SAFETY: the static types refuse these calls; the test checks the run-time guard behind them.
+    const asValue = upstream as AnyWire as RequiredWire;
+
+    assert.throws(() => h.array(asValue), TypeError);
+    assert.throws(() => h.object({ order: asValue }), TypeError);
+    // SAFETY: the static types refuse this call; the test checks the run-time guard behind them.
+    const nullableAsValue = h.resultOf(h.int()).nullable() as AnyWire as RequiredWire;
+
+    assert.throws(() => h.object({ order: nullableAsValue }), TypeError);
+  });
+
   test("a value that h.* did not build is a defect: TypeError", () => {
-    const foreign: AnyWire = JSON.parse("{}");
+    const foreign: RequiredWire = JSON.parse("{}");
 
     assert.throws(() => kindOf(foreign), TypeError);
     assert.throws(() => h.object({ a: foreign }), TypeError);

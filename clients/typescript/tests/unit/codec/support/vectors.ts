@@ -54,6 +54,52 @@ export type TaskInputFile = {
   readonly typed_refused_texts: readonly TypedRefusedText[];
 };
 
+export type ErrorCodeNotation = { readonly built_in: string } | { readonly user: string };
+
+export type ErrorNotation = {
+  readonly error_code: ErrorCodeNotation;
+  readonly message: string | null;
+  readonly data: Notation;
+  readonly exception: { readonly [key: string]: string } | null;
+  readonly sub_workflow?: {
+    readonly id: string;
+    readonly summary: { readonly [key: string]: Notation };
+  };
+};
+
+export type EnvelopeVector = {
+  readonly name: string;
+  readonly ok?: { readonly type: string; readonly value: Notation };
+  readonly err?: ErrorNotation;
+  readonly text: string;
+  readonly stored_data?: Notation;
+  readonly typescript_cannot_express?: string;
+};
+
+export type ResultEnvelopeFile = {
+  readonly vectors: readonly EnvelopeVector[];
+  readonly refused_texts: readonly { readonly name: string; readonly text: string; readonly refusal: string }[];
+};
+
+export type ErrorDataFile = {
+  readonly vectors: readonly {
+    readonly name: string;
+    readonly stored_as: "envelope" | "error";
+    readonly error: ErrorNotation;
+    readonly text: string;
+  }[];
+};
+
+/** `result_envelope.json`. */
+export function resultEnvelopeFile(): ResultEnvelopeFile {
+  return JSON.parse(readFileSync(`${STORED_FORMS_DIR}result_envelope.json`, "utf8"));
+}
+
+/** `error_data.json`. */
+export function errorDataFile(): ErrorDataFile {
+  return JSON.parse(readFileSync(`${STORED_FORMS_DIR}error_data.json`, "utf8"));
+}
+
 /** `task_input.json`. */
 export function taskInputFile(): TaskInputFile {
   return JSON.parse(readFileSync(`${STORED_FORMS_DIR}task_input.json`, "utf8"));

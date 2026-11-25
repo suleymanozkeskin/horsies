@@ -6,6 +6,9 @@ export type {
   DecodeRefused,
   EncodeRefusalKind,
   EncodeRefused,
+  EnvelopeRefused,
+  EnvelopeRule,
+  ValueRefused,
 } from "../codec/refusal.ts";
 
 export type { DecimalRefused } from "../codec/decimal-text.ts";
@@ -20,4 +23,17 @@ export type { EmptyObject } from "./infer.ts";
 
 export type { Err, Ok, Result } from "./result.ts";
 
-export type { Presence, Wire } from "./wire-type.ts";
+export type { ResultOfWire } from "./result-of.ts";
+
+export type {
+  ExceptionRecord,
+  LibraryTaskCode,
+  SubWorkflowFailure,
+  SubWorkflowSummary,
+  TaskError,
+  TaskErrorCode,
+  TaskOutcome,
+  WorkflowStatus,
+} from "./task-error.ts";
+
+export type { Presence, Role, Wire } from "./wire-type.ts";

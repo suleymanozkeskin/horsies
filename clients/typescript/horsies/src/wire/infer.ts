@@ -1,12 +1,15 @@
 // The static types of a wire type: what a reader gives and what a sender gives.
 
-import type { Presence, Wire, wirePresence, wireSent, wireValue } from "./wire-type.ts";
+import type { Presence, Role, Wire, wirePresence, wireRole, wireSent, wireValue } from "./wire-type.ts";
 
 /** Any wire type: the constraint of a generic parameter. */
-export type AnyWire = Wire<unknown, unknown, Presence>;
+export type AnyWire = Wire<unknown, unknown, Presence, Role>;
 
-/** A wire type that is always present: an array item, a tuple item, a record value. */
-export type RequiredWire = Wire<unknown, unknown, "required">;
+/** A wire type of a plain value: an object member. */
+export type ValueWire = Wire<unknown, unknown, Presence, "value">;
+
+/** A wire type of a plain value that is always present: an array item, a tuple item, a record value, an output. */
+export type RequiredWire = Wire<unknown, unknown, "required", "value">;
 
 /** The value that a reader gives for a wire type. */
 export type ValueOf<W extends AnyWire> = W[typeof wireValue];
@@ -17,8 +20,14 @@ export type SentOf<W extends AnyWire> = W[typeof wireSent];
 /** How a wire type is present as an object member. */
 export type PresenceOf<W extends AnyWire> = W[typeof wirePresence];
 
-/** The members of an object: a wire type per member name, in declaration order. */
-export type WireMembers = { readonly [name: string]: AnyWire };
+/** Whether a wire type is a plain value or an upstream outcome. */
+export type RoleOf<W extends AnyWire> = W[typeof wireRole];
+
+/** The members of an object: a wire type of a plain value per member name, in declaration order. */
+export type WireMembers = { readonly [name: string]: ValueWire };
+
+/** The parameters of a task input: a wire type per parameter, which may be an upstream outcome (`h.resultOf`). */
+export type ParameterWires = { readonly [name: string]: AnyWire };
 
 declare const noMembers: unique symbol;
 

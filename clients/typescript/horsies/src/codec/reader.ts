@@ -20,9 +20,11 @@ import type {
   TaggedUnionKind,
 } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import type { TaskOutcome } from "../wire/task-error.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
 import { isEngineKey } from "./engine-keys.ts";
+import { readEnvelopeSlots } from "./envelope.ts";
 import type { JsonText } from "./json-text.ts";
 import { decodeJsonNode } from "./json-value.ts";
 import { IntegralFloat, isTreeArray, isTreeObject, readTree, type TreeObject, type TreeValue } from "./number-text.ts";
@@ -68,6 +70,18 @@ const PARAMETERS_DEPTH = -1;
  */
 export function decodeValue(kind: Kind, text: JsonText, form: DecodeForm): Decoded {
   return decodeNode(kind, readTree(text), ROOT_PATH, TOP_DEPTH, form);
+}
+
+/**
+ * The outcome of a stored result envelope whose `ok` value has the kind `okKind` (a task read, a workflow read).
+ * Pure; see `decodeValue`.
+ */
+export function decodeEnvelope(
+  okKind: Kind,
+  text: JsonText,
+  form: DecodeForm,
+): Result<TaskOutcome<unknown>, DecodeRefused> {
+  return decodeOutcome(okKind, readTree(text), ROOT_PATH, form);
 }
 
 /** The parameters of a stored task input. Pure; see `decodeValue`. */
@@ -124,6 +138,8 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
       return decodeObject(kind, node, path, depth, form);
     case "json":
       return decodeJsonNode(node, path, depth, MAX_VALUE_JSON_DEPTH);
+    case "resultOf":
+      return decodeOutcome(kind.inner, node, path, form);
     default:
       return unreachable(kind, "decodeNode");
   }
@@ -157,6 +173,36 @@ function decodeText<T>(
   const value = read(node);
 
   return value.ok ? value : refuse(value.error.kind, path, value.error.detail);
+}
+
+/**
+ * The outcome of a result envelope at `path`. The envelope and the error object are the engine's levels, so the `ok`
+ * value starts at the top.
+ */
+function decodeOutcome(
+  okKind: Kind,
+  node: TreeValue,
+  path: string,
+  form: DecodeForm,
+): Result<TaskOutcome<unknown>, DecodeRefused> {
+  const slots = readEnvelopeSlots(node, path);
+
+  if (!slots.ok) {
+    return slots;
+  }
+
+  switch (slots.value.slot) {
+    case "ok": {
+      const value = decodeNode(okKind, slots.value.value, memberPath(path, "ok"), TOP_DEPTH, form);
+
+      return value.ok ? ok(Object.freeze({ kind: "succeeded", value: value.value })) : value;
+    }
+
+    case "err":
+      return ok(Object.freeze({ kind: "failed", error: slots.value.error }));
+    default:
+      return unreachable(slots.value, "decodeOutcome");
+  }
 }
 
 function decodeInt(node: TreeValue, path: string): Decoded {
