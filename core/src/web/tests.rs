@@ -2027,6 +2027,109 @@ async fn a_task_detail_read_that_fails_is_not_a_not_found() {
     assert_eq!(read.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+/// Each read kind that a database failure ends, with the start of its
+/// detail: monitoring queries, and the worker reads of the broker.
+const FAILING_READS: [(&str, &str); 4] = [
+    ("/api/workflows/names", "Workflow names query failed: "),
+    ("/api/workers", "Worker state query failed: "),
+    ("/api/workers/classes", "Class report query failed: "),
+    ("/api/workers/w1/history", "Worker history query failed: "),
+];
+
+/// The four action paths, on a task id and a workflow id that no row has.
+fn failing_actions() -> [String; 4] {
+    let task_id = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+    [
+        format!("/api/tasks/{task_id}/cancel"),
+        format!("/api/workflows/{workflow_id}/pause"),
+        format!("/api/workflows/{workflow_id}/resume"),
+        format!("/api/workflows/{workflow_id}/cancel"),
+    ]
+}
+
+/// Assert that every read of [`FAILING_READS`] and every action of
+/// [`failing_actions`] answers `expected` with a `detail` text.
+async fn assert_failures_answer(router: &Router, expected: StatusCode) {
+    for (path, detail_start) in FAILING_READS {
+        let response = router
+            .clone()
+            .oneshot(request(Method::GET, path))
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = json(response).await;
+        assert_eq!(status, expected, "{path}: {body}");
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.starts_with(detail_start)),
+            "{path}: {body}"
+        );
+    }
+    for path in failing_actions() {
+        let response = router.clone().oneshot(action_request(&path)).await.unwrap();
+        let status = response.status();
+        let body = json(response).await;
+        assert_eq!(status, expected, "{path}: {body}");
+        assert!(body["detail"].is_string(), "{path}: {body}");
+    }
+}
+
+/// A database that refuses the connect (nothing listens on its port): a
+/// cause that may clear. Every read kind and every action answers 503.
+#[tokio::test]
+async fn a_database_failure_that_may_clear_is_503_on_every_route_kind() {
+    let router = test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    );
+
+    assert_failures_answer(&router, StatusCode::SERVICE_UNAVAILABLE).await;
+}
+
+/// A database with no horsies relation or function: each read statement,
+/// and the client family check of each action, is refused with an SQLSTATE
+/// of class 42 (undefined table or function), a cause that stays. Every read
+/// kind and every action answers 500: a repeat fails until the schema
+/// changes. The schema probe reads a matching schema, so each action reaches
+/// its first statement.
+#[tokio::test]
+async fn a_database_failure_that_stays_is_500_on_every_route_kind() {
+    let database = crate::test_support::TestDatabase::create_empty().await;
+    let pool = TestPoolOptions::new().connect_lazy(database.url());
+    let state = test_state(
+        &pool,
+        Arc::new(AllowAll),
+        fixed_probe(status(
+            SchemaState::Match,
+            Some(crate::expected_schema_version()),
+        )),
+        true,
+        MemoryAssets::standard(),
+    );
+    let broker = Arc::clone(&state.broker);
+    let router = build_router(state);
+
+    assert_failures_answer(&router, StatusCode::INTERNAL_SERVER_ERROR).await;
+    // The test broker has no listener, so a worker ping cannot run: that
+    // stays too.
+    let ping = router
+        .clone()
+        .oneshot(request(
+            Method::GET,
+            "/api/workers/ping?timeout_seconds=0.1",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ping.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    drop(router);
+    broker.close().await;
+    database.drop().await;
+}
+
 /// A UUIDv7 whose embedded birth is `birth`, with random tail bits.
 fn uuid7_born_at(birth: chrono::DateTime<chrono::Utc>) -> Uuid {
     let milliseconds =

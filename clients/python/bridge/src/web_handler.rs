@@ -22,6 +22,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use horsies_core::db::Transience;
+use horsies_core::monitoring::database_failure_status;
 use horsies_core::telemetry::declared::{warn_folded_names, Folded, FoldedNames};
 use horsies_core::web::{
     route_access, AccessGrant as CoreGrant, AccessNeed, Bytes, EventFrames, EventStreamItem,
@@ -215,14 +217,16 @@ impl MonitoringResponse {
         }
     }
 
-    /// The 503 of a handler whose broker could not be built (a connection
-    /// setting that the core refuses).
-    fn broker_unavailable(error: &BrokerError) -> Self {
+    /// The answer of a handler whose broker could not be built, with the
+    /// status of the error's retry rule ([`database_failure_status`]): 500
+    /// for a connection setting that the core refuses (a repeat fails until
+    /// the settings change), 503 for a cause that may clear.
+    fn broker_failed(error: &BrokerError) -> Self {
         let body = serde_json::json!({
             "detail": format!("The monitoring handler has no broker: {error}"),
         });
         Self {
-            status: 503,
+            status: database_failure_status(Transience::of_retryable(error.is_retryable())),
             headers: vec![("content-type".to_owned(), "application/json".to_owned())],
             body: Bytes::from(body.to_string()),
         }
@@ -443,9 +447,7 @@ async fn handle_operation(
 ) -> HandleOutcome {
     let built = match state.built(core).await {
         Ok(built) => built,
-        Err(error) => {
-            return HandleOutcome::Response(MonitoringResponse::broker_unavailable(&error))
-        }
+        Err(error) => return HandleOutcome::Response(MonitoringResponse::broker_failed(&error)),
     };
     let response = built.handler.handle(request.parts, request.grant).await;
     match built.child_source.take_interrupt() {
@@ -683,8 +685,8 @@ mod tests {
     }
 
     #[test]
-    fn a_broker_failure_is_a_json_503() {
-        let response = MonitoringResponse::broker_unavailable(&BrokerError::ConnectionFailed(
+    fn a_broker_failure_that_may_clear_is_a_json_503() {
+        let response = MonitoringResponse::broker_failed(&BrokerError::ConnectionFailed(
             "refused URL".to_owned(),
         ));
         assert_eq!(response.status, 503);
@@ -692,5 +694,17 @@ mod tests {
         assert!(body["detail"]
             .as_str()
             .is_some_and(|detail| detail.contains("refused URL")));
+    }
+
+    #[test]
+    fn a_refused_connection_setting_is_a_json_500() {
+        let response = MonitoringResponse::broker_failed(&BrokerError::InvalidConnectionSettings(
+            horsies_core::PostgresConfigError::InvalidUrlScheme("mysql".to_owned()),
+        ));
+        assert_eq!(response.status, 500);
+        let body: serde_json::Value = serde_json::from_slice(&response.body).expect("a JSON body");
+        assert!(body["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.starts_with("The monitoring handler has no broker: ")));
     }
 }

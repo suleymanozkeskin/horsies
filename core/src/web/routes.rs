@@ -31,10 +31,10 @@ use crate::monitoring::{ActionBody, ActionOutcome, INTERNAL_SERVER_ERROR_TEXT};
 
 use super::app::WebState;
 use super::common::{
-    pagination_refused, parse_error_categories, parse_f64, parse_fastapi_bool, parse_group_by,
-    parse_i64, parse_path_integer, parse_path_uuid, parse_sort_by, parse_sort_direction,
-    parse_statuses, query_failed, validate_f64_range, validate_i64_range, ApiError, PathInteger,
-    QueryValues,
+    broker_read_failed, pagination_refused, parse_error_categories, parse_f64, parse_fastapi_bool,
+    parse_group_by, parse_i64, parse_path_integer, parse_path_uuid, parse_sort_by,
+    parse_sort_direction, parse_statuses, query_failed, validate_f64_range, validate_i64_range,
+    ApiError, PathInteger, QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
 use super::stdlib_uuid_text::parse_stdlib_uuid_text;
@@ -531,7 +531,7 @@ async fn read_worker_ping(
         .broker
         .ping_workers(None, Duration::from_secs_f64(params.timeout_seconds), None)
         .await
-        .map_err(|error| ApiError::unavailable(format!("Worker ping failed: {}", error.message())))?
+        .map_err(|error| broker_read_failed("Worker ping", &error))?
         .into_iter()
         .map(|pong| WorkerPingInfo {
             worker_id: pong.worker_id,
@@ -557,13 +557,17 @@ async fn read_schedules(
 }
 
 /// Pending streams per (queue, class) with their oldest wait and coverage,
-/// and the budget load of each live worker. A failed or refused read is 503.
+/// and the budget load of each live worker. A failed read that may clear is
+/// 503; a read that stored data or a bound refused is 500
+/// ([`broker_read_failed`]).
 async fn read_class_report(
     State(state): State<WebState>,
 ) -> Result<Json<ClassReportInfo>, ApiError> {
-    let report = state.broker.get_class_report().await.map_err(|error| {
-        ApiError::unavailable(format!("Class report query failed: {}", error.message()))
-    })?;
+    let report = state
+        .broker
+        .get_class_report()
+        .await
+        .map_err(|error| broker_read_failed("Class report query", &error))?;
     Ok(Json(class_report_info(&report)))
 }
 
@@ -614,9 +618,7 @@ async fn read_workers(
         .broker
         .list_worker_states_with_read_time()
         .await
-        .map_err(|error| {
-            ApiError::unavailable(format!("Worker state query failed: {}", error.message()))
-        })?;
+        .map_err(|error| broker_read_failed("Worker state query", &error))?;
     Ok(Json(listed.into_iter().map(worker_state).collect()))
 }
 
@@ -645,9 +647,7 @@ async fn read_worker_history(
         .broker
         .get_worker_state_history(&worker_id, Some(params.limit))
         .await
-        .map_err(|error| {
-            ApiError::unavailable(format!("Worker history query failed: {}", error.message()))
-        })
+        .map_err(|error| broker_read_failed("Worker history query", &error))
         .map(|snapshots| {
             Json(
                 snapshots

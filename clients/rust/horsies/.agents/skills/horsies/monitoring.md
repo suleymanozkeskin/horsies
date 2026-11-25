@@ -208,7 +208,7 @@ and `task_id`; `code()`, `message()`, `retryable()`, `task_id()` and
 | `NotFound` | 404 | No live or history row has the id. Nothing changed |
 | `NotCancellable { current_status, .. }` | 409 | Terminal, or RUNNING without `include_running`; `current_status` is the status found. Nothing changed |
 | `WorkflowTask { current_status, .. }` | 400 | The task belongs to a workflow. Nothing changed |
-| `DbOperationFailed { retryable, cause, .. }` | 503 | The statement or the connect failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
+| `DbOperationFailed { retryable, cause, .. }` | 503 when `retryable`, else 500 | The statement or the connect failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `NotCancellable` with `CANCELLED` |
 | `StoredDataInvalid { cause, .. }` | 500 | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed |
 
 There is no manual retry action. Re-execution is a rerun (see `tasks.md`).
@@ -227,8 +227,10 @@ returns.
 | `cancel_workflow_action(&app, workflow_id)` | `POST /api/workflows/{id}/cancel` |
 
 `resume_workflow_action` builds the sub-workflow children that the resume
-owes from the workflow definitions registered on `app`. A failed connect is
-503 with the cause. The rules of each action are on the shared docs page
+owes from the workflow definitions registered on `app`. A database failure,
+and a failed connect, answer with the cause: 503 when the cause may clear
+(`retryable`), 500 when it stays (for example SQLSTATE 23514, a CHECK
+constraint). The rules of each action are on the shared docs page
 `monitoring/action-semantics`.
 
 ## Web UI: the Axum Mount (feature `web`)
@@ -253,7 +255,9 @@ read when the last read is 15 s old or more).
 
 - Building the router does no I/O. The core handler is built at the first
   request on the app's handle. A request whose broker cannot be built is
-  answered 503 with the cause; the next request tries again.
+  answered with the cause: 503 when the cause may clear, 500 when it stays
+  (a connection setting that the core refuses). The next request tries
+  again.
 - The mount runs no schema step. For a monitoring-only process, build the
   app with `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)`.
 - A workflow resume builds the children it owes from the workflow
