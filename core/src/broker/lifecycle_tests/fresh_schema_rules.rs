@@ -3,17 +3,22 @@
 //! The core installs the same SQL text as Python. Objects that Python's
 //! `clients/python/tests/integration/test_baseline_install.py` already checks are not tested
 //! again here. These tests cover the rules of the fresh-schema rows that no
-//! committed test checks: the live rerun lineage pair, the two history CHECKs,
-//! and the absence of a DEFAULT partition.
+//! committed test checks: the live rerun lineage pair, the claim generation
+//! of a CLAIMED or RUNNING row (migration 1005), the two history CHECKs, and
+//! the absence of a DEFAULT partition.
 
+use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use super::support::{assert_refused, cleanup_tasks, pool, seed_task, Constraint, TaskSeed};
+use super::support::{
+    assert_refused, cleanup_tasks, generation, live_row, pool, seed_task, Constraint, TaskSeed,
+    WORKER,
+};
 use crate::core::config::retention::RetentionConfig;
 use crate::core::history::archive::attempts::encode_attempt_snapshot;
 use crate::core::history::maintenance::coverage::CoverageOutcome;
-use crate::test_support::sql::{self, TestConnection};
+use crate::test_support::sql::{self, TestConnection, TestPool};
 
 /// Levels below a partition root that the tree walk reads: root, class
 /// parent, leaf.
@@ -146,6 +151,113 @@ async fn a_live_row_carries_both_rerun_ids_or_neither() {
     assert_eq!(paired.rows_affected(), 1);
 
     cleanup_tasks(&pool, &[task_id]).await;
+}
+
+/// The CHECK of migration 1005: a CLAIMED or RUNNING row holds its claim
+/// generation (`claimed_at`).
+const CLAIM_GENERATION_RULE: &str = "horsies_tasks_claim_generation_by_status";
+
+/// Insert one live row of `status` that `owner` holds at the claim
+/// generation `claimed_at`. Every baseline column is named. A CLAIMED row
+/// holds a lease of five minutes; a RUNNING row started now. Returns the
+/// database's answer, so a test can assert a refusal.
+async fn insert_live_row(
+    pool: &TestPool,
+    task_id: Uuid,
+    status: &str,
+    owner: Option<&str>,
+    claimed_at: Option<DateTime<Utc>>,
+) -> Result<u64, sql::Error> {
+    let inserted = sql::query(
+        "INSERT INTO horsies_tasks (
+            id, task_name, queue_name, priority, input, task_options, execution,
+            retention_class_key, sent_at, created_at,
+            command_fingerprint_version, command_fingerprint, idempotency_key_digest,
+            status, enqueued_at, claimed_at, claimed_by_worker_id, claim_expires_at,
+            started_at, finalizing_at, finalizing_by_worker_id,
+            worker_pid, worker_hostname, worker_process_name,
+            retry_count, max_retries, next_retry_at, good_until, is_workflow_task,
+            updated_at, retain_rerun_input, rerun_of_task_id, rerun_root_task_id
+        ) VALUES (
+            $1, 'fresh.schema', 'default', 100, '{}', NULL, 'ISOLATED',
+            'forever', NOW(), NOW(),
+            1, decode(repeat('0e', 32), 'hex'), NULL,
+            $2, NOW(), $3, $4,
+            CASE WHEN $2 = 'CLAIMED' THEN NOW() + interval '5 minutes' END,
+            CASE WHEN $2 = 'RUNNING' THEN NOW() END, NULL, NULL,
+            NULL, NULL, NULL,
+            0, 0, NULL, NULL, FALSE,
+            NOW(), FALSE, NULL, NULL
+        )",
+    )
+    .bind(task_id)
+    .bind(status)
+    .bind(claimed_at)
+    .bind(owner)
+    .execute(pool)
+    .await?;
+    Ok(inserted.rows_affected())
+}
+
+/// A CLAIMED or RUNNING row with no claim generation is refused (CHECK
+/// `horsies_tasks_claim_generation_by_status`): at its insert, and at an
+/// update that clears `claimed_at` of a held row. The held row keeps its
+/// status and its claim generation.
+#[tokio::test]
+async fn a_claimed_or_running_row_with_no_claim_generation_is_refused() {
+    let pool = pool().await;
+    let mut seeded = Vec::new();
+    for (status, seed) in [
+        ("CLAIMED", TaskSeed::claimed()),
+        ("RUNNING", TaskSeed::running()),
+    ] {
+        let inserted = insert_live_row(&pool, Uuid::new_v4(), status, Some(WORKER), None).await;
+        assert_refused(inserted, "23514", Constraint::Named(CLAIM_GENERATION_RULE));
+
+        let task_id = seed_task(&pool, &seed).await;
+        seeded.push(task_id);
+        let cleared = sql::query("UPDATE horsies_tasks SET claimed_at = NULL WHERE id = $1")
+            .bind(task_id)
+            .execute(&pool)
+            .await
+            .map(|done| done.rows_affected());
+        assert_refused(cleared, "23514", Constraint::Named(CLAIM_GENERATION_RULE));
+        let row = live_row(&pool, task_id).await.expect("live row");
+        assert_eq!(row["status"], status, "{row}");
+        assert!(!row["claimed_at"].is_null(), "{row}");
+    }
+
+    cleanup_tasks(&pool, &seeded).await;
+}
+
+/// A CLAIMED or RUNNING row with its claim generation is accepted, and the
+/// row holds that generation. The CHECK does not read a PENDING row: a
+/// PENDING row with no claim is accepted too.
+#[tokio::test]
+async fn a_claimed_or_running_row_with_its_claim_generation_is_accepted() {
+    let pool = pool().await;
+    let mut inserted_ids = Vec::new();
+    for (status, owner, claimed_at) in [
+        ("CLAIMED", Some(WORKER), Some(generation())),
+        ("RUNNING", Some(WORKER), Some(generation())),
+        ("PENDING", None, None),
+    ] {
+        let task_id = Uuid::new_v4();
+        let inserted = insert_live_row(&pool, task_id, status, owner, claimed_at)
+            .await
+            .unwrap_or_else(|error| panic!("{status}: {error}"));
+        assert_eq!(inserted, 1, "{status}");
+        inserted_ids.push(task_id);
+        let stored: (String, Option<DateTime<Utc>>) =
+            sql::query_as("SELECT status::text, claimed_at FROM horsies_tasks WHERE id = $1")
+                .bind(task_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read the inserted row");
+        assert_eq!(stored, (status.to_owned(), claimed_at), "{status}");
+    }
+
+    cleanup_tasks(&pool, &inserted_ids).await;
 }
 
 /// `test_task_history_archive_prototypes.py::test_completed_and_workflow_rows_reject_rerun_input`:

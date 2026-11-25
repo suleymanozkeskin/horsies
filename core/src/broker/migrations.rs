@@ -24,7 +24,9 @@
 //!   adds the attempt outcome `CANCELLED`: the cancel of a RUNNING task
 //!   records its attempt and sends the cancel notice to its worker. Version
 //!   1004 (`1004_worker_profile_name.sql`) adds the name of the worker
-//!   profile to each worker snapshot.
+//!   profile to each worker snapshot. Version 1005
+//!   (`1005_claim_generation_by_status.sql`) adds the CHECK that a CLAIMED or
+//!   RUNNING task row holds its claim generation (`claimed_at`).
 //!
 //! The released text of a migration never changes: a database that applied
 //! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
@@ -147,12 +149,17 @@ pub(crate) const ATTEMPT_CANCELLED_MIGRATION_VERSION: i64 = 1003;
 /// each worker snapshot (`core/migrations/1004_worker_profile_name.sql`).
 pub(crate) const WORKER_PROFILE_NAME_MIGRATION_VERSION: i64 = 1004;
 
+/// Version of the migration that adds the CHECK that a CLAIMED or RUNNING
+/// task row holds its claim generation
+/// (`core/migrations/1005_claim_generation_by_status.sql`).
+pub(crate) const CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION: i64 = 1005;
+
 /// The files of `core/migrations/`, one per migration after the baseline,
 /// in apply order: the version of the migration, the file name and the text.
 /// The core includes them by relative path and keeps no copy. A file added to
 /// the folder without a line here fails
 /// `later_migration_list_is_the_whole_folder`.
-pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 4] = [
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 5] = [
     (
         LIFECYCLE_RECORD_MIGRATION_VERSION,
         "1001_lifecycle_record.sql",
@@ -172,6 +179,11 @@ pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 4] = [
         WORKER_PROFILE_NAME_MIGRATION_VERSION,
         "1004_worker_profile_name.sql",
         include_str!("../../migrations/1004_worker_profile_name.sql"),
+    ),
+    (
+        CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION,
+        "1005_claim_generation_by_status.sql",
+        include_str!("../../migrations/1005_claim_generation_by_status.sql"),
     ),
 ];
 
@@ -247,7 +259,7 @@ struct MigrationSource {
 /// The embedded chain, in apply order: the baseline, then the migrations of
 /// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
 /// so both clients apply the same chain.
-const MIGRATION_SOURCES: [MigrationSource; 5] = [
+const MIGRATION_SOURCES: [MigrationSource; 6] = [
     MigrationSource {
         version: BASELINE_MIGRATION_VERSION,
         description: "baseline",
@@ -312,6 +324,21 @@ const MIGRATION_SOURCES: [MigrationSource; 5] = [
         script: SqlScript::new(
             "migration_1004_worker_profile_name",
             LATER_MIGRATION_FILES[3].2,
+        ),
+        family_row: FamilyRow::NotWritten,
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The migration adds no column and builds no index: it adds one CHECK to
+    // horsies_tasks. A CLAIMED or RUNNING row with no claim generation stops
+    // it with SQLSTATE 23514, and nothing of it stays.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[4].0,
+        description: "claim generation by status",
+        script: SqlScript::new(
+            "migration_1005_claim_generation_by_status",
+            LATER_MIGRATION_FILES[4].2,
         ),
         family_row: FamilyRow::NotWritten,
         readers: ReaderPublication::NotPublished,

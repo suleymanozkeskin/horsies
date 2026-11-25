@@ -210,7 +210,24 @@ def make_task(
     A terminal status is dated by whichever end timestamp the row carries,
     else now, which keeps aged fixtures aged: a row completed sixty days ago
     is terminal sixty days ago.
+
+    A CLAIMED or RUNNING row holds its claim generation (CHECK
+    ``horsies_tasks_claim_generation_by_status``): the claim took the row at
+    its ``enqueued_at``.
     """
+    enqueued = enqueued_at or ago(60)
+    claimed_at: datetime | None
+    match status:
+        case TaskStatus.CLAIMED | TaskStatus.RUNNING:
+            claimed_at = enqueued
+        case (
+            TaskStatus.PENDING
+            | TaskStatus.COMPLETED
+            | TaskStatus.FAILED
+            | TaskStatus.CANCELLED
+            | TaskStatus.EXPIRED
+        ):
+            claimed_at = None
     return task_row(
         task_id=task_id or str(uuid.uuid4()),
         task_name=task_name,
@@ -220,8 +237,8 @@ def make_task(
         retry_count=retry_count,
         max_retries=max_retries,
         is_workflow_task=is_workflow_task,
-        enqueued_at=enqueued_at or ago(60),
-        claimed_at=None,
+        enqueued_at=enqueued,
+        claimed_at=claimed_at,
         started_at=started_at,
         completed_at=completed_at,
         failed_at=failed_at,
