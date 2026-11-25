@@ -102,11 +102,11 @@ describe('cardDuration', () => {
 });
 
 describe('cardFacts', () => {
-  it('states nothing on the card of a node that ran once with short engine steps', () => {
-    expect(cardFacts(NORMAL_NODE, READ_MS)).toEqual([]);
+  it('states nothing on the card of a node that ran once', () => {
+    expect(cardFacts(NORMAL_NODE)).toEqual([]);
   });
 
-  it('states a long engine step in words, marked, before the attempt count', () => {
+  it('marks no long step: a queue wait of 7.2s is a plain fact of the timeline, not of the card', () => {
     const queuedAndRetried = exactTiming(
       [
         ['enqueued', 0, 7.2],
@@ -131,20 +131,14 @@ describe('cardFacts', () => {
       ],
     };
 
-    expect(cardFacts(retried, READ_MS)).toEqual([
-      { tone: 'marked', text: 'queue wait 7.2s' },
-      { tone: 'plain', text: '2 attempts' },
-    ]);
+    expect(cardFacts(queuedAndRetried)).toEqual([]);
+    expect(cardFacts(retried)).toEqual([{ tone: 'plain', text: '2 attempts' }]);
   });
 
-  it('states the coverage of a node whose timing is not exact', () => {
-    expect(cardFacts(UNAVAILABLE_NODE, READ_MS)).toEqual([{ tone: 'plain', text: 'timing unavailable' }]);
-    expect(cardFacts(CLOCK_ORDER_NODE, READ_MS)).toEqual([{ tone: 'marked', text: 'timing inconsistent' }]);
-    expect(cardFacts(PARTIAL_OPEN_NODE, READ_MS).map(fact => fact.text)).toEqual([
-      'unknown 1m 40s',
-      '2 tasks',
-      'partial timing',
-    ]);
+  it('states the coverage of a node whose timing is not exact, a contradiction as a warning', () => {
+    expect(cardFacts(UNAVAILABLE_NODE)).toEqual([{ tone: 'plain', text: 'timing unavailable' }]);
+    expect(cardFacts(CLOCK_ORDER_NODE)).toEqual([{ tone: 'warning', text: 'timing inconsistent' }]);
+    expect(cardFacts(PARTIAL_OPEN_NODE).map(fact => fact.text)).toEqual(['2 tasks', 'partial timing']);
   });
 
   it('fits three lines of text: the card is 60 px high', () => {

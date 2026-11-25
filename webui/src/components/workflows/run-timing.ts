@@ -1,7 +1,7 @@
-// Run-level timing from the segments of every node: the critical path and
+// Run-level timing from the segments of every node: the longest chain and
 // its phases (the split of the run duration), the time of a node without its
 // dependency wait, the node with the longest such time, the pause time of a
-// run, and the facts of a node that the normal case does not have. Pure: no
+// run, and the counts of a node that the normal case does not have. Pure: no
 // React, no DOM. Every function takes the draw time (`drawAtMs`), to which an
 // open segment runs.
 
@@ -10,7 +10,7 @@ import { instantMs } from '@/lib/time-text';
 import type { ComposedRunTiming, NodeTiming, TimingSegment } from '@/types/timing';
 import type { WorkflowEdge, WorkflowNode } from '@/types/workflows';
 
-import { PHASE_ORDER, phaseWeight, type PhaseKey } from './phase';
+import type { TimingKind } from './phase';
 import {
   pauseSpan,
   phaseComposition,
@@ -79,15 +79,15 @@ export function activeMs(segments: readonly TimingSegment[], drawAtMs: number): 
 }
 
 /**
- * The critical path of a run: the chain of nodes whose end times decided
- * the end of the run. It ends at the node that ended last; each step goes to
- * the dependency that ended last, the one that released the node. `phases`
- * is the time of the chain without its dependency wait, by phase: each node
- * of the chain starts when the node before it ends, so the phases add up to
- * the duration of a run that had no pause. `lengthMs` is their sum.
+ * The longest chain of a run: the chain of nodes whose end times decided the
+ * end of the run. It ends at the node that ended last; each step goes to the
+ * dependency that ended last, the one that released the node. `phases` is
+ * the time of the chain without its dependency wait, by kind: each node of
+ * the chain starts when the node before it ends, so the phases add up to the
+ * duration of a run that had no pause. `lengthMs` is their sum.
  */
-export type CriticalPath =
-  | { kind: 'path'; taskIndices: number[]; lengthMs: number; phases: PhaseTotal[] }
+export type LongestChain =
+  | { kind: 'chain'; taskIndices: number[]; lengthMs: number; phases: PhaseTotal[] }
   | { kind: 'no_timing' };
 
 interface TimedNode {
@@ -143,11 +143,11 @@ function dependenciesByNode(edges: readonly WorkflowEdge[]): Map<number, number[
   return dependencies;
 }
 
-export function criticalPath(
+export function longestChain(
   nodes: readonly WorkflowNode[],
   edges: readonly WorkflowEdge[],
   drawAtMs: number
-): CriticalPath {
+): LongestChain {
   const timed = timedNodes(nodes, drawAtMs);
   let last: TimedNode | undefined;
   for (const candidate of timed.values()) {
@@ -181,24 +181,24 @@ export function criticalPath(
     .filter(segment => segment.phase.kind !== 'pending');
   const phases = phaseComposition(segments, drawAtMs);
   return {
-    kind: 'path',
+    kind: 'chain',
     taskIndices: chain.map(entry => entry.node.task_index),
     lengthMs: phases.reduce((sum, total) => sum + total.ms, 0),
     phases,
   };
 }
 
-/** Whether a node is on the critical path of its run. */
-export type CriticalMembership = 'on_path' | 'off_path';
+/** Whether a node is on the longest chain of its run. */
+export type ChainMembership = 'on_chain' | 'off_chain';
 
-export function criticalMembership(path: CriticalPath, taskIndex: number): CriticalMembership {
-  switch (path.kind) {
-    case 'path':
-      return path.taskIndices.includes(taskIndex) ? 'on_path' : 'off_path';
+export function chainMembership(chain: LongestChain, taskIndex: number): ChainMembership {
+  switch (chain.kind) {
+    case 'chain':
+      return chain.taskIndices.includes(taskIndex) ? 'on_chain' : 'off_chain';
     case 'no_timing':
-      return 'off_path';
+      return 'off_chain';
     default:
-      return assertNever(path, 'critical path');
+      return assertNever(chain, 'longest chain');
   }
 }
 
@@ -320,8 +320,8 @@ export type NodePart =
 /** The parts of a node in the order they first appear; each phase of the
  * node is summed over its segments. */
 export function nodeParts(segments: readonly TimingSegment[], drawAtMs: number): NodePart[] {
-  const order: (PhaseKey | 'task')[] = [];
-  const nodeIntervals = new Map<PhaseKey, PhaseInterval[]>();
+  const order: (TimingKind | 'task')[] = [];
+  const nodeIntervals = new Map<TimingKind, PhaseInterval[]>();
   const tasks = new Set<number>();
   const attempts = new Set<string>();
   let taskMs = 0;
@@ -380,31 +380,16 @@ export function pausedTime(timing: ComposedRunTiming, drawAtMs: number): PausedT
   return { kind: 'paused', ms, open: timing.pauses.some(pause => pause.end.kind === 'open') };
 }
 
-/** A fact of a node that the normal case does not have: a long engine step
- * or a gap of the record (with what it tells), more than one attempt, or
- * more than one task. */
-export type NodeFact =
-  | { kind: 'long_step'; key: PhaseKey; ms: number; tells: string }
+/** How many times the task of a node ran: more than one task (a task was
+ * replaced), one task with its attempt count (1 or more), or no task. */
+export type NodeRunCount =
+  | { kind: 'tasks'; count: number }
   | { kind: 'attempts'; count: number }
-  | { kind: 'tasks'; count: number };
+  | { kind: 'no_task' };
 
-/** The facts of a node from its segments: each long step first, in lifecycle
- * order, then its task count (more than one), else its attempt count (more
- * than one). */
-export function nodeFacts(segments: readonly TimingSegment[], drawAtMs: number): NodeFact[] {
-  const steps = phaseComposition(segments, drawAtMs).flatMap((total): NodeFact[] => {
-    const weight = phaseWeight(total.key, total.longestMs);
-    switch (weight.kind) {
-      case 'marked':
-        return [{ kind: 'long_step', key: total.key, ms: total.ms, tells: weight.tells }];
-      case 'main':
-      case 'plain':
-      case 'quiet':
-        return [];
-      default:
-        return assertNever(weight, 'phase weight');
-    }
-  });
+/** The run count of a node from the sources of its segments. One task with
+ * no attempt row yet counts as one attempt. */
+export function nodeRunCount(segments: readonly TimingSegment[]): NodeRunCount {
   const tasks = new Set<number>();
   const attempts = new Set<string>();
   for (const segment of segments) {
@@ -423,62 +408,43 @@ export function nodeFacts(segments: readonly TimingSegment[], drawAtMs: number):
         assertNever(source, 'segment source');
     }
   }
-  const counts: NodeFact[] =
-    tasks.size > 1
-      ? [{ kind: 'tasks', count: tasks.size }]
-      : attempts.size > 1
-        ? [{ kind: 'attempts', count: attempts.size }]
-        : [];
-  return [...steps, ...counts];
-}
-
-/** The long steps of one phase in the nodes that are not on the critical
- * path: the nodes, each with its longest such step, the longest first. */
-export interface OffPathLongStep {
-  key: PhaseKey;
-  /** What a long time of the phase tells. */
-  tells: string;
-  nodes: { node: WorkflowNode; longestMs: number }[];
-}
-
-/**
- * The long engine steps and record gaps of the nodes that are not on the
- * critical path, by phase, in lifecycle order. The phases of the path are
- * the split of the run duration; a long step of another node did not delay
- * the run, but it is the same signal about the queue and the workers.
- */
-export function offPathLongSteps(
-  nodes: readonly WorkflowNode[],
-  path: CriticalPath,
-  drawAtMs: number
-): OffPathLongStep[] {
-  const byPhase = new Map<PhaseKey, OffPathLongStep>();
-  for (const node of nodes) {
-    if (criticalMembership(path, node.task_index) === 'on_path') {
-      continue;
-    }
-    for (const total of phaseComposition(timedSegments(node.timing), drawAtMs)) {
-      const weight = phaseWeight(total.key, total.longestMs);
-      switch (weight.kind) {
-        case 'marked': {
-          const step = byPhase.get(total.key) ?? { key: total.key, tells: weight.tells, nodes: [] };
-          step.nodes.push({ node, longestMs: total.longestMs });
-          byPhase.set(total.key, step);
-          break;
-        }
-        case 'main':
-        case 'plain':
-        case 'quiet':
-          break;
-        default:
-          assertNever(weight, 'phase weight');
-      }
-    }
+  if (tasks.size > 1) {
+    return { kind: 'tasks', count: tasks.size };
   }
-  return PHASE_ORDER.flatMap(key => {
-    const step = byPhase.get(key);
-    return step === undefined
-      ? []
-      : [{ ...step, nodes: [...step.nodes].sort((a, b) => b.longestMs - a.longestMs) }];
-  });
+  return tasks.size === 0 ? { kind: 'no_task' } : { kind: 'attempts', count: Math.max(attempts.size, 1) };
+}
+
+/** A count of a node that the normal case does not have: more than one
+ * attempt, or more than one task. */
+export type NodeFact = { kind: 'attempts'; count: number } | { kind: 'tasks'; count: number };
+
+/** The counts of a node that the normal case does not have, from its
+ * segments: its task count (more than one), else its attempt count (more
+ * than one). */
+export function nodeFacts(segments: readonly TimingSegment[]): NodeFact[] {
+  const count = nodeRunCount(segments);
+  switch (count.kind) {
+    case 'tasks':
+      return [count];
+    case 'attempts':
+      return count.count > 1 ? [count] : [];
+    case 'no_task':
+      return [];
+    default:
+      return assertNever(count, 'node run count');
+  }
+}
+
+/** The run count in words: `3 attempts`, `1 attempt`, `2 tasks`, `no task`. */
+export function runCountText(count: NodeRunCount): string {
+  switch (count.kind) {
+    case 'tasks':
+      return `${count.count} tasks`;
+    case 'attempts':
+      return count.count === 1 ? '1 attempt' : `${count.count} attempts`;
+    case 'no_task':
+      return 'no task';
+    default:
+      return assertNever(count, 'node run count');
+  }
 }

@@ -5,8 +5,7 @@
 // so an attempt here and its segments on the run timeline have the same
 // boundaries.
 
-import { phaseWeight, type PhaseKey } from '@/components/workflows/phase';
-import { phaseTotals, type PhaseInterval, type PhaseTotal } from '@/components/workflows/timeline-geometry';
+import type { PhaseKey, TimingKind } from '@/components/workflows/phase';
 import { assertNever } from '@/lib/exhaustive';
 import { instantMs } from '@/lib/time-text';
 import type { AttemptClaims, AttemptPhases, AttemptRecordedBy } from '@/types/timing';
@@ -25,7 +24,10 @@ export type AttemptPhaseDetail =
   /** Queue wait in which earlier claims can hide: the claims were not counted. */
   | { kind: 'claims_not_counted' }
   /** From the last sign of life to the record: the worker was lost. */
-  | { kind: 'worker_lost' };
+  | { kind: 'worker_lost' }
+  /** From the start to the record of an attempt from before the lifecycle
+   * record: its phases were not captured. */
+  | { kind: 'not_captured' };
 
 /** One phase of an attempt, from `startMs` to `endMs`. Two times in the wrong
  * order (a step of the database clock) give a negative length; the times keep
@@ -37,21 +39,15 @@ export interface AttemptPhase {
   endMs: number;
 }
 
-/** When a child of the worker took the task of a long slot wait: the time
- * after the claim, or not recorded. It tells which part of the wait was long:
- * the wait for a child, or the start on the child. */
-export type ChildTook = { kind: 'after'; ms: number } | { kind: 'not_recorded' };
-
-/** A fact of an attempt that the normal case does not have. A long step
- * holds what its time tells (see `phaseWeight`). */
-export type AttemptNote =
-  | { kind: 'long_step'; key: 'enqueued' | 'finalizing'; ms: number; tells: string }
-  | { kind: 'long_slot_wait'; ms: number; tells: string; childTook: ChildTook }
-  | { kind: 'claimed_more_than_once'; count: number }
-  | { kind: 'claims_not_counted' }
-  | { kind: 'worker_lost'; lastSeenMs: number }
-  | { kind: 'cancelled' }
-  | { kind: 'not_captured' };
+/** Who wrote the attempt row: the worker (the normal case), recovery after
+ * the worker was lost, or an operator cancel while the attempt ran (the
+ * attempt ends at the cancel). `not_recorded`: the attempt is from before
+ * the lifecycle record. */
+export type AttemptWriter =
+  | { kind: 'worker' }
+  | { kind: 'recovery'; lastSeenMs: number }
+  | { kind: 'cancel' }
+  | { kind: 'not_recorded' };
 
 /** The interval of an attempt: its first recorded time to its last. */
 export type AttemptSpan =
@@ -65,10 +61,11 @@ export interface RecordedAttempt {
   errorCode: string | null;
   message: string | null;
   host: string | null;
-  /** In lifecycle order; empty for an attempt with no phase record. */
+  /** In record order. An attempt with no phase record has one unknown
+ * phase from its start to its record, or none when it has no such times. */
   phases: AttemptPhase[];
   span: AttemptSpan;
-  notes: AttemptNote[];
+  writer: AttemptWriter;
 }
 
 /** The attempt of a live task, which has no attempt row yet. A `pending`
@@ -82,9 +79,9 @@ export type LiveAttempt =
 
 export type StoryItem =
   | { kind: 'attempt'; attempt: RecordedAttempt }
-  /** The retry delay between the record of one attempt and the due time of
-   * the next. */
-  | { kind: 'retry_wait'; startMs: number; endMs: number }
+  /** The retry delay between the record of attempt `fromAttempt` and the
+   * due time of attempt `toAttempt`. */
+  | { kind: 'retry_wait'; startMs: number; endMs: number; fromAttempt: number; toAttempt: number }
   | { kind: 'live'; attempt: LiveAttempt };
 
 /** How many attempts the task may make, from its retry limit. */
@@ -158,31 +155,17 @@ function claimDetail(recordedBy: AttemptRecordedBy): AttemptPhaseDetail {
   }
 }
 
-/** The note of the writer of the attempt row. A worker is the normal case.
- * A placement that the worker did not observe has no note of its own: the
- * placement matters only for a long slot wait, and the note of that wait
- * says that the record does not show it. */
-function writerNotes(recordedBy: AttemptRecordedBy): AttemptNote[] {
+/** The writer of a captured attempt row. */
+function writerOf(recordedBy: AttemptRecordedBy): AttemptWriter {
   switch (recordedBy.kind) {
     case 'worker':
-      return [];
+      return { kind: 'worker' };
     case 'recovery':
-      return [{ kind: 'worker_lost', lastSeenMs: instantMs(recordedBy.last_seen_at) }];
+      return { kind: 'recovery', lastSeenMs: instantMs(recordedBy.last_seen_at) };
     case 'cancel':
-      return [{ kind: 'cancelled' }];
+      return { kind: 'cancel' };
     default:
       return assertNever(recordedBy, 'attempt writer');
-  }
-}
-
-function claimNotes(claims: AttemptClaims): AttemptNote[] {
-  switch (claims.kind) {
-    case 'counted':
-      return claims.count > 1 ? [{ kind: 'claimed_more_than_once', count: claims.count }] : [];
-    case 'not_counted':
-      return [{ kind: 'claims_not_counted' }];
-    default:
-      return assertNever(claims, 'attempt claims');
   }
 }
 
@@ -241,62 +224,6 @@ function phasesFromStarts(starts: readonly PhaseStart[], endMs: number | null): 
   });
 }
 
-/** The note of a long queue wait, slot wait or finalizing time. A long time
- * of earlier claims or of a record gap has its own note (more than one claim,
- * claims not counted, worker lost), so it gets none here. */
-function longStepNotes(phase: AttemptPhase): AttemptNote[] {
-  const ms = phase.endMs - phase.startMs;
-  const weight = phaseWeight(phase.key, ms);
-  switch (weight.kind) {
-    case 'main':
-    case 'plain':
-    case 'quiet':
-      return [];
-    case 'marked':
-      break;
-    default:
-      return assertNever(weight, 'phase weight');
-  }
-  const detail = phase.detail;
-  switch (phase.key) {
-    case 'enqueued':
-    case 'finalizing':
-      return [{ kind: 'long_step', key: phase.key, ms, tells: weight.tells }];
-    case 'claimed':
-      switch (detail.kind) {
-        case 'placed':
-          return [
-            {
-              kind: 'long_slot_wait',
-              ms,
-              tells: weight.tells,
-              childTook: { kind: 'after', ms: detail.placedAtMs - phase.startMs },
-            },
-          ];
-        case 'placement_not_observed':
-          return [
-            { kind: 'long_slot_wait', ms, tells: weight.tells, childTook: { kind: 'not_recorded' } },
-          ];
-        case 'none':
-        case 'earlier_claims':
-        case 'claims_not_counted':
-        case 'worker_lost':
-          return [];
-        default:
-          return assertNever(detail, 'attempt phase detail');
-      }
-    case 'pending':
-    case 'ready':
-    case 'retry_wait':
-    case 'running':
-    case 'advancing':
-    case 'unknown':
-      return [];
-    default:
-      return assertNever(phase.key, 'phase');
-  }
-}
-
 function spanOf(phases: readonly AttemptPhase[], attempt: TaskAttempt): AttemptSpan {
   const first = phases[0];
   const last = phases[phases.length - 1];
@@ -310,7 +237,21 @@ function spanOf(phases: readonly AttemptPhase[], attempt: TaskAttempt): AttemptS
     : { kind: 'span', startMs: startedMs, endMs: finishedMs };
 }
 
-/** One attempt row as phases, span and notes. */
+/** The one phase of an attempt from before the lifecycle record: unknown,
+ * from its start to its record, or none when either time is missing. */
+function notCapturedPhases(attempt: TaskAttempt): AttemptPhase[] {
+  const span = spanOf([], attempt);
+  switch (span.kind) {
+    case 'span':
+      return [{ key: 'unknown', detail: { kind: 'not_captured' }, startMs: span.startMs, endMs: span.endMs }];
+    case 'no_times':
+      return [];
+    default:
+      return assertNever(span, 'attempt span');
+  }
+}
+
+/** One attempt row as phases, span and writer. */
 export function recordedAttempt(attempt: TaskAttempt): RecordedAttempt {
   const base = {
     number: attempt.attempt,
@@ -321,28 +262,36 @@ export function recordedAttempt(attempt: TaskAttempt): RecordedAttempt {
   };
   const record = attempt.phases;
   switch (record.kind) {
-    case 'not_captured':
-      return {
-        ...base,
-        phases: [],
-        span: spanOf([], attempt),
-        notes: [{ kind: 'not_captured' }],
-      };
+    case 'not_captured': {
+      const phases = notCapturedPhases(attempt);
+      return { ...base, phases, span: spanOf(phases, attempt), writer: { kind: 'not_recorded' } };
+    }
     case 'captured': {
       const phases = phasesFromStarts(capturedStarts(attempt, record), optionalMs(attempt.finished_at));
-      return {
-        ...base,
-        phases,
-        span: spanOf(phases, attempt),
-        notes: [
-          ...phases.flatMap(longStepNotes),
-          ...claimNotes(record.claims),
-          ...writerNotes(record.recorded_by),
-        ],
-      };
+      return { ...base, phases, span: spanOf(phases, attempt), writer: writerOf(record.recorded_by) };
     }
     default:
       return assertNever(record, 'attempt phases');
+  }
+}
+
+/** The kind of a phase of an attempt: the claims before the claim that ran
+ * the attempt are `earlier_claims`, and the time after the last sign of life
+ * of a lost worker is `worker_lost`. */
+export function attemptPhaseKind(phase: AttemptPhase): TimingKind {
+  switch (phase.detail.kind) {
+    case 'earlier_claims':
+      return 'earlier_claims';
+    case 'worker_lost':
+      return 'worker_lost';
+    case 'none':
+    case 'placed':
+    case 'placement_not_observed':
+    case 'claims_not_counted':
+    case 'not_captured':
+      return phase.key;
+    default:
+      return assertNever(phase.detail, 'attempt phase detail');
   }
 }
 
@@ -400,12 +349,15 @@ export function liveAttempt(leaf: LeafTask): LiveRead {
 }
 
 /** The retry wait from the record of `previous` to the due time `nextDueMs`
- * of the next attempt, or nothing when either time is missing. */
-function retryWaitBetween(previous: TaskAttempt | undefined, nextDueMs: number | null): StoryItem[] {
-  const recordedMs = previous === undefined ? null : optionalMs(previous.finished_at);
+ * of attempt `next`, or nothing when either time is missing. */
+function retryWaitBetween(previous: TaskAttempt | undefined, next: number, nextDueMs: number | null): StoryItem[] {
+  if (previous === undefined) {
+    return [];
+  }
+  const recordedMs = optionalMs(previous.finished_at);
   return recordedMs === null || nextDueMs === null
     ? []
-    : [{ kind: 'retry_wait', startMs: recordedMs, endMs: nextDueMs }];
+    : [{ kind: 'retry_wait', startMs: recordedMs, endMs: nextDueMs, fromAttempt: previous.attempt, toAttempt: next }];
 }
 
 const dueOf = (attempt: TaskAttempt): number | null => {
@@ -448,7 +400,7 @@ function liveItems(ordered: readonly TaskAttempt[], leaf: LeafTask | null): Stor
       return ordered.some(attempt => attempt.attempt === read.attempt.number)
         ? []
         : [
-            ...retryWaitBetween(ordered[ordered.length - 1], liveDueOf(read.attempt, leaf)),
+            ...retryWaitBetween(ordered[ordered.length - 1], read.attempt.number, liveDueOf(read.attempt, leaf)),
             { kind: 'live', attempt: read.attempt },
           ];
     default:
@@ -464,7 +416,7 @@ function liveItems(ordered: readonly TaskAttempt[], leaf: LeafTask | null): Stor
 export function attemptStory(attempts: readonly TaskAttempt[], leaf: LeafTask | null): AttemptStory {
   const ordered = [...attempts].sort((a, b) => a.attempt - b.attempt);
   const recorded: StoryItem[] = ordered.flatMap((attempt, index) => [
-    ...(index === 0 ? [] : retryWaitBetween(ordered[index - 1], dueOf(attempt))),
+    ...(index === 0 ? [] : retryWaitBetween(ordered[index - 1], attempt.attempt, dueOf(attempt))),
     { kind: 'attempt' as const, attempt: recordedAttempt(attempt) },
   ]);
   const live = liveItems(ordered, leaf);
@@ -474,47 +426,4 @@ export function attemptStory(attempts: readonly TaskAttempt[], leaf: LeafTask | 
     allowed:
       leaf === null ? { kind: 'no_task_row' } : { kind: 'limit', count: leaf.max_retries + 1 },
   };
-}
-
-/** The time from the first recorded time of the story to its last, with the
- * time of each phase over the attempts and the retry waits, in lifecycle
- * order. */
-export type StoryTotals =
-  | { kind: 'measured'; spanMs: number; totals: PhaseTotal[] }
-  | { kind: 'no_times' };
-
-/** The phase intervals of the story: each phase of each recorded attempt,
- * and each retry wait. */
-function storyIntervals(items: readonly StoryItem[]): PhaseInterval[] {
-  return items.flatMap((item): PhaseInterval[] => {
-    switch (item.kind) {
-      case 'attempt':
-        return item.attempt.phases.map(phase => ({
-          key: phase.key,
-          startMs: phase.startMs,
-          endMs: phase.endMs,
-          open: false,
-        }));
-      case 'retry_wait':
-        return [{ key: 'retry_wait', startMs: item.startMs, endMs: item.endMs, open: false }];
-      case 'live':
-        return [];
-      default:
-        return assertNever(item, 'story item');
-    }
-  });
-}
-
-export function storyTotals(items: readonly StoryItem[]): StoryTotals {
-  const intervals = storyIntervals(items);
-  if (intervals.length === 0) {
-    return { kind: 'no_times' };
-  }
-  let firstMs = Number.POSITIVE_INFINITY;
-  let lastMs = Number.NEGATIVE_INFINITY;
-  for (const interval of intervals) {
-    firstMs = Math.min(firstMs, interval.startMs);
-    lastMs = Math.max(lastMs, interval.endMs);
-  }
-  return { kind: 'measured', spanMs: Math.max(lastMs - firstMs, 0), totals: phaseTotals(intervals) };
 }

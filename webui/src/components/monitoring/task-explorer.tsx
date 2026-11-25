@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, type ReactNode } from 'react';
 
 import { ChevronLeft, ChevronRight, RotateCcw, X } from 'lucide-react';
 import {
@@ -19,9 +19,7 @@ import { Toggle } from '@/components/ui/toggle';
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { useMeta } from '@/hooks/use-meta';
 import { useBreakdown, useFacets, useTasks } from '@/hooks/use-tasks';
-import { zoneText } from '@/lib/clock-text';
-import { formatDuration, formatInstant, formatRelative, formatTime } from '@/lib/format-duration';
-import { instantMs } from '@/lib/time-text';
+import { formatDuration, formatRelative, formatTime } from '@/lib/format-duration';
 import { cn } from '@/lib/utils';
 import {
   DEFAULT_DIR,
@@ -36,8 +34,7 @@ import {
 } from '@/routes/search';
 import type { TaskSummary } from '@/types/tasks';
 
-import { AttemptTiming } from './attempt-timing';
-import { DetailRow, TraceRow } from './detail';
+import { AttemptPanel } from './attempt-panel';
 import { ErrorChip } from './error-chip';
 import { errorCategoryColorVar } from './error-taxonomy';
 import { FacetCombobox, type FacetOption } from './facet-combobox';
@@ -66,6 +63,31 @@ function taskCountText(count: number): string {
   return `${count.toLocaleString()} ${count === 1 ? 'task' : 'tasks'}`;
 }
 
+/** The close button of the task detail. */
+function CloseDetailButton({ onClose }: { onClose: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClose}
+      className="shrink-0 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
+      aria-label="Close detail"
+    >
+      <X className="size-4" />
+    </button>
+  );
+}
+
+/** The task detail while it has no task to show: a state line with the close
+ * button. */
+function DetailState({ text, onClose }: { text: ReactNode; onClose: () => void }) {
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0 flex-1 text-sm text-muted-foreground">{text}</div>
+      <CloseDetailButton onClose={onClose} />
+    </div>
+  );
+}
+
 function TaskDetailPanel({
   taskId,
   onClose,
@@ -76,83 +98,25 @@ function TaskDetailPanel({
   const view = useTaskActions(taskId, onClose);
   const { meta } = useMeta();
   const { detail, isLoading, isError } = view;
-  const leaf = detail?.leaf;
   return (
-    <aside className="flex w-full shrink-0 flex-col border-hairline max-lg:border-t max-lg:pt-4 lg:sticky lg:top-[calc(var(--capsule-height)_+_1.5rem)] lg:max-h-[calc(100dvh_-_var(--shell-block)_-_var(--capsule-height)_-_1.5rem)] lg:w-[420px] lg:border-l lg:pl-6">
-      <div className="flex items-center justify-between gap-3 border-b border-hairline pb-3">
-        <span
-          className="truncate font-mono text-sm font-semibold"
-          title={detail?.task_name}
-        >
-          {detail?.task_name ?? 'Task'}
-        </span>
-        <button
-          type="button"
-          onClick={onClose}
-          className="shrink-0 rounded-full p-1.5 text-muted-foreground transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
-          aria-label="Close detail"
-        >
-          <X className="size-4" />
-        </button>
-      </div>
-      <div className="-mx-1 flex flex-col gap-4 overflow-y-auto px-1 pt-4 pb-1">
+    <aside
+      aria-label="Task detail"
+      className="flex w-full shrink-0 flex-col border-hairline max-lg:border-t max-lg:pt-4 lg:sticky lg:top-[calc(var(--capsule-height)_+_1.5rem)] lg:max-h-[calc(100dvh_-_var(--shell-block)_-_var(--capsule-height)_-_1.5rem)] lg:w-[420px] lg:border-l lg:pl-6"
+    >
+      <div className="-mx-1 flex flex-col overflow-y-auto px-1 pb-1">
         {isError && detail === undefined ? (
-          <ErrorState compact message="Could not load this task." />
-        ) : !detail && isLoading ? (
-          <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : !detail || !leaf ? (
-          <p className="text-sm text-muted-foreground">Task not found.</p>
+          <DetailState text={<ErrorState compact message="Could not load this task." />} onClose={onClose} />
+        ) : detail === undefined && isLoading ? (
+          <DetailState text="Loading…" onClose={onClose} />
+        ) : detail === undefined ? (
+          <DetailState text="Task not found." onClose={onClose} />
         ) : (
-          <>
-            <TaskActionBar view={view} />
-            <DetailRow label="Status" value={<StatusChip status={leaf.status} />} />
-            {leaf.error_code && (
-              <DetailRow
-                label="Error"
-                value={
-                  <ErrorChip
-                    code={leaf.error_code}
-                    category={detail.error_category}
-                  />
-                }
-              />
-            )}
-            <div className="flex gap-8">
-              <DetailRow label="Queue" value={detail.queue_name} />
-              <DetailRow label="Priority" value={detail.priority} />
-            </div>
-            {leaf.good_until && (
-              <DetailRow
-                label="Good until"
-                value={
-                  <span className="font-mono text-xs">
-                    {formatInstant(instantMs(leaf.good_until))} {zoneText(instantMs(leaf.good_until))}
-                  </span>
-                }
-              />
-            )}
-            <TraceRow
-              traceId={leaf.trace_id}
-              template={meta?.trace_link_template ?? null}
-            />
-            {leaf.failed_reason !== null &&
-              !detail.attempts.some(
-                attempt => (attempt.error_message ?? attempt.failed_reason) === leaf.failed_reason
-              ) && (
-                <div>
-                  <span className="text-xs uppercase tracking-wide text-muted-foreground">
-                    Failure
-                  </span>
-                  <pre className="mt-1 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-lg bg-glass-inset p-2 font-mono text-11 leading-snug">
-                    {leaf.failed_reason}
-                  </pre>
-                </div>
-              )}
-            <AttemptTiming attempts={detail.attempts} leaf={leaf} isLoading={isLoading} />
-            <span className="font-mono text-10 text-muted-foreground">
-              {leaf.task_id}
-            </span>
-          </>
+          <AttemptPanel
+            detail={detail}
+            traceTemplate={meta?.trace_link_template ?? null}
+            titleEnd={<CloseDetailButton onClose={onClose} />}
+            actions={<TaskActionBar view={view} />}
+          />
         )}
       </div>
     </aside>

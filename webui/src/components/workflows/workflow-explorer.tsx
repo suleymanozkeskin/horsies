@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 
 import { ChevronLeft, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react';
 
@@ -16,6 +16,7 @@ import type { WorkflowNode, WorkflowStatus } from '@/types/workflows';
 import { NodeDetailContent } from './node-detail';
 import { RunList } from './run-list';
 import { RunTimingSummary } from './run-summary';
+import type { KeyLight } from './timing-key';
 import { WorkflowGraph } from './workflow-graph';
 import { WorkflowTimeline } from './workflow-timeline';
 
@@ -33,6 +34,13 @@ const DEFAULT_PANEL_WIDTH = 440;
 const PANEL_RESIZE_STEP = 24; // px moved per arrow-key press on the separator
 
 const RAIL_OPEN_KEY = 'workflow-rail-open';
+
+const ALL_LIT: KeyLight = { kind: 'all' };
+
+/** The same light: a new light that equals the shown one keeps the state, so
+ * the views do not draw again. */
+const sameLight = (a: KeyLight, b: KeyLight): boolean =>
+  a.kind === 'all' ? b.kind === 'all' : b.kind === 'phase' && a.phase === b.phase;
 const PANEL_WIDTH_KEY = 'workflow-panel-width';
 
 function viewTitle(view: PanelView): string {
@@ -64,6 +72,12 @@ export function WorkflowExplorer({
   const [views, setViews] = useState<PanelView[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('graph');
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set());
+  // The kind that a key entry lights, in the run summary and in the timeline.
+  const [isolation, setIsolation] = useState<KeyLight>(ALL_LIT);
+  const isolate = useCallback(
+    (next: KeyLight): void => setIsolation(previous => (sameLight(previous, next) ? previous : next)),
+    []
+  );
   const containerRef = useRef<HTMLDivElement>(null);
 
   const runId = search.run ?? null;
@@ -259,6 +273,8 @@ export function WorkflowExplorer({
               workflowId={runId}
               statusFilter={statusFilter}
               onToggleStatus={toggleStatusFilter}
+              isolation={isolation}
+              onIsolate={isolate}
             />
           )}
           <div className="min-h-0 flex-1">
@@ -278,6 +294,8 @@ export function WorkflowExplorer({
                 selectedIndex={rootSelectedIndex}
                 onSelectNode={node => focusDetail(runId, node)}
                 statusFilter={statusFilter}
+                isolation={isolation}
+                onIsolate={isolate}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-sm text-muted-foreground">

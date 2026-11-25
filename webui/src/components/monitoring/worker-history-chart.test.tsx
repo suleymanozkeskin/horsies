@@ -1,7 +1,13 @@
 import { cloneElement, type ReactElement, type ReactNode } from 'react';
 
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -119,6 +125,20 @@ const percentTicks = (container: HTMLElement): number[] =>
 const legendItem = (label: string): HTMLElement =>
   screen.getByRole('button', { name: label });
 
+/** The legend of a chart, found by the chart title. */
+const legendOf = (chart: string): HTMLElement =>
+  screen.getByRole('group', { name: `Series of ${chart}` });
+
+/** The items of a legend, in order. */
+const itemsOf = (legend: HTMLElement): HTMLElement[] =>
+  within(legend).getAllByRole('button');
+
+/** Whether `later` comes after `earlier` in the document, outside it. */
+const comesAfter = (earlier: Node, later: Node): boolean =>
+  !earlier.contains(later) &&
+  (earlier.compareDocumentPosition(later) & Node.DOCUMENT_POSITION_FOLLOWING) !==
+    0;
+
 /** Renders the charts of a worker with two snapshots and waits for the series. */
 async function renderWithHistory(): Promise<HTMLElement> {
   stubFetch([point(3), point(1)]);
@@ -144,6 +164,8 @@ describe('WorkerHistoryChart', () => {
     expect(container.textContent).toContain('Load');
     expect(container.textContent).toContain('Worker process');
     expect(container.textContent).toContain('Loading history…');
+    expect(itemsOf(legendOf('Load'))).toHaveLength(2);
+    expect(itemsOf(legendOf('Worker process'))).toHaveLength(2);
   });
 
   it('holds both chart blocks for a worker that has recorded nothing', async () => {
@@ -190,6 +212,35 @@ describe('WorkerHistoryChart', () => {
     expect(container.textContent).toContain(
       'The worker process only. Its task children are not in these numbers.'
     );
+  });
+
+  it('puts a legend under each chart, with one item per series', async () => {
+    const container = await renderWithHistory();
+    const bodies = slotBodies(container);
+    expect(bodies).toHaveLength(2);
+    const [loadBody, processBody] = bodies;
+    const loadLegend = legendOf('Load');
+    const processLegend = legendOf('Worker process');
+
+    expect(itemsOf(loadLegend).map(item => item.textContent)).toEqual([
+      'running',
+      'claimed',
+    ]);
+    expect(itemsOf(processLegend).map(item => item.textContent)).toEqual([
+      'CPU',
+      'memory',
+    ]);
+    // Each item carries the icon of its chart's mark: a block for an area,
+    // a line with a dot for a line.
+    for (const item of itemsOf(loadLegend)) {
+      expect(item.querySelector('svg rect')).not.toBeNull();
+    }
+    for (const item of itemsOf(processLegend)) {
+      expect(item.querySelector('svg circle')).not.toBeNull();
+    }
+    expect(comesAfter(loadBody!, loadLegend)).toBe(true);
+    expect(comesAfter(loadLegend, processBody!)).toBe(true);
+    expect(comesAfter(processBody!, processLegend)).toBe(true);
   });
 
   it('draws the four series before a click', async () => {
@@ -246,6 +297,31 @@ describe('WorkerHistoryChart', () => {
       'CPU',
       'memory',
     ]);
+    expect(legendItem('running').getAttribute('aria-pressed')).toBe('true');
+    expect(legendItem('claimed').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('toggles a series from the keyboard', async () => {
+    await renderWithHistory();
+    const running = legendItem('running');
+
+    // A native button in the tab order: the browser clicks it on Enter and
+    // on Space. jsdom does not, so the test sends that click itself.
+    expect(running.tagName).toBe('BUTTON');
+    expect(running.getAttribute('type')).toBe('button');
+    expect(running.tabIndex).toBe(0);
+    running.focus();
+
+    fireEvent.click(running);
+
+    expect(legendItem('claimed').getAttribute('aria-pressed')).toBe('false');
+    // The same item keeps the focus, so the next key press reaches it.
+    expect(document.activeElement).toBe(running);
+
+    fireEvent.click(running);
+
+    expect(legendItem('claimed').getAttribute('aria-pressed')).toBe('true');
+    expect(document.activeElement).toBe(running);
   });
 
   it('keeps the legend of one chart apart from the other chart', async () => {

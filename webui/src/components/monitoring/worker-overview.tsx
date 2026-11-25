@@ -12,7 +12,12 @@ import {
   useWorkers,
 } from '@/hooks/use-workers';
 import { assertNever } from '@/lib/exhaustive';
-import { formatElapsed, formatTime } from '@/lib/format-duration';
+import {
+  formatDuration,
+  formatMilliseconds,
+  formatRelative,
+  formatTime,
+} from '@/lib/format-duration';
 import { cn } from '@/lib/utils';
 import type {
   BudgetLoad,
@@ -185,7 +190,7 @@ function WorkerCard({
           claimed
         </span>
         <span className="ml-auto" title={formatTime(worker.worker_started_at)}>
-          up {formatElapsed(worker.uptime_s)}
+          up {formatDuration(worker.uptime_s)}
         </span>
       </div>
 
@@ -247,7 +252,7 @@ function WorkerFocus({
           </div>
           <span className="font-mono text-xs text-muted-foreground">
             {profileText(worker.profile)} · pid {worker.pid} ·{' '}
-            {worker.processes} proc · up {formatElapsed(worker.uptime_s)}
+            {worker.processes} proc · up {formatDuration(worker.uptime_s)}
           </span>
         </div>
         <span
@@ -326,6 +331,12 @@ function WorkerFocus({
   );
 }
 
+/** The state of a reachable database: its round trip as a duration, or the
+ * word alone when the ping measured none. */
+function reachableText(latencyMs: number | null): string {
+  return latencyMs === null ? 'reachable' : `reachable · ${formatMilliseconds(latencyMs)}`;
+}
+
 function LivenessBanner({
   responsiveCount,
   isFetching,
@@ -349,7 +360,7 @@ function LivenessBanner({
       ? 'not pinged yet'
       : ageS < 5
         ? 'just now'
-        : `pinged ${formatElapsed(ageS)} ago`;
+        : `pinged ${formatRelative(new Date(lastPingedAt).toISOString())}`;
 
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
@@ -370,7 +381,7 @@ function LivenessBanner({
             : liveness === undefined
               ? '…'
               : liveness.db_reachable
-                ? `reachable · ${liveness.db_latency_ms?.toFixed(1)} ms`
+                ? reachableText(liveness.db_latency_ms)
                 : 'unreachable'}
         </span>
       </span>

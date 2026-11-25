@@ -95,7 +95,7 @@ describe('class report helpers', () => {
   });
 
   it('writes a wait and a stream with no due row', () => {
-    expect(waitText(served.wait)).toBe('1m');
+    expect(waitText(served.wait)).toBe('1m 35.0s');
     expect(waitText(withoutCapacity.wait)).toMatch(/^next due in /);
   });
 
@@ -135,7 +135,7 @@ describe('ClassCoveragePanel', () => {
 
     expect(screen.getByText('2 worker(s) · capacity 80')).toBeTruthy();
     expect(screen.getByText('no live worker')).toBeTruthy();
-    expect(screen.getByText('1h 1m')).toBeTruthy();
+    expect(screen.getByText('1h 1m 40.0s')).toBeTruthy();
   });
 
   it('shows no warning when every stream is served', () => {

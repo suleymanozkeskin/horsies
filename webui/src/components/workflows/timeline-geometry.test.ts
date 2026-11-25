@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  axisTicks,
   boxOf,
   endpointMark,
   nodeTimingIsOpen,
@@ -128,18 +127,6 @@ describe('boxOf', () => {
   });
 });
 
-describe('axisTicks', () => {
-  it('spaces the ticks evenly from the start to the end', () => {
-    expect(axisTicks(AXIS, 5)).toEqual([
-      { pct: 0, offsetMs: 0 },
-      { pct: 25, offsetMs: 25_000 },
-      { pct: 50, offsetMs: 50_000 },
-      { pct: 75, offsetMs: 75_000 },
-      { pct: 100, offsetMs: 100_000 },
-    ]);
-  });
-});
-
 describe('endpointMark', () => {
   it('marks a terminal node at its completion time', () => {
     expect(endpointMark(timed(EXACT_RETRIED_NODE).endpoint, AXIS)).toEqual({
@@ -156,7 +143,7 @@ describe('endpointMark', () => {
 });
 
 describe('phaseTotals', () => {
-  it('sums each phase, keeps its longest interval, and says when one is open', () => {
+  it('sums each kind, keeps its longest interval and its count, and says when one is open', () => {
     const totals = phaseTotals([
       { key: 'enqueued', startMs: at(0), endMs: at(0.1), open: false },
       { key: 'running', startMs: at(0.1), endMs: at(3.1), open: false },
@@ -164,10 +151,10 @@ describe('phaseTotals', () => {
       { key: 'running', startMs: at(10.2), endMs: at(15), open: true },
     ]);
 
-    // Two queue waits of 100 ms and 200 ms: 300 ms in all, and no long step.
+    // Two queue waits of 100 ms and 200 ms: 300 ms in all.
     expect(totals).toEqual([
-      { key: 'enqueued', ms: 300, longestMs: 200, open: false },
-      { key: 'running', ms: 7_800, longestMs: 4_800, open: true },
+      { key: 'enqueued', ms: 300, longestMs: 200, count: 2, open: false },
+      { key: 'running', ms: 7_800, longestMs: 4_800, count: 2, open: true },
     ]);
   });
 
@@ -191,7 +178,7 @@ describe('segmentInterval', () => {
       open: false,
     });
     expect(segmentInterval(nth(segments, 1), at(100))).toEqual({
-      key: 'unknown',
+      key: 'worker_lost',
       startMs: at(5),
       endMs: at(100),
       open: true,
@@ -200,28 +187,32 @@ describe('segmentInterval', () => {
 });
 
 describe('phaseComposition', () => {
-  it('sums each phase over retries, every claim kind into claimed, in lifecycle order', () => {
+  it('sums each kind over retries, earlier claims apart from the slot wait, in the order of the keys', () => {
     const totals = phaseComposition(segmentsOf(EXACT_RETRIED_NODE), at(100));
 
-    // claimed: earlier claims 1 s + the recorded claim 2 s + the second
-    // attempt's claim 1 s; its longest interval is the recorded claim.
+    // slot wait: the recorded claim 2 s + the second attempt's claim 1 s;
+    // the earlier claim of 1 s is a kind of its own. The retry wait is last.
     expect(totals.map(total => [total.key, total.ms, total.longestMs])).toEqual([
       ['pending', 1_000, 1_000],
       ['ready', 1_000, 1_000],
       ['enqueued', 1_000, 1_000],
-      ['retry_wait', 1_000, 1_000],
-      ['claimed', 4_000, 2_000],
+      ['earlier_claims', 1_000, 1_000],
+      ['claimed', 3_000, 2_000],
       ['running', 1_000, 1_000],
       ['finalizing', 1_000, 1_000],
       ['advancing', 1_000, 1_000],
+      ['retry_wait', 1_000, 1_000],
     ]);
     expect(totals.every(total => !total.open)).toBe(true);
   });
 
-  it('keeps unknown time as its own phase and counts an open segment to the draw time', () => {
+  it('keeps a lost worker apart from other unknown time, and counts an open segment to the draw time', () => {
     const totals = phaseComposition(segmentsOf(PARTIAL_OPEN_NODE), at(100));
 
-    expect(totals).toEqual([{ key: 'unknown', ms: 100_000, longestMs: 95_000, open: true }]);
+    expect(totals).toEqual([
+      { key: 'worker_lost', ms: 95_000, longestMs: 95_000, count: 1, open: true },
+      { key: 'unknown', ms: 5_000, longestMs: 5_000, count: 1, open: false },
+    ]);
   });
 
   it('is empty when no segment has length', () => {

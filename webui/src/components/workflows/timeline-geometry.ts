@@ -13,7 +13,7 @@ import type {
   TimingSegment,
 } from '@/types/timing';
 
-import { PHASE_ORDER, type PhaseKey } from './phase';
+import { segmentKind, TIMING_KIND_ORDER, type TimingKind } from './phase';
 
 /** The smallest axis span: a run whose range is one instant still divides. */
 const MIN_AXIS_SPAN_MS = 1;
@@ -34,12 +34,6 @@ export interface TimeSpan {
 export interface AxisBox {
   leftPct: number;
   widthPct: number;
-}
-
-/** One tick of the axis: its position and its offset from the axis start. */
-export interface AxisTick {
-  pct: number;
-  offsetMs: number;
 }
 
 const clampPct = (value: number): number => Math.min(Math.max(value, 0), 100);
@@ -97,15 +91,6 @@ export function boxOf(span: TimeSpan, axis: TimeAxis): AxisBox {
 export const pointPct = (epochMs: number, axis: TimeAxis): number =>
   clampPct(((epochMs - axis.startMs) / axis.spanMs) * 100);
 
-/** `count` evenly spaced ticks from the axis start to its end. */
-export function axisTicks(axis: TimeAxis, count: number): AxisTick[] {
-  const intervals = Math.max(count - 1, 1);
-  return Array.from({ length: intervals + 1 }, (_, index) => ({
-    pct: (index / intervals) * 100,
-    offsetMs: (axis.spanMs * index) / intervals,
-  }));
-}
-
 /** The position of the endpoint marker, or `not_terminal` for no marker. */
 export type EndpointMark =
   | { kind: 'terminal'; status: TerminalNodeStatus; pct: number; atMs: number }
@@ -124,50 +109,53 @@ export function endpointMark(endpoint: NodeEndpoint, axis: TimeAxis): EndpointMa
   }
 }
 
-/** One interval of a phase, for a total: its phase, its time span, and
+/** One interval of a phase, for a total: its kind, its time span, and
  * whether it has no end yet. */
 export interface PhaseInterval {
-  key: PhaseKey;
+  key: TimingKind;
   startMs: number;
   endMs: number;
   open: boolean;
 }
 
-/** The time of one phase over a set of intervals. */
+/** The time of one kind over a set of intervals. */
 export interface PhaseTotal {
-  key: PhaseKey;
-  /** The time of the phase, summed over its intervals. */
+  key: TimingKind;
+  /** The time of the kind, summed over its intervals. */
   ms: number;
-  /** The time of its longest interval: a sum of short intervals is not one
-   * long step. */
+  /** The time of its longest interval. */
   longestMs: number;
-  /** True when an interval of the phase has no end yet. */
+  /** The number of its intervals. */
+  count: number;
+  /** True when an interval of the kind has no end yet. */
   open: boolean;
 }
 
 /**
- * The time of each phase in the intervals, in lifecycle order. An interval
- * whose times are in the wrong order counts as no time. A phase with no time
- * is left out; with no time at all the list is empty.
+ * The time of each kind in the intervals, in the order of the keys. An
+ * interval whose times are in the wrong order counts as no time. A kind with
+ * no time is left out; with no time at all the list is empty.
  */
 export function phaseTotals(intervals: readonly PhaseInterval[]): PhaseTotal[] {
-  const totals = new Map<PhaseKey, PhaseTotal>();
+  const totals = new Map<TimingKind, PhaseTotal>();
   for (const interval of intervals) {
     const ms = Math.max(interval.endMs - interval.startMs, 0);
     const total = totals.get(interval.key) ?? {
       key: interval.key,
       ms: 0,
       longestMs: 0,
+      count: 0,
       open: false,
     };
     totals.set(interval.key, {
       key: interval.key,
       ms: total.ms + ms,
       longestMs: Math.max(total.longestMs, ms),
+      count: total.count + 1,
       open: total.open || interval.open,
     });
   }
-  return PHASE_ORDER.flatMap(key => {
+  return TIMING_KIND_ORDER.flatMap(key => {
     const total = totals.get(key);
     return total !== undefined && total.ms > 0 ? [total] : [];
   });
@@ -177,7 +165,7 @@ export function phaseTotals(intervals: readonly PhaseInterval[]): PhaseTotal[] {
 export function segmentInterval(segment: TimingSegment, drawAtMs: number): PhaseInterval {
   const span = segmentSpan(segment, drawAtMs);
   return {
-    key: segment.phase.kind,
+    key: segmentKind(segment.phase),
     startMs: span.startMs,
     endMs: span.endMs,
     open: segment.end.kind === 'open',
@@ -185,8 +173,8 @@ export function segmentInterval(segment: TimingSegment, drawAtMs: number): Phase
 }
 
 /**
- * The time of each phase in the segments, summed over retries and
- * generations, in lifecycle order.
+ * The time of each kind in the segments, summed over retries and
+ * generations, in the order of the keys.
  */
 export function phaseComposition(
   segments: readonly TimingSegment[],

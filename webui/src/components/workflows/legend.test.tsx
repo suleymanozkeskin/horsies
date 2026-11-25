@@ -2,62 +2,41 @@ import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
 import { markText, TimingLegend, type LegendMark } from '@/components/workflows/legend';
-import { phaseMeaning } from '@/components/workflows/phase';
 
-const MARKS: LegendMark[] = ['paused', 'end', 'critical_row', 'critical_edge', 'tolerant_join'];
+const MARKS: LegendMark[] = ['chain_edge', 'tolerant_join'];
 
 describe('TimingLegend', () => {
-  it('lists the fill of each phase that the view draws, then the marks of the view', () => {
-    render(<TimingLegend phases={['pending', 'enqueued', 'running']} marks={['paused', 'end', 'critical_row']} />);
+  it('lists the marks of the graph: the longest chain, then the tolerant join', () => {
+    render(<TimingLegend marks={MARKS} />);
 
     expect(screen.getAllByRole('listitem').map(item => item.textContent)).toEqual([
-      'dependency wait',
-      'queue wait',
-      'running',
-      'run paused',
-      'end of a node',
-      'critical path',
+      'longest chain',
+      'tolerant join',
     ]);
   });
 
-  it('holds no time: the key explains the drawing, and the summary holds the numbers', () => {
-    render(<TimingLegend phases={['enqueued', 'running']} marks={[]} />);
-
-    expect(screen.getByRole('list', { name: 'Legend' }).textContent).toBe('queue waitrunning');
-  });
-
-  it('draws the swatch of dependency wait as the thin track of the timeline', () => {
-    render(<TimingLegend phases={['pending', 'running']} marks={[]} />);
-
-    const swatch = (phase: string): Element | null | undefined =>
-      document.querySelector(`[data-legend-phase="${phase}"]`)?.querySelector('[aria-hidden]');
-    expect(swatch('pending')?.className).toContain('h-1 ');
-    expect(swatch('running')?.className).toContain('h-2.5');
-  });
-
   it('states the meaning of each item as its description, for the hover and for a screen reader', () => {
-    render(<TimingLegend phases={['claimed']} marks={['tolerant_join', 'end']} />);
+    render(<TimingLegend marks={MARKS} />);
 
     const described = (text: string): string | null | undefined =>
       screen.getByText(text).closest('[aria-description]')?.getAttribute('aria-description');
-    expect(described('slot wait')).toBe(phaseMeaning('claimed'));
+    expect(described('longest chain')).toContain('decided the end of the run');
     expect(described('tolerant join')).toContain('runs even when a dependency failed');
-    expect(described('end of a node')).toContain('terminal status');
   });
 
-  it('gives every mark a label and a meaning', () => {
+  it('never says critical path', () => {
     for (const mark of MARKS) {
-      expect(markText(mark).label).not.toBe('');
-      expect(markText(mark).meaning.length).toBeGreaterThan(20);
+      expect(markText(mark).label).not.toMatch(/critical/i);
+      expect(markText(mark).meaning).not.toMatch(/critical/i);
     }
   });
 
-  it('wraps instead of clipping, and shows nothing with no item', () => {
-    const { container, rerender } = render(<TimingLegend phases={[]} marks={['end']} />);
+  it('wraps instead of clipping, and shows nothing with no mark', () => {
+    const { container, rerender } = render(<TimingLegend marks={['chain_edge']} />);
 
     expect(screen.getByRole('list', { name: 'Legend' }).className).toContain('flex-wrap');
 
-    rerender(<TimingLegend phases={[]} marks={[]} />);
+    rerender(<TimingLegend marks={[]} />);
     expect(container.querySelector('ul')).toBeNull();
   });
 });

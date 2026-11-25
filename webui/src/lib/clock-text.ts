@@ -40,13 +40,30 @@ export function dayOffset(baseMs: number, epochMs: number): number {
   return Math.round((otherDay - baseDay) / MS_PER_DAY);
 }
 
+/** Local time of day to the second: `09:14:26`. */
+export function clockSecondText(epochMs: number): string {
+  const date = new Date(epochMs);
+  return `${pad(date.getHours(), 2)}:${pad(date.getMinutes(), 2)}:${pad(date.getSeconds(), 2)}`;
+}
+
+/** ` +1d` (or ` -1d`) when `epochMs` falls on another local day than
+ * `baseMs`, else nothing. */
+function dayOffsetSuffix(baseMs: number, epochMs: number): string {
+  const offset = dayOffset(baseMs, epochMs);
+  return offset === 0 ? '' : ` ${offset > 0 ? '+' : ''}${offset}d`;
+}
+
 /** The time of day of `epochMs` for a view whose date line shows the day of
  * `baseMs`: `09:14:26.244`, with `+1d` (or `-1d`) when the time falls on
  * another local day. */
 export function clockTextFrom(baseMs: number, epochMs: number): string {
-  const offset = dayOffset(baseMs, epochMs);
-  const text = clockText(epochMs);
-  return offset === 0 ? text : `${text} ${offset > 0 ? '+' : ''}${offset}d`;
+  return `${clockText(epochMs)}${dayOffsetSuffix(baseMs, epochMs)}`;
+}
+
+/** `clockSecondText` for a view whose date line shows the day of `baseMs`:
+ * `09:14:26`, with the day offset of a time on another local day. */
+export function clockSecondTextFrom(baseMs: number, epochMs: number): string {
+  return `${clockSecondText(epochMs)}${dayOffsetSuffix(baseMs, epochMs)}`;
 }
 
 /** The date line of a timing view: `2026-11-24 · times in GMT+1`. */

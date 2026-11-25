@@ -6,7 +6,7 @@ import {
 } from '@/components/ui/select-combobox';
 import { StatusChip } from '@/components/ui/status-chip';
 import { useWorkflowNames, useWorkflowRuns } from '@/hooks/use-workflow-runs';
-import { formatElapsed } from '@/lib/format-duration';
+import { formatDuration } from '@/lib/format-duration';
 import { statusColorVar } from '@/lib/status-utils';
 import { cn } from '@/lib/utils';
 import type { WorkflowRunSummary } from '@/types/workflows';
@@ -98,7 +98,7 @@ export function RunList({ selectedRunId, onSelect }: RunListProps) {
                   <div className="flex items-center justify-between gap-2">
                     <StatusChip status={run.status} />
                     <span className="font-mono text-xs text-muted-foreground">
-                      {formatElapsed(run.wall_s)}
+                      {formatDuration(run.wall_s)}
                     </span>
                   </div>
                   <span className="truncate font-mono text-10 text-muted-foreground">

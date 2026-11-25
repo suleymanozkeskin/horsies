@@ -106,9 +106,8 @@
      simulation), so a reader who does not see the hues still sees the
      boundary. Waits are striped and work is solid; dependency wait is drawn
      as a thin track. `unknown` is a hatch, so it never reads as a measured
-     phase. `--phase-ink` is the text on a fill; the running fill has its own
-     ink. The pause band and the two row placeholders are tints and hatches of
-     the base tokens. */
+     phase. The pause band and the two row placeholders are tints and hatches
+     of the base tokens. */
   --phase-pending: #c8c0ae;
   --phase-ready: #8f887a;
   --phase-enqueued: #f0ad4e;
@@ -118,12 +117,18 @@
   --phase-finalizing: #7cd0e2;
   --phase-advancing: #3a9f6e;
   --phase-unknown: var(--muted-foreground);
-  --phase-ink: #1a1a14;
-  --phase-running-ink: white;
-  --critical-path: var(--foreground);
-  /* Ink of a marked time (a long engine step, a gap of the record): 5.4:1 on
-     the card. */
-  --marked-ink: #7a5600;
+  /* The longest chain of a run: the links of the timeline and the edges of
+     the graph. */
+  --longest-chain: var(--foreground);
+  /* The tick marks of a duration axis: the ink, diluted. */
+  --tick: color-mix(in oklab, var(--foreground) 38%, transparent);
+  /* The two patterns of the key: a wait is striped, work is solid. */
+  --pattern-wait-fill: repeating-linear-gradient(
+    135deg,
+    var(--muted-foreground) 0 3px,
+    color-mix(in oklab, var(--muted-foreground) 45%, var(--background)) 3px 6px
+  );
+  --pattern-work-fill: var(--muted-foreground);
   --phase-pending-fill: var(--phase-pending);
   --phase-ready-fill: repeating-linear-gradient(
     135deg,
@@ -315,10 +320,14 @@
   --phase-finalizing: #b5f3fa;
   --phase-advancing: #16a06c;
   --phase-unknown: var(--muted-foreground);
-  --phase-ink: #050505;
-  --phase-running-ink: var(--phase-ink);
-  --critical-path: var(--foreground);
-  --marked-ink: #ffc94a;
+  --longest-chain: var(--foreground);
+  --tick: color-mix(in oklab, var(--foreground) 38%, transparent);
+  --pattern-wait-fill: repeating-linear-gradient(
+    135deg,
+    var(--muted-foreground) 0 3px,
+    color-mix(in oklab, var(--muted-foreground) 45%, var(--background)) 3px 6px
+  );
+  --pattern-work-fill: var(--muted-foreground);
   --phase-pending-fill: var(--phase-pending);
   --phase-ready-fill: repeating-linear-gradient(
     135deg,

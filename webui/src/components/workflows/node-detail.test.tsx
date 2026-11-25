@@ -3,9 +3,10 @@ import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { NodeDetailContent } from '@/components/workflows/node-detail';
-import { normalAttempt } from '@/test/attempt-fixtures';
+import { leafTask, normalAttempt } from '@/test/attempt-fixtures';
 import { TIMING_EXAMPLES } from '@/test/timing-examples';
 import { CASCADE_EDGES, CASCADE_NODES, nth, workflowRun } from '@/test/workflow-fixtures';
+import type { TaskDetail } from '@/types/tasks';
 import type { WorkflowNode, WorkflowRunDetail, WorkflowTaskDetail } from '@/types/workflows';
 
 const RUN: WorkflowRunDetail = {
@@ -13,7 +14,9 @@ const RUN: WorkflowRunDetail = {
   edges: CASCADE_EDGES,
 };
 
-const taskDetail = (node: WorkflowNode, patch: Partial<WorkflowTaskDetail>): WorkflowTaskDetail => ({
+const LEAF = { ...leafTask('COMPLETED', 0, 2, { enqueuedAt: null, startedAt: null }), task_id: 'task-a' };
+
+const nodeDetail = (node: WorkflowNode, patch: Partial<WorkflowTaskDetail>): WorkflowTaskDetail => ({
   task_index: node.task_index,
   node_id: node.node_id,
   task_name: node.task_name,
@@ -25,18 +28,31 @@ const taskDetail = (node: WorkflowNode, patch: Partial<WorkflowTaskDetail>): Wor
   ...patch,
 });
 
-/** Answers the run read and the node read of the panel. */
+/** The task read of the node: the same attempts, with the queue and the
+ * priority that the node read does not hold. */
+const taskOf = (detail: WorkflowTaskDetail): TaskDetail => ({
+  leaf: detail.leaf ?? LEAF,
+  task_name: detail.task_name,
+  queue_name: 'payments',
+  priority: 7,
+  is_workflow_task: true,
+  error_category: null,
+  attempts: detail.attempts,
+  workflow_id: 'run-1',
+  workflow_task_index: detail.task_index,
+});
+
+/** Answers the run read, the node read and the task read of the panel. */
 function stubApi(detail: WorkflowTaskDetail): void {
   vi.stubGlobal(
     'fetch',
-    vi.fn((input: RequestInfo | URL) =>
-      Promise.resolve(
-        new Response(JSON.stringify(String(input).includes('/tasks/') ? detail : RUN), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        })
-      )
-    )
+    vi.fn((input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.includes('/workflows/run-1/tasks/') ? detail : url.includes('/tasks/') ? taskOf(detail) : RUN;
+      return Promise.resolve(
+        new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      );
+    })
   );
 }
 
@@ -54,22 +70,33 @@ afterEach(() => {
 });
 
 describe('NodeDetailContent', () => {
-  it('shows the node timing and the attempts of a node that ran', async () => {
+  it('shows the node timing and the attempt panel of the task of a node that ran', async () => {
     const node = nth(CASCADE_NODES, 0);
-    stubApi(taskDetail(node, { attempts: [normalAttempt(1, 0, 'COMPLETED')] }));
+    stubApi(nodeDetail(node, { leaf: LEAF, attempts: [normalAttempt(1, 0, 'COMPLETED')] }));
     renderPanel(node);
 
     expect(await screen.findByRole('region', { name: 'Node timing' })).not.toBeNull();
-    expect(await screen.findByRole('article', { name: 'Attempt 1' })).not.toBeNull();
+    expect(await screen.findByRole('region', { name: 'Timing' })).not.toBeNull();
+    // The attempt panel reads the task: its queue and priority.
+    expect(document.querySelector('[data-task-meta]')?.textContent).toContain('queuepaymentspriority7');
+  });
+
+  it('marks a node on the longest chain on its chip line', async () => {
+    const node = nth(CASCADE_NODES, 0);
+    stubApi(nodeDetail(node, { leaf: LEAF, attempts: [normalAttempt(1, 0, 'COMPLETED')] }));
+    renderPanel(node);
+
+    expect(await screen.findByText('longest chain')).not.toBeNull();
+    expect(document.body.textContent).not.toMatch(/critical/i);
   });
 
   it('shows a node error once: not again when an attempt has it as its message', async () => {
     const node = nth(CASCADE_NODES, 1);
     const message = 'unreachable on attempt 1';
-    stubApi(taskDetail(node, { node_error: message, attempts: [normalAttempt(1, 0, 'FAILED')] }));
+    stubApi(nodeDetail(node, { node_error: message, leaf: LEAF, attempts: [normalAttempt(1, 0, 'FAILED')] }));
     renderPanel(node);
 
-    await screen.findByRole('article', { name: 'Attempt 1' });
+    await screen.findByRole('region', { name: 'Errors' });
     expect(screen.getAllByText(message)).toHaveLength(1);
     expect(screen.queryByText('Node error')).toBeNull();
   });
@@ -77,8 +104,9 @@ describe('NodeDetailContent', () => {
   it('shows a node error that no attempt has', async () => {
     const node = nth(CASCADE_NODES, 1);
     stubApi(
-      taskDetail(node, {
+      nodeDetail(node, {
         node_error: 'upstream dependency failed',
+        leaf: LEAF,
         attempts: [normalAttempt(1, 0, 'FAILED')],
       })
     );
@@ -88,12 +116,12 @@ describe('NodeDetailContent', () => {
     expect(screen.getByText('Node error')).not.toBeNull();
   });
 
-  it('has no attempts section for a skipped node: it never has an attempt', async () => {
+  it('has no attempt panel for a skipped node: it never has an attempt', async () => {
     const node = nth(CASCADE_NODES, 3);
-    stubApi(taskDetail(node, {}));
+    stubApi(nodeDetail(node, {}));
     renderPanel(node);
 
-    expect((await screen.findByRole('region', { name: 'Node timing' })).textContent).toContain('Did not run');
-    expect(screen.queryByRole('region', { name: 'Attempts' })).toBeNull();
+    expect((await screen.findByRole('region', { name: 'Node timing' })).textContent).toContain('did not run');
+    expect(screen.queryByRole('region', { name: 'Timing' })).toBeNull();
   });
 });

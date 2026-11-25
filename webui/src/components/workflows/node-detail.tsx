@@ -1,14 +1,19 @@
 import { Layers } from 'lucide-react';
 
 import { RESIDUAL_COPY } from '@/actions/copy';
-import { AttemptTiming } from '@/components/monitoring/attempt-timing';
+import { AttemptPanel } from '@/components/monitoring/attempt-panel';
 import { Hint } from '@/components/ui/hint';
 import { StatusChip } from '@/components/ui/status-chip';
+import { useMeta } from '@/hooks/use-meta';
+import { useTask } from '@/hooks/use-task';
+import { useWorkflowRun } from '@/hooks/use-workflow-run';
 import { useWorkflowTask } from '@/hooks/use-workflow-task';
-import type { WorkflowNode } from '@/types/workflows';
+import { assertNever } from '@/lib/exhaustive';
+import type { LeafTask, WorkflowNode, WorkflowTaskDetail } from '@/types/workflows';
 
-import { NodeTimingSection } from './node-timing';
+import { ChainBadge, NodeTimingSection } from './node-timing';
 import { residualState } from './residual';
+import { chainMembership, longestChain, type ChainMembership } from './run-timing';
 
 interface NodeDetailContentProps {
   workflowId: string;
@@ -18,11 +23,62 @@ interface NodeDetailContentProps {
   onOpenSubworkflow: (subWorkflowId: string, label: string) => void;
 }
 
-/** Detail body for one node: status and task, the one node timing summary,
- * the node error, and the attempts. Chrome-less — the surrounding panel owns
- * the header/close/resize and the inline padding. A node error that an
- * attempt shows as its message is not shown twice, and a skipped node, which
- * never has an attempt, has no attempts section. */
+/** What the node panel shows of the task of a node: the attempt panel of its
+ * task, a line for a node with no task yet, or nothing for a sub-workflow
+ * node (its child run is its work) and a skipped node (it never has an
+ * attempt). */
+type NodeTaskView =
+  | { kind: 'task'; leaf: LeafTask }
+  | { kind: 'no_task' }
+  | { kind: 'none' };
+
+function nodeTaskView(node: WorkflowNode, detail: WorkflowTaskDetail | undefined): NodeTaskView {
+  if (detail === undefined || detail.is_subworkflow) {
+    return { kind: 'none' };
+  }
+  if (node.node_status === 'SKIPPED' && detail.attempts.length === 0) {
+    return { kind: 'none' };
+  }
+  return detail.leaf === null ? { kind: 'no_task' } : { kind: 'task', leaf: detail.leaf };
+}
+
+/** Whether the node is on the longest chain of its run, from the run read
+ * that the graph and the timeline share; or `not_loaded` before that read. */
+type ChainRead = { kind: 'loaded'; membership: ChainMembership } | { kind: 'not_loaded' };
+
+function useChainMembership(workflowId: string, taskIndex: number): ChainRead {
+  const { detail, readClock } = useWorkflowRun(workflowId);
+  return detail === undefined || readClock === undefined
+    ? { kind: 'not_loaded' }
+    : {
+        kind: 'loaded',
+        membership: chainMembership(longestChain(detail.nodes, detail.edges, readClock.asOfMs), taskIndex),
+      };
+}
+
+/** The state of a task read that holds no task. */
+function taskReadText(isError: boolean, isLoading: boolean): string {
+  if (isError) {
+    return 'Could not load the task of this node.';
+  }
+  return isLoading ? 'Loading…' : 'Task not found.';
+}
+
+/** The attempt panel of the task of a node, from the task read (it holds the
+ * queue, the priority and the error category that the node read does not). */
+function NodeTask({ taskId }: { taskId: string }) {
+  const { detail, isLoading, isError } = useTask(taskId);
+  const { meta } = useMeta();
+  if (detail === undefined) {
+    return <p className="m-0 text-xs text-muted-foreground">{taskReadText(isError, isLoading)}</p>;
+  }
+  return <AttemptPanel detail={detail} traceTemplate={meta?.trace_link_template ?? null} />;
+}
+
+/** Detail body for one node: its status and its marks, the one node timing
+ * summary, the node error, and the attempt panel of its task. Chrome-less —
+ * the surrounding panel owns the header/close/resize and the inline padding.
+ * A node error that an attempt shows as its message is not shown twice. */
 export function NodeDetailContent({
   workflowId,
   runStatus,
@@ -31,7 +87,8 @@ export function NodeDetailContent({
 }: NodeDetailContentProps) {
   const label = node.node_id ?? node.task_name ?? `#${node.task_index}`;
   const drillId = node.is_subworkflow ? node.sub_workflow_id : null;
-  const { detail, isLoading } = useWorkflowTask(workflowId, node.task_index);
+  const { detail } = useWorkflowTask(workflowId, node.task_index);
+  const chainRead = useChainMembership(workflowId, node.task_index);
 
   const leaf = detail?.leaf ?? null;
   const nodeError = detail?.node_error;
@@ -40,14 +97,14 @@ export function NodeDetailContent({
     detail?.attempts.some(
       attempt => (attempt.error_message ?? attempt.failed_reason) === nodeError
     ) ?? false;
-  const skippedWithNoAttempt =
-    node.node_status === 'SKIPPED' && (detail?.attempts.length ?? 0) === 0;
+  const task = nodeTaskView(node, detail);
 
   return (
     <div className="flex flex-col gap-4 py-4">
       <div className="flex flex-col gap-1.5">
         <span className="inline-flex flex-wrap items-center gap-2">
           <StatusChip status={node.node_status} />
+          {chainRead.kind === 'loaded' && <ChainBadge membership={chainRead.membership} />}
           {residual !== null && (
             <span className="rounded-full border border-hairline-strong px-2 py-0.5 text-10 uppercase text-muted-foreground">
               {RESIDUAL_COPY[residual].badge}
@@ -60,11 +117,13 @@ export function NodeDetailContent({
               </span>
             </Hint>
           )}
-          <Hint text={`The task of the node: ${node.task_name}.`} className="min-w-0">
-            <span className="block min-w-0 break-all font-mono text-xs text-muted-foreground">
-              {node.task_name}
-            </span>
-          </Hint>
+          {task.kind !== 'task' && (
+            <Hint text={`The task of the node: ${node.task_name}.`} className="min-w-0">
+              <span className="block min-w-0 break-all font-mono text-xs text-muted-foreground">
+                {node.task_name}
+              </span>
+            </Hint>
+          )}
         </span>
         {residual !== null && (
           <p className="text-xs text-muted-foreground">{RESIDUAL_COPY[residual].tooltip}</p>
@@ -95,9 +154,24 @@ export function NodeDetailContent({
         </div>
       )}
 
-      {detail && !detail.is_subworkflow && !skippedWithNoAttempt && (
-        <AttemptTiming attempts={detail.attempts} leaf={leaf} isLoading={isLoading} />
-      )}
+      <NodeTaskSection task={task} />
     </div>
   );
+}
+
+function NodeTaskSection({ task }: { task: NodeTaskView }) {
+  switch (task.kind) {
+    case 'task':
+      return (
+        <div className="border-t border-hairline pt-4">
+          <NodeTask taskId={task.leaf.task_id} />
+        </div>
+      );
+    case 'no_task':
+      return <p className="m-0 text-xs text-muted-foreground">no attempt recorded</p>;
+    case 'none':
+      return null;
+    default:
+      return assertNever(task, 'node task view');
+  }
 }

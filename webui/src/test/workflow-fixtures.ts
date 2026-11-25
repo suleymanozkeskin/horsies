@@ -115,7 +115,7 @@ export function exactTiming(
 }
 
 /** A run where `b` fails and skips `d`; `e` joins `d` and `b` with a
- * tolerant join and ends last. `x` has no timing. The critical path is
+ * tolerant join and ends last. `x` has no timing. The longest chain is
  * a → b → e: d and b end at one instant (the skip cascade), and b ran. */
 export const CASCADE_NODES: WorkflowNode[] = [
   workflowNode(0, 'a', 'COMPLETED', exactTiming([['enqueued', 0, 1], ['running', 1, 3], ['advancing', 3, 3.5]], 'COMPLETED', 3.5)),
