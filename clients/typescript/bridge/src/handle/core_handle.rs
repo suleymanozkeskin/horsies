@@ -184,6 +184,10 @@ pub struct DatabasePingRecord {
 /// profile of its process. Starts nothing. A manifest that the core refuses
 /// throws `MANIFEST_REFUSED` with the field path and the cause.
 #[napi(ts_return_type = "NativeEnvelope<CoreHandle>")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
 pub fn build_core_handle(manifest_json: String, profile: HandleProfile) -> Envelope<CoreHandle> {
     sync_call("build_core_handle", || {
         match parse_producer_manifest(&manifest_json) {
@@ -213,6 +217,10 @@ impl CoreHandle {
     /// `CLIENT_DEFECT`: the package checks the retention config first.
     /// Starts nothing.
     #[napi(ts_return_type = "NativeEnvelope<CoreHandle>")]
+    #[allow(
+        clippy::needless_pass_by_value,
+        reason = "napi-rs passes the arguments of a JavaScript call by value"
+    )]
     pub fn with_install_coverage(&self, coverage: InstallCoverageArg) -> Envelope<CoreHandle> {
         sync_call("with_install_coverage", || {
             match coverage_request(&coverage) {
