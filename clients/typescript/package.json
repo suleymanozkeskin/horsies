@@ -8,14 +8,14 @@
     "tests"
   ],
   "scripts": {
-    "lint": "oxlint --deny-warnings horsies tests"
+    "lint": "oxlint --deny-warnings horsies tests",
+    "typecheck-speed": "bun tests/typecheck-speed/cli.ts check",
+    "typecheck-speed:record": "bun tests/typecheck-speed/cli.ts record"
   },
   "devDependencies": {
-    "@cloudflare/oxlint-config": "0.2.0",
-    "@oxlint/plugins": "1.95.0",
+    "@oxlint/plugins": "1.93.0",
     "@types/bun": "1.4.4",
     "@types/node": "26.6.6",
-    "oxlint": "1.95.0",
-    "tsrs": "7.1.0-beta.tsrs5"
+    "oxlint": "1.93.0"
   }
 }

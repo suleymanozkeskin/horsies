@@ -4,10 +4,16 @@
 //! frozen dataclass per manifest
 //! type, the integer bounds the core's parser enforces, and the dump
 //! function that gives the manifest's JSON text.
+//!
+//! The renderer has no Python form for a time of day, an optional value or
+//! a variant that holds the fields of a record type: only the schedule
+//! pattern schema (`SCHEDULE_PATTERN`) uses them, and the Python package
+//! keeps its own pattern models. A module that holds one of them is a
+//! defect of the caller, and the renderer stops with a panic that names it.
 
 use horsies_core::manifest_schema::{
     ChoiceValue, IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType, PythonValue,
-    TaggedVariant,
+    TaggedVariant, VariantFields,
 };
 
 use crate::python_text::{docstring, string_literal, GENERATED_HEADER};
@@ -180,12 +186,20 @@ fn render_tagged(
             name: tag_field,
             value: variant.tag_value,
         };
+        let fields = match variant.fields {
+            VariantFields::Own(fields) => fields,
+            VariantFields::OfRecord(record) => panic!(
+                "{}: the Python renderer has no form for a variant that holds the fields of \
+                 the record type {record}",
+                variant.python_class
+            ),
+        };
         text.push_str("\n\n");
         text.push_str(&render_dataclass(
             variant.python_class,
             variant.doc,
             Some(tag),
-            variant.fields,
+            fields,
         ));
     }
     let members: Vec<&str> = variants
@@ -282,6 +296,9 @@ fn python_type(value: PythonValue) -> String {
         PythonValue::Named(name) => name.to_owned(),
         PythonValue::List(item) => format!("tuple[{}, ...]", python_type(item.value())),
         PythonValue::Map(item) => format!("dict[str, {}]", python_type(item.value())),
+        PythonValue::Optional(_) | PythonValue::TimeOfDay => {
+            panic!("the Python renderer has no form for the manifest value {value:?}")
+        }
     }
 }
 
@@ -311,7 +328,8 @@ pub(crate) fn snake_case(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use horsies_core::manifest_schema::{
-        PythonItem, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST, WORKFLOW_SPEC_DATA,
+        MemberDefault, PythonItem, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST,
+        WORKFLOW_SPEC_DATA,
     };
 
     use super::*;
@@ -327,11 +345,13 @@ mod tests {
             name: "pool_size",
             doc: "Connections of the pool.",
             value: PythonValue::Int(BOUND),
+            default: MemberDefault::NoDefault,
         },
         ManifestField {
             name: "echo",
             doc: "",
             value: PythonValue::Bool,
+            default: MemberDefault::NoDefault,
         },
     ];
 
@@ -506,5 +526,38 @@ mod tests {
         assert!(rendered.contains("    nodes: tuple[SpecNode, ...]\n"));
         assert!(rendered.contains("    args_from: dict[str, int]\n"));
         assert!(rendered.contains("    queue_classes: dict[str, str]\n"));
+    }
+
+    #[test]
+    #[should_panic(expected = "the Python renderer has no form for the manifest value TimeOfDay")]
+    fn a_time_of_day_has_no_python_form() {
+        let _refused = python_type(PythonValue::TimeOfDay);
+    }
+
+    #[test]
+    #[should_panic(expected = "the Python renderer has no form for the manifest value Optional")]
+    fn an_optional_value_has_no_python_form() {
+        let _refused = python_type(PythonValue::Optional(PythonItem::Str));
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the Python renderer has no form for a variant that holds the fields"
+    )]
+    fn a_variant_that_holds_a_record_has_no_python_form() {
+        let manifest_type = ManifestType {
+            python_name: "Pattern",
+            doc: "",
+            shape: ManifestShape::Tagged {
+                tag_field: "type",
+                variants: &[TaggedVariant {
+                    python_class: "PatternDaily",
+                    tag_value: "daily",
+                    doc: "",
+                    fields: VariantFields::OfRecord("Daily"),
+                }],
+            },
+        };
+        let _refused = render_type(&manifest_type);
     }
 }

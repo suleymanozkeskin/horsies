@@ -13,8 +13,8 @@ use std::sync::Arc;
 use horsies_core::core::config::worker_profile::ProfileRequest;
 use horsies_core::worker_manifest::{MetricsEndpoint, WorkerManifest};
 use horsies_core::{
-    child_command, run_end_of, ClientFamily, RunPhase, Worker, WorkerPlan, WorkerPlanRefused,
-    WorkerRunEnd, WorkerStop,
+    child_command, run_end_of, ClientFamily, ProcessExit, RunPhase, Worker, WorkerPlan,
+    WorkerPlanRefused, WorkerRunEnd, WorkerStop,
 };
 
 pub use horsies_core::telemetry::listen::{ListenAddress, ListenAddressRefused};
@@ -221,7 +221,9 @@ async fn run_plan(
     workflows: Arc<WorkflowRegistry>,
     stop: WorkerStop,
 ) -> WorkerRunEnd {
-    match Worker::from_plan(plan, workflows, ClientFamily::Rust).await {
+    // The fail-closed exits 77 and 79 run the exit handlers of the process,
+    // as before.
+    match Worker::from_plan(plan, workflows, ClientFamily::Rust, ProcessExit::Standard).await {
         Ok(worker) => worker.with_stop(&stop).run_to_end().await,
         Err(error) => {
             tracing::error!("the worker did not build: {error}");

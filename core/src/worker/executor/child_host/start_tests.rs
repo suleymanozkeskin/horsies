@@ -22,6 +22,7 @@ use crate::broker::{OrphanSelfHeal, PostgresBroker, PrestartExpiry};
 use crate::core::config::PostgresConfig;
 use crate::core::registry::task::TaskRegistry;
 use crate::db::{CheckoutClass, CorePool, KeptOpen};
+use crate::process_exit::ProcessExit;
 use crate::test_support::migrated_database_url;
 use crate::test_support::migrated_pool;
 use crate::test_support::sql::{self, TestConnection, TestPool, TestPoolOptions};
@@ -48,7 +49,8 @@ const EXPIRY_FUNCTION: &str = "horsies_expire_owned_claim";
 /// A child context on `broker`; its frames go to a socket no one reads.
 fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
     let (ours, theirs) = UnixStream::pair().expect("a socket pair");
-    let writer = FrameWriter::start(ours, 16).expect("the frame writer starts");
+    let writer =
+        FrameWriter::start(ours, 16, ProcessExit::Standard).expect("the frame writer starts");
     let context = HostContext {
         broker: Arc::new(broker),
         app: Arc::new(ChildApp {
@@ -60,6 +62,8 @@ fn context_on(broker: PostgresBroker) -> (HostContext, UnixStream) {
             family: crate::ClientFamily::Rust,
             body_scope: super::BodyScope::NoScope,
             handler_child: super::HandlerChildApp::without_handlers(),
+            event_loop: super::EventLoopWatch::RuntimeOnly,
+            exit: ProcessExit::Standard,
         }),
         pid: PID,
         writer,

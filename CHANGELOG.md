@@ -8,6 +8,127 @@ and there is no migration contract between pre-1.0 versions.
 
 ## [Unreleased]
 
+### Added
+
+- **Codegen model: the schema of the schedule pattern.**
+  `horsies_core::manifest_schema::SCHEDULE_PATTERN` lists the types of the
+  `pattern_json` text of the scheduler manifest, in render order: `Weekday`,
+  `Month`, the five pattern records, `CronNumericTerm`,
+  `CronEnumTerm<Weekday>`, `CronEnumTerm<Month>`, `DaySelector`,
+  `CronSchedule` and `SchedulePattern`. `pattern_json` stays text, so the
+  scheduler manifest does not change. The Python package keeps its own
+  pattern models; the Python renderer does not render this module.
+- The bounds of the pattern fields are public constants of
+  `horsies_core::core::config::schedule` (`INTERVAL_SECONDS` to
+  `INTERVAL_DAYS`, `HOURLY_MINUTE`, `HOURLY_SECOND`, `MONTHLY_DAY`,
+  `CRON_MINUTE`, `CRON_HOUR`, `CRON_DAY_OF_MONTH`, `CRON_NUMERIC_VALUE`,
+  `CRON_NUMERIC_STEP`, `CRON_ENUM_STEP`, `CRON_MONTH_SPAN`,
+  `CRON_WEEKDAY_SPAN`). The pattern rules read them; their messages do not
+  change.
+- **Child host: the run handle and host-held work.**
+  `horsies_core::current_run()` gives the `RunHandle` of the current async
+  run, or `RunHandleRefused::NotInAnAsyncRun` outside an async body and on
+  the thread of a blocking body. `RunHandle` is `Clone + Send + Sync`.
+  `RunHandle::register_host_work(name)` registers a piece of work that a
+  host program runs outside the Rust runtime; it counts toward
+  `MAX_RUN_WORK` and is refused with `HostWorkRefused::RunEnded` or
+  `TooMuchWork { bound }`. A cancel round asks a `HostWork` to stop
+  (`HostWork::stop_requested`, `HostWork::stop_state`) with a
+  `WorkStopCause`, `RunCancelled { cause }` or `LeftWork`, and does not
+  remove it. The piece leaves the run at `HostWork::end` or at a drop. A
+  piece alive after the rounds is named in `left_work_stuck`,
+  `leftover_stuck` or `run_stuck`, and the run keeps its seat until the
+  piece ends. Work of `spawn_in_run` and the Rust client do not change.
+
+### Changed
+
+- **Codegen model: the call forms that give a code.**
+  `horsies_core::catalog::CatalogMember` has a new field
+  `forms: CallForms`, `AnyForm` or `BlockingFormOnly`. The `CodeCatalog`
+  derive sets `BlockingFormOnly` for a variant with
+  `#[code_catalog(blocking_form_only)]`, and refuses the key on the enum.
+  The `ASYNC_CONTEXT` members of `BrokerErrorCode`, `TaskSendErrorCode`,
+  `WorkflowStartErrorCode`, `HandleErrorCode` and `RetrievalCode` have it:
+  only a blocking call form (a Python sync call, a Rust blocking call)
+  gives these codes. An error class reads the mark through the member of
+  its `code` slot; `CodeCatalog::member_named` finds that member. Code that
+  builds a `CatalogMember` value sets the new field. The generated Python
+  package does not change.
+- **Codegen model: the forms of the pattern types.** `PythonValue` has
+  `Optional(PythonItem)` and `TimeOfDay`, and `PythonItem` has `TimeOfDay`.
+  `ManifestField` has a new field `default: MemberDefault` (`NoDefault` or
+  `Int(value)`, the reader's value for a missing member).
+  `TaggedVariant::fields` is a `VariantFields`: `Own(fields)`, or
+  `OfRecord(name)` for a newtype variant that holds the fields of a record
+  type. `ManifestValue` is implemented for `Option<T>` and `NaiveTime`. The
+  `ManifestSchema` derive reads `rename_all = "snake_case"`, a newtype
+  variant under a tag, a generic type recorded once per use
+  (`#[manifest_schema(uses(...))]`), an integer field that names its bound
+  (`#[manifest_schema(int_bound = ...)]`), and the field serde keys
+  `skip_serializing_if = "Option::is_none"` and `default = "<const fn>"`.
+  Code that builds these model values or matches on these enums sets the
+  new field and takes the new variants. `HourlySchedule.second` reads its
+  default from `default_hourly_second` (0), as before. The generated Python
+  package does not change.
+- **Child host: the host loop watch.** `ChildApp` has a new field
+  `event_loop: EventLoopWatch`, `RuntimeOnly` or `Host(Arc<HostLoop>)`. A
+  host program that runs task code on an event loop of its own gives the
+  child a `HostLoop`: its timer calls `HostLoop::turned` every
+  `HOST_LOOP_TURN_TICK` (100 ms), and it marks the run whose code the loop
+  runs with `HostLoop::hold(task_id)` and `HostLoop::release`. The watch
+  thread of a shared async child, and of a shared thread child for its
+  main thread, sends one `loop_blocked` frame when the loop has not turned
+  for `LOOP_BLOCK_LIMIT` (5 s). The culprit is the held run when every
+  sample of the block saw it (a sample counts after 200 ms with no turn);
+  else no run is named. An isolated child watches no host loop. Code that
+  builds a `ChildApp` sets the new field; the Rust client sets
+  `RuntimeOnly`, and its poll watch does not change.
+- **Child host: start facts for start hooks.** `NamedChildStartHook::start`
+  takes a `ChildStartFacts`: `Isolated`, `SharedAsync { seats }`,
+  `SharedThread { seats }` or `Handler`, read from the init frame before
+  the first hook. A host that starts its own seats in a start hook reads
+  the seat count there. Code that builds a `NamedChildStartHook` takes the
+  argument. The Rust client's `on_child_start` and
+  `on_handler_child_start` do not change: their hooks take no argument.
+- **Exits from core threads: `ProcessExit`.** `horsies_core::ProcessExit`
+  names how the core ends the process from its own threads: the control
+  and writer threads of a child (exit codes 71 and 72) and the fail-closed
+  liveness and runner heartbeat watches of a worker (79 and 77).
+  `Standard` is `std::process::exit`, as before. `Immediate(ExitDrain)`
+  runs the drain (with `ExitDrain::WithHost` the host's own drain, then a
+  flush of Rust's standard output and standard error) for at most
+  `EXIT_DRAIN_BOUND` (2 s), then ends the process with `libc::_exit`, so
+  no exit handler of the host runtime runs. `ChildApp` has a new field
+  `exit`, and `Worker::from_plan` takes the exit as its fourth argument.
+  The Rust client and the Python bridge pass `Standard`; their exits do
+  not change.
+
+### Fixed
+
+- **A schema install of the `TYPESCRIPT` client family into an empty
+  database records its family row.** The install writes the family row in
+  the transaction of the first migration whose `CHECK`
+  `horsies_client_family_family_known` admits the value: migration 1000 for
+  `PYTHON` and `RUST`, as before, and migration 1006 for `TYPESCRIPT`.
+  Before, every install wrote the row in the transaction of migration 1000,
+  whose `CHECK` admits only `PYTHON` and `RUST`: an install with
+  `ClientFamily::TypeScript` into an empty database failed with SQLSTATE
+  23514 and wrote nothing. A Python or a Rust install does not change. A
+  `TYPESCRIPT` install into an empty database that stops before migration
+  1006 commits leaves no family row. No handle writes into a database with
+  no family row, and the next install, of any client family, applies the
+  rest of the chain and records its own family.
+- **A send refuses a shared task with no `timeout_ms`.** A send of a
+  `SHARED_ASYNC` or `SHARED_THREAD` task whose task options have no
+  `timeout_ms` (absent or `null`) is refused before any statement, and
+  nothing is written: the send gives `VALIDATION_FAILED`, and a broker
+  enqueue gives `INVALID_TASK_OPTIONS`. Before, the send wrote the task, and
+  each worker failed its run with `WORKER_SERIALIZATION_ERROR`. A schedule
+  and a rerun do not change: they write the task, and the worker refuses
+  its run as before. The Rust task macro and the Python task decorator
+  refuse such a task at registration, so the tasks that they register do not
+  change.
+
 ## [0.8.1] - 2026-11-25
 
 0.8.1 needs a stop-all upgrade: stop every worker, scheduler and producer,
