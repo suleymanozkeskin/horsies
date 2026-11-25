@@ -121,8 +121,8 @@ BASELINE_COLUMNS_BY_SOURCE: Final = (
     ('tableoid of the two partitioned parents', 2),
 )
 """The columns that the baseline catalog has a rule for, by the migration
-that adds them. Migration 1003 adds no column. A migration that adds a
-column adds a line here."""
+that adds them. Migrations 1003, 1005 and 1006 add no column. A migration
+that adds a column adds a line here."""
 
 
 def test_baseline_catalog_has_a_rule_for_each_column_of_the_migration_chain() -> None:

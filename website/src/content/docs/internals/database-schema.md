@@ -1,7 +1,7 @@
 ---
 title: Database Schema
 section: shared
-summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000, 1001, 1002, 1003, 1004 and 1006).
+summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000 to 1006).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -17,6 +17,7 @@ The schema is a chain of migrations. Each migration runs in its own transaction,
 | 1002 | `core/migrations/1002_workflow_start_command_fingerprint.sql` | The start command fingerprint of each top-level workflow: two columns and one `CHECK` on `horsies_workflows`, and the workflow start functions that write and compare it (`horsies_workflow_start`, `horsies_workflow_start_top_row`, `horsies_workflow_start_child_row`, `horsies_workflow_child_start`) |
 | 1003 | `core/migrations/1003_attempt_cancelled.sql` | The cancel of a running task: the attempt outcome `CANCELLED` and the writer `CANCEL` in the two `CHECK`s of `horsies_task_attempts`, `horsies_cancel_task` (it writes the `CANCELLED` attempt of a `RUNNING` task and sends the cancel notice), and `horsies_cancelled_runs` (the read of a worker after a lost notice) |
 | 1004 | `core/migrations/1004_worker_profile_name.sql` | The name of the worker profile in each worker snapshot: the column `profile_name` and one `CHECK` on `horsies_worker_states` |
+| 1005 | `core/migrations/1005_claim_generation_by_status.sql` | The claim generation of a held task row: one `CHECK` on `horsies_tasks` (`horsies_tasks_claim_generation_by_status`) |
 | 1006 | `core/migrations/1006_typescript_client_family.sql` | The client family `TYPESCRIPT`: the `CHECK` `horsies_client_family_family_known` admits `PYTHON`, `RUST` and `TYPESCRIPT` |
 
 The files of migration 1000:
@@ -108,7 +109,25 @@ Upgrade from version 1003 to version 1004 (also from an earlier version, after t
 - The migration writes no value into old rows. A snapshot written before it has `profile_name` NULL: the reads
   give its profile as not recorded.
 
-Upgrade to version 1006 (also from an earlier version, after the migrations before it):
+Upgrade from version 1004 to version 1005 (also from an earlier version, after the migrations before it):
+
+- Stop every process of an earlier build before the first start of this build, and upgrade every process
+  together. The first start applies migration 1005. A process of an earlier build that starts after it is
+  refused, because the database holds a newer version.
+- A database at version 1005 does not go back to an earlier build.
+- The migration adds one `CHECK` to `horsies_tasks`. The `CHECK` reads the table once, under `ACCESS EXCLUSIVE`
+  until the migration commits. It rewrites no table and writes no value into old rows.
+- A `CLAIMED` or `RUNNING` row with `claimed_at` NULL stops the migration. No horsies writer makes such a row; a
+  statement written by hand can. The migration fails with SQLSTATE 23514, and its message names the table, the
+  `CHECK`, the row count and the query that finds the rows. The database stays at version 1004 and the process
+  does not start. Correct or delete each row, then start again:
+
+  ```sql
+  SELECT id, status, claimed_by_worker_id FROM horsies_tasks
+  WHERE status IN ('CLAIMED', 'RUNNING') AND claimed_at IS NULL;
+  ```
+
+Upgrade from version 1005 to version 1006 (also from an earlier version, after the migrations before it):
 
 - Stop every process of an earlier build before the first start of this build, and upgrade every process
   together. The first start applies migration 1006. A process of an earlier build that starts after it is
@@ -175,6 +194,11 @@ Live task storage.
 
 The `CHECK` `horsies_tasks_attempt_claims_shape` admits three pairs: both NULL; `attempt_claims` 0 with no
 `first_claimed_at` on a `PENDING` row; `attempt_claims` 1 or more with `first_claimed_at` set.
+
+The `CHECK` `horsies_tasks_claim_generation_by_status` (migration 1005) refuses a `CLAIMED` or `RUNNING` row with
+`claimed_at` NULL. `claimed_at` is the claim generation: the claim writes it with `CLAIMED`, the start keeps it, and
+each writer that clears it sets `PENDING` in the same statement. The attempt writers copy it into the phase record
+of the attempt row. The `CHECK` does not read a `PENDING` row.
 
 The claim reads `horsies_tasks_claim_pending` and `horsies_tasks_claim_expired_order`, keyed `(queue_name,
 execution, priority, enqueued_at, id)` over `PENDING` and `CLAIMED` rows, and `horsies_tasks_claim_expired_at`,

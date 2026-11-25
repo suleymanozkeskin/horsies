@@ -2807,9 +2807,10 @@ mod tests {
         PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust)
     }
 
-    /// The claim generation of every row that `insert_claimed_task` seeds and
-    /// of every claimed task that `claimed_task` builds, so a test's dispatch
-    /// fences on the generation its row carries.
+    /// The claim generation of every row that `insert_claimed_task` and
+    /// `insert_running_task` seed and of every claimed task that
+    /// `claimed_task` builds, so a test's dispatch fences on the generation
+    /// its row carries.
     fn test_claim_generation() -> chrono::DateTime<Utc> {
         static GENERATION: std::sync::OnceLock<chrono::DateTime<Utc>> = std::sync::OnceLock::new();
         *GENERATION.get_or_init(Utc::now)
@@ -2877,7 +2878,7 @@ mod tests {
                     $1, 'finalize_test', $2, 100, 'null', $5, 'ISOLATED',
                     'standard_30d', NOW(), NOW(),
                     1, decode(repeat('00', 32), 'hex'), NULL,
-                    'RUNNING', NOW(), NULL, NULL, NULL,
+                    'RUNNING', NOW(), $6, NULL, NULL,
                     NOW(), NULL, NULL,
                     NULL, NULL, NULL,
                     $3, $4, NULL, NULL, FALSE,
@@ -2889,6 +2890,7 @@ mod tests {
         .bind(retry_count)
         .bind(max_retries)
         .bind(task_options)
+        .bind(test_claim_generation())
         .execute(pool)
         .await
         .unwrap();

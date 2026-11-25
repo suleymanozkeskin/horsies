@@ -49,6 +49,7 @@ _MIGRATION_DESCRIPTIONS: Final[dict[int, str]] = {
     1002: 'workflow start command fingerprint',
     1003: 'attempt cancelled',
     1004: 'worker profile name',
+    1005: 'claim generation by status',
     1006: 'typescript client family',
 }
 """The description that the bookkeeping row of each migration of the chain

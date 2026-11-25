@@ -4807,6 +4807,9 @@ mod stale_and_expired_list_tests {
         }
     }
 
+    /// A row of `status`, enqueued 20 minutes ago. A RUNNING row was claimed
+    /// and started 10 minutes ago: it holds its claim generation (CHECK
+    /// `horsies_tasks_claim_generation_by_status`).
     async fn seed(
         pool: &TestPool,
         task_name: &str,
@@ -4818,12 +4821,13 @@ mod stale_and_expired_list_tests {
             "INSERT INTO horsies_tasks (
                  id, task_name, queue_name, priority, input, task_options, execution,
                  retention_class_key, sent_at, created_at, command_fingerprint_version,
-                 command_fingerprint, status, enqueued_at, started_at, good_until,
+                 command_fingerprint, status, enqueued_at, claimed_at, started_at, good_until,
                  retry_count, max_retries, is_workflow_task, updated_at, retain_rerun_input
              ) VALUES (
                  $1, $2, 'default', 100, '{}', NULL, 'ISOLATED',
                  'forever', NOW(), NOW(), 1,
                  decode(repeat('0d', 32), 'hex'), $3, NOW() - INTERVAL '20 minutes',
+                 CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '10 minutes' END,
                  CASE WHEN $3 = 'RUNNING' THEN NOW() - INTERVAL '10 minutes' END,
                  NOW() - $4 * INTERVAL '1 minute',
                  0, 0, FALSE, NOW(), FALSE

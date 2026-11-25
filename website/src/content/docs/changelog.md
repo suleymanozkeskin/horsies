@@ -299,18 +299,39 @@ there is no migration contract between pre-1.0 versions.
   earlier build that runs on writes its snapshots with no profile name. A
   database at 1004 does not go back to an earlier build. The web monitoring
   schema check expects version 1004.
+- **Schema migration 1005: a CLAIMED or RUNNING task row holds its claim
+  generation. Stop every process and upgrade together.** The first start of
+  this build applies migration 1005
+  (`core/migrations/1005_claim_generation_by_status.sql`) after migration
+  1004. It adds the CHECK `horsies_tasks_claim_generation_by_status` to
+  `horsies_tasks`: a row with the status `CLAIMED` or `RUNNING` has
+  `claimed_at`. No horsies writer makes a row that breaks the rule. A
+  statement written by hand (for example a test seed) that inserts such a
+  row, or that clears `claimed_at` of such a row, now fails at once with
+  SQLSTATE 23514 and the name of the CHECK. Before, the row was accepted,
+  and the attempt writer that copies `claimed_at` refused it later. The
+  CHECK reads the table once, under `ACCESS EXCLUSIVE` until the migration
+  commits; no table is rewritten and no row changes. A database that holds
+  such a row stops the migration with SQLSTATE 23514: the message names the
+  table, the CHECK, the row count and the query that finds the rows, the
+  database stays at 1004, and the process does not start. Correct or delete
+  each row, then start again. A process of an earlier build that starts
+  after the migration is refused, because the database holds a newer
+  version. A database at 1005 does not go back to an earlier build. The web
+  monitoring schema check expects version 1005.
 - **Schema migration 1006: the client family `TYPESCRIPT` is reserved.**
   The first start of this build applies migration 1006
-  (`core/migrations/1006_typescript_client_family.sql`). It replaces the
-  CHECK `horsies_client_family_family_known`: the family row can hold
-  `TYPESCRIPT` in addition to `PYTHON` and `RUST`. No TypeScript client is
-  released yet. The Python and Rust clients never write `TYPESCRIPT`, and
-  the migration does not change the family row. The migration holds
-  `ACCESS EXCLUSIVE` on `horsies_client_family` (one row) until it commits;
-  no table is rewritten. A process of an earlier build that starts after it
-  is refused, because the database holds a newer version; one that runs on
-  keeps writing. A database at 1006 does not go back to an earlier build.
-  The web monitoring schema check expects version 1006.
+  (`core/migrations/1006_typescript_client_family.sql`) after migration
+  1005. It replaces the CHECK `horsies_client_family_family_known`: the
+  family row can hold `TYPESCRIPT` in addition to `PYTHON` and `RUST`. No
+  TypeScript client is released yet. The Python and Rust clients never write
+  `TYPESCRIPT`, and the migration does not change the family row. The
+  migration holds `ACCESS EXCLUSIVE` on `horsies_client_family` (one row)
+  until it commits; no table is rewritten. A process of an earlier build
+  that starts after it is refused, because the database holds a newer
+  version; one that runs on keeps writing. A database at 1006 does not go
+  back to an earlier build. The web monitoring schema check expects version
+  1006.
   - A Python or a Rust client refuses a database whose family row holds
     `TYPESCRIPT` as it refuses a database of the other client: the install,
     each write and a rerun fail with the same errors and write nothing. The
