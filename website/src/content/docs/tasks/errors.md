@@ -150,6 +150,7 @@ The codes of the client calls. The error types that carry them are on the client
 | `BROKER_NOT_CONFIGURED` | No | `spec.start()` called without broker |
 | `VALIDATION_FAILED` | No | A start check (`WorkflowValidationError`) refused the start, or a retry of another workflow's error. Any other exception in the start checks is a defect and propagates. In the start transaction, an exception that is not a database or driver error is a defect and propagates, also a `SerializationError` |
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written. Use another id |
+| `WORKFLOW_COMMAND_CONFLICT` | No | The workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written. Send the same start command, or use another id. See [Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/) |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction propagates |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
 
@@ -275,7 +276,7 @@ deployment pattern.
 | HRS-107 | `TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF` | `execution=Execution.SHARED_ASYNC` on a function defined with `def`. Define it with `async def`, or use `SHARED_THREAD` |
 | HRS-108 | `TASK_SHARED_THREAD_REQUIRES_DEF` | `execution=Execution.SHARED_THREAD` on a function defined with `async def`. Define it with `def`, or use `SHARED_ASYNC` |
 | HRS-109 | `TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT` | `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` |
-| HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | `cancel_grace_ms` with an execution class other than `SHARED_ASYNC` |
+| HRS-110 | `TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC` | `cancel_grace_ms` with the execution class `SHARED_THREAD` |
 | HRS-111 | `TASK_CANCEL_GRACE_OUT_OF_RANGE` | `cancel_grace_ms` outside `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000) |
 | HRS-112 | `TASK_INVALID_ERROR_CODE` | A declared error code is empty, not `UPPER_SNAKE_CASE`, or an exception class name. See [Declared Error Codes](#declared-error-codes) |
 | HRS-113 | `TASK_DUPLICATE_ERROR_CODE` | A task declares one error code more than once |

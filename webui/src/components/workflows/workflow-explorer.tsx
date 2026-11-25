@@ -1,16 +1,22 @@
-import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
 
 import { ChevronLeft, PanelLeftClose, PanelLeftOpen, X } from 'lucide-react';
 
 import { WorkflowActionBar } from '@/actions/action-bar';
 import { useWorkflowActions } from '@/actions/use-workflow-actions';
+import { Button } from '@/components/ui/button';
+import { Capsule, CapsuleSeparator } from '@/components/ui/capsule';
+import { PageHeader } from '@/components/ui/page-header';
+import { Toggle } from '@/components/ui/toggle';
 import { useLocalStorage } from '@/hooks/use-local-storage';
+import { cn } from '@/lib/utils';
 import type { WorkflowSearch, WorkflowSearchPatch } from '@/routes/search';
 import type { WorkflowNode, WorkflowStatus } from '@/types/workflows';
 
-import { Legend } from './legend';
 import { NodeDetailContent } from './node-detail';
 import { RunList } from './run-list';
+import { RunTimingSummary } from './run-summary';
+import type { KeyLight } from './timing-key';
 import { WorkflowGraph } from './workflow-graph';
 import { WorkflowTimeline } from './workflow-timeline';
 
@@ -28,6 +34,13 @@ const DEFAULT_PANEL_WIDTH = 440;
 const PANEL_RESIZE_STEP = 24; // px moved per arrow-key press on the separator
 
 const RAIL_OPEN_KEY = 'workflow-rail-open';
+
+const ALL_LIT: KeyLight = { kind: 'all' };
+
+/** The same light: a new light that equals the shown one keeps the state, so
+ * the views do not draw again. */
+const sameLight = (a: KeyLight, b: KeyLight): boolean =>
+  a.kind === 'all' ? b.kind === 'all' : b.kind === 'phase' && a.phase === b.phase;
 const PANEL_WIDTH_KEY = 'workflow-panel-width';
 
 function viewTitle(view: PanelView): string {
@@ -59,13 +72,19 @@ export function WorkflowExplorer({
   const [views, setViews] = useState<PanelView[]>([]);
   const [viewMode, setViewMode] = useState<ViewMode>('graph');
   const [statusFilter, setStatusFilter] = useState<Set<string>>(new Set());
+  // The kind that a key entry lights, in the run summary and in the timeline.
+  const [isolation, setIsolation] = useState<KeyLight>(ALL_LIT);
+  const isolate = useCallback(
+    (next: KeyLight): void => setIsolation(previous => (sameLight(previous, next) ? previous : next)),
+    []
+  );
   const containerRef = useRef<HTMLDivElement>(null);
 
   const runId = search.run ?? null;
   const workflow = useWorkflowActions(runId);
   const runDetail = workflow.detail;
 
-  // Legend-driven status filter: toggling a status fades nodes of other
+  // Status filter of the run summary: toggling a status fades nodes of other
   // statuses (empty set = show everything).
   const toggleStatusFilter = (status: WorkflowStatus): void =>
     setStatusFilter(previous => {
@@ -175,180 +194,192 @@ export function WorkflowExplorer({
   };
 
   return (
-    <div
-      ref={containerRef}
-      className="glass flex h-[calc(100vh-10rem)] overflow-hidden rounded-xl"
-    >
-      {railOpen && (
-        <div className="w-72 shrink-0">
-          <RunList
-            selectedRunId={runId}
-            onSelect={run => {
-              setViews([]);
-              onSearchChange({ run: run.id, node: undefined });
-            }}
-          />
-        </div>
-      )}
+    <div className="flex h-full min-h-0 flex-col gap-4">
+      <PageHeader title="Workflows" />
+      <div ref={containerRef} className="flex min-h-0 flex-1">
+        {railOpen && (
+          <div className="w-72 shrink-0">
+            <RunList
+              selectedRunId={runId}
+              onSelect={run => {
+                setViews([]);
+                onSearchChange({ run: run.id, node: undefined });
+              }}
+            />
+          </div>
+        )}
 
-      <div className="flex min-w-0 flex-1 flex-col">
-        <div className="flex flex-wrap items-center gap-3 border-b border-border px-3 py-2 text-sm">
-          <button
-            type="button"
-            onClick={() => setRailOpen(open => !open)}
-            aria-label={railOpen ? 'Collapse run list' : 'Expand run list'}
-            title={railOpen ? 'Collapse run list' : 'Expand run list'}
-            className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
-          >
-            {railOpen ? (
-              <PanelLeftClose className="size-4" />
-            ) : (
-              <PanelLeftOpen className="size-4" />
-            )}
-          </button>
-          {runId !== null && runDetail !== undefined ? (
-            <>
+        <div
+          className={cn(
+            'flex min-w-0 flex-1 flex-col',
+            railOpen && 'pl-4',
+            top !== undefined && 'pr-4'
+          )}
+        >
+          <div className="flex flex-wrap items-center gap-3 pb-3 text-sm">
+            <Capsule>
+              <Button
+                type="button"
+                variant="capsule"
+                size="capsule-icon"
+                onClick={() => setRailOpen(open => !open)}
+                aria-label={railOpen ? 'Collapse run list' : 'Expand run list'}
+                title={railOpen ? 'Collapse run list' : 'Expand run list'}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                {railOpen ? <PanelLeftClose /> : <PanelLeftOpen />}
+              </Button>
+              {runId !== null && runDetail !== undefined && (
+                <>
+                  <CapsuleSeparator />
+                  <Toggle
+                    variant="segment"
+                    size="capsule"
+                    pressed={viewMode === 'graph'}
+                    onClick={() => setViewMode('graph')}
+                  >
+                    Graph
+                  </Toggle>
+                  <Toggle
+                    variant="segment"
+                    size="capsule"
+                    pressed={viewMode === 'timeline'}
+                    onClick={() => setViewMode('timeline')}
+                  >
+                    Timeline
+                  </Toggle>
+                  {/* Hidden when the action bar renders nothing, or renders
+                      an empty bar because no action is shown. */}
+                  <CapsuleSeparator className="last:hidden [&:has(+:empty)]:hidden" />
+                  <WorkflowActionBar view={workflow} />
+                </>
+              )}
+            </Capsule>
+            {runId !== null && runDetail !== undefined ? (
               <span
                 className="min-w-0 flex-1 truncate font-medium"
                 title={runDetail.run.name}
               >
                 {runDetail.run.name}
               </span>
-              <WorkflowActionBar view={workflow} />
-              <div className="flex shrink-0 overflow-hidden rounded-md border border-border text-xs">
-                <button
-                  type="button"
-                  onClick={() => setViewMode('graph')}
-                  aria-pressed={viewMode === 'graph'}
-                  className={
-                    viewMode === 'graph'
-                      ? 'bg-accent-surface px-2 py-0.5 font-medium text-foreground'
-                      : 'px-2 py-0.5 text-muted-foreground hover:text-foreground'
-                  }
-                >
-                  Graph
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode('timeline')}
-                  aria-pressed={viewMode === 'timeline'}
-                  className={
-                    viewMode === 'timeline'
-                      ? 'bg-accent-surface px-2 py-0.5 font-medium text-foreground'
-                      : 'px-2 py-0.5 text-muted-foreground hover:text-foreground'
-                  }
-                >
-                  Timeline
-                </button>
-              </div>
-              <div className="hidden shrink-0 lg:block">
-                <Legend active={statusFilter} onToggle={toggleStatusFilter} />
-              </div>
-            </>
-          ) : (
-            <span className="text-muted-foreground">
-              Select a workflow run to view its graph.
-            </span>
-          )}
-        </div>
-        <div className="min-h-0 flex-1">
-          {runId !== null && viewMode === 'graph' ? (
-            <WorkflowGraph
-              workflowId={runId}
-              selectedIndex={rootSelectedIndex}
-              onSelectNode={node => pushDetail(runId, node)}
-              onDrillInto={(subId, label) => pushGraph(subId, label)}
-              onFocusNode={node => focusDetail(runId, node)}
-              statusFilter={statusFilter}
-            />
-          ) : runId !== null && viewMode === 'timeline' ? (
-            <WorkflowTimeline
-              workflowId={runId}
-              selectedIndex={rootSelectedIndex}
-              onSelectNode={node => focusDetail(runId, node)}
-              statusFilter={statusFilter}
-            />
-          ) : (
-            <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-              {railOpen
-                ? 'Select a workflow run to view its graph.'
-                : 'Expand the run list to pick a workflow.'}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {top !== undefined && (
-        <>
-          <div
-            role="separator"
-            aria-orientation="vertical"
-            aria-label="Resize panel"
-            aria-valuemin={MIN_PANEL_WIDTH}
-            aria-valuenow={Math.round(panelWidth)}
-            tabIndex={0}
-            onPointerDown={startResize}
-            onKeyDown={onSeparatorKeyDown}
-            className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary focus:outline-none focus-visible:bg-primary"
-          />
-          <div
-            className="flex shrink-0 flex-col bg-glass-inset"
-            style={{ width: panelWidth }}
-          >
-            <div className="flex items-center gap-2 border-b border-border p-3">
-              {views.length > 1 && (
-                <button
-                  type="button"
-                  onClick={back}
-                  aria-label="Back"
-                  className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
-                >
-                  <ChevronLeft className="size-4" />
-                </button>
-              )}
-              <span
-                className="min-w-0 flex-1 truncate text-sm font-semibold"
-                title={viewTitle(top)}
-              >
-                {viewTitle(top)}
+            ) : (
+              <span className="text-muted-foreground">
+                Select a workflow run to view its graph.
               </span>
-              <button
-                type="button"
-                onClick={closePanel}
-                aria-label="Close panel"
-                className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
-              >
-                <X className="size-4" />
-              </button>
-            </div>
-
-            <div className="min-h-0 flex-1 overflow-hidden">
-              {top.kind === 'detail' ? (
-                <div className="h-full overflow-y-auto">
-                  <NodeDetailContent
-                    workflowId={top.workflowId}
-                    runStatus={
-                      top.workflowId === runId
-                        ? (runDetail?.run.status ?? '')
-                        : ''
-                    }
-                    node={top.node}
-                    onOpenSubworkflow={(subId, label) => pushGraph(subId, label)}
-                  />
-                </div>
-              ) : (
-                <WorkflowGraph
-                  workflowId={top.workflowId}
-                  selectedIndex={null}
-                  onSelectNode={node => pushDetail(top.workflowId, node)}
-                  onDrillInto={(subId, label) => pushGraph(subId, label)}
-                  statusFilter={statusFilter}
-                />
-              )}
-            </div>
+            )}
           </div>
-        </>
-      )}
+          {runId !== null && runDetail !== undefined && (
+            <RunTimingSummary
+              workflowId={runId}
+              statusFilter={statusFilter}
+              onToggleStatus={toggleStatusFilter}
+              isolation={isolation}
+              onIsolate={isolate}
+            />
+          )}
+          <div className="min-h-0 flex-1">
+            {runId !== null && viewMode === 'graph' ? (
+              <WorkflowGraph
+                workflowId={runId}
+                selectedIndex={rootSelectedIndex}
+                onSelectNode={node => pushDetail(runId, node)}
+                onDrillInto={(subId, label) => pushGraph(subId, label)}
+                onFocusNode={node => focusDetail(runId, node)}
+                statusFilter={statusFilter}
+                countsPlacement="in_run_summary"
+              />
+            ) : runId !== null && viewMode === 'timeline' ? (
+              <WorkflowTimeline
+                workflowId={runId}
+                selectedIndex={rootSelectedIndex}
+                onSelectNode={node => focusDetail(runId, node)}
+                statusFilter={statusFilter}
+                isolation={isolation}
+                onIsolate={isolate}
+              />
+            ) : (
+              <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+                {railOpen
+                  ? 'Select a workflow run to view its graph.'
+                  : 'Expand the run list to pick a workflow.'}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {top !== undefined && (
+          <>
+            <div
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize panel"
+              aria-valuemin={MIN_PANEL_WIDTH}
+              aria-valuenow={Math.round(panelWidth)}
+              tabIndex={0}
+              onPointerDown={startResize}
+              onKeyDown={onSeparatorKeyDown}
+              className="w-1 shrink-0 cursor-col-resize transition-colors hover:bg-primary focus:outline-none focus-visible:bg-primary"
+            />
+            <div
+              className="flex shrink-0 flex-col border-l border-hairline"
+              style={{ width: panelWidth }}
+            >
+              <div className="box-content flex h-(--capsule-height) shrink-0 items-center gap-2 border-b border-hairline pb-3 pl-4">
+                {views.length > 1 && (
+                  <button
+                    type="button"
+                    onClick={back}
+                    aria-label="Back"
+                    className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-glass-inset text-muted-foreground transition-colors hover:text-foreground"
+                  >
+                    <ChevronLeft className="size-4" />
+                  </button>
+                )}
+                <span
+                  className="min-w-0 flex-1 truncate text-sm font-semibold"
+                  title={viewTitle(top)}
+                >
+                  {viewTitle(top)}
+                </span>
+                <button
+                  type="button"
+                  onClick={closePanel}
+                  aria-label="Close panel"
+                  className="inline-flex size-7 shrink-0 items-center justify-center rounded-full bg-glass-inset text-muted-foreground transition-colors hover:text-foreground"
+                >
+                  <X className="size-4" />
+                </button>
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-hidden pl-4">
+                {top.kind === 'detail' ? (
+                  <div className="h-full overflow-y-auto">
+                    <NodeDetailContent
+                      workflowId={top.workflowId}
+                      runStatus={
+                        top.workflowId === runId
+                          ? (runDetail?.run.status ?? '')
+                          : ''
+                      }
+                      node={top.node}
+                      onOpenSubworkflow={(subId, label) => pushGraph(subId, label)}
+                    />
+                  </div>
+                ) : (
+                  <WorkflowGraph
+                    workflowId={top.workflowId}
+                    selectedIndex={null}
+                    onSelectNode={node => pushDetail(top.workflowId, node)}
+                    onDrillInto={(subId, label) => pushGraph(subId, label)}
+                    statusFilter={statusFilter}
+                    countsPlacement="in_graph"
+                  />
+                )}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

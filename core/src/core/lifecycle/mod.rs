@@ -16,6 +16,7 @@ pub mod commands;
 pub mod fences;
 pub mod operations;
 pub mod outcomes;
+pub mod placement;
 
 pub use attempt_outcomes::{
     decode_failed_attempt_row, decode_stale_attempt_row, decode_workflow_success_row, AfterFailure,
@@ -33,6 +34,7 @@ pub use outcomes::{
     decode_moved_row, decode_outcome_row, GuardEvidence, GuardKind, MovedRow, ObservedTaskState,
     ObservedWorkflowTask, OutcomeDecodeError, TerminalizationOutcome,
 };
+pub use placement::{AttemptPlacement, SlotWait};
 
 /// A command or fence could not be constructed from the given data.
 ///
@@ -92,6 +94,7 @@ pub(crate) mod tests {
                     task_id: Uuid::nil(),
                     fence: owned.clone(),
                     result_json: "{}".into(),
+                    placement: AttemptPlacement::NotObserved,
                 },
             ),
             (
@@ -331,7 +334,7 @@ pub(crate) mod tests {
         }
         fields_of!(
             command;
-            CompleteTaskFused { task_id, fence, result_json },
+            CompleteTaskFused { task_id, fence, result_json, placement },
             ExpireOwnedClaim { task_id, fence, result_json, error_code },
             ExpirePendingTasks { batch_size, result_json, error_code },
             CancelOwnedOrphan { task_id, fence },
@@ -351,7 +354,7 @@ pub(crate) mod tests {
 
     /// Every field that a command may carry, by role (Python
     /// `TestIllegalStatesAreUnrepresentable::test_no_variant_carries_an_unaccounted_field`).
-    const ACCOUNTED_FIELDS: [&str; 10] = [
+    const ACCOUNTED_FIELDS: [&str; 11] = [
         // What the command acts on.
         "task_id",
         "workflow_ids",
@@ -363,6 +366,7 @@ pub(crate) mod tests {
         "result_json",
         "error_code",
         "failed_reason",
+        "placement",
         // What it wakes.
         "notify_channel",
         "notify_payload",

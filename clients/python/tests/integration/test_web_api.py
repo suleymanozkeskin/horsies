@@ -62,6 +62,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function'
 
 UTC = timezone.utc
 ACT = {INTENT_HEADER: INTENT_VALUE}
+RUNNING_WORKER_ID: Final = 'worker-api-aaaa'
 
 
 # --------------------------------------------------------------------------- #
@@ -110,7 +111,26 @@ def make_task(
     error_code: str | None = None,
     worker_id: str | None = None,
 ) -> TaskRow:
-    """Build a task row. A terminal row ends now."""
+    """Build a task row that no claim holds: PENDING or terminal. A terminal
+    row ends now.
+
+    A CLAIMED or RUNNING row holds a claim (``claimed_at``), which this
+    builder does not write. A RUNNING row comes from ``make_running_task``.
+    """
+    match status:
+        case TaskStatus.CLAIMED | TaskStatus.RUNNING:
+            raise AssertionError(
+                f'make_task writes no claim; a {status.value} row holds one '
+                '(use make_running_task for RUNNING)',
+            )
+        case (
+            TaskStatus.PENDING
+            | TaskStatus.COMPLETED
+            | TaskStatus.FAILED
+            | TaskStatus.CANCELLED
+            | TaskStatus.EXPIRED
+        ):
+            pass
     return task_row(
         task_id=str(uuid.uuid4()),
         task_name=task_name,
@@ -132,6 +152,40 @@ def make_task(
         worker_hostname=None,
         worker_pid=None,
         worker_process_name=None,
+        claim_expires_at=None,
+    )
+
+
+def make_running_task(*, worker_id: str = RUNNING_WORKER_ID) -> TaskRow:
+    """Build a RUNNING plain task as its start leaves it.
+
+    ``horsies_start_attempt`` moves a CLAIMED row of ``worker_id`` to RUNNING
+    and keeps its claim generation (``claimed_at``). It writes ``started_at``
+    and the process facts. The cancel of a RUNNING task copies these facts
+    into the attempt row that it writes.
+    """
+    now = datetime.now(UTC)
+    return task_row(
+        task_id=str(uuid.uuid4()),
+        task_name='api_task',
+        queue_name='default',
+        status=TaskStatus.RUNNING,
+        priority=100,
+        retry_count=0,
+        max_retries=3,
+        is_workflow_task=False,
+        enqueued_at=now - timedelta(seconds=60),
+        claimed_at=now - timedelta(seconds=40),
+        started_at=now - timedelta(seconds=30),
+        completed_at=None,
+        failed_at=None,
+        good_until=None,
+        error_code=None,
+        failed_reason=None,
+        worker_id=worker_id,
+        worker_hostname='api-host',
+        worker_pid=4242,
+        worker_process_name='api-process',
         claim_expires_at=None,
     )
 
@@ -262,7 +316,7 @@ class TestTaskReads:
     ) -> None:
         await persist(
             session,
-            make_task(worker_id='unknown', status=TaskStatus.RUNNING),
+            make_running_task(worker_id='unknown'),
             make_task(worker_id=None),
         )
 
@@ -647,7 +701,7 @@ class TestTaskActionMapping:
     async def test_running_task_needs_the_explicit_body_flag(
         self, api: AsyncClient, session: AsyncSession
     ) -> None:
-        task = make_task(status=TaskStatus.RUNNING)
+        task = make_running_task()
         await persist(session, task)
 
         refused = await api.post(f'/api/tasks/{task.id}/cancel', headers=ACT)
@@ -661,6 +715,34 @@ class TestTaskActionMapping:
         assert refused.json()['current_status'] == 'RUNNING'
         assert allowed.status_code == 200
         assert allowed.json()['was_status'] == 'RUNNING'
+
+    async def test_running_cancel_records_the_attempt_as_cancelled(
+        self, api: AsyncClient, session: AsyncSession
+    ) -> None:
+        """The cancel statement writes the attempt of the run before the move;
+        the task detail reads it from the attempt archive."""
+        task = make_running_task()
+        await persist(session, task)
+
+        cancel = await api.post(
+            f'/api/tasks/{task.id}/cancel',
+            json={'include_running': True},
+            headers=ACT,
+        )
+        detail = await api.get(f'/api/tasks/{task.id}')
+
+        assert cancel.status_code == 200
+        assert detail.status_code == 200
+        body = detail.json()
+        assert body['leaf']['status'] == 'CANCELLED'
+        [attempt] = body['attempts']
+        assert attempt['attempt'] == 1
+        assert attempt['outcome'] == 'CANCELLED'
+        assert attempt['will_retry'] is False
+        assert attempt['error_code'] == 'TASK_CANCELLED'
+        assert attempt['worker_hostname'] == 'api-host'
+        assert attempt['phases']['kind'] == 'captured'
+        assert attempt['phases']['recorded_by'] == {'kind': 'cancel'}
 
     async def test_stored_data_that_does_not_parse_is_a_server_error(
         self, api: AsyncClient, session: AsyncSession

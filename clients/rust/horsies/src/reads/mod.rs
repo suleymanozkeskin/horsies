@@ -13,7 +13,7 @@ pub use health::{PingTarget, WorkerHistoryLimit};
 /// The values that the health reads return, and their failure.
 pub use horsies_core::{
     BoundedTaskList, BrokerErrorCode, BrokerOperationError, BrokerOperationFailedCode,
-    ClassCoverage, ClassReport, DatabasePing, ExpiredTaskRow, StaleMinutes, StaleTaskRow,
-    StaleThresholdRefusal, WorkerPong, WorkerStateSnapshot, MAX_STALE_THRESHOLD_MINUTES,
-    TASK_LIST_BOUND,
+    ClassCoverage, ClassReport, DatabasePing, ExpiredTaskRow, SnapshotProfile, StaleMinutes,
+    StaleTaskRow, StaleThresholdRefusal, WorkerPong, WorkerStateSnapshot,
+    MAX_STALE_THRESHOLD_MINUTES, TASK_LIST_BOUND,
 };

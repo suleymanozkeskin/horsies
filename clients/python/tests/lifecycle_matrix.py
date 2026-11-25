@@ -80,6 +80,10 @@ class Attempt(Enum):
     FUSED_UPSERT = 'FUSED_UPSERT'
     """The statement itself upserts the attempt."""
 
+    RUNNING_INSERT = 'RUNNING_INSERT'
+    """The statement inserts the attempt of a RUNNING row before its move (the
+    cancel of a running task); a row in another status gets no attempt."""
+
 
 class Shape(Enum):
     """Row cardinality and locking discipline."""
@@ -144,7 +148,7 @@ MATRIX: tuple[TerminalWriter, ...] = (
         target_status='CANCELLED',
         fence=Fence.NONE,
         guards=(),
-        attempt=Attempt.NONE,
+        attempt=Attempt.RUNNING_INSERT,
         writes_result=False,
         shape=Shape.SINGLE,
         emits_notify=EmitsNotify.MOVE_EVENTS_ONLY,

@@ -218,6 +218,7 @@ mod tests {
             "BROKER_NOT_CONFIGURED",
             "VALIDATION_FAILED",
             "WORKFLOW_ID_CONFLICT",
+            "WORKFLOW_COMMAND_CONFLICT",
             "ENQUEUE_FAILED",
             "ASYNC_CONTEXT",
         ]);
@@ -327,7 +328,12 @@ mod tests {
             "CANCELLED",
             "EXPIRED",
         ]);
-        assert_python_members::<TaskAttemptOutcome>(&["COMPLETED", "FAILED", "WORKER_FAILURE"]);
+        assert_python_members::<TaskAttemptOutcome>(&[
+            "COMPLETED",
+            "FAILED",
+            "WORKER_FAILURE",
+            "CANCELLED",
+        ]);
         // clients/python/horsies/core/models/workflow/enums.py
         assert_python_members::<WorkflowStatus>(&[
             "PENDING",

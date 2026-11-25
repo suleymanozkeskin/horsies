@@ -8,11 +8,11 @@ use uuid::Uuid;
 
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::core::task::error::OperationalErrorCode;
-use crate::events::{AttemptNumber, AttemptStart, RunTrace};
+use crate::events::{AttemptNumber, AttemptStart, OperatorCancelEnd, RunTrace};
 use crate::telemetry::trace_carrier::StoredTraceId;
 use crate::worker::executor::protocol::{
-    BodyEnd, FailureDetail, ProcessId, ResultEnvelopeText, RunEnd, StopReason, TaskInputText,
-    TaskTimeoutMs,
+    BodyEnd, CancelledBody, FailureDetail, ProcessId, ResultEnvelopeText, RunEnd, StopReason,
+    TaskInputText, TaskTimeoutMs,
 };
 use crate::worker::executor::supervisor::ChildLost;
 use crate::worker::retry::StoredOptions;
@@ -205,6 +205,59 @@ pub enum TimeoutCancel {
     Ended(CancelEnd),
 }
 
+/// How a run whose task an operator cancelled ended, as its slot saw it.
+/// The cancel statement recorded the attempt as `CANCELLED` and moved the
+/// row to history before the worker learned of it, so the worker writes
+/// nothing for any of these ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelledEnd {
+    /// The child reported the end of the cancelled run (`run_cancelled`, or
+    /// `shared_result` with `cancelled`), with the start of the attempt.
+    ReportedByChild {
+        end: OperatorCancelEnd,
+        start: AttemptStart,
+    },
+    /// The worker killed the child after it sent the cancel and before the
+    /// child reported the end: the hard stop after the cancel grace of an
+    /// isolated run, the deadline, the drain deadline, a frame out of turn,
+    /// a slot defect, or the kill of a shared child that no run in it had
+    /// time left for.
+    ChildKilled,
+    /// The child was lost after the worker sent the cancel and before it
+    /// reported the end.
+    ChildLost,
+}
+
+impl CancelledEnd {
+    /// The end that a child reported for a cancelled run whose body `body`
+    /// ran or not: `dropped` when a shared async child sent the second
+    /// cancel for the run after the cancel signal. Pure.
+    pub fn reported(
+        body: CancelledBody,
+        dropped: SecondCancelAfterSignal,
+        start: AttemptStart,
+    ) -> Self {
+        let end = match (body, dropped) {
+            (CancelledBody::NotStarted, _) => OperatorCancelEnd::BeforeBody,
+            (CancelledBody::Ran, SecondCancelAfterSignal::Sent) => {
+                OperatorCancelEnd::DroppedAfterGrace
+            }
+            (CancelledBody::Ran, SecondCancelAfterSignal::NotSent) => {
+                OperatorCancelEnd::ReturnedAfterSignal
+            }
+        };
+        Self::ReportedByChild { end, start }
+    }
+}
+
+/// Whether a child sent the second cancel of a run after the operator
+/// cancel signal: the run was alive after its cancel grace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SecondCancelAfterSignal {
+    NotSent,
+    Sent,
+}
+
 /// What the body of a run returned, and the start of its attempt: the time
 /// that the start write returned to the child. A body that ran had its
 /// start written.
@@ -263,6 +316,10 @@ pub enum AttemptEnd {
     /// The child was killed and its exit was not seen. Nothing is written:
     /// stale recovery or the claim lease decides the row.
     EndUnknown { pid: ProcessId },
+    /// An operator cancelled the task while it ran (`cancel_task` with
+    /// `include_running`). The cancel statement wrote the `CANCELLED`
+    /// attempt and moved the row; nothing is written.
+    Cancelled(CancelledEnd),
 }
 
 /// How the worker learned that the deadline of a run ended it.
@@ -356,6 +413,10 @@ pub enum Settlement {
     NotHeld,
     /// Nothing was written: stale recovery or the lease decides the row.
     LeftToRecovery,
+    /// An operator cancelled the task while it ran: the cancel statement
+    /// recorded the attempt as `CANCELLED` and moved the row; nothing was
+    /// owed.
+    RecordedByCancel,
     /// Every retry of the write failed with an error a retry can clear; the
     /// row waits for recovery.
     RetriesExhausted,

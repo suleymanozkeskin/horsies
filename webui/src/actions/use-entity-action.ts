@@ -22,6 +22,7 @@ import {
   conflictMessage,
   FORBIDDEN_MESSAGE,
   goneMessage,
+  refusedMessage,
   SCHEMA_INCOMPATIBLE_MESSAGE,
   successMessage,
   unavailableMessage,
@@ -208,6 +209,18 @@ export function useEntityAction<TDetail>(
             toast.notify({ tone: 'error', message: WORKFLOW_MANAGED_MESSAGE });
             refetchEntity();
             return;
+          case 500:
+            // The server cannot complete this request (for example the
+            // database refused the change). A retry gives the same result, so
+            // the toast has no Retry action.
+            dispatch({ type: 'refused', detail: error.detail });
+            toast.notify({
+              tone: 'error',
+              message: refusedMessage(action, error.detail),
+              durationMs: 0,
+            });
+            refetchEntity();
+            return;
           case 403:
             dispatch({ type: 'forbidden' });
             toast.notify({ tone: 'error', message: FORBIDDEN_MESSAGE });
@@ -250,15 +263,17 @@ export function useEntityAction<TDetail>(
     [run, state]
   );
 
-  // `conflict` and `gone` are display-only stops: the toast carries the message
-  // and the refetch is already in flight, so release the entity's buttons.
+  // `conflict`, `gone` and `refused` are display-only stops: the toast carries
+  // the message and the refetch is already in flight, so release the entity's
+  // buttons.
   useEffect(() => {
     switch (state.phase) {
       case 'conflict': {
         const timer = window.setTimeout(() => dispatch({ type: 'refetched' }), 0);
         return () => window.clearTimeout(timer);
       }
-      case 'gone': {
+      case 'gone':
+      case 'refused': {
         const timer = window.setTimeout(
           () => dispatch({ type: 'acknowledged' }),
           0

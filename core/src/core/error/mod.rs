@@ -220,7 +220,8 @@ pub enum ErrorCode {
     /// `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms`.
     #[code_catalog(value = "HRS-109")]
     TaskSharedExecutionRequiresTimeout,
-    /// `cancel_grace_ms` with an execution class other than `SHARED_ASYNC`.
+    /// `cancel_grace_ms` with `execution=SHARED_THREAD`: only `SHARED_ASYNC`
+    /// and `ISOLATED` take one, since a thread cannot be stopped.
     #[code_catalog(value = "HRS-110")]
     TaskCancelGraceRequiresSharedAsync,
     /// `cancel_grace_ms` outside 100 to 10,000 ms.

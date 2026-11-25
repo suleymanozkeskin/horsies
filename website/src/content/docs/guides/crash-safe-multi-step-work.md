@@ -269,7 +269,7 @@ def start_checkout(order: Order) -> WorkflowStartResult[WorkflowHandle[str]]:
 - `from_node(charge)` gives the result of the `charge_card` node to the `charge` parameter. It adds the `args_from` entry and the `waits_for` entry. See [Typed Node Builder](/horsies/concepts/workflows/typed-node-builder/).
 - The `node_id` of a node is the name of the step in the web UI, and the key of its result in `handle.results()`.
 - `start()` returns `Ok(WorkflowHandle)` or `Err(WorkflowStartError)`. See [Workflow API](/horsies/concepts/workflows/workflow-api/).
-- To start one checkout per order, derive the `workflow_id` from the order id. See [Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/).
+- To start one checkout per order, derive the `workflow_id` from the order id. A repeat start with that id and the same start command returns the handle of the first workflow and starts nothing. A repeat start with another start command, for example another amount, is refused with `WORKFLOW_COMMAND_CONFLICT`. See [Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/).
 
 ## What Runs Again
 
@@ -291,8 +291,9 @@ The rules of the table:
 
 Each step is a task with its own name and its own attempts. The Workflows surface of the [web UI](/horsies/monitoring/web-ui-overview/#workflows) shows the run as a graph with one node per step:
 
-- the status of each node;
-- for a selected node: its error, its task and its attempt history;
+- the status of each node, its node time, and its attempt count when the step ran more than once (`3 attempts`);
+- for a selected node: its error, its task, and the attempts of its task. Each attempt shows its outcome, its error code and its phase times, with the retry wait between two attempts. An attempt that a worker crash ended has a `worker lost` note. See [Attempt timing](/horsies/monitoring/web-ui-overview/#attempt-timing);
+- the Timeline view: one row per node on one time axis, which shows the order of the steps and the waits between them;
 - failure navigation, which moves through the `FAILED` nodes.
 
 The Tasks surface lists each step as a task. The task name filter shows one step across all orders.
@@ -315,6 +316,8 @@ A node runs at least once. Its body can run more than once:
 - The answer is lost. The provider did the effect, but the call timed out. The step returns a code in `auto_retry_for`, and the retry calls the provider again.
 - The workflow starts again. A new start runs every node again.
 
+A cancel does not undo an effect. An operator cancel of a running step (`cancel_task` with `include_running=True`, or the web UI) makes the step `CANCELLED` at once. The body gets the cancel: an `async def` body at its next `await`, a `def` body when it reads `runtime.cancel_state()`. An effect that the body did before it stopped stays, and no result is stored for it. See [Cancelling a RUNNING Task](/horsies/monitoring/action-semantics/#cancelling-a-running-task).
+
 Rules:
 
 - A step that calls an external API sends the idempotency key of that API. The API answers a repeated key with the result of the first call, and does not do the effect again.
@@ -326,7 +329,7 @@ Rules:
 
 **Don't put two effects in one node.** A retry of the node repeats both effects.
 
-**Don't make an idempotency key from a random value or from the task id.** A random value changes on each run. A task id changes on each new start of the workflow. In both cases the provider gets a new key and does the effect again.
+**Don't make an idempotency key from a random value or from the task id.** A random value changes on each run. A task id changes on each new start of the workflow, and when a resume after a pause starts the node again. In both cases the provider gets a new key and does the effect again.
 
 **Don't add `WORKER_CRASHED` to `auto_retry_for` of a step whose effect has no idempotency key.** The retry does the effect again.
 

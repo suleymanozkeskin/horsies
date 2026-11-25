@@ -100,6 +100,8 @@ def _seen(frame: ParentFrame) -> _Seen:
             return 'init'
         case core.SharedRunFrame():
             return 'shared_run'
+        case core.CancelRunFrame():
+            return 'cancel_run'
         case core.EventsFrame():
             return 'events'
 

@@ -37,7 +37,9 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use futures_util::StreamExt;
+use horsies_core::db::Transience;
 use horsies_core::handle::CoreHandle;
+use horsies_core::monitoring::database_failure_status;
 use horsies_core::monitoring::fleet::FleetLabels;
 use horsies_core::telemetry::declared::{warn_folded_names, Folded};
 use horsies_core::web::{
@@ -89,10 +91,12 @@ impl Default for MonitoringConfig {
 ///
 /// Building it does no I/O: the core handler is built at the first request,
 /// on the broker of the app's handle; a request whose broker cannot be built
-/// answers 503 with the cause, and the next request tries again. A resume
-/// builds its owed children through the workflow registry of `app`, with
-/// the definitions registered when each child builds. No schema step runs:
-/// build the app with `SchemaMode::ObserveOnly` for a monitoring tool.
+/// answers with the cause, 503 when the cause may clear and 500 when it
+/// stays (for example a connection setting that the core refuses), and the
+/// next request tries again. A resume builds its owed children through the
+/// workflow registry of `app`, with the definitions registered when each
+/// child builds. No schema step runs: build the app with
+/// `SchemaMode::ObserveOnly` for a monitoring tool.
 pub fn router<P>(app: &Horsies, config: MonitoringConfig, policy: P) -> Router
 where
     P: MonitoringAuthPolicy,
@@ -186,12 +190,7 @@ where
     let grant = grant_of(&mount.policy, access.need, MonitoringRequest::of(&head)).await;
     let handler = match mount.handler().await {
         Ok(handler) => handler,
-        Err(error) => {
-            return detail(
-                StatusCode::SERVICE_UNAVAILABLE,
-                &format!("The monitoring handler could not connect its broker: {error}"),
-            )
-        }
+        Err(error) => return handler_build_failed(&error),
     };
     match (access.form, grant.view) {
         (ResponseForm::EventStream, Verdict::Allowed) => {
@@ -341,6 +340,21 @@ fn event_stream(frames: EventFrames) -> Response {
         HeaderValue::from_static("no"),
     );
     response
+}
+
+/// The answer of a request whose handler could not be built: the broker
+/// error of the handle's connect, with the status of its retry rule
+/// ([`database_failure_status`]): 503 when the cause may clear, 500 when it
+/// stays. Pure.
+fn handler_build_failed(error: &BrokerError) -> Response {
+    let status = StatusCode::from_u16(database_failure_status(Transience::of_retryable(
+        error.is_retryable(),
+    )))
+    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    detail(
+        status,
+        &format!("The monitoring handler could not connect its broker: {error}"),
+    )
 }
 
 /// A refusal of the mount itself, `{"detail": ...}` as the core's

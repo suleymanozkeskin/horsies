@@ -90,6 +90,7 @@ fn failure(task_id: Uuid) -> FinishFailedAttempt {
             error_message: Some("boom".to_owned()),
             failed_reason: None,
         },
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -98,6 +99,7 @@ fn success(task_id: Uuid) -> FinishWorkflowSuccess {
         task_id,
         fence: owned_claim(),
         result_json: r#"{"ok": 1}"#.to_owned(),
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -253,15 +255,16 @@ async fn the_stale_move_waits_for_a_workflow_success_that_holds_its_locks() {
     let (task_id, workflow_id) = stale_task(&pool, Origin::WorkflowNode).await;
     let mut holder = pool.begin().await.expect("begin the success");
     let holder_pid = backend_pid(&mut holder).await;
-    let applied: String =
-        sql::query_scalar("SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4)")
-            .bind(task_id)
-            .bind(WORKER)
-            .bind(generation())
-            .bind(r#"{"ok": 1}"#)
-            .fetch_one(&mut *holder)
-            .await
-            .expect("workflow success in an open transaction");
+    let applied: String = sql::query_scalar(
+        "SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4, 'NOT_OBSERVED', NULL)",
+    )
+    .bind(task_id)
+    .bind(WORKER)
+    .bind(generation())
+    .bind(r#"{"ok": 1}"#)
+    .fetch_one(&mut *holder)
+    .await
+    .expect("workflow success in an open transaction");
 
     let stale_pool = pool.clone();
     let stale_move = tokio::spawn(async move {
@@ -320,11 +323,12 @@ async fn a_failure_finalize_waits_for_a_monitoring_cancel_that_holds_its_locks()
         .await
         .is_ok();
     probe.rollback().await.expect("release the probe");
-    // The baseline argument list: no retry, the REFUSE rule (the child
-    // reported a result) and the capacity wake of a plain task.
+    // The argument list of migration 1001: no retry, the REFUSE rule (the
+    // child reported a result), the capacity wake of a plain task and no
+    // observed placement.
     let applied: String = sql::query_scalar(
         "SELECT outcome FROM horsies_finish_failed_attempt($1, $2, $3, 'NONE', NULL, NULL, NULL,
-                $4, 'BOOM', NULL, 'FAILED', 'boom', NULL, 'REFUSE', TRUE)",
+                $4, 'BOOM', NULL, 'FAILED', 'boom', NULL, 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)",
     )
     .bind(task_id)
     .bind(WORKER)

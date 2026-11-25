@@ -16,8 +16,8 @@ use tokio_postgres::Row;
 
 use super::harness::{describe, BaselineDatabase, Session};
 
-const FIXTURES_SQL: &str = include_str!("cases/baseline_workflow_fixtures.sql");
-const CASES_SQL: &str = include_str!("cases/baseline_workflow_functions.sql");
+pub(super) const FIXTURES_SQL: &str = include_str!("cases/baseline_workflow_fixtures.sql");
+pub(super) const CASES_SQL: &str = include_str!("cases/baseline_workflow_functions.sql");
 
 /// Polls of the waiting session's wait event before the case fails.
 const LOCK_WAIT_POLLS: u32 = 200;
@@ -92,6 +92,30 @@ fn lock_order_cases() -> Vec<LockOrderCase> {
             contend: r#"SELECT disposition, detail FROM wft_start1('00000000-0000-7000-8000-00000000a001', 'fail', '[{"idx":0}]') WHERE row_kind = 'OUTCOME'"#,
             contended: vec![Cell::text("EXISTS"), Cell::text("wf")],
             check: None,
+        },
+        LockOrderCase {
+            name: r#"a second start with the same id and another start command waits for the first, then sees OTHER_COMMAND and writes nothing"#,
+            setup: r#"SELECT 1"#,
+            hold: r#"SELECT disposition FROM wft_start1('00000000-0000-7000-8000-00000000a0b1', 'fail', '[{"idx":0}]') WHERE row_kind = 'OUTCOME'"#,
+            held: vec![Cell::text("STARTED")],
+            contend: r#"SELECT disposition, detail FROM wft_start1('00000000-0000-7000-8000-00000000a0b1', 'fail', '[{"idx":0},{"idx":1}]') WHERE row_kind = 'OUTCOME'"#,
+            contended: vec![Cell::text("OTHER_COMMAND"), Cell::text("wf")],
+            check: Some((
+                r#"SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = '00000000-0000-7000-8000-00000000a0b1'"#,
+                vec![Cell::Integer(1)],
+            )),
+        },
+        LockOrderCase {
+            name: r#"a start waits for an open delete of the row with its id, then starts a new workflow"#,
+            setup: r#"SELECT count(*) FROM wft_start1('00000000-0000-7000-8000-00000000a0c1', 'fail', '[{"idx":0}]')"#,
+            hold: r#"DELETE FROM horsies_workflows WHERE id = '00000000-0000-7000-8000-00000000a0c1' RETURNING status"#,
+            held: vec![Cell::text("RUNNING")],
+            contend: r#"SELECT disposition FROM wft_start1('00000000-0000-7000-8000-00000000a0c1', 'fail', '[{"idx":0},{"idx":1}]') WHERE row_kind = 'OUTCOME'"#,
+            contended: vec![Cell::text("STARTED")],
+            check: Some((
+                r#"SELECT count(*) FROM horsies_workflow_tasks WHERE workflow_id = '00000000-0000-7000-8000-00000000a0c1'"#,
+                vec![Cell::Integer(2)],
+            )),
         },
         LockOrderCase {
             name: r#"a cancel waits for a phase 2 that holds the workflow row, then cancels the tree"#,

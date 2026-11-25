@@ -19,6 +19,7 @@ from horsies.core.types.result import Ok, is_ok, is_err
 from horsies.core.workflows.start_types import (
     WorkflowStartAsyncContext,
     WorkflowStartBrokerNotConfigured,
+    WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed,
     WorkflowStartError,
     WorkflowStartIdConflict,
@@ -77,6 +78,11 @@ def _refused_variants() -> list[WorkflowStartError]:
             workflow_name='test-wf',
             workflow_id='wf-123',
             existing_workflow_name='other-wf',
+        ),
+        WorkflowStartCommandConflict(
+            message='id held by another start command',
+            workflow_name='test-wf',
+            workflow_id='wf-123',
         ),
     ]
 

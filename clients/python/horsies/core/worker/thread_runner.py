@@ -24,13 +24,16 @@ from horsies.core.telemetry.attempt_span import BodyEndOrder, run_in_attempt_spa
 from horsies.core.worker.child_frames import ThreadSeatWork, stored_refusal_of
 from horsies.core.worker.run_return import (
     BodyInterrupted,
+    CancelledBody,
     CoreStoppedBeforeStart,
     EncodedResult,
     MarkerEnd,
     ResultEnvelope,
+    RunCancelled,
     RunWorkflow,
     StartedRunning,
 )
+from horsies.core.worker.run_cancel import RunCancel, SkipTheBody, StartTheBody
 from horsies.core.worker.shared_child import StoppedBeforeRunning
 from horsies.core.worker.thread_child import ThreadSeatReturn
 from horsies.core.worker.child_runner import (
@@ -40,6 +43,7 @@ from horsies.core.worker.child_runner import (
     _confirm_until_not_resumed,
     _prepare_task_call,
     _PreparedCall,
+    run_runtime,
     _stored_timeout_refusal_response,
     _task_exception_response,
     encoded_body_end,
@@ -61,10 +65,11 @@ class PostgresThreadSeats:
         work: ThreadSeatWork,
         start_check: Callable[[], StartCheck],
         body_end: Callable[[], BodyEndOrder],
+        cancel: RunCancel,
     ) -> ThreadSeatReturn:
         """Run the task of ``frame`` on the calling seat thread; see
         ``run_thread_seat_task``."""
-        return run_thread_seat_task(frame, work, start_check, body_end)
+        return run_thread_seat_task(frame, work, start_check, body_end, cancel)
 
     def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         """Write the finalizing marker of the run of ``frame``; see
@@ -102,6 +107,7 @@ def run_thread_seat_task(
     work: ThreadSeatWork,
     start_check: Callable[[], StartCheck],
     body_end: Callable[[], BodyEndOrder],
+    cancel: RunCancel,
 ) -> ThreadSeatReturn:
     """Run one task on the calling seat thread, up to its result.
 
@@ -124,6 +130,12 @@ def run_thread_seat_task(
     seat writes the marker after the return (``mark_thread_seat_finalizing``). A body that a refusal of the
     core of the child ended does not return: the child ends at once
     (``set_running_or_end_child``).
+
+    ``cancel`` marks the body of the run (``RunCancel.begin_body``,
+    ``RunCancel.end_body``), and the runtime of the body reads its cell: an
+    operator cancel or the deadline sets it, and the body reads it with
+    ``TaskRuntime.cancel_state``. An operator cancel that came before the
+    body skips it: ``RunCancelled`` with ``NOT_STARTED``.
     """
     logger.info(f'Starting task execution: {frame.task_name} ({frame.task_id})')
     ownership_result = _confirm_until_not_resumed(
@@ -135,11 +147,22 @@ def run_thread_seat_task(
     )
     match ownership_result:
         case StartedRunning() as started:
-            return set_running_or_end_child(
-                str(frame.task_id),
-                started,
-                _run_after_running(frame, work, started.workflow, body_end),
-            )
+            match cancel.begin_body():
+                case SkipTheBody():
+                    logger.info(
+                        f'Task {frame.task_name} ({frame.task_id}) was cancelled before '
+                        'its body started; the body does not run',
+                    )
+                    return RunCancelled(
+                        body=CancelledBody.NOT_STARTED, started_at=started.started_at,
+                    )
+                case StartTheBody():
+                    pass
+                case _ as unreachable:
+                    assert_never(unreachable)
+            ran = _run_after_running(frame, work, started.workflow, body_end, cancel)
+            cancel.end_body()
+            return set_running_or_end_child(str(frame.task_id), started, ran)
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
         case DeadlineBeforeStart():
@@ -159,6 +182,7 @@ def _run_after_running(
     work: ThreadSeatWork,
     workflow: RunWorkflow,
     body_end: Callable[[], BodyEndOrder],
+    cancel: RunCancel,
 ) -> ResultEnvelope | BodyInterrupted:
     """The steps of a run after its RUNNING update (``_thread_steps``),
     inside the span and the log context of its attempt, whose start gave the
@@ -168,7 +192,7 @@ def _run_after_running(
     the end that the run table reports."""
     return run_in_attempt_span(
         shared_attempt_subject(frame, Execution.SHARED_THREAD, workflow),
-        lambda: _thread_steps(frame, work),
+        lambda: _thread_steps(frame, work, cancel),
         body_end,
     )
 
@@ -176,6 +200,7 @@ def _run_after_running(
 def _thread_steps(
     frame: core.SharedRunFrame,
     work: ThreadSeatWork,
+    cancel: RunCancel,
 ) -> EncodedResult | BodyInterrupted:
     """The steps of a run after its RUNNING update, as in
     ``_run_task_entry``. Any exception becomes ``TASK_EXCEPTION``. A body
@@ -191,7 +216,12 @@ def _thread_steps(
                 pass
             case _ as unreachable:
                 assert_never(unreachable)
-        prepared = _prepare_task_call(frame.task_name, frame.input, OnSharedThreadSeat())
+        prepared = _prepare_task_call(
+            frame.task_name,
+            frame.input,
+            OnSharedThreadSeat(),
+            run_runtime(frame.task_id, frame.attempt, cancel.cell),
+        )
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass

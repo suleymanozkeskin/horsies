@@ -30,11 +30,14 @@ import horsies._core as core
 from horsies.core.worker import child_main
 from horsies.core.worker import task_loop as task_loop_module
 from horsies.core.worker.child_frames import MAX_BODY_BYTES
+from horsies.core.worker.run_cancel import RunCancel
 from horsies.core.worker.run_return import (
+    CancelledBody,
     MarkerDone,
     MarkerEnd,
     MarkerMetStoppedCore,
     ResultEnvelope,
+    RunCancelled,
     SetRunning,
     StoppedBeforeRunning,
 )
@@ -44,7 +47,7 @@ from horsies.core.worker.task_loop import (
     TaskLoop,
 )
 from tests.fixtures.core_frames import init_frame, run_frame
-from tests.fixtures.run_return import set_running
+from tests.fixtures.run_return import STARTED_AT, set_running
 
 pytestmark = [pytest.mark.unit]
 
@@ -111,7 +114,7 @@ def _leave(task_loop: TaskLoop, work: Coroutine[Any, Any, None]) -> asyncio.Task
 
 def _report(
     task_loop: TaskLoop,
-    returned: SetRunning | StoppedBeforeRunning,
+    returned: SetRunning | StoppedBeforeRunning | RunCancelled,
     marker_end: MarkerEnd = MarkerDone(),
     events: list[str] | None = None,
     metas: list[dict[str, Any]] | None = None,
@@ -299,6 +302,55 @@ class TestTheMarkerOfARun:
         assert after is child_main._AfterRun.SERVES
 
 
+class TestACancelledRun:
+    """A run that an operator cancelled reports ``run_cancelled`` in place of
+    ``result``, with no finalizing marker: the row is in history."""
+
+    def test_a_cancelled_run_reports_its_body_and_start_with_no_marker(
+        self,
+        task_loop: TaskLoop,
+    ) -> None:
+        after, events, metas = _report(
+            task_loop,
+            RunCancelled(body=CancelledBody.RAN, started_at=STARTED_AT),
+        )
+
+        assert after == child_main._AfterRun.SERVES
+        assert events == ['run_cancelled']
+        assert metas[0]['body'] == 'ran'
+        assert metas[0]['task_loop'] == {'kind': 'empty'}
+        assert metas[0]['child'] == 'serves_on'
+        assert metas[0]['task_id'] == str(TASK_ID)
+
+    def test_a_skipped_body_reports_not_started(self, task_loop: TaskLoop) -> None:
+        _after, events, metas = _report(
+            task_loop,
+            RunCancelled(body=CancelledBody.NOT_STARTED, started_at=STARTED_AT),
+        )
+
+        assert events == ['run_cancelled']
+        assert metas[0]['body'] == 'not_started'
+
+    def test_a_cancelled_run_that_left_work_names_it_and_the_child_retires(
+        self,
+        short_grace: None,
+        task_loop: TaskLoop,
+    ) -> None:
+        """The child does not wait for that work: the parent replaces it."""
+        left = _leave(task_loop, asyncio.sleep(30))
+
+        after, events, metas = _report(
+            task_loop,
+            RunCancelled(body=CancelledBody.RAN, started_at=STARTED_AT),
+        )
+
+        assert after == child_main._AfterRun.TO_RETIRE
+        assert events == ['run_cancelled']
+        assert metas[0]['task_loop']['kind'] == 'held'
+        assert metas[0]['task_loop']['count'] == 1
+        left.cancel()
+
+
 class TestAChildToRetire:
     def test_a_run_frame_after_a_run_that_left_work_ends_the_child(
         self,
@@ -333,12 +385,12 @@ class TestWhatEscapesARun:
     ) -> None:
         monkeypatch.setattr(child_main.os, '_exit', _raise_exit)
 
-        def escapes(_frame: object, _init: object, _loop: object) -> NoReturn:
+        def escapes(_frame: object, _init: object, _loop: object, _cancel: object) -> NoReturn:
             raise RuntimeError('escaped the runner')
 
         with pytest.raises(_Exited) as exited:
             child_main._run_or_exit(
-                escapes, run_frame(task_id=TASK_ID), init_frame(), TaskLoop()
+                escapes, run_frame(task_id=TASK_ID), init_frame(), TaskLoop(), RunCancel()
             )
 
         assert exited.value.code == child_main.CHILD_DEFECT_EXIT_CODE
@@ -349,12 +401,12 @@ class TestWhatEscapesARun:
     ) -> None:
         monkeypatch.setattr(child_main.os, '_exit', _raise_exit)
 
-        def exits(_frame: object, _init: object, _loop: object) -> NoReturn:
+        def exits(_frame: object, _init: object, _loop: object, _cancel: object) -> NoReturn:
             raise SystemExit(7)
 
         with pytest.raises(_Exited) as exited:
             child_main._run_or_exit(
-                exits, run_frame(task_id=TASK_ID), init_frame(), TaskLoop()
+                exits, run_frame(task_id=TASK_ID), init_frame(), TaskLoop(), RunCancel()
             )
 
         assert exited.value.code == 7

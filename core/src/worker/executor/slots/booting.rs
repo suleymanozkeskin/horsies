@@ -490,6 +490,8 @@ async fn boot_reply(
             | ChildFrame::SharedResult(_)
             | ChildFrame::DeadlineFired(_)
             | ChildFrame::SecondCancel(_)
+            | ChildFrame::CancelFired(_)
+            | ChildFrame::RunCancelled(_)
             | ChildFrame::RunStuck(_)
             | ChildFrame::LeftoverCancel(_)
             | ChildFrame::LeftoverStuck(_)

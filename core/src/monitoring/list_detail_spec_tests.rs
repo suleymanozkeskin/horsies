@@ -28,7 +28,7 @@ use crate::test_support::sql::{self, TestPool, TestPoolOptions};
 /// Upper bound of a span that counts up to now (Python
 /// `_LIVE_SPAN_CEILING_S`): wide enough for a slow runner, tight enough to
 /// catch a span measured from the wrong start.
-const LIVE_SPAN_CEILING_S: i64 = 600;
+const LIVE_SPAN_CEILING: Duration = Duration::seconds(600);
 
 /// A broker on a server that does not answer (Python's `unreachable_broker`).
 fn unreachable_broker() -> PostgresBroker {
@@ -103,7 +103,7 @@ async fn record_detached_period_leaf(pool: &TestPool, upper_anchor: DateTime<Utc
 }
 
 /// The spans of the only row of the list (Python `_only_row`).
-async fn only_spans(broker: &PostgresBroker) -> (Option<i64>, Option<i64>) {
+async fn only_spans(broker: &PostgresBroker) -> (Option<Duration>, Option<Duration>) {
     let page = page(
         broker,
         TaskListQuery::new(window())
@@ -675,7 +675,10 @@ async fn a_claimed_task_counts_its_queue_time_up() {
     let (queue_s, exec_s) = only_spans(&database.broker()).await;
 
     let queue_s = queue_s.expect("a claimed task has a queue span");
-    assert!((25..=LIVE_SPAN_CEILING_S).contains(&queue_s), "{queue_s}");
+    assert!(
+        (Duration::seconds(25)..=LIVE_SPAN_CEILING).contains(&queue_s),
+        "{queue_s}"
+    );
     assert_eq!(exec_s, None);
     database.drop().await;
 }
@@ -690,7 +693,10 @@ async fn a_completed_task_reports_both_closed_spans() {
 
     let spans = only_spans(&database.broker()).await;
 
-    assert_eq!(spans, (Some(30), Some(15)));
+    assert_eq!(
+        spans,
+        (Some(Duration::seconds(30)), Some(Duration::seconds(15)))
+    );
     database.drop().await;
 }
 
@@ -706,7 +712,7 @@ async fn a_task_cancelled_before_it_started_reports_a_closed_queue_span() {
 
     let spans = only_spans(&database.broker()).await;
 
-    assert_eq!(spans, (Some(300), None));
+    assert_eq!(spans, (Some(Duration::seconds(300)), None));
     database.drop().await;
 }
 
@@ -735,7 +741,7 @@ async fn a_task_expired_before_it_started_reports_a_closed_queue_span() {
 
     let spans = only_spans(&database.broker()).await;
 
-    assert_eq!(spans, (Some(300), None));
+    assert_eq!(spans, (Some(Duration::seconds(300)), None));
     database.drop().await;
 }
 

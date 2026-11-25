@@ -27,12 +27,18 @@ import pytest
 
 from horsies import _core as core
 from horsies.core.models.tasks import MIN_CANCEL_GRACE_MS, MIN_TASK_TIMEOUT_MS
-from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst, DeadlineFirst
+from horsies.core.telemetry.attempt_span import (
+    BodyEndOrder,
+    BodyFirst,
+    DeadlineFirst,
+    OperatorCancelFirst,
+)
 from horsies.core.types.result import Ok, Result
 from horsies.core.worker import child_main, run_mark, shared_child
 from horsies.core.worker.child_inbox import ParentFrameInbox
 from horsies.core.worker.child_frames import (
     BootFailedFrame,
+    CancelFiredFrame,
     ChildFrame,
     MAX_LEFTOVER_TASK_NAMES,
     DeadlineFiredFrame,
@@ -42,18 +48,23 @@ from horsies.core.worker.child_frames import (
     RssMb,
     RssReading,
     RunStuckFrame,
+    SeatCancelled,
     SeatTimedOut,
     SharedResultFrame,
     StartNotReported,
     StartReported,
 )
+from horsies import CancelCause, CancelNotRequested, CancelRequested, RunCancelState
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
+from horsies.core.worker.run_cancel import RunCancel, SkipTheBody, StartTheBody
 from horsies.core.worker.run_return import (
+    CancelledBody,
     CoreStoppedAfterBody,
     MarkerDone,
     MarkerEnd,
     MarkerMetStoppedCore,
     ResultEnvelope,
+    RunCancelled,
 )
 from horsies.core.worker.shared_child import (
     FRAMES_PER_SEAT,
@@ -67,9 +78,11 @@ from horsies.core.worker.shared_child import (
 from tests.fixtures.core_frames import (
     async_work,
     init_frame,
+    isolated_cancel_frame,
     refusal,
     run_frame,
     shared_async_kind,
+    shared_cancel_frame,
     shared_run_frame,
     stop_frame,
 )
@@ -147,16 +160,38 @@ class _ScriptedSeats:
         self.markers: list[int] = []
         self.marker: Callable[[], Any] | None = None
         self.marker_end: MarkerEnd = MarkerDone()
+        self.starts: dict[str, Callable[[], Any]] = {}
+        self.cancel_states: dict[int, RunCancelState] = {}
 
     async def run(
         self,
         frame: core.SharedRunFrame,
         body_end: Callable[[], BodyEndOrder],
+        cancel: RunCancel,
     ) -> SeatReturn:
+        """A task named in ``starts`` awaits that start write first. The
+        body begins with ``cancel`` as the real runner does, and a cancel
+        that leaves the body after an operator cancel is mapped, as
+        ``await_task_call_in_worker`` maps it."""
         self.started.append(frame.dispatch)
-        value = await self._behaviors[frame.task_name]()
+        if frame.task_name in self.starts:
+            await self.starts[frame.task_name]()
         if frame.task_name in self.not_running:
+            _ = await self._behaviors[frame.task_name]()
             return StoppedBeforeRunning('CLAIM_LOST')
+        match cancel.begin_body():
+            case SkipTheBody():
+                return RunCancelled(body=CancelledBody.NOT_STARTED, started_at=STARTED_AT)
+            case StartTheBody():
+                pass
+        try:
+            value = await self._behaviors[frame.task_name]()
+        except asyncio.CancelledError:
+            if not cancel.operator_requested():
+                raise
+            value = 'cancelled'
+        cancel.end_body()
+        self.cancel_states[frame.dispatch] = cancel.cell.state()
         self.orders[frame.dispatch] = body_end()
         return set_running(ResultEnvelope(str(value)))
 
@@ -915,6 +950,341 @@ async def _swallow_every_cancel(stop: threading.Event) -> None:
             await asyncio.sleep(0.01)
 
 
+def _cancel_after_start(
+    behaviors: dict[str, Callable[[], Any]],
+    frames: list[core.SharedRunFrame],
+    cancel_dispatch: int,
+    ended: Callable[[_RecordingWriter], bool],
+    starts: dict[str, Callable[[], Any]] | None = None,
+) -> tuple[_RecordingWriter, _ScriptedSeats]:
+    """Serve ``frames``; once run ``cancel_dispatch`` started, send its
+    operator cancel; serve until ``ended`` holds, then stop."""
+    harness, writer, started = _seat_loop(len(frames), behaviors)
+    started.starts = starts if starts is not None else {}
+    inbox = ParentFrameInbox()
+
+    async def scenario() -> None:
+        serving = asyncio.ensure_future(harness.serve(inbox))
+        for frame in frames:
+            inbox.put(frame)
+        await _until(lambda: cancel_dispatch in started.started)
+        await asyncio.sleep(0.01)
+        inbox.put(shared_cancel_frame(dispatch=cancel_dispatch, task_id=_task_id(cancel_dispatch)))
+        await _until(lambda: ended(writer))
+        inbox.put(stop_frame())
+        await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+    asyncio.run(scenario())
+    return writer, started
+
+
+class TestAnOperatorCancel:
+    """The steps at C (the operator cancel), at C + G, and after the cancel
+    rounds, as at a deadline; the deadline no longer applies."""
+
+    def test_a_cooperating_task_ends_cancelled_at_the_first_cancel(self) -> None:
+        async def hang() -> int:
+            await asyncio.Event().wait()
+            return 0
+
+        writer, started = _cancel_after_start(
+            {'hang': hang},
+            [_frame(1, 'hang', 60_000, GRACE_MS)],
+            1,
+            _results_of(1),
+        )
+
+        assert _kinds(writer, 1) == ['CancelFiredFrame', 'SharedResultFrame']
+        assert writer.frames[0] == CancelFiredFrame(dispatch=1, task_id=_task_id(1))
+        [result] = _results(writer)
+        assert result.end == SeatCancelled(body=CancelledBody.RAN)
+        assert result.started == StartReported(STARTED_AT)
+        assert started.cancel_states == {1: CancelRequested(cause=CancelCause.OPERATOR)}
+        assert started.markers == []
+        assert started.orders == {1: OperatorCancelFirst()}
+
+    def test_a_value_returned_after_the_cancel_is_dropped(self) -> None:
+        async def returns_a_value() -> str:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+            return 'value after the cancel'
+
+        writer, _started = _cancel_after_start(
+            {'value': returns_a_value},
+            [_frame(1, 'value', 60_000, GRACE_MS)],
+            1,
+            _results_of(1),
+        )
+
+        assert _results(writer)[0].end == SeatCancelled(body=CancelledBody.RAN)
+
+    def test_a_task_alive_after_the_grace_gets_the_second_cancel(self) -> None:
+        async def suppress_then_work() -> int:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+            await asyncio.sleep(30)
+            return 1
+
+        writer, _started = _cancel_after_start(
+            {'suppress_then_work': suppress_then_work},
+            [_frame(1, 'suppress_then_work', 60_000, GRACE_MS)],
+            1,
+            _results_of(1),
+        )
+
+        assert _kinds(writer, 1) == [
+            'CancelFiredFrame',
+            'SecondCancelFrame',
+            'SharedResultFrame',
+        ]
+        assert _results(writer)[0].end == SeatCancelled(body=CancelledBody.RAN)
+
+    def test_a_task_that_swallows_every_cancel_is_reported_stuck(self) -> None:
+        stop = threading.Event()
+
+        async def swallow_all() -> int:
+            give_up_at = time.monotonic() + RUN_TIMEOUT_S
+            while not stop.is_set() and time.monotonic() < give_up_at:
+                try:
+                    await asyncio.sleep(0.01)
+                except asyncio.CancelledError:
+                    continue
+            return 1
+
+        def stuck_then_released(writer: _RecordingWriter) -> bool:
+            if any(isinstance(frame, RunStuckFrame) for frame in writer.frames):
+                stop.set()
+            return len(_results(writer)) == 1
+
+        writer, _started = _cancel_after_start(
+            {'swallow_all': swallow_all},
+            [_frame(1, 'swallow_all', 60_000, GRACE_MS)],
+            1,
+            stuck_then_released,
+        )
+
+        assert _kinds(writer, 1) == [
+            'CancelFiredFrame',
+            'SecondCancelFrame',
+            'RunStuckFrame',
+            'SharedResultFrame',
+        ]
+        assert _results(writer)[0].end == SeatCancelled(body=CancelledBody.RAN)
+
+    def test_the_deadline_after_the_cancel_adds_nothing(self) -> None:
+        """The body takes the cancel and ends past its deadline, within a
+        long grace: no deadline report, and the end is the cancel."""
+
+        async def ends_past_the_deadline() -> int:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+            await asyncio.sleep(DEADLINE_MS / 1000 + 0.2)
+            return 1
+
+        writer, _started = _cancel_after_start(
+            {'late': ends_past_the_deadline},
+            [_frame(1, 'late', DEADLINE_MS, 5_000)],
+            1,
+            _results_of(1),
+        )
+
+        assert _kinds(writer, 1) == ['CancelFiredFrame', 'SharedResultFrame']
+        assert _results(writer)[0].end == SeatCancelled(body=CancelledBody.RAN)
+
+    def test_a_cancel_during_the_start_write_skips_the_body(self) -> None:
+        release_start = asyncio.Event()
+        body_ran: list[int] = []
+
+        async def slow_start() -> None:
+            await release_start.wait()
+
+        async def body() -> int:
+            body_ran.append(1)
+            return 1
+
+        harness, writer, started = _seat_loop(1, {'body': body})
+        started.starts = {'body': slow_start}
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(harness.serve(inbox))
+            inbox.put(_frame(1, 'body'))
+            await _until(lambda: 1 in started.started)
+            inbox.put(shared_cancel_frame(dispatch=1, task_id=_task_id(1)))
+            await asyncio.sleep(0.05)
+            assert writer.frames == []
+            release_start.set()
+            await _until(lambda: len(_results(writer)) == 1)
+            inbox.put(stop_frame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+        assert body_ran == []
+        assert _kinds(writer, 1) == ['CancelFiredFrame', 'SharedResultFrame']
+        [result] = _results(writer)
+        assert result.end == SeatCancelled(body=CancelledBody.NOT_STARTED)
+        assert result.started == StartReported(STARTED_AT)
+        assert started.markers == []
+
+    def test_a_kept_cancel_is_dropped_when_the_start_stops_the_run(self) -> None:
+        """The start write ends the run first (a lost claim): that end goes
+        out, with no cancel report."""
+        release_start = asyncio.Event()
+
+        async def slow_start() -> None:
+            await release_start.wait()
+
+        async def claim_lost() -> int:
+            return 0
+
+        harness, writer, started = _seat_loop(1, {'lost': claim_lost})
+        started.starts = {'lost': slow_start}
+        started.not_running = {'lost'}
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(harness.serve(inbox))
+            inbox.put(_frame(1, 'lost'))
+            await _until(lambda: 1 in started.started)
+            inbox.put(shared_cancel_frame(dispatch=1, task_id=_task_id(1)))
+            await asyncio.sleep(0.02)
+            release_start.set()
+            await _until(lambda: len(_results(writer)) == 1)
+            inbox.put(stop_frame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+        assert _kinds(writer, 1) == ['SharedResultFrame']
+        assert _results(writer)[0].end == StoppedBeforeRunning('CLAIM_LOST')
+
+    def test_a_cancel_after_the_deadline_keeps_the_timeout(self) -> None:
+        async def hang() -> int:
+            await asyncio.Event().wait()
+            return 0
+
+        harness, writer, started = _seat_loop(1, {'hang': hang})
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(harness.serve(inbox))
+            inbox.put(_frame(1, 'hang', DEADLINE_MS, 5_000))
+            await _until(lambda: 'DeadlineFiredFrame' in _kinds(writer, 1))
+            inbox.put(shared_cancel_frame(dispatch=1, task_id=_task_id(1)))
+            await _until(lambda: len(_results(writer)) == 1)
+            inbox.put(stop_frame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+        assert 'CancelFiredFrame' not in _kinds(writer, 1)
+        assert _results(writer)[0].end == SeatTimedOut()
+        assert started.cancel_states == {}
+
+    def test_the_deadline_sets_the_cancel_state_of_the_run(self) -> None:
+        """A body that swallows the deadline cancel reads ``DEADLINE``."""
+
+        async def swallow_cancel() -> str:
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.Event().wait()
+            return 'late'
+
+        _writer, started = _run_and_read_states(
+            {'swallow': swallow_cancel},
+            [_frame(1, 'swallow', DEADLINE_MS, 5_000)],
+        )
+
+        assert started.cancel_states == {1: CancelRequested(cause=CancelCause.DEADLINE)}
+
+    def test_a_run_with_no_cancel_reads_not_requested(self) -> None:
+        async def quick() -> int:
+            return 1
+
+        _writer, started = _run_and_read_states({'quick': quick}, [_frame(1, 'quick')])
+
+        assert started.cancel_states == {1: CancelNotRequested()}
+
+    def test_a_cancel_of_a_run_that_the_child_does_not_run_is_ignored(self) -> None:
+        release = asyncio.Event()
+
+        async def hold() -> int:
+            await release.wait()
+            return 2
+
+        harness, writer, started = _seat_loop(1, {'hold': hold})
+        inbox = ParentFrameInbox()
+
+        async def scenario() -> None:
+            serving = asyncio.ensure_future(harness.serve(inbox))
+            inbox.put(_frame(1, 'hold'))
+            await _until(lambda: 1 in started.started)
+            inbox.put(shared_cancel_frame(dispatch=7, task_id=_task_id(7)))
+            inbox.put(shared_cancel_frame(dispatch=1, task_id=_task_id(2)))
+            await asyncio.sleep(0.05)
+            release.set()
+            await _until(lambda: len(_results(writer)) == 1)
+            inbox.put(shared_cancel_frame(dispatch=1, task_id=_task_id(1)))
+            await asyncio.sleep(0.02)
+            inbox.put(stop_frame())
+            await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+        asyncio.run(scenario())
+        assert _kinds(writer, 1) == ['SharedResultFrame']
+        assert _results(writer)[0].end == ResultEnvelope('2')
+
+    def test_the_neighbour_of_a_stuck_cancelled_run_keeps_its_seat_and_result(
+        self,
+    ) -> None:
+        stop = threading.Event()
+
+        async def swallow_all() -> int:
+            give_up_at = time.monotonic() + RUN_TIMEOUT_S
+            while not stop.is_set() and time.monotonic() < give_up_at:
+                try:
+                    await asyncio.sleep(0.01)
+                except asyncio.CancelledError:
+                    continue
+            return 1
+
+        async def neighbour() -> int:
+            await asyncio.sleep(0.3)
+            return 5
+
+        def both_ended(writer: _RecordingWriter) -> bool:
+            if any(isinstance(frame, RunStuckFrame) for frame in writer.frames):
+                stop.set()
+            return len(_results(writer)) == 2
+
+        writer, _started = _cancel_after_start(
+            {'swallow_all': swallow_all, 'neighbour': neighbour},
+            [_frame(1, 'swallow_all', 60_000, GRACE_MS), _frame(2, 'neighbour')],
+            1,
+            both_ended,
+        )
+
+        ends = {frame.dispatch: frame.end for frame in _results(writer)}
+        assert ends == {1: SeatCancelled(body=CancelledBody.RAN), 2: ResultEnvelope('5')}
+        assert _kinds(writer, 2) == ['SharedResultFrame']
+
+
+def _run_and_read_states(
+    behaviors: dict[str, Callable[[], Any]],
+    frames: list[core.SharedRunFrame],
+) -> tuple[_RecordingWriter, _ScriptedSeats]:
+    """Serve ``frames`` until each run ended, then stop."""
+    harness, writer, started = _seat_loop(len(frames), behaviors)
+    inbox = ParentFrameInbox()
+
+    async def scenario() -> None:
+        serving = asyncio.ensure_future(harness.serve(inbox))
+        for frame in frames:
+            inbox.put(frame)
+        await _until(lambda: len(_results(writer)) == len(frames))
+        inbox.put(stop_frame())
+        await asyncio.wait_for(serving, RUN_TIMEOUT_S)
+
+    asyncio.run(scenario())
+    return writer, started
+
+
 class TestWorkLeftAfterAReturn:
     """A coroutine returned before its deadline while marked work was alive:
     the run ends with what it returned, after that work ended, was
@@ -1626,6 +1996,14 @@ class TestParentDefects:
         isolated = run_frame(task_id=_task_id(99), task_name='x')
         self._serve_until_exit(2, [isolated])
         assert exits[0][1] == child_main.BAD_PARENT_FRAME_EXIT_CODE
+
+    def test_the_cancel_of_an_isolated_run_ends_the_child(
+        self,
+        exits: list[tuple[str, int]],
+    ) -> None:
+        self._serve_until_exit(2, [isolated_cancel_frame(task_id=_task_id(99))])
+        assert exits[0][1] == child_main.BAD_PARENT_FRAME_EXIT_CODE
+        assert 'cancel of isolated task' in exits[0][0]
 
 
 class TestFrameWriter:

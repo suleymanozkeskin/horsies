@@ -1,46 +1,69 @@
-import { statusColorVar, statusLabel } from '@/lib/status-utils';
-import type { WorkflowStatus } from '@/types/workflows';
+import { Hint } from '@/components/ui/hint';
+import { assertNever } from '@/lib/exhaustive';
 
-import { LEGEND_STATUSES } from './status';
+/** A mark of the graph: the bold edges of the longest chain, and the dashed
+ * border of a tolerant join. */
+export type LegendMark = 'chain_edge' | 'tolerant_join';
 
-interface LegendProps {
-  /** Statuses currently used as a visibility filter (empty = show all). */
-  active: ReadonlySet<string>;
-  onToggle: (status: WorkflowStatus) => void;
+function MarkSwatch({ mark }: { mark: LegendMark }) {
+  switch (mark) {
+    case 'chain_edge':
+      return (
+        <span
+          className="inline-block h-0.5 w-3 rounded-full"
+          style={{ background: 'var(--longest-chain)' }}
+          aria-hidden
+        />
+      );
+    case 'tolerant_join':
+      return <span className="inline-block h-2.5 w-3 rounded-sm border border-dashed border-foreground" aria-hidden />;
+    default:
+      return assertNever(mark, 'legend mark');
+  }
 }
 
-/** Clickable status key: each chip toggles a filter that fades nodes whose
- * status is not selected. Also documents the dashed-border convention. */
-export function Legend({ active, onToggle }: LegendProps) {
-  const filtering = active.size > 0;
+export function markText(mark: LegendMark): { label: string; meaning: string } {
+  switch (mark) {
+    case 'chain_edge':
+      return {
+        label: 'longest chain',
+        meaning:
+          'The bold edges join the nodes of the longest chain: the chain of nodes whose end times decided the end of the run.',
+      };
+    case 'tolerant_join':
+      return {
+        label: 'tolerant join',
+        meaning: 'A node with a dashed border runs even when a dependency failed.',
+      };
+    default:
+      return assertNever(mark, 'legend mark');
+  }
+}
+
+/**
+ * The key to the marks of the graph. It wraps instead of clipping. Each item
+ * gives its meaning on hover and to a screen reader.
+ */
+export function TimingLegend({ marks }: { marks: readonly LegendMark[] }) {
+  if (marks.length === 0) {
+    return null;
+  }
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-      {LEGEND_STATUSES.map(status => {
-        const on = active.has(status);
+    <ul
+      aria-label="Legend"
+      className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground"
+    >
+      {marks.map(mark => {
+        const text = markText(mark);
         return (
-          <button
-            key={status}
-            type="button"
-            onClick={() => onToggle(status)}
-            aria-pressed={on}
-            title={
-              on
-                ? `Showing ${statusLabel(status)} — click to clear`
-                : `Show only ${statusLabel(status)}`
-            }
-            className="inline-flex items-center gap-1.5 rounded px-1 hover:text-foreground"
-            style={{ opacity: filtering && !on ? 0.4 : 1 }}
-          >
-            <span
-              className="size-2 rounded-full"
-              style={{ background: statusColorVar(status) }}
-              aria-hidden
-            />
-            {statusLabel(status)}
-          </button>
+          <li key={mark} data-legend-mark={mark}>
+            <Hint text={text.meaning} className="inline-flex items-center gap-1.5">
+              <MarkSwatch mark={mark} />
+              <span>{text.label}</span>
+            </Hint>
+          </li>
         );
       })}
-      <span className="border-l border-border pl-3">dashed = tolerant join</span>
-    </div>
+    </ul>
   );
 }

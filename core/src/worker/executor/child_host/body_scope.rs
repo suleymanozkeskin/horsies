@@ -135,6 +135,9 @@ pub enum BodyOutcome<'a> {
     /// The deadline of the run came before the end of the body: the run
     /// ends `TASK_TIMEOUT`, whatever the body returns later.
     TimedOut,
+    /// An operator cancelled the task before the end of the body: the task
+    /// is `CANCELLED` (`TASK_CANCELLED`), whatever the body returns.
+    Cancelled,
 }
 
 impl<'a> BodyOutcome<'a> {

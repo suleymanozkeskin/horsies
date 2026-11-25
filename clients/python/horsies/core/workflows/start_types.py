@@ -29,6 +29,7 @@ from horsies._catalog.workflow_start import (
 )
 from horsies._catalog.workflow_start_errors import (
     WorkflowStartAsyncContext as WorkflowStartAsyncContext,
+    WorkflowStartCommandConflict as WorkflowStartCommandConflict,
     WorkflowStartCoreError as WorkflowStartCoreError,
     WorkflowStartEnqueueFailed as WorkflowStartEnqueueFailed,
     WorkflowStartIdConflict as WorkflowStartIdConflict,

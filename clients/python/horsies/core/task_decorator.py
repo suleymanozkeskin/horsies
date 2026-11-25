@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import (
     Callable,
+    Concatenate,
     Final,
     get_origin,
     get_type_hints,
@@ -46,6 +47,7 @@ from horsies.core.codec.payload_guard import (
     warn_if_payload_large,
 )
 from horsies.core.codec.task_options import serialize_task_options
+from horsies.core.task_runtime import TaskRuntime
 from horsies.core.process_role import (
     ProcessRole,
     process_role,
@@ -942,7 +944,7 @@ class NodeFactory(Generic[P, T]):
         # Type checker validates 'value' against my_task's signature
     """
 
-    _fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T]'
+    _fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[P, T] | AsyncRuntimeTaskFunction[P, T]'
     _waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None
@@ -956,7 +958,7 @@ class NodeFactory(Generic[P, T]):
 
     def __init__(
         self,
-        fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T]',
+        fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[P, T] | AsyncRuntimeTaskFunction[P, T]',
         *,
         waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
         workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
@@ -1183,12 +1185,70 @@ class AsyncTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
     ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]: ...
 
 
+class RuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+    """A `def` task function whose first parameter takes its `TaskRuntime`.
+
+    `P` is the parameters after the runtime: the sends, the schedules and
+    `node()` take these, and the worker passes the runtime on each run. A
+    direct call takes the runtime first, for example
+    `charge(TaskRuntime.for_test(task_id=...), order_id='o-1')`.
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        runtime: TaskRuntime,
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> TaskResult[T, TaskError]: ...
+
+
+class AsyncRuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+    """An `async def` task function whose first parameter takes its
+    `TaskRuntime`.
+
+    As `RuntimeTaskFunction`; a direct call returns a coroutine.
+    """
+
+    @abstractmethod
+    def __call__(
+        self,
+        runtime: TaskRuntime,
+        /,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]: ...
+
+
+# The runtime overloads come first. A function whose first parameter takes a
+# `TaskRuntime` also fits the overloads after them, with the runtime in `P`;
+# the first match wins, so the sends of such a task do not take the runtime.
+# A type checker reports that overlap; it is the intended order.
+
+
 class TaskDecorator(Protocol):
     """What `app.task(task_name, **options)` returns.
 
     It registers one task function: a `def` function gives a
     `TaskFunction`, and an `async def` function gives an `AsyncTaskFunction`.
+    A function whose first parameter is `runtime: TaskRuntime` gives a
+    `RuntimeTaskFunction` or an `AsyncRuntimeTaskFunction`.
     """
+
+    @overload
+    def __call__(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        /,
+    ) -> AsyncRuntimeTaskFunction[P, T]: ...
+
+    @overload
+    def __call__(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        fn: Callable[Concatenate[TaskRuntime, P], TaskResult[T, TaskError]],
+        /,
+    ) -> RuntimeTaskFunction[P, T]: ...
 
     @overload
     def __call__(
@@ -1212,6 +1272,14 @@ class SharedAsyncTaskDecorator(Protocol):
     `def` function. The decorator refuses it at run time too (HRS-107).
     """
 
+    @overload
+    def __call__(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        /,
+    ) -> AsyncRuntimeTaskFunction[P, T]: ...
+
+    @overload
     def __call__(
         self,
         fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
@@ -1226,6 +1294,14 @@ class SharedThreadTaskDecorator(Protocol):
     `async def` function. The decorator refuses it at run time too (HRS-108).
     """
 
+    @overload
+    def __call__(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        fn: Callable[Concatenate[TaskRuntime, P], TaskResult[T, TaskError]],
+        /,
+    ) -> RuntimeTaskFunction[P, T]: ...
+
+    @overload
     def __call__(
         self,
         fn: Callable[P, TaskResult[T, TaskError]],
@@ -1234,8 +1310,8 @@ class SharedThreadTaskDecorator(Protocol):
 
 
 class CancelGraceRefusedDecorator(Protocol):
-    """What `app.task(task_name, cancel_grace_ms=..., ...)` returns for a
-    literal class other than `SHARED_ASYNC`.
+    """What `app.task(task_name, cancel_grace_ms=..., ...)` returns for the
+    literal class `SHARED_THREAD`.
 
     It accepts no function, so a type checker refuses the decoration. The
     decorator refuses it at run time too (HRS-110).
@@ -1427,22 +1503,24 @@ class SharedWithoutTimeout:
 
 
 @dataclass(frozen=True, slots=True)
-class CancelGraceWithoutSharedAsync:
-    """`cancel_grace_ms` with a class other than `SHARED_ASYNC`."""
-
-    execution: Execution
+class CancelGraceOnSharedThread:
+    """`cancel_grace_ms` with `SHARED_THREAD`: a thread cannot be stopped,
+    so the class has no cancel grace."""
 
 
 @dataclass(frozen=True, slots=True)
 class CancelGraceOutOfRange:
-    """`cancel_grace_ms` outside MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS."""
+    """`cancel_grace_ms` outside MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS,
+    for `execution` (`SHARED_ASYNC` or `ISOLATED`)."""
+
+    execution: Literal[Execution.SHARED_ASYNC, Execution.ISOLATED]
 
 
 type ExecutionRuleViolation = (
     SharedAsyncOnDef
     | SharedThreadOnAsyncDef
     | SharedWithoutTimeout
-    | CancelGraceWithoutSharedAsync
+    | CancelGraceOnSharedThread
     | CancelGraceOutOfRange
 )
 """A task declaration that breaks one of the execution rules."""
@@ -1456,10 +1534,12 @@ def check_execution_rules(
 
     The rules, checked in this order, give the first violation:
     `SHARED_ASYNC` needs an `async def` function and `SHARED_THREAD` a `def`
-    function; a shared class needs `timeout_ms`; only `SHARED_ASYNC` takes
-    `cancel_grace_ms`; and a `cancel_grace_ms` is from MIN_CANCEL_GRACE_MS
-    to MAX_CANCEL_GRACE_MS. `ISOLATED` takes both kinds and no timeout.
-    Pure: it does not read or change any state.
+    function; a shared class needs `timeout_ms`; `SHARED_THREAD` takes no
+    `cancel_grace_ms`; and a `cancel_grace_ms` of `SHARED_ASYNC` or
+    `ISOLATED` is from MIN_CANCEL_GRACE_MS to MAX_CANCEL_GRACE_MS.
+    `ISOLATED` takes both kinds, no timeout, and a grace or none (the hard
+    stop after an operator cancel). Pure: it does not read or change any
+    state.
     """
     match options.execution:
         case Execution.ISOLATED:
@@ -1492,20 +1572,21 @@ def _check_function_kind(
 def _check_cancel_grace(
     execution: Execution,
     cancel_grace_ms: int | None,
-) -> Result[None, CancelGraceWithoutSharedAsync | CancelGraceOutOfRange]:
-    """Only `SHARED_ASYNC` takes a grace, and the grace is in its bounds."""
+) -> Result[None, CancelGraceOnSharedThread | CancelGraceOutOfRange]:
+    """`SHARED_THREAD` takes no grace; the grace of `SHARED_ASYNC` and of
+    `ISOLATED` is in its bounds."""
     match cancel_grace_ms:
         case None:
             return Ok(None)
         case int():
             pass
     match execution:
-        case Execution.SHARED_ASYNC:
+        case Execution.SHARED_ASYNC | Execution.ISOLATED:
             if MIN_CANCEL_GRACE_MS <= cancel_grace_ms <= MAX_CANCEL_GRACE_MS:
                 return Ok(None)
-            return Err(CancelGraceOutOfRange())
-        case Execution.ISOLATED | Execution.SHARED_THREAD:
-            return Err(CancelGraceWithoutSharedAsync(execution=execution))
+            return Err(CancelGraceOutOfRange(execution=execution))
+        case Execution.SHARED_THREAD:
+            return Err(CancelGraceOnSharedThread())
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1534,7 +1615,7 @@ def execution_rule_error(
     match violation:
         case SharedAsyncOnDef() | SharedThreadOnAsyncDef() | SharedWithoutTimeout():
             rule = _function_rule_text(violation)
-        case CancelGraceWithoutSharedAsync() | CancelGraceOutOfRange():
+        case CancelGraceOnSharedThread() | CancelGraceOutOfRange():
             rule = _grace_rule_text(violation)
         case _ as unreachable:
             assert_never(unreachable)
@@ -1593,36 +1674,54 @@ def _function_rule_text(
 
 
 def _grace_rule_text(
-    violation: CancelGraceWithoutSharedAsync | CancelGraceOutOfRange,
+    violation: CancelGraceOnSharedThread | CancelGraceOutOfRange,
 ) -> _RuleText:
     """The text of a rule about `cancel_grace_ms`."""
     match violation:
-        case CancelGraceWithoutSharedAsync(execution=execution):
+        case CancelGraceOnSharedThread():
             return _RuleText(
                 code=ErrorCode.TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC,
-                message='cancel_grace_ms requires execution=SHARED_ASYNC',
+                message='cancel_grace_ms is not valid with execution=SHARED_THREAD',
                 notes=(
-                    f'execution is {execution.value}',
-                    'only a SHARED_ASYNC task is cancelled and gets a grace '
-                    'to stop; a thread cannot be cancelled',
+                    'execution is SHARED_THREAD',
+                    'a thread cannot be cancelled or stopped, so a SHARED_THREAD '
+                    'task has no cancel grace',
                 ),
                 help_text=(
-                    'remove cancel_grace_ms, or use '
-                    'Execution.SHARED_ASYNC with an `async def` function'
+                    'remove cancel_grace_ms, or use Execution.SHARED_ASYNC with an '
+                    '`async def` function, or Execution.ISOLATED'
                 ),
             )
-        case CancelGraceOutOfRange():
+        case CancelGraceOutOfRange(execution=execution):
             return _RuleText(
                 code=ErrorCode.TASK_CANCEL_GRACE_OUT_OF_RANGE,
                 message='cancel_grace_ms is out of range',
                 notes=(
                     f'cancel_grace_ms must be from {MIN_CANCEL_GRACE_MS} to '
                     f'{MAX_CANCEL_GRACE_MS} ms',
+                    f'execution is {execution.value}',
                 ),
-                help_text=(
-                    'set a value in the range, or remove cancel_grace_ms to '
-                    f'use the default of {DEFAULT_CANCEL_GRACE_MS} ms'
-                ),
+                help_text=_grace_range_help(execution),
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _grace_range_help(
+    execution: Literal[Execution.SHARED_ASYNC, Execution.ISOLATED],
+) -> str:
+    """The fix of a grace out of range: the default of the class when the
+    grace is removed."""
+    match execution:
+        case Execution.SHARED_ASYNC:
+            return (
+                'set a value in the range, or remove cancel_grace_ms to '
+                f'use the default of {DEFAULT_CANCEL_GRACE_MS} ms'
+            )
+        case Execution.ISOLATED:
+            return (
+                'set a value in the range, or remove cancel_grace_ms: an '
+                'ISOLATED task then has no hard stop after an operator cancel'
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -1720,6 +1819,32 @@ def _cancel_requested() -> bool:
 
 
 @overload
+def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
+    fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    app: 'Horsies',
+    task_name: str,
+    task_options: Optional['TaskOptions'] = None,
+    *,
+    exception_mapper: ExceptionMapper | None = None,
+    default_unhandled_error_code: str | None = None,
+    error_codes: tuple[str, ...] = (),
+) -> 'AsyncRuntimeTaskFunction[P, T]': ...
+
+
+@overload
+def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
+    fn: Callable[Concatenate[TaskRuntime, P], TaskResult[T, TaskError]],
+    app: 'Horsies',
+    task_name: str,
+    task_options: Optional['TaskOptions'] = None,
+    *,
+    exception_mapper: ExceptionMapper | None = None,
+    default_unhandled_error_code: str | None = None,
+    error_codes: tuple[str, ...] = (),
+) -> 'RuntimeTaskFunction[P, T]': ...
+
+
+@overload
 def create_task_wrapper(
     fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
     app: 'Horsies',
@@ -1755,13 +1880,16 @@ def create_task_wrapper(
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
     error_codes: tuple[str, ...] = (),
-) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T]':
+) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[Any, T] | AsyncRuntimeTaskFunction[Any, T]':
     """
     Create a task wrapper for a specific app instance.
     Called by app.task() decorator.
 
     A `def` function gives a `TaskFunction`. An `async def` function gives
-    an `AsyncTaskFunction`, whose direct call returns a coroutine.
+    an `AsyncTaskFunction`, whose direct call returns a coroutine. A
+    function whose first parameter takes the `TaskRuntime` gives the runtime
+    form of each (`RuntimeTaskFunction`, `AsyncRuntimeTaskFunction`): the
+    same wrapper, whose sends do not take the runtime.
 
     `error_codes` are the codes that the task declares, which the decorator
     checked (`parse_declared_error_codes`), with the codes of its exception

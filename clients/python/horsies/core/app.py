@@ -4,6 +4,7 @@ from typing import (
     Literal,
     Optional,
     Callable,
+    Concatenate,
     TypeVar,
     overload,
     TYPE_CHECKING,
@@ -148,13 +149,16 @@ from horsies.core.event_handlers import (
 
 if TYPE_CHECKING:
     from horsies.core.task_decorator import (
+        AsyncRuntimeTaskFunction,
         AsyncTaskFunction,
         CancelGraceRefusedDecorator,
+        RuntimeTaskFunction,
         SharedAsyncTaskDecorator,
         SharedThreadTaskDecorator,
         TaskDecorator,
         TaskFunction,
     )
+    from horsies.core.task_runtime import TaskRuntime
     from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
     from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
     from horsies.core.models.class_coverage import ClassCoverage, ClassReport
@@ -459,7 +463,7 @@ class Horsies:
         # The pool that get_broker() opens. A worker child sets its
         # task-send pool before it imports task modules.
         self._broker_pool: _ConfigBrokerPool | _TaskSendBrokerPool = _ConfigBrokerPool()
-        self.tasks: 'TaskRegistry[TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any]]' = (
+        self.tasks: 'TaskRegistry[TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any] | RuntimeTaskFunction[Any, Any] | AsyncRuntimeTaskFunction[Any, Any]]' = (
             TaskRegistry()
         )
         self.logger: logging.Logger = get_logger('app')
@@ -755,6 +759,25 @@ class Horsies:
                 )
             return queue_name
 
+    # The runtime forms come first: a function whose first parameter takes a
+    # TaskRuntime also fits the plain forms, with the runtime in P.
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        func: Callable[
+            Concatenate['TaskRuntime', P],
+            Coroutine[Any, Any, 'TaskResult[T, TaskError]'],
+        ],
+    ) -> 'AsyncRuntimeTaskFunction[P, T]': ...
+
+    @overload
+    def task(  # pyright: ignore[reportOverlappingOverload]
+        self,
+        task_name: str,
+        func: Callable[Concatenate['TaskRuntime', P], 'TaskResult[T, TaskError]'],
+    ) -> 'RuntimeTaskFunction[P, T]': ...
+
     @overload
     def task(
         self,
@@ -803,10 +826,10 @@ class Horsies:
         error_codes: type[Enum] | tuple[str, ...] = (),
     ) -> 'SharedThreadTaskDecorator': ...
 
-    # cancel_grace_ms with a literal class other than SHARED_ASYNC: the
-    # returned decorator takes no function, so the decoration is refused.
-    # The last overload also accepts these arguments, for a class known at
-    # run time; a type checker picks this overload first for the literal.
+    # cancel_grace_ms with a literal SHARED_THREAD: the returned decorator
+    # takes no function, so the decoration is refused. The last overload also
+    # accepts these arguments, for a class known at run time; a type checker
+    # picks this overload first for the literal.
     @overload
     def task(  # pyright: ignore[reportOverlappingOverload]
         self,
@@ -822,6 +845,9 @@ class Horsies:
         error_codes: type[Enum] | tuple[str, ...] = (),
     ) -> 'CancelGraceRefusedDecorator': ...
 
+    # ISOLATED, the default class. cancel_grace_ms is the hard stop after an
+    # operator cancel: the worker kills the child that long after the cancel
+    # when the run has not ended. Without it, nothing is killed.
     @overload
     def task(
         self,
@@ -833,27 +859,14 @@ class Horsies:
         default_unhandled_error_code: Optional[str] = None,
         error_codes: type[Enum] | tuple[str, ...] = (),
         timeout_ms: Optional[int] = None,
+        cancel_grace_ms: Optional[int] = None,
         execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
     ) -> 'TaskDecorator': ...
 
-    @overload
-    def task(  # pyright: ignore[reportOverlappingOverload]
-        self,
-        task_name: str,
-        *,
-        cancel_grace_ms: int,
-        queue_name: Optional[str] = None,
-        retry_policy: Optional['RetryPolicy'] = None,
-        exception_mapper: Optional['ExceptionMapper'] = None,
-        default_unhandled_error_code: Optional[str] = None,
-        error_codes: type[Enum] | tuple[str, ...] = (),
-        timeout_ms: Optional[int] = None,
-        execution: Literal[Execution.ISOLATED] = Execution.ISOLATED,
-    ) -> 'CancelGraceRefusedDecorator': ...
-
     # A class known only at run time: timeout_ms is required, because a
     # shared class needs it. cancel_grace_ms is accepted, because the class
-    # may be SHARED_ASYNC. The decorator checks the rules at run time.
+    # may be SHARED_ASYNC or ISOLATED. The decorator checks the rules at run
+    # time.
     @overload
     def task(
         self,
@@ -880,6 +893,8 @@ class Horsies:
     ) -> Union[
         'TaskFunction[Any, Any]',
         'AsyncTaskFunction[Any, Any]',
+        'RuntimeTaskFunction[Any, Any]',
+        'AsyncRuntimeTaskFunction[Any, Any]',
         'TaskDecorator',
         'SharedAsyncTaskDecorator',
         'SharedThreadTaskDecorator',
@@ -891,11 +906,18 @@ class Horsies:
 
         A `def` function gives a `TaskFunction`. An `async def` function
         gives an `AsyncTaskFunction`, whose direct call returns a coroutine.
+        A function whose first parameter is `runtime: TaskRuntime` gives a
+        `RuntimeTaskFunction` or an `AsyncRuntimeTaskFunction`: the worker
+        passes the runtime of each run, and the sends do not take it.
 
         `execution` (an `Execution`, default `ISOLATED`) declares how a
         worker runs the task. `SHARED_ASYNC` needs an `async def` function
         and `timeout_ms`; `SHARED_THREAD` needs a `def` function and
-        `timeout_ms`; only `SHARED_ASYNC` takes `cancel_grace_ms`.
+        `timeout_ms`. `cancel_grace_ms` is for `SHARED_ASYNC` (the time to
+        stop after a cancel, default 1000 ms) and `ISOLATED` (the hard stop
+        after an operator cancel: the worker kills the child when the run has
+        not ended that long after the cancel; with none, nothing is killed).
+        `SHARED_THREAD` takes none: a thread cannot be stopped.
 
         `error_codes` (an `Enum` class, whose member values are the codes, or
         a tuple of code texts; default `()`) declares the task's own error
@@ -921,6 +943,19 @@ class Horsies:
         """
 
         @overload
+        def decorator(  # pyright: ignore[reportOverlappingOverload]
+            fn: Callable[
+                Concatenate['TaskRuntime', P],
+                Coroutine[Any, Any, 'TaskResult[T, TaskError]'],
+            ],
+        ) -> 'AsyncRuntimeTaskFunction[P, T]': ...
+
+        @overload
+        def decorator(  # pyright: ignore[reportOverlappingOverload]
+            fn: Callable[Concatenate['TaskRuntime', P], 'TaskResult[T, TaskError]'],
+        ) -> 'RuntimeTaskFunction[P, T]': ...
+
+        @overload
         def decorator(
             fn: Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
         ) -> 'AsyncTaskFunction[P, T]': ...
@@ -933,7 +968,7 @@ class Horsies:
         def decorator(
             fn: Callable[P, 'TaskResult[T, TaskError]']
             | Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
-        ) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T]':
+        ) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[Any, T] | AsyncRuntimeTaskFunction[Any, T]':
             fn_location = SourceLocation.from_function(fn)
 
             if task_name == '':

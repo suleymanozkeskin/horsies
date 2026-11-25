@@ -23,7 +23,7 @@ use uuid::Uuid;
 
 use super::harness::{describe, BaselineDatabase, Session};
 
-const CASES_SQL: &str = include_str!("cases/baseline_lifecycle_functions.sql");
+pub(super) const CASES_SQL: &str = include_str!("cases/baseline_lifecycle_functions.sql");
 
 /// Time between two reads of the waiting session's state.
 const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -85,7 +85,7 @@ const SESSION_QUEUE: &str = "q_sessions";
 
 /// One committed plain task of worker w1. Parameters: `$1` id, `$2` queue,
 /// `$3` status.
-const INSERT_TASK_SQL: &str = r#"
+pub(super) const INSERT_TASK_SQL: &str = r#"
 INSERT INTO horsies_tasks (
     id, task_name, queue_name, priority, input, task_options, execution, retention_class_key, sent_at,
     created_at, command_fingerprint_version, command_fingerprint, idempotency_key_digest, status, enqueued_at,
@@ -120,17 +120,18 @@ const LIVE_COUNT_SQL: &str = "SELECT count(*) FROM horsies_tasks WHERE id = $1::
 const CANCEL_ROWS_SQL: &str = "SELECT * FROM horsies_cancel_task($1::uuid, TRUE)";
 
 const CANCEL_SQL: &str = "SELECT outcome FROM horsies_cancel_task($1::uuid, TRUE)";
-const COMPLETE_SQL: &str =
-    "SELECT outcome FROM horsies_complete_task_fused($1::uuid, 'w1', $2::timestamptz, '{}', TRUE)";
+const COMPLETE_SQL: &str = "SELECT outcome FROM horsies_complete_task_fused(
+    $1::uuid, 'w1', $2::timestamptz, '{}', TRUE, 'NOT_OBSERVED', NULL)";
 const FAIL_SQL: &str = "SELECT outcome FROM horsies_finish_failed_attempt(
-    $1::uuid, 'w1', $2::timestamptz, 'NONE', NULL, NULL, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)";
+    $1::uuid, 'w1', $2::timestamptz, 'NONE', NULL, NULL, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE,
+    'NOT_OBSERVED', NULL)";
 const FAIL_STALE_SQL: &str = "SELECT outcome FROM horsies_finish_stale_attempt(
     $1::uuid, 'BEAT_AGE', 60000, 60000, NULL, NULL, 'NONE', NULL, NULL, '{}', 'WORKER_CRASHED', 'r', 'm', 'r')";
 
 const BATCH_SUCCESS_SQL: &str = "SELECT string_agg(outcome, ',' ORDER BY ordinality)
     FROM horsies_complete_tasks_fused(
         ARRAY[$1::uuid, $2::uuid]::uuid[], ARRAY[$3::timestamptz, $4::timestamptz]::timestamptz[],
-        ARRAY['{}', '{}'], 'w1', TRUE)";
+        ARRAY['{}', '{}'], 'w1', TRUE, ARRAY['NOT_OBSERVED', 'NOT_OBSERVED'], ARRAY[NULL, NULL]::bigint[])";
 
 const START_SQL: &str = "SELECT outcome, miss_reason
     FROM horsies_start_attempt($1::uuid, 'w1', $2::timestamptz, 7, 'h', 'p')";
@@ -158,14 +159,15 @@ const WAKE_SEND_SQL: &str = "SELECT * FROM horsies_enqueue_task(
     'FIRST', 'NO_CARRIER', NULL, NULL)";
 const WAKE_BATCH_SUCCESS_SQL: &str = "SELECT * FROM horsies_complete_tasks_fused(
     ARRAY[$1::uuid, $2::uuid]::uuid[], ARRAY[$3::timestamptz, $4::timestamptz]::timestamptz[],
-    ARRAY['{}', '{}'], 'w1', TRUE)";
-const SILENT_SUCCESS_SQL: &str =
-    "SELECT * FROM horsies_complete_task_fused($1::uuid, 'w1', $2::timestamptz, '{}', FALSE)";
+    ARRAY['{}', '{}'], 'w1', TRUE, ARRAY['NOT_OBSERVED', 'NOT_OBSERVED'], ARRAY[NULL, NULL]::bigint[])";
+const SILENT_SUCCESS_SQL: &str = "SELECT * FROM horsies_complete_task_fused(
+    $1::uuid, 'w1', $2::timestamptz, '{}', FALSE, 'NOT_OBSERVED', NULL)";
 const TERMINAL_FAILURE_SQL: &str = "SELECT * FROM horsies_finish_failed_attempt(
-    $1::uuid, 'w1', $2::timestamptz, 'NONE', NULL, NULL, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)";
+    $1::uuid, 'w1', $2::timestamptz, 'NONE', NULL, NULL, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE,
+    'NOT_OBSERVED', NULL)";
 const RETRY_FAILURE_SQL: &str = "SELECT * FROM horsies_finish_failed_attempt(
     $1::uuid, 'w1', $2::timestamptz, 'RETRY', 0, 30.0, 'SAME_CLASS', '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE',
-    TRUE)";
+    TRUE, 'NOT_OBSERVED', NULL)";
 const RELEASE_ISOLATED_SQL: &str = "SELECT * FROM horsies_release_claims(
     ARRAY[$1::uuid, $2::uuid]::uuid[], ARRAY[$3::timestamptz, $4::timestamptz]::timestamptz[], 'w1', 'ISOLATED')";
 const RELEASE_SAME_CLASS_SQL: &str = "SELECT * FROM horsies_release_claims(

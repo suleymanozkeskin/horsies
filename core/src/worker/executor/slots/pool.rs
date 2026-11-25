@@ -21,8 +21,10 @@ use super::board::{PoolBoard, PoolHealth};
 use super::budgets::SlotService;
 use super::dispatch::{AttemptEnd, AttemptLog, ClaimedTask, ExecutionClass, NotRunCause};
 use super::isolated::run_slot;
-use super::route::IsolatedDeadline;
+use super::route::{IsolatedCancelStop, IsolatedDeadline};
+use crate::broker::claims::ClaimRead;
 use crate::broker::OrphanSelfHeal;
+use crate::core::lifecycle::{AttemptPlacement, SlotWait};
 use crate::events::QueueName;
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
@@ -103,30 +105,20 @@ pub struct Placed {
     pub wall: DateTime<Utc>,
 }
 
-/// Whether the submitter of a task is told when a child takes it.
+/// Where the submitter of a task is told that a child took it: the
+/// placement goes to this sender, at most once.
 #[derive(Debug)]
-pub enum PlacementWatch {
-    /// No one is told.
-    Unwatched,
-    /// The placement goes to this sender, at most once.
-    Watched(oneshot::Sender<Placed>),
-}
+pub struct PlacementWatch(oneshot::Sender<Placed>);
 
-/// The submitter's end of a [`PlacementWatch`].
+/// The submitter's end of a watched placement ([`watched_placement`]): the
+/// placement comes on this receiver; the sender drops when the task ends
+/// before a child takes it.
 #[derive(Debug)]
-pub enum PlacementReceipt {
-    /// The placement is not watched.
-    Unwatched,
-    /// The placement comes on this receiver; the sender drops when the task
-    /// ends before a child takes it.
-    Watched(oneshot::Receiver<Placed>),
-}
+pub struct PlacementReceipt(oneshot::Receiver<Placed>);
 
 /// Whether a child took a submitted task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildPlacement {
-    /// The placement was not watched.
-    NotWatched,
     /// A child took the task.
     Placed(Placed),
     /// The task ended before a child took it.
@@ -135,14 +127,26 @@ pub enum ChildPlacement {
 
 impl PlacementReceipt {
     /// Wait until a child takes the task, or until the task ends before a
-    /// child takes it. Returns at once when the placement is not watched.
+    /// child takes it.
     pub async fn placement(self) -> ChildPlacement {
+        match self.0.await {
+            Ok(placed) => ChildPlacement::Placed(placed),
+            Err(_no_child_took_it) => ChildPlacement::NotPlaced,
+        }
+    }
+}
+
+impl ChildPlacement {
+    /// The placement that the attempt row of the task keeps, for a task
+    /// whose claim result the worker read at `read`: the slot wait from the
+    /// read to the placement, or no placement for a task that reached no
+    /// child. Pure.
+    pub fn attempt_placement(&self, read: ClaimRead) -> AttemptPlacement {
         match self {
-            Self::Unwatched => ChildPlacement::NotWatched,
-            Self::Watched(receiver) => match receiver.await {
-                Ok(placed) => ChildPlacement::Placed(placed),
-                Err(_no_child_took_it) => ChildPlacement::NotPlaced,
+            Self::Placed(placed) => AttemptPlacement::Placed {
+                slot_wait: SlotWait::between(read.at, placed.at),
             },
+            Self::NotPlaced => AttemptPlacement::NotObserved,
         }
     }
 }
@@ -151,10 +155,7 @@ impl PlacementReceipt {
 /// its submitter waits on.
 pub fn watched_placement() -> (PlacementWatch, PlacementReceipt) {
     let (sender, receiver) = oneshot::channel();
-    (
-        PlacementWatch::Watched(sender),
-        PlacementReceipt::Watched(receiver),
-    )
+    (PlacementWatch(sender), PlacementReceipt(receiver))
 }
 
 /// Where the placement of one task goes, once its pool knows the kind of
@@ -179,7 +180,8 @@ pub(super) struct Answer {
 impl Answer {
     #[cfg(test)]
     pub(super) fn new(sender: oneshot::Sender<AttemptEnd>) -> Self {
-        Self::watched(sender, PlacementWatch::Unwatched, ExecutionClass::Isolated)
+        let (watch, _receipt) = watched_placement();
+        Self::watched(sender, watch, ExecutionClass::Isolated)
     }
 
     /// The answer of a task of a pool whose children are of `child_kind`,
@@ -189,9 +191,9 @@ impl Answer {
         watch: PlacementWatch,
         child_kind: ExecutionClass,
     ) -> Self {
-        let placement = match watch {
-            PlacementWatch::Unwatched => PlacementNotice::Unwatched,
-            PlacementWatch::Watched(to) => PlacementNotice::Watched { to, child_kind },
+        let placement = PlacementNotice::Watched {
+            to: watch.0,
+            child_kind,
         };
         Self {
             sender: Some(sender),
@@ -239,6 +241,7 @@ impl Drop for Answer {
 pub(super) struct QueuedRun {
     pub(super) frame: RunFrame,
     pub(super) deadline: IsolatedDeadline,
+    pub(super) cancel_stop: IsolatedCancelStop,
     pub(super) answer: Answer,
     /// The log fields of the attempt.
     pub(super) log: AttemptLog,
@@ -496,8 +499,8 @@ impl IsolatedPool {
         Self { shared, slots }
     }
 
-    /// Queue one task for the next idle slot. The input is dropped once the
-    /// frame is sent.
+    /// Queue one task for the next idle slot, with no kill for an operator
+    /// cancel. The input is dropped once the frame is sent.
     #[cfg(test)]
     pub fn submit(
         &self,
@@ -506,17 +509,40 @@ impl IsolatedPool {
         work: IsolatedWork,
         deadline: IsolatedDeadline,
     ) -> Submitted {
-        self.submit_watched(task, input, work, deadline, PlacementWatch::Unwatched)
+        self.submit_with_cancel_stop(
+            task,
+            input,
+            work,
+            deadline,
+            IsolatedCancelStop::CooperativeOnly,
+        )
     }
 
-    /// As `IsolatedPool::submit`; `watch` is told when a child takes the
-    /// task, with the kind `ISOLATED`.
+    /// As `IsolatedPool::submit`, with the stop of an operator cancel.
+    #[cfg(test)]
+    pub fn submit_with_cancel_stop(
+        &self,
+        task: &ClaimedTask,
+        input: TaskInputText,
+        work: IsolatedWork,
+        deadline: IsolatedDeadline,
+        cancel_stop: IsolatedCancelStop,
+    ) -> Submitted {
+        let (watch, _receipt) = watched_placement();
+        self.submit_watched(task, input, work, deadline, cancel_stop, watch)
+    }
+
+    /// Queue one task for the next idle slot, with its deadline and the
+    /// stop of an operator cancel; `watch` is told when a child takes the
+    /// task, with the kind `ISOLATED`. The input is dropped once the frame
+    /// is sent.
     pub fn submit_watched(
         &self,
         task: &ClaimedTask,
         input: TaskInputText,
         work: IsolatedWork,
         deadline: IsolatedDeadline,
+        cancel_stop: IsolatedCancelStop,
         watch: PlacementWatch,
     ) -> Submitted {
         let (sender, receiver) = oneshot::channel();
@@ -544,6 +570,7 @@ impl IsolatedPool {
                     input,
                 },
                 deadline,
+                cancel_stop,
                 answer: Answer::watched(sender, watch, ExecutionClass::Isolated),
                 log: task.log(),
             });

@@ -210,6 +210,12 @@ When a task fails with `on_error=OnError.PAUSE`:
   task row. Seeing history records appear when a workflow is paused is
   expected, not a fault.
 
+**The run keeps a record of each pause.** The pause writes one `WORKFLOW_PAUSED` event for the workflow and one
+for each descendant that it pauses (table `horsies_workflow_events`). An abandoned claim writes `TASK_MOVED` with
+the locator of its history record, and its node writes `NODE_READY`. A resume writes one `WORKFLOW_RESUMED` event
+for each workflow that it resumes. A pause that a cancel or a paused expiry ends has no end event: the completion
+time of the run ends it. See [horsies_workflow_events](/horsies/internals/database-schema/#horsies_workflow_events).
+
 **Never-resumed pauses can be bounded by policy.** `paused_workflow_auto_cancel_after`
 (a `timedelta` on `AppConfig.retention`, default `None` = disabled) expires a
 workflow that has been PAUSED longer than the configured age, recording the

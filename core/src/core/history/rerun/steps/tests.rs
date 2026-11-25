@@ -9,7 +9,10 @@ use chrono::Duration;
 use sha2::{Digest, Sha256};
 
 use super::*;
-use crate::core::history::archive::attempts::encode_attempt_snapshot;
+use crate::core::history::archive::attempts::{
+    encode_attempt_archive, encode_attempt_snapshot, Finalizing, OpenAttempt, OpenAttemptFacts,
+    OpenClaims,
+};
 use crate::core::history::identity::keys::IDEMPOTENCY_SCOPE_VERSION;
 
 const SOURCE: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00e0);
@@ -146,6 +149,18 @@ fn a_database_of_another_family_or_of_none_is_refused_first() {
             own: ClientFamily::Rust,
         }
     );
+    let typescript = with(
+        history_values(),
+        "client_family",
+        StatementValue::Text("TYPESCRIPT".to_owned()),
+    );
+    assert_eq!(
+        prepare_values(typescript, None),
+        RerunPreparation::ClientFamilyMismatch {
+            stored: RecordedFamily::Recorded(ClientFamily::TypeScript),
+            own: ClientFamily::Rust,
+        }
+    );
     let none = with(
         history_values(),
         "client_family",
@@ -160,26 +175,52 @@ fn a_database_of_another_family_or_of_none_is_refused_first() {
     );
 }
 
+/// A rerun of the TypeScript client meets a `RUST` row: the same refusal,
+/// with the family of the caller.
+#[test]
+fn a_typescript_rerun_refuses_a_database_of_another_family() {
+    let command = command(None);
+    let read = rerun_read(&command, &policy());
+    let prepared = prepare_rerun_write(
+        &read,
+        &CallerRow::new(history_values()),
+        &command,
+        &policy(),
+        ClientFamily::TypeScript,
+        sent_at(),
+    )
+    .expect("a row of the read's columns");
+    assert_eq!(
+        prepared,
+        RerunPreparation::ClientFamilyMismatch {
+            stored: RecordedFamily::Recorded(ClientFamily::Rust),
+            own: ClientFamily::TypeScript,
+        }
+    );
+}
+
 /// A family value that is not a client family is corrupt stored data: the
 /// rerun ends with the stored value before the class check, and nothing is
-/// written. No panic.
+/// written. No panic. The stored text is compared with no case folding.
 #[test]
 fn a_family_value_that_is_no_client_family_is_refused_as_corrupt_first() {
-    let corrupt = with(
-        with(
-            history_values(),
-            "class_registered",
-            StatementValue::Bool(false),
-        ),
-        "client_family",
-        StatementValue::Text("GO".to_owned()),
-    );
-    assert_eq!(
-        prepare_values(corrupt, None),
-        RerunPreparation::UnknownStoredFamily(UnknownStoredFamily {
-            stored: "GO".to_owned(),
-        })
-    );
+    for stored in ["GO", "typescript"] {
+        let corrupt = with(
+            with(
+                history_values(),
+                "class_registered",
+                StatementValue::Bool(false),
+            ),
+            "client_family",
+            StatementValue::Text(stored.to_owned()),
+        );
+        assert_eq!(
+            prepare_values(corrupt, None),
+            RerunPreparation::UnknownStoredFamily(UnknownStoredFamily {
+                stored: stored.to_owned(),
+            })
+        );
+    }
 }
 
 #[test]
@@ -292,6 +333,44 @@ fn a_history_row_that_does_not_decode_is_a_corrupt_source() {
     );
     assert!(matches!(
         refusal(snapshot),
+        RerunRefusal::SourceCorrupt { .. }
+    ));
+}
+
+/// A source whose attempts history keeps in archive version 2 (migration
+/// 1001) prepares its write as a version-1 source does; an archive version
+/// that the attempt domain does not retain is a corrupt source.
+#[test]
+fn a_source_archived_in_version_two_is_read_and_an_unknown_version_is_corrupt() {
+    let open = OpenAttempt::Open(OpenAttemptFacts::new(
+        OpenClaims::NotClaimed,
+        Finalizing::NotMarked,
+    ));
+    let archive = encode_attempt_archive(&[], &open).expect("an empty version-2 archive");
+    let version_two = with(
+        with(
+            with(
+                history_values(),
+                "attempt_archive_version",
+                StatementValue::Int2(archive.version),
+            ),
+            "attempt_snapshot",
+            StatementValue::Bytea(archive.payload.clone()),
+        ),
+        "attempt_snapshot_digest",
+        StatementValue::Bytea(archive.digest.to_vec()),
+    );
+    assert!(matches!(
+        prepare_values(version_two.clone(), None),
+        RerunPreparation::Write(_)
+    ));
+    let version_three = with(
+        version_two,
+        "attempt_archive_version",
+        StatementValue::Int2(3),
+    );
+    assert!(matches!(
+        refusal(version_three),
         RerunRefusal::SourceCorrupt { .. }
     ));
 }

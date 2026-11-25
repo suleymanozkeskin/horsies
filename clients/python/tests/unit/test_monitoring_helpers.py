@@ -3,7 +3,8 @@
 Covers:
 - ``nz`` empty-text normalization
 - ``as_utc`` awareness coercion
-- ``elapsed_s`` / ``span_s`` duration semantics, including the open-span rule
+- ``elapsed_s`` / ``span_s`` duration semantics (exact seconds), including the
+  open-span rule
 - ``categorize_error_code`` taxonomy mapping and its drift guards
 """
 
@@ -68,26 +69,35 @@ class TestAsUtc:
         naive_start = datetime(2026, 7, 26, 12, 0, 0)
         aware_end = datetime(2026, 7, 26, 12, 0, 30, tzinfo=UTC)
 
-        assert elapsed_s(naive_start, aware_end) == 30
+        assert elapsed_s(naive_start, aware_end) == 30.0
 
 
 class TestElapsedS:
-    """Whole seconds between two instants, truncated toward zero."""
+    """Seconds between two instants, exact to the microsecond."""
 
     def test_none_start_is_none(self) -> None:
         assert elapsed_s(None, datetime.now(UTC)) is None
 
-    def test_whole_seconds(self) -> None:
+    def test_whole_seconds_are_a_float(self) -> None:
         start = datetime(2026, 7, 26, 12, 0, 0, tzinfo=UTC)
         end = start + timedelta(seconds=90)
 
-        assert elapsed_s(start, end) == 90
+        measured = elapsed_s(start, end)
 
-    def test_fractional_seconds_truncate(self) -> None:
+        assert isinstance(measured, float)
+        assert measured == 90.0
+
+    def test_fractional_seconds_keep_their_microseconds(self) -> None:
         start = datetime(2026, 7, 26, 12, 0, 0, tzinfo=UTC)
-        end = start + timedelta(seconds=1, milliseconds=999)
+        end = start + timedelta(seconds=1, microseconds=999_999)
 
-        assert elapsed_s(start, end) == 1
+        assert elapsed_s(start, end) == 1.999999
+
+    def test_end_before_start_is_negative(self) -> None:
+        start = datetime(2026, 7, 26, 12, 0, 0, tzinfo=UTC)
+        end = start - timedelta(seconds=1, microseconds=500_000)
+
+        assert elapsed_s(start, end) == -1.5
 
     def test_missing_end_counts_to_now(self) -> None:
         start = datetime.now(UTC) - timedelta(seconds=20)
@@ -108,8 +118,8 @@ class TestSpanS:
         start = datetime(2026, 7, 26, 12, 0, 0, tzinfo=UTC)
         end = start + timedelta(seconds=5)
 
-        assert span_s(start, end, live=False) == 5
-        assert span_s(start, end, live=True) == 5
+        assert span_s(start, end, live=False) == 5.0
+        assert span_s(start, end, live=True) == 5.0
 
     def test_open_span_when_live_counts_up(self) -> None:
         start = datetime.now(UTC) - timedelta(seconds=15)

@@ -4,7 +4,8 @@
 use tokio::sync::oneshot;
 
 use super::{
-    Answer, AttemptEnd, BodyReturn, ChildExit, ChildLost, LossCause, ProcessId, TaskAnswer,
+    Answer, AttemptEnd, BodyReturn, CancelledEnd, ChildExit, ChildLost, LossCause, ProcessId,
+    TaskAnswer,
 };
 use crate::worker::executor::protocol::BodyEnd;
 use crate::worker::executor::slots::scripted::{ok_envelope, started_at};
@@ -79,4 +80,33 @@ fn a_loss_after_the_return_keeps_what_the_body_returned() {
 
         assert_eq!(end, returned, "{loss}");
     }
+}
+
+/// After the slot sent the cancel, a defect or a loss before the body
+/// returned ends the task as killed after the cancel; a return that came
+/// first keeps what the body returned.
+#[test]
+fn a_loss_after_the_cancel_is_a_cancelled_end_unless_the_body_returned_first() {
+    let killed = lost(
+        LossCause::SlotDefect,
+        ChildExit::Reaped(ReapedExit::KilledBySignal(9)),
+    );
+    let mut cancelled = open_answer();
+    cancelled.cancel_sent();
+    let (_answer, end) = cancelled
+        .open_at_loss(&killed)
+        .expect("the answer is still open");
+    assert_eq!(end, AttemptEnd::Cancelled(CancelledEnd::ChildKilled));
+
+    let returned = AttemptEnd::returned(BodyReturn {
+        end: BodyEnd::Result(ok_envelope(7)),
+        started_at: started_at(),
+    });
+    let mut returned_first = open_answer();
+    returned_first.body_returned(returned.clone());
+    returned_first.cancel_sent();
+    let (_answer, end) = returned_first
+        .open_at_loss(&killed)
+        .expect("the answer is still open");
+    assert_eq!(end, returned);
 }

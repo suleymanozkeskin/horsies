@@ -84,7 +84,7 @@ async def complete_fused(
                 'SELECT * FROM horsies_complete_task_fused('
                 'CAST(:task_id AS uuid), :worker, '
                 'COALESCE((SELECT claimed_at FROM horsies_tasks WHERE id = CAST(:task_id AS uuid)), NOW()), '
-                ':result, TRUE)'
+                ":result, TRUE, 'NOT_OBSERVED', NULL)"
             ),
             {'task_id': task_id, 'worker': worker, 'result': result},
         )
@@ -119,7 +119,7 @@ async def complete_locked(
             text(
                 'SELECT * FROM horsies_finish_workflow_success('
                 'CAST(:task_id AS uuid), :worker, '
-                'CAST(:claimed_at AS TIMESTAMPTZ), :result)'
+                "CAST(:claimed_at AS TIMESTAMPTZ), :result, 'NOT_OBSERVED', NULL)"
             ),
             {
                 'task_id': task_id,

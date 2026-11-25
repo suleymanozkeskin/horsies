@@ -6,6 +6,17 @@
    ramp/glass formulas are identical in both blocks; they resolve differently
    because the base tokens they mix differ.
 
+   Surface layers, as in macOS:
+   1. Backdrop: a static mesh behind everything (`--mesh-*`). The palette is
+      taken from the logo: a green-black ground, a gold halo and a grid floor.
+   2. Window: one near-opaque surface that holds all page content.
+      `--background` IS the window's solid color, so every mix against
+      `--background` resolves against the surface that content sits on.
+   3. Content is solid: `--card` is the content surface, drawn with
+      `--card-edge` and `--card-shadow`. Navigation (the top bar and the
+      toolbars) is translucent glass: `--liquid-*` and `--segment-*`.
+   No text sits on the bare backdrop: it sits in a capsule or in the window.
+
    This file is the token source and is exempt from `scripts/check-tokens.mjs`,
    so `white` / `black` / `transparent` literals are permitted HERE and only
    here. */
@@ -14,13 +25,15 @@
   /* Corner radius scale root, consumed by the ported components and the grid. */
   --radius: 0.5rem;
 
-  /* Base surfaces and ink */
-  --background: #f7f3eb;
-  --card: #ede8dd;
-  --popover: #ede8dd;
+  /* Base surfaces and ink. `--background` is the window, `--card` the solid
+     content surface on it. `--muted-foreground` measures about 6:1 on the
+     window over the darkest part of the backdrop. */
+  --background: oklch(0.993 0.005 150);
+  --card: oklch(1 0 0);
+  --popover: oklch(1 0 0);
   --muted: #d6d2c6;
   --foreground: #1a1a14;
-  --muted-foreground: #7a7a68;
+  --muted-foreground: #5f5e4e;
   --border: #a8a894;
 
   /* Brand. One gold, identical in both modes — the same #DAA520 the
@@ -51,8 +64,7 @@
   /* Interaction surfaces derived from the base tokens. `--accent` is emphasis
      ink, borders, focus and chart series; a hover or selected SURFACE uses
      `--accent-surface`, which is the same hue diluted into the background. */
-  --accent-surface: color-mix(in oklab, var(--accent) 12%, var(--background));
-  --table-hover: color-mix(in oklab, var(--muted) 45%, transparent);
+  --accent-surface: color-mix(in oklab, var(--accent) 16%, var(--background));
   --surface-muted: color-mix(in oklab, var(--muted) 40%, transparent);
   --overlay: color-mix(in oklab, var(--foreground) 45%, transparent);
   --primary-hover: color-mix(in oklab, var(--primary) 88%, var(--foreground));
@@ -87,19 +99,160 @@
   --chart-4: var(--warning);
   --chart-5: var(--muted-foreground);
 
-  /* Glass tiers */
+  /* Lifecycle phases (timeline segments, phase bars, graph phase strip,
+     legend). Each phase has a base color and a fill; components use the fill.
+     Phases that touch on a timeline differ in hue AND in lightness (OKLab L
+     steps of 11 or more in both themes, also under protan, deutan and tritan
+     simulation), so a reader who does not see the hues still sees the
+     boundary. Waits are striped and work is solid; dependency wait is drawn
+     as a thin track. `unknown` is a hatch, so it never reads as a measured
+     phase. The pause band and the two row placeholders are tints and hatches
+     of the base tokens. */
+  --phase-pending: #c8c0ae;
+  --phase-ready: #8f887a;
+  --phase-enqueued: #f0ad4e;
+  --phase-retry-wait: #e0675c;
+  --phase-claimed: #a87300;
+  --phase-running: #1d5fa8;
+  --phase-finalizing: #7cd0e2;
+  --phase-advancing: #3a9f6e;
+  --phase-unknown: var(--muted-foreground);
+  /* The longest chain of a run: the links of the timeline and the edges of
+     the graph. */
+  --longest-chain: var(--foreground);
+  /* The tick marks of a duration axis: the ink, diluted. */
+  --tick: color-mix(in oklab, var(--foreground) 38%, transparent);
+  /* The two patterns of the key: a wait is striped, work is solid. */
+  --pattern-wait-fill: repeating-linear-gradient(
+    135deg,
+    var(--muted-foreground) 0 3px,
+    color-mix(in oklab, var(--muted-foreground) 45%, var(--background)) 3px 6px
+  );
+  --pattern-work-fill: var(--muted-foreground);
+  --phase-pending-fill: var(--phase-pending);
+  --phase-ready-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-ready) 0 3px,
+    color-mix(in oklab, var(--phase-ready) 62%, var(--background)) 3px 6px
+  );
+  --phase-enqueued-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-enqueued) 0 3px,
+    color-mix(in oklab, var(--phase-enqueued) 62%, var(--background)) 3px 6px
+  );
+  --phase-retry-wait-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-retry-wait) 0 3px,
+    color-mix(in oklab, var(--phase-retry-wait) 62%, var(--background)) 3px 6px
+  );
+  --phase-claimed-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-claimed) 0 3px,
+    color-mix(in oklab, var(--phase-claimed) 62%, var(--background)) 3px 6px
+  );
+  --phase-running-fill: var(--phase-running);
+  --phase-finalizing-fill: var(--phase-finalizing);
+  --phase-advancing-fill: var(--phase-advancing);
+  --phase-unknown-hatch: repeating-linear-gradient(
+    135deg,
+    var(--phase-unknown) 0 3px,
+    transparent 3px 6px
+  );
+  --pause-band: color-mix(in oklab, var(--warning) 16%, transparent);
+  --timing-unavailable-hatch: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--muted-foreground) 22%, transparent) 0 4px,
+    transparent 4px 8px
+  );
+  --timing-inconsistent-hatch: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--error) 30%, transparent) 0 4px,
+    transparent 4px 8px
+  );
+
+  /* Backdrop mesh. Sunlit top left, a gold halo at the top, a green glow on
+     the grid floor at the bottom. `--mesh-floor-line` draws the grid. */
+  --mesh-sun: oklch(0.99 0.025 95 / 0.95);
+  --mesh-halo: oklch(0.88 0.09 85 / 0.7);
+  --mesh-floor-glow: oklch(0.78 0.13 150 / 0.75);
+  --mesh-side: oklch(0.88 0.06 160 / 0.6);
+  --mesh-base-1: oklch(0.975 0.012 150);
+  --mesh-base-2: oklch(0.95 0.03 155);
+  --mesh-base-3: oklch(0.9 0.055 156);
+  --mesh-base-4: oklch(0.85 0.07 155);
+  --mesh-floor-line: oklch(0.5 0.13 150 / 0.2);
+  --mesh-grain-opacity: 0.14;
+
+  /* Window */
+  --window: color-mix(in oklab, var(--background) 90%, transparent);
+  --window-edge: color-mix(in oklab, var(--background) 85%, transparent);
+  --window-highlight: inset 0 1px 0 oklch(1 0 0 / 0.9);
+  --window-shadow:
+    0 0 0 0.5px oklch(0.3 0.03 80 / 0.2),
+    0 24px 60px -20px oklch(0.3 0.05 155 / 0.36),
+    0 8px 20px -10px oklch(0.3 0.05 155 / 0.2);
+
+  /* Content on the window: solid surfaces, hairlines and hover.
+     `--surface-hover` is a translucent wash for rows and items on the window;
+     `--card-hover` is the solid fill of a hovered `content-surface` box, a step
+     toward the ink, so it reads as a change in both themes. */
+  --card-edge: oklch(0.3 0.02 85 / 0.13);
+  --card-shadow: 0 1px 2px oklch(0.3 0.03 80 / 0.07);
+  --card-hover: color-mix(in oklab, var(--card) 96%, var(--foreground));
+  --hairline: oklch(0.3 0.02 85 / 0.12);
+  --hairline-strong: oklch(0.3 0.02 85 / 0.18);
+  --surface-hover: oklch(0.3 0.02 85 / 0.045);
+
+  /* Navigation glass: capsules on the backdrop or on the window. Inside the
+     window a capsule takes the brighter `--liquid-fill-on-window`.
+     `--liquid-solid` is the fill where backdrop-filter is unavailable. */
+  --liquid-fill: oklch(1 0 0 / 0.34);
+  --liquid-fill-on-window: oklch(1 0 0 / 0.62);
+  --liquid-solid: oklch(0.985 0.004 150);
+  --liquid-glint: oklch(1 0 0 / 0.38);
+  --liquid-rim:
+    inset 1px 1px 0 oklch(1 0 0 / 0.75), inset -1px -1px 0 oklch(1 0 0 / 0.3),
+    inset 0 0 0 0.5px oklch(1 0 0 / 0.35);
+  --liquid-glow: inset 0 0 16px oklch(1 0 0 / 0.22);
+  --liquid-drop:
+    0 10px 28px -8px oklch(0.3 0.05 155 / 0.26),
+    0 2px 6px -2px oklch(0.3 0.05 155 / 0.13);
+  --segment-track: oklch(0.3 0.02 85 / 0.07);
+  --segment-rim:
+    inset 0 0 0 0.5px oklch(0.3 0.02 85 / 0.1),
+    inset 0 1px 1px oklch(0.3 0.02 85 / 0.06);
+  --segment-on: oklch(1 0 0);
+  --segment-on-shadow:
+    0 1px 2px oklch(0.3 0.03 80 / 0.18), 0 0 0 0.5px oklch(0.3 0.02 85 / 0.08);
+  --nav-on: color-mix(in oklab, var(--accent) 32%, white);
+
+  /* Menus, popovers and dialogs: glass with the navigation rim. */
   --glass-blur-sm: 8px;
-  --glass-surface: color-mix(in oklab, var(--card) 72%, transparent);
-  --glass-surface-strong: color-mix(in oklab, var(--card) 88%, transparent);
-  --glass-field: color-mix(in oklab, var(--card) 55%, transparent);
-  --glass-table: color-mix(in oklab, var(--card) 65%, transparent);
-  --glass-inset: color-mix(in oklab, var(--muted) 45%, transparent);
+  --glass-blur-md: 24px;
+  --glass-blur-lg: 40px;
+  --glass-saturate: 140%;
+  --window-blur: 48px;
+  --window-saturate: 120%;
+  --glass-surface-strong: oklch(1 0 0 / 0.78);
+  --menu-shadow:
+    0 12px 32px -12px oklch(0.3 0.05 155 / 0.32),
+    0 4px 10px -4px oklch(0.3 0.05 155 / 0.16);
+  --dialog-shadow:
+    0 30px 80px -24px oklch(0.3 0.05 155 / 0.45),
+    0 10px 24px -12px oklch(0.3 0.05 155 / 0.22);
+
+  /* In-window fills. Field: interactive cells (inputs, outline buttons, code
+     wells). Inset: muted zones. Table: the shadstack grid paints this on its
+     shell and on every row; transparent, so rows take the window. */
+  --glass-field: oklch(1 0 0 / 0.9);
+  --glass-table: transparent;
+  --glass-inset: oklch(0.3 0.02 85 / 0.05);
 }
 
 .dark {
-  --background: #050505;
-  --card: #0d0d0d;
-  --popover: #0d0d0d;
+  --background: oklch(0.195 0.014 160);
+  --card: oklch(0.24 0.014 160);
+  --popover: oklch(0.24 0.014 160);
   --muted: #1a1a10;
   --foreground: #f5f5f0;
   --muted-foreground: #c9c9bc;
@@ -125,8 +278,7 @@
   --destructive-foreground: #050505;
   --input: var(--border);
 
-  --accent-surface: color-mix(in oklab, var(--accent) 18%, var(--background));
-  --table-hover: color-mix(in oklab, var(--muted) 45%, transparent);
+  --accent-surface: color-mix(in oklab, var(--accent) 20%, var(--background));
   --surface-muted: color-mix(in oklab, var(--muted) 40%, transparent);
   --overlay: color-mix(in oklab, var(--background) 70%, transparent);
   --primary-hover: color-mix(in oklab, var(--primary) 88%, var(--foreground));
@@ -159,10 +311,120 @@
   --chart-4: var(--warning);
   --chart-5: var(--muted-foreground);
 
+  --phase-pending: #3a382f;
+  --phase-ready: #8f8b7b;
+  --phase-enqueued: #ffb54a;
+  --phase-retry-wait: #f47067;
+  --phase-claimed: #a87a10;
+  --phase-running: #62b4fa;
+  --phase-finalizing: #b5f3fa;
+  --phase-advancing: #16a06c;
+  --phase-unknown: var(--muted-foreground);
+  --longest-chain: var(--foreground);
+  --tick: color-mix(in oklab, var(--foreground) 38%, transparent);
+  --pattern-wait-fill: repeating-linear-gradient(
+    135deg,
+    var(--muted-foreground) 0 3px,
+    color-mix(in oklab, var(--muted-foreground) 45%, var(--background)) 3px 6px
+  );
+  --pattern-work-fill: var(--muted-foreground);
+  --phase-pending-fill: var(--phase-pending);
+  --phase-ready-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-ready) 0 3px,
+    color-mix(in oklab, var(--phase-ready) 62%, var(--background)) 3px 6px
+  );
+  --phase-enqueued-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-enqueued) 0 3px,
+    color-mix(in oklab, var(--phase-enqueued) 62%, var(--background)) 3px 6px
+  );
+  --phase-retry-wait-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-retry-wait) 0 3px,
+    color-mix(in oklab, var(--phase-retry-wait) 62%, var(--background)) 3px 6px
+  );
+  --phase-claimed-fill: repeating-linear-gradient(
+    135deg,
+    var(--phase-claimed) 0 3px,
+    color-mix(in oklab, var(--phase-claimed) 62%, var(--background)) 3px 6px
+  );
+  --phase-running-fill: var(--phase-running);
+  --phase-finalizing-fill: var(--phase-finalizing);
+  --phase-advancing-fill: var(--phase-advancing);
+  --phase-unknown-hatch: repeating-linear-gradient(
+    135deg,
+    var(--phase-unknown) 0 3px,
+    transparent 3px 6px
+  );
+  --pause-band: color-mix(in oklab, var(--warning) 16%, transparent);
+  --timing-unavailable-hatch: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--muted-foreground) 22%, transparent) 0 4px,
+    transparent 4px 8px
+  );
+  --timing-inconsistent-hatch: repeating-linear-gradient(
+    135deg,
+    color-mix(in oklab, var(--error) 30%, transparent) 0 4px,
+    transparent 4px 8px
+  );
+
+  /* Backdrop mesh: a green-black ground, a gold halo at the top and a green
+     glow on the grid floor. The dark structure has no sun and no fourth
+     ground stop; see `.app-backdrop` in app.css. */
+  --mesh-halo: oklch(0.66 0.13 76 / 0.38);
+  --mesh-floor-glow: oklch(0.58 0.17 150 / 0.45);
+  --mesh-side: oklch(0.3 0.07 155 / 0.5);
+  --mesh-base-1: oklch(0.16 0.03 156);
+  --mesh-base-2: oklch(0.19 0.045 155);
+  --mesh-base-3: oklch(0.12 0.03 156);
+  --mesh-floor-line: oklch(0.82 0.2 150 / 0.3);
+  --mesh-grain-opacity: 0.18;
+
+  --window: color-mix(in oklab, var(--background) 90%, transparent);
+  --window-edge: color-mix(in oklab, var(--background) 85%, transparent);
+  --window-highlight: inset 0 1px 0 oklch(1 0 0 / 0.07);
+  --window-shadow:
+    0 0 0 0.5px oklch(0 0 0 / 0.6), 0 24px 60px -20px oklch(0 0 0 / 0.7),
+    0 8px 20px -10px oklch(0 0 0 / 0.5);
+
+  --card-edge: oklch(1 0 0 / 0.08);
+  --card-shadow: 0 1px 2px oklch(0 0 0 / 0.3);
+  --card-hover: color-mix(in oklab, var(--card) 96%, var(--foreground));
+  --hairline: oklch(1 0 0 / 0.09);
+  --hairline-strong: oklch(1 0 0 / 0.14);
+  --surface-hover: oklch(1 0 0 / 0.045);
+
+  --liquid-fill: oklch(0.3 0.03 160 / 0.36);
+  --liquid-fill-on-window: oklch(0.32 0.025 160 / 0.6);
+  --liquid-solid: oklch(0.27 0.014 160);
+  --liquid-glint: oklch(1 0 0 / 0.09);
+  --liquid-rim:
+    inset 1px 1px 0 oklch(1 0 0 / 0.16), inset -1px -1px 0 oklch(1 0 0 / 0.06),
+    inset 0 0 0 0.5px oklch(1 0 0 / 0.1);
+  --liquid-glow: inset 0 0 16px oklch(1 0 0 / 0.04);
+  --liquid-drop:
+    0 10px 28px -8px oklch(0 0 0 / 0.55), 0 2px 6px -2px oklch(0 0 0 / 0.35);
+  --segment-track: oklch(1 0 0 / 0.07);
+  --segment-rim: inset 0 0 0 0.5px oklch(1 0 0 / 0.08);
+  --segment-on: oklch(0.4 0.02 160);
+  --segment-on-shadow:
+    0 1px 2px oklch(0 0 0 / 0.4), inset 0 0.5px 0 oklch(1 0 0 / 0.12);
+  --nav-on: color-mix(in oklab, var(--accent) 34%, oklch(0.25 0.02 160));
+
   --glass-blur-sm: 8px;
-  --glass-surface: color-mix(in oklab, var(--card) 72%, transparent);
-  --glass-surface-strong: color-mix(in oklab, var(--card) 88%, transparent);
-  --glass-field: color-mix(in oklab, var(--card) 55%, transparent);
-  --glass-table: color-mix(in oklab, var(--card) 65%, transparent);
-  --glass-inset: color-mix(in oklab, var(--muted) 45%, transparent);
+  --glass-blur-md: 24px;
+  --glass-blur-lg: 40px;
+  --glass-saturate: 140%;
+  --window-blur: 48px;
+  --window-saturate: 120%;
+  --glass-surface-strong: oklch(0.24 0.014 160 / 0.8);
+  --menu-shadow:
+    0 12px 32px -12px oklch(0 0 0 / 0.6), 0 4px 10px -4px oklch(0 0 0 / 0.4);
+  --dialog-shadow:
+    0 30px 80px -24px oklch(0 0 0 / 0.7), 0 10px 24px -12px oklch(0 0 0 / 0.5);
+
+  --glass-field: oklch(1 0 0 / 0.05);
+  --glass-table: transparent;
+  --glass-inset: oklch(1 0 0 / 0.05);
 }

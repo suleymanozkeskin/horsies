@@ -489,16 +489,17 @@ jobs:
       - name: Package and verify the crates
         run: cargo publish --dry-run -p horsies-core-derive -p horsies-core -p horsies-macros -p horsies
 
-      # horsies-core compiles in the baseline SQL files (include_str!) and,
-      # with the `web` feature, the web UI build (include_dir!). A package
-      # without them does not build or does not serve the web UI. The client
-      # crate has its own copy of neither.
-      - name: Verify which crate carries the baseline SQL files and the web UI build
+      # horsies-core compiles in the SQL files of the migration chain
+      # (core/baseline/ and core/migrations/, include_str!) and, with the
+      # `web` feature, the web UI build (include_dir!). A package without them
+      # does not build or does not serve the web UI. The client crate has its
+      # own copy of none of them.
+      - name: Verify which crate carries the migration SQL files and the web UI build
         run: |
           set -euo pipefail
           core="target/package/horsies-core-${VERSION}.crate"
           core_files="$(tar -tzf "$core" | sed "s|^horsies-core-${VERSION}/||")"
-          for folder in baseline webui-dist; do
+          for folder in baseline migrations webui-dist; do
             expected="$(git ls-files -- "core/$folder" | sed 's|^core/||' | LC_ALL=C sort)"
             actual="$(printf '%s\n' "$core_files" | { grep "^$folder/" || true; } | LC_ALL=C sort)"
             if [ -z "$expected" ]; then

@@ -1,6 +1,6 @@
 """Child program: ``python -m horsies.core.worker.child_main <fd> <parent pid>``.
 
-The child speaks the core frame codec at version 2 (``horsies._core``,
+The child speaks the core frame codec at version 4 (``horsies._core``,
 ``child_frames``). The init frame names the protocol version first: a frame
 of another version ends the child with ``PROTOCOL_MISMATCH_EXIT_CODE``, after
 a log line with both numbers. The init frame names the kind of the child. An isolated child has two
@@ -22,6 +22,12 @@ the worker: it runs the event handlers of the app and no task; see
 
 When the parent is gone the child exits at once. Nothing can save its result,
 and a run that continues could overlap a retry of the same task.
+
+An operator cancel of a run (``core.CancelRunFrame``) reaches an isolated
+child on its control thread, while the main thread runs the task: the
+control thread gives it to the run (``run_cancel.IsolatedRuns``), and the run
+reports ``RunCancelledFrame`` in place of ``ResultFrame``. A shared child
+reads the cancel frame in its serve loop.
 """
 
 # pyright: reportPrivateUsage=false
@@ -31,6 +37,7 @@ from __future__ import annotations
 import atexit
 import collections
 import ctypes
+import functools
 import gc
 import logging
 import multiprocessing
@@ -80,7 +87,9 @@ from horsies.core.worker.child_frames import (
     RssMb,
     RssReading,
     RssUnreadable,
+    RunCancelledFrame,
     RunEnd,
+    SeatCancelled,
     SeatEnd,
     SeatTimedOut,
     StartNotReported,
@@ -96,10 +105,21 @@ from horsies.core.worker.run_return import (
     CoreStoppedBeforeStart,
     MarkerEnd,
     ResultEnvelope,
+    RunCancelled,
     RunReturn,
     SetRunning,
     StoppedBeforeRunning,
     end_after_marker,
+)
+from horsies.core.worker.run_cancel import (
+    CancelAfterBody,
+    CancelAfterEnd,
+    CancelEarlierCause,
+    CancelKept,
+    CancelToBody,
+    IsolatedRuns,
+    NotThisRun,
+    RunCancel,
 )
 from horsies.core.worker.runtime import _read_current_rss_mb
 from horsies.core.worker.task_loop import (
@@ -148,8 +168,8 @@ _PR_SET_PDEATHSIG: Final = 1
 # frame that reports why it failed.
 BootFn = Callable[[core.InitFrame], Result[AsyncTaskPresence, BootFailedFrame]]
 # Runs one task of an isolated child, up to its result, and writes no
-# finalizing marker.
-RunTaskFn = Callable[[core.RunFrame, core.InitFrame, TaskLoop], RunReturn]
+# finalizing marker. The ``RunCancel`` is the operator cancel of the run.
+RunTaskFn = Callable[[core.RunFrame, core.InitFrame, TaskLoop, RunCancel], RunReturn]
 # Writes the finalizing marker of an isolated run that set its row RUNNING
 # and has ended. Logs a failed write; nothing escapes. Returns
 # ``MarkerMetStoppedCore`` when the core of the child stopped.
@@ -321,6 +341,8 @@ def _read_parent_frames(
                     _exit_bad_parent_frame('Parent sent a second init frame')
                 case core.EventsFrame():
                     _exit_bad_parent_frame('Parent sent an events frame to a task child')
+                case core.CancelRunFrame() as frame:
+                    work.put_cancel(frame)
                 case core.RunFrame() | core.SharedRunFrame() | core.StopFrame() as frame:
                     work.put(frame)
                 case _ as unreachable:
@@ -376,7 +398,13 @@ def read_python_init_frame(
             return frame
         case core.InitFrame():
             _exit_bad_parent_frame('Parent sent the init frame of a Rust child')
-        case core.RunFrame() | core.SharedRunFrame() | core.EventsFrame() | core.StopFrame():
+        case (
+            core.RunFrame()
+            | core.SharedRunFrame()
+            | core.CancelRunFrame()
+            | core.EventsFrame()
+            | core.StopFrame()
+        ):
             _exit_bad_parent_frame('First parent frame was not an init frame')
         case _ as unreachable:
             assert_never(unreachable)
@@ -500,7 +528,7 @@ def end_child_after_frame(end: SeatEnd, task_id: uuid.UUID) -> None:
             end_child_after_core_refusal(stopped, f'At the start of task {task_id}')
         case CoreStoppedAfterBody(stopped=stopped):
             end_child_after_core_refusal(stopped, f'After the body of task {task_id}')
-        case ResultEnvelope() | StoppedBeforeRunning() | SeatTimedOut():
+        case ResultEnvelope() | StoppedBeforeRunning() | SeatTimedOut() | SeatCancelled():
             return
         case _ as unreachable:
             assert_never(unreachable)
@@ -520,6 +548,7 @@ def _run_or_exit(
     frame: core.RunFrame,
     init: core.InitFrame,
     task_loop: TaskLoop,
+    cancel: RunCancel,
 ) -> RunReturn:
     """Run one task. Anything that escapes ends this process at once.
 
@@ -528,7 +557,7 @@ def _run_or_exit(
     recovers the row by its status.
     """
     try:
-        return run_task(frame, init, task_loop)
+        return run_task(frame, init, task_loop, cancel)
     except SystemExit as exc:
         flush_output()
         os._exit(exc.code if isinstance(exc.code, int) else 1)
@@ -626,6 +655,11 @@ def _report_run(
     or a marker that met the stopped core after the body finished
     (``MarkerMetStoppedCore``): the frame reports the result of the body,
     and the worker writes it (``end_child_after_frame``).
+
+    A run that an operator cancelled (``RunCancelled``) reports
+    ``RunCancelledFrame`` with no marker: the cancel statement moved the row
+    to history. Work that the body left on the task loop is not waited for:
+    the frame names it, and the parent replaces the child.
     """
     started: AttemptStart
     match returned:
@@ -635,6 +669,8 @@ def _report_run(
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             end = returned
             started = StartNotReported()
+        case RunCancelled() as cancelled:
+            return _report_cancelled_run(sock, frame, cancelled, task_loop)
         case _ as unreachable:
             assert_never(unreachable)
     match task_loop.report(), end, started:
@@ -698,6 +734,71 @@ def _report_run(
         case _ as unreachable:
             assert_never(unreachable)
     return _AfterRun.TO_RETIRE
+
+
+def _report_cancelled_run(
+    sock: socket.socket,
+    frame: core.RunFrame,
+    cancelled: RunCancelled,
+    task_loop: TaskLoop,
+) -> _AfterRun:
+    """Report the end of an isolated run that an operator cancelled: one
+    ``RunCancelledFrame``, with what is left on the task loop. No marker:
+    the row is in history. A body that left work makes the child one to
+    retire, as after a return with work left."""
+    report = task_loop.report()
+    _send_child_frame(
+        sock,
+        RunCancelledFrame(
+            task_id=frame.task_id,
+            body=cancelled.body,
+            started_at=cancelled.started_at,
+            rss=_read_rss(),
+            task_loop=report,
+        ),
+    )
+    match report:
+        case NoTaskLoop() | LoopHoldsNoTask():
+            return _AfterRun.SERVES
+        case LoopHoldsTasks() as left:
+            logger.warning(
+                'Task %s (%s) was cancelled and left work on the task loop (%s); '
+                'the child is replaced',
+                frame.task_name,
+                frame.task_id,
+                left.names_text(),
+            )
+            return _AfterRun.TO_RETIRE
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _cancel_isolated_run(runs: IsolatedRuns, frame: core.CancelRunFrame) -> None:
+    """Control thread: give the operator cancel of ``frame`` to the run of
+    this isolated child. A cancel of a run that the child does not run now
+    is ignored: the end of the run and the cancel crossed. A shared target
+    is a parent defect: the process ends with ``BAD_PARENT_FRAME_EXIT_CODE``.
+    """
+    match frame.target:
+        case core.IsolatedCancelTarget(task_id=task_id):
+            pass
+        case core.SharedCancelTarget(dispatch=dispatch):
+            _exit_bad_parent_frame(
+                f'Parent sent the cancel of shared run {dispatch} to an isolated child',
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+    match runs.request(task_id):
+        case CancelKept():
+            logger.info('Task %s was cancelled before its body started', task_id)
+        case CancelToBody():
+            logger.info('Task %s was cancelled while its body runs', task_id)
+        case CancelAfterBody():
+            logger.info('Task %s was cancelled after its body ended', task_id)
+        case CancelEarlierCause() | CancelAfterEnd() | NotThisRun():
+            logger.debug('The cancel of task %s found no run to cancel', task_id)
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _marked_end(
@@ -1100,7 +1201,13 @@ def _serve_isolated(
     ``runners.mark_finalizing`` as its last write. The stop frame closes the
     loop, bounded by ``LOOP_CLOSE_TIMEOUT_S``, and ``exit_after_stop`` ends
     the process.
+
+    The control thread gives each cancel frame to the run in flight
+    (``_cancel_isolated_run``), before the ready frame goes out, so no
+    cancel waits in the queue while a task runs.
     """
+    runs = IsolatedRuns()
+    work.route_cancels(functools.partial(_cancel_isolated_run, runs))
     gc.collect()
     _send_child_frame(sock, ReadyFrame(pid=os.getpid(), rss=_read_rss()))
     after_run = _AfterRun.SERVES
@@ -1108,13 +1215,19 @@ def _serve_isolated(
         match work.get():
             case core.RunFrame() as frame:
                 _refuse_run_on_a_child_to_retire(after_run, frame)
+                cancel = runs.begin(frame.task_id)
+                returned = _run_or_exit(runners.run_task, frame, init, task_loop, cancel)
                 after_run = _report_run(
                     sock,
                     frame,
-                    _run_or_exit(runners.run_task, frame, init, task_loop),
+                    returned,
                     task_loop,
                     runners.mark_finalizing,
                 )
+                runs.end()
+            case core.CancelRunFrame():
+                # Cancels go to the route, never to the queue, once it is set.
+                _exit_bad_parent_frame('A cancel frame reached the queue of an isolated child')
             case core.SharedRunFrame():
                 _exit_bad_parent_frame('Parent sent a shared run frame to an isolated child')
             case core.StopFrame():
@@ -1180,15 +1293,17 @@ def run_child_task(
     frame: core.RunFrame,
     init: core.InitFrame,
     task_loop: TaskLoop,
+    cancel: RunCancel,
 ) -> RunReturn:
-    """Run the task of ``frame`` (``child_runner._run_task_entry``). Writes
-    no finalizing marker."""
-    from horsies.core.worker.child_runner import _run_task_entry, isolated_work_of
+    """Run the task of ``frame`` (``child_runner.run_isolated_task``), with
+    ``cancel``, the operator cancel of the run. Writes no finalizing
+    marker."""
+    from horsies.core.worker.child_runner import isolated_work_of, run_isolated_task
 
-    return _run_task_entry(
+    return run_isolated_task(
         frame.task_name,
         frame.input,
-        str(frame.task_id),
+        frame.task_id,
         frame.worker_id,
         isolated_work_of(frame.work),
         claimed_at=frame.claimed_at,
@@ -1197,6 +1312,7 @@ def run_child_task(
         queue_name=frame.queue_name,
         attempt=frame.attempt,
         trace=run_trace_of(frame.trace),
+        cancel=cancel,
     )
 
 

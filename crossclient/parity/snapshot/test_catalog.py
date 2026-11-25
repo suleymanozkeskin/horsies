@@ -9,6 +9,7 @@ import pytest
 
 from horsies.core.types.result import Err, Ok
 from crossclient.parity.snapshot.catalog import BASELINE_CATALOG
+from crossclient.parity.snapshot.catalog import RUN_CLOCK as CATALOG_RUN_CLOCK
 from crossclient.parity.snapshot.coverage import (
     DatabaseType,
     DetachedLeaf,
@@ -110,10 +111,102 @@ def test_baseline_catalog_has_no_shape_defects() -> None:
     assert catalog_defects(BASELINE_CATALOG) == ()
 
 
-def test_baseline_catalog_has_a_rule_for_each_of_266_columns_in_21_tables() -> None:
-    # 263 table columns of migration 1000, plus tableoid of the two partitioned parents.
-    assert len(BASELINE_CATALOG.tables) == 21
-    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == 266
+BASELINE_COLUMNS_BY_SOURCE: Final = (
+    ('migration 1000: the 21 tables of core/baseline/0001_tables.sql', 264),
+    ('migration 1001: horsies_tasks', 2),
+    ('migration 1001: horsies_task_attempts', 9),
+    ('migration 1001: the new table horsies_workflow_events', 9),
+    ('migration 1002: horsies_workflows', 2),
+    ('migration 1004: horsies_worker_states', 1),
+    ('tableoid of the two partitioned parents', 2),
+)
+"""The columns that the baseline catalog has a rule for, by the migration
+that adds them. Migrations 1003, 1005 and 1006 add no column. A migration
+that adds a column adds a line here."""
+
+
+def test_baseline_catalog_has_a_rule_for_each_column_of_the_migration_chain() -> None:
+    # The 21 tables of migration 1000 and horsies_workflow_events of migration 1001.
+    assert len(BASELINE_CATALOG.tables) == 22
+    assert sum(len(table.columns) for table in BASELINE_CATALOG.tables) == sum(
+        count for _, count in BASELINE_COLUMNS_BY_SOURCE
+    )
+
+
+def test_the_catalog_reads_the_profile_name_of_migration_1004() -> None:
+    """The profile name of a worker snapshot compares exactly, as the other
+    settings of the worker (processes, queues): both clients of one scenario
+    run the same profile. The values of the row that differ per run have
+    rules of their own (worker_id, snapshot_at, worker_started_at)."""
+    rules = {
+        (table.name, spec.name): spec.rule
+        for table in BASELINE_CATALOG.tables
+        for spec in table.columns
+    }
+
+    assert rules[('horsies_worker_states', 'profile_name')] == Exact()
+
+
+def test_the_catalog_reads_the_start_command_of_migration_1002() -> None:
+    """The start command pair of a top-level workflow row: the version
+    compares exactly, and the digest is a labelled value, as on a task row."""
+    rules = {
+        (table.name, spec.name): spec.rule
+        for table in BASELINE_CATALOG.tables
+        for spec in table.columns
+    }
+
+    assert rules[('horsies_workflows', 'command_fingerprint_version')] == Exact()
+    assert rules[('horsies_workflows', 'command_fingerprint')] == NormalisedId(
+        family=IdFamily.COMMAND_FINGERPRINT,
+    )
+
+
+def test_the_catalog_reads_the_workflow_events_of_migration_1001() -> None:
+    """The ids of an event are labelled ids, its time is a run clock value,
+    and its sequence value is ignored."""
+    events = next(
+        table for table in BASELINE_CATALOG.tables if table.name == 'horsies_workflow_events'
+    )
+    rules = {spec.name: spec.rule for spec in events.columns}
+
+    assert rules['workflow_id'] == NormalisedId(family=IdFamily.WORKFLOW)
+    assert rules['run_workflow_id'] == NormalisedId(family=IdFamily.WORKFLOW)
+    assert rules['workflow_node_row_id'] == NormalisedId(family=IdFamily.WORKFLOW_NODE)
+    assert rules['task_id'] == NormalisedId(family=IdFamily.TASK)
+    assert rules['occurred_at'] == CATALOG_RUN_CLOCK
+    for column in ('event_kind', 'history_class', 'terminalization_kind'):
+        assert rules[column] == Exact(), column
+    assert isinstance(rules['event_id'], Ignored)
+    assert 'event_id' not in events.identity
+    assert 'event_id' not in events.order_by
+
+
+def test_the_catalog_reads_the_phase_record_of_migration_1001() -> None:
+    """The claim count of the current attempt on the task, the phase record of
+    each attempt row, and the attempt archive of version 2."""
+    rules = {
+        (table.name, spec.name): spec.rule
+        for table in BASELINE_CATALOG.tables
+        for spec in table.columns
+    }
+
+    assert rules[('horsies_tasks', 'attempt_claims')] == Exact()
+    assert rules[('horsies_tasks', 'first_claimed_at')] == CATALOG_RUN_CLOCK
+    for column in ('phase_record_version', 'attempt_claims', 'recorded_by'):
+        assert rules[('horsies_task_attempts', column)] == Exact(), column
+    for column in (
+        'enqueued_at',
+        'claimed_at',
+        'first_claimed_at',
+        'placed_at',
+        'finalizing_at',
+        'last_seen_at',
+    ):
+        assert rules[('horsies_task_attempts', column)] == CATALOG_RUN_CLOCK, column
+    archive = rules[('horsies_task_history', 'attempt_snapshot')]
+    assert isinstance(archive, StoredJson)
+    assert archive.format == FormatVersion(column='attempt_archive_version', version=2)
 
 
 def test_baseline_catalog_ignores_exactly_these_columns_with_a_reason() -> None:
@@ -132,6 +225,7 @@ def test_baseline_catalog_ignores_exactly_these_columns_with_a_reason() -> None:
         ('horsies_worker_states', 'children_memory_mb'),
         ('horsies_worker_liveness', 'generation'),
         ('horsies_workflow_phase2_pending', 'result_digest'),
+        ('horsies_workflow_events', 'event_id'),
     }
     assert all(len(reason) > 20 for reason in ignored.values())
 

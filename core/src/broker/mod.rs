@@ -1,6 +1,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used))]
 
 pub mod attempt_writes;
+pub mod cancelled_runs;
 pub mod child_writes;
 pub mod claims;
 pub mod class_budgets;
@@ -70,8 +71,8 @@ pub use enqueue_task::SendKind;
 pub use error::{is_retryable_statement_failure, BrokerError, EnqueueRefusal, EnqueueRefusalCause};
 pub use health::{
     checked_history_limit, ping_listener_disabled, ping_min_responses_refused,
-    ping_timeout_refused, worker_history_limit_refused, DatabasePing, WorkerPingRequest,
-    WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
+    ping_timeout_refused, worker_history_limit_refused, DatabasePing, SnapshotProfile,
+    WorkerPingRequest, WorkerPong, WorkerPongPayload, WorkerStateSnapshot, WORKER_PING_CHANNEL,
 };
 pub use lifecycle_operations::{CancelAnswer, CancelTaskError};
 pub use migrations::{expected_schema_version, MIGRATIONS_TABLE};

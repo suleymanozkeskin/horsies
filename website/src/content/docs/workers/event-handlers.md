@@ -24,6 +24,7 @@ from horsies.telemetry import (
     AttemptEnded,
     AttemptEndNotKnown,
     AttemptEndReportedByChild,
+    ChildResultCancelled,
     ChildResultCompleted,
 )
 
@@ -35,6 +36,8 @@ def log_attempt_end(event: AttemptEnded) -> None:
     match event.end:
         case AttemptEndReportedByChild(result=ChildResultCompleted()):
             outcome = 'completed'
+        case AttemptEndReportedByChild(result=ChildResultCancelled(end=end)):
+            outcome = f'cancelled ({end})'
         case AttemptEndReportedByChild():
             outcome = 'failed'
         case AttemptEndDecidedByWorker(reason=reason):
@@ -133,7 +136,8 @@ The task child opens the span of an attempt around the body, and OpenTelemetry e
 - an isolated task killed at its `timeout_ms` (`TASK_TIMEOUT`);
 - a run past its deadline in a shared child that the worker killed (`TASK_TIMEOUT`);
 - a shared async child killed for a blocked event loop (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
-- a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
+- a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`);
+- a child that the worker killed, or that was lost, after an operator cancel of its task (`TASK_CANCELLED`).
 
 The `AttemptEnded` event of such an attempt is `AttemptEndDecidedByWorker`. A shared run that its child ended at its deadline is not one of them: its child reports the timeout in its result frame (`AttemptEndReportedByChild` with `ChildResultTimedOut`), and the span of the child has the timeout. One attempt has one span.
 

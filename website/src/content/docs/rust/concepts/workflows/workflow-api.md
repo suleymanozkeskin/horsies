@@ -165,7 +165,12 @@ A start runs these steps in order:
 
 Steps 1 to 3 refuse with `ValidationFailed` before any I/O.
 
-- A start with an id that a workflow of the same name already has starts nothing and returns the handle of that workflow. An id of another workflow name is `WORKFLOW_ID_CONFLICT`.
+- A start with an id that already exists starts nothing. The core compares the start command of the start with the stored one ([Start a Workflow Once per Entity](/horsies/guides/start-workflow-once/)):
+  - The same workflow name and the same start command: the handle of that workflow.
+  - The same workflow name and another start command: `WORKFLOW_COMMAND_CONFLICT`.
+  - The id holds a sub-workflow: `WORKFLOW_COMMAND_CONFLICT`.
+  - Another workflow name: `WORKFLOW_ID_CONFLICT`.
+  - A run started before this release has no stored start command: the handle of that workflow, with no compare.
 - `start_workflow` and `start_workflow_with` before the registration in the process are `VALIDATION_FAILED`.
 - With `AppConfig.resend_on_transient_err`, the core runs a retryable start failure again with the same workflow id and start time, up to 3 times.
 - In a worker child a start goes through the child's producer handle, as a send does.
@@ -226,7 +231,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 }
 ```
 
-`rt.start_with_id` with an id that the task derives from its input starts the workflow once: after a retry of the task, the start finds the workflow and starts nothing.
+`rt.start_with_id` with an id that the task derives from its input starts the workflow once: after a retry of the task, the start finds the workflow and starts nothing. The retry builds the spec again, so the spec must be the same on each attempt. A spec that changes between two attempts (a value from the clock, for example) is another start command, and the start is `WORKFLOW_COMMAND_CONFLICT`.
 
 ### WorkflowStartError
 
@@ -236,6 +241,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 |---------|----------|--------------|
 | `ValidationFailed` | `ValidationFailed` | `workflow_id`, `cause`: a `StartRefusalCause`, the `WorkflowError` that refused the start (`Error`) or a check that found the refusal with no error (`Check`) |
 | `IdConflict` | `WorkflowIdConflict` | `workflow_id`, `existing_workflow_name` |
+| `CommandConflict` | `WorkflowCommandConflict` | `workflow_id` |
 | `EnqueueFailed` | `EnqueueFailed` | `workflow_id`, `retryable`, `cause`: the `WorkflowError` that the start met; a failed connect or schema install is `WorkflowError::Broker` |
 | `AsyncContext` | `AsyncContext` | `workflow_id` |
 
@@ -245,6 +251,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 |--------------------------|------|
 | `ValidationFailed` | Before any I/O: no definition key, an output type that is not the handle's (`HRS-025`), a sub-workflow node of a definition that is not registered (`HRS-020`), params given to a definition without params (`HRS-022`), a template build that refused, a start before the registration in the process. At the start: a spec or a sub-workflow child spec that the core refuses |
 | `WorkflowIdConflict` | The id belongs to another workflow name. Nothing was written |
+| `WorkflowCommandConflict` | The id holds a workflow of the same name that another start command started, or a sub-workflow. Nothing was written. Not retryable |
 | `EnqueueFailed` | The connect, the schema install, the client family check, the database, or the build of a sub-workflow child failed. `retryable` is the classification of the cause. When the commit reply was lost, a start again with the same id finds the workflow |
 | `AsyncContext` | A blocking start of `horsies::blocking` on a thread that runs a tokio runtime. Nothing was written; `workflow_id` is the id of the start. Not retryable. See [Blocking API](/horsies/rust/tasks/blocking-api/) |
 

@@ -41,6 +41,7 @@ from horsies.core.worker.child_runner import (
     OnSharedSeat,
     _prepare_task_call,
     _PreparedCall,
+    run_runtime,
     _stored_timeout_refusal_response,
     _task_exception_response,
     encoded_body_end,
@@ -55,13 +56,16 @@ from horsies.core.worker.shared_child import (
 )
 from horsies.core.worker.run_return import (
     BodyInterrupted,
+    CancelledBody,
     CoreStoppedBeforeStart,
     EncodedResult,
     MarkerEnd,
     ResultEnvelope,
+    RunCancelled,
     RunWorkflow,
     StartedRunning,
 )
+from horsies.core.worker.run_cancel import RunCancel, SkipTheBody, StartTheBody
 from horsies.core.worker.shared_lifecycle import (
     confirm_until_not_resumed,
     mark_task_finalizing,
@@ -77,12 +81,14 @@ class PostgresSeats:
         self,
         frame: core.SharedRunFrame,
         body_end: Callable[[], BodyEndOrder],
+        cancel: RunCancel,
     ) -> SeatReturn:
         """Run the task of ``frame``. The same steps and outcomes as
-        ``child_runner._run_task_entry`` but the marker, through the core
+        ``child_runner.run_isolated_task`` but the marker, through the core
         handle of the child. ``body_end`` orders the deadline and the end
-        of the steps for the attempt span."""
-        return await run_seat_task(frame, body_end)
+        of the steps for the attempt span; ``cancel`` is the cancel of the
+        run."""
+        return await run_seat_task(frame, body_end, cancel)
 
     async def mark_finalizing(self, frame: core.SharedRunFrame) -> MarkerEnd:
         """Write the finalizing marker of the run of ``frame``
@@ -199,7 +205,9 @@ def _without_left_cancel(
     ``await``. A body that caught a cancel and did not call ``uncancel()``
     leaves its request too, and ends the same way. A request of a deadline
     cancel changes nothing: the seat loop ends that run with the timeout.
-    With no request left, ``out`` returns unchanged.
+    An operator cancel stays recorded in the cancel of the run
+    (``RunCancel``), which this does not touch: the seat loop ends that run
+    as cancelled. With no request left, ``out`` returns unchanged.
     """
     seat_task = asyncio.current_task()
     assert seat_task is not None, 'a seat call runs in its seat task'
@@ -214,18 +222,24 @@ def _without_left_cancel(
 async def run_seat_task(
     frame: core.SharedRunFrame,
     body_end: Callable[[], BodyEndOrder],
+    cancel: RunCancel,
 ) -> SeatReturn:
     """Run one task on a seat, up to its result.
 
-    The steps of ``_run_task_entry`` but the finalizing marker: the RUNNING
-    transition through the core handle of the child, then the task call and
-    the result encode (``_run_after_running``). A stop before the RUNNING
-    update commits returns ``StoppedBeforeRunning``; every other end returns
-    ``SetRunning``, but a body that a refusal of the core of the child
-    ended: the child ends at once (``set_running_or_end_child``). The seat
-    loop writes the marker at the end of the run
+    The steps of ``run_isolated_task`` but the finalizing marker: the
+    RUNNING transition through the core handle of the child, then the task
+    call and the result encode (``_run_after_running``). A stop before the
+    RUNNING update commits returns ``StoppedBeforeRunning``; every other end
+    returns ``SetRunning``, but a body that a refusal of the core of the
+    child ended: the child ends at once (``set_running_or_end_child``). The
+    seat loop writes the marker at the end of the run
     (``PostgresSeats.mark_finalizing``). A cancel during the RUNNING
     transition propagates, and the seat loop reports it.
+
+    ``cancel`` marks the body of the run (``RunCancel.begin_body``,
+    ``RunCancel.end_body``): the seat loop gives an operator cancel to the
+    seat task only while the body may run. An operator cancel that came
+    before the body skips it: ``RunCancelled`` with ``NOT_STARTED``.
     """
     logger.info(f'Starting task execution: {frame.task_name} ({frame.task_id})')
     ownership_result = await confirm_until_not_resumed(
@@ -236,21 +250,32 @@ async def run_seat_task(
     )
     match ownership_result:
         case StartedRunning() as started:
-            return set_running_or_end_child(
-                str(frame.task_id),
-                started,
-                await _run_after_running(frame, started.workflow, body_end),
-            )
+            pass
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return ownership_result
         case _ as unreachable:
             assert_never(unreachable)
+    match cancel.begin_body():
+        case SkipTheBody():
+            logger.info(
+                f'Task {frame.task_name} ({frame.task_id}) was cancelled before its '
+                'body started; the body does not run',
+            )
+            return RunCancelled(body=CancelledBody.NOT_STARTED, started_at=started.started_at)
+        case StartTheBody():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    ran = await _run_after_running(frame, started.workflow, body_end, cancel)
+    cancel.end_body()
+    return set_running_or_end_child(str(frame.task_id), started, ran)
 
 
 async def _run_after_running(
     frame: core.SharedRunFrame,
     workflow: RunWorkflow,
     body_end: Callable[[], BodyEndOrder],
+    cancel: RunCancel,
 ) -> ResultEnvelope | BodyInterrupted:
     """The steps of a run after its RUNNING update (``_seat_steps``), inside
     the span and the log context of its attempt, whose start gave the
@@ -261,13 +286,14 @@ async def _run_after_running(
     the span with the timeout, the end that the seat loop reports."""
     return await run_in_attempt_span_async(
         shared_attempt_subject(frame, Execution.SHARED_ASYNC, workflow),
-        lambda: _seat_steps(frame),
+        lambda: _seat_steps(frame, cancel),
         body_end,
     )
 
 
 async def _seat_steps(
     frame: core.SharedRunFrame,
+    cancel: RunCancel,
 ) -> EncodedResult | BodyInterrupted:
     """The steps of a run after its RUNNING update, as in
     ``_run_task_entry``.
@@ -296,7 +322,12 @@ async def _seat_steps(
                 )
             case _ as unreachable:
                 assert_never(unreachable)
-        prepared = _prepare_task_call(frame.task_name, frame.input, OnSharedSeat())
+        prepared = _prepare_task_call(
+            frame.task_name,
+            frame.input,
+            OnSharedSeat(),
+            run_runtime(frame.task_id, frame.attempt, cancel.cell),
+        )
         match prepared:
             case _PreparedCall(task=task, args=args, kwargs=kwargs):
                 pass

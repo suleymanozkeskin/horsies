@@ -50,6 +50,25 @@ end, its runner heartbeats cover the row. A run that timed out, needed a
 cancel or ended after its deadline reports its end at once, with no marker
 (``_marker_at_end``).
 
+An operator cancel of a run (``core.CancelRunFrame``, ``run_cancel``) before
+its deadline, while its coroutine runs:
+
+- C (the cancel), with the body running: cancel the task, report
+  ``CancelFiredFrame``. The deadline of the run no longer applies. From here
+  the end is ``SeatCancelled`` with the body ``RAN``, whatever the task
+  returned.
+- C + G (``cancel_grace_ms`` later), when anything of the run is alive: the
+  same second cancel, cancel rounds and stuck report as after a deadline.
+- With the start write still in flight, the task is not cancelled: the body
+  does not start when the start write returns, and the run reports
+  ``CancelFiredFrame`` and ``SeatCancelled`` with the body ``NOT_STARTED``.
+  A start that ends the run another way reports that end.
+
+A cancel of a run that is past its deadline, whose coroutine returned, or
+that the child does not run, is ignored: the worker writes nothing for that
+end (the row is in history). A run that an operator cancelled writes no
+finalizing marker.
+
 A ``LoopWatchdog`` thread reports a loop that has not turned for the block
 limit (``LoopBlockedFrame``); the parent kills the child at once.
 
@@ -81,7 +100,12 @@ from typing import Any, Final, NoReturn, Protocol, assert_never
 from horsies import _core as core
 from horsies.core.logging import get_logger
 from horsies.core.models.boot_failure import ThreadStartRefused
-from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst, DeadlineFirst
+from horsies.core.telemetry.attempt_span import (
+    BodyEndOrder,
+    BodyFirst,
+    DeadlineFirst,
+    OperatorCancelFirst,
+)
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.child_inbox import NoFrameYet, ParentFrameInbox
 from horsies.core.worker.child_main import (
@@ -99,6 +123,7 @@ from horsies.core.worker.child_frames import (
     MAX_LEFTOVER_TASK_NAMES,
     BootFailedFrame,
     AttemptStart,
+    CancelFiredFrame,
     ChildFrame,
     DeadlineFiredFrame,
     LeftoverCancelFrame,
@@ -106,6 +131,7 @@ from horsies.core.worker.child_frames import (
     ReadyFrame,
     RssReading,
     RunStuckFrame,
+    SeatCancelled,
     SecondCancelFrame,
     SeatEnd,
     SeatTimedOut,
@@ -116,13 +142,25 @@ from horsies.core.worker.child_frames import (
 )
 from horsies.core.worker.loop_watchdog import LoopWatchdog
 from horsies.core.worker.run_return import (
+    CancelledBody,
     CoreStoppedAfterBody,
     CoreStoppedBeforeStart,
     MarkerEnd,
     ResultEnvelope,
+    RunCancelled,
     SetRunning as SetRunning,
     StoppedBeforeRunning as StoppedBeforeRunning,
     end_after_marker,
+)
+from horsies.core.worker.run_cancel import (
+    CancelAfterBody,
+    CancelAfterEnd,
+    CancelEarlierCause,
+    CancelKept,
+    CancelToBody,
+    EndCancelled,
+    EndNotCancelled,
+    RunCancel,
 )
 from horsies.core.worker.child_runner import CHILD_HOOK_FAILURE_EXIT_CODE
 from horsies.core.worker.run_mark import (
@@ -146,10 +184,10 @@ from horsies.core.worker.task_loop import (
 logger = get_logger('worker')
 
 FRAMES_PER_SEAT: Final = 4
-"""The most frames that one run gives: a deadline report, a second cancel
-report, a stuck report, and a result. A run that returned before its
-deadline gives at most a leftover cancel report, a leftover stuck report,
-and a result."""
+"""The most frames that one run gives: a deadline report (or a cancel
+report, after an operator cancel), a second cancel report, a stuck report,
+and a result. A run that returned before its deadline gives at most a
+leftover cancel report, a leftover stuck report, and a result."""
 
 FRAMES_PER_CHILD: Final = 2
 """The frames of a child outside its runs: the ready frame, and one report of
@@ -163,11 +201,12 @@ CHILD_DEFECT_EXIT_CODE: Final = 1
 """A defect inside the child, as when a task escapes the task runner."""
 
 
-type SeatReturn = SetRunning | StoppedBeforeRunning | CoreStoppedBeforeStart
+type SeatReturn = SetRunning | StoppedBeforeRunning | CoreStoppedBeforeStart | RunCancelled
 """What the coroutine of one run returns. ``CoreStoppedBeforeStart``: the
 core of the child stopped before the start; the run reports
 ``OWNERSHIP_UNCONFIRMED``, and the child ends itself once that frame is
-written (``FrameWriter``)."""
+written (``FrameWriter``). ``RunCancelled``: an operator cancel came before
+the body, which did not start (``NOT_STARTED``)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -188,11 +227,15 @@ class StartedSeats(Protocol):
         self,
         frame: core.SharedRunFrame,
         body_end: Callable[[], BodyEndOrder],
+        cancel: RunCancel,
     ) -> SeatReturn:
         """Run the task of ``frame`` on a seat, up to its result. Writes no
         finalizing marker. ``body_end`` gives, when the steps of the run
         return inside its attempt span, whether its deadline came first
-        (``SeatLoop._body_end``).
+        (``SeatLoop._body_end``). ``cancel`` is the cancel of the run: the
+        run marks its body with it (``RunCancel.begin_body``,
+        ``RunCancel.end_body``), skips the body after an operator cancel
+        that came first (``RunCancelled``), and its runtime reads its cell.
 
         A cancel of the calling task ends the run: the cancel propagates, or
         the run returns, whichever the task body does. Any other exception
@@ -291,7 +334,7 @@ def _bounded_shared_result(
                 started=frame.started,
                 rss=frame.rss,
             )
-        case SeatTimedOut():
+        case SeatTimedOut() | SeatCancelled():
             return frame
         case _ as unreachable:
             assert_never(unreachable)
@@ -448,10 +491,26 @@ class _Finalizing:
     end: ResultEnvelope
 
 
-type _RunStop = _Stop | _LeftoverGrace | _LeftoverCancel | _LeftoverStuck | _Finalizing
+class _Cancelled(Enum):
+    """How far the stop of a run that an operator cancelled went. The run
+    left ``BEFORE_DEADLINE`` (or ``NO_DEADLINE``) for these steps; its
+    deadline no longer applies."""
+
+    SIGNALLED = 'signalled'
+    """The cancel went to the body, or waits for the start write; the
+    cancel grace runs once the body had the cancel."""
+
+    SECOND_CANCEL = 'second_cancel'
+    STUCK = 'stuck'
+
+
+type _RunStop = (
+    _Stop | _Cancelled | _LeftoverGrace | _LeftoverCancel | _LeftoverStuck | _Finalizing
+)
 """The step of the stop of a run: on the deadline path (``_Stop``), on the
-path of the work that a run left after its return, or after the end of a
-run, while its marker is in flight."""
+path of an operator cancel (``_Cancelled``), on the path of the work that a
+run left after its return, or after the end of a run, while its marker is
+in flight."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,7 +546,8 @@ class _Seat:
     ``stop`` moves forward only. ``timer`` is the next step of the stop.
     ``watched`` holds the marked tasks whose end the run waits for: a task
     leaves it when it ends, and the run checks its end when it is empty.
-    ``program`` runs the task and writes its finalizing marker.
+    ``program`` runs the task and writes its finalizing marker. ``cancel``
+    is the cancel of the run, which its runtime reads.
     """
 
     frame: core.SharedRunFrame
@@ -498,6 +558,7 @@ class _Seat:
     stop: _RunStop
     timer: asyncio.TimerHandle | _NoTimer
     watched: set[asyncio.Task[Any]]
+    cancel: RunCancel
 
 
 class SeatLoop:
@@ -559,10 +620,11 @@ class SeatLoop:
     async def serve(self, inbox: ParentFrameInbox, started: StartedSeats) -> None:
         """Take frames from ``inbox`` until the stop frame. Returns then.
 
-        Each run frame runs on ``started``. A run frame when every seat is
-        taken, a dispatch number in use, a stop frame while runs are in
-        flight, or a frame of an isolated child is a parent defect: the
-        process ends with ``BAD_PARENT_FRAME_EXIT_CODE``.
+        Each run frame runs on ``started``. A cancel frame goes to its run
+        (``_operator_cancel``). A run frame when every seat is taken, a
+        dispatch number in use, a stop frame while runs are in flight, or a
+        frame of an isolated child is a parent defect: the process ends with
+        ``BAD_PARENT_FRAME_EXIT_CODE``.
         """
         arrived = asyncio.Event()
         inbox.call_on_put(
@@ -573,6 +635,8 @@ class SeatLoop:
             match frame:
                 case core.SharedRunFrame():
                     self._start(frame, started)
+                case core.CancelRunFrame():
+                    self._operator_cancel(frame)
                 case core.StopFrame():
                     if self._seats:
                         _exit_for_defect(
@@ -607,8 +671,9 @@ class SeatLoop:
         self._marked.open(mark)
         context = contextvars.copy_context()
         _ = context.run(RUN_MARK.set, mark)
+        cancel = RunCancel()
         task = self._loop.create_task(
-            started.run(frame, functools.partial(self._body_end, frame.dispatch)),
+            started.run(frame, functools.partial(self._body_end, frame.dispatch), cancel),
             name=f'horsies-seat-{frame.dispatch}',
             context=context,
         )
@@ -641,8 +706,101 @@ class SeatLoop:
             stop=stop,
             timer=timer,
             watched=set(),
+            cancel=cancel,
         )
         task.add_done_callback(functools.partial(self._finish, frame.dispatch))
+
+    def _operator_cancel(self, frame: core.CancelRunFrame) -> None:
+        """An operator cancelled the task of a run.
+
+        A run before its deadline whose coroutine has not returned takes
+        the cancel (``RunCancel.request_operator``): with its body running,
+        its task is cancelled, ``CancelFiredFrame`` goes out, and the cancel
+        grace starts; with its start write in flight, the body will not
+        start. Its deadline no longer applies. Any other run ignores the
+        cancel: a deadline came first, its coroutine returned, or the child
+        does not run it. The cancel of an isolated run is a parent defect:
+        the process ends with ``BAD_PARENT_FRAME_EXIT_CODE``.
+        """
+        match frame.target:
+            case core.SharedCancelTarget(dispatch=dispatch, task_id=task_id):
+                pass
+            case core.IsolatedCancelTarget(task_id=isolated_task):
+                _exit_for_defect(
+                    f'parent sent the cancel of isolated task {isolated_task} to a '
+                    'shared async child',
+                    BAD_PARENT_FRAME_EXIT_CODE,
+                )
+            case _ as unreachable:
+                assert_never(unreachable)
+        seat = self._seats.get(dispatch)
+        if seat is None or seat.frame.task_id != task_id:
+            logger.debug('The cancel of run %s (task %s) found no such run', dispatch, task_id)
+            return
+        match seat.stop:
+            case _Stop.BEFORE_DEADLINE | _Stop.NO_DEADLINE if not seat.task.done():
+                pass
+            case _:
+                logger.debug(
+                    'The cancel of run %s (task %s) came at step %s; it is ignored',
+                    dispatch,
+                    task_id,
+                    seat.stop,
+                )
+                return
+        match seat.cancel.request_operator():
+            case CancelToBody():
+                seat.task.cancel()
+                self._signalled(dispatch, seat)
+            case CancelAfterBody():
+                self._signalled(dispatch, seat)
+            case CancelKept():
+                _cancel_timer(seat)
+                seat.stop = _Cancelled.SIGNALLED
+                logger.info(
+                    'Task %s (run %s) was cancelled before its body started',
+                    task_id,
+                    dispatch,
+                )
+            case CancelEarlierCause() | CancelAfterEnd():
+                logger.debug('The cancel of run %s found an earlier cancel', dispatch)
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _signalled(self, dispatch: int, seat: _Seat) -> None:
+        """The operator cancel reached the body of run ``dispatch``: report
+        it, end the deadline, and start the cancel grace when the run has
+        one."""
+        _cancel_timer(seat)
+        seat.stop = _Cancelled.SIGNALLED
+        self._writer.send(CancelFiredFrame(dispatch=dispatch, task_id=seat.frame.task_id))
+        logger.info('Task %s (run %s) was cancelled by an operator', seat.frame.task_id, dispatch)
+        match seat.deadline:
+            case _DeadlineAt():
+                seat.timer = self._loop.call_later(
+                    _grace_s(seat.frame),
+                    self._cancel_grace_over,
+                    dispatch,
+                )
+            case _NoDeadline():
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
+
+    def _cancel_grace_over(self, dispatch: int) -> None:
+        """The cancel grace after an operator cancel of run ``dispatch`` ran
+        out (C + G). When anything of the run is alive: report it, and start
+        the cancel rounds."""
+        seat = self._seats[dispatch]
+        seat.timer = _NoTimer()
+        if self._ended(seat):
+            self._check_end(dispatch)
+            return
+        seat.stop = _Cancelled.SECOND_CANCEL
+        self._writer.send(
+            SecondCancelFrame(dispatch=dispatch, task_id=seat.frame.task_id),
+        )
+        self._cancel_round(dispatch, 0)
 
     def _ended(self, seat: _Seat) -> bool:
         """Whether the coroutine of the run and all its marked work ended."""
@@ -666,6 +824,8 @@ class SeatLoop:
         match self._seats[dispatch].stop:
             case _Stop.CANCELLED | _Stop.SECOND_CANCEL | _Stop.STUCK:
                 return DeadlineFirst()
+            case _Cancelled():
+                return OperatorCancelFirst()
             case (
                 _Stop.NO_DEADLINE
                 | _Stop.BEFORE_DEADLINE
@@ -693,6 +853,7 @@ class SeatLoop:
             self._returned(dispatch)
             return
         seat.stop = _Stop.CANCELLED
+        _ = seat.cancel.request_deadline()
         seat.task.cancel()
         self._writer.send(
             DeadlineFiredFrame(dispatch=dispatch, task_id=seat.frame.task_id),
@@ -747,7 +908,7 @@ class SeatLoop:
         match seat.stop:
             case _LeftoverGrace(left=left):
                 pass
-            case _Stop() | _LeftoverCancel() | _LeftoverStuck() | _Finalizing():
+            case _Stop() | _Cancelled() | _LeftoverCancel() | _LeftoverStuck() | _Finalizing():
                 raise AssertionError(
                     f'the leftover grace of run {dispatch} ended at step {seat.stop}',
                 )
@@ -815,8 +976,8 @@ class SeatLoop:
         names = tuple(sorted(_coroutine_name(task) for task in tasks))
         bounded_names = names[:MAX_LEFTOVER_TASK_NAMES]
         match seat.stop:
-            case _Stop.SECOND_CANCEL:
-                seat.stop = _Stop.STUCK
+            case _Stop.SECOND_CANCEL | _Cancelled.SECOND_CANCEL:
+                seat.stop = _stuck_after(seat.stop)
                 self._writer.send(
                     RunStuckFrame(
                         dispatch=dispatch,
@@ -847,6 +1008,8 @@ class SeatLoop:
                 | _Stop.BEFORE_DEADLINE
                 | _Stop.CANCELLED
                 | _Stop.STUCK
+                | _Cancelled.SIGNALLED
+                | _Cancelled.STUCK
                 | _LeftoverGrace()
                 | _LeftoverStuck()
                 | _Finalizing()
@@ -901,7 +1064,7 @@ class SeatLoop:
                 self._check_end(dispatch)
             case _Stop.BEFORE_DEADLINE:
                 self._returned(dispatch)
-            case _Stop.CANCELLED | _Stop.SECOND_CANCEL | _Stop.STUCK:
+            case _Stop.CANCELLED | _Stop.SECOND_CANCEL | _Stop.STUCK | _Cancelled():
                 self._check_end(dispatch)
             case (
                 _LeftoverGrace()
@@ -944,7 +1107,7 @@ class SeatLoop:
                 _log_left_work(seat.frame, left, _LeftWorkEnd.IN_GRACE)
             case _LeftoverCancel(left=left):
                 _log_left_work(seat.frame, left, _LeftWorkEnd.CANCELLED)
-            case _Stop() | _LeftoverStuck():
+            case _Stop() | _Cancelled() | _LeftoverStuck():
                 pass
             case _Finalizing():
                 raise AssertionError(f'run {dispatch} ended twice')
@@ -967,6 +1130,10 @@ class SeatLoop:
             case SeatTimedOut(), MarkerDue():
                 raise AssertionError(
                     f'run {dispatch} timed out and has a marker due',
+                )
+            case SeatCancelled(), MarkerDue():
+                raise AssertionError(
+                    f'run {dispatch} was cancelled and has a marker due',
                 )
             case _ as unreachable:
                 assert_never(unreachable)
@@ -995,7 +1162,9 @@ class SeatLoop:
         match seat.stop:
             case _Finalizing(end=end):
                 pass
-            case _Stop() | _LeftoverGrace() | _LeftoverCancel() | _LeftoverStuck():
+            case (
+                _Stop() | _Cancelled() | _LeftoverGrace() | _LeftoverCancel() | _LeftoverStuck()
+            ):
                 raise AssertionError(
                     f'the marker of run {dispatch} ended at step {seat.stop}',
                 )
@@ -1010,8 +1179,24 @@ class SeatLoop:
         self._send_end(dispatch, seat, end_after_marker(end, marker.result()))
 
     def _send_end(self, dispatch: int, seat: _Seat, end: SeatEnd) -> None:
-        """Free the seat of run ``dispatch`` and report its end."""
+        """Free the seat of run ``dispatch`` and report its end. A run whose
+        body an operator cancel skipped reports ``CancelFiredFrame`` first:
+        the cancel report comes before every cancelled end."""
         del self._seats[dispatch]
+        match end:
+            case SeatCancelled(body=CancelledBody.NOT_STARTED):
+                self._writer.send(CancelFiredFrame(dispatch=dispatch, task_id=seat.frame.task_id))
+            case (
+                SeatCancelled()
+                | SeatTimedOut()
+                | ResultEnvelope()
+                | StoppedBeforeRunning()
+                | CoreStoppedBeforeStart()
+                | CoreStoppedAfterBody()
+            ):
+                pass
+            case _ as unreachable:
+                assert_never(unreachable)
         self._writer.send_result(
             seat.frame.task_name,
             SharedResultFrame(
@@ -1027,7 +1212,7 @@ class SeatLoop:
 async def _next_frame(
     inbox: ParentFrameInbox,
     arrived: asyncio.Event,
-) -> core.SharedRunFrame | core.StopFrame | core.RunFrame:
+) -> core.SharedRunFrame | core.CancelRunFrame | core.StopFrame | core.RunFrame:
     """The next frame of the inbox. Waits on ``arrived``, which each later
     ``put`` sets, so no frame is missed between the check and the wait."""
     while True:
@@ -1037,14 +1222,33 @@ async def _next_frame(
                 match inbox.take():
                     case NoFrameYet():
                         await arrived.wait()
-                    case core.SharedRunFrame() | core.StopFrame() | core.RunFrame() as frame:
+                    case (
+                        core.SharedRunFrame()
+                        | core.CancelRunFrame()
+                        | core.StopFrame()
+                        | core.RunFrame()
+                    ) as frame:
                         return frame
                     case _ as unreachable:
                         assert_never(unreachable)
-            case core.SharedRunFrame() | core.StopFrame() | core.RunFrame() as frame:
+            case (
+                core.SharedRunFrame() | core.CancelRunFrame() | core.StopFrame() | core.RunFrame()
+            ) as frame:
                 return frame
             case _ as unreachable:
                 assert_never(unreachable)
+
+
+def _stuck_after(stop: _RunStop) -> _RunStop:
+    """The stuck step that follows the second cancel of a run: on the
+    deadline path, or on the path of an operator cancel. Pure."""
+    match stop:
+        case _Stop.SECOND_CANCEL:
+            return _Stop.STUCK
+        case _Cancelled.SECOND_CANCEL:
+            return _Cancelled.STUCK
+        case _:
+            raise AssertionError(f'a run became stuck at step {stop}')
 
 
 def _grace_s(frame: core.SharedRunFrame) -> float:
@@ -1080,16 +1284,30 @@ def _exit_for_end_defect(seat: _Seat, task: asyncio.Task[SeatReturn]) -> None:
 
 
 def _end_of(seat: _Seat) -> SeatEnd:
-    """The end of a run whose coroutine and marked work ended. After a
-    deadline that fired, the end is the timeout, also when the task returned
-    a value. A coroutine that returned before its deadline ends the run with
-    what it returned, also when the work that it left needed a cancel."""
+    """The end of a run whose coroutine and marked work ended; it fixes the
+    cancel of the run (``RunCancel.fix_end``). After an operator cancel that
+    reached the run, the end is ``SeatCancelled``, also when the task
+    returned a value. After a deadline that fired, the end is the timeout,
+    also when the task returned a value. A coroutine that returned before
+    its deadline ends the run with what it returned, also when the work that
+    it left needed a cancel."""
+    match seat.cancel.fix_end():
+        case EndCancelled(body=body):
+            # The start write returned: a defect that left the coroutine
+            # ends the process here.
+            _ = _seat_return(seat)
+            return SeatCancelled(body=body)
+        case EndNotCancelled():
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
     match seat.stop:
         case _Stop.CANCELLED | _Stop.SECOND_CANCEL | _Stop.STUCK:
             return SeatTimedOut()
         case (
             _Stop.NO_DEADLINE
             | _Stop.BEFORE_DEADLINE
+            | _Cancelled()
             | _LeftoverGrace()
             | _LeftoverCancel()
             | _LeftoverStuck()
@@ -1118,6 +1336,10 @@ def _returned_end(
             return result
         case StoppedBeforeRunning() | CoreStoppedBeforeStart() as stopped:
             return stopped
+        case RunCancelled():
+            raise AssertionError(
+                f'run {seat.frame.dispatch} skipped its body and did not end as cancelled',
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1140,6 +1362,10 @@ def _returned_run(seat: _Seat) -> SetRunning:
                 f'run {seat.frame.dispatch} stopped before running (its core '
                 'stopped) and left work',
             )
+        case RunCancelled():
+            raise AssertionError(
+                f'run {seat.frame.dispatch} skipped its body and left work',
+            )
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1154,7 +1380,7 @@ def _start_of(seat: _Seat) -> AttemptStart:
     if task.cancelled() or task.exception() is not None:
         return StartNotReported()
     match task.result():
-        case SetRunning(started_at=started_at):
+        case SetRunning(started_at=started_at) | RunCancelled(started_at=started_at):
             return StartReported(started_at)
         case StoppedBeforeRunning() | CoreStoppedBeforeStart():
             return StartNotReported()
@@ -1186,6 +1412,7 @@ def _marker_at_end(seat: _Seat, now: float) -> MarkerDue | NoMarker:
             _Stop.CANCELLED
             | _Stop.SECOND_CANCEL
             | _Stop.STUCK
+            | _Cancelled()
             | _LeftoverCancel()
             | _LeftoverStuck()
         ):
@@ -1197,7 +1424,7 @@ def _marker_at_end(seat: _Seat, now: float) -> MarkerDue | NoMarker:
         case _ as unreachable:
             assert_never(unreachable)
     match _seat_return(seat), seat.deadline:
-        case StoppedBeforeRunning() | CoreStoppedBeforeStart(), _:
+        case StoppedBeforeRunning() | CoreStoppedBeforeStart() | RunCancelled(), _:
             return NoMarker()
         case SetRunning(), _NoDeadline():
             return MarkerDue()

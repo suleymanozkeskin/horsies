@@ -2,6 +2,8 @@
 // run-derived: every workflow run persists its full node set, so these types
 // describe any workflow definition and any run generically.
 
+import type { AttemptPhases, NodeTiming, RunTiming } from '@/types/timing';
+
 /** Run/node lifecycle states. Open string union — backend is source of truth. */
 export type WorkflowStatus =
   | 'PENDING'
@@ -24,7 +26,8 @@ export interface WorkflowRunSummary {
   status: WorkflowStatus;
   created_at: string | null;
   completed_at: string | null;
-  /** Wall-clock seconds: completed_at (or now) minus created_at. */
+  /** Wall-clock seconds, exact to the microsecond: completed_at (or now)
+   * minus created_at. */
   wall_s: number | null;
 }
 
@@ -39,12 +42,15 @@ export interface WorkflowNode {
   allow_failed_deps: boolean;
   started_at: string | null;
   completed_at: string | null;
-  /** Execution time only; null until the node actually starts running. */
+  /** Execution time only, in seconds, exact to the microsecond; null until
+   * the node actually starts running. */
   exec_s: number | null;
   /** Direct-child task count for subworkflow nodes; null for leaf nodes. */
   child_total: number | null;
   /** FAILED direct-child task count for subworkflow nodes; null for leaf nodes. */
   child_failed: number | null;
+  /** Phase timing of the node: its segments, endpoint and coverage label. */
+  timing: NodeTiming;
 }
 
 /** A dependency edge: `from_index` must settle before `to_index` runs. */
@@ -65,6 +71,8 @@ export interface WorkflowRunDetail {
   /** Trace id of the span that started the run (32 hex digits); null when
    * the start carried no trace. */
   trace_id: string | null;
+  /** Phase timing of the run: read time, range, pauses and coverage. */
+  timing: RunTiming;
 }
 
 /** One immutable execution attempt of a leaf task. `error_message` holds the cause. */
@@ -78,6 +86,8 @@ export interface TaskAttempt {
   worker_hostname: string | null;
   started_at: string | null;
   finished_at: string | null;
+  /** Phase record of the attempt row. */
+  phases: AttemptPhases;
 }
 
 /** The leaf task execution backing a task node. */
@@ -92,9 +102,10 @@ export interface LeafTask {
   started_at: string | null;
   completed_at: string | null;
   failed_at: string | null;
-  /** Queue wait (enqueued -> started). */
+  /** Queue wait (enqueued -> started), in seconds, exact to the microsecond. */
   queue_s: number | null;
-  /** Execution time (started -> completed). */
+  /** Execution time (started -> completed), in seconds, exact to the
+   * microsecond. */
   exec_s: number | null;
   worker_hostname: string | null;
   /** Absolute expiry. */

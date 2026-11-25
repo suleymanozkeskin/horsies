@@ -60,6 +60,7 @@ fn the_timeout_write_stores_python_s_text_for_each_cancel_end() {
             TaskTimeoutMs::new(1000).unwrap(),
             RetryPlacement::SameClass,
             cancel,
+            crate::core::lifecycle::AttemptPlacement::NotObserved,
         );
         assert_eq!(write.result_json, vector.text, "{name}");
     }
@@ -82,6 +83,7 @@ fn the_killed_child_write_stores_python_s_text() {
         OperationalErrorCode::WorkerCrashed.into(),
         message,
         RetryPlacement::SameClass,
+        crate::core::lifecycle::AttemptPlacement::NotObserved,
     );
     assert_eq!(write.result_json, vector.text);
 }

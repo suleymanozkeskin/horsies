@@ -129,8 +129,15 @@ RETURNS TABLE (
         coalesce((SELECT array_agg(result ORDER BY position) FROM f), ARRAY[]::text[])
 $$;
 
+-- The start command fingerprint of a tree description, a stand-in for the core's StartCommandV1: SHA-256 of the
+-- description text. One description gives one fingerprint; another description gives another.
+CREATE FUNCTION wft_command(p_workflows jsonb, p_nodes jsonb, p_failed jsonb) RETURNS bytea LANGUAGE sql AS $$
+    SELECT sha256(convert_to(p_workflows::text || p_nodes::text || p_failed::text, 'UTF8'))
+$$;
+
 -- Starts a tree from a JSON description (wft_tree). A start with p_trace_id carries the trace pair (CARRIER), a
--- start without one carries none (NO_CARRIER).
+-- start without one carries none (NO_CARRIER). The start command is version 1 with the fingerprint of the
+-- description (wft_command).
 CREATE FUNCTION wft_start(p_workflows jsonb, p_nodes jsonb, p_failed jsonb DEFAULT '[]',
                           p_trace_carrier text DEFAULT NULL, p_trace_id bytea DEFAULT NULL)
 RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
@@ -144,7 +151,7 @@ RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
         a.node_good_untils, a.node_retention_class_keys, a.node_is_subworkflow, a.node_sub_workflow_names,
         a.node_sub_definition_keys, a.node_sub_workflow_params, a.failed_workflow_ids, a.failed_task_indexes,
         a.failed_results, CASE WHEN p_trace_id IS NULL THEN 'NO_CARRIER' ELSE 'CARRIER' END, p_trace_carrier,
-        p_trace_id
+        p_trace_id, 1::smallint, wft_command(p_workflows, p_nodes, p_failed)
     ) AS s
 $$;
 
@@ -193,7 +200,26 @@ RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
         a.node_join_types, a.node_min_successes, a.node_task_options, a.node_max_retries, a.node_executions,
         a.node_good_untils, a.node_retention_class_keys, a.node_is_subworkflow, a.node_sub_workflow_names,
         a.node_sub_definition_keys, a.node_sub_workflow_params, a.failed_workflow_ids, a.failed_task_indexes,
-        a.failed_results, p_trace_kind, p_trace_carrier, p_trace_id
+        a.failed_results, p_trace_kind, p_trace_carrier, p_trace_id, 1::smallint,
+        sha256(convert_to(p_id::text, 'UTF8'))
+    ) AS s
+$$;
+
+-- A one-node workflow p_id started with the start command pair as given, for the refusals of the pair.
+CREATE FUNCTION wft_start_commanded(p_id uuid, p_version smallint, p_fingerprint bytea)
+RETURNS SETOF horsies_workflow_step_row LANGUAGE sql AS $$
+    SELECT s.* FROM wft_tree(
+        jsonb_build_array(jsonb_build_object('id', p_id, 'on_error', 'fail')), '[{"idx":0}]', '[]'
+    ) AS a
+    CROSS JOIN LATERAL horsies_workflow_start(
+        a.workflow_ids, a.names, a.definition_keys, a.on_errors, a.output_task_indexes, a.success_policies,
+        a.parent_workflow_ids, a.parent_task_indexes, a.depths, '2030-01-01 00:00:00+00',
+        a.node_workflow_ids, a.node_task_indexes, a.node_ids, a.node_task_names, a.node_inputs, a.node_queue_names,
+        a.node_priorities, a.node_dependencies, a.node_args_from, a.node_workflow_ctx_from, a.node_allow_failed_deps,
+        a.node_join_types, a.node_min_successes, a.node_task_options, a.node_max_retries, a.node_executions,
+        a.node_good_untils, a.node_retention_class_keys, a.node_is_subworkflow, a.node_sub_workflow_names,
+        a.node_sub_definition_keys, a.node_sub_workflow_params, a.failed_workflow_ids, a.failed_task_indexes,
+        a.failed_results, 'NO_CARRIER', NULL, NULL, p_version, p_fingerprint
     ) AS s
 $$;
 
@@ -236,10 +262,11 @@ DECLARE
     v_failed boolean := (p_result::json -> 'err')::text <> 'null';
     v_task horsies_tasks;
 BEGIN
-    -- The move takes the row that the UPDATE returned.
+    -- The move takes the row that the UPDATE returned. The stand-in claim counts one claim of the attempt.
     UPDATE horsies_tasks
     SET status = 'RUNNING', claimed_at = now(), claimed_by_worker_id = 'worker-1', started_at = now(),
-        claim_expires_at = NULL, worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc'
+        claim_expires_at = NULL, worker_pid = 1, worker_hostname = 'host', worker_process_name = 'proc',
+        attempt_claims = 1, first_claimed_at = now()
     WHERE id = p_task_id
     RETURNING * INTO v_task;
     PERFORM wft_check(FOUND, 'phase-1 fixture finds task ' || p_task_id);
@@ -268,12 +295,13 @@ BEGIN
 END;
 $$;
 
--- Claims the task of a node for worker-1 at p_claimed_at, with a live lease, as horsies_claim leaves it.
+-- Claims the task of a node for worker-1 at p_claimed_at, with a live lease and the first claim of its attempt, as
+-- horsies_claim leaves it.
 CREATE FUNCTION wft_claim(p_task_id uuid, p_claimed_at timestamptz) RETURNS void LANGUAGE plpgsql AS $$
 BEGIN
     UPDATE horsies_tasks
     SET status = 'CLAIMED', claimed_at = p_claimed_at, claimed_by_worker_id = 'worker-1',
-        claim_expires_at = now() + interval '1 minute'
+        claim_expires_at = now() + interval '1 minute', attempt_claims = 1, first_claimed_at = p_claimed_at
     WHERE id = p_task_id AND status = 'PENDING';
     PERFORM wft_check(FOUND, 'claim fixture finds the PENDING task ' || p_task_id);
 END;

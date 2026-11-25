@@ -228,7 +228,7 @@ export function SelectCombobox({
               )}
             </CommandList>
             {overflow > 0 && (
-              <div className="border-t border-border px-3 py-2 text-11 text-muted-foreground">
+              <div className="border-t border-hairline px-3 py-2 text-11 text-muted-foreground">
                 {overflow} more — keep typing to narrow
               </div>
             )}

@@ -21,6 +21,14 @@
 //! - A slot defect (a run frame that cannot be encoded, a panic of the slot
 //!   task) kills the child; every run of it then takes the crash path, as
 //!   at a loss. Repeated defects fail the pools ([`super::defects`]).
+//! - An operator cancel routed to a run ([`CancelBell`]) sends `cancel_run`
+//!   for it while its stop is not reported. The child answers
+//!   `cancel_fired`, then ends the run as cancelled; the end is
+//!   `Cancelled`, and nothing is written. A run that the parent sent the
+//!   cancel to ends as `Cancelled` at every kill or loss of its child, with
+//!   its exit seen or not: the cancel recorded the attempt. A cancelled run
+//!   is never a reason to kill its child while it has time left, so a
+//!   neighbour run is not killed before its own deadline.
 
 use std::sync::Arc;
 
@@ -32,30 +40,34 @@ use super::booting::{boot_child, BootSlot, Booted};
 use super::defects::{
     count_defect, AfterDefect, CatchPanic, GenerationEnd, Served, SlotDefect, SlotDefects,
 };
-use super::dispatch::{AttemptEnd, AttemptLog, NotRunCause};
+use super::dispatch::{AttemptEnd, AttemptLog, CancelledEnd, NotRunCause};
 use super::pool::{Answer, ExitNotSeen};
 use super::replacement::{reason_of_loss, tell_replaced, ChildLeave, GenerationChild};
 use super::seat_runs::{
     backstop_step, end_at_late_backstop_exit, end_at_loss, end_past_deadlines, shared_recycle,
-    Backstop, BackstopStep, ChildService, CloseReason, FrameOutOfTurn, LoopBlockStep, LossSight,
-    RunStopReport, RunWork, SeatRun, SeatRuns, StopReportFrame, StopStep, SHARED_STUCK_BACKSTOP,
+    Backstop, BackstopStep, CancelSend, ChildService, CloseReason, FrameOutOfTurn, LoopBlockStep,
+    LossSight, OperatorCancel, RunStopReport, RunWork, SeatRun, SeatRuns, StopReportFrame,
+    StopStep, SHARED_STUCK_BACKSTOP,
 };
 use super::shared::{Accepting, QueuedSeatRun, SharedPoolShared, Take};
 use crate::telemetry::labels::ReplaceReason;
 use crate::worker::executor::protocol::{
-    ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RunRef, SharedResultFrame,
+    CancelTarget, ChildAfterFrame, ChildFrame, ParentFrame, ProcessId, RunRef, SharedResultFrame,
 };
 use crate::worker::executor::supervisor::{
     log_core_stopped_child, ChildChannel, ChildExit, ChildLost, EndWithoutTask, ExitState,
     FrameWait, LossCause, MailboxBound, SendFailure,
 };
-use crate::worker::runner_beats::{HeldChild, HeldDispatch, RegistryClosed};
+use crate::worker::runner_beats::{
+    CancelBell, CancelTake, HeldChild, HeldDispatch, RegistryClosed,
+};
 
 /// Whether the runner beats of a run go on.
 enum Beats {
     /// The runner beats go on while the dispatch is held; dropping it ends
-    /// them.
-    Held { _dispatch: HeldDispatch },
+    /// them. The dispatch also carries the operator cancel routed to the
+    /// run.
+    Held { dispatch: HeldDispatch },
     /// The end was read or a kill was sent.
     Ended,
 }
@@ -107,6 +119,8 @@ enum ReadyNotice {
 /// One child of the slot and its runs.
 struct Generation {
     channel: ChildChannel,
+    /// Rung when an operator cancel is routed to a run of this child.
+    cancel_bell: CancelBell,
     runs: SeatRuns<RunHold>,
     service: ChildService,
     /// What the child said it does after its result frames: once one said
@@ -124,6 +138,8 @@ enum SlotEvent {
     Frame(FrameWait),
     /// Placement picked this slot.
     Wake,
+    /// An operator cancel was routed to a run of the child.
+    CancelRequest,
     /// The pools stop or failed.
     PoolStopping,
     DrainDeadline,
@@ -227,6 +243,7 @@ async fn serve_generation(
 ) -> GenerationEnd {
     let mut generation = Generation {
         channel,
+        cancel_bell: CancelBell::default(),
         runs: SeatRuns::new(pool.seats),
         service: ChildService::Open,
         child_after: ChildAfterFrame::ServesOn,
@@ -331,6 +348,10 @@ async fn serve_step(pool: &SharedPoolShared, local: usize, generation: &mut Gene
     match next_event(pool, local, generation).await {
         SlotEvent::Frame(wait) => on_wait(pool, local, generation, wait).await,
         SlotEvent::Wake => Flow::Continue,
+        SlotEvent::CancelRequest => {
+            send_cancels(generation).await;
+            Flow::Continue
+        }
         SlotEvent::PoolStopping => {
             generation.service.close_for_pool_stop();
             Flow::Continue
@@ -413,8 +434,10 @@ async fn next_event(
         .map(|due| due.saturating_duration_since(Instant::now()));
     let open = matches!(generation.service, ChildService::Open);
     let drain_kill = generation.kill == KillSent::NotSent && generation.runs.count() > 0;
+    let cancel_bell = generation.cancel_bell.clone();
     tokio::select! {
         wait = generation.channel.await_frame(bound) => SlotEvent::Frame(wait),
+        () = cancel_bell.rung(), if drain_kill => SlotEvent::CancelRequest,
         () = pool.wakes[local].notified(), if open => SlotEvent::Wake,
         () = pool.board.stop.cancelled(), if open => SlotEvent::PoolStopping,
         () = pool.board.failed.cancelled(), if open => SlotEvent::PoolStopping,
@@ -524,8 +547,9 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
         pid: channel.pid(),
         spawner: pool.spawner.clone(),
         kill_mark: channel.kill_mark(),
+        cancel_bell: generation.cancel_bell.clone(),
     };
-    let held = match pool.live.hold(frame.task_id, frame.claimed_at, child) {
+    let held = match pool.live.hold(frame.task_id, frame.claimed_at, log, child) {
         Ok(held) => held,
         Err(RegistryClosed) => {
             tracing::error!(
@@ -552,7 +576,7 @@ async fn send_run(pool: &SharedPoolShared, generation: &mut Generation, queued: 
         report: RunStopReport::NotReported,
         attached: RunHold {
             answer,
-            beats: Beats::Held { _dispatch: held },
+            beats: Beats::Held { dispatch: held },
             backstop: Backstop::after_send(work, sent_at),
             log,
         },
@@ -602,6 +626,76 @@ async fn send_kill(generation: &mut Generation, reason: KillReason) {
         hold.backstop = Backstop::Done;
     }
     let _ = generation.channel.kill_for_caller().await;
+}
+
+/// Send `cancel_run` for each run of the child whose operator cancel the
+/// slot takes now, while its stop is not reported ([`SeatRuns::note_cancel_sent`]).
+/// A frame that cannot be encoded is a defect, and a send that fails kills
+/// the child, as for a run frame.
+async fn send_cancels(generation: &mut Generation) {
+    let requested: Vec<(RunRef, AttemptLog)> = generation
+        .runs
+        .iter()
+        .filter_map(|seat| match &seat.attached.beats {
+            Beats::Held { dispatch } => match dispatch.take_cancel() {
+                CancelTake::Requested => Some((seat.run, seat.attached.log)),
+                CancelTake::NoRequest => None,
+            },
+            Beats::Ended => None,
+        })
+        .collect();
+    for (requested_run, log) in requested {
+        let run = match generation.runs.note_cancel_sent(requested_run.dispatch) {
+            CancelSend::Send(run) => run,
+            CancelSend::Skip => {
+                tracing::debug!(
+                    task_id = %requested_run.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
+                    pid = generation.channel.pid().get(),
+                    "a cancelled run is a refusal or is stopping already; no cancel is sent",
+                );
+                continue;
+            }
+        };
+        tracing::info!(
+            task_id = %run.task_id,
+            attempt = log.attempt.get(),
+            trace_id = log.trace_id.log_field(),
+            pid = generation.channel.pid().get(),
+            "an operator cancelled the task; sending the cancel to its child",
+        );
+        let sent = generation
+            .channel
+            .send(&ParentFrame::CancelRun(CancelTarget::Shared(run)))
+            .await;
+        match sent {
+            Ok(()) => {}
+            Err(SendFailure::Encode(error)) => {
+                tracing::error!(
+                    task_id = %run.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
+                    error = %error,
+                    "a cancel frame could not be encoded: {error}",
+                );
+                generation.defect = Some(SlotDefect::frame_not_encoded(&error));
+                send_kill(generation, KillReason::SlotDefect).await;
+                return;
+            }
+            Err(failure @ (SendFailure::Write(_) | SendFailure::TimedOut)) => {
+                tracing::warn!(
+                    task_id = %run.task_id,
+                    attempt = log.attempt.get(),
+                    trace_id = log.trace_id.log_field(),
+                    failure = %failure,
+                    "a cancel frame could not be sent; killing the child",
+                );
+                send_kill(generation, KillReason::SendFailed).await;
+                return;
+            }
+        }
+    }
 }
 
 /// End one run with `end`: its beats end, and its answer goes out.
@@ -696,6 +790,24 @@ async fn on_frame(
         ChildFrame::SecondCancel(run) => {
             on_stop_report(generation, &StopReportFrame::SecondCancel(run))
         }
+        ChildFrame::CancelFired(run) => {
+            generation
+                .runs
+                .note_cancel_fired(run)
+                .map_err(BadFrame::OutOfTurn)?;
+            let log = generation
+                .runs
+                .get(run.dispatch)
+                .map(|seat| seat.attached.log);
+            tracing::debug!(
+                task_id = %run.task_id,
+                attempt = log.map(|log| log.attempt.get()),
+                trace_id = log.and_then(|log| log.trace_id.log_field()),
+                pid,
+                "the child gave the operator cancel to the task",
+            );
+            Ok(())
+        }
         ChildFrame::RunStuck(stuck) => {
             on_stop_report(generation, &StopReportFrame::RunStuck(stuck))
         }
@@ -733,6 +845,7 @@ async fn on_frame(
         ChildFrame::BodyReturned(_) => Err(BadFrame::WrongKind("body_returned")),
         ChildFrame::LeftWorkEnded(_) => Err(BadFrame::WrongKind("left_work_ended")),
         ChildFrame::LeftWorkStuck(_) => Err(BadFrame::WrongKind("left_work_stuck")),
+        ChildFrame::RunCancelled(_) => Err(BadFrame::WrongKind("run_cancelled")),
         ChildFrame::HandlerStats(_) => Err(BadFrame::WrongKind("handler_stats")),
     }
 }
@@ -954,6 +1067,18 @@ fn answer_without_seen_exit(
     kill: KillSent,
     exit: watch::Receiver<ExitState>,
 ) {
+    // A run that the parent sent an operator cancel to ends at once: the
+    // cancel recorded its attempt, so no write waits for the exit.
+    let (cancelled, seats): (Vec<SeatRun<RunHold>>, Vec<SeatRun<RunHold>>) = seats
+        .into_iter()
+        .partition(|seat| seat.report.operator_cancel() == OperatorCancel::Sent);
+    for seat in cancelled {
+        let end = match kill {
+            KillSent::Sent(_) => CancelledEnd::ChildKilled,
+            KillSent::NotSent => CancelledEnd::ChildLost,
+        };
+        finish(seat, AttemptEnd::Cancelled(end));
+    }
     let unknown = AttemptEnd::EndUnknown { pid: lost.pid };
     match pool.config.exit_not_seen {
         ExitNotSeen::LeaveToRecovery => {

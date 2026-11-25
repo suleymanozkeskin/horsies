@@ -25,8 +25,10 @@ This module imports `opentelemetry`. `attempt_spans_of` imports it only for
   exception that the task error keeps is recorded on the span first. A run
   whose deadline came first in its child (a shared run, `RunTimedOut`) sets
   ERROR with `error.type` = `TASK_TIMEOUT`, the code that the worker
-  records; what the body returned is not recorded. A body that a refusal
-  of the core ended, and an exception that left the steps, set ERROR with
+  records; what the body returned is not recorded. A run that an operator
+  cancelled (`RunCancelledByOperator`) sets ERROR with `error.type` =
+  `TASK_CANCELLED`, the code of its attempt row. A body that a refusal of
+  the core ended, and an exception that left the steps, set ERROR with
   `error.type` = the class name of the exception, which is recorded.
 
 The tracer and the propagator come from the global API at each use: a
@@ -56,6 +58,7 @@ from horsies.core.telemetry.attempt_span import (
     FlushNotConfirmed,
     ProviderFlush,
     ProviderHasNoFlush,
+    RunCancelledByOperator,
     RunTimedOut,
     ScopeRaised,
     SpansFlushed,
@@ -178,6 +181,8 @@ class OtelAttemptSpan:
                 mark_error(self.span, code)
             case RunTimedOut():
                 mark_error(self.span, OutcomeCode.TASK_TIMEOUT.value)
+            case RunCancelledByOperator():
+                mark_error(self.span, OutcomeCode.TASK_CANCELLED.value)
             case BodyInterrupted(refusal=exception) | ScopeRaised(exception=exception):
                 self.span.record_exception(exception)
                 mark_error(self.span, type(exception).__qualname__)

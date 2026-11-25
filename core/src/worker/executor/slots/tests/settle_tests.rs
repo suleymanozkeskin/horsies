@@ -370,6 +370,30 @@ async fn a_release_that_cannot_reach_the_database_is_not_written() {
     assert_eq!(settled, Settlement::RetriesExhausted);
 }
 
+/// An end of a run whose task an operator cancelled sends no statement:
+/// the cancel statement recorded the attempt and moved the row. On a
+/// database that cannot be reached, any statement would end as
+/// `RetriesExhausted`; each cancelled end settles as `RecordedByCancel`.
+#[tokio::test]
+async fn a_cancelled_end_sends_no_statement() {
+    let ends = [
+        crate::worker::executor::slots::CancelledEnd::ReportedByChild {
+            end: crate::events::OperatorCancelEnd::ReturnedAfterSignal,
+            start: crate::events::AttemptStart::Reported {
+                started_at: DateTime::<Utc>::UNIX_EPOCH,
+            },
+        },
+        crate::worker::executor::slots::CancelledEnd::ChildKilled,
+        crate::worker::executor::slots::CancelledEnd::ChildLost,
+    ];
+    for end in ends {
+        let settled = writer(unreachable_broker())
+            .settle(&claimed_now(), AttemptEnd::Cancelled(end))
+            .await;
+        assert_eq!(settled, Settlement::RecordedByCancel, "{end:?}");
+    }
+}
+
 /// Python `TestFinalizeAfterSlotOutcome::test_finished_task_goes_to_persist`:
 /// a reported value completes the task.
 #[tokio::test]

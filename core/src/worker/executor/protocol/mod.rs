@@ -14,8 +14,25 @@
 //! Nothing is pickled: each frame is built from a fixed set of fields, and a
 //! field outside that set makes the frame malformed.
 //!
-//! Version 3 ([`PROTOCOL_VERSION`]) keeps the framing and the content of
-//! version 2, and adds:
+//! Version 4 ([`PROTOCOL_VERSION`]) keeps the framing and the content of
+//! version 3, and adds the operator cancel of a run:
+//!
+//! - The parent frame `cancel_run` with its `target`: `isolated` with the
+//!   `task_id`, or `shared` with the `dispatch` and the `task_id`. The
+//!   cancel statement has moved the row to history and recorded the
+//!   attempt as `CANCELLED`; the child gives the cancel to the task code. A
+//!   `cancel_run` for a run that the child does not run is ignored: the end
+//!   of the run and the cancel can cross.
+//! - The child frame `cancel_fired` (`dispatch`, `task_id`): a shared child
+//!   applied the cancel to the run, once per run.
+//! - The seat end `cancelled` with `body` (`ran` or `not_started`) in
+//!   `shared_result`, after `cancel_fired`. It reports the start.
+//! - The child frame `run_cancelled` (`task_id`, `body`, `started_at`,
+//!   `rss_mb`, `task_loop`, `child`): an isolated run that was cancelled
+//!   ended, in place of `result`. Its `task_loop` is `none`, `empty`, or
+//!   `held` with the count and the names of the work that the body left.
+//!
+//! Version 3 kept the framing and the content of version 2, and added:
 //!
 //! - The run frames (`run`, `shared_run`) carry `trace`: the trace carrier
 //!   that the send stored on the task row (`carrier` with its text, one JSON
@@ -89,11 +106,11 @@ pub use bounds::{
 };
 pub use child_frames::{
     decode_child_frame, encode_child_frame, BodyEnd, BodyReturnedFrame, BootFailedFrame,
-    ChildAfterFrame, ChildFrame, ChildFrameRefusal, HandlerCounts, HandlerCountsInvalid,
-    HandlerCountsList, HandlerStatsFrame, LeftWorkEnd, LeftWorkEndedFrame, LeftWorkStuckFrame,
-    LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ReadyFrame,
-    ReportedBootCause, ResultFrame, RunEnd, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    ShortageErrno, SpanReadCounts, StopReason,
+    CancelledBody, CancelledLoop, ChildAfterFrame, ChildFrame, ChildFrameRefusal, HandlerCounts,
+    HandlerCountsInvalid, HandlerCountsList, HandlerStatsFrame, LeftWorkEnd, LeftWorkEndedFrame,
+    LeftWorkStuckFrame, LeftoverCancelFrame, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit,
+    NoLeftWork, ReadyFrame, ReportedBootCause, ResultFrame, RunCancelledFrame, RunEnd, RunRef,
+    RunStuckFrame, SeatEnd, SharedResultFrame, ShortageErrno, SpanReadCounts, StopReason,
 };
 pub use event_batch::{EventBatch, EventCountOutOfBounds, WireEvent, WireEventRefusal};
 pub use exit_codes::{
@@ -108,10 +125,11 @@ pub use header::{
 };
 pub use metadata::{ExpectedType, MalformedFrame, ProtocolMismatch, ReceivedProtocol};
 pub use parent_frames::{
-    decode_parent_frame, encode_parent_frame, ChildConnection, ChildKind, ChildLogLevel, ChildPool,
-    ChildProgram, DatabaseUrl, EventsFrame, HandlerChild, InitFrame, IsolatedChild, IsolatedWork,
-    ParentFrame, ParentFrameRefusal, PythonProgram, RunFrame, ServerSessions, SharedAsyncChild,
-    SharedRunFrame, SharedThreadChild, SharedWork, StoredOptionsRefusal, TaskKind,
+    decode_parent_frame, encode_parent_frame, CancelTarget, ChildConnection, ChildKind,
+    ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, EventsFrame, HandlerChild, InitFrame,
+    IsolatedChild, IsolatedWork, ParentFrame, ParentFrameRefusal, PythonProgram, RunFrame,
+    ServerSessions, SharedAsyncChild, SharedRunFrame, SharedThreadChild, SharedWork,
+    StoredOptionsRefusal, TaskKind,
 };
 pub use preload_frames::{
     decode_preload_frame, encode_preload_frame, PreloadFrame, SPAWN_REQUEST_BYTE,
@@ -130,4 +148,4 @@ pub use values::{
 
 /// The version of the frame content. `init` and `ready` carry it; a child
 /// or a parent that reads another number stops with a named mismatch.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;

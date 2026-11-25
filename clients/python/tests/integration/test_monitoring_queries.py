@@ -174,6 +174,17 @@ def ago(seconds: int) -> datetime:
     return datetime.now(UTC) - timedelta(seconds=seconds)
 
 
+def before(instant: datetime, seconds: int) -> datetime:
+    """The timestamp ``seconds`` before ``instant``.
+
+    The spans of the monitoring reads are exact to the microsecond. Times
+    built from one ``instant`` differ by whole seconds exactly; two calls of
+    ``ago`` read the clock twice, so their difference is a few microseconds
+    longer.
+    """
+    return instant - timedelta(seconds=seconds)
+
+
 def make_task(
     *,
     task_id: str | None = None,
@@ -199,7 +210,24 @@ def make_task(
     A terminal status is dated by whichever end timestamp the row carries,
     else now, which keeps aged fixtures aged: a row completed sixty days ago
     is terminal sixty days ago.
+
+    A CLAIMED or RUNNING row holds its claim generation (CHECK
+    ``horsies_tasks_claim_generation_by_status``): the claim took the row at
+    its ``enqueued_at``.
     """
+    enqueued = enqueued_at or ago(60)
+    claimed_at: datetime | None
+    match status:
+        case TaskStatus.CLAIMED | TaskStatus.RUNNING:
+            claimed_at = enqueued
+        case (
+            TaskStatus.PENDING
+            | TaskStatus.COMPLETED
+            | TaskStatus.FAILED
+            | TaskStatus.CANCELLED
+            | TaskStatus.EXPIRED
+        ):
+            claimed_at = None
     return task_row(
         task_id=task_id or str(uuid.uuid4()),
         task_name=task_name,
@@ -209,8 +237,8 @@ def make_task(
         retry_count=retry_count,
         max_retries=max_retries,
         is_workflow_task=is_workflow_task,
-        enqueued_at=enqueued_at or ago(60),
-        claimed_at=None,
+        enqueued_at=enqueued,
+        claimed_at=claimed_at,
         started_at=started_at,
         completed_at=completed_at,
         failed_at=failed_at,
@@ -2155,7 +2183,7 @@ class TestGetTaskDetail:
 class TestTaskDurations:
     """Which spans count up to now, and which report nothing at all."""
 
-    async def _only_row(self, broker: PostgresBroker) -> tuple[int | None, int | None]:
+    async def _only_row(self, broker: PostgresBroker) -> tuple[float | None, float | None]:
         result = await list_tasks(
             broker,
             window=_test_window(),
@@ -2206,56 +2234,59 @@ class TestTaskDurations:
     async def test_running_task_freezes_queue_time_and_counts_execution(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
+        now = datetime.now(UTC)
         await insert_rows(
             session,
             make_task(
                 status=TaskStatus.RUNNING,
-                enqueued_at=ago(60),
-                started_at=ago(40),
+                enqueued_at=before(now, 60),
+                started_at=before(now, 40),
             ),
         )
 
         queue_s, exec_s = await self._only_row(broker)
 
-        assert queue_s == 20
+        assert queue_s == 20.0
         assert exec_s is not None
         assert 40 <= exec_s <= _LIVE_SPAN_CEILING_S
 
     async def test_completed_task_reports_both_closed_spans(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
+        now = datetime.now(UTC)
         await insert_rows(
             session,
             make_task(
                 status=TaskStatus.COMPLETED,
-                enqueued_at=ago(90),
-                started_at=ago(60),
-                completed_at=ago(45),
+                enqueued_at=before(now, 90),
+                started_at=before(now, 60),
+                completed_at=before(now, 45),
             ),
         )
 
         queue_s, exec_s = await self._only_row(broker)
 
-        assert queue_s == 30
-        assert exec_s == 15
+        assert queue_s == 30.0
+        assert exec_s == 15.0
 
     async def test_failed_task_measures_execution_to_failed_at(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
+        now = datetime.now(UTC)
         await insert_rows(
             session,
             make_task(
                 status=TaskStatus.FAILED,
-                enqueued_at=ago(90),
-                started_at=ago(70),
-                failed_at=ago(55),
+                enqueued_at=before(now, 90),
+                started_at=before(now, 70),
+                failed_at=before(now, 55),
             ),
         )
 
         queue_s, exec_s = await self._only_row(broker)
 
-        assert queue_s == 20
-        assert exec_s == 15
+        assert queue_s == 20.0
+        assert exec_s == 15.0
 
     async def test_cancelled_before_start_reports_the_closed_queue_span(
         self, broker: PostgresBroker, session: AsyncSession
@@ -2264,33 +2295,41 @@ class TestTaskDurations:
 
         A history row always carries its terminal instant, so a task
         cancelled before starting reports the time it actually waited —
-        a closed span, never a live count-up — and no execution span.
+        a closed span, never a live count-up — and no execution span. The
+        terminal instant of a task that did not complete is its ``failed_at``.
         """
+        now = datetime.now(UTC)
         await insert_rows(
             session,
             make_task(
                 status=TaskStatus.CANCELLED,
-                enqueued_at=ago(300),
+                enqueued_at=before(now, 300),
+                failed_at=now,
                 error_code='TASK_CANCELLED',
             ),
         )
 
         queue_s, exec_s = await self._only_row(broker)
 
-        assert queue_s == 300
+        assert queue_s == 300.0
         assert exec_s is None
 
     async def test_expired_before_start_reports_the_closed_queue_span(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
+        now = datetime.now(UTC)
         await insert_rows(
             session,
-            make_task(status=TaskStatus.EXPIRED, enqueued_at=ago(300)),
+            make_task(
+                status=TaskStatus.EXPIRED,
+                enqueued_at=before(now, 300),
+                failed_at=now,
+            ),
         )
 
         queue_s, exec_s = await self._only_row(broker)
 
-        assert queue_s == 300
+        assert queue_s == 300.0
         assert exec_s is None
 
     async def test_detail_leaf_uses_the_same_spans_as_the_list_row(
@@ -2435,14 +2474,15 @@ class TestListWorkflowRuns:
     async def test_wall_time_counts_up_until_completion(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
+        now = datetime.now(UTC)
         await insert_rows(
             session,
-            make_workflow(name='open_flow', status='PAUSED', created_at=ago(45)),
+            make_workflow(name='open_flow', status='PAUSED', created_at=before(now, 45)),
             make_workflow(
                 name='closed_flow',
                 status='COMPLETED',
-                created_at=ago(200),
-                completed_at=ago(140),
+                created_at=before(now, 200),
+                completed_at=before(now, 140),
             ),
         )
 
@@ -2450,7 +2490,7 @@ class TestListWorkflowRuns:
 
         assert is_ok(result)
         walls = {run.name: run.wall_s for run in result.ok_value}
-        assert walls['closed_flow'] == 60
+        assert walls['closed_flow'] == 60.0
         open_wall = walls['open_flow']
         assert open_wall is not None
         assert 45 <= open_wall <= _LIVE_SPAN_CEILING_S
@@ -2586,33 +2626,34 @@ class TestGetWorkflowRun:
     ) -> None:
         run = make_workflow()
         await insert_rows(session, run)
+        now = datetime.now(UTC)
         await insert_rows(
             session,
             make_node(
                 workflow_id=run.id,
                 task_index=0,
                 status='RUNNING',
-                started_at=ago(35),
+                started_at=before(now, 35),
             ),
             make_node(
                 workflow_id=run.id,
                 task_index=1,
                 status='COMPLETED',
-                started_at=ago(90),
-                completed_at=ago(60),
+                started_at=before(now, 90),
+                completed_at=before(now, 60),
             ),
             make_node(
                 workflow_id=run.id,
                 task_index=2,
                 status='SKIPPED',
-                started_at=ago(90),
+                started_at=before(now, 90),
                 completed_at=None,
             ),
             make_node(
                 workflow_id=run.id,
                 task_index=3,
                 status='ENQUEUED',
-                started_at=ago(90),
+                started_at=before(now, 90),
             ),
         )
 
@@ -2625,7 +2666,7 @@ class TestGetWorkflowRun:
         running_exec = nodes[0].exec_s
         assert running_exec is not None
         assert 35 <= running_exec <= _LIVE_SPAN_CEILING_S
-        assert nodes[1].exec_s == 30
+        assert nodes[1].exec_s == 30.0
         assert nodes[2].exec_s is None
         assert nodes[3].exec_s is None
 

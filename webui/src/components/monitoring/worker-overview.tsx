@@ -3,24 +3,28 @@ import { useMemo, useState } from 'react';
 import { Activity, Cpu, Database, MemoryStick, RefreshCw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+import { Capsule } from '@/components/ui/capsule';
+import { PageHeader } from '@/components/ui/page-header';
 import { useNow } from '@/hooks/use-now';
 import {
   useClassReport,
-  useSchedules,
   useWorkerLiveness,
   useWorkers,
 } from '@/hooks/use-workers';
-import { formatElapsed, formatRelative, formatTime } from '@/lib/format-duration';
+import { assertNever } from '@/lib/exhaustive';
+import {
+  formatDuration,
+  formatMilliseconds,
+  formatRelative,
+  formatTime,
+} from '@/lib/format-duration';
 import { cn } from '@/lib/utils';
-import type { BudgetLoad, WorkerState } from '@/types/workers';
+import type {
+  BudgetLoad,
+  ClassReport,
+  SnapshotProfile,
+  WorkerState,
+} from '@/types/workers';
 
 import { budgetsOf } from './class-coverage';
 import {
@@ -29,8 +33,14 @@ import {
   ClassCoveragePanel,
   DownSlotList,
 } from './class-coverage-panel';
+import { SchedulesTable } from './schedules-table';
 import { ErrorState } from './states';
 import { WorkerHistoryChart } from './worker-history-chart';
+import {
+  WorkerProfilePanel,
+  type ClassReportRead,
+} from './worker-profile-panel';
+import { groupByProfile } from './worker-profiles';
 
 interface WorkerStatus {
   label: string;
@@ -48,6 +58,24 @@ function workerStatus(worker: WorkerState, responsive: boolean): WorkerStatus {
     return { label: 'stale', color: 'var(--muted-foreground)' };
   }
   return { label: 'no ping', color: 'var(--warning-dark)' };
+}
+
+/** The page header count: live workers, plus the stale ones when any exist. */
+function workerCountText(liveCount: number, staleCount: number): string {
+  const live = `${liveCount} live`;
+  return staleCount === 0 ? live : `${live} · ${staleCount} stale`;
+}
+
+/** The worker profile of a snapshot in a line of worker facts. */
+function profileText(profile: SnapshotProfile): string {
+  switch (profile.kind) {
+    case 'named':
+      return `profile ${profile.name}`;
+    case 'not_recorded':
+      return 'profile not recorded';
+    default:
+      return assertNever(profile, 'snapshot profile');
+  }
 }
 
 /** A thin labelled bar for a 0–100 percentage metric. */
@@ -99,6 +127,7 @@ function WorkerCard({
   budgets,
   responsive,
   focused,
+  showsProfile,
   onSelect,
 }: {
   worker: WorkerState;
@@ -106,6 +135,9 @@ function WorkerCard({
   budgets: BudgetLoad[] | undefined;
   responsive: boolean;
   focused: boolean;
+  /** Whether the card names the worker profile. A card inside the panel of
+   * its profile does not: the panel names it. */
+  showsProfile: boolean;
   onSelect: () => void;
 }) {
   const status = workerStatus(worker, responsive);
@@ -114,8 +146,8 @@ function WorkerCard({
       type="button"
       onClick={onSelect}
       className={cn(
-        'glass flex w-full flex-col gap-3 rounded-xl border border-border p-4 text-left transition-colors hover:bg-glass-surface-strong',
-        focused && 'ring-1 ring-primary',
+        'content-surface flex w-full flex-col gap-3 rounded-xl p-4 text-left transition-colors',
+        focused ? 'bg-accent-surface' : 'hover:bg-card-hover',
         !responsive && worker.stale && 'opacity-70'
       )}
     >
@@ -133,10 +165,11 @@ function WorkerCard({
           </div>
           <span className="font-mono text-11 text-muted-foreground">
             pid {worker.pid} · {worker.processes} proc
+            {showsProfile && ` · ${profileText(worker.profile)}`}
           </span>
         </div>
         <span
-          className="rounded-full border border-border px-2 py-0.5 text-10 font-medium"
+          className="rounded-full border border-hairline-strong px-2 py-0.5 text-10 font-medium"
           style={{ color: status.color }}
         >
           {status.label}
@@ -157,7 +190,7 @@ function WorkerCard({
           claimed
         </span>
         <span className="ml-auto" title={formatTime(worker.worker_started_at)}>
-          up {formatElapsed(worker.uptime_s)}
+          up {formatDuration(worker.uptime_s)}
         </span>
       </div>
 
@@ -204,7 +237,7 @@ function WorkerFocus({
 }) {
   const status = workerStatus(worker, responsive);
   return (
-    <div className="glass flex flex-col gap-4 rounded-xl border border-border p-4">
+    <div className="flex flex-col gap-4">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -218,12 +251,12 @@ function WorkerFocus({
             </span>
           </div>
           <span className="font-mono text-xs text-muted-foreground">
-            pid {worker.pid} · {worker.processes} proc · up{' '}
-            {formatElapsed(worker.uptime_s)}
+            {profileText(worker.profile)} · pid {worker.pid} ·{' '}
+            {worker.processes} proc · up {formatDuration(worker.uptime_s)}
           </span>
         </div>
         <span
-          className="rounded-full border border-border px-2.5 py-1 text-xs font-medium"
+          className="rounded-full border border-hairline-strong px-2.5 py-1 text-xs font-medium"
           style={{ color: status.color }}
         >
           {status.label}
@@ -234,7 +267,7 @@ function WorkerFocus({
         {worker.queues.map(queue => (
           <span
             key={queue}
-            className="rounded bg-muted px-1.5 py-0.5 font-mono text-10 text-muted-foreground"
+            className="rounded bg-glass-inset px-1.5 py-0.5 font-mono text-10 text-muted-foreground"
           >
             {queue}
             {worker.queue_max_concurrency[queue] === undefined
@@ -269,7 +302,7 @@ function WorkerFocus({
         icon={MemoryStick}
       />
 
-      <div className="flex flex-col gap-2 border-t border-border pt-3">
+      <div className="flex flex-col gap-2 border-t border-hairline pt-3">
         <span className="text-11 font-medium text-muted-foreground">
           Execution classes
         </span>
@@ -283,7 +316,7 @@ function WorkerFocus({
       </div>
 
       {worker.slot_health === 'slots_down' && (
-        <div className="flex flex-col gap-2 border-t border-border pt-3">
+        <div className="flex flex-col gap-2 border-t border-hairline pt-3">
           <span className="text-11 font-medium text-muted-foreground">
             Down slots
           </span>
@@ -291,11 +324,17 @@ function WorkerFocus({
         </div>
       )}
 
-      <div className="border-t border-border pt-3">
+      <div className="border-t border-hairline pt-3">
         <WorkerHistoryChart workerId={worker.worker_id} />
       </div>
     </div>
   );
+}
+
+/** The state of a reachable database: its round trip as a duration, or the
+ * word alone when the ping measured none. */
+function reachableText(latencyMs: number | null): string {
+  return latencyMs === null ? 'reachable' : `reachable · ${formatMilliseconds(latencyMs)}`;
 }
 
 function LivenessBanner({
@@ -321,10 +360,10 @@ function LivenessBanner({
       ? 'not pinged yet'
       : ageS < 5
         ? 'just now'
-        : `pinged ${formatElapsed(ageS)} ago`;
+        : `pinged ${formatRelative(new Date(lastPingedAt).toISOString())}`;
 
   return (
-    <div className="glass flex flex-wrap items-center gap-x-6 gap-y-2 rounded-xl border border-border px-4 py-3 text-sm">
+    <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
       <span className="flex items-center gap-2">
         <Database className="size-4 text-muted-foreground" />
         <span className="text-muted-foreground">Database</span>
@@ -342,7 +381,7 @@ function LivenessBanner({
             : liveness === undefined
               ? '…'
               : liveness.db_reachable
-                ? `reachable · ${liveness.db_latency_ms?.toFixed(1)} ms`
+                ? reachableText(liveness.db_latency_ms)
                 : 'unreachable'}
         </span>
       </span>
@@ -352,79 +391,40 @@ function LivenessBanner({
         <span className="font-medium tabular-nums">{responsiveCount}</span>
       </span>
       <span className="text-xs text-muted-foreground">{freshness}</span>
-      <Button
-        variant="outline"
-        size="sm"
-        className="ml-auto h-8"
-        onClick={onPing}
-        disabled={isFetching}
-        title="Re-ping workers (not polled automatically)"
-      >
-        <RefreshCw className={cn('size-3.5', isFetching && 'animate-spin')} />
-        {isFetching ? 'Pinging…' : 'Ping'}
-      </Button>
+      <Capsule className="ml-auto">
+        <Button
+          variant="capsule"
+          size="capsule"
+          onClick={onPing}
+          disabled={isFetching}
+          title="Re-ping workers (not polled automatically)"
+        >
+          <RefreshCw className={cn('size-3.5', isFetching && 'animate-spin')} />
+          {isFetching ? 'Pinging…' : 'Ping'}
+        </Button>
+      </Capsule>
     </div>
   );
 }
 
-function SchedulesTable() {
-  const { schedules, isLoading, isError } = useSchedules();
-  return (
-    <div className="glass overflow-hidden rounded-xl border border-border">
-      <div className="border-b border-border px-4 py-3 text-sm font-medium">
-        Schedules
-      </div>
-      {isError ? (
-        <div className="p-4">
-          <ErrorState compact message="Could not load schedules." />
-        </div>
-      ) : isLoading && schedules.length === 0 ? (
-        <p className="p-4 text-sm text-muted-foreground">Loading schedules…</p>
-      ) : schedules.length === 0 ? (
-        <p className="p-4 text-sm text-muted-foreground">
-          No schedules registered.
-        </p>
-      ) : (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Schedule</TableHead>
-              <TableHead>Last run</TableHead>
-              <TableHead>Next run</TableHead>
-              <TableHead className="text-right">Runs</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {schedules.map(schedule => (
-              <TableRow key={schedule.schedule_name}>
-                <TableCell className="font-mono text-xs">
-                  {schedule.schedule_name}
-                </TableCell>
-                <TableCell
-                  className="text-muted-foreground"
-                  title={formatTime(schedule.last_run_at)}
-                >
-                  {formatRelative(schedule.last_run_at)}
-                </TableCell>
-                <TableCell title={formatTime(schedule.next_run_at)}>
-                  {formatRelative(schedule.next_run_at)}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {schedule.run_count}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      )}
-    </div>
-  );
+/** Whether the class report was read. A report from an earlier read counts
+ * as read when a later read failed: its budgets stay on the page. */
+function classReportRead(
+  report: ClassReport | undefined,
+  isError: boolean
+): ClassReportRead {
+  if (report !== undefined) {
+    return 'loaded';
+  }
+  return isError ? 'failed' : 'loading';
 }
 
-/** Worker + scheduler overview: liveness banner, the pending rows per
- * execution class with fleet warnings, a worker list, a focused active worker
- * with its budgets, down slots and history charts on the right, and the
- * schedules table. */
+/** Worker + scheduler overview: page header and liveness row, the pending
+ * rows per execution class with fleet warnings, the live workers in groups of
+ * one worker profile with the budget load of each group, a focused active
+ * worker with its budgets, down slots and history charts on the right, and the
+ * schedules table. Sections sit flat on the window; only the worker cards are
+ * boxes. */
 export function WorkerOverview() {
   const { workers, isLoading, isError, refetch } = useWorkers();
   const {
@@ -478,15 +478,24 @@ export function WorkerOverview() {
     sorted[0] ??
     null;
 
+  // The count is shown only once a worker read has answered.
+  const countText =
+    workers.length > 0 || (!isLoading && !isError)
+      ? workerCountText(liveWorkers.length, staleWorkers.length)
+      : undefined;
+
   const banner = (
     <>
-      <LivenessBanner
-        responsiveCount={responsiveIds.size}
-        isFetching={isFetching}
-        isError={pingError}
-        lastPingedAt={lastPingedAt}
-        onPing={refresh}
-      />
+      <div className="flex flex-col gap-3 border-b border-hairline pb-4">
+        <PageHeader title="Workers">{countText}</PageHeader>
+        <LivenessBanner
+          responsiveCount={responsiveIds.size}
+          isFetching={isFetching}
+          isError={pingError}
+          lastPingedAt={lastPingedAt}
+          onPing={refresh}
+        />
+      </div>
       <ClassCoveragePanel
         report={report}
         isLoading={reportLoading}
@@ -498,7 +507,7 @@ export function WorkerOverview() {
 
   if (isError && workers.length === 0) {
     return (
-      <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-6">
         {banner}
         <ErrorState message="Could not load workers." onRetry={refetch} />
       </div>
@@ -510,7 +519,7 @@ export function WorkerOverview() {
     : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3';
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-6">
       {banner}
       {/* A failed poll never blanks the grid: stale rows stay visible beside
           the error banner so the operator is not left blind. */}
@@ -519,40 +528,56 @@ export function WorkerOverview() {
       )}
 
       {isLoading && workers.length === 0 ? (
-        <p className="glass rounded-xl border border-border p-4 text-sm text-muted-foreground">
-          Loading workers…
-        </p>
+        <p className="text-sm text-muted-foreground">Loading workers…</p>
       ) : workers.length === 0 ? (
-        <p className="glass rounded-xl border border-border p-6 text-sm text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           No workers have reported state. Is a horsies worker running?
         </p>
       ) : (
-        <div className="flex flex-col gap-4 lg:flex-row">
+        <div className="flex flex-col gap-6 lg:flex-row">
           <div
             className={cn(
-              'flex min-w-0 flex-col gap-4',
+              'flex min-w-0 flex-col gap-6',
               focusWorker ? 'lg:flex-1' : 'w-full'
             )}
           >
-            <div className={cn('grid gap-3', gridClass)}>
-              {liveWorkers.map(worker => (
-                <WorkerCard
-                  key={worker.worker_id}
-                  worker={worker}
-                  budgets={budgetsOf(report, worker.worker_id)}
-                  responsive={isResponsive(worker)}
-                  focused={focusWorker?.worker_id === worker.worker_id}
-                  onSelect={() => setFocusId(worker.worker_id)}
-                />
+            <section
+              aria-label="Workers by profile"
+              className="flex flex-col gap-3"
+            >
+              <span className="text-sm font-semibold">Workers by profile</span>
+              {liveWorkers.length === 0 && (
+                <p className="text-sm text-muted-foreground">No live worker.</p>
+              )}
+              {groupByProfile(liveWorkers, report).map(group => (
+                <WorkerProfilePanel
+                  key={group.key}
+                  group={group}
+                  reportRead={classReportRead(report, reportError)}
+                >
+                  <div className={cn('grid gap-3', gridClass)}>
+                    {group.workers.map(worker => (
+                      <WorkerCard
+                        key={worker.worker_id}
+                        worker={worker}
+                        budgets={budgetsOf(report, worker.worker_id)}
+                        responsive={isResponsive(worker)}
+                        focused={focusWorker?.worker_id === worker.worker_id}
+                        showsProfile={false}
+                        onSelect={() => setFocusId(worker.worker_id)}
+                      />
+                    ))}
+                  </div>
+                </WorkerProfilePanel>
               ))}
-            </div>
+            </section>
 
             {staleWorkers.length > 0 && (
               <div className="flex flex-col gap-3">
                 <Button
                   variant="ghost"
                   size="sm"
-                  className="glass self-start text-muted-foreground"
+                  className="self-start text-muted-foreground"
                   onClick={() => setShowStale(shown => !shown)}
                 >
                   {showStale ? 'Hide' : 'Show'} {staleWorkers.length} stale
@@ -567,6 +592,7 @@ export function WorkerOverview() {
                         budgets={budgetsOf(report, worker.worker_id)}
                         responsive={false}
                         focused={focusWorker?.worker_id === worker.worker_id}
+                        showsProfile
                         onSelect={() => setFocusId(worker.worker_id)}
                       />
                     ))}
@@ -579,7 +605,7 @@ export function WorkerOverview() {
           </div>
 
           {focusWorker && (
-            <aside className="shrink-0 self-start lg:sticky lg:top-4 lg:w-1/2">
+            <aside className="shrink-0 border-hairline max-lg:border-t max-lg:pt-6 lg:sticky lg:top-4 lg:w-1/2 lg:self-start lg:border-l lg:pl-6">
               <WorkerFocus
                 worker={focusWorker}
                 budgets={budgetsOf(report, focusWorker.worker_id)}

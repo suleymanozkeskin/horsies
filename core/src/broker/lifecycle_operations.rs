@@ -430,10 +430,14 @@ impl PostgresBroker {
     /// The function takes the task advisory lock, then the row lock. A
     /// PENDING or CLAIMED plain task (RUNNING only with `include_running`)
     /// moves to history as CANCELLED (`CANCEL_ADMIN`, error code
-    /// `TASK_CANCELLED`) with no attempt and no result; `task_done` and
-    /// `horsies_task_status` fire. A RUNNING task's code keeps running on its
-    /// worker. Every other task is refused with no write
-    /// ([`CancelAnswer`]).
+    /// `TASK_CANCELLED`) with no result; `task_done` and
+    /// `horsies_task_status` fire. A PENDING or CLAIMED task gets no attempt
+    /// row. A RUNNING task gets one attempt row with the outcome `CANCELLED`
+    /// (recorded by `CANCEL`, ended at the cancel) in the same statement, and
+    /// the cancel notice `horsies_task_cancel` goes to its worker at commit:
+    /// the worker gives the cancel to the running code, and writes nothing
+    /// for the attempt. Every other task is refused with no write and no
+    /// notice ([`CancelAnswer`]).
     ///
     /// Errors: [`CancelTaskError`].
     ///

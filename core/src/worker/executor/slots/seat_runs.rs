@@ -12,8 +12,21 @@
 //! | `SecondCancelReported` | `run_stuck` | `StuckReported` | async |
 //! | `NotReported` | `leftover_cancel` | `LeftoverCancelReported` | async |
 //! | `LeftoverCancelReported` | `leftover_stuck` | `LeftoverStuckReported` | async |
+//! | `NotReported` | the parent sends `cancel_run` | `CancelRequested` | async, thread |
+//! | `CancelRequested` | `cancel_fired` | `CancelReported` | async, thread |
+//! | `CancelRequested` | `deadline_fired` | `DeadlineReported` (the deadline came first in the child) | async, thread |
+//! | `CancelRequested` | `leftover_cancel` | `LeftoverCancelReported` (the body returned first) | async |
+//! | `CancelReported` | `second_cancel` | `CancelSecondReported` | async |
+//! | `CancelSecondReported` | `run_stuck` | `CancelStuckReported` | async |
+//! | `CancelReported` | `deadline_fired` | `CancelDeadlineReported` | thread |
 //! | any | `shared_result` finished | the run ends | every work |
-//! | not a leftover report | `shared_result` timed out | the run ends at its timeout | async, thread |
+//! | not a leftover report, no cancel report | `shared_result` timed out | the run ends at its timeout | async, thread |
+//! | a cancel report | `shared_result` cancelled | the run ends cancelled | async, thread |
+//!
+//! An operator cancel goes to a run only while its stop is not reported: a
+//! run that passed its deadline, or whose body returned, is ending already.
+//! Once the parent sent the cancel, every end of the run at a kill or a loss
+//! of its child is `Cancelled`: the cancel statement recorded the attempt.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -24,7 +37,8 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::dispatch::{
-    AttemptEnd, BodyReturn, CancelEnd, LoopKillCode, TimeoutCancel, TimeoutSeen,
+    AttemptEnd, BodyReturn, CancelEnd, CancelledEnd, LoopKillCode, SecondCancelAfterSignal,
+    TimeoutCancel, TimeoutSeen,
 };
 use super::pool::{MemoryLimit, TaskLimit};
 use super::shared_stop::{
@@ -33,10 +47,11 @@ use super::shared_stop::{
 };
 use crate::broker::attempt_writes::RetryPlacement;
 use crate::broker::child_writes::LONGEST_REFUSAL_WRITES_BOUND;
+use crate::events::AttemptStart;
 use crate::worker::executor::protocol::{
-    CancelGraceMs, DispatchNumber, FailureDetail, LeftoverCancelFrame, LeftoverStuckFrame,
-    LoopBlockedFrame, LoopCulprit, RssReading, RunRef, RunStuckFrame, SeatEnd, SharedResultFrame,
-    SharedWork, TaskTimeoutMs, LOOP_BLOCK_LIMIT, STUCK_REPORT_DELAY,
+    CancelGraceMs, CancelledBody, DispatchNumber, FailureDetail, LeftoverCancelFrame,
+    LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, RssReading, RunRef, RunStuckFrame, SeatEnd,
+    SharedResultFrame, SharedWork, TaskTimeoutMs, LOOP_BLOCK_LIMIT, STUCK_REPORT_DELAY,
 };
 use crate::worker::executor::supervisor::{ChildExit, ChildLost, LossCause};
 
@@ -104,11 +119,6 @@ impl RunWork {
 
 /// What the child reported about the stop of a run.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[expect(
-    clippy::enum_variant_names,
-    reason = "each variant is a report of the child, not the event itself: `DeadlineReported` \
-              is not the deadline; the rename would touch every shared-slot test"
-)]
 pub enum RunStopReport {
     NotReported,
     /// The deadline fired; an async child cancelled the run.
@@ -127,32 +137,95 @@ pub enum RunStopReport {
     LeftoverStuckReported {
         returned: BodyReturn,
     },
+    /// An operator cancelled the task: the parent sent `cancel_run`, and
+    /// the child has not reported that it applied it.
+    CancelRequested,
+    /// The child applied the cancel (`cancel_fired`).
+    CancelReported,
+    /// The cancel grace after the cancel ran out while the async run was
+    /// alive; the child sent the second cancel.
+    CancelSecondReported,
+    /// The run did not stop after that second cancel and its cancel rounds.
+    CancelStuckReported,
+    /// A thread run that the child applied the cancel to passed its
+    /// deadline: the thread runs on.
+    CancelDeadlineReported,
+}
+
+/// Whether the parent sent an operator cancel to a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperatorCancel {
+    NotSent,
+    Sent,
+}
+
+/// What the parent does with an operator cancel routed to a run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelSend {
+    /// Send `cancel_run` for the run; its report is `CancelRequested`.
+    Send(RunRef),
+    /// Send nothing: the run is a refusal with no task code, or its stop is
+    /// reported already (its deadline passed, or its body returned).
+    Skip,
 }
 
 impl RunStopReport {
     fn deadline_reported(&self) -> bool {
         match self {
-            Self::DeadlineReported | Self::SecondCancelReported | Self::StuckReported => true,
+            Self::DeadlineReported
+            | Self::SecondCancelReported
+            | Self::StuckReported
+            | Self::CancelDeadlineReported => true,
             Self::NotReported
             | Self::LeftoverCancelReported { .. }
-            | Self::LeftoverStuckReported { .. } => false,
+            | Self::LeftoverStuckReported { .. }
+            | Self::CancelRequested
+            | Self::CancelReported
+            | Self::CancelSecondReported
+            | Self::CancelStuckReported => false,
+        }
+    }
+
+    /// Whether the parent sent an operator cancel to the run. A run whose
+    /// deadline or return the child reported first keeps that report.
+    pub fn operator_cancel(&self) -> OperatorCancel {
+        match self {
+            Self::CancelRequested
+            | Self::CancelReported
+            | Self::CancelSecondReported
+            | Self::CancelStuckReported
+            | Self::CancelDeadlineReported => OperatorCancel::Sent,
+            Self::NotReported
+            | Self::DeadlineReported
+            | Self::SecondCancelReported
+            | Self::StuckReported
+            | Self::LeftoverCancelReported { .. }
+            | Self::LeftoverStuckReported { .. } => OperatorCancel::NotSent,
         }
     }
 
     /// Whether the run has no time left: a thread run past its deadline,
-    /// an async run that is stuck.
+    /// an async run that is stuck. A cancelled async run that is not stuck
+    /// still has time: it is never a reason to kill its child.
     pub fn out_of_time(&self, kind: SharedChildKind) -> bool {
         match (kind, self) {
             (SharedChildKind::Thread, report) => report.deadline_reported(),
-            (SharedChildKind::Async, Self::StuckReported | Self::LeftoverStuckReported { .. }) => {
-                true
-            }
+            (
+                SharedChildKind::Async,
+                Self::StuckReported
+                | Self::LeftoverStuckReported { .. }
+                | Self::CancelStuckReported,
+            ) => true,
             (
                 SharedChildKind::Async,
                 Self::NotReported
                 | Self::DeadlineReported
                 | Self::SecondCancelReported
-                | Self::LeftoverCancelReported { .. },
+                | Self::LeftoverCancelReported { .. }
+                | Self::CancelRequested
+                | Self::CancelReported
+                | Self::CancelSecondReported
+                | Self::CancelDeadlineReported,
             ) => false,
         }
     }
@@ -353,6 +426,10 @@ impl<P> SeatRuns<P> {
         let seat = self.checked(frame.run)?;
         let end = match (frame.end, &seat.report, seat.work) {
             (SeatEnd::Finished(end), _, _) => AttemptEnd::reported(end, frame.started_at),
+            (SeatEnd::Cancelled(body), report, _) => {
+                cancelled_end_of(body, report, frame.started_at)
+                    .ok_or(out_of_turn(frame.run, OutOfTurn::StepOutOfOrder))?
+            }
             (
                 SeatEnd::TimedOut,
                 RunStopReport::LeftoverCancelReported { .. }
@@ -362,6 +439,14 @@ impl<P> SeatRuns<P> {
             | (SeatEnd::TimedOut, _, RunWork::Refusal) => {
                 return Err(out_of_turn(frame.run, OutOfTurn::NoSuchStep))
             }
+            (
+                SeatEnd::TimedOut,
+                RunStopReport::CancelReported
+                | RunStopReport::CancelSecondReported
+                | RunStopReport::CancelStuckReported
+                | RunStopReport::CancelDeadlineReported,
+                _,
+            ) => return Err(out_of_turn(frame.run, OutOfTurn::StepOutOfOrder)),
             (SeatEnd::TimedOut, report, RunWork::AsyncTask { timeout, .. }) => {
                 AttemptEnd::TimedOut {
                     timeout,
@@ -389,21 +474,78 @@ impl<P> SeatRuns<P> {
     }
 
     /// Mark that the deadline of a run fired (Python `_note_deadline`).
-    /// Returns its timeout, for the log.
+    /// Returns its timeout, for the log. A deadline that fired in the child
+    /// before it read an operator cancel is the deadline report; a thread
+    /// run that the child applied the cancel to runs on past its deadline.
     pub fn note_deadline(&mut self, run: RunRef) -> Result<TaskTimeoutMs, FrameOutOfTurn> {
         let seat = self.checked(run)?;
-        let timeout = match (seat.work, &seat.report) {
+        let (timeout, report) = match (seat.work, &seat.report) {
             (
                 RunWork::AsyncTask { timeout, .. } | RunWork::ThreadTask { timeout },
-                RunStopReport::NotReported,
-            ) => timeout,
+                RunStopReport::NotReported | RunStopReport::CancelRequested,
+            ) => (timeout, RunStopReport::DeadlineReported),
+            (RunWork::ThreadTask { timeout }, RunStopReport::CancelReported) => {
+                (timeout, RunStopReport::CancelDeadlineReported)
+            }
             (RunWork::Refusal, _) => return Err(out_of_turn(run, OutOfTurn::NoSuchStep)),
             (RunWork::AsyncTask { .. } | RunWork::ThreadTask { .. }, _) => {
                 return Err(out_of_turn(run, OutOfTurn::StepOutOfOrder))
             }
         };
-        seat.report = RunStopReport::DeadlineReported;
+        seat.report = report;
         Ok(timeout)
+    }
+
+    /// Note an operator cancel routed to run `dispatch`: a run of task code
+    /// whose stop is not reported gets `cancel_run`, and its report is
+    /// `CancelRequested`. A run that ended before the route is not in flight:
+    /// `Skip`.
+    pub fn note_cancel_sent(&mut self, dispatch: DispatchNumber) -> CancelSend {
+        let Some(seat) = self.runs.get_mut(&dispatch) else {
+            return CancelSend::Skip;
+        };
+        match (seat.work, &seat.report) {
+            (
+                RunWork::AsyncTask { .. } | RunWork::ThreadTask { .. },
+                RunStopReport::NotReported,
+            ) => {
+                seat.report = RunStopReport::CancelRequested;
+                CancelSend::Send(seat.run)
+            }
+            (RunWork::Refusal, _)
+            | (
+                RunWork::AsyncTask { .. } | RunWork::ThreadTask { .. },
+                RunStopReport::DeadlineReported
+                | RunStopReport::SecondCancelReported
+                | RunStopReport::StuckReported
+                | RunStopReport::LeftoverCancelReported { .. }
+                | RunStopReport::LeftoverStuckReported { .. }
+                | RunStopReport::CancelRequested
+                | RunStopReport::CancelReported
+                | RunStopReport::CancelSecondReported
+                | RunStopReport::CancelStuckReported
+                | RunStopReport::CancelDeadlineReported,
+            ) => CancelSend::Skip,
+        }
+    }
+
+    /// Mark that the child applied the operator cancel of a run
+    /// (`cancel_fired`). Valid only after the parent sent it.
+    pub fn note_cancel_fired(&mut self, run: RunRef) -> Result<(), FrameOutOfTurn> {
+        let seat = self.checked(run)?;
+        match (seat.work, &seat.report) {
+            (RunWork::Refusal, _) => Err(out_of_turn(run, OutOfTurn::NoSuchStep)),
+            (
+                RunWork::AsyncTask { .. } | RunWork::ThreadTask { .. },
+                RunStopReport::CancelRequested,
+            ) => {
+                seat.report = RunStopReport::CancelReported;
+                Ok(())
+            }
+            (RunWork::AsyncTask { .. } | RunWork::ThreadTask { .. }, _) => {
+                Err(out_of_turn(run, OutOfTurn::StepOutOfOrder))
+            }
+        }
     }
 
     /// Record a step of the stop of an async run (Python
@@ -429,7 +571,18 @@ impl<P> SeatRuns<P> {
                 RunStopReport::StuckReported,
                 StopStep::Close(CloseReason::AtDeadline { culprit: run }),
             ),
-            (StopReportFrame::LeftoverCancel(cancel), RunStopReport::NotReported) => (
+            (StopReportFrame::SecondCancel(_), RunStopReport::CancelReported) => (
+                RunStopReport::CancelSecondReported,
+                StopStep::Close(CloseReason::SecondCancel),
+            ),
+            (StopReportFrame::RunStuck(_), RunStopReport::CancelSecondReported) => (
+                RunStopReport::CancelStuckReported,
+                StopStep::Close(CloseReason::SecondCancel),
+            ),
+            (
+                StopReportFrame::LeftoverCancel(cancel),
+                RunStopReport::NotReported | RunStopReport::CancelRequested,
+            ) => (
                 RunStopReport::LeftoverCancelReported {
                     returned: BodyReturn {
                         end: cancel.returned.clone(),
@@ -638,22 +791,36 @@ pub fn deadline_state<P>(seat: &SeatRun<P>, closer: CloseCulprit, now: Instant) 
     }
     match (&seat.report, seat.work) {
         (RunStopReport::StuckReported, _) => DeadlineState::Culprit,
-        (RunStopReport::DeadlineReported | RunStopReport::SecondCancelReported, _) => {
-            DeadlineState::Passed
-        }
+        (
+            RunStopReport::DeadlineReported
+            | RunStopReport::SecondCancelReported
+            | RunStopReport::CancelDeadlineReported,
+            _,
+        ) => DeadlineState::Passed,
         (
             RunStopReport::LeftoverCancelReported { .. }
             | RunStopReport::LeftoverStuckReported { .. },
             _,
         ) => DeadlineState::Pending,
         (
-            RunStopReport::NotReported,
+            RunStopReport::NotReported
+            | RunStopReport::CancelRequested
+            | RunStopReport::CancelReported
+            | RunStopReport::CancelSecondReported
+            | RunStopReport::CancelStuckReported,
             RunWork::AsyncTask { timeout, .. } | RunWork::ThreadTask { timeout },
         ) => match now >= seat.sent_at + Duration::from_millis(timeout.get()) {
             true => DeadlineState::Passed,
             false => DeadlineState::Pending,
         },
-        (RunStopReport::NotReported, RunWork::Refusal) => DeadlineState::Pending,
+        (
+            RunStopReport::NotReported
+            | RunStopReport::CancelRequested
+            | RunStopReport::CancelReported
+            | RunStopReport::CancelSecondReported
+            | RunStopReport::CancelStuckReported,
+            RunWork::Refusal,
+        ) => DeadlineState::Pending,
     }
 }
 
@@ -666,7 +833,12 @@ fn retry_after_timeout(report: &RunStopReport) -> RetryPlacement {
         | RunStopReport::DeadlineReported
         | RunStopReport::SecondCancelReported
         | RunStopReport::LeftoverCancelReported { .. }
-        | RunStopReport::LeftoverStuckReported { .. } => RetryPlacement::SameClass,
+        | RunStopReport::LeftoverStuckReported { .. }
+        | RunStopReport::CancelRequested
+        | RunStopReport::CancelReported
+        | RunStopReport::CancelSecondReported
+        | RunStopReport::CancelStuckReported
+        | RunStopReport::CancelDeadlineReported => RetryPlacement::SameClass,
     }
 }
 
@@ -677,9 +849,9 @@ fn retry_after_timeout(report: &RunStopReport) -> RetryPlacement {
 /// timeout ([`SeatRuns::end_run`] refuses it first): a defect. Pure.
 fn cancel_end_of(report: &RunStopReport) -> CancelEnd {
     match report {
-        RunStopReport::NotReported | RunStopReport::DeadlineReported => {
-            CancelEnd::ReturnedAfterSignal
-        }
+        RunStopReport::NotReported
+        | RunStopReport::DeadlineReported
+        | RunStopReport::CancelRequested => CancelEnd::ReturnedAfterSignal,
         RunStopReport::SecondCancelReported | RunStopReport::StuckReported => {
             CancelEnd::DroppedAfterGrace
         }
@@ -687,6 +859,60 @@ fn cancel_end_of(report: &RunStopReport) -> CancelEnd {
         | RunStopReport::LeftoverStuckReported { .. } => {
             unreachable!("a run that returned before its deadline has no cancel end ({report:?})")
         }
+        RunStopReport::CancelReported
+        | RunStopReport::CancelSecondReported
+        | RunStopReport::CancelStuckReported
+        | RunStopReport::CancelDeadlineReported => unreachable!(
+            "a run that its child cancelled for an operator never ends as a timeout ({report:?})"
+        ),
+    }
+}
+
+/// The end of a run that its child reported `cancelled` with `body`, by its
+/// report: dropped after the grace when the child sent the second cancel
+/// after `cancel_fired`. `None` when the child reported no `cancel_fired`
+/// for the run: the frame is out of turn. Pure.
+fn cancelled_end_of(
+    body: CancelledBody,
+    report: &RunStopReport,
+    start: AttemptStart,
+) -> Option<AttemptEnd> {
+    let dropped = match report {
+        RunStopReport::CancelReported | RunStopReport::CancelDeadlineReported => {
+            SecondCancelAfterSignal::NotSent
+        }
+        RunStopReport::CancelSecondReported | RunStopReport::CancelStuckReported => {
+            SecondCancelAfterSignal::Sent
+        }
+        RunStopReport::NotReported
+        | RunStopReport::DeadlineReported
+        | RunStopReport::SecondCancelReported
+        | RunStopReport::StuckReported
+        | RunStopReport::LeftoverCancelReported { .. }
+        | RunStopReport::LeftoverStuckReported { .. }
+        | RunStopReport::CancelRequested => return None,
+    };
+    Some(AttemptEnd::Cancelled(CancelledEnd::reported(
+        body, dropped, start,
+    )))
+}
+
+/// The end of a run that the parent sent an operator cancel to, at a kill
+/// or a loss of its child: the cancel recorded the attempt, so it is
+/// `Cancelled` whatever ended the child. `None` for a run with no cancel.
+/// Pure.
+fn cancelled_at_loss(report: &RunStopReport, cause: LossCause) -> Option<AttemptEnd> {
+    match report.operator_cancel() {
+        OperatorCancel::NotSent => None,
+        OperatorCancel::Sent => Some(AttemptEnd::Cancelled(match cause {
+            LossCause::KilledByParent => CancelledEnd::ChildKilled,
+            LossCause::ChildDied
+            | LossCause::ChannelLost
+            | LossCause::ProtocolViolation
+            | LossCause::ProtocolMismatch(_)
+            | LossCause::SlotDefect
+            | LossCause::SpawnerStopped => CancelledEnd::ChildLost,
+        })),
     }
 }
 
@@ -764,6 +990,9 @@ pub fn end_at_loss<P>(
     loss: SeenLoss,
     now: Instant,
 ) -> AttemptEnd {
+    if let Some(cancelled) = cancelled_at_loss(&seat.report, loss.0.cause) {
+        return cancelled;
+    }
     match (&seat.report, loss.0.cause) {
         (
             RunStopReport::LeftoverCancelReported { returned }
@@ -799,6 +1028,9 @@ pub fn end_past_deadlines<P>(
     kind: SharedChildKind,
     reason: CloseReason,
 ) -> AttemptEnd {
+    if let Some(cancelled) = cancelled_at_loss(&seat.report, LossCause::KilledByParent) {
+        return cancelled;
+    }
     match (kind, &seat.report, reason) {
         (SharedChildKind::Async, RunStopReport::LeftoverStuckReported { returned }, _) => {
             AttemptEnd::returned(returned.clone())
@@ -859,17 +1091,27 @@ pub fn first_backstop(work: RunWork) -> Duration {
 /// backstop always kills.
 pub fn due_step_reported(work: RunWork, report: &RunStopReport) -> bool {
     match (work, report) {
+        // A thread run that the child applied a cancel to runs on: the
+        // child answered, and the thread may pass its deadline with no
+        // report.
+        (RunWork::ThreadTask { .. }, RunStopReport::CancelReported) => true,
         (RunWork::ThreadTask { .. }, report) => report.deadline_reported(),
         (
             RunWork::AsyncTask { .. },
             RunStopReport::SecondCancelReported
             | RunStopReport::StuckReported
             | RunStopReport::LeftoverCancelReported { .. }
-            | RunStopReport::LeftoverStuckReported { .. },
+            | RunStopReport::LeftoverStuckReported { .. }
+            | RunStopReport::CancelSecondReported
+            | RunStopReport::CancelStuckReported,
         ) => true,
         (
             RunWork::AsyncTask { .. },
-            RunStopReport::NotReported | RunStopReport::DeadlineReported,
+            RunStopReport::NotReported
+            | RunStopReport::DeadlineReported
+            | RunStopReport::CancelRequested
+            | RunStopReport::CancelReported
+            | RunStopReport::CancelDeadlineReported,
         ) => false,
         (RunWork::Refusal, _) => false,
     }
@@ -879,11 +1121,17 @@ pub fn due_step_reported(work: RunWork, report: &RunStopReport) -> bool {
 /// or after the cancel of the work it left.
 pub fn stuck_step_reported(report: &RunStopReport) -> bool {
     match report {
-        RunStopReport::StuckReported | RunStopReport::LeftoverStuckReported { .. } => true,
+        RunStopReport::StuckReported
+        | RunStopReport::LeftoverStuckReported { .. }
+        | RunStopReport::CancelStuckReported => true,
         RunStopReport::NotReported
         | RunStopReport::DeadlineReported
         | RunStopReport::SecondCancelReported
-        | RunStopReport::LeftoverCancelReported { .. } => false,
+        | RunStopReport::LeftoverCancelReported { .. }
+        | RunStopReport::CancelRequested
+        | RunStopReport::CancelReported
+        | RunStopReport::CancelSecondReported
+        | RunStopReport::CancelDeadlineReported => false,
     }
 }
 

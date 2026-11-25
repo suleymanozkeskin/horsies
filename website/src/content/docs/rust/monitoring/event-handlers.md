@@ -12,12 +12,21 @@ The worker emits one event at each step of a task and of its children. A handler
 ## Register a Handler
 
 ```rust
-use horsies::events::{AttemptEnded, HandlerError, TaskClaimed};
+use horsies::events::{AttemptEnd, AttemptEnded, ChildResult, HandlerError, TaskClaimed};
 use horsies::{Horsies, HorsiesError};
 
 async fn record_attempt_end(event: AttemptEnded) -> Result<(), HandlerError> {
+    let how = match &event.end {
+        AttemptEnd::ReportedByChild { result: ChildResult::Completed, .. } => "completed".to_owned(),
+        AttemptEnd::ReportedByChild { result: ChildResult::Cancelled { end }, .. } => {
+            format!("cancelled ({end:?})")
+        }
+        AttemptEnd::ReportedByChild { .. } => "failed".to_owned(),
+        AttemptEnd::DecidedByWorker { reason, .. } => format!("{reason:?}"),
+        AttemptEnd::NotKnown { .. } => "not known".to_owned(),
+    };
     println!(
-        "task {} attempt {} ended after {:?}",
+        "task {} attempt {} {how} after {:?}",
         event.task_id,
         event.attempt.get(),
         event.run_duration
@@ -109,7 +118,8 @@ With the feature `otel`, a task body runs inside its attempt span in the task ch
 - an isolated task killed at its timeout (`TASK_TIMEOUT`);
 - a run past its deadline in a shared child that the worker killed (`TASK_TIMEOUT`);
 - a shared async child killed for a blocked runtime (`TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`);
-- a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`).
+- a child lost before it reported the end, with its exit seen (`WORKER_CRASHED`);
+- a child that the worker killed, or that was lost, after an operator cancel of its task (`TASK_CANCELLED`).
 
 The `AttemptEnded` event of such an attempt is `AttemptEnd::DecidedByWorker`. A shared run that its child ended at its deadline is not one of them: its child reports the timeout (`AttemptEnd::ReportedByChild` with `ChildResult::TimedOut`), and the span of the child has `TASK_TIMEOUT`. One attempt has one span.
 

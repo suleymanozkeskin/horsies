@@ -9,7 +9,7 @@ from typing import ClassVar
 from horsies._catalog.error_detail import NoCause
 from horsies._catalog.workflow_start import WorkflowStartErrorCode
 
-__all__ = ['WorkflowStartValidationFailed', 'WorkflowStartIdConflict', 'WorkflowStartEnqueueFailed', 'WorkflowStartAsyncContext', 'WorkflowStartCoreError']
+__all__ = ['WorkflowStartValidationFailed', 'WorkflowStartIdConflict', 'WorkflowStartCommandConflict', 'WorkflowStartEnqueueFailed', 'WorkflowStartAsyncContext', 'WorkflowStartCoreError']
 
 
 @dataclass(slots=True, frozen=True)
@@ -44,6 +44,26 @@ class WorkflowStartIdConflict:
     workflow_name: str
     workflow_id: str
     existing_workflow_name: str
+
+
+@dataclass(slots=True, frozen=True)
+class WorkflowStartCommandConflict:
+    """The workflow id holds a run that another start command started. Nothing was written.
+
+    The run has the name of this start. Its stored start command (the
+    nodes, their inputs and options, and the workflow settings) differs
+    from the command of this start, or the run is a sub-workflow, which has
+    no start command. ``workflow_id`` is the id of that run. A start with
+    this id must send the same command; another command is refused again,
+    so send the same command or use another id. The retry methods refuse
+    this error.
+    """
+
+    code: ClassVar[WorkflowStartErrorCode] = WorkflowStartErrorCode.WORKFLOW_COMMAND_CONFLICT
+    retryable: ClassVar[bool] = False
+    message: str = field(repr=False)
+    workflow_name: str
+    workflow_id: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -84,6 +104,7 @@ class WorkflowStartAsyncContext:
 type WorkflowStartCoreError = (
     WorkflowStartValidationFailed
     | WorkflowStartIdConflict
+    | WorkflowStartCommandConflict
     | WorkflowStartEnqueueFailed
     | WorkflowStartAsyncContext
 )

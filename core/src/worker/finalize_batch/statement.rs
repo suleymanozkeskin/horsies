@@ -3,7 +3,8 @@
 //!
 //! - One statement in autocommit for 1 to 64 rows of one worker: the task
 //!   ids, the claim generations and the result texts as arrays, the worker
-//!   id once, and the wake as the constant TRUE. The function calls
+//!   id once, the wake as the constant TRUE, and the placement of each
+//!   attempt as two arrays (kinds, slot waits). The function calls
 //!   `horsies_complete_task_fused` once per row in task id order; each row
 //!   keeps its own fence and outcome, and the rows of one queue send one
 //!   capacity wake.
@@ -30,15 +31,18 @@ use crate::db::{
 
 /// `horsies_complete_tasks_fused`. Parameters in order: task ids, claim
 /// generations, result texts (one element per row, in input order), worker
-/// id. The wake argument is the constant TRUE (as Python).
+/// id, placement kinds and slot waits in microseconds (one element per row,
+/// in input order). The wake argument is the constant TRUE (as Python).
 pub(crate) static COMPLETE_PLAIN_SUCCESSES: TypedStatement = TypedStatement::new(
     "complete_plain_successes",
-    "SELECT * FROM horsies_complete_tasks_fused($1, $2, $3, $4, TRUE)",
+    "SELECT * FROM horsies_complete_tasks_fused($1, $2, $3, $4, TRUE, $5, $6)",
     &[
         ParameterType::UuidArray,
         ParameterType::TimestamptzArray,
         ParameterType::TextArray,
         ParameterType::Text,
+        ParameterType::TextArray,
+        ParameterType::Int8Array,
     ],
 );
 
@@ -81,6 +85,16 @@ pub(crate) async fn complete_plain_successes(
         .iter()
         .map(|row| row.result_json.as_str())
         .collect();
+    let placement_kinds: Vec<&str> = batch
+        .rows()
+        .iter()
+        .map(|row| row.placement.kind_sql())
+        .collect();
+    let slot_waits_us: Vec<Option<i64>> = batch
+        .rows()
+        .iter()
+        .map(|row| row.placement.slot_wait_us())
+        .collect();
     let statement = &COMPLETE_PLAIN_SUCCESSES;
     let bound = statement
         .bind()
@@ -88,6 +102,8 @@ pub(crate) async fn complete_plain_successes(
         .value(&claimed_ats)
         .value(&results)
         .value(&worker_id)
+        .value(&placement_kinds)
+        .value(&slot_waits_us)
         .finish();
     log.log(statement);
     let rows = pool

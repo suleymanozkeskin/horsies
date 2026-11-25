@@ -70,6 +70,7 @@ fn crash_write(task_id: Uuid, retry: RetryRequest) -> FinishFailedAttempt {
             error_message: Some("the child exited".to_owned()),
             failed_reason: Some("the child exited".to_owned()),
         },
+        placement: crate::core::lifecycle::AttemptPlacement::NotObserved,
     }
 }
 
@@ -335,15 +336,16 @@ async fn finalizer_row_lock_wins_reaper_race() {
 
     // The success takes the task lock again in the finalizer's session and
     // reads the row the finalizer holds.
-    let outcome: String =
-        sql::query_scalar("SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4)")
-            .bind(task_id)
-            .bind(WORKER)
-            .bind(generation())
-            .bind(r#"{"ok": 1}"#)
-            .fetch_one(&mut *finalizer)
-            .await
-            .expect("workflow success");
+    let outcome: String = sql::query_scalar(
+        "SELECT outcome FROM horsies_finish_workflow_success($1, $2, $3, $4, 'NOT_OBSERVED', NULL)",
+    )
+    .bind(task_id)
+    .bind(WORKER)
+    .bind(generation())
+    .bind(r#"{"ok": 1}"#)
+    .fetch_one(&mut *finalizer)
+    .await
+    .expect("workflow success");
     assert_eq!(outcome, "APPLIED");
     finalizer.commit().await.expect("commit the finalizer");
 

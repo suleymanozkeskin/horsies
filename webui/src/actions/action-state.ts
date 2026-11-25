@@ -20,7 +20,10 @@ export type ActionState =
   | { phase: 'settling'; action: ActionKind; deadlineAt: number }
   | { phase: 'conflict'; action: ActionKind; currentStatus: string | null }
   | { phase: 'gone'; action: ActionKind }
-  | { phase: 'failed'; action: ActionKind; detail: string | null };
+  | { phase: 'failed'; action: ActionKind; detail: string | null }
+  /** 500: the server cannot complete the request; a retry gives the same
+   * result, so this phase has no retry. */
+  | { phase: 'refused'; action: ActionKind; detail: string | null };
 
 export type ActionPhase = ActionState['phase'];
 
@@ -35,6 +38,7 @@ export type ActionEvent =
   | { type: 'workflow-managed' }
   | { type: 'forbidden' }
   | { type: 'unavailable'; detail: string | null }
+  | { type: 'refused'; detail: string | null }
   | { type: 'network-error' }
   | { type: 'verify-observed'; at: number }
   | { type: 'verify-not-observed'; detail: string | null }
@@ -114,6 +118,11 @@ export function actionReducer(
         ? { phase: 'failed', action: state.action, detail: event.detail }
         : state;
 
+    case 'refused':
+      return state.phase === 'submitting'
+        ? { phase: 'refused', action: state.action, detail: event.detail }
+        : state;
+
     case 'network-error':
       return state.phase === 'submitting'
         ? { phase: 'verifying', action: state.action }
@@ -141,7 +150,11 @@ export function actionReducer(
       return state.phase === 'conflict' ? IDLE : state;
 
     case 'acknowledged':
-      return state.phase === 'gone' || state.phase === 'failed' ? IDLE : state;
+      return state.phase === 'gone' ||
+        state.phase === 'failed' ||
+        state.phase === 'refused'
+        ? IDLE
+        : state;
 
     case 'retry':
       return state.phase === 'failed'

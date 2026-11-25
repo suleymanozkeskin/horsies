@@ -2,7 +2,12 @@
 
 use sha2::{Digest, Sha256};
 
+use super::registry::is_retained;
+
 pub const ARCHIVE_VERSION_1: i16 = 1;
+/// Version 2 of the attempt archive: the phase record of each attempt and the
+/// open attempt (migration 1001). The other domains have version 1 only.
+pub const ARCHIVE_VERSION_2: i16 = 2;
 pub const JSON_UTF8_CODEC: &str = "json-utf8";
 pub const JSON_CONTENT_TYPE: &str = "application/json";
 /// Codec of history rows at `history_schema_version` 1 (transcode component `HistoryRow`).
@@ -64,13 +69,16 @@ pub fn decode_history_row_version(version: i16) -> Result<i16, ArchiveDecodeErro
     }
 }
 
+/// Checks the envelope of a stored value of `domain`: a version that the
+/// domain retains ([`is_retained`]), the `json-utf8` codec and the
+/// `application/json` content type. Pure.
 pub fn validate_envelope_contract(
     domain: ArchiveDomain,
     version: i16,
     codec: &str,
     content_type: &str,
 ) -> Result<(), ArchiveDecodeError> {
-    if version != ARCHIVE_VERSION_1 {
+    if !is_retained(domain, version) {
         return Err(ArchiveDecodeError::UnknownVersion { domain, version });
     }
     if codec != JSON_UTF8_CODEC {

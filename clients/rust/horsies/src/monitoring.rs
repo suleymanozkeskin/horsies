@@ -32,21 +32,28 @@ use crate::Horsies;
 
 pub use horsies_core::monitoring::resolve_monitoring_window;
 pub use horsies_core::monitoring::{
-    categorize_error_code, elapsed_s, span_s, task_action_outcome, ActionBody, ActionConflictCode,
+    categorize_error_code, elapsed, span, task_action_outcome, ActionBody, ActionConflictCode,
     ActionOutcome, ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, BudgetLoadInfo,
     CancelTaskBody, ClassReportInfo, DownSlotInfo, ErrorCategory, ErrorFacet, FacetValue, Facets,
     GroupRow, HistoryContractSource, HistoryWindow, LeafTaskInfo, LivenessReport,
     MonitoringQueryError, MonitoringQueryErrorCode, MonitoringQueryErrorSource, MonitoringResult,
-    PaginationRefused, PendingStreamInfo, ScheduleStateInfo, SlotHealthKind, SortDirection,
-    StatusCount, StreamCoverageInfo, StreamWaitInfo, TaskAbsenceReason, TaskActionError,
-    TaskActionErrorCode, TaskActionResult, TaskAttemptInfo, TaskBreakdownQuery, TaskCancelled,
-    TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskGroupBy,
-    TaskListPage, TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary, WindowRefused,
-    WorkerClassLoadInfo, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowEdge,
-    WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery, WorkflowTaskDetail,
-    INTERNAL_SERVER_ERROR_TEXT, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
-    MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT, MONITORING_WINDOW_MAX,
-    RESUME_RECOVERY_WARNING, STATE_CONFLICT,
+    PaginationRefused, PendingStreamInfo, ScheduleStateInfo, SlotHealthKind, SnapshotProfileInfo,
+    SortDirection, StatusCount, StreamCoverageInfo, StreamWaitInfo, TaskAbsenceReason,
+    TaskActionError, TaskActionErrorCode, TaskActionResult, TaskAttemptInfo, TaskBreakdownQuery,
+    TaskCancelled, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters,
+    TaskGroupBy, TaskListPage, TaskListQuery, TaskSortField, TaskStatsQuery, TaskSummary,
+    WindowRefused, WorkerClassLoadInfo, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo,
+    WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail, WorkflowRunSummary, WorkflowRunsQuery,
+    WorkflowTaskDetail, INTERNAL_SERVER_ERROR_TEXT, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT,
+    MAX_TASK_PAGE_LIMIT, MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT, MONITORING_WINDOW_DEFAULT,
+    MONITORING_WINDOW_MAX, RESUME_RECOVERY_WARNING, STATE_CONFLICT,
+};
+pub use horsies_core::monitoring::{
+    AttemptClaimsInfo, AttemptFinalizingInfo, AttemptPhasesInfo, AttemptPlacementInfo,
+    AttemptRecordedByInfo, MissingRecord, NodeEndpointInfo, NodeTimingInfo, PauseEndInfo,
+    PauseIntervalInfo, RunConflictInfo, RunCoverageInfo, RunTimingInfo, SegmentClaimInfo,
+    SegmentEndInfo, SegmentPhaseInfo, SegmentSourceInfo, TerminalNodeStatus, TimingBoundary,
+    TimingConflictInfo, TimingSegmentInfo, UnavailableReason, UnknownReason, WorkflowEventKind,
 };
 
 /// The count of each task status over the live table and the history
@@ -119,10 +126,12 @@ pub async fn list_workflow_runs(
     core_monitoring::list_workflow_runs(&broker, query).await
 }
 
-/// The run `workflow_id` with its nodes and edges, or `None` when no run
-/// has the id.
+/// The run `workflow_id` with its nodes, edges and phase timing
+/// ([`RunTimingInfo`] on the run, [`NodeTimingInfo`] on each node), or
+/// `None` when no run has the id. One statement reads the run.
 ///
-/// Errors: `DB_OPERATION_FAILED`.
+/// Errors: `DB_OPERATION_FAILED`; `HISTORY_CONTRACT_VIOLATION` for an
+/// attempt archive that does not decode.
 pub async fn get_workflow_run(
     app: &Horsies,
     workflow_id: Uuid,
@@ -157,6 +166,15 @@ pub async fn list_schedules(app: &Horsies) -> MonitoringResult<Vec<ScheduleState
 /// `horsies.monitoring.cancel_task`). PENDING and CLAIMED are eligible;
 /// RUNNING only with `include_running`. Writes.
 ///
+/// A RUNNING task moves at once, and the same statement records its running
+/// attempt with the outcome `CANCELLED`. The worker that runs it gets the
+/// cancel notice and gives the cancel to the task code:
+/// `TaskRuntime::cancelled()` completes, `TaskRuntime::is_cancelled()` is
+/// `true`, and `TaskRuntime::cancel_state()` is `Requested` with the cause
+/// `Operator`. Code that does not stop runs on until it returns; what it
+/// returns is dropped. An `ISOLATED` task with `cancel_grace_ms` is killed
+/// with its child that long after the cancel reached it.
+///
 /// Errors: `TASK_NOT_FOUND`, `TASK_IS_WORKFLOW_TASK`,
 /// `TASK_NOT_CANCELLABLE` (with the current status), `STORED_DATA_INVALID`,
 /// and `DB_OPERATION_FAILED`, also for a failed connect (nothing written).
@@ -184,7 +202,8 @@ pub async fn cancel_task_action(
 
 /// Pause the workflow `workflow_id`, answered as the web route
 /// `POST /api/workflows/{id}/pause` answers it: 200, 404, 409 with the
-/// current status, or 503 (a failed connect too). Writes.
+/// current status, or a database failure (a failed connect too): 503 when
+/// the cause may clear, 500 when it stays. Writes.
 pub async fn pause_workflow_action(app: &Horsies, workflow_id: Uuid) -> ActionOutcome {
     action(app, "Workflow pause", |broker| async move {
         core_monitoring::pause_workflow_action(&broker, workflow_id).await
@@ -246,7 +265,9 @@ fn connect_failed(operation: &str, error: BrokerError) -> MonitoringQueryError {
 }
 
 /// Run the workflow action `run` on `app`'s broker; a failed connect is
-/// answered 503 with the cause (`<subject> failed: <cause>`).
+/// answered with the cause (`<subject> failed: <cause>`), 503 when the cause
+/// may clear and 500 when it stays
+/// ([`core_monitoring::connect_failed_action`]).
 ///
 /// # Panics
 ///
@@ -260,7 +281,7 @@ where
     refuse_in_a_fork(format_args!("{subject}"));
     match app.reads_handle().broker().await {
         Ok(broker) => run(broker).await,
-        Err(error) => core_monitoring::connect_failed_action(&format!("{subject} failed: {error}")),
+        Err(error) => core_monitoring::connect_failed_action(subject, &error),
     }
 }
 

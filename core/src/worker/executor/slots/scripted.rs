@@ -24,19 +24,19 @@ use super::dispatch::{AttemptEnd, ClaimedTask, ExecutionClass, RetryFacts, TaskK
 use super::pool::{
     ExitNotSeen, IsolatedPool, IsolatedPoolConfig, MemoryLimit, Submitted, TaskLimit,
 };
-use super::route::IsolatedDeadline;
+use super::route::{IsolatedCancelStop, IsolatedDeadline};
 use super::shared::{SharedPool, SharedPoolConfig};
 use crate::worker::executor::placement::ChildCpus;
 use crate::worker::executor::protocol::{
     encode_child_frame, encode_parent_frame, AsyncSeats, BlockedWhere, BodyEnd, BootDetail,
-    BootErrorName, BootFailedFrame, CancelGraceMs, ChildAfterFrame, ChildConnection, ChildFrame,
-    ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl, DispatchNumber,
-    ExecutorThreads, InitFrame, IsolatedChild, IsolatedWork, LeftoverCancelFrame, LeftoverName,
-    LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame, PoolMaxSize,
-    PoolMinSize, ProcessId, ReadyFrame, ReportedBootCause, ResultEnvelopeText, ResultFrame,
-    RssReading, RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd, SharedAsyncChild,
-    SharedResultFrame, SharedThreadChild, SharedWork, ShortageErrno, StuckWork, TaskInputText,
-    TaskSendPool, TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
+    BootErrorName, BootFailedFrame, CancelGraceMs, CancelledBody, CancelledLoop, ChildAfterFrame,
+    ChildConnection, ChildFrame, ChildKind, ChildLogLevel, ChildPool, ChildProgram, DatabaseUrl,
+    DispatchNumber, ExecutorThreads, InitFrame, IsolatedChild, IsolatedWork, LeftoverCancelFrame,
+    LeftoverName, LeftoverStuckFrame, LoopBlockedFrame, LoopCulprit, NoLeftWork, ParentFrame,
+    PoolMaxSize, PoolMinSize, ProcessId, ReadyFrame, ReportedBootCause, ResultEnvelopeText,
+    ResultFrame, RssReading, RunCancelledFrame, RunEnd, RunFrame, RunRef, RunStuckFrame, SeatEnd,
+    SharedAsyncChild, SharedResultFrame, SharedThreadChild, SharedWork, ShortageErrno, StuckWork,
+    TaskInputText, TaskSendPool, TaskTimeoutMs, ThreadSeats, HEADER_BYTES,
 };
 use crate::worker::executor::supervisor::{ChildCommand, Spawner, CHILD_KILL_WAIT};
 use crate::worker::retry::read_stored_options;
@@ -234,6 +234,40 @@ pub(super) fn shared_result_with_rss(run: RunRef, value: u32, rss: RssReading) -
             started_at: started_at(),
         },
         rss,
+        child: ChildAfterFrame::ServesOn,
+    })
+}
+
+/// The child applied the operator cancel to the shared run.
+pub(super) fn cancel_fired(run: RunRef) -> ChildFrame {
+    ChildFrame::CancelFired(run)
+}
+
+/// A shared run that an operator cancelled ended; its body ran or not.
+pub(super) fn shared_cancelled(run: RunRef, body: CancelledBody) -> ChildFrame {
+    ChildFrame::SharedResult(SharedResultFrame {
+        run,
+        end: SeatEnd::Cancelled(body),
+        started_at: crate::events::AttemptStart::Reported {
+            started_at: started_at(),
+        },
+        rss: RssReading::Unreadable,
+        child: ChildAfterFrame::ServesOn,
+    })
+}
+
+/// An isolated `task` that an operator cancelled ended, with `task_loop`.
+pub(super) fn run_cancelled(
+    task: &ClaimedTask,
+    body: CancelledBody,
+    task_loop: CancelledLoop,
+) -> ChildFrame {
+    ChildFrame::RunCancelled(RunCancelledFrame {
+        task_id: task.task_id,
+        body,
+        started_at: started_at(),
+        rss: RssReading::Unreadable,
+        task_loop,
         child: ChildAfterFrame::ServesOn,
     })
 }
@@ -673,12 +707,32 @@ pub(super) fn start_shared(
     board: &Arc<PoolBoard>,
     config: SharedPoolConfig,
 ) -> SharedPool {
-    SharedPool::start(
-        config,
-        Arc::clone(board),
-        spawner.handle(),
-        LiveDispatches::default(),
-    )
+    start_shared_with_live(spawner, board, config, LiveDispatches::default())
+}
+
+/// As [`start_shared`], on the registry of held dispatches `live`, through
+/// which a test routes an operator cancel.
+pub(super) fn start_shared_with_live(
+    spawner: &Spawner,
+    board: &Arc<PoolBoard>,
+    config: SharedPoolConfig,
+    live: LiveDispatches,
+) -> SharedPool {
+    SharedPool::start(config, Arc::clone(board), spawner.handle(), live)
+}
+
+/// An isolated pool of `slots` slots, alone on its board, on the registry
+/// of held dispatches `live`, through which a test routes an operator
+/// cancel.
+pub(super) fn start_isolated_with_live(
+    spawner: &Spawner,
+    slots: usize,
+    config: IsolatedPoolConfig,
+    live: LiveDispatches,
+) -> (IsolatedPool, Arc<PoolBoard>) {
+    let board = Arc::new(PoolBoard::new(layout(slots, 0, 0)));
+    let pool = IsolatedPool::start(config, Arc::clone(&board), spawner.handle(), live);
+    (pool, board)
 }
 
 /// The receiver of a task that the pool queued.
@@ -696,6 +750,16 @@ pub(super) fn submit_isolated(
     deadline: IsolatedDeadline,
 ) -> oneshot::Receiver<AttemptEnd> {
     queued(pool.submit(task, input(), IsolatedWork::Run, deadline))
+}
+
+/// Queue `task` on an isolated pool, with the stop of an operator cancel.
+pub(super) fn submit_isolated_with_cancel_stop(
+    pool: &IsolatedPool,
+    task: &ClaimedTask,
+    deadline: IsolatedDeadline,
+    cancel_stop: IsolatedCancelStop,
+) -> oneshot::Receiver<AttemptEnd> {
+    queued(pool.submit_with_cancel_stop(task, input(), IsolatedWork::Run, deadline, cancel_stop))
 }
 
 /// The one answer of a task, within [`ANSWER_WAIT`].

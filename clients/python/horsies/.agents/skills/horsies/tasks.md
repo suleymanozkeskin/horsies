@@ -31,7 +31,7 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 | `error_codes` | `type[Enum] \| tuple[str, ...]` | `()` | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. They are the values of the task's `error_code` metric label besides the built-in codes and `undeclared`; another user code counts as `undeclared` there. The values of the task's `exception_mapper` and of `AppConfig.exception_mapper` are added with no second declaration. The task function keeps the codes in `task_error_codes`; `horsies check` lists them. |
 | `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed, and after the child exits the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`, and a retry never runs next to the killed attempt. A deadline that fires before user code starts requeues the task instead, also after the exit. If the child does not exit within 30 s of the kill, nothing is written and stale-task recovery takes the task; with stale RUNNING recovery off, the worker writes the row once it sees the exit (a stop ends that wait). Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
 | `execution` | `Execution` | `Execution.ISOLATED` | How a worker runs the task. `ISOLATED`: `def` or `async def`, `timeout_ms` optional. `SHARED_ASYNC`: `async def` only, `timeout_ms` required. `SHARED_THREAD`: `def` only, `timeout_ms` required. Every task row stores the class (`horsies_tasks.execution`), and a worker claims each class into the budget its claim plan routes it to (a worker with isolated children only runs every class isolated). |
-| `cancel_grace_ms` | `int \| None` | `None` | `SHARED_ASYNC` only: the time to stop after a cancel, from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). `None` stores `DEFAULT_CANCEL_GRACE_MS` (1,000). The stored options hold the value in effect at send. |
+| `cancel_grace_ms` | `int \| None` | `None` | The time to stop after a cancel, from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). `SHARED_ASYNC`: the time to the second cancel (at the deadline and after an operator cancel); `None` stores `DEFAULT_CANCEL_GRACE_MS` (1,000). `ISOLATED`: the time from an operator cancel to the kill of the child when the task has not stopped; `None` stores nothing, and the cancel is cooperative only. `SHARED_THREAD`: refused (`HRS-110`). The stored options hold the value in effect at send. |
 
 `good_until` is **not** accepted at definition time — it is a per-send concern. Passing it raises `HRS-102`. Use `.with_options(good_until=...)` at send time instead. For workflow nodes, use `.node(good_until=...)`.
 
@@ -45,8 +45,8 @@ def my_task(*, ...) -> TaskResult[T, TaskError]: ...
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
 - Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
-- `execution` rules, one code each, checked in this order (the first broken rule is reported): `SHARED_ASYNC` on a `def` function — `HRS-107`; `SHARED_THREAD` on an `async def` function — `HRS-108`; `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` — `HRS-109`; `cancel_grace_ms` with a class other than `SHARED_ASYNC` — `HRS-110`; `cancel_grace_ms` outside 100 to 10,000 — `HRS-111`. A value that is not an `Execution` member raises `HRS-102`.
-- With `execution` written as a member, a type checker refuses the same declarations: the overloads require `timeout_ms` for a shared class and take `cancel_grace_ms` only with `SHARED_ASYNC`, and the decorator they return accepts only the function kind of the class. A class known only at run time requires `timeout_ms`.
+- `execution` rules, one code each, checked in this order (the first broken rule is reported): `SHARED_ASYNC` on a `def` function — `HRS-107`; `SHARED_THREAD` on an `async def` function — `HRS-108`; `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` — `HRS-109`; `cancel_grace_ms` with `SHARED_THREAD` — `HRS-110`; `cancel_grace_ms` outside 100 to 10,000 — `HRS-111`. A value that is not an `Execution` member raises `HRS-102`.
+- With `execution` written as a member, a type checker refuses the same declarations: the overloads require `timeout_ms` for a shared class and refuse `cancel_grace_ms` with `SHARED_THREAD`, and the decorator they return accepts only the function kind of the class. A class known only at run time requires `timeout_ms`.
 
 Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]` for an `async def` function.
 
@@ -67,7 +67,7 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 
 - A worker profile with `shared_thread=SharedThreadChildren(count, seats)` runs `SHARED_THREAD` rows on shared thread children: one process runs up to `seats` such `def` tasks at once, each on a seat thread started at boot, and a free seat takes the next task at once. `seats` is 1 to 256. A worker with no shared thread children runs them in isolated children; its other children never run one. A `SHARED_THREAD` row whose function is now `async def` is written `ISOLATED` and returned to the queue before dispatch. A row without a usable stored `timeout_ms` fails with `WORKER_SERIALIZATION_ERROR` on every worker.
 - When threads help (Linux, 4 CPUs, CPython 3.13 and 3.14): C code that releases the GIL (zlib, hashlib) scales with threads on every build, 4 threads 2.6 to 3.8 times one; pure-Python code gains nothing on a standard build (0.56 to 1.02 times) and scales on a free-threaded build (1.9 to 3.6 times); more threads than CPUs added nothing. Sync I/O waits release the GIL.
-- Timeout: a thread cannot be cancelled. At `timeout_ms` the child reports the deadline and closes (no new task); the task runs on. When every task still in the child is past its own deadline, the worker kills the child with its session; after the exit each of those tasks gets `TASK_TIMEOUT`, its retry and its workflow step; the task whose deadline closed the child retries isolated. A task alone in its child is killed at its deadline. A neighbour with time left runs to its end. A task that ends by itself after its deadline is `TASK_TIMEOUT`. A child that has not reported a deadline by `timeout_ms + 10 s` is frozen (C code holds the GIL) and killed: each task past its deadline gets `TASK_TIMEOUT`, the others take the crash path; no new culprit is named, and the task whose deadline already closed the child retries isolated (also at the drain deadline of a stop).
+- Timeout: a thread cannot be stopped from outside. At `timeout_ms` the child reports the deadline, sets the cancel state of the run to `CancelRequested(cause=CancelCause.DEADLINE)` when no operator cancel came first, and closes (no new task); the task runs on. When every task still in the child is past its own deadline, the worker kills the child with its session; after the exit each of those tasks gets `TASK_TIMEOUT`, its retry and its workflow step; the task whose deadline closed the child retries isolated. A task alone in its child is killed at its deadline. A neighbour with time left runs to its end. A task that ends by itself after its deadline is `TASK_TIMEOUT`. A child that has not reported a deadline by `timeout_ms + 10 s` is frozen (C code holds the GIL) and killed: each task past its deadline gets `TASK_TIMEOUT`, the others take the crash path; no new culprit is named, and the task whose deadline already closed the child retries isolated (also at the drain deadline of a stop).
 - Author rules: the function runs next to itself on other threads; no module state without a lock; `timeout_ms` is required, and each blocking call needs its own timeout below it; a timeout closes the child and the kill ends every task still in it; a crash of the child ends every task in it.
 - The RUNNING update and the finalizing marker run on the seat thread, on the one sync pool of the child (`SharedThreadChildren.pool`, derived from the seats by default; a thread waits up to 30 s for a connection). The worker process writes the runner heartbeats.
 - Recycling: as for shared async children (`SharedRecycle`).
@@ -83,6 +83,38 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 - A thread of `asyncio.to_thread()` that outlives its task is not waited for and does not cause a replacement. At the stop, the child does not wait for it past the close (at most 7 seconds): it exits, and `atexit` handlers do not run. An idle executor does not count: its shutdown gets at least 1 second, and so does the close of the async generators.
 - In an `async def` task, send with `.send_async()` / `.schedule_async()`. The sync `.send()` / `.schedule()` return `Err(TaskSendAsyncContext)` there and enqueue nothing.
 - An exception, a wrong return, and the exception mappers give the same `TaskResult` as in a `def` task.
+
+### Cancellation
+
+- An operator cancel of a running task (`cancel_task(broker, task_id, include_running=True)`, or the web UI) moves the task to history as `CANCELLED` at once, and writes its attempt row with outcome `CANCELLED` (`finished_at` = the cancel time, `recorded_by` `CANCEL`), in one statement. A waiting `handle.get()` returns `TASK_CANCELLED`. What the task returns after the cancel is dropped.
+- The worker gives the cancel to the task code: a `NOTIFY` on `horsies_task_cancel`; a lost notice is found by one read after a listener reconnect, or after a runner heartbeat of the run that does not land (at most `runner_heartbeat_interval_ms`, default 30 s).
+- `async def` body (isolated or shared async): `asyncio.CancelledError` at the next `await`. Let it propagate; catch it only to clean up, then raise it again.
+- `def` body (isolated or shared thread): read the cancel state. The first parameter `runtime: TaskRuntime` (before the `*`) gives the run; `runtime.cancel_state()` returns `CancelNotRequested()` or `CancelRequested(cause)`. `CancelCause`: `OPERATOR` (an operator cancel), `DEADLINE` (the deadline of a `SHARED_ASYNC` or `SHARED_THREAD` run). The first cause stays.
+- A cancel after the start of the run and before the body starts: the body does not run.
+- Code that does not stop: `ISOLATED` runs until it returns or its `timeout_ms` kill; with `cancel_grace_ms` on the task, the worker kills the child `cancel_grace_ms` after the cancel. `SHARED_ASYNC`: after `cancel_grace_ms` the second cancel and the cancel rounds; the child closes; a stuck run keeps its seat until no task in the child has time left. `SHARED_THREAD`: the thread runs until it returns.
+- An isolated `async def` body that leaves asyncio tasks after a cancel: the child does not wait for them, and the worker replaces the child.
+- Tests: `TaskRuntime.for_test(task_id=..., cancel_state=CancelRequested(cause=CancelCause.OPERATOR))` gives a runtime with a fixed cancel state.
+
+```python
+from horsies import CancelNotRequested, CancelRequested, TaskRuntime
+
+
+def import_batch(batch_id: str) -> None:
+    ...  # stands in for one step of the work
+
+
+@app.task('import_batches', timeout_ms=600_000, cancel_grace_ms=5_000)
+def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> TaskResult[int, TaskError]:
+    done = 0
+    for batch_id in batch_ids:
+        match runtime.cancel_state():
+            case CancelRequested():
+                break  # what the task returns after a cancel is dropped
+            case CancelNotRequested():
+                import_batch(batch_id)
+                done += 1
+    return TaskResult(ok=done)
+```
 
 ## `TaskResult[T, TaskError]`
 
@@ -435,14 +467,14 @@ attempts: list[TaskAttemptInfo] | None       # opt-in: include_attempts=True (No
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 task_id: UUID, attempt: int
-outcome: TaskAttemptOutcome  # COMPLETED, FAILED, WORKER_FAILURE
+outcome: TaskAttemptOutcome  # COMPLETED, FAILED, WORKER_FAILURE, CANCELLED
 will_retry: bool
 started_at: datetime, finished_at: datetime
 error_code: str | None, error_message: str | None, failed_reason: str | None
 worker_id: str | None, worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | None
 ```
 
-`TaskAttemptOutcome`: `COMPLETED` (success), `FAILED` (domain/library error or recoverable worker/process failure represented as a TaskResult), `WORKER_FAILURE` (legacy/rare worker failure path without a usable TaskResult).
+`TaskAttemptOutcome`: `COMPLETED` (success), `FAILED` (domain/library error or recoverable worker/process failure represented as a TaskResult), `WORKER_FAILURE` (legacy/rare worker failure path without a usable TaskResult), `CANCELLED` (an operator cancelled the running task; the cancel wrote the row, and `finished_at` is the cancel time).
 
 `TaskStatus`: `PENDING -> CLAIMED -> RUNNING -> COMPLETED | FAILED | CANCELLED | EXPIRED`. `is_terminal` is `True` for `COMPLETED`, `FAILED`, `CANCELLED`, `EXPIRED`. `EXPIRED` means the task's `good_until` deadline passed before execution started (either PENDING or CLAIMED).
 
@@ -815,6 +847,8 @@ from horsies import (
     Horsies, AppConfig, PostgresConfig,
     # Task result types
     TaskResult, TaskError, SubWorkflowError, TaskInfo, TaskAttemptInfo,
+    # The run of a task: cancel state
+    TaskRuntime, RunCancelState, CancelNotRequested, CancelRequested, CancelCause,
     # Error code families
     BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
     # Retry

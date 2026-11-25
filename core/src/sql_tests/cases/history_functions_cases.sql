@@ -274,7 +274,8 @@ SELECT fixture_task((SELECT id FROM ids WHERE name = 'plain'), 'RUNNING', 'forev
 SELECT fixture_attempt((SELECT id FROM ids WHERE name = 'plain'), 1);
 SELECT fixture_attempt((SELECT id FROM ids WHERE name = 'plain'), 2);
 CREATE TEMP TABLE expected_snapshot AS
-    SELECT horsies_encode_task_attempts((SELECT id FROM ids WHERE name = 'plain')) AS snapshot;
+    SELECT horsies_encode_attempt_archive(t) AS snapshot
+    FROM horsies_tasks AS t WHERE t.id = (SELECT id FROM ids WHERE name = 'plain');
 SELECT fixture_move((SELECT id FROM ids WHERE name = 'plain'), 'FAILED', 'FAIL_RUNNING', now(), '{"error":"x"}',
     'E1', 'boom');
 SELECT fixture_check(
@@ -288,8 +289,11 @@ SELECT fixture_check(
                          AND convert_from(h.rerun_input_inline, 'UTF8')
                              = '{"input":{"a":1},"options":{"retry":null}}'
                          AND h.rerun_input_digest = sha256(h.rerun_input_inline))
-            AND bool_and(h.attempt_snapshot = (SELECT snapshot FROM expected_snapshot)
-                         AND h.attempt_snapshot_digest = sha256(h.attempt_snapshot))
+            AND bool_and(h.attempt_archive_version = 2
+                         AND h.attempt_snapshot = (SELECT snapshot FROM expected_snapshot)
+                         AND h.attempt_snapshot_digest = sha256(h.attempt_snapshot)
+                         AND jsonb_array_length(convert_from(h.attempt_snapshot, 'UTF8')::jsonb -> 0) = 2
+                         AND (convert_from(h.attempt_snapshot, 'UTF8')::jsonb -> 1) = 'null'::jsonb)
             AND bool_and(h.last_claimed_worker_id = 'w1' AND h.last_worker_pid = 7 AND h.workflow_id IS NULL)
      FROM horsies_task_history AS h WHERE h.task_id = (SELECT id FROM ids WHERE name = 'plain'))
 );
@@ -648,8 +652,17 @@ SELECT fixture_check(
     AND NOT EXISTS (
         SELECT 1 FROM horsies_task_attempts WHERE task_id IN (SELECT id FROM ids WHERE name LIKE 'batch\_%')
     )
-    AND (SELECT convert_from(h.attempt_snapshot, 'UTF8') LIKE '[[1,"FAILED",true,%'
+    AND (SELECT h.attempt_archive_version = 2
+                AND convert_from(h.attempt_snapshot, 'UTF8') LIKE '[[[1,"FAILED",true,%],null]'
+                AND h.attempt_snapshot_digest = sha256(h.attempt_snapshot)
          FROM horsies_task_history AS h WHERE h.task_id = (SELECT id FROM ids WHERE name = 'batch_keyed'))
+);
+-- batch_plain has no attempt row: its attempt 1 is open, with the claim facts of the live row (written with no
+-- claim count).
+SELECT fixture_check(
+    'batch: a row with no attempt row keeps its open attempt in version 2',
+    (SELECT h.attempt_archive_version = 2 AND convert_from(h.attempt_snapshot, 'UTF8') = '[[],[null,null,null]]'
+     FROM horsies_task_history AS h WHERE h.task_id = (SELECT id FROM ids WHERE name = 'batch_plain'))
 );
 CREATE TEMP TABLE history_count AS SELECT count(*) AS n FROM horsies_task_history;
 SELECT horsies_move_tasks_to_history('{}'::uuid[], 'EXPIRED', 'EXPIRE_PENDING', now(), NULL, NULL, NULL);

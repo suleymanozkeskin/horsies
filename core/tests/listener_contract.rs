@@ -29,6 +29,10 @@ const NOTIFY: TypedStatement = TypedStatement::new(
 const TASK_DONE: &str = "task_done";
 const TASK_NEW: &str = "task_new";
 
+/// A channel whose notification marks the end of the notifications sent
+/// before it.
+const FENCE: &str = "fence";
+
 /// The bound of each wait for an event that must come.
 const EVENT_BOUND: Duration = Duration::from_secs(15);
 
@@ -252,16 +256,35 @@ async fn subscriptions_dropped_during_a_burst_leave_the_others_receiving() {
 /// Python `TestFanoutErrorPaths.test_bounded_queue_drops_on_full`: a full
 /// subscription drops its oldest payload and reads `Overflowed` once; a
 /// subscription with room gets every payload.
+///
+/// The listener gives one notification to its subscribers one at a time, in
+/// the order of its registry. Thus a payload in `control` does not show that
+/// `bounded` holds that payload too. The `fence` payload shows it:
+/// - The pool sends the four notifications one after the other, each in its
+///   own transaction. PostgreSQL delivers notifications of different
+///   transactions in commit order, across channels.
+/// - `drive_connection` gives each notification to every subscriber before
+///   it reads the next one.
+///
+/// When `fence` reads its payload, `bounded` and `control` hold all three
+/// task ids.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_full_subscription_drops_payloads_and_the_others_get_theirs() {
     let database = ListenerDatabase::create().await;
     let bounded = database.subscribe(TASK_DONE, 1).await;
     let control = database.subscribe(TASK_DONE, QUEUE_SIZE).await;
+    let fence = database.subscribe(FENCE, QUEUE_SIZE).await;
     let task_ids: Vec<String> = (0..3).map(|_| Uuid::new_v4().to_string()).collect();
+    let fence_payload = Uuid::new_v4().to_string();
 
     for task_id in &task_ids {
         database.notify(TASK_DONE, task_id).await;
     }
+    database.notify(FENCE, &fence_payload).await;
+    assert_eq!(
+        next_event(&fence).await,
+        PayloadEvent::Payload(fence_payload)
+    );
 
     for task_id in &task_ids {
         assert_eq!(
@@ -278,7 +301,7 @@ async fn a_full_subscription_drops_payloads_and_the_others_get_theirs() {
         stays_silent(&bounded).await,
         "a queue of one holds one payload"
     );
-    drop((bounded, control));
+    drop((bounded, control, fence));
     database.remove().await;
 }
 

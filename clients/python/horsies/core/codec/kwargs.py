@@ -9,7 +9,9 @@ Strict binding: every kwarg key must correspond to a named parameter
 the receiver actually declares. Unknown keys, user-supplied
 engine-injected names (`workflow_ctx` / `workflow_meta`), and
 user-supplied TaskResult-typed kwargs (the engine populates those via
-`args_from`) all fail closed producer-side.
+`args_from`) all fail closed producer-side. So does a kwarg that names the
+first parameter of a task that takes its `TaskRuntime`: the worker passes the
+runtime by position on each run (`runtime_parameter_of`).
 
 Decode-side mirrors the producer: unknown kwarg names on the wire fail
 closed. Engine transport keys (`__h_*` prefix) and TaskResult-typed
@@ -51,12 +53,16 @@ from horsies.core.codec.typed import (
     validate_omitted_default,
 )
 from horsies.core.models.tasks import TaskResult
+from horsies.core.task_runtime import TaskRuntime
 from horsies.core.types.result import Err, Ok, Result
 
 
 __all__ = [
     'KwargBinding',
     'MissingKwargs',
+    'NoRuntimeParameter',
+    'RuntimeParameter',
+    'TakesRuntime',
     'build_with_engine_parameters',
     'decode_kwargs',
     'declared_taskresult_ok_type',
@@ -69,8 +75,11 @@ __all__ = [
     'resolve_build_with_hints',
     'resolve_hints_and_sig',
     'resolve_producer_kwarg_binding',
+    'runtime_parameter_of',
     'subworkflow_target_ok_type',
+    'task_runtime_parameter',
     'underlying_task_fn',
+    'without_runtime_parameter',
 ]
 
 
@@ -107,6 +116,104 @@ function. A producer-side value would either be silently overwritten
 or collide with the engine injection; rejecting at encode is the
 honest contract.
 """
+
+
+@dataclass(frozen=True, slots=True)
+class TakesRuntime:
+    """The first parameter of the task function, ``name``, takes the
+    ``TaskRuntime`` of the run. The worker passes the runtime by position on
+    each run; a producer never supplies it."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class NoRuntimeParameter:
+    """The task function takes no ``TaskRuntime``."""
+
+
+type RuntimeParameter = TakesRuntime | NoRuntimeParameter
+
+
+_POSITIONAL_KINDS: Final = (
+    inspect.Parameter.POSITIONAL_ONLY,
+    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+)
+"""The parameter kinds that the runtime parameter can have: the worker passes
+the runtime by position."""
+
+
+def runtime_parameter_of(
+    sig: inspect.Signature,
+    hints: Mapping[str, Any],
+) -> RuntimeParameter:
+    """The parameter of a task function that takes its ``TaskRuntime``.
+
+    It is the first parameter, when that parameter is positional and its hint
+    is exactly ``TaskRuntime``. Any other place or form of ``TaskRuntime`` is
+    refused at registration (``check_task_signature``). Pure.
+    """
+    parameters = list(sig.parameters.values())
+    if not parameters:
+        return NoRuntimeParameter()
+    first = parameters[0]
+    if first.kind in _POSITIONAL_KINDS and hints.get(first.name) is TaskRuntime:
+        return TakesRuntime(name=first.name)
+    return NoRuntimeParameter()
+
+
+def task_runtime_parameter(task_fn: Callable[..., Any]) -> RuntimeParameter:
+    """``runtime_parameter_of`` for a task wrapper or its function.
+
+    A callable whose hints do not resolve takes no runtime, the same as in
+    ``encode_kwargs_read_back``: ``@app.task`` refuses a function whose hints
+    do not resolve, so only a bare callable reaches that case.
+    """
+    resolved = resolve_hints_and_sig(underlying_task_fn(task_fn))
+    if resolved is None:
+        return NoRuntimeParameter()
+    hints, sig = resolved
+    return runtime_parameter_of(sig, hints)
+
+
+def without_runtime_parameter(
+    sig: inspect.Signature,
+    runtime: RuntimeParameter,
+) -> inspect.Signature:
+    """``sig`` without the parameter that takes the ``TaskRuntime``: the
+    parameters that a producer binds. Pure."""
+    match runtime:
+        case TakesRuntime(name=name):
+            return sig.replace(
+                parameters=[
+                    parameter
+                    for parameter in sig.parameters.values()
+                    if parameter.name != name
+                ],
+            )
+        case NoRuntimeParameter():
+            return sig
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _names_runtime_parameter(key: str, runtime: RuntimeParameter) -> bool:
+    """Whether ``key`` names the parameter that takes the ``TaskRuntime``."""
+    match runtime:
+        case TakesRuntime(name=name):
+            return key == name
+        case NoRuntimeParameter():
+            return False
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _runtime_kwarg_message(key: str, task_fn: Callable[..., Any]) -> str:
+    return (
+        f'kwarg {key!r} of {_fn_name(task_fn)!r} takes the TaskRuntime of '
+        f'the run; the worker passes it on each run, so producer code must '
+        f'not supply it'
+    )
 
 
 _TRANSPORT_KEY_PREFIXES: tuple[str, ...] = ('__h_',)
@@ -240,6 +347,8 @@ def resolve_producer_kwarg_binding(
 
     - kwarg name shadows an engine-injected param
       (``workflow_ctx`` / ``workflow_meta``).
+    - kwarg name is the parameter that takes the ``TaskRuntime``: the worker
+      passes the runtime on each run.
     - kwarg name not declared on the callable's signature, or the name of its
       ``*args`` or ``**params``: a catch-all has no declared type, so it takes
       nothing from a producer.
@@ -257,6 +366,11 @@ def resolve_producer_kwarg_binding(
                 f'not supply it (the engine populates {key!r} at worker '
                 f'time)'
             ),
+        )
+    if _names_runtime_parameter(key, runtime_parameter_of(sig, hints)):
+        return KwargBinding(
+            kind='error',
+            error_message=_runtime_kwarg_message(key, task_fn),
         )
     parameter = sig.parameters.get(key)
     if parameter is None or not _is_addressable_named_param(parameter):
@@ -356,7 +470,8 @@ def missing_required_kwargs(
     the engine fills the rest, so it does not call this.
 
     A callable with no type hints passes, the same as in `encode_kwargs`:
-    `@app.task` guarantees hints on a real task.
+    `@app.task` guarantees hints on a real task. The parameter that takes the
+    `TaskRuntime` is never missing: the worker passes it on each run.
 
     Args:
         task_fn: The task callable.
@@ -370,9 +485,10 @@ def missing_required_kwargs(
     if resolved is None or not resolved[0]:
         return MissingKwargs(producer=(), workflow_only=())
     hints, sig = resolved
+    bound_by_producer = without_runtime_parameter(sig, runtime_parameter_of(sig, hints))
     missing = [
         name
-        for name, parameter in sig.parameters.items()
+        for name, parameter in bound_by_producer.parameters.items()
         if parameter.default is inspect.Parameter.empty
         and parameter.kind
         in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
@@ -509,19 +625,23 @@ def decode_kwargs(
         Dict mapping kwarg names to typed Python values.
 
     Raises:
-        StrictJsonError: on unknown kwarg name on the wire, or kwarg
-            without a type annotation.
+        StrictJsonError: on unknown kwarg name on the wire, a kwarg that
+            names the parameter of the `TaskRuntime`, or kwarg without a
+            type annotation.
         ValueValidationError: when a raw value doesn't satisfy its
             declared type.
     """
     if not raw_kwargs:
         return {}
     hints, sig = _hints_or_raise(task_fn)
+    runtime = runtime_parameter_of(sig, hints)
     decoded: dict[str, Any] = {}
     for key, raw_value in raw_kwargs.items():
         if any(key.startswith(p) for p in _TRANSPORT_KEY_PREFIXES):
             decoded[key] = raw_value
             continue
+        if _names_runtime_parameter(key, runtime):
+            raise StrictJsonError(_runtime_kwarg_message(key, task_fn))
         if key not in sig.parameters:
             raise StrictJsonError(
                 f"unknown kwarg {key!r} for task {_fn_name(task_fn)!r} on "

@@ -1,4 +1,4 @@
-"""Version-3 parent frames for tests of the Python child.
+"""Version-4 parent frames for tests of the Python child.
 
 The core gives a child its parent frames as core classes, which Python
 cannot build: each helper here writes the wire bytes of one frame (the
@@ -191,6 +191,27 @@ def shared_run_frame(
     return frame
 
 
+def isolated_cancel_frame(*, task_id: uuid.UUID) -> core.CancelRunFrame:
+    """A cancel of the isolated run of ``task_id``, as the core decodes it."""
+    frame = _decoded(
+        {'kind': 'cancel_run', 'target': {'kind': 'isolated', 'task_id': str(task_id)}},
+    )
+    assert isinstance(frame, core.CancelRunFrame), frame
+    return frame
+
+
+def shared_cancel_frame(*, dispatch: int, task_id: uuid.UUID) -> core.CancelRunFrame:
+    """A cancel of the shared run ``dispatch``, as the core decodes it."""
+    frame = _decoded(
+        {
+            'kind': 'cancel_run',
+            'target': {'kind': 'shared', 'dispatch': dispatch, 'task_id': str(task_id)},
+        },
+    )
+    assert isinstance(frame, core.CancelRunFrame), frame
+    return frame
+
+
 def stop_frame() -> core.StopFrame:
     """The stop frame, as the core decodes it."""
     frame = _decoded({'kind': 'stop'})
@@ -249,7 +270,7 @@ def init_meta(
     imports: tuple[str, ...] = (),
     log_level: str = 'info',
     database_url: str = 'postgresql://user:secret@127.0.0.1:1/none',
-    protocol: int = 3,
+    protocol: int = 4,
     parent_sys_path: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """The metadata of an init frame of a Python child. A child replaces its

@@ -14,8 +14,9 @@ use crate::core::task::error::OperationalErrorCode;
 use crate::core::task::{Execution, TaskErrorCode, UserCode};
 use crate::core::{BuiltInTaskCode, OutcomeCode};
 use crate::events::{
-    self, AttemptErrorCode, AttemptRecord, AttemptStart, ChildResult, RetryCount, RunTrace,
-    SlotIndex, SlotRecovered, TraceCarrierText, WorkerDecision, WorkerIdText, WorkflowPlace,
+    self, AttemptErrorCode, AttemptRecord, AttemptStart, ChildResult, OperatorCancelEnd,
+    RetryCount, RunTrace, SlotIndex, SlotRecovered, TraceCarrierText, WorkerDecision, WorkerIdText,
+    WorkflowPlace,
 };
 use crate::telemetry::labels::ReleaseReason;
 use crate::telemetry::registry::SampleValue;
@@ -23,8 +24,8 @@ use crate::test_support::telemetry::{series_of, worker_registry, WatchedTelemetr
 use crate::worker::executor::protocol::StopReason;
 use crate::worker::executor::slots::outcome::{EndView, ResultRead};
 use crate::worker::executor::slots::{
-    ChildPlacement, ClaimedTask, LoopKillCode, NotRunCause, Settlement, TerminalState, TimeoutSeen,
-    WrittenEnd,
+    CancelledEnd, ChildPlacement, ClaimedTask, LoopKillCode, NotRunCause, Settlement,
+    TerminalState, TimeoutSeen, WrittenEnd,
 };
 
 /// An event of slot `slot`.
@@ -282,7 +283,6 @@ fn a_placed_task_gives_one_attempt_placed_with_its_child_and_one_slot_wait() {
 
 #[test]
 fn a_task_that_no_child_took_or_telemetry_off_gives_no_placement() {
-    use crate::worker::executor::slots::{PlacementReceipt, PlacementWatch};
     let mut watched = WatchedTelemetry::new();
     let task = claimed_task(Execution::Isolated);
     let read = ClaimRead::now();
@@ -294,10 +294,6 @@ fn a_task_that_no_child_took_or_telemetry_off_gives_no_placement() {
 
     assert!(watched.events().is_empty());
     assert!(watched.series(MetricId::TaskSlotWaitDuration).is_empty());
-    assert!(matches!(
-        WorkerTelemetry::Off.placement_watch(),
-        (PlacementWatch::Unwatched, PlacementReceipt::Unwatched)
-    ));
 }
 
 /// A watched telemetry value whose registry declares the queue `default`
@@ -437,6 +433,40 @@ fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
             ExpectedEnd::Decided(WorkerDecision::ChildLost),
             "FAILED",
             "WORKER_CRASHED",
+        ),
+        (
+            EndView::Cancelled(CancelledEnd::ReportedByChild {
+                end: OperatorCancelEnd::ReturnedAfterSignal,
+                start: AttemptStart::NotReported,
+            }),
+            ExpectedEnd::Reported(ChildResult::Cancelled {
+                end: OperatorCancelEnd::ReturnedAfterSignal,
+            }),
+            "CANCELLED",
+            "TASK_CANCELLED",
+        ),
+        (
+            EndView::Cancelled(CancelledEnd::ReportedByChild {
+                end: OperatorCancelEnd::BeforeBody,
+                start: AttemptStart::NotReported,
+            }),
+            ExpectedEnd::Reported(ChildResult::Cancelled {
+                end: OperatorCancelEnd::BeforeBody,
+            }),
+            "CANCELLED",
+            "TASK_CANCELLED",
+        ),
+        (
+            EndView::Cancelled(CancelledEnd::ChildKilled),
+            ExpectedEnd::Decided(WorkerDecision::KilledAfterCancel),
+            "CANCELLED",
+            "TASK_CANCELLED",
+        ),
+        (
+            EndView::Cancelled(CancelledEnd::ChildLost),
+            ExpectedEnd::Decided(WorkerDecision::LostAfterCancel),
+            "CANCELLED",
+            "TASK_CANCELLED",
         ),
     ];
     for (view, expected, outcome, code) in cases {
@@ -687,6 +717,22 @@ fn only_an_end_with_no_result_frame_asks_for_a_worker_made_span() {
             Err(WorkerDecision::TaskBlockedLoop),
         ),
         (EndView::Crashed, Err(WorkerDecision::ChildLost)),
+        (
+            EndView::Cancelled(CancelledEnd::ReportedByChild {
+                end: OperatorCancelEnd::DroppedAfterGrace,
+                start: reported,
+            }),
+            Ok((
+                ChildResult::Cancelled {
+                    end: OperatorCancelEnd::DroppedAfterGrace,
+                },
+                reported,
+            )),
+        ),
+        (
+            EndView::Cancelled(CancelledEnd::ChildKilled),
+            Err(WorkerDecision::KilledAfterCancel),
+        ),
     ];
     for (view, expected) in cases {
         let mut watched = declaring_telemetry();
@@ -820,6 +866,10 @@ fn each_settlement_gives_one_attempt_recorded_with_its_record() {
         ),
         (Settlement::NothingOwed, AttemptRecord::NothingOwed),
         (Settlement::NotHeld, AttemptRecord::NotHeld),
+        (
+            Settlement::RecordedByCancel,
+            AttemptRecord::RecordedByCancel,
+        ),
         (Settlement::LeftToRecovery, AttemptRecord::LeftToRecovery),
         (
             Settlement::RetriesExhausted,

@@ -80,6 +80,7 @@ SHAPES: Final[tuple[ClassShape, ...]] = (
     ClassShape(task_actions.TaskActionStoredDataInvalid, monitoring_errors.TaskActionStoredDataInvalid, (('message', False), ('task_id', True), ('exception', False),), 'STORED_DATA_INVALID', never_retryable=True),
     ClassShape(start_types.WorkflowStartValidationFailed, workflow_start_errors.WorkflowStartValidationFailed, (('message', False), ('workflow_name', True), ('workflow_id', True), ('exception', False),), 'VALIDATION_FAILED', never_retryable=True),
     ClassShape(start_types.WorkflowStartIdConflict, workflow_start_errors.WorkflowStartIdConflict, (('message', False), ('workflow_name', True), ('workflow_id', True), ('existing_workflow_name', True),), 'WORKFLOW_ID_CONFLICT', never_retryable=True),
+    ClassShape(start_types.WorkflowStartCommandConflict, workflow_start_errors.WorkflowStartCommandConflict, (('message', False), ('workflow_name', True), ('workflow_id', True),), 'WORKFLOW_COMMAND_CONFLICT', never_retryable=True),
     ClassShape(start_types.WorkflowStartEnqueueFailed, workflow_start_errors.WorkflowStartEnqueueFailed, (('message', False), ('retryable', True), ('workflow_name', True), ('workflow_id', True), ('exception', False),), 'ENQUEUE_FAILED', never_retryable=False),
     ClassShape(start_types.WorkflowStartAsyncContext, workflow_start_errors.WorkflowStartAsyncContext, (('message', False), ('workflow_name', True), ('workflow_id', True),), 'ASYNC_CONTEXT', never_retryable=True),
 )

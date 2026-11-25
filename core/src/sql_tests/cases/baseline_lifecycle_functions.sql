@@ -1036,7 +1036,8 @@ SELECT lc_expect(
     (SELECT concat_ws('|', outcome, terminalization_kind, observed_status, observed_worker_id,
         observed_claimed_at = now() - interval '1 second', terminal_at = now(), ordinality IS NULL)
      FROM horsies_complete_task_fused(
-        '00000000-0000-7000-8000-000000001001', 'w1', now() - interval '1 second', '{"ok":1}', TRUE)),
+        '00000000-0000-7000-8000-000000001001', 'w1', now() - interval '1 second', '{"ok":1}', TRUE,
+        'NOT_OBSERVED', NULL)),
     'APPLIED|COMPLETE_FUSED|RUNNING|w1|t|t|t'
 );
 SELECT lc_expect(
@@ -1055,33 +1056,37 @@ SELECT lc_expect(
 SELECT lc_expect(
     'success: a replay is already applied',
     (SELECT outcome || ':' || terminalization_kind FROM horsies_complete_task_fused(
-        '00000000-0000-7000-8000-000000001001', 'w1', now() - interval '1 second', '{"ok":1}', TRUE)),
+        '00000000-0000-7000-8000-000000001001', 'w1', now() - interval '1 second', '{"ok":1}', TRUE,
+        'NOT_OBSERVED', NULL)),
     'ALREADY_APPLIED:COMPLETE_FUSED'
 );
 SELECT lc_task('00000000-0000-7000-8000-000000001002', 'RUNNING');
 SELECT lc_expect(
     'success: another claim generation is a lost claim',
     (SELECT outcome FROM horsies_complete_task_fused(
-        '00000000-0000-7000-8000-000000001002', 'w1', now() - interval '2 seconds', '{"ok":1}', TRUE)),
+        '00000000-0000-7000-8000-000000001002', 'w1', now() - interval '2 seconds', '{"ok":1}', TRUE,
+        'NOT_OBSERVED', NULL)),
     'LOST_CLAIM'
 );
 SELECT lc_expect(
     'success: another worker is a lost claim',
     (SELECT outcome FROM horsies_complete_task_fused(
-        '00000000-0000-7000-8000-000000001002', 'w2', now() - interval '1 second', '{"ok":1}', TRUE)),
+        '00000000-0000-7000-8000-000000001002', 'w2', now() - interval '1 second', '{"ok":1}', TRUE,
+        'NOT_OBSERVED', NULL)),
     'LOST_CLAIM'
 );
 SELECT lc_task('00000000-0000-7000-8000-000000001003', 'CLAIMED');
 SELECT lc_expect(
     'success: a row that never started is a source state conflict',
     (SELECT outcome || ':' || observed_status FROM horsies_complete_task_fused(
-        '00000000-0000-7000-8000-000000001003', 'w1', now() - interval '1 second', '{"ok":1}', TRUE)),
+        '00000000-0000-7000-8000-000000001003', 'w1', now() - interval '1 second', '{"ok":1}', TRUE,
+        'NOT_OBSERVED', NULL)),
     'SOURCE_STATE_CONFLICT:CLAIMED'
 );
 SELECT lc_expect(
     'success: an absent task',
     (SELECT outcome FROM horsies_complete_task_fused(
-        '00000000-0000-7000-8000-0000000010ff', 'w1', now(), '{"ok":1}', TRUE)),
+        '00000000-0000-7000-8000-0000000010ff', 'w1', now(), '{"ok":1}', TRUE, 'NOT_OBSERVED', NULL)),
     'TASK_ABSENT'
 );
 SELECT lc_expect(
@@ -1091,7 +1096,7 @@ SELECT lc_expect(
     'RUNNING:0'
 );
 SELECT lc_expect_sqlstate('success: a NULL claim generation', $q$SELECT * FROM horsies_complete_task_fused(
-    '00000000-0000-7000-8000-000000001002', 'w1', NULL, '{"ok":1}', TRUE)$q$, '22023');
+    '00000000-0000-7000-8000-000000001002', 'w1', NULL, '{"ok":1}', TRUE, 'NOT_OBSERVED', NULL)$q$, '22023');
 
 -- The batch: rows given out of id order, one of them not held.
 SELECT lc_task('00000000-0000-7000-8000-000000001013', 'RUNNING');
@@ -1104,7 +1109,8 @@ SELECT lc_expect(
         ARRAY['00000000-0000-7000-8000-000000001013', '00000000-0000-7000-8000-000000001012',
               '00000000-0000-7000-8000-000000001011']::uuid[],
         ARRAY[now() - interval '1 second', now() - interval '1 second', now() - interval '1 second'],
-        ARRAY['{"ok":13}', '{"ok":12}', '{"ok":11}'], 'w1', TRUE)),
+        ARRAY['{"ok":13}', '{"ok":12}', '{"ok":11}'], 'w1', TRUE,
+        ARRAY['NOT_OBSERVED', 'NOT_OBSERVED', 'NOT_OBSERVED'], ARRAY[NULL, NULL, NULL]::bigint[])),
     '1:1013:APPLIED,2:1012:LOST_CLAIM,3:1011:APPLIED'
 );
 SELECT lc_expect(
@@ -1115,18 +1121,24 @@ SELECT lc_expect(
     '1011={"ok":11},1013={"ok":13}'
 );
 SELECT lc_expect_sqlstate('success batch: an empty batch', $q$SELECT * FROM horsies_complete_tasks_fused(
-    ARRAY[]::uuid[], ARRAY[]::timestamptz[], ARRAY[]::text[], 'w1', TRUE)$q$, '22023');
+    ARRAY[]::uuid[], ARRAY[]::timestamptz[], ARRAY[]::text[], 'w1', TRUE, ARRAY[]::text[], ARRAY[]::bigint[])$q$,
+    '22023');
 SELECT lc_expect_sqlstate('success batch: 65 rows', $q$SELECT * FROM horsies_complete_tasks_fused(
     ARRAY(SELECT gen_random_uuid() FROM generate_series(1, 65)),
     ARRAY(SELECT now() FROM generate_series(1, 65)),
-    ARRAY(SELECT '{}'::text FROM generate_series(1, 65)), 'w1', TRUE)$q$, '22023');
+    ARRAY(SELECT '{}'::text FROM generate_series(1, 65)), 'w1', TRUE,
+    ARRAY(SELECT 'NOT_OBSERVED'::text FROM generate_series(1, 65)),
+    ARRAY(SELECT NULL::bigint FROM generate_series(1, 65)))$q$, '22023');
 SELECT lc_expect_sqlstate('success batch: arrays of different lengths', $q$SELECT * FROM horsies_complete_tasks_fused(
-    ARRAY[gen_random_uuid()], ARRAY[now(), now()], ARRAY['{}'], 'w1', TRUE)$q$, '22023');
+    ARRAY[gen_random_uuid()], ARRAY[now(), now()], ARRAY['{}'], 'w1', TRUE, ARRAY['NOT_OBSERVED'],
+    ARRAY[NULL]::bigint[])$q$, '22023');
 SELECT lc_expect_sqlstate('success batch: a repeated id', $q$SELECT * FROM horsies_complete_tasks_fused(
     ARRAY['00000000-0000-7000-8000-000000001002', '00000000-0000-7000-8000-000000001002']::uuid[],
-    ARRAY[now(), now()], ARRAY['{}', '{}'], 'w1', TRUE)$q$, '22023');
+    ARRAY[now(), now()], ARRAY['{}', '{}'], 'w1', TRUE, ARRAY['NOT_OBSERVED', 'NOT_OBSERVED'],
+    ARRAY[NULL, NULL]::bigint[])$q$, '22023');
 SELECT lc_expect_sqlstate('success batch: a NULL claim generation', $q$SELECT * FROM horsies_complete_tasks_fused(
-    ARRAY[gen_random_uuid()], ARRAY[NULL]::timestamptz[], ARRAY['{}'], 'w1', TRUE)$q$, '22023');
+    ARRAY[gen_random_uuid()], ARRAY[NULL]::timestamptz[], ARRAY['{}'], 'w1', TRUE, ARRAY['NOT_OBSERVED'],
+    ARRAY[NULL]::bigint[])$q$, '22023');
 
 -- A workflow task: index 0 has a dependent (index 1), index 2 has none.
 SELECT lc_workflow('00000000-0000-7000-8000-000000001e01', 'RUNNING');
@@ -1142,7 +1154,7 @@ SELECT lc_expect(
     'workflow success: applied, with a dependent node',
     (SELECT concat_ws('|', outcome, terminalization_kind, queue_name, task_name, node_has_dependents)
      FROM horsies_finish_workflow_success(
-        '00000000-0000-7000-8000-000000001021', 'w1', now() - interval '1 second', '{"ok":21}')),
+        '00000000-0000-7000-8000-000000001021', 'w1', now() - interval '1 second', '{"ok":21}', 'NOT_OBSERVED', NULL)),
     'APPLIED|COMPLETE_LOCKED|q_lc|lc.task|t'
 );
 SELECT lc_expect(
@@ -1154,27 +1166,28 @@ SELECT lc_expect(
 SELECT lc_expect(
     'workflow success: applied, with no dependent node',
     (SELECT outcome || ':' || node_has_dependents FROM horsies_finish_workflow_success(
-        '00000000-0000-7000-8000-000000001023', 'w1', now() - interval '1 second', '{"ok":23}')),
+        '00000000-0000-7000-8000-000000001023', 'w1', now() - interval '1 second', '{"ok":23}', 'NOT_OBSERVED', NULL)),
     'APPLIED:false'
 );
 SELECT lc_expect(
     'workflow success: a replay is already applied with no dependents fact',
     (SELECT outcome || ':' || coalesce(node_has_dependents::text, 'null') FROM horsies_finish_workflow_success(
-        '00000000-0000-7000-8000-000000001023', 'w1', now() - interval '1 second', '{"ok":23}')),
+        '00000000-0000-7000-8000-000000001023', 'w1', now() - interval '1 second', '{"ok":23}', 'NOT_OBSERVED', NULL)),
     'ALREADY_APPLIED:null'
 );
 SELECT lc_expect_sqlstate('workflow success: a plain task', $q$SELECT * FROM horsies_finish_workflow_success(
-    '00000000-0000-7000-8000-000000001002', 'w1', now() - interval '1 second', '{}')$q$, '22023');
+    '00000000-0000-7000-8000-000000001002', 'w1', now() - interval '1 second', '{}', 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('workflow success: a NULL result', $q$SELECT * FROM horsies_finish_workflow_success(
-    '00000000-0000-7000-8000-000000001002', 'w2', now() - interval '1 second', NULL)$q$, '23502');
+    '00000000-0000-7000-8000-000000001002', 'w2', now() - interval '1 second', NULL, 'NOT_OBSERVED', NULL)$q$, '23502');
 SELECT lc_expect_sqlstate('workflow success: a NULL claim generation', $q$SELECT * FROM horsies_finish_workflow_success(
-    '00000000-0000-7000-8000-000000001002', 'w2', NULL, '{}')$q$, '22023');
+    '00000000-0000-7000-8000-000000001002', 'w2', NULL, '{}', 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_task('00000000-0000-7000-8000-000000001024', 'RUNNING', 'w1', TRUE);
 SELECT lc_node('00000000-0000-7000-8000-000000001f24', '00000000-0000-7000-8000-000000001e01', 3, 'RUNNING',
                '00000000-0000-7000-8000-000000001024');
 SELECT lc_expect_sqlstate('success: the plain success refuses a workflow task (the move)', $q$
     SELECT * FROM horsies_complete_task_fused(
-        '00000000-0000-7000-8000-000000001024', 'w1', now() - interval '1 second', '{}', TRUE)$q$, '22023');
+        '00000000-0000-7000-8000-000000001024', 'w1', now() - interval '1 second', '{}', TRUE,
+        'NOT_OBSERVED', NULL)$q$, '22023');
 
 ------------------------------------------------------------------------------------------------------------------------
 -- horsies_finish_failed_attempt
@@ -1187,7 +1200,8 @@ SELECT lc_expect(
         task_name, coalesce(node_has_dependents::text, 'null'))
      FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002001', 'w1', now() - interval '1 second', 'NONE', NULL, NULL, NULL,
-        '{"err":1}', 'BOOM', 'final reason', 'FAILED', 'attempt message', 'attempt reason', 'REFUSE', TRUE)),
+        '{"err":1}', 'BOOM', 'final reason', 'FAILED', 'attempt message', 'attempt reason', 'REFUSE', TRUE,
+        'NOT_OBSERVED', NULL)),
     'APPLIED|FAIL_RUNNING|NOT_REQUESTED|f|q_lc|lc.task|null'
 );
 SELECT lc_expect(
@@ -1206,7 +1220,7 @@ SELECT lc_expect(
         next_retry_at < clock_timestamp() + interval '11 seconds', queue_name)
      FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002002', 'w1', now() - interval '1 second', 'RETRY', 1, 10.0, 'SAME_CLASS',
-        '{"err":2}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)),
+        '{"err":2}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)),
     'RETRY_SCHEDULED|2|t|t|q_lc'
 );
 SELECT lc_expect(
@@ -1229,7 +1243,7 @@ SELECT lc_expect(
     'failed attempt: a retry placed ISOLATED',
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002003', 'w1', now() - interval '1 second', 'RETRY', 0, 0.0, 'ISOLATED',
-        '{"err":3}', 'BOOM', 'r', 'WORKER_FAILURE', 'm', 'r', 'REFUSE', TRUE)),
+        '{"err":3}', 'BOOM', 'r', 'WORKER_FAILURE', 'm', 'r', 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)),
     'RETRY_SCHEDULED'
 );
 SELECT lc_expect(
@@ -1245,7 +1259,7 @@ SELECT lc_expect(
     (SELECT concat_ws('|', outcome, retry_disposition, good_until = now() + interval '5 seconds')
      FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002004', 'w1', now() - interval '1 second', 'RETRY', 0, 60.0, 'SAME_CLASS',
-        '{"err":4}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)),
+        '{"err":4}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)),
     'APPLIED|PAST_DEADLINE|t'
 );
 SELECT lc_task('00000000-0000-7000-8000-000000002005', 'RUNNING');
@@ -1253,14 +1267,14 @@ SELECT lc_expect(
     'failed attempt: a retry from another retry count is refused',
     (SELECT outcome || ':' || observed_status FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002005', 'w1', now() - interval '1 second', 'RETRY', 4, 1.0, 'SAME_CLASS',
-        '{"err":5}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)),
+        '{"err":5}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)),
     'SOURCE_STATE_CONFLICT:RUNNING'
 );
 SELECT lc_expect(
     'failed attempt: another claim generation is a lost claim',
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002005', 'w1', now() - interval '3 seconds', 'NONE', NULL, NULL, NULL,
-        '{"err":5}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)),
+        '{"err":5}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)),
     'LOST_CLAIM'
 );
 SELECT lc_expect(
@@ -1275,7 +1289,7 @@ SELECT lc_expect(
     'failed attempt (#713): RELEASE returns a CLAIMED row of this generation with no attempt',
     (SELECT outcome || ':' || observed_status FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002006', 'w1', now() - interval '1 second', 'RETRY', 0, 1.0, 'SAME_CLASS',
-        '{"err":6}', 'WORKER_CRASHED', 'r', 'WORKER_FAILURE', 'm', 'r', 'RELEASE', TRUE)),
+        '{"err":6}', 'WORKER_CRASHED', 'r', 'WORKER_FAILURE', 'm', 'r', 'RELEASE', TRUE, 'NOT_OBSERVED', NULL)),
     'RELEASED:CLAIMED'
 );
 SELECT lc_expect(
@@ -1290,7 +1304,7 @@ SELECT lc_expect(
     'failed attempt (#713): RELEASE on a row the child started writes the failure',
     (SELECT outcome || ':' || terminalization_kind FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-00000000200a', 'w1', now() - interval '1 second', 'NONE', NULL, NULL, NULL,
-        '{"err":10}', 'WORKER_CRASHED', 'r', 'WORKER_FAILURE', 'm', 'r', 'RELEASE', TRUE)),
+        '{"err":10}', 'WORKER_CRASHED', 'r', 'WORKER_FAILURE', 'm', 'r', 'RELEASE', TRUE, 'NOT_OBSERVED', NULL)),
     'APPLIED:FAIL_RUNNING'
 );
 SELECT lc_task('00000000-0000-7000-8000-000000002007', 'CLAIMED');
@@ -1298,14 +1312,14 @@ SELECT lc_expect(
     'failed attempt (#713): RELEASE of another claim generation is a lost claim',
     (SELECT outcome FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002007', 'w1', now() - interval '2 seconds', 'NONE', NULL, NULL, NULL,
-        '{"err":7}', 'WORKER_CRASHED', 'r', 'WORKER_FAILURE', 'm', 'r', 'RELEASE', TRUE)),
+        '{"err":7}', 'WORKER_CRASHED', 'r', 'WORKER_FAILURE', 'm', 'r', 'RELEASE', TRUE, 'NOT_OBSERVED', NULL)),
     'LOST_CLAIM'
 );
 SELECT lc_expect(
     'failed attempt: REFUSE on a CLAIMED row is a source state conflict',
     (SELECT outcome || ':' || observed_status FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002007', 'w1', now() - interval '1 second', 'NONE', NULL, NULL, NULL,
-        '{"err":7}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)),
+        '{"err":7}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)),
     'SOURCE_STATE_CONFLICT:CLAIMED'
 );
 -- A workflow task: the move records phase 2 and the dependents fact; no wake.
@@ -1318,7 +1332,7 @@ SELECT lc_expect(
     'failed attempt: a workflow task owes phase 2 and reports its dependents',
     (SELECT concat_ws('|', outcome, is_workflow_task, node_has_dependents) FROM horsies_finish_failed_attempt(
         '00000000-0000-7000-8000-000000002008', 'w1', now() - interval '1 second', 'NONE', NULL, NULL, NULL,
-        '{"err":8}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE)),
+        '{"err":8}', 'BOOM', 'r', 'FAILED', 'm', 'r', 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)),
     'APPLIED|t|t'
 );
 SELECT lc_expect(
@@ -1329,31 +1343,31 @@ SELECT lc_expect(
 );
 SELECT lc_expect_sqlstate('failed attempt: NONE with a retry count', $q$SELECT * FROM horsies_finish_failed_attempt(
     gen_random_uuid(), 'w1', now(), 'NONE', 1, NULL, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE',
-    TRUE)$q$, '22023');
+    TRUE, 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('failed attempt: RETRY without a placement', $q$SELECT * FROM horsies_finish_failed_attempt(
     gen_random_uuid(), 'w1', now(), 'RETRY', 1, 1.0, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE',
-    TRUE)$q$, '22023');
+    TRUE, 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('failed attempt: an infinite delay', $q$SELECT * FROM horsies_finish_failed_attempt(
     gen_random_uuid(), 'w1', now(), 'RETRY', 1, 'Infinity'::float8, 'SAME_CLASS', '{}', 'E', 'r', 'FAILED', 'm',
-    'r', 'REFUSE', TRUE)$q$, '22023');
+    'r', 'REFUSE', TRUE, 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('failed attempt: a negative delay', $q$SELECT * FROM horsies_finish_failed_attempt(
     gen_random_uuid(), 'w1', now(), 'RETRY', 1, -1.0, 'SAME_CLASS', '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE',
-    TRUE)$q$, '22023');
+    TRUE, 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('failed attempt: an unknown placement', $q$SELECT * FROM horsies_finish_failed_attempt(
     gen_random_uuid(), 'w1', now(), 'RETRY', 1, 1.0, 'same_class', '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE',
-    TRUE)$q$, '22023');
+    TRUE, 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('failed attempt: a COMPLETED attempt outcome', $q$SELECT * FROM horsies_finish_failed_attempt(
     gen_random_uuid(), 'w1', now(), 'NONE', NULL, NULL, NULL, '{}', 'E', 'r', 'COMPLETED', 'm', 'r', 'REFUSE',
-    TRUE)$q$, '22023');
+    TRUE, 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('failed attempt: an unknown claimed-row rule', $q$SELECT * FROM horsies_finish_failed_attempt(
     gen_random_uuid(), 'w1', now(), 'NONE', NULL, NULL, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'KEEP',
-    TRUE)$q$, '22023');
+    TRUE, 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('failed attempt: a NULL claim generation', $q$SELECT * FROM horsies_finish_failed_attempt(
     gen_random_uuid(), 'w1', NULL, 'NONE', NULL, NULL, NULL, '{}', 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE',
-    TRUE)$q$, '22023');
+    TRUE, 'NOT_OBSERVED', NULL)$q$, '22023');
 SELECT lc_expect_sqlstate('failed attempt: a NULL result', $q$SELECT * FROM horsies_finish_failed_attempt(
     gen_random_uuid(), 'w1', now(), 'NONE', NULL, NULL, NULL, NULL, 'E', 'r', 'FAILED', 'm', 'r', 'REFUSE',
-    TRUE)$q$, '23502');
+    TRUE, 'NOT_OBSERVED', NULL)$q$, '23502');
 
 ------------------------------------------------------------------------------------------------------------------------
 -- Stale RUNNING recovery: horsies_stale_running_scan, horsies_finish_stale_attempt

@@ -2,8 +2,9 @@
 
 `tests/lifecycle_matrix.py` declares what each terminal writer does. A
 declaration nobody executes drifts from the code silently, so these tests read
-the body of each writer's baseline SQL function and assert the declared
-guards, shape, and notification behavior are actually there.
+the body of each writer's SQL function, as the migration chain installs it,
+and assert the declared guards, shape, and notification behavior are
+actually there.
 
 Every writer moves its row to history: a single-row function calls
 `horsies_move_task_to_history` with its target status, and a batch function
@@ -18,7 +19,7 @@ from typing import Final
 
 import pytest
 
-from tests.baseline_sql import baseline_function
+from tests.baseline_sql import installed_function
 from tests.lifecycle_matrix import (
     MATRIX,
     Attempt,
@@ -57,7 +58,7 @@ FUNCTION_OF_WRITER: Final[dict[str, str]] = {
     'T15': 'horsies_cancel_orphaned_tasks',
     'T16': 'horsies_cancel_nodes_of_cancelled_workflow',
 }
-"""The baseline function that implements each writer contract."""
+"""The installed function that implements each writer contract."""
 
 _MOVE_FUNCTION: Final = 'horsies_move_task_to_history'
 _BATCH_MOVE_FUNCTION: Final = 'horsies_move_tasks_to_history'
@@ -89,6 +90,8 @@ _MOVE_EVENTS: Final = (
     "pg_notify('horsies_task_status',",
 )
 _ATTEMPT_UPSERT: Final = 'INSERT INTO horsies_task_attempts'
+_RUNNING_ATTEMPT_INSERT: Final = "IF v_row.status = 'RUNNING' THEN INSERT INTO horsies_task_attempts"
+"""The attempt insert of a writer that records the attempt of a RUNNING row only."""
 _TERMINAL_TIME: Final = 'v_terminal_at := NOW()'
 _LINE_COMMENT_RE: Final = re.compile(r'--[^\n]*')
 
@@ -99,7 +102,7 @@ def _body(writer_id: str) -> str:
     A comment may name a marker ("SKIP LOCKED never waits") that the code
     does not hold.
     """
-    return _LINE_COMMENT_RE.sub('', baseline_function(FUNCTION_OF_WRITER[writer_id]))
+    return _LINE_COMMENT_RE.sub('', installed_function(FUNCTION_OF_WRITER[writer_id]))
 
 
 def _normalised(writer_id: str) -> str:
@@ -258,15 +261,20 @@ class TestDeclaredGuardsMatchTheStatements:
 
     @pytest.mark.parametrize('function', [_MOVE_FUNCTION, _BATCH_MOVE_FUNCTION])
     def test_the_moves_send_the_status_events(self, function: str) -> None:
-        sql = ' '.join(baseline_function(function).split())
+        sql = ' '.join(installed_function(function).split())
         for event in _MOVE_EVENTS:
             assert event in sql, event
 
     @pytest.mark.parametrize('row', MATRIX, ids=_ids(list(MATRIX)))
-    def test_fused_attempt_upsert(self, row: TerminalWriter) -> None:
+    def test_attempt_writes(self, row: TerminalWriter) -> None:
         sql = _normalised(row.writer_id)
-        fused = row.attempt is Attempt.FUSED_UPSERT
-        assert (_ATTEMPT_UPSERT in sql) is fused, row.writer_id
+        match row.attempt:
+            case Attempt.FUSED_UPSERT:
+                assert _ATTEMPT_UPSERT in sql, row.writer_id
+            case Attempt.RUNNING_INSERT:
+                assert _RUNNING_ATTEMPT_INSERT in sql, row.writer_id
+            case Attempt.NONE:
+                assert _ATTEMPT_UPSERT not in sql, row.writer_id
 
     @pytest.mark.parametrize('row', MATRIX, ids=_ids(list(MATRIX)))
     def test_every_writer_takes_terminal_at_from_the_database_clock(
