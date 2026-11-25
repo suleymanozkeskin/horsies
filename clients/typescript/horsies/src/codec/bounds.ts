@@ -6,3 +6,6 @@
  * `core/src/core/codec/strict_read.rs`). The outermost array or object is level 1.
  */
 export const MAX_JSON_DEPTH = 300;
+
+/** The most digits of a stored integer (core `MAX_INT_DIGITS`, `core/src/core/codec/strict_read.rs`). */
+export const MAX_INT_DIGITS = 4300;

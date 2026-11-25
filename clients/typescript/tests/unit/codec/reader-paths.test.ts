@@ -23,7 +23,13 @@ const DEFINING_MODULE = "codec/json-text.ts";
 
 const MAKERS = ["jsonTextCheckedByCore", "writtenJsonText"] as const;
 
-const READER_PATHS: readonly ReaderPath[] = [];
+const READER_PATHS: readonly ReaderPath[] = [
+  {
+    module: "codec/writer.ts",
+    maker: "writtenJsonText",
+    checkInFront: "the writer built the text from the kind tree: finite floats, well-formed strings, bounded depth",
+  },
+];
 
 function sourceModules(): readonly string[] {
   return readdirSync(SOURCE_DIR, { recursive: true, encoding: "utf8" })
