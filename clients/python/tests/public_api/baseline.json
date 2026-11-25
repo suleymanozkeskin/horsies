@@ -2117,6 +2117,26 @@
     "returns": "typing.TypeIs[horsies.Err[~E]]"
    }
   },
+  "horsies.monitoring:AttemptClaimsInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.ClaimsCountedInfo | horsies.monitoring.ClaimsNotCountedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:AttemptFinalizingInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.FinalizingMarkedInfo | horsies.monitoring.FinalizingNotMarkedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:AttemptPhasesInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.PhasesCapturedInfo | horsies.monitoring.PhasesNotCapturedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:AttemptPlacementInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.PlacementNotObservedInfo | horsies.monitoring.PlacementPlacedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:AttemptRecordedByInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.RecordedByCancelInfo | horsies.monitoring.RecordedByRecoveryInfo | horsies.monitoring.RecordedByWorkerInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
   "horsies.monitoring:Breakdown": {
    "abstract": false,
    "bases": [
@@ -2605,6 +2625,278 @@
    },
    "type_params": []
   },
+  "horsies.monitoring:ClaimEarlierInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['earlier']",
+      "default": "'earlier'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "count"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ClaimEarlierInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'earlier'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['earlier']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "count",
+      "type": "int"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:ClaimNotRecordedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['not_recorded']",
+      "default": "'not_recorded'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ClaimNotRecordedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'not_recorded'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['not_recorded']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:ClaimRecordedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['recorded']",
+      "default": "'recorded'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.PlacementNotObservedInfo | horsies.monitoring.PlacementPlacedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "placement"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ClaimRecordedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'recorded'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['recorded']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "placement",
+      "type": "horsies.monitoring.PlacementNotObservedInfo | horsies.monitoring.PlacementPlacedInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:ClaimsCountedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['counted']",
+      "default": "'counted'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "count"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "first_claimed_at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ClaimsCountedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'counted'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['counted']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "count",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "first_claimed_at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:ClaimsNotCountedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['not_counted']",
+      "default": "'not_counted'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ClaimsNotCountedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'not_counted'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['not_counted']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
   "horsies.monitoring:ClassReportInfo": {
    "abstract": false,
    "bases": [
@@ -2682,6 +2974,229 @@
       "metadata": [],
       "name": "workers",
       "type": "list[horsies.monitoring.WorkerClassLoadInfo]"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:ConflictClockOrderInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['clock_order']",
+      "default": "'clock_order'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "horsies.monitoring.TimingBoundary",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "earlier"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "earlier_at"
+     },
+     {
+      "annotation": "horsies.monitoring.TimingBoundary",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "later"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "later_at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ConflictClockOrderInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'clock_order'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['clock_order']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "earlier",
+      "type": "horsies.monitoring.TimingBoundary"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "earlier_at",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "later",
+      "type": "horsies.monitoring.TimingBoundary"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "later_at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:ConflictMissingRecordInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['missing_record']",
+      "default": "'missing_record'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "horsies.monitoring.MissingRecord",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "record"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ConflictMissingRecordInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'missing_record'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['missing_record']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "record",
+      "type": "horsies.monitoring.MissingRecord"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:ConflictUnexpectedEventInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['unexpected_event']",
+      "default": "'unexpected_event'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "event_id"
+     },
+     {
+      "annotation": "horsies.monitoring.WorkflowEventKind",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "event"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ConflictUnexpectedEventInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'unexpected_event'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['unexpected_event']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "event_id",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "event",
+      "type": "horsies.monitoring.WorkflowEventKind"
      }
     ],
     "kind": "pydantic"
@@ -2778,6 +3293,120 @@
       "metadata": [],
       "name": "failed_boots",
       "type": "int"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:EndpointNotTerminalInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['not_terminal']",
+      "default": "'not_terminal'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.EndpointNotTerminalInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'not_terminal'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['not_terminal']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:EndpointTerminalInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['terminal']",
+      "default": "'terminal'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "Literal['COMPLETED', 'FAILED', 'SKIPPED']",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "status"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.EndpointTerminalInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'terminal'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['terminal']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "status",
+      "type": "Literal['COMPLETED', 'FAILED', 'SKIPPED']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "at",
+      "type": "datetime.datetime"
      }
     ],
     "kind": "pydantic"
@@ -3047,6 +3676,107 @@
    },
    "type_params": []
   },
+  "horsies.monitoring:FinalizingMarkedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['marked']",
+      "default": "'marked'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "finalizing_at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.FinalizingMarkedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'marked'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['marked']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "finalizing_at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:FinalizingNotMarkedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['not_marked']",
+      "default": "'not_marked'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.FinalizingNotMarkedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'not_marked'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['not_marked']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
   "horsies.monitoring:GroupRow": {
    "abstract": false,
    "bases": [
@@ -3278,13 +4008,13 @@
       "name": "failed_at"
      },
      {
-      "annotation": "None | int",
+      "annotation": "None | float",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "queue_s"
      },
      {
-      "annotation": "None | int",
+      "annotation": "None | float",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "exec_s"
@@ -3406,14 +4136,14 @@
       "default": "required",
       "metadata": [],
       "name": "queue_s",
-      "type": "None | int"
+      "type": "None | float"
      },
      {
       "alias": null,
       "default": "required",
       "metadata": [],
       "name": "exec_s",
-      "type": "None | int"
+      "type": "None | float"
      },
      {
       "alias": null,
@@ -3547,6 +4277,47 @@
    "kind": "value",
    "type": "datetime.timedelta",
    "value": "datetime.timedelta(days=30)"
+  },
+  "horsies.monitoring:MissingRecord": {
+   "abstract": false,
+   "bases": [
+    "str",
+    "enum.Enum"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "values"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.monitoring.models.MissingRecord",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "str",
+    "enum.Enum",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "kind": "enum",
+    "members": {
+     "ATTEMPT_ROW": "'ATTEMPT_ROW'",
+     "CHILD_RUN": "'CHILD_RUN'",
+     "COMPLETION_TIME": "'COMPLETION_TIME'",
+     "LINKED_TASK": "'LINKED_TASK'",
+     "LINKED_WORK": "'LINKED_WORK'",
+     "OPEN_ATTEMPT": "'OPEN_ATTEMPT'",
+     "TASK_TIMES": "'TASK_TIMES'"
+    }
+   },
+   "type_params": []
   },
   "horsies.monitoring:MonitoringQueryDbOperationFailed": {
    "abstract": false,
@@ -3797,6 +4568,281 @@
    },
    "type_params": []
   },
+  "horsies.monitoring:NodeEndpointInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.EndpointNotTerminalInfo | horsies.monitoring.EndpointTerminalInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:NodeTimingExactInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['exact']",
+      "default": "'exact'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "list[horsies.monitoring.TimingSegmentInfo]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "segments"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.EndpointNotTerminalInfo | horsies.monitoring.EndpointTerminalInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "endpoint"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.NodeTimingExactInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'exact'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['exact']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "segments",
+      "type": "list[horsies.monitoring.TimingSegmentInfo]"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "endpoint",
+      "type": "horsies.monitoring.EndpointNotTerminalInfo | horsies.monitoring.EndpointTerminalInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:NodeTimingInconsistentInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['inconsistent']",
+      "default": "'inconsistent'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.ConflictClockOrderInfo | horsies.monitoring.ConflictMissingRecordInfo | horsies.monitoring.ConflictUnexpectedEventInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "conflict"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.NodeTimingInconsistentInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'inconsistent'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['inconsistent']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "conflict",
+      "type": "horsies.monitoring.ConflictClockOrderInfo | horsies.monitoring.ConflictMissingRecordInfo | horsies.monitoring.ConflictUnexpectedEventInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:NodeTimingInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.NodeTimingExactInfo | horsies.monitoring.NodeTimingInconsistentInfo | horsies.monitoring.NodeTimingPartialInfo | horsies.monitoring.NodeTimingUnavailableInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:NodeTimingPartialInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['partial']",
+      "default": "'partial'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "list[horsies.monitoring.UnknownReason]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "reasons"
+     },
+     {
+      "annotation": "list[horsies.monitoring.TimingSegmentInfo]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "segments"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.EndpointNotTerminalInfo | horsies.monitoring.EndpointTerminalInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "endpoint"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.NodeTimingPartialInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'partial'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['partial']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "reasons",
+      "type": "list[horsies.monitoring.UnknownReason]"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "segments",
+      "type": "list[horsies.monitoring.TimingSegmentInfo]"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "endpoint",
+      "type": "horsies.monitoring.EndpointNotTerminalInfo | horsies.monitoring.EndpointTerminalInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:NodeTimingUnavailableInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['unavailable']",
+      "default": "'unavailable'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "horsies.monitoring.UnavailableReason",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "reason"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.NodeTimingUnavailableInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'unavailable'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['unavailable']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "reason",
+      "type": "horsies.monitoring.UnavailableReason"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
   "horsies.monitoring:PageRefused": {
    "abstract": false,
    "bases": [
@@ -3834,6 +4880,225 @@
     "frozen": true,
     "kind": "dataclass",
     "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PauseEndInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.PauseOpenInfo | horsies.monitoring.PauseResumedInfo | horsies.monitoring.PauseRunEndedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:PauseIntervalInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "started_at"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.PauseOpenInfo | horsies.monitoring.PauseResumedInfo | horsies.monitoring.PauseRunEndedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "end"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PauseIntervalInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "started_at",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "end",
+      "type": "horsies.monitoring.PauseOpenInfo | horsies.monitoring.PauseResumedInfo | horsies.monitoring.PauseRunEndedInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PauseOpenInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['open']",
+      "default": "'open'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PauseOpenInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'open'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['open']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PauseResumedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['resumed']",
+      "default": "'resumed'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PauseResumedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'resumed'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['resumed']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PauseRunEndedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['run_ended']",
+      "default": "'run_ended'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PauseRunEndedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'run_ended'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['run_ended']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "kind": "pydantic"
    },
    "type_params": []
   },
@@ -3914,6 +5179,1443 @@
       "metadata": [],
       "name": "wait",
       "type": "horsies.monitoring.StreamNoneDueInfo | horsies.monitoring.StreamWaitingInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhaseAdvancingInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['advancing']",
+      "default": "'advancing'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhaseAdvancingInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'advancing'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['advancing']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhaseClaimedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['claimed']",
+      "default": "'claimed'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.ClaimEarlierInfo | horsies.monitoring.ClaimNotRecordedInfo | horsies.monitoring.ClaimRecordedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "claim"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhaseClaimedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'claimed'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['claimed']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "claim",
+      "type": "horsies.monitoring.ClaimEarlierInfo | horsies.monitoring.ClaimNotRecordedInfo | horsies.monitoring.ClaimRecordedInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhaseEnqueuedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['enqueued']",
+      "default": "'enqueued'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhaseEnqueuedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'enqueued'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['enqueued']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhaseFinalizingInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['finalizing']",
+      "default": "'finalizing'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhaseFinalizingInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'finalizing'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['finalizing']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhasePendingInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['pending']",
+      "default": "'pending'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhasePendingInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'pending'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['pending']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhaseReadyInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['ready']",
+      "default": "'ready'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhaseReadyInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'ready'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['ready']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhaseRetryWaitInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['retry_wait']",
+      "default": "'retry_wait'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhaseRetryWaitInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'retry_wait'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['retry_wait']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhaseRunningInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['running']",
+      "default": "'running'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhaseRunningInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'running'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['running']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhaseUnknownInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['unknown']",
+      "default": "'unknown'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "horsies.monitoring.UnknownReason",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "reason"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhaseUnknownInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'unknown'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['unknown']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "reason",
+      "type": "horsies.monitoring.UnknownReason"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhasesCapturedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['captured']",
+      "default": "'captured'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "enqueued_at"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "claimed_at"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.ClaimsCountedInfo | horsies.monitoring.ClaimsNotCountedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "claims"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.FinalizingMarkedInfo | horsies.monitoring.FinalizingNotMarkedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "finalizing"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.RecordedByCancelInfo | horsies.monitoring.RecordedByRecoveryInfo | horsies.monitoring.RecordedByWorkerInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "recorded_by"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhasesCapturedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'captured'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['captured']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "enqueued_at",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "claimed_at",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "claims",
+      "type": "horsies.monitoring.ClaimsCountedInfo | horsies.monitoring.ClaimsNotCountedInfo"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "finalizing",
+      "type": "horsies.monitoring.FinalizingMarkedInfo | horsies.monitoring.FinalizingNotMarkedInfo"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "recorded_by",
+      "type": "horsies.monitoring.RecordedByCancelInfo | horsies.monitoring.RecordedByRecoveryInfo | horsies.monitoring.RecordedByWorkerInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PhasesNotCapturedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['not_captured']",
+      "default": "'not_captured'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PhasesNotCapturedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'not_captured'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['not_captured']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PlacementNotObservedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['not_observed']",
+      "default": "'not_observed'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PlacementNotObservedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'not_observed'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['not_observed']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:PlacementPlacedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['placed']",
+      "default": "'placed'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "placed_at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.PlacementPlacedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'placed'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['placed']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "placed_at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:ProfileNamedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['named']",
+      "default": "'named'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "name"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ProfileNamedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'named'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['named']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "name",
+      "type": "str"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:ProfileNotRecordedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['not_recorded']",
+      "default": "'not_recorded'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.ProfileNotRecordedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'not_recorded'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['not_recorded']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RecordedByCancelInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['cancel']",
+      "default": "'cancel'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RecordedByCancelInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'cancel'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['cancel']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RecordedByRecoveryInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['recovery']",
+      "default": "'recovery'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "last_seen_at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RecordedByRecoveryInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'recovery'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['recovery']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "last_seen_at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RecordedByWorkerInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['worker']",
+      "default": "'worker'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.PlacementNotObservedInfo | horsies.monitoring.PlacementPlacedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "placement"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RecordedByWorkerInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'worker'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['worker']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "placement",
+      "type": "horsies.monitoring.PlacementNotObservedInfo | horsies.monitoring.PlacementPlacedInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RunConflictInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.RunConflictNodeInfo | horsies.monitoring.RunConflictPauseInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:RunConflictNodeInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['node']",
+      "default": "'node'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_index"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RunConflictNodeInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'node'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['node']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "task_index",
+      "type": "int"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RunConflictPauseInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['pause']",
+      "default": "'pause'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.ConflictClockOrderInfo | horsies.monitoring.ConflictMissingRecordInfo | horsies.monitoring.ConflictUnexpectedEventInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "conflict"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RunConflictPauseInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'pause'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['pause']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "conflict",
+      "type": "horsies.monitoring.ConflictClockOrderInfo | horsies.monitoring.ConflictMissingRecordInfo | horsies.monitoring.ConflictUnexpectedEventInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RunCoverageExactInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['exact']",
+      "default": "'exact'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RunCoverageExactInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'exact'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['exact']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RunCoverageInconsistentInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['inconsistent']",
+      "default": "'inconsistent'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "list[Annotated[horsies.monitoring.RunConflictNodeInfo | horsies.monitoring.RunConflictPauseInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "conflicts"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RunCoverageInconsistentInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'inconsistent'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['inconsistent']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "conflicts",
+      "type": "list[Annotated[horsies.monitoring.RunConflictNodeInfo | horsies.monitoring.RunConflictPauseInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]]"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RunCoverageInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.RunCoverageExactInfo | horsies.monitoring.RunCoverageInconsistentInfo | horsies.monitoring.RunCoveragePartialInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:RunCoveragePartialInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['partial']",
+      "default": "'partial'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "list[horsies.monitoring.UnknownReason]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "reasons"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RunCoveragePartialInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'partial'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['partial']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "reasons",
+      "type": "list[horsies.monitoring.UnknownReason]"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RunTimingComposedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['composed']",
+      "default": "'composed'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "as_of"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "captured_since"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.RunCoverageExactInfo | horsies.monitoring.RunCoverageInconsistentInfo | horsies.monitoring.RunCoveragePartialInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "coverage"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "range_started_at"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "range_ended_at"
+     },
+     {
+      "annotation": "bool",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "open_segments"
+     },
+     {
+      "annotation": "list[horsies.monitoring.PauseIntervalInfo]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "pauses"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RunTimingComposedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'composed'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['composed']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "as_of",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "captured_since",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "coverage",
+      "type": "horsies.monitoring.RunCoverageExactInfo | horsies.monitoring.RunCoverageInconsistentInfo | horsies.monitoring.RunCoveragePartialInfo"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "range_started_at",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "range_ended_at",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "open_segments",
+      "type": "bool"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "pauses",
+      "type": "list[horsies.monitoring.PauseIntervalInfo]"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:RunTimingInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.RunTimingComposedInfo | horsies.monitoring.RunTimingUnavailableInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:RunTimingUnavailableInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['unavailable']",
+      "default": "'unavailable'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "as_of"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "captured_since"
+     },
+     {
+      "annotation": "horsies.monitoring.UnavailableReason",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "reason"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.RunTimingUnavailableInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'unavailable'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['unavailable']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "as_of",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "captured_since",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "reason",
+      "type": "horsies.monitoring.UnavailableReason"
      }
     ],
     "kind": "pydantic"
@@ -4029,11 +6731,329 @@
    },
    "type_params": []
   },
+  "horsies.monitoring:SegmentClaimInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.ClaimEarlierInfo | horsies.monitoring.ClaimNotRecordedInfo | horsies.monitoring.ClaimRecordedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:SegmentEndInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.SegmentEndedInfo | horsies.monitoring.SegmentOpenInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:SegmentEndedInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['ended']",
+      "default": "'ended'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "at"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.SegmentEndedInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'ended'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['ended']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "at",
+      "type": "datetime.datetime"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:SegmentOpenInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['open']",
+      "default": "'open'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.SegmentOpenInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'open'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['open']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:SegmentPhaseInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.PhaseAdvancingInfo | horsies.monitoring.PhaseClaimedInfo | horsies.monitoring.PhaseEnqueuedInfo | horsies.monitoring.PhaseFinalizingInfo | horsies.monitoring.PhasePendingInfo | horsies.monitoring.PhaseReadyInfo | horsies.monitoring.PhaseRetryWaitInfo | horsies.monitoring.PhaseRunningInfo | horsies.monitoring.PhaseUnknownInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:SegmentSourceInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.SourceAttemptInfo | horsies.monitoring.SourceNodeInfo | horsies.monitoring.SourceTaskInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:SnapshotProfileInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.ProfileNamedInfo | horsies.monitoring.ProfileNotRecordedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
   "horsies.monitoring:SortDirection": {
    "defined_as": "horsies.monitoring.queries.SortDirection",
    "kind": "type alias",
    "type_params": [],
    "value": "Literal['asc', 'desc']"
+  },
+  "horsies.monitoring:SourceAttemptInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['attempt']",
+      "default": "'attempt'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "generation"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_id"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "attempt"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.SourceAttemptInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'attempt'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['attempt']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "generation",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "task_id",
+      "type": "uuid.UUID"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "attempt",
+      "type": "int"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:SourceNodeInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['node']",
+      "default": "'node'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.SourceNodeInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'node'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['node']"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:SourceTaskInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Literal['task']",
+      "default": "'task'",
+      "kind": "KEYWORD_ONLY",
+      "name": "kind"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "generation"
+     },
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "task_id"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.SourceTaskInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "'task'",
+      "metadata": [],
+      "name": "kind",
+      "type": "Literal['task']"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "generation",
+      "type": "int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "task_id",
+      "type": "uuid.UUID"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
   },
   "horsies.monitoring:StatusCount": {
    "abstract": false,
@@ -4341,7 +7361,7 @@
       "name": "oldest_due_at"
      },
      {
-      "annotation": "int",
+      "annotation": "float",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "wait_s"
@@ -4383,7 +7403,7 @@
       "default": "required",
       "metadata": [],
       "name": "wait_s",
-      "type": "int"
+      "type": "float"
      }
     ],
     "kind": "pydantic"
@@ -4917,6 +7937,12 @@
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "finished_at"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.PhasesCapturedInfo | horsies.monitoring.PhasesNotCapturedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "phases"
      }
     ],
     "returns": "None"
@@ -4998,6 +8024,13 @@
       "metadata": [],
       "name": "finished_at",
       "type": "None | datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "phases",
+      "type": "horsies.monitoring.PhasesCapturedInfo | horsies.monitoring.PhasesNotCapturedInfo"
      }
     ],
     "kind": "pydantic"
@@ -5512,13 +8545,13 @@
       "name": "failed_at"
      },
      {
-      "annotation": "None | int",
+      "annotation": "None | float",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "queue_s"
      },
      {
-      "annotation": "None | int",
+      "annotation": "None | float",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "exec_s"
@@ -5658,17 +8691,232 @@
       "default": "required",
       "metadata": [],
       "name": "queue_s",
-      "type": "None | int"
+      "type": "None | float"
      },
      {
       "alias": null,
       "default": "required",
       "metadata": [],
       "name": "exec_s",
-      "type": "None | int"
+      "type": "None | float"
      }
     ],
     "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:TimingBoundary": {
+   "abstract": false,
+   "bases": [
+    "str",
+    "enum.Enum"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "values"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.monitoring.models.TimingBoundary",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "str",
+    "enum.Enum",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "kind": "enum",
+    "members": {
+     "ATTEMPT_ENQUEUED": "'ATTEMPT_ENQUEUED'",
+     "ATTEMPT_RECORDED": "'ATTEMPT_RECORDED'",
+     "CHILD_COMPLETED": "'CHILD_COMPLETED'",
+     "CHILD_CREATED": "'CHILD_CREATED'",
+     "CLAIM": "'CLAIM'",
+     "FINALIZING": "'FINALIZING'",
+     "FIRST_CLAIM": "'FIRST_CLAIM'",
+     "LAST_SEEN": "'LAST_SEEN'",
+     "NODE_COMPLETED": "'NODE_COMPLETED'",
+     "NODE_CREATED": "'NODE_CREATED'",
+     "NODE_ENQUEUED": "'NODE_ENQUEUED'",
+     "NODE_READY": "'NODE_READY'",
+     "PLACEMENT": "'PLACEMENT'",
+     "READ_TIME": "'READ_TIME'",
+     "RUN_COMPLETED": "'RUN_COMPLETED'",
+     "RUN_PAUSED": "'RUN_PAUSED'",
+     "RUN_RESUMED": "'RUN_RESUMED'",
+     "START": "'START'",
+     "TASK_CREATED": "'TASK_CREATED'",
+     "TASK_MOVED": "'TASK_MOVED'"
+    }
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:TimingConflictInfo": {
+   "kind": "type form",
+   "text": "Annotated[horsies.monitoring.ConflictClockOrderInfo | horsies.monitoring.ConflictMissingRecordInfo | horsies.monitoring.ConflictUnexpectedEventInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]"
+  },
+  "horsies.monitoring:TimingSegmentInfo": {
+   "abstract": false,
+   "bases": [
+    "pydantic.main.BaseModel"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "Annotated[horsies.monitoring.PhaseAdvancingInfo | horsies.monitoring.PhaseClaimedInfo | horsies.monitoring.PhaseEnqueuedInfo | horsies.monitoring.PhaseFinalizingInfo | horsies.monitoring.PhasePendingInfo | horsies.monitoring.PhaseReadyInfo | horsies.monitoring.PhaseRetryWaitInfo | horsies.monitoring.PhaseRunningInfo | horsies.monitoring.PhaseUnknownInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "phase"
+     },
+     {
+      "annotation": "datetime.datetime",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "started_at"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.SegmentEndedInfo | horsies.monitoring.SegmentOpenInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "end"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.SourceAttemptInfo | horsies.monitoring.SourceNodeInfo | horsies.monitoring.SourceTaskInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "source"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.monitoring.models.TimingSegmentInfo",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "pydantic.main.BaseModel",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "config": {
+     "extra": "unset",
+     "frozen": "True",
+     "strict": "unset"
+    },
+    "fields": [
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "phase",
+      "type": "horsies.monitoring.PhaseAdvancingInfo | horsies.monitoring.PhaseClaimedInfo | horsies.monitoring.PhaseEnqueuedInfo | horsies.monitoring.PhaseFinalizingInfo | horsies.monitoring.PhasePendingInfo | horsies.monitoring.PhaseReadyInfo | horsies.monitoring.PhaseRetryWaitInfo | horsies.monitoring.PhaseRunningInfo | horsies.monitoring.PhaseUnknownInfo"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "started_at",
+      "type": "datetime.datetime"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "end",
+      "type": "horsies.monitoring.SegmentEndedInfo | horsies.monitoring.SegmentOpenInfo"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "source",
+      "type": "horsies.monitoring.SourceAttemptInfo | horsies.monitoring.SourceNodeInfo | horsies.monitoring.SourceTaskInfo"
+     }
+    ],
+    "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:UnavailableReason": {
+   "abstract": false,
+   "bases": [
+    "str",
+    "enum.Enum"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "values"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.monitoring.models.UnavailableReason",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "str",
+    "enum.Enum",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "kind": "enum",
+    "members": {
+     "RUN_BEFORE_CAPTURE": "'RUN_BEFORE_CAPTURE'",
+     "TIMING_BOUND_EXCEEDED": "'TIMING_BOUND_EXCEEDED'"
+    }
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:UnknownReason": {
+   "abstract": false,
+   "bases": [
+    "str",
+    "enum.Enum"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "values"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.monitoring.models.UnknownReason",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "str",
+    "enum.Enum",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "kind": "enum",
+    "members": {
+     "ATTEMPT_NOT_CAPTURED": "'ATTEMPT_NOT_CAPTURED'",
+     "CLAIMS_NOT_COUNTED": "'CLAIMS_NOT_COUNTED'",
+     "HISTORY_PRUNED": "'HISTORY_PRUNED'",
+     "WORKER_LOST": "'WORKER_LOST'"
+    }
    },
    "type_params": []
   },
@@ -6007,7 +9255,7 @@
       "name": "snapshot_at"
      },
      {
-      "annotation": "None | int",
+      "annotation": "None | float",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "snapshot_age_s"
@@ -6025,7 +9273,7 @@
       "name": "worker_started_at"
      },
      {
-      "annotation": "None | int",
+      "annotation": "None | float",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "uptime_s"
@@ -6095,6 +9343,12 @@
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "down_slots"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.ProfileNamedInfo | horsies.monitoring.ProfileNotRecordedInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "profile"
      }
     ],
     "returns": "None"
@@ -6147,7 +9401,7 @@
       "default": "required",
       "metadata": [],
       "name": "snapshot_age_s",
-      "type": "None | int"
+      "type": "None | float"
      },
      {
       "alias": null,
@@ -6168,7 +9422,7 @@
       "default": "required",
       "metadata": [],
       "name": "uptime_s",
-      "type": "None | int"
+      "type": "None | float"
      },
      {
       "alias": null,
@@ -6246,6 +9500,13 @@
       "metadata": [],
       "name": "down_slots",
       "type": "list[horsies.monitoring.DownSlotInfo]"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "profile",
+      "type": "horsies.monitoring.ProfileNamedInfo | horsies.monitoring.ProfileNotRecordedInfo"
      }
     ],
     "kind": "pydantic"
@@ -6306,6 +9567,45 @@
      }
     ],
     "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies.monitoring:WorkflowEventKind": {
+   "abstract": false,
+   "bases": [
+    "str",
+    "enum.Enum"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "values"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.monitoring.models.WorkflowEventKind",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "str",
+    "enum.Enum",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "kind": "enum",
+    "members": {
+     "NODE_ENQUEUED": "'NODE_ENQUEUED'",
+     "NODE_READY": "'NODE_READY'",
+     "TASK_MOVED": "'TASK_MOVED'",
+     "WORKFLOW_PAUSED": "'WORKFLOW_PAUSED'",
+     "WORKFLOW_RESUMED": "'WORKFLOW_RESUMED'"
+    }
    },
    "type_params": []
   },
@@ -6372,7 +9672,7 @@
       "name": "completed_at"
      },
      {
-      "annotation": "None | int",
+      "annotation": "None | float",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "exec_s"
@@ -6388,6 +9688,12 @@
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "child_failed"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.NodeTimingExactInfo | horsies.monitoring.NodeTimingInconsistentInfo | horsies.monitoring.NodeTimingPartialInfo | horsies.monitoring.NodeTimingUnavailableInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "timing"
      }
     ],
     "returns": "None"
@@ -6475,7 +9781,7 @@
       "default": "required",
       "metadata": [],
       "name": "exec_s",
-      "type": "None | int"
+      "type": "None | float"
      },
      {
       "alias": null,
@@ -6490,6 +9796,13 @@
       "metadata": [],
       "name": "child_failed",
       "type": "None | int"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "timing",
+      "type": "horsies.monitoring.NodeTimingExactInfo | horsies.monitoring.NodeTimingInconsistentInfo | horsies.monitoring.NodeTimingPartialInfo | horsies.monitoring.NodeTimingUnavailableInfo"
      }
     ],
     "kind": "pydantic"
@@ -6539,6 +9852,12 @@
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "trace_id"
+     },
+     {
+      "annotation": "Annotated[horsies.monitoring.RunTimingComposedInfo | horsies.monitoring.RunTimingUnavailableInfo, FieldInfo(annotation=NoneType, required=True, discriminator='kind')]",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "timing"
      }
     ],
     "returns": "None"
@@ -6599,6 +9918,13 @@
       "metadata": [],
       "name": "trace_id",
       "type": "None | str"
+     },
+     {
+      "alias": null,
+      "default": "required",
+      "metadata": [],
+      "name": "timing",
+      "type": "horsies.monitoring.RunTimingComposedInfo | horsies.monitoring.RunTimingUnavailableInfo"
      }
     ],
     "kind": "pydantic"
@@ -6650,7 +9976,7 @@
       "name": "completed_at"
      },
      {
-      "annotation": "None | int",
+      "annotation": "None | float",
       "default": "required",
       "kind": "KEYWORD_ONLY",
       "name": "wall_s"
@@ -6720,7 +10046,7 @@
       "default": "required",
       "metadata": [],
       "name": "wall_s",
-      "type": "None | int"
+      "type": "None | float"
      }
     ],
     "kind": "pydantic"
@@ -7001,7 +10327,7 @@
       "name": "end"
      }
     ],
-    "returns": "None | int"
+    "returns": "None | float"
    }
   },
   "horsies.monitoring:get_task_detail": {
@@ -7303,7 +10629,7 @@
       "name": "live"
      }
     ],
-    "returns": "None | int"
+    "returns": "None | float"
    }
   },
   "horsies.monitoring:task_breakdown": {
@@ -7941,6 +11267,46 @@
       "kw_only": true,
       "name": "record_duration",
       "type": "datetime.timedelta"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.telemetry:ChildResultCancelled": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies._catalog.events.OperatorCancelEnd",
+      "default": "required",
+      "kind": "KEYWORD_ONLY",
+      "name": "end"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.ChildResultCancelled",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": true,
+      "name": "end",
+      "type": "horsies._catalog.events.OperatorCancelEnd"
      }
     ],
     "frozen": true,
@@ -9331,6 +12697,108 @@
    },
    "type_params": []
   },
+  "horsies:AttemptNumber": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "value"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.task_runtime.AttemptNumber",
+   "kind": "class",
+   "members": {
+    "parse": {
+     "kind": "classmethod",
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "int",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "number"
+       }
+      ],
+      "returns": "horsies.Err[horsies.AttemptNumberRefused] | horsies.Ok[typing.Self]"
+     }
+    }
+   },
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "value",
+      "type": "int"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies:AttemptNumberRefused": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "number"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.task_runtime.AttemptNumberRefused",
+   "kind": "class",
+   "members": {
+    "reason": {
+     "kind": "property",
+     "settable": false,
+     "type": "str"
+    }
+   },
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "number",
+      "type": "int"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
   "horsies:BothDays": {
    "abstract": false,
    "bases": [
@@ -10410,6 +13878,105 @@
      }
     ],
     "kind": "pydantic"
+   },
+   "type_params": []
+  },
+  "horsies:CancelCause": {
+   "abstract": false,
+   "bases": [
+    "enum.Enum"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "values"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.task_runtime.CancelCause",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "enum.Enum",
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "kind": "enum",
+    "members": {
+     "DEADLINE": "'DEADLINE'",
+     "OPERATOR": "'OPERATOR'"
+    }
+   },
+   "type_params": []
+  },
+  "horsies:CancelNotRequested": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.task_runtime.CancelNotRequested",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies:CancelRequested": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies.CancelCause",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "cause"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.task_runtime.CancelRequested",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "cause",
+      "type": "horsies.CancelCause"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
    },
    "type_params": []
   },
@@ -12963,6 +16530,59 @@
    },
    "type_params": []
   },
+  "horsies:FencingToken": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "uuid.UUID",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "task_id"
+     },
+     {
+      "annotation": "int",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "value"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.task_runtime.FencingToken",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "task_id",
+      "type": "uuid.UUID"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "value",
+      "type": "int"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
   "horsies:ForkedAfterCoreStart": {
    "abstract": false,
    "bases": [
@@ -14528,6 +18148,54 @@
          "name": "task_name"
         },
         {
+         "annotation": "collections.abc.Callable[typing.Concatenate[horsies.TaskRuntime, ~P], collections.abc.Coroutine[typing.Any, typing.Any, horsies.TaskResult[~T, horsies.TaskError]]]",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "func"
+        }
+       ],
+       "returns": "horsies.core.task_decorator.AsyncRuntimeTaskFunction[~P, ~T]"
+      },
+      {
+       "async": "sync",
+       "parameters": [
+        {
+         "annotation": "unannotated",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "self"
+        },
+        {
+         "annotation": "str",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "task_name"
+        },
+        {
+         "annotation": "collections.abc.Callable[typing.Concatenate[horsies.TaskRuntime, ~P], horsies.TaskResult[~T, horsies.TaskError]]",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "func"
+        }
+       ],
+       "returns": "horsies.core.task_decorator.RuntimeTaskFunction[~P, ~T]"
+      },
+      {
+       "async": "sync",
+       "parameters": [
+        {
+         "annotation": "unannotated",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "self"
+        },
+        {
+         "annotation": "str",
+         "default": "required",
+         "kind": "POSITIONAL_OR_KEYWORD",
+         "name": "task_name"
+        },
+        {
          "annotation": "collections.abc.Callable[~P, collections.abc.Coroutine[typing.Any, typing.Any, horsies.TaskResult[~T, horsies.TaskError]]]",
          "default": "required",
          "kind": "POSITIONAL_OR_KEYWORD",
@@ -14804,6 +18472,12 @@
          "name": "timeout_ms"
         },
         {
+         "annotation": "None | int",
+         "default": "None",
+         "kind": "KEYWORD_ONLY",
+         "name": "cancel_grace_ms"
+        },
+        {
          "annotation": "Literal[<Execution.ISOLATED: 'ISOLATED'>]",
          "default": "horsies.Execution.ISOLATED",
          "kind": "KEYWORD_ONLY",
@@ -14811,72 +18485,6 @@
         }
        ],
        "returns": "horsies.core.task_decorator.TaskDecorator"
-      },
-      {
-       "async": "sync",
-       "parameters": [
-        {
-         "annotation": "unannotated",
-         "default": "required",
-         "kind": "POSITIONAL_OR_KEYWORD",
-         "name": "self"
-        },
-        {
-         "annotation": "str",
-         "default": "required",
-         "kind": "POSITIONAL_OR_KEYWORD",
-         "name": "task_name"
-        },
-        {
-         "annotation": "int",
-         "default": "required",
-         "kind": "KEYWORD_ONLY",
-         "name": "cancel_grace_ms"
-        },
-        {
-         "annotation": "None | str",
-         "default": "None",
-         "kind": "KEYWORD_ONLY",
-         "name": "queue_name"
-        },
-        {
-         "annotation": "None | horsies.RetryPolicy",
-         "default": "None",
-         "kind": "KEYWORD_ONLY",
-         "name": "retry_policy"
-        },
-        {
-         "annotation": "None | dict[type[BaseException], str]",
-         "default": "None",
-         "kind": "KEYWORD_ONLY",
-         "name": "exception_mapper"
-        },
-        {
-         "annotation": "None | str",
-         "default": "None",
-         "kind": "KEYWORD_ONLY",
-         "name": "default_unhandled_error_code"
-        },
-        {
-         "annotation": "tuple[str, ...] | type[enum.Enum]",
-         "default": "()",
-         "kind": "KEYWORD_ONLY",
-         "name": "error_codes"
-        },
-        {
-         "annotation": "None | int",
-         "default": "None",
-         "kind": "KEYWORD_ONLY",
-         "name": "timeout_ms"
-        },
-        {
-         "annotation": "Literal[<Execution.ISOLATED: 'ISOLATED'>]",
-         "default": "horsies.Execution.ISOLATED",
-         "kind": "KEYWORD_ONLY",
-         "name": "execution"
-        }
-       ],
-       "returns": "horsies.core.task_decorator.CancelGraceRefusedDecorator"
       },
       {
        "async": "sync",
@@ -14973,7 +18581,7 @@
         "name": "task_options_kwargs"
        }
       ],
-      "returns": "horsies.core.task_decorator.AsyncTaskFunction[typing.Any, typing.Any] | horsies.core.task_decorator.CancelGraceRefusedDecorator | horsies.core.task_decorator.SharedAsyncTaskDecorator | horsies.core.task_decorator.SharedThreadTaskDecorator | horsies.core.task_decorator.TaskDecorator | horsies.core.task_decorator.TaskFunction[typing.Any, typing.Any]"
+      "returns": "horsies.core.task_decorator.AsyncRuntimeTaskFunction[typing.Any, typing.Any] | horsies.core.task_decorator.AsyncTaskFunction[typing.Any, typing.Any] | horsies.core.task_decorator.CancelGraceRefusedDecorator | horsies.core.task_decorator.RuntimeTaskFunction[typing.Any, typing.Any] | horsies.core.task_decorator.SharedAsyncTaskDecorator | horsies.core.task_decorator.SharedThreadTaskDecorator | horsies.core.task_decorator.TaskDecorator | horsies.core.task_decorator.TaskFunction[typing.Any, typing.Any]"
      }
     },
     "validate_queue_name": {
@@ -18534,6 +22142,71 @@
    },
    "type_params": []
   },
+  "horsies:ProfileNamed": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "name"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.models.health.ProfileNamed",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "name",
+      "type": "str"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies:ProfileNotRecorded": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.models.health.ProfileNotRecorded",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
   "horsies:QueueMode": {
    "abstract": false,
    "bases": [
@@ -20093,6 +23766,12 @@
    },
    "type_params": []
   },
+  "horsies:RunCancelState": {
+   "defined_as": "horsies.core.task_runtime.RunCancelState",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.CancelNotRequested | horsies.CancelRequested"
+  },
   "horsies:ScheduleConfig": {
    "abstract": false,
    "bases": [
@@ -20754,6 +24433,10 @@
     "slots": true
    },
    "type_params": []
+  },
+  "horsies:SnapshotProfile": {
+   "kind": "type form",
+   "text": "horsies.ProfileNamed | horsies.ProfileNotRecorded"
   },
   "horsies:SpawnFailed": {
    "abstract": false,
@@ -21845,6 +25528,7 @@
    "shape": {
     "kind": "enum",
     "members": {
+     "CANCELLED": "'CANCELLED'",
      "COMPLETED": "'COMPLETED'",
      "FAILED": "'FAILED'",
      "WORKER_FAILURE": "'WORKER_FAILURE'"
@@ -22610,7 +26294,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "horsies.core.task_decorator.AsyncTaskFunction[typing.Any, ~OkT_co] | horsies.core.task_decorator.TaskFunction[typing.Any, ~OkT_co]",
+      "annotation": "horsies.core.task_decorator.AsyncRuntimeTaskFunction[typing.Any, ~OkT_co] | horsies.core.task_decorator.AsyncTaskFunction[typing.Any, ~OkT_co] | horsies.core.task_decorator.RuntimeTaskFunction[typing.Any, ~OkT_co] | horsies.core.task_decorator.TaskFunction[typing.Any, ~OkT_co]",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "fn"
@@ -22727,7 +26411,7 @@
       "init": true,
       "kw_only": false,
       "name": "fn",
-      "type": "horsies.core.task_decorator.AsyncTaskFunction[typing.Any, ~OkT_co] | horsies.core.task_decorator.TaskFunction[typing.Any, ~OkT_co]"
+      "type": "horsies.core.task_decorator.AsyncRuntimeTaskFunction[typing.Any, ~OkT_co] | horsies.core.task_decorator.AsyncTaskFunction[typing.Any, ~OkT_co] | horsies.core.task_decorator.RuntimeTaskFunction[typing.Any, ~OkT_co] | horsies.core.task_decorator.TaskFunction[typing.Any, ~OkT_co]"
      },
      {
       "default": "factory tuple",
@@ -22974,6 +26658,103 @@
     "~T",
     "~E"
    ]
+  },
+  "horsies:TaskRuntime": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies.FencingToken",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "fencing_token"
+     },
+     {
+      "annotation": "horsies.core.task_runtime.RunCancelCell",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "_cancel"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.task_runtime.TaskRuntime",
+   "kind": "class",
+   "members": {
+    "cancel_state": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "horsies.RunCancelState"
+     }
+    },
+    "for_test": {
+     "kind": "classmethod",
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "uuid.UUID",
+        "default": "required",
+        "kind": "KEYWORD_ONLY",
+        "name": "task_id"
+       },
+       {
+        "annotation": "horsies.AttemptNumber",
+        "default": "AttemptNumber(value=1)",
+        "kind": "KEYWORD_ONLY",
+        "name": "attempt"
+       },
+       {
+        "annotation": "horsies.RunCancelState",
+        "default": "CancelNotRequested()",
+        "kind": "KEYWORD_ONLY",
+        "name": "cancel_state"
+       }
+      ],
+      "returns": "horsies.TaskRuntime"
+     }
+    }
+   },
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "fencing_token",
+      "type": "horsies.FencingToken"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "_cancel",
+      "type": "horsies.core.task_runtime.RunCancelCell"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
   },
   "horsies:TaskSchedule": {
    "abstract": false,
@@ -25025,6 +28806,12 @@
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "class_capacity"
+     },
+     {
+      "annotation": "horsies.ProfileNamed | horsies.ProfileNotRecorded",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "profile"
      }
     ],
     "returns": "None"
@@ -25184,6 +28971,13 @@
       "kw_only": false,
       "name": "class_capacity",
       "type": "horsies.ClassBudgets"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "profile",
+      "type": "horsies.ProfileNamed | horsies.ProfileNotRecorded"
      }
     ],
     "frozen": true,
@@ -26695,6 +30489,83 @@
    },
    "type_params": []
   },
+  "horsies:WorkflowStartCommandConflict": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "message"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "workflow_name"
+     },
+     {
+      "annotation": "str",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "workflow_id"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.workflow_start_errors.WorkflowStartCommandConflict",
+   "kind": "class",
+   "members": {
+    "code": {
+     "kind": "attribute",
+     "type": "horsies.WorkflowStartErrorCode",
+     "value": "horsies.WorkflowStartErrorCode.WORKFLOW_COMMAND_CONFLICT"
+    },
+    "retryable": {
+     "kind": "attribute",
+     "type": "bool",
+     "value": "False"
+    }
+   },
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "message",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "workflow_name",
+      "type": "str"
+     },
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "workflow_id",
+      "type": "str"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
   "horsies:WorkflowStartEnqueueFailed": {
    "abstract": false,
    "bases": [
@@ -26833,6 +30704,7 @@
      "BROKER_NOT_CONFIGURED": "'BROKER_NOT_CONFIGURED'",
      "ENQUEUE_FAILED": "'ENQUEUE_FAILED'",
      "VALIDATION_FAILED": "'VALIDATION_FAILED'",
+     "WORKFLOW_COMMAND_CONFLICT": "'WORKFLOW_COMMAND_CONFLICT'",
      "WORKFLOW_ID_CONFLICT": "'WORKFLOW_ID_CONFLICT'"
     }
    },
@@ -27778,7 +31650,7 @@
   }
  },
  "format": 1,
- "package_version": "0.7.0",
+ "package_version": "0.8.1",
  "reachable": {
   "horsies._catalog.broker_errors.BrokerCoreEnqueueError": {
    "defined_as": "horsies._catalog.broker_errors.BrokerCoreEnqueueError",
@@ -28162,7 +32034,7 @@
    "defined_as": "horsies._catalog.events.AttemptRecord",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies._catalog.events.AttemptRecordClaimReleased | horsies._catalog.events.AttemptRecordCompleted | horsies._catalog.events.AttemptRecordFailed | horsies._catalog.events.AttemptRecordLeftToRecovery | horsies._catalog.events.AttemptRecordNotHeld | horsies._catalog.events.AttemptRecordNothingOwed | horsies._catalog.events.AttemptRecordRetriesExhausted | horsies._catalog.events.AttemptRecordRetryScheduled | horsies._catalog.events.AttemptRecordWriteFailed"
+   "value": "horsies._catalog.events.AttemptRecordClaimReleased | horsies._catalog.events.AttemptRecordCompleted | horsies._catalog.events.AttemptRecordFailed | horsies._catalog.events.AttemptRecordLeftToRecovery | horsies._catalog.events.AttemptRecordNotHeld | horsies._catalog.events.AttemptRecordNothingOwed | horsies._catalog.events.AttemptRecordRecordedByCancel | horsies._catalog.events.AttemptRecordRetriesExhausted | horsies._catalog.events.AttemptRecordRetryScheduled | horsies._catalog.events.AttemptRecordWriteFailed"
   },
   "horsies._catalog.events.AttemptRecordClaimReleased": {
    "abstract": false,
@@ -28300,6 +32172,31 @@
     "returns": "None"
    },
    "defined_as": "horsies._catalog.events.AttemptRecordNothingOwed",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies._catalog.events.AttemptRecordRecordedByCancel": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies._catalog.events.AttemptRecordRecordedByCancel",
    "kind": "class",
    "members": {},
    "mro": [
@@ -28590,7 +32487,7 @@
    "defined_as": "horsies._catalog.events.ChildResult",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies._catalog.events.ChildResultFailed | horsies._catalog.events.ChildResultTimedOut | horsies._catalog.events.ChildResultWorkerFailure | horsies.telemetry.ChildResultCompleted"
+   "value": "horsies._catalog.events.ChildResultFailed | horsies._catalog.events.ChildResultTimedOut | horsies._catalog.events.ChildResultWorkerFailure | horsies.telemetry.ChildResultCancelled | horsies.telemetry.ChildResultCompleted"
   },
   "horsies._catalog.events.ChildResultFailed": {
    "abstract": false,
@@ -28871,6 +32768,12 @@
    "kind": "type alias",
    "type_params": [],
    "value": "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"
+  },
+  "horsies._catalog.events.OperatorCancelEnd": {
+   "defined_as": "horsies._catalog.events.OperatorCancelEnd",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "Literal['BEFORE_BODY', 'DROPPED_AFTER_GRACE', 'RETURNED_AFTER_SIGNAL']"
   },
   "horsies._catalog.events.RecoveryAction": {
    "defined_as": "horsies._catalog.events.RecoveryAction",
@@ -29285,7 +33188,7 @@
    "defined_as": "horsies._catalog.events.WorkerDecision",
    "kind": "type alias",
    "type_params": [],
-   "value": "Literal['CHILD_LOST', 'NEIGHBOUR_BLOCKED_LOOP', 'TASK_BLOCKED_LOOP', 'TIMED_OUT']"
+   "value": "Literal['CHILD_LOST', 'KILLED_AFTER_CANCEL', 'LOST_AFTER_CANCEL', 'NEIGHBOUR_BLOCKED_LOOP', 'TASK_BLOCKED_LOOP', 'TIMED_OUT']"
   },
   "horsies._catalog.events.WorkflowPlace": {
    "defined_as": "horsies._catalog.events.WorkflowPlace",
@@ -29350,7 +33253,7 @@
    "defined_as": "horsies._catalog.workflow_start_errors.WorkflowStartCoreError",
    "kind": "type alias",
    "type_params": [],
-   "value": "horsies.WorkflowStartAsyncContext | horsies.WorkflowStartEnqueueFailed | horsies.WorkflowStartIdConflict | horsies.WorkflowStartValidationFailed"
+   "value": "horsies.WorkflowStartAsyncContext | horsies.WorkflowStartCommandConflict | horsies.WorkflowStartEnqueueFailed | horsies.WorkflowStartIdConflict | horsies.WorkflowStartValidationFailed"
   },
   "horsies._core.CoreDatabaseError": {
    "abstract": false,
@@ -31543,6 +35446,411 @@
    },
    "type_params": []
   },
+  "horsies.core.task_decorator.AsyncRuntimeTaskFunction": {
+   "abstract": true,
+   "bases": [
+    "horsies.core.task_decorator._TaskFunctionMembers",
+    "typing.Protocol"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "args"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_KEYWORD",
+      "name": "kwargs"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.task_decorator.AsyncRuntimeTaskFunction",
+   "kind": "class",
+   "members": {
+    "__call__": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_ONLY",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskRuntime",
+        "default": "required",
+        "kind": "POSITIONAL_ONLY",
+        "name": "runtime"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "collections.abc.Coroutine[typing.Any, typing.Any, horsies.TaskResult[~T, horsies.TaskError]]"
+     }
+    },
+    "node": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "None | collections.abc.Sequence[horsies.SubWorkflowNode[typing.Any] | horsies.TaskNode[typing.Any]]",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "waits_for"
+       },
+       {
+        "annotation": "None | collections.abc.Sequence[horsies.SubWorkflowNode[typing.Any] | horsies.TaskNode[typing.Any]]",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "workflow_ctx_from"
+       },
+       {
+        "annotation": "None | dict[str, horsies.SubWorkflowNode[typing.Any] | horsies.TaskNode[typing.Any]]",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "args_from"
+       },
+       {
+        "annotation": "None | str",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "queue"
+       },
+       {
+        "annotation": "None | int",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "priority"
+       },
+       {
+        "annotation": "bool",
+        "default": "False",
+        "kind": "KEYWORD_ONLY",
+        "name": "allow_failed_deps"
+       },
+       {
+        "annotation": "Literal['all', 'any', 'quorum']",
+        "default": "'all'",
+        "kind": "KEYWORD_ONLY",
+        "name": "join"
+       },
+       {
+        "annotation": "None | int",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "min_success"
+       },
+       {
+        "annotation": "None | datetime.datetime",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "good_until"
+       },
+       {
+        "annotation": "None | str",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "node_id"
+       }
+      ],
+      "returns": "horsies.core.task_decorator.NodeFactory[~P, ~T]"
+     }
+    },
+    "retry_schedule": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskSendRetryable",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "error"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "retry_schedule_async": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "coroutine",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskSendRetryable",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "error"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "retry_send": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskSendRetryable",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "error"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "retry_send_async": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "coroutine",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskSendRetryable",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "error"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "schedule": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "int",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "delay"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "schedule_async": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "coroutine",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "int",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "delay"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "send": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "send_async": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "coroutine",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "with_options": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "None | datetime.datetime",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "good_until"
+       },
+       {
+        "annotation": "None | str",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "idempotency_key"
+       },
+       {
+        "annotation": "horsies.RetentionChoice",
+        "default": "<no retention choice>",
+        "kind": "KEYWORD_ONLY",
+        "name": "retention"
+       }
+      ],
+      "returns": "horsies.TaskSendOptions[~P, ~T]"
+     }
+    }
+   },
+   "mro": [
+    "horsies.core.task_decorator._TaskFunctionMembers",
+    "typing.Protocol",
+    "typing.Generic",
+    "object"
+   ],
+   "protocol": true,
+   "shape": {
+    "attributes": {
+     "task_error_codes": "tuple[str, ...]",
+     "task_name": "str",
+     "task_options_json": "None | str",
+     "task_queue_name": "None | str"
+    },
+    "kind": "plain"
+   },
+   "type_params": [
+    "~P",
+    "~T"
+   ]
+  },
   "horsies.core.task_decorator.AsyncTaskFunction": {
    "abstract": true,
    "bases": [
@@ -32012,7 +36320,7 @@
     "async": "sync",
     "parameters": [
      {
-      "annotation": "horsies.core.task_decorator.AsyncTaskFunction[~P, ~T] | horsies.core.task_decorator.TaskFunction[~P, ~T]",
+      "annotation": "horsies.core.task_decorator.AsyncRuntimeTaskFunction[~P, ~T] | horsies.core.task_decorator.AsyncTaskFunction[~P, ~T] | horsies.core.task_decorator.RuntimeTaskFunction[~P, ~T] | horsies.core.task_decorator.TaskFunction[~P, ~T]",
       "default": "required",
       "kind": "POSITIONAL_OR_KEYWORD",
       "name": "fn"
@@ -32126,6 +36434,411 @@
     "~T"
    ]
   },
+  "horsies.core.task_decorator.RuntimeTaskFunction": {
+   "abstract": true,
+   "bases": [
+    "horsies.core.task_decorator._TaskFunctionMembers",
+    "typing.Protocol"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_POSITIONAL",
+      "name": "args"
+     },
+     {
+      "annotation": "unannotated",
+      "default": "required",
+      "kind": "VAR_KEYWORD",
+      "name": "kwargs"
+     }
+    ],
+    "returns": "unannotated"
+   },
+   "defined_as": "horsies.core.task_decorator.RuntimeTaskFunction",
+   "kind": "class",
+   "members": {
+    "__call__": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_ONLY",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskRuntime",
+        "default": "required",
+        "kind": "POSITIONAL_ONLY",
+        "name": "runtime"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "horsies.TaskResult[~T, horsies.TaskError]"
+     }
+    },
+    "node": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "None | collections.abc.Sequence[horsies.SubWorkflowNode[typing.Any] | horsies.TaskNode[typing.Any]]",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "waits_for"
+       },
+       {
+        "annotation": "None | collections.abc.Sequence[horsies.SubWorkflowNode[typing.Any] | horsies.TaskNode[typing.Any]]",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "workflow_ctx_from"
+       },
+       {
+        "annotation": "None | dict[str, horsies.SubWorkflowNode[typing.Any] | horsies.TaskNode[typing.Any]]",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "args_from"
+       },
+       {
+        "annotation": "None | str",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "queue"
+       },
+       {
+        "annotation": "None | int",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "priority"
+       },
+       {
+        "annotation": "bool",
+        "default": "False",
+        "kind": "KEYWORD_ONLY",
+        "name": "allow_failed_deps"
+       },
+       {
+        "annotation": "Literal['all', 'any', 'quorum']",
+        "default": "'all'",
+        "kind": "KEYWORD_ONLY",
+        "name": "join"
+       },
+       {
+        "annotation": "None | int",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "min_success"
+       },
+       {
+        "annotation": "None | datetime.datetime",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "good_until"
+       },
+       {
+        "annotation": "None | str",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "node_id"
+       }
+      ],
+      "returns": "horsies.core.task_decorator.NodeFactory[~P, ~T]"
+     }
+    },
+    "retry_schedule": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskSendRetryable",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "error"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "retry_schedule_async": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "coroutine",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskSendRetryable",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "error"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "retry_send": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskSendRetryable",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "error"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "retry_send_async": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "coroutine",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.TaskSendRetryable",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "error"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "schedule": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "int",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "delay"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "schedule_async": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "coroutine",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "int",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "delay"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "send": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "send_async": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "coroutine",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
+       },
+       {
+        "annotation": "~P",
+        "default": "required",
+        "kind": "VAR_KEYWORD",
+        "name": "kwargs"
+       }
+      ],
+      "returns": "horsies.TaskSendResult[horsies.TaskHandle[~T]]"
+     }
+    },
+    "with_options": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "None | datetime.datetime",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "good_until"
+       },
+       {
+        "annotation": "None | str",
+        "default": "None",
+        "kind": "KEYWORD_ONLY",
+        "name": "idempotency_key"
+       },
+       {
+        "annotation": "horsies.RetentionChoice",
+        "default": "<no retention choice>",
+        "kind": "KEYWORD_ONLY",
+        "name": "retention"
+       }
+      ],
+      "returns": "horsies.TaskSendOptions[~P, ~T]"
+     }
+    }
+   },
+   "mro": [
+    "horsies.core.task_decorator._TaskFunctionMembers",
+    "typing.Protocol",
+    "typing.Generic",
+    "object"
+   ],
+   "protocol": true,
+   "shape": {
+    "attributes": {
+     "task_error_codes": "tuple[str, ...]",
+     "task_name": "str",
+     "task_options_json": "None | str",
+     "task_queue_name": "None | str"
+    },
+    "kind": "plain"
+   },
+   "type_params": [
+    "~P",
+    "~T"
+   ]
+  },
   "horsies.core.task_decorator.SharedAsyncTaskDecorator": {
    "abstract": false,
    "bases": [
@@ -32161,17 +36874,17 @@
        {
         "annotation": "unannotated",
         "default": "required",
-        "kind": "POSITIONAL_ONLY",
-        "name": "self"
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
        },
        {
-        "annotation": "collections.abc.Callable[~P, collections.abc.Coroutine[typing.Any, typing.Any, horsies.TaskResult[~T, horsies.TaskError]]]",
+        "annotation": "unannotated",
         "default": "required",
-        "kind": "POSITIONAL_ONLY",
-        "name": "fn"
+        "kind": "VAR_KEYWORD",
+        "name": "kwds"
        }
       ],
-      "returns": "horsies.core.task_decorator.AsyncTaskFunction[~P, ~T]"
+      "returns": "unannotated"
      }
     }
    },
@@ -32222,17 +36935,17 @@
        {
         "annotation": "unannotated",
         "default": "required",
-        "kind": "POSITIONAL_ONLY",
-        "name": "self"
+        "kind": "VAR_POSITIONAL",
+        "name": "args"
        },
        {
-        "annotation": "collections.abc.Callable[~P, horsies.TaskResult[~T, horsies.TaskError]]",
+        "annotation": "unannotated",
         "default": "required",
-        "kind": "POSITIONAL_ONLY",
-        "name": "fn"
+        "kind": "VAR_KEYWORD",
+        "name": "kwds"
        }
       ],
-      "returns": "horsies.core.task_decorator.TaskFunction[~P, ~T]"
+      "returns": "unannotated"
      }
     }
    },
@@ -33100,6 +37813,154 @@
    },
    "type_params": []
   },
+  "horsies.core.task_runtime.CancelAlreadySet": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [
+     {
+      "annotation": "horsies.CancelCause",
+      "default": "required",
+      "kind": "POSITIONAL_OR_KEYWORD",
+      "name": "cause"
+     }
+    ],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.task_runtime.CancelAlreadySet",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [
+     {
+      "default": "required",
+      "init": true,
+      "kw_only": false,
+      "name": "cause",
+      "type": "horsies.CancelCause"
+     }
+    ],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.task_runtime.CancelRequestOutcome": {
+   "defined_as": "horsies.core.task_runtime.CancelRequestOutcome",
+   "kind": "type alias",
+   "type_params": [],
+   "value": "horsies.core.task_runtime.CancelAlreadySet | horsies.core.task_runtime.CancelSet"
+  },
+  "horsies.core.task_runtime.CancelSet": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.task_runtime.CancelSet",
+   "kind": "class",
+   "members": {},
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "fields": [],
+    "frozen": true,
+    "kind": "dataclass",
+    "slots": true
+   },
+   "type_params": []
+  },
+  "horsies.core.task_runtime.RunCancelCell": {
+   "abstract": false,
+   "bases": [
+    "object"
+   ],
+   "constructor": {
+    "async": "sync",
+    "parameters": [],
+    "returns": "None"
+   },
+   "defined_as": "horsies.core.task_runtime.RunCancelCell",
+   "kind": "class",
+   "members": {
+    "holding": {
+     "kind": "classmethod",
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "horsies.RunCancelState",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "state"
+       }
+      ],
+      "returns": "horsies.core.task_runtime.RunCancelCell"
+     }
+    },
+    "request": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       },
+       {
+        "annotation": "horsies.CancelCause",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "cause"
+       }
+      ],
+      "returns": "horsies.core.task_runtime.CancelRequestOutcome"
+     }
+    },
+    "state": {
+     "kind": "method",
+     "overloads": [],
+     "signature": {
+      "async": "sync",
+      "parameters": [
+       {
+        "annotation": "unannotated",
+        "default": "required",
+        "kind": "POSITIONAL_OR_KEYWORD",
+        "name": "self"
+       }
+      ],
+      "returns": "horsies.RunCancelState"
+     }
+    }
+   },
+   "mro": [
+    "object"
+   ],
+   "protocol": false,
+   "shape": {
+    "attributes": {},
+    "kind": "plain"
+   },
+   "type_params": []
+  },
   "horsies.core.telemetry.send_telemetry.CallEnd": {
    "defined_as": "horsies.core.telemetry.send_telemetry.CallEnd",
    "kind": "type alias",
@@ -33604,6 +38465,11 @@
    "horsies.core.models.schedule:Weekday",
    "horsies.core.models.schedule:WeeklySchedule",
    "horsies.core.types.result:is_err",
+   "horsies.monitoring:AttemptClaimsInfo",
+   "horsies.monitoring:AttemptFinalizingInfo",
+   "horsies.monitoring:AttemptPhasesInfo",
+   "horsies.monitoring:AttemptPlacementInfo",
+   "horsies.monitoring:AttemptRecordedByInfo",
    "horsies.monitoring:Breakdown",
    "horsies.monitoring:BreakdownCounts",
    "horsies.monitoring:BreakdownGroup",
@@ -33611,17 +38477,30 @@
    "horsies.monitoring:BreakdownUnclaimedGroup",
    "horsies.monitoring:BreakdownValueGroup",
    "horsies.monitoring:BudgetLoadInfo",
+   "horsies.monitoring:ClaimEarlierInfo",
+   "horsies.monitoring:ClaimNotRecordedInfo",
+   "horsies.monitoring:ClaimRecordedInfo",
+   "horsies.monitoring:ClaimsCountedInfo",
+   "horsies.monitoring:ClaimsNotCountedInfo",
    "horsies.monitoring:ClassReportInfo",
+   "horsies.monitoring:ConflictClockOrderInfo",
+   "horsies.monitoring:ConflictMissingRecordInfo",
+   "horsies.monitoring:ConflictUnexpectedEventInfo",
    "horsies.monitoring:DownSlotInfo",
+   "horsies.monitoring:EndpointNotTerminalInfo",
+   "horsies.monitoring:EndpointTerminalInfo",
    "horsies.monitoring:ErrorCategory",
    "horsies.monitoring:ErrorFacet",
    "horsies.monitoring:FacetValue",
    "horsies.monitoring:Facets",
+   "horsies.monitoring:FinalizingMarkedInfo",
+   "horsies.monitoring:FinalizingNotMarkedInfo",
    "horsies.monitoring:GroupRow",
    "horsies.monitoring:LeafTaskInfo",
    "horsies.monitoring:LivenessReport",
    "horsies.monitoring:MONITORING_WINDOW_DEFAULT",
    "horsies.monitoring:MONITORING_WINDOW_MAX",
+   "horsies.monitoring:MissingRecord",
    "horsies.monitoring:MonitoringQueryDbOperationFailed",
    "horsies.monitoring:MonitoringQueryError",
    "horsies.monitoring:MonitoringQueryErrorCode",
@@ -33629,10 +38508,55 @@
    "horsies.monitoring:MonitoringQueryHistoryContractViolation",
    "horsies.monitoring:MonitoringResult",
    "horsies.monitoring:MonitoringWindow",
+   "horsies.monitoring:NodeEndpointInfo",
+   "horsies.monitoring:NodeTimingExactInfo",
+   "horsies.monitoring:NodeTimingInconsistentInfo",
+   "horsies.monitoring:NodeTimingInfo",
+   "horsies.monitoring:NodeTimingPartialInfo",
+   "horsies.monitoring:NodeTimingUnavailableInfo",
    "horsies.monitoring:PageRefused",
+   "horsies.monitoring:PauseEndInfo",
+   "horsies.monitoring:PauseIntervalInfo",
+   "horsies.monitoring:PauseOpenInfo",
+   "horsies.monitoring:PauseResumedInfo",
+   "horsies.monitoring:PauseRunEndedInfo",
    "horsies.monitoring:PendingStreamInfo",
+   "horsies.monitoring:PhaseAdvancingInfo",
+   "horsies.monitoring:PhaseClaimedInfo",
+   "horsies.monitoring:PhaseEnqueuedInfo",
+   "horsies.monitoring:PhaseFinalizingInfo",
+   "horsies.monitoring:PhasePendingInfo",
+   "horsies.monitoring:PhaseReadyInfo",
+   "horsies.monitoring:PhaseRetryWaitInfo",
+   "horsies.monitoring:PhaseRunningInfo",
+   "horsies.monitoring:PhaseUnknownInfo",
+   "horsies.monitoring:PhasesCapturedInfo",
+   "horsies.monitoring:PhasesNotCapturedInfo",
+   "horsies.monitoring:PlacementNotObservedInfo",
+   "horsies.monitoring:PlacementPlacedInfo",
+   "horsies.monitoring:RecordedByRecoveryInfo",
+   "horsies.monitoring:RecordedByWorkerInfo",
+   "horsies.monitoring:RunConflictInfo",
+   "horsies.monitoring:RunConflictNodeInfo",
+   "horsies.monitoring:RunConflictPauseInfo",
+   "horsies.monitoring:RunCoverageExactInfo",
+   "horsies.monitoring:RunCoverageInconsistentInfo",
+   "horsies.monitoring:RunCoverageInfo",
+   "horsies.monitoring:RunCoveragePartialInfo",
+   "horsies.monitoring:RunTimingComposedInfo",
+   "horsies.monitoring:RunTimingInfo",
+   "horsies.monitoring:RunTimingUnavailableInfo",
    "horsies.monitoring:ScheduleStateInfo",
+   "horsies.monitoring:SegmentClaimInfo",
+   "horsies.monitoring:SegmentEndInfo",
+   "horsies.monitoring:SegmentEndedInfo",
+   "horsies.monitoring:SegmentOpenInfo",
+   "horsies.monitoring:SegmentPhaseInfo",
+   "horsies.monitoring:SegmentSourceInfo",
    "horsies.monitoring:SortDirection",
+   "horsies.monitoring:SourceAttemptInfo",
+   "horsies.monitoring:SourceNodeInfo",
+   "horsies.monitoring:SourceTaskInfo",
    "horsies.monitoring:StatusCount",
    "horsies.monitoring:StreamNoCapacityInfo",
    "horsies.monitoring:StreamNoneDueInfo",
@@ -33657,12 +38581,18 @@
    "horsies.monitoring:TaskPage",
    "horsies.monitoring:TaskSortField",
    "horsies.monitoring:TaskSummary",
+   "horsies.monitoring:TimingBoundary",
+   "horsies.monitoring:TimingConflictInfo",
+   "horsies.monitoring:TimingSegmentInfo",
+   "horsies.monitoring:UnavailableReason",
+   "horsies.monitoring:UnknownReason",
    "horsies.monitoring:WindowRefused",
    "horsies.monitoring:WorkerClassLoadInfo",
    "horsies.monitoring:WorkerHistoryPoint",
    "horsies.monitoring:WorkerPingInfo",
    "horsies.monitoring:WorkerStateInfo",
    "horsies.monitoring:WorkflowEdge",
+   "horsies.monitoring:WorkflowEventKind",
    "horsies.monitoring:WorkflowNodeInfo",
    "horsies.monitoring:WorkflowRunDetail",
    "horsies.monitoring:WorkflowRunSummary",
@@ -33686,6 +38616,7 @@
    "horsies.telemetry:AttemptEndReportedByChild",
    "horsies.telemetry:AttemptEnded",
    "horsies.telemetry:AttemptRecorded",
+   "horsies.telemetry:ChildResultCancelled",
    "horsies.telemetry:ChildResultCompleted",
    "horsies.telemetry:TaskClaimed",
    "horsies.web:AllowAll",
@@ -33696,6 +38627,7 @@
    "horsies:AllSlotsServing",
    "horsies:AnyNode",
    "horsies:AppConfig",
+   "horsies:AttemptNumber",
    "horsies:BothDays",
    "horsies:BrokerEnqueueFailed",
    "horsies:BrokerErrorCode",
@@ -33706,6 +38638,9 @@
    "horsies:BuiltInTaskCode",
    "horsies:ByMonthDay",
    "horsies:ByWeekday",
+   "horsies:CancelCause",
+   "horsies:CancelNotRequested",
+   "horsies:CancelRequested",
    "horsies:ChildOfSend",
    "horsies:ChildPreload",
    "horsies:ClaimLimits",
@@ -33730,6 +38665,7 @@
    "horsies:ExceptionMapper",
    "horsies:Execution",
    "horsies:ExecutorThreads",
+   "horsies:FencingToken",
    "horsies:HandleAsyncContext",
    "horsies:HandleDbOperationFailed",
    "horsies:HandleErrorCode",
@@ -33772,6 +38708,8 @@
    "horsies:PayloadPolicy",
    "horsies:PoolSize",
    "horsies:PostgresConfig",
+   "horsies:ProfileNamed",
+   "horsies:ProfileNotRecorded",
    "horsies:QueueMode",
    "horsies:RecoveryConfig",
    "horsies:RerunEnqueuePolicy",
@@ -33790,6 +38728,7 @@
    "horsies:RetentionConfig",
    "horsies:RetrievalCode",
    "horsies:RetryPolicy",
+   "horsies:RunCancelState",
    "horsies:ScheduleConfig",
    "horsies:SchedulePattern",
    "horsies:SharedAsyncChildren",
@@ -33816,6 +38755,7 @@
    "horsies:TaskLimit",
    "horsies:TaskNode",
    "horsies:TaskResult",
+   "horsies:TaskRuntime",
    "horsies:TaskSchedule",
    "horsies:TaskSendAsyncContext",
    "horsies:TaskSendEnqueueFailed",
@@ -33848,6 +38788,7 @@
    "horsies:WorkflowSpec",
    "horsies:WorkflowStartAsyncContext",
    "horsies:WorkflowStartBrokerNotConfigured",
+   "horsies:WorkflowStartCommandConflict",
    "horsies:WorkflowStartEnqueueFailed",
    "horsies:WorkflowStartError",
    "horsies:WorkflowStartErrorCode",
