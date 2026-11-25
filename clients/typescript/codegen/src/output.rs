@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ts_text::GENERATED_HEADER;
 use crate::{
-    catalogs, constants, error_catalogs, error_detail, events, manifest, producer_metrics,
-    retention_class, task_code, wire_json,
+    catalogs, constants, error_catalogs, error_detail, events, manifest, monitoring_models,
+    producer_metrics, retention_class, task_code, wire_json,
 };
 
 /// The folder of the generated modules, inside the package folder.
@@ -133,6 +133,7 @@ pub fn render_all() -> Vec<GeneratedFile> {
         events::generated_files(),
         producer_metrics::generated_files(),
         manifest::schedule_pattern_files(),
+        monitoring_models::generated_files(),
     ]
     .into_iter()
     .flatten()
@@ -346,6 +347,7 @@ mod tests {
             "monitoring",
             "monitoring_bounds",
             "monitoring_errors",
+            "monitoring_models",
             "producer_metrics",
             "retention_class",
             "schedule_pattern",
