@@ -17,15 +17,25 @@
 //!   `<NAME>_MIN` and `<NAME>_MAX`.
 //! - A list is a `ReadonlyArray`. A map is a `ReadonlyMap<string, T>`: its
 //!   keys keep their order, and a key `__proto__` is a plain key.
+//! - An optional value is `T | null`: Python's form writes `null` for no
+//!   value, and the converter does too.
+//! - A time of day is a `Temporal.PlainTime`. Its wire value is its text,
+//!   `HH:MM:SS` for a whole second. The converter does not cut a fraction of
+//!   a second: the core refuses it.
+//! - A variant that holds the fields of a record type extends that record.
+//! - A field with a member default has a constant of the default,
+//!   `<HOLDER>_<FIELD>_DEFAULT`, named by the record or variant that holds
+//!   the field. The type has the member all the same: Python's form writes
+//!   every member, and so does the converter.
 //!
 //! A converter writes the members of a value in the model's order, the tag
 //! first for a variant. In the wire value an integer is a `bigint` and an
 //! object is a `Map`. The package writes the text with its codec writer.
 
 use horsies_core::manifest_schema::{
-    type_fields, IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType,
-    TaggedVariant, VariantFields, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, WORKER_MANIFEST,
-    WORKFLOW_SPEC_DATA,
+    IntBound, ManifestField, ManifestModule, ManifestShape, ManifestType, MemberDefault,
+    TaggedVariant, VariantFields, PRODUCER_MANIFEST, SCHEDULER_MANIFEST, SCHEDULE_PATTERN,
+    WORKER_MANIFEST, WORKFLOW_SPEC_DATA,
 };
 
 use crate::model::{
@@ -49,6 +59,9 @@ pub const WORKER_MANIFEST_MODULE: &str = "worker_manifest";
 
 /// The stem of the workflow spec data module.
 pub const WORKFLOW_SPEC_MODULE: &str = "workflow_spec";
+
+/// The stem of the schedule pattern module.
+pub const SCHEDULE_PATTERN_MODULE: &str = "schedule_pattern";
 
 /// The constant of the version that the core reads.
 const VERSION_CONSTANT: &str = "MANIFEST_VERSION";
@@ -84,6 +97,7 @@ pub fn generated_files() -> Vec<GeneratedFile> {
         (SCHEDULER_MANIFEST_MODULE, SCHEDULER_MANIFEST),
         (WORKER_MANIFEST_MODULE, WORKER_MANIFEST),
         (WORKFLOW_SPEC_MODULE, WORKFLOW_SPEC_DATA),
+        (SCHEDULE_PATTERN_MODULE, SCHEDULE_PATTERN),
     ]
     .iter()
     .map(|(stem, module)| catalog_file(stem, render_manifest_module(module)))
@@ -91,12 +105,14 @@ pub fn generated_files() -> Vec<GeneratedFile> {
 }
 
 /// The text of the TypeScript module of `module`: the import of the wire
-/// type, the version, the bounds, the types, the integer helper when a
-/// field holds a `number` integer, and the converters. Pure.
+/// type, the version, the bounds, the member defaults, the types, the
+/// integer helper when a field holds a `number` integer, and the
+/// converters. Pure.
 ///
 /// Panics when the model breaks a rule that the text needs: the root is a
-/// choice or no type of the module, a field names no type of the module,
-/// or a record has no field.
+/// choice or no type of the module, a field names no type of the module, a
+/// record has no field, a variant holds the fields of a type that is not a
+/// record, or a member default is on a field that is not an integer.
 pub fn render_manifest_module(module: &ManifestModule) -> String {
     let root = find_type(module, module.root);
     match root.shape {
@@ -112,6 +128,7 @@ pub fn render_manifest_module(module: &ManifestModule) -> String {
         integer_literal(i128::from(module.version))
     ));
     sections.extend(module.int_bounds().into_iter().map(bound_constants));
+    sections.extend(member_default_constants(module));
     for manifest_type in module.types {
         sections.extend(type_declarations(manifest_type));
     }
@@ -190,13 +207,12 @@ enum Container {
     List,
     /// The field maps text keys to items.
     Map,
+    /// The field is an item or no value.
+    Optional,
 }
 
 /// How a field of type `value` holds its items, and the item type. Pure.
-///
-/// Panics for a form that this renderer has no TypeScript form for;
-/// `subject` names the field.
-fn field_parts(value: ValueType, subject: &str) -> (Container, ItemType) {
+fn field_parts(value: ValueType) -> (Container, ItemType) {
     match value {
         ValueType::Bool => (Container::Single, ItemType::Bool),
         ValueType::Str => (Container::Single, ItemType::Str),
@@ -205,24 +221,18 @@ fn field_parts(value: ValueType, subject: &str) -> (Container, ItemType) {
         ValueType::TimeOfDay => (Container::Single, ItemType::TimeOfDay),
         ValueType::List(item) => (Container::List, item),
         ValueType::Map(item) => (Container::Map, item),
-        ValueType::Optional(_) => no_typescript_form("an optional value", subject),
+        ValueType::Optional(item) => (Container::Optional, item),
     }
 }
 
-/// Stop the render: the model holds `form` at `subject`, and this renderer
-/// has no TypeScript form for it.
-fn no_typescript_form(form: &str, subject: &str) -> ! {
-    panic!("{subject} is {form}: the manifest renderer has no TypeScript form for it")
-}
-
-/// `holder.field`, the subject of a field in panics and in the text of the
-/// integer helper. Pure.
+/// `holder.field`, the subject of a field in the text of the integer
+/// helper. Pure.
 fn field_subject(holder: &str, field: &ManifestField) -> String {
     format!("{holder}.{}", field.name)
 }
 
 /// The TypeScript type of an item. Pure.
-fn item_type_text(item: ItemType, subject: &str) -> String {
+fn item_type_text(item: ItemType) -> String {
     match item {
         ItemType::Bool => "boolean".to_owned(),
         ItemType::Str => "string".to_owned(),
@@ -231,29 +241,25 @@ fn item_type_text(item: ItemType, subject: &str) -> String {
             IntegerType::BigInt => "bigint".to_owned(),
         },
         ItemType::Named(name) => name.to_owned(),
-        ItemType::TimeOfDay => no_typescript_form("a time of day", subject),
+        ItemType::TimeOfDay => "Temporal.PlainTime".to_owned(),
     }
 }
 
-/// The TypeScript type of the field `holder.name`. Pure.
-fn field_type_text(holder: &str, field: &ManifestField) -> String {
-    let subject = field_subject(holder, field);
-    let (container, item) = field_parts(field_value_type(field), &subject);
-    let item_text = item_type_text(item, &subject);
+/// The TypeScript type of a field. Pure.
+fn field_type_text(field: &ManifestField) -> String {
+    let (container, item) = field_parts(field_value_type(field));
+    let item_text = item_type_text(item);
     match container {
         Container::Single => item_text,
         Container::List => format!("ReadonlyArray<{item_text}>"),
         Container::Map => format!("ReadonlyMap<string, {item_text}>"),
+        Container::Optional => format!("{item_text} | null"),
     }
 }
 
-/// The member `name: Type` of the field `holder.name`. Pure.
-fn field_member(holder: &str, field: &ManifestField) -> String {
-    format!(
-        "{}: {}",
-        property_key(field.name),
-        field_type_text(holder, field)
-    )
+/// The member `name: Type` of a field. Pure.
+fn field_member(field: &ManifestField) -> String {
+    format!("{}: {}", property_key(field.name), field_type_text(field))
 }
 
 /// `export interface <heading> {` with one `readonly` member per line.
@@ -306,15 +312,13 @@ fn record_interface(name: &str, fields: &[ManifestField]) -> String {
         !fields.is_empty(),
         "the record {name} has no field: an empty interface has no TypeScript form"
     );
-    let members: Vec<String> = fields
-        .iter()
-        .map(|field| field_member(name, field))
-        .collect();
+    let members: Vec<String> = fields.iter().map(field_member).collect();
     interface(name, &members)
 }
 
 /// The interface of one variant: the tag member, then the variant's own
-/// fields. Pure.
+/// fields; for a variant that holds the fields of a record, the tag member
+/// of an interface that extends the record. Pure.
 fn variant_interface(tag_field: &str, variant: &TaggedVariant) -> String {
     let name = tagged_variant_type_name(variant);
     let tag = format!(
@@ -325,13 +329,11 @@ fn variant_interface(tag_field: &str, variant: &TaggedVariant) -> String {
     match variant.fields {
         VariantFields::Own(fields) => {
             let members: Vec<String> = std::iter::once(tag)
-                .chain(fields.iter().map(|field| field_member(name, field)))
+                .chain(fields.iter().map(field_member))
                 .collect();
             interface(name, &members)
         }
-        VariantFields::OfRecord(record) => {
-            no_typescript_form(&format!("a variant that holds the record {record}"), name)
-        }
+        VariantFields::OfRecord(record) => interface(&format!("{name} extends {record}"), &[tag]),
     }
 }
 
@@ -366,10 +368,12 @@ enum Conversion {
     SafeInteger,
     /// A record or a tagged value: the converter of this name.
     Converter(String),
+    /// A time of day: its text.
+    TimeOfDayText,
 }
 
 /// How an item of `module` becomes its wire value. Pure.
-fn item_wire(module: &ManifestModule, item: ItemType, subject: &str) -> ItemWire {
+fn item_wire(module: &ManifestModule, item: ItemType) -> ItemWire {
     match item {
         ItemType::Bool | ItemType::Str => ItemWire::AsIs,
         ItemType::Int(bound) => match integer_type(bound) {
@@ -382,7 +386,7 @@ fn item_wire(module: &ManifestModule, item: ItemType, subject: &str) -> ItemWire
             }
             ManifestShape::Choice { .. } => ItemWire::AsIs,
         },
-        ItemType::TimeOfDay => no_typescript_form("a time of day", subject),
+        ItemType::TimeOfDay => ItemWire::Converted(Conversion::TimeOfDayText),
     }
 }
 
@@ -393,6 +397,7 @@ fn conversion_expression(conversion: &Conversion, access: &str, subject: &str) -
             format!("{INTEGER_HELPER}({access}, {})", string_literal(subject))
         }
         Conversion::Converter(name) => format!("{name}({access})"),
+        Conversion::TimeOfDayText => format!("{access}.toString()"),
     }
 }
 
@@ -405,8 +410,8 @@ fn field_wire_expression(
     access: &str,
 ) -> String {
     let subject = field_subject(holder, field);
-    let (container, item) = field_parts(field_value_type(field), &subject);
-    match item_wire(module, item, &subject) {
+    let (container, item) = field_parts(field_value_type(field));
+    match item_wire(module, item) {
         ItemWire::AsIs => access.to_owned(),
         ItemWire::Converted(conversion) => match container {
             Container::Single => conversion_expression(&conversion, access, &subject),
@@ -418,6 +423,10 @@ fn field_wire_expression(
                 "new Map(Array.from({access}, ([key, item]) => [key, {}] as const))",
                 conversion_expression(&conversion, "item", &subject)
             ),
+            Container::Optional => format!(
+                "{access} === null ? null : {}",
+                conversion_expression(&conversion, access, &subject)
+            ),
         },
     }
 }
@@ -425,14 +434,92 @@ fn field_wire_expression(
 /// Whether a field of `module` holds a `number` integer, so the module
 /// needs [`INTEGER_HELPER`]. Pure.
 fn uses_integer_helper(module: &ManifestModule) -> bool {
-    module.types.iter().any(|manifest_type| {
-        let holder = manifest_type_name(manifest_type);
-        type_fields(manifest_type).iter().any(|field| {
-            let subject = field_subject(holder, field);
-            let (_container, item) = field_parts(field_value_type(field), &subject);
-            item_wire(module, item, &subject) == ItemWire::Converted(Conversion::SafeInteger)
+    module
+        .types
+        .iter()
+        .flat_map(held_fields)
+        .any(|(_holder, field)| {
+            let (_container, item) = field_parts(field_value_type(&field));
+            item_wire(module, item) == ItemWire::Converted(Conversion::SafeInteger)
         })
-    })
+}
+
+/// Each field that `manifest_type` defines, with the record or the variant
+/// that holds it. A variant that holds the fields of a record type adds
+/// none: that record defines them. Pure.
+fn held_fields(manifest_type: &ManifestType) -> Vec<(&'static str, ManifestField)> {
+    match manifest_type.shape {
+        ManifestShape::Record { fields } => {
+            let holder = manifest_type_name(manifest_type);
+            fields.iter().map(|field| (holder, *field)).collect()
+        }
+        ManifestShape::Tagged { variants, .. } => variants
+            .iter()
+            .flat_map(|variant| {
+                let holder = tagged_variant_type_name(variant);
+                let fields: &'static [ManifestField] = match variant.fields {
+                    VariantFields::Own(fields) => fields,
+                    VariantFields::OfRecord(_) => &[],
+                };
+                fields.iter().map(move |field| (holder, *field))
+            })
+            .collect(),
+        ManifestShape::Choice { .. } => Vec::new(),
+    }
+}
+
+/// `PascalCase` to `SCREAMING_SNAKE_CASE`: `HourlySchedule` gives
+/// `HOURLY_SCHEDULE`. An underscore goes before each upper-case letter but
+/// the first. Pure.
+fn screaming_snake_case(pascal: &str) -> String {
+    let mut text = String::with_capacity(pascal.len() * 2);
+    for (position, character) in pascal.char_indices() {
+        if position > 0 && character.is_ascii_uppercase() {
+            text.push('_');
+        }
+        text.push(character.to_ascii_uppercase());
+    }
+    text
+}
+
+/// The constant of the member default of the field `holder.name`, or none
+/// for a field without a default. Pure.
+///
+/// A default on a field that is not an integer is a defect of the model:
+/// the core records a default on an integer field only.
+fn member_default_constant(holder: &str, field: &ManifestField) -> Option<String> {
+    match field.default {
+        MemberDefault::NoDefault => None,
+        MemberDefault::Int(default) => match field_value_type(field) {
+            ValueType::Int(bound) => Some(format!(
+                "export const {}_{}_DEFAULT = {};",
+                screaming_snake_case(holder),
+                field.name.to_ascii_uppercase(),
+                integer_value_literal(bound, default)
+            )),
+            value @ (ValueType::Bool
+            | ValueType::Str
+            | ValueType::Named(_)
+            | ValueType::List(_)
+            | ValueType::Map(_)
+            | ValueType::Optional(_)
+            | ValueType::TimeOfDay) => panic!(
+                "{holder}.{} has a member default, but its value {value:?} is not an integer",
+                field.name
+            ),
+        },
+    }
+}
+
+/// The member default constants of `module`, one section each, in the
+/// model's order. Pure.
+fn member_default_constants(module: &ManifestModule) -> Vec<String> {
+    module
+        .types
+        .iter()
+        .flat_map(held_fields)
+        .filter_map(|(holder, field)| member_default_constant(holder, &field))
+        .collect()
 }
 
 /// `object.name`, or `object["name"]` for a name that is not an
@@ -527,8 +614,8 @@ fn tagged_converter(
     text
 }
 
-/// The wire `Map` of one variant: the tag, then the variant's own fields.
-/// Pure.
+/// The wire `Map` of one variant: the tag, then the variant's own fields,
+/// or the members of the record whose fields the variant holds. Pure.
 fn variant_map(module: &ManifestModule, tag_field: &str, variant: &TaggedVariant) -> String {
     let name = tagged_variant_type_name(variant);
     let tag = format!(
@@ -544,8 +631,24 @@ fn variant_map(module: &ManifestModule, tag_field: &str, variant: &TaggedVariant
             map_literal(&entries, CASE_INDENT)
         }
         VariantFields::OfRecord(record) => {
-            no_typescript_form(&format!("a variant that holds the record {record}"), name)
+            let entries = [
+                tag,
+                format!("...{}(value)", held_record_converter(module, name, record)),
+            ];
+            map_literal(&entries, CASE_INDENT)
         }
+    }
+}
+
+/// The converter of `record`, whose fields the variant `variant` holds. A
+/// name that is not a record type of the module is a defect of the model.
+/// Pure.
+fn held_record_converter(module: &ManifestModule, variant: &str, record: &str) -> String {
+    match find_type(module, record).shape {
+        ManifestShape::Record { .. } => converter_name(record),
+        ManifestShape::Tagged { .. } | ManifestShape::Choice { .. } => panic!(
+            "{variant} holds the fields of {record}, which is not a record type of the module"
+        ),
     }
 }
 
@@ -903,17 +1006,14 @@ mod tests {
     #[test]
     fn a_map_field_is_a_readonly_map_from_text_keys() {
         assert_eq!(
-            field_type_text(
-                "Root",
-                &field("ages", PythonValue::Map(PythonItem::Int(PRIORITY)))
-            ),
+            field_type_text(&field("ages", PythonValue::Map(PythonItem::Int(PRIORITY)))),
             "ReadonlyMap<string, number>"
         );
         assert_eq!(
-            field_type_text(
-                "Root",
-                &field("limits", PythonValue::Map(PythonItem::Named("Limit")))
-            ),
+            field_type_text(&field(
+                "limits",
+                PythonValue::Map(PythonItem::Named("Limit"))
+            )),
             "ReadonlyMap<string, Limit>"
         );
     }
@@ -955,37 +1055,237 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "Root.note is an optional value: the manifest renderer has no TypeScript form"
-    )]
-    fn an_optional_field_has_no_typescript_form_here() {
-        let _refused = field_type_text(
-            "Root",
-            &field("note", PythonValue::Optional(PythonItem::Str)),
+    fn an_optional_field_is_its_item_type_or_null() {
+        assert_eq!(
+            field_type_text(&field("note", PythonValue::Optional(PythonItem::Str))),
+            "string | null"
+        );
+        assert_eq!(
+            field_type_text(&field(
+                "seconds",
+                PythonValue::Optional(PythonItem::Int(PRIORITY))
+            )),
+            "number | null"
+        );
+    }
+
+    #[test]
+    fn an_optional_member_is_null_or_the_converted_item() {
+        assert_eq!(
+            member_entry(
+                &SAMPLE,
+                "Root",
+                &field("seconds", PythonValue::Optional(PythonItem::Int(PRIORITY)))
+            ),
+            "[\"seconds\", value.seconds === null ? null : \
+             integerToWire(value.seconds, \"Root.seconds\")]"
+        );
+        assert_eq!(
+            member_entry(
+                &SAMPLE,
+                "Root",
+                &field("note", PythonValue::Optional(PythonItem::Str))
+            ),
+            "[\"note\", value.note]"
+        );
+    }
+
+    #[test]
+    fn a_time_of_day_is_a_plain_time_whose_wire_value_is_its_text() {
+        assert_eq!(
+            field_type_text(&field("at", PythonValue::TimeOfDay)),
+            "Temporal.PlainTime"
+        );
+        assert_eq!(
+            member_entry(&SAMPLE, "Root", &field("at", PythonValue::TimeOfDay)),
+            "[\"at\", value.at.toString()]"
+        );
+        assert_eq!(
+            member_entry(
+                &SAMPLE,
+                "Root",
+                &field("times", PythonValue::List(PythonItem::TimeOfDay))
+            ),
+            "[\"times\", value.times.map((item) => item.toString())]"
+        );
+    }
+
+    const DAILY: ManifestType = ManifestType {
+        python_name: "Daily",
+        doc: "",
+        shape: ManifestShape::Record {
+            fields: &[ManifestField {
+                name: "time",
+                doc: "",
+                value: PythonValue::TimeOfDay,
+                default: MemberDefault::NoDefault,
+            }],
+        },
+    };
+
+    const PATTERN_DAILY: TaggedVariant = TaggedVariant {
+        python_class: "PatternDaily",
+        tag_value: "daily",
+        doc: "",
+        fields: VariantFields::OfRecord("Daily"),
+    };
+
+    /// A module whose tagged root has a variant that holds a record.
+    const PATTERN: ManifestModule = ManifestModule {
+        root: "Pattern",
+        version: 1,
+        reader: "",
+        reader_short: "",
+        types: &[
+            DAILY,
+            ManifestType {
+                python_name: "Pattern",
+                doc: "",
+                shape: ManifestShape::Tagged {
+                    tag_field: "type",
+                    variants: &[PATTERN_DAILY],
+                },
+            },
+        ],
+    };
+
+    #[test]
+    fn a_variant_that_holds_a_record_extends_the_record_with_its_tag() {
+        assert_eq!(
+            variant_interface("type", &PATTERN_DAILY),
+            "export interface PatternDaily extends Daily {\n  readonly type: \"daily\";\n}"
+        );
+    }
+
+    #[test]
+    fn a_variant_that_holds_a_record_writes_the_tag_then_the_record_members() {
+        assert_eq!(
+            variant_map(&PATTERN, "type", &PATTERN_DAILY),
+            "new Map<string, WireJson>([\n        \
+             [\"type\", \"daily\"],\n        \
+             ...dailyToWire(value),\n      \
+             ])"
         );
     }
 
     #[test]
     #[should_panic(
-        expected = "Root.at is a time of day: the manifest renderer has no TypeScript form"
+        expected = "PatternMode holds the fields of Mode, which is not a record type of the module"
     )]
-    fn a_time_of_day_has_no_typescript_form_here() {
-        let _refused = field_type_text("Root", &field("at", PythonValue::TimeOfDay));
+    fn a_variant_that_holds_the_fields_of_a_choice_is_a_defect() {
+        let variant = TaggedVariant {
+            python_class: "PatternMode",
+            tag_value: "mode",
+            doc: "",
+            fields: VariantFields::OfRecord("Mode"),
+        };
+        let _refused = variant_map(&SAMPLE, "type", &variant);
+    }
+
+    #[test]
+    fn a_member_default_is_a_constant_named_by_its_holder_and_field() {
+        let second = ManifestField {
+            name: "second",
+            doc: "",
+            value: PythonValue::Int(PRIORITY),
+            default: MemberDefault::Int(7),
+        };
+        assert_eq!(
+            member_default_constant("HourlySchedule", &second),
+            Some("export const HOURLY_SCHEDULE_SECOND_DEFAULT = 7;".to_owned())
+        );
+        let step = ManifestField {
+            name: "max_step",
+            doc: "",
+            value: PythonValue::Int(BYTES),
+            default: MemberDefault::Int(10_000),
+        };
+        assert_eq!(
+            member_default_constant("CronEnumTermWeekdayEnumRange", &step),
+            Some(
+                "export const CRON_ENUM_TERM_WEEKDAY_ENUM_RANGE_MAX_STEP_DEFAULT = 10_000n;"
+                    .to_owned()
+            )
+        );
+    }
+
+    #[test]
+    fn a_field_without_a_member_default_has_no_constant() {
+        assert_eq!(
+            member_default_constant("Root", &field("enabled", PythonValue::Bool)),
+            None
+        );
     }
 
     #[test]
     #[should_panic(
-        expected = "PatternDaily is a variant that holds the record Daily: the manifest renderer \
-                    has no TypeScript form"
+        expected = "Root.note has a member default, but its value Str is not an integer"
     )]
-    fn a_variant_that_holds_a_record_has_no_typescript_form_here() {
-        let variant = TaggedVariant {
-            python_class: "PatternDaily",
-            tag_value: "daily",
+    fn a_member_default_on_a_field_that_is_not_an_integer_is_a_defect() {
+        let note = ManifestField {
+            name: "note",
             doc: "",
-            fields: VariantFields::OfRecord("Daily"),
+            value: PythonValue::Str,
+            default: MemberDefault::Int(1),
         };
-        let _refused = variant_interface("type", &variant);
+        let _refused = member_default_constant("Root", &note);
+    }
+
+    #[test]
+    fn the_defaults_of_a_module_come_from_records_and_variants_in_model_order() {
+        let module = ManifestModule {
+            root: "Root",
+            version: 1,
+            reader: "",
+            reader_short: "",
+            types: &[
+                ManifestType {
+                    python_name: "Term",
+                    doc: "",
+                    shape: ManifestShape::Tagged {
+                        tag_field: "kind",
+                        variants: &[TaggedVariant {
+                            python_class: "TermRange",
+                            tag_value: "range",
+                            doc: "",
+                            fields: VariantFields::Own(&[ManifestField {
+                                name: "step",
+                                doc: "",
+                                value: PythonValue::Int(PRIORITY),
+                                default: MemberDefault::Int(1),
+                            }]),
+                        }],
+                    },
+                },
+                ManifestType {
+                    python_name: "Root",
+                    doc: "",
+                    shape: ManifestShape::Record {
+                        fields: &[
+                            ManifestField {
+                                name: "term",
+                                doc: "",
+                                value: PythonValue::Named("Term"),
+                                default: MemberDefault::NoDefault,
+                            },
+                            ManifestField {
+                                name: "second",
+                                doc: "",
+                                value: PythonValue::Int(PRIORITY),
+                                default: MemberDefault::Int(0),
+                            },
+                        ],
+                    },
+                },
+            ],
+        };
+        assert_eq!(
+            member_default_constants(&module),
+            [
+                "export const TERM_RANGE_STEP_DEFAULT = 1;",
+                "export const ROOT_SECOND_DEFAULT = 0;",
+            ]
+        );
     }
 
     /// Each declared name of `text`: `export const`, `export interface`,
@@ -1150,7 +1450,58 @@ mod tests {
     }
 
     #[test]
-    fn the_files_are_the_four_manifest_modules() {
+    fn the_schedule_pattern_module_has_every_type_bound_default_and_converter_once() {
+        let text = render_manifest_module(&SCHEDULE_PATTERN);
+        assert_module_text(&SCHEDULE_PATTERN, &text);
+        let bounds: Vec<&str> = SCHEDULE_PATTERN
+            .int_bounds()
+            .iter()
+            .map(|bound| bound.name)
+            .collect();
+        assert_eq!(
+            bounds,
+            [
+                "INTERVAL_SECONDS",
+                "INTERVAL_MINUTES",
+                "INTERVAL_HOURS",
+                "INTERVAL_DAYS",
+                "HOURLY_MINUTE",
+                "HOURLY_SECOND",
+                "MONTHLY_DAY",
+                "CRON_NUMERIC_STEP",
+                "CRON_NUMERIC_VALUE",
+                "CRON_ENUM_STEP",
+            ]
+        );
+        let defaults: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("_DEFAULT = "))
+            .collect();
+        assert_eq!(
+            defaults,
+            [
+                "export const HOURLY_SCHEDULE_SECOND_DEFAULT = 0;",
+                "export const CRON_NUMERIC_TERM_RANGE_STEP_DEFAULT = 1;",
+                "export const CRON_ENUM_TERM_WEEKDAY_ENUM_RANGE_STEP_DEFAULT = 1;",
+                "export const CRON_ENUM_TERM_MONTH_ENUM_RANGE_STEP_DEFAULT = 1;",
+            ]
+        );
+        for part in [
+            "\nexport interface SchedulePatternInterval extends IntervalSchedule {\n  \
+             readonly type: \"interval\";\n}\n",
+            "\n  readonly seconds: number | null;\n",
+            "\n  readonly time: Temporal.PlainTime;\n",
+            "\nexport type Weekday =\n  | \"monday\"\n",
+            "\nexport function schedulePatternToWire(value: SchedulePattern): \
+             ReadonlyMap<string, WireJson> {\n  switch (value.type) {\n",
+            "\n        [\"type\", \"cron\"],\n        ...cronScheduleToWire(value),\n",
+        ] {
+            assert!(text.contains(part), "{part}");
+        }
+    }
+
+    #[test]
+    fn the_files_are_the_five_manifest_modules() {
         let files = generated_files();
         let paths: Vec<&Path> = files.iter().map(GeneratedFile::relative_path).collect();
         assert_eq!(
@@ -1160,6 +1511,7 @@ mod tests {
                 Path::new("src/_catalog/scheduler_manifest.ts"),
                 Path::new("src/_catalog/worker_manifest.ts"),
                 Path::new("src/_catalog/workflow_spec.ts"),
+                Path::new("src/_catalog/schedule_pattern.ts"),
             ]
         );
         let modules = [
@@ -1167,6 +1519,7 @@ mod tests {
             SCHEDULER_MANIFEST,
             WORKER_MANIFEST,
             WORKFLOW_SPEC_DATA,
+            SCHEDULE_PATTERN,
         ];
         for (file, module) in files.iter().zip(modules.iter()) {
             assert_eq!(file.text(), render_manifest_module(module));
