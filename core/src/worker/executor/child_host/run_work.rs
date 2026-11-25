@@ -34,12 +34,27 @@
 //! starts with [`spawn_in_run`] read the token and the signal from the run;
 //! a blocking body reads them from its thread, which [`in_blocking_run`]
 //! marks while the body runs.
+//!
+//! A host program that runs task code outside the Rust runtime (for example
+//! a JavaScript event loop) takes the handle of the run in the async body
+//! ([`current_run`]) and keeps it. Any thread may use the handle to register
+//! host-held work ([`RunHandle::register_host_work`]): a piece of work that
+//! the host runs and that the child cannot drop. It counts toward
+//! [`MAX_RUN_WORK`] and is in the left-work and stuck reports like work of
+//! [`spawn_in_run`]. A cancel round does not remove it: the round asks the
+//! host to stop it ([`HostWork::stop_requested`], with a [`WorkStopCause`]),
+//! and the piece stays in the run until the host ends it ([`HostWork::end`],
+//! or a drop of the [`HostWork`]). A piece that is alive after the rounds is
+//! stuck, and the run keeps its seat until the piece ends or the parent
+//! kills the child, as for a Python task that survives its cancels. The
+//! poll watch does not time host-held work: its code runs on the host's own
+//! loop.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
-use std::num::NonZeroU64;
+use std::num::{NonZeroU32, NonZeroU64};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -150,6 +165,23 @@ pub enum RunSpawnRefused {
     /// The run holds [`MAX_RUN_WORK`] pieces of work alive already.
     #[error("the run holds {bound} pieces of work alive already")]
     TooMuchWork { bound: usize },
+}
+
+/// Why a run took no new piece of work: the refusals that
+/// [`spawn_in_run`] and [`RunHandle::register_host_work`] share.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkRefused {
+    RunEnded,
+    TooMuchWork { bound: usize },
+}
+
+impl From<WorkRefused> for RunSpawnRefused {
+    fn from(refused: WorkRefused) -> Self {
+        match refused {
+            WorkRefused::RunEnded => Self::RunEnded,
+            WorkRefused::TooMuchWork { bound } => Self::TooMuchWork { bound },
+        }
+    }
 }
 
 /// Start `future` as work of the current run, named `name` in reports. It
@@ -268,7 +300,8 @@ struct CancelShared {
 /// docs). A shared async run cancelled at its deadline ends as a timeout
 /// whatever its body returns; a run cancelled by an operator ends cancelled.
 /// In a shared async child the body and its work are dropped when they are
-/// alive after the run's cancel grace.
+/// alive after the run's cancel grace; host-held work gets a stop request
+/// in place of the drop ([`HostWork::stop_requested`]).
 #[derive(Clone)]
 pub struct RunCancelSignal {
     shared: Arc<CancelShared>,
@@ -494,10 +527,12 @@ enum ScopeState {
 
 /// How a piece of work can be aborted. The handle comes right after the
 /// spawn; an abort before it is kept and done when the handle comes.
+/// Host-held work has no handle: an abort round asks the host to stop it.
 enum AbortSlot {
     Pending,
     AbortWhenAttached,
     Attached(AbortHandle),
+    HostHeld(Arc<HostStop>),
 }
 
 struct AliveWork {
@@ -553,6 +588,23 @@ pub(super) enum Alive {
         count: NonZeroU64,
         names: Vec<LeftoverName>,
     },
+}
+
+/// The work alive in `work`, and the names of the first ones. Pure.
+fn alive_in(work: &ScopeWork) -> Alive {
+    let Some(count) = u64::try_from(work.alive.len())
+        .ok()
+        .and_then(NonZeroU64::new)
+    else {
+        return Alive::Nothing;
+    };
+    let names = work
+        .alive
+        .values()
+        .take(MAX_LEFTOVER_TASK_NAMES)
+        .map(|alive| alive.name.clone())
+        .collect();
+    Alive::Work { count, names }
 }
 
 /// The report of the work a run left after its body returned.
@@ -641,11 +693,20 @@ impl RunScope {
     }
 
     fn register(&self, name: &str) -> Result<u64, RunSpawnRefused> {
+        self.register_slot(name, AbortSlot::Pending)
+            .map_err(RunSpawnRefused::from)
+    }
+
+    /// Enter a piece of work named `name` into the run, with `abort` as
+    /// the way a cancel round reaches it.
+    ///
+    /// Errors: [`WorkRefused`]; nothing was entered then.
+    fn register_slot(&self, name: &str, abort: AbortSlot) -> Result<u64, WorkRefused> {
         let mut work = self.shared.lock();
         match (work.state, work.alive.len() >= MAX_RUN_WORK) {
-            (ScopeState::Closed, _) => return Err(RunSpawnRefused::RunEnded),
+            (ScopeState::Closed, _) => return Err(WorkRefused::RunEnded),
             (ScopeState::Open, true) => {
-                return Err(RunSpawnRefused::TooMuchWork {
+                return Err(WorkRefused::TooMuchWork {
                     bound: MAX_RUN_WORK,
                 })
             }
@@ -657,7 +718,7 @@ impl RunScope {
             id,
             AliveWork {
                 name: LeftoverName::cut(name),
-                abort: AbortSlot::Pending,
+                abort,
             },
         );
         Ok(id)
@@ -676,6 +737,9 @@ impl RunScope {
                 alive.abort = AbortSlot::Attached(handle);
             }
             AbortSlot::Attached(_) => unreachable!("work {id} got its abort handle twice"),
+            AbortSlot::HostHeld(_) => {
+                unreachable!("host-held work {id} got an abort handle; only spawned work has one")
+            }
         }
     }
 
@@ -728,30 +792,61 @@ impl RunScope {
 
     /// The work of the run that is alive, and the names of the first ones.
     pub(super) fn alive(&self) -> Alive {
-        let work = self.shared.lock();
-        let Some(count) = u64::try_from(work.alive.len())
-            .ok()
-            .and_then(NonZeroU64::new)
-        else {
-            return Alive::Nothing;
-        };
-        let names = work
-            .alive
-            .values()
-            .take(MAX_LEFTOVER_TASK_NAMES)
-            .map(|alive| alive.name.clone())
-            .collect();
-        Alive::Work { count, names }
+        alive_in(&self.shared.lock())
     }
 
-    /// Abort every piece of work alive.
+    /// Close the run when no work of it is alive, under one lock with the
+    /// read: no host-held work can register between the read and the close,
+    /// so a late `register_host_work` gives `RunEnded`. With work alive the
+    /// run stays open, and the work is returned. A host registers from any
+    /// thread, so an end of a run reads and closes through this step, not
+    /// through [`Self::alive`] and then [`Self::close`].
+    pub(super) fn close_when_idle(&self) -> Alive {
+        let mut work = self.shared.lock();
+        let alive = alive_in(&work);
+        match alive {
+            Alive::Nothing => work.state = ScopeState::Closed,
+            Alive::Work { .. } => {}
+        }
+        alive
+    }
+
+    /// Wait until no work of the run is alive, at most `bound`, then close
+    /// the run with [`Self::close_when_idle`]. `Done`: the run is closed with
+    /// nothing alive. `StillAlive`: work was alive at the bound, or a piece
+    /// registered after the last end and before the close; the run is open.
+    pub(super) async fn wait_idle_then_close(&self, bound: Duration) -> WorkWait {
+        match self.wait_done(bound).await {
+            WorkWait::StillAlive => WorkWait::StillAlive,
+            WorkWait::Done => match self.close_when_idle() {
+                Alive::Nothing => WorkWait::Done,
+                Alive::Work { .. } => WorkWait::StillAlive,
+            },
+        }
+    }
+
+    /// Why a cancel round of this run asks its work to stop, read from the
+    /// run's cancel signal: the rounds of a run whose signal fired stop its
+    /// work for the signal's cause; the rounds of a run whose signal did not
+    /// fire stop the work that its body left. Pure read.
+    fn stop_cause(&self) -> WorkStopCause {
+        match self.cancel.state() {
+            SignalState::NotFired => WorkStopCause::LeftWork,
+            SignalState::Fired { cause } => WorkStopCause::RunCancelled { cause },
+        }
+    }
+
+    /// Abort every piece of work alive. Host-held work is not removed: the
+    /// round asks the host to stop it.
     fn abort_alive(&self) {
+        let cause = self.stop_cause();
         let mut work = self.shared.lock();
         for alive in work.alive.values_mut() {
             match alive.abort {
                 AbortSlot::Pending => alive.abort = AbortSlot::AbortWhenAttached,
                 AbortSlot::AbortWhenAttached => {}
                 AbortSlot::Attached(ref handle) => handle.abort(),
+                AbortSlot::HostHeld(ref stop) => stop.ask(cause),
             }
         }
     }
@@ -790,7 +885,8 @@ impl RunScope {
 
     /// Abort the work alive, and again in [`EXTRA_CANCEL_ROUNDS`] more
     /// rounds [`CANCEL_ROUND_INTERVAL`] apart; work alive one interval
-    /// after the last round is stuck.
+    /// after the last round is stuck. Each round asks host-held work to
+    /// stop, with the cause of [`Self::stop_cause`].
     pub(super) async fn end_in_rounds(&self) -> RoundsEnd {
         self.abort_alive();
         for _ in 0..EXTRA_CANCEL_ROUNDS {
@@ -803,6 +899,258 @@ impl RunScope {
             WorkWait::Done => RoundsEnd::Ended,
             WorkWait::StillAlive => RoundsEnd::Stuck,
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Run handle and host-held work
+// ---------------------------------------------------------------------------
+
+/// Why [`current_run`] gave no handle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum RunHandleRefused {
+    /// The caller is not the async body of a run, nor work that such a body
+    /// started with `spawn_in_run`. The thread of a blocking body gets this
+    /// refusal too: a blocking run has no work set.
+    #[error("current_run was called outside the async body of a task run")]
+    NotInAnAsyncRun,
+}
+
+/// Why [`RunHandle::register_host_work`] registered nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum HostWorkRefused {
+    /// The run has ended: its left work is being stopped, or the run is
+    /// over. Nothing was registered.
+    #[error("the run has ended; it takes no new work")]
+    RunEnded,
+    /// The run holds [`MAX_RUN_WORK`] pieces of work alive already, host-held
+    /// work and the work of `spawn_in_run` together. Nothing was registered.
+    #[error("the run holds {bound} pieces of work alive already")]
+    TooMuchWork { bound: usize },
+}
+
+impl From<WorkRefused> for HostWorkRefused {
+    fn from(refused: WorkRefused) -> Self {
+        match refused {
+            WorkRefused::RunEnded => Self::RunEnded,
+            WorkRefused::TooMuchWork { bound } => Self::TooMuchWork { bound },
+        }
+    }
+}
+
+/// Why a cancel round asks the work of a run to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WorkStopCause {
+    /// The run's cancel signal fired with `cause`: in a shared async child,
+    /// something of the run was alive after the cancel grace; in an isolated
+    /// child, the body ended after an operator cancel.
+    RunCancelled { cause: CancelCause },
+    /// The body returned before any cancel, and work that it left was alive
+    /// after the grace for left work: 1 s in an isolated child, the run's
+    /// cancel grace in a shared async child.
+    LeftWork,
+}
+
+/// Whether a cancel round asked a piece of host-held work to stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostStopState {
+    NotRequested,
+    /// A round asked it to stop; `cause` is the cause of the first round,
+    /// which a later round does not change.
+    Requested {
+        cause: WorkStopCause,
+    },
+}
+
+/// The stop request of one piece of host-held work, as the rounds wrote it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopRecord {
+    NotRequested,
+    Requested {
+        cause: WorkStopCause,
+        rounds: NonZeroU32,
+    },
+}
+
+/// The stop request that a piece of host-held work shares with the rounds
+/// of its run.
+struct HostStop {
+    record: Mutex<StopRecord>,
+    /// Woken at each round that asks the piece to stop.
+    woken: Notify,
+}
+
+impl HostStop {
+    fn new() -> Self {
+        Self {
+            record: Mutex::new(StopRecord::NotRequested),
+            woken: Notify::new(),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, StopRecord> {
+        // A poisoned lock means a panic while it was held; the record is a
+        // valid value.
+        self.record.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// One round asks the piece to stop: the first round sets `cause`, a
+    /// later round keeps the first cause and counts itself. Wakes every
+    /// waiter.
+    fn ask(&self, cause: WorkStopCause) {
+        {
+            let mut record = self.lock();
+            *record = match *record {
+                StopRecord::NotRequested => StopRecord::Requested {
+                    cause,
+                    rounds: NonZeroU32::MIN,
+                },
+                StopRecord::Requested {
+                    cause: first,
+                    rounds,
+                } => StopRecord::Requested {
+                    cause: first,
+                    rounds: rounds.saturating_add(1),
+                },
+            };
+        }
+        self.woken.notify_waiters();
+    }
+
+    /// The stop request as task code reads it. Pure read.
+    fn state(&self) -> HostStopState {
+        match *self.lock() {
+            StopRecord::NotRequested => HostStopState::NotRequested,
+            StopRecord::Requested { cause, .. } => HostStopState::Requested { cause },
+        }
+    }
+
+    /// The rounds that asked the piece to stop. Pure read.
+    #[cfg(test)]
+    fn rounds(&self) -> u32 {
+        match *self.lock() {
+            StopRecord::NotRequested => 0,
+            StopRecord::Requested { rounds, .. } => rounds.get(),
+        }
+    }
+}
+
+/// The handle of one async run, for code outside the run's tokio task. A
+/// host program takes it in the async body ([`current_run`]), keeps it, and
+/// registers the work that it runs outside the Rust runtime through it from
+/// any thread. It stays valid after the run ended; each method then answers
+/// `RunEnded`.
+///
+/// The handle gives no cancel signal. A host whose work must see the
+/// deadline or an operator cancel when they fire reads
+/// [`run_cancel_signal`] in the async body too and keeps it next to the
+/// handle: the stop request of host-held work
+/// ([`HostWork::stop_requested`]) comes only at the cancel rounds, after the
+/// cancel grace, and at the stop of left work.
+#[derive(Clone)]
+pub struct RunHandle {
+    scope: RunScope,
+}
+
+impl fmt::Debug for RunHandle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunHandle")
+            .field("token", &self.scope.token)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The handle of the current run, taken by its async body or by work that
+/// the body started with [`spawn_in_run`]. Pure read.
+///
+/// Errors: [`RunHandleRefused::NotInAnAsyncRun`] outside such code, and on
+/// the thread of a blocking body.
+pub fn current_run() -> Result<RunHandle, RunHandleRefused> {
+    RUN_SCOPE
+        .try_with(|scope| RunHandle {
+            scope: scope.clone(),
+        })
+        .map_err(|_outside_async_run| RunHandleRefused::NotInAnAsyncRun)
+}
+
+impl RunHandle {
+    /// Register a piece of work that the host runs outside the Rust runtime,
+    /// named `name` in reports. It is alive in the run until the host ends
+    /// it ([`HostWork::end`], or a drop of the returned value). A cancel
+    /// round asks it to stop and does not remove it. Effects: one entry in
+    /// the run's work set. It does not start anything.
+    ///
+    /// Errors: [`HostWorkRefused`]; nothing was registered then.
+    pub fn register_host_work(&self, name: &str) -> Result<HostWork, HostWorkRefused> {
+        let stop = Arc::new(HostStop::new());
+        let id = self
+            .scope
+            .register_slot(name, AbortSlot::HostHeld(Arc::clone(&stop)))?;
+        Ok(HostWork {
+            ended: WorkEnded {
+                shared: Arc::clone(&self.scope.shared),
+                timing: self.scope.timing.clone(),
+                id,
+            },
+            stop,
+        })
+    }
+}
+
+/// One piece of host-held work of a run. The piece leaves the run when the
+/// host ends it ([`Self::end`]) or drops this value, so a host that loses
+/// it cannot hold the run's seat. Keep it where the host keeps its own work
+/// (for example its run table), not in the Rust future of the body: the
+/// rounds drop that future, and the drop would end the piece while the
+/// host's work runs on.
+pub struct HostWork {
+    ended: WorkEnded,
+    stop: Arc<HostStop>,
+}
+
+impl fmt::Debug for HostWork {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HostWork")
+            .field("id", &self.ended.id)
+            .field("stop", &self.stop.state())
+            .finish()
+    }
+}
+
+impl HostWork {
+    /// Whether a cancel round asked the run's work to stop, and why. Pure
+    /// read.
+    pub fn stop_state(&self) -> HostStopState {
+        self.stop.state()
+    }
+
+    /// Complete when a cancel round asks the run's work to stop; at once
+    /// when a round asked already. The cause is the first round's.
+    pub async fn stop_requested(&self) -> WorkStopCause {
+        loop {
+            let woken = self.stop.woken.notified();
+            tokio::pin!(woken);
+            // Registered before the check, so a round between the check and
+            // the wait still wakes it.
+            woken.as_mut().enable();
+            match self.stop.state() {
+                HostStopState::Requested { cause } => return cause,
+                HostStopState::NotRequested => woken.await,
+            }
+        }
+    }
+
+    /// The rounds that asked the piece to stop. Pure read.
+    #[cfg(test)]
+    pub(super) fn stop_rounds(&self) -> u32 {
+        self.stop.rounds()
+    }
+
+    /// The piece ends: it leaves the run, and every wait for the run's work
+    /// wakes.
+    pub fn end(self) {
+        let Self { ended, stop: _ } = self;
+        drop(ended);
     }
 }
 
@@ -1219,6 +1567,252 @@ mod tests {
         assert_eq!(other_thread, RunCancelState::NotInARun);
         assert!(run_cancel_signal().is_err());
         assert_eq!(run_cancel_state(), RunCancelState::NotInARun);
+    }
+
+    /// The handle of a run and its host-held work cross threads.
+    #[test]
+    fn a_run_handle_and_host_work_cross_threads() {
+        fn crosses_threads<T: Send + Sync>() {}
+        crosses_threads::<RunHandle>();
+        crosses_threads::<HostWork>();
+    }
+
+    /// Outside an async run, and on the thread of a blocking body, no run
+    /// handle is given.
+    #[test]
+    fn a_run_handle_outside_an_async_run_is_refused() {
+        assert!(matches!(
+            current_run(),
+            Err(RunHandleRefused::NotInAnAsyncRun)
+        ));
+        let on_blocking_thread = in_blocking_run(test_token(), RunCancelSignal::new(), current_run);
+        assert!(matches!(
+            on_blocking_thread,
+            Err(RunHandleRefused::NotInAnAsyncRun)
+        ));
+    }
+
+    /// A handle that the body took registers host-held work from a plain OS
+    /// thread; the piece is alive in the run, with no stop request, until
+    /// the host ends it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_handle_taken_in_the_body_registers_host_work_from_a_plain_thread() {
+        let scope = RunScope::new(test_token());
+        let body = scope.spawn_body("app.tasks.body", async {
+            current_run().expect("an async body takes the handle of its run")
+        });
+        let handle = body.await.expect("the body ends");
+        let work = std::thread::spawn(move || handle.register_host_work("host.promise"))
+            .join()
+            .expect("the thread ends")
+            .expect("an open run takes host-held work");
+        match scope.alive() {
+            Alive::Work { count, names } => {
+                assert_eq!(count.get(), 1);
+                let names: Vec<&str> = names.iter().map(LeftoverName::as_str).collect();
+                assert_eq!(names, ["host.promise"]);
+            }
+            Alive::Nothing => panic!("the host-held work is alive"),
+        }
+        assert_eq!(work.stop_state(), HostStopState::NotRequested);
+        work.end();
+        assert_eq!(scope.alive(), Alive::Nothing);
+    }
+
+    /// The 10,001st piece of one run is refused; nothing is registered.
+    #[tokio::test]
+    async fn the_host_work_past_the_bound_is_refused() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        let held: Vec<HostWork> = (0..MAX_RUN_WORK)
+            .map(|_| handle.register_host_work("piece").expect("under the bound"))
+            .collect();
+        assert_eq!(
+            handle.register_host_work("one more").err(),
+            Some(HostWorkRefused::TooMuchWork { bound: 10_000 })
+        );
+        assert_eq!(held.len(), MAX_RUN_WORK);
+    }
+
+    /// After the run closed, host-held work is refused.
+    #[tokio::test]
+    async fn a_closed_run_takes_no_host_work() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        scope.close();
+        assert_eq!(
+            handle.register_host_work("late").err(),
+            Some(HostWorkRefused::RunEnded)
+        );
+    }
+
+    /// A drop of the host-held work ends the piece and wakes a wait for the
+    /// run's work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_host_work_ends_the_piece_and_wakes_the_waiters() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        let work = handle
+            .register_host_work("host.promise")
+            .expect("an open run takes host-held work");
+        let waiting = scope.clone();
+        let waiter = tokio::spawn(async move { waiting.wait_all_ended().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "the piece is alive");
+        drop(work);
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("the waiter wakes at the drop")
+            .expect("the waiter ends");
+        assert_eq!(scope.alive(), Alive::Nothing);
+    }
+
+    /// The cancel signal alone asks host-held work nothing; the first round
+    /// completes a wait for the stop request with the signal's cause.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_first_round_asks_host_work_to_stop_with_the_signal_cause() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        let work = handle
+            .register_host_work("host.promise")
+            .expect("an open run takes host-held work");
+        assert_eq!(scope.fire_cancel(CancelCause::Deadline), Fire::Won);
+        assert_eq!(work.stop_state(), HostStopState::NotRequested);
+        scope.close();
+        let (cause, rounds_end) = tokio::join!(work.stop_requested(), scope.end_in_rounds());
+        assert_eq!(
+            cause,
+            WorkStopCause::RunCancelled {
+                cause: CancelCause::Deadline
+            }
+        );
+        assert_eq!(rounds_end, RoundsEnd::Stuck);
+        work.end();
+        assert_eq!(scope.alive(), Alive::Nothing);
+    }
+
+    /// Each round asks host-held work to stop and none removes it: it is
+    /// stuck after the rounds, named in the stuck report, and the run waits
+    /// until the host ends it. The rounds of a run whose signal did not fire
+    /// stop left work.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_rounds_keep_host_work_until_the_host_ends_it() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        let work = handle
+            .register_host_work("host.promise")
+            .expect("an open run takes host-held work");
+        scope.close();
+        assert_eq!(scope.end_in_rounds().await, RoundsEnd::Stuck);
+        assert_eq!(work.stop_requested().await, WorkStopCause::LeftWork);
+        assert_eq!(
+            work.stop_state(),
+            HostStopState::Requested {
+                cause: WorkStopCause::LeftWork
+            }
+        );
+        assert_eq!(work.stop_rounds(), 1 + EXTRA_CANCEL_ROUNDS);
+        match scope.alive() {
+            Alive::Work { count, names } => {
+                let stuck = stuck_report(count, names);
+                assert_eq!(stuck.tasks(), 1);
+                assert_eq!(stuck.names()[0].as_str(), "host.promise");
+            }
+            Alive::Nothing => panic!("the rounds keep host-held work"),
+        }
+        let waiting = scope.clone();
+        let waiter = tokio::spawn(async move { waiting.wait_all_ended().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiter.is_finished(), "the run waits for the host");
+        work.end();
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("the waiter wakes at the end")
+            .expect("the waiter ends");
+    }
+
+    /// A run with nothing alive closes at the idle close: a later
+    /// registration of host-held work is `RunEnded`.
+    #[tokio::test]
+    async fn an_idle_run_closes_and_takes_no_later_host_work() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        assert_eq!(scope.close_when_idle(), Alive::Nothing);
+        assert_eq!(
+            handle.register_host_work("late").err(),
+            Some(HostWorkRefused::RunEnded)
+        );
+    }
+
+    /// A run with work alive stays open at the idle close, and the close
+    /// names that work.
+    #[tokio::test]
+    async fn a_run_with_work_alive_stays_open_at_the_idle_close() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        let first = handle
+            .register_host_work("host.promise")
+            .expect("an open run takes host-held work");
+        match scope.close_when_idle() {
+            Alive::Work { count, names } => {
+                assert_eq!(count.get(), 1);
+                assert_eq!(names[0].as_str(), "host.promise");
+            }
+            Alive::Nothing => panic!("the host-held work is alive"),
+        }
+        let second = handle
+            .register_host_work("host.later")
+            .expect("a run with work alive stays open");
+        first.end();
+        second.end();
+    }
+
+    /// The wait for an idle run closes it when the work ended within the
+    /// bound, and keeps it open when the work is alive at the bound.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_wait_for_an_idle_run_closes_it_only_when_nothing_is_alive() {
+        let scope = RunScope::new(test_token());
+        let handle = RunHandle {
+            scope: scope.clone(),
+        };
+        let work = handle
+            .register_host_work("host.promise")
+            .expect("an open run takes host-held work");
+        assert_eq!(
+            scope.wait_idle_then_close(Duration::from_millis(100)).await,
+            WorkWait::StillAlive
+        );
+        let more = handle
+            .register_host_work("host.more")
+            .expect("the run stays open while work is alive");
+        let ender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            work.end();
+            more.end();
+        });
+        assert_eq!(
+            scope.wait_idle_then_close(Duration::from_secs(2)).await,
+            WorkWait::Done
+        );
+        ender.join().expect("the host thread ends");
+        assert_eq!(
+            handle.register_host_work("late").err(),
+            Some(HostWorkRefused::RunEnded)
+        );
     }
 
     /// The signal that a blocking body reads is the signal of its run: a fire

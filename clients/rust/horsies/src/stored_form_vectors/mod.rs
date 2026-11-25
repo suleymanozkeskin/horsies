@@ -7,7 +7,8 @@
 //! text back to the value. A vector names what the client cannot express
 //! (`rust_cannot_express`) or writes differently today (`rust_drift`, a
 //! finding of the README); the tests check both, so a change in either client
-//! fails a test.
+//! fails a test. The marks of the TypeScript client (`typescript_cannot_express`,
+//! `typescript_drift`) are not read here: the row structs skip unknown keys.
 
 mod error_data;
 mod result_envelope;
@@ -17,7 +18,7 @@ mod task_options;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 
-use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, Utc};
+use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use horsies_core::{
     BuiltInTaskCode, RawResultRecord, StoredEnvelopeText, SubWorkflowFailure, SubWorkflowSummary,
     TaskErrorCode, TaskErrorKind, TaskStatus, UserCode,
@@ -206,6 +207,10 @@ fn check_typed(name: &str, type_name: &str, notation: &Value, check: &mut impl T
         "datetime_offset" => check.check(StoredDateTime(offset_datetime(name, notation))),
         "datetime_naive" => check.check(StoredDateTime(naive_datetime(name, notation))),
         "date" => check.check(parsed::<NaiveDate>(name, notation)),
+        // chrono's own serde form of a time of day writes a whole
+        // millisecond with 3 digits: the vector carries that text as a
+        // `rust_drift`.
+        "time" => check.check(parsed::<NaiveTime>(name, notation)),
         "uuid" => check.check(parsed::<Uuid>(name, notation)),
         "str_enum" => check.check(color(name, notation)),
         "optional_i64" => check.check(match notation {

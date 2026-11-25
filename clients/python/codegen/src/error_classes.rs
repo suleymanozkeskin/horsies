@@ -467,7 +467,7 @@ fn render_union(name: &str, doc: &str, members: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::catalog::{CatalogMember, PythonEnumBase, TerminalStates};
+    use horsies_core::catalog::{CallForms, CatalogMember, PythonEnumBase, TerminalStates};
 
     use super::*;
 
@@ -480,6 +480,7 @@ mod tests {
             name: "PAYLOAD_MISMATCH",
             value: "PAYLOAD_MISMATCH",
             doc: "",
+            forms: CallForms::AnyForm,
         }],
         terminal_states: TerminalStates::NotALifecycle,
     };

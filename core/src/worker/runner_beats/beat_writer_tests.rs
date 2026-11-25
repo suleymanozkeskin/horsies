@@ -19,6 +19,7 @@ use super::{
 };
 use crate::broker::cancelled_runs::RunClaim;
 use crate::core::history::maintenance::coverage::ensure_startup_coverage_in_pool;
+use crate::process_exit::ProcessExit;
 use crate::test_support::sql::{self, TestPool};
 use crate::worker::executor::slots::dispatch::AttemptLog;
 use crate::worker::executor::supervisor::Spawner;
@@ -496,6 +497,7 @@ async fn the_beat_loop_keeps_a_held_row_out_of_stale_recovery() {
         live.clone(),
         cancel.clone(),
         FailClosedStop::new(CancellationToken::new()),
+        ProcessExit::Standard,
     )
     .expect("start the beat loop");
 

@@ -40,6 +40,14 @@ encoder, and the Python tests check that it still does.
     today in place of Python's. The Rust tests assert this text, so a change of
     either client fails a test; the finding is in [Findings](#findings). The
     Rust tests still read Python's text back to the value.
+  - `typescript_cannot_express`: the TypeScript client has no type for the
+    value; the text gives the reason. The TypeScript tests skip the row.
+  - `typescript_drift`: `{"text", "finding"}`: the text that the TypeScript
+    client writes in place of Python's. The TypeScript tests assert this
+    text and read Python's text back to the value.
+  - A row has at most one mark per client. The core, the Python tests and
+    the Rust tests do not read the TypeScript marks; their row readers skip
+    keys that they do not name.
 - `refused_values`: values that every encoder refuses.
 - `refused_texts`: texts that every reader refuses. `core_refusal` names the
   core's `StrictJsonError` variant. `refusal_text`, for a refusal that
@@ -89,6 +97,7 @@ file rounds one.
 | `datetime_offset` | ISO 8601 text | aware `datetime` | `StoredDateTime<DateTime<FixedOffset>>` |
 | `datetime_naive` | ISO 8601 text | naive `datetime` | `StoredDateTime<NaiveDateTime>` |
 | `date` | ISO 8601 date | `date` | `NaiveDate` |
+| `time` | ISO 8601 time of day, no offset | naive `time` | `NaiveTime` |
 | `uuid` | hyphenated text | `UUID` | `Uuid` |
 | `decimal` | decimal text | `Decimal` | none |
 | `bytes` | UTF-8 text | `bytes` | none |
@@ -105,6 +114,9 @@ A date-time's Rust type is `horsies::StoredDateTime`
 fraction: 6 digits when the microsecond is not 0, else none. chrono's own
 serde form of `DateTime` and `NaiveDateTime` writes a whole millisecond with
 3 digits (`.500Z`); both clients read either text to the same value.
+A time of day's Rust type is chrono's `NaiveTime`, whose serde form also
+writes a whole millisecond with 3 digits (`09:10:12.500`); Python writes
+`09:10:12.500000` (finding `time-milliseconds`).
 
 ## Task input (`task_input.json`)
 
@@ -338,7 +350,9 @@ refused carrier is not an error of the send: the row stores no carrier.
 ## Findings
 
 Differences that the vectors found. A fixed one names its PR; an open one is a
-`rust_drift` or a `rust_cannot_express` row, and is described on #1603.
+`rust_drift` or a `rust_cannot_express` row, and is described on #1603 or on
+its own issue. A difference of the TypeScript client is a `typescript_drift` or
+a `typescript_cannot_express` row.
 
 | Finding | Form | Facts | State |
 |---|---|---|---|
@@ -354,3 +368,6 @@ Differences that the vectors found. A fixed one names its PR; an open one is a
 | `no-parameter-input` | task input | a task with no parameters: Python stores `{}`, the Rust client stored `null` (its input is `()`) | fixed, the client's send stores `{}` |
 | `datetime-milliseconds` | task input, result, task options | chrono writes a fraction of whole milliseconds with 3 digits (`.500Z`); Python writes 6 (`.500000Z`). Microseconds and whole seconds agree. The Rust client's node deadline (`to_rfc3339`) too | fixed: `StoredDateTime` writes Python's text for a user value, and the node deadline uses `python_isoformat_utc`; chrono's own serde form is unchanged |
 | not expressible in Rust | task input, result | `big_int`, `decimal`, `bytes`, `int_enum`, a typed map in insertion order: the client depends on no type that writes Python's text | listed per row |
+| `time-milliseconds` | task input, result | chrono's `NaiveTime` writes a whole millisecond with 3 digits (`09:10:12.500`); Python writes 6 (`09:10:12.500000`). Microseconds and whole seconds agree. Both clients read either text | open: `rust_drift` rows `time_whole_milliseconds`, `ok_time_whole_milliseconds`; #2352 |
+| `integer-like-record-keys` | task input | a JavaScript object puts integer-like keys first, in ascending order, then the other keys in insertion order: the record that Python writes `{"b":1,"10":2,"2":3}` is `{"2":3,"10":2,"b":1}` in the TypeScript client. Python writes insertion order | kept: the TypeScript client keeps the JavaScript order; the `typescript_drift` row `map_integer_like_keys` pins both texts |
+| not expressible in TypeScript | task input, result | `bytes`: Python refuses `bytes` in a task signature (`clients/python/horsies/core/codec/signature_check.py`), so the TypeScript client has no bytes kind | `typescript_cannot_express` rows `bytes_utf8`, `ok_bytes` |
