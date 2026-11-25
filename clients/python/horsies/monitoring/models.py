@@ -1,11 +1,14 @@
 """Response models for the monitoring query API.
 
-Field names here are the wire contract the monitoring UI consumes. Two
+Field names here are the wire contract the monitoring UI consumes. Three
 conventions hold across every model:
 
 * Datetimes are timezone-aware UTC.
 * Optional text is normalized before it reaches a model: horsies stores ``''``
   for cleared text, and empty strings arrive here as ``None``.
+* A measured duration (``queue_s``, ``exec_s``, ``wall_s``,
+  ``snapshot_age_s``, ``uptime_s``, ``wait_s``) is a float of seconds,
+  exact to the microsecond.
 
 These models are unstable pre-1.0.
 """
@@ -747,7 +750,8 @@ class LeafTaskInfo(BaseModel):
 
     ``queue_s`` is dispatch-to-start wait; ``exec_s`` is start-to-finish run
     time. Both are split so queue wait is never conflated with run time, and
-    both are ``None`` when the span cannot be determined.
+    both are ``None`` when the span cannot be determined. Both are seconds,
+    exact to the microsecond.
 
     ``execution`` is the stored ``Execution`` of a live task, and ``None``
     for a task read from history, which does not keep the class.
@@ -767,8 +771,8 @@ class LeafTaskInfo(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     failed_at: datetime | None
-    queue_s: int | None
-    exec_s: int | None
+    queue_s: float | None
+    exec_s: float | None
     worker_hostname: str | None
     good_until: datetime | None
     execution: Execution | None
@@ -880,7 +884,8 @@ class TaskSummary(BaseModel):
     """One task row, shaped for the list view.
 
     ``error_category`` names the error family; ``None`` when there is no
-    error. ``worker_id`` is the claiming worker.
+    error. ``worker_id`` is the claiming worker. ``queue_s`` and ``exec_s``
+    are the spans of ``LeafTaskInfo``: seconds, exact to the microsecond.
     """
 
     id: UUID
@@ -899,8 +904,8 @@ class TaskSummary(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     failed_at: datetime | None
-    queue_s: int | None
-    exec_s: int | None
+    queue_s: float | None
+    exec_s: float | None
 
 
 class TaskListPage(BaseModel):
@@ -948,7 +953,7 @@ class WorkflowRunSummary(BaseModel):
     """One workflow run, root or subworkflow.
 
     ``wall_s`` counts up while ``completed_at`` is null, including for PAUSED
-    runs.
+    runs. It is seconds, exact to the microsecond.
     """
 
     id: str
@@ -957,14 +962,15 @@ class WorkflowRunSummary(BaseModel):
     status: str
     created_at: datetime | None
     completed_at: datetime | None
-    wall_s: int | None
+    wall_s: float | None
 
 
 class WorkflowNodeInfo(BaseModel):
     """A single node in a run's DAG. ``task_index`` is the stable key.
 
-    ``exec_s`` is execution time only: null until the node starts running, so
-    a node sitting in the queue does not accrue a misleading duration.
+    ``exec_s`` is execution time only, in seconds, exact to the microsecond:
+    null until the node starts running, so a node sitting in the queue does
+    not accrue a misleading duration.
     ``child_total`` / ``child_failed`` roll up a subworkflow node's direct
     children and are both null for leaf nodes and for child runs with no task
     rows yet. ``timing`` is the phase timing of the node.
@@ -979,7 +985,7 @@ class WorkflowNodeInfo(BaseModel):
     allow_failed_deps: bool
     started_at: datetime | None
     completed_at: datetime | None
-    exec_s: int | None
+    exec_s: float | None
     child_total: int | None
     child_failed: int | None
     timing: NodeTimingInfo
@@ -1073,9 +1079,11 @@ SnapshotProfileInfo = Annotated[
 class WorkerStateInfo(BaseModel):
     """Latest state snapshot for one worker (from horsies_worker_states).
 
-    ``snapshot_age_s`` is how long ago the snapshot was written; ``stale`` is
-    True once that age exceeds the snapshot threshold, signalling a worker
-    that stopped reporting. Liveness is proven separately by an active ping.
+    ``snapshot_age_s`` is how long ago the snapshot was written, and
+    ``uptime_s`` how long the worker has run; both are seconds, exact to the
+    microsecond. ``stale`` is True once that age exceeds the snapshot
+    threshold, signalling a worker that stopped reporting. Liveness is proven
+    separately by an active ping.
 
     ``slot_health`` is ``all_serving`` or ``slots_down`` (``down_slots`` lists
     them, in slot order). ``down_slots`` is empty unless ``slot_health`` is
@@ -1089,10 +1097,10 @@ class WorkerStateInfo(BaseModel):
     hostname: str
     pid: int
     snapshot_at: datetime
-    snapshot_age_s: int | None
+    snapshot_age_s: float | None
     stale: bool
     worker_started_at: datetime
-    uptime_s: int | None
+    uptime_s: float | None
     processes: int
     queues: list[str]
     queue_max_concurrency: dict[str, int]
@@ -1157,11 +1165,12 @@ class StreamUnservedInfo(BaseModel):
 
 
 class StreamWaitingInfo(BaseModel):
-    """At least one row is due. ``wait_s`` is the wait of the oldest due row."""
+    """At least one row is due. ``wait_s`` is the wait of the oldest due row,
+    in seconds, exact to the microsecond."""
 
     kind: Literal['waiting']
     oldest_due_at: datetime
-    wait_s: int
+    wait_s: float
 
 
 class StreamNoneDueInfo(BaseModel):

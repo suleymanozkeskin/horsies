@@ -199,9 +199,19 @@ fn helpers_and_error_taxonomy_are_exact() {
 
     let start = Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap();
     let end = start + Duration::milliseconds(1_999);
-    assert_eq!(elapsed_s(Some(start), Some(end)), Some(1));
-    assert_eq!(span_s(Some(start), None, false), None);
-    assert_eq!(span_s(Some(start), Some(end), false), Some(1));
+    assert_eq!(
+        elapsed(Some(start), Some(end)),
+        Some(Duration::milliseconds(1_999))
+    );
+    assert_eq!(
+        elapsed(Some(end), Some(start)),
+        Some(Duration::milliseconds(-1_999))
+    );
+    assert_eq!(span(Some(start), None, false), None);
+    assert_eq!(
+        span(Some(start), Some(end), false),
+        Some(Duration::milliseconds(1_999))
+    );
 }
 
 fn keys(value: impl Serialize) -> Vec<String> {
@@ -269,7 +279,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
         started_at: None,
         completed_at: None,
         failed_at: Some(now),
-        queue_s: Some(0),
+        queue_s: Some(Duration::zero()),
         exec_s: None,
         worker_hostname: None,
         good_until: None,
@@ -293,7 +303,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
         started_at: None,
         completed_at: None,
         failed_at: Some(now),
-        queue_s: Some(0),
+        queue_s: Some(Duration::zero()),
         exec_s: None,
     };
     let counts = BreakdownCounts {
@@ -320,7 +330,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
         status: "RUNNING".to_owned(),
         created_at: Some(now),
         completed_at: None,
-        wall_s: Some(0),
+        wall_s: Some(Duration::zero()),
     };
     let node = WorkflowNodeInfo {
         task_index: 0,
@@ -685,10 +695,10 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 hostname: "h".to_owned(),
                 pid: 1,
                 snapshot_at: now,
-                snapshot_age_s: Some(0),
+                snapshot_age_s: Some(Duration::zero()),
                 stale: false,
                 worker_started_at: now,
-                uptime_s: Some(0),
+                uptime_s: Some(Duration::zero()),
                 processes: 1,
                 queues: vec![],
                 queue_max_concurrency: BTreeMap::new(),
@@ -1484,10 +1494,14 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
         rows.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
         vec![history_match.id, wrong_code.id, live_match.id]
     );
-    assert_eq!(rows.rows[0].queue_s, Some(30));
-    assert!(rows.rows[0].exec_s.is_some_and(|seconds| seconds >= 60));
-    assert_eq!(rows.rows[2].queue_s, Some(20));
-    assert!(rows.rows[2].exec_s.is_some_and(|seconds| seconds >= 40));
+    assert_eq!(rows.rows[0].queue_s, Some(Duration::seconds(30)));
+    assert!(rows.rows[0]
+        .exec_s
+        .is_some_and(|exec| exec >= Duration::seconds(60)));
+    assert_eq!(rows.rows[2].queue_s, Some(Duration::seconds(20)));
+    assert!(rows.rows[2]
+        .exec_s
+        .is_some_and(|exec| exec >= Duration::seconds(40)));
 
     let history_rows = list_tasks(
         &broker,
@@ -1522,7 +1536,9 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
     .rows
     .pop()
     .expect("pending duration row");
-    assert!(pending_row.queue_s.is_some_and(|seconds| seconds >= 30));
+    assert!(pending_row
+        .queue_s
+        .is_some_and(|queue| queue >= Duration::seconds(30)));
     assert_eq!(pending_row.exec_s, None);
 
     // Only the status and `retried_only` scope the facets: the two FAILED
@@ -1770,7 +1786,9 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
     .expect("W2 workflow runs");
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].id, root);
-    assert!(runs[0].wall_s.is_some_and(|seconds| seconds >= 120));
+    assert!(runs[0]
+        .wall_s
+        .is_some_and(|wall| wall >= Duration::seconds(120)));
     assert!(list_workflow_runs(
         &broker,
         &WorkflowRunsQuery::new().with_status(Some("NOT_A_STATUS".to_owned())),
@@ -1809,8 +1827,10 @@ async fn workflow_graph_node_and_schedule_reads_match_the_contract() {
         (detail.nodes[1].child_total, detail.nodes[1].child_failed),
         (None, None)
     );
-    assert_eq!(detail.nodes[0].exec_s, Some(20));
-    assert!(detail.nodes[2].exec_s.is_some_and(|seconds| seconds >= 30));
+    assert_eq!(detail.nodes[0].exec_s, Some(Duration::seconds(20)));
+    assert!(detail.nodes[2]
+        .exec_s
+        .is_some_and(|exec| exec >= Duration::seconds(30)));
     assert!(get_workflow_run(&broker, Uuid::new_v4())
         .await
         .unwrap()

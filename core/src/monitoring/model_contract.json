@@ -112,7 +112,7 @@
                 },
                 "waiting": {
                   "oldest_due_at": "date-time",
-                  "wait_s": "integer"
+                  "wait_s": "number"
                 }
               }
             }
@@ -241,7 +241,7 @@
       "nullable": "string"
     },
     "exec_s": {
-      "nullable": "integer"
+      "nullable": "number"
     },
     "execution": {
       "nullable": {
@@ -263,7 +263,7 @@
     },
     "max_retries": "integer",
     "queue_s": {
-      "nullable": "integer"
+      "nullable": "number"
     },
     "retry_count": "integer",
     "started_at": {
@@ -327,7 +327,7 @@
           },
           "waiting": {
             "oldest_due_at": "date-time",
-            "wait_s": "integer"
+            "wait_s": "number"
           }
         }
       }
@@ -536,7 +536,7 @@
           "nullable": "string"
         },
         "exec_s": {
-          "nullable": "integer"
+          "nullable": "number"
         },
         "execution": {
           "nullable": {
@@ -558,7 +558,7 @@
         },
         "max_retries": "integer",
         "queue_s": {
-          "nullable": "integer"
+          "nullable": "number"
         },
         "retry_count": "integer",
         "started_at": {
@@ -601,7 +601,7 @@
             "nullable": "string"
           },
           "exec_s": {
-            "nullable": "integer"
+            "nullable": "number"
           },
           "failed_at": {
             "nullable": "date-time"
@@ -612,7 +612,7 @@
           "priority": "integer",
           "queue_name": "string",
           "queue_s": {
-            "nullable": "integer"
+            "nullable": "number"
           },
           "retry_count": "integer",
           "started_at": {
@@ -645,7 +645,7 @@
       "nullable": "string"
     },
     "exec_s": {
-      "nullable": "integer"
+      "nullable": "number"
     },
     "failed_at": {
       "nullable": "date-time"
@@ -656,7 +656,7 @@
     "priority": "integer",
     "queue_name": "string",
     "queue_s": {
-      "nullable": "integer"
+      "nullable": "number"
     },
     "retry_count": "integer",
     "started_at": {
@@ -771,14 +771,14 @@
       ]
     },
     "snapshot_age_s": {
-      "nullable": "integer"
+      "nullable": "number"
     },
     "snapshot_at": "date-time",
     "stale": "boolean",
     "tasks_claimed": "integer",
     "tasks_running": "integer",
     "uptime_s": {
-      "nullable": "integer"
+      "nullable": "number"
     },
     "worker_id": "string",
     "worker_started_at": "date-time"
@@ -799,7 +799,7 @@
       "nullable": "date-time"
     },
     "exec_s": {
-      "nullable": "integer"
+      "nullable": "number"
     },
     "is_subworkflow": "boolean",
     "node_id": {
@@ -1163,7 +1163,7 @@
             "nullable": "date-time"
           },
           "exec_s": {
-            "nullable": "integer"
+            "nullable": "number"
           },
           "is_subworkflow": "boolean",
           "node_id": {
@@ -1517,7 +1517,7 @@
         "name": "string",
         "status": "string",
         "wall_s": {
-          "nullable": "integer"
+          "nullable": "number"
         }
       }
     },
@@ -1704,7 +1704,7 @@
     "name": "string",
     "status": "string",
     "wall_s": {
-      "nullable": "integer"
+      "nullable": "number"
     }
   },
   "WorkflowTaskDetail": {
@@ -1808,7 +1808,7 @@
             "nullable": "string"
           },
           "exec_s": {
-            "nullable": "integer"
+            "nullable": "number"
           },
           "execution": {
             "nullable": {
@@ -1830,7 +1830,7 @@
           },
           "max_retries": "integer",
           "queue_s": {
-            "nullable": "integer"
+            "nullable": "number"
           },
           "retry_count": "integer",
           "started_at": {

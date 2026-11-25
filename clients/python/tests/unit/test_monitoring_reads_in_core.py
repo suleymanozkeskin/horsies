@@ -84,7 +84,7 @@ PAGE_JSON: Final = (
     '"max_retries": 3, "is_workflow_task": false, "error_code": "ORDER_REJECTED", '
     '"error_category": "DOMAIN", "worker_hostname": "host-1", "worker_id": "worker-1", '
     '"enqueued_at": "2026-11-17T11:00:00Z", "started_at": "2026-11-17T11:00:05.250000Z", '
-    '"completed_at": null, "failed_at": "2026-11-17T11:00:09Z", "queue_s": 5, "exec_s": 3}], '
+    '"completed_at": null, "failed_at": "2026-11-17T11:00:09Z", "queue_s": 5.25, "exec_s": 3.75}], '
     '"total": 7}'
 )
 FACETS_JSON: Final = (
@@ -97,7 +97,7 @@ DETAIL_JSON: Final = (
     '{"leaf": {"task_id": "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b", "status": "RUNNING", '
     '"error_code": null, "failed_reason": null, "retry_count": 0, "max_retries": 3, '
     '"enqueued_at": "2026-11-17T11:00:00Z", "started_at": "2026-11-17T11:00:01Z", '
-    '"completed_at": null, "failed_at": null, "queue_s": 1, "exec_s": 42, '
+    '"completed_at": null, "failed_at": null, "queue_s": 1.0, "exec_s": 42.5, '
     '"worker_hostname": "host-1", "good_until": null, "execution": "SHARED_THREAD", '
     '"trace_id": "0af7651916cd43dd8448eb211c80319c"}, '
     '"task_name": "t", "queue_name": "default", "priority": 100, "is_workflow_task": true, '
@@ -167,6 +167,7 @@ class TestAnswers:
             case Ok(TaskListPage(rows=[row], total=7)):
                 assert row.id == TASK_ID
                 assert row.started_at == datetime(2026, 11, 17, 11, 0, 5, 250000, tzinfo=UTC)
+                assert (row.queue_s, row.exec_s) == (5.25, 3.75)
             case _:
                 raise AssertionError(f'expected one row and the total: {result!r}')
         assert _only_argument(call).__class__ is TaskListQuery
@@ -343,12 +344,12 @@ BREAKDOWN_JSON: Final = (
 RUNS_JSON: Final = (
     '[{"id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "name": "alpha.flow", '
     '"definition_key": null, "status": "RUNNING", "created_at": "2026-11-17T11:00:00Z", '
-    '"completed_at": null, "wall_s": 60}]'
+    '"completed_at": null, "wall_s": 60.5}]'
 )
 RUN_JSON: Final = (
     '{"run": {"id": "0190a1b2-c3d4-7e5f-8a6b-000000000001", "name": "alpha.flow", '
     '"definition_key": null, "status": "RUNNING", "created_at": "2026-11-17T11:00:00Z", '
-    '"completed_at": null, "wall_s": 60}, "nodes": [], "edges": [], "failed_count": 0, '
+    '"completed_at": null, "wall_s": 60.5}, "nodes": [], "edges": [], "failed_count": 0, '
     '"failed_indices": [], "trace_id": null, "timing": {"kind": "unavailable", '
     '"as_of": "2026-11-17T11:01:00Z", "captured_since": "2026-11-17T12:00:00Z", '
     '"reason": "RUN_BEFORE_CAPTURE"}}'
@@ -426,7 +427,7 @@ class TestAggregateAndWorkflowAnswers:
 
         assert names == Ok(['alpha.flow'])
         match runs:
-            case Ok([WorkflowRunSummary(id=run_id, wall_s=60)]):
+            case Ok([WorkflowRunSummary(id=run_id, wall_s=60.5)]):
                 assert run_id == RUN_ID
             case _:
                 raise AssertionError(f'expected one run: {runs!r}')

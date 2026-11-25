@@ -25,9 +25,11 @@ export interface WorkerState {
   hostname: string;
   pid: number;
   snapshot_at: string;
+  /** Seconds since `snapshot_at`, exact to the microsecond. */
   snapshot_age_s: number | null;
   stale: boolean;
   worker_started_at: string;
+  /** Seconds since `worker_started_at`, exact to the microsecond. */
   uptime_s: number | null;
   processes: number;
   queues: string[];
@@ -105,7 +107,8 @@ export type StreamCoverage =
   | { kind: 'no_capacity'; workers: number }
   | { kind: 'unserved' };
 
-/** How long the stream's rows wait. `none_due`: every row is due later. */
+/** How long the stream's rows wait. `none_due`: every row is due later.
+ * `wait_s` is in seconds, exact to the microsecond. */
 export type StreamWait =
   | { kind: 'waiting'; oldest_due_at: string; wait_s: number }
   | { kind: 'none_due'; next_due_at: string };

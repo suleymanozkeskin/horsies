@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -72,6 +72,11 @@ pub struct TaskAttemptInfo {
 /// `trace_id` is the trace id of the span that sent the task, as 32
 /// lowercase hex digits, live and in history; `None` for a task sent with no
 /// trace.
+///
+/// `queue_s` is the queue wait (enqueue to start) and `exec_s` the run time
+/// (start to end), each a span of the stored times; the open span of a live
+/// task runs to now. Each serializes as a number of seconds, exact to the
+/// microsecond (`time_text::optional_seconds`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct LeafTaskInfo {
@@ -89,8 +94,12 @@ pub struct LeafTaskInfo {
     pub completed_at: Option<DateTime<Utc>>,
     #[serde(serialize_with = "time_text::optional_utc")]
     pub failed_at: Option<DateTime<Utc>>,
-    pub queue_s: Option<i64>,
-    pub exec_s: Option<i64>,
+    #[serde(with = "time_text::optional_seconds")]
+    #[cfg_attr(test, schemars(with = "Option<f64>"))]
+    pub queue_s: Option<TimeDelta>,
+    #[serde(with = "time_text::optional_seconds")]
+    #[cfg_attr(test, schemars(with = "Option<f64>"))]
+    pub exec_s: Option<TimeDelta>,
     pub worker_hostname: Option<String>,
     #[serde(serialize_with = "time_text::optional_utc")]
     pub good_until: Option<DateTime<Utc>>,
@@ -186,6 +195,8 @@ pub struct Breakdown {
     pub group_count: i64,
 }
 
+/// One row of the task list (Python `TaskSummary`). `queue_s` and `exec_s`
+/// are the spans of [`LeafTaskInfo`], and serialize as it does.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct TaskSummary {
@@ -209,8 +220,12 @@ pub struct TaskSummary {
     pub completed_at: Option<DateTime<Utc>>,
     #[serde(serialize_with = "time_text::optional_utc")]
     pub failed_at: Option<DateTime<Utc>>,
-    pub queue_s: Option<i64>,
-    pub exec_s: Option<i64>,
+    #[serde(with = "time_text::optional_seconds")]
+    #[cfg_attr(test, schemars(with = "Option<f64>"))]
+    pub queue_s: Option<TimeDelta>,
+    #[serde(with = "time_text::optional_seconds")]
+    #[cfg_attr(test, schemars(with = "Option<f64>"))]
+    pub exec_s: Option<TimeDelta>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -252,6 +267,9 @@ pub struct TaskDetailNotFound {
     pub reason: TaskAbsenceReason,
 }
 
+/// One workflow run, root or child (Python `WorkflowRunSummary`). `wall_s`
+/// is the time from `created_at` to `completed_at`, or to now while the run
+/// is open; it serializes as a number of seconds, exact to the microsecond.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowRunSummary {
@@ -263,11 +281,15 @@ pub struct WorkflowRunSummary {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(serialize_with = "time_text::optional_utc")]
     pub completed_at: Option<DateTime<Utc>>,
-    pub wall_s: Option<i64>,
+    #[serde(with = "time_text::optional_seconds")]
+    #[cfg_attr(test, schemars(with = "Option<f64>"))]
+    pub wall_s: Option<TimeDelta>,
 }
 
 /// One node of a run (Python `WorkflowNodeInfo`). `timing` is the phase
-/// timing of the node.
+/// timing of the node. `exec_s` is the run time of the node: to now while
+/// it runs, to `completed_at` once it finished, else `None`; it serializes
+/// as a number of seconds, exact to the microsecond.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkflowNodeInfo {
@@ -282,7 +304,9 @@ pub struct WorkflowNodeInfo {
     pub started_at: Option<DateTime<Utc>>,
     #[serde(serialize_with = "time_text::optional_utc")]
     pub completed_at: Option<DateTime<Utc>>,
-    pub exec_s: Option<i64>,
+    #[serde(with = "time_text::optional_seconds")]
+    #[cfg_attr(test, schemars(with = "Option<f64>"))]
+    pub exec_s: Option<TimeDelta>,
     pub child_total: Option<i64>,
     pub child_failed: Option<i64>,
     pub timing: NodeTimingInfo,
@@ -368,6 +392,10 @@ pub enum SnapshotProfileInfo {
 /// `down_slots` lists the down slots in slot order; it is empty unless
 /// `slot_health` is `slots_down`. `profile` names the worker profile that
 /// the worker ran.
+///
+/// `snapshot_age_s` (from `snapshot_at`) and `uptime_s` (from
+/// `worker_started_at`) are measured to the database time of the read, and
+/// serialize as numbers of seconds, exact to the microsecond.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 pub struct WorkerStateInfo {
@@ -376,11 +404,15 @@ pub struct WorkerStateInfo {
     pub pid: i32,
     #[serde(serialize_with = "time_text::utc")]
     pub snapshot_at: DateTime<Utc>,
-    pub snapshot_age_s: Option<i64>,
+    #[serde(with = "time_text::optional_seconds")]
+    #[cfg_attr(test, schemars(with = "Option<f64>"))]
+    pub snapshot_age_s: Option<TimeDelta>,
     pub stale: bool,
     #[serde(serialize_with = "time_text::utc")]
     pub worker_started_at: DateTime<Utc>,
-    pub uptime_s: Option<i64>,
+    #[serde(with = "time_text::optional_seconds")]
+    #[cfg_attr(test, schemars(with = "Option<f64>"))]
+    pub uptime_s: Option<TimeDelta>,
     pub processes: i32,
     pub queues: Vec<String>,
     pub queue_max_concurrency: BTreeMap<String, i64>,
@@ -447,12 +479,14 @@ pub enum StreamCoverageInfo {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StreamWaitInfo {
-    /// At least one row is due. `wait_s` is the wait of the oldest due row,
-    /// in whole seconds.
+    /// At least one row is due. `wait_s` is the wait of the oldest due row
+    /// at `checked_at`, as a number of seconds, exact to the microsecond.
     Waiting {
         #[serde(serialize_with = "time_text::utc")]
         oldest_due_at: DateTime<Utc>,
-        wait_s: i64,
+        #[serde(serialize_with = "time_text::seconds")]
+        #[cfg_attr(test, schemars(with = "f64"))]
+        wait_s: TimeDelta,
     },
     /// Every row is due later; `next_due_at` is the earliest due time.
     NoneDue {

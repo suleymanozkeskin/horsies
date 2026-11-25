@@ -11,7 +11,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
 use crate::broker::core_rows::{column, RowDecodeError};
@@ -37,7 +37,7 @@ use super::models::{
     TaskDetailRead, TaskSummary, WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail,
     WorkflowRunSummary, WorkflowTaskDetail,
 };
-use super::queries::{elapsed_s, normalize_optional_text, span_s, TaskGroupBy};
+use super::queries::{elapsed, normalize_optional_text, span, TaskGroupBy};
 use super::timing::{
     attempt_phases_info, compose_run, ChildRun, LiveStatus, LiveTask, MovedRecord, MovedTask,
     NodeEntry, NodeEventKind, NodeFacts, NodeStatus, NodeWork, RunEvent, RunEventKind, RunFacts,
@@ -410,22 +410,22 @@ fn summary_from_fields(fields: SummaryFields) -> Result<TaskSummary, String> {
         (Location::Live, None) => (
             None,
             None,
-            span_s(
+            span(
                 Some(fields.enqueued_at),
                 fields.started_at,
                 matches!(fields.status.as_str(), "PENDING" | "CLAIMED"),
             ),
-            span_s(fields.started_at, None, fields.status.as_str() == "RUNNING"),
+            span(fields.started_at, None, fields.status.as_str() == "RUNNING"),
         ),
         (Location::History, Some(terminal)) => (
             (fields.status == "COMPLETED").then_some(terminal),
             (fields.status != "COMPLETED").then_some(terminal),
-            span_s(
+            span(
                 Some(fields.enqueued_at),
                 fields.started_at.or(Some(terminal)),
                 false,
             ),
-            span_s(fields.started_at, Some(terminal), false),
+            span(fields.started_at, Some(terminal), false),
         ),
         (Location::Live, Some(_)) => {
             return Err(format!("live task {} has a terminal time", fields.task_id))
@@ -552,12 +552,12 @@ pub(super) fn task_detail_row(
         (Location::Live, None) => (
             None,
             None,
-            span_s(
+            span(
                 Some(enqueued_at),
                 started_at,
                 matches!(status.as_str(), "PENDING" | "CLAIMED"),
             ),
-            span_s(started_at, None, status.as_str() == "RUNNING"),
+            span(started_at, None, status.as_str() == "RUNNING"),
         ),
         (Location::History, Some(terminal)) => {
             if status.parse::<TaskStatus>().is_err() {
@@ -569,8 +569,8 @@ pub(super) fn task_detail_row(
             (
                 (status == "COMPLETED").then_some(terminal),
                 (status != "COMPLETED").then_some(terminal),
-                span_s(Some(enqueued_at), started_at.or(Some(terminal)), false),
-                span_s(started_at, Some(terminal), false),
+                span(Some(enqueued_at), started_at.or(Some(terminal)), false),
+                span(started_at, Some(terminal), false),
             )
         }
         (Location::Live, Some(_)) | (Location::History, None) => {
@@ -859,7 +859,7 @@ fn run_summary(
         status: column(row, statement, "status")?,
         created_at: Some(created_at),
         completed_at,
-        wall_s: elapsed_s(Some(created_at), completed_at),
+        wall_s: elapsed(Some(created_at), completed_at),
     })
 }
 
@@ -872,16 +872,17 @@ pub(super) fn workflow_runs(
 }
 
 /// The execution time of a node: a RUNNING node counts up to now; a finished
-/// node with a completion time is closed; any other node has none.
+/// node with a completion time is closed; any other node has none. Exact,
+/// as [`elapsed`].
 fn node_exec_s(
     status: &str,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
-) -> Option<i64> {
+) -> Option<TimeDelta> {
     match (status, completed_at) {
-        ("RUNNING", _) => elapsed_s(started_at, None),
+        ("RUNNING", _) => elapsed(started_at, None),
         ("COMPLETED" | "FAILED" | "SKIPPED" | "CANCELLED", Some(completed_at)) => {
-            elapsed_s(started_at, Some(completed_at))
+            elapsed(started_at, Some(completed_at))
         }
         _ => None,
     }
@@ -913,7 +914,7 @@ struct NodeColumns {
     allow_failed_deps: bool,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
-    exec_s: Option<i64>,
+    exec_s: Option<TimeDelta>,
     child_total: Option<i64>,
     child_failed: Option<i64>,
 }
@@ -1572,8 +1573,8 @@ mod tests {
             .expect("history summary");
         assert_eq!(completed.completed_at, Some(terminal));
         assert_eq!(completed.failed_at, None);
-        assert_eq!(completed.queue_s, Some(3));
-        assert_eq!(completed.exec_s, Some(7));
+        assert_eq!(completed.queue_s, Some(TimeDelta::seconds(3)));
+        assert_eq!(completed.exec_s, Some(TimeDelta::seconds(7)));
         assert_eq!(completed.error_code.as_deref(), Some("TASK_EXCEPTION"));
 
         let failed = summary_from_fields(fields(Location::History, "FAILED", Some(terminal)))
@@ -1587,11 +1588,30 @@ mod tests {
         let live = summary_from_fields(fields(Location::Live, "RUNNING", None)).expect("live");
         assert_eq!(live.completed_at, None);
         assert_eq!(live.failed_at, None);
-        assert_eq!(live.queue_s, Some(3));
+        assert_eq!(live.queue_s, Some(TimeDelta::seconds(3)));
         assert!(live.exec_s.is_some());
 
         assert!(summary_from_fields(fields(Location::Live, "RUNNING", Some(Utc::now()))).is_err());
         assert!(summary_from_fields(fields(Location::History, "FAILED", None)).is_err());
+    }
+
+    /// The spans of a row keep the microseconds of the stored times, in the
+    /// row and in its JSON: 2.310417 s of queue wait and 3.189583 s of run
+    /// time, not 2 s and 3 s.
+    #[test]
+    fn the_spans_of_a_row_keep_the_microseconds_of_the_stored_times() {
+        let enqueued = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid time");
+        let terminal = enqueued + TimeDelta::microseconds(5_500_000);
+        let mut stored = fields(Location::History, "COMPLETED", Some(terminal));
+        stored.started_at = Some(enqueued + TimeDelta::microseconds(2_310_417));
+
+        let summary = summary_from_fields(stored).expect("history summary");
+
+        assert_eq!(summary.queue_s, Some(TimeDelta::microseconds(2_310_417)));
+        assert_eq!(summary.exec_s, Some(TimeDelta::microseconds(3_189_583)));
+        let encoded = serde_json::to_value(&summary).expect("the row serializes");
+        assert_eq!(encoded["queue_s"], serde_json::json!(2.310417));
+        assert_eq!(encoded["exec_s"], serde_json::json!(3.189583));
     }
 
     #[test]
@@ -1815,11 +1835,12 @@ mod tests {
         let started = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("valid time");
         let completed = started + chrono::Duration::seconds(30);
 
-        assert!(node_exec_s("RUNNING", Some(started), None).is_some_and(|seconds| seconds > 30));
+        assert!(node_exec_s("RUNNING", Some(started), None)
+            .is_some_and(|running| running > TimeDelta::seconds(30)));
         for status in ["COMPLETED", "FAILED", "SKIPPED", "CANCELLED"] {
             assert_eq!(
                 node_exec_s(status, Some(started), Some(completed)),
-                Some(30),
+                Some(TimeDelta::seconds(30)),
                 "{status}"
             );
             assert_eq!(node_exec_s(status, Some(started), None), None, "{status}");
