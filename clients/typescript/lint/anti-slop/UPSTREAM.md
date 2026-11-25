@@ -7,7 +7,8 @@ engine under `vendor/eslint-stylistic/` keeps its own `LICENSE` and `UPSTREAM.md
 ## Rules in this folder
 
 `@cloudflare/oxlint-config` 0.2.0 is the base rule set of the client. These are the anti-slop rules that it does not
-contain:
+contain. Until #2354 installs that package, the base set is the `correctness` category of Oxlint
+(`oxlint.config.ts`):
 
 | Rule | Note |
 |---|---|
