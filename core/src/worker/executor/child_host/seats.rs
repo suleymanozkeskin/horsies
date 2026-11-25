@@ -10,8 +10,9 @@
 //!   `deadline_fired` is sent; the run ends as a timeout whatever its body
 //!   returns. When anything of the run (the body or its work) is alive after
 //!   the cancel grace, `second_cancel` is sent and everything of the run is
-//!   dropped (aborted) in rounds, then `run_stuck` names what is alive 0.3 s
-//!   later, and the run keeps its seat until it ends or the parent kills the
+//!   stopped in rounds (Rust work is dropped; host-held work gets a stop
+//!   request and stays), then `run_stuck` names what is alive 0.3 s later,
+//!   and the run keeps its seat until it ends or the parent kills the
 //!   child. The parent reads from `second_cancel` which of the two ended the
 //!   run. A body that returns before its deadline with work alive waits
 //!   the cancel grace for it, then sends `leftover_cancel` and aborts it in

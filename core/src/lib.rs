@@ -147,20 +147,24 @@ pub use crate::worker::finalize_batch::{
 // start work that belongs to their run with `spawn_in_run`, read the
 // cancel signal of their run with `run_cancel_signal` and its cause with
 // `run_cancel_state`, and read the fencing token of their run with
-// `run_fencing_token`. A result wait reads
+// `run_fencing_token`. A host program that runs task code outside the Rust
+// runtime takes the handle of a run with `current_run` and registers that
+// code as host-held work (`RunHandle::register_host_work`), which the cancel
+// rounds ask to stop (`HostWork::stop_requested`). A result wait reads
 // `process_role` first: a process that runs task bodies refuses it. The
 // event handlers of the app (`EventHandlerSet`) run in the handler child of
 // the same binary (`HandlerChildApp`), which also makes the span of each
 // attempt that the worker ended through the client's `EndedSpanMaker`.
 pub use crate::worker::executor::child_host::{
-    child_command, child_handle_setup, child_mode, child_producer, process_role, run_cancel_signal,
-    run_cancel_state, run_child_host, run_fencing_token, spawn_in_run, thread_role,
-    wait_inside_task_message, BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans, CancelCause,
-    ChildApp, ChildArgs, ChildArgsError, ChildHandleSetup, ChildHookFailure, ChildHostExit,
-    ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture, ChildStartHook, EndedAttempt,
-    EndedSpanMaker, EndedSpanScope, EndedWorkflow, EventHandlerRefused, EventHandlerSet,
-    HandlerChildApp, HandlerChildHasNoHandle, HandlerError, NamedChildStartHook, ProcessRole,
-    RunCancelSignal, RunCancelState, RunSignalRefused, RunSpawnRefused, ThreadRole,
+    child_command, child_handle_setup, child_mode, child_producer, current_run, process_role,
+    run_cancel_signal, run_cancel_state, run_child_host, run_fencing_token, spawn_in_run,
+    thread_role, wait_inside_task_message, BodyCarrier, BodyOutcome, BodyRun, BodyScope, BodySpans,
+    CancelCause, ChildApp, ChildArgs, ChildArgsError, ChildHandleSetup, ChildHookFailure,
+    ChildHostExit, ChildLogSetup, ChildMode, ChildProducer, ChildStartFuture, ChildStartHook,
+    EndedAttempt, EndedSpanMaker, EndedSpanScope, EndedWorkflow, EventHandlerRefused,
+    EventHandlerSet, HandlerChildApp, HandlerChildHasNoHandle, HandlerError, HostStopState,
+    HostWork, HostWorkRefused, NamedChildStartHook, ProcessRole, RunCancelSignal, RunCancelState,
+    RunHandle, RunHandleRefused, RunSignalRefused, RunSpawnRefused, ThreadRole, WorkStopCause,
     CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY,
     HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL, MAX_RUN_WORK,
     NODE_READER_STOP_BOUND, NODE_READ_QUEUE_SPANS,

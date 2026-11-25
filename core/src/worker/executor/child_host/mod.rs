@@ -15,6 +15,12 @@
 //! cancel (`cancel_run`) in every child kind, the reports of work a body
 //! left ([`spawn_in_run`]), and the protocol's exit codes.
 //!
+//! A host program that runs task code outside the Rust runtime takes the
+//! handle of a run in its async body ([`current_run`]) and registers the work
+//! that it runs there as host-held work ([`RunHandle::register_host_work`]):
+//! the cancel rounds ask such work to stop and do not drop it, and the run
+//! keeps its seat until the host ends it.
+//!
 //! A client that traces its task bodies gives the host a [`BodySpans`]: the
 //! host runs each body inside the `tracing` span that it opens for the run
 //! ([`BodyScope`]).
@@ -79,6 +85,7 @@ pub use host::{
 pub use producer::{child_producer, ChildProducer};
 pub use role::{process_role, thread_role, wait_inside_task_message, ProcessRole, ThreadRole};
 pub use run_work::{
-    run_cancel_signal, run_cancel_state, run_fencing_token, spawn_in_run, CancelCause,
-    RunCancelSignal, RunCancelState, RunSignalRefused, RunSpawnRefused, MAX_RUN_WORK,
+    current_run, run_cancel_signal, run_cancel_state, run_fencing_token, spawn_in_run, CancelCause,
+    HostStopState, HostWork, HostWorkRefused, RunCancelSignal, RunCancelState, RunHandle,
+    RunHandleRefused, RunSignalRefused, RunSpawnRefused, WorkStopCause, MAX_RUN_WORK,
 };

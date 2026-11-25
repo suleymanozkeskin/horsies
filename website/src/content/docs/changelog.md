@@ -30,6 +30,20 @@ there is no migration contract between pre-1.0 versions.
   `CRON_NUMERIC_STEP`, `CRON_ENUM_STEP`, `CRON_MONTH_SPAN`,
   `CRON_WEEKDAY_SPAN`). The pattern rules read them; their messages do not
   change.
+- **Child host: the run handle and host-held work.**
+  `horsies_core::current_run()` gives the `RunHandle` of the current async
+  run, or `RunHandleRefused::NotInAnAsyncRun` outside an async body and on
+  the thread of a blocking body. `RunHandle` is `Clone + Send + Sync`.
+  `RunHandle::register_host_work(name)` registers a piece of work that a
+  host program runs outside the Rust runtime; it counts toward
+  `MAX_RUN_WORK` and is refused with `HostWorkRefused::RunEnded` or
+  `TooMuchWork { bound }`. A cancel round asks a `HostWork` to stop
+  (`HostWork::stop_requested`, `HostWork::stop_state`) with a
+  `WorkStopCause`, `RunCancelled { cause }` or `LeftWork`, and does not
+  remove it. The piece leaves the run at `HostWork::end` or at a drop. A
+  piece alive after the rounds is named in `left_work_stuck`,
+  `leftover_stuck` or `run_stuck`, and the run keeps its seat until the
+  piece ends. Work of `spawn_in_run` and the Rust client do not change.
 
 ### Changed
 
