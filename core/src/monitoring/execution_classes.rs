@@ -69,7 +69,7 @@ fn stream_info(stream: &PendingStream) -> PendingStreamInfo {
     let wait = match stream.wait {
         StreamWait::OldestWaiting { enqueued_at, wait } => StreamWaitInfo::Waiting {
             oldest_due_at: enqueued_at,
-            wait_s: wait.num_seconds(),
+            wait_s: wait,
         },
         StreamWait::NoneDue { next_due_at } => StreamWaitInfo::NoneDue { next_due_at },
     };
@@ -177,7 +177,7 @@ mod tests {
                         "wait": {
                             "kind": "waiting",
                             "oldest_due_at": "2026-11-10T11:58:29.500000Z",
-                            "wait_s": 90,
+                            "wait_s": 90.5,
                         },
                     },
                     {

@@ -11,13 +11,13 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, TimeDelta, Utc};
 use uuid::Uuid;
 
 use crate::broker::health::ListedWorkerState;
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::monitoring::{
-    cancel_task_action, cancel_workflow_action, elapsed_s, get_task_detail, get_workflow_node,
+    cancel_task_action, cancel_workflow_action, get_task_detail, get_workflow_node,
     get_workflow_run, list_schedules, list_tasks, list_workflow_names, list_workflow_runs,
     pause_workflow_action, resolve_monitoring_window, resume_workflow_action, task_breakdown,
     task_facets, task_stats, CancelTaskBody, LivenessReport, TaskAbsenceReason, TaskBreakdownQuery,
@@ -568,17 +568,19 @@ async fn read_class_report(
 }
 
 /// A snapshot older than this is stale: the worker stopped reporting. The
-/// fleet check counts the same workers as live.
-const STALE_SNAPSHOT_THRESHOLD_S: i64 = WORKER_STATE_LIVE_WINDOW_S as i64;
+/// fleet check counts the same workers as live (a snapshot at most this
+/// old).
+const STALE_SNAPSHOT_THRESHOLD: TimeDelta = TimeDelta::seconds(WORKER_STATE_LIVE_WINDOW_S as i64);
 
 /// One entry of the worker list.
 ///
 /// The snapshot age, the staleness and the uptime are measured to `read_at`,
 /// the database clock of the list statement: `snapshot_at` and
-/// `worker_started_at` are database times too.
+/// `worker_started_at` are database times too. Each is exact to the
+/// microsecond, and the staleness compares the exact age.
 pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
     let ListedWorkerState { snapshot, read_at } = listed;
-    let age = elapsed_s(Some(snapshot.snapshot_at), Some(read_at));
+    let age = read_at - snapshot.snapshot_at;
     let (slot_health, down_slots) = slot_health_info(&snapshot.slot_health);
     let profile = snapshot_profile_info(&snapshot.profile);
     WorkerStateInfo {
@@ -586,10 +588,10 @@ pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
         hostname: snapshot.hostname,
         pid: snapshot.pid,
         snapshot_at: snapshot.snapshot_at,
-        snapshot_age_s: age,
-        stale: age.unwrap_or_default() > STALE_SNAPSHOT_THRESHOLD_S,
+        snapshot_age_s: Some(age),
+        stale: age > STALE_SNAPSHOT_THRESHOLD,
         worker_started_at: snapshot.worker_started_at,
-        uptime_s: elapsed_s(Some(snapshot.worker_started_at), Some(read_at)),
+        uptime_s: Some(read_at - snapshot.worker_started_at),
         processes: snapshot.processes,
         queues: snapshot.queues,
         queue_max_concurrency: snapshot.queue_max_concurrency,

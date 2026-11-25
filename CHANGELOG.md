@@ -210,6 +210,34 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **The monitoring API sends exact durations.** Each duration of the
+  monitoring reads and of the web API is a JSON number of seconds, exact to
+  the microsecond (`"exec_s": 2.310417`). It was a whole number of seconds.
+  The field names stay; the type changes from integer to float:
+  - `queue_s` and `exec_s` of a task list row (`GET /api/tasks`) and of a
+    task leaf (`GET /api/tasks/{id}`, `GET /api/workflows/{id}/tasks/{index}`);
+  - `wall_s` of a workflow run (`GET /api/workflows`,
+    `GET /api/workflows/{id}`) and `exec_s` of a workflow node
+    (`GET /api/workflows/{id}`);
+  - `snapshot_age_s` and `uptime_s` of a worker state (`GET /api/workers`);
+  - `wait_s` of a waiting stream of the class report
+    (`GET /api/workers/classes`).
+
+  The core computes each value from the stored times, with no rounding. A
+  negative value keeps its sign. `live_window_s` stays a whole number of
+  seconds. `stale` of a worker state compares the exact snapshot age with
+  the live window of 120 s, the rule by which the fleet check counts a live
+  worker: a snapshot 120.5 s old is stale (it was stale from 121 s).
+  - Python: these fields of the `horsies.monitoring` models are
+    `float | None`, and `StreamWaitingInfo.wait_s` is `float`. The helpers
+    `elapsed_s` and `span_s` of `horsies.monitoring` return exact seconds as
+    `float | None`; they returned whole seconds as `int | None`.
+  - Rust: in `horsies-core` and `horsies::monitoring`, these fields are
+    `Option<chrono::TimeDelta>`, and `wait_s` of `StreamWaitInfo::Waiting`
+    is `TimeDelta`; each serializes as seconds. `monitoring::elapsed_s` and
+    `monitoring::span_s` are renamed `monitoring::elapsed` and
+    `monitoring::span`, and return `Option<TimeDelta>`. The old names are
+    removed.
 - **A cancel of a RUNNING task records its attempt.** The new attempt
   outcome `CANCELLED` (`TaskAttemptOutcome.CANCELLED`,
   `TaskAttemptOutcome::Cancelled`) has `will_retry` false, error code

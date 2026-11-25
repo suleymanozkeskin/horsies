@@ -48,9 +48,9 @@ pub use models::{
     SnapshotProfileInfo, StreamCoverageInfo, StreamWaitInfo, WorkerClassLoadInfo,
 };
 pub use queries::{
-    categorize_error_code, elapsed_s, get_task_detail, get_workflow_node, get_workflow_run,
+    categorize_error_code, elapsed, get_task_detail, get_workflow_node, get_workflow_run,
     list_schedules, list_tasks, list_workflow_names, list_workflow_runs, normalize_optional_text,
-    span_s, task_breakdown, task_facets, task_stats, PaginationRefused, SortDirection,
+    span, task_breakdown, task_facets, task_stats, PaginationRefused, SortDirection,
     TaskBreakdownQuery, TaskFacetsQuery, TaskFilters, TaskGroupBy, TaskListQuery, TaskSortField,
     TaskStatsQuery, WorkflowRunsQuery, LIST_ROW_BOUND, MAX_BREAKDOWN_LIMIT, MAX_TASK_PAGE_LIMIT,
     MAX_TASK_PAGE_REACH, MAX_WORKFLOW_RUNS_LIMIT,

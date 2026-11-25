@@ -1134,41 +1134,58 @@ fn listed_worker(
 /// The worker list measures the snapshot age, the staleness and the uptime
 /// to the database clock of the list statement, not to the web host clock
 /// (#765). The instants are days before any run of this test, so an age
-/// measured to the host clock is days long and stale.
+/// measured to the host clock is days long and stale. Each value is exact
+/// to the microsecond, and a snapshot one microsecond past the live window
+/// is stale.
 #[test]
 fn worker_list_ages_are_measured_to_the_read_time() {
     let snapshot_at = chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, 10, 12, 0, 0)
         .single()
         .expect("a valid instant");
     let started_at = snapshot_at - chrono::TimeDelta::hours(1);
-    let threshold = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as i64;
+    let threshold =
+        chrono::TimeDelta::seconds(crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as i64);
+    let one_microsecond = chrono::TimeDelta::microseconds(1);
+    let fresh_age = chrono::TimeDelta::microseconds(30_000_250);
 
     let fresh = super::routes::worker_state(listed_worker(
         snapshot_at,
         started_at,
-        snapshot_at + chrono::TimeDelta::seconds(30),
+        snapshot_at + fresh_age,
         Some("default".to_owned()),
     ));
     let at_threshold = super::routes::worker_state(listed_worker(
         snapshot_at,
         started_at,
-        snapshot_at + chrono::TimeDelta::seconds(threshold),
+        snapshot_at + threshold,
         Some("default".to_owned()),
     ));
     let past_threshold = super::routes::worker_state(listed_worker(
         snapshot_at,
         started_at,
-        snapshot_at + chrono::TimeDelta::seconds(threshold + 1),
+        snapshot_at + threshold + one_microsecond,
         Some("default".to_owned()),
     ));
 
-    assert_eq!(fresh.snapshot_age_s, Some(30));
+    assert_eq!(fresh.snapshot_age_s, Some(fresh_age));
     assert!(!fresh.stale);
-    assert_eq!(fresh.uptime_s, Some(3_630));
+    assert_eq!(
+        fresh.uptime_s,
+        Some(chrono::TimeDelta::hours(1) + fresh_age)
+    );
     assert_eq!(at_threshold.snapshot_age_s, Some(threshold));
     assert!(!at_threshold.stale, "stale only past the live window");
-    assert_eq!(past_threshold.snapshot_age_s, Some(threshold + 1));
-    assert!(past_threshold.stale);
+    assert_eq!(
+        past_threshold.snapshot_age_s,
+        Some(threshold + one_microsecond)
+    );
+    assert!(
+        past_threshold.stale,
+        "stale one microsecond past the live window"
+    );
+    let encoded = serde_json::to_value(&fresh).expect("serialize the worker state");
+    assert_eq!(encoded["snapshot_age_s"], serde_json::json!(30.00025));
+    assert_eq!(encoded["uptime_s"], serde_json::json!(3630.00025));
 }
 
 /// The `profile` of a worker state is an object tagged by `kind`: a stored
@@ -1303,12 +1320,16 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
         .find(|entry| entry["worker_id"] == worker_id.as_str())
         .expect("the worker is listed");
     assert_eq!(worker["stale"], true);
+    assert!(
+        worker["snapshot_age_s"].is_f64() && worker["uptime_s"].is_f64(),
+        "the durations are JSON floats: {worker}"
+    );
     let age = worker["snapshot_age_s"]
-        .as_i64()
+        .as_f64()
         .expect("an age in seconds");
-    assert!(age >= 600, "snapshot_age_s {age}");
-    let uptime = worker["uptime_s"].as_i64().expect("an uptime in seconds");
-    assert!(uptime >= 3_600, "uptime_s {uptime}");
+    assert!(age >= 600.0, "snapshot_age_s {age}");
+    let uptime = worker["uptime_s"].as_f64().expect("an uptime in seconds");
+    assert!(uptime >= 3_600.0, "uptime_s {uptime}");
 }
 
 /// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.

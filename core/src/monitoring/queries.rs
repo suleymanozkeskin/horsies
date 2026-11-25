@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeDelta, Utc};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -359,16 +359,27 @@ pub fn normalize_optional_text(value: Option<&str>) -> Option<String> {
     })
 }
 
-pub fn elapsed_s(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -> Option<i64> {
+/// The time from `start` to `end`, or to now (the host clock) when `end` is
+/// `None`; `None` when `start` is `None`. Exact: the time between two
+/// stored times keeps their microseconds. Negative when `end` is before
+/// `start`.
+pub fn elapsed(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -> Option<TimeDelta> {
     let start = start?;
-    Some((end.unwrap_or_else(Utc::now) - start).num_seconds())
+    Some(end.unwrap_or_else(Utc::now) - start)
 }
 
-pub fn span_s(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>, live: bool) -> Option<i64> {
+/// The span from `start` to `end`. With no `end`, the span of a `live` task
+/// runs to now (the host clock), and any other task has no span. `None`
+/// when `start` is `None`. Exact and signed, as [`elapsed`].
+pub fn span(
+    start: Option<DateTime<Utc>>,
+    end: Option<DateTime<Utc>>,
+    live: bool,
+) -> Option<TimeDelta> {
     match (start, end) {
         (None, _) => None,
-        (Some(start), Some(end)) => Some((end - start).num_seconds()),
-        (Some(start), None) if live => Some((Utc::now() - start).num_seconds()),
+        (Some(start), Some(end)) => Some(end - start),
+        (Some(start), None) if live => Some(Utc::now() - start),
         (Some(_), None) => None,
     }
 }

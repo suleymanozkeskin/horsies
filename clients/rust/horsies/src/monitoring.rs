@@ -32,7 +32,7 @@ use crate::Horsies;
 
 pub use horsies_core::monitoring::resolve_monitoring_window;
 pub use horsies_core::monitoring::{
-    categorize_error_code, elapsed_s, span_s, task_action_outcome, ActionBody, ActionConflictCode,
+    categorize_error_code, elapsed, span, task_action_outcome, ActionBody, ActionConflictCode,
     ActionOutcome, ActionResponse, Breakdown, BreakdownCounts, BreakdownGroup, BudgetLoadInfo,
     CancelTaskBody, ClassReportInfo, DownSlotInfo, ErrorCategory, ErrorFacet, FacetValue, Facets,
     GroupRow, HistoryContractSource, HistoryWindow, LeafTaskInfo, LivenessReport,

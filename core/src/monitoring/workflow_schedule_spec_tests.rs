@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::sync::PoisonError;
 
+use chrono::TimeDelta;
 use uuid::Uuid;
 
 use super::spec_support::{
@@ -27,7 +28,7 @@ use crate::test_support::sql::{self, TestPool};
 
 /// Upper bound of a span that counts up to now (Python
 /// `_LIVE_SPAN_CEILING_S`).
-const LIVE_SPAN_CEILING_S: i64 = 600;
+const LIVE_SPAN_CEILING: TimeDelta = TimeDelta::seconds(600);
 
 fn child_of(parent: Uuid, name: &str) -> RunSeed {
     RunSeed {
@@ -175,14 +176,14 @@ async fn wall_time_counts_up_until_the_run_completes() {
         .await
         .expect("list the runs");
 
-    let walls: BTreeMap<&str, Option<i64>> = runs
+    let walls: BTreeMap<&str, Option<TimeDelta>> = runs
         .iter()
         .map(|run| (run.name.as_str(), run.wall_s))
         .collect();
-    assert_eq!(walls["closed_flow"], Some(60));
+    assert_eq!(walls["closed_flow"], Some(TimeDelta::seconds(60)));
     let open_wall = walls["open_flow"].expect("an open run has a wall time");
     assert!(
-        (45..=LIVE_SPAN_CEILING_S).contains(&open_wall),
+        (TimeDelta::seconds(45)..=LIVE_SPAN_CEILING).contains(&open_wall),
         "{open_wall}"
     );
     database.drop().await;
@@ -373,8 +374,11 @@ async fn node_execution_time_follows_the_node_status() {
 
     let nodes = nodes_by_index(&detail.nodes);
     let running = nodes[&0].exec_s.expect("a running node counts up");
-    assert!((35..=LIVE_SPAN_CEILING_S).contains(&running), "{running}");
-    assert_eq!(nodes[&1].exec_s, Some(30));
+    assert!(
+        (TimeDelta::seconds(35)..=LIVE_SPAN_CEILING).contains(&running),
+        "{running}"
+    );
+    assert_eq!(nodes[&1].exec_s, Some(TimeDelta::seconds(30)));
     assert_eq!(nodes[&2].exec_s, None);
     assert_eq!(nodes[&3].exec_s, None);
     database.drop().await;
