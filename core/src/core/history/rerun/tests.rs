@@ -1032,6 +1032,37 @@ async fn an_invalid_stored_execution_is_input_corrupt() {
     cleanup(&pool, &[source], &[]).await;
 }
 
+/// A rerun of a stored request of a shared class with no `timeout_ms`
+/// writes the new task with the stored options as before: only a new send
+/// refuses such options. The worker refuses the run.
+#[tokio::test]
+async fn a_rerun_of_a_stored_shared_request_without_a_timeout_is_enqueued() {
+    let pool = crate::test_support::migrated_pool().await;
+    let broker = PostgresBroker::from_test_url(pool.url(), ClientFamily::Rust);
+    let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
+    let stored_options = "{\"execution\":\"SHARED_ASYNC\",\"cancel_grace_ms\":1000}";
+    store_inline_input(&pool, source, stored_options).await;
+    let RerunOutcome::Enqueued { new_task_id, .. } = broker
+        .rerun_task(
+            RerunTask::new(source, None, None),
+            policy(SOURCE_CLASS, true),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("a stored shared request without a timeout must enqueue");
+    };
+    let (execution, task_options): (String, Option<String>) =
+        sql::query_as("SELECT execution, task_options FROM horsies_tasks WHERE id = $1")
+            .bind(new_task_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(execution, "SHARED_ASYNC");
+    assert_eq!(task_options.as_deref(), Some(stored_options));
+    cleanup(&pool, &[source, new_task_id], &[]).await;
+}
+
 #[tokio::test]
 async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
     let pool = crate::test_support::migrated_pool().await;

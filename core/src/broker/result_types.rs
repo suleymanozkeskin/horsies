@@ -55,6 +55,7 @@ pub enum BrokerErrorCode {
     InvalidTaskOptions,
     /// A sync facade was called on a thread that runs an event loop. Its wait
     /// would stall that loop, so nothing ran. Python client only.
+    #[code_catalog(blocking_form_only)]
     AsyncContext,
     /// An argument of the call was refused before anything ran. Nothing was
     /// written, and the same arguments are refused again.

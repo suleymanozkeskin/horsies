@@ -5,7 +5,8 @@
 //! The control thread owns the socket reads, so the end of the parent shows
 //! whatever the task code does: at EOF or a failed read the child exits at
 //! once with the parent-gone code; nothing can save its result, and a run
-//! that went on could overlap a retry of the same task.
+//! that went on could overlap a retry of the same task. Both threads end
+//! the process through the [`ProcessExit`] of the child app.
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -13,6 +14,7 @@ use std::thread;
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::{
     decode_parent_frame, encode_child_frame, ChildFrame, FrameOverBound, FrameReader, ParentFrame,
     RawFrame, BAD_PARENT_FRAME_EXIT_CODE, PARENT_GONE_EXIT_CODE,
@@ -69,13 +71,14 @@ pub(super) fn write_frame(mut socket: &UnixStream, frame: &ChildFrame) -> io::Re
 }
 
 /// Start the control thread: it reads the parent's frames and hands each to
-/// the serve loop, at most `bound` ahead. At EOF or a failed read it exits
-/// the process with the parent-gone code; at a bad frame with the bad-frame
-/// code.
+/// the serve loop, at most `bound` ahead. At EOF or a failed read it ends
+/// the process through `exit` with the parent-gone code; at a bad frame with
+/// the bad-frame code.
 pub(super) fn start_control_thread(
     socket: UnixStream,
     mut reader: FrameReader,
     bound: usize,
+    exit: ProcessExit,
 ) -> io::Result<mpsc::Receiver<ParentFrame>> {
     let (frames, receiver) = mpsc::channel(bound);
     thread::Builder::new()
@@ -85,15 +88,13 @@ pub(super) fn start_control_thread(
             loop {
                 let raw = match read_frame(&mut stream, &mut reader) {
                     Ok(raw) => raw,
-                    Err(ReadEnd::Eof | ReadEnd::Failed) => {
-                        std::process::exit(PARENT_GONE_EXIT_CODE)
-                    }
+                    Err(ReadEnd::Eof | ReadEnd::Failed) => exit.end(PARENT_GONE_EXIT_CODE),
                     Err(ReadEnd::OverBound(over)) => {
                         tracing::error!(
                             error = %over,
                             "Parent sent a frame over the bounds: {over}",
                         );
-                        std::process::exit(BAD_PARENT_FRAME_EXIT_CODE)
+                        exit.end(BAD_PARENT_FRAME_EXIT_CODE)
                     }
                 };
                 match decode_parent_frame(&raw.meta, raw.body) {
@@ -105,7 +106,7 @@ pub(super) fn start_control_thread(
                     }
                     Err(refusal) => {
                         tracing::error!(error = %refusal, "Parent sent a bad frame: {refusal}");
-                        std::process::exit(BAD_PARENT_FRAME_EXIT_CODE)
+                        exit.end(BAD_PARENT_FRAME_EXIT_CODE)
                     }
                 }
             }
@@ -133,15 +134,15 @@ pub(super) enum Flushed {
 }
 
 /// The sender of child frames. One writer thread writes them in order; a
-/// failed write means the parent is gone, and the process exits with the
-/// parent-gone code.
+/// failed write means the parent is gone, and the process ends through the
+/// writer's [`ProcessExit`] with the parent-gone code.
 #[derive(Clone)]
 pub(super) struct FrameWriter {
     frames: mpsc::Sender<Outgoing>,
 }
 
 impl FrameWriter {
-    pub(super) fn start(socket: UnixStream, bound: usize) -> io::Result<Self> {
+    pub(super) fn start(socket: UnixStream, bound: usize, exit: ProcessExit) -> io::Result<Self> {
         let (frames, mut receiver) = mpsc::channel::<Outgoing>(bound);
         thread::Builder::new()
             .name(WRITER_THREAD_NAME.to_owned())
@@ -150,7 +151,7 @@ impl FrameWriter {
                     match outgoing {
                         Outgoing::Frame(frame) => {
                             if write_frame(&socket, &frame).is_err() {
-                                std::process::exit(PARENT_GONE_EXIT_CODE);
+                                exit.end(PARENT_GONE_EXIT_CODE);
                             }
                         }
                         Outgoing::Flush(written) => {
