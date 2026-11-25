@@ -348,9 +348,8 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame, scope: &R
             }
         },
     };
-    match scope.alive() {
+    match scope.close_when_idle() {
         Alive::Nothing => {
-            scope.close();
             mark_finalizing(context, &facts).await;
             let started = AttemptStart::Reported { started_at };
             send_isolated_result(context, task_id, end, started).await;
@@ -486,7 +485,7 @@ async fn end_left_work(
             left,
         }))
         .await;
-    let ended = match scope.wait_done(ISOLATED_LEFTOVER_GRACE).await {
+    let ended = match scope.wait_idle_then_close(ISOLATED_LEFTOVER_GRACE).await {
         WorkWait::Done => LeftWorkEnd::InGrace,
         WorkWait::StillAlive => {
             scope.close();
@@ -966,11 +965,11 @@ async fn after_return(
     grace: CancelGraceMs,
     started_at: DateTime<Utc>,
 ) -> (SeatEnd, Marker) {
-    if let Alive::Nothing = scope.alive() {
+    if let Alive::Nothing = scope.close_when_idle() {
         return (SeatEnd::Finished(end), Marker::Write);
     }
     let grace = Duration::from_millis(grace.get());
-    if scope.wait_done(grace).await == WorkWait::Done {
+    if scope.wait_idle_then_close(grace).await == WorkWait::Done {
         return (SeatEnd::Finished(end), Marker::Write);
     }
     let returned = body_end_of(&end);
@@ -1028,7 +1027,7 @@ async fn stop_after_signal(
     grace: CancelGraceMs,
 ) {
     let grace = Duration::from_millis(grace.get());
-    if scope.wait_done(grace).await == WorkWait::Done {
+    if scope.wait_idle_then_close(grace).await == WorkWait::Done {
         return;
     }
     context.writer.send(ChildFrame::SecondCancel(run_ref)).await;
