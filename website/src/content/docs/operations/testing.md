@@ -64,7 +64,7 @@ def summarize(
     workflow_ctx: WorkflowContext | None = None,
 ) -> Result[int, TaskError]:
     if workflow_ctx is None:
-        return Err(TaskError(error_code='NO_CTX', message='Missing context'))
+        return Err(TaskError(code='NO_CTX', message='Missing context'))
     match workflow_ctx.result_for(FIRST_KEY):
         case Succeeded(first):
             return Ok(first)

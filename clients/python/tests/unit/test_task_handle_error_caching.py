@@ -64,7 +64,7 @@ def _ok_record(value: int) -> Ok[RawResultRecord]:
 def _assert_failed_with(read: ReadResult[int, TaskError], code: OutcomeCode) -> None:
     match read:
         case Ok(Failed(task_error)):
-            assert task_error.error_code == code
+            assert task_error.code == code
         case _:
             pytest.fail(f'expected a failed outcome with {code}, got {read!r}')
 

@@ -198,7 +198,7 @@ def node_error(
     escaped: the node result must encode.
     """
     return TaskError(
-        error_code=error_code,
+        code=error_code,
         message=escape_lone_surrogates(message),
         data={'workflow_id': workflow_id, 'task_index': task_index},
     )
@@ -220,7 +220,7 @@ def _failed(
 def _load_failed(node: ChildOfNode) -> ChildBuildFailed:
     return ChildBuildFailed(
         error=TaskError(
-            error_code=OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED,
+            code=OperationalErrorCode.SUBWORKFLOW_LOAD_FAILED,
             message=(
                 f'Failed to load subworkflow definition for '
                 f'{node.workflow_name}:{node.task_index}'

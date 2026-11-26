@@ -102,7 +102,7 @@ async def refresh_price(*, symbol: str) -> Result[str, TaskError]:
         case Ok(handle):
             return Ok(str(handle.task_id))
         case Err(send_err):
-            return Err(TaskError(error_code="SEND_FAILED", message=send_err.message))
+            return Err(TaskError(code="SEND_FAILED", message=send_err.message))
 ```
 
 `timeout_ms` works as for a `def` task: on expiry, the worker kills the child. An `async def` function that uses `yield` is refused with `HRS-101`.
@@ -193,7 +193,7 @@ def record_payment(runtime: TaskRuntime, *, order_id: str, cents: int) -> Result
     match written:
         case 0:
             return Err(TaskError(
-                error_code='LATER_ATTEMPT',
+                code='LATER_ATTEMPT',
                 message='a later attempt of this task holds the fence',
             ))
         case _:
@@ -234,7 +234,7 @@ Domain errors (expected failures):
 def validate_input(*, data: dict[str, JsonValue]) -> Result[dict[str, JsonValue], TaskError]:
     if not data.get("email"):
         return Err(TaskError(
-            error_code="MISSING_EMAIL",
+            code="MISSING_EMAIL",
             message="Email is required",
             data={"field": "email"},
         ))
@@ -248,7 +248,7 @@ Unhandled exceptions are wrapped automatically:
 def might_crash() -> Result[str, TaskError]:
     raise ValueError("Something went wrong")
     # Becomes Err(TaskError(
-    #     error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+    #     code=OperationalErrorCode.UNHANDLED_EXCEPTION,
     #     message="Unhandled exception in task might_crash: ...",
     # ))
 ```
@@ -372,18 +372,18 @@ def call_external_api() -> Result[dict[str, JsonValue], TaskError]:
         response = requests.get("https://api.example.com")
         if response.status_code == 429:
             return Err(TaskError(
-                error_code="RATE_LIMITED",
+                code="RATE_LIMITED",
                 message="the API answered 429",
             ))
         return Ok(response.json())
     except requests.Timeout:
         return Err(TaskError(
-            error_code="TIMEOUT",
+            code="TIMEOUT",
             message="the API did not answer in time",
         ))
 ```
 
-`auto_retry_for` reads `error_code` only. `message` is optional: `TaskError(error_code="RATE_LIMITED")` retries in the same way.
+`auto_retry_for` reads `code` only. `message` is optional: `TaskError(code="RATE_LIMITED")` retries in the same way.
 
 #### Map Exceptions to Codes
 
@@ -450,7 +450,7 @@ def register(app: Horsies) -> None:
     @app.task("charge_card", error_codes=ChargeCode)
     def charge_card(*, amount_cents: int) -> Result[str, TaskError[ChargeCode]]:
         if amount_cents > 100_000:
-            return Err(TaskError(error_code=ChargeCode.CARD_DECLINED))
+            return Err(TaskError(code=ChargeCode.CARD_DECLINED))
         return Ok("charged")
 
     @app.task("send_receipt", error_codes=("BOUNCED",))
@@ -466,9 +466,9 @@ def register(app: Horsies) -> None:
 - A stored code that `E` does not name (a row of another version of the task) is the read failure `UnknownCustomCode`. In a map of node outcomes and in a workflow context, it is a failed entry with `RESULT_DESERIALIZATION_ERROR`; for an `args_from` input, the node fails with `WORKER_SERIALIZATION_ERROR`.
 - The error of a workflow that `WorkflowHandle.get()` gives keeps its custom code as text. That error is the error of the failed node, which can be any node of the workflow, with the codes of its own task, so no one `Enum` names it.
 - A `SubWorkflowNode` gives custom codes as text: a child workflow holds the codes of many tasks.
-- A `match` on `task_error.error_code` that leaves out a member of `E` fails pyright's exhaustiveness check.
+- A `match` on `task_error.code` that leaves out a member of `E` fails pyright's exhaustiveness check.
 
-A task that returns `TaskError` keeps `str` codes with any declaration. Declaring is optional, and the default is `()`. A user code that the task does not declare still works everywhere; its metric label is `undeclared`.
+A task that returns `TaskError` keeps `str` codes with any declaration. Declaring is optional, and the default is `()`. A custom code that the task does not declare still works everywhere; its metric label is `undeclared`.
 
 The codes that the exception mappers can produce are declared with no second declaration: the values of the task's `exception_mapper` and of `AppConfig.exception_mapper` (as the app config holds it when the task is defined). A code that a task body returns directly needs `error_codes=`. For a task with `TaskError[E]`, a mapped exception gives the member of `E`, so each custom code of both mappers and both `default_unhandled_error_code` values must be the value of a member of `E`.
 

@@ -124,7 +124,7 @@ def test_stored_value_reads_as_succeeded() -> None:
 
 def test_stored_error_reads_as_failed() -> None:
     match _read(_record(TaskStatus.FAILED, _err_envelope('CARD_DECLINED'))):
-        case Ok(Failed(TaskError(error_code='CARD_DECLINED', message='stored failure'))):
+        case Ok(Failed(TaskError(code='CARD_DECLINED', message='stored failure'))):
             pass
         case other:
             pytest.fail(f'expected Ok(Failed(CARD_DECLINED)), got {other!r}')
@@ -132,7 +132,7 @@ def test_stored_error_reads_as_failed() -> None:
 
 def test_cancelled_row_reads_as_failed_task_cancelled() -> None:
     match _read(_record(TaskStatus.CANCELLED, None)):
-        case Ok(Failed(TaskError(error_code=OutcomeCode.TASK_CANCELLED))):
+        case Ok(Failed(TaskError(code=OutcomeCode.TASK_CANCELLED))):
             pass
         case other:
             pytest.fail(f'expected Ok(Failed(TASK_CANCELLED)), got {other!r}')
@@ -214,7 +214,7 @@ def test_broker_async_context_is_a_defect() -> None:
     ('read', 'final'),
     [
         (Ok(Succeeded(1)), True),
-        (Ok(Failed(TaskError(error_code='X'))), True),
+        (Ok(Failed(TaskError(code='X'))), True),
         (Err(ResultNotAvailable(message='m')), True),
         (Err(ResultDeserializationError(message='m')), True),
         (Err(NoTypeAvailable(message='m')), True),
@@ -355,7 +355,7 @@ def test_result_for_a_node_with_no_id_is_workflow_ctx_missing_id(app: Horsies) -
 
 def test_failed_workflow_without_stored_error_is_failed_workflow_failed() -> None:
     match _ended_workflow_error(str(WORKFLOW_ID), WorkflowStatus.FAILED, None):
-        case Ok(Failed(TaskError(error_code=OutcomeCode.WORKFLOW_FAILED))):
+        case Ok(Failed(TaskError(code=OutcomeCode.WORKFLOW_FAILED))):
             pass
         case other:
             pytest.fail(f'expected Ok(Failed(WORKFLOW_FAILED)), got {other!r}')
@@ -438,7 +438,7 @@ def test_node_input_of_a_succeeded_source_is_succeeded() -> None:
 @pytest.mark.usefixtures('worker_app')
 def test_node_input_of_a_failed_source_is_failed() -> None:
     match _prepared_dep(_node_input(_err_envelope('UPSTREAM_BAD'))):
-        case Failed(TaskError(error_code='UPSTREAM_BAD', message='stored failure')):
+        case Failed(TaskError(code='UPSTREAM_BAD', message='stored failure')):
             pass
         case other:
             pytest.fail(f'expected Failed(UPSTREAM_BAD), got {other!r}')

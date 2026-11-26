@@ -133,7 +133,7 @@ def _assert_subworkflow_error(
 ) -> SubWorkflowError:
     err = outcome_error(outcome)
     assert isinstance(err, SubWorkflowError), f'expected SubWorkflowError, got {err}'
-    assert err.error_code == OutcomeCode.SUBWORKFLOW_FAILED
+    assert err.code == OutcomeCode.SUBWORKFLOW_FAILED
     if child_id is not None:
         assert err.sub_workflow_id == child_id
     assert err.sub_workflow_summary.status == WorkflowStatus.FAILED

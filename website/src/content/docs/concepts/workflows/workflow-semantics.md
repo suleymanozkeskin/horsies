@@ -316,7 +316,7 @@ A (FAILED) → B (SKIPPED) → C (SKIPPED) → D (SKIPPED)
 Tasks with `allow_failed_dependencies=True` receive the outcome of each dependency:
 
 - **FAILED deps**: Receive `Failed` with the original error
-- **SKIPPED deps**: Receive a sentinel `Failed` with `error_code=UPSTREAM_SKIPPED`
+- **SKIPPED deps**: Receive a sentinel `Failed` with `code=UPSTREAM_SKIPPED`
 
 The Python example is in [Recovery Handlers](/horsies/concepts/workflows/workflow-examples/#recovery-handlers).
 

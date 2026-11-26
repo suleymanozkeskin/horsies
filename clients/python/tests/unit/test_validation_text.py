@@ -423,7 +423,7 @@ class TestReturnTypeMismatch:
 
         assert isinstance(result, Err)
         err = result.err_value
-        assert err.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert err.code == ContractCode.RETURN_TYPE_MISMATCH
         assert err.exception is None
         assert MARKER not in (err.message or '')
         assert MARKER not in json.dumps(err.data)

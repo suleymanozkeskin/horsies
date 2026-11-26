@@ -213,7 +213,7 @@ def _read_of_row(
     """``read_of_record`` for a row that the broker found. Pure."""
     if record.status == TaskStatus.CANCELLED:
         return Ok(Failed(TaskError(
-            error_code=OutcomeCode.TASK_CANCELLED,
+            code=OutcomeCode.TASK_CANCELLED,
             message=f'Task {task_id} was cancelled before completion',
             data={'task_id': str(task_id)},
         )))
@@ -321,7 +321,7 @@ def _typed_failed(
     error: TaskError, enum_class: type[Enum],
 ) -> Result[TaskOutcome[Any, TaskError[Any]], UnknownCustomCode]:
     """``typed_outcome`` of a failed outcome with the codes of ``enum_class``. Pure."""
-    match error.error_code:
+    match error.code:
         case code if isinstance(code, BUILTIN_FAMILIES) or isinstance(code, enum_class):
             return Ok(Failed(error))
         case str() as text:
@@ -336,7 +336,7 @@ def _typed_failed(
                 custom_code=text,
             ))
         case member:
-            return Ok(Failed(error.model_copy(update={'error_code': member})))
+            return Ok(Failed(error.model_copy(update={'code': member})))
 
 
 def ok_of_outcome[T, E](outcome: TaskOutcome[T, E]) -> ReadResult[T, E]:

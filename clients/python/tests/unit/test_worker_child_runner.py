@@ -968,7 +968,7 @@ def _registered_tasks() -> dict[str, Any]:
         value: list[Any] = []
         value.append(value)
         return Err(
-            TaskError(error_code='MY_ERROR', message='m', data=value),
+            TaskError(code='MY_ERROR', message='m', data=value),
         )
 
     @app.task('deep.returned')
@@ -984,13 +984,13 @@ def _registered_tasks() -> dict[str, Any]:
         for _ in range(299):
             value = [value]
         return Err(
-            TaskError(error_code='MY_ERROR', message='m', data=value),
+            TaskError(code='MY_ERROR', message='m', data=value),
         )
 
     @app.task('bytes.error_data')
     def error_data_is_not_utf8() -> Result[int, TaskError]:
         return Err(
-            TaskError(error_code='MY_ERROR', message='m', data=b'\xff'),
+            TaskError(code='MY_ERROR', message='m', data=b'\xff'),
         )
 
     return {
@@ -1419,7 +1419,7 @@ class TestRunTaskEntryErrorPaths:
         mock_task.task_ok_type = int
         mock_task.return_value = Err(
             TaskError(
-                error_code='MY_ERROR', message='m', data={frozenset({1}): 1},
+                code='MY_ERROR', message='m', data={frozenset({1}): 1},
             ),
         )
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -1524,7 +1524,7 @@ class TestRunTaskEntryErrorPaths:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Err(
-            TaskError(error_code='CUSTOM_ERR', message='failed'),
+            TaskError(code='CUSTOM_ERR', message='failed'),
         )
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -2423,7 +2423,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         injected = mock_task.call_args.kwargs['workflow_ctx']
         entry = injected._results_by_id['node_a']
         assert isinstance(entry, Failed)
-        assert entry.error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert entry.error.code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert 'nope' in entry.error.message
 
 

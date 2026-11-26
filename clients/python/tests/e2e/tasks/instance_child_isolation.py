@@ -60,7 +60,7 @@ def wait_refused_in_child() -> Result[bool, TaskError]:
     sent = healthcheck.send()
     if is_err(sent):
         return Err(
-            TaskError(error_code='E2E_SEND_FAILED', message=str(sent.err_value)),
+            TaskError(code='E2E_SEND_FAILED', message=str(sent.err_value)),
         )
     match sent.ok_value.get(timeout_ms=1000):
         case Err(err_value=WaitInsideTask()):

@@ -43,7 +43,7 @@ class SubWorkflowSummary(Generic[OkT_co]):
         def make_report(workflow_ctx: WorkflowContext | None) -> Result[str, TaskError]:
             if workflow_ctx is None:
                 return Err(TaskError(
-                    error_code="NO_CTX",
+                    code="NO_CTX",
                     message="make_report ran without a workflow context",
                 ))
             summary = workflow_ctx.summary_for(data_pipeline_node)

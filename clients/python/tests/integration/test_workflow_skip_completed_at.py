@@ -35,7 +35,7 @@ from tests.workflow_recovery_support import workflow_recovery_pass
 
 pytestmark = [pytest.mark.integration]
 
-_FAILED: Result[int, TaskError] = Err(TaskError(error_code='FAIL', message='dependency failed'))
+_FAILED: Result[int, TaskError] = Err(TaskError(code='FAIL', message='dependency failed'))
 
 
 async def _node(session: AsyncSession, workflow_id: str, index: int) -> tuple[str, object]:

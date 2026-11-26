@@ -160,7 +160,7 @@ match my_task.send(name="alice", count=3):
             case Ok(Succeeded(value)):
                 print(f"Result: {value}")
             case Ok(Failed(task_error)):
-                print(f"Task failed: {task_error.error_code}")
+                print(f"Task failed: {task_error.code}")
             case Err(read_error):
                 print(f"No result: {read_error.code}")
 

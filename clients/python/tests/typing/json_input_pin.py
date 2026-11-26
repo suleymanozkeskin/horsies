@@ -62,54 +62,54 @@ _open: _Open = {'n': 1}
 
 def writes_that_pass() -> list[TaskError]:
     return [
-        TaskError(error_code='X'),
-        TaskError(error_code='X', data=None),
-        TaskError(error_code='X', data=_ids),
-        TaskError(error_code='X', data=_counts),
-        TaskError(error_code='X', data=_nested),
-        TaskError(error_code='X', data=_deep),
-        TaskError(error_code='X', data=_union),
-        TaskError(error_code='X', data=_ordered),
-        TaskError(error_code='X', data=_default),
-        TaskError(error_code='X', data=_tally),
-        TaskError(error_code='X', data=_keyed),
-        TaskError(error_code='X', data=_exact),
-        TaskError(error_code='X', data=_wide),
-        TaskError(error_code='X', data={'ids': _ids, 'm': _counts, 'n': 1}),
-        TaskError(error_code='X', data=[_ids, _counts, None]),
+        TaskError(code='X'),
+        TaskError(code='X', data=None),
+        TaskError(code='X', data=_ids),
+        TaskError(code='X', data=_counts),
+        TaskError(code='X', data=_nested),
+        TaskError(code='X', data=_deep),
+        TaskError(code='X', data=_union),
+        TaskError(code='X', data=_ordered),
+        TaskError(code='X', data=_default),
+        TaskError(code='X', data=_tally),
+        TaskError(code='X', data=_keyed),
+        TaskError(code='X', data=_exact),
+        TaskError(code='X', data=_wide),
+        TaskError(code='X', data={'ids': _ids, 'm': _counts, 'n': 1}),
+        TaskError(code='X', data=[_ids, _counts, None]),
     ]
 
 
 def writes_that_are_flagged(mapping: Mapping[str, int]) -> list[TaskError]:
     return [
-        TaskError(error_code='X', data=_pair),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_raw),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_queue),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_items),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_price),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_proxy),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_user_dict),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_chain),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=mapping),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_int_keys),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_bad_inner),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data=_bad_nested),  # pyright: ignore[reportArgumentType]
-        TaskError(error_code='X', data={'a': (1,)}),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_pair),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_raw),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_queue),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_items),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_price),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_proxy),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_user_dict),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_chain),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=mapping),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_int_keys),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_bad_inner),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_bad_nested),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data={'a': (1,)}),  # pyright: ignore[reportArgumentType]
         # An open TypedDict can hold keys that it does not declare.
-        TaskError(error_code='X', data=_open),  # pyright: ignore[reportArgumentType]
+        TaskError(code='X', data=_open),  # pyright: ignore[reportArgumentType]
     ]
 
 
 def a_subclass_has_both_types(summary: SubWorkflowSummary[int]) -> list[SubWorkflowError]:
     return [
         SubWorkflowError(
-            error_code='X',
+            code='X',
             sub_workflow_id='s',
             sub_workflow_summary=summary,
             data=_ids,
         ),
         SubWorkflowError(
-            error_code='X',
+            code='X',
             sub_workflow_id='s',
             sub_workflow_summary=summary,
             data=_pair,  # pyright: ignore[reportArgumentType]

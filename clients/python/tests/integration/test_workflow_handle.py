@@ -196,7 +196,7 @@ class TestWorkflowHandleGet:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='pause')),
+            Err(TaskError(code='FAIL', message='pause')),
         )
 
         # The core refuses an age of 0; the workflow paused more than 1 µs ago.
@@ -275,7 +275,7 @@ class TestWorkflowHandleGet:
         result = await handle.get_async(timeout_ms=1000)
         match result:
             case Ok(Failed(error=error)):
-                assert error.error_code is OutcomeCode.WORKFLOW_CANCELLED
+                assert error.code is OutcomeCode.WORKFLOW_CANCELLED
             case _:
                 pytest.fail(f'expected a failed outcome, got {result!r}')
 
@@ -1770,7 +1770,7 @@ async def _paused_workflow(
         broker,
         str(handle.workflow_id),
         0,
-        Err(TaskError(error_code='FAIL', message='pause')),
+        Err(TaskError(code='FAIL', message='pause')),
     )
     return str(handle.workflow_id)
 
@@ -1780,7 +1780,7 @@ def _expiry_error_json(older_than: timedelta) -> str:
     match dumps_json(
         encode_task_error(
             TaskError(
-                error_code=OutcomeCode.WORKFLOW_EXPIRED,
+                code=OutcomeCode.WORKFLOW_EXPIRED,
                 message=f'paused_workflow_auto_cancel_after elapsed: {older_than}',
             ),
         ),

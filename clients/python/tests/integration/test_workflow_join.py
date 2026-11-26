@@ -108,14 +108,14 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         # Aggregator should be SKIPPED (no dep succeeded)
@@ -155,7 +155,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
 
         # Aggregator should still be PENDING (B might succeed)
@@ -274,7 +274,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
 
         status_agg = await get_task_status(session, str(handle.workflow_id), 1)
@@ -320,7 +320,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
 
         status_b = await get_task_status(session, str(handle.workflow_id), 1)
@@ -434,7 +434,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         # Aggregator should be ENQUEUED: join='any' satisfied + ctx dep is terminal (failed)
@@ -483,7 +483,7 @@ class TestOrJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
         # B should be SKIPPED now (cascade from A failing, join='all' default)
         status_b = await get_task_status(session, str(handle.workflow_id), 1)
@@ -586,14 +586,14 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         # Aggregator should be SKIPPED (max possible = 1, need 2)
@@ -636,7 +636,7 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
 
         # Aggregator should still be PENDING (B and C can still succeed)
@@ -822,14 +822,14 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='FAIL', message='A failed')),
+            Err(TaskError(code='FAIL', message='A failed')),
         )
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         status_d = await get_task_status(session, str(handle.workflow_id), 3)
@@ -875,7 +875,7 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
 
         # Aggregator should be ENQUEUED: quorum satisfied + ctx dep terminal
@@ -923,7 +923,7 @@ class TestQuorumJoin:
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='FAIL', message='B failed')),
+            Err(TaskError(code='FAIL', message='B failed')),
         )
         status_agg = await get_task_status(session, str(handle.workflow_id), 3)
         assert status_agg == 'PENDING'

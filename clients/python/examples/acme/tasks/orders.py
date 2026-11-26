@@ -51,7 +51,7 @@ def validate_order(*, order_id: str) -> Result[OrderValidation, TaskError]:
             if order is None or not order.lines:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} with lines to fulfill',
                         data={'order_id': order_id},
                     ),
@@ -103,7 +103,7 @@ def pick_pack(
             if order is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to pick',
                         data={'order_id': order_id},
                     ),
@@ -162,7 +162,7 @@ def allocate_warehouse(
     if not known:
         return Err(
             TaskError(
-                error_code=UNKNOWN_SKU,
+                code=UNKNOWN_SKU,
                 message=f'{sku} is not in the catalog',
                 data={'sku': sku},
             ),
@@ -204,7 +204,7 @@ def generate_invoice(*, order_id: str) -> Result[Invoice, TaskError]:
             if order is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to invoice',
                         data={'order_id': order_id},
                     ),

@@ -43,7 +43,7 @@ def register(app: Horsies) -> None:
     @app.task('send_welcome_email', error_codes=WelcomeCode)
     def send_welcome_email(*, email: str) -> Result[str, TaskError[WelcomeCode]]:
         if '@' not in email:
-            return Err(TaskError(error_code=WelcomeCode.INVALID_EMAIL, message=email))
+            return Err(TaskError(code=WelcomeCode.INVALID_EMAIL, message=email))
         return Ok(email)
 
     match send_welcome_email.send(email='a@b'):
@@ -72,7 +72,7 @@ def context_code_left_out(node: TaskNode[str, WelcomeCode], ctx: WorkflowContext
         case Succeeded(value):
             return value
         case Failed(task_error):
-            match task_error.error_code:  # pyright: ignore[reportMatchNotExhaustive]
+            match task_error.code:  # pyright: ignore[reportMatchNotExhaustive]
                 case WelcomeCode.INVALID_EMAIL:
                     return 'invalid'
                 case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
@@ -81,7 +81,7 @@ def context_code_left_out(node: TaskNode[str, WelcomeCode], ctx: WorkflowContext
 
 
 def every_code(task_error: TaskError[WelcomeCode]) -> str:
-    match task_error.error_code:
+    match task_error.code:
         case WelcomeCode.INVALID_EMAIL:
             return 'invalid'
         case WelcomeCode.MAILBOX_FULL:
@@ -93,7 +93,7 @@ def every_code(task_error: TaskError[WelcomeCode]) -> str:
 
 
 def code_left_out(task_error: TaskError[WelcomeCode]) -> str:
-    match task_error.error_code:  # pyright: ignore[reportMatchNotExhaustive]
+    match task_error.code:  # pyright: ignore[reportMatchNotExhaustive]
         case WelcomeCode.INVALID_EMAIL:
             return 'invalid'
         case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
@@ -102,7 +102,7 @@ def code_left_out(task_error: TaskError[WelcomeCode]) -> str:
 
 
 def text_codes_need_a_default_arm(task_error: TaskError) -> str:
-    match task_error.error_code:  # pyright: ignore[reportMatchNotExhaustive]
+    match task_error.code:  # pyright: ignore[reportMatchNotExhaustive]
         case 'INVALID_EMAIL':
             return 'invalid'
         case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():

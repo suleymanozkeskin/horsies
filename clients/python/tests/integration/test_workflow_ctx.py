@@ -150,7 +150,7 @@ class TestWorkflowCtx:
                 if envelope is None:
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx result for node {node_id!r} unavailable '
                                 f'(engine could not encode at emit time)'
@@ -181,7 +181,7 @@ class TestWorkflowCtx:
             *, workflow_ctx: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             if workflow_ctx is None:
-                return Err(TaskError(error_code='NO_CTX', message='missing'))
+                return Err(TaskError(code='NO_CTX', message='missing'))
             match workflow_ctx.result_for(node_a):
                 case Succeeded(value=value):
                     return Ok(value)
@@ -295,13 +295,13 @@ class TestWorkflowCtx:
             *, workflow_ctx: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             if workflow_ctx is None:
-                return Err(TaskError(error_code='NO_CTX', message='missing'))
+                return Err(TaskError(code='NO_CTX', message='missing'))
             match (workflow_ctx.result_for(node_a), workflow_ctx.result_for(node_b)):
                 case (Succeeded(value=first), Succeeded(value=second)):
                     return Ok(first + second)
                 case _:
                     return Err(
-                        TaskError(error_code='UPSTREAM_FAILED', message='a dependency failed'),
+                        TaskError(code='UPSTREAM_FAILED', message='a dependency failed'),
                     )
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
@@ -335,7 +335,7 @@ class TestWorkflowCtx:
 
         @app.task(task_name='ctx_skipped_failing')
         def failing_task() -> Result[int, TaskError]:
-            return Err(TaskError(error_code='FAIL', message='Failed'))
+            return Err(TaskError(code='FAIL', message='Failed'))
 
         task_b = make_simple_task(app, 'ctx_skipped_b')
 
@@ -344,7 +344,7 @@ class TestWorkflowCtx:
             *, workflow_ctx: WorkflowContext | None = None,
         ) -> Result[str, TaskError]:
             if workflow_ctx is None:
-                return Err(TaskError(error_code='NO_CTX', message='missing'))
+                return Err(TaskError(code='NO_CTX', message='missing'))
             match workflow_ctx.result_for(node_b):
                 case Succeeded():
                     return Ok('unexpected')
@@ -372,7 +372,7 @@ class TestWorkflowCtx:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='A_FAILED', message='A failed')),
+            Err(TaskError(code='A_FAILED', message='A failed')),
         )
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
@@ -380,7 +380,7 @@ class TestWorkflowCtx:
 
         match ctx.result_for(node_b):
             case Failed(error=error):
-                assert error.error_code == 'UPSTREAM_SKIPPED'
+                assert error.code == 'UPSTREAM_SKIPPED'
                 assert error.data is not None
                 assert 'dependency_index' in error.data
             case outcome:
@@ -395,14 +395,14 @@ class TestWorkflowCtx:
 
         @app.task(task_name='ctx_failed_failing')
         def failing_task() -> Result[int, TaskError]:
-            return Err(TaskError(error_code='FAIL', message='Failed'))
+            return Err(TaskError(code='FAIL', message='Failed'))
 
         @app.task(task_name='ctx_failed_c')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
         ) -> Result[str, TaskError]:
             if workflow_ctx is None:
-                return Err(TaskError(error_code='NO_CTX', message='missing'))
+                return Err(TaskError(code='NO_CTX', message='missing'))
             match workflow_ctx.result_for(node_a):
                 case Succeeded():
                     return Ok('unexpected')
@@ -429,7 +429,7 @@ class TestWorkflowCtx:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='A_FAILED', message='A failed')),
+            Err(TaskError(code='A_FAILED', message='A failed')),
         )
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
@@ -437,7 +437,7 @@ class TestWorkflowCtx:
 
         match ctx.result_for(node_a):
             case Failed(error=error):
-                assert error.error_code == 'A_FAILED'
+                assert error.code == 'A_FAILED'
                 assert error.message == 'A failed'
             case outcome:
                 pytest.fail(f'expected a failed outcome, got {outcome!r}')
@@ -480,7 +480,7 @@ class TestWorkflowCtx:
             *, workflow_ctx: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             if workflow_ctx is None:
-                return Err(TaskError(error_code='NO_CTX', message='missing'))
+                return Err(TaskError(code='NO_CTX', message='missing'))
             match workflow_ctx.result_for(node_a):
                 case Succeeded(value=value):
                     return Ok(value)
@@ -631,7 +631,7 @@ class TestWorkflowCtx:
             *, workflow_ctx: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             if workflow_ctx is None:
-                return Err(TaskError(error_code='NO_CTX', message='missing'))
+                return Err(TaskError(code='NO_CTX', message='missing'))
             # missing_node.node_id is None -> should raise RuntimeError
             match workflow_ctx.result_for(missing_node):
                 case Succeeded(value=value):
@@ -694,7 +694,7 @@ class TestWorkflowCtx:
 
         match decode_task_result(loads_json(result_json).unwrap(), Any):
             case Failed(error=error):
-                assert error.error_code == 'WORKFLOW_CTX_MISSING_ID'
+                assert error.code == 'WORKFLOW_CTX_MISSING_ID'
             case outcome:
                 pytest.fail(f'expected a failed outcome, got {outcome!r}')
 

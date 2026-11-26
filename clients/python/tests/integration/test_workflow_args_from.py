@@ -216,7 +216,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='TEST_FAIL', message='Test failure')),
+            Err(TaskError(code='TEST_FAIL', message='Test failure')),
         )
 
         # B should be enqueued (allow_failed_dependencies=True)
@@ -295,7 +295,7 @@ class TestArgsFromInjection:
                 case (Succeeded(value=first_value), Succeeded(value=second_value)):
                     return Ok(first_value + second_value)
                 case _:
-                    return Err(TaskError(error_code='FAIL', message='Failed'))
+                    return Err(TaskError(code='FAIL', message='Failed'))
 
         task_a = make_simple_task(app, 'same_dep_a')
 
@@ -361,7 +361,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='A_FAILED', message='A failed')),
+            Err(TaskError(code='A_FAILED', message='A failed')),
         )
 
         # B should be SKIPPED now (not allow_failed_dependencies)
@@ -410,7 +410,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='ORIGINAL_ERROR', message='Original failure')),
+            Err(TaskError(code='ORIGINAL_ERROR', message='Original failure')),
         )
 
         # Check B's kwargs contain A's original error (not UPSTREAM_SKIPPED)
@@ -442,7 +442,7 @@ class TestArgsFromInjection:
                 case Succeeded(value=value):
                     return Ok(value + 5)
                 case Failed(error=error):
-                    return Err(TaskError(error_code='UPSTREAM_FAILED', message=error.message))
+                    return Err(TaskError(code='UPSTREAM_FAILED', message=error.message))
 
         task_a = make_simple_task(app, 'worker_args_from_a')
         node_a = TaskNode(fn=task_a, kwargs={'value': 5})
@@ -528,7 +528,7 @@ class TestArgsFromInjection:
                 case Succeeded(value=value):
                     return Ok(value + 5)
                 case Failed(error=error):
-                    return Err(TaskError(error_code='UPSTREAM_FAILED', message=error.message))
+                    return Err(TaskError(code='UPSTREAM_FAILED', message=error.message))
 
         task_a = make_simple_task(app, 'quorum_optional_a')
         task_b = make_simple_task(app, 'quorum_optional_b')
@@ -627,7 +627,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='DEP_FAIL', message='Dep failed')),
+            Err(TaskError(code='DEP_FAIL', message='Dep failed')),
         )
 
         # B should be SKIPPED (not ENQUEUED)
@@ -721,7 +721,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='WORKER_ERR', message='Worker err test')),
+            Err(TaskError(code='WORKER_ERR', message='Worker err test')),
         )
 
         # Fetch task row for B
@@ -779,7 +779,7 @@ class TestArgsFromInjection:
         ) -> Result[str, TaskError]:
             match input_result:
                 case Failed(error=error):
-                    return Ok(error.error_code)
+                    return Ok(error.code)
                 case Succeeded():
                     return Ok('not_skipped')
 
@@ -809,7 +809,7 @@ class TestArgsFromInjection:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='A_FAIL', message='A failed')),
+            Err(TaskError(code='A_FAIL', message='A failed')),
         )
 
         # Fetch task row for C (index 2)
@@ -871,7 +871,7 @@ class TestArgsFromInjection:
                 case Succeeded(value=value):
                     return Ok(value + 1)
                 case Failed(error=error):
-                    return Err(TaskError(error_code='UPSTREAM_FAILED', message=error.message))
+                    return Err(TaskError(code='UPSTREAM_FAILED', message=error.message))
 
         node_a = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b = TaskNode(fn=task_b, kwargs={'value': 10})

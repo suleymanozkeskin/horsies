@@ -28,7 +28,7 @@ def my_task(*, ...) -> Result[T, TaskError]: ...
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
-| `error_codes` | `type[Enum] \| tuple[str, ...]` | `()` | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. They are the values of the task's `error_code` metric label besides the built-in codes and `undeclared`; another user code counts as `undeclared` there. The values of the task's `exception_mapper` and of `AppConfig.exception_mapper` are added with no second declaration. The task function keeps the codes in `task_error_codes`; `horsies check` lists them. |
+| `error_codes` | `type[Enum] \| tuple[str, ...]` | `()` | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. They are the values of the task's `error_code` metric label besides the built-in codes and `undeclared`; another custom code counts as `undeclared` there. The values of the task's `exception_mapper` and of `AppConfig.exception_mapper` are added with no second declaration. The task function keeps the codes in `task_error_codes`; `horsies check` lists them. |
 | `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed, and after the child exits the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`, and a retry never runs next to the killed attempt. A deadline that fires before user code starts requeues the task instead, also after the exit. If the child does not exit within 30 s of the kill, nothing is written and stale-task recovery takes the task; with stale RUNNING recovery off, the worker writes the row once it sees the exit (a stop ends that wait). Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
 | `execution` | `Execution` | `Execution.ISOLATED` | How a worker runs the task. `ISOLATED`: `def` or `async def`, `timeout_ms` optional. `SHARED_ASYNC`: `async def` only, `timeout_ms` required. `SHARED_THREAD`: `def` only, `timeout_ms` required. Every task row stores the class (`horsies_tasks.execution`), and a worker claims each class into the budget its claim plan routes it to (a worker with isolated children only runs every class isolated). |
 | `cancel_grace_ms` | `int \| None` | `None` | The time to stop after a cancel, from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). `SHARED_ASYNC`: the time to the second cancel (at the deadline and after an operator cancel); `None` stores `DEFAULT_CANCEL_GRACE_MS` (1,000). `ISOLATED`: the time from an operator cancel to the kill of the child when the task has not stopped; `None` stores nothing, and the cancel is cooperative only. `SHARED_THREAD`: refused (`HRS-110`). The stored options hold the value in effect at send. |
@@ -86,7 +86,7 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 
 ### Cancellation
 
-- An operator cancel of a running task (`cancel_task(broker, task_id, include_running=True)`, or the web UI) moves the task to history as `CANCELLED` at once, and writes its attempt row with outcome `CANCELLED` (`finished_at` = the cancel time, `recorded_by` `CANCEL`), in one statement. A waiting `handle.get()` returns `Ok(Failed(task_error))` with `error_code` `TASK_CANCELLED`. What the task returns after the cancel is dropped.
+- An operator cancel of a running task (`cancel_task(broker, task_id, include_running=True)`, or the web UI) moves the task to history as `CANCELLED` at once, and writes its attempt row with outcome `CANCELLED` (`finished_at` = the cancel time, `recorded_by` `CANCEL`), in one statement. A waiting `handle.get()` returns `Ok(Failed(task_error))` with the code `TASK_CANCELLED`. What the task returns after the cancel is dropped.
 - The worker gives the cancel to the task code: a `NOTIFY` on `horsies_task_cancel`; a lost notice is found by one read after a listener reconnect, or after a runner heartbeat of the run that does not land (at most `runner_heartbeat_interval_ms`, default 30 s).
 - `async def` body (isolated or shared async): `asyncio.CancelledError` at the next `await`. Let it propagate; catch it only to clean up, then raise it again.
 - `def` body (isolated or shared thread): read the cancel state. The first parameter `runtime: TaskRuntime` (before the `*`) gives the run; `runtime.cancel_state()` returns `CancelNotRequested()` or `CancelRequested(cause)`. `CancelCause`: `OPERATOR` (an operator cancel), `DEADLINE` (the deadline of a `SHARED_ASYNC` or `SHARED_THREAD` run). The first cause stays.
@@ -157,13 +157,13 @@ Every boundary validates in strict mode: `"7"`, `7.0` and `True` are refused for
 
 `@app.task` and each `SubWorkflowNode` refuse `Field(exclude=True)`, `exclude_if`, `extra='allow'`, `PlainValidator`, `WrapValidator`, `SkipValidation`, a schema hook, `Json[T]`, `Literal` with a plain `Enum`, an alias whose written key does not read back, and a default that does not hold its type. Use `AfterValidator` or `BeforeValidator`.
 
-`TaskError.data` must be JSON-native. It takes `JsonInput`, so a `list[str]` fits, and it gives `JsonValue`, an exact `list` or `dict`. A bad value becomes `{'data_refused': <cause>}`, and the code and message stay. A `TaskError` subclass with extra fields does not cross the wire: use `data`, and match on `error_code`.
+`TaskError.data` must be JSON-native. It takes `JsonInput`, so a `list[str]` fits, and it gives `JsonValue`, an exact `list` or `dict`. A bad value becomes `{'data_refused': <cause>}`, and the code and message stay. A `TaskError` subclass with extra fields does not cross the wire: use `data`, and match on `code`.
 
 Changing a model that a task takes or returns: see `SKILL.md`, Deployment facts.
 
 ### Runtime return-type validation
 
-The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter` in strict mode. A mismatch produces `Err(TaskError(error_code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. The error stores the actual type and the failing fields (`data`: `variant`, `expected_type`, `actual_type`, `validation_errors`, `validation_error_count`), not the returned value. `variant` is `'ok'` for a wrong `Ok` value and `'err'` for a wrong `Err` value. A return that is not `Ok` or `Err`, `None` included, also produces `RETURN_TYPE_MISMATCH`, with `variant` `'not_a_task_result'`. `expected_type` is `'Result[<ok>, <err>]'`.
+The task wrapper validates the returned value against declared `T` using Pydantic's `TypeAdapter` in strict mode. A mismatch produces `Err(TaskError(code=ContractCode.RETURN_TYPE_MISMATCH))` — does not raise. The error stores the actual type and the failing fields (`data`: `variant`, `expected_type`, `actual_type`, `validation_errors`, `validation_error_count`), not the returned value. `variant` is `'ok'` for a wrong `Ok` value and `'err'` for a wrong `Err` value. A return that is not `Ok` or `Err`, `None` included, also produces `RETURN_TYPE_MISMATCH`, with `variant` `'not_a_task_result'`. `expected_type` is `'Result[<ok>, <err>]'`.
 
 ## Reading a Result: `ReadResult[T, TaskError]`
 
@@ -192,7 +192,7 @@ def show_total(handle: TaskHandle[int]) -> None:
         case Ok(Succeeded(value)):
             print(value)
         case Ok(Failed(task_error)):
-            print(task_error.error_code, task_error.message)
+            print(task_error.code, task_error.message)
         case Err(read_error):
             print(read_error.code, read_error.message)
 ```
@@ -224,29 +224,29 @@ def show_total(handle: TaskHandle[int]) -> None:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 class TaskError(BaseModel):
-    error_code: BuiltInTaskCode | str
+    code: BuiltInTaskCode | str
     message: str | None = None
     data: JsonValue = None  # takes JsonInput
     exception: dict[str, Any] | BaseException | None = None
 ```
 
-`error_code` is required and must not be null: `auto_retry_for` and outcome routing read it. `message` is optional, and domain errors typically set it. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
+`code` is required and must not be null: `auto_retry_for` and outcome routing read it. `message` is optional, and domain errors typically set it. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
 
-**Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. User-defined codes must be plain `str`, not `str, Enum` subclasses.
+**Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. Custom codes must be plain `str`, not `str, Enum` subclasses.
 
 <!-- check: skip partial -- uses a name before the page defines it -->
 ```python
-TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="db down")  # OK
-TaskError(error_code="MY_CUSTOM_CODE", message="card declined")             # OK
-TaskError(error_code="BROKER_ERROR", message="db down")                     # ValueError — reserved
+TaskError(code=OperationalErrorCode.BROKER_ERROR, message="db down")  # OK
+TaskError(code="MY_CUSTOM_CODE", message="card declined")             # OK
+TaskError(code="BROKER_ERROR", message="db down")                     # ValueError — reserved
 TaskError(message="card declined")                                          # ValueError — no code
 ```
 
-**Serialization**: built-in codes serialize as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved. User strings serialize as plain strings.
+**Serialization**: built-in codes serialize as tagged dicts `{"__builtin_task_code__": "BROKER_ERROR"}` so round-trip identity is preserved. Custom codes serialize as plain strings.
 
-**Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too.
+**Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too. The stored form (the `err` slot of a stored result) has the key `error_code` in place of `code`: `encode_task_error` writes it and `decode_task_error` reads it.
 
-**Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: `TaskHandle.get()`, `WorkflowHandle.get()` and `app.get_result()` return `Err(ResultDeserializationError(...))` with the cause.
+**Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without the key `error_code` (the stored key of `code`), is stored data that does not parse: `TaskHandle.get()`, `WorkflowHandle.get()` and `app.get_result()` return `Err(ResultDeserializationError(...))` with the cause.
 
 ### `SubWorkflowError`
 
@@ -329,12 +329,12 @@ Terminal lifecycle outcomes for tasks and workflows:
 
 ### Reserved Built-In Codes
 
-All built-in code string values are globally reserved. User-defined error codes must be plain `str` and must not collide with any built-in value.
+All built-in code string values are globally reserved. Custom error codes must be plain `str` and must not collide with any built-in value.
 
 - `BUILTIN_CODE_REGISTRY` (from `horsies.core.models.tasks`) maps every reserved string to its canonical enum member
 - `horsies check` reports `HRS-212` (`CHECK_RESERVED_CODE_COLLISION`) when `exception_mapper` values or `default_unhandled_error_code` collide with a reserved code
 - The library default `UNHANDLED_EXCEPTION` for `default_unhandled_error_code` is intentionally built-in and is not flagged
-- User-defined `str, Enum` types degrade to plain `str` after JSON round-trip — only built-in families preserve enum identity
+- Custom `str, Enum` types degrade to plain `str` after JSON round-trip — only built-in families preserve enum identity
 
 ## `TaskFunction[P, T]`
 
@@ -523,7 +523,7 @@ sent_at: datetime | None, enqueued_at: datetime
 claimed_at: datetime | None, started_at: datetime | None
 completed_at: datetime | None, failed_at: datetime | None
 worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | None
-error_code: str | None                      # always returned (final TaskError.error_code, NULL if not failed)
+error_code: str | None                      # always returned (final TaskError.code, NULL if not failed)
 raw_result: dict[str, Any] | None           # opt-in: include_result=True; the stored envelope
 decoded_result: TaskOutcome[Any, TaskError] | None  # opt-in: include_result=True; set when this process decodes it
 result_decoded: bool                         # True when decoded_result is set
@@ -666,7 +666,7 @@ RetryPolicy.exponential(
 
 ### `auto_retry_for` valid values
 
-- User-defined domain codes: `"RATE_LIMITED"`, `"DEADLOCK"`, `"SERVICE_UNAVAILABLE"`
+- Custom codes: `"RATE_LIMITED"`, `"DEADLOCK"`, `"SERVICE_UNAVAILABLE"`
 - `BuiltInTaskCode` members that a task failure produces, for example `OperationalErrorCode.UNHANDLED_EXCEPTION`, `OperationalErrorCode.WORKER_CRASHED`, `OutcomeCode.TASK_TIMEOUT`
 - Plain strings matching `^[A-Z][A-Z0-9_]*$`
 
@@ -815,7 +815,7 @@ my_task.send(cfg=Config(value=42))
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
-# WRONG — returns a raw value: the result is Err(TaskError(error_code=RETURN_TYPE_MISMATCH))
+# WRONG — returns a raw value: the result is Err(TaskError(code=RETURN_TYPE_MISMATCH))
 @app.task("bad")
 def bad(*, x: int) -> Result[dict[str, int], TaskError]:
     return {"x": x}

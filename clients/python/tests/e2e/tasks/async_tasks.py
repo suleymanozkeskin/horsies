@@ -59,7 +59,7 @@ async def async_sends(*, x: int) -> Result[str, TaskError]:
             return Ok(str(handle.task_id))
         case Err(send_err):
             return Err(
-                TaskError(error_code='SEND_FAILED', message=send_err.message),
+                TaskError(code='SEND_FAILED', message=send_err.message),
             )
 
 
@@ -112,7 +112,7 @@ async def async_wait_inside_task() -> Result[AsyncWaitProbe, TaskError]:
             pass
         case Err(send_err):
             return Err(
-                TaskError(error_code='E2E_SEND_FAILED', message=send_err.message),
+                TaskError(code='E2E_SEND_FAILED', message=send_err.message),
             )
     read = await app.get_result_async(handle.task_id, WAIT_PROBE_TIMEOUT_MS)
     raw = await app.get_raw_result_async(handle.task_id, WAIT_PROBE_TIMEOUT_MS)

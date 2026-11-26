@@ -158,13 +158,13 @@ def add(*, a: int, b: int) -> Result[int, TaskError]:
 @app.task(task_name='parity.refuse')
 def refuse(*, value: int) -> Result[int, TaskError]:
     """A task error with no retry."""
-    return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
+    return Err(TaskError(code='REFUSED', message=f'refused {value}'))
 
 
 @app.task(task_name='parity.transient', retry_policy=RETRY_POLICY)
 def transient(*, value: int) -> Result[int, TaskError]:
     """A task error that the policy retries until the retries run out."""
-    return Err(TaskError(error_code='TRANSIENT', message=f'transient {value}'))
+    return Err(TaskError(code='TRANSIENT', message=f'transient {value}'))
 
 
 @app.task(task_name='parity.sleep_past_deadline', timeout_ms=SHORT_TIMEOUT_MS)
@@ -182,7 +182,7 @@ def double(*, upstream: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
             return Ok(value * 2)
         case _:
             return Err(
-                TaskError(error_code='UPSTREAM_FAILED', message='the upstream failed'),
+                TaskError(code='UPSTREAM_FAILED', message='the upstream failed'),
             )
 
 
@@ -207,7 +207,7 @@ async def add_async(*, a: int, b: int) -> Result[int, TaskError]:
 )
 async def refuse_async(*, value: int) -> Result[int, TaskError]:
     await asyncio.sleep(0)
-    return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
+    return Err(TaskError(code='REFUSED', message=f'refused {value}'))
 
 
 @app.task(
@@ -218,7 +218,7 @@ async def refuse_async(*, value: int) -> Result[int, TaskError]:
 )
 async def transient_async(*, value: int) -> Result[int, TaskError]:
     await asyncio.sleep(0)
-    return Err(TaskError(error_code='TRANSIENT', message=f'transient {value}'))
+    return Err(TaskError(code='TRANSIENT', message=f'transient {value}'))
 
 
 @app.task(
@@ -251,7 +251,7 @@ def add_thread(*, a: int, b: int) -> Result[int, TaskError]:
     timeout_ms=SHARED_TIMEOUT_MS,
 )
 def refuse_thread(*, value: int) -> Result[int, TaskError]:
-    return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
+    return Err(TaskError(code='REFUSED', message=f'refused {value}'))
 
 
 @app.task(
@@ -261,7 +261,7 @@ def refuse_thread(*, value: int) -> Result[int, TaskError]:
     retry_policy=RETRY_POLICY,
 )
 def transient_thread(*, value: int) -> Result[int, TaskError]:
-    return Err(TaskError(error_code='TRANSIENT', message=f'transient {value}'))
+    return Err(TaskError(code='TRANSIENT', message=f'transient {value}'))
 
 
 @app.task(

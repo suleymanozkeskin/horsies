@@ -376,7 +376,7 @@ def _declared_code_error(
             message = detail
             help_text = (
                 'use a different UPPER_SNAKE_CASE code that does not match a '
-                'built-in library code'
+                'built-in code'
             )
         case RepeatedCodeRefused(code=repeated):
             code = ErrorCode.TASK_DUPLICATE_ERROR_CODE
@@ -1387,7 +1387,7 @@ class Horsies:
                                 ),
                                 code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
                                 notes=['app config', f'key: {exc_cls.__name__}'],
-                                help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
+                                help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in code',
                             )
                         )
                     )
@@ -1427,7 +1427,7 @@ class Horsies:
                         ),
                         code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
                         notes=['app config'],
-                        help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
+                        help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in code',
                     )
                 )
             )
@@ -1465,7 +1465,7 @@ class Horsies:
                                 ),
                                 code=ErrorCode.CHECK_RESERVED_CODE_COLLISION,
                                 notes=[f"task '{task_name}'"],
-                                help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
+                                help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in code',
                             )
                         )
                     )
@@ -1491,7 +1491,7 @@ class Horsies:
                                         if isinstance(exc_cls, type)
                                         else f'key: {exc_cls!r}',
                                     ],
-                                    help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in library code',
+                                    help_text='use a different UPPER_SNAKE_CASE code that does not match a built-in code',
                                 )
                             )
                         )

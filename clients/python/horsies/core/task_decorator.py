@@ -835,7 +835,7 @@ class _TaskFunctionMembers(Protocol[P, T, C]):
     task_queue_name: str | None
     task_options_json: str | None
     task_error_codes: tuple[str, ...]
-    """The user error codes that the task declares (`error_codes=`), in the
+    """The custom error codes that the task declares (`error_codes=`), in the
     order of the declaration; `()` when it declares none."""
     task_code_type: CustomCodeType
     """The type of the custom codes: `EnumCodes(E)` for a task that returns
@@ -1676,11 +1676,11 @@ def custom_code_refusal(error: object, code_type: CustomCodeType) -> str | None:
     match error, code_type:
         case TaskError(), TextCodes():
             return None
-        case TaskError(error_code=code), EnumCodes(code_type=enum_class):
+        case TaskError(code=code), EnumCodes(code_type=enum_class):
             if isinstance(code, BUILTIN_FAMILIES) or isinstance(code, enum_class):
                 return None
             return (
-                f'error_code must be a member of {enum_class.__name__} or a '
+                f'code must be a member of {enum_class.__name__} or a '
                 f'built-in code; got {type(code).__name__}'
             )
         case _:
@@ -1941,7 +1941,7 @@ def create_task_wrapper(
         actual_type = type(returned).__name__
         wrapper = 'Ok' if variant == 'ok' else 'Err'
         return Err(TaskError(
-            error_code=ContractCode.RETURN_TYPE_MISMATCH,
+            code=ContractCode.RETURN_TYPE_MISMATCH,
             message=(
                 f'Task {fn.__name__} returned {wrapper}(<{actual_type}>) '
                 f'but expected type {expected_type}: {summary}'
@@ -1965,12 +1965,12 @@ def create_task_wrapper(
         """
         actual_type = _returned_type_name(returned)
         code_text = (
-            f' with error_code {escape_lone_surrogates(str(returned.error_code))!r}'
+            f' with code {escape_lone_surrogates(str(returned.code))!r}'
             if isinstance(returned, TaskError)
             else ''
         )
         return Err(TaskError(
-            error_code=ContractCode.RETURN_TYPE_MISMATCH,
+            code=ContractCode.RETURN_TYPE_MISMATCH,
             message=(
                 f'Task {fn.__name__} returned {actual_type}{code_text} '
                 f'but must return Result[{ok_type}, {err_type}]'
@@ -2016,7 +2016,7 @@ def create_task_wrapper(
                                     'err',
                                     value,
                                     refusal,
-                                    [{'loc': ['error_code'], 'msg': refusal, 'type': 'custom_code'}],
+                                    [{'loc': ['code'], 'msg': refusal, 'type': 'custom_code'}],
                                     1,
                                 )
             except ValidationError as ve:
@@ -2070,7 +2070,7 @@ def create_task_wrapper(
             case WorkflowContextMissingIdError():
                 return Err(TaskError(
                     exception=exc,
-                    error_code=ContractCode.WORKFLOW_CTX_MISSING_ID,
+                    code=ContractCode.WORKFLOW_CTX_MISSING_ID,
                     message=str(exc),
                     data={'task_name': task_name},
                 ))
@@ -2089,7 +2089,7 @@ def create_task_wrapper(
                 )
                 return Err(TaskError(
                     exception=exc,
-                    error_code=cast('C | BuiltInTaskCode', mapped_code(resolved_code, code_type)),
+                    code=cast('C | BuiltInTaskCode', mapped_code(resolved_code, code_type)),
                     message=f'Unhandled exception in task {fn.__name__}: {type(exc).__name__}: {exception_text(exc)}',
                     data={'exception_type': type(exc).__name__},
                 ))

@@ -322,7 +322,7 @@ async def test_a_refusal_sets_the_row_running_and_fails_before_resolve(
     [end] = _run_on_seats([(task_id, claimed_at, REFUSAL)])
 
     error = _failed_error(_envelope(end).text)
-    assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+    assert error.code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
     row = await _row(session, task_id)
     assert row.status == 'RUNNING'
     assert row.finalizing_at is not None

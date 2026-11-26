@@ -82,7 +82,7 @@ match add_numbers.send(a=5, b=3):
             case Ok(Succeeded(total)):
                 print(f"Sum: {total}")
             case Ok(Failed(task_error)):
-                print(f"Task failed: {task_error.error_code} - {task_error.message}")
+                print(f"Task failed: {task_error.code} - {task_error.message}")
             case Err(read_error):
                 print(f"Read failed: {read_error.code} - {read_error.message}")
     case Err(send_err):
@@ -267,7 +267,7 @@ match await app.get_result_async(task_id, timeout_ms=5000):
     case Ok(Succeeded(value)):
         ...  # the task returned this value
     case Ok(Failed(task_error)):
-        ...  # the task failed: task_error.error_code
+        ...  # the task failed: task_error.code
     case Err(read_error):
         ...  # no outcome: WaitTimeout, NoTypeAvailable, ResultDeserializationError, BrokerError, ...
 

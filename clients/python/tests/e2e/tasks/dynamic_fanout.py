@@ -60,7 +60,7 @@ def sum_shard_rows(
 ) -> Result[int, TaskError]:
     if workflow_ctx is None:
         return Err(
-            TaskError(error_code='NO_CONTEXT', message='workflow_ctx is missing'),
+            TaskError(code='NO_CONTEXT', message='workflow_ctx is missing'),
         )
     total = 0
     for position in range(shard_count):

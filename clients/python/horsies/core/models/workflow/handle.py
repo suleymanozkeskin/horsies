@@ -234,7 +234,7 @@ def _decode_stored_workflow_error(
             # readability of already-expired workflows without treating
             # arbitrary corrupt JSON as a valid terminal error.
             return Ok(Failed(TaskError(
-                error_code=OutcomeCode.WORKFLOW_EXPIRED,
+                code=OutcomeCode.WORKFLOW_EXPIRED,
                 message=stored_error,
             )))
         logger.warning(
@@ -304,7 +304,7 @@ def _ended_workflow_error(
     match stored_error:
         case None:
             return Ok(Failed(TaskError(
-                error_code=_terminal_outcome_code(status),
+                code=_terminal_outcome_code(status),
                 message=f'Workflow {status.value.lower()}',
             )))
         case stored:
@@ -337,7 +337,7 @@ class _NodeUnreadable:
     def as_outcome(self) -> Failed[TaskError]:
         """The entry of the node in a map of node outcomes."""
         return Failed(TaskError(
-            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
             message=self.message,
             data=self.data,
         ))
@@ -347,7 +347,7 @@ def _unknown_code_outcome(node_id: str, unknown: UnknownCustomCode) -> Failed[Ta
     """The entry of a node whose stored custom code its task's ``Enum`` does
     not name, in a map of node outcomes."""
     return Failed(TaskError(
-        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+        code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
         message=f'node {node_id!r}: {unknown.message}',
         data={'node_id': node_id, 'custom_code': unknown.custom_code},
     ))
@@ -521,7 +521,7 @@ def _outputless_node_outcome(
 
     if per_node_envelope is None or not isinstance(source_task_name, str):
         return Failed(TaskError(
-            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
             message=(
                 f'Outputless workflow {workflow_id} node '
                 f'{node_id!r} missing payload or task name'
@@ -537,7 +537,7 @@ def _outputless_node_outcome(
     )
     if source_ok_type is None:
         return Failed(TaskError(
-            error_code=ContractCode.NO_TYPE_AVAILABLE,
+            code=ContractCode.NO_TYPE_AVAILABLE,
             message=(
                 f'Outputless workflow {workflow_id} node '
                 f'{node_id!r}: source '
@@ -550,7 +550,7 @@ def _outputless_node_outcome(
         outcome = decode_task_result(per_node_envelope, source_ok_type)
     except (StrictJsonError, ValueValidationError) as exc:
         return Failed(TaskError(
-            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+            code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
             message=f'decode_task_result failed for node {node_id!r}: {exc}',
             data={'node_id': node_id},
         ))
@@ -996,7 +996,7 @@ class WorkflowHandle(Generic[OutT]):
                 )
             case WorkflowPausedRead():
                 return Ok(Failed(TaskError(
-                    error_code=OutcomeCode.WORKFLOW_PAUSED,
+                    code=OutcomeCode.WORKFLOW_PAUSED,
                     message='Workflow is paused awaiting intervention',
                 )))
             case WaitTimedOut():

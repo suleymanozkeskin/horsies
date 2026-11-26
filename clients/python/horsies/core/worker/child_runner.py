@@ -263,9 +263,9 @@ def result_outcome_of(out: Result[Any, TaskError]) -> ResultOutcome:
         case Err(err_value=error):
             match error.exception:
                 case BaseException() as exception:
-                    return ResultFailed(error_code_text(error.error_code), RaisedInRun(exception))
+                    return ResultFailed(error_code_text(error.code), RaisedInRun(exception))
                 case _:
-                    return ResultFailed(error_code_text(error.error_code), NothingRaised())
+                    return ResultFailed(error_code_text(error.code), NothingRaised())
 
 
 def _encoded_error(error: TaskError) -> EncodedResult:
@@ -283,7 +283,7 @@ def _serialization_error_response(
     """Build a WORKER_SERIALIZATION_ERROR response for a serde failure."""
     logger.error(f'Serialization error for task {task_name}: {error}')
     task_error = TaskError(
-        error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
         message=str(error),
         data={'task_name': task_name},
     )
@@ -321,7 +321,7 @@ def _stored_timeout_refusal_response(
             assert_never(unreachable)
     logger.error(f'Stored timeout refused for task {task_name}: {reason}')
     task_error = TaskError(
-        error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
         message=reason,
         data=data,
     )
@@ -1158,7 +1158,7 @@ def async_task_presence(app: Horsies) -> AsyncTaskPresence:
 def _resolution_failure(task_name: str, message: str) -> EncodedResult:
     """The result of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR."""
     task_error = TaskError(
-        error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
+        code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
         message=message,
         data={'task_name': task_name},
     )
@@ -1474,7 +1474,7 @@ def _prepare_task_call(
                     # typed value.
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx result for node '
                                 f'{node_id!r} unavailable (source '
@@ -1489,7 +1489,7 @@ def _prepare_task_call(
                 if not isinstance(source_task_name, str):
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx missing task_name for '
                                 f'node {node_id!r}; cannot decode'
@@ -1515,7 +1515,7 @@ def _prepare_task_call(
                 if source_ok_type is None:
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx source '
                                 f'{source_task_name!r} not '
@@ -1545,7 +1545,7 @@ def _prepare_task_call(
                 except (StrictJsonError, ValueValidationError) as exc:
                     results_by_id[node_id] = Failed(
                         TaskError(
-                            error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                            code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'decode_task_result failed for '
                                 f'workflow_ctx node {node_id!r}: '
@@ -1640,7 +1640,7 @@ def _context_entry(
             return typed
         case Err(err_value=unknown):
             return Failed(TaskError(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                 message=f'workflow_ctx node {node_id!r}: {unknown.message}',
                 data={'node_id': node_id, 'custom_code': unknown.custom_code},
             ))
@@ -1651,7 +1651,7 @@ def _task_exception_response(task_name: str, e: BaseException) -> EncodedResult:
     logger.error(f'Task exception: {task_name}: {exception_text(e)}')
     # If the task raised an exception, we wrap it in a TaskError
     task_error = TaskError(
-        error_code=OperationalErrorCode.TASK_EXCEPTION,
+        code=OperationalErrorCode.TASK_EXCEPTION,
         message=f'{type(e).__name__}: {exception_text(e)}',
         data={'task_name': task_name},
         exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere

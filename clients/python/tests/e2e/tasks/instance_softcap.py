@@ -94,7 +94,7 @@ def slow_idempotent_task(*, token: str, duration_ms: int) -> Result[str, TaskErr
     if not log_dir:
         return Err(
             TaskError(
-                error_code='CONFIG_ERROR',
+                code='CONFIG_ERROR',
                 message='E2E_IDEMPOTENT_LOG_DIR not set',
             )
         )
@@ -108,7 +108,7 @@ def slow_idempotent_task(*, token: str, duration_ms: int) -> Result[str, TaskErr
     except FileExistsError:
         return Err(
             TaskError(
-                error_code='DOUBLE_EXECUTION',
+                code='DOUBLE_EXECUTION',
                 message=f'Token {token} already executed',
             )
         )
@@ -147,7 +147,7 @@ def db_ledger_task(*, token: str) -> Result[str, TaskError]:
     except Exception as exc:
         return Err(
             TaskError(
-                error_code='LEDGER_DB_ERROR',
+                code='LEDGER_DB_ERROR',
                 message=f'{type(exc).__name__}: {exc}',
                 data={'token': token, 'worker_identity': worker_identity},
             )
@@ -156,7 +156,7 @@ def db_ledger_task(*, token: str) -> Result[str, TaskError]:
     if winner_row is None:
         return Err(
             TaskError(
-                error_code='DOUBLE_EXECUTION',
+                code='DOUBLE_EXECUTION',
                 message=f'Token {token} already won by another worker',
                 data={'token': token, 'worker_identity': worker_identity},
             )

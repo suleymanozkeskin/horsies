@@ -74,7 +74,7 @@ def book_courier(
     if flaking and attempt <= tuning.COURIER_FAILING_ATTEMPTS:
         return Err(
             TaskError(
-                error_code=COURIER_UNAVAILABLE,
+                code=COURIER_UNAVAILABLE,
                 message=f'{courier} refused the booking on attempt {attempt}',
                 data={'order_id': order_id, 'courier': courier, 'attempt': attempt},
             ),
@@ -88,7 +88,7 @@ def book_courier(
             if not stored:
                 return Err(
                     TaskError(
-                        error_code=SHIPMENT_NOT_FOUND,
+                        code=SHIPMENT_NOT_FOUND,
                         message=f'no shipment row for order {order_id}',
                         data={'order_id': order_id},
                     ),
@@ -135,7 +135,7 @@ def print_label(
             if not stored:
                 return Err(
                     TaskError(
-                        error_code=SHIPMENT_NOT_FOUND,
+                        code=SHIPMENT_NOT_FOUND,
                         message=f'no shipment row for order {order_id}',
                         data={'order_id': order_id},
                     ),
@@ -178,7 +178,7 @@ def tracking_seed(
             if shipment is None:
                 return Err(
                     TaskError(
-                        error_code=SHIPMENT_NOT_FOUND,
+                        code=SHIPMENT_NOT_FOUND,
                         message=f'no shipment row for order {order_id}',
                         data={'order_id': order_id},
                     ),

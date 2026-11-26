@@ -462,7 +462,7 @@ class TestStoredNodeResult:
         node_result = result.ok_value[0].result
         assert isinstance(node_result, Failed)
         error = node_result.error
-        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert error.message == (
             'Result JSON corrupt for node parent:0: '
             'JSON parse failed: the text is empty'
@@ -478,7 +478,7 @@ class TestStoredNodeResult:
         node_result = result.ok_value[0].result
         assert isinstance(node_result, Failed)
         error = node_result.error
-        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert error.code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert error.message is not None
         assert error.message.startswith(
             'Result JSON corrupt for node parent:0: JSON parse failed: ',

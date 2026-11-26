@@ -117,7 +117,7 @@ def assert_failed(
     when ``expected_code`` is not None."""
     task_error = failed_error(read)
     if expected_code is not None:
-        assert task_error.error_code == expected_code, (
+        assert task_error.code == expected_code, (
             f'expected error code {expected_code!r}, got {task_error!r}'
         )
 

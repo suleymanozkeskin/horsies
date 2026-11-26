@@ -190,7 +190,7 @@ match spec.start():
                 print(f"Order {notification.order_id} processed")
             case Ok(Failed(error)):
                 reveal_type(error)  # TaskError
-                print(f"Failed: {error.error_code} - {error.message}")
+                print(f"Failed: {error.code} - {error.message}")
             case Err(read_error):
                 print(f"Read failed: {read_error.code} - {read_error.message}")
 ```
@@ -295,7 +295,7 @@ def start_order_processing(order: Order) -> None:
             print(f"Order {notification.order_id} processed successfully")
         case Ok(Failed(error)):
             reveal_type(error)  # TaskError
-            print(f"Order processing failed: {error.error_code} - {error.message}")
+            print(f"Order processing failed: {error.code} - {error.message}")
         case Err(read_error):
             print(f"Read failed: {read_error.code} - {read_error.message}")
 ```
@@ -316,7 +316,7 @@ def check_inventory(
     match order_result:
         case Failed():
             return Err(TaskError(
-                error_code="UPSTREAM_FAILED",
+                code="UPSTREAM_FAILED",
                 message="Cannot check inventory: order validation failed",
             ))
         case Succeeded(order):  # ValidatedOrder
@@ -342,17 +342,17 @@ def reserve_inventory(
     match (inventory_result, cost_result, address_result):
         case (Failed(), _, _):
             return Err(TaskError(
-                error_code="INVENTORY_CHECK_FAILED",
+                code="INVENTORY_CHECK_FAILED",
                 message="Cannot reserve: inventory check failed",
             ))
         case (_, Failed(), _):
             return Err(TaskError(
-                error_code="COST_CALCULATION_FAILED",
+                code="COST_CALCULATION_FAILED",
                 message="Cannot reserve: shipping cost calculation failed",
             ))
         case (_, _, Failed()):
             return Err(TaskError(
-                error_code="ADDRESS_VALIDATION_FAILED",
+                code="ADDRESS_VALIDATION_FAILED",
                 message="Cannot reserve: address validation failed",
             ))
         case (Succeeded(inventory), Succeeded(cost), Succeeded(_address)):

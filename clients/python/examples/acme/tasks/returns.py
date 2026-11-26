@@ -106,7 +106,7 @@ def inspect_item(*, return_id: str) -> Result[Inspection, TaskError]:
             if case is None:
                 return Err(
                     TaskError(
-                        error_code=RETURN_NOT_FOUND,
+                        code=RETURN_NOT_FOUND,
                         message=f'no return {return_id} to inspect',
                         data={'return_id': return_id},
                     ),
@@ -123,7 +123,7 @@ def inspect_item(*, return_id: str) -> Result[Inspection, TaskError]:
     if damaged:
         return Err(
             TaskError(
-                error_code=DAMAGED_ITEM,
+                code=DAMAGED_ITEM,
                 message=f'{inspected.sku} came back damaged and cannot be resold',
                 data={
                     'return_id': return_id,
@@ -168,7 +168,7 @@ def restock_or_writeoff(
             if case is None:
                 return Err(
                     TaskError(
-                        error_code=RETURN_NOT_FOUND,
+                        code=RETURN_NOT_FOUND,
                         message=f'no return {return_id} to settle',
                         data={'return_id': return_id},
                     ),

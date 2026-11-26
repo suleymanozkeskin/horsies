@@ -28,7 +28,7 @@ match handle.get():
     case Ok(Succeeded(value)):
         print(f"Success: {value}")
     case Ok(Failed(task_error)):
-        print(f"Task failed: {task_error.error_code} - {task_error.message}")
+        print(f"Task failed: {task_error.code} - {task_error.message}")
     case Err(WaitTimeout()):
         print(f"Timeout waiting for {handle.task_id}")
     case Err(read_error):
@@ -171,7 +171,7 @@ match handle.get():
         # depending on your use case, either pass to a error handler ( prefer this when possible )
         your_error_handler(task_error)
         # or return/raise to propagate
-        return task_error.error_code
+        return task_error.code
     case Err(read_error):
         your_read_error_handler(read_error)
         return read_error.code

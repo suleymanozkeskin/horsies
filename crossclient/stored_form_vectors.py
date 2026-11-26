@@ -307,7 +307,7 @@ def task_error_of(notation: object) -> TaskError:
     match fields.get('sub_workflow'):
         case None:
             return TaskError(
-                error_code=code,
+                code=code,
                 message=message,
                 data=cast('JsonValue', fields['data']),
                 exception=exception,
@@ -315,7 +315,7 @@ def task_error_of(notation: object) -> TaskError:
         case sub_workflow:
             sub = _members(sub_workflow, 'sub_workflow')
             return SubWorkflowError(
-                error_code=code,
+                code=code,
                 message=message,
                 data=cast('JsonValue', fields['data']),
                 exception=exception,
