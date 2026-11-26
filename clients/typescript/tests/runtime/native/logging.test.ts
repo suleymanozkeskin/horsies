@@ -8,9 +8,13 @@ import { describe, test } from "node:test";
 
 import { configureLogging } from "../../../horsies/src/logging.ts";
 import type { LogRecord } from "../../../horsies/src/logging.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { runChildCase } from "./child-process.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** The longest time a child case may take. */
 const CHILD_CASE_BOUND_MS = 30_000;
