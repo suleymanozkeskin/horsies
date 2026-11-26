@@ -9,6 +9,7 @@ import type {
   NodeResultRead,
   NodeResultsRead,
   NodesRead,
+  OutputNodeFact,
   WorkflowStartOutcome,
   WorkflowStatusRead,
   WorkflowWaitRead,
@@ -32,6 +33,8 @@ export type CoreScript = {
   readonly wait?: WorkflowWaitRead;
   readonly nodeResult?: NodeResultRead;
   readonly role?: ProcessRoleName;
+  /** The stored output node of each workflow id; an id left out has no output node. */
+  readonly outputNodes?: ReadonlyMap<string, OutputNodeFact>;
 };
 
 /** A fake core with its recorded calls. */
@@ -88,6 +91,7 @@ export function fakeCore(script: CoreScript = {}): FakeCore {
     },
     nodeResult: async () => record("nodeResult", script.nodeResult ?? { kind: "notReady" }),
     processRole: async () => record("processRole", script.role ?? "RUNS_NO_TASK_BODIES"),
+    outputNode: async (workflowId) => record("outputNode", script.outputNodes?.get(workflowId) ?? { kind: "noOutput" }),
   };
 }
 

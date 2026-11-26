@@ -11,6 +11,7 @@ import { writtenJsonText } from "../../../horsies/src/codec/json-text.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { WorkflowId } from "../../../horsies/src/contract/ids.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
+import type { WorkflowWaitRead } from "../../../horsies/src/native/workflows/addon.ts";
 import { childSpecAnswer } from "../../../horsies/src/workflow/child-spec.ts";
 import { workflowContextOf } from "../../../horsies/src/workflow/context.ts";
 import { relayedWorkflowCore, serveWorkflowsSeatOperation } from "../../../horsies/src/workflow/core.ts";
@@ -82,7 +83,6 @@ function handle(script: CoreScript = {}, core: FakeCore = fakeCore(script)) {
     handle: workflowHandleOf<BuildReturn>({
       core,
       registry: registry(),
-      workflow: flow,
       workflowId: workflowId(),
       targets,
     }),
@@ -90,9 +90,10 @@ function handle(script: CoreScript = {}, core: FakeCore = fakeCore(script)) {
 }
 
 describe("WorkflowHandle.get", () => {
-  test("a completed workflow: the output node's value, read with the output kind", async () => {
+  test("a completed workflow: the value, read with the output kind of the stored output node's task", async () => {
     const { handle: wf } = handle({
       wait: { kind: "completed", result: { kind: "checked", text: okEnvelope('"seven"') } },
+      outputNodes: new Map([[WORKFLOW_ID, { kind: "task", taskName: "name" }]]),
     });
 
     assert.deepEqual(await wf.get({ timeoutMs: 10 }), { ok: true, value: { kind: "succeeded", value: "seven" } });
@@ -159,6 +160,88 @@ describe("WorkflowHandle.get", () => {
   });
 });
 
+describe("the read form of a stored result", () => {
+  const CHILD_ID = "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5c";
+  const completed = (text: string): WorkflowWaitRead => ({ kind: "completed", result: { kind: "checked", text } });
+
+  test("a sub-workflow output node: the child run's stored output node gives the form, and no build runs", async () => {
+    let builds = 0;
+
+    const counted = defineWorkflow({ name: "counted", definitionKey: "tests.counted.v1", params: {} }, (w) => {
+      builds += 1;
+
+      return { output: w.task(count, {}, { id: "count" }) };
+    });
+
+    const core = fakeCore({
+      wait: completed(okEnvelope("7")),
+      outputNodes: new Map([
+        [WORKFLOW_ID, { kind: "subWorkflow", childWorkflowId: { kind: "recorded", text: CHILD_ID } }],
+        [CHILD_ID, { kind: "task", taskName: "count" }],
+      ]),
+    });
+
+    const { handle: wf } = handle({}, core);
+
+    assert.deepEqual(await wf.get(), { ok: true, value: { kind: "succeeded", value: 7 } });
+    assert.equal(builds, 0);
+    assert.equal(counted.kind, "workflow");
+  });
+
+  test("a stored task name that the app does not list: taskNotListed, naming the name", async () => {
+    const { handle: wf } = handle({
+      wait: completed(okEnvelope("7")),
+      outputNodes: new Map([[WORKFLOW_ID, { kind: "task", taskName: "other.task" }]]),
+    });
+
+    assert.deepEqual(await wf.get(), { ok: false, error: { kind: "taskNotListed", taskName: "other.task" } });
+  });
+
+  test("a stored run with no output node: noOutputNode; an output index with no node: storedResultUnreadable", async () => {
+    const none = await handle({ wait: completed(okEnvelope("7")) }).handle.get();
+
+    const missing = await handle({
+      wait: completed(okEnvelope("7")),
+      outputNodes: new Map([[WORKFLOW_ID, { kind: "nodeMissing", taskIndex: 4 }]]),
+    }).handle.get();
+
+    assert.deepEqual(none, { ok: false, error: { kind: "noOutputNode" } });
+    assert(!missing.ok && missing.error.kind === "storedResultUnreadable");
+  });
+
+  test("resultFor of a sub-workflow node: its child run's stored output node gives the form", async () => {
+    const core = fakeCore({
+      nodeResult: { kind: "stored", result: { kind: "checked", text: okEnvelope("8") } },
+      nodes: {
+        kind: "nodes",
+        nodes: [
+          {
+            nodeId: { kind: "recorded", text: "child" },
+            index: 0,
+            name: "child",
+            status: "COMPLETED",
+            result: { kind: "none" },
+            startedAt: { kind: "notRecorded" },
+            completedAt: { kind: "notRecorded" },
+            subWorkflowId: { kind: "recorded", text: CHILD_ID },
+            subWorkflowSummary: { kind: "none" },
+          },
+        ],
+      },
+      outputNodes: new Map([[CHILD_ID, { kind: "task", taskName: "count" }]]),
+    });
+
+    const wf = workflowHandleOf<BuildReturn>({
+      core,
+      registry: registry(),
+      workflowId: workflowId(),
+      targets: new Map([["child", { kind: "subWorkflow", workflow: child } as const]]),
+    });
+
+    assert.deepEqual(await wf.resultFor("child"), { ok: true, value: { kind: "succeeded", value: 8 } });
+  });
+});
+
 describe("WorkflowHandle.resultFor", () => {
   test("a stored result is read with the node's contract", async () => {
     const read = await handle({
@@ -199,7 +282,6 @@ describe("WorkflowHandle.resultFor", () => {
     const byId = workflowHandleByIdOf<BuildReturn>({
       core,
       registry: registry(),
-      workflow: flow,
       workflowId: workflowId(),
       targets: new Map(),
     });
@@ -335,7 +417,6 @@ describe("the seat operations", () => {
     const wf = workflowHandleOf<BuildReturn>({
       core,
       registry: registry(),
-      workflow: flow,
       workflowId: workflowId(),
       targets: new Map(),
     });

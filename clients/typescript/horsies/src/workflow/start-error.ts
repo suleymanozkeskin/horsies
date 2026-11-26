@@ -33,8 +33,6 @@ export type WorkflowStartError<R extends BuildReturn> =
 
 /** What a retry of a failed start sends again: the same text, id, sent instant, and the nodes for typed reads. */
 export type StartRetry = {
-  /** The workflow contract: the handle of the retry reads its output with it. */
-  readonly workflow: object;
   readonly specData: string;
   readonly workflowId: string;
   readonly workflowName: string;

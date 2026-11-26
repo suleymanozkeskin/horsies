@@ -77,6 +77,20 @@ static NODE_RESULT: TypedStatement = TypedStatement::new(
     &[ParameterType::Uuid, ParameterType::Text],
 );
 
+/// The output node of one workflow, from the workflow row: no row means no workflow has the id;
+/// a NULL `output_task_index` means the workflow stores no output node; a NULL `task_name` with
+/// an index means no node row has that index.
+static WORKFLOW_OUTPUT_NODE: TypedStatement = TypedStatement::new(
+    "workflow_output_node",
+    "SELECT w.output_task_index, wt.task_name, wt.is_subworkflow, wt.sub_workflow_id
+     FROM horsies_workflows w
+     LEFT JOIN horsies_workflow_tasks wt
+            ON wt.workflow_id = w.id
+           AND wt.task_index = w.output_task_index
+     WHERE w.id = $1",
+    &[ParameterType::Uuid],
+);
+
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
@@ -105,6 +119,27 @@ pub struct StoredNode {
     pub sub_workflow_summary: Option<String>,
     pub is_subworkflow: bool,
     pub sub_definition_key: Option<String>,
+}
+
+/// The output node of one workflow, as stored: the facts with which a client finds the declared
+/// type of the workflow's result (the output node's task, or the child workflow of a
+/// sub-workflow output node).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputNodeRead {
+    /// No workflow has the id.
+    WorkflowAbsent,
+    /// The workflow stores no output node (`NO_OUTPUT`).
+    NoOutput,
+    /// The output index names no node row of the workflow: stored data that breaks the
+    /// workflow's own spec.
+    NodeMissing { task_index: i32 },
+    /// The output node runs the task `task_name`.
+    Task { task_index: i32, task_name: String },
+    /// The output node runs a child workflow; its id once the child started.
+    SubWorkflow {
+        task_index: i32,
+        child_workflow_id: Option<Uuid>,
+    },
 }
 
 /// The node rows of one workflow.
@@ -295,6 +330,41 @@ pub async fn read_workflow_node_result(
             Some(node_id.to_owned()),
         )?)),
     }
+}
+
+/// The output node of `workflow_id`: one read on the main core pool of `broker`.
+///
+/// Errors: [`WorkflowError::Broker`] for a failed read; [`WorkflowError::StepContract`] for a row
+/// that does not decode.
+pub async fn read_workflow_output_node(
+    broker: &PostgresBroker,
+    workflow_id: Uuid,
+) -> Result<OutputNodeRead, WorkflowError> {
+    match first_row(read_rows(broker, &WORKFLOW_OUTPUT_NODE, workflow_id).await?) {
+        None => Ok(OutputNodeRead::WorkflowAbsent),
+        Some(row) => output_node_of(&row),
+    }
+}
+
+/// The output node of a row of [`WORKFLOW_OUTPUT_NODE`]. Pure.
+fn output_node_of(row: &Row) -> Result<OutputNodeRead, WorkflowError> {
+    let index: Option<i32> = read_column(row, &WORKFLOW_OUTPUT_NODE, "output_task_index")?;
+    let Some(task_index) = index else {
+        return Ok(OutputNodeRead::NoOutput);
+    };
+    let task_name: Option<String> = read_column(row, &WORKFLOW_OUTPUT_NODE, "task_name")?;
+    let is_subworkflow: Option<bool> = read_column(row, &WORKFLOW_OUTPUT_NODE, "is_subworkflow")?;
+    Ok(match (task_name, is_subworkflow) {
+        (Some(_), Some(true)) => OutputNodeRead::SubWorkflow {
+            task_index,
+            child_workflow_id: read_column(row, &WORKFLOW_OUTPUT_NODE, "sub_workflow_id")?,
+        },
+        (Some(task_name), Some(false)) => OutputNodeRead::Task {
+            task_index,
+            task_name,
+        },
+        (None, _) | (Some(_), None) => OutputNodeRead::NodeMissing { task_index },
+    })
 }
 
 /// The stored status text of `workflow_id`, or `None` when no workflow has
@@ -904,5 +974,145 @@ mod wait_tests {
             .execute(&crate::test_support::migrated_pool().await)
             .await
             .expect("cleanup malformed expired workflow");
+    }
+}
+
+#[cfg(test)]
+mod output_node_tests {
+    //! The stored output node of a workflow (`read_workflow_output_node`): no workflow, no
+    //! output index, an index with no node row, a task node, and a sub-workflow node before its
+    //! child started.
+    use super::*;
+    use crate::broker::postgres::PostgresBroker;
+    use crate::test_support::sql;
+
+    /// Insert a RUNNING workflow with `output` as its output index.
+    async fn insert_workflow(pool: &sql::TestPool, workflow_id: Uuid, output: Option<i32>) {
+        sql::query(
+            "INSERT INTO horsies_workflows (
+                id, name, status, on_error, output_task_index, definition_key, depth,
+                root_workflow_id, sent_at, created_at, started_at, updated_at
+            ) VALUES ($1, 'output_wf', 'RUNNING', 'fail', $2, 'test.output.v1', 0, $1,
+                      NOW(), NOW(), NOW(), NOW())",
+        )
+        .bind(workflow_id)
+        .bind(output)
+        .execute(pool)
+        .await
+        .expect("insert workflow");
+    }
+
+    /// Insert a PENDING task node `task_name` at `task_index`.
+    async fn insert_task_node(
+        pool: &sql::TestPool,
+        workflow_id: Uuid,
+        task_index: i32,
+        task_name: &str,
+    ) {
+        sql::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, max_retries, execution, retention_class_key, created_at
+            ) VALUES ('NONE', $1, $2, $3, $4, $5, '{}',
+                      'default', 100, '{}', FALSE, 'all',
+                      'PENDING', FALSE, 0, 'ISOLATED', 'standard_30d', NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workflow_id)
+        .bind(task_index)
+        .bind(format!("node_{task_index}"))
+        .bind(task_name)
+        .execute(pool)
+        .await
+        .expect("insert task node");
+    }
+
+    /// Insert a PENDING sub-workflow node at `task_index`, whose child has not started.
+    async fn insert_sub_workflow_node(pool: &sql::TestPool, workflow_id: Uuid, task_index: i32) {
+        sql::query(
+            "INSERT INTO horsies_workflow_tasks (
+                downstream_subworkflow, id, workflow_id, task_index, node_id, task_name, input,
+                queue_name, priority, dependencies, allow_failed_deps, join_type,
+                status, is_subworkflow, sub_workflow_params, sub_definition_key, created_at
+            ) VALUES ('NONE', $1, $2, $3, $4, 'child_wf', '{}',
+                      'default', 100, '{}', FALSE, 'all',
+                      'PENDING', TRUE, 'NOT_GIVEN', 'test.child.v1', NOW())",
+        )
+        .bind(Uuid::new_v4())
+        .bind(workflow_id)
+        .bind(task_index)
+        .bind(format!("node_{task_index}"))
+        .execute(pool)
+        .await
+        .expect("insert sub-workflow node");
+    }
+
+    async fn delete_workflow(pool: &sql::TestPool, workflow_id: Uuid) {
+        for statement in [
+            "DELETE FROM horsies_workflow_tasks WHERE workflow_id = $1",
+            "DELETE FROM horsies_workflows WHERE id = $1",
+        ] {
+            sql::query(statement)
+                .bind(workflow_id)
+                .execute(pool)
+                .await
+                .expect("delete the workflow rows");
+        }
+    }
+
+    #[tokio::test]
+    async fn each_stored_output_has_its_read() {
+        let pool = crate::test_support::migrated_pool().await;
+        let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+        broker.ensure_schema_initialized().await.expect("schema");
+
+        let absent = read_workflow_output_node(&broker, Uuid::new_v4()).await;
+        assert_eq!(
+            absent.expect("the read runs"),
+            OutputNodeRead::WorkflowAbsent
+        );
+
+        let outputless = Uuid::new_v4();
+        insert_workflow(&pool, outputless, None).await;
+        let read = read_workflow_output_node(&broker, outputless).await;
+        assert_eq!(read.expect("the read runs"), OutputNodeRead::NoOutput);
+
+        let missing = Uuid::new_v4();
+        insert_workflow(&pool, missing, Some(3)).await;
+        let read = read_workflow_output_node(&broker, missing).await;
+        assert_eq!(
+            read.expect("the read runs"),
+            OutputNodeRead::NodeMissing { task_index: 3 }
+        );
+
+        let task = Uuid::new_v4();
+        insert_workflow(&pool, task, Some(1)).await;
+        insert_task_node(&pool, task, 0, "app.first").await;
+        insert_task_node(&pool, task, 1, "app.charge").await;
+        let read = read_workflow_output_node(&broker, task).await;
+        assert_eq!(
+            read.expect("the read runs"),
+            OutputNodeRead::Task {
+                task_index: 1,
+                task_name: "app.charge".to_owned()
+            }
+        );
+
+        let sub_workflow = Uuid::new_v4();
+        insert_workflow(&pool, sub_workflow, Some(0)).await;
+        insert_sub_workflow_node(&pool, sub_workflow, 0).await;
+        let read = read_workflow_output_node(&broker, sub_workflow).await;
+        assert_eq!(
+            read.expect("the read runs"),
+            OutputNodeRead::SubWorkflow {
+                task_index: 0,
+                child_workflow_id: None
+            }
+        );
+
+        for workflow_id in [outputless, missing, task, sub_workflow] {
+            delete_workflow(&pool, workflow_id).await;
+        }
     }
 }

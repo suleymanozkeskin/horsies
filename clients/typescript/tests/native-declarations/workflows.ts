@@ -14,6 +14,7 @@ import type {
   HandleDone,
   NativeClientSpec,
   NodeResultRead,
+  OutputNodeFact,
   NodeResultsRead,
   NodesRead,
   SourceRegistration,
@@ -48,37 +49,35 @@ export const registerChildSpecSourceMatches: SameFunction<
   WorkflowsAddon["registerChildSpecSource"]
 > = true;
 
-export const startWorkflowMatches: SameFunction<typeof Generated.startWorkflow, WorkflowsAddon["startWorkflow"]> =
-  true;
+export const startWorkflowMatches: SameFunction<typeof Generated.startWorkflow, WorkflowsAddon["startWorkflow"]> = true;
 
-export const workflowStatusMatches: SameFunction<
-  typeof Generated.workflowStatus,
-  WorkflowsAddon["workflowStatus"]
-> = true;
+export const workflowStatusMatches: SameFunction<typeof Generated.workflowStatus, WorkflowsAddon["workflowStatus"]> =
+  true;
 
 export const workflowNodeResultsMatches: SameFunction<
   typeof Generated.workflowNodeResults,
   WorkflowsAddon["workflowNodeResults"]
 > = true;
 
-export const workflowNodesMatches: SameFunction<typeof Generated.workflowNodes, WorkflowsAddon["workflowNodes"]> =
-  true;
+export const workflowNodesMatches: SameFunction<typeof Generated.workflowNodes, WorkflowsAddon["workflowNodes"]> = true;
 
 export const cancelWorkflowMatches: SameFunction<typeof Generated.cancelWorkflow, WorkflowsAddon["cancelWorkflow"]> =
   true;
 
-export const pauseWorkflowMatches: SameFunction<typeof Generated.pauseWorkflow, WorkflowsAddon["pauseWorkflow"]> =
-  true;
+export const pauseWorkflowMatches: SameFunction<typeof Generated.pauseWorkflow, WorkflowsAddon["pauseWorkflow"]> = true;
 
 export const resumeWorkflowMatches: SameFunction<typeof Generated.resumeWorkflow, WorkflowsAddon["resumeWorkflow"]> =
   true;
 
-export const waitWorkflowEndMatches: SameFunction<
-  typeof Generated.waitWorkflowEnd,
-  WorkflowsAddon["waitWorkflowEnd"]
-> = true;
+export const waitWorkflowEndMatches: SameFunction<typeof Generated.waitWorkflowEnd, WorkflowsAddon["waitWorkflowEnd"]> =
+  true;
 
 export const nodeResultMatches: SameFunction<typeof Generated.nodeResult, WorkflowsAddon["nodeResult"]> = true;
+
+export const workflowOutputNodeMatches: SameFunction<
+  typeof Generated.workflowOutputNode,
+  WorkflowsAddon["workflowOutputNode"]
+> = true;
 
 // The class, method by method, and its member set: no method on one side only.
 export const workflowNameMatches: SameFunction<
@@ -108,3 +107,4 @@ export const handleDoneMatches: Mutual<Generated.HandleDone, HandleDone> = true;
 export const handleChangeMatches: Mutual<Generated.HandleChange, HandleChange> = true;
 export const waitReadMatches: Mutual<Generated.WorkflowWaitRead, WorkflowWaitRead> = true;
 export const nodeResultReadMatches: Mutual<Generated.NodeResultRead, NodeResultRead> = true;
+export const outputNodeFactMatches: Mutual<Generated.OutputNodeFact, OutputNodeFact> = true;
