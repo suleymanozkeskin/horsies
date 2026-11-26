@@ -165,13 +165,13 @@ fn log_parent_not_set(run: &BodyRun<'_>, error: &SetParentError, logged: &Atomic
     }
 }
 
-/// Set the status of the attempt span by how its body ended: OK for a
+/// Set the status of the attempt span by how its body ended: unset for a
 /// returned value; ERROR with `error.type` for an error, a panic
 /// (`UNHANDLED_EXCEPTION`), a run past its deadline (`TASK_TIMEOUT`) and a
 /// run that an operator cancelled (`TASK_CANCELLED`).
 pub(super) fn close_attempt_span(span: &tracing::Span, end: &BodyOutcome<'_>) {
     match end {
-        BodyOutcome::Returned => span.set_status(Status::Ok),
+        BodyOutcome::Returned => {}
         BodyOutcome::Failed { error_code } => mark_error(span, error_code.to_string()),
         BodyOutcome::TimedOut => mark_error(span, OutcomeCode::TaskTimeout.to_string()),
         BodyOutcome::Cancelled => mark_error(span, OutcomeCode::TaskCancelled.to_string()),

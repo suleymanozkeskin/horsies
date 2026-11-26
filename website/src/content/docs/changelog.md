@@ -398,6 +398,11 @@ there is no migration contract between pre-1.0 versions.
   10000). Before, its stored error had no `data`. A reader that reads
   `data.field` now reads it for the rows of each client. The Python child
   writes the same `data` as before.
+- **The Rust client leaves the status of a successful attempt span unset.**
+  The span of a task attempt that returned a value had the status OK. It
+  now has no status, as the Python and TypeScript clients write it and as
+  the OpenTelemetry specification asks of instrumentation libraries. The
+  status ERROR with `error.type` for a failure is unchanged.
 - **The Python and Rust web handlers refuse a trusted identity header with a
   blank comma-separated member.** A request with two copies of the header,
   one blank, reaches the handler as `alice, `. `TrustedHeader` now refuses
