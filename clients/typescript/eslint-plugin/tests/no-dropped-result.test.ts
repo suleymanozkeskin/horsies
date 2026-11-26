@@ -47,6 +47,13 @@ ruleTester.run("no-dropped-result", noDroppedResult, {
     },
     { name: "a returned Result", code: `${header}export function send() { return app.send(report, { n: 1 }); }` },
     { name: "an assigned Result", code: `${header}let outcome; outcome = await handle.get();\nexport { outcome };` },
+    { name: "void discards a Promise.all of sends", code: `${header}void (await Promise.all([app.send(report, { n: 1 }), app.send(report, { n: 2 })]));` },
+    {
+      name: "an array of Results that is used",
+      code: `${header}const reads = await Promise.all([handle.get(), handle.get()]);\nconsole.log(reads.length);`,
+    },
+    { name: "an array of values that are not Results", code: `declare const numbers: number[];\nnumbers.map((n) => n + 1);` },
+    { name: "a tuple of values that are not Results", code: `declare function pair(): [number, string];\npair();` },
     { name: "a value that is not a Result", code: `${header}console.log(parseCount("1"));` },
     {
       name: "the shape of a Result without the brand",
@@ -94,6 +101,41 @@ ruleTester.run("no-dropped-result", noDroppedResult, {
       name: "a dropped union with a Result member",
       code: `${header}flag ? parseCount("1") : undefined;`,
       errors: [{ messageId: "droppedResult" }],
+    },
+    {
+      name: "a dropped tuple of Results",
+      code: `${header}declare const pair: [Result<number, "a">, Result<string, "b">];\npair;`,
+      errors: [{ messageId: "droppedResult" }],
+    },
+    {
+      name: "a dropped array of Results",
+      code: `${header}declare const many: Result<number, "a">[];\nmany;`,
+      errors: [{ messageId: "droppedResult" }],
+    },
+    {
+      name: "a dropped readonly array of Results",
+      code: `${header}declare const many: readonly Result<number, "a">[];\nmany;`,
+      errors: [{ messageId: "droppedResult" }],
+    },
+    {
+      name: "a dropped array of arrays of Results",
+      code: `${header}declare const grid: Result<number, "a">[][];\ngrid;`,
+      errors: [{ messageId: "droppedResult" }],
+    },
+    {
+      name: "a dropped awaited Promise.all of sends",
+      code: `${header}await Promise.all([app.send(report, { n: 1 }), app.send(report, { n: 2 })]);`,
+      errors: [{ messageId: "droppedResult" }],
+    },
+    {
+      name: "a dropped awaited array of reads",
+      code: `${header}declare const handles: TaskHandle<number, string>[];\nawait Promise.all(handles.map((each) => each.get()));`,
+      errors: [{ messageId: "droppedResult" }],
+    },
+    {
+      name: "a dropped Promise.all of sends that is not awaited",
+      code: `${header}Promise.all([app.send(report, { n: 1 }), app.send(report, { n: 2 })]);`,
+      errors: [{ messageId: "droppedPromisedResult" }],
     },
     {
       name: "the brand of a second copy of horsies",

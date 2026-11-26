@@ -15,7 +15,8 @@ const RESULT_BRAND = "horsies.Result";
 
 /**
  * The horsies `Result` that a value holds:
- * - `result`: the value is a `Result`, or a union with a `Result` member.
+ * - `result`: the value is a `Result`, a union with a `Result` member, or an array or tuple whose element type is
+ *   one of these (`Result[]`, `[Result, Result]`), to the depth `MAX_COLLECTION_DEPTH`.
  * - `promisedResult`: the value is a `Promise` (or another thenable) whose awaited value is a `Result`.
  * - `noResult`: neither.
  */
@@ -46,11 +47,27 @@ function isBrandProperty(checker: ts.TypeChecker, property: ts.Symbol): boolean 
   return valueType.isStringLiteral() && valueType.value === RESULT_BRAND;
 }
 
-/** A member of `type` (the type itself, or a member of its union) has the brand property. Pure. */
-function carriesBrand(checker: ts.TypeChecker, type: ts.Type): boolean {
+/** The deepest nesting of arrays and tuples that the rule reads for a `Result` (`Result[][]` is depth 2). */
+const MAX_COLLECTION_DEPTH = 3;
+
+/** The type has the brand property. Pure. */
+function hasBrandProperty(checker: ts.TypeChecker, type: ts.Type): boolean {
+  return checker.getPropertiesOfType(type).some((property) => isBrandProperty(checker, property));
+}
+
+/** A member of `type` (the type itself, or a member of its union) has the brand property, or is a collection of such. Pure. */
+function carriesBrand(checker: ts.TypeChecker, type: ts.Type, depth: number = 0): boolean {
   const members = type.isUnion() ? type.types : [type];
 
-  return members.some((member) => checker.getPropertiesOfType(member).some((property) => isBrandProperty(checker, property)));
+  return members.some((member) => {
+    if (hasBrandProperty(checker, member)) {
+      return true;
+    }
+
+    const isCollection = checker.isArrayType(member) || checker.isTupleType(member);
+
+    return isCollection && depth < MAX_COLLECTION_DEPTH && checker.getTypeArguments(member as ts.TypeReference).some((element) => carriesBrand(checker, element, depth + 1));
+  });
 }
 
 /** The horsies `Result` that a value of `type` holds. Pure. */
