@@ -10,16 +10,13 @@ import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";
 export const ping = defineTask({ name: "ping", input: {}, output: h.int() });
 
 /** A workflow with no params and one node. */
-export const plain = defineWorkflow(
-  { name: "plain", definitionKey: "tests.plain.v1", output: h.int(), params: {} },
-  (w) => ({
-    output: w.task(ping, {}, { id: "ping" }),
-  }),
-);
+export const plain = defineWorkflow({ name: "plain", definitionKey: "tests.plain.v1", params: {} }, (w) => ({
+  output: w.task(ping, {}, { id: "ping" }),
+}));
 
 /** A workflow with no params whose build has a duplicate node id. */
 export const duplicateIds = defineWorkflow(
-  { name: "duplicate", definitionKey: "tests.duplicate.v1", output: h.int(), params: {} },
+  { name: "duplicate", definitionKey: "tests.duplicate.v1", params: {} },
   (w) => {
     w.task(ping, {}, { id: "same" });
 

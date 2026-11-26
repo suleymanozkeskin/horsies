@@ -7,7 +7,7 @@ declare const app: Horsies;
 
 const count = defineTask({ name: "count", input: {}, output: h.int() });
 
-const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.int(), params: { n: h.int() }, checkCases: [{ n: 1 }] }, (w) => {
+const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", params: { n: h.int() }, checkCases: [{ n: 1 }] }, (w) => {
   const counted = w.task(count, {}, { id: "count" });
 
   w.task(count, {}, { id: "hidden", waitsFor: [counted] });

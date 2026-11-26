@@ -37,7 +37,6 @@ const fulfil = defineWorkflow(
   {
     name: "fulfil",
     definitionKey: "shop.fulfil.v1",
-    output: Receipt,
     params: { orderId: h.uuid() },
     checkCases: [{ orderId: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b" }],
   },

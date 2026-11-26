@@ -87,27 +87,15 @@ export function checkNodes(
   return first === undefined ? ok({ nodes: checked, targets }) : err([first, ...rest]);
 }
 
-/**
- * What a node gives to an `h.resultOf` parameter and as an output: the output kind of a listed task, or the declared
- * output of a listed child workflow; not known for a contract that the app does not list (a finding of its own).
- */
-export function sourceOutputOf(node: RecordedNode, view: SpecAppView): SourceOutput {
-  switch (node.kind) {
-    case "task": {
-      const listed = view.task(node.contract);
-
-      return listed.kind === "listed" ? { kind: "known", output: listed.task.compiled.output } : { kind: "notKnown" };
-    }
-
-    case "subWorkflow": {
-      const listed = view.workflow(node.workflow);
-
-      return listed.kind === "listed" ? { kind: "known", output: listed.output } : { kind: "notKnown" };
-    }
-
-    default:
-      return unreachable(node, "sourceOutputOf");
+/** What a node gives to an `h.resultOf` parameter: the output kind of a listed task, else not known here. */
+function sourceOutputOf(node: RecordedNode, view: SpecAppView): SourceOutput {
+  if (node.kind === "subWorkflow") {
+    return { kind: "notKnown" };
   }
+
+  const listed = view.task(node.contract);
+
+  return listed.kind === "listed" ? { kind: "known", output: listed.task.compiled.output } : { kind: "notKnown" };
 }
 
 type TaskRecordedNode = Extract<RecordedNode, { readonly kind: "task" }>;

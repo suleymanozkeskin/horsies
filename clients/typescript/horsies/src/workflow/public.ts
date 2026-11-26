@@ -2,7 +2,6 @@
 
 export {
   type AnyWorkflowContract,
-  type BuildReturnOf,
   type CheckCases,
   defineWorkflow,
   type OnError,

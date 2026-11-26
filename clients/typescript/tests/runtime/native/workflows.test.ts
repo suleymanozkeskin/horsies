@@ -18,7 +18,6 @@ const hello = defineWorkflow(
   {
     name: "end_to_end_hello",
     definitionKey: "tests.end_to_end_hello.v1",
-    output: h.string(),
     params: { who: h.string() },
     checkCases: [{ who: "a" }],
   },
@@ -26,7 +25,7 @@ const hello = defineWorkflow(
 );
 
 const parent = defineWorkflow(
-  { name: "end_to_end_parent", definitionKey: "tests.end_to_end_parent.v1", output: h.string(), params: {} },
+  { name: "end_to_end_parent", definitionKey: "tests.end_to_end_parent.v1", params: {} },
   (w) => ({
     output: w.subWorkflow(hello, { who: "child" }, { id: "child" }),
   }),

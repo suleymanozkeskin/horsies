@@ -9,7 +9,7 @@ const ping = defineTask({ name: "ping", input: { n: h.int() }, output: h.null() 
 export const flow = defineWorkflow(
   {
     name: "flow",
-    definitionKey: "tests.flow.v1", output: h.null(),
+    definitionKey: "tests.flow.v1",
     params: { n: h.int() },
     checkCases: [{ n: "seven" }],
   },

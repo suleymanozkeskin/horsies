@@ -53,7 +53,6 @@ export const fulfilOrder = defineWorkflow(
   {
     name: "fulfil_order",
     definitionKey: "shop.fulfil_order.v1",
-    output: Receipt,
     params: { order: Order },
     onError: "fail",
     checkCases: [{ order: sampleOrder }],
@@ -79,7 +78,6 @@ export const shipping = defineWorkflow(
   {
     name: "shipping",
     definitionKey: "shop.shipping.v1",
-    output: h.string(),
     params: { order: Order },
     checkCases: [{ order: sampleOrder }],
   },
@@ -98,7 +96,6 @@ const syncRegion = defineWorkflow(
   {
     name: "sync_region",
     definitionKey: "shop.sync_region.v1",
-    output: h.int(),
     params: { region: h.string() },
     checkCases: [{ region: "eu" }],
   },
@@ -107,34 +104,25 @@ const syncRegion = defineWorkflow(
 
 const buildReport = defineTask({ name: "build_report", input: {}, output: h.string() });
 
-export const nightly = defineWorkflow(
-  { name: "nightly", definitionKey: "shop.nightly.v1", output: h.string(), params: {} },
-  (w) => {
-    const regions = ["eu", "us", "apac"].map((region) =>
-      w.subWorkflow(syncRegion, { region }, { id: `sync-${region}` }),
-    );
+export const nightly = defineWorkflow({ name: "nightly", definitionKey: "shop.nightly.v1", params: {} }, (w) => {
+  const regions = ["eu", "us", "apac"].map((region) => w.subWorkflow(syncRegion, { region }, { id: `sync-${region}` }));
+  const report = w.task(buildReport, {}, { id: "report", waitsFor: regions, allowFailedDeps: true });
 
-    const report = w.task(buildReport, {}, { id: "report", waitsFor: regions, allowFailedDeps: true });
+  expectType<Equal<(typeof regions)[number], NodeRef<number, string, `sync-${string}`>>>();
 
-    expectType<Equal<(typeof regions)[number], NodeRef<number, string, `sync-${string}`>>>();
-
-    return { output: report };
-  },
-);
+  return { output: report };
+});
 
 /** A node-fed parameter declared optional runs under an any join. */
 const tally = defineTask({ name: "tally", input: { first: h.resultOf(h.int()).optional() }, output: h.int() });
 
-export const anyJoin = defineWorkflow(
-  { name: "any_join", definitionKey: "shop.any_join.v1", output: h.int(), params: {} },
-  (w) => {
-    const one = w.task(pickCarrier, {}, { id: "one" });
-    const count = w.task(quoteShipping, { carrier: "x", order: sampleOrder }, { id: "count" });
-    const summed = w.task(tally, { first: count }, { id: "sum", waitsFor: [one], join: { kind: "any" } });
+export const anyJoin = defineWorkflow({ name: "any_join", definitionKey: "shop.any_join.v1", params: {} }, (w) => {
+  const one = w.task(pickCarrier, {}, { id: "one" });
+  const count = w.task(quoteShipping, { carrier: "x", order: sampleOrder }, { id: "count" });
+  const summed = w.task(tally, { first: count }, { id: "sum", waitsFor: [one], join: { kind: "any" } });
 
-    return { output: summed };
-  },
-);
+  return { output: summed };
+});
 
 /** The typed set of resultFor: the nodes of the returned object. */
 type NodesOf<W> = W extends WorkflowContract<ParameterSchemas, infer R> ? ReturnedNodes<R>["id"] : never;
