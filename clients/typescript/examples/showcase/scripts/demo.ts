@@ -1,5 +1,5 @@
-// The bounded run of the showcase: `seed`, one worker, each scenario in turn, the wait until no task is live, the
-// report, and the stop of the worker. `scripts/run.sh` runs it under the watchdog. Every step is the entry of the
+// The bounded run of the showcase: `seed`, one worker and one scheduler, each scenario in turn, the stop of the
+// scheduler, the wait until no task is live, the report, and the stop of the worker. `scripts/run.sh` runs it under the watchdog. Every step is the entry of the
 // showcase in a process of its own, as an operator runs it.
 //
 // Exit code: 0 when every step passed and the worker stopped after its drain; 1 otherwise.
@@ -79,14 +79,22 @@ async function drain(app: Horsies): Promise<Result<void, string>> {
   return err(`tasks are still live after ${String(DRAIN_WAIT_MS / 1_000)} s`);
 }
 
-/** The scenarios, the drain and the report, with `worker` running. */
-async function steps(app: Horsies, env: Readonly<Record<string, string>>): Promise<Result<void, string>> {
+/** The scenarios with `scheduler` running, the stop of the scheduler, the drain and the report. */
+async function steps(app: Horsies, scheduler: EntryProcess, env: Readonly<Record<string, string>>): Promise<Result<void, string>> {
   for (const args of SCENARIO_STEPS) {
     const ran = await step(args, env);
 
     if (!ran.ok) {
       return ran;
     }
+  }
+
+  const schedulerStop = await stopEntry(scheduler);
+
+  say(`\nscheduler stop: ${schedulerStop}`);
+
+  if (schedulerStop !== "exited" || scheduler.child.exitCode !== 0) {
+    return err(`the scheduler did not stop after its run:\n${logTail(scheduler, LOG_TAIL_LINES)}`);
   }
 
   const drained = await drain(app);
@@ -123,7 +131,11 @@ async function main(): Promise<number> {
   say(`\n$ acme worker --profile ${WORKER_PROFILE} (in the background)`);
 
   const worker: EntryProcess = startEntry(["worker", "--profile", WORKER_PROFILE], env);
-  const ran = await steps(built.value.app, env);
+
+  say("$ acme scheduler (in the background)");
+
+  const scheduler: EntryProcess = startEntry(["scheduler"], env);
+  const ran = await steps(built.value.app, scheduler, env);
   const stopped = await stopEntry(worker);
 
   say(`\nworker stop: ${stopped}`);

@@ -2,11 +2,13 @@
 
 The Acme Clothing application of the Rust showcase (`clients/rust/examples/showcase/`) on the TypeScript client of
 horsies. It runs on Node 26 and on Bun 1.4. It shows typed contracts and their implementations, a worker profile with
-isolated and shared async children, workflows with a sub-workflow, a quorum join and a pause, deterministic business
-faults, an operator cancel, a rerun in the app's own transaction, and the monitoring reads and web page.
+isolated and shared async children, workflows with a sub-workflow, a quorum join and a pause, a table of typed
+schedules, deterministic business faults, an operator cancel, a rerun in the app's own transaction, and the monitoring
+reads and web page.
 
 `src/main.ts` is one entry for every process: the scenarios, the operator commands, and, through `cli.run(app)`, the
-worker, each worker child, `check`, `web` and `metrics`. The worker starts each child with the same entry.
+worker, each worker child, the scheduler, `check`, `web` and `metrics`. The worker starts each child with the same
+entry.
 
 The package is private (`"private": true`): it is never published.
 
@@ -25,13 +27,14 @@ cd examples/showcase
 alias acme='node --import "$PWD/../dev/source-package.ts" src/main.ts'   # Bun: bun --preload ... src/main.ts
 acme seed
 acme worker                 # in another terminal; SIGTERM or SIGINT stops it after the drain
+acme scheduler              # in another terminal: the schedule table
 acme steady --orders 10 --cover-errors
 acme report
 acme web --auth none        # the monitoring page at http://127.0.0.1:8600
 ```
 
-`scripts/run.sh <node|bun>` runs `seed`, a worker, every scenario, the wait until no task is live, and `report`, under
-the watchdog (2 GiB, 900 s).
+`scripts/run.sh <node|bun>` runs `seed`, a worker and a scheduler, every scenario, the stop of the scheduler, the wait
+until no task is live, and `report`, under the watchdog (2 GiB, 900 s).
 
 ### The database
 
@@ -76,6 +79,14 @@ what a sender needs, `src/tasks/` is what a worker runs.
 | 30% of returns | Item came back damaged | `DAMAGED_ITEM` | The returns workflow pauses; a resume writes the item off. |
 
 Each rate is a draw over a domain id (`src/simulate.ts`), so the same id gives the same fault in every run.
+
+## Schedules
+
+`src/schedules.ts` holds the schedule table of the Rust showcase: 32 schedules, 29 enabled, for the supplier feeds,
+the regional rollups, cache and search warm-ups, sales and retention work, reconciliation, marketing and catalog
+maintenance. Each schedule names its task contract, so its input typechecks against the task's input; the patterns are
+typed (`interval`, `hourly`, `daily`, `weekly`, `monthly`, `cron`), and `check` checks the table with the app.
+`acme scheduler` runs it; `report` shows each schedule's stored state.
 
 ## Scenarios
 
@@ -122,7 +133,6 @@ and the report through it. A test or the run starts each entry process with the 
 
 ## Differences from the Rust showcase
 
-- The schedules and the `scheduler` command wait for the schedules of the TypeScript client (#2529).
 - The restock workflow feeds `update_stock_levels` through three optional upstream parameters under a quorum join,
   because the workflow context does not reach a TypeScript body yet (#2460).
 - `flaky_export` crashes its own child on a drawn first attempt, so it runs in an isolated child.

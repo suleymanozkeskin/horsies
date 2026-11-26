@@ -301,5 +301,6 @@ describe("through a worker of the entry", () => {
     assert.match(text, /^workers: [1-9]\d* live$/mu);
     assert.match(text, /^failed tasks: \d+ in all/mu);
     assert.match(text, /^workflows \(the newest \d+\): (?!the read failed)/mu);
+    assert.match(text, /^schedules: \d+ with a stored state, \d+ slots sent$/mu);
   });
 });

@@ -133,6 +133,25 @@ export const CLEARANCE_PRICE_CENTS = 690;
 export const LOYALTY_POINTS_PER_EURO = 2;
 export const LOYALTY_LIFETIME_MAX = 9_000;
 
+/** The schedule table (`src/schedules.ts`): the first supplier feed interval, and the step between suppliers. */
+export const SUPPLIER_FEED_INTERVAL_SECONDS = 90;
+export const SUPPLIER_FEED_STEP_SECONDS = 30;
+
+/** The regions of the hourly rollups and of the cache warm-ups. */
+export const REGIONS: readonly [string, ...string[]] = ["eu-central", "uk", "turkiye", "nordics"];
+
+/** The minute of the first regional rollup, and the step between regions. */
+export const ROLLUP_FIRST_MINUTE = 10;
+export const ROLLUP_MINUTE_STEP = 5;
+export const CACHE_WARM_INTERVAL_MINUTES = 5;
+export const SEARCH_PREWARM_INTERVAL_MINUTES = 10;
+export const ABANDONED_CART_MINUTE = 5;
+export const RETENTION_AUDIT_DAYS = 30;
+export const SALES_ROLLUP_HOUR = 3;
+export const RECONCILE_MINUTE = 15;
+export const RECONCILE_HOUR_STEP = 4;
+export const PRICE_SYNC_MINUTE_STEP = 15;
+
 /** How often each worker writes its state snapshot. */
 export const WORKER_STATE_SNAPSHOT_INTERVAL_MS = 10_000;
 

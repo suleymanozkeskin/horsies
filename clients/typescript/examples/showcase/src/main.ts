@@ -1,8 +1,10 @@
 // The one entry of every process of the showcase: the producer scenarios, the operator commands, and, through
-// `cli.run(app)`, the worker, each of its children, the check, the monitoring server and the metrics server.
+// `cli.run(app)`, the worker, each of its children, the scheduler, the check, the monitoring server and the metrics
+// server.
 //
 //   <runtime> src/main.ts seed                     the Acme tables and the catalog
 //   <runtime> src/main.ts worker [--profile acme]  a worker; each child is this entry again, in child mode
+//   <runtime> src/main.ts scheduler                the schedule table (src/schedules.ts)
 //   <runtime> src/main.ts steady --orders 10       a scenario (see `SCENARIO_NAMES`)
 //   <runtime> src/main.ts report                   the monitoring and health reads
 //   <runtime> src/main.ts web --auth none          the monitoring web page and API on 127.0.0.1:8600
@@ -19,7 +21,7 @@ import { runScenario, SCENARIO_NAMES, scenarioNameOf } from "./scenarios/index.t
 import { processDatabaseSettings, settingsRefusedText } from "./settings.ts";
 
 /** The commands of `cli.run`, for the usage text. */
-const HORSIES_COMMANDS: readonly string[] = ["worker", "check", "web", "metrics"];
+const HORSIES_COMMANDS: readonly string[] = ["worker", "scheduler", "check", "web", "metrics"];
 
 /** The command that prints the usage text. */
 const HELP_COMMAND = "help";

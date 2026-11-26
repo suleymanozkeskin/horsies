@@ -1,6 +1,6 @@
 // `report [--failed N]`: the state of the showcase from the monitoring reads and the health reads of the app: the
 // database round trip, the workers and their ping replies, the tasks by status, the newest failed tasks with their
-// codes, and the workflow runs by name and status. Each read writes nothing but a schema install.
+// codes, the workflow runs by name and status, and the schedules with their sent slots. Each read writes nothing but a schema install.
 
 import { parseArgs } from "node:util";
 
@@ -8,6 +8,7 @@ import {
   type Horsies,
   MAX_WORKFLOW_RUNS_LIMIT,
   type Result,
+  type ScheduleStateInfo,
   type StatusCount,
   type TaskSummary,
   type WorkflowRunSummary,
@@ -68,6 +69,12 @@ function workflowRunsText(runs: readonly WorkflowRunSummary[]): string {
         .join(", ");
 }
 
+function schedulesText(states: readonly ScheduleStateInfo[]): string {
+  const sent = states.reduce((slots, state) => slots + state.runCount, 0);
+
+  return `${String(states.length)} with a stored state, ${String(sent)} slots sent`;
+}
+
 /** The lines of the report of `app`, with at most `failedRows` failed tasks. Effects: the reads. */
 export async function reportLines(app: Horsies, failedRows: number): Promise<readonly string[]> {
   const ping = await app.pingDatabase();
@@ -90,6 +97,7 @@ export async function reportLines(app: Horsies, failedRows: number): Promise<rea
   }
 
   lines.push(lineOf(`workflows (the newest ${String(WORKFLOW_RUNS_READ)})`, runs, workflowRunsText));
+  lines.push(lineOf("schedules", await app.monitoring.schedules(), schedulesText));
 
   return lines;
 }

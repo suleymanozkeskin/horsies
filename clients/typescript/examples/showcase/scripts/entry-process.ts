@@ -62,12 +62,16 @@ export type StopEnd = "exited" | "killedAfterWait";
 
 /** Start the entry with `args`, the environment of this process and `env`. Its output goes to a log file. */
 export function startEntry(args: readonly string[], env: Readonly<Record<string, string>>): EntryProcess {
+  return startEntryAt(SHOWCASE_ENTRY, args, env);
+}
+
+/** Start the entry file `entry` with `args`, as `startEntry` starts the showcase entry. */
+export function startEntryAt(entry: string, args: readonly string[], env: Readonly<Record<string, string>>): EntryProcess {
   const logPath = join(mkdtempSync(join(tmpdir(), "acme-showcase-")), "entry.log");
   const log = openSync(logPath, "a");
-
   const flags = startModuleFlags(process.env[START_MODULE_VARIABLE], runtimeOfProcess());
 
-  const child = spawn(process.execPath, [...flags, SHOWCASE_ENTRY, ...args], {
+  const child = spawn(process.execPath, [...flags, entry, ...args], {
     env: { ...process.env, ...env },
     stdio: ["ignore", log, log],
   });

@@ -1,5 +1,5 @@
-// The Acme app: its config, worker profile, task and workflow contracts, the store that each task child gets, and the
-// implementations.
+// The Acme app: its config, worker profile, task and workflow contracts, the store that each task child gets, the
+// implementations and the schedule table.
 //
 // Every process of the showcase builds the same app: the producer scenarios, the worker, each worker child, the
 // monitoring server and the check. Building it connects nothing: the app connects at its first operation.
@@ -9,6 +9,7 @@ import { Horsies, type HorsiesConfig, type NonEmpty, type Refusal, type Result, 
 import { ALL_TASKS } from "./contracts/index.ts";
 import { QUEUES } from "./contracts/policies.ts";
 import { err, ok } from "./result.ts";
+import { declareAcmeSchedules, type DeclareSchedules } from "./schedules.ts";
 import type { DatabaseSettings } from "./settings.ts";
 import { openStore } from "./store/connection.ts";
 import { implementAnalyticsTasks } from "./tasks/analytics.ts";
@@ -74,9 +75,13 @@ export function appConfig(url: string): HorsiesConfig {
 }
 
 /**
- * The app of the showcase database of `settings`: the provider opens one Acme store in each task child. No I/O.
+ * The app of the showcase database of `settings`, with the schedules that `declareSchedules` declares (the schedule
+ * table of the app when left out): the provider opens one Acme store in each task child. No I/O.
  */
-export function buildShowcase(settings: DatabaseSettings): Result<ShowcaseApp, AppRefused> {
+export function buildShowcase(
+  settings: DatabaseSettings,
+  declareSchedules: DeclareSchedules = declareAcmeSchedules,
+): Result<ShowcaseApp, AppRefused> {
   const created = Horsies.create(appConfig(settings.url));
 
   if (!created.ok) {
@@ -94,6 +99,7 @@ export function buildShowcase(settings: DatabaseSettings): Result<ShowcaseApp, A
   implementPromotionTasks(app, store);
   implementNotifyTasks(app);
   implementAnalyticsTasks(app);
+  declareSchedules(app);
 
   return ok({ app, store });
 }
