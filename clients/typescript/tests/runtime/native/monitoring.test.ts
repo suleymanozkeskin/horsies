@@ -8,10 +8,14 @@ import { describe, test } from "node:test";
 import type { CoreAccess } from "../../../horsies/src/app/core-access.ts";
 import { TaskId, WorkflowId } from "../../../horsies/src/contract/ids.ts";
 import { createMonitoringArea, type MonitoringArea } from "../../../horsies/src/monitoring/app-area.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { processCoreAddon } from "../../../horsies/src/native/process-core/addon.ts";
 import { nativeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** A database URL whose connect is refused at once: nothing listens on port 1. */
 const REFUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
