@@ -2,7 +2,7 @@
 // active where the body runs, so a span that user code makes in the body nests under it, also after an `await`.
 //
 // - The parent comes from the carrier that the send stored, by the parentage: `childOfSend` gives the extracted
-//   context as the parent; `linkedToSend` gives a root span with a link to the extracted span; a task with no
+//   context as the parent; `linkedToSend` gives a root span with a link to the extracted span, in the extracted context with no span; a task with no
 //   carrier gets a root span in both.
 // - The body runs in `context.with` of a context that the package builds from the root context: a function that the
 //   addon calls has an empty async context, so the package never takes the context of the bridge callback.
@@ -313,7 +313,8 @@ function placeByParentage(api: OtelApi, parentage: AttemptParentage, extracted: 
       const sendSpan = api.trace.getSpan(extracted);
       const links = sendSpan === undefined ? [] : [{ context: sendSpan.spanContext() }];
 
-      return { parent: api.ROOT_CONTEXT, links };
+      // The extracted context with no span: the new trace keeps the other entries of the carrier (the baggage).
+      return { parent: api.trace.deleteSpan(extracted), links };
     }
 
     default:
