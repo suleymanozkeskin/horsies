@@ -19,6 +19,7 @@ pub use strict_read::{
 };
 pub use user_value::{
     check_user_value, check_user_value_text, UserValueRefused, MAX_VALUE_JSON_DEPTH,
+    STRICT_JSON_ERROR_CAUSE,
 };
 
 /// Why a JSON text did not read as a value.

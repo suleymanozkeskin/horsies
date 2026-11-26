@@ -1,39 +1,47 @@
 //! The check of the options of one task: its retry policy, its timeout, its
-//! execution class and its cancel grace, as the core's `TaskOptions`.
+//! execution class and its cancel grace, by the core's rules
+//! (`check_declared_options`), into the core's `TaskOptions`.
 //!
 //! - Pure: starts no core, opens no connection, reads no clock.
-//! - Every refusal comes in one list, in this order: the retry policy and
-//!   its `autoRetryFor` codes (`HRS-102`), the timeout range (`HRS-102`), a
-//!   shared class with no timeout (`HRS-109`), a grace with `SHARED_THREAD`
-//!   (`HRS-110`), a grace outside its range (`HRS-111`). The Python client
-//!   checks in the same order: its `TaskOptions` model first, then the
-//!   rules of the class.
+//! - Each number of the facts crosses as a `u32` first. A number that is not
+//!   a whole number from 0 to 4294967295 is refused with `HRS-102`, one
+//!   refusal per field, and then the core's rules do not run.
+//! - The core's rules give every refusal in one list, in the core's order:
+//!   the retry policy and its `autoRetryFor` codes (`HRS-102`), a timeout
+//!   below its minimum (`HRS-102`), a shared class with no timeout
+//!   (`HRS-109`), a grace with `SHARED_THREAD` (`HRS-110`), a grace outside
+//!   its range (`HRS-111`). The code of each refusal is the core's
+//!   (`DeclaredOptionRefusal::error_code`); this file writes its text with
+//!   the names of `defineTask`.
 //! - A `SHARED_ASYNC` task that sets no grace gets the core's default grace
 //!   (`CancelGraceMs::DEFAULT`), stored as resolved.
 //! - The accepted options give the stored options text that a send writes
 //!   (`TaskOptions::stored_options_text`).
 
-use horsies_core::core::task::error::check_error_code_text;
-use horsies_core::core::task::execution::{MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
-use horsies_core::{
-    BuiltInTaskCode, CancelGraceMs, ErrorCode, Execution, RetryPolicy, TaskErrorCode, TaskOptions,
-    UserCode,
+use horsies_core::core::task::declared_options::{
+    check_declared_options, DeclaredMaxDelay, DeclaredMilliseconds, DeclaredOptionRefusal,
+    DeclaredRetry, DeclaredTaskOptions, RetryCodeScope,
 };
+use horsies_core::core::task::execution::{MAX_CANCEL_GRACE_MS, MIN_CANCEL_GRACE_MS};
+use horsies_core::{ErrorCode, Execution, TaskOptions, MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
 use napi_derive::napi;
 
 use crate::call::guard::sync_call;
 use crate::call::thrown::Envelope;
-use crate::sends::refusals::CoreRefusal;
+use crate::sends::refusals::{CoreRefusal, RefusalHelp};
 use crate::values::boundary::{u32_of_number, BoundaryRefusal};
 
-/// The smallest `timeout_ms` of a task (Python `MIN_TASK_TIMEOUT_MS`). The
-/// core holds the same bound in the dispatch read of stored options
-/// (`worker::retry::MIN_TASK_TIMEOUT_MS`), which it does not export. The
-/// largest timeout is the bound of a `u32`, as the core stores it.
-const MIN_TASK_TIMEOUT_MS: u32 = 1_000;
+/// The field name of the timeout in the refusal texts.
+const TIMEOUT_FIELD: &str = "timeoutMs";
+
+/// The field name of the cancel grace in the refusal texts.
+const GRACE_FIELD: &str = "cancelGraceMs";
 
 /// The field name of the retry codes in the refusal texts.
 const AUTO_RETRY_FOR_FIELD: &str = "retry.autoRetryFor";
+
+/// The help line of a refusal with `HRS-102`.
+const OPTIONS_HELP: &str = "check the options of defineTask";
 
 /// The execution class of a task.
 #[napi(string_enum = "UPPER_SNAKE")]
@@ -148,7 +156,7 @@ impl TaskOptionsRecord {
     /// The stored options text of a send with no deadline. Pure.
     #[napi(ts_return_type = "NativeEnvelope<string>")]
     pub fn stored_text(&self) -> Envelope<String> {
-        sync_call("stored_text", || {
+        sync_call("task_options_stored_text", || {
             Envelope::Value(self.options.stored_options_text())
         })
     }
@@ -178,291 +186,239 @@ pub fn check_task_options(facts: TaskOptionsFacts) -> Envelope<TaskOptionsCheck>
     })
 }
 
-/// The retry policy of a task and the codes that retry it.
-#[derive(Clone, Debug)]
-struct RetryParts {
-    policy: RetryPolicy,
-    codes: Vec<TaskErrorCode>,
-}
-
-/// The check of the options of a task. Pure.
+/// The check of the options of a task: the facts as the core's integers,
+/// then the core's rules. Pure.
 fn task_options_check(facts: &TaskOptionsFacts) -> TaskOptionsCheck {
     let name = facts.task_name.as_str();
-    let retry = retry_of(name, &facts.retry, &facts.declared_codes);
-    let timeout = timeout_of(name, &facts.timeout);
-    let class = shared_timeout_refusal(name, facts.execution, &facts.timeout);
-    let grace = grace_of(name, facts.execution, &facts.cancel_grace);
-    match (retry, timeout, class, grace) {
-        (Ok(retry), Ok(timeout_ms), None, Ok(cancel_grace_ms)) => TaskOptionsCheck::Accepted {
-            options: TaskOptionsRecord {
-                options: TaskOptions {
-                    task_name: facts.task_name.clone(),
-                    queue_name: Some(facts.queue_name.clone()),
-                    good_until: None,
-                    auto_retry_for: retry.as_ref().map(|parts| parts.codes.clone()),
-                    retry_policy: retry.map(|parts| parts.policy),
-                    timeout_ms,
-                    execution: facts.execution.execution(),
-                    cancel_grace_ms,
-                },
-            },
-        },
-        (retry, timeout, class, grace) => TaskOptionsCheck::Refused {
-            refusals: retry
-                .err()
-                .into_iter()
-                .flatten()
-                .chain(timeout.err())
-                .chain(class)
-                .chain(grace.err())
+    match declared_options(facts) {
+        Err(refused) => TaskOptionsCheck::Refused {
+            refusals: refused
+                .iter()
+                .map(|refusal| number_refusal(name, refusal))
                 .collect(),
+        },
+        Ok(declared) => match check_declared_options(declared) {
+            Ok(options) => TaskOptionsCheck::Accepted {
+                options: TaskOptionsRecord { options },
+            },
+            Err(refused) => TaskOptionsCheck::Refused {
+                refusals: refused
+                    .iter()
+                    .map(|refusal| rule_refusal(name, refusal))
+                    .collect(),
+            },
         },
     }
 }
 
-/// The retry policy and its codes, or every refusal of them. Pure.
-fn retry_of(
-    name: &str,
-    retry: &RetryFacts,
-    declared: &DeclaredCodesFact,
-) -> Result<Option<RetryParts>, Vec<CoreRefusal>> {
-    let (policy, codes) = match retry {
-        RetryFacts::NoRetry => return Ok(None),
+/// The declaration of the core's check, or the refusal of each number that
+/// is not a `u32`, in field order: the retry policy, the timeout, the grace.
+/// Pure.
+fn declared_options(facts: &TaskOptionsFacts) -> Result<DeclaredTaskOptions, Vec<BoundaryRefusal>> {
+    let retry = declared_retry(&facts.retry);
+    let timeout = declared_milliseconds(TIMEOUT_FIELD, &facts.timeout);
+    let grace = declared_milliseconds(GRACE_FIELD, &facts.cancel_grace);
+    match (retry, timeout, grace) {
+        (Ok(retry), Ok(timeout_ms), Ok(cancel_grace_ms)) => Ok(DeclaredTaskOptions {
+            task_name: facts.task_name.clone(),
+            queue_name: facts.queue_name.clone(),
+            execution: facts.execution.execution(),
+            timeout_ms,
+            cancel_grace_ms,
+            retry,
+            retry_codes: match &facts.declared_codes {
+                DeclaredCodesFact::Open => RetryCodeScope::AnyUserCode,
+                DeclaredCodesFact::Declared { codes } => RetryCodeScope::Declared(codes.clone()),
+            },
+        }),
+        (retry, timeout, grace) => Err(retry
+            .err()
+            .into_iter()
+            .flatten()
+            .chain(timeout.err())
+            .chain(grace.err())
+            .collect()),
+    }
+}
+
+/// A duration of the facts as the core's declaration, or the refusal of a
+/// number that is not a `u32`. Pure.
+fn declared_milliseconds(
+    subject: &str,
+    fact: &MillisecondsFact,
+) -> Result<DeclaredMilliseconds, BoundaryRefusal> {
+    match fact {
+        MillisecondsFact::NotSet => Ok(DeclaredMilliseconds::NotSet),
+        MillisecondsFact::Set { milliseconds } => {
+            u32_of_number(subject, *milliseconds).map(DeclaredMilliseconds::Set)
+        }
+    }
+}
+
+/// The retry policy of the facts as the core's declaration, or the refusal
+/// of each number that is not a `u32` (the intervals give one refusal).
+/// Pure.
+fn declared_retry(retry: &RetryFacts) -> Result<DeclaredRetry, Vec<BoundaryRefusal>> {
+    match retry {
+        RetryFacts::NoRetry => Ok(DeclaredRetry::NoRetry),
         RetryFacts::Fixed {
             intervals_seconds,
             jitter,
             auto_retry_for,
-        } => (fixed_policy(intervals_seconds, *jitter), auto_retry_for),
+        } => intervals_seconds
+            .iter()
+            .map(|seconds| u32_of_number("retry.intervalsSeconds", *seconds))
+            .collect::<Result<Vec<u32>, BoundaryRefusal>>()
+            .map(|intervals| DeclaredRetry::Fixed {
+                intervals_seconds: intervals,
+                jitter: *jitter,
+                auto_retry_for: auto_retry_for.clone(),
+            })
+            .map_err(|refusal| vec![refusal]),
         RetryFacts::Exponential {
             base_seconds,
             max_retries,
             jitter,
             max_delay,
             auto_retry_for,
-        } => (
-            exponential_policy(*base_seconds, *max_retries, *jitter, max_delay),
-            auto_retry_for,
-        ),
-    };
-    let policy =
-        policy.map_err(|cause| option_refusal(name, format!("invalid retry policy: {cause}")));
-    let codes = retry_codes(name, codes, declared);
-    match (policy, codes) {
-        (Ok(policy), Ok(codes)) => Ok(Some(RetryParts { policy, codes })),
-        (policy, codes) => Err(policy
-            .err()
-            .into_iter()
-            .chain(codes.err().into_iter().flatten())
-            .collect()),
-    }
-}
-
-/// A fixed policy of the intervals, or the cause of its refusal. Pure.
-fn fixed_policy(intervals_seconds: &[f64], jitter: bool) -> Result<RetryPolicy, String> {
-    let intervals = intervals_seconds
-        .iter()
-        .map(|seconds| u32_of_number("retry.intervalsSeconds", *seconds))
-        .collect::<Result<Vec<u32>, BoundaryRefusal>>()
-        .map_err(|refusal| boundary_text(&refusal))?;
-    RetryPolicy::fixed(intervals, jitter).map_err(|error| error.to_string())
-}
-
-/// An exponential policy, or the cause of its refusal. Pure.
-fn exponential_policy(
-    base_seconds: f64,
-    max_retries: f64,
-    jitter: bool,
-    max_delay: &MaxDelayFact,
-) -> Result<RetryPolicy, String> {
-    let base = u32_of_number("retry.baseSeconds", base_seconds)
-        .map_err(|refusal| boundary_text(&refusal))?;
-    let retries = u32_of_number("retry.maxRetries", max_retries)
-        .map_err(|refusal| boundary_text(&refusal))?;
-    let policy =
-        RetryPolicy::exponential(base, retries, jitter).map_err(|error| error.to_string())?;
-    let policy = match max_delay {
-        MaxDelayFact::NoCap => policy,
-        MaxDelayFact::Seconds { seconds } => policy.with_max_delay_seconds(
-            u32_of_number("retry.maxDelaySeconds", *seconds)
-                .map_err(|refusal| boundary_text(&refusal))?,
-        ),
-    };
-    policy.validate().map_err(|error| error.to_string())?;
-    Ok(policy)
-}
-
-/// The codes that retry a task, or the refusal of each code that breaks a
-/// rule: at least one code; the code-text rule of retry matching
-/// (`check_error_code_text`); with a declared list, each user code is a
-/// declared one. Pure.
-fn retry_codes(
-    name: &str,
-    codes: &[String],
-    declared: &DeclaredCodesFact,
-) -> Result<Vec<TaskErrorCode>, Vec<CoreRefusal>> {
-    if codes.is_empty() {
-        return Err(vec![option_refusal(
-            name,
-            format!("{AUTO_RETRY_FOR_FIELD} must not be empty"),
-        )]);
-    }
-    let (accepted, refused): (Vec<_>, Vec<_>) = codes
-        .iter()
-        .map(|code| retry_code(name, code, declared))
-        .partition(Result::is_ok);
-    match refused.is_empty() {
-        true => Ok(accepted.into_iter().filter_map(Result::ok).collect()),
-        false => Err(refused.into_iter().filter_map(Result::err).collect()),
-    }
-}
-
-/// One code that retries a task, or its refusal. Pure.
-fn retry_code(
-    name: &str,
-    code: &str,
-    declared: &DeclaredCodesFact,
-) -> Result<TaskErrorCode, CoreRefusal> {
-    check_error_code_text(code)
-        .map_err(|refusal| option_refusal(name, refusal.message(AUTO_RETRY_FOR_FIELD, code)))?;
-    if let Some(built_in) = BuiltInTaskCode::parse(code) {
-        return Ok(TaskErrorCode::BuiltIn(built_in));
-    }
-    let user =
-        UserCode::parse(code).map_err(|refused| option_refusal(name, refused.to_string()))?;
-    match declared {
-        DeclaredCodesFact::Open => Ok(TaskErrorCode::User(user)),
-        DeclaredCodesFact::Declared { codes } => match codes.iter().any(|known| known == code) {
-            true => Ok(TaskErrorCode::User(user)),
-            false => Err(option_refusal(
-                name,
-                format!(
-                    "{AUTO_RETRY_FOR_FIELD} code '{code}' is not a declared error code of the \
-                     task; a user code that retries the task is one of its errors"
-                ),
-            )),
-        },
-    }
-}
-
-/// The timeout of a task, or the refusal of a value outside 1000 to
-/// 4294967295 ms. Pure.
-fn timeout_of(name: &str, timeout: &MillisecondsFact) -> Result<Option<u32>, CoreRefusal> {
-    let refused = || {
-        option_refusal(
-            name,
-            format!(
-                "timeoutMs must be a whole number from {MIN_TASK_TIMEOUT_MS} to {} ms",
-                u32::MAX
-            ),
-        )
-    };
-    match timeout {
-        MillisecondsFact::NotSet => Ok(None),
-        MillisecondsFact::Set { milliseconds } => match u32_of_number("timeoutMs", *milliseconds) {
-            Ok(value) if value >= MIN_TASK_TIMEOUT_MS => Ok(Some(value)),
-            Ok(_) | Err(_) => Err(refused()),
-        },
-    }
-}
-
-/// The refusal of a shared class with no timeout (`HRS-109`). Pure.
-fn shared_timeout_refusal(
-    name: &str,
-    execution: ExecutionName,
-    timeout: &MillisecondsFact,
-) -> Option<CoreRefusal> {
-    match (execution, timeout) {
-        (ExecutionName::SharedAsync | ExecutionName::SharedThread, MillisecondsFact::NotSet) => {
-            let class = execution.execution();
-            Some(CoreRefusal::coded(
-                ErrorCode::TaskSharedExecutionRequiresTimeout,
-                format!("execution {class} requires timeoutMs"),
-                vec![
-                    format!("task '{name}'"),
-                    "a shared task runs in one child process with other tasks".to_owned(),
-                ],
-                vec![format!(
-                    "set timeoutMs, for example execution: \"{class}\", timeoutMs: 30_000"
-                )],
-            ))
+        } => {
+            let base = u32_of_number("retry.baseSeconds", *base_seconds);
+            let retries = u32_of_number("retry.maxRetries", *max_retries);
+            let cap = match max_delay {
+                MaxDelayFact::NoCap => Ok(DeclaredMaxDelay::NoCap),
+                MaxDelayFact::Seconds { seconds } => {
+                    u32_of_number("retry.maxDelaySeconds", *seconds).map(DeclaredMaxDelay::Seconds)
+                }
+            };
+            match (base, retries, cap) {
+                (Ok(base_seconds), Ok(max_retries), Ok(max_delay)) => {
+                    Ok(DeclaredRetry::Exponential {
+                        base_seconds,
+                        max_retries,
+                        jitter: *jitter,
+                        max_delay,
+                        auto_retry_for: auto_retry_for.clone(),
+                    })
+                }
+                (base, retries, cap) => Err(base
+                    .err()
+                    .into_iter()
+                    .chain(retries.err())
+                    .chain(cap.err())
+                    .collect()),
+            }
         }
-        (
-            ExecutionName::SharedAsync | ExecutionName::SharedThread,
-            MillisecondsFact::Set { .. },
-        )
-        | (ExecutionName::Isolated, _) => None,
     }
 }
 
-/// The cancel grace of a task, or its refusal: a grace with
-/// `SHARED_THREAD` (`HRS-110`), a grace outside 100 to 10,000 ms
-/// (`HRS-111`). A `SHARED_ASYNC` task with no grace gets the default. Pure.
-fn grace_of(
-    name: &str,
-    execution: ExecutionName,
-    grace: &MillisecondsFact,
-) -> Result<Option<CancelGraceMs>, CoreRefusal> {
-    match (execution, grace) {
-        (ExecutionName::SharedAsync, MillisecondsFact::NotSet) => Ok(Some(CancelGraceMs::DEFAULT)),
-        (ExecutionName::Isolated | ExecutionName::SharedThread, MillisecondsFact::NotSet) => {
-            Ok(None)
+/// The refusal of a number that is not a `u32` (`HRS-102`). Pure.
+fn number_refusal(name: &str, refusal: &BoundaryRefusal) -> CoreRefusal {
+    CoreRefusal::coded(
+        ErrorCode::TaskInvalidOptions,
+        format!("{}: {}", refusal.subject, refusal.rule),
+        vec![format!("task '{name}'")],
+        RefusalHelp::Help {
+            line: OPTIONS_HELP.to_owned(),
+        },
+    )
+}
+
+/// The refusal of a rule of the core, with the core's code and the text of
+/// `defineTask`. The first note names the task. Pure.
+fn rule_refusal(name: &str, refusal: &DeclaredOptionRefusal) -> CoreRefusal {
+    let text = rule_text(refusal);
+    CoreRefusal::coded(
+        refusal.error_code(),
+        text.message,
+        std::iter::once(format!("task '{name}'"))
+            .chain(text.notes)
+            .collect(),
+        RefusalHelp::Help { line: text.help },
+    )
+}
+
+/// The text of one refusal: the message, the notes after the task note, and
+/// the help line.
+struct RuleText {
+    message: String,
+    notes: Vec<String>,
+    help: String,
+}
+
+impl RuleText {
+    /// The text of a refusal with `HRS-102`: the message alone, and the help
+    /// of the options. Pure.
+    fn option(message: String) -> Self {
+        Self {
+            message,
+            notes: Vec::new(),
+            help: OPTIONS_HELP.to_owned(),
         }
-        (ExecutionName::SharedThread, MillisecondsFact::Set { .. }) => Err(CoreRefusal::coded(
-            ErrorCode::TaskCancelGraceRequiresSharedAsync,
-            "cancelGraceMs is not valid with execution SHARED_THREAD".to_owned(),
-            vec![
-                format!("task '{name}'"),
+    }
+}
+
+/// The text of each refusal of the core's rules, with the names of
+/// `defineTask`. Pure.
+fn rule_text(refusal: &DeclaredOptionRefusal) -> RuleText {
+    match refusal {
+        DeclaredOptionRefusal::RetryPolicy(error) => {
+            RuleText::option(format!("invalid retry policy: {error}"))
+        }
+        DeclaredOptionRefusal::NoRetryCode => {
+            RuleText::option(format!("{AUTO_RETRY_FOR_FIELD} must not be empty"))
+        }
+        DeclaredOptionRefusal::RetryCodeText { code, refusal } => {
+            RuleText::option(refusal.message(AUTO_RETRY_FOR_FIELD, code))
+        }
+        DeclaredOptionRefusal::RetryCodeNotUserCode { refused } => {
+            RuleText::option(refused.to_string())
+        }
+        DeclaredOptionRefusal::RetryCodeNotDeclared { code } => RuleText::option(format!(
+            "{AUTO_RETRY_FOR_FIELD} code '{code}' is not a declared error code of the task; a \
+             user code that retries the task is one of its errors"
+        )),
+        DeclaredOptionRefusal::TimeoutBelowMinimum => RuleText::option(format!(
+            "{TIMEOUT_FIELD} must be a whole number from {MIN_TASK_TIMEOUT_MS} to \
+             {MAX_TASK_TIMEOUT_MS} ms"
+        )),
+        DeclaredOptionRefusal::SharedClassWithoutTimeout { execution } => {
+            shared_timeout_text(*execution)
+        }
+        DeclaredOptionRefusal::GraceNotTaken { execution } => RuleText {
+            message: format!("{GRACE_FIELD} is not valid with execution {execution}"),
+            notes: vec![
                 "a thread cannot be cancelled or stopped, so a SHARED_THREAD task has no cancel \
                  grace"
                     .to_owned(),
             ],
-            vec![
-                "remove cancelGraceMs, or use execution SHARED_ASYNC with an async body, or \
+            help: format!(
+                "remove {GRACE_FIELD}, or use execution SHARED_ASYNC with an async body, or \
                  ISOLATED"
-                    .to_owned(),
+            ),
+        },
+        DeclaredOptionRefusal::GraceOutOfRange { execution } => RuleText {
+            message: format!("{GRACE_FIELD} is out of range"),
+            notes: vec![
+                format!(
+                    "{GRACE_FIELD} must be a whole number from {MIN_CANCEL_GRACE_MS} to \
+                     {MAX_CANCEL_GRACE_MS} ms"
+                ),
+                format!("execution is {execution}"),
             ],
-        )),
-        (
-            ExecutionName::Isolated | ExecutionName::SharedAsync,
-            MillisecondsFact::Set { milliseconds },
-        ) => u32_of_number("cancelGraceMs", *milliseconds)
-            .ok()
-            .and_then(|value| CancelGraceMs::new(value).ok())
-            .map(Some)
-            .ok_or_else(|| grace_range_refusal(name, execution)),
+            help: format!("set {GRACE_FIELD} to a whole number of milliseconds inside the range"),
+        },
     }
 }
 
-/// The refusal of a grace outside its range (`HRS-111`). Pure.
-fn grace_range_refusal(name: &str, execution: ExecutionName) -> CoreRefusal {
-    CoreRefusal::coded(
-        ErrorCode::TaskCancelGraceOutOfRange,
-        "cancelGraceMs is out of range".to_owned(),
-        vec![
-            format!("task '{name}'"),
-            format!(
-                "cancelGraceMs must be a whole number from {MIN_CANCEL_GRACE_MS} to \
-                 {MAX_CANCEL_GRACE_MS} ms"
-            ),
-            format!("execution is {}", execution.execution()),
-        ],
-        vec!["set cancelGraceMs to a whole number of milliseconds inside the range".to_owned()],
-    )
-}
-
-/// The refusal of a task option (`HRS-102`). Pure.
-fn option_refusal(name: &str, message: String) -> CoreRefusal {
-    CoreRefusal::coded(
-        ErrorCode::TaskInvalidOptions,
-        message,
-        vec![format!("task '{name}'")],
-        vec!["check the options of defineTask".to_owned()],
-    )
-}
-
-/// The text of a boundary refusal: the field and the rule. Pure.
-fn boundary_text(refusal: &BoundaryRefusal) -> String {
-    format!("{}: {}", refusal.subject, refusal.rule)
+/// The text of a shared class with no timeout (`HRS-109`). Pure.
+fn shared_timeout_text(execution: Execution) -> RuleText {
+    RuleText {
+        message: format!("execution {execution} requires {TIMEOUT_FIELD}"),
+        notes: vec!["a shared task runs in one child process with other tasks".to_owned()],
+        help: format!(
+            "set {TIMEOUT_FIELD}, for example execution: \"{execution}\", {TIMEOUT_FIELD}: 30_000"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -597,7 +553,7 @@ mod tests {
 
     #[test]
     fn a_grace_outside_its_range_is_refused_with_hrs_111() {
-        for milliseconds in [99.0, 10_001.0, 150.5] {
+        for milliseconds in [99.0, 10_001.0] {
             assert_eq!(
                 codes_of(&TaskOptionsFacts {
                     cancel_grace: MillisecondsFact::Set { milliseconds },
@@ -694,6 +650,76 @@ mod tests {
             },
             ..facts()
         });
+    }
+
+    /// A number that is not a `u32` is refused at the boundary, one refusal
+    /// per field; the core's rules then do not run, so the grace of a
+    /// `SHARED_THREAD` task gives no `HRS-110` here.
+    #[test]
+    fn a_number_that_is_not_a_u32_is_hrs_102_and_the_rules_do_not_run() {
+        let refused = task_options_check(&TaskOptionsFacts {
+            execution: ExecutionName::SharedThread,
+            timeout: MillisecondsFact::Set {
+                milliseconds: 1_500.5,
+            },
+            cancel_grace: MillisecondsFact::Set { milliseconds: -1.0 },
+            ..facts()
+        });
+        let TaskOptionsCheck::Refused { refusals } = refused else {
+            panic!("the numbers are refused");
+        };
+        let messages: Vec<(&str, &str)> = refusals
+            .iter()
+            .map(|refusal| (refusal.code.as_str(), refusal.message.as_str()))
+            .collect();
+        assert_eq!(
+            messages,
+            vec![
+                ("HRS-102", "timeoutMs: a whole number from 0 to 4294967295"),
+                (
+                    "HRS-102",
+                    "cancelGraceMs: a whole number from 0 to 4294967295"
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_refusal_of_the_core_has_the_text_of_define_task_and_names_the_task() {
+        let TaskOptionsCheck::Refused { refusals } = task_options_check(&TaskOptionsFacts {
+            execution: ExecutionName::SharedAsync,
+            ..facts()
+        }) else {
+            panic!("a shared class with no timeout is refused");
+        };
+        assert_eq!(
+            refusals,
+            vec![CoreRefusal {
+                code: "HRS-109".to_owned(),
+                message: "execution SHARED_ASYNC requires timeoutMs".to_owned(),
+                notes: vec![
+                    "task 'charge_payment'".to_owned(),
+                    "a shared task runs in one child process with other tasks".to_owned(),
+                ],
+                help: RefusalHelp::Help {
+                    line: "set timeoutMs, for example execution: \"SHARED_ASYNC\", timeoutMs: \
+                           30_000"
+                        .to_owned(),
+                },
+            }]
+        );
+        let TaskOptionsCheck::Refused { refusals } = task_options_check(&TaskOptionsFacts {
+            timeout: MillisecondsFact::Set {
+                milliseconds: 999.0,
+            },
+            ..facts()
+        }) else {
+            panic!("a timeout below the minimum is refused");
+        };
+        assert_eq!(
+            refusals[0].message,
+            "timeoutMs must be a whole number from 1000 to 4294967295 ms"
+        );
     }
 
     #[test]

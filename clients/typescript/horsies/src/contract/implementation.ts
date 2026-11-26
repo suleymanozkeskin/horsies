@@ -5,9 +5,10 @@ import type { BodyResult, ExecutionClass, TaskContract } from "./define-task.ts"
 import type { BodyInput, ParameterSchemas, OutputSchema } from "./schema.ts";
 
 /**
- * The run context that a body gets as its second argument, by execution class. The worker's child process gives
- * it; its member types join this map with the child process code. A key whose type is `never` has no run context
- * yet: a body of that class takes one argument.
+ * The run context that a body gets as its second argument, by execution class. The worker's child process gives it.
+ * A key whose type is `never` has no run context yet: a body of that class takes one argument. The code of the child
+ * process sets the member types in this file: a merged declaration cannot change the type of a declared member
+ * (TS2717), so no other module can add them.
  */
 export interface BodyRuntimes {
   readonly ISOLATED: never;

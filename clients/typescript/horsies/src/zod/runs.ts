@@ -4,15 +4,12 @@
 // Each run uses only the user's own schema objects, so a schema of each zod copy runs (the ES module or the CommonJS
 // build of an install, a copy in a bundle, another install of a supported release): a check runs through its own
 // `_zod.check`, a codec through its own decode and encode functions, and a schema through its own `_zod.run` (the
-// function that zod's `safeParse` and `safeEncode` call). This module builds no node of the zod module that horsies
-// imports, and imports only zod's types.
+// function that zod's `safeParse` and `safeEncode` call). This module builds no zod node and imports no zod module.
 //
 // A check runs only the checks of its own node: the kinds below it are walked by the codec. As in zod, a check sees a
 // value of its node's structure, with codec outputs and defaults filled: at encode the writer writes the node's kind
 // first and gives the check the sent value with its defaults filled (`codec/check-view.ts`); at decode the reader
 // gives the worker-form value.
-
-import type * as core from "zod/v4/core";
 
 import type {
   CheckFailure,
@@ -24,7 +21,7 @@ import type {
 import { entryPath, itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";
 import { isNumber, isPlainObject } from "../codec/values.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import type { ZodCheck, ZodCodecFunction, ZodSchema } from "./definition.ts";
+import type { ZodCheck, ZodCodecFunction, ZodPayload, ZodRunContext, ZodSchema } from "./internals.ts";
 
 /** The issue code of a check or a conversion that returned a promise: the codec runs them synchronously. */
 export const ASYNC_ISSUE_CODE = "async_check";
@@ -46,10 +43,10 @@ export const ZOD_ASYNC_MESSAGE = "Encountered Promise during synchronous parse. 
 export const ZOD_ENCODE_ERROR_NAME = "ZodEncodeError";
 
 /** A zod parse payload: the value, and the issues that the checks and the parses add to it. */
-type Payload = core.ParsePayload;
+type Payload = ZodPayload;
 
 /** The direction of a zod run: `forward` parses (decodes) a value, `backward` encodes it. */
-type Direction = "forward" | "backward";
+type Direction = ZodRunContext["direction"];
 
 /**
  * A check that runs `checks` on a value in their order, each through its own `_zod.check`, with the rules of zod's
@@ -79,9 +76,7 @@ function checksOutcome(checks: readonly ZodCheck[], payload: Payload): Result<un
     }
 
     const before = payload.issues.length;
-    // SAFETY: zod runs the checks of a node on a value of that node; the codec gives each check a value of its node's
-    // kind (`checksRun`).
-    const returned = (check as core.$ZodCheck<unknown>)._zod.check(payload);
+    const returned = check._zod.check(payload);
 
     if (returned instanceof Promise) {
       return err(oneIssue(ASYNC_ISSUE_CODE));
@@ -208,7 +203,7 @@ function keyIssues(checked: Result<true, CheckFailure>): readonly CheckIssue[] {
  * waited for. Effects: the user functions of the schema.
  */
 function runOf(schema: ZodSchema, payload: Payload, direction: Direction): Result<Payload, CheckFailure> {
-  const context: core.ParseContextInternal = { async: false, direction };
+  const context: ZodRunContext = { async: false, direction };
   const result = schema._zod.run(payload, context);
 
   return result instanceof Promise ? err(oneIssue(ASYNC_ISSUE_CODE)) : ok(result);

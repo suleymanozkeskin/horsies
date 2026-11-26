@@ -5,10 +5,12 @@
 //!   mints and the log: the retention of the send (the Rust client's rule
 //!   of `send::options::send_retention`), the payload bound
 //!   (`enforce_payload_policy`, which logs the core's warning once per task
-//!   name), the task id, and the stored options text with the deadline. A
-//!   refused fact is the send error value, not a throw. It starts the log
-//!   bridge of the process first (the forwarder thread, not the core), so
-//!   the first warning of a task is a record of the log sink.
+//!   name), the task id, the stored options text with the deadline, and the
+//!   priority of the task's queue in the accepted config. The task name and
+//!   the queue come from the checked options of the task. A refused fact is
+//!   the send error value, not a throw. It starts the log bridge of the
+//!   process first (the forwarder thread, not the core), so the first
+//!   warning of a task is a record of the log sink.
 //! - `enqueue` is one send through the core, as the Rust client's
 //!   `enqueue_once`: the core's checks that need no connection run first
 //!   (`CheckedSend::check`, which keeps the shared-class timeout check for a
@@ -28,8 +30,9 @@ use horsies_core::core::task::send_types::{
 use horsies_core::handle::CoreHandle as LazyHandle;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
-    BrokerError, CheckedSend, EnqueueRetention, FailureCause, PayloadPolicy, RetentionConfig,
-    RetentionDays, SendKind as CoreSendKind, TaskOptions, TaskSendError, TaskSendPayload,
+    BrokerError, CheckedSend, CustomQueueConfig, EnqueueRetention, FailureCause, PayloadPolicy,
+    QueueMode, RetentionConfig, RetentionDays, SendKind as CoreSendKind, TaskOptions,
+    TaskSendError, TaskSendPayload,
 };
 use napi::bindgen_prelude::{BigInt, Object};
 use napi::Env;
@@ -62,20 +65,88 @@ const ENQUEUE_SUBJECT: &str = "enqueue";
 const MAX_EXACT_BYTE_COUNT: f64 = 9_007_199_254_740_991.0;
 
 /// The rules of an accepted app config that each send applies: the retention
-/// config and the payload policy. JavaScript gets it from `checkAppConfig`;
-/// it has no constructor.
+/// config, the payload policy and the priority of each queue. JavaScript
+/// gets it from `checkAppConfig`; it has no constructor.
 #[napi]
 #[derive(Clone, Debug)]
 pub struct SendRules {
     retention: RetentionConfig,
     payload: PayloadPolicy,
+    queues: QueuePriorities,
 }
 
 impl SendRules {
     /// The rules of an accepted config. Pure.
-    pub fn new(retention: RetentionConfig, payload: PayloadPolicy) -> Self {
-        Self { retention, payload }
+    pub fn new(
+        retention: RetentionConfig,
+        payload: PayloadPolicy,
+        queues: QueuePriorities,
+    ) -> Self {
+        Self {
+            retention,
+            payload,
+            queues,
+        }
     }
+}
+
+/// The queues of an accepted config, as the priority of a send reads them.
+#[derive(Clone, Debug)]
+pub enum QueuePriorities {
+    /// The default queue mode: one queue, whose priority the package holds.
+    DefaultMode,
+    /// The custom queue mode: each queue with the priority that the core's
+    /// config holds (the core's default for a queue that names none).
+    Custom(Vec<CustomQueueConfig>),
+}
+
+impl QueuePriorities {
+    /// The queues of a config that `AppConfig::validate` accepted. That
+    /// check refuses the custom mode with no queue list, so such a config
+    /// has no queue here, and each send of it is refused. Pure.
+    pub fn of(mode: QueueMode, custom_queues: Option<Vec<CustomQueueConfig>>) -> Self {
+        match (mode, custom_queues) {
+            (QueueMode::Default, _) => Self::DefaultMode,
+            (QueueMode::Custom, Some(queues)) => Self::Custom(queues),
+            (QueueMode::Custom, None) => Self::Custom(Vec::new()),
+        }
+    }
+
+    /// The priority of a send on `queue`, or the refusal of a queue that the
+    /// custom mode does not hold: the package sends only on the queue of a
+    /// listed task, and `Horsies.create` checks that queue. Pure.
+    fn priority_of(&self, queue: &str) -> Result<SendPriority, BoundaryRefusal> {
+        match self {
+            Self::DefaultMode => Ok(SendPriority::DefaultQueue),
+            Self::Custom(queues) => queues
+                .iter()
+                .find(|configured| configured.name == queue)
+                .map(|configured| SendPriority::Configured {
+                    priority: configured.priority,
+                })
+                .ok_or_else(|| {
+                    BoundaryRefusal::new(
+                        "options.queueName",
+                        "a custom queue of the accepted config",
+                    )
+                }),
+        }
+    }
+}
+
+/// The priority that a send carries.
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_from_js = false
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SendPriority {
+    /// The one queue of the default queue mode: the package holds its
+    /// priority.
+    DefaultQueue,
+    /// A custom queue: its priority in the accepted config.
+    Configured { priority: u32 },
 }
 
 /// The retention that a send chooses.
@@ -154,12 +225,11 @@ impl DeadlineFact {
     }
 }
 
-/// The facts of one send that the send rules judge.
+/// The facts of one send that the send rules judge. The task name and the
+/// queue are the checked options' own.
 #[napi(object, object_to_js = false)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct SendFacts {
-    pub task_name: String,
-    pub queue_name: String,
     pub retention: RetentionChoice,
     pub deadline: DeadlineFact,
     /// The UTF-8 byte length of the input text.
@@ -178,6 +248,7 @@ pub enum PreparedSend {
         task_id: String,
         task_options: String,
         retention: RetentionRecord,
+        priority: SendPriority,
     },
     Refused {
         error: RawCatalogError,
@@ -186,9 +257,9 @@ pub enum PreparedSend {
 
 #[napi]
 impl SendRules {
-    /// The prepared facts of one send of a task with the checked `options`.
-    /// Mints a task id; the fork and stop rules apply, as for every core
-    /// call. Starts the log bridge of the process (the forwarder thread), so
+    /// The prepared facts of one send of the task of the checked `options`,
+    /// on its queue. Mints a task id; the fork and stop rules apply, as for
+    /// every core call. Starts the log bridge of the process (the forwarder thread), so
     /// that the payload warning reaches the log sink; starts no core. A
     /// forwarder thread that cannot start throws `CORE_START_FAILED`, as the
     /// first core call would.
@@ -227,9 +298,10 @@ impl SendRules {
 
 impl SendRules {
     /// The prepared send, in the Rust client's order: the retention, the
-    /// payload bound, the task id, the options text. A value that breaks a
-    /// boundary rule is the refusal. Mints a task id; the payload warning
-    /// goes to `log`.
+    /// payload bound, the task id, the options text; and the priority of the
+    /// queue. A value that breaks a boundary rule is the refusal: checked
+    /// options with no queue, or a queue that the config does not hold.
+    /// Mints a task id; the payload warning goes to `log`.
     fn prepared(
         &self,
         log: &LogBridge,
@@ -238,8 +310,12 @@ impl SendRules {
     ) -> Result<PreparedSend, BoundaryRefusal> {
         let deadline = facts.deadline.instant()?;
         let input_bytes = byte_count("inputBytes", facts.input_bytes)?;
-        let task_name = facts.task_name.as_str();
-        let retention = match self.retention_of(&facts.queue_name, &facts.retention) {
+        let task_name = options.task_name.as_str();
+        let queue = options.queue_name.as_deref().ok_or_else(|| {
+            BoundaryRefusal::new("options", "checked options that name the queue of the task")
+        })?;
+        let priority = self.queues.priority_of(queue)?;
+        let retention = match self.retention_of(queue, &facts.retention) {
             Ok(retention) => retention,
             Err(cause) => {
                 return Ok(refused(&validation_failed(
@@ -267,6 +343,7 @@ impl SendRules {
                 Some(at) => options.stored_send_options_text(at),
             },
             retention: RetentionRecord::of(retention),
+            priority,
         })
     }
 
@@ -538,16 +615,44 @@ fn command_of(
     })
 }
 
-/// One send through `producer`, and the outcome as the send catalog names
-/// it.
+/// One send through `producer`, as the Rust client's `enqueue_once`: the
+/// core's check of the send (no connection), the schema install once per
+/// handle, then the write. The outcome is named by the send catalog.
 async fn enqueue_operation(producer: ProducerHandle, command: EnqueueCommand) -> EnqueueOutcome {
-    match enqueue_once(producer.lazy_handle(), &command).await {
+    let handle = producer.lazy_handle();
+    let send = match checked_send(handle, &command) {
+        Ok(send) => send,
+        Err(error) => return enqueue_failed(&command, &error),
+    };
+    match handle.initialized_broker().await {
+        Ok(broker) => enqueue_outcome_of(
+            &command,
+            broker.enqueue_checked(&send, command.send_kind).await,
+        ),
+        Err(error) => enqueue_failed(&command, &error),
+    }
+}
+
+/// The outcome of the write of `command`: the stored task id, or the send
+/// error of the failure. Pure.
+fn enqueue_outcome_of(
+    command: &EnqueueCommand,
+    written: Result<Uuid, BrokerError>,
+) -> EnqueueOutcome {
+    match written {
         Ok(task_id) => EnqueueOutcome::Enqueued {
             task_id: text_of_uuid(task_id),
         },
-        Err(error) => EnqueueOutcome::Failed {
-            error: enqueue_failure_record(&command, &error),
-        },
+        Err(error) => enqueue_failed(command, &error),
+    }
+}
+
+/// The outcome of a send of `command` that failed before or at the write:
+/// the core's check refused it, the connect or the schema install failed,
+/// or the write failed. Pure.
+fn enqueue_failed(command: &EnqueueCommand, error: &BrokerError) -> EnqueueOutcome {
+    EnqueueOutcome::Failed {
+        error: enqueue_failure_record(command, error),
     }
 }
 
@@ -567,11 +672,15 @@ fn enqueue_failure_record(command: &EnqueueCommand, error: &BrokerError) -> RawC
     }
 }
 
-/// The core's check of the send (no connection), the schema install once
-/// per handle, then the write on `handle`. Returns the stored task id.
-async fn enqueue_once(handle: &LazyHandle, command: &EnqueueCommand) -> Result<Uuid, BrokerError> {
+/// The core's checks of the send of `command` that need no connection, with
+/// the rerun-input default of `handle`'s manifest. Touches no database;
+/// reads the clock.
+fn checked_send<'command>(
+    handle: &LazyHandle,
+    command: &'command EnqueueCommand,
+) -> Result<CheckedSend<'command>, BrokerError> {
     let payload = &command.payload;
-    let send = CheckedSend::check(
+    Ok(CheckedSend::check(
         &payload.task_name,
         &payload.input_json,
         &payload.queue_name,
@@ -586,9 +695,7 @@ async fn enqueue_once(handle: &LazyHandle, command: &EnqueueCommand) -> Result<U
         payload.retention,
         handle.manifest().send.retain_rerun_input_default,
     )?
-    .with_trace(command.trace.clone());
-    let broker = handle.initialized_broker().await?;
-    broker.enqueue_checked(&send, command.send_kind).await
+    .with_trace(command.trace.clone()))
 }
 
 #[cfg(test)]
@@ -622,6 +729,7 @@ mod tests {
                 warn_bytes: None,
                 reject_bytes: Some(100),
             },
+            QueuePriorities::DefaultMode,
         )
     }
 
@@ -640,8 +748,6 @@ mod tests {
 
     fn facts(retention: RetentionChoice, input_bytes: f64) -> SendFacts {
         SendFacts {
-            task_name: "report".to_owned(),
-            queue_name: "default".to_owned(),
             retention,
             deadline: DeadlineFact::NoDeadline,
             input_bytes,
@@ -677,12 +783,16 @@ mod tests {
                 key: "standard_30d".to_owned()
             }
         );
-        let audit = SendFacts {
-            queue_name: "audit".to_owned(),
-            ..facts(RetentionChoice::QueueOrDefault, 10.0)
+        let audit = TaskOptions {
+            queue_name: Some("audit".to_owned()),
+            ..options()
         };
         let prepared = rules()
-            .prepared(&quiet_log(), &audit, &options())
+            .prepared(
+                &quiet_log(),
+                &facts(RetentionChoice::QueueOrDefault, 10.0),
+                &audit,
+            )
             .expect("the facts cross");
         assert_eq!(prepared_retention(prepared), RetentionRecord::Forever);
     }
@@ -769,13 +879,14 @@ mod tests {
                 warn_bytes: Some(10),
                 reject_bytes: None,
             },
+            QueuePriorities::DefaultMode,
         );
-        let first_warning = SendFacts {
+        let first_warning = TaskOptions {
             task_name: "first_payload_warning".to_owned(),
-            ..facts(RetentionChoice::Forever, 11.0)
+            ..options()
         };
         let prepared = rules
-            .prepared(&log, &first_warning, &options())
+            .prepared(&log, &facts(RetentionChoice::Forever, 11.0), &first_warning)
             .expect("the facts cross");
         assert!(matches!(prepared, PreparedSend::Prepared { .. }));
         let record = records
@@ -788,6 +899,91 @@ mod tests {
             "{}",
             record.message
         );
+    }
+
+    fn prepared_priority(rules: &SendRules, options: &TaskOptions) -> SendPriority {
+        match rules
+            .prepared(
+                &quiet_log(),
+                &facts(RetentionChoice::Forever, 10.0),
+                options,
+            )
+            .expect("the facts cross")
+        {
+            PreparedSend::Prepared { priority, .. } => priority,
+            PreparedSend::Refused { error } => panic!("the send is prepared, got {error:?}"),
+        }
+    }
+
+    /// The rules of a custom config with the queues of the core's config
+    /// texts: `billing` with its own priority, `bulk` with none.
+    fn custom_rules() -> SendRules {
+        let queues: Vec<CustomQueueConfig> =
+            serde_json::from_str(r#"[{"name": "billing", "priority": 7}, {"name": "bulk"}]"#)
+                .expect("the queue texts read as the core's queue config");
+        SendRules::new(
+            RetentionConfig::default(),
+            PayloadPolicy::default(),
+            QueuePriorities::of(QueueMode::Custom, Some(queues)),
+        )
+    }
+
+    #[test]
+    fn a_send_in_the_default_queue_mode_takes_the_priority_of_the_package() {
+        assert_eq!(
+            prepared_priority(&rules(), &options()),
+            SendPriority::DefaultQueue
+        );
+        assert!(matches!(
+            QueuePriorities::of(QueueMode::Default, None),
+            QueuePriorities::DefaultMode
+        ));
+    }
+
+    #[test]
+    fn a_send_on_a_custom_queue_takes_the_priority_of_the_core_config() {
+        let rules = custom_rules();
+        let billing = TaskOptions {
+            queue_name: Some("billing".to_owned()),
+            ..options()
+        };
+        let bulk = TaskOptions {
+            queue_name: Some("bulk".to_owned()),
+            ..options()
+        };
+        assert_eq!(
+            prepared_priority(&rules, &billing),
+            SendPriority::Configured { priority: 7 }
+        );
+        // The core's default for a queue that names no priority.
+        assert_eq!(
+            prepared_priority(&rules, &bulk),
+            SendPriority::Configured { priority: 1 }
+        );
+    }
+
+    #[test]
+    fn a_queue_that_the_custom_config_does_not_hold_is_a_boundary_refusal() {
+        let unknown = TaskOptions {
+            queue_name: Some("unknown".to_owned()),
+            ..options()
+        };
+        let refused = custom_rules().prepared(
+            &quiet_log(),
+            &facts(RetentionChoice::Forever, 10.0),
+            &unknown,
+        );
+        assert!(matches!(refused, Err(refusal) if refusal.subject == "options.queueName"));
+        let no_queue = TaskOptions {
+            queue_name: None,
+            ..options()
+        };
+        let refused = rules().prepared(
+            &quiet_log(),
+            &facts(RetentionChoice::Forever, 10.0),
+            &no_queue,
+        );
+        assert!(matches!(refused, Err(refusal) if refusal.subject == "options"));
     }
 
     #[test]
@@ -880,6 +1076,38 @@ mod tests {
             TraceArgument::NoCarrier,
         )
         .expect("the request crosses")
+    }
+
+    /// A connect or a schema install that fails (here: the listener closed)
+    /// is the send error `ENQUEUE_FAILED`, retryable, with the core's class
+    /// in the `exception` slot.
+    #[test]
+    fn a_failed_connect_or_install_is_enqueue_failed() {
+        let command = report_command();
+        let EnqueueOutcome::Failed { error } =
+            enqueue_failed(&command, &BrokerError::ListenerClosed)
+        else {
+            panic!("a failed install is a send error");
+        };
+        assert_eq!(error.class, "TaskSendEnqueueFailed");
+        assert!(error.slots.iter().any(
+            |slot| slot.name == "retryable" && slot.value == RawSlotValue::Flag { value: true }
+        ));
+    }
+
+    #[test]
+    fn a_written_send_is_enqueued_with_its_task_id_and_a_failed_write_is_its_send_error() {
+        let command = report_command();
+        assert_eq!(
+            enqueue_outcome_of(&command, Ok(command.task_id)),
+            EnqueueOutcome::Enqueued {
+                task_id: "01890a5d-ac96-774b-bcce-b302099a8057".to_owned()
+            }
+        );
+        assert_eq!(
+            enqueue_outcome_of(&command, Err(BrokerError::ListenerClosed)),
+            enqueue_failed(&command, &BrokerError::ListenerClosed)
+        );
     }
 
     /// A refusal of the core before any statement, of the input part.

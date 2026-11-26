@@ -37,7 +37,7 @@ describe("workerProfilesJson", () => {
     );
   });
 
-  test("shared async children with the forms that follow the seats, and no limits", () => {
+  test("shared async children with the pool size that follows the seats, and no limits", () => {
     assert.deepEqual(
       profileObject({
         sharedAsync: {
@@ -45,7 +45,6 @@ describe("workerProfilesJson", () => {
           seats: 50,
           recycle: { afterPerSeat: { kind: "noLimit" }, above: { kind: "noLimit" } },
           pool: { maxSize: { kind: "fromSeats" } },
-          executor: { kind: "fromSeats" },
         },
       }),
       {
@@ -55,20 +54,19 @@ describe("workerProfilesJson", () => {
           seats: 50,
           recycle: { after_per_seat: { kind: "no_task_limit" }, above: { kind: "no_memory_limit" } },
           pool: { max_size: { kind: "pool_size_from_seats" } },
-          executor: { kind: "executor_threads_from_seats" },
         },
       },
     );
   });
 
-  test("shared async children with a set executor and pool size", () => {
+  test("shared async children with a set pool size and task send pool, and no executor: the core's default applies", () => {
     assert.deepEqual(
       profileObject({
         sharedAsync: {
           count: 1,
           seats: 8,
           pool: { minSize: 0, maxSize: { kind: "connections", connections: 4 }, check: false },
-          executor: { kind: "threads", threads: 16 },
+          taskSendPool: { kind: "connections", connections: 2 },
         },
       }),
       {
@@ -77,7 +75,7 @@ describe("workerProfilesJson", () => {
           count: 1,
           seats: 8,
           pool: { min_size: 0, max_size: { kind: "pool_size", connections: 4 }, check: false },
-          executor: { kind: "executor_threads", threads: 16 },
+          task_send_pool: { kind: "pool_size", connections: 2 },
         },
       },
     );

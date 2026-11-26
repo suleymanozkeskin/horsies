@@ -31,6 +31,7 @@ import {
   OPTIONS_TEXT,
   PLAIN_START,
   PREPARED,
+  preparedWith,
   type ProducerScript,
   rawEnqueueFailed,
   rawKeyConflict,
@@ -122,7 +123,7 @@ describe("a send that the core takes", () => {
     );
   });
 
-  test("the prepare facts: name, queue, retention choice, deadline and the input's UTF-8 bytes", async () => {
+  test("the prepare facts: the task name, the retention choice, the deadline and the input's UTF-8 bytes", async () => {
     const { context, producer } = harness();
     const goodUntil = Temporal.Instant.fromEpochNanoseconds(SENT_AT_MICROS * 1000n + 60_000_000_999n);
 
@@ -130,15 +131,16 @@ describe("a send that the core takes", () => {
     assert.deepEqual(producer.prepares, [
       {
         taskName: "report",
-        queueName: "default",
-        retention: { kind: "days", days: 7 },
-        deadline: { kind: "until", epochMicros: SENT_AT_MICROS + 60_000_000n },
-        inputBytes: 7,
+        facts: {
+          retention: { kind: "days", days: 7 },
+          deadline: { kind: "until", epochMicros: SENT_AT_MICROS + 60_000_000n },
+          inputBytes: 7,
+        },
       },
     ]);
   });
 
-  test("the request: the default queue route, the prepared facts, the input text, the cut sent instant", async () => {
+  test("the request: the default queue route and its priority 100, the prepared facts, the input text, the cut sent instant", async () => {
     const { context, producer } = harness();
 
     await sendReport(context, { n: 1 }, { idempotencyKey: "key-1", delaySeconds: 30 });
@@ -157,13 +159,17 @@ describe("a send that the core takes", () => {
     });
   });
 
-  test("a custom queue gives its name and priority", async () => {
+  test("a custom queue gives its name, and the priority that the core's accepted config holds for it", async () => {
     const queues: QueueSetup = {
       kind: "custom",
-      queues: new Map([["billing", { name: "billing", priority: 7, maxConcurrency: { kind: "coreDefault" } }]]),
+      queues: new Map([["billing", { name: "billing", maxConcurrency: { kind: "coreDefault" } }]]),
     };
 
-    const { context, producer } = harness({ queues, contracts: [billed] });
+    const { context, producer } = harness({
+      queues,
+      contracts: [billed],
+      script: { prepared: [preparedWith({ kind: "configured", priority: 7 })] },
+    });
 
     await sendTask(context, billed, {}, {});
     assert.deepEqual(
@@ -436,6 +442,14 @@ describe("the suppression of sends", () => {
     assert.equal(await sendInProcess({ ...PLAIN_START, argumentAfterScript: "check" }), "SEND_SUPPRESSED");
   });
 
+  test("the scheduler before it serves", async () => {
+    assert.equal(await sendInProcess({ ...PLAIN_START, argumentAfterScript: "scheduler" }), "SEND_SUPPRESSED");
+    assert.deepEqual(initialSuppression({ ...PLAIN_START, argumentAfterScript: "scheduler" }), {
+      kind: "suppressed",
+      reason: "schedulerBeforeServe",
+    });
+  });
+
   test("HORSIES_SUPPRESS_SENDS=1, with whitespace around it, suppresses; another value does not", async () => {
     assert.equal(await sendInProcess(PLAIN_START, { HORSIES_SUPPRESS_SENDS: "1" }), "SEND_SUPPRESSED");
     assert.equal(await sendInProcess(PLAIN_START, { HORSIES_SUPPRESS_SENDS: " 1\n" }), "SEND_SUPPRESSED");
@@ -464,7 +478,7 @@ describe("the suppression of sends", () => {
     assert.equal(await sendInProcess(PLAIN_START), "sent");
   });
 
-  test("the start of serving opens a task child and a seat, not the check command or the variable", () => {
+  test("the start of serving opens a task child, a seat and the scheduler, not the check command or the variable", () => {
     const opened = (start: ProcessStart): SendSuppression => {
       const state = new SuppressionState(initialSuppression(start), () => undefined);
 
@@ -475,6 +489,7 @@ describe("the suppression of sends", () => {
 
     assert.deepEqual(opened({ ...PLAIN_START, argumentAfterScript: "--horsies-child" }), { kind: "open" });
     assert.deepEqual(opened({ ...PLAIN_START, seatIsolate: true }), { kind: "open" });
+    assert.deepEqual(opened({ ...PLAIN_START, argumentAfterScript: "scheduler" }), { kind: "open" });
     assert.deepEqual(opened({ ...PLAIN_START, argumentAfterScript: "check" }), { kind: "suppressed", reason: "checkCommand" });
     assert.deepEqual(servingSuppression({ kind: "open" }), { kind: "open" });
   });

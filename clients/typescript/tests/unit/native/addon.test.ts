@@ -9,7 +9,7 @@ describe("addonOrThrow", () => {
   test("gives the export object of a loaded addon", () => {
     const exports = {};
 
-    assert.equal(addonOrThrow({ kind: "loaded", exports, source: { kind: "pathVariable", path: "/a.node" } }), exports);
+    assert.equal(addonOrThrow({ kind: "loaded", exports, source: { kind: "devBuild", path: "/a.node" } }), exports);
   });
 
   test("throws AddonOutsideMainThread with the thread of a worker", () => {
@@ -39,6 +39,21 @@ describe("addonOrThrow", () => {
       {
         name: "CoreStartFailed",
         cause: "the native addon did not load from the package @horsies/native-linux-x64-gnu: Cannot find module",
+      },
+    );
+  });
+
+  test("throws CoreStartFailed that names the dev build of a failed dev load", () => {
+    assert.throws(
+      () =>
+        addonOrThrow({
+          kind: "loadFailed",
+          source: { kind: "devBuild", path: "/builds/horsies.node" },
+          cause: "no such file",
+        }),
+      {
+        name: "CoreStartFailed",
+        cause: "the native addon did not load from the dev build /builds/horsies.node: no such file",
       },
     );
   });
