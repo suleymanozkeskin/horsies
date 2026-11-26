@@ -10,19 +10,17 @@
 
 import { isIPv4, isIPv6 } from "node:net";
 
-import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
-import { appCoreHandle } from "../app/core-access.ts";
 import type { AppContext } from "../app/context.ts";
 import type { WorkerLogLevel } from "../_catalog/worker_manifest.ts";
 import { reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
 import { configureLogging } from "../logging.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
-import { clientVersion } from "../web/client-version.ts";
 import { unreachable } from "../native/call/never.ts";
 import { allowAll, trustedHeader, trustedHeaderRefusalText, viewOnly } from "../web/auth.ts";
 import type { ActionsSwitch, MonitoringAuthPolicy } from "../web/auth.ts";
-import { createMonitoringHandler } from "../web/handler.ts";
+import { monitoringAppOf } from "../web/app-facts.ts";
+import { monitoringHandlerOf } from "../web/handler.ts";
 import type { MonitoringHandler, MonitoringHandlerApp, MonitoringHandlerOptions } from "../web/handler.ts";
 import { serveHandler, serverRuntime } from "../web/serve.ts";
 import { addressText } from "../web/server.ts";
@@ -115,34 +113,6 @@ export interface WebCommandDeps {
   readonly signals: SignalSource;
 }
 
-/**
- * The facts of the app of `context` that the monitoring handler and the fleet metrics read, on a main thread: the
- * app's core handle (`appCoreHandle`), the queue names of its config, its schedule names (none: the config holds no
- * schedules yet) and the package version.
- */
-export function monitoringAppOf(context: AppContext): MonitoringHandlerApp {
-  return {
-    coreHandle: appCoreHandle(context.core),
-    queueNames: queueNamesOf(context),
-    scheduleNames: [],
-    clientVersion: clientVersion(),
-  };
-}
-
-/** The queue names of the config of `context`: the default queue, or the custom queues. Pure. */
-function queueNamesOf(context: AppContext): readonly string[] {
-  const queues = context.config.queues;
-
-  switch (queues.kind) {
-    case "default":
-      return [DEFAULT_QUEUE_ROUTE.queueName];
-    case "custom":
-      return [...queues.queues.keys()];
-    default:
-      return unreachable(queues);
-  }
-}
-
 /** The dependencies of `web` for the app of `context` in this process, with the check without the live step. */
 export function processWebCommandDeps(context: AppContext): WebCommandDeps {
   const checks = { checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions };
@@ -172,7 +142,7 @@ export function webCommandDeps(app: MonitoringHandlerApp, checkStatic: () => Pro
     },
     checkStatic,
     parseTraceLink,
-    createHandler: (options) => createMonitoringHandler(app, options),
+    createHandler: (options) => monitoringHandlerOf(app, options),
     serve: async (handler, address) =>
       serveHandler(serverRuntime(), handler, address, (failure) => {
         output.writeError(`horsies web: ${failure.method} ${failure.path} failed: ${failure.name}: ${failure.message}`);

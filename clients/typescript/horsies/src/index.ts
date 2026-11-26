@@ -20,6 +20,8 @@ export * from "./monitoring/public.ts";
 
 export * from "./rerun/public.ts";
 
+export * from "./web/public.ts";
+
 export * from "./thrown-errors.ts";
 
 export * from "./cli/public.ts";
