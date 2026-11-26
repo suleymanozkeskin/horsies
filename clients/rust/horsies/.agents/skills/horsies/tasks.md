@@ -33,7 +33,7 @@ first. The attributes after it:
 | `cancel_grace_ms` | `100..=10000` | `shared_async`: the time from the cancel signal (the deadline, or an operator cancel) to the drop of the body; default 1,000. `isolated`: the time from an operator cancel to the kill of the child when the body has not ended; no default, so no kill. On `shared_thread` it is a compile error |
 | `retry_policy` | a `RetryPolicy` expression | Goes with `retry_for` |
 | `retry_for` | `["CODE", ...]` | Goes with `retry_policy`, with at least one code. Each entry is a built-in code or a code of `E`; another entry is a compile error |
-| `workflow_context` | no value | The task takes the workflow context in its parameter `workflow_ctx` (see `workflows.md`) |
+| `workflow_context` | no value | The task takes the workflow context in its parameter `workflow_context` (see `workflows.md`) |
 
 - An unknown attribute is a compile error that lists the known ones.
 - `good_until` is not a task attribute. Set a deadline per send with

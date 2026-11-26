@@ -51,8 +51,8 @@ async fn send_receipt(
 }
 
 #[task("audit_checkout", workflow_context)]
-async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
-    let charged = workflow_ctx.result_for::<u64, Infallible>(&NodeKey::new("charge"));
+async fn audit_checkout(workflow_context: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
+    let charged = workflow_context.result_for::<u64, Infallible>(&NodeKey::new("charge"));
     Ok(matches!(charged, Ok(TaskOutcome::Succeeded(_))))
 }
 
@@ -189,7 +189,7 @@ ended. Give that node its dependency results through the workflow context.
 ## The Workflow Context
 
 A task that takes the context has the attribute `workflow_context` and a
-parameter named `workflow_ctx` of type `WorkflowContext`. The child of the
+parameter named `workflow_context` of type `WorkflowContext`. The child of the
 worker writes the context into that parameter.
 
 | Method | Returns |

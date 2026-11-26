@@ -236,11 +236,11 @@ class TestEncodeScheduleKwargs:
         assert result == dumps_json({'value': 5})
 
     def test_engine_injected_kwarg_rejected(self) -> None:
-        def f(x: int, workflow_ctx: WorkflowContext | None = None) -> str:
+        def f(x: int, workflow_context: WorkflowContext | None = None) -> str:
             return str(x)
 
         app = self._make_app_with_task(_make_task_mock(f))
-        result = _encode_schedule_kwargs(app, self._schedule({'x': 1, 'workflow_ctx': None}))
+        result = _encode_schedule_kwargs(app, self._schedule({'x': 1, 'workflow_context': None}))
         assert is_err(result)
         assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'not encodable' in result.err_value.message

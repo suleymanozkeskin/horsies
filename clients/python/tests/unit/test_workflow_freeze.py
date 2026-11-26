@@ -69,7 +69,7 @@ class MockFn(TaskFunction[Any, Any]):
 
 @dataclass
 class MockFnWithCtx(TaskFunction[Any, Any]):
-    """MockFn that accepts workflow_ctx (passes HRS-010 validator)."""
+    """MockFn that accepts workflow_context (passes HRS-010 validator)."""
 
     task_name: str
     queue: str | None = None
@@ -79,7 +79,7 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
     def __call__(
         self,
         *args: Any,
-        workflow_ctx: WorkflowContext | None = None,
+        workflow_context: WorkflowContext | None = None,
         **kwargs: Any,
     ) -> Result[Any, TaskError]:
         return Ok(None)
@@ -122,7 +122,7 @@ def _target_b(
 def _target_c(
     *,
     data: TaskOutcome[Any, TaskError] | None = None,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[Any, TaskError]:
     return Ok(None)
 

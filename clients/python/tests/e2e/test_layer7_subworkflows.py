@@ -748,7 +748,7 @@ async def test_runtime_built_child_reads_its_shard_nodes_through_workflow_ctx(
 
     ``build_with`` builds one count node per shard from the upstream list, and
     the child's fan-in node reads each count node by ``NodeKey`` through
-    ``workflow_ctx``. Three shards of ten characters give a total of 30.
+    ``workflow_context``. Three shards of ten characters give a total of 30.
     """
     spec = fanout_tasks.TenantReport.build(fanout_tasks.app)
     with run_worker(

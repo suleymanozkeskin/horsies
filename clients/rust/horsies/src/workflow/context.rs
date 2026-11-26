@@ -2,7 +2,7 @@
 //! task that takes it (Python `WorkflowContext`).
 //!
 //! A node names the dependencies with `workflow_context_from`, and its task
-//! takes the context as the input field `workflow_ctx` (the task attribute's
+//! takes the context as the input field `workflow_context` (the task attribute's
 //! `workflow_context`). The child of the worker writes the context into that
 //! field; its form is the core's `WorkflowContext`.
 
@@ -220,16 +220,18 @@ mod tests {
     fn a_stored_integer_outside_i64_and_u64_reads_as_its_type() {
         #[derive(Deserialize)]
         struct Input {
-            workflow_ctx: WorkflowContext,
+            workflow_context: WorkflowContext,
         }
         let text = concat!(
-            r#"{"workflow_ctx":{"workflow_id":"00000000-0000-0000-0000-000000000007","#,
+            r#"{"workflow_context":{"workflow_id":"00000000-0000-0000-0000-000000000007","#,
             r#""task_index":2,"task_name":"report","results_by_id":{"#,
             r#""max":{"__h_task_result__":true,"ok":340282366920938463463374607431768211455,"err":null},"#,
             r#""below":{"__h_task_result__":true,"ok":-9223372036854775809,"err":null}},"#,
             r#""summaries_by_id":{}}}"#,
         );
-        let context = decode_input::<Input>(text.as_bytes()).unwrap().workflow_ctx;
+        let context = decode_input::<Input>(text.as_bytes())
+            .unwrap()
+            .workflow_context;
         assert_eq!(
             context.result_for::<u128, Infallible>(&NodeKey::new("max")),
             Ok(TaskOutcome::Succeeded(u128::MAX))
@@ -247,7 +249,7 @@ mod tests {
     fn a_summary_output_outside_i64_and_u64_reads_as_its_type() {
         #[derive(Deserialize)]
         struct Input {
-            workflow_ctx: WorkflowContext,
+            workflow_context: WorkflowContext,
         }
         let summary = |output: &str| {
             format!(
@@ -255,11 +257,13 @@ mod tests {
             )
         };
         let text = format!(
-            r#"{{"workflow_ctx":{{"workflow_id":"00000000-0000-0000-0000-000000000007","task_index":2,"task_name":"report","results_by_id":{{}},"summaries_by_id":{{"max":{},"below":{}}}}}}}"#,
+            r#"{{"workflow_context":{{"workflow_id":"00000000-0000-0000-0000-000000000007","task_index":2,"task_name":"report","results_by_id":{{}},"summaries_by_id":{{"max":{},"below":{}}}}}}}"#,
             summary("340282366920938463463374607431768211455"),
             summary("-9223372036854775809"),
         );
-        let context = decode_input::<Input>(text.as_bytes()).unwrap().workflow_ctx;
+        let context = decode_input::<Input>(text.as_bytes())
+            .unwrap()
+            .workflow_context;
         assert_eq!(
             context.output_for(&NodeKey::<u128>::new("max")),
             Ok(Some(u128::MAX))

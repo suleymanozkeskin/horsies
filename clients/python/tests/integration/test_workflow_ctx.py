@@ -1,4 +1,4 @@
-"""Integration tests for workflow_ctx injection."""
+"""Integration tests for workflow_context injection."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def _is_str_keyed_dict(value: object) -> TypeGuard[dict[str, Any]]:
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestWorkflowCtx:
-    """Tests for workflow_ctx injection."""
+    """Tests for workflow_context injection."""
 
     @pytest_asyncio.fixture
     async def setup(
@@ -139,7 +139,7 @@ class TestWorkflowCtx:
         """
         ctx_data_raw = kwargs.get('__h_workflow_ctx__')
         if not _is_str_keyed_dict(ctx_data_raw):
-            raise AssertionError('workflow_ctx data missing or invalid')
+            raise AssertionError('workflow_context data missing or invalid')
 
         typed_ctx_data = ctx_data_raw
 
@@ -152,7 +152,7 @@ class TestWorkflowCtx:
                         TaskError(
                             code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx result for node {node_id!r} unavailable '
+                                f'workflow_context result for node {node_id!r} unavailable '
                                 f'(engine could not encode at emit time)'
                             ),
                             data={'node_id': node_id},
@@ -172,17 +172,17 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Injected workflow_ctx supports result_for(node)."""
+        """Injected workflow_context supports result_for(node)."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'ctx_inject_a')
 
         @app.task(name='ctx_inject_b')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
-            if workflow_ctx is None:
+            if workflow_context is None:
                 return Err(TaskError(code='NO_CTX', message='missing'))
-            match workflow_ctx.result_for(node_a):
+            match workflow_context.result_for(node_a):
                 case Succeeded(value=value):
                     return Ok(value)
                 case Failed(error=error):
@@ -218,15 +218,15 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """No workflow_ctx injected when workflow_context_from is not set."""
+        """No workflow_context injected when workflow_context_from is not set."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'no_ctx_from_a')
 
         @app.task(name='no_ctx_from_b')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
-            if workflow_ctx is None:
+            if workflow_context is None:
                 return Ok(0)
             return Ok(1)
 
@@ -285,18 +285,18 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_ctx includes multiple deps and result_for works for each."""
+        """workflow_context includes multiple deps and result_for works for each."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'ctx_multi_a')
         task_b = make_simple_task(app, 'ctx_multi_b')
 
         @app.task(name='ctx_multi_c')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
-            if workflow_ctx is None:
+            if workflow_context is None:
                 return Err(TaskError(code='NO_CTX', message='missing'))
-            match (workflow_ctx.result_for(node_a), workflow_ctx.result_for(node_b)):
+            match (workflow_context.result_for(node_a), workflow_context.result_for(node_b)):
                 case (Succeeded(value=first), Succeeded(value=second)):
                     return Ok(first + second)
                 case _:
@@ -341,11 +341,11 @@ class TestWorkflowCtx:
 
         @app.task(name='ctx_skipped_c')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[str, TaskError]:
-            if workflow_ctx is None:
+            if workflow_context is None:
                 return Err(TaskError(code='NO_CTX', message='missing'))
-            match workflow_ctx.result_for(node_b):
+            match workflow_context.result_for(node_b):
                 case Succeeded():
                     return Ok('unexpected')
                 case Failed(error=error):
@@ -399,11 +399,11 @@ class TestWorkflowCtx:
 
         @app.task(name='ctx_failed_c')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[str, TaskError]:
-            if workflow_ctx is None:
+            if workflow_context is None:
                 return Err(TaskError(code='NO_CTX', message='missing'))
-            match workflow_ctx.result_for(node_a):
+            match workflow_context.result_for(node_a):
                 case Succeeded():
                     return Ok('unexpected')
                 case Failed(error=error):
@@ -446,7 +446,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Tasks without workflow_ctx param reject workflow_context_from."""
+        """Tasks without workflow_context param reject workflow_context_from."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'no_ctx_param_a')
         task_b = make_no_ctx_task(app, 'no_ctx_param_b')
@@ -460,7 +460,7 @@ class TestWorkflowCtx:
 
         with pytest.raises(
             WorkflowValidationError,
-            match='workflow_context_from declared but function missing workflow_ctx param',
+            match='workflow_context_from declared but function missing workflow_context param',
         ) as exc_info:
             make_workflow_spec(
                 broker=broker, name='no_ctx_param', tasks=[node_a, node_b]
@@ -477,11 +477,11 @@ class TestWorkflowCtx:
 
         @app.task(name='ctx_worker_b')
         def ctx_worker_b(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
-            if workflow_ctx is None:
+            if workflow_context is None:
                 return Err(TaskError(code='NO_CTX', message='missing'))
-            match workflow_ctx.result_for(node_a):
+            match workflow_context.result_for(node_a):
                 case Succeeded(value=value):
                     return Ok(value)
                 case Failed(error=error):
@@ -628,12 +628,12 @@ class TestWorkflowCtx:
 
         @app.task(name='ctx_missing_id_b')
         def ctx_missing_id_b(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
-            if workflow_ctx is None:
+            if workflow_context is None:
                 return Err(TaskError(code='NO_CTX', message='missing'))
             # missing_node.node_id is None -> should raise RuntimeError
-            match workflow_ctx.result_for(missing_node):
+            match workflow_context.result_for(missing_node):
                 case Succeeded(value=value):
                     return Ok(value)
                 case Failed(error=error):
@@ -708,7 +708,7 @@ class TestWorkflowCtx:
 
         @app.task(name='e009_b')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             return Ok(0)
 
@@ -738,7 +738,7 @@ class TestWorkflowCtx:
 
         @app.task(name='key_err_b')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             return Ok(0)
 
@@ -777,7 +777,7 @@ class TestWorkflowCtx:
 
         @app.task(name='has_res_b')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             return Ok(0)
 
@@ -809,7 +809,7 @@ class TestWorkflowCtx:
 
         @app.task(name='has_res_false_b')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             return Ok(0)
 
@@ -849,7 +849,7 @@ class TestWorkflowCtx:
 
         @app.task(name='nodekey_b')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             return Ok(0)
 
@@ -884,7 +884,7 @@ class TestWorkflowCtx:
 
         @app.task(name='empty_ctx_b')
         def ctx_reader(
-            *, workflow_ctx: WorkflowContext | None = None,
+            *, workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             return Ok(0)
 
@@ -908,7 +908,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Worker silently skips ctx injection when function has no workflow_ctx param."""
+        """Worker silently skips ctx injection when function has no workflow_context param."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'skip_ctx_a')
 
@@ -917,7 +917,7 @@ class TestWorkflowCtx:
             return Ok(value + 100)
 
         # Build a workflow where node_b has workflow_context_from but the function
-        # does NOT declare workflow_ctx. Normally WorkflowSpec validation rejects
+        # does NOT declare workflow_context. Normally WorkflowSpec validation rejects
         # this (HRS-010), so we bypass validation by manually injecting
         # __h_workflow_ctx__ into the task's kwargs at the DB level.
         node_a: TaskNode[int] = TaskNode(function=task_a, kwargs={'value': 1})

@@ -119,8 +119,8 @@ use horsies::{task, NodeKey, TaskError, TaskOutcome, WorkflowContext};
 use serde_json::json;
 
 #[task("audit_checkout", workflow_context)]
-async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
-    let charged = workflow_ctx.result_for::<u64, Infallible>(&NodeKey::new("charge"));
+async fn audit_checkout(workflow_context: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
+    let charged = workflow_context.result_for::<u64, Infallible>(&NodeKey::new("charge"));
     Ok(matches!(charged, Ok(TaskOutcome::Succeeded(_))))
 }
 

@@ -1,10 +1,10 @@
-"""Layer 5 e2e tests: workflow data flow (args_from, workflow_ctx, SKIPPED/FAILED propagation).
+"""Layer 5 e2e tests: workflow data flow (args_from, workflow_context, SKIPPED/FAILED propagation).
 
 Tests verify:
 - args_from wiring and serialization across worker boundaries
 - WorkflowContext.result_for() in real execution
 - SKIPPED vs FAILED propagation semantics
-- Mixed args_from and workflow_ctx usage
+- Mixed args_from and workflow_context usage
 
 All tests poll the database for the state they wait for.
 """
@@ -138,20 +138,20 @@ async def test_args_from_multiple_dependencies(broker: PostgresBroker) -> None:
 
 
 # =============================================================================
-# T5.3: workflow_ctx result_for (A → B)
+# T5.3: workflow_context result_for (A → B)
 # =============================================================================
 
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
-    """T5.3: B accesses A's result via workflow_ctx.result_for()."""
+    """T5.3: B accesses A's result via workflow_context.result_for()."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
         ready_check=_make_ready_check(),
     ):
-        # spec_ctx_single: A produces 42, B reads it via workflow_ctx
+        # spec_ctx_single: A produces 42, B reads it via workflow_context
         handle = await start_ok_in_thread(wf_tasks.spec_ctx_single)
 
         status = await wait_for_workflow_completion(
@@ -173,14 +173,14 @@ async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
 
 
 # =============================================================================
-# T5.4: workflow_ctx with multiple deps (A, B → C)
+# T5.4: workflow_context with multiple deps (A, B → C)
 # =============================================================================
 
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> None:
-    """T5.4: C accesses both A and B via workflow_ctx and sums them."""
+    """T5.4: C accesses both A and B via workflow_context and sums them."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',
@@ -376,14 +376,14 @@ async def test_join_ctx_gating(broker: PostgresBroker) -> None:
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_mixed_args_from_and_ctx(broker: PostgresBroker) -> None:
-    """T5.8: D receives data from both args_from (B) and workflow_ctx (C)."""
+    """T5.8: D receives data from both args_from (B) and workflow_context (C)."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-2',
         ready_check=_make_ready_check(),
     ):
         # spec_mixed_dataflow: A produces 7, B doubles (14), C produces 3
-        # D receives B via args_from and C via workflow_ctx
+        # D receives B via args_from and C via workflow_context
         handle = await start_ok_in_thread(wf_tasks.spec_mixed_dataflow)
 
         status = await wait_for_workflow_completion(
@@ -533,14 +533,14 @@ async def test_args_from_dict_serialization(broker: PostgresBroker) -> None:
 
 
 # =============================================================================
-# T5.12: Same node via both args_from and workflow_ctx (dual injection)
+# T5.12: Same node via both args_from and workflow_context (dual injection)
 # =============================================================================
 
 
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_dual_injection_same_node(broker: PostgresBroker) -> None:
-    """T5.12: B reads A via both args_from and workflow_ctx without interference."""
+    """T5.12: B reads A via both args_from and workflow_context without interference."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',

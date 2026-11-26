@@ -534,11 +534,11 @@ Tasks can access upstream results via `WorkflowContext` using the type-safe `res
 ### Enabling WorkflowContext
 
 1. Set `workflow_context_from` on the TaskNode to specify which upstream results to include
-2. Declare `workflow_ctx: WorkflowContext | None` parameter in the task function
+2. Declare `workflow_context: WorkflowContext | None` parameter in the task function
 
 **Important:** `workflow_context_from` is **per-task**. The context is built fresh for each task that opts in, and does **not** persist or propagate to downstream tasks.
 
-**Scope:** Inside a task function, only results from nodes listed in `workflow_context_from` are accessible via `workflow_ctx.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
+**Scope:** Inside a task function, only results from nodes listed in `workflow_context_from` are accessible via `workflow_context.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
 
 This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns the read error `RESULT_NOT_READY` if the task hasn't completed.
 

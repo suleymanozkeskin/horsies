@@ -116,7 +116,7 @@ describe('seriesBound', () => {
 		expect(seriesBound(duration)).toBe(1);
 		const closed = parsed(TWO_METRICS.replace('  label task (horsies.task.name): declared task names, fallback "(unregistered)"\n', '').replace(
 			'  label error_code (error.type): "" "TASK_TIMEOUT" then declared custom error codes, fallback "undeclared"\n',
-			'  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC"\n',
+			'  label execution (horsies.child.execution): "ISOLATED" "SHARED_ASYNC"\n',
 		));
 		expect(seriesBound(closed[0])).toBe(6);
 	});

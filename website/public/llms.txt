@@ -389,7 +389,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - PAUSE — pause workflow immediately, block new enqueues, await resume() or cancel()
 
 ### WorkflowContext
-- Injected when task declares workflow_ctx: WorkflowContext | None = None
+- Injected when task declares workflow_context: WorkflowContext | None = None
 - Requires workflow_context_from on the TaskNode
 - .workflow_id -> str, .task_index -> int, .task_name -> str
 - .result_for(node: TaskNode[T] | NodeKey[T]) -> TaskOutcome[T, TaskError] (Succeeded(value) or Failed(error))
@@ -414,7 +414,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### NodeKey[T]
 - NodeKey("string_id") for dynamic/string-based lookup
 - node.key() to get NodeKey from a TaskNode or SubWorkflowNode
-- Used with workflow_ctx.result_for() and handle.result_for()
+- Used with workflow_context.result_for() and handle.result_for()
 
 ### SuccessPolicy / SuccessCase
 - SuccessPolicy(cases=[SuccessCase(required=[...])], optional=[...])

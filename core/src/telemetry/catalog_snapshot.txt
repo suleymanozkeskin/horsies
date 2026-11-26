@@ -103,24 +103,24 @@ horsies.worker.children.started
   kind: counter
   unit: 1
   recorder: worker
-  help: Child processes that sent their ready frame, by kind.
-  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
+  help: Child processes that sent their ready frame, by execution class.
+  label execution (horsies.child.execution): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
 horsies.worker.children.replaced
   prometheus: horsies_worker_children_replaced_total
   kind: counter
   unit: 1
   recorder: worker
-  help: Child processes that ended and were replaced, by kind and reason.
-  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
+  help: Child processes that ended and were replaced, by execution class and reason.
+  label execution (horsies.child.execution): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
   label reason (horsies.reason): "child_died" "channel_lost" "protocol_violation" "protocol_mismatch" "killed_by_parent" "slot_defect" "spawner_stopped" "task_count" "memory_limit" "second_cancel" "loop_blocked" "leftover_work" "at_deadline" "core_stopped"
 horsies.worker.child.boot.duration
   prometheus: horsies_worker_child_boot_duration_seconds
   kind: histogram
   unit: s
   recorder: worker
-  help: Time from the start of a child process to its ready frame, by kind.
+  help: Time from the start of a child process to its ready frame, by execution class.
   buckets: 0.005 0.01 0.025 0.05 0.1 0.25 0.5 1 2.5 5 10 30 60 120 300 600 1800 3600 7200 21600 86400
-  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
+  label execution (horsies.child.execution): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
 horsies.worker.seats
   prometheus: horsies_worker_seats
   kind: gauge
@@ -140,8 +140,8 @@ horsies.worker.slots.down
   kind: gauge
   unit: 1
   recorder: worker
-  help: Child slots that are down, by kind.
-  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
+  help: Child slots that are down, by execution class.
+  label execution (horsies.child.execution): "ISOLATED" "SHARED_ASYNC" "SHARED_THREAD"
 horsies.worker.claim.passes
   prometheus: horsies_worker_claim_passes_total
   kind: counter

@@ -98,9 +98,9 @@ pub async fn sync_supplier_feed(supplier: String) -> Result<SupplierFeed, TaskEr
 )]
 pub async fn update_stock_levels(
     feed_node_ids: Vec<String>,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<StockUpdate, TaskError<AcmeCode>> {
-    let context = workflow_ctx.ok_or_else(|| {
+    let context = workflow_context.ok_or_else(|| {
         TaskError::custom(
             AcmeCode::NoWorkflowContext,
             "update_stock_levels runs as a node of the restock workflow",

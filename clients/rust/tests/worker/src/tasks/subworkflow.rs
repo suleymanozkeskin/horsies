@@ -125,9 +125,9 @@ fn failed_child_id<T>(outcome: &TaskOutcome<T, WfCode>) -> Option<String> {
 #[task("e2e_sub_probe_failed_child", workflow_context)]
 pub async fn sub_probe_failed_child(
     child_result: TaskOutcome<i64, WfCode>,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<serde_json::Value, TaskError<WfCode>> {
-    let context = workflow_ctx
+    let context = workflow_context
         .ok_or_else(|| TaskError::custom(WfCode::NoCtx, "WorkflowContext not provided"))?;
     let key = NodeKey::<i64>::new(FAILURE_PROBE_CHILD);
     let args_child = failed_child_id(&child_result);
@@ -152,9 +152,9 @@ pub async fn sub_probe_failed_child(
 /// child through its context.
 #[task("e2e_sub_probe_success_ctx", workflow_context)]
 pub async fn sub_probe_success_ctx(
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<serde_json::Value, TaskError<WfCode>> {
-    let context = workflow_ctx
+    let context = workflow_context
         .ok_or_else(|| TaskError::custom(WfCode::NoCtx, "WorkflowContext not provided"))?;
     let key = NodeKey::<i64>::new(SUCCESS_CTX_CHILD);
     let result = context

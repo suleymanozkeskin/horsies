@@ -56,7 +56,7 @@ def _plain_fn(x: int, y: str) -> str:
     return f"{x}{y}"  # pragma: no cover
 
 
-def _fn_with_workflow_ctx(workflow_ctx: Any, x: int) -> None:
+def _fn_with_workflow_ctx(workflow_context: Any, x: int) -> None:
     pass  # pragma: no cover
 
 

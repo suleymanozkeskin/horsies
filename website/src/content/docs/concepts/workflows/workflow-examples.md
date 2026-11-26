@@ -405,7 +405,7 @@ typed_b = handle.result_for(fetch_b)
 
 ## WorkflowContext
 
-Set `workflow_context_from` on the node, and declare `workflow_ctx: WorkflowContext | None` in the task. See [WorkflowContext](/horsies/concepts/workflows/workflow-semantics/#workflowcontext-type-safe-result-access) for its scope.
+Set `workflow_context_from` on the node, and declare `workflow_context: WorkflowContext | None` in the task. See [WorkflowContext](/horsies/concepts/workflows/workflow-semantics/#workflowcontext-type-safe-result-access) for its scope.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -420,13 +420,13 @@ node_c: TaskNode[Summary] = TaskNode(
 )
 
 @app.task(name="aggregate")
-def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> Result[Summary, TaskError]:
-    if workflow_ctx is None:
+def aggregate(*, workflow_context: WorkflowContext | None = None) -> Result[Summary, TaskError]:
+    if workflow_context is None:
         return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     # Type-safe access: result_for returns TaskOutcome[T, TaskError] matching the node's type
-    a_result: TaskOutcome[int, TaskError] = workflow_ctx.result_for(node_a)
-    b_result: TaskOutcome[str, TaskError] = workflow_ctx.result_for(node_b)
+    a_result: TaskOutcome[int, TaskError] = workflow_context.result_for(node_a)
+    b_result: TaskOutcome[str, TaskError] = workflow_context.result_for(node_b)
 
     match (a_result, b_result):
         case (Failed(error), _):
@@ -461,7 +461,7 @@ match a_result:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 key_a = node_a.key()  # NodeKey[int]
-result = workflow_ctx.result_for(key_a)
+result = workflow_context.result_for(key_a)
 ```
 
 For dynamic workflows where node references are not available inside the task function, construct a `NodeKey` from the string ID:
@@ -489,12 +489,12 @@ config = AppConfig(
 app = Horsies(config)
 
 @app.task("fan_in")
-def fan_in(*, workflow_ctx: WorkflowContext | None = None) -> Result[str, TaskError]:
-    if workflow_ctx is None:
+def fan_in(*, workflow_context: WorkflowContext | None = None) -> Result[str, TaskError]:
+    if workflow_context is None:
         return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     i: int = 0
-    match workflow_ctx.result_for(NodeKey(f"save_{i}")):
+    match workflow_context.result_for(NodeKey(f"save_{i}")):
         case Failed(error):
             return Err(error)
         case Succeeded():

@@ -59,12 +59,12 @@ The core worker of each worker process records them. Its metrics endpoint (`--me
 | [`horsies.finalize.retries`](#horsiesfinalizeretries) | `horsies_finalize_retries_total` | counter | `stage` |
 | [`horsies.recovery.tasks`](#horsiesrecoverytasks) | `horsies_recovery_tasks_total` | counter | `action` |
 | [`horsies.recovery.pass.failures`](#horsiesrecoverypassfailures) | `horsies_recovery_pass_failures_total` | counter | `step` |
-| [`horsies.worker.children.started`](#horsiesworkerchildrenstarted) | `horsies_worker_children_started_total` | counter | `kind` |
-| [`horsies.worker.children.replaced`](#horsiesworkerchildrenreplaced) | `horsies_worker_children_replaced_total` | counter | `kind`, `reason` |
-| [`horsies.worker.child.boot.duration`](#horsiesworkerchildbootduration) | `horsies_worker_child_boot_duration_seconds` | histogram | `kind` |
+| [`horsies.worker.children.started`](#horsiesworkerchildrenstarted) | `horsies_worker_children_started_total` | counter | `execution` |
+| [`horsies.worker.children.replaced`](#horsiesworkerchildrenreplaced) | `horsies_worker_children_replaced_total` | counter | `execution`, `reason` |
+| [`horsies.worker.child.boot.duration`](#horsiesworkerchildbootduration) | `horsies_worker_child_boot_duration_seconds` | histogram | `execution` |
 | [`horsies.worker.seats`](#horsiesworkerseats) | `horsies_worker_seats` | gauge | `execution` |
 | [`horsies.worker.seats.in_use`](#horsiesworkerseatsin_use) | `horsies_worker_seats_in_use` | gauge | `execution` |
-| [`horsies.worker.slots.down`](#horsiesworkerslotsdown) | `horsies_worker_slots_down` | gauge | `kind` |
+| [`horsies.worker.slots.down`](#horsiesworkerslotsdown) | `horsies_worker_slots_down` | gauge | `execution` |
 | [`horsies.worker.claim.passes`](#horsiesworkerclaimpasses) | `horsies_worker_claim_passes_total` | counter | `result` |
 | [`horsies.worker.memory.rss`](#horsiesworkermemoryrss) | `horsies_worker_memory_rss_bytes` | gauge | `process` |
 | [`horsies.telemetry.events.dropped`](#horsiestelemetryeventsdropped) | `horsies_telemetry_events_dropped_total` | counter | `cause` |
@@ -267,7 +267,7 @@ Reaper passes in which a recovery step failed, by step.
 
 ### horsies.worker.children.started
 
-Child processes that sent their ready frame, by kind.
+Child processes that sent their ready frame, by execution class.
 
 | Item | Value |
 | ---- | ----- |
@@ -278,11 +278,11 @@ Child processes that sent their ready frame, by kind.
 
 | Label and attribute | Values |
 | ------------------- | ------ |
-| `kind` / `horsies.child.kind` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
+| `execution` / `horsies.child.execution` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
 
 ### horsies.worker.children.replaced
 
-Child processes that ended and were replaced, by kind and reason.
+Child processes that ended and were replaced, by execution class and reason.
 
 | Item | Value |
 | ---- | ----- |
@@ -293,12 +293,12 @@ Child processes that ended and were replaced, by kind and reason.
 
 | Label and attribute | Values |
 | ------------------- | ------ |
-| `kind` / `horsies.child.kind` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
+| `execution` / `horsies.child.execution` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
 | `reason` / `horsies.reason` | `child_died`, `channel_lost`, `protocol_violation`, `protocol_mismatch`, `killed_by_parent`, `slot_defect`, `spawner_stopped`, `task_count`, `memory_limit`, `second_cancel`, `loop_blocked`, `leftover_work`, `at_deadline`, `core_stopped` |
 
 ### horsies.worker.child.boot.duration
 
-Time from the start of a child process to its ready frame, by kind.
+Time from the start of a child process to its ready frame, by execution class.
 
 | Item | Value |
 | ---- | ----- |
@@ -310,7 +310,7 @@ Time from the start of a child process to its ready frame, by kind.
 
 | Label and attribute | Values |
 | ------------------- | ------ |
-| `kind` / `horsies.child.kind` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
+| `execution` / `horsies.child.execution` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
 
 ### horsies.worker.seats
 
@@ -344,7 +344,7 @@ Seats that hold a task, by execution class.
 
 ### horsies.worker.slots.down
 
-Child slots that are down, by kind.
+Child slots that are down, by execution class.
 
 | Item | Value |
 | ---- | ----- |
@@ -355,7 +355,7 @@ Child slots that are down, by kind.
 
 | Label and attribute | Values |
 | ------------------- | ------ |
-| `kind` / `horsies.child.kind` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
+| `execution` / `horsies.child.execution` | `ISOLATED`, `SHARED_ASYNC`, `SHARED_THREAD` |
 
 ### horsies.worker.claim.passes
 

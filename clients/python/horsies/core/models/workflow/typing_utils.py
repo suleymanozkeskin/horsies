@@ -66,7 +66,7 @@ def _task_accepts_workflow_ctx(function: Callable[..., Any]) -> bool:
         sig = inspect.signature(inspect_target)
     except (TypeError, ValueError):
         return False
-    return 'workflow_ctx' in sig.parameters
+    return 'workflow_context' in sig.parameters
 
 
 def _get_signature(function: Callable[..., Any]) -> inspect.Signature | None:

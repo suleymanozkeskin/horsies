@@ -251,7 +251,7 @@ These calls do not wait, so they work in a task:
 - `send()` and `send_async()`
 - starting a workflow
 - `TaskHandle.info()`
-- `workflow_ctx.result_for()`
+- `workflow_context.result_for()`
 
 A task that waits keeps its child while it waits. When enough tasks wait for other tasks, no child is free for the tasks that they wait for, and nothing moves until timeouts end the waits. A loop in a task that polls `info()` and sleeps holds its child the same way; it is outside this contract.
 

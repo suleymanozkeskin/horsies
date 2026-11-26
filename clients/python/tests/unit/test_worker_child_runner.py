@@ -1602,19 +1602,19 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         assert _error_code(payload) == _SERIALIZATION_ERROR
 
     # (test_workflow_ctx_results_by_id_bad_json removed: the strict-serde
-    # phase 5/6 rewrite of workflow_ctx kwarg decode no longer raises
+    # phase 5/6 rewrite of workflow_context kwarg decode no longer raises
     # SerializationError on per-node decode failure. Per-node failures
     # now fold into a sentinel Failed(TaskError(RESULT_DESERIALIZATION_ERROR))
-    # so the workflow_ctx stays typed. New contract is covered by
+    # so the workflow_context stays typed. New contract is covered by
     # test_workflow_handle_decode.py and the integration tests.)
 
     def test_workflow_ctx_summaries_by_id_bad_json(
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """workflow_ctx with invalid summaries_by_id JSON → serde error."""
+        """workflow_context with invalid summaries_by_id JSON → serde error."""
 
-        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+        def _task_with_ctx(workflow_context: Any = None) -> Result[str, TaskError]:
             return Ok('done')
 
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
@@ -1653,7 +1653,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         serialization error instead.
         """
 
-        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+        def _task_with_ctx(workflow_context: Any = None) -> Result[str, TaskError]:
             return Ok('done')
 
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
@@ -2113,9 +2113,9 @@ class TestRunTaskEntryWorkflowHappyPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """workflow_ctx with valid results_by_id + summaries_by_id → injected."""
+        """workflow_context with valid results_by_id + summaries_by_id → injected."""
 
-        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+        def _task_with_ctx(workflow_context: Any = None) -> Result[str, TaskError]:
             return Ok('done')
 
         patches = _make_run_task_patches()
@@ -2388,7 +2388,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+        def _task_with_ctx(workflow_context: Any = None) -> Result[str, TaskError]:
             return Ok('done')
 
         patches = _make_run_task_patches()
@@ -2420,7 +2420,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         with _apply_patches(patches):
             _ = envelope_of(_run_task_entry(**_run_entry_defaults))
 
-        injected = mock_task.call_args.kwargs['workflow_ctx']
+        injected = mock_task.call_args.kwargs['workflow_context']
         entry = injected._results_by_id['node_a']
         assert isinstance(entry, Failed)
         assert entry.error.code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR

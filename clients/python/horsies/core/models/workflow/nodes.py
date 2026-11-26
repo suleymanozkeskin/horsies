@@ -111,7 +111,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
     workflow_context_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
     """
     - Optional context: subset of dependencies to include in WorkflowContext
-    - Only injected if task declares `workflow_ctx: WorkflowContext | None` parameter
+    - Only injected if task declares `workflow_context: WorkflowContext | None` parameter
 
     """
     # Queue/priority overrides (if None, use task decorator defaults)

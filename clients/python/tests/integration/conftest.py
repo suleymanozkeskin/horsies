@@ -153,12 +153,12 @@ def make_simple_task(app: Horsies, name: str = 'simple_task') -> Any:
 
 
 def make_simple_ctx_task(app: Horsies, name: str = 'simple_ctx_task') -> Any:
-    """Create a simple task that accepts workflow_ctx and doubles its input."""
+    """Create a simple task that accepts workflow_context and doubles its input."""
 
     @app.task(name=name)
     def simple_ctx_task(
         *, value: int,
-        workflow_ctx: WorkflowContext | None = None,
+        workflow_context: WorkflowContext | None = None,
     ) -> Result[int, TaskError]:
         return Ok(value * 2)
 
@@ -225,20 +225,20 @@ def make_recovery_task(app: Horsies, name: str = 'recovery_task') -> Any:
 
 
 def make_ctx_receiver_task(app: Horsies, name: str = 'ctx_receiver') -> Any:
-    """Create a task that receives workflow_ctx."""
+    """Create a task that receives workflow_context."""
 
     @app.task(name=name)
     def ctx_receiver(
-        *, workflow_ctx: WorkflowContext | None = None,
+        *, workflow_context: WorkflowContext | None = None,
     ) -> Result[dict[str, JsonValue], TaskError]:
-        if workflow_ctx is None:
+        if workflow_context is None:
             return Ok({'ctx': None})
         return Ok(
             {
-                'workflow_id': workflow_ctx.workflow_id,
-                'task_index': workflow_ctx.task_index,
-                'task_name': workflow_ctx.task_name,
-                'result_keys': list(workflow_ctx._results_by_id.keys()),
+                'workflow_id': workflow_context.workflow_id,
+                'task_index': workflow_context.task_index,
+                'task_name': workflow_context.task_name,
+                'result_keys': list(workflow_context._results_by_id.keys()),
             }
         )
 
@@ -246,7 +246,7 @@ def make_ctx_receiver_task(app: Horsies, name: str = 'ctx_receiver') -> Any:
 
 
 def make_no_ctx_task(app: Horsies, name: str = 'no_ctx_task') -> Any:
-    """Create a task that does NOT declare workflow_ctx param."""
+    """Create a task that does NOT declare workflow_context param."""
 
     @app.task(name=name)
     def no_ctx_task(*, value: int = 0) -> Result[int, TaskError]:

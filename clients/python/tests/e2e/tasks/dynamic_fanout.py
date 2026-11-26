@@ -3,7 +3,7 @@
 The child workflow ``ShardReport`` is built at run time by
 ``SubWorkflowNode.build_with`` from the result of ``list_shards``. It has one
 count node per shard and a fan-in node that reads the shard results through
-``workflow_ctx.result_for(NodeKey(...))``. The shapes follow the example in
+``workflow_context.result_for(NodeKey(...))``. The shapes follow the example in
 ``website/src/content/docs/concepts/workflows/subworkflows.md``
 ("Dynamic Fan-Out with ``args_from``").
 """
@@ -56,15 +56,15 @@ def count_shard_rows(*, shard: str) -> Result[int, TaskError]:
 def sum_shard_rows(
     *,
     shard_count: int,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[int, TaskError]:
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
-            TaskError(code='NO_CONTEXT', message='workflow_ctx is missing'),
+            TaskError(code='NO_CONTEXT', message='workflow_context is missing'),
         )
     total = 0
     for position in range(shard_count):
-        match workflow_ctx.result_for(NodeKey[int](f'shard_{position}')):
+        match workflow_context.result_for(NodeKey[int](f'shard_{position}')):
             case Failed(error):
                 return Err(error)
             case Succeeded(rows):

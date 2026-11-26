@@ -113,14 +113,14 @@ class TestMissingRequiredKwargs:
         assert missing_required_kwargs(charge, ()) == MissingKwargs((), ())
 
     def test_a_required_workflow_ctx_needs_a_workflow(self) -> None:
-        def step(*, workflow_ctx: WorkflowContext) -> Result[int, TaskError]:
+        def step(*, workflow_context: WorkflowContext) -> Result[int, TaskError]:
             return Ok(1)
 
         app = _mock_app()
         result = create_task_wrapper(step, app, 'test.step').send()
 
         assert is_err(result)
-        assert 'workflow_ctx' in result.err_value.message
+        assert 'workflow_context' in result.err_value.message
         assert 'workflow node' in result.err_value.message
         app.get_broker.assert_not_called()
 

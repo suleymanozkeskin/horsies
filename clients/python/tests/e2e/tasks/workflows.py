@@ -384,15 +384,15 @@ def fail_with_task(*, error_code: str) -> Result[int, TaskError]:
 
 @app.task(name='e2e_wf_ctx_reader')
 def ctx_reader_task(
-    *, workflow_ctx: WorkflowContext | None = None,
+    *, workflow_context: WorkflowContext | None = None,
 ) -> Result[int, TaskError]:
     """Reads integer value from workflow context."""
     time.sleep(0.05)
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
             TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
-    match workflow_ctx.result_for(node_ctx_a.key()):
+    match workflow_context.result_for(node_ctx_a.key()):
         case Succeeded(value):
             return Ok(value)
         case Failed(error):
@@ -401,16 +401,16 @@ def ctx_reader_task(
 
 @app.task(name='e2e_wf_ctx_reader_str')
 def ctx_reader_str_task(
-    *, workflow_ctx: WorkflowContext | None = None,
+    *, workflow_context: WorkflowContext | None = None,
 ) -> Result[str, TaskError]:
     """Reads string value from workflow context."""
     time.sleep(0.05)
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
             TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
-    for node_id in workflow_ctx._results_by_id:
-        match workflow_ctx._results_by_id[node_id]:
+    for node_id in workflow_context._results_by_id:
+        match workflow_context._results_by_id[node_id]:
             case Succeeded(value):
                 return Ok(str(value))
             case Failed(error):
@@ -422,16 +422,16 @@ def ctx_reader_str_task(
 
 @app.task(name='e2e_wf_ctx_sum')
 def ctx_sum_task(
-    *, workflow_ctx: WorkflowContext | None = None,
+    *, workflow_context: WorkflowContext | None = None,
 ) -> Result[int, TaskError]:
     """Sums all integer results from workflow context."""
     time.sleep(0.05)
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
             TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
-    first = workflow_ctx.result_for(node_ctx_multi_a.key())
-    second = workflow_ctx.result_for(node_ctx_multi_b.key())
+    first = workflow_context.result_for(node_ctx_multi_a.key())
+    second = workflow_context.result_for(node_ctx_multi_b.key())
     match first:
         case Failed(error):
             return Err(error)
@@ -469,9 +469,9 @@ def passthrough_task(*, value: int) -> Result[int, TaskError]:
 @app.task(name='e2e_wf_mixed_reader')
 def mixed_reader_task(
     *, from_args: TaskOutcome[int, TaskError],
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[dict[str, int], TaskError]:
-    """Reads from both args_from and workflow_ctx."""
+    """Reads from both args_from and workflow_context."""
     time.sleep(0.05)
     result: dict[str, int] = {}
 
@@ -482,14 +482,14 @@ def mixed_reader_task(
         case Succeeded(value):
             result['from_args'] = value
 
-    # Get value from workflow_ctx
-    if workflow_ctx is None:
+    # Get value from workflow_context
+    if workflow_context is None:
         return Err(
             TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
 
-    for node_id in workflow_ctx._results_by_id:
-        match workflow_ctx._results_by_id[node_id]:
+    for node_id in workflow_context._results_by_id:
+        match workflow_context._results_by_id[node_id]:
             case Succeeded(value):
                 result['from_ctx'] = value
                 break
@@ -522,9 +522,9 @@ def receive_dict_task(
 @app.task(name='e2e_wf_dual_reader')
 def dual_reader_task(
     *, from_args: TaskOutcome[int, TaskError],
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[dict[str, int], TaskError]:
-    """Reads same node's result via both args_from and workflow_ctx."""
+    """Reads same node's result via both args_from and workflow_context."""
     time.sleep(0.05)
     match from_args:
         case Failed(error):
@@ -532,11 +532,11 @@ def dual_reader_task(
         case Succeeded(args_value):
             pass
 
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
             TaskError(code='NO_CTX', message='WorkflowContext not provided'),
         )
-    match workflow_ctx.result_for(node_dual_a.key()):
+    match workflow_context.result_for(node_dual_a.key()):
         case Failed(error):
             return Err(error)
         case Succeeded(ctx_value):
@@ -581,7 +581,7 @@ spec_args_from_multi = _workflow(
 
 
 # =============================================================================
-# L5.3: workflow_ctx result_for (A → B)
+# L5.3: workflow_context result_for (A → B)
 # =============================================================================
 
 node_ctx_a = TaskNode(function=produce_int_task, kwargs={"value": 42})
@@ -599,7 +599,7 @@ spec_ctx_single = _workflow(
 
 
 # =============================================================================
-# L5.4: workflow_ctx with multiple deps (A, B → C)
+# L5.4: workflow_context with multiple deps (A, B → C)
 # =============================================================================
 
 node_ctx_multi_a = TaskNode(function=produce_int_task, kwargs={"value": 100})
@@ -779,7 +779,7 @@ spec_args_from_dict = _workflow(
 
 
 # =============================================================================
-# L5.12: Same node via both args_from and workflow_ctx (dual injection)
+# L5.12: Same node via both args_from and workflow_context (dual injection)
 # =============================================================================
 
 node_dual_a = TaskNode(function=produce_int_task, kwargs={"value": 77})
@@ -809,11 +809,11 @@ from horsies.core.models.tasks import RetryPolicy
 @app.task(name='e2e_wf_mark')
 def mark_task(
     *, value: str,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[str, TaskError]:
     """Returns the provided value."""
     time.sleep(0.05)
-    _ = workflow_ctx
+    _ = workflow_context
     return Ok(value)
 
 
@@ -1092,7 +1092,7 @@ def e2e_sub_report_input_task(
 @app.task(name='e2e_sub_probe_failed_child')
 def e2e_sub_probe_failed_child_task(
     *, child_result: TaskOutcome[int, TaskError],
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
 
@@ -1109,9 +1109,9 @@ def e2e_sub_probe_failed_child_task(
     ctx_lookup_ok = False
     summary_lookup_ok = False
 
-    if workflow_ctx is not None:
+    if workflow_context is not None:
         try:
-            ctx_result = workflow_ctx.result_for(node_e2e_sub_failure_probe_child.key())
+            ctx_result = workflow_context.result_for(node_e2e_sub_failure_probe_child.key())
             ctx_lookup_ok = True
             match ctx_result:
                 case Failed(error):
@@ -1125,7 +1125,7 @@ def e2e_sub_probe_failed_child_task(
             )
 
         try:
-            summary = workflow_ctx.summary_for(node_e2e_sub_failure_probe_child)
+            summary = workflow_context.summary_for(node_e2e_sub_failure_probe_child)
             summary_lookup_ok = True
             summary_status = summary.status.value
             summary_failed_tasks = summary.failed_tasks
@@ -1158,7 +1158,7 @@ def e2e_sub_probe_failed_child_task(
 
 @app.task(name='e2e_sub_probe_success_ctx')
 def e2e_sub_probe_success_ctx_task(
-    *, workflow_ctx: WorkflowContext | None = None,
+    *, workflow_context: WorkflowContext | None = None,
 ) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
 
@@ -1170,13 +1170,13 @@ def e2e_sub_probe_success_ctx_task(
     summary_completed_tasks: int | None = None
     summary_lookup_ok = False
 
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
             TaskError(code='NO_CTX', message='WorkflowContext not provided'),
         )
 
     try:
-        match workflow_ctx.result_for(node_e2e_sub_success_ctx_child.key()):
+        match workflow_context.result_for(node_e2e_sub_success_ctx_child.key()):
             case Succeeded(value):
                 result_ok = True
                 result_value = value
@@ -1187,7 +1187,7 @@ def e2e_sub_probe_success_ctx_task(
         result_error_code = f'{type(exc).__name__}: {exc}'
 
     try:
-        summary = workflow_ctx.summary_for(node_e2e_sub_success_ctx_child)
+        summary = workflow_context.summary_for(node_e2e_sub_success_ctx_child)
         summary_lookup_ok = True
         summary_status = summary.status.value
         summary_output = summary.output

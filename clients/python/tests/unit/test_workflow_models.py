@@ -65,7 +65,7 @@ def _open_target(
 def _ctx_target(
     *,
     input: TaskOutcome[Any, TaskError] | None = None,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[Any, TaskError]:
     return Ok(None)
 
@@ -138,7 +138,7 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
 
 @dataclass
 class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
-    """Mock TaskWrapper that accepts workflow_ctx."""
+    """Mock TaskWrapper that accepts workflow_context."""
 
     _original_function = staticmethod(_ctx_target)
 
@@ -149,7 +149,7 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
 
     def __call__(
         self,
-        workflow_ctx: WorkflowContext | None = None,
+        workflow_context: WorkflowContext | None = None,
         *args: Any,
         **kwargs: Any,
     ) -> Result[Any, TaskError]:
@@ -901,7 +901,7 @@ class TestWorkflowSpecValidation:
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
         # Use MockTaskWrapperWithCtx so only the waits_for check fires
-        # (not also CTX_PARAM_MISSING for lacking workflow_ctx param)
+        # (not also CTX_PARAM_MISSING for lacking workflow_context param)
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
         node_a = TaskNode(function=fn_a)
@@ -919,7 +919,7 @@ class TestWorkflowSpecValidation:
         assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_CTX_FROM
 
     def test_workflow_context_from_requires_workflow_ctx_param(self) -> None:
-        """workflow_context_from requires workflow_ctx param → WORKFLOW_CTX_PARAM_MISSING."""
+        """workflow_context_from requires workflow_context param → WORKFLOW_CTX_PARAM_MISSING."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_with_ctx = MockTaskWrapperWithCtx(task_name='task_with_ctx')
         fn_b = MockTaskWrapper(task_name='task_b')
@@ -939,7 +939,7 @@ class TestWorkflowSpecValidation:
         )
 
         with pytest.raises(
-            WorkflowValidationError, match='missing workflow_ctx param',
+            WorkflowValidationError, match='missing workflow_context param',
         ) as exc_info:
             WorkflowSpec(name='ctx_param_missing', tasks=[node_a, node_c])
 
@@ -2397,7 +2397,7 @@ class TestWorkflowDefinition:
 
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        # fn_c must accept workflow_ctx since audit_node uses workflow_context_from
+        # fn_c must accept workflow_context since audit_node uses workflow_context_from
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
         # Define nodes outside so we can reference them in waits_for and workflow_context_from

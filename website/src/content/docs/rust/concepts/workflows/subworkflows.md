@@ -268,8 +268,8 @@ The result of a sub-workflow node is the result of its child: the child's output
 | Read | Gives |
 |------|-------|
 | `arg_from(field, child_node)` | `TaskOutcome<T, E>` with `T` the child's output type |
-| `workflow_ctx.summary_for(&key)` | The `SubWorkflowSummary` of the ended child |
-| `workflow_ctx.output_for::<T>(&key)` | `Option<T>`: the child's output, `None` when the child stored none |
+| `workflow_context.summary_for(&key)` | The `SubWorkflowSummary` of the ended child |
+| `workflow_context.output_for::<T>(&key)` | `Option<T>`: the child's output, `None` when the child stored none |
 | `handle.tasks()` | `WorkflowNodeInfo` with `sub_workflow_id` and `sub_workflow_summary` |
 
 `SubWorkflowSummary`:

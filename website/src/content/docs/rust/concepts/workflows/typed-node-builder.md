@@ -109,7 +109,7 @@ A `TaskOutcome<S, E>` parameter has no default. A node that joins on any or on a
 
 ## Read Results through the Workflow Context
 
-A task that takes the workflow context has the attribute `workflow_context` and a parameter named `workflow_ctx` of type `WorkflowContext`. The node names the dependencies whose results the context holds with `.workflow_context_from(nodes)`.
+A task that takes the workflow context has the attribute `workflow_context` and a parameter named `workflow_context` of type `WorkflowContext`. The node names the dependencies whose results the context holds with `.workflow_context_from(nodes)`.
 
 ```rust
 use std::convert::Infallible;
@@ -117,8 +117,8 @@ use std::convert::Infallible;
 use horsies::{task, NodeKey, TaskError, TaskOutcome, WorkflowContext};
 
 #[task("audit_checkout", workflow_context)]
-async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
-    let charged = workflow_ctx.result_for::<u64, Infallible>(&NodeKey::new("charge"));
+async fn audit_checkout(workflow_context: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
+    let charged = workflow_context.result_for::<u64, Infallible>(&NodeKey::new("charge"));
     Ok(matches!(charged, Ok(TaskOutcome::Succeeded(_))))
 }
 ```
@@ -136,7 +136,7 @@ let _audit = builder.task(
 
 - Each node of `workflow_context_from` must be a dependency of the node: `HRS-009` otherwise. `waits_for` and `arg_from` make a dependency.
 - `workflow_context_from` on a task without the `workflow_context` attribute is `HRS-010`.
-- The worker writes the context into the parameter `workflow_ctx` only for a node with `workflow_context_from`. A node of such a task without `workflow_context_from` is `HRS-020`: its parameter has no value.
+- The worker writes the context into the parameter `workflow_context` only for a node with `workflow_context_from`. A node of such a task without `workflow_context_from` is `HRS-020`: its parameter has no value.
 - Give each context source a node id, and read it with `NodeKey::new(id)`. `WorkflowSpec::key(node_ref)` and `TaskNode::key()` also give the key.
 
 | `WorkflowContext` method | Returns |

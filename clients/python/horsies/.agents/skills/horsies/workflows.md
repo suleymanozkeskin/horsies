@@ -172,11 +172,11 @@ FETCH_NODE_ID = "fetch"  # shared constant; the workflow passes it to node_id=
 @app.task("summarize_rows")
 def summarize_rows(
     *,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[int, TaskError]:
-    if workflow_ctx is None:
-        return Err(TaskError(code="NO_CONTEXT", message="workflow_ctx is missing"))
-    match workflow_ctx.result_for(NodeKey[list[int]](FETCH_NODE_ID)):
+    if workflow_context is None:
+        return Err(TaskError(code="NO_CONTEXT", message="workflow_context is missing"))
+    match workflow_context.result_for(NodeKey[list[int]](FETCH_NODE_ID)):
         case Succeeded(rows):
             return Ok(sum(rows))
         case Failed(error):
@@ -529,7 +529,7 @@ policy = SuccessPolicy(
 
 ## WorkflowContext
 
-Injected when a task declares `workflow_ctx: WorkflowContext | None = None`:
+Injected when a task declares `workflow_context: WorkflowContext | None = None`:
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -554,14 +554,14 @@ class WorkflowContext(BaseModel):
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("aggregate")
-def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> Result[Report, TaskError]:
-    if workflow_ctx is None:
+def aggregate(*, workflow_context: WorkflowContext | None = None) -> Result[Report, TaskError]:
+    if workflow_context is None:
         return Err(TaskError(
             code="NO_CTX",
             message="aggregate ran without a workflow context",
         ))
-    ra = workflow_ctx.result_for(ParallelPipeline.a)  # TaskOutcome[int, TaskError]
-    rb = workflow_ctx.result_for(ParallelPipeline.b)
+    ra = workflow_context.result_for(ParallelPipeline.a)  # TaskOutcome[int, TaskError]
+    rb = workflow_context.result_for(ParallelPipeline.b)
     ...  # match each outcome: case Succeeded(value) / case Failed(error)
 ```
 
@@ -609,7 +609,7 @@ class SubWorkflowSummary(Generic[OkT]):
     error_summary: str | None = None
 ```
 
-Accessed via `workflow_ctx.summary_for(subworkflow_node)`.
+Accessed via `workflow_context.summary_for(subworkflow_node)`.
 
 ## Failure Semantics
 

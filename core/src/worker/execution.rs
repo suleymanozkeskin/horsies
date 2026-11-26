@@ -185,7 +185,7 @@ const PHASE_RETRY_MAX_DELAY_S: f64 = 15.0;
 /// The input must pass the core's strict JSON read rule; a refused text fails
 /// the task before user code runs. An object input is Python's keyword input;
 /// its engine members (Python `core/worker/child_runner.py:1362-1580`):
-/// - `WORKFLOW_CTX_KWARG` becomes `workflow_ctx` when `accepts_workflow_context`,
+/// - `WORKFLOW_CTX_KWARG` becomes `workflow_context` when `accepts_workflow_context`,
 ///   and is removed otherwise (check-time callers pass `false`: no runtime
 ///   context);
 /// - `WORKFLOW_META_KWARG` is removed;
@@ -241,16 +241,16 @@ pub(crate) fn build_task_input(
         .collect();
     check_input_members(&user_members, &args_from_names)
         .map_err(|refusal| input_refused(&refusal))?;
-    let workflow_ctx = match (members.workflow_ctx, accepts_workflow_context) {
+    let workflow_context = match (members.workflow_context, accepts_workflow_context) {
         (Some(payload), true) => Some(workflow_ctx_text(payload.get())?),
         (Some(_), false) | (None, _) => None,
     };
-    Ok(task_input_text(&members.task_members, workflow_ctx.as_deref()).into_bytes())
+    Ok(task_input_text(&members.task_members, workflow_context.as_deref()).into_bytes())
 }
 
-/// The input field that takes the workflow context (Python's `workflow_ctx`
+/// The input field that takes the workflow context (Python's `workflow_context`
 /// parameter).
-const WORKFLOW_CTX_FIELD: &str = "workflow_ctx";
+const WORKFLOW_CONTEXT_FIELD: &str = "workflow_context";
 
 /// Whether an object input holds a member that the engine writes: the
 /// workflow context, the workflow meta, or an `args_from` entry (an object
@@ -296,7 +296,7 @@ struct TaskMembers<'a> {
     /// The members that the task gets, in text order, each with its name.
     task_members: Vec<(String, TaskMember<'a>)>,
     /// The context payload (`WORKFLOW_CTX_KWARG`), as its text.
-    workflow_ctx: Option<&'a RawValue>,
+    workflow_context: Option<&'a RawValue>,
 }
 
 /// Read the members of the object input `input` from its text: the context
@@ -310,11 +310,11 @@ fn task_members(input: &str) -> Result<TaskMembers<'_>, TaskError> {
         .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
     let mut read = TaskMembers {
         task_members: Vec::with_capacity(members.len()),
-        workflow_ctx: None,
+        workflow_context: None,
     };
     for (name, value) in members {
         match name.as_str() {
-            WORKFLOW_CTX_KWARG => read.workflow_ctx = Some(value),
+            WORKFLOW_CTX_KWARG => read.workflow_context = Some(value),
             WORKFLOW_META_KWARG => {}
             _ => {
                 let member = match args_from_inner_text(&name, value)
@@ -330,23 +330,23 @@ fn task_members(input: &str) -> Result<TaskMembers<'_>, TaskError> {
     Ok(read)
 }
 
-/// The task input text: `members` in their order, with `workflow_ctx`, when
-/// given, as the `workflow_ctx` field. A member of that name keeps its place
-/// and takes the context, as Python's `kwargs['workflow_ctx'] = ...`; else
+/// The task input text: `members` in their order, with `workflow_context`, when
+/// given, as the `workflow_context` field. A member of that name keeps its place
+/// and takes the context, as Python's `kwargs['workflow_context'] = ...`; else
 /// the field comes last. Pure.
-fn task_input_text(members: &[(String, TaskMember<'_>)], workflow_ctx: Option<&str>) -> String {
+fn task_input_text(members: &[(String, TaskMember<'_>)], workflow_context: Option<&str>) -> String {
     let mut written: Vec<(&str, &str)> = members
         .iter()
         .map(|(name, member)| (name.as_str(), member.text()))
         .collect();
-    match workflow_ctx {
+    match workflow_context {
         None => {}
         Some(context) => match written
             .iter()
-            .position(|(name, _)| *name == WORKFLOW_CTX_FIELD)
+            .position(|(name, _)| *name == WORKFLOW_CONTEXT_FIELD)
         {
             Some(place) => written[place].1 = context,
-            None => written.push((WORKFLOW_CTX_FIELD, context)),
+            None => written.push((WORKFLOW_CONTEXT_FIELD, context)),
         },
     }
     object_text(&written)
@@ -1454,7 +1454,7 @@ mod parse {
         summaries_by_id: HashMap<String, serde_json::Value>,
     }
 
-    /// The `workflow_ctx` field that the task reads, in the form of the core's `WorkflowContext`
+    /// The `workflow_context` field that the task reads, in the form of the core's `WorkflowContext`
     /// (`crate::core::workflow::context`).
     #[derive(Serialize)]
     struct WorkflowCtxField {
@@ -1476,7 +1476,7 @@ mod parse {
         Unreadable(TaskResult<serde_json::Value>),
     }
 
-    /// The text of the `workflow_ctx` field from the text of the context payload (Python
+    /// The text of the `workflow_context` field from the text of the context payload (Python
     /// `core/worker/child_runner.py:1438-1580`).
     ///
     /// - A result entry that reads as a result envelope is kept as its text. An entry that is
@@ -1567,14 +1567,14 @@ mod parse {
         if envelope.get() == "null" {
             return unreadable(
                 format!(
-                    "workflow_ctx result for node '{node_id}' unavailable (source task not registered at encode time)"
+                    "workflow_context result for node '{node_id}' unavailable (source task not registered at encode time)"
                 ),
                 serde_json::json!({ "node_id": node_id }),
             );
         }
         let Some(serde_json::Value::String(source_task_name)) = source_task_name else {
             return unreadable(
-                format!("workflow_ctx missing task_name for node '{node_id}'; cannot decode"),
+                format!("workflow_context missing task_name for node '{node_id}'; cannot decode"),
                 serde_json::json!({ "node_id": node_id }),
             );
         };
@@ -1582,7 +1582,7 @@ mod parse {
         match read {
             Ok(_reads) => ContextEntry::Stored(envelope),
             Err(e) => unreadable(
-                format!("decode_task_result failed for workflow_ctx node '{node_id}': {e}"),
+                format!("decode_task_result failed for workflow_context node '{node_id}': {e}"),
                 serde_json::json!({ "node_id": node_id, "source_task_name": source_task_name }),
             ),
         }
@@ -1802,7 +1802,7 @@ mod task_input_tests {
         assert_eq!(
             task_input_with_context(&input),
             format!(
-                r#"{{"x":1,"workflow_ctx":{{"workflow_id":"00000000-0000-0000-0000-000000000000","task_index":2,"task_name":"consume","results_by_id":{{"below":{BELOW_I64_ENVELOPE},"max":{U128_MAX_ENVELOPE}}},"summaries_by_id":{{}}}}}}"#
+                r#"{{"x":1,"workflow_context":{{"workflow_id":"00000000-0000-0000-0000-000000000000","task_index":2,"task_name":"consume","results_by_id":{{"below":{BELOW_I64_ENVELOPE},"max":{U128_MAX_ENVELOPE}}},"summaries_by_id":{{}}}}}}"#
             )
         );
     }
@@ -1843,20 +1843,20 @@ mod task_input_tests {
         }
     }
 
-    /// The context takes the place of a member named `workflow_ctx`, as Python's
-    /// `kwargs['workflow_ctx'] = ...`; without one, it comes last.
+    /// The context takes the place of a member named `workflow_context`, as Python's
+    /// `kwargs['workflow_context'] = ...`; without one, it comes last.
     #[test]
     fn the_context_takes_the_place_of_a_member_of_its_name() {
         let payload = r#"{"workflow_id":"00000000-0000-0000-0000-000000000000","task_index":0,"task_name":"t"}"#;
         let context = r#"{"workflow_id":"00000000-0000-0000-0000-000000000000","task_index":0,"task_name":"t","results_by_id":{},"summaries_by_id":{}}"#;
         for (input, expected) in [
             (
-                format!(r#"{{"workflow_ctx":5,"y":2,"__h_workflow_ctx__":{payload}}}"#),
-                format!(r#"{{"workflow_ctx":{context},"y":2}}"#),
+                format!(r#"{{"workflow_context":5,"y":2,"__h_workflow_ctx__":{payload}}}"#),
+                format!(r#"{{"workflow_context":{context},"y":2}}"#),
             ),
             (
                 format!(r#"{{"__h_workflow_ctx__":{payload},"y":2}}"#),
-                format!(r#"{{"y":2,"workflow_ctx":{context}}}"#),
+                format!(r#"{{"y":2,"workflow_context":{context}}}"#),
             ),
         ] {
             assert_eq!(task_input_with_context(&input), expected, "{input}");
@@ -1873,7 +1873,7 @@ mod workflow_ctx_tests {
     use crate::core::workflow::context::WorkflowContext;
     use crate::core::workflow::node::NodeKey;
 
-    /// The context that the task reads from the `workflow_ctx` field built from `payload`.
+    /// The context that the task reads from the `workflow_context` field built from `payload`.
     fn built_context(payload: &serde_json::Value) -> WorkflowContext {
         let text = workflow_ctx_text(&payload.to_string()).unwrap();
         serde_json::from_str(&text).unwrap()
@@ -1922,7 +1922,7 @@ mod workflow_ctx_tests {
         assert_eq!(summary.output.as_ref().map(JsonText::get), Some("5"));
     }
 
-    /// A summary output outside the `i64` and `u64` range keeps its stored text in the `workflow_ctx` field,
+    /// A summary output outside the `i64` and `u64` range keeps its stored text in the `workflow_context` field,
     /// and the task's context reads it as `u128` or `i128`.
     #[test]
     fn a_summary_output_keeps_its_stored_text() {

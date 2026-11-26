@@ -233,9 +233,9 @@ fn context_value(
 #[task("e2e_wf_ctx_reader", workflow_context)]
 pub async fn ctx_reader(
     source: String,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<i64, TaskError<WfCode>> {
-    context_value(workflow_ctx.as_ref(), &source)
+    context_value(workflow_context.as_ref(), &source)
 }
 
 /// Python `e2e_wf_ctx_reader_str`: the text value of node `source` from the
@@ -243,9 +243,9 @@ pub async fn ctx_reader(
 #[task("e2e_wf_ctx_reader_str", workflow_context)]
 pub async fn ctx_reader_str(
     source: String,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<String, TaskError<WfCode>> {
-    let context = workflow_ctx
+    let context = workflow_context
         .ok_or_else(|| TaskError::custom(WfCode::NoCtx, "WorkflowContext not provided"))?;
     match context.result_for::<String, WfCode>(&NodeKey::new(source)) {
         Ok(TaskOutcome::Succeeded(value)) => Ok(value),
@@ -260,10 +260,10 @@ pub async fn ctx_reader_str(
 pub async fn ctx_sum(
     first: String,
     second: String,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<i64, TaskError<WfCode>> {
-    let first = context_value(workflow_ctx.as_ref(), &first)?;
-    let second = context_value(workflow_ctx.as_ref(), &second)?;
+    let first = context_value(workflow_context.as_ref(), &first)?;
+    let second = context_value(workflow_context.as_ref(), &second)?;
     Ok(first + second)
 }
 
@@ -273,13 +273,13 @@ pub async fn ctx_sum(
 pub async fn mixed_reader(
     from_args: TaskOutcome<i64, WfCode>,
     ctx_source: String,
-    workflow_ctx: Option<WorkflowContext>,
+    workflow_context: Option<WorkflowContext>,
 ) -> Result<BTreeMap<String, i64>, TaskError<WfCode>> {
     let from_args = match from_args {
         TaskOutcome::Succeeded(value) => value,
         TaskOutcome::Failed(error) => return Err(error),
     };
-    let from_ctx = context_value(workflow_ctx.as_ref(), &ctx_source)?;
+    let from_ctx = context_value(workflow_context.as_ref(), &ctx_source)?;
     Ok(BTreeMap::from([
         ("from_args".to_owned(), from_args),
         ("from_ctx".to_owned(), from_ctx),

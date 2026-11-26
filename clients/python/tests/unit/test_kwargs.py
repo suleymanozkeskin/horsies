@@ -3,7 +3,7 @@
 Covers the strict producer/worker binding:
 
 - Unknown kwarg names rejected (encode + decode).
-- User-supplied engine-injected names (workflow_ctx / workflow_meta)
+- User-supplied engine-injected names (workflow_context / workflow_meta)
   rejected at encode.
 - User-supplied TaskOutcome-typed kwargs rejected at encode; engine
   envelopes for TaskOutcome-typed params pass through at decode.
@@ -32,7 +32,7 @@ def _task_a(value: int) -> Result[int, TaskError]:  # pyright: ignore[reportUnus
     ...
 
 
-def _task_with_ctx(value: int, workflow_ctx: object) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
+def _task_with_ctx(value: int, workflow_context: object) -> Result[int, TaskError]:  # pyright: ignore[reportUnusedParameter]
     ...
 
 
@@ -97,9 +97,9 @@ class TestEncodeStrictBinding:
     def test_workflow_ctx_user_supplied_rejected(self) -> None:
         with pytest.raises(
             StrictJsonError,
-            match="kwarg 'workflow_ctx' is engine-injected",
+            match="kwarg 'workflow_context' is engine-injected",
         ):
-            encode_kwargs_read_back(_task_with_ctx, {'value': 1, 'workflow_ctx': 'x'})
+            encode_kwargs_read_back(_task_with_ctx, {'value': 1, 'workflow_context': 'x'})
 
     def test_workflow_meta_user_supplied_rejected(self) -> None:
         with pytest.raises(

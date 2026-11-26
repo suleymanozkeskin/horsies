@@ -880,7 +880,7 @@ class TestParameterDefaults:
     def test_workflow_ctx_and_args_from_slots_are_exempt(self) -> None:
         def task(
             *,
-            workflow_ctx: WorkflowContext | None = None,
+            workflow_context: WorkflowContext | None = None,
             value: TaskOutcome[int, TaskError] | None = None,
         ) -> Result[int, TaskError]:
             return Ok(1)
@@ -1144,7 +1144,7 @@ class TestFillOmittedDefaults:
     def test_engine_filled_parameters_are_skipped(self) -> None:
         def task(
             *,
-            workflow_ctx: WorkflowContext | None = None,
+            workflow_context: WorkflowContext | None = None,
             value: TaskOutcome[int, TaskError] | None = None,
         ) -> Result[int, TaskError]:
             return Ok(1)

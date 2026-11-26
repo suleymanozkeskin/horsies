@@ -47,7 +47,7 @@ const PRIORITY_RANGE: std::ops::RangeInclusive<u32> = 1..=100;
 
 /// The input member that takes the workflow context (the task attribute's
 /// `workflow_context`).
-const WORKFLOW_CTX_FIELD: &str = "workflow_ctx";
+const WORKFLOW_CONTEXT_FIELD: &str = "workflow_context";
 
 // ---------------------------------------------------------------------------
 // Success policy
@@ -595,7 +595,7 @@ impl WorkflowSpecBuilder {
                         .with_code(ErrorCode::WorkflowCtxParamMissing)
                         .with_note(format!("node {owner} declares workflow_context_from"))
                         .with_help(
-                            "add `workflow_context` to the task attribute and a `workflow_ctx: \
+                            "add `workflow_context` to the task attribute and a `workflow_context: \
                              WorkflowContext` parameter, or remove workflow_context_from",
                         ),
                     );
@@ -818,7 +818,7 @@ fn check_input(
         .map(|member| (member.as_str(), result.as_str()))
         .collect();
     if takes_context {
-        members.push((WORKFLOW_CTX_FIELD, context.as_str()));
+        members.push((WORKFLOW_CONTEXT_FIELD, context.as_str()));
     }
     let static_members: Vec<&str> = input.names().collect();
     if let Err(failure) = input_check(input.text_with(&members).as_bytes(), &static_members) {

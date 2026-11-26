@@ -28,8 +28,8 @@ async fn consume(total: TaskOutcome<f64, Infallible>) -> Result<String, TaskErro
 }
 
 #[task("summarize", workflow_context)]
-async fn summarize(workflow_ctx: WorkflowContext) -> Result<u32, TaskError<Infallible>> {
-    Ok(u32::try_from(workflow_ctx.task_index()).unwrap_or(0))
+async fn summarize(workflow_context: WorkflowContext) -> Result<u32, TaskError<Infallible>> {
+    Ok(u32::try_from(workflow_context.task_index()).unwrap_or(0))
 }
 
 struct Pipeline;

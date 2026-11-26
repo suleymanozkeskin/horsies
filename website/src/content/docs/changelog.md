@@ -367,7 +367,9 @@ there is no migration contract between pre-1.0 versions.
   reruns and events (Python, Rust, core).** The entries below list each
   rename. No old name stays as an alias. Before the upgrade, drain the
   tasks and the workflows: stored text with an old key does not read (each
-  entry names the effect).
+  entry names the effect). Tasks and workflows must be drained before the
+  upgrade because the stored context key changed (`workflow_ctx` is
+  `workflow_context`); a task row that holds the old key fails closed.
 - **Breaking (Python): `TaskError.error_code` is `TaskError.code`.** The
   attribute and the constructor keyword change: `TaskError(code=...,
   message=..., data=...)`, also on `SubWorkflowError`.
@@ -466,7 +468,9 @@ there is no migration contract between pre-1.0 versions.
   `TaskFunction.task_error_codes` -> `error_codes`.
 - **Rust tasks: the generated module and the workflow context.**
   `#[task(workflow_ctx)]` -> `#[task(workflow_context)]`; the task parameter
-  keeps the name `workflow_ctx`. `TaskFunction::accepts_workflow_ctx` /
+  is `workflow_context`, and so is the key of the context in the stored
+  task input (Python parameter, Rust field and core input field). The core
+  does not read the old key. `TaskFunction::accepts_workflow_ctx` /
   `RegisteredTask::accepts_workflow_ctx` -> `accepts_workflow_context`,
   `RegisteredTask::with_workflow_ctx` -> `with_workflow_context`. The
   generated `<task>::handle` -> `<task>::function`, `<task>::params::<name>()`
@@ -552,6 +556,13 @@ there is no migration contract between pre-1.0 versions.
   `AttemptPlaced.execution` stays the class of the task.
   `EVENT_CONTRACT_VERSION` is 9; version 9 also adds the built-in code
   `UNKNOWN_CUSTOM_CODE`.
+- **Metrics and spans: the label `kind` is `execution`.** The label of the
+  child metrics `horsies.worker.children.started`,
+  `horsies.worker.children.replaced`, `horsies.worker.child.boot.duration`
+  and `horsies.worker.slots.down` is `execution` (was `kind`); the span and
+  metric attribute `horsies.child.kind` is `horsies.child.execution`. The
+  values do not change. The Grafana dashboard uses the new label; a query
+  or an alert rule of your own that groups by `kind` must change.
 - **Rust: the union of the events is `horsies::events::AnyEvent`.** The core
   union `horsies_core::events::Event` is `AnyEvent`, and the Rust client
   exports it, with the name of the Python `AnyEvent`.

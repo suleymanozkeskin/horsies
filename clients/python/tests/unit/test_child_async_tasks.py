@@ -829,12 +829,12 @@ class TestWorkflowContext:
         @app.task('async_reads_ctx')
         async def reads_ctx(
             *,
-            workflow_ctx: WorkflowContext | None = None,
+            workflow_context: WorkflowContext | None = None,
         ) -> Result[str, TaskError]:
-            assert workflow_ctx is not None
-            match workflow_ctx.result_for(NodeKey[str]('node_a')):
+            assert workflow_context is not None
+            match workflow_context.result_for(NodeKey[str]('node_a')):
                 case Succeeded(value=upstream):
-                    return Ok(f'{workflow_ctx.workflow_id}:{upstream}')
+                    return Ok(f'{workflow_context.workflow_id}:{upstream}')
                 case Failed(error=upstream_error):
                     return Err(upstream_error)
 

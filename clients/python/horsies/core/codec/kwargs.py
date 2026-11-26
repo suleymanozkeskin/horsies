@@ -7,7 +7,7 @@ the worker's `_run_task_entry`.
 
 Strict binding: every kwarg key must correspond to a named parameter
 the receiver actually declares. Unknown keys, user-supplied
-engine-injected names (`workflow_ctx` / `workflow_meta`), and
+engine-injected names (`workflow_context` / `workflow_meta`), and
 user-supplied TaskOutcome-typed kwargs (the engine populates those via
 `args_from`) all fail closed producer-side. So does a kwarg that names the
 first parameter of a task that takes its `TaskRuntime`: the worker passes the
@@ -113,7 +113,7 @@ def underlying_task_fn(task: Any) -> Callable[..., Any]:
 
 
 _INJECTED_PARAM_NAMES: frozenset[str] = frozenset({
-    'workflow_ctx',
+    'workflow_context',
     'workflow_meta',
 })
 """User-facing parameter names the engine fills in at worker time.
@@ -332,7 +332,7 @@ class KwargBinding:
     source of truth so the two paths cannot drift.
 
     Producer-side semantics: engine-injected names
-    (``workflow_ctx`` / ``workflow_meta``) and TaskOutcome-typed kwargs
+    (``workflow_context`` / ``workflow_meta``) and TaskOutcome-typed kwargs
     (engine populates via ``args_from``) are errors here. Decode-side
     treats them differently and uses its own per-key logic.
     """
@@ -355,7 +355,7 @@ def resolve_producer_kwarg_binding(
     error_message=...)`` for invalid producer use:
 
     - kwarg name shadows an engine-injected param
-      (``workflow_ctx`` / ``workflow_meta``).
+      (``workflow_context`` / ``workflow_meta``).
     - kwarg name is the parameter that takes the ``TaskRuntime``: the worker
       passes the runtime on each run.
     - kwarg name not declared on the callable's signature, or the name of its
@@ -420,7 +420,7 @@ def encode_kwargs_read_back(
     For `.send()` and schedules. A workflow stores the form that its spec proved.
 
     Binds strictly: every key must match a declared parameter name on
-    `task_fn`. Engine-injected names (`workflow_ctx` / `workflow_meta`)
+    `task_fn`. Engine-injected names (`workflow_context` / `workflow_meta`)
     and TaskOutcome-typed parameters fail closed when supplied by the
     producer — the engine populates those on the wire itself.
 

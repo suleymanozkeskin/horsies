@@ -227,14 +227,14 @@ from horsies import WorkflowContext
 @app.task(name="aggregate")
 def aggregate(
     *,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[Summary, TaskError]:
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     # Access individual outcomes
-    result_a = workflow_ctx.result_for(node_a)  # TaskOutcome[int, TaskError]
-    result_b = workflow_ctx.result_for(node_b)  # TaskOutcome[str, TaskError]
+    result_a = workflow_context.result_for(node_a)  # TaskOutcome[int, TaskError]
+    result_b = workflow_context.result_for(node_b)  # TaskOutcome[str, TaskError]
 
     # Build summary from both
     return Ok(Summary(
@@ -260,7 +260,7 @@ class AggregationWorkflow(WorkflowDefinition[Summary]):
 
 **Rules:**
 - Every node in `workflow_context_from` must also be in `waits_for`
-- The task function must have `workflow_ctx: WorkflowContext | None` parameter
+- The task function must have `workflow_context: WorkflowContext | None` parameter
 - Context is built fresh per task; it does not propagate downstream
 - `result_for()` and `summary_for()` raise `WorkflowContextMissingIdError` if the node has no `node_id`. Always assign `node_id` to nodes used with context
 
@@ -464,15 +464,15 @@ def count_shard_rows(*, shard: str) -> Result[int, TaskError]:
 def sum_shard_rows(
     *,
     shard_count: int,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[int, TaskError]:
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
-            TaskError(code="NO_CONTEXT", message="workflow_ctx is missing"),
+            TaskError(code="NO_CONTEXT", message="workflow_context is missing"),
         )
     total = 0
     for position in range(shard_count):
-        match workflow_ctx.result_for(NodeKey[int](f"shard_{position}")):
+        match workflow_context.result_for(NodeKey[int](f"shard_{position}")):
             case Failed(error):
                 return Err(error)
             case Succeeded(rows):
@@ -555,13 +555,13 @@ from horsies import WorkflowContext, SubWorkflowSummary
 @app.task(name="report_health")
 def report_health(
     *,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[HealthReport, TaskError]:
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     # Get summary for the child subworkflow node
-    summary: SubWorkflowSummary = workflow_ctx.summary_for(child_node)
+    summary: SubWorkflowSummary = workflow_context.summary_for(child_node)
 
     return Ok(HealthReport(
         status=summary.status,           # WorkflowStatus (COMPLETED, FAILED, etc.)
@@ -988,7 +988,7 @@ workflow can continue deterministic failure propagation without leaving the node
 @app.task(name="my_task")
 def my_task(
     *,
-    workflow_ctx: WorkflowContext | None = None,  # Add this
+    workflow_context: WorkflowContext | None = None,  # Add this
 ) -> Result[Output, TaskError]:
     ...
 ```
@@ -1113,9 +1113,9 @@ def parse_and_validate(
 @app.task(name="aggregate_sources")
 def aggregate_sources(
     *,
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[AggregatedReport, TaskError]:
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     total = 0
@@ -1124,7 +1124,7 @@ def aggregate_sources(
 
     # Access subworkflow summaries
     for node in [source1_node, source2_node]:
-        summary = workflow_ctx.summary_for(node)
+        summary = workflow_context.summary_for(node)
         if summary.status.value == "COMPLETED":
             sources.append(f"{node.name}: {summary.completed_tasks}/{summary.total_tasks} tasks")
             if summary.output:

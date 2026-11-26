@@ -236,7 +236,7 @@ def _feed_node(node_id: str) -> TaskNode[SupplierFeed]:
 def update_stock_levels(
     *,
     feed_node_ids: list[str],
-    workflow_ctx: WorkflowContext | None = None,
+    workflow_context: WorkflowContext | None = None,
 ) -> Result[RestockPlan, TaskError]:
     """Apply whatever supplier feeds reported — the quorum aggregate.
 
@@ -245,7 +245,7 @@ def update_stock_levels(
     feed is missing or failed is simply absent from the context, which is why
     every lookup is guarded rather than assumed.
     """
-    if workflow_ctx is None:
+    if workflow_context is None:
         return Err(
             TaskError(
                 code=NO_WORKFLOW_CONTEXT,
@@ -266,10 +266,10 @@ def update_stock_levels(
 
     for node_id in feed_node_ids:
         node = _feed_node(node_id)
-        if not workflow_ctx.has_result(node):
+        if not workflow_context.has_result(node):
             missing.append(node_id)
             continue
-        match workflow_ctx.result_for(node):
+        match workflow_context.result_for(node):
             case Failed(_):
                 missing.append(node_id)
                 continue

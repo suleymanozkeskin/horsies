@@ -32,7 +32,7 @@ struct OptionalReportInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ContextInput {
-    workflow_ctx: WorkflowContext,
+    workflow_context: WorkflowContext,
 }
 
 fn total<I>() -> InputField<I, TaskOutcome<f64, Infallible>> {

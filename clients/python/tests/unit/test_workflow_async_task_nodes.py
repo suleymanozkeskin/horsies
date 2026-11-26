@@ -155,7 +155,7 @@ class TestAsyncTaskNodes:
         @app.task('async_with_ctx')
         async def with_ctx(
             *,
-            workflow_ctx: WorkflowContext | None = None,
+            workflow_context: WorkflowContext | None = None,
         ) -> Result[int, TaskError]:
             return Ok(1)
 

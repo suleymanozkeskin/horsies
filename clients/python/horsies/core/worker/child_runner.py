@@ -1446,7 +1446,7 @@ def _prepare_task_call(
             case _ as unreachable:
                 assert_never(unreachable)
 
-    # Handle workflow injection payloads (workflow_ctx / workflow_meta).
+    # Handle workflow injection payloads (workflow_context / workflow_meta).
     workflow_ctx_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_CTX, None)
     workflow_meta_data = kwargs.pop(_ENGINE_KEY_WORKFLOW_META, None)
     if workflow_ctx_data is not None or workflow_meta_data is not None:
@@ -1454,7 +1454,7 @@ def _prepare_task_call(
 
         underlying_fn = underlying_task_fn(task)
         sig = inspect.signature(underlying_fn)
-        if workflow_ctx_data is not None and 'workflow_ctx' in sig.parameters:
+        if workflow_ctx_data is not None and 'workflow_context' in sig.parameters:
             from horsies.core.models.workflow import (
                 WorkflowContext,
                 SubWorkflowSummary,
@@ -1476,7 +1476,7 @@ def _prepare_task_call(
                         TaskError(
                             code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx result for node '
+                                f'workflow_context result for node '
                                 f'{node_id!r} unavailable (source '
                                 f'task not registered at encode '
                                 f'time)'
@@ -1491,7 +1491,7 @@ def _prepare_task_call(
                         TaskError(
                             code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx missing task_name for '
+                                f'workflow_context missing task_name for '
                                 f'node {node_id!r}; cannot decode'
                             ),
                             data={'node_id': node_id},
@@ -1517,7 +1517,7 @@ def _prepare_task_call(
                         TaskError(
                             code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
-                                f'workflow_ctx source '
+                                f'workflow_context source '
                                 f'{source_task_name!r} not '
                                 f'registered in this process (no task '
                                 f'or workflow definition with this name)'
@@ -1548,7 +1548,7 @@ def _prepare_task_call(
                             code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'decode_task_result failed for '
-                                f'workflow_ctx node {node_id!r}: '
+                                f'workflow_context node {node_id!r}: '
                                 f'{exc}'
                             ),
                             data={
@@ -1576,14 +1576,14 @@ def _prepare_task_call(
                             task_name, SerializationError(str(summary_exc))
                         )
 
-            kwargs['workflow_ctx'] = WorkflowContext.from_serialized(
+            kwargs['workflow_context'] = WorkflowContext.from_serialized(
                 workflow_id=workflow_ctx_data.get('workflow_id', ''),
                 task_index=workflow_ctx_data.get('task_index', 0),
                 task_name=workflow_ctx_data.get('task_name', ''),
                 results_by_id=results_by_id,
                 summaries_by_id=summaries_by_id,
             )
-        # If task doesn't declare workflow_ctx, silently skip injection.
+        # If task doesn't declare workflow_context, silently skip injection.
 
         if workflow_meta_data is not None and 'workflow_meta' in sig.parameters:
             from horsies.core.models.workflow import WorkflowMeta
@@ -1641,7 +1641,7 @@ def _context_entry(
         case Err(err_value=unknown):
             return Failed(TaskError(
                 code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                message=f'workflow_ctx node {node_id!r}: {unknown.message}',
+                message=f'workflow_context node {node_id!r}: {unknown.message}',
                 data={'node_id': node_id, 'custom_code': unknown.custom_code},
             ))
 

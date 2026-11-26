@@ -528,7 +528,7 @@ class WorkflowSpec(Generic[OutT]):
 
         Producer-side rules apply (see
         ``codec.kwargs.resolve_producer_kwarg_binding``): engine-injected
-        names (``workflow_ctx`` / ``workflow_meta``) and TaskOutcome-typed
+        names (``workflow_context`` / ``workflow_meta``) and TaskOutcome-typed
         kwargs (engine-populated via ``args_from``) fail closed here as
         workflow validation errors, with per-key context preserved.
 
@@ -577,7 +577,7 @@ class WorkflowSpec(Generic[OutT]):
                         help_text=(
                             'every kwarg must bind to a declared, typed '
                             'parameter on the node\'s callable; '
-                            'workflow_ctx / workflow_meta / TaskOutcome-'
+                            'workflow_context / workflow_meta / TaskOutcome-'
                             'typed kwargs are engine-populated'
                         ),
                     ))
@@ -969,17 +969,17 @@ class WorkflowSpec(Generic[OutT]):
 
                 errors.append(
                     WorkflowValidationError(
-                        message='workflow_context_from declared but function missing workflow_ctx param',
+                        message='workflow_context_from declared but function missing workflow_context param',
                         code=ErrorCode.WORKFLOW_CTX_PARAM_MISSING,
                         location=function_location,  # May be None for non-function callables
                         notes=[
                             f"workflow '{self.name}'\n"
                             f"TaskNode '{task.name}' declares workflow_context_from=[...]\n"
-                            f"but function '{task.name}' has no workflow_ctx parameter",
+                            f"but function '{task.name}' has no workflow_context parameter",
                         ],
                         help_text=(
                             'either:\n'
-                            '  1. add `workflow_ctx: WorkflowContext | None` param to the function above if needs context\n'
+                            '  1. add `workflow_context: WorkflowContext | None` param to the function above if needs context\n'
                             '  2. remove `workflow_context_from` from the TaskNode definition if this was a mistake'
                         ),
                     )
@@ -1421,8 +1421,8 @@ class WorkflowSpec(Generic[OutT]):
 
             # Auto-injected workflow context for TaskNode when workflow_context_from is set
             if isinstance(node, TaskNode):
-                if node.workflow_context_from is not None and 'workflow_ctx' in sig.parameters:
-                    injected_kwargs.add('workflow_ctx')
+                if node.workflow_context_from is not None and 'workflow_context' in sig.parameters:
+                    injected_kwargs.add('workflow_context')
                 # WorkflowMeta is auto-injected if declared
                 if 'workflow_meta' in sig.parameters:
                     injected_kwargs.add('workflow_meta')
