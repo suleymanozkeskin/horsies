@@ -442,7 +442,7 @@ fn allowed_action_router() -> Router {
     test_router(
         Arc::new(AllowAll),
         status(SchemaState::Match, Some(crate::expected_schema_version())),
-        true,
+        Actions::Enabled,
     )
 }
 
@@ -3306,7 +3306,7 @@ async fn a_body_over_the_bound_is_refused_after_the_verdicts() {
 /// with 413, not with the 422 of the key.
 #[tokio::test]
 async fn a_body_over_the_bound_with_an_unknown_key_is_413_on_every_action_route() {
-    let handler = granted_handler(true);
+    let handler = granted_handler(Actions::Enabled);
     let mut over = br#"{"include_runing": true}"#.to_vec();
     over.resize(super::handler::MAX_REQUEST_BODY_BYTES + 1, b' ');
     let over = axum::body::Bytes::from(over);
