@@ -78,8 +78,8 @@ export type WorkflowRecord = {
   readonly definitionKey: string;
   readonly onError: OnErrorSetting;
   /**
-   * The task contract of the params and the declared output: its compiled form is the params' kind tree and the
-   * output kind.
+   * The task contract of the params and the declared output (task name `PARAMS_CONTRACT_NAME`): its compiled form is
+   * the params' kind tree and the output kind.
    */
   readonly paramsContract: object;
   /** The parameter names of the params, in declaration order. */
@@ -99,6 +99,13 @@ type DefinitionFields = {
   readonly onError?: string;
   readonly checkCases?: readonly object[];
 };
+
+/**
+ * The task name of the params contract of every workflow. The contract only carries the params and the declared
+ * output to the contract compile, so its name is a fixed label: the workflow's own rules check the workflow name
+ * (HRS-001 for an empty one), and the spec text writer refuses a name with a lone surrogate.
+ */
+const PARAMS_CONTRACT_NAME = "workflow params";
 
 const records = new WeakMap<object, WorkflowRecord>();
 
@@ -143,7 +150,7 @@ function recordOf(fields: DefinitionFields, build: (w: WorkflowBuilder, params: 
     name: fields.name,
     definitionKey: fields.definitionKey,
     onError: onErrorSetting(fields.onError),
-    paramsContract: defineTask({ name: fields.name, input: params, output: fields.output }),
+    paramsContract: defineTask({ name: PARAMS_CONTRACT_NAME, input: params, output: fields.output }),
     paramNames: Object.freeze(Object.keys(params)),
     checkCases: Object.freeze([...(fields.checkCases ?? [])]),
     build,
