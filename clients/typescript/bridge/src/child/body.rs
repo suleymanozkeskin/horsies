@@ -52,7 +52,6 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::Status;
 use napi_derive::napi;
 use tokio::sync::oneshot;
-use uuid::Uuid;
 
 use crate::call::guard::sync_call;
 use crate::call::node_api::{call_status, CallStatus};
@@ -144,6 +143,10 @@ impl WorkStopCauseName {
     object_from_js = false
 )]
 #[derive(Clone, Debug, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the value becomes a JavaScript object at the post, and napi-rs has no conversion of a Box"
+)]
 pub enum ChildPost {
     /// Run the body of `task_name` for the run `run_key`, with the stored
     /// input text. `attempt` is the fencing token's value, from 1.
