@@ -32,12 +32,4 @@ export const LAYER_FILES: readonly LayerFile[] = [
 export type PendingScenarios = { readonly issue: number; readonly needs: string; readonly mirrors: readonly string[] };
 
 /** The scenarios of the suite's design that no file runs yet. */
-export const PENDING_SCENARIOS: readonly PendingScenarios[] = [
-  {
-    issue: 2591,
-    needs: "layer 7 cases of parents with no output node",
-    mirrors: [
-      "the outputless reads of Python test_layer7_subworkflows.py (test_outputless_success_policy_keeps_failed_subworkflow_result, test_subworkflow_recovery_outputless_recovery, test_subworkflow_deep_outputless_nested_failed_optional, test_subworkflow_deep_outputless_all_failed_required, test_subworkflow_deep_mixed_paths); layer 7 runs each of these cases with an output node",
-    ],
-  },
-];
+export const PENDING_SCENARIOS: readonly PendingScenarios[] = [];

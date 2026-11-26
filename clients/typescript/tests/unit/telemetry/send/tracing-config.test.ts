@@ -14,10 +14,10 @@ import { tracingPartsOf, tracingPartsOfApp } from "../../../../horsies/src/telem
 import { SpansNotMade } from "../../../../horsies/src/telemetry/not-made.ts";
 import { ClientDefect } from "../../../../horsies/src/thrown-errors.ts";
 import { type OtelApiLoad, requireOtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
-import { tracingSettingOf } from "../../../../horsies/src/telemetry/tracing-config.ts";
+import { type AttemptParentage, type TracingConfigInput, tracingSettingOf, type WorkerEndedSpans } from "../../../../horsies/src/telemetry/tracing-config.ts";
 import { h } from "../../../../horsies/src/wire/public.ts";
 import { NO_OP_START_OBSERVER } from "../../../../horsies/src/workflow/start.ts";
-import { DATABASE_URL, fakeEnvironment } from "../../app/support.ts";
+import { catalogRefusal, DATABASE_URL, fakeChecks, fakeEnvironment } from "../../app/support.ts";
 import { API, installSdk, recordedWarnings } from "../support.ts";
 
 const listed = defineTask({ name: "listed", input: {}, output: h.null() });
@@ -68,6 +68,29 @@ describe("the tracing setting", () => {
       parentage: "linkedToSend",
       workerEndedSpans: "noSpans",
     });
+  });
+});
+
+describe("a tracing setting from a caller with no type check", () => {
+  test("a parentage outside the union is a TypeError that names it", () => {
+    // SAFETY: the test gives the off-type value that a JavaScript caller can give.
+    const parentage = "child" as AttemptParentage;
+
+    assert.throws(() => tracingSettingOf({ kind: "otelTracing", parentage }), { name: "TypeError", message: /parentage: no case for child/u });
+  });
+
+  test("a workerEndedSpans outside the union is a TypeError that names it", () => {
+    // SAFETY: the test gives the off-type value that a JavaScript caller can give.
+    const workerEndedSpans = "yes" as WorkerEndedSpans;
+
+    assert.throws(() => tracingSettingOf({ kind: "otelTracing", workerEndedSpans }), { name: "TypeError", message: /workerEndedSpans: no case for yes/u });
+  });
+
+  test("a kind outside the union is a TypeError", () => {
+    // SAFETY: the test gives the off-type value that a JavaScript caller can give.
+    const input = { kind: "otel" } as unknown as TracingConfigInput;
+
+    assert.throws(() => tracingSettingOf(input), TypeError);
   });
 });
 
@@ -138,6 +161,23 @@ describe("Horsies.create and the tracing step", () => {
 
     assert.equal(codes.at(-1), "HRS-220");
     assert.ok(codes.length >= 2, `the config refusal and the tracing refusal: ${codes.join(", ")}`);
+  });
+
+  test("a config that the parse accepts and a tracing step that refuses: the core's config and option refusals follow it", () => {
+    const { loader } = countingLoader(MISSING);
+
+    const checks = fakeChecks({
+      config: [catalogRefusal("HRS-101", "the core refuses the config")],
+      options: [catalogRefusal("HRS-102", "the core refuses the options")],
+    });
+
+    const created = createHorsies(
+      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [listed] },
+      fakeEnvironment({ otelApi: loader, checks }),
+    );
+
+    assert.deepEqual(created.ok ? [] : created.error.refusals.map((refused) => refused.code), ["HRS-220", "HRS-101", "HRS-102"]);
+    assert.deepEqual(checks.calls, { configs: 1, codes: 0, options: 1 });
   });
 
   test("an app with no tracing never loads the API", () => {

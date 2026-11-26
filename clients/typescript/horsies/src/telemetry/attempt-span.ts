@@ -2,7 +2,7 @@
 // active where the body runs, so a span that user code makes in the body nests under it, also after an `await`.
 //
 // - The parent comes from the carrier that the send stored, by the parentage: `childOfSend` gives the extracted
-//   context as the parent; `linkedToSend` gives a root span with a link to the extracted span; a task with no
+//   context as the parent; `linkedToSend` gives a root span with a link to the extracted span, in the extracted context with no span; a task with no
 //   carrier gets a root span in both.
 // - The body runs in `context.with` of a context that the package builds from the root context: a function that the
 //   addon calls has an empty async context, so the package never takes the context of the bridge callback.
@@ -130,7 +130,7 @@ function openedObservation(deps: AttemptSpanDeps, facts: RecordedFacts): BodyObs
     deps.notMade.report({ kind: "attempt", taskId: facts.taskId }, cause);
   };
 
-  const opened = openedAttemptSpan(deps, facts, SDK_CLOCK, notMade);
+  const opened = openedAttemptSpan(deps, facts, SDK_CLOCK, {}, notMade);
 
   switch (opened.kind) {
     case "notOpen":
@@ -155,20 +155,21 @@ export type OpenedAttemptSpan = { readonly kind: "open"; readonly open: OpenSpan
 
 /**
  * Open the attempt span of `facts` from `start`: `run <task_name>`, CONSUMER, the parent and the links by the
- * parentage, the attributes of the run and of its workflow node. A throw of the user's SDK goes to `openFailed` and
+ * parentage, the attributes of the run and of its workflow node, and `extraAttributes`. A throw of the user's SDK goes to `openFailed` and
  * gives `notOpen`.
  */
 export function openedAttemptSpan(
   deps: AttemptSpanDeps,
   facts: RecordedFacts,
   start: SpanTime,
+  extraAttributes: OtelAttributes,
   openFailed: (cause: unknown) => void,
 ): OpenedAttemptSpan {
   const { api } = deps;
 
   try {
     const place = spanPlace(api, deps.parentage, facts.carrier);
-    const attributes = { ...runAttributes(facts), ...workflowAttributes(facts.workflow) };
+    const attributes = { ...runAttributes(facts), ...workflowAttributes(facts.workflow), ...extraAttributes };
     const options = { kind: api.SpanKind.CONSUMER, attributes, links: place.links };
 
     const span = api.trace
@@ -312,7 +313,8 @@ function placeByParentage(api: OtelApi, parentage: AttemptParentage, extracted: 
       const sendSpan = api.trace.getSpan(extracted);
       const links = sendSpan === undefined ? [] : [{ context: sendSpan.spanContext() }];
 
-      return { parent: api.ROOT_CONTEXT, links };
+      // The extracted context with no span: the new trace keeps the other entries of the carrier (the baggage).
+      return { parent: api.trace.deleteSpan(extracted), links };
     }
 
     default:

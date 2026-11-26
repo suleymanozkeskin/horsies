@@ -15,7 +15,9 @@
 //   attempt, and the handler child makes none.
 // - A `SHARED_THREAD` task: its seat isolate makes the span. A sync body that holds its isolate past its deadline and
 //   then returns ends its span at the settle of the run on the child's main thread, with `TASK_TIMEOUT`. A neighbour
-//   with time left keeps the thread child alive past that deadline. `SHARED_THREAD` children run on Node only: on Bun
+//   with time left keeps the thread child alive past that deadline. A body that ends its isolate with `process.exit`
+//   gives the run `WORKER_CRASHED`, and the main thread of the thread child makes the span, with `horsies.span.source`
+//   = `worker`, in the trace of the send. `SHARED_THREAD` children run on Node only: on Bun
 //   these cases are skipped (the worker refuses the profile).
 //
 // Run it with `run.ts` (see that file).
@@ -349,6 +351,27 @@ describe("attempt spans and the spans of the attempts that the worker ended", ()
       assert.equal(SPAN_SOURCE_KEY in span.attributes, false, "the seat isolate made the span");
       assert.ok(BigInt(span.endNanos) - BigInt(span.startNanos) >= heldNanos, `the span holds the body: ${span.startNanos} to ${span.endNanos}`);
       assert.ok(BigInt(span.endNanos) <= readAt, `the span ended at the settle, before the outcome was read: ${span.endNanos}`);
+    });
+  });
+
+  threadSeatTest("a seat body that ends its isolate with process.exit gets a WORKER_CRASHED span that the thread child's main thread made, in the trace of the sender", async (suite) => {
+    await threadWorker(suite);
+    await withTestTracing(async (tracing) => {
+      const handle = await inParentSpan(tracing, async () => sentHandle("the thread exit", suite.app.send(endedSpans.endedSpansThreadExit, {})));
+
+      assert.equal(await failedCode(handle, RESULT_WAIT_MS), "WORKER_CRASHED");
+
+      const span = onlySpan(await waitForSpans(suite, TASK_ID_KEY, handle.taskId));
+
+      assert.equal(span.name, `run ${endedSpans.endedSpansThreadExit.name}`);
+      assert.equal(span.status, "ERROR");
+      assert.equal(span.attributes[ERROR_TYPE_KEY], "WORKER_CRASHED");
+      assert.equal(span.attributes[SPAN_SOURCE_KEY], "worker");
+      assert.equal(span.attributes[TASK_EXECUTION_KEY], "SHARED_THREAD");
+      assert.equal(span.attributes[TASK_ATTEMPT_KEY], 1);
+      assert.equal(span.traceId, tracing.parent.spanContext().traceId);
+      assert.deepEqual(span.parent, { kind: "parent", spanId: sendSpanOf(tracing, handle.taskId).spanContext().spanId });
+      assert.ok(BigInt(span.startNanos) <= BigInt(span.endNanos), `start ${span.startNanos}, end ${span.endNanos}`);
     });
   });
 });

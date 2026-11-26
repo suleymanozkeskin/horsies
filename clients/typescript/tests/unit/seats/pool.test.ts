@@ -8,7 +8,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { ChildPost } from "../../../horsies/src/native/child/addon.ts";
+import type { BodyFactsRecord, ChildPost } from "../../../horsies/src/native/child/addon.ts";
+import type { EndedSeatRun } from "../../../horsies/src/seats/body-observer.ts";
 import { cancelStateOf } from "../../../horsies/src/seats/cancel-cells.ts";
 import {
   type IsolateEvents,
@@ -61,6 +62,9 @@ class PoolFakes {
   readonly ends: number[] = [];
   readonly defects: CoreDefect[] = [];
   readonly notMade: string[] = [];
+  readonly endedRuns: EndedSeatRun[] = [];
+  /** The wall clock that `now` reads. */
+  wall: Temporal.Instant = ENDED_AT;
   readonly timers: { readonly milliseconds: number; readonly fire: () => void; stopped: boolean }[] = [];
   now = 0;
   /** The seat whose next start the runtime refuses, if any. */
@@ -81,7 +85,7 @@ class PoolFakes {
       },
       bounds: () => TEST_SEAT_BOUNDS,
       clock: () => this.now,
-      now: () => ENDED_AT,
+      now: () => this.wall,
       timer: (milliseconds, fire) => {
         const timer = { milliseconds, fire, stopped: false };
 
@@ -93,6 +97,9 @@ class PoolFakes {
       },
       settle: (runKey, taskName, outcome) => {
         this.settles.push([runKey, taskName, outcome]);
+      },
+      isolateEnded: (run) => {
+        this.endedRuns.push(run);
       },
       serve: async (request): Promise<SeatAnswer> => {
         this.served.push(operationName(request));
@@ -124,6 +131,18 @@ class PoolFakes {
     }
   }
 }
+
+const RECORDED_FACTS: BodyFactsRecord = {
+  kind: "recorded",
+  taskId: TASK_ID,
+  taskName: "crunch",
+  queueName: "default",
+  attempt: 2,
+  workerId: "worker-1",
+  execution: "SHARED_THREAD",
+  workflow: { kind: "notInWorkflow" },
+  carrier: { kind: "noCarrier" },
+};
 
 function runPost(runKey: bigint, taskName = "crunch"): SeatRunPost {
   return { kind: "runBody", runKey, taskName, inputJson: '{"n":1}', taskId: TASK_ID, attempt: 2, facts: { kind: "notRecorded" } };
@@ -287,6 +306,26 @@ describe("runs on the seat pool", () => {
 });
 
 describe("an isolate that ends", () => {
+  test("during a run: the seat body observer gets the run's facts, the time of the run post and the time of the exit", async () => {
+    const { pool, fakes } = await bootedPool(1);
+    const facts = { ...RECORDED_FACTS, taskId: TASK_ID };
+    const startedAt = Temporal.Instant.from("2026-11-26T10:00:00Z");
+    const exitedAt = Temporal.Instant.from("2026-11-26T10:00:03Z");
+
+    fakes.wall = startedAt;
+    pool.run({ ...runPost(5n), facts });
+    fakes.wall = exitedAt;
+    fakes.isolate(0).events.exit(1);
+    assert.deepEqual(fakes.endedRuns, [{ facts, startedAt, endedAt: exitedAt }]);
+  });
+
+  test("while free: no run ended, so the seat body observer gets nothing", async () => {
+    const { fakes } = await bootedPool(1);
+
+    fakes.isolate(0).events.exit(1);
+    assert.deepEqual(fakes.endedRuns, []);
+  });
+
   test("during a run: the run ends WORKER_CRASHED with the error that ended the isolate, and a new isolate takes the seat", async () => {
     const { pool, fakes } = await bootedPool(2);
 
