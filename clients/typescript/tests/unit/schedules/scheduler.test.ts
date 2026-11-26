@@ -3,11 +3,14 @@
 // sends of the process, which open when the scheduler starts to serve.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 
 import { createHorsies, type Horsies } from "../../../horsies/src/app.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { checkReport } from "../../../horsies/src/check/report.ts";
+import { staticCheck } from "../../../horsies/src/check/static-check.ts";
+import { COMMAND_NAMES } from "../../../horsies/src/cli/run.ts";
 import { refusal } from "../../../horsies/src/app/refusal.ts";
 import { parseSchedulerStart, runSchedulerCommand, type SchedulerCommandDeps } from "../../../horsies/src/cli/scheduler-command.ts";
 import type { CommandOutput } from "../../../horsies/src/cli/usage.ts";
@@ -25,17 +28,25 @@ import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import { DATABASE_URL, fakeChecks, fakeEnvironment } from "../app/support.ts";
 import { declare, FAKE_SCHEDULER, fakeCore, HOURLY, ping, unlisted } from "./support.ts";
 
-/** An app of `ping`, implemented, in a process started as `<entry> scheduler`: its sends start suppressed. */
-function schedulerApp(): Horsies {
+/** An app of `ping`, with no implementation, in a process started as `<entry> scheduler`: its sends start suppressed. */
+function unimplementedSchedulerApp(): Horsies {
   const created = createHorsies(
     { broker: { databaseUrl: DATABASE_URL }, tasks: [ping] },
     fakeEnvironment({ start: { argumentAfterScript: "scheduler", seatIsolate: false } }),
   );
 
   assert.ok(created.ok);
-  created.value.implement(ping, () => ping.ok(null));
 
   return created.value;
+}
+
+/** The app of `unimplementedSchedulerApp` with `ping` implemented. */
+function schedulerApp(): Horsies {
+  const app = unimplementedSchedulerApp();
+
+  app.implement(ping, () => ping.ok(null));
+
+  return app;
 }
 
 /** A schedule of `ping` every hour. */
@@ -75,6 +86,15 @@ describe("the scheduler run", () => {
     assert.deepEqual(await runSchedulerOf(context, { logLevel: "DEBUG" }, deps), ok({ kind: "stopped" }));
     assert.deepEqual(deps.steps, ["level DEBUG", "stop handlers", "stop the prepared scheduler", "run the prepared scheduler"]);
     assert.equal(context.suppression.current().kind, "open");
+  });
+
+  test("an entry with no implementation passes the start check: the scheduler sends by contract", async () => {
+    const context = declare(unimplementedSchedulerApp(), PING_SCHEDULE, { kind: "core", calls: fakeCore() });
+    const deps = runDeps({ kind: "stopped" });
+
+    assert.equal(context.implementations.size, 0);
+    assert.deepEqual(await runSchedulerOf(context, { logLevel: "INFO" }, deps), ok({ kind: "stopped" }));
+    assert.equal(staticCheck(context, fakeChecks(), "withSchedules", "check").kind, "refused");
   });
 
   test("no app.schedules call: notConfigured, and nothing starts", async () => {
@@ -176,6 +196,16 @@ const ERRORS: readonly SchedulerRunError[] = [
 ];
 
 describe("the scheduler command", () => {
+  test("the doc of cli.run names each command of the command table, in its order", () => {
+    const source = readFileSync(new URL("../../../horsies/src/cli/public.ts", import.meta.url), "utf8");
+    const listed = /names for `app` \(([^)]+)\)/.exec(source.replaceAll(/\n\s*\*\s*/g, " "))?.[1];
+
+    assert.deepEqual(
+      listed?.split(", ").map((name) => name.replaceAll("`", "")),
+      [...COMMAND_NAMES],
+    );
+  });
+
   test("no flag: INFO; --loglevel in any case", () => {
     assert.deepEqual(parseSchedulerStart([]), ok({ logLevel: "INFO" }));
     assert.deepEqual(parseSchedulerStart(["--loglevel=warning"]), ok({ logLevel: "WARNING" }));
