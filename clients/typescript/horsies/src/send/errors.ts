@@ -36,7 +36,13 @@ export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqu
 export type TaskSendKeyConflict = TaskSendIdempotencyKeyConflict & { readonly retryable: false };
 
 /** A send error of the task send catalog, with the fixed `retryable` of a key conflict. */
-export type SendFailure = Exclude<TaskSendCoreError, TaskSendIdempotencyKeyConflict> | TaskSendKeyConflict;
+export type SendFailure =
+  | TaskSendSuppressed
+  | TaskSendValidationFailed
+  | TaskSendEnqueueFailed
+  | TaskSendPayloadMismatch
+  | TaskSendPayloadTooLarge
+  | TaskSendKeyConflict;
 
 /** The error of a send, told apart by `code`. */
 export type TaskSendError<O, E extends string> =

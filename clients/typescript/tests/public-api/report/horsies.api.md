@@ -597,7 +597,7 @@ export type ExecutorThreads = {
 };
 
 // @public
-export type FinishedStatus = "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED";
+export type FinishedStatus = "COMPLETED" | "FAILED" | "EXPIRED";
 
 // @public
 export type Flat<T> = {
@@ -1199,7 +1199,7 @@ export type RetentionPeriod = {
 };
 
 // @public
-export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed, O, E> | WithSentTypes<TaskSendIdempotencyKeyConflict, O, E>;
+export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed, O, E>;
 
 // @public
 export type RetryAttempts = {
@@ -1264,6 +1264,9 @@ export type SendableInput<P extends ParameterSchemas> = HasRequiredUpstreamOutco
 
 // @public
 export type SenderMayLeaveOut<P> = P extends AnyWire ? PresenceOf<P> extends "required" ? false : true : P extends ZodOptionalIn ? true : false;
+
+// @public
+export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict;
 
 // @public
 export type SendInput<P extends ParameterSchemas> = keyof PlainParameters<P> extends never ? EmptyObject : ParametersSent<PlainParameters<P>>;
@@ -1445,7 +1448,7 @@ export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema
 
 // @public
 export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
-    readonly errors?: readonly UserCode<E>[];
+    readonly errors?: string extends E ? readonly WidenedCodes[] : readonly UserCode<E>[];
     // (undocumented)
     readonly execution?: X;
     readonly input: P;
@@ -1572,7 +1575,7 @@ export interface TaskSendEnqueueFailed {
 }
 
 // @public
-export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | RetryableSendError<O, E>;
+export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | RetryableSendError<O, E>;
 
 // @public (undocumented)
 export interface TaskSendIdempotencyKeyConflict {
@@ -1587,6 +1590,11 @@ export interface TaskSendIdempotencyKeyConflict {
     // (undocumented)
     readonly taskId: string;
 }
+
+// @public
+export type TaskSendKeyConflict = TaskSendIdempotencyKeyConflict & {
+    readonly retryable: false;
+};
 
 // @public (undocumented)
 export interface TaskSendPayload {
@@ -1738,6 +1746,9 @@ export type ValueRefused = {
 
 // @public
 export type ValueWire = Wire<unknown, unknown, Presence, "value">;
+
+// @public
+export type WidenedCodes = "horsies: declare errors as literal codes, not as a string[]";
 
 // @public
 export interface Wire<V, S = V, P extends Presence = "required", R extends Role = "value"> {
