@@ -1,4 +1,4 @@
-//! `error_detail.ts`: the cause union of the `exception` field of a catalog
+//! `error_detail.ts`: the cause union of the `cause` field of a catalog
 //! error, and `NoCause`.
 //!
 //! The union `CoreCause` is told apart by `kind`:
@@ -56,7 +56,7 @@ const CORE_FAILURE_COMMENT: &str =
     "/** A core operation failed. `subject` names the operation and `failure` names the cause. */";
 
 const CORE_CAUSE_COMMENT: &str =
-    "/** The cause of a failed core operation: the `exception` field of a catalog error. */";
+    "/** The cause of a failed core operation: the `cause` field of a catalog error. */";
 
 const NO_CAUSE_COMMENT: &str =
     "/** No exception caused the failure: a check of the core found it. */";

@@ -12,62 +12,62 @@ import {
 const MESSAGE = "the workflow call failed";
 
 describe("handleCoreErrorFromNative", () => {
-  test("HandleWorkflowNotFound", () => {
+  test("WorkflowHandleNotFound", () => {
     const value = handleCoreErrorFromNative({
-      class: "HandleWorkflowNotFound",
+      class: "WorkflowHandleNotFound",
       slots: { message: MESSAGE, workflow_id: WORKFLOW_ID },
     });
 
     expectConverted(value, {
-      shown: { code: "WORKFLOW_NOT_FOUND", retryable: false, workflowId: WORKFLOW_ID },
+      shown: { kind: "notFound", code: "WORKFLOW_NOT_FOUND", retryable: false, workflowId: WORKFLOW_ID },
       hidden: ["message"],
       message: MESSAGE,
       cause: null,
     });
   });
 
-  test("HandleDbOperationFailed", () => {
+  test("WorkflowHandleDatabaseOperationFailed", () => {
     const value = handleCoreErrorFromNative({
-      class: "HandleDbOperationFailed",
+      class: "WorkflowHandleDatabaseOperationFailed",
       slots: {
         message: MESSAGE,
         retryable: true,
         workflow_id: WORKFLOW_ID,
-        exception: CONNECTION_FAILURE,
+        cause: CONNECTION_FAILURE,
       },
     });
 
     expectConverted(value, {
-      shown: { code: "DB_OPERATION_FAILED", retryable: true, workflowId: WORKFLOW_ID },
-      hidden: ["message", "exception"],
+      shown: { kind: "databaseOperationFailed", code: "DATABASE_OPERATION_FAILED", retryable: true, workflowId: WORKFLOW_ID },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: CONNECTION_FAILURE,
     });
   });
 
-  test("HandleStoredDataInvalid", () => {
+  test("WorkflowHandleStoredDataInvalid", () => {
     const value = handleCoreErrorFromNative({
-      class: "HandleStoredDataInvalid",
-      slots: { message: MESSAGE, workflow_id: WORKFLOW_ID, exception: CONTRACT_VIOLATION },
+      class: "WorkflowHandleStoredDataInvalid",
+      slots: { message: MESSAGE, workflow_id: WORKFLOW_ID, cause: CONTRACT_VIOLATION },
     });
 
     expectConverted(value, {
-      shown: { code: "STORED_DATA_INVALID", retryable: false, workflowId: WORKFLOW_ID },
-      hidden: ["message", "exception"],
+      shown: { kind: "storedDataInvalid", code: "STORED_DATA_INVALID", retryable: false, workflowId: WORKFLOW_ID },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: CONTRACT_VIOLATION,
     });
   });
 
-  test("HandleResumeRecoveryFailed", () => {
+  test("WorkflowHandleResumeRecoveryFailed", () => {
     const value = handleCoreErrorFromNative({
-      class: "HandleResumeRecoveryFailed",
-      slots: { message: MESSAGE, workflow_id: WORKFLOW_ID, exception: SERVER_FAILURE },
+      class: "WorkflowHandleResumeRecoveryFailed",
+      slots: { message: MESSAGE, workflow_id: WORKFLOW_ID, cause: SERVER_FAILURE },
     });
 
     expectConverted(value, {
-      shown: { code: "RESUME_RECOVERY_FAILED", retryable: false, workflowId: WORKFLOW_ID },
-      hidden: ["message", "exception"],
+      shown: { kind: "resumeRecoveryFailed", code: "RESUME_RECOVERY_FAILED", retryable: false, workflowId: WORKFLOW_ID },
+      hidden: ["message", "cause"],
       message: MESSAGE,
       cause: SERVER_FAILURE,
     });
@@ -75,7 +75,7 @@ describe("handleCoreErrorFromNative", () => {
 
   test("the class that only a blocking form gives is not a class of this build", () => {
     expect(() =>
-      handleCoreErrorFromNative(JSON.parse('{"class":"HandleAsyncContext","slots":{}}')),
-    ).toThrow("handleCoreErrorFromNative: unknown class name HandleAsyncContext");
+      handleCoreErrorFromNative(JSON.parse('{"class":"WorkflowHandleAsyncContext","slots":{}}')),
+    ).toThrow("handleCoreErrorFromNative: unknown class name WorkflowHandleAsyncContext");
   });
 });

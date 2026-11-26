@@ -107,7 +107,7 @@ describe("app.rerun with a database that cannot be reached", () => {
 
     assert.ok(!answer.ok && answer.error.code === "CONNECT_FAILED", JSON.stringify(answer));
     assert.equal(answer.error.retryable, true);
-    assert.equal(answer.error.exception.subject, "rerun_task");
+    assert.equal(answer.error.cause.subject, "rerun_task");
   });
 
   test("a window of 0 and of 31 days is INVALID_POLICY, not the connect failure", async () => {

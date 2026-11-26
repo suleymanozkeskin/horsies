@@ -9,8 +9,8 @@ serves every route, guard and event of the web UI, so a TypeScript app, a
 Python app and a Rust app answer alike.
 
 Every call in this file returns a `Result`: `{ ok: true, value }` or
-`{ ok: false, error }`. Each error is a closed union told apart by `code`,
-with `retryable`. A process-state refusal of the core throws `CoreError`; a
+`{ ok: false, error }`. Each error is a closed union told apart by `kind`
+(the variant name, named after its code), with `code` and `retryable`. A process-state refusal of the core throws `CoreError`; a
 defect of the package throws `CoreDefect` (see `SKILL.md`).
 
 ## Health Reads on the App
@@ -31,15 +31,15 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
   const pongs = await app.pingWorkers({ timeoutMs: 2_000, minResponses: { kind: "atLeast", count: 1 } });
 
   if (!pongs.ok) {
-    switch (pongs.error.code) {
-      case "INVALID_INPUT":
-      case "LISTENER_DISABLED":
-      case "WORKER_PING_FAILED":
-      case "SEAT_RELAY_FULL":
-        console.error(`workers: ${pongs.error.message}`);
+    switch (pongs.error.kind) {
+      case "invalidInput":
+        // The core's refusal has `message`; the refusal of a worker id has `field` and `reason`.
+        console.error(`workers: ${"field" in pongs.error ? `${pongs.error.field}: ${pongs.error.reason}` : pongs.error.message}`);
         break;
-      case "QUERY_REFUSED":
-        console.error(`workers: ${pongs.error.field}: ${pongs.error.reason}`);
+      case "listenerDisabled":
+      case "workerPingFailed":
+      case "seatRelayFull":
+        console.error(`workers: ${pongs.error.message}`);
         break;
       default: {
         const unknownError: never = pongs.error;
@@ -59,7 +59,7 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
 
 | Method | Returns |
 |---|---|
-| `app.pingDatabase()` | `DatabasePing` (`latencyMs`): a timed `SELECT 1` round trip. Error: `DB_PING_FAILED` |
+| `app.pingDatabase()` | `DatabasePing` (`latencyMs`): a timed `SELECT 1` round trip. Error: `DATABASE_PING_FAILED` |
 | `app.pingWorkers(options?)` | `readonly WorkerPong[]` (`workerId`, `hostname`, `pid`, `roundTripMs`), the distinct replies by worker id |
 | `app.monitoring.workers()` | `readonly WorkerStateSnapshot[]`: the latest snapshot of each worker that wrote one |
 | `app.monitoring.worker(workerId)` | `WorkerStateRead`: `{ kind: "found", snapshot }` or `{ kind: "notFound", workerId }` |
@@ -79,10 +79,11 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
 - `pingWorkers` errors: `INVALID_INPUT` (a `timeoutMs` or a `count` that is
   not a whole number above 0, answered before any connect),
   `LISTENER_DISABLED` (the core handle of this process runs no listener),
-  `WORKER_PING_FAILED`, and `QUERY_REFUSED` (a worker id that holds a lone
-  surrogate).
+  `WORKER_PING_FAILED`, and `INVALID_INPUT` with `field` and `reason` (a
+  worker id that holds a lone surrogate).
 - The other health reads give `MONITORING_QUERY_FAILED`; `worker` and
-  `workerHistory` add `QUERY_REFUSED`; `staleTasks` and `workerHistory` add
+  `workerHistory` add `INVALID_INPUT` with `field` and `reason` for a worker
+  id; `staleTasks` and `workerHistory` add
   `INVALID_INPUT` for a threshold or a count outside its rule.
 - Each health read connects the app's handle and installs the schema once
   per handle, as a send does; then it reads only. The database ping reads
@@ -179,12 +180,12 @@ Errors:
 
 | Code | When |
 |---|---|
-| `QUERY_REFUSED` | An argument that the call refuses before any connect: `field` (`window`, `page`, `limit`, `taskNames`, `queues`, `workers`, `errorCodes`, `workflowName`, `taskIndex`, `workerId`) and `reason`. A count that is not a whole number, a value outside the core's bound, and text with a lone surrogate. Nothing ran. Not retryable |
-| `DB_OPERATION_FAILED` | The database or the connect failed. `retryable` is the classification of the cause; `exception` holds the cause |
+| `INVALID_INPUT` (`invalidInput`) | An argument that the call refuses before any connect: `field` (`window`, `page`, `limit`, `taskNames`, `queues`, `workers`, `errorCodes`, `workflowName`, `taskIndex`, `workerId`) and `reason`. A count that is not a whole number, a value outside the core's bound, and text with a lone surrogate. Nothing ran. Not retryable |
+| `DATABASE_OPERATION_FAILED` | The database or the connect failed. `retryable` is the classification of the cause; `cause` holds the cause |
 | `HISTORY_CONTRACT_VIOLATION` | A history row does not decode. Not retryable |
 
 `taskDetail`, `workflowNames`, `workflowRun` and `schedules` take no query,
-so their error is `MonitoringQueryCoreError` (no `QUERY_REFUSED`).
+so their error is `MonitoringQueryError` (no `invalidInput`).
 
 Phase timing (the lifecycle record of migration 1001):
 
@@ -226,14 +227,14 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
     return true;
   }
 
-  switch (cancelled.error.code) {
-    case "TASK_NOT_FOUND":
-    case "TASK_NOT_CANCELLABLE":
+  switch (cancelled.error.kind) {
+    case "notFound":
+    case "notCancellable":
       return false;
-    case "TASK_IS_WORKFLOW_TASK":
-    case "DB_OPERATION_FAILED":
-    case "STORED_DATA_INVALID":
-    case "SEAT_RELAY_FULL":
+    case "workflowTask":
+    case "databaseOperationFailed":
+    case "storedDataInvalid":
+    case "seatRelayFull":
       console.error(cancelled.error.message);
 
       return false;
@@ -270,7 +271,7 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
 | `TASK_NOT_FOUND` | No live or history row has the id. Nothing changed |
 | `TASK_NOT_CANCELLABLE` | Terminal, or `RUNNING` with `pendingOrClaimedOnly`; `currentStatus` is the status found. Nothing changed |
 | `TASK_IS_WORKFLOW_TASK` | The task belongs to a workflow; `currentStatus` is the status found. Nothing changed |
-| `DB_OPERATION_FAILED` | The statement or the connect failed; `retryable` follows the cause. The outcome is unknown: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
+| `DATABASE_OPERATION_FAILED` | The statement or the connect failed; `retryable` follows the cause. The outcome is unknown: nothing was written, or the commit reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
 | `STORED_DATA_INVALID` | Stored data does not parse. Nothing changed |
 
 There is no manual retry action. Re-execution is a rerun (Rerun, below).
@@ -572,7 +573,8 @@ nothing):
 | `keyConflict` | `taskId`, `reservedByTaskId` | The caller key holds another command |
 | `keyReplay` | `existingTaskId` | The caller key holds this command already |
 
-Errors (each with `code`, `message`; `RerunErrorCode` names the codes):
+Errors (each with `kind`, the code in camelCase, `code` and `message`;
+`RerunErrorCode` names the codes):
 
 | Code | Union | When |
 |---|---|---|

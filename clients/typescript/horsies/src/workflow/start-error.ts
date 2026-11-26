@@ -26,7 +26,7 @@ export declare const startTypes: unique symbol;
 export type StartEnqueueFailed<R extends BuildReturn> = WorkflowStartEnqueueFailed & { readonly [startTypes]?: R };
 
 /**
- * The error of a workflow start, told apart by `code`. `SEAT_RELAY_FULL` comes in a `SHARED_THREAD` body only: the seat
+ * The error of a workflow start, told apart by `kind`. `SEAT_RELAY_FULL` comes in a `SHARED_THREAD` body only: the seat
  * relay held its bound and sent nothing, so no tree was written; start again (`retryStart` does not take it).
  */
 export type WorkflowStartError<R extends BuildReturn> =
@@ -81,16 +81,16 @@ export function startValidationFailed(
   message: string,
   workflowName: string,
   workflowId: string,
-  exception: CoreCause | NoCause,
+  cause: CoreCause | NoCause,
 ): WorkflowStartValidationFailed {
   const error = workflowStartCoreErrorFromNative({
     class: "WorkflowStartValidationFailed",
-    slots: { message, workflow_name: workflowName, workflow_id: workflowId, exception },
+    slots: { message, workflow_name: workflowName, workflow_id: workflowId, cause },
   });
 
-  if (error.code !== "VALIDATION_FAILED") {
+  if (error.kind !== "validationFailed") {
     throw new TypeError(
-      `workflowStartCoreErrorFromNative: the converter gave the code ${error.code} for another class`,
+      `workflowStartCoreErrorFromNative: the converter gave the kind ${error.kind} for another class`,
     );
   }
 

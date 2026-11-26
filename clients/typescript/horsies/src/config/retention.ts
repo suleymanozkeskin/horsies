@@ -3,7 +3,7 @@
 // `core/src/core/config/retention.rs`). A refusal of a retention field has the code of the retention config
 // (`HRS-216`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { PAUSED_AGE_MICROS_MAX, PAUSED_AGE_MICROS_MIN } from "../_catalog/worker_manifest.ts";
 import { refusal } from "../app/refusal.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -67,16 +67,16 @@ const NANOSECONDS_PER_DAY = 24n * NANOSECONDS_PER_HOUR;
 const DAYS_PER_WEEK = 7n;
 
 /** A `u32` field of the retention config. */
-const RETENTION_U32 = u32Field(ErrorCode.CONFIG_INVALID_RETENTION);
+const RETENTION_U32 = u32Field(HorsiesErrorCode.CONFIG_INVALID_RETENTION);
 
 /** A `u64` field of the retention config. */
-const RETENTION_U64 = u64Field(ErrorCode.CONFIG_INVALID_RETENTION);
+const RETENTION_U64 = u64Field(HorsiesErrorCode.CONFIG_INVALID_RETENTION);
 
 /** A count of whole days whose seconds are a safe integer. */
 const DAY_COUNT: IntegerBound = Object.freeze({
   min: 0,
   max: Math.floor(Number.MAX_SAFE_INTEGER / SECONDS_PER_DAY),
-  code: ErrorCode.CONFIG_INVALID_RETENTION,
+  code: HorsiesErrorCode.CONFIG_INVALID_RETENTION,
 });
 
 /** The core's `retention` object of `input`. Pure. */
@@ -155,7 +155,7 @@ function queueRetentionJson(mapping: Readonly<Record<string, QueueRetention>>, p
   return checkedObject(
     Object.entries(mapping).map(([queue, retention]) => {
       const at = keyPath(path, queue);
-      const name = checkedText(queue, ErrorCode.CONFIG_INVALID_RETENTION, at);
+      const name = checkedText(queue, HorsiesErrorCode.CONFIG_INVALID_RETENTION, at);
 
       return name.kind === "refused" ? name : entry(queue, queueRetentionValue(retention, at));
     }),
@@ -194,7 +194,7 @@ function pausedAgeJson(age: Temporal.Duration, path: string): Checked<ConfigJson
   const help = ["give a positive age in days, hours, minutes, seconds or smaller units, in whole microseconds"];
 
   if (age.years !== 0 || age.months !== 0) {
-    return refused(refusal(ErrorCode.CONFIG_INVALID_RETENTION, path, "years and months have no fixed length", help));
+    return refused(refusal(HorsiesErrorCode.CONFIG_INVALID_RETENTION, path, "years and months have no fixed length", help));
   }
 
   const nanoseconds = durationNanoseconds(age);
@@ -207,7 +207,7 @@ function pausedAgeJson(age: Temporal.Duration, path: string): Checked<ConfigJson
   ) {
     return refused(
       refusal(
-        ErrorCode.CONFIG_INVALID_RETENTION,
+        HorsiesErrorCode.CONFIG_INVALID_RETENTION,
         path,
         `must be whole microseconds from ${PAUSED_AGE_MICROS_MIN} to ${PAUSED_AGE_MICROS_MAX}`,
         help,

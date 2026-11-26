@@ -3,10 +3,10 @@
 
 import type { ReadError } from "horsies";
 
-/** A switch that misses the kinds of `ReadError` other than `database` and `waitTimeout`. */
+/** A switch that misses the kinds of `ReadError` other than `databaseError` and `waitTimeout`. */
 export function retryableOf(error: ReadError): boolean {
   switch (error.kind) { // expect: @typescript-eslint/switch-exhaustiveness-check switchIsNotExhaustive
-    case "database":
+    case "databaseError":
       return error.retryable;
     case "waitTimeout":
       return true;
@@ -26,11 +26,11 @@ export function readErrorText(error: ReadError): string {
       return `no result: ${error.status}`;
     case "storedResultUnreadable":
       return `the stored result does not read: ${error.cause}`;
-    case "unknownUserCode":
-      return `an unknown custom code: ${error.code}`;
+    case "unknownCustomCode":
+      return `an unknown custom code: ${error.storedCode}`;
     case "waitInsideTask":
       return "a wait inside a task";
-    case "database":
+    case "databaseError":
       return `the database failed: ${error.message}`;
     case "invalidInput":
       return `a wait over ${error.maxMs} ms`;

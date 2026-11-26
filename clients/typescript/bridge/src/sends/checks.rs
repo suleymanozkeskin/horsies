@@ -18,8 +18,8 @@ use horsies_core::manifest::{
     WholeSeconds,
 };
 use horsies_core::{
-    AppConfig, AppConfigError, CoverageRequest, DeclaredErrorCodes, ErrorCode, PostgresConfig,
-    RetentionConfig,
+    AppConfig, AppConfigError, CoverageRequest, DeclaredErrorCodes, HorsiesErrorCode,
+    PostgresConfig, RetentionConfig,
 };
 use napi_derive::napi;
 
@@ -227,7 +227,7 @@ fn coverage_check(retention: &RetentionConfig) -> CoverageCheck {
                 .collect(),
         }),
         Err(refused) => CoverageCheck::Refused(CoreRefusal::coded(
-            ErrorCode::ConfigInvalidRetention,
+            HorsiesErrorCode::ConfigInvalidRetention,
             format!("invalid retention config: {refused}"),
             vec!["the schema install creates the history leaves of these horizons".to_owned()],
             RefusalHelp::Help {
@@ -295,7 +295,7 @@ fn database_manifest(config: &PostgresConfig) -> Result<DatabaseManifest, Vec<Co
 /// (`HRS-213`). The cause names the bound, never the value. Pure.
 fn broker_setting_refused(field: &str, cause: &str) -> CoreRefusal {
     CoreRefusal::coded(
-        ErrorCode::ConfigInvalidBrokerPool,
+        HorsiesErrorCode::ConfigInvalidDatabasePool,
         format!("invalid broker config: broker.{field}: {cause}"),
         Vec::new(),
         RefusalHelp::NoHelp,

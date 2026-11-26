@@ -1,9 +1,9 @@
 // A refusal of `Horsies.create` or of a registration after it: the code, the place and the rule.
 
-import type { ErrorCode } from "../_catalog/error_codes.ts";
+import type { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 
 /** The code of a refusal: a code of the core's catalog (`HRS-nnn`). */
-export type RefusalCode = ErrorCode;
+export type RefusalCode = HorsiesErrorCode;
 
 /**
  * Why the app refuses a config field, a contract or a registration.

@@ -14,6 +14,8 @@ import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { ContextUse, TaskContract } from "../contract/define-task.ts";
 import type { WorkflowId } from "../contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
+import { RetrievalCode } from "../_catalog/task_codes.ts";
+import type { ReadErrorTag } from "../read/errors.ts";
 import { type ReadForm, readFormOf } from "../read/handle.ts";
 import type { Recorded } from "../read/info.ts";
 import { readSubWorkflowSummary } from "../codec/sub-workflow.ts";
@@ -34,8 +36,8 @@ export type ContextReadError =
   | { readonly kind: "notInContext"; readonly nodeId: string }
   /** The stored value does not read with the contract's types. `cause` holds no value. */
   | { readonly kind: "unreadable"; readonly nodeId: string; readonly cause: string }
-  /** The stored error has a custom code that the contract does not list. */
-  | { readonly kind: "unknownUserCode"; readonly nodeId: string; readonly code: string };
+  /** The stored error has a custom code that the contract does not list; `storedCode` holds it. */
+  | (ReadErrorTag<"unknownCustomCode"> & { readonly nodeId: string; readonly storedCode: string });
 
 /** The workflow context of one task run. */
 export interface WorkflowContext {
@@ -256,7 +258,14 @@ function contextOutcome(
 
       return form.codes.codes.includes(outcome.error.code)
         ? ok(outcome)
-        : err(Object.freeze({ kind: "unknownUserCode", nodeId, code: outcome.error.code }));
+        : err(
+            Object.freeze({
+              kind: "unknownCustomCode",
+              code: RetrievalCode.UNKNOWN_CUSTOM_CODE,
+              nodeId,
+              storedCode: outcome.error.code,
+            }),
+          );
     }
 
     default:

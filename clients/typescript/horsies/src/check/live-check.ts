@@ -2,7 +2,7 @@
 // connectivity of the database, then the connection fit of each worker profile. It stops at the first step that
 // refuses. It installs no schema and writes nothing but the LISTEN probe's one NOTIFY.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { refusalOfCore } from "../app/core-checks.ts";
@@ -42,7 +42,7 @@ function refusedWith(first: Refusal, ...rest: readonly Refusal[]): CheckOutcome 
 
 /** A connect or a `SELECT 1` that failed (Python `_check_broker_connectivity`). Pure. */
 function connectivityRefusal(cause: string): Refusal {
-  return refusal(ErrorCode.BROKER_INVALID_URL, BROKER_PATH, `broker connectivity check failed; ${cause}`, [
+  return refusal(HorsiesErrorCode.DATABASE_INVALID_URL, BROKER_PATH, `broker connectivity check failed; ${cause}`, [
     "check broker.databaseUrl in Horsies.create",
   ]);
 }
@@ -50,7 +50,7 @@ function connectivityRefusal(cause: string): Refusal {
 /** A session URL that delivers no NOTIFY to a LISTEN in PgBouncer transaction mode (Python `_run_listener_probe`). Pure. */
 function listenerRefusal(cause: string): Refusal {
   return refusal(
-    ErrorCode.BROKER_INVALID_URL,
+    HorsiesErrorCode.DATABASE_INVALID_URL,
     BROKER_PATH,
     `broker listener capability check failed; the session database URL appears to be transaction-pooled: a LISTEN notification was not delivered; ${cause}`,
     ["use a direct or session-capable PostgreSQL URL for broker.sessionDatabase"],

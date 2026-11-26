@@ -1,9 +1,9 @@
 // The queries of the monitoring reads, and the addon arguments that they give.
 //
 // - The core owns the bounds of a query (the window, the page, the limits): the read gives them to the addon, and the
-//   addon answers a refused value at once as `QUERY_REFUSED` (field `window`, `page` or `limit`).
+//   addon answers a refused value at once as `invalidInput` (`INVALID_INPUT`) (field `window`, `page` or `limit`).
 // - This module refuses what the addon cannot take: a count that is not a whole number, and text that is not
-//   well-formed (a lone surrogate). Both are `QUERY_REFUSED` before any call.
+//   well-formed (a lone surrogate). Both are `invalidInput` (`INVALID_INPUT`) before any call.
 // - A field that a query leaves out takes the core's default: the addon argument says `coreDefault`, and the core's
 //   query keeps the value of its `new`. The package holds no copy of a default.
 

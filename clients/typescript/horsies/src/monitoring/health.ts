@@ -2,7 +2,7 @@
 //
 // - Each health read connects the handle and installs the schema once per handle, as a send does; then it reads only.
 //   The database ping reads only.
-// - Expected failures are values: the broker codes that each read lists (`errors.ts`), or `QUERY_REFUSED` for a
+// - Expected failures are values: the database codes that each read lists (`errors.ts`), or `invalidInput` (`INVALID_INPUT`) for a
 //   worker id that is not well-formed text. A count or threshold outside its rule is the core's `INVALID_INPUT`,
 //   answered before any connect. In a `SHARED_THREAD` body, `SEAT_RELAY_FULL` when the seat relay sent nothing.
 

@@ -16,7 +16,7 @@
 // no implementation, as the Python scheduler needs no task bodies. Every check runs phase 2: Python's `app.check` and
 // the Rust client's `check_scope` check the workflows at each start too.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import type { AppContext } from "../app/context.ts";
 import type { CoreChecks } from "../app/core-checks.ts";
 import { exceptionCodeRefusals } from "../app/implement.ts";
@@ -103,7 +103,7 @@ export function implementationRefusals(context: AppContext): readonly Refusal[] 
   return context.listed
     .filter((entry) => !context.implementations.has(entry.task.compiled.record.name))
     .map((entry) =>
-      refusal(ErrorCode.TASK_NOT_REGISTERED, entry.path, "the contract has no implementation in this entry", [
+      refusal(HorsiesErrorCode.TASK_NOT_REGISTERED, entry.path, "the contract has no implementation in this entry", [
         "call app.implement(contract, body) in a module that the entry imports before cli.run",
       ]),
     );

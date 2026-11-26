@@ -2,7 +2,7 @@
 // and they need no addon: each list entry, its params, its check cases rule, and one build with all spec checks for a
 // workflow with no params.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
@@ -68,7 +68,7 @@ export function checkWorkflowsAtCreate(input: WorkflowsAtCreate): WorkflowsCheck
       own.push(
         ...entry.error.map((refused) =>
           refusal(
-            ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
+            HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
             path,
             `${paramsContractPlace(refused.path)}: ${refused.detail} [${refused.rule}]`,
             [],
@@ -145,12 +145,12 @@ function storedTextCheck(text: string, maxChars: number): StoredTextCheck {
 function unstorableTextRefusal(path: string, subject: string, check: UnstorableText): Refusal {
   switch (check.kind) {
     case "loneSurrogate":
-      return refusal(ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG, path, `the ${subject} holds a lone surrogate`, [
+      return refusal(HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG, path, `the ${subject} holds a lone surrogate`, [
         `give the ${subject} as well-formed UTF-16: each surrogate in a pair`,
       ]);
     case "tooLong":
       return refusal(
-        ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+        HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
         path,
         `the ${subject} has ${String(check.chars)} characters; the most is ${String(check.maxChars)}`,
         [],
@@ -177,7 +177,7 @@ function nameRefusals(path: string, name: string): readonly Refusal[] {
     case "valid":
       return [];
     case "empty":
-      return [refusal(ErrorCode.WORKFLOW_NO_NAME, path, "a workflow name must not be empty", [])];
+      return [refusal(HorsiesErrorCode.WORKFLOW_NO_NAME, path, "a workflow name must not be empty", [])];
     case "loneSurrogate":
     case "tooLong":
       return [unstorableTextRefusal(path, "workflow name", check)];
@@ -198,7 +198,7 @@ function keyRefusals(path: string, workflow: object, key: string, keys: Map<stri
     case "valid":
       return uniqueKeyRefusals(path, workflow, key, keys);
     case "empty":
-      return [refusal(ErrorCode.WORKFLOW_NO_DEFINITION_KEY, path, "a definition key must not be empty", [])];
+      return [refusal(HorsiesErrorCode.WORKFLOW_NO_DEFINITION_KEY, path, "a definition key must not be empty", [])];
     case "loneSurrogate":
     case "tooLong":
       return [unstorableTextRefusal(path, "definition key", check)];
@@ -220,7 +220,7 @@ function uniqueKeyRefusals(path: string, workflow: object, key: string, keys: Ma
   const detail =
     first === workflow ? "the workflow is listed twice" : `another workflow has the definition key "${key}"`;
 
-  return [refusal(ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY, path, detail, ["give each workflow its own key"])];
+  return [refusal(HorsiesErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY, path, detail, ["give each workflow its own key"])];
 }
 
 /** The refusals of a record: the name, the key, its uniqueness, the error rule, the check cases rule. */
@@ -235,7 +235,7 @@ function recordRefusals(path: string, workflow: object, keys: Map<string, object
   if (record.onError.kind === "invalid") {
     refusals.push(
       refusal(
-        ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+        HorsiesErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
         path,
         `onError "${record.onError.given}" is not "fail" or "pause"`,
         [],
@@ -245,7 +245,7 @@ function recordRefusals(path: string, workflow: object, keys: Map<string, object
 
   if (record.paramNames.length > 0 && record.checkCases.length === 0) {
     refusals.push(
-      refusal(ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED, path, "a workflow with params declares check cases", [
+      refusal(HorsiesErrorCode.WORKFLOW_CHECK_CASES_REQUIRED, path, "a workflow with params declares check cases", [
         "add checkCases: one params value per case that check builds",
       ]),
     );
@@ -268,7 +268,7 @@ export function buildRefusals(
       const facts = thrownFacts(run.cause);
 
       return [
-        refusal(ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION, path, `the build threw ${facts.name}: ${facts.message}`, [
+        refusal(HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION, path, `the build threw ${facts.name}: ${facts.message}`, [
           "a build returns { output } and never throws",
         ]),
       ];
@@ -276,7 +276,7 @@ export function buildRefusals(
 
     case "thenable":
       return [
-        refusal(ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION, path, "the build returned a thenable; a build is sync", []),
+        refusal(HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION, path, "the build returned a thenable; a build is sync", []),
       ];
     case "returned": {
       const checked = checkBuild(entry.record, run, registry.view);

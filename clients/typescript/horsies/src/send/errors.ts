@@ -1,5 +1,5 @@
 // The errors of a send: the task send catalog of the core, generated (`src/_catalog/task_send_errors.ts`), told apart
-// by `code`. The two errors that `retrySend` takes carry the contract's types and hold the prepared payload in a
+// by `kind`. The two errors that `retrySend` takes carry the contract's types and hold the prepared payload in a
 // member that is not enumerable, so `JSON.stringify` of an error never holds the input.
 
 import type { CoreCause, NoCause } from "../_catalog/error_detail.ts";
@@ -48,7 +48,7 @@ export type SendFailure =
   | TaskSendIdempotencyKeyConflict
   | SeatRelayFull;
 
-/** The error of a send, told apart by `code`. */
+/** The error of a send, told apart by `kind`. */
 export type TaskSendError<O, E extends string> =
   | TaskSendSuppressed
   | TaskSendValidationFailed
@@ -69,14 +69,14 @@ export function sendErrorOfRaw(raw: RawCatalogError): SendFailure {
 export function suppressedError(message: string): TaskSendSuppressed {
   const error = taskSendCoreErrorFromNative({ class: "TaskSendSuppressed", slots: { message } });
 
-  return error.code === "SEND_SUPPRESSED" ? error : wrongCode(error);
+  return error.kind === "suppressed" ? error : wrongClass(error);
 }
 
 /** `VALIDATION_FAILED`: the send breaks a rule; nothing is written. Pure. */
-export function validationFailed(message: string, exception: CoreCause | NoCause): TaskSendValidationFailed {
-  const error = taskSendCoreErrorFromNative({ class: "TaskSendValidationFailed", slots: { message, exception } });
+export function validationFailed(message: string, cause: CoreCause | NoCause): TaskSendValidationFailed {
+  const error = taskSendCoreErrorFromNative({ class: "TaskSendValidationFailed", slots: { message, cause } });
 
-  return error.code === "VALIDATION_FAILED" ? error : wrongCode(error);
+  return error.kind === "validationFailed" ? error : wrongClass(error);
 }
 
 /** The cause of a value that a rule of the client refuses (Python's `ValueError`). Pure. */
@@ -95,6 +95,6 @@ export function preconditionFailed(message: string): CoreCause {
   });
 }
 
-function wrongCode(error: TaskSendCoreError): never {
-  throw new TypeError(`taskSendCoreErrorFromNative: the converter gave the code ${error.code} for another class`);
+function wrongClass(error: TaskSendCoreError): never {
+  throw new TypeError(`taskSendCoreErrorFromNative: the converter gave the kind ${error.kind} for another class`);
 }

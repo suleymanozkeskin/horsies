@@ -27,7 +27,7 @@ import type {
   CancelTaskError,
   HealthInputError,
   HealthReadError,
-  MonitoringCoreReadError,
+  MonitoringQueryError,
   MonitoringReadError,
   PingDatabaseError,
   PingWorkersError,
@@ -101,12 +101,12 @@ export interface Monitoring {
   taskFacets(query?: TaskFacetsQuery): Promise<Result<Facets, MonitoringReadError>>;
   taskBreakdown(query: TaskBreakdownQuery): Promise<Result<Breakdown, MonitoringReadError>>;
   listTasks(query?: TaskListQuery): Promise<Result<TaskListPage, MonitoringReadError>>;
-  taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringCoreReadError>>;
-  workflowNames(): Promise<Result<readonly string[], MonitoringCoreReadError>>;
+  taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringQueryError>>;
+  workflowNames(): Promise<Result<readonly string[], MonitoringQueryError>>;
   workflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
-  workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringCoreReadError>>;
+  workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringQueryError>>;
   workflowNode(workflowId: WorkflowId, taskIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
-  schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringCoreReadError>>;
+  schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryError>>;
   workers(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
   worker(workerId: string): Promise<Result<WorkerStateRead, WorkerReadError>>;
   workerHistory(

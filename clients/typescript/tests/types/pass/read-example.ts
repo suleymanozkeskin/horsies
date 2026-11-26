@@ -36,18 +36,30 @@ function describeReadError(error: ReadError): string {
       return `${code} ${error.status}`;
     }
 
-    case "storedResultUnreadable":
-      return error.cause;
-    case "unknownUserCode":
-      return error.code;
+    case "storedResultUnreadable": {
+      const code: "RESULT_DESERIALIZATION_ERROR" = error.code;
+
+      return `${code} ${error.cause}`;
+    }
+
+    case "unknownCustomCode": {
+      const code: "UNKNOWN_CUSTOM_CODE" = error.code;
+
+      return `${code} ${error.storedCode}`;
+    }
+
     case "waitInsideTask": {
       const code: "WAIT_INSIDE_TASK" = error.code;
 
       return code;
     }
 
-    case "database":
-      return `${error.code} ${String(error.retryable)}`;
+    case "databaseError": {
+      const code: "DATABASE_ERROR" = error.code;
+
+      return `${code} ${error.databaseCode} ${String(error.retryable)}`;
+    }
+
     case "invalidInput": {
       const code: "INVALID_INPUT" = error.code;
 

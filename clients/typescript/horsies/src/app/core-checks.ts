@@ -1,8 +1,8 @@
 // The checks of `Horsies.create` that the core makes, through the addon's pure check functions (main thread only),
 // and the facts that they take. One source per rule: the core's.
 
-import type { ErrorCode } from "../_catalog/error_codes.ts";
-import { ErrorCode as ErrorCodes } from "../_catalog/error_codes.ts";
+import type { HorsiesErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode as ErrorCodes } from "../_catalog/error_codes.ts";
 import type { ContractRecord, MillisecondsSetting, RetrySetting } from "../contract/definition.ts";
 import type { InstallCoverageArg } from "../native/handle/addon.ts";
 import type {
@@ -165,11 +165,11 @@ function helpLines(help: RefusalHelp): readonly string[] {
   }
 }
 
-function catalogCode(code: string): ErrorCode {
+function catalogCode(code: string): HorsiesErrorCode {
   if (!CATALOG_CODES.has(code)) {
     throw new TypeError(`refusalOfCore: the core gave the code ${code}, which the generated catalog does not hold`);
   }
 
   // SAFETY: the set of the generated catalog holds the code, checked on the line above.
-  return code as ErrorCode;
+  return code as HorsiesErrorCode;
 }

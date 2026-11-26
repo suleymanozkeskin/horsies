@@ -139,9 +139,9 @@ export function codeSlot(name: string, catalog: string, value: string): RawSlot 
   return { name, value: { kind: "codeMember", catalog, value } };
 }
 
-/** The `exception` slot of a core failure. */
+/** The `cause` slot of a core failure. */
 export function causeSlot(cause: CauseRecord): RawSlot {
-  return { name: "exception", value: { kind: "exception", exception: { kind: "coreFailure", cause } } };
+  return { name: "cause", value: { kind: "exception", exception: { kind: "coreFailure", cause } } };
 }
 
 /** A connection cause of the operation `subject`. */
@@ -149,10 +149,10 @@ export function connectionCause(subject: string, retryable: boolean): CauseRecor
   return { kind: "connection", subject, message: "connection refused", retryable };
 }
 
-/** The raw record of `MonitoringQueryDbOperationFailed`. */
+/** The raw record of `MonitoringQueryDatabaseOperationFailed`. */
 export function monitoringDbFailed(subject: string, retryable: boolean): RawCatalogError {
   return {
-    class: "MonitoringQueryDbOperationFailed",
+    class: "MonitoringQueryDatabaseOperationFailed",
     slots: [
       textSlot("message", `${subject} failed: connection refused`),
       flagSlot("retryable", retryable),
@@ -161,12 +161,12 @@ export function monitoringDbFailed(subject: string, retryable: boolean): RawCata
   };
 }
 
-/** The raw record of `BrokerOperationFailed` with `code`. */
+/** The raw record of `DatabaseOperationFailed` with `code`. */
 export function brokerOperationFailed(code: string, subject: string): RawCatalogError {
   return {
-    class: "BrokerOperationFailed",
+    class: "DatabaseOperationFailed",
     slots: [
-      codeSlot("code", "BrokerErrorCode", code),
+      codeSlot("code", "DatabaseErrorCode", code),
       textSlot("message", `${subject} failed: connection refused`),
       flagSlot("retryable", true),
       causeSlot(connectionCause(subject, true)),
@@ -174,15 +174,15 @@ export function brokerOperationFailed(code: string, subject: string): RawCatalog
   };
 }
 
-/** The raw record of `BrokerInvalidInput`. */
+/** The raw record of `DatabaseInvalidInput`. */
 export function brokerInvalidInput(message: string): RawCatalogError {
   return {
-    class: "BrokerInvalidInput",
-    slots: [textSlot("message", message), { name: "exception", value: { kind: "exception", exception: { kind: "noCause" } } }],
+    class: "DatabaseInvalidInput",
+    slots: [textSlot("message", message), { name: "cause", value: { kind: "exception", exception: { kind: "noCause" } } }],
   };
 }
 
-/** The raw record of `BrokerListenerDisabled`. */
+/** The raw record of `DatabaseListenerDisabled`. */
 export function brokerListenerDisabled(): RawCatalogError {
-  return { class: "BrokerListenerDisabled", slots: [textSlot("message", "ping_workers listener unavailable")] };
+  return { class: "DatabaseListenerDisabled", slots: [textSlot("message", "ping_workers listener unavailable")] };
 }

@@ -112,12 +112,12 @@ export function readErrorText(error: ReadError): string {
       return `the task is ${error.status} and stores no result`;
     case "storedResultUnreadable":
       return `the stored result does not read with the contract: ${error.cause}`;
-    case "unknownUserCode":
-      return `the stored error has the code ${error.code}, which the contract does not declare`;
+    case "unknownCustomCode":
+      return `the stored error has the code ${error.storedCode}, which the contract does not declare`;
     case "waitInsideTask":
       return "a wait inside a task body";
-    case "database":
-      return `the database read failed (${error.code}): ${error.message}`;
+    case "databaseError":
+      return `the database read failed (${error.databaseCode}): ${error.message}`;
     case "invalidInput":
       return `the wait is not a whole number of milliseconds from 0 to ${String(error.maxMs)}`;
     case "seatRelayFull":
@@ -141,14 +141,14 @@ export function workflowReadErrorText(error: WorkflowReadError): string {
       return "the node stores no result yet";
     case "storedResultUnreadable":
       return `the stored result does not read with the contract: ${error.cause}`;
-    case "unknownUserCode":
-      return `the stored error has the code ${error.code}, which the contract does not declare`;
+    case "unknownCustomCode":
+      return `the stored error has the code ${error.storedCode}, which the contract does not declare`;
     case "waitInsideTask":
       return "a wait inside a task body";
     case "noTypeAvailable":
       return `the app does not list the workflow ${error.workflowName}`;
-    case "database":
-      return `the database read failed (${error.code}): ${error.message}`;
+    case "databaseError":
+      return `the database read failed (${error.databaseCode}): ${error.message}`;
     case "invalidInput":
       return `the wait is not a whole number of milliseconds from 0 to ${String(error.maxMs)}`;
     case "seatRelayFull":

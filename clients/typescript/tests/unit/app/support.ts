@@ -307,7 +307,7 @@ export function rawEnqueueFailed(taskName: string, retryable: boolean): RawCatal
       { name: "message", value: { kind: "text", text: "connection refused" } },
       { name: "retryable", value: { kind: "flag", value: retryable } },
       {
-        name: "exception",
+        name: "cause",
         value: {
           kind: "exception",
           exception: {
@@ -363,7 +363,7 @@ export function rawValidationFailed(message: string): RawCatalogError {
     class: "TaskSendValidationFailed",
     slots: [
       { name: "message", value: { kind: "text", text: message } },
-      { name: "exception", value: { kind: "exception", exception: { kind: "clientClass", class: "valueError", text: message } } },
+      { name: "cause", value: { kind: "exception", exception: { kind: "clientClass", class: "valueError", text: message } } },
     ],
   };
 }

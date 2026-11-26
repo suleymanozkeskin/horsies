@@ -228,7 +228,7 @@ describe("the send error codes", () => {
     const error = sent.ok ? undefined : sent.error;
 
     assert.equal(error?.code, "VALIDATION_FAILED");
-    assert.deepEqual(error?.code === "VALIDATION_FAILED" ? [error.exception.kind, "failure" in error.exception ? error.exception.failure : ""] : [], [
+    assert.deepEqual(error?.code === "VALIDATION_FAILED" ? [error.cause.kind, "failure" in error.cause ? error.cause.failure : ""] : [], [
       "coreFailure",
       "preconditionFailed",
     ]);
@@ -240,7 +240,7 @@ describe("the send error codes", () => {
     const error = await sendReport(context, { n: 1 }, { delaySeconds: -1 });
 
     assert.equal(codeOf(error), "VALIDATION_FAILED");
-    assert.equal(error !== "sent" && error.code === "VALIDATION_FAILED" ? error.exception.kind : "", "ruleRefused");
+    assert.equal(error !== "sent" && error.code === "VALIDATION_FAILED" ? error.cause.kind : "", "ruleRefused");
     assert.equal(producer.prepares.length, 0);
   });
 

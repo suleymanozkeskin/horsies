@@ -39,14 +39,14 @@ export function workflowReadErrorText(error: WorkflowReadError): string {
       return "the node stores no result yet";
     case "storedResultUnreadable":
       return `the stored result does not read: ${error.cause}`;
-    case "unknownUserCode":
-      return `the stored error has the undeclared code ${error.code}`;
+    case "unknownCustomCode":
+      return `the stored error has the undeclared code ${error.storedCode}`;
     case "waitInsideTask":
       return "a wait inside a task";
     case "noTypeAvailable":
       return `the app does not list the workflow ${error.workflowName}`;
-    case "database":
-      return `the database read failed: ${error.code}: ${error.message}`;
+    case "databaseError":
+      return `the database read failed: ${error.databaseCode}: ${error.message}`;
     case "invalidInput":
       return `the wait is not 0 to ${String(error.maxMs)} ms`;
     case "seatRelayFull":
@@ -158,10 +158,10 @@ export async function handleCall<T>(subject: string, call: Promise<Result<T, Wor
 
 /**
  * The sub-workflow failure of `error` (Rust `subworkflow_failure`, Python `_assert_subworkflow_error`): the code
- * `SUBWORKFLOW_FAILED`, the child `childId`, which FAILED with at least one failed task. Fails the test otherwise.
+ * `SUB_WORKFLOW_FAILED`, the child `childId`, which FAILED with at least one failed task. Fails the test otherwise.
  */
 export function subWorkflowFailure(error: TaskError, childId: string): SubWorkflowFailure {
-  assert.deepEqual(errorCode(error), { source: "builtIn", code: "SUBWORKFLOW_FAILED" }, errorText(error));
+  assert.deepEqual(errorCode(error), { source: "builtIn", code: "SUB_WORKFLOW_FAILED" }, errorText(error));
 
   const failure = error.subWorkflow;
 

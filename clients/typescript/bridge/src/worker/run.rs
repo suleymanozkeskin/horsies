@@ -648,13 +648,13 @@ mod tests {
     #[test]
     fn a_core_error_keeps_its_code_notes_and_help() {
         let error = HorsiesError::new("unknown worker profile 'absent'")
-            .with_code(horsies_core::ErrorCode::CliInvalidArgs)
+            .with_code(horsies_core::HorsiesErrorCode::CliInvalidArgs)
             .with_note("the app defines the profiles: io")
             .with_help("pass one of them to --profile");
         assert_eq!(
             coded_refusal(&error),
             CoreRefusal {
-                code: horsies_core::ErrorCode::CliInvalidArgs
+                code: horsies_core::HorsiesErrorCode::CliInvalidArgs
                     .as_code_str()
                     .to_owned(),
                 message: "unknown worker profile 'absent'".to_owned(),

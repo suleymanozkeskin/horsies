@@ -13,9 +13,9 @@ export function describeReadError(error: ReadError): string {
     case "taskNotFound":
     case "resultNotAvailable":
     case "storedResultUnreadable":
-    case "unknownUserCode":
+    case "unknownCustomCode":
     case "waitInsideTask":
-    case "database":
+    case "databaseError":
       return error.kind;
     default:
       return assertNever(error);

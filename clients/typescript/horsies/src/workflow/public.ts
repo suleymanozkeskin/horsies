@@ -59,12 +59,12 @@ export type {
 
 export type {
   HandleCoreError,
-  HandleDbOperationFailed,
-  HandleResumeRecoveryFailed,
-  HandleStoredDataInvalid,
-  HandleWorkflowNotFound,
+  WorkflowHandleDatabaseOperationFailed,
+  WorkflowHandleResumeRecoveryFailed,
+  WorkflowHandleStoredDataInvalid,
+  WorkflowHandleNotFound,
 } from "../_catalog/workflow_handle_errors.ts";
 
-export { HandleErrorCode } from "../_catalog/workflow_handle.ts";
+export { WorkflowHandleErrorCode } from "../_catalog/workflow_handle.ts";
 
 export { WorkflowTaskStatus } from "../_catalog/status.ts";

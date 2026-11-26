@@ -3,7 +3,7 @@
 // - `includeRunning`: `PENDING`, `CLAIMED` and `RUNNING` move to `CANCELLED`. A running body sees `runtime.signal`
 //   abort with the cause `OPERATOR`; the statement records the running attempt with the outcome `CANCELLED`.
 // - `pendingOrClaimedOnly`: `PENDING` and `CLAIMED` only; no user code ran.
-// - One statement. `DB_OPERATION_FAILED` leaves the outcome unknown: nothing written, or committed with the reply lost.
+// - One statement. `DATABASE_OPERATION_FAILED` leaves the outcome unknown: nothing written, or committed with the reply lost.
 //   A repeat tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED`.
 // - A task of a workflow is refused (`TASK_IS_WORKFLOW_TASK`): use the workflow handle.
 

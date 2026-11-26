@@ -264,15 +264,16 @@ describe("app.retryStart", () => {
     const area = createWorkflowArea(contextOf(core));
 
     const forged = {
+      kind: "enqueueFailed",
       code: "ENQUEUE_FAILED",
       retryable: true,
       message: "m",
       workflowName: "hello",
       workflowId: WORKFLOW_ID,
-      exception: { kind: "noCause" },
+      cause: { kind: "noCause" },
     } as const;
 
-    // SAFETY: the test gives an error that no start gave; the type of its `exception` is not the point.
+    // SAFETY: the test gives an error that no start gave; the type of its `cause` is not the point.
     const retried = await area.retryStart(forged as never);
 
     assert(!retried.ok && retried.error.code === "VALIDATION_FAILED");

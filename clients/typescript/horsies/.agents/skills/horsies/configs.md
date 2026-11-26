@@ -60,10 +60,10 @@ const app = created.value;
 - `CreateRefused.refusals` is a non-empty list of `Refusal`. The order: the
   config (the TypeScript parse, then the core's check), then each listed
   contract in list order, then the workflows.
-- A `Refusal` has `code` (an `HRS-nnn` value of `ErrorCode`), `path` (the
-  config field, for example `customQueues[1].name`, or the contract, for
-  example `tasks[2] charge_payment`), `message` and `help` (zero or more
-  lines). The codes are on the shared docs page
+- A `Refusal` has `code` (an `HRS-nnn` value of `HorsiesErrorCode`),
+  `path` (the config field, for example `customQueues[1].name`, or the
+  contract, for example `tasks[2] charge_payment`), `message` and `help`
+  (zero or more lines). The codes are on the shared docs page
   `https://suleymanozkeskin.github.io/horsies/tasks/errors/` ("Config error
   codes").
 - `create` does no I/O. On the main thread the addon loads and the core
@@ -503,7 +503,7 @@ after `cli.run`.** Each command sets every logger to its `--loglevel`.
 ```ts
 import {
   // App
-  Horsies, ErrorCode, cli,
+  Horsies, HorsiesErrorCode, cli,
   type HorsiesConfig, type CreateRefused, type Refusal, type RefusalCode,
   // Config
   type AppConfigInput, type BrokerConfigInput, type BrokerConnection, type SessionDatabase, type Secret,

@@ -1,7 +1,7 @@
 // The contract list of an app (`Horsies.create({ tasks })`): each listed contract, its queue route and its compiled
 // form. The checks here are TypeScript code, so they run on every thread.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import {
   compileContract,
   type CompiledContract,
@@ -61,7 +61,7 @@ export function checkContractList(contracts: readonly object[], queues: QueueSet
 
       refusals.push({
         index,
-        refusal: refusal(ErrorCode.TASK_DUPLICATE_NAME, path, detail, ["list each task once, under one name"]),
+        refusal: refusal(HorsiesErrorCode.TASK_DUPLICATE_NAME, path, detail, ["list each task once, under one name"]),
       });
 
       return;
@@ -113,14 +113,14 @@ function contractRefusal(refused: ContractRefused, path: string): Refusal {
 function contractRuleCode(rule: ContractRule): RefusalCode {
   switch (rule) {
     case "TaskName":
-      return ErrorCode.TASK_INVALID_OPTIONS;
+      return HorsiesErrorCode.TASK_INVALID_OPTIONS;
     case "ParameterName":
     case "SchemaVendor":
     case "Zod3Schema":
     case "ZodVersionNotSupported":
     case "ZodSchema":
     case "WireKind":
-      return ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION;
+      return HorsiesErrorCode.TASK_STRICT_SIGNATURE_VIOLATION;
     default:
       return unreachable(rule, "contractRuleCode");
   }
@@ -141,7 +141,7 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
         : {
             ok: false,
             error: refusal(
-              ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+              HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE,
               path,
               `the task names the queue "${record.queue.name}", and the default queue mode takes no queue`,
               ["remove queue, or set queueMode: \"custom\" with customQueues"],
@@ -151,7 +151,7 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
       if (record.queue.kind === "noQueue") {
         return {
           ok: false,
-          error: refusal(ErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "the custom queue mode needs a queue on each task", [
+          error: refusal(HorsiesErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "the custom queue mode needs a queue on each task", [
             "set queue to one of the customQueues",
           ]),
         };
@@ -162,7 +162,7 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
       return queue === undefined
         ? {
             ok: false,
-            error: refusal(ErrorCode.TASK_INVALID_QUEUE, path, `the queue "${record.queue.name}" is not a custom queue`, [
+            error: refusal(HorsiesErrorCode.TASK_INVALID_QUEUE, path, `the queue "${record.queue.name}" is not a custom queue`, [
               "add the queue to customQueues, or name one of them",
             ]),
           }

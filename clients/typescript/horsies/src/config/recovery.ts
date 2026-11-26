@@ -2,7 +2,7 @@
 // core's `RecoveryConfig`, `core/src/core/config/recovery.rs`). A refusal of a recovery field has the code of the
 // recovery config (`HRS-204`).
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import {
   accepted,
   type Checked,
@@ -35,10 +35,10 @@ export interface RecoveryConfigInput {
 }
 
 /** A `u32` field of the recovery config. */
-const RECOVERY_U32 = u32Field(ErrorCode.CONFIG_INVALID_RECOVERY);
+const RECOVERY_U32 = u32Field(HorsiesErrorCode.CONFIG_INVALID_RECOVERY);
 
 /** A `u64` field of the recovery config. */
-const RECOVERY_U64 = u64Field(ErrorCode.CONFIG_INVALID_RECOVERY);
+const RECOVERY_U64 = u64Field(HorsiesErrorCode.CONFIG_INVALID_RECOVERY);
 
 /** The core's `recovery` object of `input`. Pure. */
 export function recoveryJson(input: RecoveryConfigInput, path: string): Checked<ConfigJson> {

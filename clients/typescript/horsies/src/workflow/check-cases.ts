@@ -3,7 +3,7 @@
 // fails for certain: a child that includes itself with the same params and no wait between (`HRS-037`), and a nesting
 // past depth 32 with no wait on the path (`HRS-036`). The checks of the Rust client's `check_findings`.
 
-import { ErrorCode } from "../_catalog/error_codes.ts";
+import { HorsiesErrorCode } from "../_catalog/error_codes.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
 import { decodeParameters } from "../codec/reader.ts";
 import { refusalText } from "../codec/refusal.ts";
@@ -43,7 +43,7 @@ function workflowRefusals(registry: WorkflowRegistry, entry: ListedWorkflow): re
     return params.ok
       ? rootRefusals(registry, entry, params.value, casePath)
       : [
-          refusal(ErrorCode.WORKFLOW_CHECK_CASE_INVALID, casePath, refusalText(params.error), [
+          refusal(HorsiesErrorCode.WORKFLOW_CHECK_CASE_INVALID, casePath, refusalText(params.error), [
             "give each case the params of the workflow",
           ]),
         ];
@@ -77,7 +77,7 @@ function checkedSpec(
 
       return err([
         refusal(
-          ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
+          HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION,
           path,
           `the build threw ${facts.name}: ${facts.message}`,
           [],
@@ -87,7 +87,7 @@ function checkedSpec(
 
     case "thenable":
       return err([
-        refusal(ErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION, path, "the build returned a thenable; a build is sync", []),
+        refusal(HorsiesErrorCode.WORKFLOW_CHECK_BUILDER_EXCEPTION, path, "the build returned a thenable; a build is sync", []),
       ]);
     case "returned": {
       const checked = checkBuild(record, run, registry.view);
@@ -142,7 +142,7 @@ function walk(
           // Rust client's walk gives the same finding.
           refusals.push(
             refusal(
-              ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+              HorsiesErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
               nodePath,
               `the params of the sub-workflow node do not decode: ${refusalText(params.error)}`,
               ["make each check of the child's params pure"],
@@ -189,7 +189,7 @@ function decideNesting(steps: readonly NestingStep[], step: NestingStep, path: s
       refusals: startsForCertain(walked.slice(earlier + 1))
         ? [
             refusal(
-              ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
+              HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
               path,
               "a sub-workflow includes itself with the same params, and no node between the two waits",
               ["change the params at each level, so that the nesting ends"],
@@ -205,7 +205,7 @@ function decideNesting(steps: readonly NestingStep[], step: NestingStep, path: s
       refusals: startsForCertain(walked)
         ? [
             refusal(
-              ErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT,
+              HorsiesErrorCode.WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT,
               path,
               `the child workflow would have depth ${walked.length}; the limit is ${MAX_SUBWORKFLOW_DEPTH}`,
               ["nest fewer levels; at run time this node fails with SUBWORKFLOW_DEPTH_LIMIT_REACHED"],

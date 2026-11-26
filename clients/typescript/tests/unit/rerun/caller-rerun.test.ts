@@ -40,6 +40,16 @@ async function rerunIn(
   return { answer, ran: statements.map((statement) => statement.name) };
 }
 
+/** The `kind` of each refusal code of the rerun steps. */
+const STEP_REFUSAL_KINDS: Readonly<Record<CallerStepRefusal["code"], CallerRerunError["kind"]>> = {
+  CLASS_NOT_REGISTERED: "classNotRegistered",
+  CALLER_KEY_REFUSED: "callerKeyRefused",
+  ID_MINT_REFUSED: "idMintRefused",
+  CLIENT_FAMILY_MISMATCH: "clientFamilyMismatch",
+  UNKNOWN_STORED_FAMILY: "unknownStoredFamily",
+  CONTRACT_VIOLATION: "contractViolation",
+};
+
 const ENQUEUED: RerunOutcome = {
   kind: "enqueued",
   newTaskId: NEW_TASK_ID,
@@ -139,7 +149,7 @@ describe("app.rerunIn errors", () => {
     for (const refusal of refusals) {
       const { answer, ran } = await rerunIn({ ...ENQUEUED_ANSWERS, preparation: { kind: "refused", error: refusal } }, [rowOf("t")]);
 
-      assert.deepEqual(answer, { ok: false, error: { ...refusal, retryable: false } }, refusal.code);
+      assert.deepEqual(answer, { ok: false, error: { kind: STEP_REFUSAL_KINDS[refusal.code], ...refusal, retryable: false } }, refusal.code);
       assert.deepEqual(ran, ["rerun_source_read"], refusal.code);
     }
   });
@@ -155,6 +165,7 @@ describe("app.rerunIn errors", () => {
     assert.deepEqual(answer, {
       ok: false,
       error: {
+        kind: "driverFailed",
         code: "DRIVER_FAILED",
         message: "statement rerun_enqueue failed in the caller's driver: could not serialize access",
         statement: "rerun_enqueue",
@@ -179,6 +190,7 @@ describe("app.rerunIn errors", () => {
     assert.deepEqual(answer, {
       ok: false,
       error: {
+        kind: "noOpenTransaction",
         code: "NO_OPEN_TRANSACTION",
         retryable: false,
         message: "statement rerun_source_read did not run: the caller's connection has no open transaction; run BEGIN first",
@@ -216,6 +228,7 @@ describe("app.rerunIn errors", () => {
     assert.deepEqual(answer, {
       ok: false,
       error: {
+        kind: "resultNotText",
         code: "RESULT_NOT_TEXT",
         retryable: false,
         message:
@@ -236,7 +249,7 @@ describe("app.rerunIn errors", () => {
 
     assert.deepEqual(answer, {
       ok: false,
-      error: { code: "CONTRACT_VIOLATION", retryable: false, message: "statement rerun_source_read gave 0 rows; it gives one row" },
+      error: { kind: "contractViolation", code: "CONTRACT_VIOLATION", retryable: false, message: "statement rerun_source_read gave 0 rows; it gives one row" },
     });
   });
 
@@ -248,7 +261,7 @@ describe("app.rerunIn errors", () => {
 
     assert.deepEqual(answer, {
       ok: false,
-      error: { code: "CONTRACT_VIOLATION", retryable: false, message: "statement `rerun_enqueue` declares 2 result columns; the row has 1 cells" },
+      error: { kind: "contractViolation", code: "CONTRACT_VIOLATION", retryable: false, message: "statement `rerun_enqueue` declares 2 result columns; the row has 1 cells" },
     });
   });
 });
