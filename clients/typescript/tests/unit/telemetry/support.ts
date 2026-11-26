@@ -130,12 +130,15 @@ export function recordedWarnings(): { readonly warnings: TelemetryWarnings; read
   return { warnings: new TelemetryWarnings((line) => lines.push(line)), lines };
 }
 
-/** The id of a span that was not made: the workflow id of a start, the task id of a seat attempt. */
+/** The id of a span that was not made: the workflow id of a start, the task id of the other kinds. */
 function notMadeId(span: NotMadeSpan): string {
   switch (span.kind) {
     case "workflowStart":
       return span.workflowId;
+    case "send":
+    case "attempt":
     case "seatAttempt":
+    case "workerEnded":
       return span.taskId;
     default: {
       const unexpected: never = span;

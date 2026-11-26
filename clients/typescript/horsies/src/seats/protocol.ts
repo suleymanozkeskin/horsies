@@ -25,8 +25,8 @@
 // - `defect`: a defect of the package in the isolate; the main thread applies the defect rule (the child aborts).
 // - `log`: one line that the isolate's process events write (a detached throw, a rejection that no body awaits).
 // - `flushed`: the flush of the seat body observer settled.
-// - `spanNotMade`: the user's SDK threw at a span of the isolate (a workflow start, or the attempt span of a run); the
-//   main thread writes the record of the process (`src/telemetry/not-made.ts`).
+// - `spanNotMade`: the user's SDK threw at a span of the isolate (a send, a workflow start, or the attempt span of a
+//   run); the main thread writes the record of the process (`src/telemetry/not-made.ts`).
 //
 // A message of another kind or of another protocol version, or a field that is missing or of another type, is a defect
 // of the package: the parse throws `ClientDefect`. On the main thread the defect rule then ends the child; in an
@@ -380,7 +380,10 @@ function notMadeSpanOf(span: object): NotMadeSpan {
   switch (kind) {
     case "workflowStart":
       return { kind, workflowId: textField(span, "workflowId") };
+    case "send":
+    case "attempt":
     case "seatAttempt":
+    case "workerEnded":
       return { kind, taskId: textField(span, "taskId") };
     default:
       throw protocolDefect(`the span that a seat isolate did not make has the unknown kind ${String(kind)}`);

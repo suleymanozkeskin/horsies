@@ -7,15 +7,12 @@
 //!   package's span maker through a threadsafe function in non-blocking
 //!   mode, with a queue of [`ENDED_SPAN_QUEUE_BOUND`] spans.
 //! - A full queue, an environment that is closing, or a status that
-//!   Node-API refuses leaves the span not made. It is reported as the Rust
-//!   client reports a span that its maker does not make: no metric, and one
-//!   line at ERROR per process on the `horsies.worker` logger, in the form
-//!   of the core's line for a `make` that panicked. The event still goes to
-//!   the handlers.
+//!   Node-API refuses leaves the span not made. It is reported as every span
+//!   of the package that is not made (`logging::span_not_made`): no metric,
+//!   and one record at WARNING per process on `horsies.telemetry`. The event
+//!   still goes to the handlers.
 //! - The times are epoch microseconds, so the span keeps the precision of
 //!   the worker's clock.
-
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use horsies_core::{EndedAttempt, EndedSpanMaker, EndedWorkflow, HANDLER_QUEUE_EVENTS};
 use napi::bindgen_prelude::{BigInt, Function};
@@ -25,6 +22,7 @@ use napi_derive::napi;
 
 use crate::call::node_api::{call_status, CallStatus};
 use crate::child::body_facts::{BodyCarrierRecord, BodyExecution, BodyWorkflowRecord};
+use crate::logging::span_not_made::{report_span_not_made, NotMadeSpan};
 use crate::values::boundary::epoch_micros_of;
 
 /// The spans that wait for the JavaScript thread at once. The span maker
@@ -117,11 +115,9 @@ type SpanFunction = ThreadsafeFunction<
     ENDED_SPAN_QUEUE_BOUND,
 >;
 
-/// The span maker of the handler child: the package's function, and
-/// whether this maker logged a span that it did not make.
+/// The span maker of the handler child: the package's function.
 pub struct JsEndedSpans {
     function: SpanFunction,
-    not_made_logged: AtomicBool,
 }
 
 impl JsEndedSpans {
@@ -138,33 +134,17 @@ impl JsEndedSpans {
                 .weak::<true>()
                 .max_queue_size::<ENDED_SPAN_QUEUE_BOUND>()
                 .build()?,
-            not_made_logged: AtomicBool::new(false),
         })
-    }
-
-    /// Log at ERROR, once per maker (one maker per handler child), that the
-    /// span of `attempt` was not made for `cause`.
-    fn not_made(&self, attempt: &EndedAttempt<'_>, cause: &str) {
-        match self.not_made_logged.swap(true, Ordering::Relaxed) {
-            true => {}
-            false => tracing::error!(
-                target: "horsies.worker",
-                task_id = %attempt.task_id,
-                "{}",
-                not_made_text(&attempt.task_id.to_string(), cause),
-            ),
-        }
     }
 }
 
-/// The text of the log line of a span that was not made: the form of the
-/// core's line for a `make` that panicked. Pure.
-fn not_made_text(task_id: &str, cause: &str) -> String {
-    format!(
-        "the span of the attempt of task {task_id} that the worker ended was not made: {cause}. \
-         The event still goes to the handlers; this span is not complete. Later spans that are \
-         not made are not logged."
-    )
+/// Report, once per process, that the span of `attempt` was not made for
+/// `cause`.
+fn not_made(attempt: &EndedAttempt<'_>, cause: &str) {
+    let span = NotMadeSpan::WorkerEnded {
+        task_id: attempt.task_id.to_string(),
+    };
+    report_span_not_made(&span, cause);
 }
 
 impl EndedSpanMaker for JsEndedSpans {
@@ -176,11 +156,11 @@ impl EndedSpanMaker for JsEndedSpans {
         match call_status(status) {
             CallStatus::Queued => {}
             CallStatus::QueueFull => {
-                self.not_made(attempt, "the queue of the JavaScript thread is full");
+                not_made(attempt, "the queue of the JavaScript thread is full")
             }
-            CallStatus::Closing => self.not_made(attempt, "the JavaScript environment is closing"),
+            CallStatus::Closing => not_made(attempt, "the JavaScript environment is closing"),
             CallStatus::Refused { status } => {
-                self.not_made(attempt, &format!("Node-API refused the call: {status}"));
+                not_made(attempt, &format!("Node-API refused the call: {status}"));
             }
         }
     }
@@ -189,20 +169,6 @@ impl EndedSpanMaker for JsEndedSpans {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_line_of_a_span_not_made_names_the_task_and_the_cause() {
-        let text = not_made_text("0192f6a1-7b3c-7d4e-8f00-0123456789ab", "the queue is full");
-        assert!(
-            text.contains("task 0192f6a1-7b3c-7d4e-8f00-0123456789ab"),
-            "{text}"
-        );
-        assert!(text.contains("was not made: the queue is full."), "{text}");
-        assert!(
-            text.contains("Later spans that are not made are not logged."),
-            "{text}"
-        );
-    }
 
     #[test]
     fn the_queue_has_the_bound_of_the_queue_of_one_handler() {

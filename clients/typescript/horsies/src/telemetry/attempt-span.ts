@@ -13,7 +13,9 @@
 //   signal: the core ends such a run at its deadline or at an operator cancel while the body may run on, so a body
 //   that never settles still gets its span.
 // - A body that does not start gets no span (the core posts no body for it).
-// - A throw of the user's SDK never changes a run: no span at the open, and one warning per process and kind.
+// - A throw of the user's SDK never changes a run: no span at the open. A throw at any stage (the open, the record of
+//   a thrown value, the end) is a span not made: one WARNING record per process on `horsies.telemetry`
+//   (`not-made.ts`).
 // - The seat isolates of a `SHARED_THREAD` child have their own observer (`seat-span.ts`), which opens, runs and ends
 //   the same span with the functions of this module.
 
@@ -63,13 +65,15 @@ import {
 import { markError } from "./send-span.ts";
 import { attemptSpanStore } from "./span-id-store.ts";
 import type { AttemptParentage } from "./tracing-config.ts";
+import type { SpansNotMade } from "./not-made.ts";
 import type { TelemetryWarnings } from "./warnings.ts";
 
-/** What the attempt-span observer reads. */
+/** What the attempt-span observer reads. `warnings` takes a flush that fails; `notMade` a span not made. */
 export type AttemptSpanDeps = {
   readonly api: OtelApi;
   readonly parentage: AttemptParentage;
   readonly warnings: TelemetryWarnings;
+  readonly notMade: SpansNotMade;
 };
 
 /** The facts of a run that has its facts recorded. */
@@ -122,15 +126,17 @@ export function otelBodyObserver(deps: AttemptSpanDeps): BodyObserver {
 
 /** The observation of one body: its span, or none when the user's SDK threw at the open. */
 function openedObservation(deps: AttemptSpanDeps, facts: RecordedFacts): BodyObservation {
-  const opened = openedAttemptSpan(deps, facts, SDK_CLOCK, (cause) => {
-    deps.warnings.warnOnce("attemptSpanOpen", cause);
-  });
+  const notMade = (cause: unknown): void => {
+    deps.notMade.report({ kind: "attempt", taskId: facts.taskId }, cause);
+  };
+
+  const opened = openedAttemptSpan(deps, facts, SDK_CLOCK, notMade);
 
   switch (opened.kind) {
     case "notOpen":
       return NO_OBSERVATION;
     case "open":
-      return new AttemptSpan(deps, opened.open);
+      return new AttemptSpan(deps, opened.open, notMade);
     default:
       return unreachable(opened, "openedObservation");
   }
@@ -198,11 +204,13 @@ function withTime(options: OtelSpanOptions, start: SpanTime): OtelSpanOptions {
 class AttemptSpan implements BodyObservation {
   readonly #deps: AttemptSpanDeps;
   readonly #open: OpenSpan;
+  readonly #notMade: (cause: unknown) => void;
   #state: "open" | "ended" = "open";
 
-  constructor(deps: AttemptSpanDeps, open: OpenSpan) {
+  constructor(deps: AttemptSpanDeps, open: OpenSpan, notMade: (cause: unknown) => void) {
     this.#deps = deps;
     this.#open = open;
+    this.#notMade = notMade;
   }
 
   run<T>(call: () => T): T {
@@ -211,9 +219,9 @@ class AttemptSpan implements BodyObservation {
 
   thrown(cause: unknown): void {
     if (this.#state === "open") {
-      guarded(this.#deps, () => {
+      guarded(() => {
         recordThrown(this.#open.span, cause);
-      });
+      }, this.#notMade);
     }
   }
 
@@ -248,9 +256,9 @@ class AttemptSpan implements BodyObservation {
     }
 
     this.#state = "ended";
-    guarded(this.#deps, () => {
+    guarded(() => {
       endAttemptSpan(this.#deps.api, this.#open.span, end, SDK_CLOCK);
-    });
+    }, this.#notMade);
   }
 }
 
@@ -394,11 +402,11 @@ export function endAttemptSpan(api: OtelApi, span: OtelSpan, end: BodyEnd, at: S
   }
 }
 
-/** Run `step`; a throw of the user's SDK is written once per process. */
-export function guarded(deps: AttemptSpanDeps, step: () => void): void {
+/** Run `step` of a span; a throw of the user's SDK goes to `notMade`. */
+export function guarded(step: () => void, notMade: (cause: unknown) => void): void {
   try {
     step();
   } catch (cause) {
-    deps.warnings.warnOnce("attemptSpanEnd", cause);
+    notMade(cause);
   }
 }

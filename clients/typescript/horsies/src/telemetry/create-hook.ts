@@ -59,7 +59,7 @@ export type TracingEnvironment = {
   readonly clock: () => number;
   /** The wall clock: the start of the span of a seat run, whose end is the main thread's wall-clock time. */
   readonly now: () => Temporal.Instant;
-  /** The reports of the start spans and the seat attempt spans that were not made. */
+  /** The reports of the spans that were not made, of every kind. */
   readonly notMade: SpansNotMade;
 };
 
@@ -104,14 +104,14 @@ export function tracingPartsOf(setting: TracingSetting, environment: TracingEnvi
 
 function otelParts(setting: OtelTracingSetting, api: OtelApi, environment: TracingEnvironment): TracingParts {
   const { warnings } = environment;
-  const spanDeps = { api, parentage: setting.parentage, warnings };
+  const spanDeps = { api, parentage: setting.parentage, warnings, notMade: environment.notMade };
 
   return Object.freeze({
     setting,
-    sendObserver: otelSendObserver({ api, warnings, clock: environment.clock }),
+    sendObserver: otelSendObserver({ api, warnings, notMade: environment.notMade, clock: environment.clock }),
     startObserver: otelStartObserver({ api, notMade: environment.notMade }),
     bodyObserver: otelBodyObserver(spanDeps),
-    seatBodyObserver: otelSeatBodyObserver({ ...spanDeps, now: environment.now, notMade: environment.notMade }),
+    seatBodyObserver: otelSeatBodyObserver({ ...spanDeps, now: environment.now }),
     endedSpans: endedSpansOf(setting, spanDeps),
   });
 }

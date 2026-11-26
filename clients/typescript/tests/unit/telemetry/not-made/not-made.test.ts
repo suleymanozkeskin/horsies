@@ -64,15 +64,23 @@ describe("the writer of a main thread", () => {
     assert.deepEqual(lines, [`${lineText(ATTEMPT, "Error: broken")} The core log did not start: the OS refused a thread.`]);
   });
 
-  test("the line of each kind names its span", () => {
-    assert.equal(
-      lineText(START, "Error: broken"),
-      `horsies telemetry: the span of the start of workflow ${WORKFLOW_ID} was not made: Error: broken.`,
-    );
-    assert.equal(
-      lineText(ATTEMPT, "Error: broken"),
-      `horsies telemetry: the span of the attempt of task ${TASK_ID} in a seat isolate was not made: Error: broken.`,
-    );
+  test("the line of each kind names its span and what goes on", () => {
+    const later = "Later spans of this kind that are not made are not logged.";
+
+    const lines: readonly [NotMadeSpan, string][] = [
+      [{ kind: "send", taskId: TASK_ID }, `the span of the send of task ${TASK_ID} was not made or is not complete: Error: broken. The send goes on.`],
+      [START, `the span of the start of workflow ${WORKFLOW_ID} was not made or is not complete: Error: broken. The start goes on.`],
+      [{ kind: "attempt", taskId: TASK_ID }, `the span of the attempt of task ${TASK_ID} was not made or is not complete: Error: broken. The run goes on.`],
+      [ATTEMPT, `the span of the attempt of task ${TASK_ID} in a seat isolate was not made or is not complete: Error: broken. The run goes on.`],
+      [
+        { kind: "workerEnded", taskId: TASK_ID },
+        `the span of the attempt of task ${TASK_ID} that the worker ended was not made or is not complete: Error: broken. The event still goes to the handlers.`,
+      ],
+    ];
+
+    for (const [span, text] of lines) {
+      assert.equal(lineText(span, "Error: broken"), `horsies.telemetry: ${text} ${later}`);
+    }
   });
 });
 

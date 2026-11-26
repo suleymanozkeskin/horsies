@@ -94,7 +94,7 @@ describe("the messages of a seat isolate", () => {
       () => parseSeatToMain({ kind: "op", protocol: 1, requestId: 1, request: { area: "web", operation: {} } }),
       /unknown area web/,
     );
-    assert.throws(() => parseSeatToMain({ kind: "spanNotMade", protocol: 1, span: { kind: "send" }, cause: "c" }), /unknown kind send/);
+    assert.throws(() => parseSeatToMain({ kind: "spanNotMade", protocol: 1, span: { kind: "metric" }, cause: "c" }), /unknown kind metric/);
   });
 });
 

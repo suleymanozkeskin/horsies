@@ -1,8 +1,8 @@
 // The attempt span of a body in a seat isolate: the span of a Node child (name, kind, attributes, the parent from the
 // stored carrier), active where the body runs; its start at the isolate's clock and its end at the main thread's
 // `endedAt`; the status of each verdict; the cancel signal ends nothing; a thrown value is recorded; no span for facts
-// that are not recorded; a throw of the SDK changes no run (at the open or the end it is one report of a span not made
-// per process, at the record of a thrown value one warning); the flush of the isolate's provider.
+// that are not recorded; a throw of the SDK changes no run and is one report of a span not made per process (at the
+// open, the end or the record of a thrown value); the flush of the isolate's provider.
 
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -270,15 +270,14 @@ describe("the attempt span of a seat body with a broken SDK", () => {
     assert.deepEqual(written, [`seatAttempt ${TASK_ID} Error: the SDK is broken at end`]);
   });
 
-  test("a throw when the span records a thrown value is one warning: the span is still made", () => {
+  test("a throw when the span records a thrown value is a span that is not complete: one report per process", () => {
     const { observer, lines, written } = observerOf(apiWithBrokenSpans("recordException"));
     const observation = observer.enter(factsWith(NO_CARRIER));
 
     observation.thrown(new RangeError("out of range"));
     observation.end({ kind: "failed", code: "UNHANDLED_EXCEPTION" }, ENDED_AT);
-    assert.deepEqual(written, []);
-    assert.equal(lines.length, 1);
-    assert.match(lines[0] ?? "", /the span of an attempt did not end.*the SDK is broken at recordException/u);
+    assert.deepEqual(written, [`seatAttempt ${TASK_ID} Error: the SDK is broken at recordException`]);
+    assert.deepEqual(lines, []);
   });
 });
 
