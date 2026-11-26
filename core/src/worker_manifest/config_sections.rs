@@ -16,9 +16,9 @@ use std::collections::BTreeMap;
 
 use crate::core::config::bounded::BoundedU32;
 use crate::core::config::worker_profile::{
-    ChildPreload, DrainTimeout, ExecutorThreadsSetting, IsolatedSetting, MemoryLimitSetting,
-    PoolSizeSetting, SharedAsyncSetting, SharedPool, SharedRecycle, SharedThreadSetting,
-    TaskLimitSetting, WorkerProfile,
+    checked_worker_profiles, input, ChildPreload, DrainTimeout, ExecutorThreadsSetting,
+    IsolatedSetting, MemoryLimitSetting, PoolSizeSetting, SharedAsyncSetting, SharedPool,
+    SharedRecycle, SharedThreadSetting, TaskLimitSetting, WorkerProfile,
 };
 use crate::core::config::{
     AppConfig, CustomQueueConfig, PausedWorkflowAge, PayloadPolicy, QueueMode, RecoveryConfig,
@@ -254,17 +254,26 @@ impl PayloadField {
 
 /// The config sections of `config`. Pure: no I/O.
 ///
-/// - Every profile of the config goes in: the worker checks the profile set
-///   and picks the profile that the start asks for.
-/// - The builder does not depend on `AppConfig::validate`: it checks each
-///   manifest bound itself.
+/// - Every profile of the config goes in, in its checked form
+///   ([`checked_worker_profiles`]), whose bounds are the bounds of the
+///   manifest fields: the worker checks the profile set and picks the
+///   profile that the start asks for.
+/// - For the other sections, the builder does not depend on
+///   `AppConfig::validate`: it checks each manifest bound itself.
 ///
 /// Errors: [`ManifestBoundRefused`] for the first value outside its
 /// manifest bound, in this order: the claim values (`prefetch_buffer`,
 /// `claim_lease_ms`, `max_claim_renew_age_ms`, `cluster_wide_cap`, each
 /// custom queue in config order), then the recovery, retention (each mapped
-/// queue in name order), resilience and payload sections. A profile has no
-/// refusal: each of its values already has the bound of its manifest field.
+/// queue in name order), resilience and payload sections.
+///
+/// # Panics
+///
+/// When a profile has a value outside its bound. `AppConfig::validate`
+/// refuses each such value with its path, and a client builds the sections
+/// only of a config that validation accepted (the Rust `Horsies::new`, the
+/// TypeScript `Horsies.create`), so a value outside its bound here is a
+/// defect of the client.
 pub fn config_sections(config: &AppConfig) -> Result<ConfigSections, ManifestBoundRefused> {
     let claim = claim_manifest(config)?;
     let recovery = recovery_manifest(&config.recovery)?;
@@ -272,8 +281,7 @@ pub fn config_sections(config: &AppConfig) -> Result<ConfigSections, ManifestBou
     let resilience = resilience_manifest(&config.resilience)?;
     let payload = payload_manifest(&config.payload)?;
     Ok(ConfigSections {
-        profiles: config
-            .worker_profiles
+        profiles: checked_profiles(&config.worker_profiles)
             .iter()
             .map(|(name, profile)| (name.clone(), profile_manifest(profile)))
             .collect(),
@@ -285,8 +293,30 @@ pub fn config_sections(config: &AppConfig) -> Result<ConfigSections, ManifestBou
     })
 }
 
-/// `profile` with every value given. Total: each config value already has
-/// the bound of its manifest field. Pure.
+/// Every profile of the config in its checked form, by name. Pure.
+///
+/// Panics when a profile has a value outside its bound, with the path and
+/// the bound of each such value: a defect of the client
+/// ([`config_sections`]).
+fn checked_profiles(
+    profiles: &BTreeMap<String, input::WorkerProfile>,
+) -> BTreeMap<String, WorkerProfile> {
+    match checked_worker_profiles(profiles) {
+        Ok(checked) => checked,
+        Err(refusals) => panic!(
+            "the worker manifest is built from a config that AppConfig::validate refuses, a \
+             defect of the client: {}",
+            refusals
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("; "),
+        ),
+    }
+}
+
+/// `profile` with every value given. Total: each value of a checked
+/// profile has the bound of its manifest field. Pure.
 fn profile_manifest(profile: &WorkerProfile) -> wire::WorkerProfileManifest {
     wire::WorkerProfileManifest {
         isolated: isolated_manifest(&profile.isolated),
