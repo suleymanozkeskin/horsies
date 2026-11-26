@@ -92,6 +92,43 @@ describe("platformListOf", () => {
     });
   });
 
+  test("reads a manylinux build with its image and glibc floor", () => {
+    const build = { kind: "manylinux-container", image: "quay.io/pypa/manylinux_2_28_x86_64:2026.11.21-1", glibc_floor: "2.28" };
+    const read = platformListOf({ platforms: [row({ npm: npm({ build }) })] });
+
+    assert.ok(read.ok);
+    assert.deepEqual(read.value[0]?.build, {
+      kind: "manylinux-container",
+      image: "quay.io/pypa/manylinux_2_28_x86_64:2026.11.21-1",
+      glibcFloor: [2, 28],
+    });
+  });
+
+  test("RowForm: a manylinux build without an image or with a glibc floor that is not <major>.<minor>", () => {
+    for (const build of [
+      { kind: "manylinux-container", glibc_floor: "2.28" },
+      { kind: "manylinux-container", image: "quay.io/pypa/manylinux_2_28_x86_64", glibc_floor: "2_28" },
+    ]) {
+      assert.deepEqual(refusalOf(row({ npm: npm({ build }) })), { kind: "RowForm", index: 0, field: "npm.build" });
+    }
+  });
+
+  test("BuildMismatch: a build form that does not build for the row's C library", () => {
+    assert.deepEqual(refusalOf(row({ npm: npm({ build: { kind: "alpine-container", node_variant: "alpine3.23" } }) })), {
+      kind: "BuildMismatch",
+      row: "linux-x86_64",
+      build: "alpine-container",
+      cLibrary: "glibc",
+    });
+
+    assert.deepEqual(refusalOf(row({ npm: npm({ build: { kind: "runner" } }) })), {
+      kind: "BuildMismatch",
+      row: "linux-x86_64",
+      build: "runner",
+      cLibrary: "glibc",
+    });
+  });
+
   test("UnknownValue: release, c_library, npm.cpu and npm.platform outside their sets", () => {
     assert.deepEqual(refusalOf(row({ release: "later" })), { kind: "UnknownValue", row: "linux-x86_64", field: "release", value: "later" });
 

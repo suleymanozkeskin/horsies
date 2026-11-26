@@ -55,12 +55,23 @@ export function bunImage(versions: RuntimeVersions, variant: string): string {
   return `oven/bun:${versions.bun}-${variant}`;
 }
 
+/** The container image of a build: the Node image of an Alpine build, the manylinux image of a manylinux build. Pure. */
+function buildImageOf(build: NpmBuild, versions: RuntimeVersions): { readonly build_image?: string } {
+  switch (build.kind) {
+    case "alpine-container":
+      return { build_image: nodeImage(versions, build.nodeVariant) };
+    case "manylinux-container":
+      return { build_image: build.image };
+    case "glibc-2.17-toolchain":
+    case "runner":
+      return {};
+  }
+}
+
 /** The build entry of a row. Pure. */
 export function buildEntryOf(row: ReleasePlatform, versions: RuntimeVersions): BuildEntry {
   const entry = { name: row.name, runner: row.runner, rust_target: row.rustTarget, platform: row.platform };
-
-  const buildImage =
-    row.build.kind === "alpine-container" ? { build_image: nodeImage(versions, row.build.nodeVariant) } : {};
+  const buildImage = buildImageOf(row.build, versions);
 
   const checkImages =
     row.install.kind === "container"

@@ -1,12 +1,13 @@
-// The glibc floor of a Linux glibc addon: the highest `GLIBC_` symbol version that the file needs is at most 2.17,
-// the glibc of the napi cross toolchain. A file built against a newer glibc refuses to load on an older system.
+// The glibc floor of a Linux glibc addon: the highest `GLIBC_` symbol version that the file needs is at most the glibc
+// of its build (2.17 for the napi cross toolchain; the image's glibc for a manylinux build). A file built against a
+// newer glibc refuses to load on an older system.
 
 import type { Result } from "../../horsies/src/wire/result.ts";
 import { runTool } from "../public-api/tools.ts";
 import type { ToolFailed } from "../public-api/tools.ts";
 
-/** The highest glibc version that a published addon may need. */
-export const GLIBC_FLOOR: readonly number[] = [2, 17];
+/** The glibc of the napi cross toolchain (`napi build --use-napi-cross`). */
+export const NAPI_CROSS_GLIBC_FLOOR: readonly number[] = [2, 17];
 
 /** The glibc versions that a file needs: the numbered ones, and each `GLIBC_` name that is not a number. */
 export type GlibcNeeds = {

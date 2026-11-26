@@ -61,6 +61,16 @@ describe("buildEntryOf", () => {
     assert.equal(buildEntryOf(MUSL_ROW, VERSIONS).build_image, "node:26.13.1-alpine3.23");
   });
 
+  test("a manylinux row names its manylinux image", () => {
+    const row: ReleasePlatform = {
+      ...GLIBC_ROW,
+      build: { kind: "manylinux-container", image: "quay.io/pypa/manylinux_2_28_aarch64:2026.11.21-1", glibcFloor: [2, 28] },
+    };
+
+    assert.equal(buildEntryOf(row, VERSIONS).build_image, "quay.io/pypa/manylinux_2_28_aarch64:2026.11.21-1");
+    assert.equal(buildEntryOf(row, VERSIONS).build, "manylinux-container");
+  });
+
   test("a runner row names no image", () => {
     assert.deepEqual(buildEntryOf(MACOS_ROW, VERSIONS), {
       name: "macos-arm64",

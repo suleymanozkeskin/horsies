@@ -64,7 +64,8 @@ jobs:
 
   # One release build of the addon per platform, with no cargo feature: a
   # published build has no test-only export (the feature test-probes). Each
-  # row loads its file in Node 26 and in Bun 1.4 and uploads it.
+  # row builds on a runner of its own CPU, loads its file in Node 26 and in
+  # Bun 1.4, and uploads it.
   build-addons:
     name: build-addons (${{ matrix.name }})
     needs: platforms
@@ -103,7 +104,7 @@ jobs:
       # rustup is preinstalled on the runner. With no argument it installs the
       # toolchain and components that rust-toolchain.toml names.
       - name: Install the Rust toolchain
-        if: matrix.build != 'alpine-container'
+        if: matrix.build == 'glibc-2.17-toolchain' || matrix.build == 'runner'
         run: |
           rustup toolchain install
           rustup target add "$RUST_TARGET"
@@ -117,18 +118,14 @@ jobs:
         working-directory: clients/typescript/bridge
         run: ./node_modules/.bin/napi build --platform --no-js --release --target "$RUST_TARGET" --use-napi-cross --output-dir "$ADDON_DIR"
 
-      - name: Build the addon on the runner
-        if: matrix.build == 'runner'
-        working-directory: clients/typescript/bridge
-        run: ./node_modules/.bin/napi build --platform --no-js --release --target "$RUST_TARGET" --output-dir "$ADDON_DIR"
-
-      # musl: the build runs in an Alpine container of the runner's CPU, so
-      # the Rust toolchain and the C compiler are musl's own. The napi CLI is
-      # JavaScript from the workspace install of the step above; the
-      # container's Node runs it. napi build turns off crt-static for a musl
-      # target, so the addon links musl's libc dynamically.
-      - name: Build the addon in an Alpine container
-        if: matrix.build == 'alpine-container'
+      # The image of the row's wheel (release.yml builds the wheel with
+      # maturin in the same manylinux image), on a runner of the row's CPU:
+      # the C compiler is the image's own gcc, and the addon needs no glibc
+      # above the image's. The napi CLI is JavaScript from the workspace
+      # install above; Node of the workflow's version runs it, from the
+      # nodejs.org tarball, checked against its SHASUMS256.txt.
+      - name: Build the addon in the manylinux image
+        if: matrix.build == 'manylinux-container'
         env:
           BUILD_IMAGE: ${{ matrix.build_image }}
         run: |
@@ -138,6 +135,61 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/work" \
             --volume "$ADDON_DIR:/addon-out" \
             --env RUST_TARGET \
+            --env NODE_VERSION="$TYPESCRIPT_NODE_VERSION" \
+            --workdir /work \
+            "$BUILD_IMAGE" \
+            bash -euo pipefail -c '
+              case "$(uname -m)" in
+                aarch64) node_arch=arm64 ;;
+                x86_64) node_arch=x64 ;;
+                *) echo "no Node build for $(uname -m)"; exit 1 ;;
+              esac
+              node_file="node-v${NODE_VERSION}-linux-${node_arch}.tar.gz"
+              cd /tmp
+              curl --fail --silent --show-error --location --remote-name "https://nodejs.org/dist/v${NODE_VERSION}/${node_file}"
+              curl --fail --silent --show-error --location --remote-name "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
+              grep " ${node_file}\$" SHASUMS256.txt | sha256sum --check --strict
+              tar -xzf "$node_file"
+              export PATH="/tmp/node-v${NODE_VERSION}-linux-${node_arch}/bin:$PATH"
+              curl --proto "=https" --tlsv1.2 --fail --silent --show-error https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal --default-toolchain none --no-modify-path
+              export PATH="$HOME/.cargo/bin:$PATH"
+              cd /work
+              rustup toolchain install
+              rustup target add "$RUST_TARGET"
+              rustc --version
+              node --version
+              gcc --version | head -n 1
+              cd clients/typescript/bridge
+              ./node_modules/.bin/napi build --platform --no-js --release --target "$RUST_TARGET" --output-dir /addon-out
+            '
+
+      - name: Build the addon on the runner
+        if: matrix.build == 'runner'
+        working-directory: clients/typescript/bridge
+        run: ./node_modules/.bin/napi build --platform --no-js --release --target "$RUST_TARGET" --output-dir "$ADDON_DIR"
+
+      # musl: the build runs in an Alpine container of the runner's CPU, so
+      # the Rust toolchain and the C compiler are musl's own. The napi CLI is
+      # JavaScript from the workspace install of the step above; the
+      # container's Node runs it. napi build turns off crt-static for a musl
+      # target, so the addon links musl's libc dynamically. For
+      # aarch64-unknown-linux-musl, napi build sets the cross linker
+      # aarch64-linux-musl-gcc unless CARGO_TARGET_<TARGET>_LINKER is set;
+      # this build is native, so the variable names the container's gcc.
+      - name: Build the addon in an Alpine container
+        if: matrix.build == 'alpine-container'
+        env:
+          BUILD_IMAGE: ${{ matrix.build_image }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$ADDON_DIR"
+          linker_variable="CARGO_TARGET_$(tr 'a-z-' 'A-Z_' <<< "$RUST_TARGET")_LINKER"
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE:/work" \
+            --volume "$ADDON_DIR:/addon-out" \
+            --env RUST_TARGET \
+            --env "$linker_variable=gcc" \
             --workdir /work \
             "$BUILD_IMAGE" \
             sh -euc '
@@ -200,7 +252,8 @@ jobs:
   # packs it and one platform package per row, and checks each tarball: the
   # files it holds, its manifest, the API report of the packed declarations,
   # no file that names the dev-only variable, no test-only export in an
-  # addon file, and the glibc 2.17 floor of each glibc addon
+  # addon file, and the glibc floor of each glibc addon: 2.17 for the napi
+  # cross toolchain, the image's glibc for a manylinux build
   # (tests/packages/pack.ts).
   pack-npm:
     needs: [platforms, build-addons]

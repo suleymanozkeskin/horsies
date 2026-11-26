@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { compareVersions, GLIBC_FLOOR, glibcFloorProblems, glibcNeedsOf } from "./glibc-floor.ts";
+import { compareVersions, NAPI_CROSS_GLIBC_FLOOR, glibcFloorProblems, glibcNeedsOf } from "./glibc-floor.ts";
 
 /** The version needs section of `readelf --version-info --wide` for a file that needs `versions`. */
 function readelfOutput(versions: readonly string[]): string {
@@ -37,22 +37,27 @@ describe("compareVersions", () => {
 
 describe("glibcFloorProblems", () => {
   test("passes needs at or below the floor", () => {
-    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(readelfOutput(["2.2.5", "2.14", "2.17"])), GLIBC_FLOOR), []);
+    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(readelfOutput(["2.2.5", "2.14", "2.17"])), NAPI_CROSS_GLIBC_FLOOR), []);
   });
 
   test("a need above the floor", () => {
-    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(readelfOutput(["2.17", "2.34"])), GLIBC_FLOOR), [
+    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(readelfOutput(["2.17", "2.34"])), NAPI_CROSS_GLIBC_FLOOR), [
       "needs GLIBC_2.34, above the floor 2.17",
     ]);
   });
 
   test("a need that is not a numbered version", () => {
-    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(readelfOutput(["2.17", "PRIVATE"])), GLIBC_FLOOR), [
+    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(readelfOutput(["2.17", "PRIVATE"])), NAPI_CROSS_GLIBC_FLOOR), [
       "needs GLIBC_PRIVATE, which is not a numbered glibc version",
     ]);
   });
 
+  test("a manylinux_2_28 floor passes 2.28 and refuses 2.29", () => {
+    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(readelfOutput(["2.17", "2.28"])), [2, 28]), []);
+    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(readelfOutput(["2.29"])), [2, 28]), ["needs GLIBC_2.29, above the floor 2.28"]);
+  });
+
   test("a file that needs no glibc version", () => {
-    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(""), GLIBC_FLOOR), ["needs no GLIBC_ version: it is not a glibc build"]);
+    assert.deepEqual(glibcFloorProblems(glibcNeedsOf(""), NAPI_CROSS_GLIBC_FLOOR), ["needs no GLIBC_ version: it is not a glibc build"]);
   });
 });

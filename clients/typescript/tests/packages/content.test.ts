@@ -125,20 +125,31 @@ describe("platformExpectationOf", () => {
       os: "linux",
       cpu: "x64",
       libc: { kind: "field", value: "glibc" },
+      glibcFloor: { kind: "floor", version: [2, 17] },
       binary: "horsies.linux-x64-gnu.node",
     });
   });
 
+  test("a manylinux build has the floor of its image", () => {
+    const row: ReleasePlatform = {
+      ...GLIBC_ROW,
+      build: { kind: "manylinux-container", image: "quay.io/pypa/manylinux_2_28_aarch64:2026.11.21-1", glibcFloor: [2, 28] },
+    };
+
+    assert.deepEqual(platformExpectationOf(row, "0.8.1").glibcFloor, { kind: "floor", version: [2, 28] });
+  });
+
   test("a musl row has libc musl; a macOS row is darwin with no libc field", () => {
-    assert.deepEqual(platformExpectationOf({ ...GLIBC_ROW, cLibrary: "musl", platform: "linux-x64-musl" }, "0.8.1").libc, {
+    assert.deepEqual(platformExpectationOf({ ...GLIBC_ROW, cLibrary: "musl", platform: "linux-x64-musl", build: { kind: "alpine-container", nodeVariant: "alpine3.23" } }, "0.8.1").libc, {
       kind: "field",
       value: "musl",
     });
 
-    const macos = platformExpectationOf({ ...GLIBC_ROW, cLibrary: "libsystem", platform: "darwin-arm64", cpu: "arm64" }, "0.8.1");
+    const macos = platformExpectationOf({ ...GLIBC_ROW, cLibrary: "libsystem", platform: "darwin-arm64", cpu: "arm64", build: { kind: "runner" } }, "0.8.1");
 
     assert.equal(macos.os, "darwin");
     assert.deepEqual(macos.libc, { kind: "noField" });
+    assert.deepEqual(macos.glibcFloor, { kind: "noFloor" });
   });
 });
 
@@ -175,7 +186,7 @@ describe("platformFileProblems and platformManifestProblems", () => {
   });
 
   test("a libc field on a platform that has none", () => {
-    const macos = platformExpectationOf({ ...GLIBC_ROW, cLibrary: "libsystem", platform: "darwin-arm64", cpu: "arm64" }, "0.8.1");
+    const macos = platformExpectationOf({ ...GLIBC_ROW, cLibrary: "libsystem", platform: "darwin-arm64", cpu: "arm64", build: { kind: "runner" } }, "0.8.1");
 
     const darwinManifest = {
       ...manifest,

@@ -23,9 +23,13 @@ export type CLibrary = "glibc" | "musl" | "libsystem";
 /** The npm `cpu` value of a platform package. */
 export type NpmCpu = "x64" | "arm64";
 
-/** How a row builds its addon. */
+/**
+ * How a row builds its addon. A glibc row builds with the glibc 2.17 toolchain of napi or in a manylinux image (the
+ * image of the row's wheel; `glibcFloor` is its glibc); a musl row in an Alpine container; a macOS row on the runner.
+ */
 export type NpmBuild =
   | { readonly kind: "glibc-2.17-toolchain" }
+  | { readonly kind: "manylinux-container"; readonly image: string; readonly glibcFloor: readonly number[] }
   | { readonly kind: "alpine-container"; readonly nodeVariant: string }
   | { readonly kind: "runner" };
 
@@ -53,6 +57,7 @@ export type PlatformListRefused =
   | { readonly kind: "RowForm"; readonly index: number; readonly field: string }
   | { readonly kind: "UnknownValue"; readonly row: string; readonly field: string; readonly value: string }
   | { readonly kind: "PlatformMismatch"; readonly row: string; readonly platform: string; readonly expected: string }
+  | { readonly kind: "BuildMismatch"; readonly row: string; readonly build: NpmBuild["kind"]; readonly cLibrary: CLibrary }
   | { readonly kind: "RepeatedName"; readonly row: string }
   | { readonly kind: "RepeatedPlatform"; readonly platform: string };
 
@@ -130,6 +135,8 @@ export function platformListRefusedText(refusal: PlatformListRefused): string {
       return `${file}: row ${refusal.row}: ${refusal.field} ${JSON.stringify(refusal.value)} is not a known value`;
     case "PlatformMismatch":
       return `${file}: row ${refusal.row}: npm.platform is ${refusal.platform}; its C library and CPU give ${refusal.expected}`;
+    case "BuildMismatch":
+      return `${file}: row ${refusal.row}: the build ${refusal.build} does not build for the C library ${refusal.cLibrary}`;
     case "RepeatedName":
       return `${file}: the name ${refusal.row} is on two rows`;
     case "RepeatedPlatform":
@@ -254,11 +261,43 @@ function npmFieldsOf(
     return { ok: false, error: { kind: "RowForm", index, field: "npm.build" } };
   }
 
+  if (!buildFits(build.kind, cLibrary)) {
+    return { ok: false, error: { kind: "BuildMismatch", row, build: build.kind, cLibrary } };
+  }
+
   if (install === undefined) {
     return { ok: false, error: { kind: "RowForm", index, field: "npm.install" } };
   }
 
   return { ok: true, value: { platform, cpu, build, install } };
+}
+
+/** Whether a build form builds for a C library. Pure. */
+export function buildFits(build: NpmBuild["kind"], cLibrary: CLibrary): boolean {
+  switch (build) {
+    case "glibc-2.17-toolchain":
+    case "manylinux-container":
+      return cLibrary === "glibc";
+    case "alpine-container":
+      return cLibrary === "musl";
+    case "runner":
+      return cLibrary === "libsystem";
+  }
+}
+
+/** A glibc version of the form `<major>.<minor>`. */
+const GLIBC_VERSION_FORM = /^\d+\.\d+$/u;
+
+/** The manylinux build form, or `undefined` when its image or glibc floor is not one. Pure. */
+function manylinuxBuildOf(value: Readonly<Record<string, ParsedJson>>): NpmBuild | undefined {
+  const image = value["image"];
+  const floor = value["glibc_floor"];
+
+  if (Object.keys(value).length !== 3 || !isString(image) || image.length === 0 || !isString(floor) || !GLIBC_VERSION_FORM.test(floor)) {
+    return undefined;
+  }
+
+  return { kind: "manylinux-container", image, glibcFloor: floor.split(".").map(Number) };
 }
 
 /** The build form of a row, or `undefined` when it is not one. Pure. */
@@ -274,6 +313,9 @@ function buildOf(value: ParsedJson | undefined): NpmBuild | undefined {
     case "glibc-2.17-toolchain":
     case "runner":
       return Object.keys(value).length === 1 ? { kind } : undefined;
+    case "manylinux-container":
+      // SAFETY: the members of a parsed JSON object are parsed JSON.
+      return manylinuxBuildOf(value as Readonly<Record<string, ParsedJson>>);
     case "alpine-container":
       return Object.keys(value).length === 2 && isString(nodeVariant) && nodeVariant.length > 0
         ? { kind, nodeVariant }

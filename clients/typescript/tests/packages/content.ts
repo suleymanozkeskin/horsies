@@ -3,9 +3,10 @@
 
 import { isArray, isPlainObject, isString } from "../../horsies/src/codec/values.ts";
 import type { ParsedJson } from "../public-api/package.ts";
+import { NAPI_CROSS_GLIBC_FLOOR } from "./glibc-floor.ts";
 import type { JsonObject } from "./manifest.ts";
 import { platformPackageOf } from "./platforms.ts";
-import type { CLibrary, ReleasePlatform } from "./platforms.ts";
+import type { CLibrary, NpmBuild, ReleasePlatform } from "./platforms.ts";
 
 /** The folder of the skill files in the package. */
 export const SKILL_FOLDER = ".agents/skills/horsies";
@@ -128,6 +129,9 @@ function publicAccessProblems(manifest: JsonObject): readonly string[] {
 /** The npm `libc` field of a platform package: its one value, or no field (macOS). */
 export type LibcField = { readonly kind: "field"; readonly value: "glibc" | "musl" } | { readonly kind: "noField" };
 
+/** The highest glibc version that a platform's addon file may need: the glibc of its build, or none (not glibc). */
+export type GlibcFloor = { readonly kind: "floor"; readonly version: readonly number[] } | { readonly kind: "noFloor" };
+
 /** What a platform package must be. */
 export type PlatformExpectation = {
   readonly packageName: string;
@@ -135,8 +139,22 @@ export type PlatformExpectation = {
   readonly os: "linux" | "darwin";
   readonly cpu: string;
   readonly libc: LibcField;
+  readonly glibcFloor: GlibcFloor;
   readonly binary: string;
 };
+
+/** The glibc floor of a build form: the napi cross toolchain gives 2.17, a manylinux image its glibc. Pure. */
+export function glibcFloorOf(build: NpmBuild): GlibcFloor {
+  switch (build.kind) {
+    case "glibc-2.17-toolchain":
+      return { kind: "floor", version: NAPI_CROSS_GLIBC_FLOOR };
+    case "manylinux-container":
+      return { kind: "floor", version: build.glibcFloor };
+    case "alpine-container":
+    case "runner":
+      return { kind: "noFloor" };
+  }
+}
 
 /** The binary file name of a platform: `horsies.<platform>.node` (`napi.binaryName` of `bridge/package.json`). Pure. */
 export function binaryFileOf(row: ReleasePlatform): string {
@@ -156,7 +174,14 @@ function osAndLibcOf(cLibrary: CLibrary): Pick<PlatformExpectation, "os" | "libc
 
 /** The expectation of a row's platform package at `version`. Pure. */
 export function platformExpectationOf(row: ReleasePlatform, version: string): PlatformExpectation {
-  return { packageName: platformPackageOf(row), version, cpu: row.cpu, binary: binaryFileOf(row), ...osAndLibcOf(row.cLibrary) };
+  return {
+    packageName: platformPackageOf(row),
+    version,
+    cpu: row.cpu,
+    binary: binaryFileOf(row),
+    glibcFloor: glibcFloorOf(row.build),
+    ...osAndLibcOf(row.cLibrary),
+  };
 }
 
 /** The files that a platform tarball holds: exactly the manifest, the README, the license and the binary. */

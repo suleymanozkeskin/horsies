@@ -12,7 +12,7 @@ import { TESTS_DIR, toolFailedText } from "../public-api/tools.ts";
 import { testOnlyNamesInBytes } from "./addon-exports.ts";
 import { exportTargets, horsiesFileProblems, horsiesManifestProblems, platformFileProblems, platformManifestProblems } from "./content.ts";
 import type { PlatformExpectation, SkillFolder } from "./content.ts";
-import { GLIBC_FLOOR, glibcFloorProblems, glibcNeedsOf, readelfVersionInfo } from "./glibc-floor.ts";
+import { glibcFloorProblems, glibcNeedsOf, readelfVersionInfo } from "./glibc-floor.ts";
 import type { JsonObject } from "./manifest.ts";
 import type { PackedTarball } from "./npm-pack.ts";
 
@@ -95,8 +95,8 @@ function apiReportProblems(packageDir: string, manifest: JsonObject, workDir: st
   });
 }
 
-/** The problems of the glibc floor of an addon file. Effects: runs readelf. */
-function glibcProblems(binaryFile: string): readonly string[] {
+/** The problems of an addon file against the glibc floor `floor`. Effects: runs readelf. */
+function glibcProblems(binaryFile: string, floor: readonly number[]): readonly string[] {
   const output = readelfVersionInfo(binaryFile);
 
   if (!output.ok) {
@@ -108,7 +108,22 @@ function glibcProblems(binaryFile: string): readonly string[] {
     }
   }
 
-  return glibcFloorProblems(glibcNeedsOf(output.value), GLIBC_FLOOR).map((problem) => `${binaryFile}: ${problem}`);
+  return glibcFloorProblems(glibcNeedsOf(output.value), floor).map((problem) => `${binaryFile}: ${problem}`);
+}
+
+/**
+ * The glibc floor problems of a platform's addon file: a glibc platform is read against the floor of its build; a
+ * glibc platform with no floor is a problem; another platform has none. Effects: runs readelf for a glibc platform.
+ */
+function floorProblems(binaryFile: string, expected: PlatformExpectation): readonly string[] {
+  const glibc = expected.libc.kind === "field" && expected.libc.value === "glibc";
+
+  switch (expected.glibcFloor.kind) {
+    case "floor":
+      return glibc ? glibcProblems(binaryFile, expected.glibcFloor.version) : [];
+    case "noFloor":
+      return glibc ? [`${expected.packageName}: a glibc platform whose build has no glibc floor`] : [];
+  }
 }
 
 /** The problems of one unpacked platform tarball. Effects: reads the addon file; runs readelf for a glibc build. */
@@ -120,7 +135,7 @@ export function platformProblems(tarball: PackedTarball, packageDir: string, exp
     (name) => `${expected.packageName}: the addon holds the test-only export ${name}; it was built with test-probes`,
   );
 
-  const floor = expected.libc.kind === "field" && expected.libc.value === "glibc" ? glibcProblems(binaryFile) : [];
+  const floor = floorProblems(binaryFile, expected);
 
   return [
     ...platformFileProblems(tarball.files, expected),
