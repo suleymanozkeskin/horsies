@@ -42,7 +42,7 @@ export type { ContextReadError, RuntimeWorkflowContext, WorkflowContext } from "
 
 export type { NodeResult, WorkflowHandle, WorkflowHandleBase, WorkflowHandleById, WorkflowTaskInfo } from "./handle.ts";
 
-export type { WorkflowReadError } from "./handle-error.ts";
+export type { WorkflowHandleError, WorkflowReadError } from "./handle-error.ts";
 
 export type { StartOptions } from "./start.ts";
 

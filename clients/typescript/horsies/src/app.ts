@@ -20,7 +20,6 @@ import {
 } from "./app/create.ts";
 import { registerImplementation } from "./app/implement.ts";
 import { recordAppContext } from "./app/internals.ts";
-import { appCoreHandle } from "./app/core-access.ts";
 import { createWorkflowArea, type WorkflowArea } from "./workflow/app-area.ts";
 import { workflowCoreOf } from "./workflow/core.ts";
 import type { WorkflowContract } from "./workflow/define.ts";
@@ -38,7 +37,7 @@ import type { EventHandler, EventHandlerOptions, HandlerChildStartHook } from ".
 import { createMonitoringArea, type Monitoring, type MonitoringArea } from "./monitoring/app-area.ts";
 import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts";
 import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/health-types.ts";
-import { createRerunArea, type RerunArea } from "./rerun/app-area.ts";
+import { type RerunArea, rerunAreaOfCore } from "./rerun/app-area.ts";
 import type { CallerTransaction } from "./rerun/caller.ts";
 import type { CallerRerunError, RerunError } from "./rerun/errors.ts";
 import type { RerunCommand, RerunOutcome, RerunPolicy } from "./rerun/types.ts";
@@ -71,10 +70,7 @@ export class Horsies {
     });
     this.#monitoringArea = createMonitoringArea(context.core);
     this.monitoring = this.#monitoringArea.monitoring;
-    this.#rerunArea = createRerunArea({
-      coreHandle: () => appCoreHandle(context.core),
-      activeCarrier: () => context.observer.activeCarrier(),
-    });
+    this.#rerunArea = rerunAreaOfCore(context.core, () => context.observer.activeCarrier());
     recordAppContext(this, context);
   }
 
@@ -112,8 +108,10 @@ export class Horsies {
   /**
    * Add a provider of app state and give its key; `runtime.state(key)` gives the value. Calls nothing: the factory
    * runs in each task child, before the child reports ready, in registration order and before the `onChildStart`
-   * hooks, for at most 10 s. A factory that throws, rejects or runs past its bound stops the worker with
-   * `CHILD_HOOK_FAILED` (exit 173). A call after `cli.run` serves a child is a defect: `ClientDefect`.
+   * hooks, for at most 10 s. In a `SHARED_THREAD` child it runs in each seat isolate instead (a pool cannot cross
+   * isolates, so each seat builds its own), and the 10 s bound holds for the boot of all of them. A factory that
+   * throws, rejects or runs past its bound stops the worker with `CHILD_HOOK_FAILED` (exit 173). A call after
+   * `cli.run` serves a child is a defect: `ClientDefect`.
    */
   provide<T>(factory: ProviderFactory<T>): StateKey<Awaited<T>> {
     return provideFor(this.#context, factory);

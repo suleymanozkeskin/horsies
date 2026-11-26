@@ -1,6 +1,6 @@
 //! The child host entry of task and handler children: child mode, the task
 //! body forms, the start hooks, the event loop watch, the body facts, the exit
-//! rule, and the slots that the thread seats and the handler child fill.
+//! rule, and the slot that the handler child fills.
 //!
 //! - `host`: `childArguments` and `serveChild`, the child app of a plan on
 //!   the core's child host.
@@ -12,8 +12,8 @@
 //!   start hooks.
 //! - `loop_watch`: the marks of the JavaScript main thread's loop.
 //! - `exit`: the host thread, the exit of the process, the backstop.
-//! - `handler_slot`, `seat_slot`: the slots that the handler child area and
-//!   the thread seat area fill before the serve.
+//! - `handler_slot`: the slot that the handler child area fills before the
+//!   serve.
 
 pub mod body;
 pub mod body_facts;
@@ -21,5 +21,4 @@ pub mod exit;
 pub mod handler_slot;
 pub mod host;
 pub mod loop_watch;
-pub mod seat_slot;
 pub mod start_hooks;

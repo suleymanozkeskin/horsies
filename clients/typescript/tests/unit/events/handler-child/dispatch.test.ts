@@ -14,6 +14,7 @@ import type { RegisteredHandler } from "../../../../horsies/src/events/register.
 import { wireItemsOf } from "../../../../horsies/src/events/wire-text.ts";
 import type { HandlerChildPlan } from "../../../../horsies/src/native/handler-child/addon.ts";
 import { FakeChildNative, settled } from "../../child/child-native.ts";
+import { unusedSeatHost } from "../../seats/support.ts";
 import { implementedApp } from "../../worker/support.ts";
 
 /** The wire text of the core's vector `task_claimed`: its time is above 2^53 nanoseconds. */
@@ -196,6 +197,7 @@ describe("the fill of the handler slot", () => {
       reportDefect: (defect) => {
         throw defect;
       },
+      seats: unusedSeatHost(),
     };
 
     void runChildMode(app, ["--horsies-child", "3", "4242"], deps).catch(() => undefined);

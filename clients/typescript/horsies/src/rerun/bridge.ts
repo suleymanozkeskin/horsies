@@ -17,6 +17,7 @@ import type {
 } from "../native/facades/rerun.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { TraceArgument } from "../native/values/records.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import type { RerunRequest } from "./parse.ts";
 
 /** The write of one rerun: its statement, and the decode of its row. */
@@ -33,8 +34,8 @@ export type BridgePreparation =
 
 /** The rerun functions of the addon, with each envelope read. */
 export interface RerunBridge {
-  /** The rerun in a transaction of `handle`. */
-  rerunTask(handle: CoreHandle, request: RerunRequest, trace: TraceArgument): Promise<AppRerunAnswer>;
+  /** The rerun in a transaction of `handle`; in a seat isolate, `seatRelayFull` when the relay sent nothing. */
+  rerunTask(handle: CoreHandle, request: RerunRequest, trace: TraceArgument): Promise<AppRerunAnswer | SeatRelayFullOutcome>;
   /** The source read as a caller statement. */
   readStatement(request: RerunRequest): CallerStatementRecord;
   /** What the source read's row decides. */

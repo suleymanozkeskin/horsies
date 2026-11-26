@@ -110,11 +110,11 @@ export function countingRelay(read: TaskInfoRead): { readonly access: CoreAccess
       requests += 1;
 
       const reply: SendsSeatReply =
-        operation.kind === "taskInfo"
+        "kind" in operation && operation.kind === "taskInfo"
           ? { kind: "taskInfo", read }
           : { kind: "taskInfo", read: { kind: "absent", reason: "NOT_CLASSIFIED" } };
 
-      return reply;
+      return { kind: "reply", reply };
     },
   };
 

@@ -180,8 +180,18 @@ async function preparedRequest(
     inputBytes: Buffer.byteLength(text.value, "utf8"),
   });
 
-  if (prepared.kind === "refused") {
-    return err(sendErrorOfRaw(prepared.error));
+  switch (prepared.kind) {
+    case "refused":
+      return err(sendErrorOfRaw(prepared.error));
+    case "seatRelayFull":
+      return err(prepared.error);
+    case "prepared":
+      break;
+    default: {
+      const unexpected: never = prepared;
+
+      throw new TypeError(`send: a prepare outside its type: ${String(unexpected)}`);
+    }
   }
 
   const request: EnqueueRequest = {
@@ -298,6 +308,8 @@ async function enqueueOnce(
       return ok(taskIdFromCore(outcome.taskId, "enqueue"));
     case "failed":
       return err(sendErrorOfRaw(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default: {
       const unexpected: never = outcome;
 

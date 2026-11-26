@@ -10,7 +10,9 @@
 //    handler slot: the event handlers, the start hooks of the handler child and the worker-ended span maker.
 // 5. The serve: sends from task code are no longer suppressed; the core posts each body, cancel and stop request to
 //    the post dispatcher, and runs each start hook through the hook runner. The turn timer starts at hook 0 (a host
-//    that started); the culprit method of Node starts there in a shared async child.
+//    that started); the culprit method of Node starts there in a shared async child. In a `SHARED_THREAD` child hook 0
+//    boots the seat isolates, and each post goes to the seat pool (`src/seats/router.ts`): the main thread runs no
+//    body and sets no run mark, and its turns keep the core's main-thread watch fed.
 // 6. The exit rule: the flush of the body observer, at most its bound, then the end of the process with the host's
 //    code. The child never waits for its event loop to empty.
 
@@ -47,6 +49,10 @@ import type {
   StartHookCall,
 } from "../native/child/addon.ts";
 import type { AppConfigCheck } from "../native/sends/addon.ts";
+import { processSeatHost } from "../seats/node-isolates.ts";
+import { serveSeatOperation } from "../seats/operations.ts";
+import type { SeatHost } from "../seats/pool.ts";
+import { SeatRouter } from "../seats/router.ts";
 import type { PanicRule } from "../thrown-errors.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -67,7 +73,16 @@ import { installProcessEvents, processEventHooks, type ProcessEventHooks, UNCAUG
 import { thrownRecord } from "./thrown-error.ts";
 import { currentRun } from "./run-store.ts";
 import { RunTable } from "./run-table.ts";
-import { bodyFormOf, hookRunner, postDispatcher, type ServeNative, startHookNames, taskContextUseOf } from "./serve.ts";
+import {
+  bodyFormOf,
+  type ChildServe,
+  hookRunner,
+  postDispatcher,
+  type ServeNative,
+  settleRun,
+  startHookNames,
+  taskContextUseOf,
+} from "./serve.ts";
 import { StateValues } from "./state.ts";
 
 /** The calls of the addon in child mode. */
@@ -91,6 +106,8 @@ export interface ChildModeDeps {
   /** Where the start hook runner settles its calls. */
   readonly settlement: CallbackSettlement;
   readonly hostname: string;
+  /** The seat isolates of a `SHARED_THREAD` child, its clock and its timers. */
+  readonly seats: SeatHost;
   readonly writeLine: (line: string) => void;
   /** Wait `milliseconds`; the wait does not keep the process alive. */
   readonly wait: (milliseconds: number) => Promise<void>;
@@ -199,23 +216,40 @@ async function servedChild(
   const marks = loopMarksOf(deps.native);
   const table = new RunTable(deps.native, marks, states);
 
-  const post = postDispatcher({
+  const serve: ChildServe = {
     implementations: context.implementations,
     table,
     observer: bodyObserverOf(context),
     native: deps.native,
     marks,
     reportDefect: deps.reportDefect,
+  };
+
+  const router = new SeatRouter({
+    ...deps.seats,
+    settle: (runKey, taskName, outcome) => {
+      settleRun(serve, runKey, taskName, outcome);
+    },
+    serve: async (request) => serveSeatOperation(context.core, request),
+    endChild: (code) => {
+      void childEnd.end(code);
+    },
+    writeLine: deps.writeLine,
+    reportDefect: deps.reportDefect,
   });
 
+  const post = router.posts(postDispatcher(serve));
+
   // Hook 0 runs only in a host that started, after it made the loop: the turns start there.
-  const hooks = hookRunner(members, states, (facts) => {
+  const hooks = hookRunner(members, states, async (facts) => {
     // The turns and the culprit marks run until the process ends.
     void startTurns(deps.native, deps.timer);
 
     if (facts.kind === "sharedAsync") {
       void startCulpritMarks(deps.culprit, marks);
     }
+
+    await router.start(facts);
   });
 
   const plan = childPlan(context, members, processArguments, deps);
@@ -300,6 +334,7 @@ export function processChildModeDeps(): ChildModeDeps {
     culprit: runtimeCulpritMethod(),
     settlement: addonSettlement,
     hostname: hostname(),
+    seats: processSeatHost(),
     writeLine: (line) => {
       process.stderr.write(`${line}\n`);
     },

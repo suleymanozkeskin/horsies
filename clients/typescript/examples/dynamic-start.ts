@@ -101,6 +101,7 @@ app.implement(startReport, async ({ region }) => {
     case "WORKFLOW_ID_CONFLICT":
     case "WORKFLOW_COMMAND_CONFLICT":
     case "ENQUEUE_FAILED":
+    case "SEAT_RELAY_FULL":
       return startReport.err({ code: "START_FAILED", message: sendErrorText(started.error) });
     default: {
       const unexpected: never = started.error;

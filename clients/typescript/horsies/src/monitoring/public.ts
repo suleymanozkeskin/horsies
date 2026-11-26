@@ -5,6 +5,7 @@ export type {
   BrokerOperationFailedWith,
   HealthInputError,
   HealthReadError,
+  MonitoringCoreReadError,
   MonitoringReadError,
   PingDatabaseError,
   PingWorkersError,

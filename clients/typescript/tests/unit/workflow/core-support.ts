@@ -13,7 +13,7 @@ import type {
   WorkflowStatusRead,
   WorkflowWaitRead,
 } from "../../../horsies/src/native/workflows/addon.ts";
-import type { RestartRequest, StartCall, StartRequest, WorkflowCore } from "../../../horsies/src/workflow/core.ts";
+import type { AddonWorkflowCore, RestartRequest, StartCall, StartRequest } from "../../../horsies/src/workflow/core.ts";
 
 /** A canonical workflow id of the fakes. */
 export const WORKFLOW_ID = "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b";
@@ -37,7 +37,7 @@ export type CoreScript = {
 };
 
 /** A fake core with its recorded calls. */
-export type FakeCore = WorkflowCore & {
+export type FakeCore = AddonWorkflowCore & {
   readonly starts: StartRequest[];
   readonly restarts: RestartRequest[];
   readonly calls: string[];

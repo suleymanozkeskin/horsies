@@ -30,6 +30,7 @@ import {
   handleErrorOfRaw,
   readErrorOfHandle,
   storedDataInvalid,
+  type WorkflowHandleError,
   type WorkflowReadError,
   workflowNotFound,
   workflowWait,
@@ -64,19 +65,19 @@ export interface WorkflowTaskInfo {
 /** The handle operations that every handle has. */
 export interface WorkflowHandleBase<R extends BuildReturn> {
   readonly workflowId: WorkflowId;
-  status(): Promise<Result<WorkflowStatus, HandleCoreError>>;
+  status(): Promise<Result<WorkflowStatus, WorkflowHandleError>>;
   /** The workflow's outcome, waiting while it runs, up to `timeoutMs`. The user code is open. */
   get(options?: GetOptions): Promise<Result<TaskOutcome<WorkflowOutput<R>, string>, WorkflowReadError>>;
   /** The stored result of each node that has one, by node id. */
-  results(): Promise<Result<ReadonlyMap<string, NodeResult>, HandleCoreError>>;
+  results(): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>>;
   /** Every node, in index order. */
-  tasks(): Promise<Result<readonly WorkflowTaskInfo[], HandleCoreError>>;
+  tasks(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
   /** Pause a RUNNING workflow: `true` when it paused. */
-  pause(): Promise<Result<boolean, HandleCoreError>>;
+  pause(): Promise<Result<boolean, WorkflowHandleError>>;
   /** Resume a PAUSED workflow: `true` when it resumed. */
-  resume(): Promise<Result<boolean, HandleCoreError>>;
+  resume(): Promise<Result<boolean, WorkflowHandleError>>;
   /** Cancel the workflow and its descendants. */
-  cancel(): Promise<Result<void, HandleCoreError>>;
+  cancel(): Promise<Result<void, WorkflowHandleError>>;
 }
 
 /** The handle of a started workflow: `resultFor` takes the id of a node of the returned object. */
@@ -165,7 +166,16 @@ function handleBase<R extends BuildReturn>(facts: HandleFacts): WorkflowHandleBa
     status: async () => {
       const read = await facts.core.status(id);
 
-      return read.kind === "status" ? ok(read.status) : err(handleErrorOfRaw(read.error));
+      switch (read.kind) {
+        case "status":
+          return ok(read.status);
+        case "failed":
+          return err(handleErrorOfRaw(read.error));
+        case "seatRelayFull":
+          return err(read.error);
+        default:
+          return unreachable(read, "status");
+      }
     },
     // SAFETY: the reader decodes with the output form of the workflow, whose value type is `WorkflowOutput<R>`.
     get: async (options: GetOptions = {}) => (await workflowOutcome(facts, options)) as never,
@@ -176,13 +186,31 @@ function handleBase<R extends BuildReturn>(facts: HandleFacts): WorkflowHandleBa
     cancel: async () => {
       const done = await facts.core.cancel(id);
 
-      return done.kind === "done" ? ok(undefined) : err(handleErrorOfRaw(done.error));
+      switch (done.kind) {
+        case "done":
+          return ok(undefined);
+        case "failed":
+          return err(handleErrorOfRaw(done.error));
+        case "seatRelayFull":
+          return err(done.error);
+        default:
+          return unreachable(done, "cancel");
+      }
     },
   };
 }
 
-function changed(read: Awaited<ReturnType<WorkflowCore["pause"]>>): Result<boolean, HandleCoreError> {
-  return read.kind === "changed" ? ok(read.changed) : err(handleErrorOfRaw(read.error));
+function changed(read: Awaited<ReturnType<WorkflowCore["pause"]>>): Result<boolean, WorkflowHandleError> {
+  switch (read.kind) {
+    case "changed":
+      return ok(read.changed);
+    case "failed":
+      return err(handleErrorOfRaw(read.error));
+    case "seatRelayFull":
+      return err(read.error);
+    default:
+      return unreachable(read, "changed");
+  }
 }
 
 /**
@@ -369,6 +397,8 @@ async function nodeOutcome(facts: HandleFacts, nodeId: string, form: ReadForm): 
       return err(Object.freeze({ kind: "resultNotReady" }));
     case "failed":
       return err(readErrorOfHandle(handleErrorOfRaw(read.error)));
+    case "seatRelayFull":
+      return err(Object.freeze({ kind: "seatRelayFull", error: read.error }));
     case "stored":
       return checkedOutcome(read.result, form);
     default:
@@ -398,7 +428,7 @@ function nodeResultOf(result: CheckedText): NodeResult {
     : Object.freeze({ kind: "unreadable", cause: refusalText(decoded.error) });
 }
 
-async function nodeResults(facts: HandleFacts): Promise<Result<ReadonlyMap<string, NodeResult>, HandleCoreError>> {
+async function nodeResults(facts: HandleFacts): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>> {
   const read = await facts.core.nodeResults(facts.workflowId);
 
   switch (read.kind) {
@@ -414,12 +444,14 @@ async function nodeResults(facts: HandleFacts): Promise<Result<ReadonlyMap<strin
       return err(workflowNotFound(facts.workflowId));
     case "failed":
       return err(handleErrorOfRaw(read.error));
+    case "seatRelayFull":
+      return err(read.error);
     default:
       return unreachable(read, "nodeResults");
   }
 }
 
-async function nodeInfos(facts: HandleFacts): Promise<Result<readonly WorkflowTaskInfo[], HandleCoreError>> {
+async function nodeInfos(facts: HandleFacts): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>> {
   const read = await facts.core.nodes(facts.workflowId);
 
   switch (read.kind) {
@@ -443,6 +475,8 @@ async function nodeInfos(facts: HandleFacts): Promise<Result<readonly WorkflowTa
       return err(workflowNotFound(facts.workflowId));
     case "failed":
       return err(handleErrorOfRaw(read.error));
+    case "seatRelayFull":
+      return err(read.error);
     default:
       return unreachable(read, "nodeInfos");
   }

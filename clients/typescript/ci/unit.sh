@@ -50,9 +50,10 @@ bun test
 # build runs in a task child, and the telemetry (the spans and the context
 # across `await` with the OpenTelemetry SDK). The schedule checks read time
 # zones through the engine's Temporal (V8 on Node, JavaScriptCore on Bun), so
-# the schedule tests run on Node too.
-print_step_title "Run the codec, wire type, zod adapter, child, workflow, telemetry, schedule and stored-form tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/telemetry/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
+# the schedule tests run on Node too. The seat isolates of SHARED_THREAD
+# children run on Node, so their tests run there too.
+print_step_title "Run the codec, wire type, zod adapter, child, seat, workflow, telemetry, schedule and stored-form tests on Node"
+node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/seats/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/telemetry/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
 
 # The lint rule package (eslint-plugin/) runs in ESLint, on Node: its
 # RuleTester cases, and ESLint and tsc of TypeScript 7 on its fixture project.

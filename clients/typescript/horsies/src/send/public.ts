@@ -35,4 +35,8 @@ export type {
   WithSentTypes,
 } from "./errors.ts";
 
+export type { SeatRelayFull } from "../seats/relay-full.ts";
+
+export { SeatRelayCode } from "../_catalog/task_send.ts";
+
 export type { Retention, SendOptions } from "./options.ts";

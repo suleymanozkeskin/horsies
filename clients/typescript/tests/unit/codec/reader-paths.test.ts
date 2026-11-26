@@ -75,6 +75,15 @@ const READER_PATHS: readonly ReaderPath[] = [
     },
   },
   {
+    module: "seats/isolate.ts",
+    maker: "jsonTextCheckedByCore",
+    checkedBy: "build_task_input",
+    proof: {
+      file: "unit/seats/isolate.test.ts",
+      test: "the reader of a seat isolate gets only the input text that the core posts after its strict check",
+    },
+  },
+  {
     module: "codec/error-data.ts",
     maker: "writtenJsonText",
     checkedBy: "errorDataText",

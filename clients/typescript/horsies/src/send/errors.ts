@@ -15,6 +15,7 @@ import {
   type TaskSendValidationFailed,
 } from "../_catalog/task_send_errors.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
+import type { SeatRelayFull } from "../seats/relay-full.ts";
 import { nativeCatalogValue } from "./catalog-value.ts";
 
 /** Type-only key of the types of a sent task. It does not exist at run time. */
@@ -35,14 +36,15 @@ export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqu
  */
 export type TaskSendKeyConflict = TaskSendIdempotencyKeyConflict & { readonly retryable: false };
 
-/** A send error of the task send catalog, with the fixed `retryable` of a key conflict. */
+/** A send error of the task send catalog, with the fixed `retryable` of a key conflict, or the seat relay at its bound. */
 export type SendFailure =
   | TaskSendSuppressed
   | TaskSendValidationFailed
   | TaskSendEnqueueFailed
   | TaskSendPayloadMismatch
   | TaskSendPayloadTooLarge
-  | TaskSendKeyConflict;
+  | TaskSendKeyConflict
+  | SeatRelayFull;
 
 /** The error of a send, told apart by `code`. */
 export type TaskSendError<O, E extends string> =
@@ -51,6 +53,7 @@ export type TaskSendError<O, E extends string> =
   | TaskSendPayloadMismatch
   | TaskSendPayloadTooLarge
   | TaskSendKeyConflict
+  | SeatRelayFull
   | RetryableSendError<O, E>;
 
 /** The public send error of a raw record of the task send catalog. An unknown class throws (a build defect). */

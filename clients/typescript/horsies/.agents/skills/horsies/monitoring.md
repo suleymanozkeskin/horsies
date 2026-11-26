@@ -35,6 +35,7 @@ export async function checkHealth(app: Horsies): Promise<boolean> {
       case "INVALID_INPUT":
       case "LISTENER_DISABLED":
       case "WORKER_PING_FAILED":
+      case "SEAT_RELAY_FULL":
         console.error(`workers: ${pongs.error.message}`);
         break;
       case "QUERY_REFUSED":
@@ -232,6 +233,7 @@ export async function cancelPending(app: Horsies, storedId: string): Promise<boo
     case "TASK_IS_WORKFLOW_TASK":
     case "DB_OPERATION_FAILED":
     case "STORED_DATA_INVALID":
+    case "SEAT_RELAY_FULL":
       console.error(cancelled.error.message);
 
       return false;
