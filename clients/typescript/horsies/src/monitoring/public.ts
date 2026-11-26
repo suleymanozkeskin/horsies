@@ -3,13 +3,14 @@
 export type {
   CancelTaskError,
   BrokerOperationFailedWith,
-  HealthQueryError,
+  HealthInputError,
   HealthReadError,
   MonitoringReadError,
   PingDatabaseError,
   PingWorkersError,
   QueryRefused,
   QueryRefusedField,
+  WorkerHistoryError,
   WorkerReadError,
 } from "./errors.ts";
 
@@ -53,10 +54,15 @@ export type {
 export { DEFAULT_PING_TIMEOUT_MS } from "./health.ts";
 
 export {
-  DEFAULT_BREAKDOWN_LIMIT,
-  DEFAULT_TASK_PAGE_LIMIT,
-  DEFAULT_TASK_PAGE_OFFSET,
-  DEFAULT_WORKFLOW_RUNS_LIMIT,
+  MAX_BREAKDOWN_LIMIT,
+  MAX_TASK_PAGE_LIMIT,
+  MAX_TASK_PAGE_REACH,
+  MAX_WORKFLOW_RUNS_LIMIT,
+} from "../_catalog/monitoring_bounds.ts";
+
+export { MONITORING_WINDOW_DEFAULT } from "./bounds.ts";
+
+export {
   type ErrorCategory,
   type MonitoringWindow,
   type RetriedFilter,

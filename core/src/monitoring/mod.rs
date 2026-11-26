@@ -31,7 +31,7 @@ pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::reads::pages::HistoryWindow;
 pub use errors::{
     HistoryContractSource, MonitoringQueryError, MonitoringQueryErrorCode,
-    MonitoringQueryErrorSource, MonitoringResult,
+    MonitoringQueryErrorSource, MonitoringQueryRefusalCode, MonitoringResult,
 };
 pub use execution_classes::{class_report_info, slot_health_info, snapshot_profile_info};
 pub use failure_status::database_failure_status;

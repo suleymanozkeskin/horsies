@@ -460,8 +460,10 @@ fn node_address(workflow_id: &str, task_index: f64) -> Result<(Uuid, i32), Bound
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::monitoring::TaskDetailNotFound;
-    use horsies_core::BrokerError;
+    use horsies_core::monitoring::{
+        HistoryContractSource, MonitoringQueryErrorSource, TaskDetailNotFound,
+    };
+    use horsies_core::{BrokerError, HistoryError};
 
     use super::*;
 
@@ -523,6 +525,24 @@ mod tests {
                 assert_eq!(error.class, "MonitoringQueryDbOperationFailed");
                 let names: Vec<&str> = error.slots.iter().map(|slot| slot.name.as_str()).collect();
                 assert_eq!(names, ["message", "retryable", "exception"]);
+            }
+            other => panic!("a failed read, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_history_contract_violation_is_its_raw_record_with_no_retryable_slot() {
+        let error = MonitoringQueryError::HistoryContractViolation {
+            message: "history contract violation: status DONE".to_owned(),
+            source: HistoryContractSource(MonitoringQueryErrorSource::History(
+                HistoryError::Contract("status DONE".to_owned()),
+            )),
+        };
+        match read_failed("task list query", &error) {
+            MonitoringReadOutcome::Failed { error } => {
+                assert_eq!(error.class, "MonitoringQueryHistoryContractViolation");
+                let names: Vec<&str> = error.slots.iter().map(|slot| slot.name.as_str()).collect();
+                assert_eq!(names, ["message", "exception"]);
             }
             other => panic!("a failed read, got {other:?}"),
         }

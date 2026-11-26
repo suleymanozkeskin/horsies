@@ -122,6 +122,35 @@ pub enum ErrorCategoryArg {
     Domain,
 }
 
+/// A count of a query: the core's default (of `TaskListQuery::new`,
+/// `TaskBreakdownQuery::new` or `WorkflowRunsQuery::new`), or a value.
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_to_js = false
+)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum CountArg {
+    CoreDefault,
+    Set { value: f64 },
+}
+
+/// The sort of the task list: the core's default (`TaskListQuery::new`), or
+/// a field and a direction.
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_to_js = false
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SortArg {
+    CoreDefault,
+    Set {
+        field: SortFieldArg,
+        direction: SortDirectionArg,
+    },
+}
+
 /// The sort field of the task list.
 #[napi(string_enum = "camelCase")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,7 +231,7 @@ pub struct TaskBreakdownArg {
     pub window: WindowArg,
     pub group_by: GroupByArg,
     pub filters: FiltersArg,
-    pub limit: f64,
+    pub limit: CountArg,
 }
 
 /// The task list read: the window, the filters, the sort and the page.
@@ -211,10 +240,9 @@ pub struct TaskBreakdownArg {
 pub struct TaskListArg {
     pub window: WindowArg,
     pub filters: FiltersArg,
-    pub sort_field: SortFieldArg,
-    pub sort_direction: SortDirectionArg,
-    pub offset: f64,
-    pub limit: f64,
+    pub sort: SortArg,
+    pub offset: CountArg,
+    pub limit: CountArg,
 }
 
 /// The workflow name filter of the workflow runs read.
@@ -251,7 +279,7 @@ pub enum RunStatusArg {
 pub struct WorkflowRunsArg {
     pub name: RunNameArg,
     pub status: RunStatusArg,
-    pub limit: f64,
+    pub limit: CountArg,
 }
 
 /// The core query of a task stats read. Pure.
@@ -281,31 +309,46 @@ pub fn task_facets_query(arg: &TaskFacetsArg) -> Result<TaskFacetsQuery, QuerySt
 /// The core query of a task breakdown read. Pure.
 pub fn task_breakdown_query(arg: TaskBreakdownArg) -> Result<TaskBreakdownQuery, QueryStop> {
     let window = history_window(&arg.window)?;
-    let limit = whole_number("limit", arg.limit)?;
-    TaskBreakdownQuery::new(window, group_column(arg.group_by))
-        .with_filters(task_filters(arg.filters)?)
-        .with_limit(limit)
-        .map_err(|refused| QueryStop::Refused(QueryRefusal::new(QueryField::Limit, refused.reason)))
+    let query = TaskBreakdownQuery::new(window, group_column(arg.group_by))
+        .with_filters(task_filters(arg.filters)?);
+    match set_count("limit", &arg.limit)? {
+        None => Ok(query),
+        Some(limit) => query.with_limit(limit).map_err(|refused| {
+            QueryStop::Refused(QueryRefusal::new(QueryField::Limit, refused.reason))
+        }),
+    }
 }
 
 /// The core query of a task list read. Pure.
+///
+/// A count left at the core's default takes the value of
+/// `TaskListQuery::new`; the core checks the page as a whole.
 pub fn task_list_query(arg: TaskListArg) -> Result<TaskListQuery, QueryStop> {
     let window = history_window(&arg.window)?;
-    let offset = whole_number("offset", arg.offset)?;
-    let limit = whole_number("limit", arg.limit)?;
-    TaskListQuery::new(window)
-        .with_filters(task_filters(arg.filters)?)
-        .with_sort(
-            sort_field(arg.sort_field),
-            sort_direction(arg.sort_direction),
-        )
-        .with_pagination(offset, limit)
-        .map_err(|refused| QueryStop::Refused(QueryRefusal::new(QueryField::Page, refused.reason)))
+    let query = TaskListQuery::new(window).with_filters(task_filters(arg.filters)?);
+    let query = match arg.sort {
+        SortArg::CoreDefault => query,
+        SortArg::Set { field, direction } => {
+            query.with_sort(sort_field(field), sort_direction(direction))
+        }
+    };
+    let offset = set_count("offset", &arg.offset)?;
+    let limit = set_count("limit", &arg.limit)?;
+    match (offset, limit) {
+        (None, None) => Ok(query),
+        (offset, limit) => {
+            let offset = offset.unwrap_or(query.offset());
+            let limit = limit.unwrap_or(query.limit());
+            query.with_pagination(offset, limit).map_err(|refused| {
+                QueryStop::Refused(QueryRefusal::new(QueryField::Page, refused.reason))
+            })
+        }
+    }
 }
 
 /// The core query of a workflow runs read. Pure.
 pub fn workflow_runs_query(arg: WorkflowRunsArg) -> Result<WorkflowRunsQuery, QueryStop> {
-    let limit = whole_number("limit", arg.limit)?;
+    let limit = set_count("limit", &arg.limit)?;
     let name = match arg.name {
         RunNameArg::AnyName => None,
         RunNameArg::Named { name } => Some(name),
@@ -314,11 +357,22 @@ pub fn workflow_runs_query(arg: WorkflowRunsArg) -> Result<WorkflowRunsQuery, Qu
         RunStatusArg::AnyStatus => None,
         RunStatusArg::Status { status } => Some(status),
     };
-    WorkflowRunsQuery::new()
-        .with_name(name)
-        .with_status(status)
-        .with_limit(limit)
-        .map_err(|refused| QueryStop::Refused(QueryRefusal::new(QueryField::Limit, refused.reason)))
+    let query = WorkflowRunsQuery::new().with_name(name).with_status(status);
+    match limit {
+        None => Ok(query),
+        Some(limit) => query.with_limit(limit).map_err(|refused| {
+            QueryStop::Refused(QueryRefusal::new(QueryField::Limit, refused.reason))
+        }),
+    }
+}
+
+/// The value of a count, or `None` for the core's default. A value that is
+/// not a whole number is a defect of the package. Pure.
+fn set_count(subject: &str, count: &CountArg) -> Result<Option<i64>, BoundaryRefusal> {
+    match count {
+        CountArg::CoreDefault => Ok(None),
+        CountArg::Set { value } => whole_number(subject, *value).map(Some),
+    }
 }
 
 /// The core's window of `arg`, or the refusal of the window. Pure, but for
@@ -480,10 +534,17 @@ mod tests {
         TaskListArg {
             window: window(WindowBoundArg::CoreDefault, WindowBoundArg::CoreDefault),
             filters: no_filters(),
-            sort_field: SortFieldArg::EnqueuedAt,
-            sort_direction: SortDirectionArg::Descending,
-            offset,
-            limit,
+            sort: SortArg::CoreDefault,
+            offset: CountArg::Set { value: offset },
+            limit: CountArg::Set { value: limit },
+        }
+    }
+
+    fn core_default_list() -> TaskListArg {
+        TaskListArg {
+            offset: CountArg::CoreDefault,
+            limit: CountArg::CoreDefault,
+            ..list(0.0, 1.0)
         }
     }
 
@@ -497,6 +558,38 @@ mod tests {
     #[test]
     fn the_default_window_and_page_build_a_list_query() {
         assert!(task_list_query(list(0.0, 50.0)).is_ok());
+    }
+
+    #[test]
+    fn a_page_left_at_the_core_default_keeps_the_values_of_new() {
+        let built = task_list_query(core_default_list()).expect("the core's default page");
+        let new = TaskListQuery::new(
+            history_window(&window(
+                WindowBoundArg::CoreDefault,
+                WindowBoundArg::CoreDefault,
+            ))
+            .expect("the default window"),
+        );
+        assert_eq!((built.offset(), built.limit()), (new.offset(), new.limit()));
+    }
+
+    #[test]
+    fn a_lone_limit_keeps_the_core_default_offset() {
+        let arg = TaskListArg {
+            limit: CountArg::Set { value: 7.0 },
+            ..core_default_list()
+        };
+        let built = task_list_query(arg).expect("a page in bounds");
+        assert_eq!((built.offset(), built.limit()), (0, 7));
+    }
+
+    #[test]
+    fn a_lone_offset_past_the_reach_is_refused_as_the_page() {
+        let arg = TaskListArg {
+            offset: CountArg::Set { value: 499.0 },
+            ..core_default_list()
+        };
+        assert_eq!(refused_field(task_list_query(arg)), QueryField::Page);
     }
 
     #[test]
@@ -563,7 +656,7 @@ mod tests {
                 window: window(WindowBoundArg::CoreDefault, WindowBoundArg::CoreDefault),
                 group_by: GroupByArg::Queue,
                 filters: no_filters(),
-                limit,
+                limit: CountArg::Set { value: limit },
             };
             assert_eq!(refused_field(task_breakdown_query(arg)), QueryField::Limit);
         }
@@ -575,7 +668,7 @@ mod tests {
             let arg = WorkflowRunsArg {
                 name: RunNameArg::AnyName,
                 status: RunStatusArg::AnyStatus,
-                limit,
+                limit: CountArg::Set { value: limit },
             };
             assert_eq!(refused_field(workflow_runs_query(arg)), QueryField::Limit);
         }

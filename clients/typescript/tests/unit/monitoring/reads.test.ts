@@ -24,12 +24,14 @@ import {
   workflowRuns,
 } from "../../../horsies/src/monitoring/reads.ts";
 import type { WireJson } from "../../../horsies/src/_catalog/wire_json.ts";
+import type { RawCatalogError } from "../../../horsies/src/native/values/records.ts";
 import {
   coreText,
   fakeHandle,
   monitoringDbFailed,
   sample,
   taskIdOf,
+  textSlot,
   timingExamples,
   valueEnvelope,
   withMember,
@@ -121,7 +123,8 @@ describe("each read decodes the core's text", () => {
 
     const [arg] = calls.get("readTaskList") ?? [];
 
-    assert.ok(arg instanceof Object && "limit" in arg && arg.limit === 7);
+    assert.ok(arg instanceof Object && "limit" in arg);
+    assert.deepEqual(arg.limit, { kind: "set", value: 7 });
   });
 });
 
@@ -174,6 +177,31 @@ describe("expected failures are values", () => {
     assert.ok(!read.ok && read.error.code === "DB_OPERATION_FAILED");
     assert.equal(read.error.retryable, true);
     assert.equal(read.error.message, "task list query failed: connection refused");
+  });
+
+  test("a stored row outside the read contract is HISTORY_CONTRACT_VIOLATION, never retryable", async () => {
+    const error: RawCatalogError = {
+      class: "MonitoringQueryHistoryContractViolation",
+      slots: [
+        textSlot("message", "history contract violation: status DONE"),
+        {
+          name: "exception",
+          value: { kind: "exception", exception: { kind: "generated", class: "HistoryContractError", text: "status DONE" } },
+        },
+      ],
+    };
+
+    const read = await listTasks(fakeTarget({ kind: "failed", error }).target, {});
+
+    assert.ok(!read.ok && read.error.code === "HISTORY_CONTRACT_VIOLATION");
+    assert.equal(read.error.retryable, false);
+    assert.deepEqual(read.error.exception, { kind: "historyContract", message: "status DONE" });
+  });
+
+  test("a read with no query to refuse makes a refusal of the bridge a defect", async () => {
+    const outcome: MonitoringReadOutcome = { kind: "refused", field: "limit", reason: "no limit" };
+
+    await assert.rejects(schedules(fakeTarget(outcome).target), { name: "ClientDefect", subject: "schedules" });
   });
 
   test("a failed detail read is the core's error", async () => {

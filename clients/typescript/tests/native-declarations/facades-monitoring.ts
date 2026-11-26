@@ -38,6 +38,7 @@ import type {
   WorkerStateRecord,
 } from "../../horsies/src/native/facades/health.ts";
 import type {
+  CountArg,
   ErrorCategoryArg,
   FiltersArg,
   GroupByArg,
@@ -47,6 +48,7 @@ import type {
   RetriedArg,
   RunNameArg,
   RunStatusArg,
+  SortArg,
   SortDirectionArg,
   SortFieldArg,
   TaskAbsenceReasonName,
@@ -105,6 +107,10 @@ export const getClassReportMatches: SameFunction<typeof Generated.getClassReport
 export const cancelTaskMatches: SameFunction<typeof Generated.cancelTask, CancelAddon["cancelTask"]> = true;
 
 export const queryFieldMatches: Mutual<Generated.QueryField, QueryField> = true;
+
+export const countMatches: Mutual<Generated.CountArg, CountArg> = true;
+
+export const sortMatches: Mutual<Generated.SortArg, SortArg> = true;
 export const windowBoundMatches: Mutual<Generated.WindowBoundArg, WindowBoundArg> = true;
 export const windowMatches: Mutual<Generated.WindowArg, WindowArg> = true;
 export const retriedMatches: Mutual<Generated.RetriedArg, RetriedArg> = true;
