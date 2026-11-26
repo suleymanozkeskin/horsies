@@ -5043,7 +5043,7 @@ export const WorkflowId: {
 // @public (undocumented)
 export interface WorkflowNodeInfo {
     // (undocumented)
-    readonly allowFailedDeps: boolean;
+    readonly allowFailedDependencies: boolean;
     // (undocumented)
     readonly childFailed: number | null;
     // (undocumented)

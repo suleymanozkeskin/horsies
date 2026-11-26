@@ -85,8 +85,8 @@ describe("specDataTextOf", () => {
         taskNode(
           0,
           "ping",
-          '"task_name":"ping","input_json":"{}","dependencies":[],"args_from":{},"workflow_ctx_from":[],' +
-            '"allow_failed_deps":false,"join":{"kind":"ALL"}',
+          '"task_name":"ping","input_json":"{}","dependencies":[],"args_from":{},"workflow_context_from":[],' +
+            '"allow_failed_dependencies":false,"join":{"kind":"ALL"}',
         ) +
         "]}",
     );
@@ -101,7 +101,7 @@ describe("specDataTextOf", () => {
 
     assert.match(
       text,
-      /"node_id":"add","task_name":"add","input_json":"\{\\"a\\":2\}","dependencies":\[0\],"args_from":\{"b":0\},"workflow_ctx_from":\[\],"allow_failed_deps":true/,
+      /"node_id":"add","task_name":"add","input_json":"\{\\"a\\":2\}","dependencies":\[0\],"args_from":\{"b":0\},"workflow_context_from":\[\],"allow_failed_dependencies":true/,
     );
   });
 

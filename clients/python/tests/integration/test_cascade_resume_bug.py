@@ -195,7 +195,7 @@ class TestCascadeResumeMissingCompletionCheck:
 
         session.expire_all()
 
-        # Child task D should be SKIPPED (dep C failed, allow_failed_deps=False)
+        # Child task D should be SKIPPED (dep C failed, allow_failed_dependencies=False)
         child_d_res = await session.execute(
             text("""
                 SELECT status FROM horsies_workflow_tasks

@@ -174,7 +174,7 @@ class TestOrJoin:
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
         """
-        join='any' may become true early, but if workflow_ctx_from deps are not terminal,
+        join='any' may become true early, but if workflow_context_from deps are not terminal,
         the task should not be enqueued yet.
         """
         session, broker, app = setup
@@ -188,7 +188,7 @@ class TestOrJoin:
             kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
-            workflow_ctx_from=[node_b],
+            workflow_context_from=[node_b],
         )
 
         spec = make_workflow_spec(
@@ -402,7 +402,7 @@ class TestOrJoin:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_ctx_from dep fails (terminal) → aggregator still proceeds if join is met."""
+        """workflow_context_from dep fails (terminal) → aggregator still proceeds if join is met."""
         session, broker, app = setup
 
         task = make_simple_ctx_task(app, 'ctx_any_fail')
@@ -416,7 +416,7 @@ class TestOrJoin:
             kwargs={'value': 0},
             waits_for=[node_a, node_b],
             join='any',
-            workflow_ctx_from=[node_b],
+            workflow_context_from=[node_b],
         )
 
         spec = make_workflow_spec(
@@ -445,7 +445,7 @@ class TestOrJoin:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_ctx_from dep is SKIPPED (terminal) → aggregator proceeds if join is met."""
+        """workflow_context_from dep is SKIPPED (terminal) → aggregator proceeds if join is met."""
         session, broker, app = setup
 
         task = make_simple_ctx_task(app, 'ctx_any_skip')
@@ -466,7 +466,7 @@ class TestOrJoin:
             kwargs={'value': 0},
             waits_for=[node_b, node_c],
             join='any',
-            workflow_ctx_from=[node_b],
+            workflow_context_from=[node_b],
         )
 
         spec = make_workflow_spec(
@@ -662,7 +662,7 @@ class TestQuorumJoin:
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
         """
-        join='quorum' may be satisfied early, but workflow_ctx_from deps must be terminal
+        join='quorum' may be satisfied early, but workflow_context_from deps must be terminal
         before enqueueing the task.
         """
         session, broker, app = setup
@@ -677,7 +677,7 @@ class TestQuorumJoin:
             waits_for=[node_a, node_b],
             join='quorum',
             min_success=1,
-            workflow_ctx_from=[node_b],
+            workflow_context_from=[node_b],
         )
 
         spec = make_workflow_spec(
@@ -842,7 +842,7 @@ class TestQuorumJoin:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_ctx_from dep fails (terminal) → aggregator still ENQUEUED if quorum met."""
+        """workflow_context_from dep fails (terminal) → aggregator still ENQUEUED if quorum met."""
         session, broker, app = setup
 
         task = make_simple_ctx_task(app, 'ctx_quorum_fail')
@@ -857,7 +857,7 @@ class TestQuorumJoin:
             waits_for=[node_a, node_b],
             join='quorum',
             min_success=1,
-            workflow_ctx_from=[node_b],
+            workflow_context_from=[node_b],
         )
 
         spec = make_workflow_spec(

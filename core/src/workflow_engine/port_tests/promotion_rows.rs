@@ -171,7 +171,7 @@ async fn join_any_is_enqueued_on_the_first_of_two_successes() {
 async fn a_context_dependent_and_a_plain_dependent_of_one_level_are_both_enqueued() {
     let pool = shared_pool().await;
     let mut reader = after(2, "promotion_mixed_ctx_task", &[0]);
-    reader.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
+    reader.workflow_context_from = Some(vec!["node_0".to_owned()]);
     let workflow_id = run(
         &pool,
         &spec(
@@ -356,7 +356,7 @@ async fn sole_waiter_on(pool: &TestPool, holder_pid: i32) -> i32 {
 /// nodes end ENQUEUED with their task rows, and the pause applies after.
 ///
 /// Node 1 waits for the FAILED node 0, so case 0 skips it; its dependents
-/// (2, 3, 4, `allow_failed_deps`) are promoted by the skip cascade. A
+/// (2, 3, 4, `allow_failed_dependencies`) are promoted by the skip cascade. A
 /// trigger holds the step at its first node write, on an advisory lock that
 /// the test holds. The pause starts while the step waits there, and the test
 /// releases the step once the pause waits on the step.
@@ -381,7 +381,7 @@ async fn a_pause_during_the_case_zero_step_applies_after_its_commit() {
             &db.pool,
             &NodeSeed::task(workflow_id, index, "PENDING")
                 .deps(&[1])
-                .allow_failed_deps(),
+                .allow_failed_dependencies(),
         )
         .await;
     }

@@ -21,13 +21,13 @@
 //! order:
 //!
 //! `[task_index, node_id, task_name, input, queue_name, priority, dependencies,
-//! args_from, workflow_ctx_from, allow_failed_deps, join_type, min_success,
+//! args_from, workflow_context_from, allow_failed_dependencies, join_type, min_success,
 //! task_options, retention_class_key, is_subworkflow, sub_definition_key,
 //! sub_workflow_params]`
 //!
 //! The stored texts in it: `success_policy`; the node `input`; `dependencies`
 //! (a JSON array of node indexes, in the given order); `args_from` (a JSON
-//! object of key to node index, in key order); `workflow_ctx_from` (a JSON
+//! object of key to node index, in key order); `workflow_context_from` (a JSON
 //! array of node ids, NULL for no list and for an empty list); `task_options`
 //! (with `good_until` merged in). The queue and the priority of a sub-workflow
 //! node are their stored forms (`"default"`, `100`).
@@ -110,8 +110,8 @@ pub(crate) struct StartNodeV1<'a> {
     /// The stored JSON object of key to node index, in key order.
     pub(crate) args_from: Option<&'a str>,
     /// The stored JSON array of node ids.
-    pub(crate) workflow_ctx_from: Option<&'a str>,
-    pub(crate) allow_failed_deps: bool,
+    pub(crate) workflow_context_from: Option<&'a str>,
+    pub(crate) allow_failed_dependencies: bool,
     pub(crate) join_type: &'a str,
     pub(crate) min_success: Option<i32>,
     /// The stored task options text, with `good_until` merged in.
@@ -177,8 +177,8 @@ impl Serialize for StartNodeV1<'_> {
         array.serialize_element(&self.priority)?;
         array.serialize_element(self.dependencies)?;
         array.serialize_element(&self.args_from)?;
-        array.serialize_element(&self.workflow_ctx_from)?;
-        array.serialize_element(&self.allow_failed_deps)?;
+        array.serialize_element(&self.workflow_context_from)?;
+        array.serialize_element(&self.allow_failed_dependencies)?;
         array.serialize_element(self.join_type)?;
         array.serialize_element(&self.min_success)?;
         array.serialize_element(&self.task_options)?;

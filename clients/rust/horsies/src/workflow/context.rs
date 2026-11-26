@@ -1,7 +1,7 @@
 //! The workflow context: the results of chosen dependencies, given to a
 //! task that takes it (Python `WorkflowContext`).
 //!
-//! A node names the dependencies with `workflow_ctx_from`, and its task
+//! A node names the dependencies with `workflow_context_from`, and its task
 //! takes the context as the input field `workflow_ctx` (the task attribute's
 //! `workflow_ctx`). The child of the worker writes the context into that
 //! field; its form is the core's `WorkflowContext`.
@@ -21,7 +21,7 @@ use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode};
 
 /// The context of one workflow task: its place in the workflow, and the
 /// results and sub-workflow summaries of the dependencies that its node
-/// names in `workflow_ctx_from`, by node id.
+/// names in `workflow_context_from`, by node id.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowContext {
     workflow_id: Uuid,
@@ -54,9 +54,9 @@ impl PartialEq for StoredResultText {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WorkflowContextError {
     /// The context holds no entry for the node: the node is not in the
-    /// task node's `workflow_ctx_from`, or the dependency did not end
+    /// task node's `workflow_context_from`, or the dependency did not end
     /// (Python `KeyError`; the core's `WORKFLOW_CTX_MISSING_ID`).
-    #[error("node '{node_id}' is not in the workflow context; name it in workflow_ctx_from")]
+    #[error("node '{node_id}' is not in the workflow context; name it in workflow_context_from")]
     NotInContext { node_id: String },
     /// The stored value does not read as the asked type
     /// (`RESULT_DESERIALIZATION_ERROR`). `cause` names no value.

@@ -6,7 +6,7 @@ returns a `DAMAGED_ITEM` error, and because `returns_review` is declared with
 `OnError.PAUSE`, the whole workflow stops there and waits for a person — no new
 nodes start, and the run sits PAUSED with the reason readable in the node.
 
-`restock_or_writeoff` sets `allow_failed_deps=True`, so once the run is resumed
+`restock_or_writeoff` sets `allow_failed_dependencies=True`, so once the run is resumed
 it executes on either branch: it reads the inspection's `TaskOutcome` and writes
 the item off when it is damaged, or returns it to stock when it is not.
 """
@@ -158,7 +158,7 @@ def restock_or_writeoff(
     """Handle both inspection outcomes.
 
     Reached on the damaged branch only because its node sets
-    `allow_failed_deps=True` — without it the node would be SKIPPED and the
+    `allow_failed_dependencies=True` — without it the node would be SKIPPED and the
     damaged item would sit in the returns desk forever.
     """
     match store.get_return(return_id):

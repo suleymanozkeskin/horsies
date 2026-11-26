@@ -52,8 +52,8 @@ fn retry_options(max_retries: usize) -> String {
 struct StoredNode {
     dependencies: Vec<i32>,
     args_from: Option<serde_json::Value>,
-    workflow_ctx_from: Option<Vec<String>>,
-    allow_failed_deps: bool,
+    workflow_context_from: Option<Vec<String>>,
+    allow_failed_dependencies: bool,
     task_options: Option<String>,
     max_retries: Option<i32>,
 }
@@ -63,8 +63,9 @@ impl sql::FromTestRow for StoredNode {
         Ok(Self {
             dependencies: sql::named(row, "dependencies")?,
             args_from: sql::named(row, "args_from")?,
-            workflow_ctx_from: sql::named(row, "workflow_ctx_from")?,
-            allow_failed_deps: sql::named(row, "allow_failed_deps")?,
+            // The stored column names differ from the public names on purpose.
+            workflow_context_from: sql::named(row, "workflow_ctx_from")?,
+            allow_failed_dependencies: sql::named(row, "allow_failed_deps")?,
             task_options: sql::named(row, "task_options")?,
             max_retries: sql::named(row, "max_retries")?,
         })
@@ -250,16 +251,16 @@ async fn start_stores_the_output_index_or_null() {
 }
 
 /// `TestWorkflowStart.test_dependencies_stored_as_array`,
-/// `.test_args_from_stored_as_jsonb`, `.test_workflow_ctx_from_stored` and
-/// `.test_allow_failed_deps_stored`
+/// `.test_args_from_stored_as_jsonb`, `.test_workflow_context_from_stored` and
+/// `.test_allow_failed_dependencies_stored`
 #[tokio::test]
 async fn start_stores_the_edges_and_the_dataflow_of_each_node() {
     let pool = shared_pool().await;
     let mut join = task_node(2, "edges_join");
     join.dependencies = vec![0, 1];
     join.args_from.insert("left".to_owned(), 0);
-    join.workflow_ctx_from = Some(vec!["node_1".to_owned()]);
-    join.allow_failed_deps = true;
+    join.workflow_context_from = Some(vec!["node_1".to_owned()]);
+    join.allow_failed_dependencies = true;
     let workflow_id = start(
         &pool,
         &spec(
@@ -273,16 +274,16 @@ async fn start_stores_the_edges_and_the_dataflow_of_each_node() {
     let root = stored_node(&pool, workflow_id, 0).await;
     assert!(root.dependencies.is_empty());
     assert_eq!(root.args_from, None);
-    assert_eq!(root.workflow_ctx_from, None);
-    assert!(!root.allow_failed_deps);
+    assert_eq!(root.workflow_context_from, None);
+    assert!(!root.allow_failed_dependencies);
     let stored_join = stored_node(&pool, workflow_id, 2).await;
     assert_eq!(stored_join.dependencies, vec![0, 1]);
     assert_eq!(stored_join.args_from, Some(serde_json::json!({"left": 0})));
     assert_eq!(
-        stored_join.workflow_ctx_from,
+        stored_join.workflow_context_from,
         Some(vec!["node_1".to_owned()])
     );
-    assert!(stored_join.allow_failed_deps);
+    assert!(stored_join.allow_failed_dependencies);
 }
 
 /// `TestWorkflowStart.test_retry_policy_honored_in_workflow_tasks`

@@ -51,7 +51,7 @@ export function workflowNode(
     node_status: nodeStatus,
     is_subworkflow: false,
     sub_workflow_id: null,
-    allow_failed_deps: false,
+    allow_failed_dependencies: false,
     started_at: null,
     completed_at: null,
     exec_s: null,
@@ -122,7 +122,7 @@ export const CASCADE_NODES: WorkflowNode[] = [
   workflowNode(1, 'b', 'FAILED', exactTiming([['pending', 0, 3.5], ['running', 3.5, 5]], 'FAILED', 5)),
   workflowNode(2, 'c', 'COMPLETED', exactTiming([['pending', 0, 3.5], ['running', 3.5, 4]], 'COMPLETED', 4)),
   workflowNode(3, 'd', 'SKIPPED', exactTiming([['pending', 0, 5]], 'SKIPPED', 5)),
-  { ...workflowNode(4, 'e', 'COMPLETED', exactTiming([['pending', 0, 5], ['enqueued', 5, 6], ['running', 6, 8]], 'COMPLETED', 8)), allow_failed_deps: true },
+  { ...workflowNode(4, 'e', 'COMPLETED', exactTiming([['pending', 0, 5], ['enqueued', 5, 6], ['running', 6, 8]], 'COMPLETED', 8)), allow_failed_dependencies: true },
   workflowNode(5, 'x', 'COMPLETED', UNAVAILABLE_NODE),
 ];
 
