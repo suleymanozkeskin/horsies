@@ -16,9 +16,12 @@ import type { AnyWire, EmptyObject, Flat, PresenceOf, SentOf, ValueOf } from "..
 /** Type-only key of the sent type of `hz.wire()`. It does not exist at run time. */
 export declare const zodWireSent: unique symbol;
 
-/** A zod 4 schema type, as the static types read it. */
+/**
+ * A zod 4 schema type, as the static types read it: the definition type that every zod 4 schema declares. The output
+ * type is read from the schema's own type (`ZodOutputOf`), so the constraint names no top type.
+ */
 export type ZodSchemaLike = {
-  readonly _zod: { readonly def: { readonly type: string }; readonly output: unknown };
+  readonly _zod: { readonly def: { readonly type: string } };
 };
 
 export type ZodDefOf<S> = S extends { readonly _zod: { readonly def: infer D } } ? D : never;
@@ -27,9 +30,15 @@ export type ZodOutputOf<S> = S extends { readonly _zod: { readonly output: infer
 
 /**
  * Whether an output type is zod's `JSONType`, the output of `z.json()`: it takes every JSON primitive and arrays of
- * itself, and it is not `unknown`. (`z.json()` is a lazy schema at run time and a union in its static type.)
+ * itself, and it does not take `undefined`. The `undefined` test keeps out a top type (the output of `z.unknown()`,
+ * which takes every value) and an optional member (`z.json().optional()`, read through its `optional` definition).
+ * (`z.json()` is a lazy schema at run time and a union in its static type.)
  */
-export type IsZodJson<O> = unknown extends O ? false : [string | number | boolean | null | O[]] extends [O] ? true : false;
+export type IsZodJson<O> = [undefined] extends [O]
+  ? false
+  : [string | number | boolean | null | O[]] extends [O]
+    ? true
+    : false;
 
 /** A member that a reader may give without the key: zod marks `.optional()` with `optout`. */
 export type ZodOptionalOut = { readonly _zod: { readonly optout: "optional" } };

@@ -703,7 +703,7 @@ export interface IsolatedRecycleInput {
 export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "resultOf" ? true : false) : false;
 
 // @public
-export type IsZodJson<O> = unknown extends O ? false : [string | number | boolean | null | O[]] extends [O] ? true : false;
+export type IsZodJson<O> = [undefined] extends [O] ? false : [string | number | boolean | null | O[]] extends [O] ? true : false;
 
 // @public (undocumented)
 export interface JsonUnreadable {
@@ -1929,7 +1929,6 @@ export type ZodSchemaLike = {
         readonly def: {
             readonly type: string;
         };
-        readonly output: unknown;
     };
 };
 
