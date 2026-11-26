@@ -22,7 +22,7 @@ from horsies.core.codec.typed import Json
 from horsies.core.models.outcome import (
     Failed,
     ReadResult,
-    ResultDeserializationError,
+    ReadResultDeserializationError,
     Succeeded,
 )
 from horsies.core.models.tasks import (
@@ -41,12 +41,12 @@ from horsies.core.types.result import Err, Ok
 
 
 def _unreadable_message(result: ReadResult[Any, TaskError]) -> str:
-    """The message of a read that is ``Err(ResultDeserializationError)``."""
+    """The message of a read that is ``Err(ReadResultDeserializationError)``."""
     match result:
-        case Err(ResultDeserializationError(message=message)):
+        case Err(ReadResultDeserializationError(message=message)):
             return message
         case _:
-            pytest.fail(f'expected Err(ResultDeserializationError), got {result!r}')
+            pytest.fail(f'expected Err(ReadResultDeserializationError), got {result!r}')
 
 
 def _typed_envelope(ok: Any) -> dict[str, Any]:
@@ -159,7 +159,7 @@ class TestWorkflowEnvelopeMarkerGuards:
             workflow_id='wf-x',
         )
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     def test_missing_marker_rejected(self) -> None:
         result = _decode_workflow_envelope(
@@ -169,7 +169,7 @@ class TestWorkflowEnvelopeMarkerGuards:
             workflow_id='wf-x',
         )
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
 
 @pytest.mark.unit

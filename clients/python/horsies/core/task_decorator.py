@@ -95,13 +95,13 @@ from horsies.core.types.result import (
     result_type_arguments,
 )
 from horsies.core.models.outcome import (
-    AsyncContext,
     Failed,
-    InvalidInput,
+    ReadAsyncContext,
+    ReadInvalidInput,
     ReadResult,
-    ResultNotAvailable,
+    ReadResultNotAvailable,
+    ReadWaitInsideTask,
     Succeeded,
-    WaitInsideTask,
 )
 from horsies.core.task_read import is_final_read, read_of_record
 from horsies.core.brokers.enqueue_task import SendKind
@@ -459,14 +459,14 @@ class TaskHandle(Generic[T, C]):
     - ``Ok(Succeeded(value))``: the task returned ``value``.
     - ``Ok(Failed(task_error))``: the task returned this error, or the
       library recorded it (``TASK_CANCELLED``, ``TASK_TIMEOUT``, ...).
-    - ``Err(read_error)``: the read gave no outcome (``WaitTimeout``,
-      ``TaskNotFound``, ``BrokerError``, ...). A read failure is never a
+    - ``Err(read_error)``: the read gave no outcome (``ReadWaitTimeout``,
+      ``ReadTaskNotFound``, ``ReadDatabaseError``, ...). A read failure is never a
       ``TaskError``.
 
     Neither method raises for a task error or a read failure. The handle
     keeps the first final read (``is_final_read``): an outcome,
-    ``ResultNotAvailable``, ``ResultDeserializationError``,
-    ``UnknownCustomCode`` and ``NoTypeAvailable``.
+    ``ReadResultNotAvailable``, ``ReadResultDeserializationError``,
+    ``ReadUnknownCustomCode`` and ``ReadNoTypeAvailable``.
     """
 
     def __init__(
@@ -483,7 +483,7 @@ class TaskHandle(Generic[T, C]):
         # Declared OkT for typed decode. ``.send()`` / ``.send_async()``
         # populate this from the wrapper's ``task_ok_type``. By-id
         # reconstruction without an app or registered task leaves this
-        # ``None``; ``.get()`` then returns ``NoTypeAvailable`` when an ok
+        # ``None``; ``.get()`` then returns ``ReadNoTypeAvailable`` when an ok
         # payload is present.
         self.ok_type: TypeAnnotation | None = ok_type
         # The type of the custom codes of the task: a read turns a stored
@@ -511,25 +511,25 @@ class TaskHandle(Generic[T, C]):
         )
 
     def _wait_inside_task_result(self, operation: str) -> ReadResult[T, TaskError[C]]:
-        """Return ``WaitInsideTask`` for a refused wait. Not kept; nothing ran."""
-        return Err(WaitInsideTask(message=wait_inside_task_message(
+        """Return ``ReadWaitInsideTask`` for a refused wait. Not kept; nothing ran."""
+        return Err(ReadWaitInsideTask(message=wait_inside_task_message(
             f'TaskHandle.{operation}() for task {self.task_id}',
         )))
 
     def _before_read(
-        self, operation: str, timeout_ms: Optional[int],
+        self, operation: str, wait_ms: Optional[int],
     ) -> ReadResult[T, TaskError[C]] | None:
         """The answer that comes before any broker read, or None to read.
 
-        In order: ``InvalidInput`` for a ``timeout_ms`` that no wait can use,
-        ``WaitInsideTask`` in a process that runs task bodies, the kept read,
-        and ``ResultNotAvailable`` (kept) for a handle with no broker. The
+        In order: ``ReadInvalidInput`` for a ``wait_ms`` that no wait can use,
+        ``ReadWaitInsideTask`` in a process that runs task bodies, the kept read,
+        and ``ReadResultNotAvailable`` (kept) for a handle with no broker. The
         wait limit is the first check in every client, so one input gives
         one code.
         """
-        match wait_timeout_seconds(timeout_ms):
+        match wait_timeout_seconds(wait_ms):
             case Err(err_value=refused):
-                return Err(InvalidInput(
+                return Err(ReadInvalidInput(
                     message=f'TaskHandle.{operation}() for task {self.task_id}: {refused.message}',
                 ))
             case Ok():
@@ -540,80 +540,80 @@ class TaskHandle(Generic[T, C]):
             return self._cached_result
         if self._broker_mode and self._app:
             return None
-        return self._kept(Err(ResultNotAvailable(
+        return self._kept(Err(ReadResultNotAvailable(
             message=f'Task {self.task_id}: result not available; the task may not have run',
         )))
 
     def get(
         self,
-        timeout_ms: Optional[int] = None,
+        wait_ms: Optional[int] = None,
     ) -> ReadResult[T, TaskError[C]]:
         """
         Read the task result (blocking).
 
-        The first check is the wait limit: a timeout_ms that is not None or
-        an int from 0 to MAX_TASK_TIMEOUT_MS returns ``Err(InvalidInput)``
+        The first check is the wait limit: a wait_ms that is not None or
+        an int from 0 to MAX_TASK_TIMEOUT_MS returns ``Err(ReadInvalidInput)``
         (not kept) before any other check. Then a broker-backed handle
-        returns ``Err(WaitInsideTask)`` (not kept) in a process that runs
+        returns ``Err(ReadWaitInsideTask)`` (not kept) in a process that runs
         task bodies; compose tasks with a workflow there. It returns
-        ``Err(AsyncContext)`` (not kept) on a thread that runs an event loop;
+        ``Err(ReadAsyncContext)`` (not kept) on a thread that runs an event loop;
         use ``get_async()`` there.
 
         Args:
-            timeout_ms: Maximum time to wait for result (milliseconds)
+            wait_ms: Maximum time to wait for result (milliseconds)
 
         Returns:
             ReadResult[T, TaskError[C]]: ``Ok(Succeeded(value))``,
             ``Ok(Failed(task_error))`` or ``Err(read_error)``. Never raises
             for a task error or a read failure.
         """
-        before = self._before_read('get', timeout_ms)
+        before = self._before_read('get', wait_ms)
         if before is not None:
             return before
         assert self._app is not None, 'a broker-backed handle reads through its app'
         if in_running_event_loop():
-            return Err(AsyncContext(message=async_context_message(
+            return Err(ReadAsyncContext(message=async_context_message(
                 f'TaskHandle.get() for task {self.task_id}',
                 'handle.get_async(...)',
             )))
         broker_result = self._app.get_broker().get_raw_result_record(
-            self.task_id, timeout_ms,
+            self.task_id, wait_ms,
         )
         return self._kept(
             read_of_record(
-                self.task_id, broker_result, self.ok_type, timeout_ms, self.code_type,
+                self.task_id, broker_result, self.ok_type, wait_ms, self.code_type,
             ),
         )
 
     async def get_async(
         self,
-        timeout_ms: Optional[int] = None,
+        wait_ms: Optional[int] = None,
     ) -> ReadResult[T, TaskError[C]]:
         """
         Read the task result asynchronously.
 
-        The first check is the wait limit, as in ``get()``: a timeout_ms
+        The first check is the wait limit, as in ``get()``: a wait_ms
         that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS returns
-        ``Err(InvalidInput)`` (not kept). Then a broker-backed handle returns
-        ``Err(WaitInsideTask)`` (not kept) in a process that runs task
+        ``Err(ReadInvalidInput)`` (not kept). Then a broker-backed handle returns
+        ``Err(ReadWaitInsideTask)`` (not kept) in a process that runs task
         bodies; compose tasks with a workflow there.
 
         Args:
-            timeout_ms: Maximum time to wait for result (milliseconds)
+            wait_ms: Maximum time to wait for result (milliseconds)
 
         Returns:
             ReadResult[T, TaskError[C]], as ``get()``.
         """
-        before = self._before_read('get_async', timeout_ms)
+        before = self._before_read('get_async', wait_ms)
         if before is not None:
             return before
         assert self._app is not None, 'a broker-backed handle reads through its app'
         broker_result = await self._app.get_broker().get_raw_result_record_async(
-            self.task_id, timeout_ms,
+            self.task_id, wait_ms,
         )
         return self._kept(
             read_of_record(
-                self.task_id, broker_result, self.ok_type, timeout_ms, self.code_type,
+                self.task_id, broker_result, self.ok_type, wait_ms, self.code_type,
             ),
         )
 

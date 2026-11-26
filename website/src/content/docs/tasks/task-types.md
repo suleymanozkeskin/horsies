@@ -231,8 +231,8 @@ The consumer holds the declared `ok_type` (from the task registry) and calls `de
 | Code | Source | When |
 |------|--------|------|
 | `BrokerErrorCode.INVALID_JSON_PAYLOAD` | raw result read (`app.get_raw_result`, `broker.get_raw_result_record`), task info read (`handle.info(include_result=True)`) | the stored result does not parse as JSON, or is not a JSON object. For the task info read, also a malformed envelope or a failed typed slot decode |
-| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | typed read (`TaskHandle.get`, `app.get_result`, `WorkflowHandle.get`, `WorkflowHandle.result_for`) | the stored result does not parse, has a malformed envelope, or fails the typed slot decode. The read returns `Err(ResultDeserializationError(...))` |
-| `ContractCode.NO_TYPE_AVAILABLE` | typed read | the task succeeded, and its `task_name` is not in the local task registry, so no `ok_type` is available to decode the ok slot. The read returns `Err(NoTypeAvailable(...))` |
+| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | typed read (`TaskHandle.get`, `app.get_result`, `WorkflowHandle.get`, `WorkflowHandle.result_for`) | the stored result does not parse, has a malformed envelope, or fails the typed slot decode. The read returns `Err(ReadResultDeserializationError(...))` |
+| `ContractCode.NO_TYPE_AVAILABLE` | typed read | the task succeeded, and its `task_name` is not in the local task registry, so no `ok_type` is available to decode the ok slot. The read returns `Err(ReadNoTypeAvailable(...))` |
 | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` or `ContractCode.NO_TYPE_AVAILABLE` | node map (`WorkflowHandle.results()`, the terminal results of an outputless workflow's `get()`) | a node whose stored result does not decode stays in the map as `Failed(TaskError(error_code=...))` with one of these codes |
 
 ## API Reference

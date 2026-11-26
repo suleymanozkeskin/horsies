@@ -47,10 +47,10 @@ from horsies.core.models.task_send_types import (
     TaskSendValidationFailed,
 )
 from horsies.core.models.outcome import (
-    BrokerError,
-    NoTypeAvailable,
-    ResultDeserializationError,
-    WaitInsideTask,
+    ReadDatabaseError,
+    ReadNoTypeAvailable,
+    ReadResultDeserializationError,
+    ReadWaitInsideTask,
 )
 from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
@@ -312,9 +312,9 @@ def _handle(broker: MagicMock) -> TaskHandle[int]:
 
 
 READ_ERROR_OF: dict[type[Any], tuple[type[Any], bool]] = {
-    BrokerNoTypeAvailable: (NoTypeAvailable, True),
-    BrokerInvalidJsonPayload: (ResultDeserializationError, True),
-    BrokerWaitInsideTask: (WaitInsideTask, False),
+    BrokerNoTypeAvailable: (ReadNoTypeAvailable, True),
+    BrokerInvalidJsonPayload: (ReadResultDeserializationError, True),
+    BrokerWaitInsideTask: (ReadWaitInsideTask, False),
 }
 
 
@@ -334,14 +334,14 @@ class TestResultMapping:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(return_value=Err(error))
         handle = _handle(broker)
-        expected_type, cached = READ_ERROR_OF.get(type(error), (BrokerError, False))
+        expected_type, cached = READ_ERROR_OF.get(type(error), (ReadDatabaseError, False))
 
         first = await handle.get_async()
         _ = await handle.get_async()
 
         match first:
-            case Err(err_value=BrokerError() as read_error):
-                assert expected_type is BrokerError
+            case Err(err_value=ReadDatabaseError() as read_error):
+                assert expected_type is ReadDatabaseError
                 assert read_error.message == (
                     f'the result read of task {HANDLE_TASK_ID} failed '
                     f'({error.code.value}): {error.message}'

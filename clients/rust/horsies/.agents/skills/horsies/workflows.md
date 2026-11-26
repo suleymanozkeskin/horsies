@@ -203,8 +203,9 @@ worker writes the context into that parameter.
 | `output_for::<T>(&key)` | `Result<Option<T>, WorkflowContextError>`: the child's output |
 
 - `WorkflowContextError`: `NotInContext { node_id }` (the node is not in
-  `workflow_context_from`, or it did not end), `Unreadable { node_id, cause }`,
-  `UnknownUserCode { node_id, cause }`.
+  `workflow_context_from`, or it did not end),
+  `ResultDeserializationError { node_id, cause }`,
+  `UnknownCustomCode { node_id, cause }`.
 - Each node of `workflow_context_from` must be a dependency of the node.
 - `workflow_context_from` on a task without the `workflow_ctx` attribute is
   refused (`HRS-010`).
@@ -418,7 +419,7 @@ with the error's id.
 | Method | Returns |
 |---|---|
 | `workflow_id()` | `Uuid` |
-| `get(limit)` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>`: waits while the workflow runs, up to `limit`. A `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` is `InvalidInput`, as the first check |
+| `get(wait)` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>`: waits while the workflow runs, up to `wait`. A `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` is `InvalidInput`, as the first check |
 | `result_for::<V, E>(&key)` | `Result<TaskOutcome<V, E>, WorkflowReadError>`: one node, read with its types. Not a wait |
 | `status()` | `HandleResult<WorkflowStatus>` |
 | `results()` | `HandleResult<BTreeMap<String, NodeResult>>`: the stored result of each node with a node id |
@@ -443,15 +444,15 @@ with the error's id.
 
 | `WorkflowReadError` | Code | When |
 |---|---|---|
-| `WaitTimedOut { workflow_id }` | `WAIT_TIMEOUT` | The workflow had not ended when the limit passed |
+| `WaitTimeout { workflow_id }` | `WAIT_TIMEOUT` | The workflow had not ended when the limit passed |
 | `WorkflowNotFound { workflow_id }` | `WORKFLOW_NOT_FOUND` | No workflow has the id |
 | `ResultNotReady { workflow_id, node_id }` | `RESULT_NOT_READY` | `result_for`: the node stores no result yet, or no node has the id |
-| `StoredResultUnreadable { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types |
-| `UnknownUserCode { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` |
+| `ResultDeserializationError { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types |
+| `UnknownCustomCode { workflow_id, cause }` | `UNKNOWN_CUSTOM_CODE` | The stored custom code is not a code of `E` |
 | `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms); `cause` is `WaitLimitRefused`. The first check, before any statement |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` on a thread that runs a tokio runtime. Nothing was read |
-| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
+| `DatabaseError { database_code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `database_code` is the handle code of the failed operation. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
 `HandleOperationError` (from `status`, `results`, `tasks`, `cancel`,
 `pause`, `resume`) is an enum with one variant per state; every variant

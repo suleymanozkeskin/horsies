@@ -240,7 +240,7 @@ Step 1 sets workflow options (keyword-only). Step 2 passes task kwargs with type
 ```python
 match spec.start():
     case Ok(handle):
-        result = handle.get(timeout_ms=30_000)
+        result = handle.get(wait_ms=30_000)
     case Err(WorkflowStartEnqueueFailed(retryable=True) as err):
         match spec.retry_start(err):
             case Ok(handle): ...
@@ -321,7 +321,7 @@ match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_brok
         print(invalid.message)         # the text is not a UUID
 ```
 
-All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or `for_id`. If the `workflow_id` does not exist, `get` and `result_for` return `Err(WorkflowNotFound(...))`. The other methods return `Err(HandleWorkflowNotFound)`. `pause_workflow()`, `resume_workflow()` and their sync forms take the `uuid.UUID` too. The `workflow_id` of every handle error class is the canonical text of the UUID.
+All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or `for_id`. If the `workflow_id` does not exist, `get` and `result_for` return `Err(ReadWorkflowNotFound(...))`. The other methods return `Err(HandleWorkflowNotFound)`. `pause_workflow()`, `resume_workflow()` and their sync forms take the `uuid.UUID` too. The `workflow_id` of every handle error class is the canonical text of the UUID.
 
 ### Return types
 
@@ -337,7 +337,7 @@ from horsies import Err, Failed, Ok, Succeeded, WorkflowHandle
 
 
 def report_total(workflow: WorkflowHandle[int]) -> None:
-    match workflow.get(timeout_ms=30_000):
+    match workflow.get(wait_ms=30_000):
         case Ok(Succeeded(total)):
             print(f"total: {total}")
         case Ok(Failed(task_error)):
@@ -355,8 +355,8 @@ def status(self) -> HandleResult[WorkflowStatus]
 async def status_async(self) -> HandleResult[WorkflowStatus]
 
 # Get — blocking poll until terminal or paused
-def get(self, timeout_ms: int | None = None) -> ReadResult[OutT, TaskError]
-async def get_async(self, timeout_ms: int | None = None) -> ReadResult[OutT, TaskError]
+def get(self, wait_ms: int | None = None) -> ReadResult[OutT, TaskError]
+async def get_async(self, wait_ms: int | None = None) -> ReadResult[OutT, TaskError]
 
 # Single-node result — non-blocking, single DB query
 def result_for(self, node: TaskNode[OkT] | NodeKey[OkT]) -> ReadResult[OkT, TaskError]
@@ -395,18 +395,18 @@ appearing during a pause are expected, not a fault.
 ### `get()` semantics
 
 - Polls via PostgreSQL `LISTEN` on `workflow_done` channel, with 1-second polling fallback.
-- `COMPLETED` → returns `Ok(Succeeded(value))` with the output node's value. With no `output` it returns `Ok(Succeeded(terminal_results))`, a `{node_id: TaskOutcome | None, ...}` map; the entry of a `SKIPPED` terminal node is `Failed(TaskError(error_code=OutcomeCode.WORKFLOW_OUTPUT_SKIPPED))`. With a success case that does not require the output node: a `SKIPPED` output node → `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED`, and a `FAILED` output node → `Ok(Failed(task_error))` with that node's error. A `COMPLETED` row whose result is NULL or empty → `Err(ResultDeserializationError(...))`: the library always stores a result with `COMPLETED`.
-- `FAILED` / `CANCELLED` → returns `Ok(Failed(task_error))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when the error is NULL (no error is stored). An empty stored error → `Err(ResultDeserializationError(...))`.
+- `COMPLETED` → returns `Ok(Succeeded(value))` with the output node's value. With no `output` it returns `Ok(Succeeded(terminal_results))`, a `{node_id: TaskOutcome | None, ...}` map; the entry of a `SKIPPED` terminal node is `Failed(TaskError(error_code=OutcomeCode.WORKFLOW_OUTPUT_SKIPPED))`. With a success case that does not require the output node: a `SKIPPED` output node → `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED`, and a `FAILED` output node → `Ok(Failed(task_error))` with that node's error. A `COMPLETED` row whose result is NULL or empty → `Err(ReadResultDeserializationError(...))`: the library always stores a result with `COMPLETED`.
+- `FAILED` / `CANCELLED` → returns `Ok(Failed(task_error))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when the error is NULL (no error is stored). An empty stored error → `Err(ReadResultDeserializationError(...))`.
 - `EXPIRED` → returns `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_EXPIRED`. The error `data` holds the policy name and the age.
-- A stored error that is not JSON, is JSON but not an object, or does not decode as a `TaskError` → `Err(ResultDeserializationError(...))`, with the cause in the message. Any other exception in the decode is a defect and propagates.
-- The workflow row is removed after `get()` read its terminal status, also `COMPLETED` (retention) → `Err(WorkflowNotFound(...))`.
-- A status read that fails: no workflow has the id → `Err(WorkflowNotFound(...))`; a database failure or a stored status that does not parse → `Err(BrokerError(...))`.
+- A stored error that is not JSON, is JSON but not an object, or does not decode as a `TaskError` → `Err(ReadResultDeserializationError(...))`, with the cause in the message. Any other exception in the decode is a defect and propagates.
+- The workflow row is removed after `get()` read its terminal status, also `COMPLETED` (retention) → `Err(ReadWorkflowNotFound(...))`.
+- A status read that fails: no workflow has the id → `Err(ReadWorkflowNotFound(...))`; a database failure or a stored status that does not parse → `Err(ReadDatabaseError(...))`.
 - `PAUSED` → returns immediately with `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_PAUSED`.
-- Timeout → returns `Err(WaitTimeout(...))`. The workflow can still end; a later `get()` can read its outcome.
+- Timeout → returns `Err(ReadWaitTimeout(...))`. The workflow can still end; a later `get()` can read its outcome.
 
 ### `result_for()` semantics
 
-Non-blocking single DB query. Returns `Err(ResultNotReady(...))` if the node has no result yet. Always call `handle.get()` first to wait for completion. A node with no `node_id` returns `Err(WorkflowCtxMissingId(...))`.
+Non-blocking single DB query. Returns `Err(ReadResultNotReady(...))` if the node has no result yet. Always call `handle.get()` first to wait for completion. A node with no `node_id` returns `Err(ReadWorkflowContextMissingId(...))`.
 
 ### HandleOperationError / HandleErrorCode
 
@@ -419,7 +419,7 @@ Non-blocking single DB query. Returns `Err(ResultNotReady(...))` if the node has
 | `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | the core's classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
 | `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
-| `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `Err(AsyncContext(...))` instead) |
+| `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `Err(ReadAsyncContext(...))` instead) |
 
 ```python
 from horsies import Err, HandleResumeRecoveryFailed, Ok
@@ -759,8 +759,8 @@ from horsies import (
     Result, Ok, Err, is_ok, is_err,
     # Outcomes and reads
     TaskOutcome, Succeeded, Failed, ReadResult, ReadError,
-    WaitTimeout, WorkflowNotFound, ResultNotReady, ResultDeserializationError,
-    BrokerError, NoTypeAvailable, AsyncContext, WaitInsideTask, InvalidInput,
-    WorkflowCtxMissingId,
+    ReadWaitTimeout, ReadWorkflowNotFound, ReadResultNotReady, ReadResultDeserializationError,
+    ReadDatabaseError, ReadNoTypeAvailable, ReadAsyncContext, ReadWaitInsideTask, ReadInvalidInput,
+    ReadWorkflowContextMissingId,
 )
 ```

@@ -74,7 +74,7 @@ fn report<T: Debug, E: UserErrorCode>(label: &str, read: Result<TaskOutcome<T, E
     match read {
         Ok(TaskOutcome::Succeeded(value)) => println!("{label}: {value:?}"),
         Ok(TaskOutcome::Failed(error)) => println!("{label}: failed: {error}"),
-        Err(ReadError::WaitTimedOut { task_id, .. }) => {
+        Err(ReadError::WaitTimeout { task_id, .. }) => {
             println!("{label}: task {task_id} has not finished; is a worker running?");
         }
         Err(error) => println!("{label}: the read failed ({:?}): {error}", error.code()),

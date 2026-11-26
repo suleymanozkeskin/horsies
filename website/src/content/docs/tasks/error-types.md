@@ -41,46 +41,46 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 - `Ok(Failed(task_error))`: the task returned `task_error`, or the library recorded it (`TASK_CANCELLED`, `TASK_TIMEOUT`, `WORKER_CRASHED`, ...).
 - `Err(read_error)`: the read gave no outcome.
 
-`ReadError` is a closed union of frozen classes, one class per catalog code. Every class has `code` (its catalog member) and `message` (the subject and the cause). `BrokerError` adds `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`). Match on the class; a `match` that omits a class fails pyright's exhaustiveness check.
+`ReadError` is a closed union of frozen classes, one class per catalog code. Every class has `code` (its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` adds `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`). Match on the class; a `match` that omits a class fails pyright's exhaustiveness check.
 
 | Class | `code` | When | Kept by a `TaskHandle` |
 | ----- | ------ | ---- | ---------------------- |
-| `WaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow did not end before the wait limit. It may still run | No |
-| `TaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send | No |
-| `WorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle | – |
-| `ResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or the handle has no broker | Yes |
-| `ResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `result_for()`: the node stores no result yet | – |
-| `WaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read | No |
-| `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form | No |
-| `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
-| `ResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types | Yes |
-| `UnknownCustomCode` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` of the task does not name. `custom_code` holds the stored text | Yes |
-| `BrokerError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed. A later read may succeed | No |
-| `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value: the handle was built by id, or the task is not registered here | Yes |
-| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `result_for()` got a node with no `node_id`. Nothing was read | – |
+| `ReadWaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow did not end before the wait limit. It may still run | No |
+| `ReadTaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send | No |
+| `ReadWorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle | – |
+| `ReadResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or the handle has no broker | Yes |
+| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `result_for()`: the node stores no result yet | – |
+| `ReadWaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read | No |
+| `ReadAsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form | No |
+| `ReadInvalidInput` | `RetrievalCode.INVALID_INPUT` | `wait_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
+| `ReadResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types | Yes |
+| `ReadUnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` of the task does not name. `custom_code` holds the stored text | Yes |
+| `ReadDatabaseError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed. A later read may succeed | No |
+| `ReadNoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value: the handle was built by id, or the task is not registered here | Yes |
+| `ReadWorkflowContextMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `result_for()` got a node with no `node_id`. Nothing was read | – |
 
-A failed task decodes without a declared type, so `NoTypeAvailable` comes only for a task that succeeded. A process that does not import the task code still reads failed tasks.
+A failed task decodes without a declared type, so `ReadNoTypeAvailable` comes only for a task that succeeded. A process that does not import the task code still reads failed tasks.
 
 A read does its checks before it reads, in this order. Only the first check that fails gives its class:
 
-1. `InvalidInput`: the wait limit (`timeout_ms`) is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`.
-2. `WaitInsideTask`: the read runs in a process that runs task bodies.
+1. `ReadInvalidInput`: the wait limit (`wait_ms`) is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`.
+2. `ReadWaitInsideTask`: the read runs in a process that runs task bodies.
 3. A `TaskHandle` returns the read that it keeps.
-4. `AsyncContext`: a sync read runs on a thread that runs an event loop.
+4. `ReadAsyncContext`: a sync read runs on a thread that runs an event loop.
 
-The Rust and the TypeScript clients use the same order. So a read inside a task with a wait above the limit gives `InvalidInput` in each client.
+The Rust and the TypeScript clients use the same order. So a read inside a task with a wait above the limit gives `INVALID_INPUT` in each client.
 
 ```python
 from horsies import (
-    BrokerError,
     Err,
     Failed,
     Ok,
+    ReadDatabaseError,
     ReadResult,
+    ReadTaskNotFound,
+    ReadWaitTimeout,
     Succeeded,
     TaskError,
-    TaskNotFound,
-    WaitTimeout,
 )
 
 
@@ -90,7 +90,7 @@ def describe_read(read: ReadResult[int, TaskError]) -> str:
             return f'value: {value}'
         case Ok(Failed(task_error)):
             return f'task failed: {task_error.error_code}'
-        case Err(WaitTimeout() | TaskNotFound() | BrokerError()):
+        case Err(ReadWaitTimeout() | ReadTaskNotFound() | ReadDatabaseError()):
             return 'no outcome yet: read again later'
         case Err(read_error):
             return f'no outcome: {read_error.code}: {read_error.message}'

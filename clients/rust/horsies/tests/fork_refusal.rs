@@ -103,7 +103,7 @@ fn one_node_spec(app: &mut Horsies) -> WorkflowSpec {
 fn child_report(app: &mut Horsies) -> Vec<String> {
     let echo_function = echo::register(app).expect("register the task");
     let spec = one_node_spec(app);
-    let task_handle = app.task_handle_of::<u32, Infallible>(TASK_ID);
+    let task_handle = app.task_handle::<u32, Infallible>(TASK_ID);
     let workflow: WorkflowHandle<u32> = app.workflow_handle(WORKFLOW_ID);
     let app = &*app;
     let calls: [Option<String>; 18] = [

@@ -188,7 +188,7 @@ from horsies import Err, Failed, Ok, Succeeded, TaskHandle
 
 
 def show_total(handle: TaskHandle[int]) -> None:
-    match handle.get(timeout_ms=30_000):
+    match handle.get(wait_ms=30_000):
         case Ok(Succeeded(value)):
             print(value)
         case Ok(Failed(task_error)):
@@ -201,23 +201,23 @@ def show_total(handle: TaskHandle[int]) -> None:
 
 ### `ReadError`
 
-`ReadError` is a closed union of frozen classes, one per catalog code. A `match` on it is exhaustive under a type checker. Every class has `code` (a class variable: its catalog member) and `message` (the subject and the cause). `BrokerError` adds `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`). Match one class with its arm, for example `case Err(WaitTimeout()):`.
+`ReadError` is a closed union of frozen classes, one per catalog code. A `match` on it is exhaustive under a type checker. Every class has `code` (a class variable: its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` adds `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`). Match one class with its arm, for example `case Err(ReadWaitTimeout()):`.
 
 | Class | `code` | When |
 |---|---|---|
-| `WaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow had not ended when the wait limit passed. It may still run |
-| `TaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send |
-| `WorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle |
-| `ResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or a handle with no broker holds no result |
-| `ResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `WorkflowHandle.result_for()`: the node stores no result yet |
-| `WaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read |
-| `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form |
-| `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read |
-| `ResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types |
-| `UnknownCustomCode` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` does not name (a row of another version of the task); `custom_code` is the stored text |
-| `BrokerError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed. A later read may succeed |
-| `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The stored value succeeded, and this process has no declared type to read it with: the handle was built by id, or the task or workflow is not registered here |
-| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read |
+| `ReadWaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow had not ended when the wait limit passed. It may still run |
+| `ReadTaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send |
+| `ReadWorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle |
+| `ReadResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or a handle with no broker holds no result |
+| `ReadResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `WorkflowHandle.result_for()`: the node stores no result yet |
+| `ReadWaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read |
+| `ReadAsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form |
+| `ReadInvalidInput` | `RetrievalCode.INVALID_INPUT` | `wait_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read |
+| `ReadResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types |
+| `ReadUnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` does not name (a row of another version of the task); `custom_code` is the stored text |
+| `ReadDatabaseError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed. A later read may succeed |
+| `ReadNoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The stored value succeeded, and this process has no declared type to read it with: the handle was built by id, or the task or workflow is not registered here |
+| `ReadWorkflowContextMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read |
 
 ## `TaskError`
 
@@ -246,7 +246,7 @@ TaskError(message="card declined")                                          # Va
 
 **Deserialization**: use standard `model_validate()` / `model_validate_json()` everywhere. No special rehydration methods needed — works for nested models too.
 
-**Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: `TaskHandle.get()`, `WorkflowHandle.get()` and `app.get_result()` return `Err(ResultDeserializationError(...))` with the cause.
+**Stored data**: `TaskError` refuses a key that it does not declare, at construction and at decode. A stored error with an unknown key, or without `error_code`, is stored data that does not parse: `TaskHandle.get()`, `WorkflowHandle.get()` and `app.get_result()` return `Err(ReadResultDeserializationError(...))` with the cause.
 
 ### `SubWorkflowError`
 
@@ -275,10 +275,10 @@ Infra-level failures during task execution, brokering, or worker processing:
 - `UNHANDLED_EXCEPTION` — uncaught exception wrapped by library
 - `TASK_EXCEPTION` — the worker caught an exception outside the task wrapper, or a validator raised on a default
 - `WORKER_CRASHED` — worker process died during execution
-- `BROKER_ERROR` — DB/broker failure during result retrieval (`read_error.code` of `BrokerError`)
+- `BROKER_ERROR` — DB/broker failure during result retrieval (`read_error.code` of `ReadDatabaseError`)
 - `WORKER_RESOLUTION_ERROR` — task name not found in registry
 - `WORKER_SERIALIZATION_ERROR` — failed to serialize/deserialize arguments
-- `RESULT_DESERIALIZATION_ERROR` — a stored result or a stored workflow error is corrupt or does not decode (`read_error.code` of `ResultDeserializationError`)
+- `RESULT_DESERIALIZATION_ERROR` — a stored result or a stored workflow error is corrupt or does not decode (`read_error.code` of `ReadResultDeserializationError`)
 - `WORKFLOW_ENQUEUE_FAILED` — workflow node failed during enqueue
 - `SUBWORKFLOW_LOAD_FAILED` — sub-workflow definition could not be loaded
 - `WORKFLOW_RECOVERY_LIMIT_REACHED` — workflow recovery raised a persistent error in `workflow_recovery_failure_limit` reaper passes, so the workflow failed closed
@@ -293,22 +293,23 @@ Violations of the declared API contract between task author and library:
 
 <!-- members: ContractCode -->
 - `RETURN_TYPE_MISMATCH` — returned value doesn't fit the declared type, or is not `Ok` or `Err`, including `None`
-- `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID (`read_error.code` of `WorkflowCtxMissingId`)
-- `NO_TYPE_AVAILABLE` — a typed decode needs the success type, but the task or workflow is not registered locally (for example a handle built from an id) (`read_error.code` of `NoTypeAvailable`)
+- `WORKFLOW_CTX_MISSING_ID` — workflow context missing required ID (`read_error.code` of `ReadWorkflowContextMissingId`)
+- `NO_TYPE_AVAILABLE` — a typed decode needs the success type, but the task or workflow is not registered locally (for example a handle built from an id) (`read_error.code` of `ReadNoTypeAvailable`)
 
 ### `RetrievalCode`
 
 The `code` of a read error (`read_error.code`) when `handle.get()` / `handle.result_for()` gives no outcome. A read never puts these codes in a `TaskError`. Each member has its `ReadError` class:
 
 <!-- members: RetrievalCode -->
-- `WAIT_TIMEOUT` — `WaitTimeout`: `get()` timed out; task may still be running, not cached, re-pollable
-- `TASK_NOT_FOUND` — `TaskNotFound`: task ID does not exist
-- `WORKFLOW_NOT_FOUND` — `WorkflowNotFound`: workflow ID does not exist, or retention removed the workflow after `get()` read its terminal status
-- `RESULT_NOT_AVAILABLE` — `ResultNotAvailable`: the task reached a terminal status and stored no result
-- `RESULT_NOT_READY` — `ResultNotReady`: the workflow node stores no result yet
-- `ASYNC_CONTEXT` — `AsyncContext`: sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
-- `INVALID_INPUT` — `InvalidInput`: an argument of `get()` / `get_async()` was refused before any read: `timeout_ms` must be None or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached
-- `WAIT_INSIDE_TASK` — `WaitInsideTask`: a result wait (`TaskHandle.get()` / `get_async()`, `app.get_result()` / `get_result_async()`, `WorkflowHandle.get()` / `get_async()`) was called inside a worker child, also from a thread that the task started; it waited for nothing, not cached. It is the first check of the call, before `timeout_ms` and `ASYNC_CONTEXT`. The raw reads `app.get_raw_result()` and `broker.get_raw_result_record()` (and `*_async`) return `Err(BrokerWaitInsideTask)` there. A task never waits for another task: compose them as a workflow. `send()`, starting a workflow, `info()` and `workflow_ctx.result_for()` still work in a task
+- `WAIT_TIMEOUT` — `ReadWaitTimeout`: `get()` timed out; task may still be running, not cached, re-pollable
+- `TASK_NOT_FOUND` — `ReadTaskNotFound`: task ID does not exist
+- `WORKFLOW_NOT_FOUND` — `ReadWorkflowNotFound`: workflow ID does not exist, or retention removed the workflow after `get()` read its terminal status
+- `RESULT_NOT_AVAILABLE` — `ReadResultNotAvailable`: the task reached a terminal status and stored no result
+- `RESULT_NOT_READY` — `ReadResultNotReady`: the workflow node stores no result yet
+- `ASYNC_CONTEXT` — `ReadAsyncContext`: sync `get()` / `result_for()` called on a thread that runs an event loop; nothing ran, not cached — call `get_async()` / `result_for_async()`
+- `INVALID_INPUT` — `ReadInvalidInput`: an argument of `get()` / `get_async()` was refused before any read: `wait_ms` must be None or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295 ms); not cached
+- `WAIT_INSIDE_TASK` — `ReadWaitInsideTask`: a result wait (`TaskHandle.get()` / `get_async()`, `app.get_result()` / `get_result_async()`, `WorkflowHandle.get()` / `get_async()`) was called inside a worker child, also from a thread that the task started; it waited for nothing, not cached. It is the first check of the call, before `timeout_ms` and `ASYNC_CONTEXT`. The raw reads `app.get_raw_result()` and `broker.get_raw_result_record()` (and `*_async`) return `Err(BrokerWaitInsideTask)` there. A task never waits for another task: compose them as a workflow. `send()`, starting a workflow, `info()` and `workflow_ctx.result_for()` still work in a task
+- `UNKNOWN_CUSTOM_CODE` — `ReadUnknownCustomCode`: the stored error has a custom code that the declared `Enum` of the task does not name (a row of another version of the task); cached. Deploy the `Enum` with the code
 
 ### `OutcomeCode`
 
@@ -500,8 +501,8 @@ Returned by successful `.send()` / `.send_async()` / `.schedule()` / `.schedule_
 ```python
 task_id: UUID  # stable across retries of the same send
 
-def get(timeout_ms: int | None = None) -> ReadResult[T, TaskError]
-async def get_async(timeout_ms: int | None = None) -> ReadResult[T, TaskError]
+def get(wait_ms: int | None = None) -> ReadResult[T, TaskError]
+async def get_async(wait_ms: int | None = None) -> ReadResult[T, TaskError]
 
 def info(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> BrokerResult[TaskInfo | None]
 async def info_async(*, include_result: bool = False, include_failed_reason: bool = False, include_attempts: bool = False) -> BrokerResult[TaskInfo | None]
@@ -509,17 +510,17 @@ async def info_async(*, include_result: bool = False, include_failed_reason: boo
 
 ### Caching semantics
 
-- An outcome (`Ok(Succeeded(...))`, `Ok(Failed(...))`) and the final read errors `ResultNotAvailable`, `ResultDeserializationError`, `UnknownCustomCode` and `NoTypeAvailable` **are** cached — repeated `get()` returns the cached value without DB query.
-- The other read errors (`WaitTimeout`, `TaskNotFound`, `BrokerError`, `AsyncContext`, `WaitInsideTask`, `InvalidInput`) are **not** cached — subsequent `get()` calls read from the broker again.
+- An outcome (`Ok(Succeeded(...))`, `Ok(Failed(...))`) and the final read errors `ReadResultNotAvailable`, `ReadResultDeserializationError`, `ReadUnknownCustomCode` and `ReadNoTypeAvailable` **are** cached — repeated `get()` returns the cached value without DB query.
+- The other read errors (`ReadWaitTimeout`, `ReadTaskNotFound`, `ReadDatabaseError`, `ReadAsyncContext`, `ReadWaitInsideTask`, `ReadInvalidInput`) are **not** cached — subsequent `get()` calls read from the broker again.
 
 ### `TaskInfo` fields
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 task_id: UUID, task_name: str, status: TaskStatus
-queue_name: str, priority: int
+queue: str, priority: int
 retry_count: int, max_retries: int, next_retry_at: datetime | None
-sent_at: datetime | None, enqueued_at: datetime
+sent_at: datetime | None, due_at: datetime        # due_at: a worker may claim the task from this time
 claimed_at: datetime | None, started_at: datetime | None
 completed_at: datetime | None, failed_at: datetime | None
 worker_hostname: str | None, worker_pid: int | None, worker_process_name: str | None
@@ -614,11 +615,11 @@ Pre-serialized at send time. Never construct manually — created by the library
 ```python
 match my_task.send(**kwargs):
     case Ok(handle):
-        result = handle.get(timeout_ms=5000)
+        result = handle.get(wait_ms=5000)
     case Err(TaskSendEnqueueFailed(retryable=True) as err):
         match my_task.retry_send(err):
             case Ok(handle):
-                result = handle.get(timeout_ms=5000)
+                result = handle.get(wait_ms=5000)
             case Err(retry_err):
                 log_permanent_failure(retry_err)
     case Err(err):
@@ -759,7 +760,7 @@ codec. Non-serializable return → `WORKER_SERIALIZATION_ERROR`.
 
 `app.get_result(task_id, ...)`, `TaskHandle.get(...)` and
 `WorkflowHandle.get(...)` (and their `*_async` forms) return
-`Err(ResultDeserializationError(...))` when the stored envelope is
+`Err(ReadResultDeserializationError(...))` when the stored envelope is
 malformed, misses the `__h_task_result__` marker, or does not decode as
 the registered types. The read error is apart from any `TaskError` of
 the task. The same read gives the same error until the stored value
@@ -767,7 +768,7 @@ changes, so a `TaskHandle` caches it.
 
 A successful stored value with no declared type in this process (a
 handle built by id, or a task that is not registered here) gives
-`Err(NoTypeAvailable(...))`. Read the raw result
+`Err(ReadNoTypeAvailable(...))`. Read the raw result
 (`app.get_raw_result()`), or import the task module.
 
 ## Common Pitfalls
@@ -860,20 +861,20 @@ def t() -> Result[str, TaskError]: ...
 # WRONG — on a thread that runs an event loop, each sync call returns ASYNC_CONTEXT
 async def report(handle: TaskHandle[str]) -> None:
     send_r = my_task.send(value="test")      # Err(ASYNC_CONTEXT), nothing enqueued
-    result = handle.get(timeout_ms=5000)     # Err(AsyncContext(...)), not cached
+    result = handle.get(wait_ms=5000)     # Err(ReadAsyncContext(...)), not cached
 
 # CORRECT — use the *_async forms
 async def report() -> None:
     handle = (await my_task.send_async(value="test")).unwrap()
-    result = await handle.get_async(timeout_ms=5000)
+    result = await handle.get_async(wait_ms=5000)
 ```
 
-### `WaitTimeout` is not a terminal failure
+### `ReadWaitTimeout` is not a terminal failure
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-match handle.get(timeout_ms=5000):
-    case Err(WaitTimeout()):
+match handle.get(wait_ms=5000):
+    case Err(ReadWaitTimeout()):
         # Task may still be running. NOT cached — calling get() again will re-poll.
         check_again_later(handle.task_id)
     case _:
@@ -917,9 +918,9 @@ from horsies import (
     TaskError, SubWorkflowError, TaskInfo, TaskAttemptInfo,
     # Read result types: the outcome and the read errors
     ReadResult, TaskOutcome, Succeeded, Failed, ReadError,
-    WaitTimeout, TaskNotFound, WorkflowNotFound, ResultNotAvailable, ResultNotReady,
-    WaitInsideTask, AsyncContext, InvalidInput, ResultDeserializationError, UnknownCustomCode,
-    BrokerError, NoTypeAvailable, WorkflowCtxMissingId,
+    ReadWaitTimeout, ReadTaskNotFound, ReadWorkflowNotFound, ReadResultNotAvailable, ReadResultNotReady,
+    ReadWaitInsideTask, ReadAsyncContext, ReadInvalidInput, ReadResultDeserializationError, ReadUnknownCustomCode,
+    ReadDatabaseError, ReadNoTypeAvailable, ReadWorkflowContextMissingId,
     # The run of a task: cancel state
     TaskRuntime, RunCancelState, CancelNotRequested, CancelRequested, CancelCause,
     # Error code families

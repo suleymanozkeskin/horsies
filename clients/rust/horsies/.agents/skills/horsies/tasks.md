@@ -581,15 +581,15 @@ async fn print_outcome(
 
 | `ReadError` | Code | When | Kept by the handle |
 |---|---|---|---|
-| `WaitTimedOut { task_id, status }` | `WAIT_TIMEOUT` | The task had not ended when the limit passed | No |
+| `WaitTimeout { task_id, status }` | `WAIT_TIMEOUT` | The task had not ended when the limit passed | No |
 | `TaskNotFound { task_id, reason }` | `TASK_NOT_FOUND` | Neither the live table nor the history holds the task | No |
 | `ResultNotAvailable { task_id, status }` | `RESULT_NOT_AVAILABLE` | Terminal status with no stored result | Yes |
-| `StoredResultUnreadable { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read with `T` and `E` | Yes |
-| `UnknownUserCode { task_id, code, code_type }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` | Yes |
+| `ResultDeserializationError { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read with `T` and `E` | Yes |
+| `UnknownCustomCode { task_id, stored_code, code_type }` | `UNKNOWN_CUSTOM_CODE` | The stored custom code is not a code of `E` | Yes |
 | `InvalidInput { task_id, cause }` | `INVALID_INPUT` | The `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read | No |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a worker child. Nothing was read | No |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread that runs a tokio runtime. Nothing was read | No |
-| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed | No |
+| `DatabaseError { database_code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `database_code` is the code of the failed operation | No |
 
 - `ReadError::code()` returns the library code of the failure.
 - `reason` is a `TaskAbsenceReason`: `PredatesRetainedHistory` (retention
@@ -603,15 +603,15 @@ async fn print_outcome(
 `TaskInfo`: status and times, plus the parts asked for (attempts newest
 first). Its `result` is a `TaskResult<JsonText>`: the value as its stored
 text, read with `decode::<T>()`. The info is not kept. Its errors are `TaskNotFound`,
-`StoredResultUnreadable` and `Database`.
+`ResultDeserializationError` and `DatabaseError`.
 
 Reads by task id, on the app:
 
 | Method | Returns |
 |---|---|
-| `app.task_handle_of::<T, E>(task_id)` | A `TaskHandle<T, E>`. No I/O |
-| `app.get_result::<T, E>(task_id, limit)` | `Result<TaskOutcome<T, E>, ReadError>`. Nothing is kept |
-| `app.get_raw_result(task_id, limit)` | `Result<StoredResult, ReadError>`: `task_id`, `task_name`, `status`, `envelope_json` |
+| `app.task_handle::<T, E>(task_id)` | A `TaskHandle<T, E>`. No I/O |
+| `app.get_result::<T, E>(task_id, wait)` | `Result<TaskOutcome<T, E>, ReadError>`. Nothing is kept |
+| `app.get_raw_result(task_id, wait)` | `Result<StoredResult, ReadError>`: `task_id`, `task_name`, `status`, `envelope_json` |
 | `app.get_task_info(task_id, parts)` | `Result<TaskInfo, ReadError>` |
 
 ## Blocking API
@@ -811,7 +811,7 @@ use horsies::{
     RegisteredTask, async_task_fn, blocking_task_fn,
     // Library codes
     BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
-    ExceptionRecord, SubWorkflowFailure, UserCode, UserCodeRefused, UnknownUserCode,
+    ExceptionRecord, SubWorkflowFailure, UserCode, UserCodeRefused, UnknownCustomCode,
     // Sends
     TaskFunction, TaskFunctionSendOptions, TaskFunctionNotFound, TaskSendOptions,
     SendRetention, RetentionDays, WholeSeconds, TaskSendError, TaskSendErrorCode,

@@ -289,7 +289,7 @@ from horsies import Err, Failed, Ok, OutcomeCode, Succeeded, WorkflowHandle
 
 
 def read_label(handle: WorkflowHandle[str]) -> str | None:
-    match handle.get(timeout_ms=30000):
+    match handle.get(wait_ms=30000):
         case Ok(Succeeded(label)):
             return label
         case Ok(Failed(error)) if error.error_code == OutcomeCode.WORKFLOW_OUTPUT_SKIPPED:
@@ -384,7 +384,7 @@ match await spec.start_async():
         pass
 
 # Wait for workflow completion first
-await handle.get_async(timeout_ms=30000)
+await handle.get_async(wait_ms=30000)
 
 # Now safe to access individual results (node_id keys)
 # results() returns Ok(dict) or Err(HandleOperationError)
@@ -596,7 +596,7 @@ node_b: TaskNode[str] = TaskNode(
 
 ### Fire-and-Forget with result_for()
 
-`result_for()` is non-blocking. It queries the database once and returns immediately. If the task hasn't completed, it returns `Err(ResultNotReady(...))`.
+`result_for()` is non-blocking. It queries the database once and returns immediately. If the task hasn't completed, it returns `Err(ReadResultNotReady(...))`.
 
 **Don't do this:**
 
@@ -607,14 +607,14 @@ match spec.start():
         raise RuntimeError(start_error.message)
     case Ok(handle):
         # Immediately call result_for() - task likely hasn't completed yet
-        result = handle.result_for(node)  # Returns Err(ResultNotReady(...))
+        result = handle.result_for(node)  # Returns Err(ReadResultNotReady(...))
 ```
 
 **Do this instead:**
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Ok, ResultNotReady
+from horsies import Err, Ok, ReadResultNotReady
 
 match spec.start():
     case Err(start_error):
@@ -623,12 +623,12 @@ match spec.start():
         pass
 
 # Option 1: Wait for workflow completion first
-handle.get(timeout_ms=30000)
-result = handle.result_for(node)  # `ResultNotReady` is still possible depending on your workflow definition
+handle.get(wait_ms=30000)
+result = handle.result_for(node)  # `ReadResultNotReady` is still possible depending on your workflow definition
 
 # Option 2: Check if result is ready
 match handle.result_for(node):
-    case Err(ResultNotReady()):
+    case Err(ReadResultNotReady()):
         # Handle not-ready case: poll, wait, or skip, decide for your use case
         do_something()
     case _:
@@ -639,4 +639,4 @@ match handle.result_for(node):
 
 - Workflows can be long-running (minutes to hours)
 - `result_for()` does not block or poll - it's a single database query
-- Use `handle.get(timeout_ms=...)` to wait for completion before accessing individual task results
+- Use `handle.get(wait_ms=...)` to wait for completion before accessing individual task results

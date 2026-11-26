@@ -572,7 +572,7 @@ async fn test_task_info_after_completion() {
     let info = handle.info(ALL_PARTS).await.expect("read the info");
     assert_eq!(info.task_id, handle.task_id());
     assert_eq!(info.task_name, "e2e_simple");
-    assert_eq!(info.queue_name, "default");
+    assert_eq!(info.queue, "default");
     assert_eq!(info.status, TaskStatus::Completed);
     let result = info.result.expect("the result was asked for");
     assert_eq!(
@@ -616,13 +616,13 @@ async fn test_exponential_backoff_intervals() {
         .info(TaskInfoParts::default())
         .await
         .expect("read the info");
-    let mut enqueued = vec![first.enqueued_at];
+    let mut enqueued = vec![first.due_at];
     let _worker = suite.worker(Profile::Isolated1).await;
     poll::poll_until(Duration::from_secs(15), "the second retry", async || {
         let info = handle.info(TaskInfoParts::default()).await.ok()?;
         let count = usize::try_from(info.retry_count).ok()?;
         if count == enqueued.len() {
-            enqueued.push(info.enqueued_at);
+            enqueued.push(info.due_at);
         }
         assert_eq!(info.sent_at, first.sent_at, "sent_at changed on a retry");
         (enqueued.len() > 2).then_some(())
@@ -831,7 +831,7 @@ async fn test_wait_timeout() {
         .expect("send");
     let read = handle.get(within(Duration::from_millis(500))).await;
     assert!(
-        matches!(read, Err(ReadError::WaitTimedOut { .. })),
+        matches!(read, Err(ReadError::WaitTimeout { .. })),
         "{read:?}"
     );
 }

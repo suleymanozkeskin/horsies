@@ -17,7 +17,7 @@ use uuid::Uuid;
 use super::node::NodeKey;
 use crate::handle::read_stored_result;
 use crate::task::body::value_free_decode_text;
-use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode};
+use crate::{TaskError, TaskOutcome, UnknownCustomCode, UserErrorCode};
 
 /// The context of one workflow task: its place in the workflow, and the
 /// results and sub-workflow summaries of the dependencies that its node
@@ -61,13 +61,13 @@ pub enum WorkflowContextError {
     /// The stored value does not read as the asked type
     /// (`RESULT_DESERIALIZATION_ERROR`). `cause` names no value.
     #[error("the stored value of node '{node_id}' does not read: {cause}")]
-    Unreadable { node_id: String, cause: String },
-    /// The stored error has a user code that the asked code type does not
-    /// name.
+    ResultDeserializationError { node_id: String, cause: String },
+    /// The stored error has a custom code that the asked code type does not
+    /// name (`UNKNOWN_CUSTOM_CODE`).
     #[error("the stored error of node '{node_id}': {cause}")]
-    UnknownUserCode {
+    UnknownCustomCode {
         node_id: String,
-        cause: UnknownUserCode,
+        cause: UnknownCustomCode,
     },
 }
 
@@ -107,7 +107,7 @@ impl WorkflowContext {
                     node_id: node_id.to_owned(),
                 })?;
         let read = read_stored_result::<T>(stored.0.get()).map_err(|refused| {
-            WorkflowContextError::Unreadable {
+            WorkflowContextError::ResultDeserializationError {
                 node_id: node_id.to_owned(),
                 cause: refused.cause,
             }
@@ -116,7 +116,7 @@ impl WorkflowContext {
             TaskResult::Ok(value) => Ok(TaskOutcome::Succeeded(value)),
             TaskResult::Err(stored) => TaskError::<E>::from_stored(stored)
                 .map(TaskOutcome::Failed)
-                .map_err(|cause| WorkflowContextError::UnknownUserCode {
+                .map_err(|cause| WorkflowContextError::UnknownCustomCode {
                     node_id: node_id.to_owned(),
                     cause,
                 }),
@@ -149,7 +149,7 @@ impl WorkflowContext {
     /// and `u64` range reads as `u128` or `i128`, as Python reads any integer.
     ///
     /// Errors: [`WorkflowContextError::NotInContext`];
-    /// [`WorkflowContextError::Unreadable`] for an output that does not read
+    /// [`WorkflowContextError::ResultDeserializationError`] for an output that does not read
     /// as `T`.
     pub fn output_for<T: DeserializeOwned>(
         &self,
@@ -158,15 +158,12 @@ impl WorkflowContext {
         let summary = self.summary_for(key)?;
         match &summary.output {
             None => Ok(None),
-            Some(output) => {
-                output
-                    .decode::<T>()
-                    .map(Some)
-                    .map_err(|error| WorkflowContextError::Unreadable {
-                        node_id: key.node_id().to_owned(),
-                        cause: value_free_decode_text(&error),
-                    })
-            }
+            Some(output) => output.decode::<T>().map(Some).map_err(|error| {
+                WorkflowContextError::ResultDeserializationError {
+                    node_id: key.node_id().to_owned(),
+                    cause: value_free_decode_text(&error),
+                }
+            }),
         }
     }
 
@@ -282,7 +279,7 @@ mod tests {
         );
         assert!(matches!(
             context.output_for(&NodeKey::<u64>::new("max")),
-            Err(WorkflowContextError::Unreadable { .. })
+            Err(WorkflowContextError::ResultDeserializationError { .. })
         ));
     }
 
@@ -297,11 +294,11 @@ mod tests {
         );
         assert!(matches!(
             context.result_for::<String, Infallible>(&NodeKey::new("fetch")),
-            Err(WorkflowContextError::Unreadable { .. })
+            Err(WorkflowContextError::ResultDeserializationError { .. })
         ));
         assert!(matches!(
             context.result_for::<u32, Infallible>(&NodeKey::new("check")),
-            Err(WorkflowContextError::UnknownUserCode { .. })
+            Err(WorkflowContextError::UnknownCustomCode { .. })
         ));
         assert!(matches!(
             context.summary_for(&NodeKey::<u32>::new("fetch")),

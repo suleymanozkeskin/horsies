@@ -2938,13 +2938,15 @@ fn history_task_info(
         task_id: detail.task_id,
         task_name: detail.task_name,
         status,
-        queue_name: detail.queue_name,
+        // History column queue_name.
+        queue: detail.queue_name,
         priority: detail.priority,
         retry_count: detail.retry_count as u32,
         max_retries: detail.max_retries as u32,
         next_retry_at: None,
         sent_at: detail.sent_at,
-        enqueued_at: detail.enqueued_at,
+        // History column enqueued_at: the time the row became due.
+        due_at: detail.enqueued_at,
         claimed_at: detail.claimed_at,
         started_at: detail.started_at,
         completed_at: (status == crate::core::TaskStatus::Completed).then_some(terminal_at),

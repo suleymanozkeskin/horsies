@@ -23,14 +23,15 @@ from horsies import (
     Ok,
     OperationalErrorCode,
     OutcomeCode,
+    ReadUnknownCustomCode,
     Result,
+    RetrievalCode,
     Succeeded,
     TaskError,
     TaskOutcome,
-    UnknownCustomCode,
 )
 from horsies.core.app import Horsies
-from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
+from horsies.core.brokers.result_types import BrokerResult, StoredResult
 from horsies.core.codec.typed import encode_returned_result
 from horsies.core.errors import ErrorCode, TaskDefinitionError
 from horsies.core.models.app import AppConfig
@@ -66,8 +67,8 @@ def _app(mapper: dict[type[BaseException], str] | None = None) -> Horsies:
     ))
 
 
-def _stored_error(code: str) -> BrokerResult[RawResultRecord | None]:
-    return Ok(RawResultRecord(
+def _stored_error(code: str) -> BrokerResult[StoredResult | None]:
+    return Ok(StoredResult(
         task_id=TASK_ID,
         task_name='send_welcome_email',
         status=TaskStatus.FAILED,
@@ -200,15 +201,15 @@ def test_stored_code_that_the_enum_does_not_name_is_unknown_custom_code() -> Non
         TASK_ID, _stored_error('RATE_LIMITED'), str, None, EnumCodes(code_type=WelcomeCode),
     )
     match read:
-        case Err(err_value=UnknownCustomCode(custom_code='RATE_LIMITED')):
-            pass
+        case Err(err_value=ReadUnknownCustomCode(custom_code='RATE_LIMITED') as unknown):
+            assert unknown.code is RetrievalCode.UNKNOWN_CUSTOM_CODE
         case other:
-            pytest.fail(f'expected Err(UnknownCustomCode), got {other!r}')
+            pytest.fail(f'expected Err(ReadUnknownCustomCode), got {other!r}')
     assert is_final_read(read)
 
 
 def test_built_in_code_reads_unchanged_with_typed_codes() -> None:
-    stored: BrokerResult[RawResultRecord | None] = Ok(RawResultRecord(
+    stored: BrokerResult[StoredResult | None] = Ok(StoredResult(
         task_id=TASK_ID, task_name='send_welcome_email', status=TaskStatus.CANCELLED, raw_result=None,
     ))
     match read_of_record(TASK_ID, stored, str, None, EnumCodes(code_type=WelcomeCode)):
@@ -365,10 +366,10 @@ def test_result_for_an_unknown_code_is_unknown_custom_code() -> None:
     from horsies.core.models.workflow.handle import _node_read
 
     match _node_read(_node_decode(_typed_app(), 'send_welcome_email', 'RATE_LIMITED')):
-        case Err(err_value=UnknownCustomCode(custom_code='RATE_LIMITED')):
+        case Err(err_value=ReadUnknownCustomCode(custom_code='RATE_LIMITED')):
             pass
         case other:
-            pytest.fail(f'expected Err(UnknownCustomCode), got {other!r}')
+            pytest.fail(f'expected Err(ReadUnknownCustomCode), got {other!r}')
 
 
 def test_result_for_an_untyped_node_gives_the_text() -> None:

@@ -14,28 +14,28 @@ from __future__ import annotations
 from typing import assert_never
 
 from horsies import (
-    AsyncContext,
-    BrokerError,
     Err,
     Failed,
-    InvalidInput,
-    NoTypeAvailable,
     Ok,
+    ReadAsyncContext,
+    ReadDatabaseError,
     ReadError,
+    ReadInvalidInput,
+    ReadNoTypeAvailable,
     ReadResult,
+    ReadResultDeserializationError,
+    ReadResultNotAvailable,
+    ReadResultNotReady,
+    ReadTaskNotFound,
+    ReadUnknownCustomCode,
+    ReadWaitInsideTask,
+    ReadWaitTimeout,
+    ReadWorkflowContextMissingId,
+    ReadWorkflowNotFound,
     Result,
-    ResultDeserializationError,
-    ResultNotAvailable,
-    ResultNotReady,
     Succeeded,
     TaskError,
-    TaskNotFound,
     TaskOutcome,
-    UnknownCustomCode,
-    WaitInsideTask,
-    WaitTimeout,
-    WorkflowCtxMissingId,
-    WorkflowNotFound,
 )
 
 
@@ -91,18 +91,18 @@ def no_ok_value_on_every_member(read: ReadResult[str, TaskError]) -> object:
 def every_read_error(error: ReadError) -> bool:
     """Whether a later read may give an outcome: one arm per class."""
     match error:
-        case WaitTimeout() | TaskNotFound() | ResultNotReady() | BrokerError():
+        case ReadWaitTimeout() | ReadTaskNotFound() | ReadResultNotReady() | ReadDatabaseError():
             return True
         case (
-            WorkflowNotFound()
-            | ResultNotAvailable()
-            | WaitInsideTask()
-            | AsyncContext()
-            | InvalidInput()
-            | ResultDeserializationError()
-            | UnknownCustomCode()
-            | NoTypeAvailable()
-            | WorkflowCtxMissingId()
+            ReadWorkflowNotFound()
+            | ReadResultNotAvailable()
+            | ReadWaitInsideTask()
+            | ReadAsyncContext()
+            | ReadInvalidInput()
+            | ReadResultDeserializationError()
+            | ReadUnknownCustomCode()
+            | ReadNoTypeAvailable()
+            | ReadWorkflowContextMissingId()
         ):
             return False
         case _ as unreachable:
@@ -111,16 +111,16 @@ def every_read_error(error: ReadError) -> bool:
 
 def read_error_left_out(error: ReadError) -> bool:
     match error:  # pyright: ignore[reportMatchNotExhaustive]
-        case WaitTimeout() | TaskNotFound() | ResultNotReady() | BrokerError():
+        case ReadWaitTimeout() | ReadTaskNotFound() | ReadResultNotReady() | ReadDatabaseError():
             return True
         case (
-            WorkflowNotFound()
-            | ResultNotAvailable()
-            | WaitInsideTask()
-            | AsyncContext()
-            | InvalidInput()
-            | ResultDeserializationError()
-            | NoTypeAvailable()
+            ReadWorkflowNotFound()
+            | ReadResultNotAvailable()
+            | ReadWaitInsideTask()
+            | ReadAsyncContext()
+            | ReadInvalidInput()
+            | ReadResultDeserializationError()
+            | ReadNoTypeAvailable()
         ):
             return False
     return False

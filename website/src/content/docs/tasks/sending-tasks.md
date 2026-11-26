@@ -156,7 +156,7 @@ from horsies import Err, Failed, Ok, Succeeded
 match my_task.send(name="alice", count=3):
     case Ok(handle):
         # Blocking wait, with a timeout in milliseconds
-        match handle.get(timeout_ms=5000):
+        match handle.get(wait_ms=5000):
             case Ok(Succeeded(value)):
                 print(f"Result: {value}")
             case Ok(Failed(task_error)):
@@ -168,11 +168,11 @@ match my_task.send(name="alice", count=3):
         result = handle.get()
 
         # Async wait
-        result = await handle.get_async(timeout_ms=5000)
+        result = await handle.get_async(wait_ms=5000)
     case Err(err):
         print(f"Send failed: {err.code}")
 ```
-`get()` and `get_async()` return `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error of the task. `Err(read_error)` means the read gave no outcome, for example `WaitTimeout`. See [Retrieving Results](/horsies/tasks/retrieving-results/).
+`get()` and `get_async()` return `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error of the task. `Err(read_error)` means the read gave no outcome, for example `ReadWaitTimeout`. See [Retrieving Results](/horsies/tasks/retrieving-results/).
 
 `get_async()` waits via broker notifications (LISTEN/NOTIFY) with a polling fallback.
 
@@ -494,7 +494,7 @@ The codes, and which of them the retry methods accept, are in the [Errors Refere
 | Property/Method | Type | Description |
 | --------------- | ---- | ----------- |
 | `.task_id` | `uuid.UUID` | Unique task identifier |
-| `.get(timeout_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (blocking) |
-| `.get_async(timeout_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (async) |
+| `.get(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (blocking) |
+| `.get_async(wait_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (async) |
 | `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Fetch task metadata from broker |
 | `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Async variant of `.info()` |

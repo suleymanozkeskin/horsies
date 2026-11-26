@@ -60,7 +60,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(healthcheck.send())
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -88,7 +88,7 @@ async def test_args_from_single_dependency(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         # Get final result
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # B should have doubled A's value: 5 * 2 = 10
         output = cast(WorkflowTerminalResults, succeeded_value(result))
@@ -124,7 +124,7 @@ async def test_args_from_multiple_dependencies(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # C should have summed A and B: 10 + 20 = 30
         output = cast(WorkflowTerminalResults, succeeded_value(result))
@@ -159,7 +159,7 @@ async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # B should have read A's value: 42
         output = cast(WorkflowTerminalResults, succeeded_value(result))
@@ -194,7 +194,7 @@ async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> Non
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # C should have summed A and B via ctx: 100 + 200 = 300
         output = cast(WorkflowTerminalResults, succeeded_value(result))
@@ -244,7 +244,7 @@ async def test_failed_propagation(broker: PostgresBroker) -> None:
         ), f"B should be COMPLETED, got {db_tasks[1]['status']}"
 
         # Verify B received A's original error (not UPSTREAM_SKIPPED)
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
         output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_check_upstream_skipped' in key:
@@ -300,7 +300,7 @@ async def test_skipped_propagation(broker: PostgresBroker) -> None:
         ), f"C should be COMPLETED, got {db_tasks[2]['status']}"
 
         # Verify C's result indicates it received UPSTREAM_SKIPPED
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
         output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_check_upstream_skipped' in key:
@@ -355,7 +355,7 @@ async def test_join_ctx_gating(broker: PostgresBroker) -> None:
         ), 'C should start only after ctx dep B is terminal'
 
         # Verify C actually received B's result value via ctx
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
         output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_ctx_reader_str' in key:
@@ -391,7 +391,7 @@ async def test_mixed_args_from_and_ctx(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # D should return {"from_args": 14, "from_ctx": 3}
         output = cast(WorkflowTerminalResults, succeeded_value(result))
@@ -435,7 +435,7 @@ async def test_args_from_transitive_chain(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # C should have doubled B's doubled value: 3 * 2 * 2 = 12
         output = cast(WorkflowTerminalResults, succeeded_value(result))
@@ -483,7 +483,7 @@ async def test_args_from_failed_dep_skips_and_fails_workflow(
         ), f"B should be SKIPPED, got {db_tasks[1]['status']}"
 
         # handle.get() should surface the failure error code
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
         assert_failed(result, 'DATAFLOW_FAIL')
 
 
@@ -508,7 +508,7 @@ async def test_args_from_dict_serialization(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
@@ -553,7 +553,7 @@ async def test_dual_injection_same_node(broker: PostgresBroker) -> None:
         )
         assert status == 'COMPLETED'
 
-        result = await asyncio.to_thread(handle.get, timeout_ms=1000)
+        result = await asyncio.to_thread(handle.get, wait_ms=1000)
 
         # Both paths should deliver the same value (77)
         output = cast(WorkflowTerminalResults, succeeded_value(result))

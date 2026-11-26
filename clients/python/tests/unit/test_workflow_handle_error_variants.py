@@ -23,11 +23,11 @@ import pytest
 import horsies._core as core
 from horsies.core.codec.json_io import EmptyJsonTextError, SerializationError
 from horsies.core.models.outcome import (
-    BrokerError,
     Failed,
+    ReadDatabaseError,
     ReadError,
-    ResultDeserializationError,
-    WorkflowNotFound,
+    ReadResultDeserializationError,
+    ReadWorkflowNotFound,
 )
 from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.models.workflow.enums import WorkflowStatus
@@ -289,7 +289,7 @@ def _wait_failures() -> list[tuple[Any, ReadError]]:
     return [
         (
             _core_record(core.WorkflowAbsent),
-            WorkflowNotFound(message=f'Workflow {WORKFLOW_ID} not found'),
+            ReadWorkflowNotFound(message=f'Workflow {WORKFLOW_ID} not found'),
         ),
         (
             HandleDbOperationFailed(
@@ -298,7 +298,7 @@ def _wait_failures() -> list[tuple[Any, ReadError]]:
                 workflow_id=WORKFLOW_ID,
                 exception=connection_lost,
             ),
-            BrokerError(message=failed_message, retryable=True, exception=connection_lost),
+            ReadDatabaseError(message=failed_message, retryable=True, exception=connection_lost),
         ),
         (
             HandleStoredDataInvalid(
@@ -306,7 +306,7 @@ def _wait_failures() -> list[tuple[Any, ReadError]]:
                 workflow_id=WORKFLOW_ID,
                 exception=contract_violated,
             ),
-            BrokerError(message=failed_message, retryable=False, exception=contract_violated),
+            ReadDatabaseError(message=failed_message, retryable=False, exception=contract_violated),
         ),
     ]
 
@@ -321,7 +321,7 @@ def test_get_returns_each_wait_failure_as_a_read_error(
 ) -> None:
     handle = _handle_answering('wait_workflow_result_async', answer)
 
-    result = asyncio.run(handle.get_async(timeout_ms=0))
+    result = asyncio.run(handle.get_async(wait_ms=0))
 
     assert result == Err(read_error)
 
@@ -508,9 +508,9 @@ class TestStoredWorkflowResult:
         result = handle._completed_result(stored)
 
         match result:
-            case Err(ResultDeserializationError(message=message)):
+            case Err(ReadResultDeserializationError(message=message)):
                 assert 'nested deeper than' in message
             case _:
-                pytest.fail(f'expected Err(ResultDeserializationError), got {result!r}')
+                pytest.fail(f'expected Err(ReadResultDeserializationError), got {result!r}')
 
 

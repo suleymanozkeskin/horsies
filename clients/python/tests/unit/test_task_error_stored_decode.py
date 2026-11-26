@@ -17,7 +17,7 @@ from pydantic import SecretStr, ValidationError
 from horsies.core.app import Horsies
 from horsies.core.brokers.result_types import (
     BrokerInvalidJsonPayload,
-    RawResultRecord,
+    StoredResult,
 )
 from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON
 from horsies.core.codec.json_io import dumps_json, loads_json
@@ -40,7 +40,7 @@ from horsies.core.models.tasks import (
 from horsies.core.models.outcome import (
     Failed,
     ReadResult,
-    ResultDeserializationError,
+    ReadResultDeserializationError,
     Succeeded,
     TaskOutcome,
 )
@@ -126,10 +126,10 @@ def _make_app() -> Horsies:
 
 def _assert_stored_data_error(read: ReadResult[Any, TaskError], cause: str) -> None:
     match read:
-        case Err(err_value=ResultDeserializationError(message=message)):
+        case Err(err_value=ReadResultDeserializationError(message=message)):
             assert cause in message
         case _:
-            pytest.fail(f'expected ResultDeserializationError, got {read!r}')
+            pytest.fail(f'expected ReadResultDeserializationError, got {read!r}')
 
 
 def _failed_task_error(read: Result[TaskOutcome[Any, TaskError], object]) -> TaskError:
@@ -237,7 +237,7 @@ class TestErrorWithNoMessage:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
@@ -262,7 +262,7 @@ class TestErrorWithNoMessage:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
@@ -448,7 +448,7 @@ class TestClientReaders:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,
@@ -473,7 +473,7 @@ class TestClientReaders:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.FAILED,

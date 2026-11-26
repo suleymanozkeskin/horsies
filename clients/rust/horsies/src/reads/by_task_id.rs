@@ -38,41 +38,41 @@ impl Horsies {
     /// A handle of task `task_id`, sent earlier, read with the output type
     /// `T` and the code type `E` (Python `TaskHandle(task_id, app)`). Starts
     /// nothing.
-    pub fn task_handle_of<T, E>(&self, task_id: Uuid) -> TaskHandle<T, E> {
+    pub fn task_handle<T, E>(&self, task_id: Uuid) -> TaskHandle<T, E> {
         TaskHandle::new(task_id, self.reads_handle())
     }
 
     /// The outcome of task `task_id`, read with `T` and `E`, waiting up to
-    /// `limit` while it has not finished (Python `get_result`). Nothing is
+    /// `wait` while it has not finished (Python `get_result`). Nothing is
     /// kept between calls.
     ///
     /// Errors: [`ReadError`], as `TaskHandle::get`.
     pub async fn get_result<T, E>(
         &self,
         task_id: Uuid,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<TaskOutcome<T, E>, ReadError>
     where
         T: DeserializeOwned + Clone,
         E: UserErrorCode,
     {
-        self.task_handle_of::<T, E>(task_id).get(limit).await
+        self.task_handle::<T, E>(task_id).get(wait).await
     }
 
-    /// The stored result of task `task_id`, waiting up to `limit` while it
+    /// The stored result of task `task_id`, waiting up to `wait` while it
     /// has not finished (Python `get_raw_result`).
     ///
     /// Errors: `InvalidInput` for a `Within` limit above
     /// `MAX_WAIT_LIMIT_MS`, as the first check; `WaitInsideTask` in a
     /// process that runs task bodies; both before any statement.
-    /// `TaskNotFound`; `WaitTimedOut`; `ResultNotAvailable` for a terminal
-    /// task that stored no result; `Database`.
+    /// `TaskNotFound`; `WaitTimeout`; `ResultNotAvailable` for a terminal
+    /// task that stored no result; `DatabaseError`.
     pub async fn get_raw_result(
         &self,
         task_id: Uuid,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<StoredResult, ReadError> {
-        let wait = checked_task_wait(task_id, limit)?;
+        let checked = checked_task_wait(task_id, wait)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "Horsies.get_raw_result() for task {task_id}"
@@ -85,7 +85,7 @@ impl Horsies {
             .await
             .map_err(|error| ReadError::of_broker(&error))?;
         let record = broker
-            .get_raw_result_record(task_id, wait)
+            .get_raw_result_record(task_id, checked)
             .await
             .map_err(|error| ReadError::of_operation(task_id, error))?;
         match record {
@@ -98,8 +98,8 @@ impl Horsies {
     /// `get_task_info`): the live row or the history record, attempts
     /// newest first, the stored result read as a `TaskResult`.
     ///
-    /// Errors: `TaskNotFound`; `StoredResultUnreadable` for a stored result
-    /// that is not a task result; `Database`.
+    /// Errors: `TaskNotFound`; `ResultDeserializationError` for a stored result
+    /// that is not a task result; `DatabaseError`.
     pub async fn get_task_info(
         &self,
         task_id: Uuid,
@@ -142,7 +142,7 @@ fn stored_result(record: RawResultRecord) -> Result<StoredResult, ReadError> {
             None,
         ) => Err(ReadError::ResultNotAvailable { task_id, status }),
         (status @ (TaskStatus::Pending | TaskStatus::Claimed | TaskStatus::Running), _) => {
-            Err(ReadError::WaitTimedOut { task_id, status })
+            Err(ReadError::WaitTimeout { task_id, status })
         }
     }
 }
@@ -203,7 +203,7 @@ mod tests {
     fn an_unfinished_task_at_the_limit_timed_out() {
         assert_eq!(
             stored_result(record(TaskStatus::Running, None)),
-            Err(ReadError::WaitTimedOut {
+            Err(ReadError::WaitTimeout {
                 task_id: Uuid::from_u128(9),
                 status: TaskStatus::Running
             })

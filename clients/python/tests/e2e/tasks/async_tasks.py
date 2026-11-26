@@ -17,9 +17,9 @@ from horsies.core.brokers.result_types import BrokerWaitInsideTask
 from horsies.core.models.outcome import (
     Failed,
     ReadResult,
+    ReadWaitInsideTask,
     Succeeded,
     TaskOutcome,
-    WaitInsideTask,
 )
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
@@ -94,7 +94,7 @@ class AsyncWaitProbe(BaseModel):
 
 def _refused(read: ReadResult[Any, TaskError]) -> bool:
     match read:
-        case Err(err_value=WaitInsideTask()):
+        case Err(err_value=ReadWaitInsideTask()):
             return True
         case _:
             return False
@@ -121,7 +121,7 @@ async def async_wait_inside_task() -> Result[AsyncWaitProbe, TaskError]:
         AsyncWaitProbe(
             sent_task_id=str(handle.task_id),
             get_async_refused=_refused(
-                await handle.get_async(timeout_ms=WAIT_PROBE_TIMEOUT_MS),
+                await handle.get_async(wait_ms=WAIT_PROBE_TIMEOUT_MS),
             ),
             app_get_result_async_refused=_refused(read),
             raw_async_refused=is_err(raw)
@@ -129,7 +129,7 @@ async def async_wait_inside_task() -> Result[AsyncWaitProbe, TaskError]:
             workflow_started=is_ok(started),
             workflow_get_async_refused=is_ok(started)
             and _refused(
-                await started.ok_value.get_async(timeout_ms=WAIT_PROBE_TIMEOUT_MS),
+                await started.ok_value.get_async(wait_ms=WAIT_PROBE_TIMEOUT_MS),
             ),
         ),
     )

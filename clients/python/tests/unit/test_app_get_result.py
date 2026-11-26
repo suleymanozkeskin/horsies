@@ -7,7 +7,7 @@ the wrong shape past the contract.
 
 Tests bypass the real Postgres broker by patching `Horsies.get_broker`
 to return a mock whose `get_raw_result_record_async` yields a crafted
-`RawResultRecord` envelope.
+`StoredResult` envelope.
 """
 
 from __future__ import annotations
@@ -20,15 +20,15 @@ import pytest
 from horsies.core.app import Horsies
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
-    RawResultRecord,
+    StoredResult,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import (
     Failed,
-    ResultDeserializationError,
-    ResultNotAvailable,
-    WaitTimeout,
+    ReadResultDeserializationError,
+    ReadResultNotAvailable,
+    ReadWaitTimeout,
 )
 from horsies.core.models.tasks import (
     OperationalErrorCode,
@@ -88,7 +88,7 @@ class TestHorsiesGetResultEnvelopeGuards:
                 'exception': None,
             },
         }
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.FAILED,
@@ -99,15 +99,15 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('task-x')
 
         match result:
-            case Err(ResultDeserializationError() as read_error):
+            case Err(ReadResultDeserializationError() as read_error):
                 assert 'envelope invalid' in read_error.message
             case _:
-                pytest.fail(f'expected ResultDeserializationError, got {result!r}')
+                pytest.fail(f'expected ReadResultDeserializationError, got {result!r}')
         assert is_final_read(result) is True
 
     @pytest.mark.asyncio
     async def test_envelope_with_both_slots_populated_rejected(self) -> None:
-        """`ok` and `err` both populated → ``ResultDeserializationError``."""
+        """`ok` and `err` both populated → ``ReadResultDeserializationError``."""
         app = _make_app()
         malformed = {
             '__h_task_result__': True,
@@ -119,7 +119,7 @@ class TestHorsiesGetResultEnvelopeGuards:
                 'exception': None,
             },
         }
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.FAILED,
@@ -130,13 +130,13 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('task-x')
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     @pytest.mark.asyncio
     async def test_envelope_missing_marker_rejected(self) -> None:
         """Payload lacking the marker isn't a TaskResult envelope."""
         app = _make_app()
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.COMPLETED,
@@ -147,7 +147,7 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('task-x')
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     @pytest.mark.asyncio
     async def test_removed_builtin_code_in_err_slot_returns_invalid_json_payload(
@@ -155,7 +155,7 @@ class TestHorsiesGetResultEnvelopeGuards:
     ) -> None:
         """A stored err slot tagged with the removed code
         ``PYDANTIC_HYDRATION_ERROR`` fails closed with
-        ``ResultDeserializationError``."""
+        ``ReadResultDeserializationError``."""
         app = _make_app()
         stored = {
             '__h_task_result__': True,
@@ -167,7 +167,7 @@ class TestHorsiesGetResultEnvelopeGuards:
                 'exception': None,
             },
         }
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.FAILED,
@@ -178,26 +178,26 @@ class TestHorsiesGetResultEnvelopeGuards:
         result = await app.get_result_async('task-x')
 
         match result:
-            case Err(ResultDeserializationError() as read_error):
+            case Err(ReadResultDeserializationError() as read_error):
                 assert (
                     "Unknown built-in task code: 'PYDANTIC_HYDRATION_ERROR'"
                     in read_error.message
                 )
             case _:
-                pytest.fail(f'expected ResultDeserializationError, got {result!r}')
+                pytest.fail(f'expected ReadResultDeserializationError, got {result!r}')
 
     @pytest.mark.asyncio
     async def test_terminal_status_with_none_payload_is_result_not_available(
         self,
     ) -> None:
-        """Terminal status + empty result column → ``ResultNotAvailable``.
+        """Terminal status + empty result column → ``ReadResultNotAvailable``.
 
         Mirrors the TaskHandle-level guard: terminal failures to write
         the payload are cacheable (engine misbehaviour), not transient
         timeouts.
         """
         app = _make_app()
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.COMPLETED,
@@ -209,16 +209,16 @@ class TestHorsiesGetResultEnvelopeGuards:
 
         # A read failure, not a task outcome: kept by a handle.
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultNotAvailable)
+        assert isinstance(result.err_value, ReadResultNotAvailable)
         assert is_final_read(result) is True
 
     @pytest.mark.asyncio
     async def test_non_terminal_status_with_none_payload_is_wait_timeout(
         self,
     ) -> None:
-        """Non-terminal + raw_result=None → ``WaitTimeout``."""
+        """Non-terminal + raw_result=None → ``ReadWaitTimeout``."""
         app = _make_app()
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.RUNNING,
@@ -226,16 +226,16 @@ class TestHorsiesGetResultEnvelopeGuards:
         )
         _patch_broker(app, Ok(record))
 
-        result = await app.get_result_async('task-x', timeout_ms=100)
+        result = await app.get_result_async('task-x', wait_ms=100)
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, WaitTimeout)
+        assert isinstance(result.err_value, ReadWaitTimeout)
 
     @pytest.mark.asyncio
     async def test_cancelled_status_returns_task_cancelled(self) -> None:
         """Cancelled row → ``Ok(Failed(TASK_CANCELLED))``."""
         app = _make_app()
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='task-x',
             task_name='unknown',
             status=TaskStatus.CANCELLED,
@@ -279,7 +279,7 @@ class TestHorsiesGetResultEnvelopeGuards:
             'ok': None,
             'err': original.model_dump(mode='json'),
         }
-        record = RawResultRecord(
+        record = StoredResult(
             task_id='parent-task',
             task_name='unknown',
             status=TaskStatus.FAILED,
@@ -320,13 +320,13 @@ def _make_task_info(
         task_id=task_id,
         task_name=task_name,
         status=TaskStatus.FAILED,
-        queue_name='default',
+        queue='default',
         priority=0,
         retry_count=0,
         max_retries=0,
         next_retry_at=None,
         sent_at=now,
-        enqueued_at=now,
+        due_at=now,
         claimed_at=now,
         started_at=now,
         completed_at=None,

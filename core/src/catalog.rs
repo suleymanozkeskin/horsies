@@ -360,6 +360,7 @@ mod tests {
             "ASYNC_CONTEXT",
             "INVALID_INPUT",
             "WAIT_INSIDE_TASK",
+            "UNKNOWN_CUSTOM_CODE",
         ]);
         assert_python_members::<OutcomeCode>(&[
             "TASK_CANCELLED",

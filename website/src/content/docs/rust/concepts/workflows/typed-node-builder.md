@@ -153,8 +153,8 @@ let _audit = builder.task(
 | `WorkflowContextError` | When |
 |------------------------|------|
 | `NotInContext { node_id }` | The context holds no entry for the node: it is not in `workflow_context_from`, or it did not end |
-| `Unreadable { node_id, cause }` | The stored value does not read as the asked type; `cause` names no value |
-| `UnknownUserCode { node_id, cause }` | The stored error has a user code that `E` does not name |
+| `ResultDeserializationError { node_id, cause }` | The stored value does not read as the asked type; `cause` names no value |
+| `UnknownCustomCode { node_id, cause }` | The stored error has a custom code that `E` does not name |
 
 ## Node Options
 

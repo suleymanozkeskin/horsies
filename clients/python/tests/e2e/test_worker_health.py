@@ -160,7 +160,7 @@ def _make_shared_ready_check():
         nonlocal handle
         if handle is None:
             handle = unwrap_send(shared_async_tasks.shared_sleep.send(seconds=0))
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
