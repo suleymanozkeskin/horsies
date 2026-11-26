@@ -27,6 +27,7 @@ import {
   DATABASE_URL,
   fakeEnvironment,
   fakeProducer,
+  fakeCoreHandle,
   type FakeProducer,
   OPTIONS_TEXT,
   PLAIN_START,
@@ -75,7 +76,7 @@ function harness(parts: HarnessParts = {}): Harness {
   const context: SendContext = {
     contracts: contractLookup(list.entries),
     resendOnTransientErr: parts.resend ?? false,
-    core: { kind: "addon", producer },
+    core: { kind: "addon", producer, handle: fakeCoreHandle() },
     observer: parts.observer ?? NO_OP_OBSERVER,
     suppression: new SuppressionState(parts.suppression ?? { kind: "open" }, () => undefined),
     pause: async (milliseconds) => {
