@@ -43,7 +43,7 @@ reports each refusal with its `HRS-nnn` code.
 | `timeoutMs` | 1,000 to 4,294,967,295 | The deadline of a run. Required for `SHARED_ASYNC` (typecheck). Below 1,000 is `HRS-102` |
 | `cancelGraceMs` | 100 to 10,000 | See The Cancel Signal |
 | `retry` | a `RetryPolicy` | See Retry Policy |
-| `workflowContext` | `true` | A workflow node of the task may name `ctxFrom` (see `workflows.md`) |
+| `workflowContext` | `true` | A workflow node of the task may name `ctxFrom`, and the body reads `runtime.workflowContext` (see `workflows.md`, The Workflow Context) |
 
 - `errors` takes literal codes; no `as const` is needed. A list of the type
   `string[]` fails typecheck, because its codes are not known to the types.
@@ -343,6 +343,7 @@ The second argument of a body. The worker's child gives it;
 | `cancelState()` | `{ kind: "notRequested" }` or `{ kind: "requested", cause: "DEADLINE" \| "OPERATOR" }`, with no turn of the event loop |
 | `spawn(name, (signal) => work)` | `Result<Promise<T>, SpawnRefused>`: work that belongs to the run |
 | `state(key)` | The value that the provider of `key` built in this process (App State) |
+| `workflowContext` | Only for a task with `workflowContext: true` (typecheck): `{ kind: "context", context }` or `{ kind: "noContext" }` (`workflows.md`, The Workflow Context) |
 
 ## App State
 
@@ -814,6 +815,13 @@ export async function testEmptyOrder(): Promise<boolean> {
   that `app.provide` returned with a value of the key's type
   (`[[Reports, fakePool]]`); a key with no entry throws `ClientDefect`.
   `spawn` runs its work at once and is never refused.
+- `TaskRuntime.forTest({ ..., workflowContext })`: the stored form of a
+  workflow context: `workflow_id`, `task_index`, `task_name`, and
+  `results_by_id`, the stored result of each node by node id
+  (`{ __h_task_result__: true, ok: <value>, err: null }`). Left out, the
+  runtime holds `{ kind: "noContext" }`. A form that does not read throws
+  `TypeError` with the member and the rule. The runtime fits the body of a
+  task with or without `workflowContext: true`.
 - A user code that the core's rules would refuse is not checked by `run`:
   that check needs the addon.
 
@@ -871,7 +879,7 @@ import {
   // Implementations and the runtime
   type Implementation, type ImplementOptions, type ExceptionMapping,
   TaskRuntime, AttemptNumber, type CancelState, type CancelCause, type FencingToken,
-  type SpawnRefused, type StateKey,
+  type SpawnRefused, type StateKey, type WorkflowTaskRuntime, type StoredWorkflowContext,
   // Sends
   type SendOptions, type Retention, type TaskSendError, type RetryableSendError,
   // Reads

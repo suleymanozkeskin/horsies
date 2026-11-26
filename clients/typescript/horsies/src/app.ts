@@ -2,7 +2,7 @@
 // the package adds its members in one block here.
 
 import { implementationOf, type BodyFor, type Implementation, type ImplementOptions } from "./contract/implementation.ts";
-import type { AnyTaskContract, ExecutionClass, TaskContract } from "./contract/define-task.ts";
+import type { AnyTaskContract, ContextUse, ExecutionClass, TaskContract } from "./contract/define-task.ts";
 import type { TaskId, WorkflowId } from "./contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue, SendableInput } from "./contract/schema.ts";
 import { readFormOf, type TaskHandle, taskHandleOf } from "./read/handle.ts";
@@ -91,11 +91,17 @@ export class Horsies {
    * The implementation of a listed contract. Never throws and calls no addon function: a contract that the app does
    * not list, or a second implementation, is a refusal that `check` and the worker start report.
    */
-  implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(
-    contract: TaskContract<P, O, E, X>,
-    body: NoInfer<BodyFor<P, O, E, X>>,
+  implement<
+    P extends ParameterSchemas,
+    O extends OutputSchema,
+    E extends string,
+    X extends ExecutionClass,
+    C extends ContextUse,
+  >(
+    contract: TaskContract<P, O, E, X, C>,
+    body: NoInfer<BodyFor<P, O, E, X, C>>,
     options: ImplementOptions<NoInfer<E>> = {},
-  ): Implementation<P, O, E, X> {
+  ): Implementation<P, O, E, X, C> {
     const implementation = implementationOf(contract, body, options.exceptions ?? []);
 
     registerImplementation(this.#context, implementation);

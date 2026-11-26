@@ -67,7 +67,7 @@ import { installProcessEvents, processEventHooks, type ProcessEventHooks, UNCAUG
 import { thrownRecord } from "./thrown-error.ts";
 import { currentRun } from "./run-store.ts";
 import { RunTable } from "./run-table.ts";
-import { bodyFormOf, hookRunner, postDispatcher, type ServeNative, startHookNames } from "./serve.ts";
+import { bodyFormOf, hookRunner, postDispatcher, type ServeNative, startHookNames, taskContextUseOf } from "./serve.ts";
 import { StateValues } from "./state.ts";
 
 /** The calls of the addon in child mode. */
@@ -257,7 +257,11 @@ export function childPlan(
   }
 
   return {
-    tasks: [...context.implementations].map(([name, parts]) => ({ name, form: bodyFormOf(parts.contract) })),
+    tasks: [...context.implementations].map(([name, parts]) => ({
+      name,
+      form: bodyFormOf(parts.contract),
+      context: taskContextUseOf(parts.contract),
+    })),
     startHooks: startHookNames(members),
     producerManifestJson: checked.manifestJson,
     hostname: deps.hostname,

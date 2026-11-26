@@ -49,6 +49,7 @@ export type {
   AnyImplementation,
   BodyFor,
   BodyRuntimes,
+  ContextBodyRuntimes,
   ErrorClass,
   ExceptionMapping,
   Implementation,
