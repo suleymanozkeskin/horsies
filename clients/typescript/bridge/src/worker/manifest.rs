@@ -79,7 +79,7 @@ pub fn config_sections(
     let payload = payload_manifest(&config.payload)?;
     Ok(ConfigSections {
         database: database_manifest(producer, &config.broker),
-        send: producer.send.clone(),
+        send: producer.send,
         profiles: config
             .worker_profiles
             .iter()
