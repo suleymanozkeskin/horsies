@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import {
+  binFileProblems,
   exportTargets,
   horsiesFileProblems,
   horsiesManifestProblems,
@@ -86,6 +87,23 @@ describe("horsiesFileProblems", () => {
       "the skill file workflows.md is not packed",
       "the skill file configs.md is not packed",
     ]);
+  });
+});
+
+describe("binFileProblems", () => {
+  const bin = { horsies: "./dist/tools/bin.js" };
+
+  test("passes a bin horsies whose file is packed", () => {
+    assert.deepEqual(binFileProblems([...PACKED, "dist/tools/bin.js"], bin), []);
+  });
+
+  test("a bin file that is not packed", () => {
+    assert.deepEqual(binFileProblems(PACKED, bin), ["the bin horsies names dist/tools/bin.js, which is not packed"]);
+  });
+
+  test("a manifest with no bin horsies", () => {
+    assert.deepEqual(binFileProblems(PACKED, undefined), ["the manifest has no bin horsies"]);
+    assert.deepEqual(binFileProblems(PACKED, { other: "./dist/tools/bin.js" }), ["the manifest has no bin horsies"]);
   });
 });
 
