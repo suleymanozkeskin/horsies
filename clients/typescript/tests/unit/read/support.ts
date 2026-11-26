@@ -14,6 +14,7 @@ import type {
   WaitBound,
 } from "../../../horsies/src/native/sends/addon.ts";
 import type { RawCatalogError } from "../../../horsies/src/native/values/records.ts";
+import { fakeCoreHandle } from "../app/support.ts";
 
 /** A task id of the tests (a UUIDv7 text). */
 export const TASK_ID: TaskId = taskId("0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b");
@@ -95,7 +96,7 @@ function scripted<T>(answers: readonly T[] | undefined, call: number, operation:
 
 /** The core access of a main thread with a fake producer. */
 export function addonAccess(fake: FakeProducer): CoreAccess {
-  return { kind: "addon", producer: fake.producer };
+  return { kind: "addon", producer: fake.producer, handle: fakeCoreHandle() };
 }
 
 /** A seat relay that answers `taskInfo` with `read` and counts its requests. */
