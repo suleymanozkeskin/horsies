@@ -3,7 +3,9 @@
 // - The check functions (`checkAppConfig`, `parseDeclaredErrorCodes`, `checkTaskOptions`) and the classes that they
 //   give are pure: they start no core, open no connection and read no clock, so `Horsies.create` can call them before
 //   a child host shapes the process runtime.
-// - `prepareSendFacts` mints a task id; it starts no core.
+// - `prepareSendFacts` mints a task id and starts the log forwarder of the process, so the payload warning reaches the
+//   log sink; it starts no core. `buildTaskError` starts the log forwarder too, so the record of data that the codec
+//   cannot write reaches the log sink; it starts no core.
 // - `enqueue`, `getResult` and `taskInfo` are operations on a core handle: they start the core of the process at the
 //   first call and run on its runtime.
 
@@ -12,15 +14,16 @@ import type { NativeEnvelope } from "../call/envelope.ts";
 import type { InstallCoverageArg, NativeCoreHandle } from "../handle/addon.ts";
 import type { RawCatalogError, TraceArgument } from "../values/records.ts";
 
-/** The code of a refusal of a core check: a catalog code (`HRS-nnn`), or none (a field bound with no catalog code). */
-export type CoreRefusalCode = { readonly kind: "catalog"; readonly code: string } | { readonly kind: "noCode" };
+/** How to fix a refused value: no line, or one line, as the core's error holds it. */
+export type RefusalHelp = { readonly kind: "noHelp" } | { readonly kind: "help"; readonly line: string };
 
-/** One refusal of a core check: the code, the core's message, and its notes and help lines. */
+/** One refusal of a core check: the catalog code, the core's message, its notes and its help. */
 export interface CoreRefusal {
-  readonly code: CoreRefusalCode;
+  /** A code of the core's catalog, as its text (`HRS-102`). */
+  readonly code: string;
   readonly message: string;
   readonly notes: string[];
-  readonly help: string[];
+  readonly help: RefusalHelp;
 }
 
 /**
@@ -28,8 +31,9 @@ export interface CoreRefusal {
  * out takes the core's default):
  * - `accepted`: the send rules of the config, the JSON text of the producer manifest of its broker settings, and the
  *   coverage values of its retention for `CoreHandle.withInstallCoverage`;
- * - `refused`: every refusal, in the core's order. A text that the core's config reader refuses is one refusal with
- *   no code.
+ * - `refused`: every refusal, in the core's order.
+ *
+ * A text that the core's config reader refuses throws `ClientDefect`: the package writes the text from a parsed config.
  */
 export type AppConfigCheck =
   | {
@@ -111,10 +115,8 @@ export type RetentionRecord = { readonly kind: "forever" } | { readonly kind: "c
 /** A deadline: none, or an instant in epoch microseconds. */
 export type DeadlineFact = { readonly kind: "noDeadline" } | { readonly kind: "until"; readonly epochMicros: bigint };
 
-/** The facts of one send that the send rules judge. */
+/** The facts of one send that the send rules judge. The task name and the queue are the checked options' own. */
 export interface SendFacts {
-  readonly taskName: string;
-  readonly queueName: string;
   readonly retention: RetentionChoice;
   readonly deadline: DeadlineFact;
   /** The UTF-8 byte length of the input text. */
@@ -122,9 +124,15 @@ export interface SendFacts {
 }
 
 /**
- * The prepared facts of one send: a new task id, the stored options text (with the deadline) and the retention, or
- * the send error of a refused fact (`TaskSendValidationFailed` for a retention that the config does not register or a
- * refused id, `TaskSendPayloadTooLarge` for an input above the reject bound).
+ * The priority that a send carries: the one queue of the default queue mode (the package holds its priority), or a
+ * custom queue with its priority in the core's accepted config (the core's default for a queue that names none).
+ */
+export type SendPriority = { readonly kind: "defaultQueue" } | { readonly kind: "configured"; readonly priority: number };
+
+/**
+ * The prepared facts of one send: a new task id, the stored options text (with the deadline), the retention and the
+ * priority, or the send error of a refused fact (`TaskSendValidationFailed` for a retention that the config does not
+ * register or a refused id, `TaskSendPayloadTooLarge` for an input above the reject bound).
  */
 export type PreparedSend =
   | {
@@ -132,14 +140,15 @@ export type PreparedSend =
       readonly taskId: string;
       readonly taskOptions: string;
       readonly retention: RetentionRecord;
+      readonly priority: SendPriority;
     }
   | { readonly kind: "refused"; readonly error: RawCatalogError };
 
-/** The rules of an accepted app config that each send applies: retention and the payload bounds. Pure. */
+/** The rules of an accepted app config that each send applies: retention, the payload bounds and the queues. */
 export interface NativeSendRules {
   /**
-   * The prepared facts of one send of a task with the checked `options`. Logs the payload warning of the core once
-   * per task name when the input is above the warn bound. Mints a task id.
+   * The prepared facts of one send of the task of the checked `options`, on its queue. Logs the payload warning of
+   * the core once per task name when the input is above the warn bound. Mints a task id.
    */
   prepareSendFacts(facts: SendFacts, options: NativeTaskOptions): NativeEnvelope<PreparedSend>;
 }
@@ -182,14 +191,28 @@ export type TaskStatusName = "PENDING" | "CLAIMED" | "RUNNING" | "COMPLETED" | "
 /** Why neither the live table nor the task history holds a task. */
 export type AbsenceReason = "PREDATES_RETAINED_HISTORY" | "WITHIN_RETAINED_HISTORY" | "NOT_CLASSIFIED";
 
-/** The stored result envelope of a task: its text, or none when the wait ended before the task. */
-export type EnvelopeFact = { readonly kind: "stored"; readonly text: string } | { readonly kind: "notFinished" };
+/** The status of a task that has not finished. */
+export type LiveStatusName = "PENDING" | "CLAIMED" | "RUNNING";
 
-/** The status of one task and its stored result envelope. */
+/** The status of a finished task. */
+export type FinishedStatusName = "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED";
+
+/**
+ * The stored result of a task when the read ended, with the status of the task:
+ * - `stored`: the row stores this result envelope text;
+ * - `waitEnded`: the wait ended before the task finished, so no result is stored yet;
+ * - `finishedWithoutResult`: the task finished and stores no result (a cancel before a start, an expiry, a terminal
+ *   row of the live table).
+ */
+export type EnvelopeFact =
+  | { readonly kind: "stored"; readonly status: TaskStatusName; readonly text: string }
+  | { readonly kind: "waitEnded"; readonly status: LiveStatusName }
+  | { readonly kind: "finishedWithoutResult"; readonly status: FinishedStatusName };
+
+/** One task and its stored result. */
 export interface ResultRecord {
   readonly taskId: string;
   readonly taskName: string;
-  readonly status: TaskStatusName;
   readonly envelope: EnvelopeFact;
 }
 
@@ -286,11 +309,24 @@ export type ExceptionPart =
       readonly traceback: string;
     };
 
-/** The parts of the error of a body. `dataJson` is the codec's stored `data` text (`null` for no data). */
+/** Why the codec cannot write the `data` of an error: a value that is not JSON-native, or an integer that is too long. */
+export type DataRefusedReason = "notJsonNative" | "integerTooLong";
+
+/**
+ * The `data` of a body error: none, the codec's stored `data` text, or data that the codec cannot write. The bridge
+ * stores the last as `{"data_refused": "<cause>"}` with Python's cause, keeps the code and the message, and logs an
+ * ERROR record on `horsies.codec`.
+ */
+export type ErrorDataPart =
+  | { readonly kind: "noData" }
+  | { readonly kind: "text"; readonly text: string }
+  | { readonly kind: "notStorable"; readonly reason: DataRefusedReason };
+
+/** The parts of the error of a body. */
 export interface TaskErrorParts {
   readonly code: ErrorCodePart;
   readonly message: OptionalText;
-  readonly dataJson: string;
+  readonly data: ErrorDataPart;
   readonly exception: ExceptionPart;
 }
 

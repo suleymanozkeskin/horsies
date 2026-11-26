@@ -25,7 +25,7 @@ use crate::call::operation::{guarded_start, spawn_operation};
 use crate::call::thrown::NativeThrown;
 use crate::handle::core_handle::{BrokerConnection, CoreHandle};
 use crate::sends::refusals::CoreRefusal;
-use crate::worker::run::thrown_now;
+use crate::worker::run::{coded_refusal, thrown_now};
 
 /// The subject of the live check in its refusals.
 const LIVE_CHECK_SUBJECT: &str = "check_live";
@@ -137,7 +137,7 @@ fn connections_outcome(errors: &[horsies_core::HorsiesError]) -> LiveCheckOutcom
     match errors.is_empty() {
         true => LiveCheckOutcome::Passed,
         false => LiveCheckOutcome::ConnectionsRefused {
-            refusals: errors.iter().map(CoreRefusal::of_error).collect(),
+            refusals: errors.iter().map(coded_refusal).collect(),
         },
     }
 }
@@ -168,6 +168,7 @@ mod tests {
         let LiveCheckOutcome::ConnectionsRefused { refusals } = connections_outcome(&errors) else {
             panic!("an error refuses");
         };
-        assert_eq!(refusals, vec![CoreRefusal::of_error(&errors[0])]);
+        assert_eq!(refusals, vec![coded_refusal(&errors[0])]);
+        assert_eq!(refusals[0].code, "HRS-219");
     }
 }

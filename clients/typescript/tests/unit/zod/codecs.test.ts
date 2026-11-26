@@ -10,13 +10,13 @@ import { h } from "../../../horsies/src/wire/builders.ts";
 import { Decimal } from "../../../horsies/src/wire/decimal.ts";
 import type { RequiredWire } from "../../../horsies/src/wire/infer.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
-import { codecKindOf, hz, wireKindOf } from "../../../horsies/src/zod/codecs.ts";
-import type { ZodSchema } from "../../../horsies/src/zod/definition.ts";
+import { hzKindOf } from "../../../horsies/src/zod/brand.ts";
+import { hz } from "../../../horsies/src/zod/codecs.ts";
 import { acceptedKind, storedText, workerValue } from "./support.ts";
 
 type CodecRow = {
   readonly name: string;
-  readonly schema: ZodSchema;
+  readonly schema: z.ZodType;
   readonly wire: RequiredWire;
   readonly value: object;
   readonly text: string;
@@ -101,8 +101,8 @@ describe("hz.* codecs", () => {
     assert.equal(result.success, false);
   });
 
-  test("a codec that is not one of hz.* has no hz kind", () => {
-    assert.equal(codecKindOf(Number).found, "none");
+  test("a codec function that is not one of hz.* has no hz brand", () => {
+    assert.equal(hzKindOf(Number).found, "none");
   });
 });
 
@@ -124,7 +124,7 @@ describe("hz.wire()", () => {
     assert.throws(() => hz.wire(upstream), TypeError);
   });
 
-  test("a test function that is not one of hz.wire() has no hz kind", () => {
-    assert.equal(wireKindOf(() => true).found, "none");
+  test("a test function that is not one of hz.wire() has no hz brand", () => {
+    assert.equal(hzKindOf(() => true).found, "none");
   });
 });

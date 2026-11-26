@@ -4,7 +4,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { refusedCodeParts } from "../../../horsies/src/child/body.ts";
+import { errorDataPart, refusedCodeParts } from "../../../horsies/src/child/body.ts";
+import type { TaskErrorParts } from "../../../horsies/src/native/sends/addon.ts";
 import { implementationOf, implementationParts, type ImplementationParts } from "../../../horsies/src/contract/implementation.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
@@ -13,6 +14,11 @@ import { adapterRun, errorParts, RUN_TASK_ID } from "./support.ts";
 const add = defineTask({ name: "add", input: { a: h.int(), b: h.int() }, output: h.int(), errors: ["TOO_BIG"] });
 
 const greet = defineTask({ name: "greet", input: { name: h.string() }, output: h.object({ text: h.string() }) });
+
+/** The stored data text of error parts, or the kind of a data part with no text. */
+function dataText(parts: TaskErrorParts): string {
+  return parts.data.kind === "text" ? parts.data.text : parts.data.kind;
+}
 
 class CardDeclined extends Error {
   override readonly name = "CardDeclined";
@@ -41,8 +47,8 @@ describe("the input of a body", () => {
 
     assert.deepEqual(error.code, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
     assert.equal(error.message.kind === "text" ? error.message.text : "", "task input does not decode as add.input: $.a: expected an integer [WrongType]");
-    assert.doesNotMatch(error.dataJson, /secret-text/u);
-    assert.match(error.dataJson, /"expected_type":"add\.input"/u);
+    assert.doesNotMatch(dataText(error), /secret-text/u);
+    assert.match(dataText(error), /"expected_type":"add\.input"/u);
     assert.deepEqual(run.observation.calls, ["end"]);
   });
 });
@@ -84,7 +90,7 @@ describe("the errors of a body", () => {
       parts: {
         code: { kind: "user", code: "TOO_BIG" },
         message: { kind: "text", text: "over the cap" },
-        dataJson: '{"cap":10}',
+        data: { kind: "text", text: '{"cap":10}' },
         exception: { kind: "noException" },
       },
     });
@@ -106,7 +112,7 @@ describe("the errors of a body", () => {
 
     assert.deepEqual(error.code, { kind: "user", code: "TOO_BIG" });
     assert.equal(error.message.kind === "text" ? error.message.text : "", "Unhandled exception in task add: CardDeclined: the card was declined");
-    assert.equal(error.dataJson, '{"exception_type":"CardDeclined"}');
+    assert.equal(dataText(error), '{"exception_type":"CardDeclined"}');
     assert.equal(error.exception.kind === "record" ? error.exception.className : "", "CardDeclined");
   });
 
@@ -142,7 +148,24 @@ describe("the errors of a body", () => {
       '{"a":1,"b":1}',
     );
 
-    assert.equal(errorParts(run.outcome).dataJson, '{"exception_type":"null"}');
+    assert.equal(dataText(errorParts(run.outcome)), '{"exception_type":"null"}');
+  });
+
+  test("the data part: the codec's text, none, and each replacement of data that the codec cannot write", async () => {
+    // Deeper than Pydantic's dump writes, with a lone surrogate: the depth names the cause.
+    let deep: unknown = "\uD800";
+
+    for (let level = 0; level < 260; level += 1) {
+      deep = [deep];
+    }
+
+    const noData = await adapterRun(parts(add, () => add.err({ code: "TOO_BIG" })), '{"a":1,"b":1}');
+
+    assert.deepEqual(errorParts(noData.outcome).data, { kind: "noData" });
+    assert.deepEqual(errorDataPart({ cap: 10 }), { kind: "text", text: '{"cap":10}' });
+    assert.deepEqual(errorDataPart({ rate: Number.NaN }), { kind: "notStorable", reason: "notJsonNative" });
+    assert.deepEqual(errorDataPart(10n ** 5000n), { kind: "notStorable", reason: "integerTooLong" });
+    assert.deepEqual(errorDataPart(deep), { kind: "text", text: '{"data_refused":"ValueValidationError"}' });
   });
 
   test("a user code that the core refuses is RETURN_TYPE_MISMATCH that names the task and the rule", () => {

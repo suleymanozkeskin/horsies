@@ -7,7 +7,7 @@ import type {
   AppConfigCheck,
   AttemptOutcomeName,
   CoreRefusal,
-  CoreRefusalCode,
+  DataRefusedReason,
   DeadlineFact,
   DeclaredCodesCheck,
   DeclaredCodesFact,
@@ -16,9 +16,12 @@ import type {
   EnqueueRequest,
   EnvelopeFact,
   ErrorCodePart,
+  ErrorDataPart,
   ExceptionPart,
   ExecutionName,
   ExecutionRecord,
+  FinishedStatusName,
+  LiveStatusName,
   MaxDelayFact,
   MillisecondsFact,
   NativeSendRules,
@@ -30,6 +33,7 @@ import type {
   RecordedCount,
   RecordedInstant,
   RecordedText,
+  RefusalHelp,
   ResultRead,
   ResultRecord,
   RetentionChoice,
@@ -37,6 +41,7 @@ import type {
   RetryFacts,
   SendFacts,
   SendKind,
+  SendPriority,
   SendsAddon,
   TaskAttemptRecord,
   TaskErrorBuild,
@@ -48,6 +53,11 @@ import type {
   TaskStatusName,
   WaitBound,
 } from "../../horsies/src/native/sends/addon.ts";
+import type {
+  ChildProducerProbeAddon,
+  NativeProbeChildProducer,
+  ProbeClose,
+} from "../runtime/native/child-producer-probe.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const checkAppConfigMatches: SameFunction<typeof Generated.checkAppConfig, SendsAddon["checkAppConfig"]> =
@@ -92,8 +102,8 @@ export const errorTextMatches: SameFunction<Generated.TaskErrorRecord["storedTex
 
 export const taskErrorMatches: Mutual<Generated.TaskErrorRecord, NativeTaskError> = true;
 
-export const refusalCodeMatches: Mutual<Generated.CoreRefusalCode, CoreRefusalCode> = true;
 export const refusalMatches: Mutual<Generated.CoreRefusal, CoreRefusal> = true;
+export const refusalHelpMatches: Mutual<Generated.RefusalHelp, RefusalHelp> = true;
 export const appConfigCheckMatches: Mutual<Generated.AppConfigCheck, AppConfigCheck> = true;
 export const declaredCodesCheckMatches: Mutual<Generated.DeclaredCodesCheck, DeclaredCodesCheck> = true;
 export const executionNameMatches: Mutual<Generated.ExecutionName, ExecutionName> = true;
@@ -108,6 +118,7 @@ export const retentionRecordMatches: Mutual<Generated.RetentionRecord, Retention
 export const deadlineMatches: Mutual<Generated.DeadlineFact, DeadlineFact> = true;
 export const sendFactsMatches: Mutual<Generated.SendFacts, SendFacts> = true;
 export const preparedSendMatches: Mutual<Generated.PreparedSend, PreparedSend> = true;
+export const sendPriorityMatches: Mutual<Generated.SendPriority, SendPriority> = true;
 export const delayMatches: Mutual<Generated.DelayFact, DelayFact> = true;
 export const optionalTextMatches: Mutual<Generated.OptionalText, OptionalText> = true;
 export const enqueueRequestMatches: Mutual<Generated.EnqueueRequest, EnqueueRequest> = true;
@@ -116,6 +127,8 @@ export const enqueueOutcomeMatches: Mutual<Generated.EnqueueOutcome, EnqueueOutc
 export const waitBoundMatches: Mutual<Generated.WaitBound, WaitBound> = true;
 export const statusMatches: Mutual<Generated.TaskStatusName, TaskStatusName> = true;
 export const absenceMatches: Mutual<Generated.AbsenceReason, AbsenceReason> = true;
+export const liveStatusMatches: Mutual<Generated.LiveStatusName, LiveStatusName> = true;
+export const finishedStatusMatches: Mutual<Generated.FinishedStatusName, FinishedStatusName> = true;
 export const envelopeMatches: Mutual<Generated.EnvelopeFact, EnvelopeFact> = true;
 export const resultRecordMatches: Mutual<Generated.ResultRecord, ResultRecord> = true;
 export const resultReadMatches: Mutual<Generated.ResultRead, ResultRead> = true;
@@ -130,5 +143,36 @@ export const infoReadMatches: Mutual<Generated.TaskInfoRead, TaskInfoRead> = tru
 export const roleMatches: Mutual<Generated.ProcessRoleName, ProcessRoleName> = true;
 export const errorCodeMatches: Mutual<Generated.ErrorCodePart, ErrorCodePart> = true;
 export const exceptionMatches: Mutual<Generated.ExceptionPart, ExceptionPart> = true;
+export const dataRefusedReasonMatches: Mutual<Generated.DataRefusedReason, DataRefusedReason> = true;
+export const errorDataMatches: Mutual<Generated.ErrorDataPart, ErrorDataPart> = true;
 export const errorPartsMatches: Mutual<Generated.TaskErrorParts, TaskErrorParts> = true;
 export const errorBuildMatches: Mutual<Generated.TaskErrorBuild, TaskErrorBuild> = true;
+
+// The test exports of a build with the cargo feature `test-probes` (`build:dev`).
+export const probeChildProducerMatches: SameFunction<
+  typeof Generated.probeChildProducer,
+  ChildProducerProbeAddon["probeChildProducer"]
+> = true;
+
+export const probeEnqueueInChildMatches: SameFunction<
+  typeof Generated.probeEnqueueInChild,
+  ChildProducerProbeAddon["probeEnqueueInChild"]
+> = true;
+
+export const probeGetResultInChildMatches: SameFunction<
+  typeof Generated.probeGetResultInChild,
+  ChildProducerProbeAddon["probeGetResultInChild"]
+> = true;
+
+export const probeTaskInfoInChildMatches: SameFunction<
+  typeof Generated.probeTaskInfoInChild,
+  ChildProducerProbeAddon["probeTaskInfoInChild"]
+> = true;
+
+export const probeCloseMethodMatches: SameFunction<
+  Generated.ProbeChildProducer["close"],
+  NativeProbeChildProducer["close"]
+> = true;
+
+export const probeChildMatches: Mutual<Generated.ProbeChildProducer, NativeProbeChildProducer> = true;
+export const probeCloseMatches: Mutual<Generated.ProbeClose, ProbeClose> = true;

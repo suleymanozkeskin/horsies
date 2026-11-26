@@ -8,29 +8,14 @@ import type { DecodeRefused, EncodeRefused } from "../../../horsies/src/codec/re
 import { encodeValue } from "../../../horsies/src/codec/writer.ts";
 import type { Kind } from "../../../horsies/src/wire/kinds.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
-import {
-  compileMember,
-  compileValue,
-  type SelfCheckPassed,
-  type ZodMemberKind,
-} from "../../../horsies/src/zod/adapter.ts";
+import { compileMember, compileValue, type ZodMemberKind } from "../../../horsies/src/zod/adapter.ts";
 import { readDefinition, type ZodSchema } from "../../../horsies/src/zod/definition.ts";
 import { type CodecRuns, codecRuns } from "../../../horsies/src/zod/runs.ts";
 import { zodRefusalText } from "../../../horsies/src/zod/rules.ts";
-import { selfCheckOnce } from "../../../horsies/src/zod/self-check.ts";
-
-/** The proof of the passed self-check of this process on the installed zod; a failure fails the test. */
-export function passedSelfCheck(): SelfCheckPassed {
-  const outcome = selfCheckOnce();
-
-  assert.ok(outcome.ok, outcome.ok ? "" : JSON.stringify(outcome.error));
-
-  return outcome.value;
-}
 
 /** The kind of a schema that the adapter accepts as a whole value; a refusal fails the test with its texts. */
 export function acceptedKind(schema: ZodSchema): Kind {
-  const compiled = compileValue(passedSelfCheck(), schema);
+  const compiled = compileValue(schema);
 
   assert.ok(compiled.ok, compiled.ok ? "" : compiled.error.map(zodRefusalText).join("\n"));
 
@@ -39,7 +24,7 @@ export function acceptedKind(schema: ZodSchema): Kind {
 
 /** The kind and presence of a schema that the adapter accepts as a member. */
 export function acceptedMember(schema: ZodSchema): ZodMemberKind {
-  const compiled = compileMember(passedSelfCheck(), schema);
+  const compiled = compileMember(schema);
 
   assert.ok(compiled.ok, compiled.ok ? "" : compiled.error.map(zodRefusalText).join("\n"));
 
