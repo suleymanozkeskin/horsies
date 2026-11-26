@@ -4,7 +4,8 @@
 // after the build returns, so every finding names its node. A node can name only nodes that the build made before it,
 // so a build has no cycle and its first node is a root.
 
-import { isObjectLike } from "../codec/values.ts";
+import { NODE_INDEX_MAX } from "../_catalog/workflow_spec.ts";
+import { isFunction, isObjectLike } from "../codec/values.ts";
 import type { ContextUse, ExecutionClass, TaskContract } from "../contract/define-task.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
 import type { WorkflowContract } from "./define.ts";
@@ -72,24 +73,41 @@ export type RecordedNode =
     };
 
 /** The nodes of one run of a build, in the order of the calls. */
+/** The most nodes of one workflow (the core's `MAX_WORKFLOW_NODES`). */
+export const MAX_WORKFLOW_NODES: number = NODE_INDEX_MAX + 1;
+
 export class BuildSession {
   readonly #nodes: RecordedNode[] = [];
+  #made = 0;
   #state: "open" | "sealed" = "open";
 
-  /** The recorded nodes. */
+  /** The recorded nodes: at most `MAX_WORKFLOW_NODES + 1`, so the checks see that a build made too many. */
   nodes(): readonly RecordedNode[] {
     return this.#nodes;
   }
 
-  /** Record a node and give its reference. A call after the build returned is a defect: `TypeError`. */
+  /** How many nodes the build made, the ones past the record bound too. */
+  madeCount(): number {
+    return this.#made;
+  }
+
+  /**
+   * Record a node and give its reference. Past `MAX_WORKFLOW_NODES + 1` nodes the session keeps no more nodes, so a
+   * build that makes too many holds no growing record; the checks refuse the build (`HRS-038`) before they read a
+   * reference. A call after the build returned is a defect: `TypeError`.
+   */
   add(node: RecordedNode): AnyNode {
     if (this.#state === "sealed") {
       throw new TypeError("horsies: a workflow node was added after its build returned; a build is sync");
     }
 
-    const index = this.#nodes.length;
+    const index = this.#made;
 
-    this.#nodes.push(node);
+    this.#made += 1;
+
+    if (this.#nodes.length <= MAX_WORKFLOW_NODES) {
+      this.#nodes.push(node);
+    }
 
     return nodeRefOf(this, index, node.options.id);
   }
@@ -176,5 +194,5 @@ export function runBuild(build: (w: WorkflowBuilder, params: never) => unknown, 
 
 /** Whether a returned value is a thenable. Pure. */
 function isThenable(value: unknown): value is PromiseLike<unknown> {
-  return isObjectLike(value) && "then" in value && value.then instanceof Function;
+  return isObjectLike(value) && "then" in value && isFunction(value.then);
 }

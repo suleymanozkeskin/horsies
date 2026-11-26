@@ -67,7 +67,7 @@ export function checkNodes(
 
   nodes.forEach((node, index) => {
     const context: NodeContext = { index, place: `nodes[${index}] ${node.options.id}`, session, view, outputs };
-    const result = node.kind === "task" ? checkTaskNode(context, node) : checkSubWorkflowNode(context, node);
+    const result = checkNode(context, node);
 
     if (result.ok) {
       checked.push(result.value);
@@ -75,17 +75,36 @@ export function checkNodes(
       findings.push(...result.error);
     }
 
-    targets.set(
-      node.options.id,
-      node.kind === "task"
-        ? { kind: "task", contract: node.contract }
-        : { kind: "subWorkflow", workflow: node.workflow },
-    );
+    targets.set(node.options.id, nodeTarget(node));
   });
 
   const [first, ...rest] = findings;
 
   return first === undefined ? ok({ nodes: checked, targets }) : err([first, ...rest]);
+}
+
+/** The checks of one node by its kind. Pure. */
+function checkNode(context: NodeContext, node: RecordedNode): NodeChecked {
+  switch (node.kind) {
+    case "task":
+      return checkTaskNode(context, node);
+    case "subWorkflow":
+      return checkSubWorkflowNode(context, node);
+    default:
+      return unreachable(node, "checkNode");
+  }
+}
+
+/** What a node runs: its task's contract, or its child workflow. Pure. */
+function nodeTarget(node: RecordedNode): NodeTarget {
+  switch (node.kind) {
+    case "task":
+      return { kind: "task", contract: node.contract };
+    case "subWorkflow":
+      return { kind: "subWorkflow", workflow: node.workflow };
+    default:
+      return unreachable(node, "nodeTarget");
+  }
 }
 
 /**

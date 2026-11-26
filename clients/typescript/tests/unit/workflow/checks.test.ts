@@ -3,9 +3,12 @@
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
+import { runInNewContext } from "node:vm";
 
 import { defineTask, type OutputSchema } from "../../../horsies/src/contract/public.ts";
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { h, type RequiredWire } from "../../../horsies/src/wire/public.ts";
+import { MAX_WORKFLOW_NODES, runBuild } from "../../../horsies/src/workflow/builder.ts";
 import type { AnyNode, BuildReturn } from "../../../horsies/src/workflow/node.ts";
 import { defineWorkflow, type WorkflowBuilder } from "../../../horsies/src/workflow/public.ts";
 import { checked, DEFAULT_QUEUES, findingCodes, passedSpec, viewOf } from "./support.ts";
@@ -43,6 +46,23 @@ function flow(build: (w: WorkflowBuilder) => BuildReturn, name = "flow", output:
 }
 
 describe("the builder", () => {
+  test("a build of a record whose error rule create refuses is a defect", () => {
+    // SAFETY: the types refuse this error rule; Horsies.create refuses it before any build (HRS-033).
+    const refused = defineWorkflow(
+      { name: "rule", definitionKey: "tests.rule.v1", output: h.int(), params: {}, onError: "stop" as never },
+      (w) => ({ output: w.task(ping, {}, { id: "ping" }) }),
+    );
+
+    assert.throws(() => checked(refused, {}, view), ClientDefect);
+  });
+
+  test("a build that returns a thenable of another realm is a thenable", () => {
+    const thenable: unknown = runInNewContext("({ then(resolve) { resolve(1); } })");
+    const run = runBuild(() => thenable, {});
+
+    assert.equal(run.kind, "thenable");
+  });
+
   test("the dependencies: the parameter sources in declaration order, then waitsFor, each node once", () => {
     const spec = passedSpec(
       flow((w) => {
@@ -320,6 +340,44 @@ describe("the checks", () => {
     );
 
     assert.deepEqual(codes, ["HRS-038"]);
+  });
+
+  test("a build past the node bound: HRS-038 with the made count, and the session keeps one node past the bound", () => {
+    const made = MAX_WORKFLOW_NODES + 50;
+
+    const run = runBuild((w: WorkflowBuilder) => {
+      let last: AnyNode = w.task(ping, {}, { id: "n0" });
+
+      for (let index = 1; index < made; index += 1) {
+        last = w.task(ping, {}, { id: `n${index}` });
+      }
+
+      return { output: last };
+    }, {});
+
+    assert(run.kind === "returned");
+    assert.equal(run.session.nodes().length, MAX_WORKFLOW_NODES + 1);
+    assert.equal(run.session.madeCount(), made);
+
+    const outcome = checked(
+      flow((w) => {
+        let last: AnyNode = w.task(ping, {}, { id: "n0" });
+
+        for (let index = 1; index < made; index += 1) {
+          last = w.task(ping, {}, { id: `n${index}` });
+        }
+
+        return { output: last };
+      }),
+      {},
+      view,
+    );
+
+    assert(!outcome.ok);
+    assert.deepEqual(
+      outcome.error.map((found) => [found.code, found.detail]),
+      [["HRS-038", `the build made ${made} nodes, more than the limit of ${MAX_WORKFLOW_NODES}`]],
+    );
   });
 
   test("an output that is no node of the build: HRS-011", () => {

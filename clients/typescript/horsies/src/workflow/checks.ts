@@ -8,23 +8,22 @@
 // No cycle check is needed: a node can name only nodes that the build made before it.
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
-import { NODE_INDEX_MAX } from "../_catalog/workflow_spec.ts";
+import { ClientDefect } from "../thrown-errors.ts";
+import type { SpecOnError } from "../_catalog/workflow_spec.ts";
 import { isArray, isObjectLike, isString } from "../codec/values.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 import type { Kind, ObjectKind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import { unreachable } from "../wire/unreachable.ts";
 import type { ListedLookup } from "../send/send.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import type { BuildRun, BuildSession, RecordedNode } from "./builder.ts";
-import { nodeSlot } from "./builder.ts";
+import { MAX_WORKFLOW_NODES, nodeSlot } from "./builder.ts";
 import type { WorkflowRecord } from "./define.ts";
 import { type CheckedPolicy, type CheckedSpec, finding, type SpecFinding } from "./findings.ts";
 import { compileContract } from "../contract/compile.ts";
 import { storedFormFits } from "./kind-match.ts";
 import { checkNodes, type NodeTarget, sourceOutputOf } from "./node-checks.ts";
-
-/** The most nodes of one workflow (the core's `MAX_WORKFLOW_NODES`). */
-export const MAX_WORKFLOW_NODES: number = NODE_INDEX_MAX + 1;
 
 /** The longest node id, in characters. */
 export const MAX_NODE_ID_LENGTH = 128;
@@ -88,7 +87,7 @@ export function checkBuild(record: WorkflowRecord, run: ReturnedRun, view: SpecA
     return err(nonEmpty(found, rest));
   }
 
-  const onError = record.onError.kind === "valid" ? record.onError.onError : "FAIL";
+  const onError = validOnError(record);
 
   const spec: CheckedSpec = {
     name: record.name,
@@ -100,6 +99,24 @@ export function checkBuild(record: WorkflowRecord, run: ReturnedRun, view: SpecA
   };
 
   return ok({ spec, targets: checked.value.targets });
+}
+
+/**
+ * The error rule of a record that a build of the app's list has. `Horsies.create` refuses a record with another rule
+ * (`HRS-033`) before any build of it, so a build of one is a defect: `ClientDefect`.
+ */
+function validOnError(record: WorkflowRecord): SpecOnError {
+  switch (record.onError.kind) {
+    case "valid":
+      return record.onError.onError;
+    case "invalid":
+      throw new ClientDefect({
+        subject: "checkBuild",
+        rule: `the error rule "${record.onError.given}" is refused at Horsies.create, before any build`,
+      });
+    default:
+      return unreachable(record.onError, "validOnError");
+  }
 }
 
 function nonEmpty(first: SpecFinding | undefined, rest: readonly SpecFinding[]): NonEmpty<SpecFinding> {
@@ -124,8 +141,8 @@ function gateOne(record: WorkflowRecord, session: BuildSession, nodes: readonly 
     return findings;
   }
 
-  if (nodes.length > MAX_WORKFLOW_NODES) {
-    const detail = `the build made ${nodes.length} nodes, more than the limit of ${MAX_WORKFLOW_NODES}`;
+  if (session.madeCount() > MAX_WORKFLOW_NODES) {
+    const detail = `the build made ${session.madeCount()} nodes, more than the limit of ${MAX_WORKFLOW_NODES}`;
 
     findings.push(
       finding(ErrorCode.WORKFLOW_TOO_MANY_NODES, "nodes", detail, [
