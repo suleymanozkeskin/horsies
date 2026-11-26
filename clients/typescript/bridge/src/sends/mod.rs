@@ -11,7 +11,7 @@
 //! - `task_error`: the core's task error of a body, built from its parts.
 
 pub mod checks;
-mod early_end;
+pub mod early_end;
 pub mod refusals;
 pub mod send;
 pub mod task_error;

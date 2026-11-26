@@ -67,6 +67,11 @@ impl SendRules {
     pub fn new(retention: RetentionConfig, payload: PayloadPolicy) -> Self {
         Self { retention, payload }
     }
+
+    /// The retention config of the accepted app config. Pure.
+    pub fn retention(&self) -> &RetentionConfig {
+        &self.retention
+    }
 }
 
 /// The retention that a send chooses.
