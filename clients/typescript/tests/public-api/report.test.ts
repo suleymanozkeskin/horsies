@@ -95,8 +95,12 @@ describe("apiReport", () => {
   });
 
   test("a global type of the runtime, the Fetch types of the web handler, is named in the report with no error", () => {
-    const index =
-      "export type Handler = (request: Request) => Promise<Response>;\nexport declare function stop(signal: AbortSignal): void;\n";
+    const index = [
+      "export type Handler = (request: Request) => Promise<Response>;",
+      "export declare function stop(signal: AbortSignal): void;",
+      "",
+    ].join("\n");
+
     const built = declarationPackage("fetch-types", index);
     const entry = built.entryPoints[0];
     const report = entry === undefined ? undefined : apiReport(built, entry, built.folder);
