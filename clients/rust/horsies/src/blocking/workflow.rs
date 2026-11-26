@@ -1,5 +1,5 @@
 //! The blocking forms of the workflow starts and of the workflow handle
-//! (Python's sync `WorkflowSpec.start` and `retry_start`, and the sync
+//! (Python's sync `WorkflowSpec.start` and `resend_start`, and the sync
 //! methods of `WorkflowHandle`).
 //!
 //! As for the other views, a view method has the name, the arguments and
@@ -10,13 +10,13 @@
 //!   answers the `ASYNC_CONTEXT` member of its catalog: a start answers
 //!   `WorkflowStartError::AsyncContext` with the workflow id of the
 //!   start, nothing written (Python `WorkflowStartAsyncContext`); `status`,
-//!   `results`, `tasks`, `cancel`, `pause` and `resume` answer
+//!   `results`, `nodes`, `cancel`, `pause` and `resume` answer
 //!   `HandleOperationError::AsyncContext` (Python `HandleAsyncContext`); `get`
 //!   and `result_for` answer `WorkflowReadError::AsyncContext` (Python's
 //!   `RetrievalCode.ASYNC_CONTEXT`).
 //! - The thread check comes first, as in Python's `WorkflowSpec.start`: a
 //!   template's build runs inside its start, so on a runtime thread the
-//!   build does not run either. Two checks come before it: `retry_start`
+//!   build does not run either. Two checks come before it: `resend_start`
 //!   checks its error (`VALIDATION_FAILED` for an error that the start
 //!   cannot retry), and `get` checks its limit (`InvalidInput`) and then
 //!   refuses a wait in a process that runs task bodies (`WaitInsideTask`).
@@ -59,7 +59,7 @@ struct StartNames<'a> {
 
 /// Run a start on the process runtime, or answer why it cannot run, with
 /// `workflow_id`: the id that the start would have used, so
-/// `start_with_id` or `retry_start` can run the same start later.
+/// `start_with_id` or `resend_start` can run the same start later.
 ///
 /// # Panics
 ///
@@ -129,19 +129,19 @@ where
         )
     }
 
-    /// `WorkflowFunction::retry_start`, blocking. The error is checked
+    /// `WorkflowFunction::resend_start`, blocking. The error is checked
     /// first, on any thread, as in Python: `VALIDATION_FAILED` for an error
     /// that the start cannot retry. On a runtime thread the answer is
     /// `ASYNC_CONTEXT` with the workflow id of the error.
-    pub fn retry_start(
+    pub fn resend_start(
         &self,
         error: &WorkflowStartError,
     ) -> Result<WorkflowHandle<T>, WorkflowStartError> {
         let workflow_id = validate_start_retry(error, self.function.name())?;
         block_start(
-            self.function.retry_start(error),
+            self.function.resend_start(error),
             workflow_id,
-            &self.names("retry_start()", "function.retry_start(&error)"),
+            &self.names("resend_start()", "function.resend_start(&error)"),
         )
     }
 
@@ -176,12 +176,12 @@ where
 {
     /// `WorkflowTemplate::start`, blocking. On a runtime thread the build
     /// does not run.
-    pub fn start(&self, params: P) -> Result<WorkflowHandle<T>, WorkflowStartError> {
+    pub fn start(&self, parameters: P) -> Result<WorkflowHandle<T>, WorkflowStartError> {
         let workflow_id = new_workflow_id();
         block_start(
-            self.template.start_with_id(params, workflow_id),
+            self.template.start_with_id(parameters, workflow_id),
             workflow_id,
-            &self.names("start()", "template.start(params)"),
+            &self.names("start()", "template.start(parameters)"),
         )
     }
 
@@ -189,15 +189,15 @@ where
     /// build does not run.
     pub fn start_with_id(
         &self,
-        params: P,
+        parameters: P,
         workflow_id: Uuid,
     ) -> Result<WorkflowHandle<T>, WorkflowStartError> {
         block_start(
-            self.template.start_with_id(params, workflow_id),
+            self.template.start_with_id(parameters, workflow_id),
             workflow_id,
             &self.names(
                 "start_with_id()",
-                "template.start_with_id(params, workflow_id)",
+                "template.start_with_id(parameters, workflow_id)",
             ),
         )
     }
@@ -229,13 +229,13 @@ impl HorsiesView<'_> {
     }
 
     /// `Horsies::start_workflow`, blocking: start the workflow definition
-    /// `D`, which takes no params, through its registration on the app.
+    /// `D`, which takes no parameters, through its registration on the app.
     ///
     /// Errors: as the async method. On a runtime thread `ASYNC_CONTEXT`,
     /// also when the app does not register `D`.
     pub fn start_workflow<D>(&self) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
     where
-        D: WorkflowDefinition<Params = ()>,
+        D: WorkflowDefinition<Parameters = ()>,
         D::Output: DeserializeOwned + Send + Sync,
     {
         let workflow_id = new_workflow_id();
@@ -247,26 +247,27 @@ impl HorsiesView<'_> {
     }
 
     /// `Horsies::start_workflow_with`, blocking: start the workflow
-    /// definition `D` with `params`, through its registration on the app.
+    /// definition `D` with `parameters`, through its registration on the app.
     ///
     /// Errors: as the async method. On a runtime thread `ASYNC_CONTEXT`,
     /// also when the app does not register `D`; the build does not run.
     pub fn start_workflow_with<D>(
         &self,
-        params: D::Params,
+        parameters: D::Parameters,
     ) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
     where
         D: WorkflowDefinition,
-        D::Params: Send + Sync,
+        D::Parameters: Send + Sync,
         D::Output: DeserializeOwned + Send + Sync,
     {
         let workflow_id = new_workflow_id();
         block_start(
-            self.app.start_workflow_with_as::<D>(params, workflow_id),
+            self.app
+                .start_workflow_with_as::<D>(parameters, workflow_id),
             workflow_id,
             &definition_names::<D>(
                 "start_workflow_with()",
-                "app.start_workflow_with::<D>(params)",
+                "app.start_workflow_with::<D>(parameters)",
             ),
         )
     }
@@ -338,9 +339,9 @@ impl<T> WorkflowHandleView<'_, T> {
         )
     }
 
-    /// `WorkflowHandle::tasks`, blocking.
-    pub fn tasks(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
-        self.block_handle(self.handle.tasks(), "tasks()", &HandleOperation::Tasks)
+    /// `WorkflowHandle::nodes`, blocking.
+    pub fn nodes(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
+        self.block_handle(self.handle.nodes(), "nodes()", &HandleOperation::Tasks)
     }
 
     /// `WorkflowHandle::cancel`, blocking.

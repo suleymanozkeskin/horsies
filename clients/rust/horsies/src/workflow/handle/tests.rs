@@ -539,12 +539,12 @@ fn a_stored_node_reads_its_status_result_and_summary() {
     let mut node = stored_node(
         "COMPLETED",
         Some(
-            r#"{"status": "COMPLETED", "output": null, "total_tasks": 3, "completed_tasks": 3, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}"#,
+            r#"{"status": "COMPLETED", "output": null, "total_nodes": 3, "completed_nodes": 3, "failed_nodes": 0, "skipped_nodes": 0, "error_summary": null}"#,
         ),
     );
     node.result = Some(json!({"__h_task_result__": true, "ok": 42, "err": null}).to_string());
     let info = node_info(workflow(), node).unwrap();
-    assert_eq!(info.status, WorkflowTaskStatus::Completed);
+    assert_eq!(info.status, WorkflowNodeStatus::Completed);
     assert_eq!(
         info.result,
         Some(NodeResult::Outcome(TaskOutcome::Succeeded(
@@ -557,10 +557,10 @@ fn a_stored_node_reads_its_status_result_and_summary() {
     assert_eq!(summary.status, WorkflowStatus::Completed);
     assert_eq!(
         (
-            summary.total_tasks,
-            summary.completed_tasks,
-            summary.failed_tasks,
-            summary.skipped_tasks,
+            summary.total_nodes,
+            summary.completed_nodes,
+            summary.failed_nodes,
+            summary.skipped_nodes,
         ),
         (3, 3, 0, 0)
     );
@@ -575,7 +575,7 @@ fn a_stored_summary_output_keeps_its_stored_text() {
         "-9223372036854775809",
     ] {
         let text = format!(
-            r#"{{"status": "COMPLETED", "output": {output}, "total_tasks": 1, "completed_tasks": 1, "failed_tasks": 0, "skipped_tasks": 0, "error_summary": null}}"#
+            r#"{{"status": "COMPLETED", "output": {output}, "total_nodes": 1, "completed_nodes": 1, "failed_nodes": 0, "skipped_nodes": 0, "error_summary": null}}"#
         );
         let info = node_info(workflow(), stored_node("COMPLETED", Some(&text))).unwrap();
         let summary_output = info
@@ -660,7 +660,7 @@ fn a_summary_that_does_not_read_is_stored_data_invalid() {
     let deep = format!("{{\"status\":{}{}}}", "[".repeat(1_100), "]".repeat(1_100));
     for summary in [
         "{not valid json!!!",
-        r#"{"status": "NOT_A_STATUS", "total_tasks": 1}"#,
+        r#"{"status": "NOT_A_STATUS", "total_nodes": 1}"#,
         deep.as_str(),
     ] {
         let refused = node_info(workflow(), stored_node("COMPLETED", Some(summary))).unwrap_err();

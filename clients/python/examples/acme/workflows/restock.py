@@ -75,7 +75,7 @@ class Restock(WorkflowDefinition[RestockPlan]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[*feeds, aggregate],
+            nodes=[*feeds, aggregate],
             on_error=OnError.FAIL,
             output=aggregate,
             # The quorum join decides when the aggregate *runs*; it does not
@@ -95,7 +95,7 @@ class Restock(WorkflowDefinition[RestockPlan]):
 _CHECK_SUPPLIERS: Final[list[str]] = list(tuning.SUPPLIERS)
 
 
-@app.workflow_builder(cases=[{'suppliers': _CHECK_SUPPLIERS}])
+@app.check_workflow_builder(cases=[{'suppliers': _CHECK_SUPPLIERS}])
 def build_restock(*, suppliers: list[str]) -> WorkflowSpec[RestockPlan]:
     """Build the restock DAG for a set of suppliers."""
     return Restock.build_with(app, suppliers=suppliers)

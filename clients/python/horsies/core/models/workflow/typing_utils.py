@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 NODE_ID_PATTERN = re.compile(r'^[A-Za-z0-9_\-:.]+$')
 
 
-def slugify(value: str) -> str:
+def node_id_from_text(value: str) -> str:
     """
     Convert a string to a valid node_id by replacing invalid characters.
 
@@ -43,8 +43,8 @@ def slugify(value: str) -> str:
     Result matches NODE_ID_PATTERN: [A-Za-z0-9_\\-:.]+
 
     Example:
-        slugify("My Workflow Name")  # "My_Workflow_Name"
-        slugify("task:v2.0")         # "task:v2.0" (unchanged)
+        node_id_from_text("My Workflow Name")  # "My_Workflow_Name"
+        node_id_from_text("task:v2.0")         # "task:v2.0" (unchanged)
     """
     result = value.replace(' ', '_')
     result = re.sub(r'[^A-Za-z0-9_\-:.]', '', result)
@@ -320,7 +320,7 @@ def _resolve_source_node_ok_type(node: TaskNode[Any, Any] | SubWorkflowNode[Any]
     """Resolve output ok-type for TaskNode/SubWorkflowNode source used in args_from."""
     if isinstance(node, TaskNode):
         return _resolve_task_fn_ok_type(node.fn)
-    return _resolve_workflow_def_ok_type(node.workflow_def)
+    return _resolve_workflow_def_ok_type(node.workflow_definition)
 
 
 def validate_workflow_generic_output_match(

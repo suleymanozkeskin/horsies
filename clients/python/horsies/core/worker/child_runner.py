@@ -1576,17 +1576,20 @@ def _prepare_task_call(
                             task_name, SerializationError(str(summary_exc))
                         )
 
+            # The engine payload keeps its stored keys (`task_index`,
+            # `results_by_id`, `summaries_by_id`): SQL writes them. They map
+            # here to the API names of the context.
             kwargs['workflow_ctx'] = WorkflowContext.from_serialized(
                 workflow_id=workflow_ctx_data.get('workflow_id', ''),
-                task_index=workflow_ctx_data.get('task_index', 0),
+                node_index=workflow_ctx_data.get('task_index', 0),
                 task_name=workflow_ctx_data.get('task_name', ''),
-                results_by_id=results_by_id,
-                summaries_by_id=summaries_by_id,
+                results_by_node_id=results_by_id,
+                summaries_by_node_id=summaries_by_id,
             )
         # If task doesn't declare workflow_ctx, silently skip injection.
 
         if workflow_meta_data is not None and 'workflow_meta' in sig.parameters:
-            from horsies.core.models.workflow import WorkflowMeta
+            from horsies.core.models.workflow import WorkflowMetadata
 
             if isinstance(workflow_meta_data, dict):
                 meta_dict = cast(dict[str, Any], workflow_meta_data)
@@ -1596,9 +1599,11 @@ def _prepare_task_call(
                 except (TypeError, ValueError):
                     task_index_value = 0
 
-                kwargs['workflow_meta'] = WorkflowMeta(
+                # The stored key `task_index` (written by SQL) maps to the
+                # API name `node_index`.
+                kwargs['workflow_meta'] = WorkflowMetadata(
                     workflow_id=str(meta_dict.get('workflow_id', '')),
-                    task_index=task_index_value,
+                    node_index=task_index_value,
                     task_name=str(meta_dict.get('task_name', '')),
                 )
         # If task doesn't declare workflow_meta, silently skip injection.

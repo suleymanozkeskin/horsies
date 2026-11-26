@@ -27,8 +27,8 @@ from horsies.core.models.workflow import TaskNode
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.types.result import Err, Ok, Result, is_ok
 from horsies.core.workflows.lifecycle import (
-    pause_workflow_sync,
-    resume_workflow_sync,
+    pause_workflow,
+    resume_workflow,
     start_workflow,
 )
 
@@ -95,7 +95,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
             threads, _record(core.WorkflowPaused),
         )
 
-        result = pause_workflow_sync(broker, WORKFLOW_KEY)
+        result = pause_workflow(broker, WORKFLOW_KEY)
 
         assert is_ok(result)
         broker._core_handle.pause_workflow.assert_called_once_with(WORKFLOW_KEY)
@@ -109,7 +109,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
             threads, _record(core.WorkflowResumed),
         )
 
-        result = resume_workflow_sync(broker, WORKFLOW_KEY)
+        result = resume_workflow(broker, WORKFLOW_KEY)
 
         assert is_ok(result)
         broker._core_handle.resume_workflow.assert_called_once_with(WORKFLOW_KEY)

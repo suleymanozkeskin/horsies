@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde::Deserialize;
 
 use crate::core::config::bounded::BoundedU32;
-use crate::core::workflow::node::{AnyNode, JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{AnyNode, JoinType, SubWorkflowParameters};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::workflow::spec::MAX_WORKFLOW_NODES;
 use crate::core::{OnError, WorkflowSpec};
@@ -455,7 +455,7 @@ struct NodeBody {
     task_options_json: Option<String>,
     is_subworkflow: bool,
     sub_definition_key: Option<String>,
-    sub_workflow_params: SubWorkflowParams,
+    sub_workflow_params: SubWorkflowParameters,
 }
 
 impl NodeBody {
@@ -476,7 +476,7 @@ impl NodeBody {
                 },
                 is_subworkflow: false,
                 sub_definition_key: None,
-                sub_workflow_params: SubWorkflowParams::NotGiven,
+                sub_workflow_params: SubWorkflowParameters::NotGiven,
             },
             SpecNodeBody::SubWorkflow {
                 definition_key,
@@ -488,8 +488,8 @@ impl NodeBody {
                 is_subworkflow: true,
                 sub_definition_key: Some(definition_key),
                 sub_workflow_params: match params {
-                    SpecSubWorkflowParams::Given => SubWorkflowParams::Given,
-                    SpecSubWorkflowParams::NotGiven => SubWorkflowParams::NotGiven,
+                    SpecSubWorkflowParams::Given => SubWorkflowParameters::Given,
+                    SpecSubWorkflowParams::NotGiven => SubWorkflowParameters::NotGiven,
                 },
             },
         }

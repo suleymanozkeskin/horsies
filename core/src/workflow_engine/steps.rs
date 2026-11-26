@@ -35,7 +35,7 @@ use uuid::Uuid;
 
 use crate::broker::core_rows::{column, one_row, query_in, query_on, roll_back, RowDecodeError};
 use crate::broker::{BrokerError, PostgresBroker};
-use crate::core::workflow::node::SubWorkflowParams;
+use crate::core::workflow::node::SubWorkflowParameters;
 use crate::db::{
     BoundStatement, CheckoutClass, CorePool, IsolationLevel, NotSentCause, ParameterType,
     PooledConnection, Row, StatementFailure, TypedStatement,
@@ -393,7 +393,7 @@ pub(crate) struct OwedChildStart {
     /// stores none (the load then fails the node).
     pub(crate) sub_definition_key: Option<String>,
     /// The params choice that the client set on the node.
-    pub(crate) sub_workflow_params: SubWorkflowParams,
+    pub(crate) sub_workflow_params: SubWorkflowParameters,
     /// The depth of the parent workflow.
     pub(crate) parent_depth: i32,
     /// The terminal dependencies of the node.
@@ -1012,7 +1012,7 @@ fn child_start_row(
     statement: &TypedStatement,
 ) -> Result<OwedChildStart, StepContractError> {
     let params_text: String = column(row, statement, "sub_workflow_params")?;
-    let Some(sub_workflow_params) = SubWorkflowParams::from_stored(&params_text) else {
+    let Some(sub_workflow_params) = SubWorkflowParameters::from_stored(&params_text) else {
         return Err(RowDecodeError::Shape {
             statement: statement.name(),
             reason: format!(

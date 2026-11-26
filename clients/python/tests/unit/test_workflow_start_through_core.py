@@ -91,7 +91,7 @@ def registered_child() -> None:
 def _spec() -> WorkflowSpec[Any]:
     first = TaskNode(fn=value_task, kwargs={'value': 1})
     second = TaskNode(fn=value_task, kwargs={'value': 2})
-    child = SubWorkflowNode(workflow_def=StartCoreChild, waits_for=[first])
+    child = SubWorkflowNode(workflow_definition=StartCoreChild, waits_for=[first])
     joined = TaskNode(
         fn=value_task,
         kwargs={'value': 3},
@@ -349,7 +349,7 @@ class TestNodeRowAsserts:
             'start_core.task_args', [node], output=node,
             definition_key='start_core.task_args.v1',
         )
-        object.__setattr__(spec.tasks[0], 'args', (1,))
+        object.__setattr__(spec.nodes[0], 'args', (1,))
 
         with pytest.raises(AssertionError) as exc_info:
             await start_workflow_async(spec, broker, WORKFLOW_ID, SENT_AT)
@@ -366,10 +366,10 @@ class TestNodeRowAsserts:
         broker = _broker(_record(core.WorkflowStarted))
         spec = APP.workflow(
             'start_core.subworkflow_args',
-            [SubWorkflowNode(workflow_def=StartCoreChild)],
+            [SubWorkflowNode(workflow_definition=StartCoreChild)],
             definition_key='start_core.subworkflow_args.v1',
         )
-        object.__setattr__(spec.tasks[0], 'args', (1, 2))
+        object.__setattr__(spec.nodes[0], 'args', (1, 2))
 
         with pytest.raises(AssertionError) as exc_info:
             await start_workflow_async(spec, broker, WORKFLOW_ID, SENT_AT)

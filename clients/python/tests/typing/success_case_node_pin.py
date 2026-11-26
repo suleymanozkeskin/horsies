@@ -29,7 +29,7 @@ def define(produce: TaskFunction[[], int]) -> None:
         config = WorkflowDefinitionConfig(output=step)
 
     task_node = TaskNode(fn=produce)
-    sub_node = SubWorkflowNode(workflow_def=Child)
+    sub_node = SubWorkflowNode(workflow_definition=Child)
 
     SuccessCase(required=[sub_node])
     SuccessCase(required=[task_node, sub_node])

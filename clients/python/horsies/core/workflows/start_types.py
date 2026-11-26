@@ -10,7 +10,7 @@ variant.
 ``workflow_id`` is the id that this start used: the caller's id, or the id
 minted for the start when the caller gave none.
 
-The retry methods ``WorkflowSpec.retry_start`` / ``retry_start_async`` take a
+The resend methods ``WorkflowSpec.resend_start`` / ``resend_start_async`` take a
 ``WorkflowStartRetryable`` and start the workflow again with its id.
 
 The classes of the core's start catalog are generated from horsies-core into

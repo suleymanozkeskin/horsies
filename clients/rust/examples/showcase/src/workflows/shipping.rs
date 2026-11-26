@@ -20,7 +20,7 @@ pub struct Shipping;
 
 impl WorkflowDefinition for Shipping {
     type Output = TrackingSeed;
-    type Params = ShippingParams;
+    type Parameters = ShippingParams;
 
     fn name() -> &'static str {
         "shipping"

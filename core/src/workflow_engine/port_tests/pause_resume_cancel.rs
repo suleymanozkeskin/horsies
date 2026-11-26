@@ -66,7 +66,7 @@ async fn cancel_skips_a_pending_node() {
     let tasks = workflow_handle.tasks().await.expect("tasks()");
     assert_eq!(
         tasks[1].status,
-        crate::core::WorkflowTaskStatus::Skipped,
+        crate::core::WorkflowNodeStatus::Skipped,
         "{tasks:?}"
     );
 }

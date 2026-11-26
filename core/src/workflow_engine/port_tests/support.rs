@@ -29,11 +29,11 @@ use crate::core::history::maintenance::coverage::{
 use crate::core::lifecycle::{OwnedClaim, TerminalizationOutcome};
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
 use crate::core::workflow::handle_types::HandleResult;
-use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{JoinType, SubWorkflowParameters};
 use crate::core::workflow::policy::{SuccessCase, SuccessPolicy};
 use crate::core::{
     AnyNode, OnError, OutcomeCode, RetrievalCode, SubWorkflowSummary, TaskError, TaskResult,
-    WorkflowSpec, WorkflowStatus, WorkflowTaskStatus,
+    WorkflowNodeStatus, WorkflowSpec, WorkflowStatus,
 };
 use crate::db::CheckoutClass;
 use crate::test_support::child_specs::TestChildSpecs;
@@ -359,7 +359,7 @@ pub(super) enum NodeKind {
     SubWorkflow {
         definition_key: String,
         child: Option<Uuid>,
-        params: SubWorkflowParams,
+        params: SubWorkflowParameters,
     },
 }
 
@@ -432,7 +432,7 @@ impl NodeSeed {
             kind: NodeKind::SubWorkflow {
                 definition_key: definition_key.to_owned(),
                 child,
-                params: SubWorkflowParams::NotGiven,
+                params: SubWorkflowParameters::NotGiven,
             },
             ..Self::task(workflow_id, task_index, status)
         }
@@ -682,7 +682,7 @@ pub(super) fn task_node(index: usize, task_name: &str) -> AnyNode {
         task_options_json: None,
         is_subworkflow: false,
         sub_definition_key: None,
-        sub_workflow_params: SubWorkflowParams::NotGiven,
+        sub_workflow_params: SubWorkflowParameters::NotGiven,
     }
 }
 
@@ -985,7 +985,7 @@ fn completed_result(text: &str) -> TaskResult<serde_json::Value> {
 pub(super) struct NodeInfo {
     pub(super) index: i32,
     pub(super) name: String,
-    pub(super) status: WorkflowTaskStatus,
+    pub(super) status: WorkflowNodeStatus,
     pub(super) result: Option<TaskResult<serde_json::Value>>,
     pub(super) started_at: Option<DateTime<Utc>>,
     pub(super) completed_at: Option<DateTime<Utc>>,

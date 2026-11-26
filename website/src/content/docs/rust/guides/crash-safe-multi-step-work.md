@@ -215,7 +215,7 @@ struct Checkout;
 
 impl WorkflowDefinition for Checkout {
     type Output = String;
-    type Params = CheckoutParams;
+    type Parameters = CheckoutParams;
 
     fn name() -> &'static str {
         "checkout"
@@ -261,7 +261,7 @@ fn register_checkout(
     let _charge_card = charge_card::register(app)?;
     let _write_invoice = write_invoice::register(app)?;
     let _send_receipt = send_receipt::register(app)?;
-    app.workflow_template::<Checkout>()
+    app.register_workflow_definition_with::<Checkout>()
 }
 
 async fn start_checkout(

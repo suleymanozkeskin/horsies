@@ -160,7 +160,7 @@ node_mixed_sink = TaskNode(
 
 spec_mixed_chain = app.workflow(
     name='e2e_async_mixed_chain',
-    tasks=[node_mixed_source, node_mixed_async, node_mixed_sink],
+    nodes=[node_mixed_source, node_mixed_async, node_mixed_sink],
     output=node_mixed_sink,
     definition_key='tests.e2e.tasks.async_tasks.e2e_async_mixed_chain.v1',
 )
@@ -232,7 +232,7 @@ node_after_left_work = TaskNode(
 
 spec_left_work = app.workflow(
     name='e2e_async_left_work',
-    tasks=[node_left_work, node_after_left_work],
+    nodes=[node_left_work, node_after_left_work],
     output=node_after_left_work,
     definition_key='tests.e2e.tasks.async_tasks.e2e_async_left_work.v1',
 )

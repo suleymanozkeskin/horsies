@@ -57,10 +57,10 @@ pub trait BlockingTaskFn: Send + Sync + 'static {
 
 /// Metadata describing a registered task.
 ///
-/// Use [`TaskMeta::for_input::<A>()`] in task construction macros to
+/// Use [`TaskMetadata::for_input::<A>()`] in task construction macros to
 /// automatically populate `expects_input` and `input_type_name`.
 #[derive(Debug, Clone, Default)]
-pub struct TaskMeta {
+pub struct TaskMetadata {
     /// Whether this task opts into workflow context injection.
     pub accepts_workflow_ctx: bool,
     /// Definition-time task options, if the task was registered through
@@ -97,7 +97,7 @@ pub enum TaskModule {
     NotGiven,
 }
 
-impl TaskMeta {
+impl TaskMetadata {
     /// The same metadata, for a task defined in `module_path`. The task
     /// macros pass `module_path!()`.
     pub fn in_module(self, module_path: &'static str) -> Self {
@@ -142,24 +142,24 @@ impl TaskMeta {
 pub enum RegisteredTask {
     Async {
         task: Arc<dyn AsyncTaskFn>,
-        meta: TaskMeta,
+        metadata: TaskMetadata,
     },
     Blocking {
         task: Arc<dyn BlockingTaskFn>,
-        meta: TaskMeta,
+        metadata: TaskMetadata,
     },
 }
 
 impl Clone for RegisteredTask {
     fn clone(&self) -> Self {
         match self {
-            Self::Async { task, meta } => Self::Async {
+            Self::Async { task, metadata } => Self::Async {
                 task: Arc::clone(task),
-                meta: meta.clone(),
+                metadata: metadata.clone(),
             },
-            Self::Blocking { task, meta } => Self::Blocking {
+            Self::Blocking { task, metadata } => Self::Blocking {
                 task: Arc::clone(task),
-                meta: meta.clone(),
+                metadata: metadata.clone(),
             },
         }
     }
@@ -179,7 +179,9 @@ impl RegisteredTask {
     /// Returns true if this task accepts workflow context injection.
     pub fn accepts_workflow_ctx(&self) -> bool {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.accepts_workflow_ctx,
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => {
+                metadata.accepts_workflow_ctx
+            }
         }
     }
 
@@ -197,13 +199,13 @@ impl RegisteredTask {
     /// Mark this task as accepting workflow context injection.
     pub fn with_workflow_ctx(self) -> Self {
         match self {
-            Self::Async { task, mut meta } => {
-                meta.accepts_workflow_ctx = true;
-                Self::Async { task, meta }
+            Self::Async { task, mut metadata } => {
+                metadata.accepts_workflow_ctx = true;
+                Self::Async { task, metadata }
             }
-            Self::Blocking { task, mut meta } => {
-                meta.accepts_workflow_ctx = true;
-                Self::Blocking { task, meta }
+            Self::Blocking { task, mut metadata } => {
+                metadata.accepts_workflow_ctx = true;
+                Self::Blocking { task, metadata }
             }
         }
     }
@@ -211,36 +213,38 @@ impl RegisteredTask {
     /// Attach task options metadata.
     pub fn with_task_options(self, task_options: TaskOptions) -> Self {
         match self {
-            Self::Async { task, mut meta } => {
-                meta.task_options = Some(task_options);
-                Self::Async { task, meta }
+            Self::Async { task, mut metadata } => {
+                metadata.task_options = Some(task_options);
+                Self::Async { task, metadata }
             }
-            Self::Blocking { task, mut meta } => {
-                meta.task_options = Some(task_options);
-                Self::Blocking { task, meta }
+            Self::Blocking { task, mut metadata } => {
+                metadata.task_options = Some(task_options);
+                Self::Blocking { task, metadata }
             }
         }
     }
 
-    /// The user error codes that the task declares ([`TaskMeta::error_codes`]).
+    /// The user error codes that the task declares ([`TaskMetadata::error_codes`]).
     pub fn error_codes(&self) -> &'static [&'static str] {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.error_codes,
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => metadata.error_codes,
         }
     }
 
     /// Access task options metadata, if present.
     pub fn task_options(&self) -> Option<&TaskOptions> {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.task_options.as_ref(),
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => {
+                metadata.task_options.as_ref()
+            }
         }
     }
 
     /// Set the resolved queue name on this task's metadata.
     pub fn set_queue_name(&mut self, queue: String) {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
-                meta.queue_name = Some(queue);
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => {
+                metadata.queue_name = Some(queue);
             }
         }
     }
@@ -248,8 +252,8 @@ impl RegisteredTask {
     /// Set the resolved priority on this task's metadata.
     pub fn set_priority(&mut self, priority: u32) {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
-                meta.priority = Some(priority);
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => {
+                metadata.priority = Some(priority);
             }
         }
     }
@@ -257,8 +261,8 @@ impl RegisteredTask {
     /// Set whether this task expects non-unit input.
     pub fn set_expects_input(&mut self, expects: bool) {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
-                meta.expects_input = expects;
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => {
+                metadata.expects_input = expects;
             }
         }
     }
@@ -266,8 +270,8 @@ impl RegisteredTask {
     /// Set the input type name for diagnostics.
     pub fn set_input_type_name(&mut self, name: &'static str) {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => {
-                meta.input_type_name = Some(name);
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => {
+                metadata.input_type_name = Some(name);
             }
         }
     }
@@ -275,28 +279,34 @@ impl RegisteredTask {
     /// The resolved queue name, if set during registration.
     pub fn queue_name(&self) -> Option<&str> {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.queue_name.as_deref(),
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => {
+                metadata.queue_name.as_deref()
+            }
         }
     }
 
     /// The resolved priority, if set during registration.
     pub fn priority(&self) -> Option<u32> {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.priority,
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => metadata.priority,
         }
     }
 
     /// Whether this task expects non-unit input.
     pub fn expects_input(&self) -> bool {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.expects_input,
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => {
+                metadata.expects_input
+            }
         }
     }
 
     /// The input type name, for diagnostics.
     pub fn input_type_name(&self) -> Option<&'static str> {
         match self {
-            Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.input_type_name,
+            Self::Async { metadata, .. } | Self::Blocking { metadata, .. } => {
+                metadata.input_type_name
+            }
         }
     }
 }
@@ -336,14 +346,14 @@ mod tests {
     fn registered_task_variants() {
         let async_task = RegisteredTask::Async {
             task: Arc::new(DummyAsync),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         };
         assert!(async_task.is_async());
         assert!(!async_task.is_blocking());
 
         let blocking_task = RegisteredTask::Blocking {
             task: Arc::new(DummyBlocking),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         };
         assert!(blocking_task.is_blocking());
         assert!(!blocking_task.is_async());
@@ -353,12 +363,13 @@ mod tests {
     fn a_task_declares_no_error_code_unless_its_meta_names_some() {
         let plain = RegisteredTask::Blocking {
             task: Arc::new(DummyBlocking),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         };
         assert!(plain.error_codes().is_empty());
         let declared = RegisteredTask::Async {
             task: Arc::new(DummyAsync),
-            meta: TaskMeta::for_input::<()>().with_error_codes(&["RATE_LIMITED", "DECLINED"]),
+            metadata: TaskMetadata::for_input::<()>()
+                .with_error_codes(&["RATE_LIMITED", "DECLINED"]),
         };
         assert_eq!(declared.error_codes(), ["RATE_LIMITED", "DECLINED"]);
     }

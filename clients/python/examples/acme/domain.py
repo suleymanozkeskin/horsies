@@ -215,7 +215,7 @@ class PaymentRefund(BaseModel):
 
 
 class PickPack(BaseModel):
-    """Warehouse work, stamped with the `WorkflowMeta` the engine injected."""
+    """Warehouse work, stamped with the `WorkflowMetadata` the engine injected."""
 
     order_id: str
     station: str

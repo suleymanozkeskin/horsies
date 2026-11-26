@@ -266,7 +266,7 @@ class CheckoutWorkflow(WorkflowDefinition[str]):
             to_address=order.customer_email,
             invoice=from_node(invoice),
         )
-        return app.workflow(name=cls.name, tasks=[charge, invoice, receipt], output=receipt)
+        return app.workflow(name=cls.name, nodes=[charge, invoice, receipt], output=receipt)
 
 
 def start_checkout(order: Order) -> WorkflowStartResult[WorkflowHandle[str]]:

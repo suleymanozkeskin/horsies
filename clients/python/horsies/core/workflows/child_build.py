@@ -56,7 +56,7 @@ from horsies.core.models.workflow import (
     validate_workflow_generic_output_match,
 )
 from horsies.core.models.workflow.limits import MAX_SUBWORKFLOW_DEPTH
-from horsies.core.models.workflow.nodes import stored_kwargs
+from horsies.core.models.workflow.nodes import node_target_name, stored_kwargs
 from horsies.core.types.result import Err, Ok
 from horsies.core.workflows.retention import queue_retention_class
 from horsies.core.workflows.sql import (
@@ -517,7 +517,7 @@ def _serialized(value: object, context: str) -> str:
 
 def _index_of(node: TaskNode[Any, Any] | SubWorkflowNode[Any]) -> int:
     assert node.index is not None, (
-        f'node {node.name!r} has no index; a WorkflowSpec assigns one to every node'
+        f'node {node_target_name(node)!r} has no index; a WorkflowSpec assigns one to every node'
     )
     return node.index
 
@@ -550,9 +550,9 @@ def subworkflow_node_row(node: SubWorkflowNode[Any], owner: NodeOwner) -> NodeRo
     return NodeRow(
         task_index=_index_of(node),
         node_id=node.node_id,
-        task_name=node.name,
+        task_name=node.workflow_name,
         input_json=_serialized(
-            stored_kwargs(node), f"kwargs for {owner.kwargs_label('sub')} {node.name}",
+            stored_kwargs(node), f"kwargs for {owner.kwargs_label('sub')} {node.workflow_name}",
         ),
         queue_name=SUBWORKFLOW_NODE_QUEUE,
         priority=SUBWORKFLOW_NODE_PRIORITY,
@@ -564,8 +564,8 @@ def subworkflow_node_row(node: SubWorkflowNode[Any], owner: NodeOwner) -> NodeRo
         min_success=node.min_success,
         task_options=None,
         kind=SubWorkflowNodeKind(
-            sub_workflow_name=node.workflow_def.name,
-            sub_definition_key=node.workflow_def._require_definition_key(),  # pyright: ignore[reportPrivateUsage]
+            sub_workflow_name=node.workflow_definition.name,
+            sub_definition_key=node.workflow_definition._require_definition_key(),  # pyright: ignore[reportPrivateUsage]
             params=subworkflow_params_of(node),
         ),
     )
@@ -592,18 +592,18 @@ def task_options_with_good_until(node: TaskNode[Any, Any], owner: NodeOwner) -> 
                 base_options = cast(dict[str, Any], parsed_options)
             case Ok(not_an_object):
                 raise SerializationError(
-                    f'Task options for {owner.options_label()} {node.name} are not '
+                    f'Task options for {owner.options_label()} {node.task_name} are not '
                     f'a JSON object: got {type(not_an_object).__name__}',
                 )
             case Err(parse_error):
                 raise SerializationError(
-                    f'Corrupt task_options for {owner.options_label()} {node.name}: '
+                    f'Corrupt task_options for {owner.options_label()} {node.task_name}: '
                     f'{parse_error}',
                 )
             case _ as unreachable:
                 assert_never(unreachable)
     base_options['good_until'] = node.good_until.isoformat()
-    return _serialized(base_options, f'task_options for {owner.options_label()} {node.name}')
+    return _serialized(base_options, f'task_options for {owner.options_label()} {node.task_name}')
 
 
 def task_node_row(
@@ -634,9 +634,9 @@ def task_node_row(
     return NodeRow(
         task_index=_index_of(node),
         node_id=node.node_id,
-        task_name=node.name,
+        task_name=node.task_name,
         input_json=_serialized(
-            stored_kwargs(node), f"kwargs for {owner.kwargs_label('task')} {node.name}",
+            stored_kwargs(node), f"kwargs for {owner.kwargs_label('task')} {node.task_name}",
         ),
         queue_name=queue_name,
         priority=priority,
@@ -670,15 +670,15 @@ def child_node_rows(
     from horsies.core.workflows.lifecycle import guard_no_positional_args
 
     rows: list[NodeRow] = []
-    for child_node in child_spec.tasks:
+    for child_node in child_spec.nodes:
         try:
-            guard_no_positional_args(child_node.name, child_node.args)
+            guard_no_positional_args(node_target_name(child_node), child_node.args)
         except ValueError as exc:
             kind_text = 'subworkflow' if isinstance(child_node, SubWorkflowNode) else 'task'
             return _failed(
                 node,
                 (
-                    f'Invalid child {kind_text} node args for {child_node.name}: '
+                    f'Invalid child {kind_text} node args for {node_target_name(child_node)}: '
                     f'{str(exc)[:BUILD_FAILURE_TEXT_CHARS]}'
                 ),
                 OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
@@ -689,7 +689,7 @@ def child_node_rows(
             case TaskNode():
                 _ = task_options_with_good_until(child_node, NodeOwner.CHILD)
                 _ = _serialized(
-                    stored_kwargs(child_node), f'kwargs for child task {child_node.name}',
+                    stored_kwargs(child_node), f'kwargs for child task {child_node.task_name}',
                 )
                 assert broker.app is not None, (
                     'a built child spec implies an app: build_with refuses a broker without one'
@@ -699,7 +699,7 @@ def child_node_rows(
                 except ConfigurationError as exc:
                     return _failed(
                         node,
-                        f'Invalid queue/priority for child task {child_node.name}: {exc}',
+                        f'Invalid queue/priority for child task {child_node.task_name}: {exc}',
                         OperationalErrorCode.WORKFLOW_ENQUEUE_FAILED,
                     )
                 rows.append(

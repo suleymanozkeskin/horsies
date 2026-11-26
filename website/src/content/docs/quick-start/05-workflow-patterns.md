@@ -72,7 +72,7 @@ def start_order_workflow(
 
     workflow = app.workflow(
         name=f"order_{order.order_id}",
-        tasks=nodes,
+        nodes=nodes,
         output=output_node,
         on_error=OnError.FAIL,
         definition_key="myapp.order_workflow.v1",
@@ -132,7 +132,7 @@ def sync_all_warehouses_task() -> Result[dict[str, int], TaskError]:
     # Queue max_concurrency limits simultaneous execution
     workflow = app.workflow(
         name='sync_all_warehouses',
-        tasks=nodes,
+        nodes=nodes,
         output=last_node,
         definition_key='myapp.sync_all_warehouses.v1',
     )
@@ -213,7 +213,7 @@ def fulfillment_workflow(order: Order) -> None:
 
     workflow = app.workflow(
         name=f"fulfillment_{order.order_id}",
-        tasks=[
+        nodes=[
             node_validate,
             node_inventory,
             node_reserve,
@@ -262,7 +262,7 @@ def trigger_shipment_tracking(shipment_id: str) -> bool:
 
     workflow = app.workflow(
         name=f"tracking_{shipment_id}",
-        tasks=[node_fetch, node_update, node_notify],
+        nodes=[node_fetch, node_update, node_notify],
         output=node_notify,
         definition_key="myapp.shipment_tracking.v1",
     )
@@ -318,7 +318,7 @@ def process_returns_task() -> Result[dict[str, str], TaskError]:
 
     workflow = app.workflow(
         name='returns_processing',
-        tasks=[node_web, node_store, node_phone, node_aggregate],
+        nodes=[node_web, node_store, node_phone, node_aggregate],
         output=node_aggregate,
         on_error=OnError.FAIL,
         definition_key='myapp.returns_processing.v1',

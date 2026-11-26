@@ -2,7 +2,7 @@
 """The sync workflow facades call the core's blocking forms.
 
 ``WorkflowHandle``'s sync methods, ``start_workflow``,
-``pause_workflow_sync`` and ``resume_workflow_sync`` share one outcome
+``pause_workflow`` and ``resume_workflow`` share one outcome
 mapping with their async forms. For each catalog outcome of the core's
 record, and for each refusal before the core call, the sync facade returns
 the outcome of its async form (``outcome_shape``), calls the blocking form
@@ -39,10 +39,10 @@ from horsies.core.models.workflow.handle_types import (
 )
 from horsies.core.types.result import Ok, Result, is_ok
 from horsies.core.workflows.lifecycle import (
+    pause_workflow_async,
     pause_workflow,
-    pause_workflow_sync,
+    resume_workflow_async,
     resume_workflow,
-    resume_workflow_sync,
     start_workflow,
     start_workflow_async,
 )
@@ -147,7 +147,7 @@ def _answering(method: str, answer: object) -> CoreAnswers:
 
 
 def _workflow_handle() -> WorkflowHandle[int]:
-    return WorkflowHandle(workflow_id=WORKFLOW_KEY, broker=APP.get_broker(), out_type=int)
+    return WorkflowHandle(workflow_id=WORKFLOW_KEY, broker=APP.get_broker(), output_type=int)
 
 
 async def _awaited(awaitable: Awaitable[object]) -> object:
@@ -273,9 +273,9 @@ FACADES: Final[dict[str, Facade]] = {
             **HANDLE_FAILURES,
         },
     ),
-    'WorkflowHandle.tasks': Facade(
-        blocking=lambda handle: handle.tasks(),
-        awaited=lambda handle: handle.tasks_async(),
+    'WorkflowHandle.nodes': Facade(
+        blocking=lambda handle: handle.nodes(),
+        awaited=lambda handle: handle.nodes_async(),
         blocking_form='workflow_nodes',
         arguments=(WORKFLOW_KEY,),
         keywords={},
@@ -349,9 +349,9 @@ FACADES: Final[dict[str, Facade]] = {
             **HANDLE_FAILURES,
         },
     ),
-    'pause_workflow_sync': Facade(
-        blocking=lambda handle: pause_workflow_sync(handle.broker, handle.workflow_id),
-        awaited=lambda handle: pause_workflow(handle.broker, handle.workflow_id),
+    'pause_workflow': Facade(
+        blocking=lambda handle: pause_workflow(handle.broker, handle.workflow_id),
+        awaited=lambda handle: pause_workflow_async(handle.broker, handle.workflow_id),
         blocking_form='pause_workflow',
         arguments=(WORKFLOW_KEY,),
         keywords={},
@@ -376,9 +376,9 @@ FACADES: Final[dict[str, Facade]] = {
             **HANDLE_FAILURES,
         },
     ),
-    'resume_workflow_sync': Facade(
-        blocking=lambda handle: resume_workflow_sync(handle.broker, handle.workflow_id),
-        awaited=lambda handle: resume_workflow(handle.broker, handle.workflow_id),
+    'resume_workflow': Facade(
+        blocking=lambda handle: resume_workflow(handle.broker, handle.workflow_id),
+        awaited=lambda handle: resume_workflow_async(handle.broker, handle.workflow_id),
         blocking_form='resume_workflow',
         arguments=(WORKFLOW_KEY,),
         keywords={},

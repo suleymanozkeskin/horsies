@@ -290,10 +290,10 @@ def _summary(notation: object) -> SubWorkflowSummary[object]:
     return SubWorkflowSummary(
         status=WorkflowStatus(text_of(fields, 'status')),
         output=fields['output'],
-        total_tasks=_count(fields, 'total_tasks'),
-        completed_tasks=_count(fields, 'completed_tasks'),
-        failed_tasks=_count(fields, 'failed_tasks'),
-        skipped_tasks=_count(fields, 'skipped_tasks'),
+        total_nodes=_count(fields, 'total_nodes'),
+        completed_nodes=_count(fields, 'completed_nodes'),
+        failed_nodes=_count(fields, 'failed_nodes'),
+        skipped_nodes=_count(fields, 'skipped_nodes'),
         error_summary=_optional_text(fields, 'error_summary'),
     )
 

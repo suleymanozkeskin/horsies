@@ -1887,7 +1887,7 @@ mod workflow_ctx_tests {
     /// the definition key of each node, and the stored summary text.
     #[test]
     fn pythons_context_payload_reads() {
-        let summary = r#"{"status":"COMPLETED","output":5,"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}"#;
+        let summary = r#"{"status":"COMPLETED","output":5,"total_nodes":1,"completed_nodes":1,"failed_nodes":0,"skipped_nodes":0,"error_summary":null}"#;
         let payload = serde_json::json!({
             "workflow_id": "00000000-0000-0000-0000-000000000000",
             "task_index": 2,
@@ -1928,7 +1928,7 @@ mod workflow_ctx_tests {
     fn a_summary_output_keeps_its_stored_text() {
         let summary = |output: &str| {
             format!(
-                r#"{{"status":"COMPLETED","output":{output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}}"#
+                r#"{{"status":"COMPLETED","output":{output},"total_nodes":1,"completed_nodes":1,"failed_nodes":0,"skipped_nodes":0,"error_summary":null}}"#
             )
         };
         let wide = "340282366920938463463374607431768211455";

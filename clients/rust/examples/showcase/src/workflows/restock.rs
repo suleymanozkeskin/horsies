@@ -4,7 +4,7 @@
 //! completed; a feed may fail.
 
 use horsies::{
-    HorsiesError, SuccessCase, SuccessPolicy, WorkflowDefConfig, WorkflowDefinition,
+    HorsiesError, SuccessCase, SuccessPolicy, WorkflowDefinition, WorkflowDefinitionConfig,
     WorkflowSpecBuilder,
 };
 
@@ -22,7 +22,7 @@ pub struct Restock;
 
 impl WorkflowDefinition for Restock {
     type Output = StockUpdate;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "restock"
@@ -32,7 +32,7 @@ impl WorkflowDefinition for Restock {
         "acme.restock.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let mut feeds = Vec::new();
         let mut feed_ids = Vec::new();
         for supplier in tuning::SUPPLIERS {
@@ -56,7 +56,7 @@ impl WorkflowDefinition for Restock {
                 .join_quorum(quorum),
         )?;
         let policy = SuccessPolicy::new(vec![SuccessCase::new([update])]).optional(feeds);
-        Ok(WorkflowDefConfig::new()
+        Ok(WorkflowDefinitionConfig::new()
             .output(update)
             .success_policy(policy))
     }

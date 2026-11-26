@@ -60,7 +60,7 @@ struct Checkout;
 
 impl WorkflowDefinition for Checkout {
     type Output = String;
-    type Params = CheckoutParams;
+    type Parameters = CheckoutParams;
 
     fn name() -> &'static str {
         "checkout"
@@ -103,20 +103,20 @@ impl WorkflowDefinition for Checkout {
 | Item | Rule |
 |---|---|
 | `type Output` | The type of the workflow's result: the output node's type, or `OutputlessResults` for a workflow with no output node |
-| `type Params` | The params of `build_with` (`Serialize + DeserializeOwned`); `()` for a definition without params |
+| `type Parameters` | The parameters of `build_with` (`Serialize + DeserializeOwned`); `()` for a definition without parameters |
 | `fn name()` | The workflow name, unique in the app |
 | `fn definition_key()` | The stable identity, unique in the app. A start and the engine find the workflow by it |
 | `fn on_error()` | Default `OnError::Fail`; `OnError::Pause` pauses the workflow at a failure |
-| `fn define(builder)` | A definition without params adds its nodes and returns `WorkflowDefConfig::new().output(node).success_policy(policy)`. The builder is a builder of the app, with the name, the key and `on_error` |
-| `fn build_with(builder, params)` | A definition with params builds its spec on `builder`, a builder of the app named after the definition. The engine calls it for each sub-workflow node that gives params, and may call it more than once for one node: give it no side effects |
+| `fn define(builder)` | A definition without parameters adds its nodes and returns `WorkflowDefinitionConfig::new().output(node).success_policy(policy)`. The builder is a builder of the app, with the name, the key and `on_error` |
+| `fn build_with(builder, parameters)` | A definition with parameters builds its spec on `builder`, a builder of the app named after the definition. The engine calls it for each sub-workflow node that gives parameters, and may call it more than once for one node: give it no side effects |
 | `fn build(builder)` | Default: sets the key and `on_error` on `builder`, runs `define`, then `build`. Refuses an `Output` that is not the output node's type (`HRS-025`) |
-| `fn node(params)` | A sub-workflow node of this definition (see Sub-Workflows) |
+| `fn node(parameters)` | A sub-workflow node of this definition (see Sub-Workflows) |
 
 A definition implements `define` or `build_with`. One with neither is
 refused at build. In `build_with`, set the definition key and the
 `on_error` on the builder yourself. The app makes the builder of each build
 from itself, so the task nodes resolve against the tasks of that app. A
-definition without params builds when it registers: register its tasks
+definition without parameters builds when it registers: register its tasks
 first.
 
 ## `WorkflowSpecBuilder` and `WorkflowSpec`
@@ -195,7 +195,7 @@ worker writes the context into that parameter.
 | Method | Returns |
 |---|---|
 | `workflow_id()` | The workflow's `Uuid` |
-| `task_index()` | The index of the task's node |
+| `node_index()` | The index of the task's node |
 | `task_name()` | The task name of the node |
 | `result_for::<T, E>(&key)` | `Result<TaskOutcome<T, E>, WorkflowContextError>` |
 | `has_result(node_id)` | Whether the context holds the node's result |
@@ -216,7 +216,7 @@ worker writes the context into that parameter.
 <!-- rust-check: skip partial -- fetch_report is a task that the file does not define -->
 ```rust
 use horsies::{
-    HorsiesError, OutputlessResults, SubWorkflowParams, WorkflowDefConfig, WorkflowDefinition,
+    HorsiesError, OutputlessResults, SubWorkflowParameters, WorkflowDefinitionConfig, WorkflowDefinition,
     WorkflowInput, WorkflowSpec, WorkflowSpecBuilder,
 };
 use serde::{Deserialize, Serialize};
@@ -230,7 +230,7 @@ struct RegionReport;
 
 impl WorkflowDefinition for RegionReport {
     type Output = OutputlessResults;
-    type Params = RegionParams;
+    type Parameters = RegionParams;
 
     fn name() -> &'static str {
         "region_report"
@@ -256,7 +256,7 @@ struct AllRegions;
 
 impl WorkflowDefinition for AllRegions {
     type Output = OutputlessResults;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "all_regions"
@@ -266,17 +266,17 @@ impl WorkflowDefinition for AllRegions {
         "reports.all_regions.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let _eu = builder.sub_workflow(
-            RegionReport::node(SubWorkflowParams::Given(RegionParams { region: "eu".to_owned() }))?
+            RegionReport::node(SubWorkflowParameters::Given(RegionParams { region: "eu".to_owned() }))?
                 .node_id("eu"),
         );
         let _us = builder.sub_workflow(
-            RegionReport::node(SubWorkflowParams::NotGiven)?
+            RegionReport::node(SubWorkflowParameters::NotGiven)?
                 .set(RegionParams::field_region(), "us".to_owned())?
                 .node_id("us"),
         );
-        Ok(WorkflowDefConfig::new())
+        Ok(WorkflowDefinitionConfig::new())
     }
 }
 ```
@@ -287,17 +287,17 @@ impl WorkflowDefinition for AllRegions {
   per field that serde reads: `RegionParams::field_region()`. It applies
   `rename` and `rename_all`, and makes no token for a `skip` or
   `skip_deserializing` field. A `flatten` field is a compile error.
-- `SubWorkflowParams::NotGiven`: the child builds as defined and stores the
-  input `{}`. `Given(params)`: the engine calls the child's `build_with`.
-  Params given to a definition without params are refused (`HRS-022`).
-- `SubWorkflowNode` has `set`, `set_params`, `arg_from`, `waits_for`,
+- `SubWorkflowParameters::NotGiven`: the child builds as defined and stores the
+  input `{}`. `Given(parameters)`: the engine calls the child's `build_with`.
+  Parameters given to a definition without parameters are refused (`HRS-022`).
+- `SubWorkflowNode` has `set`, `set_parameters`, `arg_from`, `waits_for`,
   `waits_for_all`, `node_id`, `allow_failed_dependencies`, `join_all`,
   `join_any`, `join_quorum` and `key`.
-- `SubWorkflowNode::of::<D>(params)` and a registered template's
-  `template.node(params)` also make one.
+- `SubWorkflowNode::of::<D>(parameters)` and a registered template's
+  `template.node(parameters)` also make one.
 - The depth limit of nested children is 32. `check()` reports a nesting
   that reaches it for certain (`HRS-036`) or repeats a definition with the
-  same params at once (`HRS-037`).
+  same parameters at once (`HRS-037`).
 - A failed child gives its node a `TaskError` whose `sub_workflow()` is the
   `SubWorkflowFailure`.
 
@@ -310,21 +310,21 @@ register yet (`HRS-302`).
 
 | Method | Returns |
 |---|---|
-| `app.register_workflow_definition::<D>()` | `Result<WorkflowFunction<D::Output>, HorsiesError>`, for a definition without params |
-| `app.workflow_template::<D>()` | `Result<WorkflowTemplate<D::Params, D::Output>, HorsiesError>`, for a definition with params |
+| `app.register_workflow_definition::<D>()` | `Result<WorkflowFunction<D::Output>, HorsiesError>`, for a definition without parameters |
+| `app.register_workflow_definition_with::<D>()` | `Result<WorkflowTemplate<D::Parameters, D::Output>, HorsiesError>`, for a definition with parameters |
 | `app.start_workflow::<D>()` | Starts `D` through its registration on this app (`register_workflow_definition`) |
-| `app.start_workflow_with::<D>(params)` | Starts `D` with params through its registration on this app (`workflow_template`) |
+| `app.start_workflow_with::<D>(parameters)` | Starts `D` with parameters through its registration on this app (`register_workflow_definition_with`) |
 | `app.start::<T>(&spec)`, `app.start_with_id::<T>(&spec, id)` | Starts a spec that needs no registration. Its sub-workflow children must be registered |
 | `rt.start::<T>(&spec)`, `rt.start_with_id::<T>(&spec, id)` | The same, from a task body through `TaskRuntime` |
 | `app.workflow_handle::<T>(workflow_id)` | The handle of a started workflow. No I/O |
 
 | `WorkflowFunction<T>` | `WorkflowTemplate<P, T>` |
 |---|---|
-| `start()` | `start(params)` |
-| `start_with_id(workflow_id)` | `start_with_id(params, workflow_id)` |
-| `retry_start(&error)` | — |
+| `start()` | `start(parameters)` |
+| `start_with_id(workflow_id)` | `start_with_id(parameters, workflow_id)` |
+| `resend_start(&error)` | — |
 | `handle(workflow_id)` | `handle(workflow_id)` |
-| `spec()`, `name()`, `definition_key()` | `build(params)`, `node(params)`, `name()`, `definition_key()` |
+| `spec()`, `name()`, `definition_key()` | `build(parameters)`, `node(parameters)`, `name()`, `definition_key()` |
 
 ```rust
 use std::time::Duration;
@@ -337,7 +337,7 @@ fn register_checkout(
     let _charge = charge_order::register(app)?;
     let _receipt = send_receipt::register(app)?;
     let _audit = audit_checkout::register(app)?;
-    app.workflow_template::<Checkout>()
+    app.register_workflow_definition_with::<Checkout>()
 }
 
 async fn run_checkout(
@@ -371,7 +371,7 @@ async fn run_checkout(
   value from the clock, a deploy) is a conflict. A task retry builds the
   spec again, so the spec of `rt.start_with_id` must be the same on each
   attempt.
-- `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)` on
+- `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(parameters)` on
   an app that does not register `D` in that form return `VALIDATION_FAILED`
   with the cause `PreconditionFailed`. Nothing is written. A registration
   on another app of the process does not count.
@@ -401,16 +401,16 @@ is `WorkflowError::Broker`.
 
 | `WorkflowStartErrorCode` | When |
 |---|---|
-| `ValidationFailed` | Before any I/O: no definition key, an output type that is not the handle's (`HRS-025`), a sub-workflow node of a definition that is not registered (`HRS-020`), params given to a definition without params (`HRS-022`), a template build that refused, or a start before the registration in the process |
+| `ValidationFailed` | Before any I/O: no definition key, an output type that is not the handle's (`HRS-025`), a sub-workflow node of a definition that is not registered (`HRS-020`), parameters given to a definition without parameters (`HRS-022`), a template build that refused, or a start before the registration in the process |
 | `WorkflowIdConflict` | The id belongs to another workflow name. Nothing was written |
 | `WorkflowCommandConflict` | The id holds a workflow of the same name that another start command started, or a sub-workflow. Nothing was written. Not retryable |
 | `EnqueueFailed` | The connect, the schema install or the start failed. `retryable` is the classification of the cause. A start again with the same id finds the workflow when the commit reply was lost |
 | `AsyncContext` | A blocking start (`horsies::blocking`) on a thread that runs a tokio runtime. Nothing was written; `workflow_id` is the id of the start. Not retryable |
 
-`WorkflowFunction::retry_start(&error)` starts again with the error's
+`WorkflowFunction::resend_start(&error)` starts again with the error's
 `workflow_id`. It takes an `EnqueueFailed` or an `AsyncContext` error. It
 refuses with `ValidationFailed` an error with another code and an error of
-another workflow name. For a template, call `start_with_id(params, workflow_id)`
+another workflow name. For a template, call `start_with_id(parameters, workflow_id)`
 with the error's id.
 
 ## `WorkflowHandle<T>`
@@ -438,7 +438,7 @@ with the error's id.
 - `NodeResult` is `Outcome(TaskOutcome<JsonText, UserCode>)` or
   `Unreadable { cause }`.
 - `WorkflowNodeInfo` has `node_id`, `index`, `name`, `status`
-  (`WorkflowTaskStatus`), `result`, `started_at`, `completed_at`,
+  (`WorkflowNodeStatus`), `result`, `started_at`, `completed_at`,
   `sub_workflow_id`, `sub_workflow_summary`.
 
 | `WorkflowReadError` | Code | When |
@@ -453,7 +453,7 @@ with the error's id.
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` on a thread that runs a tokio runtime. Nothing was read |
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
-`HandleOperationError` (from `status`, `results`, `tasks`, `cancel`,
+`HandleOperationError` (from `status`, `results`, `nodes`, `cancel`,
 `pause`, `resume`) is an enum with one variant per state; every variant
 has `message` and `workflow_id`, and `DbOperationFailed` has `retryable`.
 `DbOperationFailed`, `StoredDataInvalid` and `ResumeRecoveryFailed` carry
@@ -461,7 +461,7 @@ their `cause`, the `WorkflowError`. A failure's message starts with the
 operation's label: `Status failed for workflow <id>: <cause>`.
 The methods `code()`, `message()`, `retryable()`, `workflow_id()` and
 `failure_cause()` read every variant. The operations document these codes: `WorkflowNotFound`, `DbOperationFailed`,
-`StoredDataInvalid` (`status`, `tasks`, `resume`), and
+`StoredDataInvalid` (`status`, `nodes`, `resume`), and
 `ResumeRecoveryFailed` (`resume` committed and the work after it failed:
 the workflow is RUNNING). A blocking form (`handle.blocking()`) on a thread
 that runs a tokio runtime is `AsyncContext`, and nothing ran.
@@ -469,16 +469,16 @@ that runs a tokio runtime is `AsyncContext`, and nothing ran.
 ## Success Policy and `on_error`
 
 ```rust
-use horsies::{SuccessCase, SuccessPolicy, TypedNodeRef, WorkflowDefConfig};
+use horsies::{SuccessCase, SuccessPolicy, TypedNodeRef, WorkflowDefinitionConfig};
 
 fn checkout_policy(
     charged: TypedNodeRef<u64>,
     receipt: TypedNodeRef<String>,
     audit: TypedNodeRef<bool>,
-) -> WorkflowDefConfig {
+) -> WorkflowDefinitionConfig {
     let policy = SuccessPolicy::new(vec![SuccessCase::new([charged.untyped(), receipt.untyped()])])
         .optional([audit]);
-    WorkflowDefConfig::new().output(receipt).success_policy(policy)
+    WorkflowDefinitionConfig::new().output(receipt).success_policy(policy)
 }
 ```
 
@@ -492,7 +492,7 @@ fn checkout_policy(
 
 ## Statuses
 
-| `WorkflowStatus` | `WorkflowTaskStatus` |
+| `WorkflowStatus` | `WorkflowNodeStatus` |
 |---|---|
 | `Pending`, `Running`, `Completed`, `Failed`, `Paused`, `Cancelled`, `Expired` | `Pending`, `Ready`, `Enqueued`, `Running`, `Completed`, `Failed`, `Skipped` |
 
@@ -534,7 +534,7 @@ the function a new builder of the app, named after the check builder
 builder from `rt.workflow_builder("region_fetch")`.
 
 For a template, pass the builder to `build_with`:
-`app.check_workflow_builder(Checkout::name(), |builder, params: &CheckoutParams| Checkout::build_with(builder, params.clone()))`.
+`app.check_workflow_builder(Checkout::name(), |builder, params: &CheckoutParams| Checkout::build_with(builder, parameters.clone()))`.
 
 ## Validation Codes
 
@@ -549,7 +549,7 @@ For a template, pass the builder to `build_with`:
 | `HRS-019` | A key of the input that binds to no parameter, or a member name of the engine (`__h_...`, `__horsies_...`) |
 | `HRS-020` | A missing parameter; at start, a sub-workflow node of an unregistered definition |
 | `HRS-021` | A parameter that both `set` and `arg_from` give |
-| `HRS-022` | Params given to a definition without params |
+| `HRS-022` | Parameters given to a definition without parameters |
 | `HRS-025` | An output type that is not the declared or the handle's type |
 | `HRS-026` | An input that is not a JSON object |
 | `HRS-031` | A value that does not encode, does not read back, or has another type; a key that binds to no field, or a field with no value, inside the value of a parameter |
@@ -566,7 +566,7 @@ waiting work a node of the workflow.
 **Give `build_with` no side effects.** The engine can call it more than
 once for one node.
 
-**Register the tasks before the definitions.** A definition without params
+**Register the tasks before the definitions.** A definition without parameters
 builds at registration on a builder of the app, and `builder.task(node)`
 refuses a task that the app does not register yet (`HRS-302`).
 
@@ -586,19 +586,19 @@ is `HRS-013`.
 ```rust
 use horsies::{
     // Definitions and specs
-    WorkflowDefinition, WorkflowDefConfig, WorkflowSpec, WorkflowSpecBuilder, OnError,
+    WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpec, WorkflowSpecBuilder, OnError,
     SuccessPolicy, SuccessCase, OutputlessResults,
     // Nodes
-    TaskNode, SubWorkflowNode, SubWorkflowParams, NodeRef, TypedNodeRef, NodeKey,
+    TaskNode, SubWorkflowNode, SubWorkflowParameters, NodeRef, TypedNodeRef, NodeKey,
     InputField, JoinType, WorkflowInput,
     // Context
-    WorkflowContext, WorkflowContextError, SubWorkflowSummary, WorkflowMeta,
+    WorkflowContext, WorkflowContextError, SubWorkflowSummary, WorkflowMetadata,
     // Starts
     WorkflowFunction, WorkflowTemplate, WorkflowCheckBuilderRegistration,
     WorkflowStartError, WorkflowStartErrorCode,
     // Handle
     WorkflowHandle, WorkflowReadError, NodeResult, WorkflowNodeInfo, WorkflowStatus,
-    WorkflowTaskStatus, HandleOperationError, HandleErrorCode, HandleResult,
+    WorkflowNodeStatus, HandleOperationError, HandleErrorCode, HandleResult,
     TaskOutcome, UserCode, WaitLimit,
 };
 ```

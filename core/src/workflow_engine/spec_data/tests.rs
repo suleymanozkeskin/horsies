@@ -129,7 +129,7 @@ fn a_spec_reads_into_the_core_spec_and_its_queue_classes() {
         report.sub_definition_key.as_deref(),
         Some("tests.report.v1")
     );
-    assert_eq!(report.sub_workflow_params, SubWorkflowParams::NotGiven);
+    assert_eq!(report.sub_workflow_params, SubWorkflowParameters::NotGiven);
     assert_eq!(report.dependencies, vec![0]);
     assert_eq!(report.args_from, HashMap::from([("rows".to_owned(), 0)]));
 

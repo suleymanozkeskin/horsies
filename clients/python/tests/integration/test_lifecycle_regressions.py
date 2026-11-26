@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.types.result import is_ok
-from horsies.core.workflows.lifecycle import pause_workflow
+from horsies.core.workflows.lifecycle import pause_workflow_async
 from tests.integration.conftest import compute_test_command_fingerprint
 
 pytestmark = [pytest.mark.integration]
@@ -97,7 +97,7 @@ async def test_pause_resets_retry_window_claimed_workflow_task(
         worker_id='retry-window-worker',
     )
 
-    result = await pause_workflow(broker, uuid.UUID(workflow_id))
+    result = await pause_workflow_async(broker, uuid.UUID(workflow_id))
 
     assert is_ok(result)
     assert result.ok_value is True

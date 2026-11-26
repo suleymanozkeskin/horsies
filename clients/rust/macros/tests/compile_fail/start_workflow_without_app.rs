@@ -6,7 +6,7 @@ struct Nightly;
 
 impl WorkflowDefinition for Nightly {
     type Output = OutputlessResults;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "nightly"

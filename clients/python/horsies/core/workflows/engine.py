@@ -16,7 +16,7 @@ from horsies.core.codec.typed import decode_task_result
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.logging import get_logger
 from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
-from horsies.core.models.workflow import WorkflowTaskStatus
+from horsies.core.models.workflow import WorkflowNodeStatus
 from horsies.core.types.result import is_err
 
 if TYPE_CHECKING:
@@ -183,7 +183,7 @@ def terminal_dependency_result(
     from horsies.core.models.outcome import Failed
     from horsies.core.models.tasks import TaskError
 
-    if status == WorkflowTaskStatus.SKIPPED.value:
+    if status == WorkflowNodeStatus.SKIPPED.value:
         return Failed(
             TaskError(
                 error_code=OutcomeCode.UPSTREAM_SKIPPED,
@@ -217,6 +217,6 @@ from horsies.core.workflows import lifecycle as _lifecycle  # noqa: E402
 start_workflow_async = _lifecycle.start_workflow_async
 start_workflow = _lifecycle.start_workflow
 pause_workflow = _lifecycle.pause_workflow
-pause_workflow_sync = _lifecycle.pause_workflow_sync
+pause_workflow_async = _lifecycle.pause_workflow_async
 resume_workflow = _lifecycle.resume_workflow
-resume_workflow_sync = _lifecycle.resume_workflow_sync
+resume_workflow_async = _lifecycle.resume_workflow_async

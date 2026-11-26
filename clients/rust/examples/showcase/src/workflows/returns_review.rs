@@ -23,7 +23,7 @@ pub struct ReturnsReview;
 
 impl WorkflowDefinition for ReturnsReview {
     type Output = RestockDecision;
-    type Params = ReturnsParams;
+    type Parameters = ReturnsParams;
 
     fn name() -> &'static str {
         "returns_review"

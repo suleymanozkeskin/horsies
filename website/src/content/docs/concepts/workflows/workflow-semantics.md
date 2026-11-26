@@ -54,9 +54,9 @@ PENDING → READY → ENQUEUED → RUNNING → COMPLETED
 | `CANCELLED` | `"CANCELLED"` | Yes |
 | `EXPIRED` | `"EXPIRED"` | Yes |
 
-`WorkflowTaskStatus` values:
+`WorkflowNodeStatus` values:
 
-<!-- members: WorkflowTaskStatus -->
+<!-- members: WorkflowNodeStatus -->
 | Enum | Value | Terminal |
 |------|-------|----------|
 | `PENDING` | `"PENDING"` | No |
@@ -474,7 +474,7 @@ When no success case is satisfied:
 
 A success case does not have to require the output node. The workflow is then COMPLETED, and its output node can be SKIPPED or FAILED. The workflow result follows the status of the output node:
 
-<!-- members: WorkflowTaskStatus subset -->
+<!-- members: WorkflowNodeStatus subset -->
 | Output node | Workflow result | Outcome of `WorkflowHandle.get()` |
 |-------------|-----------------|-----------------------------------|
 | COMPLETED | The node's result | `Succeeded` with the node's value |
@@ -544,16 +544,16 @@ This is distinct from `WorkflowHandle.result_for()`, which queries the database 
 
 ### Node IDs
 
-The context looks up results by **node_id**, not by object identity. `node_id` is optional on a node. If omitted, it is auto-assigned when the spec is built, in the format `{slugified_workflow_name}:{task_index}`. The slug converts spaces to underscores and removes invalid characters: a workflow named `My Data Pipeline` gets the node ids `My_Data_Pipeline:0`, `My_Data_Pipeline:1`.
+The context looks up results by **node_id**, not by object identity. `node_id` is optional on a node. If omitted, it is auto-assigned when the spec is built, in the format `{node_id_from_text(workflow_name)}:{index}`. The slug converts spaces to underscores and removes invalid characters: a workflow named `My Data Pipeline` gets the node ids `My_Data_Pipeline:0`, `My_Data_Pipeline:1`.
 
 You can also provide an explicit `node_id` for stable external references.
 Explicit node_ids must match the pattern `[A-Za-z0-9_\-:.]+`.
 
-The Python API (typed `result_for`, `NodeKey`, `slugify`) is in [WorkflowContext](/horsies/concepts/workflows/workflow-examples/#workflowcontext).
+The Python API (typed `result_for`, `NodeKey`, `node_id_from_text`) is in [WorkflowContext](/horsies/concepts/workflows/workflow-examples/#workflowcontext).
 
-### WorkflowMeta (Metadata Only)
+### WorkflowMetadata (Metadata Only)
 
-A task that needs only the workflow metadata (the workflow id, the task index, the task name), and no results, declares a workflow meta parameter. The engine injects it when the task declares it, with no `workflow_context_from`. The Python example is in [WorkflowMeta](/horsies/concepts/workflows/workflow-examples/#workflowmeta).
+A task that needs only the workflow metadata (the workflow id, the task index, the task name), and no results, declares a workflow meta parameter. The engine injects it when the task declares it, with no `workflow_context_from`. The Python example is in [WorkflowMetadata](/horsies/concepts/workflows/workflow-examples/#workflowmeta).
 
 ### Comparison: args_from vs workflow_context_from
 

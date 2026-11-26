@@ -1732,10 +1732,10 @@ class TestDecodeTaskErrorPolymorphic:
         summary: SubWorkflowSummary[Any] = SubWorkflowSummary(
             status=WorkflowStatus.FAILED,
             output=None,
-            total_tasks=3,
-            completed_tasks=1,
-            failed_tasks=2,
-            skipped_tasks=0,
+            total_nodes=3,
+            completed_nodes=1,
+            failed_nodes=2,
+            skipped_nodes=0,
             error_summary='child boom',
         )
         original = SubWorkflowError(
@@ -1754,7 +1754,7 @@ class TestDecodeTaskErrorPolymorphic:
         assert isinstance(decoded, TaskError)
         assert decoded.sub_workflow_id == 'wf-abc'
         assert decoded.sub_workflow_summary.status == WorkflowStatus.FAILED
-        assert decoded.sub_workflow_summary.failed_tasks == 2
+        assert decoded.sub_workflow_summary.failed_nodes == 2
         assert decoded.sub_workflow_summary.error_summary == 'child boom'
 
     def test_sub_workflow_error_round_trips_via_engine_emit_shape(self) -> None:
@@ -1782,10 +1782,10 @@ class TestDecodeTaskErrorPolymorphic:
         summary: SubWorkflowSummary[Any] = SubWorkflowSummary(
             status=WorkflowStatus.FAILED,
             output=None,
-            total_tasks=1,
-            completed_tasks=0,
-            failed_tasks=1,
-            skipped_tasks=0,
+            total_nodes=1,
+            completed_nodes=0,
+            failed_nodes=1,
+            skipped_nodes=0,
             error_summary='child failed',
         )
         original_err = SubWorkflowError(
@@ -1810,7 +1810,7 @@ class TestDecodeTaskErrorPolymorphic:
 
         assert isinstance(decoded, SubWorkflowError)
         assert decoded.sub_workflow_id == 'wf-xyz'
-        assert decoded.sub_workflow_summary.failed_tasks == 1
+        assert decoded.sub_workflow_summary.failed_nodes == 1
         assert decoded.sub_workflow_summary.error_summary == 'child failed'
 
     def test_encode_task_result_preserves_sub_workflow_error_subclass(self) -> None:
@@ -1839,10 +1839,10 @@ class TestDecodeTaskErrorPolymorphic:
         summary: SubWorkflowSummary[Any] = SubWorkflowSummary(
             status=WorkflowStatus.FAILED,
             output=None,
-            total_tasks=2,
-            completed_tasks=0,
-            failed_tasks=2,
-            skipped_tasks=0,
+            total_nodes=2,
+            completed_nodes=0,
+            failed_nodes=2,
+            skipped_nodes=0,
             error_summary='both children boom',
         )
         original_err = SubWorkflowError(
@@ -1862,7 +1862,7 @@ class TestDecodeTaskErrorPolymorphic:
                 assert isinstance(decoded_err, SubWorkflowError)
                 assert decoded_err.sub_workflow_id == 'wf-pq'
                 assert decoded_err.sub_workflow_summary.status == WorkflowStatus.FAILED
-                assert decoded_err.sub_workflow_summary.failed_tasks == 2
+                assert decoded_err.sub_workflow_summary.failed_nodes == 2
                 assert (
                     decoded_err.sub_workflow_summary.error_summary
                     == 'both children boom'

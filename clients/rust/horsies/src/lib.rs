@@ -82,7 +82,7 @@ pub mod __private {
     pub use crate::task::body::{
         body_result, check_input, decode_input, decode_unit_input, StoredTaskError,
     };
-    pub use horsies_core::core::task::fn_trait::TaskMeta;
+    pub use horsies_core::core::task::fn_trait::TaskMetadata;
     pub use horsies_core::core::task::{AsyncTaskFn, BlockingTaskFn, RawTaskResult};
     pub use horsies_core::{RegisteredTask, TaskResult};
     /// The generated `Input` struct of a task derives serde through this

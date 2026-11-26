@@ -28,8 +28,11 @@ pub struct WorkflowContext {
     /// ID of the running workflow instance.
     pub workflow_id: Uuid,
 
-    /// Index of the current task within the workflow.
-    pub task_index: i32,
+    /// Index of the current node within the workflow. The stored key keeps
+    /// the schema name `task_index`: the SQL function that writes the
+    /// context writes that key.
+    #[serde(rename = "task_index")]
+    pub node_index: i32,
 
     /// Registered task function name.
     pub task_name: String,
@@ -49,14 +52,14 @@ impl WorkflowContext {
     /// Create a new context with pre-populated upstream results.
     pub fn new(
         workflow_id: Uuid,
-        task_index: i32,
+        node_index: i32,
         task_name: String,
         results_by_id: HashMap<String, TaskResult<JsonText>>,
         summaries_by_id: HashMap<String, SubWorkflowSummary>,
     ) -> Self {
         Self {
             workflow_id,
-            task_index,
+            node_index,
             task_name,
             results_by_id,
             summaries_by_id,
@@ -255,7 +258,7 @@ mod tests {
         let json = serde_json::to_string(&ctx).unwrap();
         let back: WorkflowContext = serde_json::from_str(&json).unwrap();
         assert_eq!(back.workflow_id, Uuid::nil());
-        assert_eq!(back.task_index, 2);
+        assert_eq!(back.node_index, 2);
         assert_eq!(back.task_name, "process");
         assert!(back.has_result("fetch:0"));
         assert!(back.has_result("count:1"));
@@ -275,10 +278,10 @@ mod tests {
             SubWorkflowSummary {
                 status: WorkflowStatus::Completed,
                 output: Some(JsonText::parse("42").unwrap()),
-                total_tasks: 3,
-                completed_tasks: 3,
-                failed_tasks: 0,
-                skipped_tasks: 0,
+                total_nodes: 3,
+                completed_nodes: 3,
+                failed_nodes: 0,
+                skipped_nodes: 0,
                 error_summary: None,
             },
         );
@@ -298,7 +301,7 @@ mod tests {
         let restored = back.summary_for(&key).unwrap();
         assert_eq!(restored.status, WorkflowStatus::Completed);
         assert_eq!(restored.output, Some(JsonText::parse("42").unwrap()));
-        assert_eq!(restored.total_tasks, 3);
+        assert_eq!(restored.total_nodes, 3);
     }
 
     #[test]
@@ -322,10 +325,10 @@ mod tests {
             SubWorkflowSummary {
                 status: WorkflowStatus::Completed,
                 output: None,
-                total_tasks: 2,
-                completed_tasks: 2,
-                failed_tasks: 0,
-                skipped_tasks: 0,
+                total_nodes: 2,
+                completed_nodes: 2,
+                failed_nodes: 0,
+                skipped_nodes: 0,
                 error_summary: None,
             },
         );
@@ -388,10 +391,10 @@ mod tests {
             SubWorkflowSummary {
                 status: WorkflowStatus::Completed,
                 output: Some(JsonText::parse(r#"{"total": 7, "label": "done"}"#).unwrap()),
-                total_tasks: 2,
-                completed_tasks: 2,
-                failed_tasks: 0,
-                skipped_tasks: 0,
+                total_nodes: 2,
+                completed_nodes: 2,
+                failed_nodes: 0,
+                skipped_nodes: 0,
                 error_summary: None,
             },
         );
@@ -445,10 +448,10 @@ mod tests {
             r#"{"workflow_id": "00000000-0000-0000-0000-000000000000", "task_index": 1, "task_name": "t","#,
             r#" "summaries_by_id": {"#,
             r#""wide": {"status": "COMPLETED", "output": 340282366920938463463374607431768211455,"#,
-            r#" "total_tasks": 1, "completed_tasks": 1, "failed_tasks": 0, "skipped_tasks": 0,"#,
+            r#" "total_nodes": 1, "completed_nodes": 1, "failed_nodes": 0, "skipped_nodes": 0,"#,
             r#" "error_summary": null},"#,
             r#""below": {"status": "COMPLETED", "output": -9223372036854775809,"#,
-            r#" "total_tasks": 1, "completed_tasks": 1, "failed_tasks": 0, "skipped_tasks": 0,"#,
+            r#" "total_nodes": 1, "completed_nodes": 1, "failed_nodes": 0, "skipped_nodes": 0,"#,
             r#" "error_summary": null}}}"#,
         );
         let ctx: WorkflowContext = serde_json::from_str(text).unwrap();
@@ -522,7 +525,7 @@ mod tests {
         }"#;
         let ctx: WorkflowContext = serde_json::from_str(json).unwrap();
         assert_eq!(ctx.workflow_id, Uuid::nil());
-        assert_eq!(ctx.task_index, 3);
+        assert_eq!(ctx.node_index, 3);
         assert!(ctx.has_result("fetch:0"));
         assert!(!ctx.has_summary("anything"));
     }

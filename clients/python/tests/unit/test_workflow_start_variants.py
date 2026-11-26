@@ -117,8 +117,8 @@ class TestVariantCatalog:
 def _make_spec(name: str = 'conflict-wf') -> Any:
     spec = MagicMock()
     spec.name = name
-    spec.tasks = []
-    spec.workflow_def_cls = None
+    spec.nodes = []
+    spec.workflow_definition = None
     spec.output = None
     spec.success_policy = None
     spec.on_error.value = 'FAIL_WORKFLOW'
@@ -136,7 +136,7 @@ class TestValidationCause:
         task.queue = None
         task.priority = 100
         task.name = 'unbound-queue'
-        spec.tasks = [task]
+        spec.nodes = [task]
         broker = MagicMock()
         broker.app = None
 

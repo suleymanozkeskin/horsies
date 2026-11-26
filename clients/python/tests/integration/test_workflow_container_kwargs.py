@@ -120,7 +120,7 @@ class _GrandchildWorkflow(WorkflowDefinition[int]):
         node = TaskNode(fn=grandchild_task, kwargs={'values': values})
         return app.workflow(
             name=cls.name,
-            tasks=[node],
+            nodes=[node],
             output=node,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
@@ -139,12 +139,12 @@ class _ChildWorkflow(WorkflowDefinition[int]):
 
         node = TaskNode(fn=child_task, kwargs={'values': values})
         nested: SubWorkflowNode[int] = SubWorkflowNode(
-            workflow_def=_GrandchildWorkflow,
+            workflow_definition=_GrandchildWorkflow,
             kwargs={'values': values},
         )
         return app.workflow(
             name=cls.name,
-            tasks=[node, nested],
+            nodes=[node, nested],
             output=node,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
@@ -187,7 +187,7 @@ class TestContainerKwargsAtStart:
         )
         spec = app.workflow(
             name=f'container_{label}',
-            tasks=[node],
+            nodes=[node],
             output=node,
             definition_key=f'tests.container.{label}.v1',
         )
@@ -208,12 +208,12 @@ class TestContainerKwargsAtStart:
         register_workflow_definition(_ChildWorkflow)
         try:
             node: SubWorkflowNode[int] = SubWorkflowNode(
-                workflow_def=_ChildWorkflow,
+                workflow_definition=_ChildWorkflow,
                 kwargs={'values': [1, 2]},
             )
             spec = app.workflow(
                 name='container_parent',
-                tasks=[node],
+                nodes=[node],
                 output=node,
                 definition_key='tests.container.parent.v1',
             )

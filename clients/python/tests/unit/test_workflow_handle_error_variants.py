@@ -362,13 +362,13 @@ class TestStoredSubworkflowSummary:
     async def test_a_valid_summary_parses(self) -> None:
         handle = _tasks_handle(json.dumps({
             'status': 'COMPLETED',
-            'total_tasks': 1,
-            'completed_tasks': 1,
-            'failed_tasks': 0,
-            'skipped_tasks': 0,
+            'total_nodes': 1,
+            'completed_nodes': 1,
+            'failed_nodes': 0,
+            'skipped_nodes': 0,
         }))
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_ok(result)
         summary = result.ok_value[0].sub_workflow_summary
@@ -379,7 +379,7 @@ class TestStoredSubworkflowSummary:
     async def test_a_stored_null_is_no_summary(self) -> None:
         handle = _tasks_handle(None)
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_ok(result)
         assert result.ok_value[0].sub_workflow_summary is None
@@ -388,7 +388,7 @@ class TestStoredSubworkflowSummary:
     async def test_an_empty_summary_is_stored_data_invalid(self) -> None:
         handle = _tasks_handle('')
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_err(result)
         err = result.err_value
@@ -405,7 +405,7 @@ class TestStoredSubworkflowSummary:
     async def test_corrupt_summary_json_is_stored_data_invalid(self) -> None:
         handle = _tasks_handle('{not valid json')
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_err(result)
         err = result.err_value
@@ -417,7 +417,7 @@ class TestStoredSubworkflowSummary:
     async def test_a_summary_past_the_depth_bound_is_stored_data_invalid(self) -> None:
         handle = _tasks_handle('{"status":' + '[' * 1_100 + ']' * 1_100 + '}')
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_err(result)
         err = result.err_value
@@ -427,9 +427,9 @@ class TestStoredSubworkflowSummary:
 
     @pytest.mark.asyncio
     async def test_an_invalid_summary_is_stored_data_invalid(self) -> None:
-        handle = _tasks_handle('{"status": "NOT_A_STATUS", "total_tasks": 1}')
+        handle = _tasks_handle('{"status": "NOT_A_STATUS", "total_nodes": 1}')
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_err(result)
         err = result.err_value
@@ -447,7 +447,7 @@ class TestStoredNodeResult:
     async def test_a_stored_null_is_no_result(self) -> None:
         handle = _tasks_handle(None, result_json=None)
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_ok(result)
         assert result.ok_value[0].result is None
@@ -456,7 +456,7 @@ class TestStoredNodeResult:
     async def test_an_empty_result_is_a_deserialization_error(self) -> None:
         handle = _tasks_handle(None, result_json='')
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_ok(result)
         node_result = result.ok_value[0].result
@@ -472,7 +472,7 @@ class TestStoredNodeResult:
     async def test_a_result_that_is_not_json_names_the_node(self) -> None:
         handle = _tasks_handle(None, result_json='{not valid json')
 
-        result = await handle.tasks_async()
+        result = await handle.nodes_async()
 
         assert is_ok(result)
         node_result = result.ok_value[0].result
@@ -503,7 +503,7 @@ class TestStoredWorkflowResult:
         )
         broker = MagicMock()
         handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
-        handle.out_type = int
+        handle.output_type = int
 
         result = handle._completed_result(stored)
 

@@ -236,7 +236,7 @@ returns `ASYNC_CONTEXT` (`TaskSendError::AsyncContext`,
 use std::convert::Infallible;
 
 use horsies::{
-    task, HorsiesError, TaskError, TaskOutcome, WorkflowDefConfig, WorkflowDefinition,
+    task, HorsiesError, TaskError, TaskOutcome, WorkflowDefinitionConfig, WorkflowDefinition,
     WorkflowSpecBuilder,
 };
 
@@ -259,7 +259,7 @@ struct DailyReport;
 
 impl WorkflowDefinition for DailyReport {
     type Output = usize;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "daily_report"
@@ -269,14 +269,14 @@ impl WorkflowDefinition for DailyReport {
         "reports.daily_report.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let fetched = builder.task(
             fetch_report::node().set(fetch_report::params::region(), "eu".to_owned())?,
         )?;
         let published = builder.task(
             publish_report::node().arg_from(publish_report::params::report(), fetched),
         )?;
-        Ok(WorkflowDefConfig::new().output(published))
+        Ok(WorkflowDefinitionConfig::new().output(published))
     }
 }
 ```

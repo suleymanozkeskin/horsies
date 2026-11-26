@@ -34,5 +34,5 @@ class WorkflowStartErrorCode(str, Enum):
 
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
     """A sync or blocking start was called on a thread that runs an event loop or a tokio
-    runtime; its wait would stall that loop, so nothing was written. `retry_start` accepts it.
+    runtime; its wait would stall that loop, so nothing was written. `resend_start` accepts it.
     """

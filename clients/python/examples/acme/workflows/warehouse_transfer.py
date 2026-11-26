@@ -58,7 +58,7 @@ class WarehouseTransfer(WorkflowDefinition[StockRelease]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[allocate, release],
+            nodes=[allocate, release],
             on_error=OnError.FAIL,
             output=release,
         )
@@ -67,7 +67,7 @@ class WarehouseTransfer(WorkflowDefinition[StockRelease]):
 _CHECK_SKU: Final[str] = 'ACME-SKU-0001'
 
 
-@app.workflow_builder(cases=[{'sku': _CHECK_SKU, 'quantity': 5}])
+@app.check_workflow_builder(cases=[{'sku': _CHECK_SKU, 'quantity': 5}])
 def build_warehouse_transfer(
     *,
     sku: str,

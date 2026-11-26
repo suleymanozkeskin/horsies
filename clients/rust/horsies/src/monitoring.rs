@@ -329,7 +329,7 @@ mod tests {
             task_index: 0,
             child_depth: 1,
             definition_key: Some("tests.absent.v1".to_owned()),
-            params: horsies_core::SubWorkflowParams::NotGiven,
+            params: horsies_core::SubWorkflowParameters::NotGiven,
             node_input: "{}".to_owned(),
             args_from: None,
             sources: Vec::new(),

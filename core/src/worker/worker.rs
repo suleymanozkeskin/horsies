@@ -2423,7 +2423,7 @@ mod tests {
     use crate::broker::PostgresBroker;
     use crate::core::config::recovery::RecoveryConfig;
     use crate::core::history::maintenance::coverage::StartupCoverageOutcome;
-    use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
+    use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMetadata};
     use crate::core::task::{OperationalErrorCode, TaskError, TaskErrorCode, TaskResult, UserCode};
     use chrono::Utc;
     use futures::FutureExt;
@@ -4195,7 +4195,7 @@ mod tests {
 
     /// The registered task of `body` (see [`TestTask`]), defined in this
     /// module: the module that a client's task macro names
-    /// ([`TaskMeta::in_module`] with `module_path!()`), so the exception
+    /// ([`TaskMetadata::in_module`] with `module_path!()`), so the exception
     /// record of a panic carries it.
     fn test_task<F, Fut>(body: F) -> RegisteredTask
     where
@@ -4204,7 +4204,7 @@ mod tests {
     {
         RegisteredTask::Async {
             task: Arc::new(TestTask(body)),
-            meta: TaskMeta::for_input::<()>().in_module(module_path!()),
+            metadata: TaskMetadata::for_input::<()>().in_module(module_path!()),
         }
     }
 
@@ -5300,7 +5300,7 @@ mod tests {
             &broker,
             RegisteredTask::Async {
                 task: Arc::new(InvalidJsonTask),
-                meta: TaskMeta::default(),
+                metadata: TaskMetadata::default(),
             },
             task_id,
         )

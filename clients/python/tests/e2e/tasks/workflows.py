@@ -24,7 +24,7 @@ from tests.e2e.tasks.instance import app
 def _workflow(*, name: str, tasks: list[Any], **kwargs: Any) -> Any:
     return app.workflow(
         name=name,
-        tasks=tasks,
+        nodes=tasks,
         definition_key=f'tests.e2e.tasks.workflows.{name}.v1',
         **kwargs,
     )
@@ -1128,7 +1128,7 @@ def e2e_sub_probe_failed_child_task(
             summary = workflow_ctx.summary_for(node_e2e_sub_failure_probe_child)
             summary_lookup_ok = True
             summary_status = summary.status.value
-            summary_failed_tasks = summary.failed_tasks
+            summary_failed_tasks = summary.failed_nodes
             summary_error_summary = summary.error_summary
         except Exception as exc:
             summary_error_summary = f'{type(exc).__name__}: {exc}'
@@ -1191,7 +1191,7 @@ def e2e_sub_probe_success_ctx_task(
         summary_lookup_ok = True
         summary_status = summary.status.value
         summary_output = summary.output
-        summary_completed_tasks = summary.completed_tasks
+        summary_completed_tasks = summary.completed_nodes
     except Exception as exc:
         summary_status = f'{type(exc).__name__}: {exc}'
 
@@ -1247,7 +1247,7 @@ class E2ESubNestedOkMiddleWorkflow(WorkflowDefinition[int]):
     name = 'e2e_sub_nested_ok_middle_workflow'
     definition_key = 'tests.e2e.sub.nested.ok.middle.v1'
 
-    child = SubWorkflowNode(workflow_def=E2ESubOkWorkflow)
+    child = SubWorkflowNode(workflow_definition=E2ESubOkWorkflow)
 
     config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
@@ -1256,7 +1256,7 @@ class E2ESubNestedFailMiddleWorkflow(WorkflowDefinition[int]):
     name = 'e2e_sub_nested_fail_middle_workflow'
     definition_key = 'tests.e2e.sub.nested.fail.middle.v1'
 
-    child = SubWorkflowNode(workflow_def=E2ESubFailWorkflow)
+    child = SubWorkflowNode(workflow_definition=E2ESubFailWorkflow)
 
     config = WorkflowDefinitionConfig(output=child, on_error=OnError.FAIL)
 
@@ -1279,11 +1279,11 @@ class E2ESubParamWorkflow(WorkflowDefinition[int]):
         child = TaskNode(fn=e2e_sub_int_ok_task, kwargs={'value': raw_value})
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1317,11 +1317,11 @@ class E2ESubFailedInputWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1346,11 +1346,11 @@ class E2ESubTypedKwargWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1371,11 +1371,11 @@ class E2ESubSlowWorkflow(WorkflowDefinition[str]):
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1384,7 +1384,7 @@ class E2ESubNestedSlowMiddleWorkflow(WorkflowDefinition[str]):
     definition_key = 'tests.e2e.sub.nested.slow.middle.v1'
 
     child = SubWorkflowNode(
-        workflow_def=E2ESubSlowWorkflow,
+        workflow_definition=E2ESubSlowWorkflow,
         kwargs={'value': 'nested_slow_leaf', 'delay_ms': 1_000},
     )
 
@@ -1411,11 +1411,11 @@ class E2ESubRetryWorkflow(WorkflowDefinition[str]):
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -1438,16 +1438,16 @@ class E2ESubExpiredWorkflow(WorkflowDefinition[str]):
         )
         return horsies_app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
 node_e2e_sub_success_child = SubWorkflowNode(
-    workflow_def=E2ESubOkWorkflow,
+    workflow_definition=E2ESubOkWorkflow,
     node_id='e2e_sub_success_child',
 )
 spec_subworkflow_success_full_surface = _workflow(
@@ -1458,7 +1458,7 @@ spec_subworkflow_success_full_surface = _workflow(
 
 
 node_e2e_sub_failure_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_failure_child',
 )
 spec_subworkflow_failure_fail_policy = _workflow(
@@ -1470,7 +1470,7 @@ spec_subworkflow_failure_fail_policy = _workflow(
 
 
 node_e2e_sub_pause_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_pause_child',
 )
 spec_subworkflow_failure_pause_policy = _workflow(
@@ -1482,7 +1482,7 @@ spec_subworkflow_failure_pause_policy = _workflow(
 
 
 node_e2e_sub_success_ctx_child = SubWorkflowNode(
-    workflow_def=E2ESubOkWorkflow,
+    workflow_definition=E2ESubOkWorkflow,
     node_id='e2e_sub_success_ctx_child',
 )
 node_e2e_sub_success_ctx_probe = TaskNode(
@@ -1499,7 +1499,7 @@ spec_subworkflow_success_ctx_probe = _workflow(
 
 
 node_e2e_sub_failure_probe_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_failure_probe_child',
 )
 node_e2e_sub_failure_probe = TaskNode(
@@ -1527,7 +1527,7 @@ node_e2e_sub_outputless_ok = TaskNode(
     kwargs={'value': 'required_ok'},
 )
 node_e2e_sub_outputless_fail_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_outputless_fail_child',
 )
 spec_subworkflow_outputless_success_policy = _workflow(
@@ -1541,11 +1541,11 @@ spec_subworkflow_outputless_success_policy = _workflow(
 
 
 node_e2e_sub_parallel_ok_child = SubWorkflowNode(
-    workflow_def=E2ESubOkWorkflow,
+    workflow_definition=E2ESubOkWorkflow,
     node_id='e2e_sub_parallel_ok_child',
 )
 node_e2e_sub_parallel_fail_child = SubWorkflowNode(
-    workflow_def=E2ESubFailWorkflow,
+    workflow_definition=E2ESubFailWorkflow,
     node_id='e2e_sub_parallel_fail_child',
 )
 spec_subworkflow_parallel_success_failure = _workflow(
@@ -1559,7 +1559,7 @@ spec_subworkflow_parallel_success_failure = _workflow(
 
 
 node_e2e_sub_nested_success_child = SubWorkflowNode(
-    workflow_def=E2ESubNestedOkMiddleWorkflow,
+    workflow_definition=E2ESubNestedOkMiddleWorkflow,
     node_id='e2e_sub_nested_success_child',
 )
 spec_subworkflow_nested_success = _workflow(
@@ -1570,7 +1570,7 @@ spec_subworkflow_nested_success = _workflow(
 
 
 node_e2e_sub_nested_failure_child = SubWorkflowNode(
-    workflow_def=E2ESubNestedFailMiddleWorkflow,
+    workflow_definition=E2ESubNestedFailMiddleWorkflow,
     node_id='e2e_sub_nested_failure_child',
 )
 spec_subworkflow_nested_failure = _workflow(
@@ -1586,7 +1586,7 @@ node_e2e_sub_param_source = TaskNode(
     kwargs={'value': 37},
 )
 node_e2e_sub_param_child = SubWorkflowNode(
-    workflow_def=E2ESubParamWorkflow,
+    workflow_definition=E2ESubParamWorkflow,
     node_id='e2e_sub_param_child',
     waits_for=[node_e2e_sub_param_source],
     args_from={'value': node_e2e_sub_param_source},
@@ -1604,7 +1604,7 @@ node_e2e_sub_failed_input_source = TaskNode(
     kwargs={'error_code': 'E2E_UPSTREAM_FAIL'},
 )
 node_e2e_sub_failed_input_child = SubWorkflowNode(
-    workflow_def=E2ESubFailedInputWorkflow,
+    workflow_definition=E2ESubFailedInputWorkflow,
     node_id='e2e_sub_failed_input_child',
     waits_for=[node_e2e_sub_failed_input_source],
     args_from={'value': node_e2e_sub_failed_input_source},
@@ -1622,7 +1622,7 @@ spec_subworkflow_allow_failed_dependencies_to_build_with = _workflow(
 
 
 node_e2e_sub_typed_kwarg_child = SubWorkflowNode(
-    workflow_def=E2ESubTypedKwargWorkflow,
+    workflow_definition=E2ESubTypedKwargWorkflow,
     node_id='e2e_sub_typed_kwarg_child',
     kwargs={'pet': E2ESubDog(name='Ada', bark_volume=7)},
 )

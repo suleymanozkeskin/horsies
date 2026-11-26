@@ -5,8 +5,8 @@
 use std::convert::Infallible;
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, SubWorkflowParams, TaskError, TaskOutcome,
-    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    task, AppConfig, Horsies, HorsiesError, SubWorkflowParameters, TaskError, TaskOutcome,
+    WorkflowContext, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder,
 };
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -29,14 +29,14 @@ async fn consume(total: TaskOutcome<f64, Infallible>) -> Result<String, TaskErro
 
 #[task("summarize", workflow_ctx)]
 async fn summarize(workflow_ctx: WorkflowContext) -> Result<u32, TaskError<Infallible>> {
-    Ok(u32::try_from(workflow_ctx.task_index()).unwrap_or(0))
+    Ok(u32::try_from(workflow_ctx.node_index()).unwrap_or(0))
 }
 
 struct Pipeline;
 
 impl WorkflowDefinition for Pipeline {
     type Output = String;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "pipeline"
@@ -46,7 +46,7 @@ impl WorkflowDefinition for Pipeline {
         "tests.pipeline.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let produced =
             builder.task(produce::node().set(produce::params::order(), Order { order_id: 7 })?)?;
         let consumed =
@@ -56,7 +56,7 @@ impl WorkflowDefinition for Pipeline {
                 .waits_for(consumed)
                 .workflow_context_from([consumed]),
         )?;
-        Ok(WorkflowDefConfig::new().output(consumed))
+        Ok(WorkflowDefinitionConfig::new().output(consumed))
     }
 }
 
@@ -71,5 +71,5 @@ fn main() {
     let _summarize = summarize::register(&mut app);
     let _spec = Pipeline::build(app.workflow_builder(Pipeline::name()));
     let _function = app.register_workflow_definition::<Pipeline>();
-    let _node = Pipeline::node(SubWorkflowParams::NotGiven);
+    let _node = Pipeline::node(SubWorkflowParameters::NotGiven);
 }

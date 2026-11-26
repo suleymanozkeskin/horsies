@@ -215,7 +215,7 @@ fn declared_code_error(name: &str, refusal: &DeclaredCodeRefusal) -> HorsiesErro
 mod tests {
     use std::sync::Arc;
 
-    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
+    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
     use horsies_core::core::task::result::TaskResult;
     use horsies_core::TaskOptions;
 
@@ -233,7 +233,7 @@ mod tests {
     fn plain_task() -> RegisteredTask {
         RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         }
     }
 
@@ -385,7 +385,7 @@ mod tests {
     fn task_declaring(codes: &'static [&'static str]) -> RegisteredTask {
         RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default().with_error_codes(codes),
+            metadata: TaskMetadata::default().with_error_codes(codes),
         }
     }
 
