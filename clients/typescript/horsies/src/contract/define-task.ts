@@ -2,8 +2,8 @@
 // does no I/O, so an API server can import it without the worker's code.
 //
 // `defineTask` builds a frozen contract and keeps its facts (`definition.ts`). It refuses nothing with a throw: what it
-// finds wrong (a member that is no schema, a schema of another vendor, a wire type that `checkKind` refuses) is a
-// definition refusal, which `Horsies.create` reports. The result constructors `ok` and `err` are bound to the
+// finds wrong (a task name that cannot be stored, a parameter name, a schema of another vendor, a wire type that
+// `checkKind` refuses) is a contract refusal, which `Horsies.create` reports. The result constructors `ok` and `err` are bound to the
 // contract, so a wrong value or code fails typecheck at its own line.
 
 import { LIBRARY_TASK_CODES, RESERVED_NON_TASK_CODES } from "../codec/bounds.ts";

@@ -3,37 +3,55 @@
 // once per process.
 //
 // A contract with any refusal never reaches the codec: so a default that the writer refuses (`DefaultNotStored`) is
-// reported here, and the reader never meets it.
+// reported here, and the reader never meets it. The zod adapter (`src/zod/kind.ts`) imports no zod module, so this
+// module imports it statically: a bundled producer compiles its zod contracts as an unbundled one does.
 
 import { ROOT_PATH } from "../codec/refusal.ts";
-import { checkKind, checkParameters, type KindRefused } from "../wire/check.ts";
+import { checkKind, checkParameters, type KindRefused, type KindRule } from "../wire/check.ts";
 import type { Kind, Member, ObjectKind } from "../wire/kinds.ts";
 import { objectKind } from "../wire/kinds.ts";
 import { isResultOfKind } from "../wire/result-of.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import { unreachable } from "../wire/unreachable.ts";
 import { kindOf, presenceOf } from "../wire/wire-type.ts";
-import { contractRecord, type ContractRecord, type ParameterSource, type SchemaSource } from "./definition.ts";
-import { type ZodAdapterRefused, zodEntry, type ZodKindEntry, type ZodVersion } from "./zod-entry.ts";
+import { type ZodAdapterRefused, zodMemberWire, zodValueWire } from "../zod/kind.ts";
+import type { ZodVersion } from "../zod/version.ts";
+import {
+  contractRecord,
+  type ContractRecord,
+  type DefinitionRefused,
+  type ParameterSource,
+  type SchemaSource,
+  type TaskNameFault,
+} from "./definition.ts";
 
 /** Why a contract cannot be a task. */
 export type ContractRule =
-  /** A Standard Schema that is not a zod schema. */
-  | "SchemaVendor"
-  /** A zod schema of a release that the adapter does not read (zod 3, or a version outside the supported range). */
-  | "ZodRelease"
+  /** A task name that cannot be stored: empty, or with a lone surrogate. */
+  | "TaskName"
   /** A parameter name that is not an identifier, that the engine fills, or that only the engine writes. */
   | "ParameterName"
-  /** A wire type that `checkKind` refuses, or an output that may be left out. */
-  | "WireKind"
+  /** A Standard Schema that is not a zod schema. */
+  | "SchemaVendor"
+  /** A zod 3 schema: zod 3.24 and later, or the `zod/v3` export of zod 4. */
+  | "Zod3Schema"
+  /** A schema of a zod 4 release outside the supported range. */
+  | "ZodVersionNotSupported"
   /** A zod form with no stored form. */
   | "ZodSchema"
-  /** The installed zod reads its known schemas to other kinds than horsies expects. */
-  | "ZodSelfCheck"
-  /** The zod adapter did not load. */
-  | "ZodAdapterNotLoaded";
+  /** A wire type that `checkKind` refuses, or an output that may be left out. */
+  | "WireKind";
 
-/** A refusal of a contract: the rule, the place (`input.order.items[*]`, `output`) and the cause. */
-export type ContractRefused = { readonly rule: ContractRule; readonly path: string; readonly detail: string };
+/**
+ * A refusal of a contract: the rule, the place (`name`, `input.order.items[*]`, `output`), the cause, and how to fix
+ * it (zero or more lines).
+ */
+export type ContractRefused = {
+  readonly rule: ContractRule;
+  readonly path: string;
+  readonly detail: string;
+  readonly help: readonly string[];
+};
 
 /** How a contract can be sent. */
 export type SendForm =
@@ -54,12 +72,15 @@ export type CompiledContract = {
 /** The outcome of a compile. */
 export type CompileOutcome = Result<CompiledContract, readonly ContractRefused[]>;
 
+/** The rules of `checkParameters` that judge a parameter's name. The definition's name rules judge a name first. */
+const NAME_RULES: ReadonlySet<KindRule> = new Set<KindRule>(["EngineKeyMember", "IntegerLikeMember"]);
+
 const compiled = new WeakMap<object, CompileOutcome>();
 
 /**
- * The compiled form of a contract, or every refusal of it in order: the definition, then the parameters, then the
- * output. Effects: the first compile of a contract with a zod schema loads the zod adapter. A value that
- * `defineTask` did not build is a defect: `TypeError`.
+ * The compiled form of a contract, or every refusal of it in order: the definition (the task name, the parameter
+ * names), then the parameters, then the output. A refusal of the definition does not stop the checks of the schemas.
+ * Effects: none apart from the kept outcome. A value that `defineTask` did not build is a defect: `TypeError`.
  */
 export function compileContract(contract: object): CompileOutcome {
   const kept = compiled.get(contract);
@@ -76,44 +97,72 @@ export function compileContract(contract: object): CompileOutcome {
 }
 
 function compileRecord(record: ContractRecord): CompileOutcome {
-  if (record.refusals.length > 0) {
-    return err(Object.freeze(record.refusals.map((refused) => contractRefused(refused.rule, refused.path, detailOf(refused)))));
-  }
-
   const members = record.parameters.map((parameter) => compileParameter(parameter));
   const output = compileOutput(record.output);
-  const refusals = [...members.flatMap((member) => (member.ok ? [] : member.error)), ...(output.ok ? [] : output.error)];
+  const parameters = objectKind(members.flatMap((member) => (member.ok ? [member.value] : [])));
+
+  const refusals = [
+    ...record.refusals.map(definitionRefused),
+    ...members.flatMap((member) => (member.ok ? [] : member.error)),
+    ...parameterKindRefusals(parameters, refusedNamePaths(record.refusals)),
+    ...(output.ok ? checkKind(output.value).map((refused) => wireKindRefused("output", refused)) : output.error),
+  ];
 
   if (refusals.length > 0 || !output.ok) {
     return err(Object.freeze(refusals));
   }
 
-  const parameters = objectKind(members.flatMap((member) => (member.ok ? [member.value] : [])));
-
-  const kindRefusals = [
-    ...checkParameters(parameters).map((refused) => wireKindRefused("input", refused)),
-    ...checkKind(output.value).map((refused) => wireKindRefused("output", refused)),
-  ];
-
-  if (kindRefusals.length > 0) {
-    return err(Object.freeze(kindRefusals));
-  }
-
   return ok(Object.freeze({ record, parameters, send: sendForm(parameters), output: output.value }));
 }
 
-function detailOf(refused: ContractRecord["refusals"][number]): string {
+function definitionRefused(refused: DefinitionRefused): ContractRefused {
   switch (refused.rule) {
-    case "SchemaVendor":
-      return `a Standard Schema of the vendor "${refused.vendor}" has no stored form; use h.* or zod 4`;
+    case "TaskName":
+      return contractRefused("TaskName", refused.path, taskNameDetail(refused.fault), [taskNameHelp(refused.fault)]);
     case "ParameterName":
-      return refused.detail;
-    default: {
-      const unexpected: never = refused;
-
-      throw new TypeError(`compileContract: a definition refusal outside its type: ${String(unexpected)}`);
-    }
+      return contractRefused("ParameterName", refused.path, refused.detail, []);
+    default:
+      return unreachable(refused, "definitionRefused");
   }
+}
+
+function taskNameDetail(fault: TaskNameFault): string {
+  switch (fault) {
+    case "empty":
+      return "the task name is empty";
+    case "loneSurrogate":
+      return "the task name holds a lone surrogate (text that is not well formed)";
+    default:
+      return unreachable(fault, "taskNameDetail");
+  }
+}
+
+function taskNameHelp(fault: TaskNameFault): string {
+  switch (fault) {
+    case "empty":
+      return "give a task name that is not empty";
+    case "loneSurrogate":
+      return "give a task name of well-formed text";
+    default:
+      return unreachable(fault, "taskNameHelp");
+  }
+}
+
+/** The places of the parameters whose name the definition refused (`input.<name>`). Pure. */
+function refusedNamePaths(refusals: readonly DefinitionRefused[]): ReadonlySet<string> {
+  return new Set(refusals.flatMap((refused) => (refused.rule === "ParameterName" ? [refused.path] : [])));
+}
+
+/**
+ * The `checkParameters` refusals of the compiled parameters. A name rule at a parameter whose name the definition
+ * refused is left out: the definition's refusal reports that name. Pure.
+ */
+function parameterKindRefusals(parameters: ObjectKind, refusedNames: ReadonlySet<string>): readonly ContractRefused[] {
+  return checkParameters(parameters).flatMap((refused) => {
+    const kindRefusal = wireKindRefused("input", refused);
+
+    return NAME_RULES.has(refused.rule) && refusedNames.has(kindRefusal.path) ? [] : [kindRefusal];
+  });
 }
 
 function compileParameter(parameter: ParameterSource): Result<Member, readonly ContractRefused[]> {
@@ -127,19 +176,17 @@ function compileParameter(parameter: ParameterSource): Result<Member, readonly C
     }
 
     case "zod": {
-      const schema = parameter.schema.schema;
-      const member = withEntry(path, (entry) => entry.zodMemberWire(schema));
+      const member = zodMemberWire(parameter.schema.schema);
 
       return member.ok
         ? ok({ name: parameter.name, kind: kindOf(member.value), presence: presenceOf(member.value) })
-        : member;
+        : err(zodRefusals(path, member.error));
     }
 
-    default: {
-      const unexpected: never = parameter.schema;
-
-      throw new TypeError(`compileContract: a schema source outside its type: ${String(unexpected)}`);
-    }
+    case "otherVendor":
+      return err([vendorRefused(path, parameter.schema.vendor)]);
+    default:
+      return unreachable(parameter.schema, "compileParameter");
   }
 }
 
@@ -148,57 +195,42 @@ function compileOutput(source: SchemaSource): Result<Kind, readonly ContractRefu
     case "wire":
       return presenceOf(source.wire).mode === "required"
         ? ok(kindOf(source.wire))
-        : err([contractRefused("WireKind", "output", "an output is always present; .optional() and .default() are for parameters")]);
+        : err([
+            contractRefused("WireKind", "output", "an output is always present", [
+              "remove .optional() and .default(): they are for parameters",
+            ]),
+          ]);
     case "zod": {
-      const schema = source.schema;
+      const output = zodValueWire(source.schema);
 
-      const output = withEntry("output", (entry) => entry.zodValueWire(schema));
-
-      return output.ok ? ok(kindOf(output.value)) : output;
+      return output.ok ? ok(kindOf(output.value)) : err(zodRefusals("output", output.error));
     }
 
-    default: {
-      const unexpected: never = source;
-
-      throw new TypeError(`compileContract: a schema source outside its type: ${String(unexpected)}`);
-    }
+    case "otherVendor":
+      return err([vendorRefused("output", source.vendor)]);
+    default:
+      return unreachable(source, "compileOutput");
   }
 }
 
-/** Run `compile` with the zod adapter, its refusals as contract refusals at `path`. */
-function withEntry<T>(
-  path: string,
-  compile: (entry: ZodKindEntry) => Result<T, ZodAdapterRefused>,
-): Result<T, readonly ContractRefused[]> {
-  const load = zodEntry();
-
-  switch (load.kind) {
-    case "notLoaded":
-      return err([contractRefused("ZodAdapterNotLoaded", path, `the zod adapter of horsies did not load: ${load.cause}`)]);
-    case "loaded": {
-      const outcome = compile(load.entry);
-
-      return outcome.ok ? outcome : err(zodRefusals(path, outcome.error));
-    }
-
-    default: {
-      const unexpected: never = load;
-
-      throw new TypeError(`compileContract: a load outcome outside its type: ${String(unexpected)}`);
-    }
-  }
+function vendorRefused(path: string, vendor: string): ContractRefused {
+  return contractRefused("SchemaVendor", path, `a Standard Schema of the vendor "${vendor}" has no stored form`, [
+    "use h.* or zod 4",
+  ]);
 }
 
+/** The adapter's refusals as contract refusals at `path`: the adapter's kind is the rule, its fix is the help. */
 function zodRefusals(path: string, refused: ZodAdapterRefused): readonly ContractRefused[] {
   switch (refused.kind) {
     case "Zod3Schema":
-      return [contractRefused("ZodRelease", path, `a zod 3 schema; ${refused.fix}`)];
+      return [contractRefused("Zod3Schema", path, "a zod 3 schema", [refused.fix])];
     case "ZodVersionNotSupported":
       return [
         contractRefused(
-          "ZodRelease",
+          "ZodVersionNotSupported",
           path,
           `zod ${versionText(refused.found)} is outside the supported range ${refused.supported}`,
+          [`install a zod release in the range ${refused.supported}`],
         ),
       ];
     case "KindRefused":
@@ -208,22 +240,12 @@ function zodRefusals(path: string, refused: ZodAdapterRefused): readonly Contrac
         contractRefused(
           "ZodSchema",
           `${path}${node.path.slice(ROOT_PATH.length)}`,
-          `zod type ${node.zodType} is refused [${node.rule}]; ${node.fix}`,
+          `zod type ${node.zodType} is refused [${node.rule}]`,
+          [node.fix],
         ),
       );
-    case "SelfCheckFailed":
-      return refused.failures.map((failure) =>
-        contractRefused(
-          "ZodSelfCheck",
-          path,
-          `the installed zod reads ${failure.name} as ${failure.found}, not ${failure.expected}; use a zod version that horsies supports`,
-        ),
-      );
-    default: {
-      const unexpected: never = refused;
-
-      throw new TypeError(`compileContract: a zod refusal outside its type: ${String(unexpected)}`);
-    }
+    default:
+      return unreachable(refused, "zodRefusals");
   }
 }
 
@@ -233,7 +255,7 @@ function versionText(version: ZodVersion): string {
 
 /** A `checkKind` refusal under `root` (`input`, `output`, or a parameter). Pure. */
 function wireKindRefused(root: string, refused: KindRefused): ContractRefused {
-  return contractRefused("WireKind", `${root}${refused.path.slice(ROOT_PATH.length)}`, `${refused.detail} [${refused.rule}]`);
+  return contractRefused("WireKind", `${root}${refused.path.slice(ROOT_PATH.length)}`, `${refused.detail} [${refused.rule}]`, []);
 }
 
 /** The send form of the parameters. Pure. */
@@ -251,6 +273,6 @@ function sendForm(parameters: ObjectKind): SendForm {
   });
 }
 
-function contractRefused(rule: ContractRule, path: string, detail: string): ContractRefused {
-  return Object.freeze({ rule, path, detail });
+function contractRefused(rule: ContractRule, path: string, detail: string, help: readonly string[]): ContractRefused {
+  return Object.freeze({ rule, path, detail, help: Object.freeze([...help]) });
 }
