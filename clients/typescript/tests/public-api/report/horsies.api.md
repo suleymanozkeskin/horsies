@@ -7,10 +7,575 @@
 /// <reference lib="esnext.temporal" />
 
 // @public
+export class AddonOutsideMainThread extends CoreDefect {
+    constructor(facts: {
+        readonly threadId: number;
+    });
+    // (undocumented)
+    readonly code = "ADDON_OUTSIDE_MAIN_THREAD";
+    // (undocumented)
+    readonly name = "AddonOutsideMainThread";
+    // (undocumented)
+    readonly threadId: number;
+}
+
+// @public
+export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, string, ExecutionClass>;
+
+// @public
+export type AnyTaskContract = TaskContract<ParameterSchemas, OutputSchema, string, ExecutionClass>;
+
+// @public
 export type AnyWire = Wire<unknown, unknown, Presence, Role>;
 
 // @public
+export type AppConfigInput = QueueConfigInput & {
+    readonly broker: BrokerConfigInput;
+    readonly clusterWideCap?: TaskCap;
+    readonly claim?: ClaimMode;
+    readonly maxClaimRenewAgeMs?: number;
+    readonly payload?: PayloadPolicyInput;
+    readonly recovery?: RecoveryConfigInput;
+    readonly retention?: RetentionConfigInput;
+    readonly resilience?: ResilienceConfigInput;
+    readonly workerProfiles?: Readonly<Record<string, WorkerProfileInput>>;
+    readonly resendOnTransientErr?: boolean;
+};
+
+// @public (undocumented)
+export type AttemptClaimsInfo = ClaimsCountedInfo | ClaimsNotCountedInfo;
+
+// @public (undocumented)
+export type AttemptFinalizingInfo = FinalizingMarkedInfo | FinalizingNotMarkedInfo;
+
+// @public (undocumented)
+export type AttemptPhasesInfo = PhasesCapturedInfo | PhasesNotCapturedInfo;
+
+// @public (undocumented)
+export type AttemptPlacementInfo = PlacementNotObservedInfo | PlacementPlacedInfo;
+
+// @public (undocumented)
+export type AttemptRecordedByInfo = RecordedByCancelInfo | RecordedByRecoveryInfo | RecordedByWorkerInfo;
+
+// @public
+export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> = [
+X
+] extends ["SHARED_ASYNC"] ? (input: BodyInput<P>, runtime: RuntimeOf<X>) => Promise<BodyResult<O, E>> : (input: BodyInput<P>, runtime: RuntimeOf<X>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
+
+// @public
+export type BodyInput<P extends ParameterSchemas> = ParametersValue<P>;
+
+// @public
+export type BodyResult<O extends OutputSchema, E extends string> = Ok<SchemaSent<O>> | Err<UserFailure<E>>;
+
+// @public
+export interface BodyRuntimes {
+    // (undocumented)
+    readonly ISOLATED: never;
+    // (undocumented)
+    readonly SHARED_ASYNC: never;
+    // (undocumented)
+    readonly SHARED_THREAD: never;
+}
+
+// @public
+export type BoundedTaskList<T> = {
+    readonly kind: "complete";
+    readonly rows: readonly T[];
+} | {
+    readonly kind: "truncated";
+    readonly rows: readonly T[];
+    readonly bound: number;
+};
+
+// @public (undocumented)
+export interface Breakdown {
+    // (undocumented)
+    readonly groupBy: string;
+    // (undocumented)
+    readonly groupCount: number;
+    // (undocumented)
+    readonly groups: ReadonlyArray<GroupRow>;
+    // (undocumented)
+    readonly total: BreakdownCounts;
+}
+
+// @public (undocumented)
+export interface BreakdownCounts {
+    // (undocumented)
+    readonly cancelled: number;
+    // (undocumented)
+    readonly claimed: number;
+    // (undocumented)
+    readonly completed: number;
+    // (undocumented)
+    readonly expired: number;
+    // (undocumented)
+    readonly failed: number;
+    // (undocumented)
+    readonly pending: number;
+    // (undocumented)
+    readonly retried: number;
+    // (undocumented)
+    readonly running: number;
+    // (undocumented)
+    readonly total: number;
+}
+
+// @public (undocumented)
+export type BreakdownGroup = BreakdownUnclaimedGroup | BreakdownValueGroup;
+
+// @public (undocumented)
+export interface BreakdownUnclaimedGroup {
+    // (undocumented)
+    readonly kind: "unclaimed";
+}
+
+// @public (undocumented)
+export interface BreakdownValueGroup {
+    // (undocumented)
+    readonly kind: "value";
+    // (undocumented)
+    readonly value: string;
+}
+
+// @public
+export interface BrokerConfigInput {
+    readonly connection?: BrokerConnection;
+    readonly databaseUrl: Secret;
+    readonly echo?: boolean;
+    readonly maxOverflow?: number;
+    // (undocumented)
+    readonly poolPrePing?: boolean;
+    // (undocumented)
+    readonly poolRecycle?: PoolRecycle;
+    readonly poolSize?: number;
+    readonly poolTimeoutSeconds?: number;
+    // (undocumented)
+    readonly retainRerunInputDefault?: RerunInputDefault;
+    // (undocumented)
+    readonly tcpKeepalives?: TcpKeepalives;
+    // (undocumented)
+    readonly tcpUserTimeout?: TcpUserTimeout;
+    readonly workerPoolPrePing?: boolean;
+}
+
+// @public
+export type BrokerConnection = {
+    readonly kind: "direct";
+    readonly sessionDatabase?: SessionDatabase;
+} | {
+    readonly kind: "pgbouncerTransaction";
+    readonly sessionDatabaseUrl: Secret;
+};
+
+// @public (undocumented)
+export const BrokerErrorCode: {
+    readonly SCHEMA_INIT_FAILED: "SCHEMA_INIT_FAILED";
+    readonly ENQUEUE_FAILED: "ENQUEUE_FAILED";
+    readonly PAYLOAD_MISMATCH: "PAYLOAD_MISMATCH";
+    readonly IDEMPOTENCY_KEY_CONFLICT: "IDEMPOTENCY_KEY_CONFLICT";
+    readonly TASK_INFO_QUERY_FAILED: "TASK_INFO_QUERY_FAILED";
+    readonly MONITORING_QUERY_FAILED: "MONITORING_QUERY_FAILED";
+    readonly DB_PING_FAILED: "DB_PING_FAILED";
+    readonly WORKER_PING_FAILED: "WORKER_PING_FAILED";
+    readonly CLEANUP_FAILED: "CLEANUP_FAILED";
+    readonly CLOSE_FAILED: "CLOSE_FAILED";
+    readonly LISTENER_START_FAILED: "LISTENER_START_FAILED";
+    readonly LISTENER_SUBSCRIBE_FAILED: "LISTENER_SUBSCRIBE_FAILED";
+    readonly NO_BROKER: "NO_BROKER";
+    readonly NO_TYPE_AVAILABLE: "NO_TYPE_AVAILABLE";
+    readonly INVALID_JSON_PAYLOAD: "INVALID_JSON_PAYLOAD";
+    readonly INVALID_TASK_OPTIONS: "INVALID_TASK_OPTIONS";
+    readonly ASYNC_CONTEXT: "ASYNC_CONTEXT";
+    readonly INVALID_INPUT: "INVALID_INPUT";
+    readonly LISTENER_DISABLED: "LISTENER_DISABLED";
+    readonly WAIT_INSIDE_TASK: "WAIT_INSIDE_TASK";
+};
+
+// @public (undocumented)
+export type BrokerErrorCode = (typeof BrokerErrorCode)[keyof typeof BrokerErrorCode];
+
+// @public (undocumented)
+export interface BrokerInvalidInput {
+    // (undocumented)
+    readonly code: "INVALID_INPUT";
+    // (undocumented)
+    readonly exception: CoreCause | NoCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public (undocumented)
+export interface BrokerListenerDisabled {
+    // (undocumented)
+    readonly code: "LISTENER_DISABLED";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public (undocumented)
+export interface BrokerOperationFailed {
+    // (undocumented)
+    readonly code: BrokerOperationFailedCode;
+    // (undocumented)
+    readonly exception: CoreCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+}
+
+// @public (undocumented)
+export type BrokerOperationFailedCode = "SCHEMA_INIT_FAILED" | "TASK_INFO_QUERY_FAILED" | "MONITORING_QUERY_FAILED" | "DB_PING_FAILED" | "WORKER_PING_FAILED" | "CLEANUP_FAILED" | "CLOSE_FAILED" | "LISTENER_START_FAILED" | "LISTENER_SUBSCRIBE_FAILED";
+
+// @public
+export type BrokerOperationFailedWith<Code extends BrokerOperationFailed["code"]> = BrokerOperationFailed & {
+    readonly code: Code;
+};
+
+// @public
+export interface BudgetLoad {
+    // (undocumented)
+    readonly budget: Execution;
+    // (undocumented)
+    readonly capacity: bigint;
+    // (undocumented)
+    readonly inFlight: bigint;
+    // (undocumented)
+    readonly serves: readonly Execution[];
+}
+
+// @public
+export type CancelPolicy = "includeRunning" | "pendingOrClaimedOnly";
+
+// @public
+export type CancelTaskError = TaskActionCoreError;
+
+// @public
+export interface CancelTaskOptions {
+    // (undocumented)
+    readonly policy: CancelPolicy;
+}
+
+// @public (undocumented)
+export interface ClaimEarlierInfo {
+    // (undocumented)
+    readonly count: number;
+    // (undocumented)
+    readonly kind: "earlier";
+}
+
+// @public
+export interface ClaimLimitsInput {
+    readonly claimedPerWorker?: TaskLimit;
+    readonly perQueuePerPass?: TaskLimit;
+}
+
+// @public
+export type ClaimMode = {
+    readonly kind: "hardCap";
+    readonly leaseMs?: number;
+} | {
+    readonly kind: "softCap";
+    readonly prefetchBuffer: number;
+    readonly leaseMs: number;
+};
+
+// @public (undocumented)
+export interface ClaimNotRecordedInfo {
+    // (undocumented)
+    readonly kind: "notRecorded";
+}
+
+// @public (undocumented)
+export interface ClaimRecordedInfo {
+    // (undocumented)
+    readonly kind: "recorded";
+    // (undocumented)
+    readonly placement: AttemptPlacementInfo;
+}
+
+// @public (undocumented)
+export interface ClaimsCountedInfo {
+    // (undocumented)
+    readonly count: number;
+    // (undocumented)
+    readonly firstClaimedAt: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "counted";
+}
+
+// @public (undocumented)
+export interface ClaimsNotCountedInfo {
+    // (undocumented)
+    readonly kind: "notCounted";
+}
+
+// @public
+export interface ClassBudget {
+    // (undocumented)
+    readonly budget: Execution;
+    // (undocumented)
+    readonly capacity: bigint;
+    // (undocumented)
+    readonly serves: readonly Execution[];
+}
+
+// @public
+export interface ClassCoverage {
+    // (undocumented)
+    readonly checkedAt: Temporal.Instant;
+    // (undocumented)
+    readonly liveWorkers: bigint;
+    // (undocumented)
+    readonly streams: readonly StreamCoverage[];
+}
+
+// @public
+export interface ClassReport {
+    // (undocumented)
+    readonly checkedAt: Temporal.Instant;
+    // (undocumented)
+    readonly streams: readonly PendingStream[];
+    // (undocumented)
+    readonly workers: readonly WorkerClassLoad[];
+}
+
+// @public
+export type ClearableBootCause = {
+    readonly kind: "resourceShortage";
+    readonly errno: ShortageErrno;
+} | {
+    readonly kind: "threadStartRefused";
+};
+
+// @public
+export class ClientDefect extends CoreDefect {
+    constructor(facts: {
+        readonly subject: string;
+        readonly rule: string;
+    });
+    // (undocumented)
+    readonly code = "CLIENT_DEFECT";
+    // (undocumented)
+    readonly name = "ClientDefect";
+    // (undocumented)
+    readonly rule: string;
+    // (undocumented)
+    readonly subject: string;
+}
+
+// @public
+export type ClusterWideCap = {
+    readonly kind: "capped";
+    readonly cap: number;
+} | {
+    readonly kind: "uncapped";
+};
+
+// @public
 export type CodecRefused = EncodeRefused | DecodeRefused | ReadBackRefused | ReadBackChanged;
+
+// @public
+export function configureLogging(options: LoggingOptions): void;
+
+// @public (undocumented)
+export interface ConflictClockOrderInfo {
+    // (undocumented)
+    readonly earlier: TimingBoundary;
+    // (undocumented)
+    readonly earlierAt: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "clockOrder";
+    // (undocumented)
+    readonly later: TimingBoundary;
+    // (undocumented)
+    readonly laterAt: Temporal.Instant;
+}
+
+// @public (undocumented)
+export interface ConflictMissingRecordInfo {
+    // (undocumented)
+    readonly kind: "missingRecord";
+    // (undocumented)
+    readonly record: MissingRecord;
+}
+
+// @public (undocumented)
+export interface ConflictUnexpectedEventInfo {
+    // (undocumented)
+    readonly event: WorkflowEventKind;
+    // (undocumented)
+    readonly eventId: number;
+    // (undocumented)
+    readonly kind: "unexpectedEvent";
+}
+
+// @public
+export interface ContractTypes<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+    // (undocumented)
+    readonly code: E;
+    // (undocumented)
+    readonly execution: X;
+    // (undocumented)
+    readonly input: P;
+    // (undocumented)
+    readonly output: O;
+}
+
+// @public
+export type CoreCause = CoreFailure | OutcomeDecodeError | HistoryContractError | RuleRefused | JsonUnreadable;
+
+// @public (undocumented)
+export interface CoreConnectionError {
+    // (undocumented)
+    readonly failure: "connection";
+    // (undocumented)
+    readonly kind: "coreFailure";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+    // (undocumented)
+    readonly subject: string;
+}
+
+// @public (undocumented)
+export interface CoreContractViolation {
+    // (undocumented)
+    readonly failure: "contractViolation";
+    // (undocumented)
+    readonly kind: "coreFailure";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly subject: string;
+}
+
+// @public
+export abstract class CoreDefect extends Error {
+    // (undocumented)
+    abstract readonly code: CoreDefectCode;
+}
+
+// @public
+export type CoreDefectCode = "MANIFEST_REFUSED" | "PANIC_RULE_FIXED" | "CORE_PANIC" | "ADDON_OUTSIDE_MAIN_THREAD" | "CLIENT_DEFECT";
+
+// @public
+export abstract class CoreError extends Error {
+    // (undocumented)
+    abstract readonly code: CoreErrorCode;
+}
+
+// @public
+export type CoreErrorCode = "CORE_STOPPED" | "CORE_START_FAILED" | "TOO_MANY_PENDING_CALLS" | "FORKED_AFTER_CORE_START";
+
+// @public
+export type CoreFailure = CoreServerError | CoreConnectionError | CoreContractViolation | CorePreconditionFailed;
+
+// @public
+export class CorePanic extends CoreDefect {
+    constructor(facts: {
+        readonly subject: string;
+        readonly cause: string;
+    });
+    // (undocumented)
+    readonly cause: string;
+    // (undocumented)
+    readonly code = "CORE_PANIC";
+    // (undocumented)
+    readonly name = "CorePanic";
+    // (undocumented)
+    readonly subject: string;
+}
+
+// @public (undocumented)
+export interface CorePreconditionFailed {
+    // (undocumented)
+    readonly failure: "preconditionFailed";
+    // (undocumented)
+    readonly kind: "coreFailure";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+    // (undocumented)
+    readonly subject: string;
+}
+
+// @public (undocumented)
+export interface CoreServerError {
+    // (undocumented)
+    readonly failure: "server";
+    // (undocumented)
+    readonly kind: "coreFailure";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+    // (undocumented)
+    readonly sqlstate: string;
+    // (undocumented)
+    readonly subject: string;
+}
+
+// @public
+export class CoreStartFailed extends CoreError {
+    constructor(facts: {
+        readonly cause: string;
+    });
+    // (undocumented)
+    readonly cause: string;
+    // (undocumented)
+    readonly code = "CORE_START_FAILED";
+    // (undocumented)
+    readonly name = "CoreStartFailed";
+}
+
+// @public
+export class CoreStopped extends CoreError {
+    constructor(facts: {
+        readonly subject: string;
+        readonly cause: string;
+        readonly stateAfter: StateAfter;
+    });
+    // (undocumented)
+    readonly cause: string;
+    // (undocumented)
+    readonly code = "CORE_STOPPED";
+    // (undocumented)
+    readonly name = "CoreStopped";
+    // (undocumented)
+    readonly stateAfter: StateAfter;
+    // (undocumented)
+    readonly subject: string;
+}
+
+// @public
+export type CreateRefused = {
+    readonly refusals: NonEmpty<Refusal>;
+};
+
+// @public
+export interface CustomQueueInput {
+    // (undocumented)
+    readonly maxConcurrency?: TaskCap;
+    // (undocumented)
+    readonly name: string;
+    // (undocumented)
+    readonly priority?: number;
+}
+
+// @public
+export interface DatabasePing {
+    // (undocumented)
+    readonly latencyMs: number;
+}
 
 // @public
 export class Decimal {
@@ -64,6 +629,41 @@ export type DecodeRefusalKind =
 export type DecodeRefused = ValueRefused | EnvelopeRefused;
 
 // @public
+export const DEFAULT_BREAKDOWN_LIMIT = 50;
+
+// @public
+export const DEFAULT_PING_TIMEOUT_MS = 2000;
+
+// @public (undocumented)
+export const DEFAULT_RETENTION_CLASS_KEY = "standard_30d";
+
+// @public
+export const DEFAULT_TASK_PAGE_LIMIT = 50;
+
+// @public
+export const DEFAULT_TASK_PAGE_OFFSET = 0;
+
+// @public
+export const DEFAULT_WORKFLOW_RUNS_LIMIT = 30;
+
+// @public
+export function defineTask<const P extends ParameterSchemas, O extends OutputSchema, const E extends string = string, const X extends ExecutionClass = "ISOLATED">(definition: TaskDefinition<P, O, E, X> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X>;
+
+// @public
+export interface DownSlot {
+    // (undocumented)
+    readonly cause: ClearableBootCause;
+    // (undocumented)
+    readonly detail: string;
+    // (undocumented)
+    readonly downSince: Temporal.Instant;
+    // (undocumented)
+    readonly failedBoots: bigint;
+    // (undocumented)
+    readonly slot: number;
+}
+
+// @public
 export interface EmptyObject {
     // (undocumented)
     readonly [noMembers]?: never;
@@ -114,6 +714,22 @@ export type EncodeRefused = {
     readonly detail: string;
 };
 
+// @public (undocumented)
+export interface EndpointNotTerminalInfo {
+    // (undocumented)
+    readonly kind: "notTerminal";
+}
+
+// @public (undocumented)
+export interface EndpointTerminalInfo {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "terminal";
+    // (undocumented)
+    readonly status: TerminalNodeStatus;
+}
+
 // @public
 export type EnvelopeRefused = {
     readonly side: "decode";
@@ -152,7 +768,115 @@ export type EnvelopeRule =
 export type Err<E> = {
     readonly ok: false;
     readonly error: E;
+    readonly [resultBrand]?: "horsies.Result";
 };
+
+// @public
+export type ErrorCategory = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "DOMAIN";
+
+// @public
+export type ErrorClass = abstract new (...parameters: never[]) => Error;
+
+// @public (undocumented)
+export const ErrorCode: {
+    readonly WORKFLOW_NO_NAME: "HRS-001";
+    readonly WORKFLOW_NO_NODES: "HRS-002";
+    readonly WORKFLOW_INVALID_NODE_ID: "HRS-003";
+    readonly WORKFLOW_DUPLICATE_NODE_ID: "HRS-004";
+    readonly WORKFLOW_NO_ROOT_TASKS: "HRS-005";
+    readonly WORKFLOW_INVALID_DEPENDENCY: "HRS-006";
+    readonly WORKFLOW_CYCLE_DETECTED: "HRS-007";
+    readonly WORKFLOW_INVALID_ARGS_FROM: "HRS-008";
+    readonly WORKFLOW_INVALID_CTX_FROM: "HRS-009";
+    readonly WORKFLOW_CTX_PARAM_MISSING: "HRS-010";
+    readonly WORKFLOW_INVALID_OUTPUT: "HRS-011";
+    readonly WORKFLOW_INVALID_SUCCESS_POLICY: "HRS-012";
+    readonly WORKFLOW_INVALID_JOIN: "HRS-013";
+    readonly WORKFLOW_UNRESOLVED_QUEUE: "HRS-014";
+    readonly WORKFLOW_UNRESOLVED_PRIORITY: "HRS-015";
+    readonly WORKFLOW_NO_DEFINITION_KEY: "HRS-016";
+    readonly WORKFLOW_DUPLICATE_DEFINITION_KEY: "HRS-017";
+    readonly WORKFLOW_SUBWORKFLOW_APP_MISSING: "HRS-018";
+    readonly WORKFLOW_INVALID_KWARG_KEY: "HRS-019";
+    readonly WORKFLOW_MISSING_REQUIRED_PARAMS: "HRS-020";
+    readonly WORKFLOW_KWARGS_ARGS_FROM_OVERLAP: "HRS-021";
+    readonly WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH: "HRS-022";
+    readonly WORKFLOW_ARGS_FROM_TYPE_MISMATCH: "HRS-024";
+    readonly WORKFLOW_OUTPUT_TYPE_MISMATCH: "HRS-025";
+    readonly WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED: "HRS-026";
+    readonly WORKFLOW_CHECK_CASES_REQUIRED: "HRS-027";
+    readonly WORKFLOW_CHECK_CASE_INVALID: "HRS-028";
+    readonly WORKFLOW_CHECK_BUILDER_EXCEPTION: "HRS-029";
+    readonly WORKFLOW_CHECK_UNDECORATED_BUILDER: "HRS-030";
+    readonly WORKFLOW_KWARGS_NOT_SERIALIZABLE: "HRS-031";
+    readonly WORKFLOW_INVALID_ID: "HRS-032";
+    readonly WORKFLOW_INVALID_DEFINITION_CONFIG: "HRS-033";
+    readonly WORKFLOW_INVALID_PRIORITY: "HRS-034";
+    readonly WORKFLOW_NAIVE_GOOD_UNTIL: "HRS-035";
+    readonly WORKFLOW_SUBWORKFLOW_DEPTH_LIMIT: "HRS-036";
+    readonly WORKFLOW_SUBWORKFLOW_SELF_NESTING: "HRS-037";
+    readonly WORKFLOW_TOO_MANY_NODES: "HRS-038";
+    readonly TASK_NO_RETURN_TYPE: "HRS-100";
+    readonly TASK_INVALID_RETURN_TYPE: "HRS-101";
+    readonly TASK_INVALID_OPTIONS: "HRS-102";
+    readonly TASK_INVALID_QUEUE: "HRS-103";
+    readonly TASK_PREDECORATED_NOT_SUPPORTED: "HRS-104";
+    readonly TASK_STRICT_SIGNATURE_VIOLATION: "HRS-105";
+    readonly TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF: "HRS-107";
+    readonly TASK_SHARED_THREAD_REQUIRES_DEF: "HRS-108";
+    readonly TASK_SHARED_EXECUTION_REQUIRES_TIMEOUT: "HRS-109";
+    readonly TASK_CANCEL_GRACE_REQUIRES_SHARED_ASYNC: "HRS-110";
+    readonly TASK_CANCEL_GRACE_OUT_OF_RANGE: "HRS-111";
+    readonly TASK_INVALID_ERROR_CODE: "HRS-112";
+    readonly TASK_DUPLICATE_ERROR_CODE: "HRS-113";
+    readonly CONFIG_INVALID_QUEUE_MODE: "HRS-200";
+    readonly CONFIG_INVALID_CLUSTER_CAP: "HRS-201";
+    readonly CONFIG_INVALID_PREFETCH: "HRS-202";
+    readonly BROKER_INVALID_URL: "HRS-203";
+    readonly CONFIG_INVALID_RECOVERY: "HRS-204";
+    readonly CONFIG_INVALID_SCHEDULE: "HRS-205";
+    readonly CLI_INVALID_ARGS: "HRS-206";
+    readonly WORKER_INVALID_LOCATOR: "HRS-207";
+    readonly CONFIG_INVALID_RESILIENCE: "HRS-208";
+    readonly CONFIG_INVALID_EXCEPTION_MAPPER: "HRS-209";
+    readonly MODULE_EXEC_ERROR: "HRS-210";
+    readonly BROKER_INIT_FAILED: "HRS-211";
+    readonly CHECK_RESERVED_CODE_COLLISION: "HRS-212";
+    readonly CONFIG_INVALID_BROKER_POOL: "HRS-213";
+    readonly CONFIG_INVALID_CHILD_HOOK: "HRS-214";
+    readonly CONFIG_INVALID_KEEPALIVE: "HRS-215";
+    readonly CONFIG_INVALID_RETENTION: "HRS-216";
+    readonly CHECK_LIVE_ASYNC_CONTEXT: "HRS-217";
+    readonly CONFIG_INVALID_WORKER_PROFILE: "HRS-218";
+    readonly CHECK_WORKER_CONNECTIONS: "HRS-219";
+    readonly CONFIG_OTEL_API_MISSING: "HRS-220";
+    readonly CONFIG_INVALID_TRACE_LINK: "HRS-221";
+    readonly EVENT_HANDLER_UNKNOWN_EVENT_TYPE: "HRS-222";
+    readonly EVENT_HANDLER_INVALID_SIGNATURE: "HRS-223";
+    readonly EVENT_HANDLER_DUPLICATE_NAME: "HRS-224";
+    readonly EVENT_HANDLER_INVALID_NAME: "HRS-225";
+    readonly EVENT_HANDLER_LIMIT: "HRS-226";
+    readonly CONFIG_INVALID_PAYLOAD: "HRS-227";
+    readonly TASK_NOT_REGISTERED: "HRS-300";
+    readonly TASK_DUPLICATE_NAME: "HRS-301";
+    readonly WORKFLOW_UNREGISTERED_TASK: "HRS-302";
+};
+
+// @public (undocumented)
+export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
+
+// @public (undocumented)
+export interface ErrorFacet {
+    // (undocumented)
+    readonly category: string;
+    // (undocumented)
+    readonly count: number;
+    // (undocumented)
+    readonly value: string;
+}
+
+// @public
+export type ExceptionMapping<E extends string> = readonly [ErrorClass, E];
 
 // @public
 export type ExceptionRecord = {
@@ -163,10 +887,139 @@ export type ExceptionRecord = {
     readonly traceback: string;
 };
 
+// @public (undocumented)
+export type Execution = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
+
+// @public
+export type ExecutionClass = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
+
+// @public
+export type ExecutionFact = {
+    readonly kind: "class";
+    readonly execution: ExecutionClass;
+} | {
+    readonly kind: "notKeptInHistory";
+};
+
+// @public
+export type ExecutionRules<X extends ExecutionClass> = [X] extends ["SHARED_ASYNC"] ? {
+    readonly timeoutMs: number;
+    readonly cancelGraceMs?: number;
+} : [X] extends ["SHARED_THREAD"] ? {
+    readonly timeoutMs: number;
+    readonly cancelGraceMs?: never;
+} : {
+    readonly timeoutMs?: number;
+    readonly cancelGraceMs?: number;
+};
+
+// @public
+export interface ExpiredTaskRow {
+    // (undocumented)
+    readonly enqueuedAt: Temporal.Instant;
+    readonly expiredFor: Temporal.Duration;
+    // (undocumented)
+    readonly goodUntil: Temporal.Instant;
+    // (undocumented)
+    readonly id: TaskId;
+    // (undocumented)
+    readonly priority: number;
+    // (undocumented)
+    readonly queueName: string;
+    // (undocumented)
+    readonly sentAt: Temporal.Instant;
+    // (undocumented)
+    readonly taskName: string;
+}
+
+// @public (undocumented)
+export interface Facets {
+    // (undocumented)
+    readonly errorCategoryTotals: ReadonlyMap<string, number>;
+    // (undocumented)
+    readonly errorCodes: ReadonlyArray<ErrorFacet>;
+    // (undocumented)
+    readonly queues: ReadonlyArray<FacetValue>;
+    // (undocumented)
+    readonly taskNames: ReadonlyArray<FacetValue>;
+    // (undocumented)
+    readonly workers: ReadonlyArray<FacetValue>;
+}
+
+// @public (undocumented)
+export interface FacetValue {
+    // (undocumented)
+    readonly count: number;
+    // (undocumented)
+    readonly value: string;
+}
+
+// @public (undocumented)
+export interface FinalizingMarkedInfo {
+    // (undocumented)
+    readonly finalizingAt: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "marked";
+}
+
+// @public (undocumented)
+export interface FinalizingNotMarkedInfo {
+    // (undocumented)
+    readonly kind: "notMarked";
+}
+
+// @public
+export type FinishedStatus = "COMPLETED" | "FAILED" | "EXPIRED";
+
 // @public
 export type Flat<T> = {
     [K in keyof T]: T[K];
 } & {};
+
+// @public
+export class ForkedAfterCoreStart extends CoreError {
+    constructor(facts: {
+        readonly corePid: number;
+        readonly thisPid: number;
+    });
+    // (undocumented)
+    readonly code = "FORKED_AFTER_CORE_START";
+    // (undocumented)
+    readonly corePid: number;
+    // (undocumented)
+    readonly name = "ForkedAfterCoreStart";
+    // (undocumented)
+    readonly thisPid: number;
+}
+
+// @public
+export interface GetOptions {
+    readonly timeoutMs?: number;
+}
+
+// @public (undocumented)
+export interface GroupRow {
+    // (undocumented)
+    readonly cancelled: number;
+    // (undocumented)
+    readonly claimed: number;
+    // (undocumented)
+    readonly completed: number;
+    // (undocumented)
+    readonly expired: number;
+    // (undocumented)
+    readonly failed: number;
+    // (undocumented)
+    readonly group: BreakdownGroup;
+    // (undocumented)
+    readonly pending: number;
+    // (undocumented)
+    readonly retried: number;
+    // (undocumented)
+    readonly running: number;
+    // (undocumented)
+    readonly total: number;
+}
 
 // @public (undocumented)
 export const h: WireBuilders;
@@ -177,9 +1030,162 @@ export namespace h {
 }
 
 // @public
+export type HasRequiredUpstreamOutcome<P extends ParameterSchemas> = true extends {
+    [K in keyof P]: IsUpstreamOutcome<P[K]> extends true ? (LeftOutBySender<P[K]> extends true ? false : true) : false;
+}[keyof P] ? true : false;
+
+// @public
+export type HealthQueryError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | QueryRefused;
+
+// @public
+export type HealthReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED">;
+
+// @public (undocumented)
+export interface HistoryContractError {
+    // (undocumented)
+    readonly kind: "historyContract";
+    // (undocumented)
+    readonly message: string;
+}
+
+// @public
+export class Horsies {
+    static create(config: HorsiesConfig): Result<Horsies, CreateRefused>;
+    implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, body: NoInfer<BodyFor<P, O, E, X>>, options?: ImplementOptions<NoInfer<E>>): Implementation<P, O, E, X>;
+    readonly monitoring: Monitoring;
+    pingDatabase(): Promise<Result<DatabasePing, PingDatabaseError>>;
+    pingWorkers(options?: PingWorkersOptions): Promise<Result<readonly WorkerPong[], PingWorkersError>>;
+    retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
+    send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
+    taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
+}
+
+// @public
+export type HorsiesConfig = AppConfigInput & {
+    readonly tasks: readonly AnyTaskContract[];
+};
+
+// @public
+export type HoursRetention = {
+    readonly kind: "hours";
+    readonly hours: number;
+} | {
+    readonly kind: "noPruning";
+};
+
+// @public
+export type IdRefused = {
+    readonly kind: "notCanonicalUuid";
+    readonly detail: string;
+};
+
+// @public
+export interface Implementation<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+    // (undocumented)
+    readonly contract: TaskContract<P, O, E, X>;
+    // (undocumented)
+    readonly kind: "implementation";
+}
+
+// @public
+export interface ImplementOptions<E extends string> {
+    readonly exceptions?: readonly ExceptionMapping<E>[];
+}
+
+// @public
+export interface IsolatedChildrenInput {
+    // (undocumented)
+    readonly count: number;
+    // (undocumented)
+    readonly pool?: IsolatedPoolInput;
+    // (undocumented)
+    readonly recycle?: IsolatedRecycleInput;
+    readonly taskSendPool?: PoolSize;
+}
+
+// @public
+export interface IsolatedPoolInput {
+    // (undocumented)
+    readonly check?: boolean;
+    // (undocumented)
+    readonly maxSize?: PoolSize;
+    // (undocumented)
+    readonly minSize?: number;
+}
+
+// @public
+export interface IsolatedRecycleInput {
+    // (undocumented)
+    readonly above?: MemoryLimit;
+    // (undocumented)
+    readonly after?: TaskLimit;
+}
+
+// @public
+export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "resultOf" ? true : false) : false;
+
+// @public
+export type IsZodJson<O> = [undefined] extends [O] ? false : [string | number | boolean | null | O[]] extends [O] ? true : false;
+
+// @public (undocumented)
+export interface JsonUnreadable {
+    // (undocumented)
+    readonly kind: "jsonUnreadable";
+    // (undocumented)
+    readonly message: string;
+}
+
+// @public
 export type JsonValue = null | boolean | number | bigint | string | readonly JsonValue[] | {
     readonly [key: string]: JsonValue;
 };
+
+// @public
+export type LastBeat = {
+    readonly kind: "beat";
+    readonly at: Temporal.Instant;
+} | {
+    readonly kind: "noBeatSinceStart";
+};
+
+// @public (undocumented)
+export interface LeafTaskInfo {
+    // (undocumented)
+    readonly completedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly enqueuedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly errorCode: string | null;
+    // (undocumented)
+    readonly execS: number | null;
+    // (undocumented)
+    readonly execution: Execution | null;
+    // (undocumented)
+    readonly failedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly failedReason: string | null;
+    // (undocumented)
+    readonly goodUntil: Temporal.Instant | null;
+    // (undocumented)
+    readonly maxRetries: number;
+    // (undocumented)
+    readonly queueS: number | null;
+    // (undocumented)
+    readonly retryCount: number;
+    // (undocumented)
+    readonly startedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly status: string;
+    // (undocumented)
+    readonly taskId: string;
+    // (undocumented)
+    readonly traceId: string | null;
+    // (undocumented)
+    readonly workerHostname: string | null;
+}
+
+// @public
+export type LeftOutBySender<S> = S extends AnyWire ? (PresenceOf<S> extends "required" ? false : true) : false;
 
 // @public
 export const LIBRARY_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "BROKER_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CTX_MISSING_ID", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUBWORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
@@ -189,6 +1195,262 @@ export type LibraryTaskCode = (typeof LIBRARY_TASK_CODES)[number];
 
 // @public
 export type LiteralMember = string | number | boolean | null;
+
+// @public
+export interface LogField {
+    // (undocumented)
+    readonly name: string;
+    // (undocumented)
+    readonly value: LogFieldValue;
+}
+
+// @public
+export type LogFieldValue = {
+    readonly kind: "flag";
+    readonly value: boolean;
+} | {
+    readonly kind: "integer";
+    readonly value: bigint;
+} | {
+    readonly kind: "float";
+    readonly value: number;
+} | {
+    readonly kind: "text";
+    readonly text: string;
+};
+
+// @public
+export const LOGGER_NAMES: readonly ["horsies.app", "horsies.bridge", "horsies.broker", "horsies.cli", "horsies.codec", "horsies.core", "horsies.db", "horsies.lifecycle", "horsies.listener", "horsies.monitoring", "horsies.scheduler", "horsies.scheduler.state", "horsies.sql", "horsies.web", "horsies.worker", "horsies.workflow.engine", "horsies.workflow.handle", "horsies.workflow.recovery"];
+
+// @public
+export const LOGGER_PARENTS: readonly ["horsies", "horsies.workflow"];
+
+// @public
+export type LoggerKey = LoggerName | (typeof LOGGER_PARENTS)[number];
+
+// @public
+export type LoggerName = (typeof LOGGER_NAMES)[number];
+
+// @public
+export interface LoggingOptions {
+    // (undocumented)
+    readonly levels?: LogLevels;
+    readonly sink?: LogSink | "stderr";
+}
+
+// @public
+export type LogLevel = "TRACE" | "DEBUG" | "INFO" | "WARNING" | "ERROR";
+
+// @public
+export interface LogLevels {
+    // (undocumented)
+    readonly default: LogThreshold;
+    // (undocumented)
+    readonly loggers?: Readonly<Partial<Record<LoggerKey, LogThreshold>>>;
+}
+
+// @public
+export interface LogRecord {
+    // (undocumented)
+    readonly fields: readonly LogField[];
+    // (undocumented)
+    readonly level: LogLevel;
+    // (undocumented)
+    readonly logger: LoggerName;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly source: LogSource;
+    readonly thread: string;
+    // (undocumented)
+    readonly time: Temporal.Instant;
+}
+
+// @public
+export type LogSink = (records: readonly LogRecord[]) => undefined;
+
+// @public
+export type LogSource = {
+    readonly kind: "known";
+    readonly file: string;
+    readonly line: number;
+} | {
+    readonly kind: "unknown";
+};
+
+// @public
+export type LogThreshold = LogLevel | "CRITICAL";
+
+// @public
+export class ManifestRefused extends CoreDefect {
+    constructor(facts: {
+        readonly fieldPath: string;
+        readonly cause: string;
+    });
+    // (undocumented)
+    readonly cause: string;
+    // (undocumented)
+    readonly code = "MANIFEST_REFUSED";
+    // (undocumented)
+    readonly fieldPath: string;
+    // (undocumented)
+    readonly name = "ManifestRefused";
+}
+
+// @public
+export type Measure = {
+    readonly kind: "measured";
+    readonly value: number;
+} | {
+    readonly kind: "notMeasured";
+};
+
+// @public
+export type MemoryLimit = {
+    readonly kind: "mb";
+    readonly mb: number;
+} | {
+    readonly kind: "noLimit";
+};
+
+// @public
+export type MinResponses = {
+    readonly kind: "fullWindow";
+} | {
+    readonly kind: "atLeast";
+    readonly count: number;
+};
+
+// @public (undocumented)
+export type MissingRecord = "ATTEMPT_ROW" | "CHILD_RUN" | "COMPLETION_TIME" | "LINKED_TASK" | "LINKED_WORK" | "OPEN_ATTEMPT" | "TASK_TIMES";
+
+// @public
+export interface Monitoring {
+    // (undocumented)
+    cancelTask(taskId: TaskId, options: CancelTaskOptions): Promise<Result<TaskCancelled, CancelTaskError>>;
+    // (undocumented)
+    classCoverage(): Promise<Result<ClassCoverage, HealthReadError>>;
+    // (undocumented)
+    classReport(): Promise<Result<ClassReport, HealthReadError>>;
+    // (undocumented)
+    expiredTasks(): Promise<Result<BoundedTaskList<ExpiredTaskRow>, HealthReadError>>;
+    // (undocumented)
+    listTasks(query?: TaskListQuery): Promise<Result<TaskListPage, MonitoringReadError>>;
+    // (undocumented)
+    schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringReadError>>;
+    // (undocumented)
+    staleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthQueryError>>;
+    // (undocumented)
+    taskBreakdown(query: TaskBreakdownQuery): Promise<Result<Breakdown, MonitoringReadError>>;
+    // (undocumented)
+    taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringReadError>>;
+    // (undocumented)
+    taskFacets(query?: TaskFacetsQuery): Promise<Result<Facets, MonitoringReadError>>;
+    // (undocumented)
+    taskStats(query?: TaskStatsQuery): Promise<Result<readonly StatusCount[], MonitoringReadError>>;
+    // (undocumented)
+    worker(workerId: string): Promise<Result<WorkerStateRead, WorkerReadError>>;
+    // (undocumented)
+    workerHistory(workerId: string, limit?: WorkerHistoryLimit): Promise<Result<readonly WorkerStateSnapshot[], HealthQueryError>>;
+    // (undocumented)
+    workers(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
+    // (undocumented)
+    workflowNames(): Promise<Result<readonly string[], MonitoringReadError>>;
+    // (undocumented)
+    workflowNode(workflowId: WorkflowId, taskIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
+    // (undocumented)
+    workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringReadError>>;
+    // (undocumented)
+    workflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
+}
+
+// @public (undocumented)
+export type MonitoringQueryCoreError = MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation;
+
+// @public (undocumented)
+export interface MonitoringQueryDbOperationFailed {
+    // (undocumented)
+    readonly code: "DB_OPERATION_FAILED";
+    // (undocumented)
+    readonly exception: CoreCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+}
+
+// @public (undocumented)
+export interface MonitoringQueryHistoryContractViolation {
+    // (undocumented)
+    readonly code: "HISTORY_CONTRACT_VIOLATION";
+    // (undocumented)
+    readonly exception: CoreCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public
+export type MonitoringReadError = MonitoringQueryCoreError | QueryRefused;
+
+// @public
+export interface MonitoringWindow {
+    // (undocumented)
+    readonly since?: Temporal.Instant;
+    // (undocumented)
+    readonly until?: Temporal.Instant;
+}
+
+// @public
+export interface NoCause {
+    // (undocumented)
+    readonly kind: "noCause";
+}
+
+// @public (undocumented)
+export type NodeEndpointInfo = EndpointNotTerminalInfo | EndpointTerminalInfo;
+
+// @public (undocumented)
+export interface NodeTimingExactInfo {
+    // (undocumented)
+    readonly endpoint: NodeEndpointInfo;
+    // (undocumented)
+    readonly kind: "exact";
+    // (undocumented)
+    readonly segments: ReadonlyArray<TimingSegmentInfo>;
+}
+
+// @public (undocumented)
+export interface NodeTimingInconsistentInfo {
+    // (undocumented)
+    readonly conflict: TimingConflictInfo;
+    // (undocumented)
+    readonly kind: "inconsistent";
+}
+
+// @public (undocumented)
+export type NodeTimingInfo = NodeTimingExactInfo | NodeTimingInconsistentInfo | NodeTimingPartialInfo | NodeTimingUnavailableInfo;
+
+// @public (undocumented)
+export interface NodeTimingPartialInfo {
+    // (undocumented)
+    readonly endpoint: NodeEndpointInfo;
+    // (undocumented)
+    readonly kind: "partial";
+    // (undocumented)
+    readonly reasons: ReadonlyArray<UnknownReason>;
+    // (undocumented)
+    readonly segments: ReadonlyArray<TimingSegmentInfo>;
+}
+
+// @public (undocumented)
+export interface NodeTimingUnavailableInfo {
+    // (undocumented)
+    readonly kind: "unavailable";
+    // (undocumented)
+    readonly reason: UnavailableReason;
+}
 
 // @public
 export type NonEmpty<T> = readonly [T, ...T[]];
@@ -214,6 +1476,274 @@ export type ObjectWire = Wire<object, object, "required">;
 export type Ok<T> = {
     readonly ok: true;
     readonly value: T;
+    readonly [resultBrand]?: "horsies.Result";
+};
+
+// @public (undocumented)
+export interface OutcomeDecodeError {
+    // (undocumented)
+    readonly kind: "outcomeDecode";
+    // (undocumented)
+    readonly message: string;
+}
+
+// @public
+export type OutputSchema = RequiredWire | ZodSchemaLike;
+
+// @public
+export type PanicRule = "STOP_CORE" | "ABORT_PROCESS";
+
+// @public
+export class PanicRuleFixed extends CoreDefect {
+    constructor(facts: {
+        readonly current: PanicRule;
+    });
+    // (undocumented)
+    readonly code = "PANIC_RULE_FIXED";
+    // (undocumented)
+    readonly current: PanicRule;
+    // (undocumented)
+    readonly name = "PanicRuleFixed";
+}
+
+// @public
+export type ParameterSchema = AnyWire | ZodSchemaLike;
+
+// @public
+export type ParameterSchemas = {
+    readonly [name: string]: ParameterSchema;
+};
+
+// @public
+export type ParameterSent<P> = P extends AnyWire ? SentOf<P> : ZodSentOf<P>;
+
+// @public
+export type ParametersSent<M extends ParameterSchemas> = keyof M extends never ? EmptyObject : Flat<{
+    -readonly [K in keyof M as SenderMayLeaveOut<M[K]> extends true ? never : K]: ParameterSent<M[K]>;
+} & {
+    -readonly [K in keyof M as SenderMayLeaveOut<M[K]> extends true ? K : never]?: ParameterSent<M[K]>;
+}>;
+
+// @public
+export type ParametersValue<M extends ParameterSchemas> = keyof M extends never ? EmptyObject : Flat<{
+    -readonly [K in keyof M as ReaderMayLeaveOut<M[K]> extends true ? never : K]: ParameterValue<M[K]>;
+} & {
+    -readonly [K in keyof M as ReaderMayLeaveOut<M[K]> extends true ? K : never]?: ParameterValue<M[K]>;
+}>;
+
+// @public
+export type ParameterValue<P> = P extends AnyWire ? ValueOf<P> : ZodValueOf<P>;
+
+// @public
+export type ParentCpu = "shared" | "ownCore";
+
+// @public
+export interface ParentPoolInput {
+    // (undocumented)
+    readonly maxSize?: SharedPoolSize;
+}
+
+// @public
+export type PausedWorkflowExpiry = {
+    readonly kind: "never";
+} | {
+    readonly kind: "after";
+    readonly age: Temporal.Duration;
+};
+
+// @public (undocumented)
+export type PauseEndInfo = PauseOpenInfo | PauseResumedInfo | PauseRunEndedInfo;
+
+// @public (undocumented)
+export interface PauseIntervalInfo {
+    // (undocumented)
+    readonly end: PauseEndInfo;
+    // (undocumented)
+    readonly startedAt: Temporal.Instant;
+}
+
+// @public (undocumented)
+export interface PauseOpenInfo {
+    // (undocumented)
+    readonly kind: "open";
+}
+
+// @public (undocumented)
+export interface PauseResumedInfo {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "resumed";
+}
+
+// @public (undocumented)
+export interface PauseRunEndedInfo {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "runEnded";
+}
+
+// @public
+export type PayloadBound = {
+    readonly kind: "bytes";
+    readonly bytes: number;
+} | {
+    readonly kind: "noBound";
+};
+
+// @public
+export interface PayloadPolicyInput {
+    readonly rejectBytes?: PayloadBound;
+    readonly warnBytes?: PayloadBound;
+}
+
+// @public
+export interface PendingStream {
+    // (undocumented)
+    readonly execution: Execution;
+    // (undocumented)
+    readonly queueName: string;
+    // (undocumented)
+    readonly state: StreamCoverageState;
+    // (undocumented)
+    readonly wait: StreamWait;
+}
+
+// @public (undocumented)
+export interface PhaseAdvancingInfo {
+    // (undocumented)
+    readonly kind: "advancing";
+}
+
+// @public (undocumented)
+export interface PhaseClaimedInfo {
+    // (undocumented)
+    readonly claim: SegmentClaimInfo;
+    // (undocumented)
+    readonly kind: "claimed";
+}
+
+// @public (undocumented)
+export interface PhaseEnqueuedInfo {
+    // (undocumented)
+    readonly kind: "enqueued";
+}
+
+// @public (undocumented)
+export interface PhaseFinalizingInfo {
+    // (undocumented)
+    readonly kind: "finalizing";
+}
+
+// @public (undocumented)
+export interface PhasePendingInfo {
+    // (undocumented)
+    readonly kind: "pending";
+}
+
+// @public (undocumented)
+export interface PhaseReadyInfo {
+    // (undocumented)
+    readonly kind: "ready";
+}
+
+// @public (undocumented)
+export interface PhaseRetryWaitInfo {
+    // (undocumented)
+    readonly kind: "retryWait";
+}
+
+// @public (undocumented)
+export interface PhaseRunningInfo {
+    // (undocumented)
+    readonly kind: "running";
+}
+
+// @public (undocumented)
+export interface PhasesCapturedInfo {
+    // (undocumented)
+    readonly claimedAt: Temporal.Instant;
+    // (undocumented)
+    readonly claims: AttemptClaimsInfo;
+    // (undocumented)
+    readonly enqueuedAt: Temporal.Instant;
+    // (undocumented)
+    readonly finalizing: AttemptFinalizingInfo;
+    // (undocumented)
+    readonly kind: "captured";
+    // (undocumented)
+    readonly recordedBy: AttemptRecordedByInfo;
+}
+
+// @public (undocumented)
+export interface PhasesNotCapturedInfo {
+    // (undocumented)
+    readonly kind: "notCaptured";
+}
+
+// @public (undocumented)
+export interface PhaseUnknownInfo {
+    // (undocumented)
+    readonly kind: "unknown";
+    // (undocumented)
+    readonly reason: UnknownReason;
+}
+
+// @public
+export type PingDatabaseError = BrokerOperationFailedWith<"DB_PING_FAILED">;
+
+// @public
+export type PingTarget = {
+    readonly kind: "everyWorker";
+} | {
+    readonly kind: "worker";
+    readonly workerId: string;
+};
+
+// @public
+export type PingWorkersError = BrokerInvalidInput | BrokerListenerDisabled | BrokerOperationFailedWith<"WORKER_PING_FAILED"> | QueryRefused;
+
+// @public
+export interface PingWorkersOptions {
+    // (undocumented)
+    readonly minResponses?: MinResponses;
+    // (undocumented)
+    readonly target?: PingTarget;
+    readonly timeoutMs?: number;
+}
+
+// @public (undocumented)
+export interface PlacementNotObservedInfo {
+    // (undocumented)
+    readonly kind: "notObserved";
+}
+
+// @public (undocumented)
+export interface PlacementPlacedInfo {
+    // (undocumented)
+    readonly kind: "placed";
+    // (undocumented)
+    readonly placedAt: Temporal.Instant;
+}
+
+// @public
+export type PlainParameters<P extends ParameterSchemas> = {
+    readonly [K in keyof P as IsUpstreamOutcome<P[K]> extends true ? never : K]: P[K];
+};
+
+// @public
+export type PoolRecycle = {
+    readonly kind: "never";
+} | {
+    readonly kind: "afterSeconds";
+    readonly seconds: number;
+};
+
+// @public
+export type PoolSize = {
+    readonly kind: "connections";
+    readonly connections: number;
 };
 
 // @public
@@ -221,6 +1751,38 @@ export type Presence = "required" | "optional" | "defaulted";
 
 // @public
 export type PresenceOf<W extends AnyWire> = W[typeof wirePresence];
+
+// @public
+export interface QueryRefused {
+    // (undocumented)
+    readonly code: "QUERY_REFUSED";
+    // (undocumented)
+    readonly field: QueryRefusedField;
+    // (undocumented)
+    readonly reason: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public
+export type QueryRefusedField = "window" | "page" | "limit" | "taskNames" | "queues" | "workers" | "errorCodes" | "workflowName" | "taskIndex" | "workerId";
+
+// @public
+export type QueueConfigInput = {
+    readonly queueMode?: "default";
+    readonly customQueues?: never;
+} | {
+    readonly queueMode: "custom";
+    readonly customQueues: readonly [CustomQueueInput, ...CustomQueueInput[]];
+};
+
+// @public
+export type QueueRetention = {
+    readonly kind: "days";
+    readonly days: number;
+} | {
+    readonly kind: "forever";
+};
 
 // @public
 export type ReadBackChanged = {
@@ -240,7 +1802,151 @@ export type ReadBackRefused = {
 };
 
 // @public
+export type ReaderMayLeaveOut<P> = P extends AnyWire ? PresenceOf<P> extends "optional" ? true : false : P extends ZodOptionalOut ? true : false;
+
+// @public
+export type ReadError =
+/** The task had not finished when the wait ended; it may still run. */
+    {
+    readonly kind: "waitTimedOut";
+    readonly status: UnfinishedStatus;
+} | {
+    readonly kind: "taskNotFound";
+    readonly absence: TaskAbsence;
+}
+/** The task finished and stores no result. */
+| {
+    readonly kind: "resultNotAvailable";
+    readonly status: FinishedStatus;
+}
+/** The stored result does not read with the contract's types. `cause` holds no value. */
+| {
+    readonly kind: "storedResultUnreadable";
+    readonly cause: string;
+}
+/** The stored error has a user code that the contract's `errors` does not list. */
+| {
+    readonly kind: "unknownUserCode";
+    readonly code: string;
+}
+/** A wait in a process that runs task bodies; nothing was read. */
+| {
+    readonly kind: "waitInsideTask";
+}
+/** The database or the connection failed. */
+| {
+    readonly kind: "database";
+    readonly code: BrokerErrorCode;
+    readonly retryable: boolean;
+    readonly message: string;
+}
+/** A `timeoutMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
+| {
+    readonly kind: "invalidWait";
+    readonly maxMs: number;
+};
+
+// @public
+export type Recorded<T> = {
+    readonly kind: "recorded";
+    readonly value: T;
+} | {
+    readonly kind: "notRecorded";
+};
+
+// @public (undocumented)
+export interface RecordedByCancelInfo {
+    // (undocumented)
+    readonly kind: "cancel";
+}
+
+// @public (undocumented)
+export interface RecordedByRecoveryInfo {
+    // (undocumented)
+    readonly kind: "recovery";
+    // (undocumented)
+    readonly lastSeenAt: Temporal.Instant;
+}
+
+// @public (undocumented)
+export interface RecordedByWorkerInfo {
+    // (undocumented)
+    readonly kind: "worker";
+    // (undocumented)
+    readonly placement: AttemptPlacementInfo;
+}
+
+// @public
+export interface RecoveryConfigInput {
+    // (undocumented)
+    readonly autoFailStaleRunning?: boolean;
+    // (undocumented)
+    readonly autoRequeueStaleClaimed?: boolean;
+    // (undocumented)
+    readonly autoTerminateOrphanedWorkflowTasks?: boolean;
+    // (undocumented)
+    readonly checkIntervalMs?: number;
+    // (undocumented)
+    readonly claimedStaleThresholdMs?: number;
+    // (undocumented)
+    readonly claimerHeartbeatIntervalMs?: number;
+    // (undocumented)
+    readonly crashedWorkerRecoveryGraceMs?: number;
+    // (undocumented)
+    readonly finalizingStaleThresholdMs?: number;
+    // (undocumented)
+    readonly orphanTaskAuditIntervalMs?: number;
+    // (undocumented)
+    readonly phase2QuarantineAfterAttempts?: number;
+    // (undocumented)
+    readonly runnerHeartbeatIntervalMs?: number;
+    // (undocumented)
+    readonly runningStaleThresholdMs?: number;
+    // (undocumented)
+    readonly workerStateSnapshotIntervalMs?: number;
+    // (undocumented)
+    readonly workflowRecoveryFailureLimit?: number;
+}
+
+// @public
+export type RecoveryConfigSnapshot = {
+    readonly [key: string]: JsonValue;
+};
+
+// @public
+export type Refusal = {
+    readonly code: RefusalCode;
+    readonly path: string;
+    readonly message: string;
+    readonly help: readonly string[];
+};
+
+// @public
+export type RefusalCode = ErrorCode;
+
+// @public
 export type RequiredWire = Wire<unknown, unknown, "required", "value">;
+
+// @public
+export type RerunInputDefault = "keep" | "drop";
+
+// @public
+export const RESERVED_NON_TASK_CODES: readonly ["WORKFLOW_STOPPED"];
+
+// @public
+export type ReservedCode = LibraryTaskCode | (typeof RESERVED_NON_TASK_CODES)[number];
+
+// @public
+export interface ResilienceConfigInput {
+    // (undocumented)
+    readonly dbRetryInitialMs?: number;
+    // (undocumented)
+    readonly dbRetryMaxAttempts?: RetryAttempts;
+    // (undocumented)
+    readonly dbRetryMaxMs?: number;
+    // (undocumented)
+    readonly notifyPollIntervalMs?: number;
+}
 
 // @public
 export type Result<T, E> = Ok<T> | Err<E>;
@@ -249,10 +1955,441 @@ export type Result<T, E> = Ok<T> | Err<E>;
 export type ResultOfWire<W extends RequiredWire> = Wire<TaskOutcome<ValueOf<W>>, never, "required", "resultOf">;
 
 // @public
+export type Retention = {
+    readonly kind: "days";
+    readonly days: number;
+} | {
+    readonly kind: "forever";
+};
+
+// @public
+export type RetentionClassKey = typeof DEFAULT_RETENTION_CLASS_KEY | (string & {
+    readonly [retentionClassKeyBrand]: "RetentionClassKey";
+});
+
+// @public
+export interface RetentionConfigInput {
+    // (undocumented)
+    readonly heartbeatLeafHorizonHours?: number;
+    // (undocumented)
+    readonly historyLeafHorizonDays?: number;
+    // (undocumented)
+    readonly partitionMaintenanceIntervalSeconds?: number;
+    // (undocumented)
+    readonly pausedWorkflowAutoCancelAfter?: PausedWorkflowExpiry;
+    readonly queueRetention?: Readonly<Record<string, QueueRetention>>;
+    // (undocumented)
+    readonly retentionDeleteBatchSize?: number;
+    readonly retentionPeriods?: readonly RetentionPeriod[];
+    // (undocumented)
+    readonly retentionSweepIntervalSeconds?: number;
+    readonly terminalRecordRetention?: HoursRetention;
+    readonly workerStateRetention?: HoursRetention;
+}
+
+// @public
+export type RetentionPeriod = {
+    readonly days: number;
+};
+
+// @public
+export type RetriedFilter = "any" | "retriedOnly";
+
+// @public
+export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed, O, E>;
+
+// @public
+export type RetryAttempts = {
+    readonly kind: "attempts";
+    readonly attempts: number;
+} | {
+    readonly kind: "noLimit";
+};
+
+// @public
+export type RetryCodes<E extends string> = NonEmpty<E | LibraryTaskCode>;
+
+// @public
+export type RetryPolicy<E extends string> = {
+    readonly kind: "exponential";
+    readonly baseSeconds: number;
+    readonly maxRetries: number;
+    readonly jitter?: boolean;
+    readonly maxDelaySeconds?: number;
+    readonly autoRetryFor: RetryCodes<E>;
+} | {
+    readonly kind: "fixed";
+    readonly intervalsSeconds: NonEmpty<number>;
+    readonly jitter?: boolean;
+    readonly autoRetryFor: RetryCodes<E>;
+};
+
+// @public
 export type Role = "value" | "resultOf";
 
 // @public
+export type RoleOf<W extends AnyWire> = W[typeof wireRole];
+
+// @public (undocumented)
+export interface RuleRefused {
+    // (undocumented)
+    readonly kind: "ruleRefused";
+    // (undocumented)
+    readonly message: string;
+}
+
+// @public (undocumented)
+export type RunConflictInfo = RunConflictNodeInfo | RunConflictPauseInfo;
+
+// @public (undocumented)
+export interface RunConflictNodeInfo {
+    // (undocumented)
+    readonly kind: "node";
+    // (undocumented)
+    readonly taskIndex: number;
+}
+
+// @public (undocumented)
+export interface RunConflictPauseInfo {
+    // (undocumented)
+    readonly conflict: TimingConflictInfo;
+    // (undocumented)
+    readonly kind: "pause";
+}
+
+// @public (undocumented)
+export interface RunCoverageExactInfo {
+    // (undocumented)
+    readonly kind: "exact";
+}
+
+// @public (undocumented)
+export interface RunCoverageInconsistentInfo {
+    // (undocumented)
+    readonly conflicts: ReadonlyArray<RunConflictInfo>;
+    // (undocumented)
+    readonly kind: "inconsistent";
+}
+
+// @public (undocumented)
+export type RunCoverageInfo = RunCoverageExactInfo | RunCoverageInconsistentInfo | RunCoveragePartialInfo;
+
+// @public (undocumented)
+export interface RunCoveragePartialInfo {
+    // (undocumented)
+    readonly kind: "partial";
+    // (undocumented)
+    readonly reasons: ReadonlyArray<UnknownReason>;
+}
+
+// @public
+export type RuntimeOf<X extends ExecutionClass> = BodyRuntimes[X];
+
+// @public (undocumented)
+export interface RunTimingComposedInfo {
+    // (undocumented)
+    readonly asOf: Temporal.Instant;
+    // (undocumented)
+    readonly capturedSince: Temporal.Instant;
+    // (undocumented)
+    readonly coverage: RunCoverageInfo;
+    // (undocumented)
+    readonly kind: "composed";
+    // (undocumented)
+    readonly openSegments: boolean;
+    // (undocumented)
+    readonly pauses: ReadonlyArray<PauseIntervalInfo>;
+    // (undocumented)
+    readonly rangeEndedAt: Temporal.Instant;
+    // (undocumented)
+    readonly rangeStartedAt: Temporal.Instant;
+}
+
+// @public (undocumented)
+export type RunTimingInfo = RunTimingComposedInfo | RunTimingUnavailableInfo;
+
+// @public (undocumented)
+export interface RunTimingUnavailableInfo {
+    // (undocumented)
+    readonly asOf: Temporal.Instant;
+    // (undocumented)
+    readonly capturedSince: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "unavailable";
+    // (undocumented)
+    readonly reason: UnavailableReason;
+}
+
+// @public (undocumented)
+export interface ScheduleStateInfo {
+    // (undocumented)
+    readonly lastRunAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly lastTaskId: string | null;
+    // (undocumented)
+    readonly nextRunAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly runCount: number;
+    // (undocumented)
+    readonly scheduleName: string;
+    // (undocumented)
+    readonly updatedAt: Temporal.Instant;
+}
+
+// @public
+export type SchemaSent<S> = S extends AnyWire ? SentOf<S> : ZodSentOf<S>;
+
+// @public
+export type SchemaValue<S> = S extends AnyWire ? ValueOf<S> : ZodValueOf<S>;
+
+// @public
+export type Secret = {
+    readonly kind: "fromEnv";
+    readonly name: string;
+} | {
+    readonly kind: "value";
+    readonly value: string;
+};
+
+// @public (undocumented)
+export type SegmentClaimInfo = ClaimEarlierInfo | ClaimNotRecordedInfo | ClaimRecordedInfo;
+
+// @public (undocumented)
+export interface SegmentEndedInfo {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "ended";
+}
+
+// @public (undocumented)
+export type SegmentEndInfo = SegmentEndedInfo | SegmentOpenInfo;
+
+// @public (undocumented)
+export interface SegmentOpenInfo {
+    // (undocumented)
+    readonly kind: "open";
+}
+
+// @public (undocumented)
+export type SegmentPhaseInfo = PhaseAdvancingInfo | PhaseClaimedInfo | PhaseEnqueuedInfo | PhaseFinalizingInfo | PhasePendingInfo | PhaseReadyInfo | PhaseRetryWaitInfo | PhaseRunningInfo | PhaseUnknownInfo;
+
+// @public (undocumented)
+export type SegmentSourceInfo = SourceAttemptInfo | SourceNodeInfo | SourceTaskInfo;
+
+// @public
+export type SendableInput<P extends ParameterSchemas> = HasRequiredUpstreamOutcome<P> extends true ? WorkflowNodeOnly : SendInput<P>;
+
+// @public
+export type SenderMayLeaveOut<P> = P extends AnyWire ? PresenceOf<P> extends "required" ? false : true : P extends ZodOptionalIn ? true : false;
+
+// @public
+export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict;
+
+// @public
+export type SendInput<P extends ParameterSchemas> = keyof PlainParameters<P> extends never ? EmptyObject : ParametersSent<PlainParameters<P>>;
+
+// @public
+export interface SendOptions {
+    readonly delaySeconds?: number;
+    readonly goodUntil?: Temporal.Instant;
+    readonly idempotencyKey?: string;
+    readonly retention?: Retention;
+}
+
+// @public
 export type SentOf<W extends AnyWire> = W[typeof wireSent];
+
+// @public
+export type SentTypes<O, E extends string> = {
+    readonly output: O;
+    readonly code: E;
+};
+
+// @public
+export type SessionDatabase = {
+    readonly kind: "sameAsDatabaseUrl";
+} | {
+    readonly kind: "separate";
+    readonly url: Secret;
+};
+
+// @public
+export interface SharedAsyncChildrenInput {
+    // (undocumented)
+    readonly count: number;
+    // (undocumented)
+    readonly pool?: SharedPoolInput;
+    // (undocumented)
+    readonly recycle?: SharedRecycleInput;
+    // (undocumented)
+    readonly seats: number;
+    // (undocumented)
+    readonly taskSendPool?: PoolSize;
+}
+
+// @public
+export interface SharedPoolInput {
+    // (undocumented)
+    readonly check?: boolean;
+    // (undocumented)
+    readonly maxSize?: SharedPoolSize;
+    // (undocumented)
+    readonly minSize?: number;
+}
+
+// @public
+export type SharedPoolSize = PoolSize | {
+    readonly kind: "fromSeats";
+};
+
+// @public
+export interface SharedRecycleInput {
+    // (undocumented)
+    readonly above?: MemoryLimit;
+    // (undocumented)
+    readonly afterPerSeat?: TaskLimit;
+}
+
+// @public
+export interface SharedThreadChildrenInput {
+    // (undocumented)
+    readonly count: number;
+    // (undocumented)
+    readonly pool?: SharedPoolInput;
+    // (undocumented)
+    readonly recycle?: SharedRecycleInput;
+    // (undocumented)
+    readonly seats: number;
+    // (undocumented)
+    readonly taskSendPool?: PoolSize;
+}
+
+// @public
+export type ShortageErrno = "EMFILE" | "ENFILE" | "ENOMEM" | "EAGAIN";
+
+// @public
+export type SlotHealth = {
+    readonly kind: "allSlotsServing";
+} | {
+    readonly kind: "slotsDown";
+    readonly slots: readonly DownSlot[];
+};
+
+// @public
+export type SnapshotProfile = {
+    readonly kind: "named";
+    readonly name: string;
+} | {
+    readonly kind: "notRecorded";
+};
+
+// @public
+export type SortDirection = "ascending" | "descending";
+
+// @public (undocumented)
+export interface SourceAttemptInfo {
+    // (undocumented)
+    readonly attempt: number;
+    // (undocumented)
+    readonly generation: number;
+    // (undocumented)
+    readonly kind: "attempt";
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public (undocumented)
+export interface SourceNodeInfo {
+    // (undocumented)
+    readonly kind: "node";
+}
+
+// @public (undocumented)
+export interface SourceTaskInfo {
+    // (undocumented)
+    readonly generation: number;
+    // (undocumented)
+    readonly kind: "task";
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public
+export interface StaleTaskRow {
+    // (undocumented)
+    readonly id: TaskId;
+    // (undocumented)
+    readonly lastHeartbeat: LastBeat;
+    // (undocumented)
+    readonly startedAt: Temporal.Instant;
+    // (undocumented)
+    readonly taskName: string;
+    // (undocumented)
+    readonly workerHostname: Recorded<string>;
+    // (undocumented)
+    readonly workerPid: Recorded<number>;
+    // (undocumented)
+    readonly workerProcessName: Recorded<string>;
+}
+
+// @public
+export interface StaleTasksQuery {
+    // (undocumented)
+    readonly thresholdMinutes: number;
+}
+
+// @public
+export interface StandardSchemaMarker {
+    // (undocumented)
+    readonly "~standard": {
+        readonly vendor: string;
+        readonly version: number;
+    };
+}
+
+// @public
+export type StateAfter = "noChange" | "outcomeUnknown";
+
+// @public (undocumented)
+export interface StatusCount {
+    // (undocumented)
+    readonly count: number;
+    // (undocumented)
+    readonly status: string;
+}
+
+// @public
+export interface StreamCoverage {
+    // (undocumented)
+    readonly execution: Execution;
+    // (undocumented)
+    readonly queueName: string;
+    // (undocumented)
+    readonly state: StreamCoverageState;
+}
+
+// @public
+export type StreamCoverageState = {
+    readonly kind: "served";
+    readonly workers: bigint;
+    readonly capacity: bigint;
+} | {
+    readonly kind: "withoutCapacity";
+    readonly workers: bigint;
+} | {
+    readonly kind: "unserved";
+};
+
+// @public
+export type StreamWait = {
+    readonly kind: "oldestWaiting";
+    readonly enqueuedAt: Temporal.Instant;
+    readonly wait: Temporal.Duration;
+} | {
+    readonly kind: "noneDue";
+    readonly nextDueAt: Temporal.Instant;
+};
 
 // @public
 export type SubWorkflowFailure = {
@@ -269,6 +2406,241 @@ export type SubWorkflowSummary = {
     readonly failedTasks: number;
     readonly skippedTasks: number;
     readonly errorSummary: string | null;
+};
+
+// @public
+export type TaskAbsence =
+/** The task is older than the oldest history that retention keeps: retention can have removed it. */
+"predatesRetainedHistory"
+/** No removed history can have held the task: it did not exist, or its history was removed out of band. */
+| "withinRetainedHistory"
+/** The id is not a UUIDv7, so it tells no time of birth. */
+| "notClassified";
+
+// @public (undocumented)
+export const TaskAbsenceReason: {
+    readonly PREDATES_RETAINED_HISTORY: "PREDATES_RETAINED_HISTORY";
+    readonly WITHIN_RETAINED_HISTORY: "WITHIN_RETAINED_HISTORY";
+    readonly NOT_CLASSIFIED: "NOT_CLASSIFIED";
+};
+
+// @public (undocumented)
+export type TaskAbsenceReason = (typeof TaskAbsenceReason)[keyof typeof TaskAbsenceReason];
+
+// @public (undocumented)
+export type TaskActionCoreError = TaskActionNotFound | TaskActionNotCancellable | TaskActionWorkflowTask | TaskActionDbOperationFailed | TaskActionStoredDataInvalid;
+
+// @public (undocumented)
+export interface TaskActionDbOperationFailed {
+    // (undocumented)
+    readonly code: "DB_OPERATION_FAILED";
+    // (undocumented)
+    readonly exception: CoreCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public (undocumented)
+export interface TaskActionNotCancellable {
+    // (undocumented)
+    readonly code: "TASK_NOT_CANCELLABLE";
+    // (undocumented)
+    readonly currentStatus: TaskStatus;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public (undocumented)
+export interface TaskActionNotFound {
+    // (undocumented)
+    readonly code: "TASK_NOT_FOUND";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public (undocumented)
+export interface TaskActionStoredDataInvalid {
+    // (undocumented)
+    readonly code: "STORED_DATA_INVALID";
+    // (undocumented)
+    readonly exception: CoreCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public (undocumented)
+export interface TaskActionWorkflowTask {
+    // (undocumented)
+    readonly code: "TASK_IS_WORKFLOW_TASK";
+    // (undocumented)
+    readonly currentStatus: TaskStatus;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public
+export interface TaskAttempt {
+    // (undocumented)
+    readonly attempt: number;
+    // (undocumented)
+    readonly errorCode: Recorded<string>;
+    // (undocumented)
+    readonly errorMessage: Recorded<string>;
+    // (undocumented)
+    readonly failedReason: Recorded<string>;
+    // (undocumented)
+    readonly finishedAt: Temporal.Instant;
+    // (undocumented)
+    readonly outcome: TaskAttemptOutcome;
+    // (undocumented)
+    readonly startedAt: Temporal.Instant;
+    // (undocumented)
+    readonly willRetry: boolean;
+    // (undocumented)
+    readonly workerHostname: Recorded<string>;
+    // (undocumented)
+    readonly workerId: Recorded<string>;
+    // (undocumented)
+    readonly workerPid: Recorded<number>;
+    // (undocumented)
+    readonly workerProcessName: Recorded<string>;
+}
+
+// @public (undocumented)
+export interface TaskAttemptInfo {
+    // (undocumented)
+    readonly attempt: number;
+    // (undocumented)
+    readonly errorCode: string | null;
+    // (undocumented)
+    readonly errorMessage: string | null;
+    // (undocumented)
+    readonly failedReason: string | null;
+    // (undocumented)
+    readonly finishedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly outcome: string;
+    // (undocumented)
+    readonly phases: AttemptPhasesInfo;
+    // (undocumented)
+    readonly startedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly willRetry: boolean;
+    // (undocumented)
+    readonly workerHostname: string | null;
+}
+
+// @public (undocumented)
+export const TaskAttemptOutcome: {
+    readonly COMPLETED: "COMPLETED";
+    readonly FAILED: "FAILED";
+    readonly WORKER_FAILURE: "WORKER_FAILURE";
+    readonly CANCELLED: "CANCELLED";
+};
+
+// @public (undocumented)
+export type TaskAttemptOutcome = (typeof TaskAttemptOutcome)[keyof typeof TaskAttemptOutcome];
+
+// @public
+export interface TaskBreakdownQuery extends TaskFilters {
+    // (undocumented)
+    readonly groupBy: TaskGroupBy;
+    // (undocumented)
+    readonly limit?: number;
+}
+
+// @public
+export interface TaskCancelled {
+    // (undocumented)
+    readonly taskId: TaskId;
+    // (undocumented)
+    readonly wasStatus: "PENDING" | "CLAIMED" | "RUNNING";
+}
+
+// @public
+export type TaskCap = {
+    readonly kind: "cap";
+    readonly tasks: number;
+} | {
+    readonly kind: "noCap";
+};
+
+// @public
+export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+    // (undocumented)
+    readonly [contractTypes]: ContractTypes<P, O, E, X>;
+    err<const K extends E>(failure: UserFailure<UserCode<K>>): Err<UserFailure<E>>;
+    // (undocumented)
+    readonly kind: "task";
+    // (undocumented)
+    readonly name: string;
+    ok(value: SchemaSent<O>): Ok<SchemaSent<O>>;
+}
+
+// @public
+export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+    readonly errors?: string extends E ? readonly WidenedCodes[] : readonly UserCode<E>[];
+    // (undocumented)
+    readonly execution?: X;
+    readonly input: P;
+    readonly name: string;
+    // (undocumented)
+    readonly output: O;
+    readonly queue?: string;
+    // (undocumented)
+    readonly retry?: RetryPolicy<NoInfer<E>>;
+}
+
+// @public (undocumented)
+export interface TaskDetail {
+    // (undocumented)
+    readonly attempts: ReadonlyArray<TaskAttemptInfo>;
+    // (undocumented)
+    readonly errorCategory: string | null;
+    // (undocumented)
+    readonly isWorkflowTask: boolean;
+    // (undocumented)
+    readonly leaf: LeafTaskInfo;
+    // (undocumented)
+    readonly priority: number;
+    // (undocumented)
+    readonly queueName: string;
+    // (undocumented)
+    readonly taskName: string;
+    // (undocumented)
+    readonly workflowId: string | null;
+    // (undocumented)
+    readonly workflowTaskIndex: number | null;
+}
+
+// @public
+export type TaskDetailRead = {
+    readonly kind: "found";
+    readonly detail: TaskDetail;
+} | {
+    readonly kind: "notFound";
+    readonly taskId: TaskId;
+    readonly reason: TaskAbsenceReason;
 };
 
 // @public
@@ -290,6 +2662,121 @@ export type TaskErrorCode<E extends string = string> = {
 };
 
 // @public
+export type TaskFacetsQuery = Pick<TaskFilters, "window" | "statuses" | "errorCategories" | "retried">;
+
+// @public
+export interface TaskFilters {
+    // (undocumented)
+    readonly errorCategories?: readonly ErrorCategory[];
+    // (undocumented)
+    readonly errorCodes?: readonly string[];
+    // (undocumented)
+    readonly queues?: readonly string[];
+    // (undocumented)
+    readonly retried?: RetriedFilter;
+    // (undocumented)
+    readonly statuses?: readonly TaskStatus[];
+    // (undocumented)
+    readonly taskNames?: readonly string[];
+    // (undocumented)
+    readonly window?: MonitoringWindow;
+    // (undocumented)
+    readonly workers?: readonly string[];
+}
+
+// @public
+export type TaskGroupBy = "worker" | "taskName" | "queue";
+
+// @public
+export interface TaskHandle<O, E extends string> {
+    get(options?: GetOptions): Promise<Result<TaskOutcome<O, E>, ReadError>>;
+    info(): Promise<Result<TaskInfo, ReadError>>;
+    // (undocumented)
+    readonly taskId: TaskId;
+}
+
+// @public
+export type TaskId = string & {
+    readonly [taskIdBrand]: "TaskId";
+};
+
+// @public
+export const TaskId: {
+    readonly parse: (text: string) => Result<TaskId, IdRefused>;
+};
+
+// @public
+export interface TaskInfo {
+    readonly attempts: readonly TaskAttempt[];
+    // (undocumented)
+    readonly claimedAt: Recorded<Temporal.Instant>;
+    // (undocumented)
+    readonly completedAt: Recorded<Temporal.Instant>;
+    // (undocumented)
+    readonly enqueuedAt: Temporal.Instant;
+    // (undocumented)
+    readonly errorCode: Recorded<string>;
+    // (undocumented)
+    readonly execution: ExecutionFact;
+    // (undocumented)
+    readonly failedAt: Recorded<Temporal.Instant>;
+    // (undocumented)
+    readonly failedReason: Recorded<string>;
+    // (undocumented)
+    readonly maxRetries: number;
+    // (undocumented)
+    readonly nextRetryAt: Recorded<Temporal.Instant>;
+    // (undocumented)
+    readonly priority: number;
+    // (undocumented)
+    readonly queueName: string;
+    // (undocumented)
+    readonly retryCount: number;
+    // (undocumented)
+    readonly sentAt: Recorded<Temporal.Instant>;
+    // (undocumented)
+    readonly startedAt: Recorded<Temporal.Instant>;
+    // (undocumented)
+    readonly status: TaskStatus;
+    // (undocumented)
+    readonly taskId: TaskId;
+    // (undocumented)
+    readonly taskName: string;
+    // (undocumented)
+    readonly workerHostname: Recorded<string>;
+    // (undocumented)
+    readonly workerPid: Recorded<number>;
+    // (undocumented)
+    readonly workerProcessName: Recorded<string>;
+}
+
+// @public
+export type TaskLimit = {
+    readonly kind: "tasks";
+    readonly tasks: number;
+} | {
+    readonly kind: "noLimit";
+};
+
+// @public (undocumented)
+export interface TaskListPage {
+    // (undocumented)
+    readonly rows: ReadonlyArray<TaskSummary>;
+    // (undocumented)
+    readonly total: number;
+}
+
+// @public
+export interface TaskListQuery extends TaskFilters {
+    // (undocumented)
+    readonly limit?: number;
+    // (undocumented)
+    readonly offset?: number;
+    // (undocumented)
+    readonly sort?: TaskSort;
+}
+
+// @public
 export type TaskOutcome<O, E extends string = string> = {
     readonly kind: "succeeded";
     readonly value: O;
@@ -297,6 +2784,233 @@ export type TaskOutcome<O, E extends string = string> = {
     readonly kind: "failed";
     readonly error: TaskError<E>;
 };
+
+// @public (undocumented)
+export interface TaskSendEnqueueFailed {
+    // (undocumented)
+    readonly code: "ENQUEUE_FAILED";
+    // (undocumented)
+    readonly exception: CoreCause | NoCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly payload: TaskSendPayload;
+    // (undocumented)
+    readonly retryable: boolean;
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public
+export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | RetryableSendError<O, E>;
+
+// @public (undocumented)
+export interface TaskSendIdempotencyKeyConflict {
+    // (undocumented)
+    readonly code: "IDEMPOTENCY_KEY_CONFLICT";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly ownerTaskId: string;
+    // (undocumented)
+    readonly payload: TaskSendPayload;
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public
+export type TaskSendKeyConflict = TaskSendIdempotencyKeyConflict & {
+    readonly retryable: false;
+};
+
+// @public (undocumented)
+export interface TaskSendPayload {
+    // (undocumented)
+    readonly enqueueDelaySeconds: number | null;
+    // (undocumented)
+    readonly goodUntil: Temporal.Instant | null;
+    // (undocumented)
+    readonly idempotencyKey: string | null;
+    // (undocumented)
+    readonly inputJson: string | null;
+    // (undocumented)
+    readonly priority: number;
+    // (undocumented)
+    readonly queueName: string;
+    // (undocumented)
+    readonly retentionClassKey: RetentionClassKey | null;
+    // (undocumented)
+    readonly sentAt: Temporal.Instant;
+    // (undocumented)
+    readonly taskName: string;
+    // (undocumented)
+    readonly taskOptions: string | null;
+}
+
+// @public (undocumented)
+export interface TaskSendPayloadMismatch {
+    // (undocumented)
+    readonly code: "PAYLOAD_MISMATCH";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly payload: TaskSendPayload;
+    // (undocumented)
+    readonly taskId: string;
+}
+
+// @public (undocumented)
+export interface TaskSendPayloadTooLarge {
+    // (undocumented)
+    readonly code: "PAYLOAD_TOO_LARGE";
+    // (undocumented)
+    readonly limitBytes: bigint;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly sizeBytes: bigint;
+}
+
+// @public (undocumented)
+export interface TaskSendSuppressed {
+    // (undocumented)
+    readonly code: "SEND_SUPPRESSED";
+    // (undocumented)
+    readonly message: string;
+}
+
+// @public (undocumented)
+export interface TaskSendValidationFailed {
+    // (undocumented)
+    readonly code: "VALIDATION_FAILED";
+    // (undocumented)
+    readonly exception: CoreCause | NoCause;
+    // (undocumented)
+    readonly message: string;
+}
+
+// @public
+export interface TaskSort {
+    // (undocumented)
+    readonly direction: SortDirection;
+    // (undocumented)
+    readonly field: TaskSortField;
+}
+
+// @public
+export type TaskSortField = "enqueuedAt" | "startedAt" | "completedAt" | "failedAt" | "status" | "taskName" | "queueName" | "priority" | "retryCount" | "queueSeconds" | "executionSeconds";
+
+// @public
+export type TaskStatsQuery = Omit<TaskFilters, "statuses">;
+
+// @public (undocumented)
+export const TaskStatus: {
+    readonly PENDING: "PENDING";
+    readonly CLAIMED: "CLAIMED";
+    readonly RUNNING: "RUNNING";
+    readonly COMPLETED: "COMPLETED";
+    readonly FAILED: "FAILED";
+    readonly CANCELLED: "CANCELLED";
+    readonly EXPIRED: "EXPIRED";
+};
+
+// @public (undocumented)
+export type TaskStatus = (typeof TaskStatus)[keyof typeof TaskStatus];
+
+// @public (undocumented)
+export interface TaskSummary {
+    // (undocumented)
+    readonly completedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly enqueuedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly errorCategory: string | null;
+    // (undocumented)
+    readonly errorCode: string | null;
+    // (undocumented)
+    readonly execS: number | null;
+    // (undocumented)
+    readonly failedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly id: string;
+    // (undocumented)
+    readonly isWorkflowTask: boolean;
+    // (undocumented)
+    readonly maxRetries: number;
+    // (undocumented)
+    readonly priority: number;
+    // (undocumented)
+    readonly queueName: string;
+    // (undocumented)
+    readonly queueS: number | null;
+    // (undocumented)
+    readonly retryCount: number;
+    // (undocumented)
+    readonly startedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly status: string;
+    // (undocumented)
+    readonly taskName: string;
+    // (undocumented)
+    readonly workerHostname: string | null;
+    // (undocumented)
+    readonly workerId: string | null;
+}
+
+// @public
+export type TcpKeepalives = {
+    readonly kind: "off";
+} | {
+    readonly kind: "on";
+    readonly idleSeconds: number;
+    readonly intervalSeconds: number;
+    readonly probes: number;
+};
+
+// @public
+export type TcpUserTimeout = {
+    readonly kind: "systemDefault";
+} | {
+    readonly kind: "after";
+    readonly milliseconds: number;
+};
+
+// @public (undocumented)
+export type TerminalNodeStatus = "COMPLETED" | "FAILED" | "SKIPPED";
+
+// @public (undocumented)
+export type TimingBoundary = "ATTEMPT_ENQUEUED" | "ATTEMPT_RECORDED" | "CHILD_COMPLETED" | "CHILD_CREATED" | "CLAIM" | "FINALIZING" | "FIRST_CLAIM" | "LAST_SEEN" | "NODE_COMPLETED" | "NODE_CREATED" | "NODE_ENQUEUED" | "NODE_READY" | "PLACEMENT" | "READ_TIME" | "RUN_COMPLETED" | "RUN_PAUSED" | "RUN_RESUMED" | "START" | "TASK_CREATED" | "TASK_MOVED";
+
+// @public (undocumented)
+export type TimingConflictInfo = ConflictClockOrderInfo | ConflictMissingRecordInfo | ConflictUnexpectedEventInfo;
+
+// @public (undocumented)
+export interface TimingSegmentInfo {
+    // (undocumented)
+    readonly end: SegmentEndInfo;
+    // (undocumented)
+    readonly phase: SegmentPhaseInfo;
+    // (undocumented)
+    readonly source: SegmentSourceInfo;
+    // (undocumented)
+    readonly startedAt: Temporal.Instant;
+}
+
+// @public
+export class TooManyPendingCalls extends CoreError {
+    constructor(facts: {
+        readonly subject: string;
+        readonly bound: number;
+    });
+    // (undocumented)
+    readonly bound: number;
+    // (undocumented)
+    readonly code = "TOO_MANY_PENDING_CALLS";
+    // (undocumented)
+    readonly name = "TooManyPendingCalls";
+    // (undocumented)
+    readonly subject: string;
+}
 
 // @public
 export type TupleSent<T extends readonly RequiredWire[]> = {
@@ -306,6 +3020,25 @@ export type TupleSent<T extends readonly RequiredWire[]> = {
 // @public
 export type TupleValue<T extends readonly RequiredWire[]> = {
     -readonly [K in keyof T]: ValueOf<T[K]>;
+};
+
+// @public (undocumented)
+export type UnavailableReason = "RUN_BEFORE_CAPTURE" | "TIMING_BOUND_EXCEEDED";
+
+// @public
+export type UnfinishedStatus = "PENDING" | "CLAIMED" | "RUNNING";
+
+// @public (undocumented)
+export type UnknownReason = "ATTEMPT_NOT_CAPTURED" | "CLAIMS_NOT_COUNTED" | "HISTORY_PRUNED" | "WORKER_LOST";
+
+// @public
+export type UserCode<C extends string> = C extends ReservedCode ? `horsies: "${C}" is a built-in error code` : C;
+
+// @public
+export type UserFailure<E extends string> = {
+    readonly code: E;
+    readonly message?: string;
+    readonly data?: JsonValue;
 };
 
 // @public
@@ -321,6 +3054,9 @@ export type ValueRefused = {
 
 // @public
 export type ValueWire = Wire<unknown, unknown, Presence, "value">;
+
+// @public
+export type WidenedCodes = "horsies: declare errors as literal codes, not as a string[]";
 
 // @public
 export interface Wire<V, S = V, P extends Presence = "required", R extends Role = "value"> {
@@ -370,10 +3106,389 @@ export type WireMembers = {
 };
 
 // @public
+export type WithSentTypes<V, O, E extends string> = V & {
+    readonly [sentTypes]?: SentTypes<O, E>;
+};
+
+// @public
+export interface WorkerClassLoad {
+    // (undocumented)
+    readonly budgets: readonly BudgetLoad[];
+    // (undocumented)
+    readonly snapshotAt: Temporal.Instant;
+    // (undocumented)
+    readonly workerId: string;
+}
+
+// @public
+export type WorkerHistoryLimit = {
+    readonly kind: "allRetained";
+} | {
+    readonly kind: "newest";
+    readonly count: number;
+};
+
+// @public
+export interface WorkerPong {
+    // (undocumented)
+    readonly hostname: string;
+    // (undocumented)
+    readonly pid: number;
+    // (undocumented)
+    readonly roundTripMs: number;
+    // (undocumented)
+    readonly workerId: string;
+}
+
+// @public
+export interface WorkerProfileInput {
+    // (undocumented)
+    readonly claim?: ClaimLimitsInput;
+    readonly drainTimeoutMs?: number;
+    // (undocumented)
+    readonly isolated?: IsolatedChildrenInput;
+    // (undocumented)
+    readonly parentCpu?: ParentCpu;
+    // (undocumented)
+    readonly pool?: ParentPoolInput;
+    // (undocumented)
+    readonly sharedAsync?: SharedAsyncChildrenInput;
+    // (undocumented)
+    readonly sharedThread?: SharedThreadChildrenInput;
+}
+
+// @public
+export type WorkerReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | QueryRefused;
+
+// @public
+export type WorkerStateRead = {
+    readonly kind: "found";
+    readonly snapshot: WorkerStateSnapshot;
+} | {
+    readonly kind: "notFound";
+    readonly workerId: string;
+};
+
+// @public
+export interface WorkerStateSnapshot {
+    readonly childrenMemoryMb: Measure;
+    // (undocumented)
+    readonly classCapacity: readonly ClassBudget[];
+    // (undocumented)
+    readonly clusterWideCap: ClusterWideCap;
+    // (undocumented)
+    readonly cpuPercent: Measure;
+    // (undocumented)
+    readonly hostname: string;
+    // (undocumented)
+    readonly maxClaimBatch: number;
+    // (undocumented)
+    readonly maxClaimPerWorker: number;
+    // (undocumented)
+    readonly memoryPercent: Measure;
+    readonly memoryUsageMb: Measure;
+    // (undocumented)
+    readonly pid: number;
+    // (undocumented)
+    readonly processes: number;
+    // (undocumented)
+    readonly profile: SnapshotProfile;
+    // (undocumented)
+    readonly queueMaxConcurrency: ReadonlyMap<string, bigint>;
+    // (undocumented)
+    readonly queuePriorities: ReadonlyMap<string, bigint>;
+    // (undocumented)
+    readonly queues: readonly string[];
+    // (undocumented)
+    readonly recoveryConfig: RecoveryConfigSnapshot;
+    // (undocumented)
+    readonly slotHealth: SlotHealth;
+    // (undocumented)
+    readonly snapshotAt: Temporal.Instant;
+    // (undocumented)
+    readonly tasksClaimed: number;
+    // (undocumented)
+    readonly tasksRunning: number;
+    // (undocumented)
+    readonly workerId: string;
+    // (undocumented)
+    readonly workerStartedAt: Temporal.Instant;
+}
+
+// @public
 export const WORKFLOW_STATUSES: readonly ["PENDING", "RUNNING", "COMPLETED", "FAILED", "PAUSED", "CANCELLED", "EXPIRED"];
+
+// @public (undocumented)
+export interface WorkflowEdge {
+    // (undocumented)
+    readonly fromIndex: number;
+    // (undocumented)
+    readonly toIndex: number;
+}
+
+// @public (undocumented)
+export type WorkflowEventKind = "NODE_ENQUEUED" | "NODE_READY" | "TASK_MOVED" | "WORKFLOW_PAUSED" | "WORKFLOW_RESUMED";
+
+// @public
+export type WorkflowId = string & {
+    readonly [workflowIdBrand]: "WorkflowId";
+};
+
+// @public
+export const WorkflowId: {
+    readonly parse: (text: string) => Result<WorkflowId, IdRefused>;
+};
+
+// @public (undocumented)
+export interface WorkflowNodeInfo {
+    // (undocumented)
+    readonly allowFailedDeps: boolean;
+    // (undocumented)
+    readonly childFailed: number | null;
+    // (undocumented)
+    readonly childTotal: number | null;
+    // (undocumented)
+    readonly completedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly execS: number | null;
+    // (undocumented)
+    readonly isSubworkflow: boolean;
+    // (undocumented)
+    readonly nodeId: string | null;
+    // (undocumented)
+    readonly nodeStatus: string;
+    // (undocumented)
+    readonly startedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly subWorkflowId: string | null;
+    // (undocumented)
+    readonly taskIndex: number;
+    // (undocumented)
+    readonly taskName: string;
+    // (undocumented)
+    readonly timing: NodeTimingInfo;
+}
+
+// @public
+export type WorkflowNodeOnly = "horsies: this task takes an upstream result (h.resultOf); only a workflow node can run it";
+
+// @public
+export type WorkflowNodeRead = {
+    readonly kind: "found";
+    readonly node: WorkflowTaskDetail;
+} | {
+    readonly kind: "notFound";
+    readonly workflowId: WorkflowId;
+    readonly taskIndex: number;
+};
+
+// @public (undocumented)
+export interface WorkflowRunDetail {
+    // (undocumented)
+    readonly edges: ReadonlyArray<WorkflowEdge>;
+    // (undocumented)
+    readonly failedCount: number;
+    // (undocumented)
+    readonly failedIndices: ReadonlyArray<number>;
+    // (undocumented)
+    readonly nodes: ReadonlyArray<WorkflowNodeInfo>;
+    // (undocumented)
+    readonly run: WorkflowRunSummary;
+    // (undocumented)
+    readonly timing: RunTimingInfo;
+    // (undocumented)
+    readonly traceId: string | null;
+}
+
+// @public
+export type WorkflowRunRead = {
+    readonly kind: "found";
+    readonly run: WorkflowRunDetail;
+} | {
+    readonly kind: "notFound";
+    readonly workflowId: WorkflowId;
+};
+
+// @public
+export interface WorkflowRunsQuery {
+    // (undocumented)
+    readonly limit?: number;
+    // (undocumented)
+    readonly name?: string;
+    // (undocumented)
+    readonly status?: WorkflowStatus;
+}
+
+// @public (undocumented)
+export interface WorkflowRunSummary {
+    // (undocumented)
+    readonly completedAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly createdAt: Temporal.Instant | null;
+    // (undocumented)
+    readonly definitionKey: string | null;
+    // (undocumented)
+    readonly id: string;
+    // (undocumented)
+    readonly name: string;
+    // (undocumented)
+    readonly status: string;
+    // (undocumented)
+    readonly wallS: number | null;
+}
 
 // @public
 export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
+
+// @public (undocumented)
+export interface WorkflowTaskDetail {
+    // (undocumented)
+    readonly attempts: ReadonlyArray<TaskAttemptInfo>;
+    // (undocumented)
+    readonly isSubworkflow: boolean;
+    // (undocumented)
+    readonly leaf: LeafTaskInfo | null;
+    // (undocumented)
+    readonly nodeError: string | null;
+    // (undocumented)
+    readonly nodeId: string | null;
+    // (undocumented)
+    readonly nodeStatus: string;
+    // (undocumented)
+    readonly taskIndex: number;
+    // (undocumented)
+    readonly taskName: string;
+}
+
+// @public (undocumented)
+export type ZodContainerSent<S> = ZodDefOf<S> extends {
+    readonly type: "object";
+    readonly "shape": infer M;
+} ? ZodObjectSent<M> : ZodDefOf<S> extends {
+    readonly type: "array";
+    readonly element: infer I;
+} ? ZodSentOf<I>[] : ZodDefOf<S> extends {
+    readonly type: "tuple";
+    readonly items: infer T;
+} ? {
+    -readonly [K in keyof T]: ZodSentOf<T[K]>;
+} : ZodDefOf<S> extends {
+    readonly type: "record";
+    readonly valueType: infer V;
+} ? {
+    [K in keyof ZodOutputOf<S>]: ZodSentOf<V>;
+} : ZodDefOf<S> extends {
+    readonly type: "nullable";
+    readonly innerType: infer I;
+} ? ZodSentOf<I> | null : ZodDefOf<S> extends {
+    readonly type: "optional" | "default" | "prefault" | "nonoptional";
+    readonly innerType: infer I;
+} ? ZodSentOf<I> : ZodDefOf<S> extends {
+    readonly type: "readonly";
+    readonly innerType: infer I;
+} ? Readonly<ZodSentOf<I>> : ZodDefOf<S> extends {
+    readonly type: "lazy";
+    readonly getter: () => infer I;
+} ? ZodSentOf<I> : ZodDefOf<S> extends {
+    readonly type: "union";
+    readonly options: readonly (infer O)[];
+} ? ZodSentOf<O> : ZodOutputOf<S>;
+
+// @public (undocumented)
+export type ZodContainerValue<S> = ZodDefOf<S> extends {
+    readonly type: "object";
+    readonly "shape": infer M;
+} ? ZodObjectValue<M> : ZodDefOf<S> extends {
+    readonly type: "array";
+    readonly element: infer I;
+} ? ZodValueOf<I>[] : ZodDefOf<S> extends {
+    readonly type: "tuple";
+    readonly items: infer T;
+} ? {
+    -readonly [K in keyof T]: ZodValueOf<T[K]>;
+} : ZodDefOf<S> extends {
+    readonly type: "record";
+    readonly valueType: infer V;
+} ? {
+    [K in keyof ZodOutputOf<S>]: ZodValueOf<V>;
+} : ZodDefOf<S> extends {
+    readonly type: "nullable";
+    readonly innerType: infer I;
+} ? ZodValueOf<I> | null : ZodDefOf<S> extends {
+    readonly type: "optional";
+    readonly innerType: infer I;
+} ? ZodValueOf<I> | undefined : ZodDefOf<S> extends {
+    readonly type: "default" | "prefault" | "nonoptional";
+    readonly innerType: infer I;
+} ? Exclude<ZodValueOf<I>, undefined> : ZodDefOf<S> extends {
+    readonly type: "readonly";
+    readonly innerType: infer I;
+} ? Readonly<ZodValueOf<I>> : ZodDefOf<S> extends {
+    readonly type: "lazy";
+    readonly getter: () => infer I;
+} ? ZodValueOf<I> : ZodDefOf<S> extends {
+    readonly type: "union";
+    readonly options: readonly (infer O)[];
+} ? ZodValueOf<O> : ZodOutputOf<S>;
+
+// @public (undocumented)
+export type ZodDefOf<S> = S extends {
+    readonly _zod: {
+        readonly def: infer D;
+    };
+} ? D : never;
+
+// @public (undocumented)
+export type ZodObjectSent<M> = keyof M extends never ? EmptyObject : Flat<{
+    -readonly [K in keyof M as M[K] extends ZodOptionalIn ? never : K]: ZodSentOf<M[K]>;
+} & {
+    -readonly [K in keyof M as M[K] extends ZodOptionalIn ? K : never]?: ZodSentOf<M[K]>;
+}>;
+
+// @public (undocumented)
+export type ZodObjectValue<M> = keyof M extends never ? EmptyObject : Flat<{
+    -readonly [K in keyof M as M[K] extends ZodOptionalOut ? never : K]: ZodValueOf<M[K]>;
+} & {
+    -readonly [K in keyof M as M[K] extends ZodOptionalOut ? K : never]?: ZodValueOf<M[K]>;
+}>;
+
+// @public
+export type ZodOptionalIn = {
+    readonly _zod: {
+        readonly optin: "optional" | "defaulted";
+    };
+};
+
+// @public
+export type ZodOptionalOut = {
+    readonly _zod: {
+        readonly optout: "optional";
+    };
+};
+
+// @public (undocumented)
+export type ZodOutputOf<S> = S extends {
+    readonly _zod: {
+        readonly output: infer O;
+    };
+} ? O : never;
+
+// @public
+export type ZodSchemaLike = {
+    readonly _zod: {
+        readonly def: {
+            readonly type: string;
+        };
+    };
+};
+
+// @public
+export type ZodSentOf<S> = S extends {
+    readonly [zodWireSent]: infer Sent;
+} ? Sent : IsZodJson<ZodOutputOf<S>> extends true ? JsonValue : ZodContainerSent<S>;
+
+// @public
+export type ZodValueOf<S> = IsZodJson<ZodOutputOf<S>> extends true ? JsonValue : ZodContainerValue<S>;
 
 // (No @packageDocumentation comment for this package)
 

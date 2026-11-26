@@ -32,7 +32,6 @@ import type {
   LastBeat,
   Measure,
   PendingStream,
-  Recorded,
   SlotHealth,
   StaleTaskRow,
   StreamCoverageState,
@@ -40,7 +39,9 @@ import type {
   WorkerClassLoad,
   WorkerStateSnapshot,
 } from "./health-types.ts";
+import { taskIdFromCore } from "../contract/ids.ts";
 import { jsonValueOfCoreText } from "./model-json.ts";
+import type { Recorded } from "../read/info.ts";
 
 /** Nanoseconds per microsecond. */
 const NANOSECONDS_PER_MICROSECOND = 1000n;
@@ -148,7 +149,7 @@ function boundedList<Row, Out>(
 
 function staleTaskRow(record: StaleTaskRecord): StaleTaskRow {
   return Object.freeze({
-    id: record.id,
+    id: taskIdFromCore(record.id, "staleTasks"),
     taskName: record.taskName,
     workerHostname: recorded(record.workerHostname),
     workerPid: recorded(record.workerPid),
@@ -160,7 +161,7 @@ function staleTaskRow(record: StaleTaskRecord): StaleTaskRow {
 
 function expiredTaskRow(record: ExpiredTaskRecord): ExpiredTaskRow {
   return Object.freeze({
-    id: record.id,
+    id: taskIdFromCore(record.id, "expiredTasks"),
     taskName: record.taskName,
     queueName: record.queueName,
     priority: record.priority,

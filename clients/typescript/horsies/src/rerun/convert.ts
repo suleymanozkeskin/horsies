@@ -3,7 +3,7 @@
 
 import type { CoreFailure } from "../_catalog/error_detail.ts";
 import { unreachable } from "../native/call/never.ts";
-import { coreFailure } from "../native/facades/catalog-record.ts";
+import { coreFailureOf } from "../send/catalog-value.ts";
 import type {
   AppRerunFailure,
   CallerRowArg,
@@ -26,13 +26,13 @@ export function appRerunError(failure: AppRerunFailure): RerunError {
   switch (failure.code) {
     case "CONNECT_FAILED":
     case "FAMILY_CHECK_FAILED": {
-      const exception = coreFailure(failure.cause);
+      const exception = coreFailureOf(failure.cause);
 
       return { code: failure.code, retryable: failureRetryable(exception), message: failure.message, exception };
     }
 
     case "STATEMENT_FAILED": {
-      const exception = coreFailure(failure.cause);
+      const exception = coreFailureOf(failure.cause);
 
       return {
         code: "STATEMENT_FAILED",

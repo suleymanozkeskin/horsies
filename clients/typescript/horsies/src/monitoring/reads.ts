@@ -27,6 +27,7 @@ import {
   type WorkflowRunSummary,
   type WorkflowTaskDetail,
 } from "../_catalog/monitoring_models.ts";
+import type { TaskId, WorkflowId } from "../contract/ids.ts";
 import type { NativeEnvelope } from "../native/call/envelope.ts";
 import { nativeValueAsync } from "../native/call/envelope.ts";
 import { unreachable } from "../native/call/never.ts";
@@ -62,23 +63,20 @@ const MIN_TASK_INDEX = -2_147_483_648;
 /** The largest task index of a workflow node. */
 const MAX_TASK_INDEX = 2_147_483_647;
 
-/** A UUID in hyphenated form, of either case. */
-const UUID_TEXT = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
-
 /** A task by id: its detail, or why no table holds it. */
 export type TaskDetailRead =
   | { readonly kind: "found"; readonly detail: TaskDetail }
-  | { readonly kind: "notFound"; readonly taskId: string; readonly reason: TaskAbsenceReason };
+  | { readonly kind: "notFound"; readonly taskId: TaskId; readonly reason: TaskAbsenceReason };
 
 /** A workflow run by id, or no run. */
 export type WorkflowRunRead =
   | { readonly kind: "found"; readonly run: WorkflowRunDetail }
-  | { readonly kind: "notFound"; readonly workflowId: string };
+  | { readonly kind: "notFound"; readonly workflowId: WorkflowId };
 
 /** A node of a workflow run by its task index, or no node. */
 export type WorkflowNodeRead =
   | { readonly kind: "found"; readonly node: WorkflowTaskDetail }
-  | { readonly kind: "notFound"; readonly workflowId: string; readonly taskIndex: number };
+  | { readonly kind: "notFound"; readonly workflowId: WorkflowId; readonly taskIndex: number };
 
 /** The addon and the handle that the reads call. */
 export interface ReadTarget {
@@ -183,19 +181,13 @@ export async function schedules(
 /** One workflow run with its nodes and edges, or `notFound`. */
 export async function workflowRun(
   target: ReadTarget,
-  workflowId: string,
+  workflowId: WorkflowId,
 ): Promise<Result<WorkflowRunRead, MonitoringReadError>> {
-  const id = uuidText("workflowId", workflowId);
-
-  if (!id.ok) {
-    return id;
-  }
-
-  return readModel("workflowRun", () => target.addon.readWorkflowRun(target.handle, id.value), (text) => {
+  return readModel("workflowRun", () => target.addon.readWorkflowRun(target.handle, workflowId), (text) => {
     const value = wireJsonOfCoreText("workflowRun", text);
 
     return value === null
-      ? Object.freeze({ kind: "notFound", workflowId: id.value })
+      ? Object.freeze({ kind: "notFound", workflowId })
       : Object.freeze({ kind: "found", run: decodedOrDefect("workflowRun", decodeWorkflowRunDetail(value)) });
   });
 }
@@ -203,28 +195,22 @@ export async function workflowRun(
 /** One node of a workflow run by its task index, or `notFound`. */
 export async function workflowNode(
   target: ReadTarget,
-  workflowId: string,
+  workflowId: WorkflowId,
   taskIndex: number,
 ): Promise<Result<WorkflowNodeRead, MonitoringReadError>> {
-  const id = uuidText("workflowId", workflowId);
-
-  if (!id.ok) {
-    return id;
-  }
-
   const index = taskIndexOf(taskIndex);
 
   if (!index.ok) {
     return index;
   }
 
-  const answer = () => target.addon.readWorkflowNode(target.handle, id.value, index.value);
+  const answer = () => target.addon.readWorkflowNode(target.handle, workflowId, index.value);
 
   return readModel("workflowNode", answer, (text) => {
     const value = wireJsonOfCoreText("workflowNode", text);
 
     return value === null
-      ? Object.freeze({ kind: "notFound", workflowId: id.value, taskIndex: index.value })
+      ? Object.freeze({ kind: "notFound", workflowId, taskIndex: index.value })
       : Object.freeze({ kind: "found", node: decodedOrDefect("workflowNode", decodeWorkflowTaskDetail(value)) });
   });
 }
@@ -232,15 +218,9 @@ export async function workflowNode(
 /** One task with its attempts (the lifecycle record), or why no table holds it. */
 export async function taskDetail(
   target: ReadTarget,
-  taskId: string,
+  taskId: TaskId,
 ): Promise<Result<TaskDetailRead, MonitoringReadError>> {
-  const id = uuidText("taskId", taskId);
-
-  if (!id.ok) {
-    return id;
-  }
-
-  const outcome = await nativeValueAsync("readTaskDetail", () => target.addon.readTaskDetail(target.handle, id.value));
+  const outcome = await nativeValueAsync("readTaskDetail", () => target.addon.readTaskDetail(target.handle, taskId));
 
   switch (outcome.kind) {
     case "json":
@@ -248,19 +228,12 @@ export async function taskDetail(
         Object.freeze({ kind: "found", detail: decodeCoreModel("taskDetail", outcome.text, decodeTaskDetail) }),
       );
     case "absent":
-      return ok(Object.freeze({ kind: "notFound", taskId: outcome.taskId, reason: outcome.reason }));
+      return ok(Object.freeze({ kind: "notFound", taskId, reason: outcome.reason }));
     case "failed":
       return err(monitoringQueryError(outcome.error));
     default:
       return unreachable(outcome);
   }
-}
-
-/** The lower-case text of a UUID, or the refusal of `field`. Pure. */
-export function uuidText(field: "taskId" | "workflowId", text: string): Result<string, QueryRefused> {
-  return UUID_TEXT.test(text)
-    ? ok(text.toLowerCase())
-    : err(queryRefused(field, `${field} must be a UUID in hyphenated form; got ${JSON.stringify(text)}`));
 }
 
 /** A task index that the core reads as a 32-bit integer, or the refusal. Pure. */

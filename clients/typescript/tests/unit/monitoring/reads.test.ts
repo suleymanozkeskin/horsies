@@ -29,12 +29,16 @@ import {
   fakeHandle,
   monitoringDbFailed,
   sample,
+  taskIdOf,
   timingExamples,
   valueEnvelope,
   withMember,
+  workflowIdOf,
 } from "./support/fakes.ts";
 
-const TASK_ID = "01890a5d-ac96-774b-bcce-b302099a8057";
+const ID_TEXT = "01890a5d-ac96-774b-bcce-b302099a8057";
+const TASK_ID = taskIdOf(ID_TEXT);
+const WORKFLOW_ID = workflowIdOf(ID_TEXT);
 
 /** The arguments of one call of the fake addon, after the handle. */
 type CallArguments = ReadonlyArray<object | string | number>;
@@ -137,19 +141,19 @@ describe("found and not found", () => {
   });
 
   test("workflowRun found and not found", async () => {
-    const found = await workflowRun(fakeTarget(jsonOutcome(sample("WorkflowRunDetail"))).target, TASK_ID);
-    const missing = await workflowRun(fakeTarget(jsonOutcome(null)).target, TASK_ID);
+    const found = await workflowRun(fakeTarget(jsonOutcome(sample("WorkflowRunDetail"))).target, WORKFLOW_ID);
+    const missing = await workflowRun(fakeTarget(jsonOutcome(null)).target, WORKFLOW_ID);
 
     assert.ok(found.ok && found.value.kind === "found");
-    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: TASK_ID } });
+    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: WORKFLOW_ID } });
   });
 
   test("workflowNode found and not found", async () => {
-    const found = await workflowNode(fakeTarget(jsonOutcome(sample("WorkflowTaskDetail"))).target, TASK_ID, 2);
-    const missing = await workflowNode(fakeTarget(jsonOutcome(null)).target, TASK_ID, 2);
+    const found = await workflowNode(fakeTarget(jsonOutcome(sample("WorkflowTaskDetail"))).target, WORKFLOW_ID, 2);
+    const missing = await workflowNode(fakeTarget(jsonOutcome(null)).target, WORKFLOW_ID, 2);
 
     assert.ok(found.ok && found.value.kind === "found");
-    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: TASK_ID, taskIndex: 2 } });
+    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: WORKFLOW_ID, taskIndex: 2 } });
   });
 });
 
@@ -181,26 +185,10 @@ describe("expected failures are values", () => {
 });
 
 describe("refusals before the call", () => {
-  test("a task id that is not a UUID is QUERY_REFUSED and the addon is not called", async () => {
-    const { target, calls } = fakeTarget(jsonOutcome(null));
-    const read = await taskDetail(target, "task-1");
-
-    assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "taskId");
-    assert.equal(calls.size, 0);
-  });
-
-  test("a UUID in upper case passes in lower case", async () => {
-    const { target, calls } = fakeTarget(jsonOutcome(null));
-
-    await taskDetail(target, TASK_ID.toUpperCase());
-
-    assert.deepEqual(calls.get("readTaskDetail"), [TASK_ID]);
-  });
-
   test("a task index outside 32 bits or with a fraction is QUERY_REFUSED", async () => {
     for (const index of [2 ** 31, -(2 ** 31) - 1, 1.5]) {
       const { target, calls } = fakeTarget(jsonOutcome(null));
-      const read = await workflowNode(target, TASK_ID, index);
+      const read = await workflowNode(target, WORKFLOW_ID, index);
 
       assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "taskIndex", `${index}`);
       assert.equal(calls.size, 0);
@@ -254,14 +242,14 @@ describe("the timing variants of the core decode through the reads", () => {
     const run = sample("WorkflowRunDetail");
 
     for (const timing of timingExamples("run_timings")) {
-      const read = await workflowRun(fakeTarget(jsonOutcome(withMember(run, "timing", timing))).target, TASK_ID);
+      const read = await workflowRun(fakeTarget(jsonOutcome(withMember(run, "timing", timing))).target, WORKFLOW_ID);
 
       assert.ok(read.ok && read.value.kind === "found");
     }
 
     for (const timing of timingExamples("node_timings")) {
       const node = withMember(sample("WorkflowNodeInfo"), "timing", timing);
-      const read = await workflowRun(fakeTarget(jsonOutcome(withMember(run, "nodes", [node]))).target, TASK_ID);
+      const read = await workflowRun(fakeTarget(jsonOutcome(withMember(run, "nodes", [node]))).target, WORKFLOW_ID);
 
       assert.ok(read.ok && read.value.kind === "found" && read.value.run.nodes.length === 1);
     }
