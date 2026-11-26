@@ -12,9 +12,13 @@ import { describe, test } from "node:test";
 import { defineTask, defineWorkflow, h, Horsies, WorkflowId } from "../../../horsies/src/index.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { workflowsAddon } from "../../../horsies/src/native/workflows/addon.ts";
 import { appHandle } from "../../../horsies/src/worker/run.ts";
 import { testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 const greet = defineTask({ name: "workflow_end_to_end_greet", input: { who: h.string() }, output: h.string() });
 

@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { parseAppConfig } from "../../../horsies/src/config/app-config.ts";
 import type { QueueConfigInput } from "../../../horsies/src/config/queues.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { NativeSendRules } from "../../../horsies/src/native/sends/addon.ts";
 import { checkAppConfig } from "../../../horsies/src/native/sends/sends.ts";
@@ -22,6 +23,9 @@ import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { addonConversionFacts } from "../../../horsies/src/workflow/core.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
 import { subWorkflowRootText } from "./workflow-spec-texts.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** The workflow spec data vectors of the core. */
 const VECTOR_FILE = fileURLToPath(
@@ -241,7 +245,7 @@ describe("the child spec source and the core's strict check, with a database", (
     // (`child_static_input`), and the node fails with WORKER_SERIALIZATION_ERROR.
     const { text, calls } = await startedChildResult('{"n":1,"n":1}', ["tests.strict_child.v1"]);
 
-    assert.match(text, /"error_code":"WORKER_SERIALIZATION_ERROR"/u);
+    assert.match(text, /"error_code":\{"__builtin_task_code__":"WORKER_SERIALIZATION_ERROR"\}/u);
     assert.match(text, /Corrupt kwargs JSON for subworkflow task 0/u);
     assert.equal(calls, 0);
   });
@@ -249,7 +253,7 @@ describe("the child spec source and the core's strict check, with a database", (
   test("a child whose definition key the app does not list fails to load and never calls the build", async () => {
     const { text, calls } = await startedChildResult('{"n":1}', []);
 
-    assert.match(text, /"error_code":"SUBWORKFLOW_LOAD_FAILED"/u);
+    assert.match(text, /"error_code":\{"__builtin_task_code__":"SUBWORKFLOW_LOAD_FAILED"\}/u);
     assert.equal(calls, 0);
   });
 });

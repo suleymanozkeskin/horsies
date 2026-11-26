@@ -163,7 +163,7 @@ describe("the workflow operations of a task child", () => {
 
     await reader.close();
     assert(read.kind === "stored" && read.result.kind === "checked");
-    assert.match(read.result.text, /"error_code":"SUBWORKFLOW_LOAD_FAILED"/u);
+    assert.match(read.result.text, /"error_code":\{"__builtin_task_code__":"SUBWORKFLOW_LOAD_FAILED"\}/u);
     assert.equal(envelopeValue(await child.close()), "CLOSED");
   });
 
