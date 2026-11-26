@@ -39,8 +39,8 @@ describe("zod adapter: primitive forms", () => {
 
     assert.equal(kindTextOf(z.email()), "checked(string)");
     assert.equal(storedText(kind, "a@b.co"), '"a@b.co"');
-    assert.equal(encodeRefusal(kind, "no").kind, "CheckFailed");
-    assert.equal(decodeRefusal(kind, '"no"', "worker").kind, "CheckFailed");
+    assert.equal(encodeRefusal(kind, "no").refusal, "CheckFailed");
+    assert.equal(decodeRefusal(kind, '"no"', "worker").refusal, "CheckFailed");
     assert.equal(kindTextOf(z.string().max(2)), "checked(string)");
     assert.equal(
       encodeRefusal(acceptedKind(z.string().max(2)), "abc").detail,
@@ -52,11 +52,11 @@ describe("zod adapter: primitive forms", () => {
     for (const schema of [z.int(), z.int32(), z.uint32(), z.number().int()]) {
       assert.equal(kindTextOf(schema), "checked(int)");
       assert.equal(storedText(acceptedKind(schema), 7), "7");
-      assert.equal(decodeRefusal(acceptedKind(schema), "7.0", "worker").kind, "FloatForInteger");
+      assert.equal(decodeRefusal(acceptedKind(schema), "7.0", "worker").refusal, "FloatForInteger");
     }
 
-    assert.equal(encodeRefusal(acceptedKind(z.int32()), 2 ** 40).kind, "CheckFailed");
-    assert.equal(encodeRefusal(acceptedKind(z.uint32()), -1).kind, "CheckFailed");
+    assert.equal(encodeRefusal(acceptedKind(z.int32()), 2 ** 40).refusal, "CheckFailed");
+    assert.equal(encodeRefusal(acceptedKind(z.uint32()), -1).refusal, "CheckFailed");
   });
 
   test("z.number(), z.float64(), z.float32() map to float in Python's float text", () => {
@@ -71,7 +71,7 @@ describe("zod adapter: primitive forms", () => {
     assert.equal(kindTextOf(z.bigint()), "bigint");
     assert.equal(storedText(acceptedKind(z.bigint()), 2n ** 70n), "1180591620717411303424");
     assert.equal(kindTextOf(z.int64()), "checked(bigint)");
-    assert.equal(encodeRefusal(acceptedKind(z.uint64()), -1n).kind, "CheckFailed");
+    assert.equal(encodeRefusal(acceptedKind(z.uint64()), -1n).refusal, "CheckFailed");
     assert.equal(workerValue(acceptedKind(z.int64()), "9223372036854775807"), 9_223_372_036_854_775_807n);
   });
 
@@ -83,14 +83,14 @@ describe("zod adapter: primitive forms", () => {
     assert.equal(kindTextOf(z.enum(["red", "green"])), 'literal("red","green")');
     assert.equal(kindTextOf(z.enum(Level)), "literal(1,3)");
     assert.equal(storedText(acceptedKind(z.enum(Level)), Level.High), "3");
-    assert.equal(decodeRefusal(acceptedKind(z.enum(["red"])), '"blue"', "worker").kind, "NotAMember");
+    assert.equal(decodeRefusal(acceptedKind(z.enum(["red"])), '"blue"', "worker").refusal, "NotAMember");
   });
 
   test("z.templateLiteral() maps to a checked string", () => {
     const kind = acceptedKind(z.templateLiteral(["order-", z.int()]));
 
     assert.equal(storedText(kind, "order-12"), '"order-12"');
-    assert.equal(encodeRefusal(kind, "invoice-12").kind, "CheckFailed");
+    assert.equal(encodeRefusal(kind, "invoice-12").refusal, "CheckFailed");
   });
 });
 
@@ -106,23 +106,23 @@ describe("zod adapter: containers", () => {
     const kind = acceptedKind(z.object({ id: z.int() }));
 
     assert.deepEqual(z.object({ id: z.int() }).parse({ id: 1, extra: 2 }), { id: 1 });
-    assert.equal(decodeRefusal(kind, '{"id":1,"extra":2}', "worker").kind, "UnknownMember");
-    assert.equal(decodeRefusal(kind, '{"id":1,"extra":2}', "stored").kind, "UnknownMember");
-    assert.equal(encodeRefusal(kind, { id: 1, extra: 2 }).kind, "UnknownMember");
+    assert.equal(decodeRefusal(kind, '{"id":1,"extra":2}', "worker").refusal, "UnknownMember");
+    assert.equal(decodeRefusal(kind, '{"id":1,"extra":2}', "stored").refusal, "UnknownMember");
+    assert.equal(encodeRefusal(kind, { id: 1, extra: 2 }).refusal, "UnknownMember");
   });
 
   test("an explicit undefined is refused at encode, though zod takes it for an optional member", () => {
     const schema = z.object({ id: z.int(), note: z.string().optional() });
 
     assert.deepEqual(schema.parse({ id: 1, note: undefined }), { id: 1, note: undefined });
-    assert.equal(encodeRefusal(acceptedKind(schema), { id: 1, note: undefined }).kind, "ExplicitUndefined");
+    assert.equal(encodeRefusal(acceptedKind(schema), { id: 1, note: undefined }).refusal, "ExplicitUndefined");
     assert.equal(storedText(acceptedKind(schema), { id: 1 }), '{"id":1}');
   });
 
   test("z.array() and z.tuple([...]) map to array and tuple", () => {
     assert.equal(storedText(acceptedKind(z.array(z.int())), [1, 2]), "[1,2]");
     assert.equal(storedText(acceptedKind(z.tuple([z.string(), z.number()])), ["a", 1]), '["a",1.0]');
-    assert.equal(decodeRefusal(acceptedKind(z.tuple([z.string()])), '["a","b"]', "worker").kind, "WrongType");
+    assert.equal(decodeRefusal(acceptedKind(z.tuple([z.string()])), '["a","b"]', "worker").refusal, "WrongType");
   });
 
   test("z.record(z.string(), v) maps to record, in the value's own key order", () => {
@@ -143,7 +143,7 @@ describe("zod adapter: containers", () => {
       "the check refused the value: $.<input> invalid_value",
     );
     assert.equal(storedText(partial, { b: 2 }), '{"b":2}');
-    assert.equal(decodeRefusal(partial, '{"c":1}', "worker").kind, "CheckFailed");
+    assert.equal(decodeRefusal(partial, '{"c":1}', "worker").refusal, "CheckFailed");
   });
 
   test("a record key with a string format checks each key", () => {
@@ -205,7 +205,7 @@ describe("zod adapter: unions", () => {
     const kind = acceptedKind(schema);
 
     assert.equal(storedText(kind, { method: "cash" }), '{"method":"cash"}');
-    assert.equal(decodeRefusal(kind, '{"method":"wire"}', "worker").kind, "NotAMember");
+    assert.equal(decodeRefusal(kind, '{"method":"wire"}', "worker").refusal, "NotAMember");
   });
 
   test("a refinement of one option runs only for a value of that option", () => {
@@ -217,7 +217,7 @@ describe("zod adapter: unions", () => {
     const kind = acceptedKind(schema);
 
     assert.equal(storedText(kind, { method: "card", last4: "1234" }), '{"method":"card","last4":"1234"}');
-    assert.equal(encodeRefusal(kind, { method: "card", last4: "12" }).kind, "CheckFailed");
+    assert.equal(encodeRefusal(kind, { method: "card", last4: "12" }).refusal, "CheckFailed");
     assert.equal(storedText(kind, { method: "cash" }), '{"method":"cash"}');
   });
 
@@ -255,7 +255,7 @@ describe("zod adapter: JSON, codecs, checks, lazy, h.* inside zod", () => {
     assert.equal(kindTextOf(cents), "conversion(checked(int))");
     assert.equal(storedText(kind, { price: { cents: 250 } }), '{"price":250}');
     assert.deepEqual(workerValue(kind, '{"price":99}'), { price: { cents: 99 } });
-    assert.equal(decodeRefusal(kind, '{"price":1.5}', "worker").kind, "FloatForInteger");
+    assert.equal(decodeRefusal(kind, '{"price":1.5}', "worker").refusal, "FloatForInteger");
   });
 
   test(".refine(), .check(), .superRefine() map to checks; .brand() and .readonly() change nothing", () => {
@@ -263,7 +263,7 @@ describe("zod adapter: JSON, codecs, checks, lazy, h.* inside zod", () => {
 
     assert.equal(kindTextOf(even), "checked(int)");
     assert.equal(encodeRefusal(acceptedKind(even), 3).detail, "the check refused the value: $ custom");
-    assert.equal(decodeRefusal(acceptedKind(even), "3", "worker").kind, "CheckFailed");
+    assert.equal(decodeRefusal(acceptedKind(even), "3", "worker").refusal, "CheckFailed");
     assert.equal(kindTextOf(z.string().check(z.minLength(1))), "checked(string)");
     assert.equal(kindTextOf(z.string().superRefine(() => undefined)), "checked(string)");
     assert.equal(kindTextOf(z.string().brand<"Sku">()), "string");

@@ -268,12 +268,12 @@ class SpecNode:
     name.
     """
 
-    workflow_ctx_from: tuple[str, ...]
+    workflow_context_from: tuple[str, ...]
     """The node ids of the dependencies whose results the node's workflow
     context takes; empty when the node takes no context.
     """
 
-    allow_failed_deps: bool
+    allow_failed_dependencies: bool
     """The node runs when a dependency failed."""
 
     join: SpecJoin

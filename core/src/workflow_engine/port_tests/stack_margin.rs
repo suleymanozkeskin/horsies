@@ -200,7 +200,7 @@ async fn recovery_pass_with_a_case_zero_candidate(pool: &TestPool) {
             pool,
             &NodeSeed::task(workflow_id, index, "PENDING")
                 .deps(&[1])
-                .allow_failed_deps(),
+                .allow_failed_dependencies(),
         )
         .await;
     }

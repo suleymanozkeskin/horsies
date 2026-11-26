@@ -20,7 +20,7 @@ const priced = defineTask({
   name: "priced",
   input: {},
   output: h.object({ total: h.int(), currency: h.string().default("EUR") }),
-  errors: ["NO_PRICE"],
+  errorCodes: ["NO_PRICE"],
 });
 
 const FAILURE: TaskError<"NO_PRICE"> = Object.freeze({
@@ -73,7 +73,12 @@ describe("checkCaseParams", () => {
 
     assert.deepEqual(built, {
       ok: false,
-      error: { side: "decode", kind: "MissingMember", path: "$.price", detail: "a required member is missing" },
+      error: {
+        kind: "decodeRefused",
+        refusal: "MissingMember",
+        path: "$.price",
+        detail: "a required member is missing",
+      },
     });
   });
 
@@ -97,8 +102,8 @@ describe("checkCaseParams", () => {
     for (const value of [3, { kind: "succeeded" }, { kind: "failed", error: "NO_PRICE" }, { kind: "skipped" }]) {
       const built = checkCaseParams(params, { region: "eu", price: value });
 
-      assert.equal(built.ok ? undefined : built.error.kind, "WrongType");
-      assert.equal(built.ok ? undefined : built.error.path, "$.price");
+      assert(!built.ok && built.error.kind === "decodeRefused", JSON.stringify(built));
+      assert.deepEqual([built.error.refusal, built.error.path], ["WrongType", "$.price"]);
     }
   });
 
@@ -106,21 +111,21 @@ describe("checkCaseParams", () => {
     const params = paramsOf({ price: h.taskOutcome(priced) });
     const built = checkCaseParams(params, { region: "eu", price: { kind: "succeeded", value: { total: "3" } } });
 
-    assert.equal(built.ok ? undefined : built.error.side, "encode");
+    assert.equal(built.ok ? undefined : built.error.kind, "encodeRefused");
   });
 
   test("a case that is not a plain object: the writer's refusal", () => {
     const params = paramsOf({ price: h.taskOutcome(priced) });
     const built = checkCaseParams(params, new Map([["region", "eu"]]));
 
-    assert.equal(built.ok ? undefined : built.error.side, "encode");
+    assert.equal(built.ok ? undefined : built.error.kind, "encodeRefused");
   });
 
   test("a plain param that does not encode: the writer's refusal, before the outcome params", () => {
     const params = paramsOf({ price: h.taskOutcome(priced) });
     const built = checkCaseParams(params, { region: 7 });
 
-    assert.equal(built.ok ? undefined : built.error.side, "encode");
+    assert.equal(built.ok ? undefined : built.error.kind, "encodeRefused");
   });
 });
 
@@ -137,7 +142,7 @@ describe("check of a workflow with a required h.taskOutcome param", () => {
         { price: { kind: "failed", error: FAILURE } },
       ],
     },
-    (w, { price }) => ({ output: w.task(ping, {}, { id: price.kind === "succeeded" ? "priced" : "unpriced" }) }),
+    (w, { price }) => ({ output: w.task(ping, {}, { nodeId: price.kind === "succeeded" ? "priced" : "unpriced" }) }),
   );
 
   test("check builds each case with its outcome: no refusal", () => {
@@ -157,7 +162,7 @@ describe("check of a workflow with a required h.taskOutcome param", () => {
         // SAFETY: the types require the outcome param; a JavaScript caller can leave it out.
         checkCases: [{} as never],
       },
-      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+      (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
 
     const checked = checkedAtCreate([leftOut]);

@@ -37,7 +37,7 @@ const selfNesting: object = defineWorkflow(
   { name: "loop", definitionKey: "tests.loop.v1", output: h.int(), params: {} },
   (w) => {
     // SAFETY: the workflow nests itself; its contract is complete when the build runs.
-    const again = w.subWorkflow(selfNesting as never, {}, { id: "again" });
+    const again = w.subWorkflow(selfNesting as never, {}, { nodeId: "again" });
 
     // SAFETY: the child's declared output is `h.int()`; the self reference leaves its type unknown here.
     return { output: again as NodeRef<number, string, "again"> };
@@ -108,7 +108,7 @@ describe("the static check", () => {
   test("an exception code that the core's code rules refuse is refused", () => {
     const app = testApp();
 
-    app.implement(ping, ({ n }, { ok }) => ok(n), { exceptions: [[RateLimited, "rate limited"]] });
+    app.implement(ping, ({ n }, { ok }) => ok(n), { exceptionMapper: [[RateLimited, "rate limited"]] });
     app.implement(charge, async (_input, { ok }) => ok(null));
 
     const checks = fakeChecks({ codes: [catalogRefusal("HRS-112", "'rate limited' is invalid")] });

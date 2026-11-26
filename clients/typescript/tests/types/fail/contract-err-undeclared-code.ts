@@ -7,7 +7,7 @@ import { h } from "../../../horsies/src/wire/public.ts";
 
 declare const app: Horsies;
 
-const validateOrder = defineTask({ name: "validate_order", input: { email: h.string() }, output: h.int(), errors: ["INVALID_EMAIL"] });
+const validateOrder = defineTask({ name: "validate_order", input: { email: h.string() }, output: h.int(), errorCodes: ["INVALID_EMAIL"] });
 
 export const implementation = app.implement(validateOrder, async ({ email }, { ok, err, signal }) => {
   if (signal.aborted) {

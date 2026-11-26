@@ -17,7 +17,7 @@ const validateOrder = defineTask({
   name: "validate_order",
   input: { orderId: h.uuid(), lines: h.array(h.object({ sku: h.string(), quantity: h.int() })) },
   output: ValidatedOrder,
-  errors: ["EMPTY_ORDER", "INVALID_EMAIL"],
+  errorCodes: ["EMPTY_ORDER", "INVALID_EMAIL"],
 });
 
 export async function sendAndRead(): Promise<void> {

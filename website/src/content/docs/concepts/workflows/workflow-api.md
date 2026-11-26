@@ -214,11 +214,11 @@ The `.node()` method on task functions returns a `NodeFactory` for type-safe `Ta
 |---|---|---|---|
 | `waits_for` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Dependencies |
 | `args_from` | `dict[str, TaskNode \| SubWorkflowNode]` | `None` | Result injection mapping |
-| `workflow_ctx_from` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Context sources |
+| `workflow_context_from` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Context sources |
 | `node_id` | `str` | `None` | Stable identifier |
 | `queue` | `str` | `None` | Queue override |
 | `priority` | `int` | `None` | Priority override, from 1 (highest) to 100 (lowest). A value outside 1–100 raises `HRS-034` when the spec is built |
-| `allow_failed_deps` | `bool` | `False` | Run despite failed deps |
+| `allow_failed_dependencies` | `bool` | `False` | Run despite failed deps |
 | `join` | `Literal['all', 'any', 'quorum']` | `'all'` | Dependency join semantics |
 | `min_success` | `int` | `None` | Required for `join='quorum'` |
 | `good_until` | `datetime` | `None` | Task expiry deadline. Must be timezone-aware: a naive `datetime` raises `HRS-035` when the spec is built |

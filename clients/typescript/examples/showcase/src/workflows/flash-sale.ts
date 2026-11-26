@@ -17,14 +17,14 @@ export const FLASH_SKU = "ACME-SKU-0001";
 export const flashSale = defineWorkflow(
   { name: "flash_sale", definitionKey: "acme.flash_sale.v1", params: {}, output: CacheWarm },
   (w) => {
-    const cdn = w.task(publishCdn, { campaignId: FLASH_CAMPAIGN_ID, sku: FLASH_SKU }, { id: "publish_cdn" });
-    const origin = w.task(publishOrigin, { campaignId: FLASH_CAMPAIGN_ID, sku: FLASH_SKU }, { id: "publish_origin" });
-    const search = w.task(prewarmSearch, { campaignId: FLASH_CAMPAIGN_ID }, { id: "prewarm_search" });
+    const cdn = w.task(publishCdn, { campaignId: FLASH_CAMPAIGN_ID, sku: FLASH_SKU }, { nodeId: "publish_cdn" });
+    const origin = w.task(publishOrigin, { campaignId: FLASH_CAMPAIGN_ID, sku: FLASH_SKU }, { nodeId: "publish_origin" });
+    const search = w.task(prewarmSearch, { campaignId: FLASH_CAMPAIGN_ID }, { nodeId: "prewarm_search" });
 
     const warm = w.task(
       warmCacheEdge,
       { campaignId: FLASH_CAMPAIGN_ID },
-      { id: "warm_cache_edge", waitsFor: [cdn, origin], join: { kind: "any" } },
+      { nodeId: "warm_cache_edge", waitsFor: [cdn, origin], join: { kind: "any" } },
     );
 
     return {

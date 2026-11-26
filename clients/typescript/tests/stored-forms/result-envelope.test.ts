@@ -74,7 +74,7 @@ function refusalOf(wire: RequiredWire, text: string): DecodeRefused {
 function ruleOf(text: string): EnvelopeRule {
   const refusal = refusalOf(h.json(), text);
 
-  assert(refusal.kind === "EnvelopeRefused", show(refusal));
+  assert(refusal.kind === "envelopeRefused", show(refusal));
 
   return refusal.rule;
 }
@@ -256,7 +256,8 @@ describe("result_envelope.json refused texts", () => {
           test(`${row.name} [${label}]: the ok value is refused`, () => {
             const refusal = refusalOf(wire, row.text);
 
-            assert.deepEqual([refusal.kind, refusal.path], ["EngineKey", "$.ok.<input>"]);
+            assert(refusal.kind === "decodeRefused", show(refusal));
+            assert.deepEqual([refusal.refusal, refusal.path], ["EngineKey", "$.ok.<input>"]);
           });
         }
 

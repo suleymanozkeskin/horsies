@@ -13,7 +13,7 @@ export const ping = defineTask({ name: "ping", input: {}, output: h.int() });
 export const plain = defineWorkflow(
   { name: "plain", definitionKey: "tests.plain.v1", output: h.int(), params: {} },
   (w) => ({
-    output: w.task(ping, {}, { id: "ping" }),
+    output: w.task(ping, {}, { nodeId: "ping" }),
   }),
 );
 
@@ -21,9 +21,9 @@ export const plain = defineWorkflow(
 export const duplicateIds = defineWorkflow(
   { name: "duplicate", definitionKey: "tests.duplicate.v1", output: h.int(), params: {} },
   (w) => {
-    w.task(ping, {}, { id: "same" });
+    w.task(ping, {}, { nodeId: "same" });
 
-    return { output: w.task(ping, {}, { id: "same" }) };
+    return { output: w.task(ping, {}, { nodeId: "same" }) };
   },
 );
 

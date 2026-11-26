@@ -92,8 +92,8 @@ function specNode(node: CheckedNode, facts: ConversionFacts): SpecNode {
     input_json: node.staticInput,
     dependencies: node.dependencies,
     args_from: node.argsFrom,
-    workflow_ctx_from: node.ctxFrom,
-    allow_failed_deps: node.allowFailedDeps,
+    workflow_context_from: node.workflowContextFrom,
+    allow_failed_dependencies: node.allowFailedDependencies,
     join: join(node.join),
     body: body(node.name, node.body, facts),
   };

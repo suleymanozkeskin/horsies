@@ -19,8 +19,8 @@ export const sendOrderEmail = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { orderId: h.string(), capture: h.taskOutcome(capturePayment) },
   output: EmailReceipt,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Text the customer the tracking code. */
@@ -31,8 +31,8 @@ export const sendShippingSms = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { orderId: h.string(), trackingCode: h.string() },
   output: ShippingNotice,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Send a marketing message to one segment. */
@@ -43,8 +43,8 @@ export const marketingBlast = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { segment: h.string() },
   output: MarketingBlast,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Send the win-back message to the customers that the abandoned cart sweep found. */
@@ -55,8 +55,8 @@ export const winbackBlast = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { segment: h.string(), sweep: h.taskOutcome(abandonedCartSweep) },
   output: MarketingBlast,
-  errors: ["UPSTREAM_FAILED"],
-  retry: CRASH_RETRY,
+  errorCodes: ["UPSTREAM_FAILED"],
+  retryPolicy: CRASH_RETRY,
 });
 
 export const NOTIFY_TASKS = [sendOrderEmail, sendShippingSms, marketingBlast, winbackBlast] as const;

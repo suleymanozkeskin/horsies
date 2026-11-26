@@ -52,7 +52,7 @@ impl WorkflowDefinition for Restock {
                 .node_id("update_stock_levels")
                 .set(update_stock_levels::params::feed_node_ids(), feed_ids)?
                 .waits_for_all(feeds.iter().copied())
-                .workflow_ctx_from(feeds.iter().copied())
+                .workflow_context_from(feeds.iter().copied())
                 .join_quorum(quorum),
         )?;
         let policy = SuccessPolicy::new(vec![SuccessCase::new([update])]).optional(feeds);

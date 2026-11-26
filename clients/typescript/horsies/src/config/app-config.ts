@@ -66,7 +66,7 @@ export type AppConfigInput = QueueConfigInput & {
   /** The settings of each worker, by name: a worker runs the profile of its name. */
   readonly workerProfiles?: Readonly<Record<string, WorkerProfileInput>>;
   /** Send again, up to 3 times, after a send fails with a transient database error. Left out: no resend. */
-  readonly resendOnTransientErr?: boolean;
+  readonly resendOnTransientError?: boolean;
   /** The spans and producer metrics of the app. Left out: `{ kind: "none" }`. `Horsies.create` reads it; the core does not. */
   readonly tracing?: TracingConfigInput;
 };
@@ -74,7 +74,7 @@ export type AppConfigInput = QueueConfigInput & {
 /** A parsed config. The core's config text is not enumerable, so a log of the value never shows a secret. */
 export type AppConfig = {
   readonly queues: QueueSetup;
-  readonly resendOnTransientErr: boolean;
+  readonly resendOnTransientError: boolean;
   /** The JSON text of the core's `AppConfig`. It holds the database URLs. */
   readonly coreConfigJson: string;
 };
@@ -126,8 +126,8 @@ export function queueSetup(config: AppConfig): QueueSetup {
 }
 
 /** Whether a send of the app resends after a transient database error. Pure. */
-export function resendOnTransientErr(config: AppConfig): boolean {
-  return config.resendOnTransientErr;
+export function resendOnTransientError(config: AppConfig): boolean {
+  return config.resendOnTransientError;
 }
 
 /** The core's `AppConfig` object of `input`, in the order of the core's fields. */
@@ -149,7 +149,7 @@ function coreConfigObject(input: AppConfigInput, environment: EnvironmentRead): 
     optionalEntry("worker_profiles", input.workerProfiles, (profiles) =>
       workerProfilesJson(profiles, "workerProfiles"),
     ),
-    entry("resend_on_transient_err", accepted(input.resendOnTransientErr === true)),
+    entry("resend_on_transient_err", accepted(input.resendOnTransientError === true)),
   ]);
 }
 
@@ -187,7 +187,7 @@ function claimEntries(claim: ClaimMode | undefined, path: string): Checked<reado
 function appConfigOf(input: AppConfigInput, core: ConfigObject): AppConfig {
   const config = {
     queues: queueSetupOf(input),
-    resendOnTransientErr: input.resendOnTransientErr === true,
+    resendOnTransientError: input.resendOnTransientError === true,
     coreConfigJson: JSON.stringify(core),
   };
 

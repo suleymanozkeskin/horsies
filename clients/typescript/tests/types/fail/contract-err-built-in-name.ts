@@ -1,5 +1,5 @@
 // expect: TS2322 at 16
-// Without `errors`, a built-in name fails at the line of the `err` call of the body's second argument.
+// Without `errorCodes`, a built-in name fails at the line of the `err` call of the body's second argument.
 
 import { defineTask, type Horsies } from "../../../horsies/src/index.ts";
 import { h } from "../../../horsies/src/wire/public.ts";

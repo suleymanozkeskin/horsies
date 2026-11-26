@@ -75,8 +75,8 @@ export const addNumbers = defineTask({
   with no parameters has `input: {}` and stores `{}`.
 - `output` is the wire type of the value. A zod 4 schema is accepted in
   `input` and `output` too. See `tasks.md`, Wire Types and The zod Adapter.
-- `errors: ["CODE", ...]` declares the task's own codes. With it, a body can
-  return only these codes, and a read switches over them.
+- `errorCodes: ["CODE", ...]` declares the task's own codes. With it, a body
+  can return only these codes, and a read switches over them.
 
 ## Run the App
 
@@ -89,7 +89,7 @@ import { cli, Horsies } from "horsies";
 
 const created = Horsies.create({
   broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
-  workerProfiles: { default: { isolated: { count: 4 } } },
+  workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 4 } } },
   tasks: [addNumbers],
 });
 
@@ -197,8 +197,8 @@ export const dailyReport = defineWorkflow(
     checkCases: [{ region: "eu" }],
   },
   (w, { region }) => {
-    const fetched = w.task(fetchReport, { region }, { id: "fetch" });
-    const published = w.task(publishReport, { report: fetched }, { id: "publish" });
+    const fetched = w.task(fetchReport, { region }, { nodeId: "fetch" });
+    const published = w.task(publishReport, { report: fetched }, { nodeId: "publish" });
 
     return { output: published };
   },
@@ -208,7 +208,7 @@ export const dailyReport = defineWorkflow(
 - A parameter declared `h.taskOutcome(contract)` takes an upstream node of
   that contract. The node waits for it, and the body gets the upstream
   outcome, with the output type and the codes of the contract.
-- Every node has an `id`. A workflow with `params` declares `checkCases`.
+- Every node has a `nodeId`. A workflow with `params` declares `checkCases`.
 - List the workflow in `Horsies.create({ tasks, workflows })` and start it
   with `app.start(dailyReport, { region: "eu" })`. See `workflows.md`.
 

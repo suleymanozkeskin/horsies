@@ -5,7 +5,15 @@
 // (`src/main.ts`) with the same instance. The entry reads the instance from `HORSIES_TS_E2E_INSTANCE`; its children
 // inherit it.
 
-import type { AppConfigInput, BrokerConfigInput, CustomQueueInput, RecoveryConfigInput, WorkerProfileInput } from "../../../horsies/src/index.ts";
+import type {
+  AppConfigInput,
+  BrokerConfigInput,
+  CustomQueueInput,
+  RecoveryConfigInput,
+  SharedAsyncSetting,
+  SharedThreadSetting,
+  WorkerProfileInput,
+} from "../../../horsies/src/index.ts";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import type { Connection } from "./connection.ts";
 
@@ -284,36 +292,36 @@ function workerProfiles(instance: Instance): Readonly<Record<string, WorkerProfi
 /** The settings of `profile`. Every profile drains in `TEST_DRAIN_TIMEOUT_MS`. Pure. */
 export function workerProfile(profile: Profile): WorkerProfileInput {
   const drain = { drainTimeoutMs: TEST_DRAIN_TIMEOUT_MS };
-  const sharedAsync = { count: 1, seats: 4 };
+  const sharedAsync: SharedAsyncSetting = { kind: "sharedAsyncChildren", count: 1, seats: 4 };
 
   switch (profile) {
     case "isolated-1":
-      return { ...drain, isolated: { count: 1 } };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 1 } };
     case "isolated-2":
-      return { ...drain, isolated: { count: 2 } };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 2 } };
     case "isolated-4":
-      return { ...drain, isolated: { count: 4 } };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 4 } };
     case "isolated-8":
-      return { ...drain, isolated: { count: 8 } };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 8 } };
     case "claim-batch-1":
-      return { ...drain, isolated: { count: 1 }, claim: { perQueuePerPass: { kind: "tasks", tasks: 1 } } };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 1 }, claim: { perQueuePerPass: { kind: "tasks", tasks: 1 } } };
     case "recycle-after-2-tasks":
-      return { ...drain, isolated: { count: 2, recycle: { after: { kind: "tasks", tasks: 2 } } } };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 2, recycle: { after: { kind: "tasks", tasks: 2 } } } };
     case "shared-only-1x4":
       return { ...drain, sharedAsync };
     case "split-isolated-1-shared-1x4":
-      return { ...drain, isolated: { count: 1 }, sharedAsync };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 1 }, sharedAsync };
   }
 }
 
 function threadProfile(profile: ThreadProfile): WorkerProfileInput {
   const drain = { drainTimeoutMs: TEST_DRAIN_TIMEOUT_MS };
-  const sharedThread = { count: 1, seats: 4 };
+  const sharedThread: SharedThreadSetting = { kind: "sharedThreadChildren", count: 1, seats: 4 };
 
   switch (profile) {
     case "thread-only-1x4":
       return { ...drain, sharedThread };
     case "split-isolated-1-thread-1x4":
-      return { ...drain, isolated: { count: 1 }, sharedThread };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 1 }, sharedThread };
   }
 }

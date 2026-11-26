@@ -37,8 +37,7 @@ function refusalOf(okKind: Kind, text: string): DecodeRefused {
 function ruleOf(text: string): EnvelopeRule {
   const refusal = refusalOf(JSON_KIND, text);
 
-  assert.equal(refusal.kind, "EnvelopeRefused", show(refusal));
-  assert(refusal.kind === "EnvelopeRefused");
+  assert(refusal.kind === "envelopeRefused", show(refusal));
 
   return refusal.rule;
 }
@@ -169,14 +168,14 @@ describe("h.taskOutcome parameters", () => {
       "worker",
     );
 
-    assert(!refused.ok);
-    assert.deepEqual([refused.error.kind, refused.error.path], ["WrongType", "$.order.ok.id"]);
+    assert(!refused.ok && refused.error.kind === "decodeRefused");
+    assert.deepEqual([refused.error.refusal, refused.error.path], ["WrongType", "$.order.ok.id"]);
   });
 
   test("a sender never gives an upstream outcome: WrongType", () => {
     const written = encodeParameters(parameters, { order: { kind: "succeeded", value: { id: 1 } }, note: "x" });
 
     assert(!written.ok);
-    assert.deepEqual([written.error.kind, written.error.path], ["WrongType", "$.order"]);
+    assert.deepEqual([written.error.refusal, written.error.path], ["WrongType", "$.order"]);
   });
 });

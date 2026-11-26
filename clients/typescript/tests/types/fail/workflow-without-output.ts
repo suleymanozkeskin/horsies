@@ -9,7 +9,7 @@ const ping = defineTask({ name: "ping", input: {}, output: h.null() });
 
 export const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.null(), params: {} },
   (w) => {
-    const pinged = w.task(ping, {}, { id: "ping" });
+    const pinged = w.task(ping, {}, { nodeId: "ping" });
 
     return { successPolicy: { cases: [{ required: [pinged] }] } };
   },

@@ -3,7 +3,7 @@
 // A send: the contract is listed; sends are not suppressed; the options and the input pass their checks (the input
 // with a read-back); the core prepares the facts (task id, options text, retention, payload bound, the priority of the
 // queue in the accepted config); one enqueue with
-// `FIRST`, wrapped by the send observer; with `resendOnTransientErr`, a retryable `ENQUEUE_FAILED` is sent again with
+// `FIRST`, wrapped by the send observer; with `resendOnTransientError`, a retryable `ENQUEUE_FAILED` is sent again with
 // `REPEAT`, at most `RESEND_COUNT` times. Every refusal before the enqueue writes nothing.
 
 import type { CoreAccess } from "../app/core-access.ts";
@@ -53,7 +53,7 @@ export interface ContractLookup {
 /** What a send reads from its app. */
 export interface SendContext {
   readonly contracts: ContractLookup;
-  readonly resendOnTransientErr: boolean;
+  readonly resendOnTransientError: boolean;
   readonly core: CoreAccess;
   readonly observer: SendObserver;
   readonly suppression: SuppressionState;
@@ -290,7 +290,7 @@ async function sentHandle<O, E extends string>(
 }
 
 /**
- * One enqueue; with `resendOnTransientErr`, a retryable `ENQUEUE_FAILED` is sent again with `REPEAT` after
+ * One enqueue; with `resendOnTransientError`, a retryable `ENQUEUE_FAILED` is sent again with `REPEAT` after
  * `RESEND_FIRST_WAIT_MS`, doubled each time, at most `RESEND_LONGEST_WAIT_MS`, at most `RESEND_COUNT` times.
  */
 export async function enqueueWithResends(
@@ -301,7 +301,7 @@ export async function enqueueWithResends(
 ): Promise<Result<TaskId, SendFailure>> {
   let sent = await enqueueOnce(context, request, firstKind, trace);
 
-  for (let resend = 0; resend < RESEND_COUNT && context.resendOnTransientErr && isTransient(sent); resend += 1) {
+  for (let resend = 0; resend < RESEND_COUNT && context.resendOnTransientError && isTransient(sent); resend += 1) {
     await context.pause(Math.min(RESEND_FIRST_WAIT_MS * 2 ** resend, RESEND_LONGEST_WAIT_MS));
     sent = await enqueueOnce(context, request, "REPEAT", trace);
   }

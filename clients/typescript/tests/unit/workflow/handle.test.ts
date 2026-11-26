@@ -31,13 +31,13 @@ import {
 } from "./core-support.ts";
 import { passedSpec } from "./support.ts";
 
-const count = defineTask({ name: "count", input: {}, output: h.int(), errors: ["TOO_MANY"] });
+const count = defineTask({ name: "count", input: {}, output: h.int(), errorCodes: ["TOO_MANY"] });
 const name = defineTask({ name: "name", input: { n: h.taskOutcome(count) }, output: h.string() });
 
 const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.string(), params: {} }, (w) => {
-  const counted = w.task(count, {}, { id: "count" });
+  const counted = w.task(count, {}, { nodeId: "count" });
 
-  return { output: w.task(name, { n: counted }, { id: "name" }), successPolicy: { cases: [{ required: [counted] }] } };
+  return { output: w.task(name, { n: counted }, { nodeId: "name" }), successPolicy: { cases: [{ required: [counted] }] } };
 });
 
 const child = defineWorkflow(
@@ -47,7 +47,7 @@ const child = defineWorkflow(
       throw new RangeError("negative");
     }
 
-    return { output: w.task(count, {}, { id: n === 0 ? "bad id" : "count" }) };
+    return { output: w.task(count, {}, { nodeId: n === 0 ? "bad id" : "count" }) };
   },
 );
 
@@ -176,14 +176,14 @@ describe("the read form of a sub-workflow output", () => {
       (w) => {
         builds += 1;
 
-        return { output: w.task(count, {}, { id: "count" }) };
+        return { output: w.task(count, {}, { nodeId: "count" }) };
       },
     );
 
     const parent = defineWorkflow(
       { name: "parent", definitionKey: "tests.parent.v1", output: h.int(), params: {} },
       (w) => ({
-        output: w.subWorkflow(counted, { n: 2 }, { id: "child" }),
+        output: w.subWorkflow(counted, { n: 2 }, { nodeId: "child" }),
       }),
     );
 
@@ -227,7 +227,7 @@ describe("the read form of a sub-workflow output", () => {
 describe("a workflow that the app does not list", () => {
   const other = defineWorkflow(
     { name: "other", definitionKey: "tests.other.v1", output: h.int(), params: {} },
-    (w) => ({ output: w.task(count, {}, { id: "count" }) }),
+    (w) => ({ output: w.task(count, {}, { nodeId: "count" }) }),
   );
 
   test("get answers noTypeAvailable with the name at once: no wait, no read", async () => {
@@ -348,7 +348,7 @@ describe("WorkflowHandle.resultFor", () => {
   test("a sub-workflow node by id of a child that the app does not list: noTypeAvailable, no read", async () => {
     const other = defineWorkflow(
       { name: "other", definitionKey: "tests.other_child.v1", output: h.int(), params: {} },
-      (w) => ({ output: w.task(count, {}, { id: "count" }) }),
+      (w) => ({ output: w.task(count, {}, { nodeId: "count" }) }),
     );
 
     const { core, byId } = byIdReading(okEnvelope("8"));

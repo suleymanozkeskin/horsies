@@ -14,8 +14,8 @@ export const WINBACK_SEGMENT = "CHECK-SEGMENT";
 export const customerWinback = defineWorkflow(
   { name: "customer_winback", definitionKey: "acme.customer_winback.v1", params: {}, output: MarketingBlast },
   (w) => {
-    const sweep = w.task(abandonedCartSweep, { olderThanMinutes: ABANDONED_CART_AGE_MINUTES }, { id: "abandoned_cart_sweep" });
-    const blast = w.task(winbackBlast, { segment: WINBACK_SEGMENT, sweep }, { id: "winback_blast" });
+    const sweep = w.task(abandonedCartSweep, { olderThanMinutes: ABANDONED_CART_AGE_MINUTES }, { nodeId: "abandoned_cart_sweep" });
+    const blast = w.task(winbackBlast, { segment: WINBACK_SEGMENT, sweep }, { nodeId: "winback_blast" });
 
     return { output: blast };
   },

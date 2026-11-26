@@ -18,8 +18,8 @@ export const authorizePayment = defineTask({
   queue: QUEUE_PAYMENTS,
   input: { orderId: h.string(), amountCents: h.int() },
   output: PaymentAuthorization,
-  errors: ["ORDER_NOT_FOUND", "CARD_DECLINED", "PSP_UNAVAILABLE", "STORE_UNAVAILABLE"],
-  retry: PSP_RETRY,
+  errorCodes: ["ORDER_NOT_FOUND", "CARD_DECLINED", "PSP_UNAVAILABLE", "STORE_UNAVAILABLE"],
+  retryPolicy: PSP_RETRY,
 });
 
 /** Settle the hold that the authorization node gave. */
@@ -28,8 +28,8 @@ export const capturePayment = defineTask({
   queue: QUEUE_PAYMENTS,
   input: { orderId: h.string(), authorization: h.taskOutcome(authorizePayment) },
   output: PaymentCapture,
-  errors: ["UPSTREAM_FAILED", "PAYMENT_ALREADY_CAPTURED", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["UPSTREAM_FAILED", "PAYMENT_ALREADY_CAPTURED", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /**
@@ -44,8 +44,8 @@ export const refundPayment = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { orderId: z.string().min(1), amountCents: z.int().positive(), disputedAt: hz.instant() },
   output: PaymentRefund,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Compare the authorizations and the captures of one reconciliation window. */
@@ -56,8 +56,8 @@ export const reconcilePayments = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { window: h.string() },
   output: ReconciliationReport,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 export const PAYMENT_TASKS = [authorizePayment, capturePayment, refundPayment, reconcilePayments] as const;

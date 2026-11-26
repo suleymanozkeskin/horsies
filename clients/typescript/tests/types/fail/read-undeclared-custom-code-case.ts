@@ -3,7 +3,7 @@
 
 import { defineTask, h, type Horsies, type TaskId } from "../../../horsies/src/index.ts";
 
-const validateOrder = defineTask({ name: "v", input: {}, output: h.null(), errors: ["EMPTY_ORDER"] });
+const validateOrder = defineTask({ name: "v", input: {}, output: h.null(), errorCodes: ["EMPTY_ORDER"] });
 
 export async function codeOf(app: Horsies, taskId: TaskId): Promise<string> {
   const read = await app.taskHandle(validateOrder, taskId).get();

@@ -2,7 +2,8 @@
 // the package adds its members in one block here.
 
 import { implementationOf, type BodyFor, type Implementation, type ImplementOptions } from "./contract/implementation.ts";
-import type { AnyTaskContract, ContextUse, ExecutionClass, TaskContract } from "./contract/define-task.ts";
+import type { Execution } from "./_catalog/monitoring_models.ts";
+import type { AnyTaskContract, ContextUse, TaskContract } from "./contract/define-task.ts";
 import type { TaskId, WorkflowId } from "./contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue, SendableInput } from "./contract/schema.ts";
 import { readFormOf, type TaskHandle, taskHandleOf } from "./read/handle.ts";
@@ -92,14 +93,14 @@ export class Horsies {
     P extends ParameterSchemas,
     O extends OutputSchema,
     E extends string,
-    X extends ExecutionClass,
+    X extends Execution,
     C extends ContextUse,
   >(
     contract: TaskContract<P, O, E, X, C>,
     body: NoInfer<BodyFor<P, O, E, X, C>>,
     options: ImplementOptions<NoInfer<E>> = {},
   ): Implementation<P, O, E, X, C> {
-    const implementation = implementationOf(contract, body, options.exceptions ?? []);
+    const implementation = implementationOf(contract, body, options.exceptionMapper ?? []);
 
     registerImplementation(this.#context, implementation);
 
@@ -162,7 +163,7 @@ export class Horsies {
   }
 
   /** Send a task: its handle, or the send error. A delay is the only start option. */
-  async send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(
+  async send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(
     contract: TaskContract<P, O, E, X>,
     input: NoInfer<SendableInput<P>>,
     options: SendOptions = {},
@@ -206,7 +207,7 @@ export class Horsies {
   }
 
   /** A typed handle of a stored task id, with no I/O. The contract gives the types only; the app need not list it. */
-  taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(
+  taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(
     contract: TaskContract<P, O, E, X>,
     taskId: TaskId,
   ): TaskHandle<SchemaValue<O>, E> {

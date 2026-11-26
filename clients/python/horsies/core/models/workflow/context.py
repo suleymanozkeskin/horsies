@@ -202,7 +202,7 @@ class WorkflowContext(BaseModel):
     Context passed to workflow tasks with type-safe access to dependency results.
 
     Only injected if:
-    1. TaskNode has workflow_ctx_from set, AND
+    1. TaskNode has workflow_context_from set, AND
     2. Task function declares `workflow_ctx: WorkflowContext | None` parameter
 
     Use result_for(node) to access results in a type-safe manner.
@@ -529,7 +529,7 @@ class WorkflowContext(BaseModel):
 
         Args:
             node: The TaskNode, SubWorkflowNode, or NodeKey whose result to
-                  retrieve. Must have been included in workflow_ctx_from and
+                  retrieve. Must have been included in workflow_context_from and
                   have a node_id assigned.
 
         Returns:
@@ -556,7 +556,7 @@ class WorkflowContext(BaseModel):
         if node_id not in self._results_by_id:
             raise KeyError(
                 f"TaskNode id '{node_id}' not in workflow context. "
-                'Ensure the node is included in workflow_ctx_from.'
+                'Ensure the node is included in workflow_context_from.'
             )
 
         # Cast is safe because the generic parameter ensures type correctness
@@ -588,7 +588,7 @@ class WorkflowContext(BaseModel):
 
         Args:
             node: The SubWorkflowNode whose summary to retrieve. Must have been
-                  included in workflow_ctx_from and have a node_id assigned.
+                  included in workflow_context_from and have a node_id assigned.
 
         Returns:
             A fresh ``SubWorkflowSummary[OkT]`` with the typed ``output``.
@@ -610,7 +610,7 @@ class WorkflowContext(BaseModel):
         if node_id not in self._summaries_by_id:
             raise KeyError(
                 f"SubWorkflowNode id '{node_id}' not in workflow context summaries. "
-                'Ensure the node is included in workflow_ctx_from.'
+                'Ensure the node is included in workflow_context_from.'
             )
 
         raw_summary = self._summaries_by_id[node_id]

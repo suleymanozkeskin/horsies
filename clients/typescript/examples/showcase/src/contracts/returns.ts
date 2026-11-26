@@ -14,8 +14,8 @@ export const receiveReturn = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { returnId: h.string(), orderId: h.string(), sku: h.string(), quantity: h.int() },
   output: ReturnReceipt,
-  errors: ["STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Inspect the returned item. A drawn damage is `DAMAGED_ITEM`. */
@@ -24,8 +24,8 @@ export const inspectItem = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { returnId: h.string() },
   output: Inspection,
-  errors: ["RETURN_NOT_FOUND", "DAMAGED_ITEM", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["RETURN_NOT_FOUND", "DAMAGED_ITEM", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Put a resellable item back on the shelf, or write a damaged one off. */
@@ -34,8 +34,8 @@ export const restockOrWriteoff = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { returnId: h.string(), inspection: h.taskOutcome(inspectItem) },
   output: RestockDecision,
-  errors: ["RETURN_NOT_FOUND", "UNKNOWN_SKU", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["RETURN_NOT_FOUND", "UNKNOWN_SKU", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 export const RETURN_TASKS = [receiveReturn, inspectItem, restockOrWriteoff] as const;

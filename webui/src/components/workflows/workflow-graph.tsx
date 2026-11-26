@@ -101,7 +101,7 @@ export function graphNodeFacts(node: WorkflowNode, runStatus: string): string[] 
   if (node.node_id !== null && node.node_id !== node.task_name) {
     facts.push(`Task: ${node.task_name}.`);
   }
-  if (node.allow_failed_deps) {
+  if (node.allow_failed_dependencies) {
     facts.push('Tolerant join (dashed border): the node runs even when a dependency failed.');
   }
   const rollup = childRollupBadge(node.child_total, node.child_failed);
@@ -216,7 +216,7 @@ export function WorkflowGraph({
         taskName: node.task_name,
         status: node.node_status,
         isSubworkflow: node.is_subworkflow,
-        allowFailedDeps: node.allow_failed_deps,
+        allowFailedDependencies: node.allow_failed_dependencies,
         execS: node.exec_s,
         drillable: drillableId(node) !== null,
         childTotal: node.child_total,
@@ -275,7 +275,7 @@ export function WorkflowGraph({
         longest: longestNodeTime(detail.nodes, readClock.asOfMs),
         marks: [
           ...(chainEdges.size > 0 ? (['chain_edge'] as const) : []),
-          ...(detail.nodes.some(node => node.allow_failed_deps) ? (['tolerant_join'] as const) : []),
+          ...(detail.nodes.some(node => node.allow_failed_dependencies) ? (['tolerant_join'] as const) : []),
         ],
       } satisfies RunMetrics,
       matchIndices: matches,

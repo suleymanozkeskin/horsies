@@ -199,7 +199,7 @@ export interface WorkflowsAddon {
     workflowId: string,
     sentAtMicros: bigint,
     trace: TraceArgument,
-    resendOnTransientErr: boolean,
+    resendOnTransientError: boolean,
   ): Promise<NativeEnvelope<WorkflowStartOutcome>>;
   workflowStatus(handle: NativeCoreHandle, workflowId: string): Promise<NativeEnvelope<WorkflowStatusRead>>;
   workflowNodeResults(handle: NativeCoreHandle, workflowId: string): Promise<NativeEnvelope<NodeResultsRead>>;

@@ -23,15 +23,15 @@ const hello = defineWorkflow(
     params: { who: h.string() },
     checkCases: [{ who: "a" }],
   },
-  (w, { who }) => ({ output: w.task(greet, { who }, { id: "greet" }) }),
+  (w, { who }) => ({ output: w.task(greet, { who }, { nodeId: "greet" }) }),
 );
 
 const broken = defineWorkflow(
   { name: "broken", definitionKey: "tests.broken.v1", output: h.string(), params: {} },
   (w) => {
-    w.task(greet, { who: "a" }, { id: "same" });
+    w.task(greet, { who: "a" }, { nodeId: "same" });
 
-    return { output: w.task(greet, { who: "b" }, { id: "same" }) };
+    return { output: w.task(greet, { who: "b" }, { nodeId: "same" }) };
   },
 );
 

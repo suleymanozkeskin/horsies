@@ -165,7 +165,7 @@ describe("codecRuns", () => {
     const halving = z.codec(z.int(), z.number(), { decode: (stored) => stored / 2, encode: (value) => value });
     const written = encodeWithReadBack(acceptedKind(halving), 4);
 
-    assert.equal(written.ok ? "" : written.error.kind, "ReadBackChanged");
+    assert.equal(written.ok ? "" : written.error.kind, "readBackChanged");
   });
 });
 

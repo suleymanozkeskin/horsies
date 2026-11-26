@@ -38,15 +38,15 @@ export const fenceSharedThread = defineTask({
 });
 
 /** Two reads of the token in the body, then a read in work that the body started with `runtime.spawn`. */
-export const fenceReadsTwice = defineTask({ name: "e2e_fence_reads_twice", input: {}, output: h.array(fence), errors: FENCE_CODES });
+export const fenceReadsTwice = defineTask({ name: "e2e_fence_reads_twice", input: {}, output: h.array(fence), errorCodes: FENCE_CODES });
 
 /** The first run for `marker` fails with `TRANSIENT`; its retry returns its token and the counted run. */
 export const fenceRetry = defineTask({
   name: "e2e_fence_retry",
   input: { marker: h.string() },
   output: h.object({ fence, countedRun: h.int() }),
-  errors: FENCE_CODES,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  errorCodes: FENCE_CODES,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TRANSIENT"] },
 });
 
 /** Every contract of this module. */

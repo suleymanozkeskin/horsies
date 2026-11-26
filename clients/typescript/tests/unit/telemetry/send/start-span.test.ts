@@ -206,7 +206,7 @@ const greet = defineTask({ name: "greet", input: { who: h.string() }, output: h.
 
 const hello = defineWorkflow(
   { name: "hello", definitionKey: "tests.hello.v1", output: h.string(), params: { who: h.string() }, checkCases: [{ who: "a" }] },
-  (w, { who }) => ({ output: w.task(greet, { who }, { id: "greet" }) }),
+  (w, { who }) => ({ output: w.task(greet, { who }, { nodeId: "greet" }) }),
 );
 
 /** The app of `hello` on `core`, with the tracing `tracing`. A refused create fails the test. */

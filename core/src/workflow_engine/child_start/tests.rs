@@ -74,10 +74,10 @@ fn child_spec() -> WorkflowSpec {
             input_json: "{}".to_owned(),
             dependencies: Vec::new(),
             args_from: HashMap::new(),
-            workflow_ctx_from: None,
+            workflow_context_from: None,
             queue: Some("default".to_owned()),
             priority: Some(100),
-            allow_failed_deps: false,
+            allow_failed_dependencies: false,
             join: JoinType::All,
             min_success: None,
             good_until: None,
@@ -102,10 +102,10 @@ fn sub_workflow_node(index: usize, name: &str, definition_key: &str) -> AnyNode 
         input_json: "{}".to_owned(),
         dependencies: Vec::new(),
         args_from: HashMap::new(),
-        workflow_ctx_from: None,
+        workflow_context_from: None,
         queue: None,
         priority: None,
-        allow_failed_deps: false,
+        allow_failed_dependencies: false,
         join: JoinType::All,
         min_success: None,
         good_until: None,
@@ -995,7 +995,7 @@ async fn a_start_with_a_failed_root_commits_the_child_its_progression_owes() {
     let unloadable = sub_workflow_node(0, "child_start_missing", "tests.child_start.missing.v1");
     let mut dependent = sub_workflow_node(1, CHILD_NAME, CHILD_KEY);
     dependent.dependencies = vec![0];
-    dependent.allow_failed_deps = true;
+    dependent.allow_failed_dependencies = true;
     let spec = WorkflowSpec {
         name: "child_start_failed_root".to_owned(),
         definition_key: Some("tests.child_start.failed_root.v1".to_owned()),

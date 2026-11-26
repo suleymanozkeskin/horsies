@@ -9,7 +9,6 @@ export {
   type CustomCode,
   type CustomFailure,
   defineTask,
-  type ExecutionClass,
   type ExecutionRules,
   type ReservedCode,
   type ResultConstructors,

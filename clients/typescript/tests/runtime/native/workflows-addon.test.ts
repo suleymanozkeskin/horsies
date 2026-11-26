@@ -119,7 +119,7 @@ function conversionFactsOf(
 ): ReturnType<typeof addonConversionFacts> {
   const handle = buildCoreHandle(manifestJson(UNUSED_DATABASE_URL, false), "PRODUCER");
 
-  return addonConversionFacts({ handle, rules, options: new Map(), queueNames, resendOnTransientErr: false });
+  return addonConversionFacts({ handle, rules, options: new Map(), queueNames, resendOnTransientError: false });
 }
 
 describe("the conversion facts of a main thread, from the core", () => {

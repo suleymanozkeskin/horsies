@@ -76,7 +76,7 @@ function harness(parts: HarnessParts = {}): Harness {
 
   const context: SendContext = {
     contracts: contractLookup(list.entries),
-    resendOnTransientErr: parts.resend ?? false,
+    resendOnTransientError: parts.resend ?? false,
     core: { kind: "addon", producer, handle: fakeCoreHandle() },
     observer: parts.observer ?? NO_OP_OBSERVER,
     suppression: new SuppressionState(parts.suppression ?? { kind: "open" }, () => undefined),

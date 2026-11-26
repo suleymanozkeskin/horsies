@@ -22,7 +22,7 @@ const charge = defineTask({
   name: "charge",
   input: { amount: h.int() },
   output: h.null(),
-  errors: ["CARD_DECLINED", "BANK_DOWN"],
+  errorCodes: ["CARD_DECLINED", "BANK_DOWN"],
   execution: "SHARED_ASYNC",
   timeoutMs: 5_000,
   cancelGraceMs: 1_000,
@@ -34,7 +34,7 @@ const produce = defineTask({ name: "produce", input: {}, output: h.int() });
 /** A task that takes the workflow context. */
 const audit = defineTask({ name: "audit", input: {}, output: h.int(), workflowContext: true });
 
-/** The stored form of the context of a node whose `ctxFrom` names the node `produce`, which returned 10. */
+/** The stored form of the context of a node whose `workflowContextFrom` names the node `produce`, which returned 10. */
 const STORED_CONTEXT: StoredWorkflowContext = {
   workflow_id: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5d",
   task_index: 1,
@@ -149,7 +149,7 @@ describe("implementation.run", () => {
       async () => {
         throw new CardDeclined("declined by the bank");
       },
-      { exceptions: [[CardDeclined, "CARD_DECLINED"]] },
+      { exceptionMapper: [[CardDeclined, "CARD_DECLINED"]] },
     );
 
     const outcome = await implementation.run({ amount: 5 }, runtime());

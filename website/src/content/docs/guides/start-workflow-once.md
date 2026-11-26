@@ -112,7 +112,7 @@ The core computes the start command from the spec. No client computes it. The ro
 The start command holds:
 
 - The workflow: name, `definition_key`, `on_error`, the output node, the success policy.
-- Each node of the top-level workflow, in index order: index, `node_id`, task name, kwargs (as the client encoded them, byte for byte), queue, priority, dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join rule, `min_success`, task options (with `good_until` merged in), retention class, whether the node is a sub-workflow node, its sub-workflow `definition_key`, and whether it gives params.
+- Each node of the top-level workflow, in index order: index, `node_id`, task name, kwargs (as the client encoded them, byte for byte), queue, priority, dependencies, `args_from`, `workflow_context_from`, `allow_failed_dependencies`, join rule, `min_success`, task options (with `good_until` merged in), retention class, whether the node is a sub-workflow node, its sub-workflow `definition_key`, and whether it gives params.
 
 The start command does not hold:
 

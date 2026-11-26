@@ -81,7 +81,8 @@ export interface SharedPoolInput {
 }
 
 /** `count` isolated children: each runs one task at a time in its own process. */
-export interface IsolatedChildrenInput {
+export interface IsolatedChildren {
+  readonly kind: "isolatedChildren";
   readonly count: number;
   readonly recycle?: IsolatedRecycleInput;
   readonly pool?: IsolatedPoolInput;
@@ -89,11 +90,20 @@ export interface IsolatedChildrenInput {
   readonly taskSendPool?: PoolSize;
 }
 
+/** The profile starts no isolated children. */
+export interface NoIsolatedChildren {
+  readonly kind: "noIsolatedChildren";
+}
+
+/** The isolated children of a profile. */
+export type IsolatedSetting = IsolatedChildren | NoIsolatedChildren;
+
 /**
  * `count` shared async children of `seats` seats each, on one event loop per child. The type has no `executor` field:
  * the task code of a child runs on its event loop, and the core sizes the other threads of the child from the seats.
  */
-export interface SharedAsyncChildrenInput {
+export interface SharedAsyncChildren {
+  readonly kind: "sharedAsyncChildren";
   readonly count: number;
   readonly seats: number;
   readonly recycle?: SharedRecycleInput;
@@ -101,19 +111,36 @@ export interface SharedAsyncChildrenInput {
   readonly taskSendPool?: PoolSize;
 }
 
+/** The profile starts no shared async children. */
+export interface NoSharedAsyncChildren {
+  readonly kind: "noSharedAsyncChildren";
+}
+
+/** The shared async children of a profile. */
+export type SharedAsyncSetting = SharedAsyncChildren | NoSharedAsyncChildren;
+
 /**
  * `count` shared thread children of `seats` seats each, one worker thread per seat. Node only: a worker on another
  * runtime refuses the profile at its start. The JavaScript heap of each seat has the heap limit of its child's main
  * isolate (`--max-old-space-size` on the worker command sets it), and a seat at that limit ends alone with its run.
  * The limit does not cover `ArrayBuffer` and `Buffer` memory: that memory of every seat counts toward the whole child.
  */
-export interface SharedThreadChildrenInput {
+export interface SharedThreadChildren {
+  readonly kind: "sharedThreadChildren";
   readonly count: number;
   readonly seats: number;
   readonly recycle?: SharedRecycleInput;
   readonly pool?: SharedPoolInput;
   readonly taskSendPool?: PoolSize;
 }
+
+/** The profile starts no shared thread children. */
+export interface NoSharedThreadChildren {
+  readonly kind: "noSharedThreadChildren";
+}
+
+/** The shared thread children of a profile. */
+export type SharedThreadSetting = SharedThreadChildren | NoSharedThreadChildren;
 
 /** Limits on the tasks that the worker claims. */
 export interface ClaimLimitsInput {
@@ -131,11 +158,14 @@ export interface ParentPoolInput {
 /** Where the worker process runs: on the CPUs it inherits, or on one physical core of its own (Linux only). */
 export type ParentCpu = "shared" | "ownCore";
 
-/** The settings of one worker. A class that the profile leaves out has no children. */
+/**
+ * The settings of one worker. A class that the profile leaves out has no children: the same as its `no...Children`
+ * setting (`{ kind: "noIsolatedChildren" }`).
+ */
 export interface WorkerProfileInput {
-  readonly isolated?: IsolatedChildrenInput;
-  readonly sharedAsync?: SharedAsyncChildrenInput;
-  readonly sharedThread?: SharedThreadChildrenInput;
+  readonly isolated?: IsolatedSetting;
+  readonly sharedAsync?: SharedAsyncSetting;
+  readonly sharedThread?: SharedThreadSetting;
   readonly pool?: ParentPoolInput;
   readonly claim?: ClaimLimitsInput;
   /** How long a stopping worker waits for running tasks, in milliseconds. */
@@ -179,14 +209,12 @@ export function workerProfilesJson(
 
 function profileJson(profile: WorkerProfileInput, path: string): Checked<ConfigJson> {
   return checkedObject([
-    optionalEntry("isolated", profile.isolated, (children) =>
-      isolatedJson(children, memberPath(path, "isolated")),
+    optionalEntry("isolated", profile.isolated, (setting) => isolatedJson(setting, memberPath(path, "isolated"))),
+    optionalEntry("shared_async", profile.sharedAsync, (setting) =>
+      sharedAsyncJson(setting, memberPath(path, "sharedAsync")),
     ),
-    optionalEntry("shared_async", profile.sharedAsync, (children) =>
-      sharedAsyncJson(children, memberPath(path, "sharedAsync")),
-    ),
-    optionalEntry("shared_thread", profile.sharedThread, (children) =>
-      sharedThreadJson(children, memberPath(path, "sharedThread")),
+    optionalEntry("shared_thread", profile.sharedThread, (setting) =>
+      sharedThreadJson(setting, memberPath(path, "sharedThread")),
     ),
     optionalEntry("pool", profile.pool, (pool) =>
       checkedObject([
@@ -201,7 +229,18 @@ function profileJson(profile: WorkerProfileInput, path: string): Checked<ConfigJ
   ]);
 }
 
-function isolatedJson(children: IsolatedChildrenInput, path: string): Checked<ConfigJson> {
+function isolatedJson(setting: IsolatedSetting, path: string): Checked<ConfigJson> {
+  switch (setting.kind) {
+    case "isolatedChildren":
+      return isolatedChildrenJson(setting, path);
+    case "noIsolatedChildren":
+      return accepted({ kind: "no_isolated_children" });
+    default:
+      return unreachable(setting, "isolatedJson");
+  }
+}
+
+function isolatedChildrenJson(children: IsolatedChildren, path: string): Checked<ConfigJson> {
   return checkedObject([
     accepted([["kind", "isolated_children"]]),
     entry("count", checkedInteger(children.count, ISOLATED_CHILDREN, memberPath(path, "count"))),
@@ -226,7 +265,18 @@ function isolatedJson(children: IsolatedChildrenInput, path: string): Checked<Co
   ]);
 }
 
-function sharedAsyncJson(children: SharedAsyncChildrenInput, path: string): Checked<ConfigJson> {
+function sharedAsyncJson(setting: SharedAsyncSetting, path: string): Checked<ConfigJson> {
+  switch (setting.kind) {
+    case "sharedAsyncChildren":
+      return sharedAsyncChildrenJson(setting, path);
+    case "noSharedAsyncChildren":
+      return accepted({ kind: "no_shared_async_children" });
+    default:
+      return unreachable(setting, "sharedAsyncJson");
+  }
+}
+
+function sharedAsyncChildrenJson(children: SharedAsyncChildren, path: string): Checked<ConfigJson> {
   return checkedObject([
     accepted([["kind", "shared_async_children"]]),
     entry("count", checkedInteger(children.count, SHARED_ASYNC_CHILDREN, memberPath(path, "count"))),
@@ -239,7 +289,18 @@ function sharedAsyncJson(children: SharedAsyncChildrenInput, path: string): Chec
   ]);
 }
 
-function sharedThreadJson(children: SharedThreadChildrenInput, path: string): Checked<ConfigJson> {
+function sharedThreadJson(setting: SharedThreadSetting, path: string): Checked<ConfigJson> {
+  switch (setting.kind) {
+    case "sharedThreadChildren":
+      return sharedThreadChildrenJson(setting, path);
+    case "noSharedThreadChildren":
+      return accepted({ kind: "no_shared_thread_children" });
+    default:
+      return unreachable(setting, "sharedThreadJson");
+  }
+}
+
+function sharedThreadChildrenJson(children: SharedThreadChildren, path: string): Checked<ConfigJson> {
   return checkedObject([
     accepted([["kind", "shared_thread_children"]]),
     entry("count", checkedInteger(children.count, SHARED_THREAD_CHILDREN, memberPath(path, "count"))),

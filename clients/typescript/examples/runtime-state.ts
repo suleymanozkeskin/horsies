@@ -30,7 +30,7 @@ const welcome = defineTask({
   name: "welcome",
   input: { user: h.string() },
   output: h.string(),
-  errors: ["AUDIT_NOT_SENT"],
+  errorCodes: ["AUDIT_NOT_SENT"],
 });
 
 const audit = defineTask({ name: "audit", input: { entry: h.string() }, output: h.int() });

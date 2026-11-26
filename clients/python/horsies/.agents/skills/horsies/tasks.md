@@ -379,11 +379,11 @@ async def retry_schedule_async(error: TaskSendRetryable) -> TaskSendResult[TaskH
 def node(
     *,
     waits_for: Sequence[TaskNode | SubWorkflowNode] | None = None,
-    workflow_ctx_from: Sequence[TaskNode | SubWorkflowNode] | None = None,
+    workflow_context_from: Sequence[TaskNode | SubWorkflowNode] | None = None,
     args_from: dict[str, TaskNode | SubWorkflowNode] | None = None,
     queue: str | None = None,
     priority: int | None = None,
-    allow_failed_deps: bool = False,
+    allow_failed_dependencies: bool = False,
     join: Literal['all', 'any', 'quorum'] = 'all',
     min_success: int | None = None,
     good_until: datetime | None = None,

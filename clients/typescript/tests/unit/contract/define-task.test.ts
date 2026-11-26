@@ -56,11 +56,11 @@ describe("defineTask", () => {
         queue: "billing",
         input: { order: z.object({ id: z.int() }) },
         output: h.null(),
-        errors: ["PROVIDER_DOWN"],
+        errorCodes: ["PROVIDER_DOWN"],
         execution: "SHARED_ASYNC",
         timeoutMs: 30_000,
         cancelGraceMs: 2_000,
-        retry: { kind: "exponential", baseSeconds: 30, maxRetries: 5, autoRetryFor: ["PROVIDER_DOWN"] },
+        retryPolicy: { kind: "exponential", baseSeconds: 30, maxRetries: 5, autoRetryFor: ["PROVIDER_DOWN"] },
       }),
     );
 

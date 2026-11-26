@@ -10,7 +10,7 @@
 
 import { isMainThread } from "node:worker_threads";
 
-import { type AppConfig, type AppConfigInput, parseAppConfig, resendOnTransientErr } from "../config/app-config.ts";
+import { type AppConfig, type AppConfigInput, parseAppConfig, resendOnTransientError } from "../config/app-config.ts";
 import { queueSetupOf } from "../config/queues.ts";
 import type { EnvironmentRead } from "../config/secret.ts";
 import type { AnyTaskContract } from "../contract/define-task.ts";
@@ -147,7 +147,7 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
   const onMainThread: WorkflowsOnMainThread = {
     registry: workflows.registry,
     queues,
-    resendOnTransientErr: resendOnTransientErr(parsed.value),
+    resendOnTransientError: resendOnTransientError(parsed.value),
   };
 
   const core: CoreAccess = { kind: "addon", ...environment.addonCore(accepted.value, options.options, onMainThread) };
@@ -207,7 +207,7 @@ function contextOf(
     suppression,
     send: {
       contracts: contractLookupOf(listed),
-      resendOnTransientErr: resendOnTransientErr(config),
+      resendOnTransientError: resendOnTransientError(config),
       core,
       observer: tracing.sendObserver,
       suppression,
@@ -228,7 +228,7 @@ function contextOf(
 export type WorkflowsOnMainThread = {
   readonly registry: WorkflowRegistry;
   readonly queues: QueueSetup;
-  readonly resendOnTransientErr: boolean;
+  readonly resendOnTransientError: boolean;
 };
 
 /**
@@ -255,7 +255,7 @@ function addonCoreOf(
         rules: accepted.rules,
         options,
         queueNames: admittedQueueNames(workflows.queues),
-        resendOnTransientErr: workflows.resendOnTransientErr,
+        resendOnTransientError: workflows.resendOnTransientError,
       },
       workflows.registry,
     ),

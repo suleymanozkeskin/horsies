@@ -102,7 +102,7 @@ export const refuse = defineTask({
   name: "parity.refuse",
   input: { value: h.int() },
   output: h.int(),
-  errors: ["REFUSED"],
+  errorCodes: ["REFUSED"],
 });
 
 /**
@@ -113,8 +113,8 @@ export const transient = defineTask({
   name: "parity.transient",
   input: { value: h.int() },
   output: h.int(),
-  errors: ["TRANSIENT"],
-  retry: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
+  errorCodes: ["TRANSIENT"],
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
 });
 
 /** An isolated task that the parent kills at its deadline. */
@@ -130,7 +130,7 @@ export const double = defineTask({
   name: "parity.double",
   input: { upstream: h.taskOutcome(add) },
   output: h.int(),
-  errors: ["UPSTREAM_FAILED"],
+  errorCodes: ["UPSTREAM_FAILED"],
 });
 
 // ---- Shared async ----
@@ -147,7 +147,7 @@ export const refuseAsync = defineTask({
   name: "parity.refuse_async",
   input: { value: h.int() },
   output: h.int(),
-  errors: ["REFUSED"],
+  errorCodes: ["REFUSED"],
   execution: "SHARED_ASYNC",
   timeoutMs: SHARED_TIMEOUT_MS,
 });
@@ -156,10 +156,10 @@ export const transientAsync = defineTask({
   name: "parity.transient_async",
   input: { value: h.int() },
   output: h.int(),
-  errors: ["TRANSIENT"],
+  errorCodes: ["TRANSIENT"],
   execution: "SHARED_ASYNC",
   timeoutMs: SHARED_TIMEOUT_MS,
-  retry: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
 });
 
 /**
@@ -188,7 +188,7 @@ export const refuseThread = defineTask({
   name: "parity.refuse_thread",
   input: { value: h.int() },
   output: h.int(),
-  errors: ["REFUSED"],
+  errorCodes: ["REFUSED"],
   execution: "SHARED_THREAD",
   timeoutMs: SHARED_TIMEOUT_MS,
 });
@@ -197,10 +197,10 @@ export const transientThread = defineTask({
   name: "parity.transient_thread",
   input: { value: h.int() },
   output: h.int(),
-  errors: ["TRANSIENT"],
+  errorCodes: ["TRANSIENT"],
   execution: "SHARED_THREAD",
   timeoutMs: SHARED_TIMEOUT_MS,
-  retry: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
 });
 
 /** A thread seat that cannot stop at its deadline: the child is killed when no run of it has time left. */
@@ -218,25 +218,25 @@ export const threadPastDeadline = defineTask({
 export const parityChain = defineWorkflow(
   { name: CHAIN_NAME, definitionKey: CHAIN_DEFINITION_KEY, params: {}, output: h.int(), onError: "fail" },
   (w) => {
-    const added = w.task(add, { a: 2, b: 3 }, { id: "add" });
+    const added = w.task(add, { a: 2, b: 3 }, { nodeId: "add" });
 
-    return { output: w.task(double, { upstream: added }, { id: "double" }) };
+    return { output: w.task(double, { upstream: added }, { nodeId: "double" }) };
   },
 );
 
 /** The child of `parity_parent`: one node, its output (Python `ParityChild`). */
 export const parityChild = defineWorkflow(
   { name: CHILD_NAME, definitionKey: CHILD_DEFINITION_KEY, params: {}, output: h.int(), onError: "fail" },
-  (w) => ({ output: w.task(add, { a: 2, b: 3 }, { id: "add" }) }),
+  (w) => ({ output: w.task(add, { a: 2, b: 3 }, { nodeId: "add" }) }),
 );
 
 /** A sub-workflow node of `parity_child`, then a node that takes the child's output (Python `parity_parent`). */
 export const parityParent = defineWorkflow(
   { name: PARENT_NAME, definitionKey: PARENT_DEFINITION_KEY, params: {}, output: h.int(), onError: "fail" },
   (w) => {
-    const child = w.subWorkflow(parityChild, {}, { id: "child" });
+    const child = w.subWorkflow(parityChild, {}, { nodeId: "child" });
 
-    return { output: w.task(double, { upstream: child }, { id: "double" }) };
+    return { output: w.task(double, { upstream: child }, { nodeId: "double" }) };
   },
 );
 
@@ -264,9 +264,9 @@ export const WORKFLOWS = [parityChain, parityChild, parityParent] as const;
 
 /** The worker profiles. A class that a profile leaves out has no children. */
 export const PROFILES: { readonly [Name in ProfileName]: WorkerProfileInput } = {
-  [ISOLATED]: { isolated: { count: 1 }, drainTimeoutMs: DRAIN_TIMEOUT_MS },
-  [SHARED_ASYNC]: { sharedAsync: { count: 1, seats: SHARED_SEATS }, drainTimeoutMs: DRAIN_TIMEOUT_MS },
-  [SHARED_THREAD]: { sharedThread: { count: 1, seats: SHARED_SEATS }, drainTimeoutMs: DRAIN_TIMEOUT_MS },
+  [ISOLATED]: { isolated: { kind: "isolatedChildren", count: 1 }, drainTimeoutMs: DRAIN_TIMEOUT_MS },
+  [SHARED_ASYNC]: { sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: SHARED_SEATS }, drainTimeoutMs: DRAIN_TIMEOUT_MS },
+  [SHARED_THREAD]: { sharedThread: { kind: "sharedThreadChildren", count: 1, seats: SHARED_SEATS }, drainTimeoutMs: DRAIN_TIMEOUT_MS },
 };
 
 /** The schedule `parity_slots`: each slot sends `parity.add` with 2 and 3 (Python `TaskSchedule` of `app.py`). */

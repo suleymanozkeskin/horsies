@@ -19,40 +19,42 @@ export type NodePlan<J extends Join> = {
 
 /** The options of a node of `NodePlan`. */
 export type PlannedOptions<Id extends string, J extends Join> = {
-  readonly id: Id;
+  readonly nodeId: Id;
   readonly waitsFor?: readonly AnyNode[];
   readonly join?: J;
-  readonly allowFailedDeps?: boolean;
+  readonly allowFailedDependencies?: boolean;
   readonly goodUntil?: Temporal.Instant;
   readonly queue?: string;
 };
 
 /** The options of a node with context sources: a task with `workflowContext: true`. */
-export type ContextOptions<Id extends string, J extends Join> = PlannedOptions<Id, J> & { readonly ctxFrom: readonly AnyNode[] };
+export type ContextOptions<Id extends string, J extends Join> = PlannedOptions<Id, J> & {
+  readonly workflowContextFrom: readonly AnyNode[];
+};
 
 /**
- * The options of the node `id` that `plan` describes. The join type comes from `plan` only (`NoInfer`): a call inside
+ * The options of the node `nodeId` that `plan` describes. The join type comes from `plan` only (`NoInfer`): a call inside
  * `w.task(...)` takes no join type from the option type that `w.task` expects. Pure.
  */
 export function node<const Id extends string, const J extends Join = DefaultJoin>(
-  id: Id,
+  nodeId: Id,
   plan: NodePlan<J> = {},
 ): PlannedOptions<Id, NoInfer<J>> {
   return {
-    id,
+    nodeId,
     ...(plan.after === undefined ? {} : { waitsFor: plan.after }),
     ...(plan.join === undefined ? {} : { join: plan.join }),
-    ...(plan.runsAfterFailure === undefined ? {} : { allowFailedDeps: true }),
+    ...(plan.runsAfterFailure === undefined ? {} : { allowFailedDependencies: true }),
     ...(plan.deadline === undefined ? {} : { goodUntil: plan.deadline }),
     ...(plan.queue === undefined ? {} : { queue: plan.queue }),
   };
 }
 
-/** The options of the node `id` whose workflow context holds the results of `sources`. Pure. */
+/** The options of the node `nodeId` whose workflow context holds the results of `sources`. Pure. */
 export function contextNode<const Id extends string, const J extends Join = DefaultJoin>(
-  id: Id,
+  nodeId: Id,
   sources: readonly AnyNode[],
   plan: NodePlan<J> = {},
 ): ContextOptions<Id, NoInfer<J>> {
-  return { ...node(id, plan), ctxFrom: sources };
+  return { ...node(nodeId, plan), workflowContextFrom: sources };
 }

@@ -1,9 +1,9 @@
 // The nodes of a workflow build: the node reference that `w.task` and `w.subWorkflow` give, the node options, the
 // input of a node (a value or an upstream node per parameter), and the object that a build returns.
 //
-// A node reference is a frozen `{ kind: "node", id }`. Its build and its place in the build are kept out of its public
-// members, so a reference of another build is a check finding, not a type error (one TypeScript type serves every
-// build).
+// A node reference is a frozen `{ kind: "node", nodeId }`. Its build and its place in the build are kept out of its
+// public members, so a reference of another build is a check finding, not a type error (one TypeScript type serves
+// every build).
 
 import type { ContextUse } from "../contract/define-task.ts";
 import type { IsUpstreamOutcome, ParameterSchemas } from "../contract/schema.ts";
@@ -21,7 +21,7 @@ export type NodeTypes<O, E extends string> = { readonly output: O; readonly code
 export interface NodeRef<O, E extends string, Id extends string> {
   readonly kind: "node";
   /** The node id: the key of the node in the stored workflow and in `resultFor`. */
-  readonly id: Id;
+  readonly nodeId: Id;
   readonly [nodeTypes]: NodeTypes<O, E>;
 }
 
@@ -86,16 +86,16 @@ export type NodeInput<P extends ParameterSchemas, J extends Join> = keyof P exte
 /** The options of every node. */
 export interface NodeOptionsBase<Id extends string, J extends Join> {
   /** The node id: `[A-Za-z0-9_\-:.]+`, at most 128 characters, unique in the build. */
-  readonly id: Id;
+  readonly nodeId: Id;
   /** Nodes of this build that this node waits for, besides the sources of its parameters. */
   readonly waitsFor?: readonly AnyNode[];
   /** When the node runs. Left out: `{ kind: "all" }`. */
   readonly join?: J;
   /** Run the node when a dependency failed (its parameter gets the failure). Left out: the node is `SKIPPED`. */
-  readonly allowFailedDeps?: boolean;
+  readonly allowFailedDependencies?: boolean;
 }
 
-/** The options of a task node. `ctxFrom` exists only for a task that takes the workflow context. */
+/** The options of a task node. `workflowContextFrom` exists only for a task that takes the workflow context. */
 export type TaskNodeOptions<Id extends string, J extends Join, C extends ContextUse> = NodeOptionsBase<Id, J> & {
   /** A queue that the app admits. Left out: the task's queue. */
   readonly queue?: string;
@@ -106,9 +106,9 @@ export type TaskNodeOptions<Id extends string, J extends Join, C extends Context
 } & ([C] extends ["takesContext"]
     ? {
         /** Nodes of `waitsFor` whose results the task's workflow context holds. */
-        readonly ctxFrom?: readonly AnyNode[];
+        readonly workflowContextFrom?: readonly AnyNode[];
       }
-    : { readonly ctxFrom?: never });
+    : { readonly workflowContextFrom?: never });
 
 /** The options of a sub-workflow node. */
 export type SubWorkflowNodeOptions<Id extends string, J extends Join> = NodeOptionsBase<Id, J>;

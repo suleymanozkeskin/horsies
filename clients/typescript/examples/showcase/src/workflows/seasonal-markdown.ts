@@ -20,14 +20,14 @@ export const seasonalMarkdown = defineWorkflow(
       w.task(
         updatePrice,
         { sku: `ACME-SKU-${String(index + 1).padStart(4, "0")}`, campaignId: MARKDOWN_CAMPAIGN_ID },
-        { id: `update_price_${String(index).padStart(2, "0")}` },
+        { nodeId: `update_price_${String(index).padStart(2, "0")}` },
       ),
     );
 
     const rollup = w.task(
       salesRollup,
       { window: `markdown-${MARKDOWN_CAMPAIGN_ID}` },
-      { id: "sales_rollup", waitsFor: markdowns },
+      { nodeId: "sales_rollup", waitsFor: markdowns },
     );
 
     return { output: rollup };

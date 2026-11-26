@@ -658,8 +658,8 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
     let pool = shared_pool().await;
     let child_specs = subworkflow_children();
     let mut post = after(task_node(1, "summary_fail_post"), &[0]);
-    post.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
-    post.allow_failed_deps = true;
+    post.workflow_context_from = Some(vec!["node_0".to_owned()]);
+    post.allow_failed_dependencies = true;
     let parent_id = start(
         &pool,
         &spec(

@@ -90,7 +90,7 @@ async def test_quorum_ctx_gating(broker: PostgresBroker) -> None:
         ready_check=_make_ready_check(),
     ):
         # spec_quorum_ctx_gating: A(100ms), B(150ms), C(300ms) -> D
-        # D has join=quorum, min_success=2, workflow_ctx_from=[C]
+        # D has join=quorum, min_success=2, workflow_context_from=[C]
         # A and B complete first (satisfying quorum), but D must wait for C
         handle = await start_ok_in_thread(wf_tasks.spec_quorum_ctx_gating)
 
@@ -813,14 +813,14 @@ async def test_workflow_recovers_after_worker_crash(
     DAG: A(50ms) -> B(50ms) -> C(60s) -> E(50ms, recovery queue) -> F(50ms, recovery queue)
                             -> D(60s) -/
 
-    E has allow_failed_deps=True so it runs after C,D are marked FAILED.
+    E has allow_failed_dependencies=True so it runs after C,D are marked FAILED.
     E and F are on "recovery" queue (max_concurrency=1) — sequential execution.
 
     Kill worker after A,B complete and C,D are RUNNING.
     Restart worker. Recovery chain:
         reaper marks C,D FAILED (WORKER_CRASHED)
         -> recover_stuck_workflows resolves wt mismatch
-        -> E runs (allow_failed_deps=True) on recovery queue
+        -> E runs (allow_failed_dependencies=True) on recovery queue
         -> F runs after E on recovery queue
         -> workflow finalizes as FAILED (C,D failed despite E,F succeeding)
     """
@@ -925,7 +925,7 @@ async def test_workflow_recovers_after_worker_crash(
         f"D should be FAILED, got {db_tasks[3]['status']}"
     )
 
-    # E: COMPLETED — ran after recovery (allow_failed_deps=True, recovery queue)
+    # E: COMPLETED — ran after recovery (allow_failed_dependencies=True, recovery queue)
     assert db_tasks[4]['status'] == 'COMPLETED', (
         f"E should be COMPLETED, got {db_tasks[4]['status']}"
     )

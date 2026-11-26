@@ -339,7 +339,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
         node_status: "PENDING".to_owned(),
         is_subworkflow: false,
         sub_workflow_id: None,
-        allow_failed_deps: false,
+        allow_failed_dependencies: false,
         started_at: None,
         completed_at: None,
         exec_s: None,
@@ -627,7 +627,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
                 "node_status",
                 "is_subworkflow",
                 "sub_workflow_id",
-                "allow_failed_deps",
+                "allow_failed_dependencies",
                 "started_at",
                 "completed_at",
                 "exec_s",
@@ -1563,6 +1563,47 @@ async fn every_filter_dimension_and_duration_rule_crosses_both_lifecycle_sides()
             .map(|facet| facet.count),
         Some(2)
     );
+
+    clean_w2(&pool, &scope).await;
+}
+
+/// A node row stores the column `allow_failed_deps`. The run read gives it as
+/// `WorkflowNodeInfo::allow_failed_dependencies`, and the response has the key
+/// `allow_failed_dependencies` and not the stored name.
+#[tokio::test]
+async fn the_stored_allow_failed_deps_column_reads_as_allow_failed_dependencies() {
+    let pool = migrated_pool().await;
+    let scope = TestScope::new("tolerant");
+    clean_w2(&pool, &scope).await;
+    let broker = PostgresBroker::from_test_url(pool.url(), crate::ClientFamily::Rust);
+    let workflow_id = Uuid::new_v4();
+    seed_workflow(&pool, workflow_id, &scope.workflow("tolerant"), "RUNNING").await;
+    seed_node(&pool, &scope, workflow_id, 0, "COMPLETED", &[], None, None).await;
+    seed_node(&pool, &scope, workflow_id, 1, "FAILED", &[0], None, None).await;
+    sql::query(
+        "UPDATE horsies_workflow_tasks SET allow_failed_deps = TRUE
+         WHERE workflow_id = $1 AND task_index = 1",
+    )
+    .bind(workflow_id)
+    .execute(&pool)
+    .await
+    .expect("set the stored allow_failed_deps column");
+
+    let detail = get_workflow_run(&broker, workflow_id)
+        .await
+        .expect("the workflow detail")
+        .expect("the seeded workflow");
+    assert_eq!(
+        detail
+            .nodes
+            .iter()
+            .map(|node| (node.task_index, node.allow_failed_dependencies))
+            .collect::<Vec<_>>(),
+        vec![(0, false), (1, true)]
+    );
+    let encoded = serde_json::to_value(&detail.nodes[1]).expect("serialize the node");
+    assert_eq!(encoded["allow_failed_dependencies"], json!(true));
+    assert!(encoded.get("allow_failed_deps").is_none());
 
     clean_w2(&pool, &scope).await;
 }

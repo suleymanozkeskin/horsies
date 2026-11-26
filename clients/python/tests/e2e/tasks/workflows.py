@@ -589,7 +589,7 @@ node_ctx_b = TaskNode(
     fn=ctx_reader_task,
     node_id='e2e_wf_ctx_reader',
     waits_for=[node_ctx_a],
-    workflow_ctx_from=[node_ctx_a],
+    workflow_context_from=[node_ctx_a],
 )
 
 spec_ctx_single = _workflow(
@@ -608,7 +608,7 @@ node_ctx_multi_c = TaskNode(
     fn=ctx_sum_task,
     node_id='e2e_wf_ctx_sum',
     waits_for=[node_ctx_multi_a, node_ctx_multi_b],
-    workflow_ctx_from=[node_ctx_multi_a, node_ctx_multi_b],
+    workflow_context_from=[node_ctx_multi_a, node_ctx_multi_b],
 )
 
 spec_ctx_multi = _workflow(
@@ -618,7 +618,7 @@ spec_ctx_multi = _workflow(
 
 
 # =============================================================================
-# L5.5: FAILED propagation (A fails → B with allow_failed_deps)
+# L5.5: FAILED propagation (A fails → B with allow_failed_dependencies)
 # =============================================================================
 
 node_failed_a = TaskNode(fn=fail_with_task, kwargs={"error_code": 'DELIBERATE_FAIL'})
@@ -627,7 +627,7 @@ node_failed_b = TaskNode(
     node_id='e2e_wf_check_upstream_skipped',
     waits_for=[node_failed_a],
     args_from={'input_result': node_failed_a},
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
 )
 
 spec_failed_propagation = _workflow(
@@ -649,14 +649,14 @@ node_skipped_a = TaskNode(fn=fail_with_task, kwargs={"error_code": 'CAUSE_SKIP'}
 node_skipped_b = TaskNode(
     fn=passthrough_task, kwargs={"value": 999},
     waits_for=[node_skipped_a],
-    # allow_failed_deps=False (default) means B will be SKIPPED when A fails
+    # allow_failed_dependencies=False (default) means B will be SKIPPED when A fails
 )
 node_skipped_c = TaskNode(
     fn=check_upstream_skipped_task,
     node_id='e2e_wf_check_upstream_skipped',
     waits_for=[node_skipped_b],
     args_from={'input_result': node_skipped_b},
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
 )
 
 spec_skipped_propagation = _workflow(
@@ -680,7 +680,7 @@ node_join_ctx_c = TaskNode(
     fn=ctx_reader_str_task,  # Use string reader since slow_step_task returns strings
     node_id='e2e_wf_ctx_reader_str',
     waits_for=[node_join_ctx_a, node_join_ctx_b],
-    workflow_ctx_from=[node_join_ctx_b],  # C needs B's result
+    workflow_context_from=[node_join_ctx_b],  # C needs B's result
     join='any',
 )
 
@@ -710,7 +710,7 @@ node_mixed_d = TaskNode(
     node_id='e2e_wf_mixed_reader',
     waits_for=[node_mixed_b, node_mixed_c],
     args_from={'from_args': node_mixed_b},
-    workflow_ctx_from=[node_mixed_c],
+    workflow_context_from=[node_mixed_c],
 )
 
 spec_mixed_dataflow = _workflow(
@@ -751,7 +751,7 @@ node_fail_np_b = TaskNode(
     fn=double_task,
     waits_for=[node_fail_np_a],
     args_from={'input_result': node_fail_np_a},
-    # allow_failed_deps=False (default): B should be SKIPPED
+    # allow_failed_dependencies=False (default): B should be SKIPPED
 )
 
 spec_args_from_fail_workflow = _workflow(
@@ -788,7 +788,7 @@ node_dual_b = TaskNode(
     node_id='e2e_wf_dual_reader',
     waits_for=[node_dual_a],
     args_from={'from_args': node_dual_a},
-    workflow_ctx_from=[node_dual_a],
+    workflow_context_from=[node_dual_a],
 )
 
 spec_dual_injection = _workflow(
@@ -884,7 +884,7 @@ node_quorum_c = TaskNode(fn=slow_mark_task, kwargs={"value": 'C', 'delay_ms': 30
 node_quorum_d = TaskNode(
     fn=ctx_reader_str_task,  # Use string-aware ctx reader
     waits_for=[node_quorum_a, node_quorum_b, node_quorum_c],
-    workflow_ctx_from=[node_quorum_c],  # D needs C's result for ctx
+    workflow_context_from=[node_quorum_c],  # D needs C's result for ctx
     join='quorum',
     min_success=2,
 )
@@ -1499,7 +1499,7 @@ node_e2e_sub_success_ctx_probe = TaskNode(
     fn=e2e_sub_probe_success_ctx_task,
     node_id='e2e_sub_success_ctx_probe',
     waits_for=[node_e2e_sub_success_ctx_child],
-    workflow_ctx_from=[node_e2e_sub_success_ctx_child],
+    workflow_context_from=[node_e2e_sub_success_ctx_child],
 )
 spec_subworkflow_success_ctx_probe = _workflow(
     name='e2e_subworkflow_success_ctx_probe',
@@ -1517,8 +1517,8 @@ node_e2e_sub_failure_probe = TaskNode(
     node_id='e2e_sub_failure_probe',
     waits_for=[node_e2e_sub_failure_probe_child],
     args_from={'child_result': node_e2e_sub_failure_probe_child},
-    workflow_ctx_from=[node_e2e_sub_failure_probe_child],
-    allow_failed_deps=True,
+    workflow_context_from=[node_e2e_sub_failure_probe_child],
+    allow_failed_dependencies=True,
 )
 spec_subworkflow_failure_args_ctx_probe = _workflow(
     name='e2e_subworkflow_failure_args_ctx_probe',
@@ -1618,10 +1618,10 @@ node_e2e_sub_failed_input_child = SubWorkflowNode(
     node_id='e2e_sub_failed_input_child',
     waits_for=[node_e2e_sub_failed_input_source],
     args_from={'value': node_e2e_sub_failed_input_source},
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
 )
-spec_subworkflow_allow_failed_deps_to_build_with = _workflow(
-    name='e2e_subworkflow_allow_failed_deps_to_build_with',
+spec_subworkflow_allow_failed_dependencies_to_build_with = _workflow(
+    name='e2e_subworkflow_allow_failed_dependencies_to_build_with',
     tasks=[node_e2e_sub_failed_input_source, node_e2e_sub_failed_input_child],
     output=node_e2e_sub_failed_input_child,
     success_policy=SuccessPolicy(

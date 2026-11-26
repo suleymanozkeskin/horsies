@@ -1,5 +1,6 @@
 // The info of a task: its status, times, failed reason and every attempt, newest first. The result is read by `get`.
 
+import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { TaskAttemptOutcome, TaskStatus } from "../_catalog/status.ts";
 import type {
   ExecutionRecord,
@@ -9,14 +10,13 @@ import type {
   TaskAttemptRecord,
   TaskInfoRecord,
 } from "../native/sends/addon.ts";
-import type { ExecutionClass } from "../contract/define-task.ts";
 import { type TaskId, taskIdFromCore } from "../contract/ids.ts";
 
 /** A fact that a task row may not hold. */
 export type Recorded<T> = { readonly kind: "recorded"; readonly value: T } | { readonly kind: "notRecorded" };
 
 /** How a worker runs the task: the class of a live task; a task read from history does not keep it. */
-export type ExecutionFact = { readonly kind: "class"; readonly execution: ExecutionClass } | { readonly kind: "notKeptInHistory" };
+export type ExecutionFact = { readonly kind: "class"; readonly execution: Execution } | { readonly kind: "notKeptInHistory" };
 
 /** One attempt of a task. */
 export interface TaskAttempt {

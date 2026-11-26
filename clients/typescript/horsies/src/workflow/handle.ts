@@ -16,7 +16,8 @@ import { readTree } from "../codec/number-text.ts";
 import { decodeEnvelope } from "../codec/reader.ts";
 import { refusalText } from "../codec/refusal.ts";
 import { readSubWorkflow } from "../codec/sub-workflow.ts";
-import type { ExecutionClass, TaskContract, ContextUse } from "../contract/define-task.ts";
+import type { Execution } from "../_catalog/monitoring_models.ts";
+import type { TaskContract, ContextUse } from "../contract/define-task.ts";
 import type { WorkflowId } from "../contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
 import type { CheckedText, StoredNodeRecord, StoredTextFact, WorkflowWaitRead } from "../native/workflows/addon.ts";
@@ -82,11 +83,11 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
   cancel(): Promise<Result<void, WorkflowHandleError>>;
 }
 
-/** The handle of a started workflow: `resultFor` takes the id of a node of the returned object. */
+/** The handle of a started workflow: `resultFor` takes the node id of a node of the returned object. */
 export interface WorkflowHandle<R extends BuildReturn> extends WorkflowHandleBase<R> {
   /** The outcome of one node, typed by its contract. Not a wait. */
-  resultFor<const Id extends ReturnedNodes<R>["id"]>(
-    id: Id,
+  resultFor<const Id extends ReturnedNodes<R>["nodeId"]>(
+    nodeId: Id,
   ): Promise<
     Result<
       TaskOutcome<NodeOutput<NodeById<ReturnedNodes<R>, Id>>, NodeCode<NodeById<ReturnedNodes<R>, Id>>>,
@@ -101,20 +102,23 @@ export interface WorkflowHandle<R extends BuildReturn> extends WorkflowHandleBas
  * lists the child, else `noTypeAvailable`).
  */
 export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandleBase<R> {
-  /** The outcome of the task node `id`, read with the output type and the codes of `contract`. Not a wait. */
+  /** The outcome of the task node `nodeId`, read with the output type and the codes of `contract`. Not a wait. */
   resultFor<
     P extends ParameterSchemas,
     O extends OutputSchema,
     E extends string,
-    X extends ExecutionClass,
+    X extends Execution,
     C extends ContextUse,
   >(
-    id: string,
+    nodeId: string,
     contract: TaskContract<P, O, E, X, C>,
   ): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
-  /** The outcome of the sub-workflow node `id`, read with the declared output of `workflow`, its child. Not a wait. */
+  /**
+   * The outcome of the sub-workflow node `nodeId`, read with the declared output of `workflow`, its child. Not a
+   * wait.
+   */
   resultFor<P extends ParameterSchemas, C extends BuildReturn>(
-    id: string,
+    nodeId: string,
     workflow: WorkflowContract<P, C>,
   ): Promise<Result<TaskOutcome<WorkflowOutput<C>, string>, WorkflowReadError>>;
 }
@@ -139,12 +143,12 @@ export function workflowHandleOf<R extends BuildReturn>(facts: HandleFacts): Wor
 
   return Object.freeze({
     ...base,
-    resultFor: async (id: string) => {
-      const target = facts.targets.get(id);
+    resultFor: async (nodeId: string) => {
+      const target = facts.targets.get(nodeId);
 
       // SAFETY: the reader decodes with the node's contract: its output type and its codes are the node's types.
       return (
-        target === undefined ? err(resultNotReady()) : targetOutcome(facts, id, target)
+        target === undefined ? err(resultNotReady()) : targetOutcome(facts, nodeId, target)
       ) as never;
     },
   });
@@ -154,9 +158,9 @@ export function workflowHandleOf<R extends BuildReturn>(facts: HandleFacts): Wor
 export function workflowHandleByIdOf<R extends BuildReturn>(facts: HandleFacts): WorkflowHandleById<R> {
   return Object.freeze({
     ...handleBase<R>(facts),
-    resultFor: async (id: string, contract: object) =>
+    resultFor: async (nodeId: string, contract: object) =>
       // SAFETY: the reader decodes with what `contract` declares: its output type and its codes are the result's types.
-      (await targetOutcome(facts, id, targetOf(contract))) as never,
+      (await targetOutcome(facts, nodeId, targetOf(contract))) as never,
   });
 }
 

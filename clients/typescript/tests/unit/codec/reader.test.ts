@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { type DecodeForm, decodeParameters, decodeValue } from "../../../horsies/src/codec/reader.ts";
-import type { DecodeRefused } from "../../../horsies/src/codec/refusal.ts";
+import type { ValueRefused } from "../../../horsies/src/codec/refusal.ts";
 import { decodeWire } from "../../../horsies/src/codec/typed.ts";
 import { isPlainObject } from "../../../horsies/src/codec/values.ts";
 import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
@@ -16,7 +16,7 @@ import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 function read(wire: AnyWire, text: string, form: DecodeForm = "worker"): unknown {
   const result = decodeValue(kindOf(wire), jsonTextCheckedByCore(text), form);
 
-  assert(result.ok, result.ok ? "" : `refused ${result.error.kind} at ${result.error.path}`);
+  assert(result.ok, result.ok ? "" : `refused ${JSON.stringify(result.error)}`);
 
   return result.value;
 }
@@ -29,11 +29,11 @@ function readObject(wire: AnyWire, text: string, form: DecodeForm = "worker"): R
   return value;
 }
 
-function refused(wire: AnyWire, text: string): DecodeRefused {
+function refused(wire: AnyWire, text: string): ValueRefused {
   const result = decodeValue(kindOf(wire), jsonTextCheckedByCore(text), "worker");
 
   assert(!result.ok, "decoded a refused text");
-  assert.equal(result.error.side, "decode");
+  assert(result.error.kind === "decodeRefused", `a value refusal: ${JSON.stringify(result.error)}`);
 
   return result.error;
 }
@@ -142,19 +142,19 @@ describe("reader: containers", () => {
 
 describe("reader: each refusal", () => {
   test("WrongType: a stored value of another JSON type", () => {
-    assert.equal(refused(h.null(), "0").kind, "WrongType");
-    assert.equal(refused(h.boolean(), '"true"').kind, "WrongType");
-    assert.equal(refused(h.string(), "1").kind, "WrongType");
-    assert.equal(refused(h.int(), '"7"').kind, "WrongType");
-    assert.equal(refused(h.bigint(), "[]").kind, "WrongType");
-    assert.equal(refused(h.float(), "null").kind, "WrongType");
-    assert.equal(refused(h.object({}), "[]").kind, "WrongType");
-    assert.equal(refused(h.array(h.int()), "{}").kind, "WrongType");
-    assert.equal(refused(h.record(h.int()), "[]").kind, "WrongType");
+    assert.equal(refused(h.null(), "0").refusal, "WrongType");
+    assert.equal(refused(h.boolean(), '"true"').refusal, "WrongType");
+    assert.equal(refused(h.string(), "1").refusal, "WrongType");
+    assert.equal(refused(h.int(), '"7"').refusal, "WrongType");
+    assert.equal(refused(h.bigint(), "[]").refusal, "WrongType");
+    assert.equal(refused(h.float(), "null").refusal, "WrongType");
+    assert.equal(refused(h.object({}), "[]").refusal, "WrongType");
+    assert.equal(refused(h.array(h.int()), "{}").refusal, "WrongType");
+    assert.equal(refused(h.record(h.int()), "[]").refusal, "WrongType");
   });
 
   test("WrongType: an integer text outside the finite float range under h.float()", () => {
-    assert.equal(refused(h.float(), "1".repeat(400)).kind, "WrongType");
+    assert.equal(refused(h.float(), "1".repeat(400)).refusal, "WrongType");
   });
 
   test("WrongType: a tuple of another length", () => {
@@ -163,37 +163,37 @@ describe("reader: each refusal", () => {
 
   test("FloatForInteger: 7.0, 0.5 and 1e+16 under h.int() and h.bigint()", () => {
     for (const wire of [h.int(), h.bigint()]) {
-      assert.equal(refused(wire, "7.0").kind, "FloatForInteger");
-      assert.equal(refused(wire, "0.5").kind, "FloatForInteger");
-      assert.equal(refused(wire, "1e+16").kind, "FloatForInteger");
+      assert.equal(refused(wire, "7.0").refusal, "FloatForInteger");
+      assert.equal(refused(wire, "0.5").refusal, "FloatForInteger");
+      assert.equal(refused(wire, "1e+16").refusal, "FloatForInteger");
     }
   });
 
   test("IntegerOutOfRange: an integer text outside the safe range under h.int()", () => {
-    assert.equal(refused(h.int(), "9007199254740992").kind, "IntegerOutOfRange");
+    assert.equal(refused(h.int(), "9007199254740992").refusal, "IntegerOutOfRange");
   });
 
   test("UnknownMember: an undeclared key at every depth; the key is not in the path", () => {
     const nested = refused(h.object({ inner: h.object({ a: h.int() }) }), '{"inner":{"a":1,"secret":2}}');
 
-    assert.deepEqual([nested.kind, nested.path], ["UnknownMember", "$.inner.<input>"]);
+    assert.deepEqual([nested.refusal, nested.path], ["UnknownMember", "$.inner.<input>"]);
   });
 
   test("MissingMember: a required member, and a member with no default", () => {
     const error = refused(h.object({ a: h.int(), b: h.int().optional() }), "{}");
 
-    assert.deepEqual([error.kind, error.path], ["MissingMember", "$.a"]);
+    assert.deepEqual([error.refusal, error.path], ["MissingMember", "$.a"]);
   });
 
   test("EngineKey: a stored record key that only the engine writes", () => {
     const error = refused(h.record(h.boolean()), '{"__h_task_result__":true}');
 
-    assert.deepEqual([error.kind, error.path], ["EngineKey", "$.<input>"]);
+    assert.deepEqual([error.refusal, error.path], ["EngineKey", "$.<input>"]);
   });
 
   test(`TooDeep: more than ${MAX_VALUE_JSON_DEPTH} levels`, () => {
     const levels = MAX_VALUE_JSON_DEPTH + 1;
 
-    assert.equal(refused(nestedArrays(levels), nestedText(levels)).kind, "TooDeep");
+    assert.equal(refused(nestedArrays(levels), nestedText(levels)).refusal, "TooDeep");
   });
 });

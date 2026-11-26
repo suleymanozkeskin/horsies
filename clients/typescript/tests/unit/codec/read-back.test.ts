@@ -47,29 +47,30 @@ describe("read-back", () => {
   test("an encode refusal stays the writer's refusal", () => {
     const written = encodeWithReadBack(kindOf(h.float()), Number.NaN);
 
-    assert(!written.ok);
-    assert.equal(written.error.kind, "NonFiniteFloat");
+    assert(!written.ok && written.error.kind === "encodeRefused");
+    assert.equal(written.error.refusal, "NonFiniteFloat");
   });
 
   test("ReadBackRefused: the worker form refuses what the sender wrote (a check after a conversion)", () => {
     const kind = checkedKind(intConversion((stored) => stored * 10), atMost(100));
     const written = encodeWithReadBack(kind, 50);
 
-    assert(!written.ok && written.error.kind === "ReadBackRefused");
-    assert.equal(written.error.cause.kind, "CheckFailed");
+    assert(!written.ok && written.error.kind === "readBackRefused");
+    assert(written.error.cause.kind === "decodeRefused");
+    assert.equal(written.error.cause.refusal, "CheckFailed");
   });
 
   test("ReadBackChanged: a conversion whose encode and decode do not invert", () => {
     const written = encodeWithReadBack(intConversion((stored) => stored + 1), 5);
 
-    assert(!written.ok && written.error.kind === "ReadBackChanged");
+    assert(!written.ok && written.error.kind === "readBackChanged");
     assert.equal(written.error.detail, "the read value writes another text; first difference at offset 0");
   });
 
   test("ReadBackChanged: the read value does not write again", () => {
     const written = encodeWithReadBack(intConversion(() => "five"), 5);
 
-    assert(!written.ok && written.error.kind === "ReadBackChanged");
+    assert(!written.ok && written.error.kind === "readBackChanged");
     assert.match(written.error.detail, /does not write again/);
   });
 });
@@ -89,7 +90,7 @@ describe("conversions and checks", () => {
 
     assert(!written.ok);
     assert.deepEqual(
-      [written.error.kind, written.error.detail],
+      [written.error.refusal, written.error.detail],
       ["CheckFailed", "the check refused the value: $ too_big"],
     );
   });
@@ -101,9 +102,9 @@ describe("conversions and checks", () => {
     for (const form of ["worker", "stored"] as const) {
       const read = decodeValue(refusing, text, form);
 
-      assert(!read.ok);
+      assert(!read.ok && read.error.kind === "decodeRefused");
       assert.deepEqual(
-        [read.error.kind, read.error.detail],
+        [read.error.refusal, read.error.detail],
         ["CheckFailed", "the conversion refused the stored value: $ invalid_type"],
       );
     }
@@ -113,7 +114,7 @@ describe("conversions and checks", () => {
     const written = encodeValue(intConversion((stored) => stored), "7");
 
     assert(!written.ok);
-    assert.equal(written.error.kind, "CheckFailed");
+    assert.equal(written.error.refusal, "CheckFailed");
   });
 
   test("a check runs after a decode in the worker form only", () => {
@@ -121,8 +122,8 @@ describe("conversions and checks", () => {
     const text = jsonTextCheckedByCore("11");
     const worker = decodeValue(kind, text, "worker");
 
-    assert(!worker.ok);
-    assert.equal(worker.error.kind, "CheckFailed");
+    assert(!worker.ok && worker.error.kind === "decodeRefused");
+    assert.equal(worker.error.refusal, "CheckFailed");
     assert.deepEqual(decodeValue(kind, text, "stored"), { ok: true, value: 11 });
   });
 

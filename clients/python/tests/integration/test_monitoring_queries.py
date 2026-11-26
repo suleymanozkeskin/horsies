@@ -326,7 +326,7 @@ def make_node(
     task_id: str | None = None,
     is_subworkflow: bool = False,
     sub_workflow_id: str | None = None,
-    allow_failed_deps: bool = False,
+    allow_failed_dependencies: bool = False,
     result: str | None = None,
     started_at: datetime | None = None,
     completed_at: datetime | None = None,
@@ -343,7 +343,7 @@ def make_node(
         task_name=task_name,
         status=status,
         dependencies=tuple(dependencies) if dependencies is not None else (),
-        allow_failed_deps=allow_failed_deps,
+        allow_failed_dependencies=allow_failed_dependencies,
         kind=(
             SubworkflowNode(sub_workflow_id=sub_workflow_id)
             if is_subworkflow
