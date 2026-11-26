@@ -67,6 +67,10 @@ from horsies.core.declared_error_codes import (
     CodeTextRefused,
     RepeatedCodeRefused,
     ReservedNameRefused,
+    RetryEntryNotAMember,
+    RetryEntryRefusal,
+    RetryMemberNotDeclared,
+    check_retry_codes,
     parse_declared_error_codes,
     with_mapper_codes,
 )
@@ -390,6 +394,87 @@ def _declared_code_error(
         location=location,
         notes=[f"task '{task_label}'"],
         help_text=help_text,
+    )
+
+
+_RETRY_CODES_HELP: Final = (
+    'pass code members: a built-in code, for example '
+    'OperationalErrorCode.WORKER_CRASHED, or a member of the Enum class that '
+    'the task declares with error_codes='
+)
+"""The help of a refused `auto_retry_for` entry."""
+
+
+def _retry_codes_or_raise(
+    policy: RetryPolicy,
+    code_enum: type[Enum] | None,
+    *,
+    task_name: str,
+    location: SourceLocation | None,
+) -> None:
+    """Refuse each `auto_retry_for` entry of `policy` that is not a code
+    member of the task (`check_retry_codes`). `code_enum` is the `Enum`
+    class of the task's `error_codes=`, or None for a tuple or no
+    declaration.
+
+    Raises:
+        TaskDefinitionError: `TASK_INVALID_OPTIONS`, one per refused entry,
+            several in a `MultipleValidationErrors` (`raise_collected`).
+            Nothing is registered.
+    """
+    match check_retry_codes(policy.auto_retry_for, code_enum):
+        case Ok():
+            return
+        case Err(refused):
+            pass
+    report = ValidationReport('task definition')
+    for refusal in refused.refusals:
+        report.add(
+            _retry_entry_error(
+                refusal,
+                code_enum,
+                task_name=task_name,
+                location=location,
+            ),
+        )
+    raise_collected(report)
+    raise AssertionError(
+        f"task '{task_name}': a refused auto_retry_for has no refusal",
+    )
+
+
+def _retry_entry_error(
+    refusal: RetryEntryRefusal,
+    code_enum: type[Enum] | None,
+    *,
+    task_name: str,
+    location: SourceLocation | None,
+) -> TaskDefinitionError:
+    """The definition error of one refused `auto_retry_for` entry: the task,
+    the entry and the code class that the task declares. Pure."""
+    match refusal:
+        case RetryEntryNotAMember(index=index, entry=entry, given=given):
+            message = f'auto_retry_for[{index}] is not a code member'
+            entry_note = f'auto_retry_for[{index}]={entry} is a {given}, not a code member'
+        case RetryMemberNotDeclared(index=index, member=member):
+            message = f'auto_retry_for[{index}] is not a code of the task'
+            entry_note = (
+                f'auto_retry_for[{index}]={member} is neither a built-in code '
+                'nor a member of the declared Enum class'
+            )
+        case _ as unreachable:
+            assert_never(unreachable)
+    match code_enum:
+        case None:
+            declared_note = 'the task declares no Enum class with error_codes='
+        case declared:
+            declared_note = f'the task declares error_codes={declared.__name__}'
+    return TaskDefinitionError(
+        message=message,
+        code=ErrorCode.TASK_INVALID_OPTIONS,
+        location=location,
+        notes=[f"task '{task_name}'", entry_note, declared_note],
+        help_text=_RETRY_CODES_HELP,
     )
 
 
@@ -931,6 +1016,11 @@ class Horsies:
         declaration (`with_mapper_codes`); the app's mapper is read when the
         task is defined.
 
+        Each `auto_retry_for` entry of `retry_policy` is a code member: a
+        member of a built-in code enum, or a member of the `Enum` class of
+        `error_codes=` (`check_retry_codes`). A plain `str`, or a member of
+        another `Enum` class, is `TASK_INVALID_OPTIONS`.
+
         Raises:
             TaskDefinitionError: empty task name, invalid options, mapper,
                 or error code; or an execution declaration that breaks a
@@ -1080,6 +1170,19 @@ class Horsies:
                     notes=[f"task '{fn.__name__}'", exception_text(e)],
                     help_text='check task decorator arguments',
                 )
+
+            # The retry codes are checked against the codes of the task, which
+            # only the decorator knows.
+            match task_options.retry_policy:
+                case None:
+                    pass
+                case retry_policy:
+                    _retry_codes_or_raise(
+                        retry_policy,
+                        code_enum,
+                        task_name=task_name,
+                        location=fn_location,
+                    )
 
             # VALIDATION AT DEFINITION TIME
             # Validate queue_name against app configuration

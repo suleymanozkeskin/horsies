@@ -200,14 +200,22 @@ def partial_consumer(
 ## Retry Policies in Workflows
 
 ```python
-from horsies import RetryPolicy, Result, TaskError, JsonValue
+from enum import Enum
+
+from horsies import OperationalErrorCode, RetryPolicy, Result, TaskError, JsonValue
+
+
+class FetchCode(str, Enum):
+    NETWORK_ERROR = "NETWORK_ERROR"
+
 
 @app.task(
     "fetch_data",
+    error_codes=FetchCode,
     retry_policy=RetryPolicy.exponential(
         base_seconds=1,
         max_retries=3,
-        auto_retry_for=["UNHANDLED_EXCEPTION", "NETWORK_ERROR"],
+        auto_retry_for=[OperationalErrorCode.UNHANDLED_EXCEPTION, FetchCode.NETWORK_ERROR],
     ),
 )
 def fetch_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:

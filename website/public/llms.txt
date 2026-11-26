@@ -476,9 +476,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Per-task: @app.task("name", exception_mapper={TimeoutError: "TIMEOUT"})
 
 ### RetryPolicy
-- RetryPolicy.fixed(intervals, *, auto_retry_for, jitter) e.g. RetryPolicy.fixed([60, 120, 300], auto_retry_for=["ERROR_CODE", ...]); the length of intervals is the retry count
+- RetryPolicy.fixed(intervals, *, auto_retry_for, jitter) e.g. RetryPolicy.fixed([60, 120, 300], auto_retry_for=[OperationalErrorCode.WORKER_CRASHED, MyCode.RATE_LIMITED]); the length of intervals is the retry count
 - RetryPolicy.exponential(base_seconds, *, max_retries, auto_retry_for, jitter, max_delay_seconds=None)
-- auto_retry_for: required list of error codes that trigger retries
+- auto_retry_for: required list of code members that trigger retries: built-in code members, or members of the Enum class that the task declares with error_codes= (error_codes=MyCode)
+- @app.task refuses a plain str entry, a member of another Enum class, or a custom member of a task that declares a tuple or no error_codes: TaskDefinitionError TASK_INVALID_OPTIONS (HRS-102), the notes name the task and the entry; pyright refuses a plain str
 - jitter: bool (default True, adds a random 0-25% to each delay; never shortens)
 - Exponential: exactly one base interval, delay = base * 2^(attempt-1)
 

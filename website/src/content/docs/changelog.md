@@ -91,6 +91,29 @@ there is no migration contract between pre-1.0 versions.
   - The error of a workflow that `WorkflowHandle.get` gives, and the outcome
     of a `SubWorkflowNode`, keep custom codes as text: the error of a failed
     workflow is the error of its failed node, which can be any task.
+- **Breaking (Python): `auto_retry_for` takes code members.** An entry of
+  `RetryPolicy.auto_retry_for` is a member of a built-in code enum
+  (`OperationalErrorCode`, `ContractCode`, `RetrievalCode`, `OutcomeCode`)
+  or a member of the `Enum` class that the task declares with
+  `error_codes=`. The type is `list[BuiltInTaskCode | Enum]` in the field,
+  `RetryPolicy.fixed` and `RetryPolicy.exponential`, so pyright refuses a
+  plain `str`.
+  - `@app.task` refuses a plain `str` (also a misspelled code such as
+    `"BROKR_ERROR"`), a member of another `Enum` class, and a custom member
+    of a task that declares a tuple or no `error_codes`, with
+    `TaskDefinitionError` `TASK_INVALID_OPTIONS` (`HRS-102`). The notes name
+    the task and the entry, and the task is not registered. One error per
+    refused entry; several come in one `MultipleValidationErrors`.
+  - A task that retries on a code of its own declares the code in an `Enum`
+    class, as a Rust task declares it in its code type. Its body can return
+    the member or its text.
+  - The `RetryPolicy` constructor no longer checks the entries; `@app.task`
+    checks them against the codes of the task.
+  - The stored retry policy holds the text of each code, as before.
+  - New in `horsies.core.declared_error_codes` (not exported by
+    `horsies`): `check_retry_codes`, `RetryEntryNotAMember`,
+    `RetryMemberNotDeclared`, `RetryEntryRefusal` and
+    `RetryEntriesRefused`.
 - **Breaking (Python): `Result` for task bodies, `ReadResult` for reads,
   `TaskOutcome` for node inputs.** `TaskResult` is removed, with no alias.
   - A task body returns `Result[T, TaskError]`: `Ok(value)` or
