@@ -38,6 +38,9 @@
     "horsies": {
       "name": "horsies",
       "version": "0.8.1",
+      "bin": {
+        "horsies": "./dist/tools/bin.js",
+      },
       "devDependencies": {
         "@opentelemetry/api": "1.10.0",
         "zod": "4.1.13",
