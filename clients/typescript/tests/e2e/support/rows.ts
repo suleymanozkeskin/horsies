@@ -35,7 +35,8 @@ export type TaskRow = {
   readonly isWorkflowTask: boolean;
 };
 
-const MICROS = (column: string): string => `floor(extract(epoch FROM ${column}) * 1000000)::bigint::text`;
+/** The SQL text of a time column as microseconds since 1970, as text. Pure. */
+export const MICROS = (column: string): string => `floor(extract(epoch FROM ${column}) * 1000000)::bigint::text`;
 
 /** Both tables as one relation with the columns of `TaskRow`. */
 const TASK_ROWS = `(SELECT id::text AS task_id, task_name::text, queue_name::text, priority::text, status::text,
@@ -233,7 +234,8 @@ function taskRowOf(row: readonly (string | null)[]): TaskRow {
   };
 }
 
-function rowTime(value: string | null): RowTime {
+/** The time of a column that `MICROS` read. Pure. */
+export function rowTime(value: string | null): RowTime {
   return value === null ? { kind: "notSet" } : { kind: "set", epochMicros: BigInt(value) };
 }
 
