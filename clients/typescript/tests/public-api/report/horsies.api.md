@@ -4,9 +4,11 @@
 
 ```ts
 
-// Warning: (ae-forgotten-export) The symbol "ReadBackRefused" needs to be exported by the entry point index.d.ts
-// Warning: (ae-forgotten-export) The symbol "ReadBackChanged" needs to be exported by the entry point index.d.ts
-//
+/// <reference lib="esnext.temporal" />
+
+// @public
+export type AnyWire = Wire<unknown, unknown, Presence, Role>;
+
 // @public
 export type CodecRefused = EncodeRefused | DecodeRefused | ReadBackRefused | ReadBackChanged;
 
@@ -161,13 +163,16 @@ export type ExceptionRecord = {
     readonly traceback: string;
 };
 
+// @public
+export type Flat<T> = {
+    [K in keyof T]: T[K];
+} & {};
+
 // @public (undocumented)
 export const h: WireBuilders;
 
 // @public (undocumented)
 export namespace h {
-    // Warning: (ae-forgotten-export) The symbol "AnyWire" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ValueOf" needs to be exported by the entry point index.d.ts
     export type Infer<W extends AnyWire> = ValueOf<W>;
 }
 
@@ -176,10 +181,34 @@ export type JsonValue = null | boolean | number | bigint | string | readonly Jso
     readonly [key: string]: JsonValue;
 };
 
-// Warning: (ae-forgotten-export) The symbol "LIBRARY_TASK_CODES" needs to be exported by the entry point index.d.ts
-//
+// @public
+export const LIBRARY_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "BROKER_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CTX_MISSING_ID", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUBWORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
+
 // @public
 export type LibraryTaskCode = (typeof LIBRARY_TASK_CODES)[number];
+
+// @public
+export type LiteralMember = string | number | boolean | null;
+
+// @public
+export type NonEmpty<T> = readonly [T, ...T[]];
+
+// @public
+export type ObjectSent<M extends WireMembers> = keyof M extends never ? EmptyObject : Flat<{
+    -readonly [K in keyof M as PresenceOf<M[K]> extends "required" ? K : never]: SentOf<M[K]>;
+} & {
+    -readonly [K in keyof M as PresenceOf<M[K]> extends "required" ? never : K]?: SentOf<M[K]>;
+}>;
+
+// @public
+export type ObjectValue<M extends WireMembers> = keyof M extends never ? EmptyObject : Flat<{
+    -readonly [K in keyof M as PresenceOf<M[K]> extends "optional" ? never : K]: ValueOf<M[K]>;
+} & {
+    -readonly [K in keyof M as PresenceOf<M[K]> extends "optional" ? K : never]?: ValueOf<M[K]>;
+}>;
+
+// @public
+export type ObjectWire = Wire<object, object, "required">;
 
 // @public
 export type Ok<T> = {
@@ -191,15 +220,39 @@ export type Ok<T> = {
 export type Presence = "required" | "optional" | "defaulted";
 
 // @public
+export type PresenceOf<W extends AnyWire> = W[typeof wirePresence];
+
+// @public
+export type ReadBackChanged = {
+    readonly side: "readBack";
+    readonly kind: "ReadBackChanged";
+    readonly path: string;
+    readonly detail: string;
+};
+
+// @public
+export type ReadBackRefused = {
+    readonly side: "readBack";
+    readonly kind: "ReadBackRefused";
+    readonly path: string;
+    readonly detail: string;
+    readonly cause: DecodeRefused;
+};
+
+// @public
+export type RequiredWire = Wire<unknown, unknown, "required", "value">;
+
+// @public
 export type Result<T, E> = Ok<T> | Err<E>;
 
-// Warning: (ae-forgotten-export) The symbol "RequiredWire" needs to be exported by the entry point index.d.ts
-//
 // @public
 export type ResultOfWire<W extends RequiredWire> = Wire<TaskOutcome<ValueOf<W>>, never, "required", "resultOf">;
 
 // @public
 export type Role = "value" | "resultOf";
+
+// @public
+export type SentOf<W extends AnyWire> = W[typeof wireSent];
 
 // @public
 export type SubWorkflowFailure = {
@@ -246,12 +299,28 @@ export type TaskOutcome<O, E extends string = string> = {
 };
 
 // @public
+export type TupleSent<T extends readonly RequiredWire[]> = {
+    -readonly [K in keyof T]: SentOf<T[K]>;
+};
+
+// @public
+export type TupleValue<T extends readonly RequiredWire[]> = {
+    -readonly [K in keyof T]: ValueOf<T[K]>;
+};
+
+// @public
+export type ValueOf<W extends AnyWire> = W[typeof wireValue];
+
+// @public
 export type ValueRefused = {
     readonly side: "decode";
     readonly kind: DecodeRefusalKind;
     readonly path: string;
     readonly detail: string;
 };
+
+// @public
+export type ValueWire = Wire<unknown, unknown, Presence, "value">;
 
 // @public
 export interface Wire<V, S = V, P extends Presence = "required", R extends Role = "value"> {
@@ -279,13 +348,8 @@ export interface WireBuilders {
     instant(): Wire<Temporal.Instant>;
     int(): Wire<number>;
     json(): Wire<JsonValue>;
-    // Warning: (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "LiteralMember" needs to be exported by the entry point index.d.ts
     literal<const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]>;
     null(): Wire<null>;
-    // Warning: (ae-forgotten-export) The symbol "WireMembers" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ObjectValue" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "ObjectSent" needs to be exported by the entry point index.d.ts
     object<const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>>;
     offsetDateTime(): Wire<Temporal.ZonedDateTime>;
     plainDate(): Wire<Temporal.PlainDate>;
@@ -294,18 +358,20 @@ export interface WireBuilders {
     record<W extends RequiredWire>(value: W): Wire<Readonly<Record<string, ValueOf<W>>>, Readonly<Record<string, SentOf<W>>>>;
     resultOf<W extends RequiredWire>(inner: W): ResultOfWire<W>;
     string(): Wire<string>;
-    // Warning: (ae-forgotten-export) The symbol "TupleValue" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "TupleSent" needs to be exported by the entry point index.d.ts
     tuple<const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>>;
-    // Warning: (ae-forgotten-export) The symbol "SentOf" needs to be exported by the entry point index.d.ts
     union<const T extends NonEmpty<RequiredWire>>(members: T): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
-    // Warning: (ae-forgotten-export) The symbol "ObjectWire" needs to be exported by the entry point index.d.ts
     union<const K extends string, const T extends NonEmpty<ObjectWire>>(tag: K, members: T): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
     uuid(): Wire<string>;
 }
 
-// Warning: (ae-forgotten-export) The symbol "WORKFLOW_STATUSES" needs to be exported by the entry point index.d.ts
-//
+// @public
+export type WireMembers = {
+    readonly [name: string]: ValueWire;
+};
+
+// @public
+export const WORKFLOW_STATUSES: readonly ["PENDING", "RUNNING", "COMPLETED", "FAILED", "PAUSED", "CANCELLED", "EXPIRED"];
+
 // @public
 export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
 

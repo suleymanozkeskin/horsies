@@ -1,7 +1,16 @@
 // A user of the entry point `horsies/zod`: the hz.* codecs and hz.wire() in a zod object.
 
 import { h } from "horsies";
-import { hz, type WireSchema, type ZodRule, type ZodSchemaRefused } from "horsies/zod";
+import {
+  hz,
+  type RequiredWire,
+  type Result,
+  type WireSchema,
+  type ZodAdapterRefused,
+  type ZodRule,
+  type ZodSchemaRefused,
+  zodValueWire,
+} from "horsies/zod";
 import { z } from "zod";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -30,3 +39,6 @@ export const lineSchema: WireSchema<typeof line> = hz.wire(line);
 export function refusalText(refusal: ZodSchemaRefused): ZodRule {
   return refusal.rule;
 }
+
+// The main entry's hook: the wire type of a zod schema, in the public types of the wire types.
+export const eventWire: Result<RequiredWire, ZodAdapterRefused> = zodValueWire(event);

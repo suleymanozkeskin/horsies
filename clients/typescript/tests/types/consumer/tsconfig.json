@@ -2,11 +2,12 @@
   // The project of a user of the package. The type-test runner copies it into a work folder whose node_modules holds
   // the built package (horsies) and zod, then compiles it with each compiler of both lanes. No skipLibCheck: the
   // published declarations are checked too.
+  //
+  // No `lib` setting: the default lib has no Temporal types, so the project compiles only if the published
+  // declarations carry their Temporal lib reference (each compiler gives TS2503 without it).
   "compilerOptions": {
     "target": "es2025",
     "module": "nodenext",
-    // The Temporal types: the published declarations hold no lib reference to them yet (#2427).
-    "lib": ["es2025", "dom", "esnext.temporal"],
     "types": [],
     "strict": true,
     "skipLibCheck": false,
