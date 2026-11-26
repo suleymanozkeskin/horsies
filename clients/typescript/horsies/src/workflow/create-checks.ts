@@ -5,11 +5,13 @@
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
+import type { ContractRefused } from "../contract/compile.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
 import type { ContractLookup } from "../send/send.ts";
 import { runBuild } from "./builder.ts";
 import { checkBuild } from "./checks.ts";
 import { workflowRecord } from "./define.ts";
+import { unreachable } from "../wire/unreachable.ts";
 import type { SpecFinding } from "./findings.ts";
 import { type ListedWorkflow, listedWorkflowOf, type WorkflowRegistry, workflowRegistry } from "./registry.ts";
 
@@ -50,16 +52,7 @@ export function checkWorkflowsAtCreate(input: WorkflowsAtCreate): WorkflowsCheck
     const entry = listedWorkflowOf(workflow);
 
     if (!entry.ok) {
-      own.push(
-        ...entry.error.map((refused) =>
-          refusal(
-            ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
-            path,
-            `params${refused.path.slice("input".length)}: ${refused.detail} [${refused.rule}]`,
-            [],
-          ),
-        ),
-      );
+      own.push(...entry.error.flatMap((refused) => paramsRefusals(path, record.name, refused)));
     }
 
     refusals.push(...own);
@@ -82,6 +75,33 @@ export function checkWorkflowsAtCreate(input: WorkflowsAtCreate): WorkflowsCheck
   }
 
   return { registry, refusals };
+}
+
+/**
+ * The refusals of one refusal of the params contract. The contract carries the workflow name as its task name, so an
+ * empty name is the record's HRS-001 already and gives none here; each other refusal is HRS-105. Pure.
+ */
+function paramsRefusals(path: string, workflowName: string, refused: ContractRefused): readonly Refusal[] {
+  switch (refused.rule) {
+    case "TaskName":
+      return workflowName === "" ? [] : [paramsRefusal(path, refused)];
+    case "ParameterName":
+    case "SchemaVendor":
+    case "Zod3Schema":
+    case "ZodVersionNotSupported":
+    case "ZodSchema":
+    case "WireKind":
+      return [paramsRefusal(path, refused)];
+    default:
+      return unreachable(refused.rule, "paramsRefusals");
+  }
+}
+
+/** HRS-105 of a refusal of the params contract, at the params path of the refusal. Pure. */
+function paramsRefusal(path: string, refused: ContractRefused): Refusal {
+  const detail = `params${refused.path.slice("input".length)}: ${refused.detail} [${refused.rule}]`;
+
+  return refusal(ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION, path, detail, []);
 }
 
 /** The refusals of a record: the name, the key, its uniqueness, the error rule, the check cases rule. */
