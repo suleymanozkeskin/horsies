@@ -15,6 +15,7 @@ import { type CoreChecks, refusalOfCore } from "../app/core-checks.ts";
 import { type CheckReport, checkReport, reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
 import type { NativePreparedWorker, WorkerBootCauseName, WorkerFailCauseName, WorkerPreparation, WorkerRunEnded } from "../native/worker/addon.ts";
+import type { HandleProfile } from "../native/handle/addon.ts";
 import { buildCoreHandle, type CoreHandle } from "../native/handle/core-handle.ts";
 import { setPanicRule } from "../native/process-core/process-core.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
@@ -254,26 +255,26 @@ export function processWorkerRunDeps(
       process.stderr.write(`${line}\n`);
     },
     prepare: prepareWorker,
-    run: async (worker) => runWorker(worker, childSpecHandle(context)),
+    run: async (worker) => runWorker(worker, appCoreHandle(context, "WORKER")),
     requestStop: requestWorkerStop,
     stopOnSignals,
   };
 }
 
 /**
- * The core handle whose child spec source the worker's workflow steps use: a handle of the app's producer manifest,
- * which builds nothing until an operation runs. It holds the source that the app registers for its workflows; with
- * none, each sub-workflow node fails as not listed (`runWorker`).
+ * A core handle of the app's producer manifest with the pool profile `profile`. It starts nothing until an operation
+ * runs. The worker run takes the child spec source of the app's workflows from it: with none registered, each
+ * sub-workflow node fails as not listed (`runWorker`).
  */
-export function childSpecHandle(context: AppContext): CoreHandle {
+export function appCoreHandle(context: AppContext, profile: HandleProfile): CoreHandle {
   const checked = checkAppConfig(context.config.coreConfigJson);
 
   switch (checked.kind) {
     case "accepted":
-      return buildCoreHandle(checked.manifestJson, "WORKER");
+      return buildCoreHandle(checked.manifestJson, profile);
     case "refused":
-      throw new ClientDefect({ subject: "childSpecHandle", rule: "the config check refuses the config that Horsies.create accepted" });
+      throw new ClientDefect({ subject: "appCoreHandle", rule: "the config check refuses the config that Horsies.create accepted" });
     default:
-      return unreachable(checked, "childSpecHandle");
+      return unreachable(checked, "appCoreHandle");
   }
 }

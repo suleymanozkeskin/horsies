@@ -121,6 +121,14 @@ export interface ClaimLimitsInput {
 }
 
 // @public
+export interface Cli {
+    run(app: Horsies): Promise<number>;
+}
+
+// @public
+export const cli: Cli;
+
+// @public
 export class ClientDefect extends CoreDefect {
     constructor(facts: {
         readonly subject: string;
