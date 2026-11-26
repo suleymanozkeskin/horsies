@@ -16,7 +16,7 @@ import { kindOf, presenceOf } from "../../../horsies/src/wire/wire-type.ts";
 import { hz } from "../../../horsies/src/zod/codecs.ts";
 import { zodMemberWire, zodValueWire } from "../../../horsies/src/zod/kind.ts";
 import { ASYNC_ISSUE_CODE, checksRun, ONE_WAY_ISSUE_CODE } from "../../../horsies/src/zod/runs.ts";
-import { kindText } from "../../../horsies/src/zod/self-check.ts";
+import { kindText } from "./self-check-cases.ts";
 import { decodeRefusal, encodeRefusal, runsOfCodec, storedText, workerValue } from "./support.ts";
 
 // SAFETY: `require("zod")` gives the exports of zod's CommonJS build, which the zod declarations describe.

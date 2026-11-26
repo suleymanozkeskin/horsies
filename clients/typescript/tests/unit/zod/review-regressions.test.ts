@@ -11,11 +11,11 @@ import { compileValue } from "../../../horsies/src/zod/adapter.ts";
 import { hz } from "../../../horsies/src/zod/codecs.ts";
 import type { ZodSchema } from "../../../horsies/src/zod/definition.ts";
 import { zodRefusalText } from "../../../horsies/src/zod/rules.ts";
-import { acceptedKind, encodeRefusal, passedSelfCheck, storedText, withDefinition, workerValue } from "./support.ts";
+import { acceptedKind, encodeRefusal, storedText, withDefinition, workerValue } from "./support.ts";
 
 /** The rule texts of a refused schema. */
 function refusalTexts(schema: ZodSchema): readonly string[] {
-  const compiled = compileValue(passedSelfCheck(), schema);
+  const compiled = compileValue(schema);
 
   return compiled.ok ? [] : compiled.error.map(zodRefusalText);
 }

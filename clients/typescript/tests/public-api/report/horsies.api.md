@@ -310,7 +310,7 @@ export interface CustomQueueInput {
     // (undocumented)
     readonly name: string;
     // (undocumented)
-    readonly priority: number;
+    readonly priority?: number;
 }
 
 // @public
@@ -586,14 +586,6 @@ export type ExecutionRules<X extends ExecutionClass> = [X] extends ["SHARED_ASYN
 } : {
     readonly timeoutMs?: number;
     readonly cancelGraceMs?: number;
-};
-
-// @public
-export type ExecutorThreads = {
-    readonly kind: "threads";
-    readonly threads: number;
-} | {
-    readonly kind: "fromSeats";
 };
 
 // @public
@@ -1300,8 +1292,6 @@ export type SessionDatabase = {
 export interface SharedAsyncChildrenInput {
     // (undocumented)
     readonly count: number;
-    // (undocumented)
-    readonly executor?: ExecutorThreads;
     // (undocumented)
     readonly pool?: SharedPoolInput;
     // (undocumented)

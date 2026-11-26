@@ -12,6 +12,7 @@ import type {
   MillisecondsFact,
   NativeSendRules,
   NativeTaskOptions,
+  RefusalHelp,
   RetryFacts,
   TaskOptionsCheck,
   TaskOptionsFacts,
@@ -146,7 +147,22 @@ function retryFacts(retry: RetrySetting): RetryFacts {
 
 /** The refusal of a core refusal at `path`. A code that the catalog does not hold is a defect: `TypeError`. Pure. */
 export function refusalOfCore(path: string, refused: CoreRefusal): Refusal {
-  return refusal(catalogCode(refused.code), path, [refused.message, ...refused.notes].join("; "), refused.help);
+  return refusal(catalogCode(refused.code), path, [refused.message, ...refused.notes].join("; "), helpLines(refused.help));
+}
+
+/** The help lines of a core refusal: none, or its one line. Pure. */
+function helpLines(help: RefusalHelp): readonly string[] {
+  switch (help.kind) {
+    case "noHelp":
+      return [];
+    case "help":
+      return [help.line];
+    default: {
+      const unexpected: never = help;
+
+      throw new TypeError(`refusalOfCore: a help outside its type: ${String(unexpected)}`);
+    }
+  }
 }
 
 function catalogCode(code: string): ErrorCode {

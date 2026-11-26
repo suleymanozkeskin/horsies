@@ -1,0 +1,14 @@
+{
+  // The build of the published package: the TypeScript 7 compiler of `tests/package.json` writes the
+  // JavaScript and the declarations of `src/` into `dist/`:
+  //   tests/node_modules/.bin/tsc --project horsies/tsconfig.build.json
+  // It adds only the emit settings to tsconfig.json.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  // The dev-only entry of the addon loader is not published.
+  "exclude": ["src/native/dev-addon.ts"]
+}

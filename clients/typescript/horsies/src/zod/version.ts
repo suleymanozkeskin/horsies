@@ -6,12 +6,12 @@
 //
 // The schema can come from any copy of zod: the ES module or the CommonJS build of an install, a copy in a bundle, or
 // another install. The check reads the schema's own version object, and the adapter reads and runs the schema through
-// its own internals only (`definition.ts`, `runs.ts`), never through the zod module that horsies imports.
+// its own internals only (`definition.ts`, `runs.ts`). The adapter imports no zod module.
 
 import { isNumber, isObjectLike } from "../codec/values.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import type { ZodSchema } from "./definition.ts";
+import type { ZodSchema } from "./internals.ts";
 
 /** A zod release number. */
 export type ZodVersion = { readonly major: number; readonly minor: number; readonly patch: number };

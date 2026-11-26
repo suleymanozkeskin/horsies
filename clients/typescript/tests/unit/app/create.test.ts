@@ -4,6 +4,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { z } from "zod";
+
 import { createHorsies } from "../../../horsies/src/app.ts";
 import type { HorsiesConfig } from "../../../horsies/src/app/create.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
@@ -151,6 +153,28 @@ describe("Horsies.create: the contract list", () => {
 
     assert.deepEqual(refusalsOf(config([ratio]), fakeEnvironment()), [["HRS-105", "tasks[0] ratio"]]);
   });
+
+  test("an empty task name is HRS-102, as in the Python client, with its help", () => {
+    const unnamed = defineTask({ name: "", input: {}, output: h.null() });
+    const created = createHorsies(config([unnamed]), fakeEnvironment());
+    const refused = created.ok ? [] : created.error.refusals;
+
+    assert.deepEqual(
+      refused.map((each) => [each.code, each.message, each.help]),
+      [["HRS-102", "tasks[0] : name: the task name is empty [TaskName]", ["give a task name that is not empty"]]],
+    );
+  });
+
+  test("a zod form with no stored form is HRS-105, with the adapter's fix as its help", () => {
+    const dated = defineTask({ name: "dated", input: { at: z.date() }, output: h.null() });
+    const created = createHorsies(config([dated]), fakeEnvironment());
+    const refused = created.ok ? [] : created.error.refusals;
+
+    assert.deepEqual(
+      refused.map((each) => [each.code, each.message, each.help]),
+      [["HRS-105", "tasks[0] dated: input.at: zod type date is refused [DATE] [ZodSchema]", ["use hz.instant(): a Date holds milliseconds only"]]],
+    );
+  });
 });
 
 describe("Horsies.create: the core's checks of a contract", () => {
@@ -159,6 +183,18 @@ describe("Horsies.create: the core's checks of a contract", () => {
     const environment = fakeEnvironment({ checks: fakeChecks({ codes: [catalogRefusal("HRS-112", "not UPPER_SNAKE_CASE")] }) });
 
     assert.deepEqual(refusalsOf(config([coded]), environment), [["HRS-112", "tasks[0] coded"]]);
+  });
+
+  test("the help of a core refusal: its one line, or no line", () => {
+    const withHelp = { ...catalogRefusal("HRS-109", "execution SHARED_ASYNC requires timeoutMs"), help: { kind: "help", line: "set timeoutMs" } } as const;
+    const environment = fakeEnvironment({ checks: fakeChecks({ options: [withHelp], codes: [catalogRefusal("HRS-112", "bad code")] }) });
+    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errors: ["BAD"] });
+    const created = createHorsies(config([coded]), environment);
+
+    assert.deepEqual(created.ok ? [] : created.error.refusals.map((refused) => [refused.code, refused.help]), [
+      ["HRS-112", []],
+      ["HRS-109", ["set timeoutMs"]],
+    ]);
   });
 
   test("options that the core refuses keep their code (HRS-109)", () => {
