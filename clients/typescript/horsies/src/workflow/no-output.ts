@@ -17,7 +17,7 @@ export const NO_WORKFLOW_OUTPUT: NoWorkflowOutput = Object.freeze({ kind: "noWor
 
 /** The refusal of a value that is not `NoWorkflowOutput`. It holds no value. */
 const NOT_NO_WORKFLOW_OUTPUT: CheckFailure = Object.freeze({
-  issues: Object.freeze([Object.freeze({ path: "kind", code: 'expected "noWorkflowOutput"' })]),
+  issues: Object.freeze([Object.freeze({ kind: "notNoWorkflowOutput" as const, path: "kind" })]),
 });
 
 /** The wire type of the success value of a sub-workflow node of a workflow with no output node. */
