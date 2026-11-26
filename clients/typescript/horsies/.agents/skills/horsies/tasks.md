@@ -47,7 +47,7 @@ reports each refusal with its `HRS-nnn` code.
 
 - `errors` takes literal codes; no `as const` is needed. A list of the type
   `string[]` fails typecheck, because its codes are not known to the types.
-- A built-in code name in `errors` fails typecheck: `LIBRARY_TASK_CODES`
+- A built-in code name in `errors` fails typecheck: `BUILT_IN_TASK_CODES`
   and `WORKFLOW_STOPPED` are reserved.
 - `Horsies.create` checks each declared code with the core's rule: a code
   that is empty, not `UPPER_SNAKE_CASE` or an exception class name is
@@ -112,7 +112,7 @@ value reads back to the same value.
 | `h.record(value)` | `Readonly<Record<string, T>>` | A JSON object in the value's own key order |
 | `h.union([a, b])` | `A \| B` | Primitive members, at most one per stored JSON type |
 | `h.union(tag, [objects])` | the member objects | Object members told apart by the string literal member `tag` |
-| `h.resultOf(T)` | `TaskOutcome<T>` | A whole task parameter only, which a workflow node fills (see `workflows.md`) |
+| `h.taskOutcome(contract)` | `TaskOutcome<O, E>` of the contract | A whole task parameter only, which a workflow node fills (see `workflows.md`) |
 
 | Modifier | Does |
 |---|---|
@@ -246,8 +246,8 @@ arguments.
   only the engine writes (`__h_...`, `__horsies_...`), are refused.
 - A sender may leave out an `.optional()` or defaulted parameter. A body
   gets every parameter: a default is filled, an optional one may be absent.
-- A parameter declared `h.resultOf(T)` is not sent. A task with a required
-  `h.resultOf` parameter cannot be sent: `app.send` takes a type that no
+- A parameter declared `h.taskOutcome(contract)` is not sent. A task with a
+  required `h.taskOutcome` parameter cannot be sent: `app.send` takes a type that no
   value has, so only a workflow node runs it.
 - The reader refuses an undeclared key at every depth. A stored input that
   does not decode with the parameters fails the run with
@@ -280,18 +280,18 @@ class StockServiceDown extends Error {}
 
 export const validateOrderBody = app.implement(
   validateOrder,
-  async ({ orderId, lines }) => {
+  async ({ orderId, lines }, { ok, err }) => {
     if (lines.length === 0) {
-      return validateOrder.err({ code: "EMPTY_ORDER", message: "the order has no lines" });
+      return err({ code: "EMPTY_ORDER", message: "the order has no lines" });
     }
 
     const unknownLine = lines.find((line) => !line.sku.startsWith("SKU-"));
 
     if (unknownLine !== undefined) {
-      return validateOrder.err({ code: "UNKNOWN_SKU", data: { sku: unknownLine.sku } });
+      return err({ code: "UNKNOWN_SKU", data: { sku: unknownLine.sku } });
     }
 
-    return validateOrder.ok({ orderId, lineCount: lines.length, validatedAt: Temporal.Now.instant() });
+    return ok({ orderId, lineCount: lines.length, validatedAt: Temporal.Now.instant() });
   },
   { exceptions: [[StockServiceDown, "STOCK_SERVICE_DOWN"]] },
 );
@@ -302,28 +302,32 @@ export const validateOrderBody = app.implement(
   (`HRS-300`) and a second implementation of one contract (`HRS-301`) are
   refusals that `check` and the worker start report.
 - The body is `(input, runtime) => result`. `input` is the decoded input;
-  `runtime` is the `TaskRuntime` of the run. A `SHARED_ASYNC` body returns a
+  `runtime` holds the members of the `TaskRuntime` of the run and the
+  contract's `ok` and `err`. A body may destructure it
+  (`{ ok, err, signal }`) or leave it out. A `SHARED_ASYNC` body returns a
   Promise.
-- `contract.ok(value)` is the success. `contract.err({ code, message, data })`
-  is a failure with a declared code; `message` and `data` may be left out.
-  `data` is a `JsonValue`.
+- `ok(value)` is the success, with a value of the contract's `output` type.
+  `err({ code, message, data })` is a failure with a declared code;
+  `message` and `data` may be left out. `data` is a `JsonValue`. A wrong
+  value or code fails typecheck at the line of the `ok` or `err` call. The
+  contract has no `ok` and no `err`.
 - `exceptions` maps thrown error classes to declared codes. The first entry
   whose class the thrown value is an instance of (a subclass too) gives the
   code. An undeclared code in the map fails typecheck.
 
-What the library records:
+What horsies records:
 
 | The body | Stored error |
 |---|---|
 | Returns `ok(value)` and the value encodes and reads back | No error: the value |
 | Returns `ok(value)` and the value does not read back with `output` | `WORKER_SERIALIZATION_ERROR` |
-| Returns `err(...)` | The user code, the message and the data |
+| Returns `err(...)` | The custom code, the message and the data |
 | Returns `err` with a code that the core refuses (no `errors` list) | `RETURN_TYPE_MISMATCH`; the message names the task and the rule |
 | Returns another value | `RETURN_TYPE_MISMATCH`: `Task <name> returned <type> but must return ok(value) or err({ code })` |
-| Throws or rejects with a mapped class | The mapped user code |
+| Throws or rejects with a mapped class | The mapped custom code |
 | Throws or rejects with another value | `UNHANDLED_EXCEPTION`: the message `Unhandled exception in task <name>: <type>: <text>`, `data.exception_type`, and the exception record |
 | Calls `err` with a built-in code (untyped code) | `err` throws `TypeError`, stored as `UNHANDLED_EXCEPTION` |
-| Times out, crashes, is cancelled, expires | The library code: `TASK_TIMEOUT`, `WORKER_CRASHED`, `TASK_CANCELLED`, `TASK_EXPIRED`, ... (shared docs page `tasks/errors`) |
+| Times out, crashes, is cancelled, expires | The built-in code: `TASK_TIMEOUT`, `WORKER_CRASHED`, `TASK_CANCELLED`, `TASK_EXPIRED`, ... (shared docs page `tasks/errors`) |
 
 - Error data that is not strict JSON (a value that is not JSON-native, NaN,
   an infinity, more than 300 levels, an integer of more than 4,300 digits)
@@ -332,11 +336,16 @@ What the library records:
 
 ## `TaskRuntime`
 
-The second argument of a body. The worker's child gives it;
-`TaskRuntime.forTest` gives one to a test.
+The members of the second argument of a body, with `ok` and `err`. The
+second argument is one frozen object per run; each member is an own
+property and each function member is bound to its run, so a destructured
+member works. The worker's child gives it; `TaskRuntime.forTest` gives a
+runtime to a test, and `implementation.run` adds `ok` and `err`.
 
 | Member | Gives |
 |---|---|
+| `ok(value)` | The success of the body: a value of the contract's `output` type |
+| `err({ code, message, data })` | The error of the body: a code of the contract's `errors` |
 | `taskId` | The `TaskId` of the task |
 | `fencingToken` | `{ taskId, value }`: `value` is the attempt number (Fencing Token) |
 | `signal` | An `AbortSignal` that fires at an operator cancel, and at the deadline of a `SHARED_ASYNC` run |
@@ -363,17 +372,16 @@ export const exportReport = defineTask({
   errors: ["STALE_ATTEMPT"],
 });
 
-app.implement(exportReport, async ({ reportId }, runtime) => {
-  const pool = runtime.state(Reports);
-  const token = runtime.fencingToken;
+app.implement(exportReport, async ({ reportId }, { ok, err, state, fencingToken }) => {
+  const pool = state(Reports);
   const written = await pool.query(
     "UPDATE report_exports SET fence = $2, exported_at = now() WHERE report_id = $1 AND fence <= $2",
-    [reportId, token.value],
+    [reportId, fencingToken.value],
   );
 
   return written.rowCount === 0
-    ? exportReport.err({ code: "STALE_ATTEMPT", message: "a later attempt holds the fence" })
-    : exportReport.ok(null);
+    ? err({ code: "STALE_ATTEMPT", message: "a later attempt holds the fence" })
+    : ok(null);
 });
 ```
 
@@ -456,30 +464,30 @@ function importBatch(batchId: string): void {
 }
 
 export function implementFeeds(app: Horsies): void {
-  app.implement(syncFeed, async ({ feedUrl }, runtime) => {
-    const response = await fetch(feedUrl, { signal: runtime.signal });
+  app.implement(syncFeed, async ({ feedUrl }, { ok, err, signal }) => {
+    const response = await fetch(feedUrl, { signal });
 
     if (!response.ok) {
-      return syncFeed.err({ code: "FEED_UNREACHABLE", message: `HTTP ${response.status}` });
+      return err({ code: "FEED_UNREACHABLE", message: `HTTP ${response.status}` });
     }
 
     const items: unknown = await response.json();
 
-    return syncFeed.ok(Array.isArray(items) ? items.length : 0);
+    return ok(Array.isArray(items) ? items.length : 0);
   });
 
-  app.implement(indexFeeds, async ({ feedUrls }, runtime) => {
+  app.implement(indexFeeds, async ({ feedUrls }, { ok, err, spawn }) => {
     const counts: Promise<number>[] = [];
 
     for (const feedUrl of feedUrls) {
-      const started = runtime.spawn(`fetch ${feedUrl}`, async (signal) => {
+      const started = spawn(`fetch ${feedUrl}`, async (signal) => {
         const response = await fetch(feedUrl, { signal });
 
         return response.ok ? 1 : 0;
       });
 
       if (!started.ok) {
-        return indexFeeds.err({ code: "WORK_REFUSED", message: started.error.kind });
+        return err({ code: "WORK_REFUSED", message: started.error.kind });
       }
 
       counts.push(started.value);
@@ -487,14 +495,14 @@ export function implementFeeds(app: Horsies): void {
 
     const reached = await Promise.all(counts);
 
-    return indexFeeds.ok(reached.reduce((sum, count) => sum + count, 0));
+    return ok(reached.reduce((sum, count) => sum + count, 0));
   });
 
-  app.implement(importBatches, ({ batchIds }, runtime) => {
+  app.implement(importBatches, ({ batchIds }, { ok, cancelState }) => {
     let done = 0;
 
     for (const batchId of batchIds) {
-      if (runtime.cancelState().kind === "requested") {
+      if (cancelState().kind === "requested") {
         break;
       }
 
@@ -502,7 +510,7 @@ export function implementFeeds(app: Horsies): void {
       done += 1;
     }
 
-    return importBatches.ok(done);
+    return ok(done);
   });
 }
 ```
@@ -563,7 +571,7 @@ export const fetchPrices = defineTask({
 | `"exponential"` | `baseSeconds`, `maxRetries`, `jitter?`, `maxDelaySeconds?`, `autoRetryFor` | `baseSeconds * 2^(n - 1)` |
 
 - `autoRetryFor` has at least one code: a declared code of the task or a
-  library code. Another code fails typecheck.
+  built-in code. Another code fails typecheck.
 - `jitter` is `true` when left out, as in the Python client.
   `maxDelaySeconds` caps the delay after the backoff and the jitter.
 - Each interval is 1 to 86,400 s, and a policy has 1 to 20 retries. The
@@ -600,9 +608,13 @@ export async function sendValidation(orderId: string): Promise<void> {
       }
 
       break;
-    case "IDEMPOTENCY_KEY_CONFLICT":
-      console.warn(`task ${sent.error.ownerTaskId} holds the key`);
+    case "IDEMPOTENCY_KEY_CONFLICT": {
+      // Retryable: a retry after the key's reservation ends is accepted.
+      const again = await app.retrySend(sent.error);
+
+      console.warn(again.ok ? `sent ${again.value.taskId}` : `task ${sent.error.ownerTaskId} holds the key`);
       break;
+    }
     case "VALIDATION_FAILED":
     case "PAYLOAD_TOO_LARGE":
     case "PAYLOAD_MISMATCH":
@@ -644,7 +656,7 @@ task child are suppressed: the child lifts the suppression when it serves.
 | `VALIDATION_FAILED` | `message`, `exception` | A rule refused the send. Nothing was written |
 | `PAYLOAD_TOO_LARGE` | `message`, `sizeBytes`, `limitBytes` (`bigint`) | The input is over the reject bound. Nothing was written |
 | `PAYLOAD_MISMATCH` | `taskId`, `payload`, `message` | The task id exists with another command or key. Nothing was written |
-| `IDEMPOTENCY_KEY_CONFLICT` | `taskId`, `payload`, `message`, `ownerTaskId`, `retryable: false` | Another task holds the key with another command. Nothing was written |
+| `IDEMPOTENCY_KEY_CONFLICT` | `taskId`, `payload`, `message`, `ownerTaskId`, `retryable: true` | Another task holds the key with another command. Nothing was written. The conflict clears when the key's reservation ends |
 | `ENQUEUE_FAILED` | `taskId`, `payload`, `message`, `retryable`, `exception` | The enqueue failed. The row may or may not exist. `retryable` is the classification of the cause |
 | `SEAT_RELAY_FULL` | `message`, `retryable: true`, `exception` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was sent; send again |
 
@@ -653,15 +665,16 @@ task child are suppressed: the child lifts the suppression when it serves.
 - `payload` is not enumerable, so `JSON.stringify` of an error never holds
   the input.
 
-`app.retrySend(error)` takes `ENQUEUE_FAILED` only (typecheck; another code
-from untyped code is `VALIDATION_FAILED`). It sends the same task id and
-payload again, as a repeat: a task that an earlier call wrote answers with
-its id, also after it finished, and does not run again. It takes an error of
-another app instance too, when this app lists its task.
+`app.retrySend(error)` takes `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`
+(typecheck; another code from untyped code is `VALIDATION_FAILED`). It sends
+the same task id and payload again, as a repeat: a task that an earlier call
+wrote answers with its id, also after it finished, and does not run again. A
+key conflict before the key's reservation ends gives the same conflict again.
+It takes an error of another app instance too, when this app lists its task.
 
 With `resendOnTransientErr: true` in the config, a retryable
 `ENQUEUE_FAILED` is sent again up to 3 times, after 200, 400 and 800 ms, as
-a repeat.
+a repeat. A key conflict is not sent again: only `retrySend` sends it again.
 
 ## Reads
 
@@ -670,10 +683,10 @@ import { TaskId, type ReadError } from "horsies";
 
 function readErrorText(error: ReadError): string {
   switch (error.kind) {
-    case "waitTimedOut":
+    case "waitTimeout":
       return `the task is still ${error.status}`;
     case "taskNotFound":
-      return `no record holds the task (${error.absence})`;
+      return `no record holds the task (${error.reason})`;
     case "resultNotAvailable":
       return `the task is ${error.status} and stores no result`;
     case "storedResultUnreadable":
@@ -684,10 +697,10 @@ function readErrorText(error: ReadError): string {
       return "a result wait inside a task body";
     case "database":
       return `${error.code}, retryable: ${String(error.retryable)}`;
-    case "invalidWait":
-      return `timeoutMs is a whole number from 0 to ${error.maxMs}`;
+    case "invalidInput":
+      return `waitMs is a whole number from 0 to ${error.maxMs}`;
     case "seatRelayFull":
-      return error.error.message;
+      return error.message;
   }
 }
 
@@ -701,7 +714,7 @@ export async function readValidation(text: string): Promise<void> {
   }
 
   const handle = app.taskHandle(validateOrder, taskId.value);
-  const read = await handle.get({ timeoutMs: 5_000 });
+  const read = await handle.get({ waitMs: 5_000 });
 
   if (!read.ok) {
     console.error(readErrorText(read.error));
@@ -716,14 +729,14 @@ export async function readValidation(text: string): Promise<void> {
       console.log(`${outcome.value.orderId}: ${outcome.value.lineCount} lines`);
       break;
     case "failed": {
-      const code = outcome.error.code;
+      const error = outcome.error;
 
-      switch (code.kind) {
-        case "user":
-          switch (code.code) {
+      switch (error.kind) {
+        case "custom":
+          switch (error.code) {
             case "EMPTY_ORDER":
             case "UNKNOWN_SKU":
-              console.log(`rejected: ${code.code}`);
+              console.log(`rejected: ${error.code}`);
               break;
             case "STOCK_SERVICE_DOWN":
               console.log("the stock service did not answer");
@@ -731,8 +744,8 @@ export async function readValidation(text: string): Promise<void> {
           }
 
           break;
-        case "library":
-          console.log(`the library recorded ${code.code}`);
+        case "builtIn":
+          console.log(`horsies recorded ${error.code}`);
           break;
       }
 
@@ -748,34 +761,35 @@ export async function readValidation(text: string): Promise<void> {
 }
 ```
 
-`handle.get({ timeoutMs })` waits for the task's end, at most `timeoutMs`
+`handle.get({ waitMs })` waits for the task's end, at most `waitMs`
 (whole milliseconds, 0 to 4,294,967,295). Left out: no bound.
 
 | `TaskOutcome<O, E>` | The task |
 |---|---|
 | `{ kind: "succeeded", value }` | Returned this value |
-| `{ kind: "failed", error }` | Returned this error, or the library recorded a code (`TASK_CANCELLED`, `TASK_EXPIRED`, `TASK_TIMEOUT`, `WORKER_CRASHED`, ...) |
+| `{ kind: "failed", error }` | Returned this error, or horsies recorded a code (`TASK_CANCELLED`, `TASK_EXPIRED`, `TASK_TIMEOUT`, `WORKER_CRASHED`, ...) |
 
-`TaskError<E>` has `code`, `message` (`null` when none), `data`
+`TaskError<E>` has `kind`, `code`, `message` (`null` when none), `data`
 (`null` when none), `exception` (the `ExceptionRecord` of a thrown value, or
 `null`) and `subWorkflow` (the failed child of a sub-workflow node, or
-`null`). `code` is `{ kind: "library", code: LibraryTaskCode }` or
-`{ kind: "user", code: E }`.
+`null`). `kind` is `"custom"` with `code: E` (a code that the task declares),
+or `"builtIn"` with `code: BuiltInTaskCode` (a code of horsies).
 
-| `ReadError` `kind` | Fields | When | Kept by the handle |
-|---|---|---|---|
-| `waitTimedOut` | `status` | The task had not ended when the wait ended; it may still run | No |
-| `taskNotFound` | `absence` | Neither the live table nor the history holds the task | No |
-| `resultNotAvailable` | `status` | The task ended and stores no result | Yes |
-| `storedResultUnreadable` | `cause` | The stored result does not read with the contract's types | Yes |
-| `unknownUserCode` | `code` | The stored user code is not in the contract's `errors` | Yes |
-| `waitInsideTask` | - | A result wait in a worker child. Nothing was read | No |
-| `database` | `code`, `retryable`, `message` | The database or the connection failed | No |
-| `invalidWait` | `maxMs` | `timeoutMs` outside its range. Nothing was read | No |
+| `ReadError` `kind` | `code` | Fields | When | Kept by the handle |
+|---|---|---|---|---|
+| `waitTimeout` | `WAIT_TIMEOUT` | `status` | The task had not ended when the wait ended; it may still run | No |
+| `taskNotFound` | `TASK_NOT_FOUND` | `reason` | Neither the live table nor the history holds the task | No |
+| `resultNotAvailable` | `RESULT_NOT_AVAILABLE` | `status` | The task ended and stores no result | Yes |
+| `storedResultUnreadable` | - | `cause` | The stored result does not read with the contract's types | Yes |
+| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the contract's `errors` | Yes |
+| `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A result wait in a worker child. Nothing was read | No |
+| `database` | the broker code | `retryable`, `message` | The database or the connection failed | No |
+| `invalidInput` | `INVALID_INPUT` | `maxMs` | `waitMs` outside its range. Nothing was read | No |
+| `seatRelayFull` | `SEAT_RELAY_FULL` | `retryable: true`, `message` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was read | No |
 
-- `absence` is `predatesRetainedHistory` (retention can have removed the
-  task), `withinRetainedHistory` (no removed history can have held it), or
-  `notClassified` (the id is not a UUIDv7).
+- `reason` is `PREDATES_RETAINED_HISTORY` (retention can have removed the
+  task), `WITHIN_RETAINED_HISTORY` (no removed history can have held it), or
+  `NOT_CLASSIFIED` (the id is not a UUIDv7).
 - A `CANCELLED` task reads as the outcome `TASK_CANCELLED`, never as a read
   error.
 - The handle keeps its first final read (an outcome, or a failure marked
@@ -806,12 +820,14 @@ export async function testEmptyOrder(): Promise<boolean> {
   const runtime = TaskRuntime.forTest({ taskId: taskId.value, attempt: attempt.value });
   const outcome = await validateOrderBody.run({ orderId: taskId.value, lines: [] }, runtime);
 
-  return outcome.kind === "failed" && outcome.error.code.code === "EMPTY_ORDER";
+  return outcome.kind === "failed" && outcome.error.code === "EMPTY_ORDER";
 }
 ```
 
 - `implementation.run(input, runtime)` runs the body with no worker, no
-  database and no addon. The input and the output are checked with the
+  database and no addon. The body gets the members of `runtime` and the
+  contract's `ok` and `err`; the runtime of `TaskRuntime.forTest` holds no
+  `ok` and no `err`. The input and the output are checked with the
   contract's types, as a worker checks them, and a thrown value goes
   through the exception map. It gives the outcome as a task read gives it.
 - `TaskRuntime.forTest({ taskId, attempt, state })`: `state` pairs each key
@@ -825,7 +841,7 @@ export async function testEmptyOrder(): Promise<boolean> {
   runtime holds `{ kind: "noContext" }`. A form that does not read throws
   `TypeError` with the member and the rule. The runtime fits the body of a
   task with or without `workflowContext: true`.
-- A user code that the core's rules would refuse is not checked by `run`:
+- A custom code that the core's rules would refuse is not checked by `run`:
   that check needs the addon.
 
 ## Common Pitfalls
@@ -836,7 +852,7 @@ in each child.
 
 **Wait for no result in a task body.** A result wait in a worker child is
 refused with `waitInsideTask`. Pass the result with a workflow
-(`h.resultOf`).
+(`h.taskOutcome`).
 
 <!-- ts-check: skip elided -- a Wrong / Correct pair of statements -->
 ```ts
@@ -844,7 +860,7 @@ refused with `waitInsideTask`. Pass the result with a workflow
 const total = await otherHandle.get();
 
 // CORRECT: a workflow node receives the upstream outcome
-// input: { total: h.resultOf(h.int()) }
+// input: { total: h.taskOutcome(computeTotals) }
 // w.task(report, { total: totalsNode }, { id: "report" })
 ```
 
@@ -873,14 +889,14 @@ did not list is `VALIDATION_FAILED`, and `app.implement` of it is a refusal
 ```ts
 import {
   // Contracts and wire types
-  defineTask, h, Decimal, LIBRARY_TASK_CODES,
+  defineTask, h, Decimal, BUILT_IN_TASK_CODES,
   type TaskContract, type TaskDefinition, type ExecutionClass, type RetryPolicy,
-  type UserFailure, type JsonValue, type Wire,
+  type CustomFailure, type JsonValue, type Wire,
   // Results and outcomes
-  type Result, type Ok, type Err, type TaskOutcome, type TaskError, type TaskErrorCode,
-  type LibraryTaskCode, type ExceptionRecord,
+  type Result, type Ok, type Err, type TaskOutcome, type TaskError,
+  type BuiltInTaskCode, type ExceptionRecord,
   // Implementations and the runtime
-  type Implementation, type ImplementOptions, type ExceptionMapping,
+  type Implementation, type ImplementOptions, type ExceptionMapping, type ResultConstructors,
   TaskRuntime, AttemptNumber, type CancelState, type CancelCause, type FencingToken,
   type SpawnRefused, type StateKey, type WorkflowTaskRuntime, type StoredWorkflowContext,
   // Sends

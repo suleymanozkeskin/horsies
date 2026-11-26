@@ -32,7 +32,7 @@ export const inspectItem = defineTask({
 export const restockOrWriteoff = defineTask({
   name: "restock_or_writeoff",
   queue: QUEUE_FULFILLMENT,
-  input: { returnId: h.string(), inspection: h.resultOf(Inspection) },
+  input: { returnId: h.string(), inspection: h.taskOutcome(inspectItem) },
   output: RestockDecision,
   errors: ["RETURN_NOT_FOUND", "UNKNOWN_SKU", "STORE_UNAVAILABLE"],
   retry: CRASH_RETRY,

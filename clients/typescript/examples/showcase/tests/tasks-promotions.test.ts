@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { describe, test } from "node:test";
 
+import { applyPromotions, computeLoyaltyPoints } from "../src/contracts/promotions.ts";
 import type { OrderLine } from "../src/domain.ts";
 import { draw } from "../src/simulate.ts";
 import { loadCatalog, reservedUnits } from "../src/store/catalog.ts";
@@ -41,8 +42,11 @@ import {
   PROMOTION_CODES,
   PROMOTION_SIZE_CODE_BUG_RATE,
 } from "../src/tuning.ts";
-import { idWhere, UNREACHABLE_URL } from "./fixtures.ts";
+import { idWhere, resultsOf, UNREACHABLE_URL } from "./fixtures.ts";
 import { testDatabase } from "./support.ts";
+
+const applyPromotionsResults = resultsOf(applyPromotions);
+const computeLoyaltyPointsResults = resultsOf(computeLoyaltyPoints);
 
 function bundleDrawn(id: string): boolean {
   return draw(PROMOTION_BUNDLE_BUG_RATE, [id, "bundle-bug"]);
@@ -130,7 +134,7 @@ describe("priceDrawnClearanceBundle", () => {
 describe("loyaltyPoints", () => {
   test("a customer earns the tuned points per euro of the lifetime spend", () => {
     const customerId = idWhere("t2-loyal", (id) => !draw(LOYALTY_ENGINE_BUG_RATE, [id, "lifetime-bug"]));
-    const result = loyaltyPoints(customerId, "ACME-00001");
+    const result = loyaltyPoints(customerId, "ACME-00001", computeLoyaltyPointsResults);
 
     assert.ok(result.ok);
     assert.deepEqual(result.value, {
@@ -143,7 +147,7 @@ describe("loyaltyPoints", () => {
 
   test("an engine fault of a drawn customer is LOYALTY_ENGINE_BUG with the fault's message", () => {
     const customerId = idWhere("t2-loyal", (id) => draw(LOYALTY_ENGINE_BUG_RATE, [id, "lifetime-bug"]));
-    const result = loyaltyPoints(customerId, "ACME-00001");
+    const result = loyaltyPoints(customerId, "ACME-00001", computeLoyaltyPointsResults);
 
     assert.ok(!result.ok);
     assert.equal(result.error.code, "LOYALTY_ENGINE_BUG");
@@ -184,7 +188,7 @@ describe("applyPromotionsWith with no database", () => {
     const store = openStore(UNREACHABLE_URL);
 
     try {
-      await assert.rejects(applyPromotionsWith(store, idWhere("t2-apply-bundle", bundleDrawn)), RangeError);
+      await assert.rejects(applyPromotionsWith(store, idWhere("t2-apply-bundle", bundleDrawn), applyPromotionsResults), RangeError);
     } finally {
       await closeStore(store);
     }
@@ -194,7 +198,7 @@ describe("applyPromotionsWith with no database", () => {
     const store = openStore(UNREACHABLE_URL);
 
     try {
-      const result = await applyPromotionsWith(store, cleanId("t2-apply-store"));
+      const result = await applyPromotionsWith(store, cleanId("t2-apply-store"), applyPromotionsResults);
 
       assert.ok(!result.ok);
       assert.equal(result.error.code, "STORE_UNAVAILABLE");
@@ -223,7 +227,7 @@ describe("applyPromotionsWith on the database", () => {
 
       assert.ok(reserved.ok && reserved.value.kind === "reserved", "the line is reserved before the promotion");
 
-      await assert.rejects(applyPromotionsWith(store, orderId), SizeCodeError);
+      await assert.rejects(applyPromotionsWith(store, orderId, applyPromotionsResults), SizeCodeError);
 
       const order = await getOrder(store, orderId);
       const units = await reservedUnits(store, lineSku);
@@ -250,7 +254,7 @@ describe("applyPromotionsWith on the database", () => {
     try {
       await seedPricedOrder(store, orderId, lines);
 
-      const result = await applyPromotionsWith(store, orderId);
+      const result = await applyPromotionsWith(store, orderId, applyPromotionsResults);
 
       assert.ok(result.ok);
       assert.deepEqual(result.value, { orderId, discountCents: bundleDiscountCents(lines), appliedCodes: [PROMOTION_CODES[0]] });
@@ -269,7 +273,7 @@ describe("applyPromotionsWith on the database", () => {
     const { store } = database;
 
     try {
-      const result = await applyPromotionsWith(store, cleanId(`t2-none-${randomUUID().slice(0, 8)}`));
+      const result = await applyPromotionsWith(store, cleanId(`t2-none-${randomUUID().slice(0, 8)}`), applyPromotionsResults);
 
       assert.ok(!result.ok);
       assert.equal(result.error.code, "ORDER_NOT_FOUND");

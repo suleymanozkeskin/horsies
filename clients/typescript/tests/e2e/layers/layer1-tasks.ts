@@ -88,7 +88,7 @@ describe("layer 1: tasks", () => {
 
     const error = await failed(await sentHandle("e2e_error", suite.app.send(basic.deliberateError, {})), RESULT_WAIT_MS);
 
-    assert.deepEqual(errorCode(error), { source: "task", code: "DELIBERATE_ERROR" });
+    assert.deepEqual(errorCode(error), { source: "custom", code: "DELIBERATE_ERROR" });
     assert.equal(error.message, "This is intentional");
     assert.deepEqual(error.data, { key: "value" });
   });
@@ -281,7 +281,7 @@ describe("layer 1: tasks", () => {
 
     const error = await failed(handle, CANCELLED_READ_MS);
 
-    assert.deepEqual(errorCode(error), { source: "library", code: "TASK_CANCELLED" });
+    assert.deepEqual(errorCode(error), { source: "builtIn", code: "TASK_CANCELLED" });
     assert.equal(dataMembers(error)["task_id"], handle.taskId);
   });
 
@@ -418,16 +418,16 @@ describe("layer 1: tasks", () => {
 
     assert.ok(taskId.ok);
 
-    const read = await suite.app.taskHandle(basic.simple, taskId.value).get({ timeoutMs: 1_000 });
+    const read = await suite.app.taskHandle(basic.simple, taskId.value).get({ waitMs: 1_000 });
 
     assert.equal(read.ok ? "read" : read.error.kind, "taskNotFound");
   });
 
-  e2eTest("a bounded wait for a task that no worker runs is waitTimedOut", "default", async (suite) => {
+  e2eTest("a bounded wait for a task that no worker runs is waitTimeout", "default", async (suite) => {
     const handle = await sentHandle("e2e_simple", suite.app.send(basic.simple, { x: 5 }));
-    const read = await handle.get({ timeoutMs: 500 });
+    const read = await handle.get({ waitMs: 500 });
 
-    assert.deepEqual(read, { ok: false, error: { kind: "waitTimedOut", status: "PENDING" } });
+    assert.deepEqual(read, { ok: false, error: { kind: "waitTimeout", code: "WAIT_TIMEOUT", status: "PENDING" } });
   });
 
   e2eTest("a body that returns a built-in code is stored as UNHANDLED_EXCEPTION with the TypeError", "default", async (suite) => {
@@ -435,7 +435,7 @@ describe("layer 1: tasks", () => {
 
     const error = await failed(await sentHandle("e2e_builtin_code", suite.app.send(basic.builtInCode, {})), RESULT_WAIT_MS);
 
-    assert.deepEqual(errorCode(error), { source: "library", code: "UNHANDLED_EXCEPTION" });
+    assert.deepEqual(errorCode(error), { source: "builtIn", code: "UNHANDLED_EXCEPTION" });
     assert.equal(error.exception?.type, "TypeError");
     assert.match(error.message ?? "", /^Unhandled exception in task e2e_builtin_code: TypeError: .*"TASK_EXCEPTION" is a built-in error code/);
   });
@@ -446,7 +446,7 @@ describe("layer 1: tasks", () => {
     const before = await succeeded(await sentHandle("e2e_pid", suite.app.send(basic.pid, { sleepMs: 0 })), RESULT_WAIT_MS);
     const error = await failed(await sentHandle("e2e_throws", suite.app.send(basic.throws, { text: "x" })), RESULT_WAIT_MS);
 
-    assert.deepEqual(errorCode(error), { source: "library", code: "UNHANDLED_EXCEPTION" });
+    assert.deepEqual(errorCode(error), { source: "builtIn", code: "UNHANDLED_EXCEPTION" });
     assert.equal(error.message, "Unhandled exception in task e2e_throws: TypeError: e2e boom: x");
     assert.deepEqual(error.data, { exception_type: "TypeError" });
     assert.equal(error.exception?.type, "TypeError");

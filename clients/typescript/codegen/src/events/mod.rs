@@ -11,8 +11,7 @@
 //!
 //! Every record has the member `kind`. For an event type it is the wire tag
 //! (`"AttemptEnded"`); for a variant it is the wire tag in camelCase
-//! (`"reportedByChild"`), with one fixed exception
-//! ([`types::LIBRARY_CODE_VARIANT`]). Field names are in camelCase. A field
+//! (`"reportedByChild"`, `"builtIn"`). Field names are in camelCase. A field
 //! with `FieldAccess::Internal` is not a member of its interface.
 //!
 //! A closed type that another rendered module declares with the same name
@@ -63,12 +62,10 @@ pub fn is_shared(name: &str) -> bool {
 }
 
 /// The files of the event contract: `events.ts`. The render panics when the
-/// model breaks a fact that the module relies on: the variant of the tag
-/// exception, a code union that `task_code.ts` does not render, a field
-/// name that is no member name, or a shared type that its module declares
-/// otherwise.
+/// model breaks a fact that the module relies on: a code union that
+/// `task_code.ts` does not render, a field name that is no member name, or a
+/// shared type that its module declares otherwise.
 pub fn generated_files() -> Vec<GeneratedFile> {
-    types::assert_library_code_variant(&EVENT_CONTRACT);
     let monitoring: Vec<(&str, String)> = monitoring_models::generated_files()
         .iter()
         .map(|file| (MONITORING_MODELS_MODULE, file.text().to_owned()))

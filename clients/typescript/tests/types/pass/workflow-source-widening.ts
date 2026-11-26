@@ -8,16 +8,23 @@ const text = defineTask({ name: "text", input: {}, output: h.string() });
 const letter = defineTask({ name: "letter", input: {}, output: h.literal("a", "b") });
 const count = defineTask({ name: "count", input: {}, output: h.int() });
 
+// The contracts that the parameters below name: their outputs are the target types.
+const maybeText = defineTask({ name: "maybe_text", input: {}, output: h.string().nullable() });
+const ratio = defineTask({ name: "ratio", input: {}, output: h.float() });
+
 const takesMaybeText = defineTask({
   name: "takes_maybe_text",
-  input: { value: h.resultOf(h.string().nullable()) },
+  input: { value: h.taskOutcome(maybeText) },
   output: h.int(),
 });
 
-const takesText = defineTask({ name: "takes_text", input: { value: h.resultOf(h.string()) }, output: h.int() });
-const takesFloat = defineTask({ name: "takes_float", input: { value: h.resultOf(h.float()) }, output: h.int() });
+const takesText = defineTask({ name: "takes_text", input: { value: h.taskOutcome(text) }, output: h.int() });
+const takesFloat = defineTask({ name: "takes_float", input: { value: h.taskOutcome(ratio) }, output: h.int() });
 
-/** A string source for an `h.resultOf` of a nullable string; a literal for its base scalar; an int for a float. */
+/**
+ * A string source for an `h.taskOutcome` of a contract of a nullable string output; a literal for its base scalar; an
+ * int for a float.
+ */
 export const widenedSources = defineWorkflow(
   { name: "widened_sources", definitionKey: "tests.widened_sources.v1", output: h.int(), params: {} },
   (w) => {

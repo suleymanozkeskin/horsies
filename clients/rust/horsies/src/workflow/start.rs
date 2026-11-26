@@ -246,7 +246,7 @@ mod tests {
     use horsies_core::{BrokerError, ChildSpecUnavailable, WorkflowStartErrorCode};
 
     use super::*;
-    use crate::workflow::node::tests::task_node;
+    use crate::workflow::node::tests::{add, task_node, test_builder};
     use crate::workflow::{
         SubWorkflowParams, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
     };
@@ -268,7 +268,7 @@ mod tests {
         }
 
         fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-            let tick = builder.task(task_node::<u32, ()>("tick"));
+            let tick = add(builder, task_node::<u32, ()>("tick"));
             Ok(WorkflowDefConfig::new().output(tick))
         }
     }
@@ -284,7 +284,7 @@ mod tests {
         .unwrap();
         let starter = WorkflowStarter::of(&app);
         let clone = starter.clone();
-        let mut builder = WorkflowSpecBuilder::new("late_parent");
+        let mut builder = test_builder("late_parent");
         builder.definition_key("tests.start.late_parent.v1");
         builder.sub_workflow(LateChild::node(SubWorkflowParams::NotGiven).unwrap());
         let spec = builder.build().unwrap();

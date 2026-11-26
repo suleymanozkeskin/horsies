@@ -12,29 +12,24 @@ import { pause } from "./process.ts";
 /** The interval of `pollUntilInfo`. */
 const INFO_POLL_MS = 200;
 
-/** Who chose the code of an error: the task (a declared code) or the library (a built-in code). */
-export type CodeSource = "task" | "library";
+/** Who chose the code of an error: the task (a custom code) or horsies (a built-in code). */
+export type CodeSource = "custom" | "builtIn";
 
 /** The code of a stored error and who chose it. */
 export type ErrorCode = { readonly source: CodeSource; readonly code: string };
 
 /** The code of `error`. The one reader of the code form of a stored error. Pure. */
 export function errorCode(error: TaskError): ErrorCode {
-  switch (error.code.kind) {
-    case "user":
-      return { source: "task", code: error.code.code };
-    case "library":
-      return { source: "library", code: error.code.code };
-  }
+  return { source: error.kind, code: error.code };
 }
 
 /** The text of a read error, for a message. Pure. */
 export function readErrorText(error: ReadError): string {
   switch (error.kind) {
-    case "waitTimedOut":
+    case "waitTimeout":
       return `the wait ended with the task ${error.status}`;
     case "taskNotFound":
-      return `no task (${error.absence})`;
+      return `no task (${error.reason})`;
     case "resultNotAvailable":
       return `the task is ${error.status} and stores no result`;
     case "storedResultUnreadable":
@@ -45,10 +40,10 @@ export function readErrorText(error: ReadError): string {
       return "a wait inside a task";
     case "database":
       return `the database read failed: ${error.code}: ${error.message}`;
-    case "invalidWait":
+    case "invalidInput":
       return `the wait is not 0 to ${String(error.maxMs)} ms`;
     case "seatRelayFull":
-      return `the seat relay did not send the read: ${error.error.message}`;
+      return `the seat relay did not send the read: ${error.message}`;
   }
 }
 
@@ -68,7 +63,7 @@ export async function sentHandle<O, E extends string>(
 
 /** The outcome of `handle` within `limitMs`. Fails the test when the read fails. */
 export async function outcomeOf<O, E extends string>(handle: TaskHandle<O, E>, limitMs: number): Promise<TaskOutcome<O, E>> {
-  const read = await handle.get({ timeoutMs: limitMs });
+  const read = await handle.get({ waitMs: limitMs });
 
   if (!read.ok) {
     assert.fail(`read the outcome of task ${handle.taskId}: ${readErrorText(read.error)}`);

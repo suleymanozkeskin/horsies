@@ -1,6 +1,6 @@
-//! Sending a task: the typed send and delayed send, the send options, the
-//! read-back of the input before any statement, the send retry, and the
-//! closed catalog of send errors.
+//! Sending a task: the typed send with its options (the delay among them),
+//! the read-back of the input before any statement, the send retry, the
+//! typed functions of each app, and the closed catalog of send errors.
 
 mod catalog;
 mod function;
@@ -13,14 +13,14 @@ pub use options::{SendRetention, TaskSendOptions};
 pub(crate) use catalog::TaskFunctions;
 #[cfg(test)]
 pub(crate) use function::send_options_text;
-pub(crate) use function::{RetryOf, SendStart};
 
-/// A whole number of seconds: the delay of `schedule`.
+/// A whole number of seconds: the delay of a send
+/// (`TaskSendOptions::delay`).
 pub use horsies_core::manifest::WholeSeconds;
 /// A retention period of whole days, for `SendRetention::Period`.
 pub use horsies_core::RetentionDays;
 /// The send catalog of the core: one variant per send code, each with the
-/// facts of its state. `retry_send` and `retry_schedule` accept the three
-/// that carry the payload (`resend_target`): `AsyncContext`, `EnqueueFailed`
-/// and `IdempotencyKeyConflict`.
+/// facts of its state. `retry_send` accepts the three that carry the
+/// payload (`resend_target`): `AsyncContext`, `EnqueueFailed` and
+/// `IdempotencyKeyConflict`.
 pub use horsies_core::{TaskSendError, TaskSendErrorCode, TaskSendPayload};

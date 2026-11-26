@@ -45,7 +45,8 @@ import {
 
 const report = defineTask({ name: "report", input: { n: h.int() }, output: h.int() });
 const unlisted = defineTask({ name: "unlisted", input: {}, output: h.null() });
-const upstreamOnly = defineTask({ name: "upstream_only", input: { upstream: h.resultOf(h.int()) }, output: h.null() });
+const intSource = defineTask({ name: "int_source", input: {}, output: h.int() });
+const upstreamOnly = defineTask({ name: "upstream_only", input: { upstream: h.taskOutcome(intSource) }, output: h.null() });
 const billed = defineTask({ name: "billed", queue: "billing", input: {}, output: h.null() });
 
 /** The sent instant of the tests: `SENT_AT_MICROS` and 999 nanoseconds, which the request cuts. */
@@ -105,11 +106,22 @@ function codeOf(outcome: TaskSendError<number, string> | "sent"): string {
 function retryable(raw: Parameters<typeof sendErrorOfRaw>[0]): RetryableSendError<number, string> {
   const error = sendErrorOfRaw(raw);
 
-  if (error.code !== "ENQUEUE_FAILED") {
-    throw new Error(`not a retryable error: ${error.code}`);
-  }
+  switch (error.code) {
+    case "ENQUEUE_FAILED":
+    case "IDEMPOTENCY_KEY_CONFLICT":
+      return error;
+    case "SEND_SUPPRESSED":
+    case "VALIDATION_FAILED":
+    case "PAYLOAD_MISMATCH":
+    case "PAYLOAD_TOO_LARGE":
+    case "SEAT_RELAY_FULL":
+      throw new Error(`not a retryable error: ${error.code}`);
+    default: {
+      const unexpected: never = error;
 
-  return error;
+      throw new TypeError(`retryable: an error outside its type: ${String(unexpected)}`);
+    }
+  }
 }
 
 describe("a send that the core takes", () => {
@@ -241,7 +253,7 @@ describe("the send error codes", () => {
     assert.equal(producer.prepares.length, 0);
   });
 
-  test("VALIDATION_FAILED for a task with a required h.resultOf parameter", async () => {
+  test("VALIDATION_FAILED for a task with a required h.taskOutcome parameter", async () => {
     const { context, producer } = harness();
     const sent = await sendTask(context, upstreamOnly, {}, {});
 
@@ -282,13 +294,14 @@ describe("the send error codes", () => {
     assert.equal(codeOf(await sendReport(context)), "PAYLOAD_MISMATCH");
   });
 
-  test("IDEMPOTENCY_KEY_CONFLICT from the enqueue, with the owner's task id", async () => {
+  test("IDEMPOTENCY_KEY_CONFLICT from the enqueue, with the owner's task id, retryable", async () => {
     const { context } = harness({ script: { enqueued: [{ kind: "failed", error: rawKeyConflict("report") }] } });
     const error = await sendReport(context, { n: 1 }, { idempotencyKey: "key-1" });
 
     assert.equal(error !== "sent" && error.code === "IDEMPOTENCY_KEY_CONFLICT" ? error.ownerTaskId : "", "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5c");
-    assert.equal(error !== "sent" && error.code === "IDEMPOTENCY_KEY_CONFLICT" ? error.retryable : true, false);
+    assert.equal(error !== "sent" && error.code === "IDEMPOTENCY_KEY_CONFLICT" ? error.retryable : false, true);
     assert.equal(error !== "sent" ? JSON.stringify(error).includes("payload") : true, false);
+    assert.equal(error !== "sent" ? JSON.stringify(error).includes('"retryable":true') : false, true);
   });
 
   test("the payload of an error is not in JSON.stringify of the error", async () => {
@@ -350,6 +363,16 @@ describe("the resend rule", () => {
     assert.equal(codeOf(await sendReport(context)), "ENQUEUE_FAILED");
     assert.equal(producer.enqueues.length, 1);
   });
+
+  test("on: an IDEMPOTENCY_KEY_CONFLICT is not sent again; only retrySend sends it again", async () => {
+    const { context, producer, pauses } = harness({
+      resend: true,
+      script: { enqueued: [{ kind: "failed", error: rawKeyConflict("report") }] },
+    });
+
+    assert.equal(codeOf(await sendReport(context, { n: 1 }, { idempotencyKey: "key-1" })), "IDEMPOTENCY_KEY_CONFLICT");
+    assert.deepEqual([producer.enqueues.length, pauses], [1, []]);
+  });
 });
 
 describe("retrySend", () => {
@@ -375,13 +398,41 @@ describe("retrySend", () => {
     assert.equal(producer.prepares.length, 0);
   });
 
-  test("of IDEMPOTENCY_KEY_CONFLICT (not retryable): VALIDATION_FAILED and no enqueue", async () => {
+  test("of IDEMPOTENCY_KEY_CONFLICT (retryable): one REPEAT enqueue of the payload, under the same task id", async () => {
     const { context, producer } = harness();
-    const conflict = sendErrorOfRaw(rawKeyConflict("report"));
+    const retried = await retrySend(context, retryable(rawKeyConflict("report")));
+
+    assert.equal(retried.ok ? retried.value.taskId : "", TASK_ID);
+    assert.deepEqual(
+      producer.enqueues.map((call) => [call.sendKind, call.request.taskId, call.request.inputJson, call.request.idempotencyKey]),
+      [["REPEAT", TASK_ID, '{"n":1}', { kind: "text", text: "key-1" }]],
+    );
+    assert.equal(producer.prepares.length, 0);
+  });
+
+  test("of IDEMPOTENCY_KEY_CONFLICT before the reservation ends: the same conflict again", async () => {
+    const { context, producer } = harness({ script: { enqueued: [{ kind: "failed", error: rawKeyConflict("report") }] } });
+    const retried = await retrySend(context, retryable(rawKeyConflict("report")));
+
+    assert.equal(retried.ok ? "sent" : retried.error.code, "IDEMPOTENCY_KEY_CONFLICT");
+    assert.equal(!retried.ok && retried.error.code === "IDEMPOTENCY_KEY_CONFLICT" ? retried.error.retryable : false, true);
+    assert.deepEqual(
+      producer.enqueues.map((call) => call.sendKind),
+      ["REPEAT"],
+    );
+  });
+
+  test("of PAYLOAD_MISMATCH (not retryable): VALIDATION_FAILED that names both codes, and no enqueue", async () => {
+    const { context, producer } = harness();
+    const mismatch = sendErrorOfRaw(rawPayloadMismatch("report"));
     // SAFETY: a JavaScript caller can pass an error that the type of retrySend refuses.
-    const retried = await retrySend(context, conflict as unknown as RetryableSendError<number, string>);
+    const retried = await retrySend(context, mismatch as unknown as RetryableSendError<number, string>);
 
     assert.equal(retried.ok ? "" : retried.error.code, "VALIDATION_FAILED");
+    assert.equal(
+      retried.ok ? "" : retried.error.message,
+      "retrySend takes ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT only; PAYLOAD_MISMATCH is not retryable",
+    );
     assert.deepEqual(producer.enqueues, []);
   });
 

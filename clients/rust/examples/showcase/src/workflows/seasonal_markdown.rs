@@ -32,25 +32,25 @@ impl WorkflowDefinition for SeasonalMarkdown {
         for (index, sku_number) in (1..=LAST_SKU).enumerate() {
             markdowns.push(
                 builder.task(
-                    update_price::node()?
+                    update_price::node()
                         .node_id(format!("update_price_{index:02}"))
                         .set(
                             update_price::params::sku(),
                             format!("ACME-SKU-{sku_number:04}"),
                         )?
                         .set(update_price::params::campaign_id(), CAMPAIGN_ID.to_owned())?,
-                ),
+                )?,
             );
         }
         let rollup = builder.task(
-            sales_rollup::node()?
+            sales_rollup::node()
                 .node_id("sales_rollup")
                 .set(
                     sales_rollup::params::window(),
                     format!("markdown-{CAMPAIGN_ID}"),
                 )?
                 .waits_for_all(markdowns),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(rollup))
     }
 }

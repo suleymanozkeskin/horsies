@@ -29,8 +29,8 @@ const SALES_CENTS_PER_CHARACTER = 1_000;
 
 const fetchSales = defineTask({ name: "fetch_sales", input: { region: h.string() }, output: h.int() });
 
-/** A node's dependency result arrives as an outcome: the parameter is declared `h.resultOf(...)`. */
-const formatReport = defineTask({ name: "format_report", input: { sales: h.resultOf(h.int()) }, output: h.string() });
+/** A node's dependency result arrives as an outcome: the parameter is declared `h.taskOutcome(fetchSales)`. */
+const formatReport = defineTask({ name: "format_report", input: { sales: h.taskOutcome(fetchSales) }, output: h.string() });
 
 /** The report of one region. `check` builds it with the check case. */
 const regionalReport = defineWorkflow(
@@ -71,14 +71,14 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(fetchSales, async ({ region }) => fetchSales.ok(region.length * SALES_CENTS_PER_CHARACTER));
+app.implement(fetchSales, async ({ region }, { ok }) => ok(region.length * SALES_CENTS_PER_CHARACTER));
 
-app.implement(formatReport, async ({ sales }) => {
+app.implement(formatReport, async ({ sales }, { ok }) => {
   switch (sales.kind) {
     case "succeeded":
-      return formatReport.ok(`sales: ${String(sales.value)} cents`);
+      return ok(`sales: ${String(sales.value)} cents`);
     case "failed":
-      return formatReport.ok(`no sales figure: ${failureText(sales.error)}`);
+      return ok(`no sales figure: ${failureText(sales.error)}`);
     default: {
       const unexpected: never = sales;
 
@@ -88,21 +88,21 @@ app.implement(formatReport, async ({ sales }) => {
 });
 
 // A task body starts the workflow through the app, as a producer does.
-app.implement(startReport, async ({ region }) => {
+app.implement(startReport, async ({ region }, { ok, err }) => {
   const started = await app.start(regionalReport, { region });
 
   if (started.ok) {
-    return startReport.ok(started.value.workflowId);
+    return ok(started.value.workflowId);
   }
 
   switch (started.error.code) {
     case "VALIDATION_FAILED":
-      return startReport.err({ code: "SPEC_REFUSED", message: sendErrorText(started.error) });
+      return err({ code: "SPEC_REFUSED", message: sendErrorText(started.error) });
     case "WORKFLOW_ID_CONFLICT":
     case "WORKFLOW_COMMAND_CONFLICT":
     case "ENQUEUE_FAILED":
     case "SEAT_RELAY_FULL":
-      return startReport.err({ code: "START_FAILED", message: sendErrorText(started.error) });
+      return err({ code: "START_FAILED", message: sendErrorText(started.error) });
     default: {
       const unexpected: never = started.error;
 
@@ -118,7 +118,7 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`send start_report: ${sendErrorText(sent.error)}`);
   }
 
-  const read = await sent.value.get({ timeoutMs: LONG_RESULT_WAIT_MS });
+  const read = await sent.value.get({ waitMs: LONG_RESULT_WAIT_MS });
 
   if (!read.ok) {
     return demoFailed(`read start_report: ${readErrorText(read.error)}`);
@@ -138,7 +138,7 @@ async function demo(): Promise<Result<void, string>> {
 
   printLine(`start_report started workflow ${workflowId.value}`);
 
-  const report = await app.workflowHandle(regionalReport, workflowId.value).get({ timeoutMs: LONG_RESULT_WAIT_MS });
+  const report = await app.workflowHandle(regionalReport, workflowId.value).get({ waitMs: LONG_RESULT_WAIT_MS });
 
   if (!report.ok) {
     return demoFailed(`read regional_report: ${workflowReadErrorText(report.error)}`);

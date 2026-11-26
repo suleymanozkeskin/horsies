@@ -501,7 +501,7 @@ fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig
         recovery: manifest.recovery.to_config(),
         retention: manifest.retention.to_config(),
         resilience: manifest.resilience.to_config(),
-        worker_profiles: manifest.profile_set(),
+        worker_profiles: manifest.config_profiles(),
         schedule: None,
         resend_on_transient_err: false,
     }

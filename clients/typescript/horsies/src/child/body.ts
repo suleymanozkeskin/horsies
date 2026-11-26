@@ -7,12 +7,13 @@
 //    first and given as the runtime's `workflowContext` (`workflow-input.ts`); a member that does not read is
 //    `WORKER_SERIALIZATION_ERROR` too, as the Rust client's input decode gives it.
 // 2. The body runs inside the run store, with the run held in the loop marks for its synchronous part, through the
-//    body observer. A returned Promise is awaited.
+//    body observer. Its second argument is one frozen object: the own members of the run's runtime and the
+//    contract's `ok` and `err`. A returned Promise is awaited.
 // 3. The outcome:
 //    - `ok(value)`: the value encodes with the output kind and reads back; a refusal is `WORKER_SERIALIZATION_ERROR`;
-//    - `err({ code, message, data })`: the stored error with the user code;
+//    - `err({ code, message, data })`: the stored error with the custom code;
 //    - a thrown value (or a rejection): the observer's `thrown`, then the exception map: the first entry whose class
-//      the value is an instance of gives its user code, else `UNHANDLED_EXCEPTION`; the message
+//      the value is an instance of gives its custom code, else `UNHANDLED_EXCEPTION`; the message
 //      `Unhandled exception in task <name>: <type>: <text>`, `data.exception_type`, and the exception record;
 //    - another return: `RETURN_TYPE_MISMATCH`.
 // 4. The observer's `end`.
@@ -26,7 +27,9 @@ import type { JsonText } from "../codec/json-text.ts";
 import { refusalText, type CodecRefused } from "../codec/refusal.ts";
 import { isObjectLike, isString } from "../codec/values.ts";
 import type { CompiledContract } from "../contract/compile.ts";
+import type { ResultConstructors } from "../contract/define-task.ts";
 import type { ImplementationParts } from "../contract/implementation.ts";
+import type { OutputSchema } from "../contract/schema.ts";
 import type { ErrorDataPart, OptionalText, TaskErrorParts } from "../native/sends/addon.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -75,8 +78,14 @@ type DecodedParameters = Readonly<Record<string, unknown>>;
 /** What a body returned (or its Promise resolved with), before its read. */
 type BodyReturn = { readonly returned: unknown };
 
+/**
+ * The second argument of a body: the members of its runtime and the result constructors of its contract. The type of
+ * the run's runtime is erased to the members of every class.
+ */
+type BodyArgument = ThreadTaskRuntime & ResultConstructors<OutputSchema, string>;
+
 /** The body of an implementation, with its types erased: the adapter decodes its input with the contract's kinds. */
-type ErasedBody = (input: DecodedParameters, runtime: ThreadTaskRuntime) => unknown;
+type ErasedBody = (input: DecodedParameters, runtime: BodyArgument) => unknown;
 
 /** Run the body of `run` and give its stored outcome. Never rejects. */
 export async function runBody(run: BodyRun): Promise<StoredBodyOutcome> {
@@ -139,12 +148,13 @@ async function calledBody(run: BodyRun, prepared: PreparedBody): Promise<StoredB
   // SAFETY: the parts keep the body with its types erased; the input decoded with the contract's parameters and
   // the runtime is the one of the run, so the body gets the values its static types name.
   const body = run.implementation.body as ErasedBody;
+  const argument = bodyArgumentOf(prepared.runtime, run.implementation.resultConstructors);
   let returned: unknown;
 
   const before = run.marks.hold(run.mark.taskId);
 
   try {
-    returned = runStore.run(run.mark, () => run.observation.run(() => body(prepared.input, prepared.runtime)));
+    returned = runStore.run(run.mark, () => run.observation.run(() => body(prepared.input, argument)));
   } catch (cause) {
     return thrownOutcome(run, cause);
   } finally {
@@ -156,6 +166,17 @@ async function calledBody(run: BodyRun, prepared: PreparedBody): Promise<StoredB
   } catch (cause) {
     return thrownOutcome(run, cause);
   }
+}
+
+/**
+ * The second argument of a body: the own members of `runtime` (a child's runtime, or the runtime of a test) and the
+ * result constructors of the contract, in one frozen object. Pure.
+ */
+function bodyArgumentOf(
+  runtime: ThreadTaskRuntime,
+  constructors: ResultConstructors<OutputSchema, string>,
+): BodyArgument {
+  return Object.freeze({ ...runtime, ok: constructors.ok, err: constructors.err });
 }
 
 /** Give the observer how the body ended, then give the outcome. */
@@ -206,7 +227,7 @@ function returnedOutcome(run: BodyRun, body: BodyReturn): StoredBodyOutcome {
     }
 
     case "err":
-      return userFailureOutcome(result.failure);
+      return customFailureOutcome(result.failure);
     case "notAResult":
       return notAResult(taskName, result.actualType);
     default:
@@ -214,13 +235,13 @@ function returnedOutcome(run: BodyRun, body: BodyReturn): StoredBodyOutcome {
   }
 }
 
-/** A user failure as the body gave it to `err`. */
-type UserFailureRead = { readonly code: string; readonly message: OptionalText; readonly data: BodyErrorData };
+/** A custom failure as the body gave it to `err`. */
+type CustomFailureRead = { readonly code: string; readonly message: OptionalText; readonly data: BodyErrorData };
 
 /** What a body returned. */
 type ResultRead =
   | { readonly kind: "ok"; readonly value: unknown }
-  | { readonly kind: "err"; readonly failure: UserFailureRead }
+  | { readonly kind: "err"; readonly failure: CustomFailureRead }
   | { readonly kind: "notAResult"; readonly actualType: string };
 
 /** The read of a returned value: `ok(value)`, `err({ code, message?, data? })`, or another value. Pure. */
@@ -246,8 +267,8 @@ function resultOf(body: BodyReturn): ResultRead {
   return { kind: "notAResult", actualType: actualTypeOf(returned) };
 }
 
-/** The user failure of `err(failure)`, or `undefined` when its code or message is not a text. */
-function failureOf(cause: unknown): UserFailureRead | undefined {
+/** The custom failure of `err(failure)`, or `undefined` when its code or message is not a text. */
+function failureOf(cause: unknown): CustomFailureRead | undefined {
   if (!isObjectLike(cause)) {
     return undefined;
   }
@@ -328,10 +349,10 @@ function errorOutcome(parts: Omit<TaskErrorParts, "data">, data: BodyErrorData):
   return { kind: "error", parts: { ...parts, data: data.part }, data: data.text };
 }
 
-/** The outcome of a user failure. Pure. */
-function userFailureOutcome(failure: UserFailureRead): StoredBodyOutcome {
+/** The outcome of a custom failure. Pure. */
+function customFailureOutcome(failure: CustomFailureRead): StoredBodyOutcome {
   return errorOutcome(
-    { code: { kind: "user", code: failure.code }, message: failure.message, exception: { kind: "noException" } },
+    { code: { kind: "custom", code: failure.code }, message: failure.message, exception: { kind: "noException" } },
     failure.data,
   );
 }
@@ -345,7 +366,7 @@ function thrownOutcome(run: BodyRun, cause: unknown): StoredBodyOutcome {
 
   return errorOutcome(
     {
-      code: mapped === undefined ? { kind: "library", code: "UNHANDLED_EXCEPTION" } : { kind: "user", code: mapped },
+      code: mapped === undefined ? { kind: "builtIn", code: "UNHANDLED_EXCEPTION" } : { kind: "custom", code: mapped },
       message: { kind: "text", text: `Unhandled exception in task ${run.mark.taskName}: ${record.type}: ${record.message}` },
       exception: {
         kind: "record",
@@ -360,7 +381,7 @@ function thrownOutcome(run: BodyRun, cause: unknown): StoredBodyOutcome {
   );
 }
 
-/** The user code of the first entry of the exception map whose class `cause` is an instance of. */
+/** The custom code of the first entry of the exception map whose class `cause` is an instance of. */
 function mappedCode(implementation: ImplementationParts, cause: unknown): string | undefined {
   for (const [errorClass, code] of implementation.exceptions) {
     if (isInstance(cause, errorClass)) {
@@ -391,7 +412,7 @@ function serializationError(
 
   return errorOutcome(
     {
-      code: { kind: "library", code: "WORKER_SERIALIZATION_ERROR" },
+      code: { kind: "builtIn", code: "WORKER_SERIALIZATION_ERROR" },
       message: { kind: "text", text: message },
       exception: { kind: "noException" },
     },
@@ -408,7 +429,7 @@ function contextRefusedOutcome(taskName: string, refused: ContextRefused): Store
 
   return errorOutcome(
     {
-      code: { kind: "library", code: "WORKER_SERIALIZATION_ERROR" },
+      code: { kind: "builtIn", code: "WORKER_SERIALIZATION_ERROR" },
       message: { kind: "text", text: message },
       exception: { kind: "noException" },
     },
@@ -420,7 +441,7 @@ function contextRefusedOutcome(taskName: string, refused: ContextRefused): Store
 function notAResult(taskName: string, actualType: string): StoredBodyOutcome {
   return errorOutcome(
     {
-      code: { kind: "library", code: "RETURN_TYPE_MISMATCH" },
+      code: { kind: "builtIn", code: "RETURN_TYPE_MISMATCH" },
       message: {
         kind: "text",
         text: `Task ${taskName} returned ${actualType} but must return ok(value) or err({ code })`,
@@ -432,14 +453,14 @@ function notAResult(taskName: string, actualType: string): StoredBodyOutcome {
 }
 
 /**
- * The parts of `RETURN_TYPE_MISMATCH` for an `err` whose user code the core refuses (`cause` names the rule): the
+ * The parts of `RETURN_TYPE_MISMATCH` for an `err` whose custom code the core refuses (`cause` names the rule): the
  * stored error then names the task and the rule. Pure.
  */
 export function refusedCodeParts(taskName: string, code: string, cause: string): TaskErrorParts {
   const message = `Task ${taskName} returned err with the error code ${JSON.stringify(code)}, which is refused: ${cause}`;
 
   return {
-    code: { kind: "library", code: "RETURN_TYPE_MISMATCH" },
+    code: { kind: "builtIn", code: "RETURN_TYPE_MISMATCH" },
     message: { kind: "text", text: message },
     data: errorDataPart({
       variant: "err",

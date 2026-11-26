@@ -64,7 +64,7 @@ describe("levelsArgument", () => {
   test("the namespace key applies to every logger", () => {
     const argument = levelsArgument({ default: "WARNING", loggers: { horsies: "ERROR" } });
 
-    assert.equal(argument.loggers.length, 18);
+    assert.equal(argument.loggers.length, 19);
     assert.ok(argument.loggers.every((named) => named.level === "ERROR"));
   });
 

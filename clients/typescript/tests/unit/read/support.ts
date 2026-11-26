@@ -144,13 +144,13 @@ export function okEnvelope(valueText: string): string {
   return `{"__h_task_result__":true,"ok":${valueText},"err":null}`;
 }
 
-/** The stored envelope of an error with a user code (the form of `err_user_code_without_message`). */
-export function userErrorEnvelope(code: string): string {
+/** The stored envelope of an error with a custom code (the form of `err_user_code_without_message`). */
+export function customErrorEnvelope(code: string): string {
   return `{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":"${code}","data":null,"message":null}}`;
 }
 
-/** The stored envelope of an error with a library code (the form of `err_built_in_code`). */
-export function libraryErrorEnvelope(code: string): string {
+/** The stored envelope of an error with a built-in code (the form of `err_built_in_code`). */
+export function builtInErrorEnvelope(code: string): string {
   return `{"__h_task_result__":true,"ok":null,"err":{"exception":null,"error_code":{"__builtin_task_code__":"${code}"},"data":null,"message":"the broker refused the write"}}`;
 }
 

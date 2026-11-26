@@ -1,11 +1,11 @@
 // The stored-form relations of two kind trees, for the checks that the compiler cannot make on a build that runs at
-// run time: a node's output against an `h.resultOf(T)` parameter (`HRS-024`), and an output node against the declared
-// output of its workflow (`HRS-025`).
+// run time: a node's output against an `h.taskOutcome(contract)` parameter (`HRS-024`), and an output node against
+// the declared output of its workflow (`HRS-025`).
 //
 // - The same form (`matchAt`): the two kinds write and read the same stored text: the same node at every place, the same
 //   members in the same order with the same presence, the same literal values and the same tags.
 // - `storedFormFits`, the relation of both checks: the target's reader reads every text that the source's writer gives. It is the rule of the
-//   Python client's `_is_ok_type_compatible` (`horsies/core/models/workflow/typing_utils.py`) on kinds: the same form
+//   Python client's `_is_ok_type_compatible` (`clients/python/horsies/core/models/workflow/typing_utils.py`) on kinds: the same form
 //   fits; a JSON target takes any source; a nullable or union target takes a source that fits one member; a union
 //   source fits when each member fits. Two widenings that the TypeScript type allows and the reader reads are added:
 //   a literal fits its base scalar, and an integer fits a float.
@@ -23,7 +23,11 @@ import {
   NULL_KIND,
   type ObjectKind,
 } from "../wire/kinds.ts";
+import { outcomeValueKind } from "../wire/task-outcome.ts";
 import { unreachable } from "../wire/unreachable.ts";
+
+/** The place that a defect text names for an upstream outcome kind that the comparison meets. */
+const MATCHED_PLACE = "a compared kind";
 
 /** The deepest place that the comparison follows. Past it the kinds do not match (fail closed). */
 export const KIND_MATCH_DEPTH_LIMIT = 300;
@@ -57,7 +61,7 @@ function storedKind(kind: Kind, depth: number): Kind {
     case "union":
     case "taggedUnion":
     case "nullable":
-    case "resultOf":
+    case "taskOutcome":
     case "array":
     case "tuple":
     case "record":
@@ -109,8 +113,12 @@ function matchAt(firstGiven: Kind, secondGiven: Kind, depth: number): boolean {
         second.node === "taggedUnion" && first.tag === second.tag && listsMatch(first.variants, second.variants, depth)
       );
     case "nullable":
-    case "resultOf":
-      return second.node === first.node && matchAt(first.inner, second.inner, depth + 1);
+      return second.node === "nullable" && matchAt(first.inner, second.inner, depth + 1);
+    case "taskOutcome":
+      return (
+        second.node === "taskOutcome" &&
+        matchAt(outcomeValueKind(first, MATCHED_PLACE), outcomeValueKind(second, MATCHED_PLACE), depth + 1)
+      );
     case "array":
       return second.node === "array" && matchAt(first.item, second.item, depth + 1);
     case "tuple":
@@ -216,7 +224,7 @@ function fitsAt(sourceGiven: Kind, targetGiven: Kind, depth: number): boolean {
     case "checked":
     case "conversion":
     case "literal":
-    case "resultOf":
+    case "taskOutcome":
     case "array":
     case "tuple":
     case "record":
@@ -253,7 +261,7 @@ function fitsTarget(source: Kind, target: Kind, depth: number): boolean {
     case "checked":
     case "conversion":
     case "literal":
-    case "resultOf":
+    case "taskOutcome":
     case "array":
     case "tuple":
     case "record":
@@ -283,8 +291,11 @@ function fitsSameNode(source: Kind, target: Kind, depth: number): boolean {
       return target.node === "record" && fitsAt(source.value, target.value, depth + 1);
     case "object":
       return target.node === "object" && objectFits(source, target, depth);
-    case "resultOf":
-      return target.node === "resultOf" && fitsAt(source.inner, target.inner, depth + 1);
+    case "taskOutcome":
+      return (
+        target.node === "taskOutcome" &&
+        fitsAt(outcomeValueKind(source, MATCHED_PLACE), outcomeValueKind(target, MATCHED_PLACE), depth + 1)
+      );
     case "null":
     case "boolean":
     case "bigint":
@@ -338,7 +349,7 @@ function literalFits(member: LiteralMember, target: Kind): boolean {
     case "nullable":
     case "union":
     case "taggedUnion":
-    case "resultOf":
+    case "taskOutcome":
     case "array":
     case "tuple":
     case "record":

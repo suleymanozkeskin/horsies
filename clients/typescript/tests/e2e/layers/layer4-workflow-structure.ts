@@ -369,11 +369,11 @@ describe("layer 4: workflow structure", () => {
     assert.deepEqual(statusesOf(await endedNodes(suite.rows, handle.workflowId, "COMPLETED", WORKFLOW_WAIT_MS)), ["COMPLETED"]);
   });
 
-  e2eTest("a bounded get of a workflow that no worker runs is waitTimedOut", "default", async (suite) => {
+  e2eTest("a bounded get of a workflow that no worker runs is waitTimeout", "default", async (suite) => {
     const handle = await startedHandle("slow_linear", suite.app.start(structure.slowLinear, {}));
-    const read = await handle.get({ timeoutMs: 200 });
+    const read = await handle.get({ waitMs: 200 });
 
-    assert.deepEqual(read, { ok: false, error: { kind: "waitTimedOut" } });
+    assert.deepEqual(read, { ok: false, error: { kind: "waitTimeout", code: "WAIT_TIMEOUT" } });
     assert.equal(await workflowStatus(suite.rows, handle.workflowId), "RUNNING", "the workflow still runs");
   });
 });

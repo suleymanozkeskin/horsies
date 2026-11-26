@@ -8,7 +8,9 @@
 // - Status ERROR with `error.type` = the code of the attempt row; the attributes of the span of a child, with the kind
 //   of the child as `horsies.task.execution`, and `horsies.span.source` = `worker`. A workflow node that the handler
 //   child could not read gives no workflow attribute.
-// - The maker never throws: a throw of the user's SDK is written once per process.
+// - The maker never throws: a throw of the user's SDK is a span not made: one WARNING record per process on
+//   `horsies.telemetry` (`not-made.ts`), the form of the handler child's own report of a span that it could not hand
+//   to JavaScript.
 
 import type { EndedAttemptRecord, EndedWorkflowRecord } from "../native/handler-child/addon.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -56,7 +58,7 @@ export function otelEndedSpans(deps: AttemptSpanDeps): EndedSpans {
       try {
         makeEndedSpan(deps, attempt);
       } catch (cause) {
-        deps.warnings.warnOnce("endedSpan", cause);
+        deps.notMade.report({ kind: "workerEnded", taskId: attempt.taskId }, cause);
       }
     },
   });

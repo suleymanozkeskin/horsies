@@ -2,12 +2,18 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import { defineTask } from "../../../horsies/src/contract/define-task.ts";
 import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import { checkKind, checkParameters } from "../../../horsies/src/wire/check.ts";
 import { conversionKind, objectKind } from "../../../horsies/src/wire/kinds.ts";
 import { ok } from "../../../horsies/src/wire/result.ts";
 import type { RequiredWire } from "../../../horsies/src/wire/infer.ts";
-import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
+import { kindOf, type Wire } from "../../../horsies/src/wire/wire-type.ts";
+
+/** An `h.taskOutcome` parameter of an upstream task of output `output`. */
+function outcomeOf(output: RequiredWire): Wire<unknown, never, "required", "taskOutcome"> {
+  return h.taskOutcome(defineTask({ name: "upstream", input: {}, output }));
+}
 
 function nestedArrays(levels: number): RequiredWire {
   let wire: RequiredWire = h.int();
@@ -125,14 +131,14 @@ describe("checkKind", () => {
   });
 
   test("a task input may have an upstream outcome as a whole parameter, optional or nullable", () => {
-    const upstream = h.resultOf(h.object({ id: h.int() }));
+    const upstream = outcomeOf(h.object({ id: h.int() }));
     const parameters = parametersKind({ a: upstream, b: upstream.optional(), c: upstream.nullable(), d: h.int() });
 
     assert.deepEqual(checkParameters(parameters), []);
   });
 
   test("checkParameters looks inside a nullable upstream outcome and refuses one below a conversion", () => {
-    const upstream = kindOf(h.resultOf(h.union([h.int(), h.float()])).nullable());
+    const upstream = kindOf(outcomeOf(h.union([h.int(), h.float()])).nullable());
     const parameters = objectKind([{ name: "order", kind: upstream, presence: { mode: "required" } }]);
 
     assert.deepEqual(
@@ -143,18 +149,18 @@ describe("checkKind", () => {
     const converted = objectKind([
       {
         name: "order",
-        kind: conversionKind(kindOf(h.resultOf(h.int())), ok, ok),
+        kind: conversionKind(kindOf(outcomeOf(h.int())), ok, ok),
         presence: { mode: "required" },
       },
     ]);
 
-    assert.equal(checkParameters(converted)[0]?.rule, "ResultOfPlacement");
+    assert.equal(checkParameters(converted)[0]?.rule, "TaskOutcomePlacement");
   });
 
-  test("ResultOfPlacement: an upstream outcome as a value, or below a parameter", () => {
-    const upstream = kindOf(h.resultOf(h.int()));
+  test("TaskOutcomePlacement: an upstream outcome as a value, or below a parameter", () => {
+    const upstream = kindOf(outcomeOf(h.int()));
 
-    assert.equal(checkKind(upstream)[0]?.rule, "ResultOfPlacement");
+    assert.equal(checkKind(upstream)[0]?.rule, "TaskOutcomePlacement");
 
     const nested = objectKind([
       { name: "list", kind: { node: "array", item: upstream }, presence: { mode: "required" } },
@@ -162,14 +168,14 @@ describe("checkKind", () => {
 
     assert.deepEqual(
       checkParameters(nested).map((refusal) => [refusal.rule, refusal.path]),
-      [["ResultOfPlacement", "$.list[*]"]],
+      [["TaskOutcomePlacement", "$.list[*]"]],
     );
   });
 
   test("checkParameters checks the upstream output kind and the parameter names", () => {
     const parameters = parametersKind({
       __h_x: h.int(),
-      order: h.resultOf(h.union([h.int(), h.float()])),
+      order: outcomeOf(h.union([h.int(), h.float()])),
     });
 
     assert.deepEqual(

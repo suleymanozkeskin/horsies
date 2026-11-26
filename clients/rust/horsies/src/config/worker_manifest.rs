@@ -234,10 +234,7 @@ mod tests {
     use horsies_core::{CancelGraceMs, RegisteredTask, TaskOptions, TaskResult};
 
     use super::*;
-    use crate::{
-        ChildPreload, CustomQueueConfig, DrainTimeout, IsolatedChildCount, IsolatedChildren,
-        IsolatedSetting, QueueMode, WorkerProfile,
-    };
+    use crate::{ChildPreload, CustomQueueConfig, IsolatedChildren, QueueMode, WorkerProfile};
 
     struct EchoTask;
 
@@ -284,9 +281,7 @@ mod tests {
 
     fn profile() -> WorkerProfile {
         WorkerProfile {
-            isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-                IsolatedChildCount::try_from(4).unwrap(),
-            )),
+            isolated: IsolatedChildren::new(4).into(),
             preload: ChildPreload::NoPreload,
             ..WorkerProfile::default()
         }
@@ -363,7 +358,7 @@ mod tests {
         assert_eq!(read, manifest);
         let selected = read.selected_profile().unwrap();
         assert_eq!(selected.name, "web");
-        assert_eq!(selected.profile, profile());
+        assert_eq!(WorkerProfile::from(selected.profile), profile());
     }
 
     #[test]
@@ -581,7 +576,7 @@ mod tests {
     fn a_drain_timeout_is_rounded_up_to_whole_milliseconds() {
         let mut config = config();
         let profile = WorkerProfile {
-            drain_timeout: DrainTimeout::try_from(std::time::Duration::from_micros(1_500)).unwrap(),
+            drain_timeout: std::time::Duration::from_micros(1_500),
             ..profile()
         };
         config.worker_profiles.insert("web".to_owned(), profile);

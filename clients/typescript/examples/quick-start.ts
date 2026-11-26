@@ -36,7 +36,7 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(greet, ({ name }) => greet.ok(`hello, ${name}`));
+app.implement(greet, ({ name }, { ok }) => ok(`hello, ${name}`));
 
 async function demo(): Promise<Result<void, string>> {
   const sent = await app.send(greet, { name: "world" });
@@ -45,7 +45,7 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`send greet: ${sent.error.code}: ${sent.error.message}`);
   }
 
-  const read = await sent.value.get({ timeoutMs: RESULT_WAIT_MS });
+  const read = await sent.value.get({ waitMs: RESULT_WAIT_MS });
 
   if (!read.ok) {
     return demoFailed(`read greet: ${readErrorText(read.error)}`);

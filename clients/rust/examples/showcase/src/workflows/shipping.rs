@@ -30,30 +30,32 @@ impl WorkflowDefinition for Shipping {
         "acme.shipping.v1"
     }
 
-    fn build_with(params: ShippingParams) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(Self::name());
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        params: ShippingParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         builder
             .definition_key(Self::definition_key())
             .on_error(OnError::Fail);
         let book = builder.task(
-            book_courier::node()?
+            book_courier::node()
                 .node_id("book_courier")
                 .set(book_courier::params::order_id(), params.order_id.clone())?
                 .set(book_courier::params::courier(), params.courier)?
                 .set(book_courier::params::express(), params.express)?,
-        );
+        )?;
         let label = builder.task(
-            print_label::node()?
+            print_label::node()
                 .node_id("print_label")
                 .set(print_label::params::order_id(), params.order_id.clone())?
                 .arg_from(print_label::params::booking(), book),
-        );
+        )?;
         let tracking = builder.task(
-            tracking_seed::node()?
+            tracking_seed::node()
                 .node_id("tracking_seed")
                 .set(tracking_seed::params::order_id(), params.order_id)?
                 .arg_from(tracking_seed::params::label(), label),
-        );
+        )?;
         builder.output(tracking);
         builder.build()
     }

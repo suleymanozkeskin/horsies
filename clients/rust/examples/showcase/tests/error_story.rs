@@ -75,7 +75,7 @@ async fn three_error_codes_cross_the_worker() {
         .await
         .expect("send the loyalty task");
 
-    let limit = WaitLimit::parse(Some(support::RESULT_WAIT)).expect("the wait limit");
+    let limit = WaitLimit::Within(support::RESULT_WAIT);
     assert_eq!(failed_code(bundle.get(limit).await), "UNHANDLED_EXCEPTION");
     assert_eq!(failed_code(size.get(limit).await), "DATA_CORRUPTION");
     assert_eq!(failed_code(loyalty.get(limit).await), "LOYALTY_ENGINE_BUG");

@@ -15,7 +15,8 @@ import { checkBuild } from "./checks.ts";
 import { findingRefusal } from "./create-checks.ts";
 import type { WorkflowRecord } from "./define.ts";
 import type { CheckedSpec } from "./findings.ts";
-import { buildParams, type ListedWorkflow, MAX_SUBWORKFLOW_DEPTH, type WorkflowRegistry } from "./registry.ts";
+import { checkCaseParams } from "./check-case.ts";
+import { type ListedWorkflow, MAX_SUBWORKFLOW_DEPTH, type WorkflowRegistry } from "./registry.ts";
 
 /** How the engine starts the child of a sub-workflow node: with its workflow, or after the node's dependencies. */
 type ChildStart = "withItsWorkflow" | "afterDependencies";
@@ -37,7 +38,7 @@ function workflowRefusals(registry: WorkflowRegistry, entry: ListedWorkflow): re
 
   return entry.record.checkCases.flatMap((given, position) => {
     const casePath = `${path} checkCases[${position}]`;
-    const params = buildParams(entry.params, given);
+    const params = checkCaseParams(entry.params, given);
 
     return params.ok
       ? rootRefusals(registry, entry, params.value, casePath)

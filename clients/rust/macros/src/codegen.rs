@@ -3,6 +3,11 @@
 //! module of the same name with `register`, the send helpers, `handle`,
 //! `node` and the input field tokens.
 //!
+//! The module holds no state. Each send helper takes the app that it sends
+//! through and finds the task's typed function in that app; `node()` names
+//! the task, and the workflow builder of an app resolves it against that
+//! app. So two apps of one process share no registration.
+//!
 //! Every path in the expansion starts at `::horsies`, so the user's crate
 //! needs no other dependency for it.
 
@@ -104,6 +109,9 @@ fn task_module(
     let function_type = quote! { ::horsies::TaskFunction<#input, #output, #code> };
     let handle_type = quote! { ::horsies::TaskHandle<#output, #code> };
     let send_result = quote! { ::std::result::Result<#handle_type, ::horsies::TaskSendError> };
+    // The app parameter of the send helpers resolves at the definition site
+    // of the expansion, so a task parameter named `app` binds apart from it.
+    let app = syn::Ident::new("app", proc_macro2::Span::mixed_site());
     let input_items = input_struct(signature);
     let params_items = params_module(signature);
     let send_params = send_params(signature);
@@ -133,34 +141,16 @@ fn task_module(
 
             const TASK_NAME: &str = #task_name;
 
-            /// The function that the first `register` in this process
-            /// returned; the send helpers send through it.
-            static FUNCTION: ::std::sync::OnceLock<#function_type> =
-                ::std::sync::OnceLock::new();
-
             /// Register the task on `app` and return its typed function.
-            /// The first registration in a process also serves `send`,
-            /// `schedule`, `with_options` and `node` of this module.
+            /// The send helpers and the workflow builders of `app` find the
+            /// task after this.
             pub fn register(
                 app: &mut ::horsies::Horsies,
             ) -> ::std::result::Result<#function_type, ::horsies::HorsiesError> {
                 #runtime_capture
                 let task = #registered #workflow_ctx .with_task_options(#options);
                 app.register(TASK_NAME, task)?;
-                let function =
-                    <#function_type>::__registered(app, TASK_NAME)?;
-                let _first_registration =
-                    FUNCTION.set(::std::clone::Clone::clone(&function));
-                ::std::result::Result::Ok(function)
-            }
-
-            fn registered() -> ::std::result::Result<
-                &'static #function_type,
-                ::horsies::TaskSendError,
-            > {
-                FUNCTION
-                    .get()
-                    .ok_or_else(|| ::horsies::__private::send_before_register(TASK_NAME))
+                <#function_type>::__registered(app, TASK_NAME)
             }
 
             /// The typed function of the task in the app of `runtime`.
@@ -170,65 +160,56 @@ fn task_module(
                 runtime.task_handle::<#input, #output, #code>(TASK_NAME)
             }
 
-            /// Send the task now.
-            pub async fn send(#send_params) -> #send_result {
+            /// Send the task now through `app`, the app that registered
+            /// it.
+            ///
+            /// Errors: the send errors; `VALIDATION_FAILED` when `app` does
+            /// not register the task, and nothing is written.
+            pub async fn send(#app: &::horsies::Horsies, #send_params) -> #send_result {
                 let input: #input = #build_input;
-                registered()?.send(input).await
+                ::horsies::__private::send_function::<#input, #output, #code>(#app, TASK_NAME)?
+                    .send(input)
+                    .await
             }
 
-            /// Send the task to run after `delay`.
-            pub async fn schedule(
-                delay: ::horsies::WholeSeconds,
-                #send_params
-            ) -> #send_result {
-                let input: #input = #build_input;
-                registered()?.schedule(delay, input).await
-            }
-
-            /// The send helpers with per-send options.
+            /// The send helpers with per-send options: a delay, a deadline,
+            /// an idempotency key, a retention.
             pub fn with_options(options: ::horsies::TaskSendOptions) -> SendOptions {
                 SendOptions { options }
             }
 
-            /// Per-send options of this task's send helpers.
+            /// Per-send options of this task's send helpers. A send takes
+            /// them; clone them for one more send.
+            #[derive(::std::clone::Clone, ::std::fmt::Debug)]
             pub struct SendOptions {
                 options: ::horsies::TaskSendOptions,
             }
 
             impl SendOptions {
-                /// Send the task now with these options.
-                pub async fn send(&self, #send_params) -> #send_result {
-                    let input: #input = #build_input;
-                    registered()?
-                        .with_options(::std::clone::Clone::clone(&self.options))
-                        .send(input)
-                        .await
-                }
-
-                /// Send the task to run after `delay` with these options.
-                pub async fn schedule(
-                    &self,
-                    delay: ::horsies::WholeSeconds,
+                /// Send the task through `app` with these options: now, or
+                /// after their delay. The send owns the options, so its
+                /// future borrows only `app`:
+                /// `name::with_options(options).send(&app, ..)` is one
+                /// expression, also when the future is kept in a binding.
+                ///
+                /// Errors: as `send`.
+                pub async fn send(
+                    self,
+                    #app: &::horsies::Horsies,
                     #send_params
                 ) -> #send_result {
                     let input: #input = #build_input;
-                    registered()?
-                        .with_options(::std::clone::Clone::clone(&self.options))
-                        .schedule(delay, input)
+                    ::horsies::__private::send_function::<#input, #output, #code>(#app, TASK_NAME)?
+                        .send_with_options(self.options, input)
                         .await
                 }
             }
 
-            /// A workflow node of the task, with the queue, priority and
-            /// options of its registration.
-            pub fn node() -> ::std::result::Result<
-                ::horsies::TaskNode<#output, #input>,
-                ::horsies::HorsiesError,
-            > {
-                FUNCTION
-                    .get()
-                    .map(|function| function.node())
-                    .ok_or_else(|| ::horsies::__private::node_before_register(TASK_NAME))
+            /// A workflow node of the task with an empty input `{}`. The
+            /// workflow builder that takes it resolves the queue, the
+            /// priority and the options of the task against its own app.
+            pub fn node() -> ::horsies::TaskNode<#output, #input> {
+                ::horsies::__private::task_node::<#output, #input>(TASK_NAME)
             }
         }
     }

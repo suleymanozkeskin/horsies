@@ -38,10 +38,21 @@ const RECOVERY_WAIT: Duration = Duration::from_secs(30);
 /// How long a paused workflow must stay paused.
 const PAUSED_WINDOW: Duration = Duration::from_secs(1);
 
-fn builder(name: &str) -> WorkflowSpecBuilder {
-    let mut builder = WorkflowSpecBuilder::new(name);
+fn builder(suite: &Suite, name: &str) -> WorkflowSpecBuilder {
+    let mut builder = suite.app.workflow_builder(name);
     let _key = builder.definition_key(format!("tests.e2e.{name}.v1"));
     builder
+}
+
+/// Add `node` to `spec`, a workflow builder of the suite's app. The app
+/// registers every task of the test binary, so a refusal is a defect of the
+/// test.
+fn add<T: 'static, I: 'static>(
+    spec: &mut WorkflowSpecBuilder,
+    node: TaskNode<T, I>,
+) -> TypedNodeRef<T> {
+    spec.task(node)
+        .expect("the app of the suite registers the task of the node")
 }
 
 /// A step node `id` that returns `completed_<id>`.
@@ -214,11 +225,11 @@ async fn failed_code<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
 /// Python `spec_pausable`: A (100 ms), B (200 ms), C (200 ms), D (100 ms),
 /// each after the one before.
 fn pausable(suite: &Suite) -> WorkflowSpecBuilder {
-    let mut spec = builder("pausable");
-    let a = spec.task(slow_step(suite, "a", 100));
-    let b = spec.task(slow_step(suite, "b", 200).waits_for(a));
-    let c = spec.task(slow_step(suite, "c", 200).waits_for(b));
-    let _d = spec.task(slow_step(suite, "d", 100).waits_for(c));
+    let mut spec = builder(suite, "pausable");
+    let a = add(&mut spec, slow_step(suite, "a", 100));
+    let b = add(&mut spec, slow_step(suite, "b", 200).waits_for(a));
+    let c = add(&mut spec, slow_step(suite, "c", 200).waits_for(b));
+    let _d = add(&mut spec, slow_step(suite, "d", 100).waits_for(c));
     spec
 }
 
@@ -240,21 +251,21 @@ async fn wait_for_pause_point(client: &Client, workflow_id: Uuid) {
 /// Python `spec_on_error_pause`: A, then B that fails, then C; the workflow
 /// pauses on a failure.
 fn pausing_on_error(suite: &Suite) -> WorkflowSpecBuilder {
-    let mut spec = builder("on_error_pause");
+    let mut spec = builder(suite, "on_error_pause");
     let _policy = spec.on_error(OnError::Pause);
-    let a = spec.task(step(suite, "a"));
-    let b = spec.task(fail(suite, "b").waits_for(a));
-    let _c = spec.task(step(suite, "c").waits_for(b));
+    let a = add(&mut spec, step(suite, "a"));
+    let b = add(&mut spec, fail(suite, "b").waits_for(a));
+    let _c = add(&mut spec, step(suite, "c").waits_for(b));
     spec
 }
 
 /// Python `spec_linear`: A, B, C, each after the one before; the output is
 /// C.
 fn linear(suite: &Suite, name: &str) -> WorkflowSpecBuilder {
-    let mut spec = builder(name);
-    let a = spec.task(step(suite, "a"));
-    let b = spec.task(step(suite, "b").waits_for(a));
-    let c = spec.task(step(suite, "c").waits_for(b));
+    let mut spec = builder(suite, name);
+    let a = add(&mut spec, step(suite, "a"));
+    let b = add(&mut spec, step(suite, "b").waits_for(a));
+    let c = add(&mut spec, step(suite, "c").waits_for(b));
     let _output = spec.output(c);
     spec
 }
@@ -314,11 +325,12 @@ async fn child_workflow(client: &Client, workflow_id: Uuid, task_index: i32) -> 
 async fn test_quorum_ctx_gating() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated4).await;
-    let mut spec = builder("quorum_ctx_gating");
-    let a = spec.task(slow_step(&suite, "a", 100));
-    let b = spec.task(slow_step(&suite, "b", 150));
-    let c = spec.task(slow_step(&suite, "c", 300));
-    let _d = spec.task(
+    let mut spec = builder(&suite, "quorum_ctx_gating");
+    let a = add(&mut spec, slow_step(&suite, "a", 100));
+    let b = add(&mut spec, slow_step(&suite, "b", 150));
+    let c = add(&mut spec, slow_step(&suite, "c", 300));
+    let _d = add(
+        &mut spec,
         suite
             .function(workflow::ctx_reader_str::handle)
             .node()
@@ -350,11 +362,12 @@ async fn test_quorum_ctx_gating() {
 async fn test_quorum_impossible_skips() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("quorum_impossible");
-    let a = spec.task(fail(&suite, "a"));
-    let b = spec.task(fail(&suite, "b"));
-    let c = spec.task(step(&suite, "c"));
-    let _d = spec.task(
+    let mut spec = builder(&suite, "quorum_impossible");
+    let a = add(&mut spec, fail(&suite, "a"));
+    let b = add(&mut spec, fail(&suite, "b"));
+    let c = add(&mut spec, step(&suite, "c"));
+    let _d = add(
+        &mut spec,
         step(&suite, "d")
             .waits_for(a)
             .waits_for(b)
@@ -375,10 +388,13 @@ async fn test_quorum_impossible_skips() {
 async fn test_join_any_all_deps_fail_skips() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("join_any_all_fail");
-    let a = spec.task(fail(&suite, "a"));
-    let b = spec.task(fail(&suite, "b"));
-    let _c = spec.task(step(&suite, "c").waits_for_all([a, b]).join_any());
+    let mut spec = builder(&suite, "join_any_all_fail");
+    let a = add(&mut spec, fail(&suite, "a"));
+    let b = add(&mut spec, fail(&suite, "b"));
+    let _c = add(
+        &mut spec,
+        step(&suite, "c").waits_for_all([a, b]).join_any(),
+    );
     let handle = start::<OutputlessResults>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(statuses(&nodes), vec!["FAILED", "FAILED", "SKIPPED"]);
@@ -527,7 +543,7 @@ async fn test_cancel_cascades_to_child_workflow() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = builder("cancel_running_child_cascade");
+    let mut spec = builder(&suite, "cancel_running_child_cascade");
     let child = spec.sub_workflow(
         subworkflow::SubSlow::node(SubWorkflowParams::Given(subworkflow::SlowParams {
             value: "cancel_me".to_owned(),
@@ -556,9 +572,9 @@ async fn test_cancel_cascades_to_child_workflow() {
 async fn test_success_policy_satisfied() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("success_policy_satisfied");
-    let a = spec.task(mark(&suite, "a", "required_A"));
-    let b = spec.task(fail_with(&suite, "b", "OPTIONAL_FAIL"));
+    let mut spec = builder(&suite, "success_policy_satisfied");
+    let a = add(&mut spec, mark(&suite, "a", "required_A"));
+    let b = add(&mut spec, fail_with(&suite, "b", "OPTIONAL_FAIL"));
     let _policy =
         spec.success_policy(SuccessPolicy::new(vec![SuccessCase::new([a])]).optional([b]));
     let handle = start::<OutputlessResults>(&suite, spec).await;
@@ -568,9 +584,9 @@ async fn test_success_policy_satisfied() {
 
 /// A and B are both required; B fails with `REQUIRED_FAIL`.
 fn policy_not_met(suite: &Suite) -> WorkflowSpecBuilder {
-    let mut spec = builder("success_policy_not_met");
-    let a = spec.task(mark(suite, "a", "required_A"));
-    let b = spec.task(fail_with(suite, "b", "REQUIRED_FAIL"));
+    let mut spec = builder(suite, "success_policy_not_met");
+    let a = add(&mut spec, mark(suite, "a", "required_A"));
+    let b = add(&mut spec, fail_with(suite, "b", "REQUIRED_FAIL"));
     let _policy = spec.success_policy(SuccessPolicy::new(vec![SuccessCase::new([
         a.untyped(),
         b.untyped(),
@@ -609,9 +625,9 @@ async fn test_success_policy_not_met_error_content() {
 async fn test_success_policy_multiple_cases() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("success_policy_multi");
-    let a = spec.task(fail_with(&suite, "a", "CASE1_FAIL"));
-    let b = spec.task(mark(&suite, "b", "case2_ok"));
+    let mut spec = builder(&suite, "success_policy_multi");
+    let a = add(&mut spec, fail_with(&suite, "a", "CASE1_FAIL"));
+    let b = add(&mut spec, mark(&suite, "b", "case2_ok"));
     let _policy = spec.success_policy(SuccessPolicy::new(vec![
         SuccessCase::new([a]),
         SuccessCase::new([b]),
@@ -649,10 +665,10 @@ async fn test_recovery_preserves_failed_state() {
     let suite = Suite::start(BIN, Instance::Recovery).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = builder("recovery_linear_fail_mid");
-    let a = spec.task(step(&suite, "a"));
-    let b = spec.task(fail(&suite, "b").waits_for(a));
-    let c = spec.task(step(&suite, "c").waits_for(b));
+    let mut spec = builder(&suite, "recovery_linear_fail_mid");
+    let a = add(&mut spec, step(&suite, "a"));
+    let b = add(&mut spec, fail(&suite, "b").waits_for(a));
+    let c = add(&mut spec, step(&suite, "c").waits_for(b));
     let _output = spec.output(c);
     let handle = start::<String>(&suite, spec).await;
     let _nodes = ended_nodes(&suite, &handle, "FAILED").await;
@@ -670,9 +686,9 @@ async fn test_recovery_recomputes_first_failed_error() {
     let suite = Suite::start(BIN, Instance::Recovery).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = builder("recovery_first_error");
-    let _first = spec.task(fail_with(&suite, "first", "FIRST_ERROR"));
-    let _second = spec.task(fail_with(&suite, "second", "SECOND_ERROR"));
+    let mut spec = builder(&suite, "recovery_first_error");
+    let _first = add(&mut spec, fail_with(&suite, "first", "FIRST_ERROR"));
+    let _second = add(&mut spec, fail_with(&suite, "second", "SECOND_ERROR"));
     let handle = start::<OutputlessResults>(&suite, spec).await;
     let workflow_id = handle.workflow_id();
     let _nodes = ended_nodes(&suite, &handle, "FAILED").await;
@@ -715,18 +731,20 @@ async fn test_workflow_recovers_after_worker_crash() {
     let suite = Suite::start(BIN, Instance::RecoveryQueues).await;
     let client = suite.client().await;
     let mut crashed = suite.worker(Profile::Isolated2).await;
-    let mut spec = builder("recovery_crash");
-    let a = spec.task(recovery_step(&suite, "a", 50));
-    let b = spec.task(recovery_step(&suite, "b", 50).waits_for(a));
-    let c = spec.task(recovery_step(&suite, "c", 60_000).waits_for(b));
-    let d = spec.task(recovery_step(&suite, "d", 60_000).waits_for(b));
-    let e = spec.task(
+    let mut spec = builder(&suite, "recovery_crash");
+    let a = add(&mut spec, recovery_step(&suite, "a", 50));
+    let b = add(&mut spec, recovery_step(&suite, "b", 50).waits_for(a));
+    let c = add(&mut spec, recovery_step(&suite, "c", 60_000).waits_for(b));
+    let d = add(&mut spec, recovery_step(&suite, "d", 60_000).waits_for(b));
+    let e = add(
+        &mut spec,
         recovery_step(&suite, "e", 50)
             .waits_for_all([c, d])
             .allow_failed_deps(true)
             .queue("recovery"),
     );
-    let _f = spec.task(
+    let _f = add(
+        &mut spec,
         recovery_step(&suite, "f", 50)
             .waits_for(e)
             .queue("recovery"),
@@ -786,8 +804,8 @@ async fn test_workflow_recovers_after_worker_crash() {
 async fn test_workflow_task_retries() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("retry_test");
-    let a = spec.task(retry_then_ok(&suite, "a", "wf-retry-ok", 2));
+    let mut spec = builder(&suite, "retry_test");
+    let a = add(&mut spec, retry_then_ok(&suite, "a", "wf-retry-ok", 2));
     let _output = spec.output(a);
     let handle = start::<String>(&suite, spec).await;
     let nodes = ended_nodes_within(&suite, &handle, "COMPLETED", RETRY_WAIT).await;
@@ -803,8 +821,11 @@ async fn test_workflow_task_retries() {
 async fn test_workflow_task_retries_exhausted() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("retry_exhausted");
-    let a = spec.task(retry_then_ok(&suite, "a", "wf-retry-exhausted", 10));
+    let mut spec = builder(&suite, "retry_exhausted");
+    let a = add(
+        &mut spec,
+        retry_then_ok(&suite, "a", "wf-retry-exhausted", 10),
+    );
     let _output = spec.output(a);
     let handle = start::<String>(&suite, spec).await;
     let nodes = ended_nodes_within(&suite, &handle, "FAILED", RETRY_WAIT).await;
@@ -828,8 +849,8 @@ async fn test_workflow_task_retries_exhausted() {
 async fn test_subworkflow_mixed_explicit_and_args_from() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("subworkflow_mixed_input");
-    let source: TypedNodeRef<i64> = spec.task(produce(&suite, "produce", 21));
+    let mut spec = builder(&suite, "subworkflow_mixed_input");
+    let source: TypedNodeRef<i64> = add(&mut spec, produce(&suite, "produce", 21));
     let child = spec.sub_workflow(
         subworkflow::SubLabel::node(SubWorkflowParams::NotGiven)
             .expect("a label child node")

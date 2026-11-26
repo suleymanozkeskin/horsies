@@ -1,5 +1,5 @@
 // Automatic retries: a `retry` policy with `autoRetryFor`. A retry starts when the task ends with one of the listed
-// codes: a code that the task declares, or a library code such as `TASK_TIMEOUT`.
+// codes: a custom code that the task declares, or a built-in code such as `TASK_TIMEOUT`.
 //
 //   node examples/retries.ts worker --profile default
 //   node examples/retries.ts demo
@@ -50,10 +50,10 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(callPartner, async ({ request }) =>
+app.implement(callPartner, async ({ request }, { err }) =>
   request === ""
-    ? callPartner.err({ code: "REJECTED", message: "an empty request" })
-    : callPartner.err({ code: "RATE_LIMITED", message: `the partner is busy: ${request}` }),
+    ? err({ code: "REJECTED", message: "an empty request" })
+    : err({ code: "RATE_LIMITED", message: `the partner is busy: ${request}` }),
 );
 
 /** Send `request`, read its outcome, then read how many retries ran. */
@@ -65,7 +65,7 @@ async function callOnce(request: string): Promise<Result<void, string>> {
     return demoFailed(`send call_partner ${label}: ${sendErrorText(sent.error)}`);
   }
 
-  printLine(readLine(label, await sent.value.get({ timeoutMs: LONG_RESULT_WAIT_MS }), (answer) => answer));
+  printLine(readLine(label, await sent.value.get({ waitMs: LONG_RESULT_WAIT_MS }), (answer) => answer));
 
   const info = await sent.value.info();
 

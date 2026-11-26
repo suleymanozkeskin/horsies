@@ -156,7 +156,7 @@ describe("TaskHandle.info", () => {
     const fake = fakeProducer({ infos: [{ kind: "absent", reason: "PREDATES_RETAINED_HISTORY" }] });
     const read = await taskHandleOf(addonAccess(fake), readFormOf(contract), TASK_ID).info();
 
-    assert.deepEqual(read, { ok: false, error: { kind: "taskNotFound", absence: "predatesRetainedHistory" } });
+    assert.deepEqual(read, { ok: false, error: { kind: "taskNotFound", code: "TASK_NOT_FOUND", reason: "PREDATES_RETAINED_HISTORY" } });
   });
 
   test("a failed read is database", async () => {

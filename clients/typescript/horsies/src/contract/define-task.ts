@@ -3,41 +3,42 @@
 //
 // `defineTask` builds a frozen contract and keeps its facts (`definition.ts`). It refuses nothing with a throw: what it
 // finds wrong (a task name that cannot be stored, a parameter name, a schema of another vendor, a wire type that
-// `checkKind` refuses) is a contract refusal, which `Horsies.create` reports. The result constructors `ok` and `err` are bound to the
-// contract, so a wrong value or code fails typecheck at its own line.
+// `checkKind` refuses) is a contract refusal, which `Horsies.create` reports. A body gets the result constructors `ok`
+// and `err` of its contract in its second argument (`ResultConstructors`), so a wrong value or code fails typecheck
+// at its own line.
 
-import { LIBRARY_TASK_CODES, RESERVED_NON_TASK_CODES } from "../codec/bounds.ts";
+import { BUILT_IN_TASK_CODES, RESERVED_NON_TASK_CODES } from "../codec/bounds.ts";
 import type { JsonValue } from "../codec/json-value.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 import { type Err, err as errOf, type Ok, ok as okOf } from "../wire/result.ts";
-import type { LibraryTaskCode } from "../wire/task-error.ts";
+import type { BuiltInTaskCode } from "../wire/task-error.ts";
 import { recordDefinition } from "./definition.ts";
 import type { ParameterSchemas, OutputSchema, SchemaSent } from "./schema.ts";
 
 /** How a worker runs a task. `ISOLATED` (the default): one task at a time in its own child process. */
 export type ExecutionClass = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
 
-/** A code that the library reserves: a library task code, or `WORKFLOW_STOPPED`. */
-export type ReservedCode = LibraryTaskCode | (typeof RESERVED_NON_TASK_CODES)[number];
+/** A code that horsies reserves: a built-in task code, or `WORKFLOW_STOPPED`. */
+export type ReservedCode = BuiltInTaskCode | (typeof RESERVED_NON_TASK_CODES)[number];
 
-/** A code that a task may choose. A built-in name fails typecheck with this text as the expected type. */
-export type UserCode<C extends string> = C extends ReservedCode ? `horsies: "${C}" is a built-in error code` : C;
+/** A custom code: a code that a task may choose. A built-in name fails typecheck with this text as the expected type. */
+export type CustomCode<C extends string> = C extends ReservedCode ? `horsies: "${C}" is a built-in error code` : C;
 
 /** The element type of an `errors` list whose codes the types cannot know (`string[]`): no code fits it. */
 export type WidenedCodes = "horsies: declare errors as literal codes, not as a string[]";
 
 /**
- * The error that a body returns: a code that the task chose, an optional message and optional data. `data: undefined`
+ * The error that a body returns: a custom code of the task, an optional message and optional data. `data: undefined`
  * is no data, as a left-out `data` is: `err` gives an error with no `data` member.
  */
-export type UserFailure<E extends string> = {
+export type CustomFailure<E extends string> = {
   readonly code: E;
   readonly message?: string;
   readonly data?: JsonValue;
 };
 
-/** The codes that a retry policy names: the task's codes and the library's codes. */
-export type RetryCodes<E extends string> = NonEmpty<E | LibraryTaskCode>;
+/** The codes that a retry policy names: the task's custom codes and the built-in codes. */
+export type RetryCodes<E extends string> = NonEmpty<E | BuiltInTaskCode>;
 
 /** When a failed run runs again. `jitter` is `true` when left out, as in the Python client. */
 export type RetryPolicy<E extends string> =
@@ -91,7 +92,7 @@ export interface TaskDefinition<
    * The codes that the task may return, as literals (no `as const` needed). Left out: any code that is not a built-in
    * name. A list of the type `string[]` fails typecheck: its codes would not be known to the types.
    */
-  readonly errors?: string extends E ? readonly WidenedCodes[] : readonly UserCode<E>[];
+  readonly errors?: string extends E ? readonly WidenedCodes[] : readonly CustomCode<E>[];
   readonly execution?: X;
   readonly retry?: RetryPolicy<NoInfer<E>>;
   /**
@@ -130,36 +131,59 @@ export interface TaskContract<
   readonly kind: "task";
   readonly name: string;
   readonly [contractTypes]: ContractTypes<P, O, E, X, C>;
-  /** The success of a body: the output value. */
-  ok(value: SchemaSent<O>): Ok<SchemaSent<O>>;
-  /**
-   * The error of a body: a code of the contract. A built-in name throws `TypeError`; in a body that is stored as
-   * `UNHANDLED_EXCEPTION`.
-   */
-  err<const K extends E>(failure: UserFailure<UserCode<K>>): Err<UserFailure<E>>;
 }
 
 /** Any contract: the constraint of a generic parameter. */
 export type AnyTaskContract = TaskContract<ParameterSchemas, OutputSchema, string, ExecutionClass>;
 
 /** The result of a body: the success, or an error with a code of the contract. */
-export type BodyResult<O extends OutputSchema, E extends string> = Ok<SchemaSent<O>> | Err<UserFailure<E>>;
+export type BodyResult<O extends OutputSchema, E extends string> = Ok<SchemaSent<O>> | Err<CustomFailure<E>>;
+
+/**
+ * The result constructors of a contract, in the second argument of its body: `ok(value)` with a value of the output
+ * type, and `err({ code, message?, data? })` with a code of the contract. A code that the contract does not declare
+ * fails typecheck at the line of the `err` call, and so does a built-in name.
+ */
+export type ResultConstructors<O extends OutputSchema, E extends string> = {
+  /** The success of the body: the output value. */
+  readonly ok: (value: SchemaSent<O>) => Ok<SchemaSent<O>>;
+  /**
+   * The error of the body: a code of the contract. A built-in name throws `TypeError`; in a body that is stored as
+   * `UNHANDLED_EXCEPTION`.
+   */
+  readonly err: <const K extends E>(failure: CustomFailure<CustomCode<K>>) => Err<CustomFailure<E>>;
+};
 
 /** The codes that `err` refuses at run time: the built-in names and the reserved names. */
-const RESERVED_CODES: ReadonlySet<string> = new Set<string>([...LIBRARY_TASK_CODES, ...RESERVED_NON_TASK_CODES]);
+const RESERVED_CODES: ReadonlySet<string> = new Set<string>([...BUILT_IN_TASK_CODES, ...RESERVED_NON_TASK_CODES]);
 
 /**
  * The error of a body, frozen. `data: undefined` is left out: the error holds no `data` member. Throws `TypeError` for
  * a reserved code (a defect that the static type refuses for a literal).
  */
-function failureOf<E extends string>(taskName: string, failure: UserFailure<E>): Err<UserFailure<E>> {
+function failureOf<E extends string>(taskName: string, failure: CustomFailure<E>): Err<CustomFailure<E>> {
   if (RESERVED_CODES.has(failure.code)) {
-    throw new TypeError(`${taskName}.err: "${failure.code}" is a built-in error code; a task cannot return it`);
+    throw new TypeError(`err of ${taskName}: "${failure.code}" is a built-in error code; a task cannot return it`);
   }
 
   const { data, ...withoutData } = failure;
 
   return Object.freeze(errOf(Object.freeze(data === undefined ? withoutData : { ...withoutData, data })));
+}
+
+/**
+ * The result constructors of the task `taskName`, frozen. Pure. Not exported from an entry point: the implementation
+ * keeps them, and the body adapter gives them to the body with the members of its runtime.
+ */
+export function resultConstructorsOf<O extends OutputSchema, E extends string>(
+  taskName: string,
+): ResultConstructors<O, E> {
+  return Object.freeze({
+    ok: (value: SchemaSent<O>): Ok<SchemaSent<O>> => Object.freeze(okOf(value)),
+    err: <const K extends E>(failure: CustomFailure<CustomCode<K>>): Err<CustomFailure<E>> =>
+      // SAFETY: `CustomCode<K>` is `K` for every code that is not reserved, and `K extends E`; a reserved code throws.
+      failureOf(taskName, failure as CustomFailure<E>),
+  });
 }
 
 /**
@@ -175,16 +199,7 @@ export function defineTask<
 >(
   definition: TaskDefinition<P, O, E, X, C> & ExecutionRules<NoInfer<X>>,
 ): TaskContract<P, O, E, X, ContextUseOf<C>> {
-  const name = definition.name;
-
-  const contract = {
-    kind: "task",
-    name,
-    ok: (value: SchemaSent<O>): Ok<SchemaSent<O>> => Object.freeze(okOf(value)),
-    err: <const K extends E>(failure: UserFailure<UserCode<K>>): Err<UserFailure<E>> =>
-      // SAFETY: `UserCode<K>` is `K` for every code that is not reserved, and `K extends E`; a reserved code throws.
-      failureOf(name, failure as UserFailure<E>),
-  };
+  const contract = { kind: "task", name: definition.name };
 
   // SAFETY: `contractTypes` is a type-only key; the contract's types are the type parameters of this call.
   const frozen = Object.freeze(contract) as TaskContract<P, O, E, X, ContextUseOf<C>>;

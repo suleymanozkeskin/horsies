@@ -81,35 +81,35 @@ function armLater(addon: ForwarderPanicAddon): void {
 
 /** The implementations of this module on `app`. */
 export function implementCorePanic(app: Horsies): void {
-  app.implement(panicAfterReturn, () => {
+  app.implement(panicAfterReturn, (_input, { ok, err }) => {
     const addon = forwarderPanicAddon();
 
     if (!addon.ok) {
-      return panicAfterReturn.err({ code: "PROBE_FAILED", message: probeRefusedText(addon.error) });
+      return err({ code: "PROBE_FAILED", message: probeRefusedText(addon.error) });
     }
 
     armLater(addon.value);
 
-    return panicAfterReturn.ok(process.pid);
+    return ok(process.pid);
   });
-  app.implement(panicInBody, async ({ token }) => {
+  app.implement(panicInBody, async ({ token }, { ok, err }) => {
     const ran = appendLine(`${token}-runs`, String(process.pid));
 
     if (!ran.ok) {
-      return panicInBody.err({ code: "MARKER_FAILED", message: markerErrorText(ran.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(ran.error) });
     }
 
     const first = createOnce(`${token}-first-run`, String(process.pid));
 
     if (!first.ok) {
-      return panicInBody.err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
     }
 
     if (first.value === "created") {
       const armed = armNow();
 
       if (!armed.ok) {
-        return panicInBody.err({ code: "PROBE_FAILED", message: probeRefusedText(armed.error) });
+        return err({ code: "PROBE_FAILED", message: probeRefusedText(armed.error) });
       }
 
       await sleepFor(AFTER_PANIC_WAIT_MS, "noSignal");
@@ -117,29 +117,29 @@ export function implementCorePanic(app: Horsies): void {
 
     const returned = appendLine(`${token}-returned`, String(process.pid));
 
-    return returned.ok ? panicInBody.ok(process.pid) : panicInBody.err({ code: "MARKER_FAILED", message: markerErrorText(returned.error) });
+    return returned.ok ? ok(process.pid) : err({ code: "MARKER_FAILED", message: markerErrorText(returned.error) });
   });
-  app.implement(panicThenSend, async ({ token }) => {
+  app.implement(panicThenSend, async ({ token }, { ok, err }) => {
     const first = createOnce(`${token}-first-run`, String(process.pid));
 
     if (!first.ok) {
-      return panicThenSend.err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
     }
 
     if (first.value === "existed") {
-      return panicThenSend.ok(process.pid);
+      return ok(process.pid);
     }
 
     const armed = armNow();
 
     if (!armed.ok) {
-      return panicThenSend.err({ code: "PROBE_FAILED", message: probeRefusedText(armed.error) });
+      return err({ code: "PROBE_FAILED", message: probeRefusedText(armed.error) });
     }
 
     await sleepFor(AFTER_PANIC_WAIT_MS, "noSignal");
 
     const sent = await app.send(pid, { sleepMs: 0 });
 
-    return sent.ok ? panicThenSend.ok(process.pid) : panicThenSend.err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
+    return sent.ok ? ok(process.pid) : err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
   });
 }

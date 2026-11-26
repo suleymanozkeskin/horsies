@@ -14,14 +14,20 @@ import { type SendContext, sendTask } from "../../../../horsies/src/send/send.ts
 import { otelSendObserver } from "../../../../horsies/src/telemetry/send-span.ts";
 import { h } from "../../../../horsies/src/wire/public.ts";
 import { fakeCoreHandle, fakeProducer, type ProducerScript, rawEnqueueFailed } from "../../app/support.ts";
-import { installSdk, loadedApi, recordedWarnings, type TestSdk } from "../support.ts";
+import { installSdk, loadedApi, recordedNotMade, recordedWarnings, type TestSdk } from "../support.ts";
 
 const report = defineTask({ name: "report", input: { n: h.int() }, output: h.int() });
 
 function contextOf(script: ProducerScript, resend: boolean): SendContext {
   const list = checkContractList([report], { kind: "default" });
   const core = { kind: "addon", producer: fakeProducer(script), handle: fakeCoreHandle() } as const;
-  const observer = otelSendObserver({ api: loadedApi(), warnings: recordedWarnings().warnings, clock: () => performance.now() });
+
+  const observer = otelSendObserver({
+    api: loadedApi(),
+    warnings: recordedWarnings().warnings,
+    notMade: recordedNotMade().notMade,
+    clock: () => performance.now(),
+  });
 
   return {
     contracts: contractLookup(list.entries),

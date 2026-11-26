@@ -47,6 +47,17 @@ export interface LoggerLevelArg {
 }
 
 /**
+ * A span that the package did not make or did not complete: of a send, of a workflow start, of an attempt in a Node
+ * child or in a seat isolate, of an attempt that the worker ended. Ids are canonical UUID texts.
+ */
+export type NotMadeSpan =
+  | { readonly kind: "send"; readonly taskId: string }
+  | { readonly kind: "workflowStart"; readonly workflowId: string }
+  | { readonly kind: "attempt"; readonly taskId: string }
+  | { readonly kind: "seatAttempt"; readonly taskId: string }
+  | { readonly kind: "workerEnded"; readonly taskId: string };
+
+/**
  * The sink function that the addon calls with each batch: `true` when the sink took the batch,
  * `false` when it threw. It never throws.
  */
@@ -57,6 +68,11 @@ export interface LoggingAddon {
   setLogLevels(levels: LogLevelsArg): NativeEnvelope<undefined>;
   setLogSink(sink: NativeLogSink): NativeEnvelope<undefined>;
   resetLogSink(): NativeEnvelope<undefined>;
+  /**
+   * Write the WARNING record of `span`, not made for `cause`, on `horsies.telemetry`, once per process and kind of span.
+   * Starts the log bridge; a forwarder that cannot start throws `CORE_START_FAILED`.
+   */
+  logSpanNotMade(span: NotMadeSpan, cause: string): NativeEnvelope<undefined>;
 }
 
 /** The `logging` functions of the addon. Throws as `requireAddon` does. */

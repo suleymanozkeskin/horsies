@@ -85,6 +85,7 @@ describe("the seat pool with worker threads", () => {
       serve: async () => assert.fail("the fixture runs no operation here"),
       endChild: (code) => settles.ends.push(code),
       writeLine: (line) => settles.lines.push(line),
+      spanNotMade: () => assert.fail("the fixture makes no span"),
       reportDefect: (defect) => settles.defects.push(defect),
     });
 

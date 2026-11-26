@@ -128,7 +128,7 @@ export const sleepPastDeadline = defineTask({
 /** Twice the value of its upstream node. */
 export const double = defineTask({
   name: "parity.double",
-  input: { upstream: h.resultOf(h.int()) },
+  input: { upstream: h.taskOutcome(add) },
   output: h.int(),
   errors: ["UPSTREAM_FAILED"],
 });
@@ -328,40 +328,40 @@ export function buildApp(databaseUrl: string): Result<Horsies, string> {
 
 /** The bodies of the tasks: each one by its contract. Calls no addon function. */
 function implementTasks(app: Horsies): void {
-  app.implement(add, ({ a, b }) => add.ok(a + b));
-  app.implement(refuse, ({ value }) => refuse.err({ code: "REFUSED", message: refusedMessage(value) }));
-  app.implement(transient, ({ value }) => transient.err({ code: "TRANSIENT", message: transientMessage(value) }));
-  app.implement(sleepPastDeadline, () => {
+  app.implement(add, ({ a, b }, { ok }) => ok(a + b));
+  app.implement(refuse, ({ value }, { err }) => err({ code: "REFUSED", message: refusedMessage(value) }));
+  app.implement(transient, ({ value }, { err }) => err({ code: "TRANSIENT", message: transientMessage(value) }));
+  app.implement(sleepPastDeadline, (_input, { ok }) => {
     holdThread(PAST_THE_DEADLINE_MS);
 
-    return sleepPastDeadline.ok(LATE);
+    return ok(LATE);
   });
-  app.implement(double, ({ upstream }) => {
+  app.implement(double, ({ upstream }, { ok, err }) => {
     const doubled = doubledValue(upstream);
 
-    return doubled.ok ? double.ok(doubled.value) : double.err({ code: "UPSTREAM_FAILED", message: doubled.error });
+    return doubled.ok ? ok(doubled.value) : err({ code: "UPSTREAM_FAILED", message: doubled.error });
   });
 
-  app.implement(addAsync, async ({ a, b }) => addAsync.ok(a + b));
-  app.implement(refuseAsync, async ({ value }) => refuseAsync.err({ code: "REFUSED", message: refusedMessage(value) }));
-  app.implement(transientAsync, async ({ value }) =>
-    transientAsync.err({ code: "TRANSIENT", message: transientMessage(value) }),
+  app.implement(addAsync, async ({ a, b }, { ok }) => ok(a + b));
+  app.implement(refuseAsync, async ({ value }, { err }) => err({ code: "REFUSED", message: refusedMessage(value) }));
+  app.implement(transientAsync, async ({ value }, { err }) =>
+    err({ code: "TRANSIENT", message: transientMessage(value) }),
   );
-  app.implement(asyncPastDeadline, async (_input, runtime) => {
-    await waitOrSignal(PAST_THE_DEADLINE_MS, runtime.signal);
+  app.implement(asyncPastDeadline, async (_input, { ok, signal }) => {
+    await waitOrSignal(PAST_THE_DEADLINE_MS, signal);
 
-    return asyncPastDeadline.ok(LATE);
+    return ok(LATE);
   });
 
-  app.implement(addThread, ({ a, b }) => addThread.ok(a + b));
-  app.implement(refuseThread, ({ value }) => refuseThread.err({ code: "REFUSED", message: refusedMessage(value) }));
-  app.implement(transientThread, ({ value }) =>
-    transientThread.err({ code: "TRANSIENT", message: transientMessage(value) }),
+  app.implement(addThread, ({ a, b }, { ok }) => ok(a + b));
+  app.implement(refuseThread, ({ value }, { err }) => err({ code: "REFUSED", message: refusedMessage(value) }));
+  app.implement(transientThread, ({ value }, { err }) =>
+    err({ code: "TRANSIENT", message: transientMessage(value) }),
   );
-  app.implement(threadPastDeadline, () => {
+  app.implement(threadPastDeadline, (_input, { ok }) => {
     holdThread(PAST_THE_DEADLINE_MS);
 
-    return threadPastDeadline.ok(LATE);
+    return ok(LATE);
   });
 }
 

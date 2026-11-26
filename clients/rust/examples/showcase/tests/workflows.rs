@@ -107,7 +107,7 @@ async fn run_order(
         .start(order)
         .await
         .expect("start the order workflow");
-    let limit = WaitLimit::parse(Some(support::RESULT_WAIT)).expect("the wait limit");
+    let limit = WaitLimit::Within(support::RESULT_WAIT);
     handle.get(limit).await
 }
 
@@ -164,7 +164,7 @@ async fn order_fulfillment_courier_retry_records_attempts_before_success() {
         })
         .await
         .expect("send the courier booking");
-    let limit = WaitLimit::parse(Some(support::RESULT_WAIT)).expect("the wait limit");
+    let limit = WaitLimit::Within(support::RESULT_WAIT);
     let outcome = handle.get(limit).await;
     assert!(
         matches!(outcome, Ok(TaskOutcome::Succeeded(_))),

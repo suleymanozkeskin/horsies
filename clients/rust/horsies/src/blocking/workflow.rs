@@ -18,8 +18,8 @@
 //!   template's build runs inside its start, so on a runtime thread the
 //!   build does not run either. Two checks come before it: `retry_start`
 //!   checks its error (`VALIDATION_FAILED` for an error that the start
-//!   cannot retry), and `get` refuses a wait in a process that runs task
-//!   bodies (`WaitInsideTask`).
+//!   cannot retry), and `get` checks its limit (`InvalidInput`) and then
+//!   refuses a wait in a process that runs task bodies (`WaitInsideTask`).
 //! - When the OS refused the threads of the process runtime, a start
 //!   answers `ENQUEUE_FAILED` with the workflow id, a handle method
 //!   `DB_OPERATION_FAILED`, and `get` and `result_for` `Database`, each
@@ -228,6 +228,49 @@ impl HorsiesView<'_> {
         )
     }
 
+    /// `Horsies::start_workflow`, blocking: start the workflow definition
+    /// `D`, which takes no params, through its registration on the app.
+    ///
+    /// Errors: as the async method. On a runtime thread `ASYNC_CONTEXT`,
+    /// also when the app does not register `D`.
+    pub fn start_workflow<D>(&self) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+    where
+        D: WorkflowDefinition<Params = ()>,
+        D::Output: DeserializeOwned + Send + Sync,
+    {
+        let workflow_id = new_workflow_id();
+        block_start(
+            self.app.start_workflow_as::<D>(workflow_id),
+            workflow_id,
+            &definition_names::<D>("start_workflow()", "app.start_workflow::<D>()"),
+        )
+    }
+
+    /// `Horsies::start_workflow_with`, blocking: start the workflow
+    /// definition `D` with `params`, through its registration on the app.
+    ///
+    /// Errors: as the async method. On a runtime thread `ASYNC_CONTEXT`,
+    /// also when the app does not register `D`; the build does not run.
+    pub fn start_workflow_with<D>(
+        &self,
+        params: D::Params,
+    ) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+    where
+        D: WorkflowDefinition,
+        D::Params: Send + Sync,
+        D::Output: DeserializeOwned + Send + Sync,
+    {
+        let workflow_id = new_workflow_id();
+        block_start(
+            self.app.start_workflow_with_as::<D>(params, workflow_id),
+            workflow_id,
+            &definition_names::<D>(
+                "start_workflow_with()",
+                "app.start_workflow_with::<D>(params)",
+            ),
+        )
+    }
+
     /// `Horsies::start_with_id`, blocking.
     pub fn start_with_id<T>(
         &self,
@@ -255,45 +298,6 @@ fn spec_names<'s>(spec: &'s WorkflowSpec, method: &str, async_call: &'s str) -> 
         blocking_call: format!("Horsies::{method} of workflow '{}'", spec.name()),
         async_call,
     }
-}
-
-/// [`crate::start_workflow`], blocking: start the workflow definition `D`,
-/// which takes no params, through its first registration in this process.
-///
-/// Errors: as the async function. On a runtime thread `ASYNC_CONTEXT`,
-/// also before the registration of `D`.
-pub fn start_workflow<D>() -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
-where
-    D: WorkflowDefinition<Params = ()>,
-    D::Output: DeserializeOwned + Send + Sync,
-{
-    let workflow_id = new_workflow_id();
-    block_start(
-        crate::workflow::start_workflow_as::<D>(workflow_id),
-        workflow_id,
-        &definition_names::<D>("start_workflow()", "start_workflow::<D>()"),
-    )
-}
-
-/// [`crate::start_workflow_with`], blocking: start the workflow definition
-/// `D` with `params`, through its first registration in this process.
-///
-/// Errors: as the async function. On a runtime thread `ASYNC_CONTEXT`,
-/// also before the registration of `D`; the build does not run.
-pub fn start_workflow_with<D>(
-    params: D::Params,
-) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
-where
-    D: WorkflowDefinition,
-    D::Params: Send + Sync,
-    D::Output: DeserializeOwned + Send + Sync,
-{
-    let workflow_id = new_workflow_id();
-    block_start(
-        crate::workflow::start_workflow_with_as::<D>(params, workflow_id),
-        workflow_id,
-        &definition_names::<D>("start_workflow_with()", "start_workflow_with::<D>(params)"),
-    )
 }
 
 fn definition_names<D: WorkflowDefinition>(
@@ -447,10 +451,13 @@ impl<T> WorkflowHandleView<'_, T>
 where
     T: DeserializeOwned + 'static,
 {
-    /// `WorkflowHandle::get`, blocking. In Python's order: a process that
-    /// runs task bodies refuses the wait (`WaitInsideTask`), then a runtime
-    /// thread answers `AsyncContext`.
+    /// `WorkflowHandle::get`, blocking. The limit is the first check, as in
+    /// the async form: a `Within` limit above `MAX_WAIT_LIMIT_MS` is
+    /// `InvalidInput`. Then, in Python's order: a process that runs task
+    /// bodies refuses the wait (`WaitInsideTask`), then a runtime thread
+    /// answers `AsyncContext`.
     pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError> {
+        let _wait = self.handle.checked_wait(limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(WorkflowReadError::WaitInsideTask {
                 message: wait_inside_task_message(&format!(

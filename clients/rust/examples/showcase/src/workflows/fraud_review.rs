@@ -32,20 +32,20 @@ impl WorkflowDefinition for FraudReview {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let reconcile = builder.task(
-            reconcile_payments::node()?
+            reconcile_payments::node()
                 .node_id("reconcile_payments")
                 .set(
                     reconcile_payments::params::window(),
                     format!("dispute-{ORDER_ID}"),
                 )?,
-        );
+        )?;
         let refund = builder.task(
-            refund_payment::node()?
+            refund_payment::node()
                 .node_id("refund_payment")
                 .set(refund_payment::params::order_id(), ORDER_ID.to_owned())?
                 .set(refund_payment::params::amount_cents(), AMOUNT_CENTS)?
                 .waits_for(reconcile),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(refund))
     }
 }

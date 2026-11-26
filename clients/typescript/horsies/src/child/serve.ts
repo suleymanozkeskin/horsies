@@ -178,7 +178,7 @@ function builtError(native: ServeNative, taskName: string, parts: TaskErrorParts
         return replaced.error;
       }
 
-      throw new ClientDefect({ subject: "settleRun", rule: `the core refuses the library error of a refused code: ${replaced.cause}` });
+      throw new ClientDefect({ subject: "settleRun", rule: `the core refuses the built-in error of a refused code: ${replaced.cause}` });
     }
 
     default:

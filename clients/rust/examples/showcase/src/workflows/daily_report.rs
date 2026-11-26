@@ -28,28 +28,28 @@ impl WorkflowDefinition for DailyReport {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let rollup = builder.task(
-            sales_rollup::node()?
+            sales_rollup::node()
                 .node_id("sales_rollup")
                 .set(sales_rollup::params::window(), WINDOW.to_owned())?,
-        );
+        )?;
         let sweep = builder.task(
-            abandoned_cart_sweep::node()?
+            abandoned_cart_sweep::node()
                 .node_id("abandoned_cart_sweep")
                 .set(
                     abandoned_cart_sweep::params::older_than_minutes(),
                     tuning::ABANDONED_CART_AGE_MINUTES,
                 )?
                 .waits_for(rollup),
-        );
+        )?;
         let _blast = builder.task(
-            winback_blast::node()?
+            winback_blast::node()
                 .node_id("winback_blast")
                 .set(
                     winback_blast::params::segment(),
                     format!("winback-{WINDOW}"),
                 )?
                 .arg_from(winback_blast::params::sweep(), sweep),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(sweep))
     }
 }

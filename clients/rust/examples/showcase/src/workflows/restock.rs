@@ -38,23 +38,23 @@ impl WorkflowDefinition for Restock {
         for supplier in tuning::SUPPLIERS {
             let node_id = feed_node_id(supplier);
             feeds.push(
-                builder.task(sync_supplier_feed::node()?.node_id(node_id.clone()).set(
+                builder.task(sync_supplier_feed::node().node_id(node_id.clone()).set(
                     sync_supplier_feed::params::supplier(),
                     (*supplier).to_owned(),
-                )?),
+                )?)?,
             );
             feed_ids.push(node_id);
         }
         let quorum = u32::try_from(tuning::RESTOCK_MIN_SUCCESSFUL_FEEDS.min(feeds.len()))
             .map_err(|_| HorsiesError::new("RESTOCK_MIN_SUCCESSFUL_FEEDS is above u32::MAX"))?;
         let update = builder.task(
-            update_stock_levels::node()?
+            update_stock_levels::node()
                 .node_id("update_stock_levels")
                 .set(update_stock_levels::params::feed_node_ids(), feed_ids)?
                 .waits_for_all(feeds.iter().copied())
                 .workflow_ctx_from(feeds.iter().copied())
                 .join_quorum(quorum),
-        );
+        )?;
         let policy = SuccessPolicy::new(vec![SuccessCase::new([update])]).optional(feeds);
         Ok(WorkflowDefConfig::new()
             .output(update)

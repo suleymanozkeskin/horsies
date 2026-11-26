@@ -27,7 +27,7 @@ function app(): Horsies {
     throw new Error("the app of the event tests is refused");
   }
 
-  created.value.implement(listed, () => listed.ok(null));
+  created.value.implement(listed, (_input, { ok }) => ok(null));
 
   return created.value;
 }

@@ -8,6 +8,6 @@ declare const app: Horsies;
 declare const runtime: TaskRuntime;
 
 const audit = defineTask({ name: "audit", input: {}, output: h.null(), workflowContext: true });
-const implementation = app.implement(audit, () => audit.ok(null));
+const implementation = app.implement(audit, (_input, { ok }) => ok(null));
 
 export const outcome = implementation.run({}, runtime);

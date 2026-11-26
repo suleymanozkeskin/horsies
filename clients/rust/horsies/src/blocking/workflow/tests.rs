@@ -7,7 +7,7 @@ use std::convert::Infallible;
 use serde::{Deserialize, Serialize};
 
 use super::*;
-use crate::workflow::tests_support::unit_task_node;
+use crate::workflow::tests_support::{add, test_builder, unit_task_node};
 use crate::{AppConfig, Horsies, HorsiesError, WorkflowDefConfig, WorkflowSpecBuilder};
 use horsies_core::WorkflowStartErrorCode;
 
@@ -20,7 +20,7 @@ fn app() -> Horsies {
 
 /// One task node as the output.
 fn one_task(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-    let tick = builder.task(unit_task_node("tick"));
+    let tick = add(builder, unit_task_node("tick"));
     Ok(WorkflowDefConfig::new().output(tick))
 }
 
@@ -44,8 +44,7 @@ impl WorkflowDefinition for Nightly {
     }
 }
 
-/// A definition without params, for the process-wide start. Its own type:
-/// the process keeps the first registration of each type.
+/// A definition without params, for the start by type on the app.
 struct Weekly;
 
 impl WorkflowDefinition for Weekly {
@@ -86,7 +85,10 @@ impl WorkflowDefinition for Regional {
         "tests.blocking.regional.v1"
     }
 
-    fn build_with(params: Region) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        _builder: WorkflowSpecBuilder,
+        params: Region,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         Err(HorsiesError::new(format!(
             "region {} has no build",
             params.region
@@ -190,23 +192,35 @@ async fn a_blocking_template_start_on_a_runtime_thread_runs_no_build() {
     assert_eq!(with_id.workflow_id(), workflow_id);
 }
 
+/// The blocking starts of a definition by its type on the app answer
+/// `ASYNC_CONTEXT` on a runtime thread, also for a definition that the app
+/// does not register: the thread check comes first.
 #[tokio::test]
-async fn a_blocking_process_wide_start_on_a_runtime_thread_writes_nothing() {
+async fn a_blocking_start_by_type_on_a_runtime_thread_writes_nothing() {
     let mut app = app();
+    assert_async_context(
+        &app.blocking().start_workflow::<Weekly>().unwrap_err(),
+        "blocking_weekly",
+    );
     let _function = app.register_workflow_definition::<Weekly>().unwrap();
-    assert_async_context(&start_workflow::<Weekly>().unwrap_err(), "blocking_weekly");
+    assert_async_context(
+        &app.blocking().start_workflow::<Weekly>().unwrap_err(),
+        "blocking_weekly",
+    );
     let _template = app.workflow_template::<Regional>().unwrap();
     assert_async_context(
-        &start_workflow_with::<Regional>(region()).unwrap_err(),
+        &app.blocking()
+            .start_workflow_with::<Regional>(region())
+            .unwrap_err(),
         "blocking_regional",
     );
 }
 
 #[tokio::test]
 async fn a_blocking_spec_start_on_a_runtime_thread_writes_nothing() {
-    let mut builder = WorkflowSpecBuilder::new("blocking_adhoc");
+    let mut builder = test_builder("blocking_adhoc");
     builder.definition_key("tests.blocking.adhoc.v1");
-    let tick = builder.task(unit_task_node("tick"));
+    let tick = add(&mut builder, unit_task_node("tick"));
     builder.output(tick);
     let spec = builder.build().unwrap();
     let app = app();
@@ -247,6 +261,26 @@ async fn a_blocking_handle_method_on_a_runtime_thread_is_async_context() {
         refusals[0].message().contains("`handle.status().await`"),
         "{}",
         refusals[0].message()
+    );
+}
+
+/// The limit is the first check of a blocking `get`: on a runtime thread,
+/// where the thread check answers `AsyncContext`, a limit above the bound
+/// is `InvalidInput`.
+#[tokio::test]
+async fn a_blocking_outcome_read_above_the_bound_is_invalid_input_on_any_thread() {
+    let workflow_id = Uuid::from_u128(29);
+    let handle = app().workflow_handle::<u32>(workflow_id);
+    let above = WaitLimit::Within(std::time::Duration::from_millis(
+        crate::MAX_WAIT_LIMIT_MS + 1,
+    ));
+    let read = handle.blocking().get(above).unwrap_err();
+    assert_eq!(
+        read,
+        WorkflowReadError::InvalidInput {
+            workflow_id,
+            cause: crate::WaitLimitRefused,
+        },
     );
 }
 

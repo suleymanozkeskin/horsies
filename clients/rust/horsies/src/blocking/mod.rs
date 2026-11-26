@@ -1,17 +1,17 @@
 //! Blocking forms of the async API, for a program that does not run a
-//! tokio runtime (Python's sync calls: `send`, `schedule`, the retries,
+//! tokio runtime (Python's sync calls: `send` and `schedule`, the retries,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
 //! reads, `check(live=True)`, the workflow starts and the sync methods of
 //! `WorkflowHandle`).
 //!
 //! Each async type gives a view with `blocking()`: [`TaskFunctionView`],
 //! [`TaskHandleView`], [`HorsiesView`], [`WorkflowFunctionView`],
-//! [`WorkflowTemplateView`] and [`WorkflowHandleView`]; the process-wide
-//! starts have the blocking functions [`start_workflow`] and
-//! [`start_workflow_with`]. A view method has the name, the arguments and
-//! the result type of the async method. It runs the async method on the
-//! core's process runtime, which drives the app's connections, and blocks
-//! the calling thread until the method ends.
+//! [`WorkflowTemplateView`] and [`WorkflowHandleView`]. The starts of a
+//! definition by its type are [`HorsiesView::start_workflow`] and
+//! [`HorsiesView::start_workflow_with`]. A view method has the name, the
+//! arguments and the result type of the async method. It runs the async
+//! method on the core's process runtime, which drives the app's
+//! connections, and blocks the calling thread until the method ends.
 //!
 //! ```ignore
 //! let send_email = send_email::register(&mut app)?;
@@ -29,6 +29,9 @@
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
 //!   start, `HandleErrorCode::AsyncContext`, or
 //!   `WorkflowReadError::AsyncContext`.
+//! - A read that takes a `WaitLimit` checks it first, on any thread: a
+//!   `Within` limit above `MAX_WAIT_LIMIT_MS` is `ReadError::InvalidInput`
+//!   or `WorkflowReadError::InvalidInput`, and nothing runs.
 //! - The thread of a blocking task body in a worker child (a `fn` task)
 //!   drives no async task: a blocking call works there, also where the
 //!   child runtime's handle is set.
@@ -42,10 +45,7 @@
 
 mod workflow;
 
-pub use workflow::{
-    start_workflow, start_workflow_with, WorkflowFunctionView, WorkflowHandleView,
-    WorkflowTemplateView,
-};
+pub use workflow::{WorkflowFunctionView, WorkflowHandleView, WorkflowTemplateView};
 
 use std::fmt;
 use std::future::Future;
@@ -65,12 +65,12 @@ use tokio::runtime::{Handle, Runtime};
 use uuid::Uuid;
 
 use crate::check::{connectivity_report, CHECK};
+use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
-use crate::send::{RetryOf, SendStart};
 use crate::{
     CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
     StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
-    UserErrorCode, WaitLimit, WholeSeconds, WorkerHistoryLimit,
+    UserErrorCode, WaitLimit, WorkerHistoryLimit,
 };
 
 /// Where a blocking call can run.
@@ -146,32 +146,7 @@ where
         options: TaskSendOptions,
         input: A,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.first_send(SendStart::Now, &options, &input)
-    }
-
-    /// `TaskFunction::schedule`, blocking.
-    pub fn schedule(
-        &self,
-        delay: WholeSeconds,
-        input: A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.schedule_with_options(TaskSendOptions::new(), delay, input)
-    }
-
-    /// `TaskFunction::schedule_with_options`, blocking.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "the blocking form takes the arguments of \
-                  `TaskFunction::schedule_with_options` by value; a reference would change \
-                  every caller"
-    )]
-    pub fn schedule_with_options(
-        &self,
-        options: TaskSendOptions,
-        delay: WholeSeconds,
-        input: A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.first_send(SendStart::AfterDelay(delay), &options, &input)
+        self.first_send(&options, &input)
     }
 
     /// `TaskFunction::with_options`, blocking.
@@ -188,30 +163,19 @@ where
     /// `TaskFunction::retry_send`, blocking. On a runtime thread it answers
     /// `AsyncContext` again, with the same task id and payload.
     pub fn retry_send(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.function.retry_target(error, RetryOf::Send)?;
+        let (task_id, payload) = self.function.retry_target(error)?;
         self.enqueue(task_id, payload, SendKind::Repeat, "retry_send")
-    }
-
-    /// `TaskFunction::retry_schedule`, blocking.
-    pub fn retry_schedule(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.function.retry_target(error, RetryOf::Schedule)?;
-        self.enqueue(task_id, payload, SendKind::Repeat, "retry_schedule")
     }
 
     /// The checks of a first send, then the enqueue. A refused input is
     /// refused before the thread is checked, as in Python.
     fn first_send(
         &self,
-        start: SendStart,
         options: &TaskSendOptions,
         input: &A,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.function.prepare(start, options, input)?;
-        let call = match start {
-            SendStart::Now => "send",
-            SendStart::AfterDelay(_) => "schedule",
-        };
-        self.enqueue(task_id, payload, SendKind::First, call)
+        let (task_id, payload) = self.function.prepare(options, input)?;
+        self.enqueue(task_id, payload, SendKind::First, "send")
     }
 
     /// The enqueue with resends of a prepared send, on the process runtime.
@@ -279,22 +243,12 @@ where
     T: Serialize + DeserializeOwned + 'static,
     E: UserErrorCode,
 {
-    /// Send the task now with these options, blocking.
+    /// Send the task with these options, now or after their delay,
+    /// blocking.
     pub fn send(&self, input: A) -> Result<TaskHandle<T, E>, TaskSendError> {
         self.function
             .blocking()
             .send_with_options(self.options.clone(), input)
-    }
-
-    /// Send the task to start after `delay` with these options, blocking.
-    pub fn schedule(
-        &self,
-        delay: WholeSeconds,
-        input: A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.function
-            .blocking()
-            .schedule_with_options(self.options.clone(), delay, input)
     }
 }
 
@@ -315,10 +269,13 @@ where
     T: DeserializeOwned + Clone,
     E: UserErrorCode,
 {
-    /// `TaskHandle::get`, blocking. In Python's order: a process that runs
-    /// task bodies refuses the wait; a kept read is returned; a runtime
-    /// thread answers `AsyncContext`, which is not kept.
+    /// `TaskHandle::get`, blocking. The limit is the first check, as in
+    /// the async form: a `Within` limit above `MAX_WAIT_LIMIT_MS` is
+    /// `InvalidInput`. Then, in Python's order: a process that runs task
+    /// bodies refuses the wait; a kept read is returned; a runtime thread
+    /// answers `AsyncContext`, which is not kept.
     pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
+        let _wait = checked_task_wait(self.handle.task_id(), limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "TaskHandle.get() for task {}",
@@ -428,12 +385,14 @@ impl HorsiesView<'_> {
             .get(limit)
     }
 
-    /// `Horsies::get_raw_result`, blocking.
+    /// `Horsies::get_raw_result`, blocking. The limit is the first check,
+    /// before the process and the thread checks.
     pub fn get_raw_result(
         &self,
         task_id: Uuid,
         limit: WaitLimit,
     ) -> Result<StoredResult, ReadError> {
+        let _wait = checked_task_wait(task_id, limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "Horsies.get_raw_result() for task {task_id}"
@@ -625,7 +584,7 @@ mod tests {
         };
         assert_eq!(payload.input_json, r#"{"id":7}"#);
         assert!(refused.message().contains("blocking send of task 'bill'"));
-        let (retried_id, _payload) = function.retry_target(&refused, RetryOf::Send).unwrap();
+        let (retried_id, _payload) = function.retry_target(&refused).unwrap();
         assert_eq!(retried_id, *task_id);
         let again = function.blocking().retry_send(&refused).unwrap_err();
         assert_eq!(again.task_id(), Some(*task_id));
@@ -666,6 +625,33 @@ mod tests {
             .contains("`app.get_task_info(task_id, parts).await`"));
     }
 
+    /// The limit is the first check of a blocking read: on a runtime
+    /// thread, where the thread check answers `AsyncContext`, a limit above
+    /// the bound is `InvalidInput`. Nothing is kept.
+    #[tokio::test]
+    async fn a_blocking_read_above_the_bound_is_invalid_input_on_any_thread() {
+        let app = app();
+        let task_id = Uuid::from_u128(6);
+        let above = WaitLimit::Within(Duration::from_millis(crate::MAX_WAIT_LIMIT_MS + 1));
+        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let refused = handle.blocking().get(above).unwrap_err();
+        assert_eq!(
+            refused,
+            ReadError::InvalidInput {
+                task_id,
+                cause: crate::WaitLimitRefused,
+            },
+        );
+        assert!(handle.kept().is_none());
+        let typed = app
+            .blocking()
+            .get_result::<u32, Infallible>(task_id, above)
+            .unwrap_err();
+        assert!(matches!(typed, ReadError::InvalidInput { .. }), "{typed}");
+        let raw = app.blocking().get_raw_result(task_id, above).unwrap_err();
+        assert!(matches!(raw, ReadError::InvalidInput { .. }), "{raw}");
+    }
+
     #[tokio::test]
     async fn a_blocking_health_read_on_a_runtime_thread_has_the_async_context_code() {
         let refused = app().blocking().ping_database().unwrap_err();
@@ -688,7 +674,7 @@ mod tests {
     fn a_send_whose_runtime_did_not_start_is_a_retryable_enqueue_failed() {
         let app = app();
         let (task_id, payload) = function(&app)
-            .prepare(SendStart::Now, &TaskSendOptions::new(), &Invoice { id: 3 })
+            .prepare(&TaskSendOptions::new(), &Invoice { id: 3 })
             .unwrap();
         let refused = start_failed_send(
             task_id,

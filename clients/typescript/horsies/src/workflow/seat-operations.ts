@@ -10,12 +10,13 @@ import type {
   NodesRead,
   WorkflowStatusRead,
 } from "../native/workflows/addon.ts";
-import type { RestartRequest, StartCall, StartRequest } from "./core.ts";
+import type { SpecPrepare, StartCall, StartRequest } from "./core.ts";
+import type { CheckedSpec } from "./findings.ts";
 
 /** One workflow operation that a seat isolate asks its child's main thread for. */
 export type WorkflowsSeatOperation =
+  | { readonly kind: "prepare"; readonly spec: CheckedSpec }
   | { readonly kind: "start"; readonly request: StartRequest }
-  | { readonly kind: "restart"; readonly request: RestartRequest }
   | { readonly kind: "status"; readonly workflowId: string }
   | { readonly kind: "nodeResults"; readonly workflowId: string }
   | { readonly kind: "nodes"; readonly workflowId: string }
@@ -26,8 +27,8 @@ export type WorkflowsSeatOperation =
 
 /** The answer to a `WorkflowsSeatOperation`, of the same `kind`. */
 export type WorkflowsSeatReply =
+  | { readonly kind: "prepare"; readonly prepared: SpecPrepare }
   | { readonly kind: "start"; readonly call: StartCall }
-  | { readonly kind: "restart"; readonly call: StartCall }
   | { readonly kind: "status"; readonly read: WorkflowStatusRead }
   | { readonly kind: "nodeResults"; readonly read: NodeResultsRead }
   | { readonly kind: "nodes"; readonly read: NodesRead }

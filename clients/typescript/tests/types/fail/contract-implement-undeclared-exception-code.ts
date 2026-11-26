@@ -8,6 +8,6 @@ declare const app: Horsies;
 
 const charge = defineTask({ name: "charge", input: {}, output: h.null(), errors: ["PAYMENT_DECLINED"] });
 
-export const implementation = app.implement(charge, async () => charge.ok(null), {
+export const implementation = app.implement(charge, async (_input, { ok }) => ok(null), {
   exceptions: [[TypeError, "CARD_GONE"]],
 });

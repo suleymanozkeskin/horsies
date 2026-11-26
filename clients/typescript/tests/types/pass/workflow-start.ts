@@ -1,5 +1,5 @@
 // Compile-pass cases of the sketch's start and handle code (section 5.3): the start error switch with a full match,
-// retryStart of ENQUEUE_FAILED, get with open user codes, resultFor typed by the node's contract, pause, resume,
+// retryStart of ENQUEUE_FAILED, get with open custom codes, resultFor typed by the node's contract, pause, resume,
 // cancel, and a handle by id.
 
 import {
@@ -29,7 +29,7 @@ const validate = defineTask({ name: "validate", input: { orderId: h.uuid() }, ou
 
 const charge = defineTask({
   name: "charge",
-  input: { amount: h.resultOf(h.int()) },
+  input: { amount: h.taskOutcome(validate) },
   output: Receipt,
   errors: ["PAYMENT_DECLINED"],
 });
@@ -74,7 +74,7 @@ export async function startAndRead(workflowId: WorkflowId): Promise<void> {
   }
 
   const wf = started.value;
-  const result = await wf.get({ timeoutMs: 60_000 });
+  const result = await wf.get({ waitMs: 60_000 });
 
   if (result.ok) {
     expectType<Equal<typeof result.value, TaskOutcome<{ receiptId: string }, string>>>();

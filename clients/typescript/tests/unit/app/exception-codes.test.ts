@@ -86,7 +86,7 @@ function created() {
 
 describe("exceptionCodeRefusals", () => {
   test("a code of an open contract that the core refuses is a refusal at its implementation", () => {
-    const app = appWith((target) => target.implement(open, () => open.ok(null), { exceptions: [[RateLimited, "bad code"]] }));
+    const app = appWith((target) => target.implement(open, (_input, { ok }) => ok(null), { exceptions: [[RateLimited, "bad code"]] }));
     const fake = checks();
 
     assert.deepEqual(
@@ -98,7 +98,7 @@ describe("exceptionCodeRefusals", () => {
 
   test("a code that the core accepts gives no refusal", () => {
     const app = appWith((target) =>
-      target.implement(open, () => open.ok(null), { exceptions: [[RateLimited, "RATE_LIMITED"]] }),
+      target.implement(open, (_input, { ok }) => ok(null), { exceptions: [[RateLimited, "RATE_LIMITED"]] }),
     );
 
     assert.deepEqual(exceptionCodeRefusals(appInternals(app), checks()), []);
@@ -106,8 +106,8 @@ describe("exceptionCodeRefusals", () => {
 
   test("a contract with declared codes and an implementation with no exceptions make no core call", () => {
     const app = appWith(
-      (target) => target.implement(declared, () => declared.ok(null), { exceptions: [[RateLimited, "RATE_LIMITED"]] }),
-      (target) => target.implement(open, () => open.ok(null)),
+      (target) => target.implement(declared, (_input, { ok }) => ok(null), { exceptions: [[RateLimited, "RATE_LIMITED"]] }),
+      (target) => target.implement(open, (_input, { ok }) => ok(null)),
     );
 
     const fake = checks();

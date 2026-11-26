@@ -4,8 +4,8 @@ import {
   Decimal,
   h,
   type JsonValue,
-  LIBRARY_TASK_CODES,
-  type LibraryTaskCode,
+  BUILT_IN_TASK_CODES,
+  type BuiltInTaskCode,
   type Result,
   type SentOf,
   type TaskOutcome,
@@ -66,7 +66,7 @@ export function outcomeText(outcome: TaskOutcome<Order, "OUT_OF_STOCK">): string
     case "succeeded":
       return outcome.value.id;
     case "failed":
-      return outcome.error.code.kind === "user" ? outcome.error.code.code : outcome.error.code.code;
+      return outcome.error.kind === "custom" ? outcome.error.code : outcome.error.code;
   }
 }
 
@@ -77,4 +77,4 @@ expectType<Equal<ValueOf<typeof order>, Order>>();
 
 expectType<Equal<SentOf<typeof order>["retries"], number | undefined>>();
 
-export const firstLibraryCode: LibraryTaskCode | undefined = LIBRARY_TASK_CODES[0];
+export const firstBuiltInCode: BuiltInTaskCode | undefined = BUILT_IN_TASK_CODES[0];

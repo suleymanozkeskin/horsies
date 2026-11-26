@@ -1,5 +1,5 @@
 // The workflows of the data flow layer (Rust `clients/rust/tests/worker/tests/layer5_workflow_dataflow.rs`, Python
-// `clients/python/tests/e2e/tasks/workflows.py`, the `spec_*` of layer 5): results as parameters (`h.resultOf`),
+// `clients/python/tests/e2e/tasks/workflows.py`, the `spec_*` of layer 5): results as parameters (`h.taskOutcome`),
 // results through the workflow context (the context sources of a node), and how a failure or a skip reaches the nodes after it.
 
 import { defineWorkflow, h } from "../../../../horsies/src/index.ts";

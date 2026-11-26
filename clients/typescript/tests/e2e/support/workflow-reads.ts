@@ -25,13 +25,13 @@ export const WORKFLOW_WAIT_MS = 30_000;
 /** A handle that reads a workflow's outcome: a started handle or a handle by id. */
 export type OutcomeReader<O> = {
   readonly workflowId: WorkflowId;
-  get(options?: { readonly timeoutMs?: number }): Promise<Result<TaskOutcome<O, string>, WorkflowReadError>>;
+  get(options?: { readonly waitMs?: number }): Promise<Result<TaskOutcome<O, string>, WorkflowReadError>>;
 };
 
 /** The text of a workflow read error, for a message. Pure. */
 export function workflowReadErrorText(error: WorkflowReadError): string {
   switch (error.kind) {
-    case "waitTimedOut":
+    case "waitTimeout":
       return "the wait ended before the workflow";
     case "workflowNotFound":
       return "no workflow has the id";
@@ -43,14 +43,14 @@ export function workflowReadErrorText(error: WorkflowReadError): string {
       return `the stored error has the undeclared code ${error.code}`;
     case "waitInsideTask":
       return "a wait inside a task";
-    case "workflowNotListed":
+    case "noTypeAvailable":
       return `the app does not list the workflow ${error.workflowName}`;
     case "database":
       return `the database read failed: ${error.code}: ${error.message}`;
-    case "invalidWait":
+    case "invalidInput":
       return `the wait is not 0 to ${String(error.maxMs)} ms`;
     case "seatRelayFull":
-      return `the seat relay did not send the read: ${error.error.message}`;
+      return `the seat relay did not send the read: ${error.message}`;
   }
 }
 
@@ -70,7 +70,7 @@ export async function startedHandle<R extends BuildReturn>(
 
 /** The outcome of the workflow of `handle` within `limitMs`. Fails the test when the read fails. */
 export async function workflowOutcome<O>(handle: OutcomeReader<O>, limitMs: number = WORKFLOW_WAIT_MS): Promise<TaskOutcome<O, string>> {
-  const read = await handle.get({ timeoutMs: limitMs });
+  const read = await handle.get({ waitMs: limitMs });
 
   if (!read.ok) {
     assert.fail(`read the outcome of workflow ${handle.workflowId}: ${workflowReadErrorText(read.error)}`);
@@ -161,7 +161,7 @@ export async function handleCall<T>(subject: string, call: Promise<Result<T, Wor
  * `SUBWORKFLOW_FAILED`, the child `childId`, which FAILED with at least one failed task. Fails the test otherwise.
  */
 export function subWorkflowFailure(error: TaskError, childId: string): SubWorkflowFailure {
-  assert.deepEqual(errorCode(error), { source: "library", code: "SUBWORKFLOW_FAILED" }, errorText(error));
+  assert.deepEqual(errorCode(error), { source: "builtIn", code: "SUBWORKFLOW_FAILED" }, errorText(error));
 
   const failure = error.subWorkflow;
 

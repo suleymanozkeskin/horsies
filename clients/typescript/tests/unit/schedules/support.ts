@@ -39,8 +39,11 @@ export const ping = defineTask({ name: "ping", input: {}, output: h.null() });
 /** A task of the custom queue `standard`. */
 export const sync = defineTask({ name: "sync", queue: "standard", input: { region: h.string() }, output: h.null() });
 
+/** The upstream task of the parameter of `upstreamOnly`. */
+const intSource = defineTask({ name: "int_source", input: {}, output: h.int() });
+
 /** A task that only a workflow node can run. */
-export const upstreamOnly = defineTask({ name: "upstream_only", input: { upstream: h.resultOf(h.int()) }, output: h.null() });
+export const upstreamOnly = defineTask({ name: "upstream_only", input: { upstream: h.taskOutcome(intSource) }, output: h.null() });
 
 /** A task that the apps do not list. */
 export const unlisted = defineTask({ name: "unlisted", input: {}, output: h.null() });

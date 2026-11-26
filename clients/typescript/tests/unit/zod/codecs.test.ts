@@ -6,6 +6,7 @@ import { describe, test } from "node:test";
 
 import { z } from "zod";
 
+import { defineTask } from "../../../horsies/src/contract/define-task.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";
 import { Decimal } from "../../../horsies/src/wire/decimal.ts";
 import type { RequiredWire } from "../../../horsies/src/wire/infer.ts";
@@ -118,7 +119,7 @@ describe("hz.wire()", () => {
     // SAFETY: the static types refuse both arguments (tests/types/fail/zod-wire-*.ts); this test checks the run time.
     const optional = h.string().optional() as unknown as RequiredWire;
     // SAFETY: as above.
-    const upstream = h.resultOf(h.int()) as unknown as RequiredWire;
+    const upstream = h.taskOutcome(defineTask({ name: "upstream", input: {}, output: h.int() })) as unknown as RequiredWire;
 
     assert.throws(() => hz.wire(optional), TypeError);
     assert.throws(() => hz.wire(upstream), TypeError);

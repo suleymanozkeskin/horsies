@@ -10,7 +10,7 @@ import { type ReadForm, readFormOf } from "../read/handle.ts";
 import type { ContractLookup } from "../send/send.ts";
 import type { DeclaredCodes } from "../contract/definition.ts";
 import { type Kind, objectKind, type ObjectKind } from "../wire/kinds.ts";
-import { isResultOfKind } from "../wire/result-of.ts";
+import { isTaskOutcomeKind } from "../wire/task-outcome.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { SpecAppView, WorkflowLookup } from "./checks.ts";
@@ -90,7 +90,7 @@ function lookupOf(listed: ListedWorkflow): WorkflowLookup {
  * Pure.
  */
 export function buildParams(params: ObjectKind, given: object): Result<object, CodecRefused> {
-  const plain = objectKind(params.members.filter((member) => !isResultOfKind(member.kind)));
+  const plain = objectKind(params.members.filter((member) => !isTaskOutcomeKind(member.kind)));
   const text = encodeParametersWithReadBack(plain, given);
 
   if (!text.ok) {
@@ -109,7 +109,7 @@ export type OutputReadForm =
 
 /**
  * The read form of a workflow's output: the output kind that the workflow declares (`defineWorkflow({ output })`),
- * with open user codes. The checks refuse every build whose output node does not fit it (`HRS-025`), so the declared
+ * with open custom codes. The checks refuse every build whose output node does not fit it (`HRS-025`), so the declared
  * kind is the one fact; no build runs. A workflow that the app does not list is `workflowNotListed`. Pure.
  */
 export function workflowOutputForm(workflow: object, registry: WorkflowRegistry): OutputReadForm {
@@ -129,7 +129,7 @@ export function workflowOutputForm(workflow: object, registry: WorkflowRegistry)
 }
 
 /**
- * The read form of a workflow's declared output from its own contract, with open user codes: the app need not list
+ * The read form of a workflow's declared output from its own contract, with open custom codes: the app need not list
  * the workflow. Effects: compiles the params contract at its first use (see `compileContract`).
  */
 export function declaredOutputForm(workflow: object): ReadForm {

@@ -15,8 +15,8 @@ import { specDataText } from "../../../horsies/src/workflow/spec-text.ts";
 import { passedSpec, viewOf } from "./support.ts";
 
 const ping = defineTask({ name: "ping", input: {}, output: h.int() });
-const add = defineTask({ name: "add", input: { a: h.int(), b: h.resultOf(h.int()) }, output: h.int() });
-const maybe = defineTask({ name: "maybe", input: { first: h.resultOf(h.int()).optional() }, output: h.int() });
+const add = defineTask({ name: "add", input: { a: h.int(), b: h.taskOutcome(ping) }, output: h.int() });
+const maybe = defineTask({ name: "maybe", input: { first: h.taskOutcome(ping).optional() }, output: h.int() });
 
 const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", output: h.int(), params: {} }, (w) => ({
   output: w.task(ping, {}, { id: "ping" }),
@@ -27,7 +27,7 @@ const region = defineWorkflow(
     name: "region",
     definitionKey: "tests.region.v1",
     output: h.int(),
-    params: { name: h.string(), count: h.resultOf(h.int()).optional() },
+    params: { name: h.string(), count: h.taskOutcome(ping).optional() },
     checkCases: [{ name: "eu" }],
   },
   (w) => ({ output: w.task(ping, {}, { id: "ping" }) }),

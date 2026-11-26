@@ -50,14 +50,14 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(add, async ({ a, b }) => add.ok(a + b));
+app.implement(add, async ({ a, b }, { ok }) => ok(a + b));
 
-app.implement(wordCount, ({ text }) => wordCount.ok(text.split(/\s+/u).filter((word) => word !== "").length));
+app.implement(wordCount, ({ text }, { ok }) => ok(text.split(/\s+/u).filter((word) => word !== "").length));
 
-app.implement(charge, async ({ amountCents }) =>
+app.implement(charge, async ({ amountCents }, { ok, err }) =>
   amountCents > CHARGE_LIMIT_CENTS
-    ? charge.err({ code: "OVER_LIMIT", message: "the amount is over the limit", data: { limitCents: CHARGE_LIMIT_CENTS } })
-    : charge.ok(`charged ${String(amountCents)} cents`),
+    ? err({ code: "OVER_LIMIT", message: "the amount is over the limit", data: { limitCents: CHARGE_LIMIT_CENTS } })
+    : ok(`charged ${String(amountCents)} cents`),
 );
 
 /** The value of a read as JSON text, as the Rust example prints it. Pure. */
@@ -77,11 +77,11 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`a send failed: ${failed.join("; ")}`);
   }
 
-  printLine(readLine("add", await sum.value.get({ timeoutMs: RESULT_WAIT_MS }), jsonText));
-  printLine(readLine("word_count", await words.value.get({ timeoutMs: RESULT_WAIT_MS }), jsonText));
-  printLine(readLine("charge 500", await small.value.get({ timeoutMs: RESULT_WAIT_MS }), jsonText));
+  printLine(readLine("add", await sum.value.get({ waitMs: RESULT_WAIT_MS }), jsonText));
+  printLine(readLine("word_count", await words.value.get({ waitMs: RESULT_WAIT_MS }), jsonText));
+  printLine(readLine("charge 500", await small.value.get({ waitMs: RESULT_WAIT_MS }), jsonText));
 
-  const refused = await large.value.get({ timeoutMs: RESULT_WAIT_MS });
+  const refused = await large.value.get({ waitMs: RESULT_WAIT_MS });
 
   if (refused.ok && refused.value.kind === "failed") {
     const error = refused.value.error;
