@@ -61,9 +61,4 @@ export type {
   WorkflowPlace,
 } from "../_catalog/events.ts";
 
-// The execution class in the event types. The generated event catalog and the generated monitoring models each
-// declare it, and the main entry point exports the monitoring one as `Execution`, so this one has its own name until
-// the codegen renders one type for both.
-export type { Execution as EventExecution } from "../_catalog/events.ts";
-
 export type { ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode } from "../_catalog/task_codes.ts";

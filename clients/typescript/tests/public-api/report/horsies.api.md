@@ -79,7 +79,7 @@ export interface AttemptEnded {
     // (undocumented)
     readonly end: AttemptEnd;
     // (undocumented)
-    readonly execution: EventExecution;
+    readonly execution: Execution;
     // (undocumented)
     readonly kind: "AttemptEnded";
     // (undocumented)
@@ -181,11 +181,11 @@ export interface AttemptPlaced {
     // (undocumented)
     readonly attempt: number;
     // (undocumented)
-    readonly childKind: EventExecution;
+    readonly childKind: Execution;
     // (undocumented)
     readonly childPid: number;
     // (undocumented)
-    readonly execution: EventExecution;
+    readonly execution: Execution;
     // (undocumented)
     readonly kind: "AttemptPlaced";
     // (undocumented)
@@ -602,7 +602,7 @@ export interface ChildReplaced {
     // (undocumented)
     readonly at: Temporal.Instant;
     // (undocumented)
-    readonly childKind: EventExecution;
+    readonly childKind: Execution;
     // (undocumented)
     readonly childPid: number;
     // (undocumented)
@@ -657,7 +657,7 @@ export interface ChildStarted {
     // (undocumented)
     readonly bootDuration: Temporal.Duration;
     // (undocumented)
-    readonly childKind: EventExecution;
+    readonly childKind: Execution;
     // (undocumented)
     readonly childPid: number;
     // (undocumented)
@@ -1309,9 +1309,6 @@ export interface ErrorFacet {
     // (undocumented)
     readonly value: string;
 }
-
-// @public (undocumented)
-export type EventExecution = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
 
 // @public
 export type EventHandler<T extends EventTypeName> = (event: EventOf<T>) => void | Promise<void>;
@@ -3206,7 +3203,7 @@ export interface SlotDown {
     // (undocumented)
     readonly cause: SlotDownCause;
     // (undocumented)
-    readonly childKind: EventExecution;
+    readonly childKind: Execution;
     // (undocumented)
     readonly kind: "SlotDown";
     // (undocumented)
@@ -3243,7 +3240,7 @@ export interface SlotRecovered {
     // (undocumented)
     readonly at: Temporal.Instant;
     // (undocumented)
-    readonly childKind: EventExecution;
+    readonly childKind: Execution;
     // (undocumented)
     readonly kind: "SlotRecovered";
     // (undocumented)
@@ -3599,7 +3596,7 @@ export interface TaskClaimed {
     // (undocumented)
     readonly attempt: number;
     // (undocumented)
-    readonly execution: EventExecution;
+    readonly execution: Execution;
     // (undocumented)
     readonly kind: "TaskClaimed";
     // (undocumented)
