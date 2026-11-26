@@ -2,11 +2,12 @@
 // for the rerun in the caller's transaction (`CallerRerunError`), each told apart by `code`.
 
 import type { CoreFailure } from "../_catalog/error_detail.ts";
+import { RerunErrorCode } from "../_catalog/history.ts";
 import type { CallerConnectionState } from "./caller.ts";
 
 /** The app's handle could not connect, install the schema, or open its closed pools again. Nothing ran. */
 export interface RerunConnectFailed {
-  readonly code: "CONNECT_FAILED";
+  readonly code: typeof RerunErrorCode.CONNECT_FAILED;
   readonly retryable: boolean;
   readonly message: string;
   readonly exception: CoreFailure;
@@ -21,7 +22,7 @@ export type RerunStatementOutcome = "notCommitted" | "unknown";
  * committed.
  */
 export interface RerunStatementFailed {
-  readonly code: "STATEMENT_FAILED";
+  readonly code: typeof RerunErrorCode.STATEMENT_FAILED;
   readonly retryable: boolean;
   readonly message: string;
   readonly outcome: RerunStatementOutcome;
@@ -30,7 +31,7 @@ export interface RerunStatementFailed {
 
 /** The check of the database's client family could not read the family row. Nothing was read or written. */
 export interface RerunFamilyCheckFailed {
-  readonly code: "FAMILY_CHECK_FAILED";
+  readonly code: typeof RerunErrorCode.FAMILY_CHECK_FAILED;
   readonly retryable: boolean;
   readonly message: string;
   readonly exception: CoreFailure;
@@ -38,21 +39,21 @@ export interface RerunFamilyCheckFailed {
 
 /** The command breaks a rule of its fields. Nothing ran. */
 export interface RerunInvalidCommand {
-  readonly code: "INVALID_COMMAND";
+  readonly code: typeof RerunErrorCode.INVALID_COMMAND;
   readonly retryable: false;
   readonly message: string;
 }
 
 /** The policy breaks a rule of its fields. Nothing ran. */
 export interface RerunInvalidPolicy {
-  readonly code: "INVALID_POLICY";
+  readonly code: typeof RerunErrorCode.INVALID_POLICY;
   readonly retryable: false;
   readonly message: string;
 }
 
 /** The retention class of the new task has no class row: register its period first. Nothing is written. */
 export interface RerunClassNotRegistered {
-  readonly code: "CLASS_NOT_REGISTERED";
+  readonly code: typeof RerunErrorCode.CLASS_NOT_REGISTERED;
   readonly retryable: false;
   readonly message: string;
   readonly classKey: string;
@@ -60,14 +61,14 @@ export interface RerunClassNotRegistered {
 
 /** The caller key is not a valid idempotency key: empty, or more than 255 UTF-8 bytes. Nothing is written. */
 export interface RerunCallerKeyRefused {
-  readonly code: "CALLER_KEY_REFUSED";
+  readonly code: typeof RerunErrorCode.CALLER_KEY_REFUSED;
   readonly retryable: false;
   readonly message: string;
 }
 
 /** The task id source refused to mint the new task's id. Nothing is written. */
 export interface RerunIdMintRefused {
-  readonly code: "ID_MINT_REFUSED";
+  readonly code: typeof RerunErrorCode.ID_MINT_REFUSED;
   readonly retryable: false;
   readonly message: string;
 }
@@ -82,7 +83,7 @@ export type RerunStoredFamily =
 
 /** Another client family installed the database, or it records none. Nothing is written. */
 export interface RerunClientFamilyMismatch {
-  readonly code: "CLIENT_FAMILY_MISMATCH";
+  readonly code: typeof RerunErrorCode.CLIENT_FAMILY_MISMATCH;
   readonly retryable: false;
   readonly message: string;
   readonly stored: RerunStoredFamily;
@@ -90,7 +91,7 @@ export interface RerunClientFamilyMismatch {
 
 /** The family row holds a value that is not a client family: corrupt stored data. Nothing is written. */
 export interface RerunUnknownStoredFamily {
-  readonly code: "UNKNOWN_STORED_FAMILY";
+  readonly code: typeof RerunErrorCode.UNKNOWN_STORED_FAMILY;
   readonly retryable: false;
   readonly message: string;
   readonly stored: string;
@@ -98,7 +99,7 @@ export interface RerunUnknownStoredFamily {
 
 /** A row or stored data broke the rerun's contract. Nothing committed; the same call meets it again. */
 export interface RerunContractViolation {
-  readonly code: "CONTRACT_VIOLATION";
+  readonly code: typeof RerunErrorCode.CONTRACT_VIOLATION;
   readonly retryable: false;
   readonly message: string;
 }
@@ -108,7 +109,7 @@ export interface RerunContractViolation {
  * back. Whether to run the transaction again is the rule of `driverError`, for example its SQLSTATE.
  */
 export interface RerunDriverFailed {
-  readonly code: "DRIVER_FAILED";
+  readonly code: typeof RerunErrorCode.DRIVER_FAILED;
   readonly message: string;
   /** The name of the core statement that failed. */
   readonly statement: string;
@@ -121,7 +122,7 @@ export interface RerunDriverFailed {
  * roll back a failed transaction.
  */
 export interface RerunNoOpenTransaction {
-  readonly code: "NO_OPEN_TRANSACTION";
+  readonly code: typeof RerunErrorCode.NO_OPEN_TRANSACTION;
   readonly retryable: false;
   readonly message: string;
   /** The name of the core statement that did not run. */
@@ -135,7 +136,7 @@ export interface RerunNoOpenTransaction {
  * and use a client that reads text.
  */
 export interface RerunResultNotText {
-  readonly code: "RESULT_NOT_TEXT";
+  readonly code: typeof RerunErrorCode.RESULT_NOT_TEXT;
   readonly retryable: false;
   readonly message: string;
   /** The name of the core statement whose result is not text. */
@@ -176,15 +177,15 @@ export type CallerRerunError =
 
 /** The refusal of a command field. Pure. */
 export function invalidCommand(message: string): RerunInvalidCommand {
-  return { code: "INVALID_COMMAND", retryable: false, message };
+  return { code: RerunErrorCode.INVALID_COMMAND, retryable: false, message };
 }
 
 /** The refusal of a policy field. Pure. */
 export function invalidPolicy(message: string): RerunInvalidPolicy {
-  return { code: "INVALID_POLICY", retryable: false, message };
+  return { code: RerunErrorCode.INVALID_POLICY, retryable: false, message };
 }
 
 /** The contract violation of a row. Pure. */
 export function contractViolation(message: string): RerunContractViolation {
-  return { code: "CONTRACT_VIOLATION", retryable: false, message };
+  return { code: RerunErrorCode.CONTRACT_VIOLATION, retryable: false, message };
 }

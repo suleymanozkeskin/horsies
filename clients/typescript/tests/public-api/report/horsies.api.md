@@ -2072,7 +2072,7 @@ export type RequiredWire = Wire<unknown, unknown, "required", "value">;
 // @public
 export interface RerunCallerKeyRefused {
     // (undocumented)
-    readonly code: "CALLER_KEY_REFUSED";
+    readonly code: typeof RerunErrorCode.CALLER_KEY_REFUSED;
     // (undocumented)
     readonly message: string;
     // (undocumented)
@@ -2084,7 +2084,7 @@ export interface RerunClassNotRegistered {
     // (undocumented)
     readonly classKey: string;
     // (undocumented)
-    readonly code: "CLASS_NOT_REGISTERED";
+    readonly code: typeof RerunErrorCode.CLASS_NOT_REGISTERED;
     // (undocumented)
     readonly message: string;
     // (undocumented)
@@ -2097,7 +2097,7 @@ export type RerunClientFamily = "PYTHON" | "RUST" | "TYPESCRIPT";
 // @public
 export interface RerunClientFamilyMismatch {
     // (undocumented)
-    readonly code: "CLIENT_FAMILY_MISMATCH";
+    readonly code: typeof RerunErrorCode.CLIENT_FAMILY_MISMATCH;
     // (undocumented)
     readonly message: string;
     // (undocumented)
@@ -2116,7 +2116,7 @@ export interface RerunCommand {
 // @public
 export interface RerunConnectFailed {
     // (undocumented)
-    readonly code: "CONNECT_FAILED";
+    readonly code: typeof RerunErrorCode.CONNECT_FAILED;
     // (undocumented)
     readonly exception: CoreFailure;
     // (undocumented)
@@ -2128,7 +2128,7 @@ export interface RerunConnectFailed {
 // @public
 export interface RerunContractViolation {
     // (undocumented)
-    readonly code: "CONTRACT_VIOLATION";
+    readonly code: typeof RerunErrorCode.CONTRACT_VIOLATION;
     // (undocumented)
     readonly message: string;
     // (undocumented)
@@ -2146,7 +2146,7 @@ export type RerunDeadline = {
 // @public
 export interface RerunDriverFailed {
     // (undocumented)
-    readonly code: "DRIVER_FAILED";
+    readonly code: typeof RerunErrorCode.DRIVER_FAILED;
     // (undocumented)
     readonly driverError: Error;
     // (undocumented)
@@ -2168,10 +2168,31 @@ export interface RerunEnqueued {
 // @public
 export type RerunError = RerunConnectFailed | RerunStatementFailed | RerunFamilyCheckFailed | RerunRequestRefused | RerunStepRefused;
 
+// @public (undocumented)
+export const RerunErrorCode: {
+    readonly CONNECT_FAILED: "CONNECT_FAILED";
+    readonly STATEMENT_FAILED: "STATEMENT_FAILED";
+    readonly FAMILY_CHECK_FAILED: "FAMILY_CHECK_FAILED";
+    readonly INVALID_COMMAND: "INVALID_COMMAND";
+    readonly INVALID_POLICY: "INVALID_POLICY";
+    readonly CLASS_NOT_REGISTERED: "CLASS_NOT_REGISTERED";
+    readonly CALLER_KEY_REFUSED: "CALLER_KEY_REFUSED";
+    readonly ID_MINT_REFUSED: "ID_MINT_REFUSED";
+    readonly CLIENT_FAMILY_MISMATCH: "CLIENT_FAMILY_MISMATCH";
+    readonly UNKNOWN_STORED_FAMILY: "UNKNOWN_STORED_FAMILY";
+    readonly CONTRACT_VIOLATION: "CONTRACT_VIOLATION";
+    readonly DRIVER_FAILED: "DRIVER_FAILED";
+    readonly NO_OPEN_TRANSACTION: "NO_OPEN_TRANSACTION";
+    readonly RESULT_NOT_TEXT: "RESULT_NOT_TEXT";
+};
+
+// @public (undocumented)
+export type RerunErrorCode = (typeof RerunErrorCode)[keyof typeof RerunErrorCode];
+
 // @public
 export interface RerunFamilyCheckFailed {
     // (undocumented)
-    readonly code: "FAMILY_CHECK_FAILED";
+    readonly code: typeof RerunErrorCode.FAMILY_CHECK_FAILED;
     // (undocumented)
     readonly exception: CoreFailure;
     // (undocumented)
@@ -2183,7 +2204,7 @@ export interface RerunFamilyCheckFailed {
 // @public
 export interface RerunIdMintRefused {
     // (undocumented)
-    readonly code: "ID_MINT_REFUSED";
+    readonly code: typeof RerunErrorCode.ID_MINT_REFUSED;
     // (undocumented)
     readonly message: string;
     // (undocumented)
@@ -2219,7 +2240,7 @@ export interface RerunInputUnavailable {
 // @public
 export interface RerunInvalidCommand {
     // (undocumented)
-    readonly code: "INVALID_COMMAND";
+    readonly code: typeof RerunErrorCode.INVALID_COMMAND;
     // (undocumented)
     readonly message: string;
     // (undocumented)
@@ -2229,7 +2250,7 @@ export interface RerunInvalidCommand {
 // @public
 export interface RerunInvalidPolicy {
     // (undocumented)
-    readonly code: "INVALID_POLICY";
+    readonly code: typeof RerunErrorCode.INVALID_POLICY;
     // (undocumented)
     readonly message: string;
     // (undocumented)
@@ -2257,7 +2278,7 @@ export interface RerunKeyReplay {
 // @public
 export interface RerunNoOpenTransaction {
     // (undocumented)
-    readonly code: "NO_OPEN_TRANSACTION";
+    readonly code: typeof RerunErrorCode.NO_OPEN_TRANSACTION;
     // (undocumented)
     readonly message: string;
     // (undocumented)
@@ -2298,7 +2319,7 @@ export type RerunRequestRefused = RerunInvalidCommand | RerunInvalidPolicy;
 // @public
 export interface RerunResultNotText {
     // (undocumented)
-    readonly code: "RESULT_NOT_TEXT";
+    readonly code: typeof RerunErrorCode.RESULT_NOT_TEXT;
     readonly column: string;
     readonly format: string;
     // (undocumented)
@@ -2347,7 +2368,7 @@ export interface RerunSourceLive {
 // @public
 export interface RerunStatementFailed {
     // (undocumented)
-    readonly code: "STATEMENT_FAILED";
+    readonly code: typeof RerunErrorCode.STATEMENT_FAILED;
     // (undocumented)
     readonly exception: CoreFailure;
     // (undocumented)
@@ -2375,7 +2396,7 @@ export type RerunStoredFamily = {
 // @public
 export interface RerunUnknownStoredFamily {
     // (undocumented)
-    readonly code: "UNKNOWN_STORED_FAMILY";
+    readonly code: typeof RerunErrorCode.UNKNOWN_STORED_FAMILY;
     // (undocumented)
     readonly message: string;
     // (undocumented)

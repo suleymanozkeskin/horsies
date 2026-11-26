@@ -2,6 +2,7 @@
 // and the caller statement and row in text form.
 
 import type { CoreFailure } from "../_catalog/error_detail.ts";
+import { RerunErrorCode } from "../_catalog/history.ts";
 import { type TaskId, taskIdFromCore } from "../contract/ids.ts";
 import { unreachable } from "../native/call/never.ts";
 import { coreFailureOf } from "../send/catalog-value.ts";
@@ -53,18 +54,18 @@ export function rerunOutcome(record: RerunOutcomeRecord): RerunOutcome {
 /** The public error of a failure of the rerun in the app's transaction. Pure. */
 export function appRerunError(failure: AppRerunFailure): RerunError {
   switch (failure.code) {
-    case "CONNECT_FAILED":
-    case "FAMILY_CHECK_FAILED": {
+    case RerunErrorCode.CONNECT_FAILED:
+    case RerunErrorCode.FAMILY_CHECK_FAILED: {
       const exception = coreFailureOf(failure.cause);
 
       return { code: failure.code, retryable: failureRetryable(exception), message: failure.message, exception };
     }
 
-    case "STATEMENT_FAILED": {
+    case RerunErrorCode.STATEMENT_FAILED: {
       const exception = coreFailureOf(failure.cause);
 
       return {
-        code: "STATEMENT_FAILED",
+        code: RerunErrorCode.STATEMENT_FAILED,
         retryable: failureRetryable(exception),
         message: failure.message,
         outcome: failure.outcome,
@@ -72,14 +73,14 @@ export function appRerunError(failure: AppRerunFailure): RerunError {
       };
     }
 
-    case "INVALID_POLICY":
-      return { code: "INVALID_POLICY", retryable: false, message: failure.message };
-    case "CLASS_NOT_REGISTERED":
-    case "CALLER_KEY_REFUSED":
-    case "ID_MINT_REFUSED":
-    case "CLIENT_FAMILY_MISMATCH":
-    case "UNKNOWN_STORED_FAMILY":
-    case "CONTRACT_VIOLATION":
+    case RerunErrorCode.INVALID_POLICY:
+      return { code: RerunErrorCode.INVALID_POLICY, retryable: false, message: failure.message };
+    case RerunErrorCode.CLASS_NOT_REGISTERED:
+    case RerunErrorCode.CALLER_KEY_REFUSED:
+    case RerunErrorCode.ID_MINT_REFUSED:
+    case RerunErrorCode.CLIENT_FAMILY_MISMATCH:
+    case RerunErrorCode.UNKNOWN_STORED_FAMILY:
+    case RerunErrorCode.CONTRACT_VIOLATION:
       return stepRefused(failure);
     default:
       return unreachable(failure);
@@ -89,15 +90,15 @@ export function appRerunError(failure: AppRerunFailure): RerunError {
 /** The public error of a refusal of the rerun steps. Nothing is retryable: nothing is written. Pure. */
 export function stepRefused(refusal: CallerStepRefusal): RerunStepRefused {
   switch (refusal.code) {
-    case "CLASS_NOT_REGISTERED":
+    case RerunErrorCode.CLASS_NOT_REGISTERED:
       return { code: refusal.code, retryable: false, message: refusal.message, classKey: refusal.classKey };
-    case "CLIENT_FAMILY_MISMATCH":
+    case RerunErrorCode.CLIENT_FAMILY_MISMATCH:
       return { code: refusal.code, retryable: false, message: refusal.message, stored: refusal.stored };
-    case "UNKNOWN_STORED_FAMILY":
+    case RerunErrorCode.UNKNOWN_STORED_FAMILY:
       return { code: refusal.code, retryable: false, message: refusal.message, stored: refusal.stored };
-    case "CALLER_KEY_REFUSED":
-    case "ID_MINT_REFUSED":
-    case "CONTRACT_VIOLATION":
+    case RerunErrorCode.CALLER_KEY_REFUSED:
+    case RerunErrorCode.ID_MINT_REFUSED:
+    case RerunErrorCode.CONTRACT_VIOLATION:
       return { code: refusal.code, retryable: false, message: refusal.message };
     default:
       return unreachable(refusal);

@@ -1,6 +1,7 @@
 // The rerun functions of the `facades` area of the addon, their argument and outcome records, and the
 // accessor. Hand-kept declarations of `bridge/src/facades/rerun/`.
 
+import type { RerunErrorCode } from "../../_catalog/history.ts";
 import { requireAddon } from "../call/addon.ts";
 import type { NativeEnvelope } from "../call/envelope.ts";
 import type { NativeCoreHandle } from "../handle/addon.ts";
@@ -91,21 +92,21 @@ export type StatementOutcome = "notCommitted" | "unknown";
 
 /** A failure of the rerun in the app's transaction. `message` is the core's text of the error. */
 export type AppRerunFailure =
-  | { readonly code: "CONNECT_FAILED"; readonly message: string; readonly cause: CauseRecord }
+  | { readonly code: typeof RerunErrorCode.CONNECT_FAILED; readonly message: string; readonly cause: CauseRecord }
   | {
-      readonly code: "STATEMENT_FAILED";
+      readonly code: typeof RerunErrorCode.STATEMENT_FAILED;
       readonly message: string;
       readonly cause: CauseRecord;
       readonly outcome: StatementOutcome;
     }
-  | { readonly code: "CLASS_NOT_REGISTERED"; readonly message: string; readonly classKey: string }
-  | { readonly code: "INVALID_POLICY"; readonly message: string }
-  | { readonly code: "CALLER_KEY_REFUSED"; readonly message: string }
-  | { readonly code: "ID_MINT_REFUSED"; readonly message: string }
-  | { readonly code: "CLIENT_FAMILY_MISMATCH"; readonly message: string; readonly stored: StoredFamilyRecord }
-  | { readonly code: "UNKNOWN_STORED_FAMILY"; readonly message: string; readonly stored: string }
-  | { readonly code: "FAMILY_CHECK_FAILED"; readonly message: string; readonly cause: CauseRecord }
-  | { readonly code: "CONTRACT_VIOLATION"; readonly message: string };
+  | { readonly code: typeof RerunErrorCode.CLASS_NOT_REGISTERED; readonly message: string; readonly classKey: string }
+  | { readonly code: typeof RerunErrorCode.INVALID_POLICY; readonly message: string }
+  | { readonly code: typeof RerunErrorCode.CALLER_KEY_REFUSED; readonly message: string }
+  | { readonly code: typeof RerunErrorCode.ID_MINT_REFUSED; readonly message: string }
+  | { readonly code: typeof RerunErrorCode.CLIENT_FAMILY_MISMATCH; readonly message: string; readonly stored: StoredFamilyRecord }
+  | { readonly code: typeof RerunErrorCode.UNKNOWN_STORED_FAMILY; readonly message: string; readonly stored: string }
+  | { readonly code: typeof RerunErrorCode.FAMILY_CHECK_FAILED; readonly message: string; readonly cause: CauseRecord }
+  | { readonly code: typeof RerunErrorCode.CONTRACT_VIOLATION; readonly message: string };
 
 /** How one rerun in the app's transaction ended. */
 export type AppRerunAnswer =
@@ -114,12 +115,12 @@ export type AppRerunAnswer =
 
 /** A refusal of the rerun steps in the caller's transaction. Nothing is written. */
 export type CallerStepRefusal =
-  | { readonly code: "CLASS_NOT_REGISTERED"; readonly message: string; readonly classKey: string }
-  | { readonly code: "CALLER_KEY_REFUSED"; readonly message: string }
-  | { readonly code: "ID_MINT_REFUSED"; readonly message: string }
-  | { readonly code: "CLIENT_FAMILY_MISMATCH"; readonly message: string; readonly stored: StoredFamilyRecord }
-  | { readonly code: "UNKNOWN_STORED_FAMILY"; readonly message: string; readonly stored: string }
-  | { readonly code: "CONTRACT_VIOLATION"; readonly message: string };
+  | { readonly code: typeof RerunErrorCode.CLASS_NOT_REGISTERED; readonly message: string; readonly classKey: string }
+  | { readonly code: typeof RerunErrorCode.CALLER_KEY_REFUSED; readonly message: string }
+  | { readonly code: typeof RerunErrorCode.ID_MINT_REFUSED; readonly message: string }
+  | { readonly code: typeof RerunErrorCode.CLIENT_FAMILY_MISMATCH; readonly message: string; readonly stored: StoredFamilyRecord }
+  | { readonly code: typeof RerunErrorCode.UNKNOWN_STORED_FAMILY; readonly message: string; readonly stored: string }
+  | { readonly code: typeof RerunErrorCode.CONTRACT_VIOLATION; readonly message: string };
 
 /** The outcome of the write's row. */
 export type WriteDecodeRecord =

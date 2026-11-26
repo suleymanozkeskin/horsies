@@ -2,6 +2,7 @@
 // statement and decides each outcome; this module parses the request, passes the carrier of the
 // caller's active context, and maps the answers to the public values. A rerun opens no span.
 
+import { RerunErrorCode } from "../_catalog/history.ts";
 import { unreachable } from "../native/call/never.ts";
 import type { CallerStatementRecord } from "../native/facades/rerun.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
@@ -163,14 +164,14 @@ function callerQueryError(statement: string, failure: CallerQueryFailure): Calle
   switch (failure.kind) {
     case "driverFailed":
       return {
-        code: "DRIVER_FAILED",
+        code: RerunErrorCode.DRIVER_FAILED,
         message: `statement ${statement} failed in the caller's driver: ${failure.driverError.message}`,
         statement,
         driverError: failure.driverError,
       };
     case "noOpenTransaction":
       return {
-        code: "NO_OPEN_TRANSACTION",
+        code: RerunErrorCode.NO_OPEN_TRANSACTION,
         retryable: false,
         message: `statement ${statement} did not run: ${noOpenTransactionCause(failure.state)}`,
         statement,
@@ -178,7 +179,7 @@ function callerQueryError(statement: string, failure: CallerQueryFailure): Calle
       };
     case "resultNotText":
       return {
-        code: "RESULT_NOT_TEXT",
+        code: RerunErrorCode.RESULT_NOT_TEXT,
         retryable: false,
         message:
           `statement ${statement} gave the column ${failure.column} in ${failure.format} format; the rerun reads ` +

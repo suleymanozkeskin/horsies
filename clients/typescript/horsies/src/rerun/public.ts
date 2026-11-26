@@ -59,3 +59,5 @@ export type {
 export type { CoreFailure } from "../_catalog/error_detail.ts";
 
 export type { TaskAbsenceReason } from "../_catalog/history.ts";
+
+export { RerunErrorCode } from "../_catalog/history.ts";
