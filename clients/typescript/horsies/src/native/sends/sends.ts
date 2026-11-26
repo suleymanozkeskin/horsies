@@ -55,7 +55,9 @@ export function storedOptionsText(options: NativeTaskOptions): string {
 
 /**
  * The prepared facts of one send: a new task id, the options text and the retention, or the send error of a refused
- * fact. Mints a task id; starts no core. Throws `CoreStopped` in a process whose core stopped.
+ * fact. Mints a task id and starts the log forwarder of the process, so the payload warning reaches the log sink;
+ * starts no core. Throws `CoreStopped` in a process whose core stopped, and `CoreStartFailed` when the log forwarder
+ * cannot start.
  */
 export function prepareSendFacts(rules: NativeSendRules, facts: SendFacts, options: NativeTaskOptions): PreparedSend {
   return nativeValue("prepareSendFacts", () => rules.prepareSendFacts(facts, options));

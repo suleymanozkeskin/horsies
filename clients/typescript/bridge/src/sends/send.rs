@@ -2,23 +2,28 @@
 //! enqueue of one prepared send.
 //!
 //! - `SendRules.prepareSendFacts` is pure apart from the task id that it
-//!   mints: the retention of the send (the Rust client's rule of
-//!   `send::options::send_retention`), the payload bound
+//!   mints and the log: the retention of the send (the Rust client's rule
+//!   of `send::options::send_retention`), the payload bound
 //!   (`enforce_payload_policy`, which logs the core's warning once per task
 //!   name), the task id, and the stored options text with the deadline. A
-//!   refused fact is the send error value, not a throw.
+//!   refused fact is the send error value, not a throw. It starts the log
+//!   bridge of the process first (the forwarder thread, not the core), so
+//!   the first warning of a task is a record of the log sink.
 //! - `enqueue` is one send through the core, as the Rust client's
 //!   `enqueue_once`: the core's checks that need no connection run first
 //!   (`CheckedSend::check`, which keeps the shared-class timeout check for a
 //!   `REPEAT` send too), then the schema install once per handle, then the
-//!   write. Every failure maps to the task send catalog by the core's one
-//!   rule (`send_error_from_enqueue`). Writes: a stop of the core in flight
+//!   write. In a task child the send goes through the child host's producer
+//!   handle, else through the given handle (`ProducerHandle`). Every
+//!   failure maps to the task send catalog by the core's one rule
+//!   (`send_error_from_enqueue`). Writes: a stop of the core in flight
 //!   leaves the outcome unknown, and a resend of the same request with
 //!   `REPEAT` is safe.
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
+use horsies_core::handle::CoreHandle as LazyHandle;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     BrokerError, CheckedSend, EnqueueRetention, FailureCause, PayloadPolicy, RetentionConfig,
@@ -32,9 +37,11 @@ use uuid::Uuid;
 use crate::call::guard::{sync_call, CallKind};
 use crate::call::operation::{guarded_start, spawn_operation};
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::handle::core_handle::{BrokerConnection, CoreHandle};
-use crate::process_core::runtime::pure_call_refusal;
+use crate::handle::core_handle::CoreHandle;
+use crate::logging::bridge::{started_log, LogBridge};
+use crate::process_core::runtime::{pure_call_refusal, CallRefusal, StartFailure};
 use crate::sends::early_end::thrown_now;
+use crate::sends::producer_handle::ProducerHandle;
 use crate::sends::task_options::TaskOptionsRecord;
 use crate::values::boundary::{
     instant_of_epoch_micros, text_of_uuid, u32_of_number, uuid_of_text, BoundaryRefusal,
@@ -179,7 +186,10 @@ pub enum PreparedSend {
 impl SendRules {
     /// The prepared facts of one send of a task with the checked `options`.
     /// Mints a task id; the fork and stop rules apply, as for every core
-    /// call. Starts nothing.
+    /// call. Starts the log bridge of the process (the forwarder thread), so
+    /// that the payload warning reaches the log sink; starts no core. A
+    /// forwarder thread that cannot start throws `CORE_START_FAILED`, as the
+    /// first core call would.
     #[napi(ts_return_type = "NativeEnvelope<PreparedSend>")]
     #[allow(
         clippy::needless_pass_by_value,
@@ -194,7 +204,18 @@ impl SendRules {
             if let Some(refusal) = pure_call_refusal() {
                 return Envelope::Thrown(refusal.thrown());
             }
-            match self.prepared(&facts, options.options()) {
+            let log = match started_log() {
+                Ok(log) => log,
+                Err(failure) => {
+                    return Envelope::Thrown(
+                        CallRefusal::StartFailed(StartFailure::LogForwarderStartFailed {
+                            cause: failure.cause,
+                        })
+                        .thrown(),
+                    )
+                }
+            };
+            match self.prepared(log, &facts, options.options()) {
                 Ok(prepared) => Envelope::Value(prepared),
                 Err(refusal) => Envelope::Thrown(refusal.into()),
             }
@@ -205,9 +226,11 @@ impl SendRules {
 impl SendRules {
     /// The prepared send, in the Rust client's order: the retention, the
     /// payload bound, the task id, the options text. A value that breaks a
-    /// boundary rule is the refusal. Mints a task id.
+    /// boundary rule is the refusal. Mints a task id; the payload warning
+    /// goes to `log`.
     fn prepared(
         &self,
+        log: &LogBridge,
         facts: &SendFacts,
         options: &TaskOptions,
     ) -> Result<PreparedSend, BoundaryRefusal> {
@@ -223,7 +246,7 @@ impl SendRules {
                 )))
             }
         };
-        if let Some(too_large) = self.payload_refusal(task_name, input_bytes) {
+        if let Some(too_large) = self.payload_refusal(log, task_name, input_bytes) {
             return Ok(refused(&too_large));
         }
         let task_id = match horsies_core::mint_task_id() {
@@ -275,10 +298,17 @@ impl SendRules {
     }
 
     /// The send error of an input above the reject bound, or `None`. Logs
-    /// the core's warning above the warn bound. Pure apart from the log.
-    fn payload_refusal(&self, task_name: &str, input_bytes: usize) -> Option<TaskSendError> {
-        let size =
-            enforce_payload_policy(&self.payload, task_name, PayloadKind::Kwargs, input_bytes)?;
+    /// the core's warning above the warn bound to `log`, whatever the
+    /// default dispatcher of the thread is. Pure apart from the log.
+    fn payload_refusal(
+        &self,
+        log: &LogBridge,
+        task_name: &str,
+        input_bytes: usize,
+    ) -> Option<TaskSendError> {
+        let size = tracing::dispatcher::with_default(log.dispatch(), || {
+            enforce_payload_policy(&self.payload, task_name, PayloadKind::Kwargs, input_bytes)
+        })?;
         let limit_bytes = self.payload.reject_bytes.unwrap_or_else(|| {
             unreachable!("the payload policy refuses only above its reject bound")
         });
@@ -425,9 +455,10 @@ struct EnqueueCommand {
     trace: SendTrace,
 }
 
-/// Send one task on `handle`. A request value that breaks a boundary rule
-/// resolves with `CLIENT_DEFECT` at once: the package checks each value
-/// first.
+/// Send one task on `handle`: in a task child through the child host's
+/// producer handle, else through `handle`. A request value that breaks a
+/// boundary rule resolves with `CLIENT_DEFECT` at once: the package checks
+/// each value first.
 #[napi(ts_return_type = "Promise<NativeEnvelope<EnqueueOutcome>>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -440,17 +471,34 @@ pub fn enqueue<'env>(
     send_kind: SendKind,
     trace: TraceArgument,
 ) -> napi::Result<Object<'env>> {
+    enqueue_on(
+        env,
+        ProducerHandle::of_process(handle),
+        request,
+        send_kind,
+        trace,
+    )
+}
+
+/// Send one task through `producer`, as `enqueue` does.
+///
+/// Failure exits: the `napi::Error` of a Promise that Node-API cannot
+/// create. Every other end is an envelope.
+pub fn enqueue_on<'env>(
+    env: &'env Env,
+    producer: ProducerHandle,
+    request: EnqueueRequest,
+    send_kind: SendKind,
+    trace: TraceArgument,
+) -> napi::Result<Object<'env>> {
     let command = guarded_start(ENQUEUE_SUBJECT, || {
         command_of(request, send_kind, trace).map_err(NativeThrown::from)
     });
     match command {
         Err(thrown) => thrown_now::<EnqueueOutcome>(env, thrown),
-        Ok(command) => {
-            let connection = handle.connection();
-            spawn_operation(env, ENQUEUE_SUBJECT, CallKind::Write, move |_core| {
-                enqueue_operation(connection, command)
-            })
-        }
+        Ok(command) => spawn_operation(env, ENQUEUE_SUBJECT, CallKind::Write, move |_core| {
+            enqueue_operation(producer, command)
+        }),
     }
 }
 
@@ -488,12 +536,10 @@ fn command_of(
     })
 }
 
-/// One send, and the outcome as the send catalog names it.
-async fn enqueue_operation(
-    connection: BrokerConnection,
-    command: EnqueueCommand,
-) -> EnqueueOutcome {
-    match enqueue_once(&connection, &command).await {
+/// One send through `producer`, and the outcome as the send catalog names
+/// it.
+async fn enqueue_operation(producer: ProducerHandle, command: EnqueueCommand) -> EnqueueOutcome {
+    match enqueue_once(producer.lazy_handle(), &command).await {
         Ok(task_id) => EnqueueOutcome::Enqueued {
             task_id: text_of_uuid(task_id),
         },
@@ -507,12 +553,8 @@ async fn enqueue_operation(
 }
 
 /// The core's check of the send (no connection), the schema install once
-/// per handle, then the write. Returns the stored task id.
-async fn enqueue_once(
-    connection: &BrokerConnection,
-    command: &EnqueueCommand,
-) -> Result<Uuid, BrokerError> {
-    let handle = connection.lazy_handle();
+/// per handle, then the write on `handle`. Returns the stored task id.
+async fn enqueue_once(handle: &LazyHandle, command: &EnqueueCommand) -> Result<Uuid, BrokerError> {
     let payload = &command.payload;
     let send = CheckedSend::check(
         &payload.task_name,
@@ -541,8 +583,16 @@ mod tests {
     use horsies_core::catalog::CodeEnum;
 
     use super::*;
+    use crate::logging::levels::RecordLevel;
+    use crate::logging::names::LoggerName;
     use crate::values::boundary::bigint_of_i64;
     use crate::values::catalog_values::RawSlotValue;
+
+    /// A log bridge of a test that reads none of its records.
+    fn quiet_log() -> LogBridge {
+        let (log, _records) = LogBridge::new();
+        log
+    }
 
     fn rules() -> SendRules {
         let mut retention = RetentionConfig {
@@ -599,7 +649,11 @@ mod tests {
     #[test]
     fn a_send_with_no_choice_takes_the_queue_mapping_or_the_default_class() {
         let prepared = rules()
-            .prepared(&facts(RetentionChoice::QueueOrDefault, 10.0), &options())
+            .prepared(
+                &quiet_log(),
+                &facts(RetentionChoice::QueueOrDefault, 10.0),
+                &options(),
+            )
             .expect("the facts cross");
         assert_eq!(
             prepared_retention(prepared),
@@ -612,7 +666,7 @@ mod tests {
             ..facts(RetentionChoice::QueueOrDefault, 10.0)
         };
         let prepared = rules()
-            .prepared(&audit, &options())
+            .prepared(&quiet_log(), &audit, &options())
             .expect("the facts cross");
         assert_eq!(prepared_retention(prepared), RetentionRecord::Forever);
     }
@@ -621,6 +675,7 @@ mod tests {
     fn a_registered_period_is_its_class_and_another_period_is_a_validation_failure() {
         let prepared = rules()
             .prepared(
+                &quiet_log(),
                 &facts(RetentionChoice::Days { days: 7.0 }, 10.0),
                 &options(),
             )
@@ -633,6 +688,7 @@ mod tests {
         );
         let refused = rules()
             .prepared(
+                &quiet_log(),
                 &facts(RetentionChoice::Days { days: 9.0 }, 10.0),
                 &options(),
             )
@@ -643,7 +699,11 @@ mod tests {
     #[test]
     fn an_input_above_the_reject_bound_is_payload_too_large_with_its_sizes() {
         let refused = rules()
-            .prepared(&facts(RetentionChoice::Forever, 101.0), &options())
+            .prepared(
+                &quiet_log(),
+                &facts(RetentionChoice::Forever, 101.0),
+                &options(),
+            )
             .expect("the facts cross");
         let PreparedSend::Refused { error } = refused else {
             panic!("an input above the bound is refused");
@@ -669,7 +729,7 @@ mod tests {
             ..facts(RetentionChoice::Forever, 10.0)
         };
         let PreparedSend::Prepared { task_options, .. } = rules()
-            .prepared(&deadline, &options())
+            .prepared(&quiet_log(), &deadline, &options())
             .expect("the facts cross")
         else {
             panic!("the send is prepared");
@@ -677,6 +737,40 @@ mod tests {
         assert!(
             task_options.contains(r#""good_until":"2026-08-12T09:10:12.654321+00:00""#),
             "{task_options}"
+        );
+    }
+
+    /// The first input of a task above the warn bound is a WARNING record
+    /// of the log bridge that the send rules get, not an event that no
+    /// dispatcher takes. The task name is used by no other test: the core
+    /// warns once per task name in a process.
+    #[test]
+    fn the_first_input_above_the_warn_bound_is_a_warning_record() {
+        let (log, records) = LogBridge::new();
+        let rules = SendRules::new(
+            RetentionConfig::default(),
+            PayloadPolicy {
+                warn_bytes: Some(10),
+                reject_bytes: None,
+            },
+        );
+        let first_warning = SendFacts {
+            task_name: "first_payload_warning".to_owned(),
+            ..facts(RetentionChoice::Forever, 11.0)
+        };
+        let prepared = rules
+            .prepared(&log, &first_warning, &options())
+            .expect("the facts cross");
+        assert!(matches!(prepared, PreparedSend::Prepared { .. }));
+        let record = records
+            .try_recv()
+            .expect("the first warning reached the channel");
+        assert_eq!(record.logger, LoggerName::App);
+        assert_eq!(record.level, RecordLevel::Warning);
+        assert!(
+            record.message.starts_with("payload size guardrail"),
+            "{}",
+            record.message
         );
     }
 

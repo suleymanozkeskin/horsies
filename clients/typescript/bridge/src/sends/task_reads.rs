@@ -1,6 +1,9 @@
 //! The task reads on a core handle: the result read and wait, the task info
 //! read, and the role of this process.
 //!
+//! - In a task child each read goes through the child host's producer
+//!   handle, else through the given handle (`ProducerHandle`), as the Rust
+//!   client's reads do.
 //! - Each read installs the schema once per handle first, as the Python
 //!   bridge's reads do; a failed connect or install is
 //!   `TASK_INFO_QUERY_FAILED` (`BrokerOperationFailed`).
@@ -28,8 +31,9 @@ use uuid::Uuid;
 use crate::call::guard::{sync_call, CallKind};
 use crate::call::operation::{guarded_start, spawn_operation};
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::handle::core_handle::{BrokerConnection, CoreHandle};
+use crate::handle::core_handle::CoreHandle;
 use crate::sends::early_end::thrown_now;
+use crate::sends::producer_handle::ProducerHandle;
 use crate::values::boundary::{epoch_micros_of, text_of_uuid, u32_of_number, uuid_of_text};
 use crate::values::catalog_values::RawCatalogError;
 
@@ -155,8 +159,9 @@ pub enum ResultRead {
 }
 
 /// Read the result of one task, waiting as `wait` says while it has not
-/// finished. A task id or a wait that breaks a boundary rule resolves with
-/// `CLIENT_DEFECT` at once.
+/// finished: in a task child through the child host's producer handle,
+/// else through `handle`. A task id or a wait that breaks a boundary rule
+/// resolves with `CLIENT_DEFECT` at once.
 #[napi(ts_return_type = "Promise<NativeEnvelope<ResultRead>>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -168,12 +173,25 @@ pub fn get_result<'env>(
     task_id: String,
     wait: WaitBound,
 ) -> napi::Result<Object<'env>> {
+    result_read_on(env, ProducerHandle::of_process(handle), &task_id, &wait)
+}
+
+/// Read the result of one task through `producer`, as `getResult` does.
+///
+/// Failure exits: the `napi::Error` of a Promise that Node-API cannot
+/// create. Every other end is an envelope.
+pub fn result_read_on<'env>(
+    env: &'env Env,
+    producer: ProducerHandle,
+    task_id: &str,
+    wait: &WaitBound,
+) -> napi::Result<Object<'env>> {
     let request = guarded_start(RESULT_SUBJECT, || {
-        let task_id = uuid_of_text("taskId", &task_id)?;
+        let task_id = uuid_of_text("taskId", task_id)?;
         let limit = match wait {
             WaitBound::UntilEnd => None,
             WaitBound::UpTo { milliseconds } => Some(Duration::from_millis(u64::from(
-                u32_of_number("wait.milliseconds", milliseconds)?,
+                u32_of_number("wait.milliseconds", *milliseconds)?,
             ))),
         };
         Ok::<_, NativeThrown>((task_id, limit))
@@ -181,21 +199,21 @@ pub fn get_result<'env>(
     match request {
         Err(thrown) => thrown_now::<ResultRead>(env, thrown),
         Ok((task_id, limit)) => {
-            let connection = handle.connection();
             spawn_operation(env, RESULT_SUBJECT, CallKind::Read, move |_core| {
-                result_operation(connection, task_id, limit)
+                result_operation(producer, task_id, limit)
             })
         }
     }
 }
 
-/// One result read. Installs the schema once per handle first.
+/// One result read through `producer`. Installs the schema once per handle
+/// first.
 async fn result_operation(
-    connection: BrokerConnection,
+    producer: ProducerHandle,
     task_id: Uuid,
     limit: Option<Duration>,
 ) -> ResultRead {
-    let broker = match connection.lazy_handle().initialized_broker().await {
+    let broker = match producer.lazy_handle().initialized_broker().await {
         Ok(broker) => broker,
         Err(error) => {
             return ResultRead::Failed {
@@ -449,8 +467,9 @@ pub enum TaskInfoRead {
 }
 
 /// Read the info of one task: status, times, the failed reason and every
-/// attempt, newest first; no result. A task id that breaks a boundary rule
-/// resolves with `CLIENT_DEFECT` at once.
+/// attempt, newest first; no result. In a task child the read goes through
+/// the child host's producer handle, else through `handle`. A task id that
+/// breaks a boundary rule resolves with `CLIENT_DEFECT` at once.
 #[napi(ts_return_type = "Promise<NativeEnvelope<TaskInfoRead>>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -461,23 +480,33 @@ pub fn task_info<'env>(
     handle: &CoreHandle,
     task_id: String,
 ) -> napi::Result<Object<'env>> {
+    task_info_on(env, ProducerHandle::of_process(handle), &task_id)
+}
+
+/// Read the info of one task through `producer`, as `taskInfo` does.
+///
+/// Failure exits: the `napi::Error` of a Promise that Node-API cannot
+/// create. Every other end is an envelope.
+pub fn task_info_on<'env>(
+    env: &'env Env,
+    producer: ProducerHandle,
+    task_id: &str,
+) -> napi::Result<Object<'env>> {
     let task_id = guarded_start(INFO_SUBJECT, || {
-        uuid_of_text("taskId", &task_id).map_err(NativeThrown::from)
+        uuid_of_text("taskId", task_id).map_err(NativeThrown::from)
     });
     match task_id {
         Err(thrown) => thrown_now::<TaskInfoRead>(env, thrown),
-        Ok(task_id) => {
-            let connection = handle.connection();
-            spawn_operation(env, INFO_SUBJECT, CallKind::Read, move |_core| {
-                task_info_operation(connection, task_id)
-            })
-        }
+        Ok(task_id) => spawn_operation(env, INFO_SUBJECT, CallKind::Read, move |_core| {
+            task_info_operation(producer, task_id)
+        }),
     }
 }
 
-/// One task info read. Installs the schema once per handle first.
-async fn task_info_operation(connection: BrokerConnection, task_id: Uuid) -> TaskInfoRead {
-    let broker = match connection.lazy_handle().initialized_broker().await {
+/// One task info read through `producer`. Installs the schema once per
+/// handle first.
+async fn task_info_operation(producer: ProducerHandle, task_id: Uuid) -> TaskInfoRead {
+    let broker = match producer.lazy_handle().initialized_broker().await {
         Ok(broker) => broker,
         Err(error) => {
             return TaskInfoRead::Failed {
