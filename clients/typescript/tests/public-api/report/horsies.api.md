@@ -3487,12 +3487,12 @@ export type SchemaSent<S> = S extends AnyWire ? SentOf<S> : ZodSentOf<S>;
 // @public
 export type SchemaValue<S> = S extends AnyWire ? ValueOf<S> : ZodValueOf<S>;
 
-// @public
+// @public (undocumented)
 export const SeatRelayCode: {
     readonly SEAT_RELAY_FULL: "SEAT_RELAY_FULL";
 };
 
-// @public
+// @public (undocumented)
 export type SeatRelayCode = (typeof SeatRelayCode)[keyof typeof SeatRelayCode];
 
 // @public
