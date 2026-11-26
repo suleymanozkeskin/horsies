@@ -128,11 +128,11 @@ def _app(
     telemetry: SendTelemetry,
     broker: MagicMock,
     *,
-    resend_on_transient_err: bool = False,
+    resend_on_transient_error: bool = False,
 ) -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = resend_on_transient_err
+    app.config.resend_on_transient_error = resend_on_transient_error
     app.config.payload = PayloadPolicy()
     app.are_sends_suppressed.return_value = False
     app.send_telemetry.return_value = telemetry
@@ -270,7 +270,7 @@ class TestTaskSendSpan:
     def test_a_resend_of_a_transient_failure_stays_in_one_span(self, otel: Otel) -> None:
         broker = MagicMock()
         broker.enqueue.side_effect = [_enqueue_failed(retryable=True), Ok(uuid.uuid4())]
-        app = _app(otel.telemetry, broker, resend_on_transient_err=True)
+        app = _app(otel.telemetry, broker, resend_on_transient_error=True)
         with patch('horsies.core.task_decorator.time.sleep'):
             result = _wrapper(app).send(amount=5)
 

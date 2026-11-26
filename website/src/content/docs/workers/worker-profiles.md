@@ -740,7 +740,7 @@ One worker opens this many Postgres connections itself:
 
 ```text
 pool max_size                                           # pool of the worker process
-+ pool max_size                                         # session pool, when session_database_url differs from database_url
++ pool max_size                                         # session pool, when the session database URL differs from database_url
 + 1                                                     # listener
 + 1                                                     # runner heartbeat
 + 1                                                     # liveness lock
@@ -749,7 +749,7 @@ pool max_size                                           # pool of the worker pro
 + shared thread children × shared_thread.pool max_size  # shared thread child pools
 ```
 
-The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. One listener connection carries every `LISTEN` of the worker process. One connection on the session URL holds the [liveness lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock) of the worker process. When `session_database_url` differs from `database_url`, the worker process opens a session pool there for schema work and partition maintenance, of the size of its own pool. Each `max_size` is the resolved value: a `PoolSize`, or the size that `PoolSizeFromSeats()` derives from the seats. An isolated child and a shared thread child open a sync pool; a shared async child opens an async pool. At the defaults and with no `session_database_url`, a profile of 8 isolated children needs `5 + 1 + 1 + 1 + 8 × 1 = 16`. A profile of 2 isolated children, 2 shared async children with 50 seats and 1 shared thread child with 16 seats has 118 seats and needs `12 + 1 + 1 + 1 + 2 × 1 + 2 × 5 + 1 × 2 = 29`. Each `HRS-219` error and the boot log state the formula of the profile, one term per mode, with a `session pool max_size N` term after the parent pool when the session pool is separate:
+The worker process writes the runner heartbeats of its RUNNING tasks over one connection of its own. One listener connection carries every `LISTEN` of the worker process. One connection on the session URL holds the [liveness lock](/horsies/workers/heartbeats-recovery/#worker-liveness-lock) of the worker process. When the URL of a separate `session_database` differs from `database_url`, the worker process opens a session pool there for schema work and partition maintenance, of the size of its own pool. Each `max_size` is the resolved value: a `PoolSize`, or the size that `PoolSizeFromSeats()` derives from the seats. An isolated child and a shared thread child open a sync pool; a shared async child opens an async pool. At the defaults and with no separate `session_database`, a profile of 8 isolated children needs `5 + 1 + 1 + 1 + 8 × 1 = 16`. A profile of 2 isolated children, 2 shared async children with 50 seats and 1 shared thread child with 16 seats has 118 seats and needs `12 + 1 + 1 + 1 + 2 × 1 + 2 × 5 + 1 × 2 = 29`. Each `HRS-219` error and the boot log state the formula of the profile, one term per mode, with a `session pool max_size N` term after the parent pool when the session pool is separate:
 
 ```text
 parent pool max_size 12 + listener 1 + runner heartbeat 1 + liveness lock 1 + 2 isolated children x isolated.pool max_size 1 + 2 shared async children x shared_async.pool max_size 5 + 1 shared thread children x shared_thread.pool max_size 2 = 29

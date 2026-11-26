@@ -134,10 +134,12 @@ async fn start_one_node_workflow(url: &str, name: &str) -> Uuid {
 /// the app's core pool.
 async fn listener_refused_handle(url: &str, workflow_id: Uuid) -> WorkflowHandle<u32> {
     let mut config = AppConfig::for_database_url(url);
-    config.broker.session_database_url = Some(format!(
-        "postgresql://postgres:none@127.0.0.1:1/listener_refused_{}",
-        Uuid::new_v4().simple()
-    ));
+    config.broker.session_database = horsies::SessionDatabase::Separate {
+        url: format!(
+            "postgresql://postgres:none@127.0.0.1:1/listener_refused_{}",
+            Uuid::new_v4().simple()
+        ),
+    };
     let reader =
         Horsies::with_schema_mode(config, SchemaMode::ObserveOnly).expect("the reading app");
     let handle = reader.workflow_handle::<u32>(workflow_id);

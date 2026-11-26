@@ -80,7 +80,7 @@ class TestConfigModelsForbidExtra:
                     ),
                 ),
                 recovery={
-                    'auto_requeue_stale_claimed': True,
+                    'requeue_stale_claimed': True,
                     'stale_claim_threshold': 5,
                 },  # type: ignore[arg-type]
             )

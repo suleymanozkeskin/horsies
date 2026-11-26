@@ -18,8 +18,8 @@
 //!   pool holds `pool_size + max_overflow`. The reserve of the reaper and the
 //!   per-task writes ([`crate::db::WORKER_RESERVED_CONNECTIONS`]) is kept
 //!   inside that size, so it adds no term;
-//! - session pool: a pool of its own on `session_database_url` only when that
-//!   URL differs from `database_url`, sized as the worker pool (the broker
+//! - session pool: a pool of its own on a separate session database only
+//!   when its URL differs from `database_url`, sized as the worker pool (the broker
 //!   builds both from one config; Python's session engine is sized the same
 //!   way and Python does not count it);
 //! - listener: one dedicated connection on the session URL carries every
@@ -295,11 +295,12 @@ impl ModePools {
 /// The session pool of a worker process.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionPoolTerm {
-    /// `session_database_url` is absent or equal to `database_url`: session
-    /// work takes connections of the worker pool, so there is no term.
+    /// The session database is `database_url`, or a separate URL equal to
+    /// it: session work takes connections of the worker pool, so there is no
+    /// term.
     SharedWithWorkerPool,
-    /// A pool of its own on `session_database_url` of up to `max_size`
-    /// connections.
+    /// A pool of its own on the URL of a separate session database, of up
+    /// to `max_size` connections.
     Separate { max_size: u32 },
 }
 

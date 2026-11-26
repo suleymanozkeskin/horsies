@@ -15,23 +15,23 @@ The API is on the client pages: [Broker Connections](/horsies/configuration/brok
 | Field | Default | Range | Description |
 |-------|---------|-------|-------------|
 | `database_url` | required | – | PostgreSQL connection URL; see [Connection URL Format](#connection-url-format) |
-| `session_database_url` | none | – | Direct/session-capable URL for schema setup and LISTEN/NOTIFY |
+| `session_database` | same as `database_url` | – | Where schema setup and LISTEN/NOTIFY connect: `database_url`, or a separate direct/session-capable URL |
 | `pgbouncer_transaction_mode` | off | – | Disable prepared statements for transaction-pooled PgBouncer |
 | `pool_size` | 5 | 1 to 10,000 | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | 10 | 0 to 10,000 | Additional connections beyond pool_size |
-| `pool_timeout` | 30 | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for connection |
+| `pool_timeout_seconds` | 30 | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for connection |
 | `pool_pre_ping` | on | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s, in every pool but the one of the worker process; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `worker_pool_pre_ping` | off | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: the worker sends a one-statement write in one round trip, and a dead pooled connection fails its first statement with a connection error that the worker retries; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/#health-checks-at-high-rtt) |
-| `tcp_keepalives` | on | – | Enable TCP keepalives on every connection of the core: the broker pools, the child-process pools and the listener; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
-| `tcp_keepalives_idle` | 30 | 1 to 32,767 | Idle seconds before the first keepalive probe (as libpq `keepalives_idle`) |
-| `tcp_keepalives_interval` | 10 | 1 to 32,767 | Seconds between keepalive probes (as libpq `keepalives_interval`) |
-| `tcp_keepalives_count` | 3 | 1 to 127 | Unacknowledged probes before the connection is dropped (as libpq `keepalives_count`) |
-| `tcp_user_timeout_ms` | 30000 | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (as libpq `tcp_user_timeout`); `0` uses the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `tcp_keepalives` | on | – | TCP keepalives on every connection of the core: the broker pools, the child-process pools and the listener. Off, or on with the three values below; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
+| `tcp_keepalives.idle_seconds` | 30 | 1 to 32,767 | Idle seconds before the first keepalive probe (as libpq `keepalives_idle`) |
+| `tcp_keepalives.interval_seconds` | 10 | 1 to 32,767 | Seconds between keepalive probes (as libpq `keepalives_interval`) |
+| `tcp_keepalives.probes` | 3 | 1 to 127 | Unacknowledged probes before the connection is dropped (as libpq `keepalives_count`) |
+| `tcp_user_timeout` | after 30000 ms | `milliseconds` 1 to 2,147,483,647 | How long sent data may stay unacknowledged before the connection is closed (as libpq `tcp_user_timeout`), or the operating system default; see [Remote PostgreSQL](/horsies/configuration/remote-postgres/) |
 | `retain_rerun_input_default` | off | – | App-level default for rerun-input retention at enqueue; a per-task value overrides it |
 | `echo` | off | – | Log each SQL statement at INFO on the logger `horsies.sql` (Rust: the `tracing` target `horsies.sql`): the SQL text as the message, the statement name as the field `statement`. Bound values are not shown. Python: a broker built with `echo=True` sets `horsies.sql` to INFO and, when that logger has no handler, adds one stdout handler per process |
-| `pool_recycle` | 1800 | `-1` (never) or 0 to 4,294,967,295 | Recycle connections after N seconds |
+| `pool_recycle` | after 1800 s | `seconds` 0 to 4,294,967,295, or never | Recycle a connection after `seconds`, or never |
 
-A value outside its range is refused when the config is built. The three keepalive values are checked only when `tcp_keepalives` is on.
+A value outside its range is refused when the config is built (Rust: by `Horsies::new`).
 
 The pools of a worker are not broker fields. Each child kind has its own `pool` and `task_send_pool` in the worker profile, and the worker process has the `pool` of the profile. See [Connection Pools and the Default Executor](/horsies/workers/worker-profiles/#connection-pools-and-the-default-executor) (Python).
 
@@ -51,7 +51,7 @@ Components:
 ## PgBouncer / Transaction Pooling
 
 Use a split configuration when the main SQL URL points to PgBouncer transaction
-pooling. `database_url` is used for ordinary SQL work. `session_database_url` is
+pooling. `database_url` is used for ordinary SQL work. A separate `session_database` is
 used for schema setup, partition maintenance, and PostgreSQL `LISTEN`/`NOTIFY`.
 These operations need persistent session semantics.
 
@@ -59,11 +59,11 @@ Some managed providers, including PlanetScale Postgres, expose separate pooled
 and direct connection strings. Treat provider-specific ports and hostnames as an
 example, not a Horsies requirement. Check your provider dashboard or current
 provider docs and copy the pooled transaction URL into `database_url` and the
-direct/session-capable URL into `session_database_url`.
+direct/session-capable URL into the separate `session_database`.
 
 Rules:
 
-- Workers require `session_database_url` when `pgbouncer_transaction_mode` is on.
+- Workers require a separate `session_database` when `pgbouncer_transaction_mode` is on.
 - The two URLs must be different in transaction-pool mode.
 - Worker startup checks session behavior before partition maintenance starts.
 - The web UI event stream listens on the session URL for real-time updates.
@@ -77,7 +77,7 @@ session settings. Some partition-maintenance statements have cost estimates
 above the default `jit_above_cost`, so a JIT-enabled server would compile
 them on every call.
 
-- Direct connections and the `session_database_url` pool always run without JIT.
+- Direct connections and the session database pool always run without JIT.
 - With `pgbouncer_transaction_mode` on, the `database_url` pool keeps the
   server's JIT setting, because server sessions are shared between clients.
   To disable JIT there too, set it for the role:
@@ -86,7 +86,7 @@ them on every call.
 
 ## Connection Pooling
 
-`pool_size` and `max_overflow` bound the connections of each broker pool: `pool_size` persistent connections, and up to `max_overflow` more under load. `pool_timeout` is how long a checkout waits when all connections are busy, and `pool_recycle` closes and recreates a connection after that many seconds.
+`pool_size` and `max_overflow` bound the connections of each broker pool: `pool_size` persistent connections, and up to `max_overflow` more under load. `pool_timeout_seconds` is how long a checkout waits when all connections are busy, and `pool_recycle` closes and recreates a connection after that many seconds.
 
 ### Sizing Guidelines
 
@@ -105,7 +105,7 @@ For direct PostgreSQL connections, budget a worker roughly as:
 
 ```
 pool max_size (the pool of the worker process)
-  + pool max_size again, when session_database_url differs from database_url (the session pool)
+  + pool max_size again, when the session database URL differs from database_url (the session pool)
   + 1 listener connection
   + 1 runner heartbeat connection
   + 1 liveness lock connection
@@ -140,7 +140,7 @@ a child inherits no database socket from the worker.
 
 ## Health Checks
 
-Connection health comes from `pool_pre_ping`, `worker_pool_pre_ping`, the TCP keepalives and `tcp_user_timeout_ms` in the [field table](#fields). How to tune them for a remote database is on [Remote PostgreSQL](/horsies/configuration/remote-postgres/).
+Connection health comes from `pool_pre_ping`, `worker_pool_pre_ping`, the TCP keepalives and `tcp_user_timeout` in the [field table](#fields). How to tune them for a remote database is on [Remote PostgreSQL](/horsies/configuration/remote-postgres/).
 
 ## Schema Initialization
 

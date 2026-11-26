@@ -25,7 +25,7 @@ use super::run::HostContext;
 use super::seats::{serve_isolated, serve_shared_async, serve_shared_thread, PollWatch, ServeEnd};
 use crate::broker::client_family::ClientFamily;
 use crate::broker::PostgresBroker;
-use crate::core::config::PostgresConfig;
+use crate::core::config::{PostgresConfig, SessionDatabase};
 use crate::core::TaskRegistry;
 use crate::db::KeptOpen;
 use crate::manifest::{PoolRecycle, ProducerManifest};
@@ -510,20 +510,25 @@ fn child_broker_config(
         .ok()
         .and_then(NonZeroU32::new)
         .expect("a child pool max_size is from 1 to MAX_CHILD_POOL_CONNECTIONS");
-    let (pgbouncer_transaction_mode, session_database_url) = match &connection.server_sessions {
-        ServerSessions::Kept => (false, None),
+    let (pgbouncer_transaction_mode, session_database) = match &connection.server_sessions {
+        ServerSessions::Kept => (false, SessionDatabase::SameAsDatabaseUrl),
         ServerSessions::PgBouncerTransactionMode {
             session_database_url,
-        } => (true, Some(session_database_url.as_str().to_owned())),
+        } => (
+            true,
+            SessionDatabase::Separate {
+                url: session_database_url.as_str().to_owned(),
+            },
+        ),
     };
     PostgresConfig {
-        session_database_url,
+        session_database,
         pgbouncer_transaction_mode,
         pool_pre_ping: pool.check,
-        pool_timeout: CHILD_POOL_CHECKOUT_WAIT_SECONDS,
+        pool_timeout_seconds: CHILD_POOL_CHECKOUT_WAIT_SECONDS,
         pool_recycle: CHILD_POOL_MAX_AGE,
-        tcp_keepalives: connection.tcp_keepalives,
-        tcp_user_timeout: connection.tcp_user_timeout,
+        tcp_keepalives: connection.tcp_keepalives.into(),
+        tcp_user_timeout: connection.tcp_user_timeout.into(),
         ..PostgresConfig::from_url(database_url).with_exact_pool(connections)
     }
 }
@@ -1274,11 +1279,11 @@ mod tests {
     fn the_child_pool_is_max_size_with_no_overflow() {
         let config = child_broker_config(URL, &ChildConnection::default(), child_pool(7, false));
         assert_eq!(config.database_url, URL);
-        assert_eq!(config.session_database_url, None);
+        assert_eq!(config.session_database, SessionDatabase::SameAsDatabaseUrl);
         assert_eq!(config.pool_size, 7);
         assert_eq!(config.max_overflow, 0);
         assert!(!config.pool_pre_ping);
-        assert_eq!(config.pool_timeout, 30);
+        assert_eq!(config.pool_timeout_seconds, 30);
         assert_eq!(config.pool_recycle, PoolRecycle::after_seconds(300));
         assert!(config.validate().is_ok());
     }
@@ -1318,7 +1323,7 @@ mod tests {
             }
         );
         assert!(!config.pgbouncer_transaction_mode);
-        assert_eq!(config.session_database_url, None);
+        assert_eq!(config.session_database, SessionDatabase::SameAsDatabaseUrl);
     }
 
     /// Python `prepare_threshold=None` under PgBouncer transaction mode: the
@@ -1335,7 +1340,7 @@ mod tests {
         };
         let config = child_broker_config(URL, &connection, child_pool(2, false));
         assert!(config.pgbouncer_transaction_mode);
-        assert_eq!(config.session_database_url.as_deref(), Some(SESSION_URL));
+        assert_eq!(config.effective_session_database_url(), SESSION_URL);
         assert_eq!(
             config.socket_settings(),
             SocketSettings {

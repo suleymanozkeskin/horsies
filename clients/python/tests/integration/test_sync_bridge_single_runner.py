@@ -68,7 +68,7 @@ def one_connection_app(schema_ready: None) -> Generator[OneConnectionApp, None, 
             database_url=SecretStr(DB_URL),
             pool_size=1,
             max_overflow=0,
-            pool_timeout=POOL_TIMEOUT_SECONDS,
+            pool_timeout_seconds=POOL_TIMEOUT_SECONDS,
         ),
     ))
 

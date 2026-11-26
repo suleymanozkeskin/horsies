@@ -23,6 +23,7 @@ from horsies.core.defaults import (
 from horsies.core.models.boot_failure import (
     ClearableBootCause,
 )
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.tasks import Execution
 
 
@@ -140,6 +141,8 @@ class WorkerStateSnapshot:
     ``class_capacity`` holds the claim budget of each execution class that
     the worker runs children for: its capacity in service and the classes
     whose rows it claims.
+    ``cluster_wide_cap`` is the cap that the worker ran with:
+    ``ClusterCap(tasks)`` or ``NoClusterCap()``.
     ``profile`` names the worker profile that the worker ran:
     ``ProfileNamed(name)`` or ``ProfileNotRecorded()``.
     """
@@ -151,7 +154,7 @@ class WorkerStateSnapshot:
     processes: int
     max_claim_batch: int
     max_claim_per_worker: int
-    cluster_wide_cap: int | None
+    cluster_wide_cap: ClusterCap | NoClusterCap
     queues: list[str]
     queue_priorities: dict[str, int]
     queue_max_concurrency: dict[str, int]

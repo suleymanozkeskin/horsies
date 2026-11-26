@@ -50,7 +50,7 @@ def _make_app(retention: RetentionConfig) -> MagicMock:
     app.config.custom_queues = None
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.retention = retention
     app.are_sends_suppressed.return_value = False

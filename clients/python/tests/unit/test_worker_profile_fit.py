@@ -17,7 +17,7 @@ from horsies._core import CoreStartFailed
 from horsies.core.app import Horsies
 from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 from horsies.core.models.worker_profile import (
     IsolatedChildren,
     WorkerProfile,
@@ -165,9 +165,9 @@ class TestCheckLiveWorkerConnections:
         app = _app(
             {'small': WorkerProfile(isolated=IsolatedChildren(count=1))},
             pgbouncer_transaction_mode=True,
-            session_database_url=SecretStr(
+            session_database=SessionDatabaseSeparate(url=SecretStr(
                 'postgresql://user:pass@localhost:5433/db',
-            ),
+            )),
         )
         with _live_core(refusals=[]) as built:
             assert app.check(live=True) == []

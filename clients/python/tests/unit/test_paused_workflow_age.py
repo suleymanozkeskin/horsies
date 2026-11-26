@@ -47,9 +47,9 @@ def test_a_timedelta_has_a_resolution_of_one_microsecond() -> None:
     ],
 )
 def test_a_paused_age_from_a_timedelta_is_whole_microseconds(given: timedelta) -> None:
-    config = RetentionConfig(paused_workflow_auto_cancel_after=given)
+    config = RetentionConfig(paused_workflow_cancel_after=given)
 
-    age = config.paused_workflow_auto_cancel_after
+    age = config.paused_workflow_cancel_after
     assert age is not None
     assert _is_whole_microseconds(age)
     assert age // _ONE_MICROSECOND == given // _ONE_MICROSECOND
@@ -68,9 +68,9 @@ def test_a_paused_age_read_from_seconds_or_text_is_whole_microseconds(
     given: float | str,
     micros: int,
 ) -> None:
-    config = RetentionConfig.model_validate({'paused_workflow_auto_cancel_after': given})
+    config = RetentionConfig.model_validate({'paused_workflow_cancel_after': given})
 
-    age = config.paused_workflow_auto_cancel_after
+    age = config.paused_workflow_cancel_after
     assert age is not None
     assert _is_whole_microseconds(age)
     assert age // _ONE_MICROSECOND == micros
@@ -78,7 +78,7 @@ def test_a_paused_age_read_from_seconds_or_text_is_whole_microseconds(
 
 def test_a_paused_age_below_one_microsecond_is_zero_and_refused() -> None:
     with pytest.raises(ValidationError, match='must be a positive duration'):
-        RetentionConfig.model_validate({'paused_workflow_auto_cancel_after': 1e-7})
+        RetentionConfig.model_validate({'paused_workflow_cancel_after': 1e-7})
 
 
 def test_the_bound_is_365000_days_and_the_core_bound() -> None:
@@ -87,9 +87,9 @@ def test_the_bound_is_365000_days_and_the_core_bound() -> None:
 
 
 def test_the_longest_paused_age_is_accepted() -> None:
-    config = RetentionConfig(paused_workflow_auto_cancel_after=PAUSED_WORKFLOW_AGE_MAX)
+    config = RetentionConfig(paused_workflow_cancel_after=PAUSED_WORKFLOW_AGE_MAX)
 
-    assert config.paused_workflow_auto_cancel_after == PAUSED_WORKFLOW_AGE_MAX
+    assert config.paused_workflow_cancel_after == PAUSED_WORKFLOW_AGE_MAX
 
 
 @pytest.mark.parametrize(
@@ -105,7 +105,7 @@ def test_a_paused_age_above_the_bound_is_refused_with_the_retention_code(
     given: timedelta,
 ) -> None:
     with pytest.raises(ConfigurationError) as raised:
-        RetentionConfig(paused_workflow_auto_cancel_after=given)
+        RetentionConfig(paused_workflow_cancel_after=given)
 
     assert raised.value.code is ErrorCode.CONFIG_INVALID_RETENTION
     assert 'longer than 365000 days' in raised.value.message

@@ -220,10 +220,13 @@ fn a_separate_session_url_adds_a_session_pool_sized_as_the_worker_pool() {
     let profile = isolated_only(1);
     let parent = profile.resolved_parent_pool().get();
     let mut separate = direct();
-    separate.session_database_url =
-        Some("postgresql://postgres:none@127.0.0.1:1/none?application_name=session".to_owned());
+    separate.session_database = crate::core::config::SessionDatabase::Separate {
+        url: "postgresql://postgres:none@127.0.0.1:1/none?application_name=session".to_owned(),
+    };
     let mut same_url = direct();
-    same_url.session_database_url = Some(same_url.database_url.clone());
+    same_url.session_database = crate::core::config::SessionDatabase::Separate {
+        url: same_url.database_url.clone(),
+    };
 
     let need = worker_connection_need(&profile, &separate);
 
@@ -371,8 +374,9 @@ async fn no_profile_or_transaction_mode_reads_nothing() {
         .worker_profiles
         .insert("default".to_owned(), isolated_only(1).into());
     config.broker.pgbouncer_transaction_mode = true;
-    config.broker.session_database_url =
-        Some("postgresql://postgres:none@127.0.0.1:2/none".to_owned());
+    config.broker.session_database = crate::core::config::SessionDatabase::Separate {
+        url: "postgresql://postgres:none@127.0.0.1:2/none".to_owned(),
+    };
     assert!(check_worker_connections(&config, &broker).await.is_empty());
 }
 
@@ -448,7 +452,7 @@ fn unreachable_handle(pgbouncer_transaction_mode: bool) -> CoreHandle {
             "pool_pre_ping": true,
             "pool_size": 2,
             "max_overflow": 0,
-            "pool_timeout": 1,
+            "pool_timeout_seconds": 1,
             "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
             "echo": false,
             "tcp_keepalives": {"kind": "OFF"},
@@ -637,7 +641,7 @@ fn with_application_name(url: &str, application_name: &str) -> String {
     format!("{url}{separator}application_name={application_name}")
 }
 
-/// A `session_database_url` that differs from `database_url` adds the
+/// A separate session database URL that differs from `database_url` adds the
 /// session pool that the core's worker broker opens on it, sized as the
 /// worker pool, to the sum against the server. The worker pool, the
 /// listener, the runner heartbeat, the liveness lock and one isolated child
@@ -665,10 +669,9 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
     assert!(total > u64::from(usable));
     let database_url = migrated_database_url().await;
     let mut config = AppConfig::for_database_url(database_url.clone());
-    config.broker.session_database_url = Some(with_application_name(
-        &database_url,
-        "horsies_session_pool_check",
-    ));
+    config.broker.session_database = crate::core::config::SessionDatabase::Separate {
+        url: with_application_name(&database_url, "horsies_session_pool_check"),
+    };
     config.worker_profiles =
         BTreeMap::from([("session".to_owned(), input::WorkerProfile::from(profile))]);
     let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
@@ -699,7 +702,8 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
         )
     );
 
-    config.broker.session_database_url = Some(database_url);
+    config.broker.session_database =
+        crate::core::config::SessionDatabase::Separate { url: database_url };
     let errors = check_worker_connections(&config, &broker).await;
     assert!(errors.is_empty(), "{errors:?}");
 }
@@ -766,7 +770,9 @@ async fn boot_through_a_transaction_pooler_reads_nothing() {
     let broker = unreachable_broker();
     let mut config = direct();
     config.pgbouncer_transaction_mode = true;
-    config.session_database_url = Some("postgresql://postgres:none@127.0.0.1:2/none".to_owned());
+    config.session_database = crate::core::config::SessionDatabase::Separate {
+        url: "postgresql://postgres:none@127.0.0.1:2/none".to_owned(),
+    };
 
     let fit = boot_connection_fit(&isolated_only(1), &config, &broker).await;
 

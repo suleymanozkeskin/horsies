@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 
+from horsies.core.models.cluster_cap import NoClusterCap
 from horsies.core.models.health import (
     AllSlotsServing,
     ClassBudgets,
@@ -43,7 +44,7 @@ class TestResultModels:
             processes=4,
             max_claim_batch=10,
             max_claim_per_worker=4,
-            cluster_wide_cap=None,
+            cluster_wide_cap=NoClusterCap(),
             queues=['default'],
             queue_priorities={},
             queue_max_concurrency={},
@@ -59,6 +60,6 @@ class TestResultModels:
             class_capacity=ClassBudgets(()),
             profile=ProfileNamed(name='default'),
         )
-        assert snap.cluster_wide_cap is None
+        assert snap.cluster_wide_cap == NoClusterCap()
         assert snap.queues == ['default']
         assert snap.tasks_running == 0

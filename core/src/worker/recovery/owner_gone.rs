@@ -210,8 +210,8 @@ pub(crate) struct OwnerGoneStep {
 /// One owner-gone step on `pool`: the liveness read, the judgement of
 /// `memory` with `span`, the read of the generations of the judged owners
 /// (only when the read judged one), then for each gone owner the recovery
-/// of its RUNNING rows (with `auto_fail_stale_running`) and of its CLAIMED
-/// rows (with `auto_requeue_stale_claimed`). Each statement runs alone on
+/// of its RUNNING rows (with `fail_stale_running`) and of its CLAIMED
+/// rows (with `requeue_stale_claimed`). Each statement runs alone on
 /// `pool` as reserved work and commits alone. A recovery statement that
 /// fails is logged, and the step goes on with the next one. Each row whose
 /// recovery committed is told to `telemetry` (`RunningRetried`,
@@ -257,10 +257,10 @@ pub(crate) async fn owner_gone_step(
             owner.unheld_since,
             owner.generation,
         );
-        if config.auto_fail_stale_running {
+        if config.fail_stale_running {
             step.running_recovered += recover_gone_owner_running(pool, log, owner, telemetry).await;
         }
-        if config.auto_requeue_stale_claimed {
+        if config.requeue_stale_claimed {
             step.claims_requeued += requeue_gone_owner_claims(pool, log, owner, telemetry).await;
         }
     }

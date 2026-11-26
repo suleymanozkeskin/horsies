@@ -132,8 +132,14 @@ pub fn format_banner(info: &BannerInfo<'_>) -> String {
     write_kv(&mut buf, "broker", &masked_url);
 
     // Cluster-wide cap
-    if let Some(cap) = info.app_config.cluster_wide_cap {
-        write_kv(&mut buf, "cluster_cap", &format!("{} (cluster-wide)", cap));
+    if let crate::core::config::ClusterCapSetting::ClusterCap { tasks } =
+        info.app_config.cluster_wide_cap
+    {
+        write_kv(
+            &mut buf,
+            "cluster_cap",
+            &format!("{} (cluster-wide)", tasks),
+        );
     }
 
     // Prefetch
@@ -154,12 +160,12 @@ pub fn format_banner(info: &BannerInfo<'_>) -> String {
     write_kv(
         &mut buf,
         "requeue_stale_claimed",
-        &format_bool(recovery.auto_requeue_stale_claimed),
+        &format_bool(recovery.requeue_stale_claimed),
     );
     write_kv(
         &mut buf,
         "fail_stale_running",
-        &format_bool(recovery.auto_fail_stale_running),
+        &format_bool(recovery.fail_stale_running),
     );
     write_kv(
         &mut buf,
@@ -365,7 +371,7 @@ mod tests {
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig::from_url("postgresql://localhost/test"),
-            cluster_wide_cap: None,
+            cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -374,7 +380,7 @@ mod tests {
             resilience: Default::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let worker_config = WorkerConfig::default();
         let profile = test_profile();
@@ -405,7 +411,7 @@ mod tests {
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig::from_url("postgresql://user:secret@localhost/test"),
-            cluster_wide_cap: None,
+            cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -414,7 +420,7 @@ mod tests {
             resilience: Default::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let worker_config = WorkerConfig::default();
         let profile = test_profile();
@@ -454,7 +460,7 @@ mod tests {
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: PostgresConfig::from_url("postgresql://localhost/test"),
-            cluster_wide_cap: None,
+            cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -463,7 +469,7 @@ mod tests {
             resilience: Default::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let worker_config = WorkerConfig::default();
         let profile = test_profile();

@@ -20,7 +20,7 @@ const TASK_ID: &str = "0195c1b4-7a2e-7d2f-9d4e-3b1a2c4d5e6f";
 
 fn config() -> AppConfig {
     let mut config = AppConfig::for_database_url(UNREACHABLE_URL);
-    config.broker.pool_timeout = 1;
+    config.broker.pool_timeout_seconds = 1;
     config
 }
 

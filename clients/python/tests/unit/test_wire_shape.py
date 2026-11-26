@@ -1102,7 +1102,7 @@ class TestNestedTaskOutcome:
 def _mock_app() -> MagicMock:
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = False
+    app.config.resend_on_transient_error = False
     app.config.payload = PayloadPolicy()
     app.config.exception_mapper = {}
     app.config.default_unhandled_error_code = 'UNHANDLED_EXCEPTION'

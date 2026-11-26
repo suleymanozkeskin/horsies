@@ -1778,7 +1778,7 @@ class PostgresBroker:
         when the task's policy allows it, else the failure. One core pass.
 
         The reaper of each worker runs the same pass when
-        ``RecoveryConfig.auto_fail_stale_running`` is on. This method runs
+        ``RecoveryConfig.fail_stale_running`` is on. This method runs
         it on demand, also when that setting is off.
 
         The core reads at most one scan batch of 1,000 candidates with
@@ -2074,7 +2074,7 @@ class PostgresBroker:
 
         The reaper of each worker runs the same page every
         ``RecoveryConfig.orphan_task_audit_interval_ms`` when
-        ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks`` is on. This
+        ``RecoveryConfig.terminate_orphaned_workflow_tasks`` is on. This
         method runs one page on demand, also when that setting is off.
 
         The page is the one of ``audit_orphaned_workflow_tasks``: the core

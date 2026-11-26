@@ -42,8 +42,8 @@ config = AppConfig(
     ),
     recovery=RecoveryConfig(check_interval_ms=1_000),
     retention=RetentionConfig(
-        partition_maintenance_interval_s=60,
-        retention_sweep_interval_s=30,
+        partition_maintenance_interval_seconds=60,
+        retention_sweep_interval_seconds=30,
         queue_retention={MAPPED_QUEUE: MAPPED_DURATION},
     ),
     worker_profiles=E2E_WORKER_PROFILES,

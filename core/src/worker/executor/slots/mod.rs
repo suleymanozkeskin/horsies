@@ -105,7 +105,7 @@ pub use board::{ChildLayout, ChildRss, DownState, PoolBoard, PoolFailure, SlotPh
 pub use budgets::{isolated_capacity, shared_capacity, BudgetCapacity, SlotService};
 pub use budgets::{FreeCapacity, PoolService, SharedSlotService};
 // Whether the stop before start of a workflow task cancels the task when no
-// node links it live (the app's `auto_terminate_orphaned_workflow_tasks`).
+// node links it live (the app's `terminate_orphaned_workflow_tasks`).
 // Each run frame of a pool carries it.
 pub use crate::broker::OrphanSelfHeal;
 pub use dispatch::{

@@ -480,7 +480,7 @@ const WORKFLOW_START_REQUEST_PARAMETERS: &[StubParameter] = &[
     keyword("spec_json", "str"),
     keyword("workflow_id", "uuid.UUID"),
     keyword("sent_at", "datetime.datetime"),
-    keyword("resend_on_transient_err", "bool"),
+    keyword("resend_on_transient_error", "bool"),
     keyword("trace", "NoTraceCarrier | TraceCarrier"),
 ];
 const CHILD_SPEC_BUILT_PARAMETERS: &[StubParameter] = &[keyword("spec_json", "str")];

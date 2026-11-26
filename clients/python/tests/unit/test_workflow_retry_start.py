@@ -35,7 +35,7 @@ def _make_spec(name: str = 'test-wf') -> WorkflowSpec[Any]:
     object.__setattr__(spec, 'name', name)
     object.__setattr__(spec, 'broker', MagicMock())
     object.__setattr__(spec, 'tasks', [])
-    object.__setattr__(spec, 'resend_on_transient_err', False)
+    object.__setattr__(spec, 'resend_on_transient_error', False)
     return spec
 
 

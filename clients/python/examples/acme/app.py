@@ -357,7 +357,7 @@ app = Horsies(
         exception_mapper={KeyError: domain.DATA_CORRUPTION},
         # Infra retry for the send/start path only — execution retries are a
         # per-task RetryPolicy concern.
-        resend_on_transient_err=True,
+        resend_on_transient_error=True,
     ),
 )
 

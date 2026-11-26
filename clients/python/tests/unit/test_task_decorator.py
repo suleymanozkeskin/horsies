@@ -144,7 +144,7 @@ def _make_app(
     suppress_sends: bool = False,
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str = 'UNHANDLED_EXCEPTION',
-    resend_on_transient_err: bool = False,
+    resend_on_transient_error: bool = False,
     payload_policy: PayloadPolicy | None = None,
 ) -> MagicMock:
     """Build a minimal mock Horsies app for unit tests.
@@ -157,7 +157,7 @@ def _make_app(
     app.config.custom_queues = custom_queues
     app.config.exception_mapper = exception_mapper or {}
     app.config.default_unhandled_error_code = default_unhandled_error_code
-    app.config.resend_on_transient_err = resend_on_transient_err
+    app.config.resend_on_transient_error = resend_on_transient_error
     app.config.payload = payload_policy or PayloadPolicy()
     app.are_sends_suppressed.return_value = suppress_sends
     app.send_telemetry.return_value = NO_SEND_TELEMETRY
@@ -2276,7 +2276,7 @@ class TestCreateTaskWrapperSendAsync:
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         defect = TypeError('missing required argument')
         broker.enqueue_async = AsyncMock(side_effect=defect)
@@ -2295,7 +2295,7 @@ class TestCreateTaskWrapperSendAsync:
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         defect = TypeError('missing required argument')
         broker.enqueue_async = AsyncMock(side_effect=defect)
@@ -2713,20 +2713,20 @@ class TestRetrySend:
 
 
 # =============================================================================
-# create_task_wrapper — auto-retry (resend_on_transient_err)
+# create_task_wrapper — auto-retry (resend_on_transient_error)
 # =============================================================================
 
 
 @pytest.mark.unit
 class TestAutoRetry:
-    """Tests for auto-retry behavior when resend_on_transient_err=True."""
+    """Tests for auto-retry behavior when resend_on_transient_error=True."""
 
-    def test_send_with_resend_on_transient_err_retries_transient_failure(self) -> None:
+    def test_send_with_resend_on_transient_error_retries_transient_failure(self) -> None:
         """Broker returns retryable Err twice then Ok on 3rd — total 3 calls."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         transient_err = Err(BrokerEnqueueFailed(
             message='db gone',
@@ -2749,12 +2749,12 @@ class TestAutoRetry:
             SendKind.REPEAT,
         ]
 
-    def test_send_with_resend_on_transient_err_gives_up_after_max_retries(self) -> None:
+    def test_send_with_resend_on_transient_error_gives_up_after_max_retries(self) -> None:
         """Broker always returns retryable Err — gives up after 4 total calls."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         transient_err = Err(BrokerEnqueueFailed(
             message='db gone',
@@ -2771,12 +2771,12 @@ class TestAutoRetry:
         assert isinstance(result.err_value, TaskSendEnqueueFailed)
         assert broker.enqueue.call_count == 4  # 1 initial + 3 retries
 
-    def test_send_with_resend_on_transient_err_false_no_retry(self) -> None:
+    def test_send_with_resend_on_transient_error_false_no_retry(self) -> None:
         """With flag off, broker retryable Err is returned immediately (1 call)."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=False)
+        app = _make_app(resend_on_transient_error=False)
         broker = MagicMock()
         broker.enqueue.return_value = Err(BrokerEnqueueFailed(
             message='db gone',
@@ -2791,12 +2791,12 @@ class TestAutoRetry:
         assert is_err(result)
         assert broker.enqueue.call_count == 1
 
-    def test_send_with_resend_on_transient_err_non_retryable_no_retry(self) -> None:
+    def test_send_with_resend_on_transient_error_non_retryable_no_retry(self) -> None:
         """Non-retryable Err is never retried, even with flag on."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         broker.enqueue.return_value = Err(BrokerPayloadMismatch(
             message='different payload',
@@ -2815,7 +2815,7 @@ class TestAutoRetry:
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         defect = TypeError('missing required argument')
         broker.enqueue.side_effect = defect
@@ -2833,7 +2833,7 @@ class TestAutoRetry:
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
-        app = _make_app(resend_on_transient_err=True)
+        app = _make_app(resend_on_transient_error=True)
         broker = MagicMock()
         defect = TypeError('missing required argument')
         broker.enqueue.side_effect = defect

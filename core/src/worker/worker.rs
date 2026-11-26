@@ -1279,9 +1279,7 @@ impl Worker {
         PoolFacts {
             worker_id: self.worker_id.clone(),
             orphan_self_heal: OrphanSelfHeal::of_recovery_flag(
-                self.app_config
-                    .recovery
-                    .auto_terminate_orphaned_workflow_tasks,
+                self.app_config.recovery.terminate_orphaned_workflow_tasks,
             ),
             pending_limit: pending_task_limit(
                 &self.profile.profile,
@@ -1580,6 +1578,7 @@ impl Worker {
             profile.seat_count(),
             self.app_config
                 .cluster_wide_cap
+                .claim_parameter()
                 .map_or_else(|| "unlimited".to_owned(), |cap| cap.to_string()),
             claim.max_claim_per_worker,
             claim.max_claim_batch,
@@ -1645,7 +1644,7 @@ impl Worker {
             prefetch_buffer: self.app_config.prefetch_buffer,
             max_claim_per_worker: Self::claim_limit(claim.claimed_per_worker),
             max_claim_batch: Self::claim_limit(claim.per_queue_per_pass),
-            cluster_wide_cap: self.app_config.cluster_wide_cap,
+            cluster_wide_cap: self.app_config.cluster_wide_cap.claim_parameter(),
             claim_lease_ms: claim_lease(&self.app_config),
         }
     }
@@ -2392,7 +2391,7 @@ impl Worker {
     /// `FOR UPDATE SKIP LOCKED` alone is sufficient and no lock is taken.
     fn claim_lock_keys(&self, ordered_queues: &[String]) -> Vec<i64> {
         compute_claim_lock_keys(
-            self.app_config.cluster_wide_cap,
+            self.app_config.cluster_wide_cap.claim_parameter(),
             ordered_queues,
             &self.worker_config.queue_max_concurrency,
         )
@@ -4357,7 +4356,7 @@ mod tests {
             task_fn,
             task_id,
             OrphanSelfHeal::of_recovery_flag(
-                RecoveryConfig::default().auto_terminate_orphaned_workflow_tasks,
+                RecoveryConfig::default().terminate_orphaned_workflow_tasks,
             ),
         )
         .await;
@@ -5454,34 +5453,34 @@ mod tests {
             custom_queues: None,
             broker: PostgresConfig {
                 database_url: config_url,
-                session_database_url: None,
+                session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
                 tcp_user_timeout: Default::default(),
             },
-            cluster_wide_cap: None,
+            cluster_wide_cap: crate::core::config::ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
             recovery: RecoveryConfig::default(),
             retention: crate::core::RetentionConfig::default(),
             resilience: WorkerResilienceConfig {
-                db_retry_initial_ms: 100,
-                db_retry_max_ms: 100,
-                db_retry_max_attempts: 1,
+                database_retry_initial_ms: 100,
+                database_retry_max_ms: 100,
+                database_retry_max_attempts: 1,
                 notify_poll_interval_ms: 100,
             },
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         }
     }
 
@@ -5753,9 +5752,9 @@ mod tests {
                 // A wait of at least 0.75 s gives the release time to land
                 // before the second attempt.
                 resilience: WorkerResilienceConfig {
-                    db_retry_initial_ms: 1_000,
-                    db_retry_max_ms: 1_000,
-                    db_retry_max_attempts: 3,
+                    database_retry_initial_ms: 1_000,
+                    database_retry_max_ms: 1_000,
+                    database_retry_max_attempts: 3,
                     notify_poll_interval_ms: 100,
                 },
                 ..test_app_config(database.config_url.clone())
@@ -5898,14 +5897,16 @@ mod tests {
         let broker = PostgresBroker::connect_with(
             &PostgresConfig {
                 database_url: main_url.clone(),
-                session_database_url: Some(session_url),
+                session_database: crate::core::config::SessionDatabase::Separate {
+                    url: session_url,
+                },
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
@@ -6225,14 +6226,16 @@ mod tests {
         let broker = PostgresBroker::connect_with(
             &PostgresConfig {
                 database_url: with_application_name(&database_url, "reaper_runtime"),
-                session_database_url: Some(with_application_name(&database_url, "reaper_session")),
+                session_database: crate::core::config::SessionDatabase::Separate {
+                    url: with_application_name(&database_url, "reaper_session"),
+                },
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
@@ -6243,7 +6246,7 @@ mod tests {
         .await
         .expect("connect a broker with two pools");
         let mut app_config = test_app_config(database.config_url.clone());
-        app_config.recovery.auto_requeue_stale_claimed = true;
+        app_config.recovery.requeue_stale_claimed = true;
         let worker = worker_with_config(broker, app_config);
         let health = new_reaper_health();
 

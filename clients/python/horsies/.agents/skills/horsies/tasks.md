@@ -319,7 +319,7 @@ Terminal lifecycle outcomes for tasks and workflows:
 - `TASK_EXPIRED` — task's `good_until` deadline passed before execution started (PENDING or CLAIMED)
 - `TASK_TIMEOUT` — task exceeded its `timeout_ms`; child process killed, retry opt-in via `auto_retry_for`
 - `WORKFLOW_PAUSED` — workflow is paused
-- `WORKFLOW_EXPIRED` — a paused workflow passed `paused_workflow_auto_cancel_after` and expired; `data` holds the policy name and the age
+- `WORKFLOW_EXPIRED` — a paused workflow passed `paused_workflow_cancel_after` and expired; `data` holds the policy name and the age
 - `WORKFLOW_FAILED` — workflow has failed
 - `WORKFLOW_CANCELLED` — workflow was cancelled
 - `UPSTREAM_SKIPPED` — upstream task was skipped

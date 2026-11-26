@@ -4573,7 +4573,9 @@ mod connect_tests {
     #[tokio::test]
     async fn a_worker_connect_with_a_split_session_url_opens_no_connection() {
         let mut config = PostgresConfig::from_url(UNREACHABLE_URL);
-        config.session_database_url = Some("postgresql://horsies@127.0.0.1:2/horsies".to_owned());
+        config.session_database = crate::core::config::SessionDatabase::Separate {
+            url: "postgresql://horsies@127.0.0.1:2/horsies".to_owned(),
+        };
 
         let broker = PostgresBroker::connect_worker_with(&config, crate::ClientFamily::Rust)
             .await
@@ -4742,14 +4744,14 @@ mod result_wait_tests {
     async fn an_observe_only_broker_keeps_its_listener() {
         let config = PostgresConfig {
             database_url: crate::test_support::migrated_database_url().await,
-            session_database_url: None,
+            session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
             pool_size: 2,
             max_overflow: 0,
             retain_rerun_input_default: false,
-            pool_timeout: 30,
+            pool_timeout_seconds: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),

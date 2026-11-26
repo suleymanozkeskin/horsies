@@ -218,7 +218,7 @@ A start with an existing `workflow_id` compares its start command with the store
 
 ### Auto-retry ( this is not execution retry, only for sending tasks / starting workflows, for task execution retry see `RetryPolicy` )
 
-Set `resend_on_transient_err=True` on `AppConfig` to auto-retry transient
+Set `resend_on_transient_error=True` on `AppConfig` to auto-retry transient
 `ENQUEUE_FAILED` errors (up to 3 times, exponential backoff) for both
 task sends and workflow starts.
 

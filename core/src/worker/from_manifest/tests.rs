@@ -35,7 +35,10 @@ fn the_plan_takes_the_queues_and_claim_settings_of_the_claim_section() {
             .collect::<Vec<_>>(),
         vec![("high", 1, Some(0)), ("low", 100, None)]
     );
-    assert_eq!(app.cluster_wide_cap, Some(20));
+    assert_eq!(
+        app.cluster_wide_cap,
+        crate::core::config::ClusterCapSetting::ClusterCap { tasks: 20 }
+    );
     assert_eq!(app.prefetch_buffer, 0);
     assert_eq!(app.claim_lease_ms, None);
     assert_eq!(app.max_claim_renew_age_ms, 180_000);

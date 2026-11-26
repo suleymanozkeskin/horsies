@@ -87,7 +87,7 @@ def subworkflow_start_request(workflow_id: uuid.UUID) -> WorkflowStartRequest:
         spec_json=spec_json,
         workflow_id=workflow_id,
         sent_at=datetime.now(UTC),
-        resend_on_transient_err=False,
+        resend_on_transient_error=False,
         trace=NoTraceCarrier(),
     )
 

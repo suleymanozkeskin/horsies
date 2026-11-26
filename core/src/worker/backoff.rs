@@ -17,9 +17,9 @@ impl RetryBackoff {
     /// Create a backoff tracker from resilience config.
     pub fn from_config(config: &WorkerResilienceConfig) -> Self {
         Self {
-            initial_ms: config.db_retry_initial_ms,
-            max_ms: config.db_retry_max_ms,
-            max_attempts: config.db_retry_max_attempts,
+            initial_ms: config.database_retry_initial_ms,
+            max_ms: config.database_retry_max_ms,
+            max_attempts: config.database_retry_max_attempts,
             attempts: 0,
         }
     }
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn can_retry_limited() {
         let config = WorkerResilienceConfig {
-            db_retry_max_attempts: 3,
+            database_retry_max_attempts: 3,
             ..default_config()
         };
         let mut backoff = RetryBackoff::from_config(&config);
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn reset_clears_attempts() {
         let config = WorkerResilienceConfig {
-            db_retry_max_attempts: 2,
+            database_retry_max_attempts: 2,
             ..default_config()
         };
         let mut backoff = RetryBackoff::from_config(&config);
@@ -124,8 +124,8 @@ mod tests {
     #[test]
     fn delays_increase_exponentially() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 1_000,
-            db_retry_max_ms: 300_000,
+            database_retry_initial_ms: 1_000,
+            database_retry_max_ms: 300_000,
             ..default_config()
         };
         let mut backoff = RetryBackoff::from_config(&config);
@@ -146,8 +146,8 @@ mod tests {
     #[test]
     fn delays_capped_at_max() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 10_000,
-            db_retry_max_ms: 15_000,
+            database_retry_initial_ms: 10_000,
+            database_retry_max_ms: 15_000,
             ..default_config()
         };
         let mut backoff = RetryBackoff::from_config(&config);
@@ -167,8 +167,8 @@ mod tests {
     #[test]
     fn floor_at_100ms() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 100,
-            db_retry_max_ms: 500,
+            database_retry_initial_ms: 100,
+            database_retry_max_ms: 500,
             ..default_config()
         };
         let mut backoff = RetryBackoff::from_config(&config);
@@ -191,9 +191,9 @@ mod tests {
     #[test]
     fn large_exponent_does_not_overflow() {
         let config = WorkerResilienceConfig {
-            db_retry_initial_ms: 500,
-            db_retry_max_ms: 30_000,
-            db_retry_max_attempts: 0,
+            database_retry_initial_ms: 500,
+            database_retry_max_ms: 30_000,
+            database_retry_max_attempts: 0,
             ..default_config()
         };
         let mut backoff = RetryBackoff::from_config(&config);

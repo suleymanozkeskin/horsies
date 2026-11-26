@@ -23,7 +23,11 @@ from horsies import web as horsies_web
 from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import (
+    PostgresConfig,
+    SessionDatabaseSameAsDatabaseUrl,
+    SessionDatabaseSeparate,
+)
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.web import NoTraceLink, TraceLinkTemplate
 from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
@@ -89,7 +93,7 @@ class TestAppSourceIsExclusive:
         assert isinstance(app, Horsies)
         config = app.get_broker().config
         assert config.database_url.get_secret_value() == DB_URL
-        assert config.session_database_url is None
+        assert config.session_database == SessionDatabaseSameAsDatabaseUrl()
         assert config.pgbouncer_transaction_mode is False
 
     def test_pooling_flags_reach_the_broker_config(self) -> None:
@@ -104,8 +108,7 @@ class TestAppSourceIsExclusive:
         )
 
         config = app.get_broker().config
-        assert config.session_database_url is not None
-        assert config.session_database_url.get_secret_value() == session_url
+        assert config.session_database == SessionDatabaseSeparate(url=SecretStr(session_url))
         assert config.pgbouncer_transaction_mode is True
         assert config.effective_session_database_url == session_url
 

@@ -123,7 +123,7 @@ Both reads use the claim index. The coverage read takes one index probe per pend
 | `processes` | Child process count: the number of children of the worker profile |
 | `max_claim_batch` | Claim batch size |
 | `max_claim_per_worker` | Per-worker claim cap |
-| `cluster_wide_cap` | Cluster-wide concurrency cap, if set |
+| `cluster_wide_cap` | Cluster-wide concurrency cap: `ClusterCap(tasks)` or `NoClusterCap()` |
 | `queues` | Queues this worker serves |
 | `queue_priorities` | Per-queue priorities (CUSTOM mode); empty when none is set |
 | `queue_max_concurrency` | Per-queue concurrency (CUSTOM mode); empty when none is set |

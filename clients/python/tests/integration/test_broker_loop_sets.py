@@ -52,7 +52,7 @@ def _one_connection_config() -> PostgresConfig:
         database_url=SecretStr(DB_URL),
         pool_size=1,
         max_overflow=0,
-        pool_timeout=POOL_TIMEOUT_SECONDS,
+        pool_timeout_seconds=POOL_TIMEOUT_SECONDS,
     )
 
 

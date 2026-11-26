@@ -132,7 +132,7 @@ pub struct RunFrameRecord {
     claimed_at: DateTime<Utc>,
     /// Whether the stop before start of a workflow task cancels the task
     /// when no node links it live (the app's
-    /// `auto_terminate_orphaned_workflow_tasks`).
+    /// `terminate_orphaned_workflow_tasks`).
     orphan_self_heal: bool,
     /// `'RUN'`, or `StoredOptionsRefused`.
     work: Py<PyAny>,

@@ -90,11 +90,11 @@ async def _ensure_schema_with_retry(
             _raise_schema_error(err)
 
         attempts += 1
-        match resilience.db_retry_max_attempts:
+        match resilience.database_retry_max_attempts:
             case 0:
                 should_retry = True
             case _:
-                should_retry = attempts <= resilience.db_retry_max_attempts
+                should_retry = attempts <= resilience.database_retry_max_attempts
 
         if not should_retry:
             logger.error(
@@ -104,15 +104,15 @@ async def _ensure_schema_with_retry(
 
         exponent = max(0, attempts - 1)
         base_ms = min(
-            resilience.db_retry_max_ms,
-            int(resilience.db_retry_initial_ms * (2**exponent)),
+            resilience.database_retry_max_ms,
+            int(resilience.database_retry_initial_ms * (2**exponent)),
         )
         jitter_range = base_ms * 0.25
         delay_ms = base_ms + random.uniform(-jitter_range, jitter_range)
         delay_s = max(0.1, delay_ms / 1000.0)
         logger.error(
             f'Database initialization failed: {err.message}. Retrying in {delay_s:.1f}s '
-            f'(attempt {attempts}/{resilience.db_retry_max_attempts or "inf"})'
+            f'(attempt {attempts}/{resilience.database_retry_max_attempts or "inf"})'
         )
         await asyncio.sleep(delay_s)
 
@@ -897,14 +897,24 @@ def _registryless_app(args: argparse.Namespace) -> Horsies:
     from pydantic import SecretStr
 
     from horsies.core.models.app import AppConfig
-    from horsies.core.models.broker import PostgresConfig
+    from horsies.core.models.broker import (
+        PostgresConfig,
+        SessionDatabaseSameAsDatabaseUrl,
+        SessionDatabaseSeparate,
+    )
 
     session_url: str | None = args.session_database_url
+    session_database: SessionDatabaseSameAsDatabaseUrl | SessionDatabaseSeparate
+    match session_url:
+        case None | '':
+            session_database = SessionDatabaseSameAsDatabaseUrl()
+        case url:
+            session_database = SessionDatabaseSeparate(url=SecretStr(url))
     return Horsies(
         AppConfig(
             broker=PostgresConfig(
                 database_url=SecretStr(args.database_url),
-                session_database_url=(SecretStr(session_url) if session_url else None),
+                session_database=session_database,
                 pgbouncer_transaction_mode=args.pgbouncer_transaction_mode,
             )
         ),

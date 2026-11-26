@@ -70,6 +70,7 @@ from horsies.core.models.class_coverage import (
     StreamWithoutCapacity,
     WorkerClassLoad,
 )
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.health import (
     AllSlotsServing,
     ClassBudget,
@@ -123,6 +124,7 @@ def _state_record(
     worker_id: str,
     slot_health: object,
     profile: object = _PROFILE_NAMED_RECORD,
+    cluster_wide_cap: int | None = None,
 ) -> MagicMock:
     return _record(
         WorkerStateRecord,
@@ -133,11 +135,11 @@ def _state_record(
         processes=4,
         max_claim_batch=8,
         max_claim_per_worker=4,
-        cluster_wide_cap=None,
+        cluster_wide_cap=cluster_wide_cap,
         queues=['default', 'priority'],
         queue_priorities={'default': 10},
         queue_max_concurrency={},
-        recovery_config_json='{"auto_requeue_stale_claimed": true, "check_interval_ms": 30000}',
+        recovery_config_json='{"requeue_stale_claimed": true, "check_interval_ms": 30000}',
         tasks_running=3,
         tasks_claimed=1,
         memory_usage_mb=120.5,
@@ -185,6 +187,7 @@ def _snapshot(
     worker_id: str,
     slot_health: AllSlotsServing | SlotsDown,
     profile: SnapshotProfile = ProfileNamed(name='batch'),
+    cluster_wide_cap: ClusterCap | NoClusterCap = NoClusterCap(),
 ) -> WorkerStateSnapshot:
     return WorkerStateSnapshot(
         worker_id=worker_id,
@@ -194,11 +197,11 @@ def _snapshot(
         processes=4,
         max_claim_batch=8,
         max_claim_per_worker=4,
-        cluster_wide_cap=None,
+        cluster_wide_cap=cluster_wide_cap,
         queues=['default', 'priority'],
         queue_priorities={'default': 10},
         queue_max_concurrency={},
-        recovery_config={'auto_requeue_stale_claimed': True, 'check_interval_ms': 30000},
+        recovery_config={'requeue_stale_claimed': True, 'check_interval_ms': 30000},
         tasks_running=3,
         tasks_claimed=1,
         memory_usage_mb=120.5,
@@ -283,6 +286,26 @@ class TestWorkerStates:
         assert result == Ok([
             _snapshot('w1', AllSlotsServing(), ProfileNamed(name='batch')),
             _snapshot('w2', AllSlotsServing(), ProfileNotRecorded()),
+        ])
+
+    @pytest.mark.asyncio
+    async def test_a_stored_cap_is_a_cluster_cap_and_none_is_no_cap(self) -> None:
+        broker = _broker_answering(
+            'worker_states_async',
+            _record(
+                WorkerStatesRecord,
+                states=[
+                    _state_record('w1', _record(AllSlotsServingRecord), cluster_wide_cap=20),
+                    _state_record('w2', _record(AllSlotsServingRecord)),
+                ],
+            ),
+        )
+
+        result = await broker.list_worker_states_async()
+
+        assert result == Ok([
+            _snapshot('w1', AllSlotsServing(), cluster_wide_cap=ClusterCap(tasks=20)),
+            _snapshot('w2', AllSlotsServing(), cluster_wide_cap=NoClusterCap()),
         ])
 
     @pytest.mark.asyncio

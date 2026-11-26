@@ -241,7 +241,7 @@ The meaning of each field is on [Snapshot Fields](/horsies/monitoring/worker-hea
 | `processes` | `int` |
 | `max_claim_batch` | `int` |
 | `max_claim_per_worker` | `int` |
-| `cluster_wide_cap` | `int \| None` |
+| `cluster_wide_cap` | `ClusterCap \| NoClusterCap` |
 | `queues` | `list[str]` |
 | `queue_priorities` | `dict[str, int]` |
 | `queue_max_concurrency` | `dict[str, int]` |

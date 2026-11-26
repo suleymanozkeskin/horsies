@@ -40,7 +40,7 @@ config = AppConfig(
     retention=RetentionConfig(
         # The floor, so the first maintenance tick lands promptly and the
         # test needs no clock manipulation.
-        partition_maintenance_interval_s=60,
+        partition_maintenance_interval_seconds=60,
         retention_periods=(E2E_CLASS_DURATION,),
     ),
     worker_profiles=E2E_WORKER_PROFILES,

@@ -101,7 +101,7 @@ pub enum ConnectivityRefusal {
     MainUnreachable(StatementFailure),
     /// `SELECT 1` on the session URL's own pool failed (a session URL that
     /// differs from the main URL).
-    #[error("SELECT 1 on session_database_url failed: {0}")]
+    #[error("SELECT 1 on the session_database URL failed: {0}")]
     SessionUnreachable(StatementFailure),
     /// PgBouncer transaction mode: the session URL did not deliver a NOTIFY
     /// to a LISTEN, or the probe could not run.
@@ -259,7 +259,12 @@ mod tests {
         transaction_mode: bool,
     ) -> PostgresConfig {
         let mut config = PostgresConfig::from_url(database_url);
-        config.session_database_url = session_url.map(str::to_owned);
+        config.session_database = match session_url {
+            None => crate::core::config::SessionDatabase::SameAsDatabaseUrl,
+            Some(url) => crate::core::config::SessionDatabase::Separate {
+                url: url.to_owned(),
+            },
+        };
         config.pgbouncer_transaction_mode = transaction_mode;
         config.pool_size = 2;
         config.max_overflow = 0;

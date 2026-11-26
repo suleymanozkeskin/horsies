@@ -67,7 +67,7 @@ Each isolated child holds one task, so a failure stays with that task. A shared 
 | A timeout fires as a task ends | The kill is bound to that task, so it cannot reach the next task. The killed child takes no next task |
 | An `async def` task returns while asyncio tasks that it started are still on the loop | The child waits up to 1 s for them, then cancels them in three rounds 0.1 s apart. The worker writes what the task returned after that work ended, and replaces the child. The deadline no longer applies. Work still alive after the rounds, or no report within 26.3 s of the return: the worker kills the child, and writes what the task returned after the exit. See [Async Tasks](/horsies/tasks/defining-tasks/#async-tasks) |
 | A task holds the GIL in C code | Its runner heartbeats continue: the worker process writes them, so the reaper does not fail the task |
-| The worker cannot write runner heartbeats for half of `running_stale_threshold_ms`, or its heartbeat thread dies | With `auto_fail_stale_running` on, the worker kills every child that holds a task, stops, and exits non-zero. With it off, the worker logs it and runs on. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
+| The worker cannot write runner heartbeats for half of `running_stale_threshold_ms`, or its heartbeat thread dies | With `fail_stale_running` on, the worker kills every child that holds a task, stops, and exits non-zero. With it off, the worker logs it and runs on. See [When the Worker Cannot Write Heartbeats](/horsies/workers/heartbeats-recovery/#when-the-worker-cannot-write-heartbeats) |
 
 ## Execution Flow
 
@@ -362,7 +362,7 @@ The worker command of each client builds the worker manifest of the core from th
 | Child launch | The program that each child runs, and the preload of the profile |
 
 Workers require PostgreSQL `LISTEN` for dispatch. When using transaction-pooled
-PgBouncer, configure `PostgresConfig.session_database_url` with a direct or
+PgBouncer, set `PostgresConfig.session_database` to a separate direct or
 session-capable URL. Workers fail startup instead of silently switching to
 poll-only dispatch if `LISTEN` is unavailable.
 
@@ -414,7 +414,7 @@ Workers recover from transient infrastructure failures without operator interven
 ### What It Handles
 
 - **Database outages**: Worker retries on connection loss during startup, claiming, and result writes. No crash, no manual restart.
-- **Coverage gate held at startup**: On a new database, another process can hold the partition coverage gate while it creates the history partitions, for example a producer whose first send installs the schema. When no heartbeat partition covers the present instant, the worker does not fail. It logs one info line for each wait, for example `Worker start waits for the partition coverage gate: another process creates the history partitions (coverage_gate_busy). Trying again in 512 ms`, and tries the start again with the backoff of the [configuration](#configuration). If the gate is still held when `db_retry_max_attempts` is spent, the start fails with the boot cause `DATABASE_UNAVAILABLE`, and the message names the gate, the time waited and the attempts.
+- **Coverage gate held at startup**: On a new database, another process can hold the partition coverage gate while it creates the history partitions, for example a producer whose first send installs the schema. When no heartbeat partition covers the present instant, the worker does not fail. It logs one info line for each wait, for example `Worker start waits for the partition coverage gate: another process creates the history partitions (coverage_gate_busy). Trying again in 512 ms`, and tries the start again with the backoff of the [configuration](#configuration). If the gate is still held when `database_retry_max_attempts` is spent, the start fails with the boot cause `DATABASE_UNAVAILABLE`, and the message names the gate, the time waited and the attempts.
 - **Silent NOTIFY channels**: If the PostgreSQL NOTIFY mechanism stops delivering (broken listener connection, dropped trigger), the worker falls back to periodic polling so tasks are still picked up. A lost cancel notice (`horsies_task_cancel`) is found by one read of the cancels of the held runs, after a reconnect of the listener and when a runner heartbeat of a held run does not land.
 - **Child loss**: If a child dies, the worker starts a new child in that slot. Other children continue. A task still in CLAIMED status is requeued back to PENDING. A task already in RUNNING status is recovered through the same retry policy used by the reaper: if `WORKER_CRASHED` is listed in `auto_retry_for` and retries remain, the task is scheduled for retry; otherwise it is marked FAILED with a `WORKER_CRASHED` result.
 - **Child start failure**: The cause of the failure decides what the worker does. See [Child Start Failures](#child-start-failures).
@@ -449,12 +449,12 @@ The `resilience` field of the app config holds these settings. The Python exampl
 
 | Field | Default | Description |
 | ----- | ------- | ----------- |
-| `db_retry_initial_ms` | `500` | Initial backoff delay (100–60,000ms) |
-| `db_retry_max_ms` | `30000` | Maximum backoff delay (500–300,000ms) |
-| `db_retry_max_attempts` | `0` | Max retry attempts; `0` = infinite (0–10,000) |
+| `database_retry_initial_ms` | `500` | Initial backoff delay (100–60,000ms) |
+| `database_retry_max_ms` | `30000` | Maximum backoff delay (500–300,000ms) |
+| `database_retry_max_attempts` | `0` | Max retry attempts; `0` = infinite (0–10,000) |
 | `notify_poll_interval_ms` | `5000` | Poll interval when NOTIFY is silent (1,000–300,000ms) |
 
-Backoff uses exponential growth (`initial_ms * 2^attempt`) with ±25% jitter, capped at `db_retry_max_ms`. Backoff resets after each successful loop iteration.
+Backoff uses exponential growth (`initial_ms * 2^attempt`) with ±25% jitter, capped at `database_retry_max_ms`. Backoff resets after each successful loop iteration.
 
 ## Module Discovery
 

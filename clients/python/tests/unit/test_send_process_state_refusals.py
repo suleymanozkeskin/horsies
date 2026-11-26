@@ -78,7 +78,7 @@ def _app_with(broker: PostgresBroker) -> MagicMock:
     the send at its first enqueue all the same."""
     app = MagicMock()
     app.config.queue_mode.name = 'DEFAULT'
-    app.config.resend_on_transient_err = True
+    app.config.resend_on_transient_error = True
     app.config.payload = PayloadPolicy()
     app.are_sends_suppressed.return_value = False
     app.send_telemetry.return_value = NO_SEND_TELEMETRY

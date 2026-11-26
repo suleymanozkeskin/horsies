@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::broker::PostgresConfig;
+use super::broker::{PostgresConfig, PostgresConfigError};
+use super::no_member_after_the_tag;
 use super::payload::PayloadPolicy;
 use super::queue::{CustomQueueConfig, QueueMode};
 use super::recovery::RecoveryConfig;
@@ -36,9 +37,10 @@ pub struct AppConfig {
     /// PostgreSQL broker configuration.
     pub broker: PostgresConfig,
 
-    /// Cluster-wide cap on concurrently RUNNING tasks. None = unlimited.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cluster_wide_cap: Option<u32>,
+    /// Cluster-wide cap on concurrently RUNNING tasks. Default:
+    /// [`ClusterCapSetting::NoClusterCap`].
+    #[serde(default)]
+    pub cluster_wide_cap: ClusterCapSetting,
 
     /// Prefetch buffer: 0 = hard cap mode, >0 = soft cap with lease.
     #[serde(default)]
@@ -68,7 +70,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub retention: RetentionConfig,
 
-    /// Worker resilience configuration (DB retry backoff, poll interval).
+    /// Worker resilience configuration (database retry backoff, poll interval).
     #[serde(default)]
     pub resilience: WorkerResilienceConfig,
 
@@ -97,7 +99,35 @@ pub struct AppConfig {
     /// Non-retryable errors (`Serialization`, `Migration`, `InvalidStatus`,
     /// `PayloadMismatch`) are returned immediately.
     #[serde(default)]
-    pub resend_on_transient_err: bool,
+    pub resend_on_transient_error: bool,
+}
+
+/// The cluster-wide cap of RUNNING tasks (Python `ClusterCap`,
+/// `NoClusterCap`). The JSON form is `{"kind": "cluster_cap", "tasks": 20}`
+/// or `{"kind": "no_cluster_cap"}`. [`AppConfig::validate`] refuses a cap of
+/// 0 tasks and a cap together with prefetch mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ClusterCapSetting {
+    /// At most `tasks` tasks are RUNNING at once across every queue of the
+    /// cluster.
+    ClusterCap { tasks: u32 },
+    /// No cluster-wide cap: only the queue and worker limits apply.
+    #[default]
+    #[serde(deserialize_with = "no_member_after_the_tag")]
+    NoClusterCap,
+}
+
+impl ClusterCapSetting {
+    /// The cap as the nullable parameter of the claim statement and of the
+    /// `horsies_worker_states.cluster_wide_cap` column: `None` for
+    /// [`Self::NoClusterCap`]. Pure.
+    pub const fn claim_parameter(self) -> Option<u32> {
+        match self {
+            Self::ClusterCap { tasks } => Some(tasks),
+            Self::NoClusterCap => None,
+        }
+    }
 }
 
 fn default_queue_mode() -> QueueMode {
@@ -119,6 +149,10 @@ pub enum AppConfigError {
     Prefetch(String),
     #[error("{0}")]
     Broker(String),
+    /// A TCP keepalive or user timeout value of the broker config outside
+    /// its bound.
+    #[error("{0}")]
+    Keepalive(String),
     #[error("{0}")]
     Recovery(String),
     #[error("{0}")]
@@ -148,6 +182,7 @@ impl AppConfigError {
             Self::ClusterCap(_) => Some(ErrorCode::ConfigInvalidClusterCap),
             Self::Prefetch(_) => Some(ErrorCode::ConfigInvalidPrefetch),
             Self::Broker(_) => Some(ErrorCode::BrokerInvalidUrl),
+            Self::Keepalive(_) => Some(ErrorCode::ConfigInvalidKeepalive),
             Self::Recovery(_) => Some(ErrorCode::ConfigInvalidRecovery),
             Self::Retention(_) => Some(ErrorCode::ConfigInvalidRetention),
             Self::Resilience(_) => Some(ErrorCode::ConfigInvalidResilience),
@@ -168,6 +203,7 @@ impl AppConfigError {
             | Self::ClusterCap(_)
             | Self::Prefetch(_)
             | Self::Broker(_)
+            | Self::Keepalive(_)
             | Self::Recovery(_)
             | Self::Retention(_)
             | Self::Resilience(_)
@@ -208,7 +244,7 @@ impl AppConfig {
             queue_mode: default_queue_mode(),
             custom_queues: None,
             broker: PostgresConfig::from_url(url),
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: default_max_claim_renew_age_ms(),
@@ -218,7 +254,7 @@ impl AppConfig {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         }
     }
 
@@ -250,8 +286,8 @@ impl AppConfig {
         }
 
         // Cluster-wide cap and prefetch settings
-        if let Some(cap) = self.cluster_wide_cap {
-            lines.push(format!("  cluster_wide_cap: {}", cap));
+        if let ClusterCapSetting::ClusterCap { tasks } = self.cluster_wide_cap {
+            lines.push(format!("  cluster_wide_cap: {}", tasks));
         }
         lines.push(format!("  prefetch_buffer: {}", self.prefetch_buffer));
         if let Some(lease) = self.claim_lease_ms {
@@ -262,11 +298,8 @@ impl AppConfig {
         let masked_url = mask_database_url(&self.broker.database_url);
         lines.push("  broker:".to_owned());
         lines.push(format!("    database_url: {}", masked_url));
-        if let Some(session_database_url) = &self.broker.session_database_url {
-            lines.push(format!(
-                "    session_database_url: {}",
-                mask_database_url(session_database_url),
-            ));
+        if let super::broker::SessionDatabase::Separate { url } = &self.broker.session_database {
+            lines.push(format!("    session_database: {}", mask_database_url(url)));
         }
         lines.push(format!(
             "    pgbouncer_transaction_mode: {}",
@@ -278,16 +311,16 @@ impl AppConfig {
         // Recovery config
         lines.push("  recovery:".to_owned());
         lines.push(format!(
-            "    auto_requeue_stale_claimed: {}",
-            self.recovery.auto_requeue_stale_claimed,
+            "    requeue_stale_claimed: {}",
+            self.recovery.requeue_stale_claimed,
         ));
         lines.push(format!(
             "    claimed_stale_threshold: {}ms",
             self.recovery.claimed_stale_threshold_ms,
         ));
         lines.push(format!(
-            "    auto_fail_stale_running: {}",
-            self.recovery.auto_fail_stale_running,
+            "    fail_stale_running: {}",
+            self.recovery.fail_stale_running,
         ));
         lines.push(format!(
             "    running_stale_threshold: {}ms",
@@ -331,16 +364,16 @@ impl AppConfig {
         // Resilience config
         lines.push("  resilience:".to_owned());
         lines.push(format!(
-            "    db_retry_initial: {}ms",
-            self.resilience.db_retry_initial_ms,
+            "    database_retry_initial: {}ms",
+            self.resilience.database_retry_initial_ms,
         ));
         lines.push(format!(
-            "    db_retry_max: {}ms",
-            self.resilience.db_retry_max_ms,
+            "    database_retry_max: {}ms",
+            self.resilience.database_retry_max_ms,
         ));
         lines.push(format!(
-            "    db_retry_max_attempts: {} (0=infinite)",
-            self.resilience.db_retry_max_attempts,
+            "    database_retry_max_attempts: {} (0=infinite)",
+            self.resilience.database_retry_max_attempts,
         ));
         lines.push(format!(
             "    notify_poll_interval: {}ms",
@@ -443,12 +476,10 @@ impl AppConfig {
         }
 
         // Cluster-wide cap
-        if let Some(cap) = self.cluster_wide_cap {
-            if cap == 0 {
-                errors.push(AppConfigError::ClusterCap(
-                    "cluster_wide_cap must be positive".to_owned(),
-                ));
-            }
+        if self.cluster_wide_cap == (ClusterCapSetting::ClusterCap { tasks: 0 }) {
+            errors.push(AppConfigError::ClusterCap(
+                "cluster_wide_cap.tasks must be positive".to_owned(),
+            ));
         }
 
         // Prefetch + claim lease validation
@@ -502,15 +533,21 @@ impl AppConfig {
         }
 
         // Prefetch + cluster cap conflict
-        if self.cluster_wide_cap.is_some() && self.prefetch_buffer > 0 {
+        if matches!(self.cluster_wide_cap, ClusterCapSetting::ClusterCap { .. })
+            && self.prefetch_buffer > 0
+        {
             errors.push(AppConfigError::ClusterCap(
                 "cluster_wide_cap incompatible with prefetch mode".to_owned(),
             ));
         }
 
         // Broker validation
-        if let Err(e) = self.broker.validate() {
-            errors.push(AppConfigError::Broker(e.to_string()));
+        match self.broker.validate() {
+            Ok(()) => {}
+            Err(PostgresConfigError::SocketValueOutOfBounds(refused)) => {
+                errors.push(AppConfigError::Keepalive(refused.to_string()));
+            }
+            Err(error) => errors.push(AppConfigError::Broker(error.to_string())),
         }
 
         // Recovery validation
@@ -592,14 +629,14 @@ mod tests {
     fn valid_broker() -> PostgresConfig {
         PostgresConfig {
             database_url: "postgresql://localhost/test".to_owned(),
-            session_database_url: None,
+            session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
             pool_size: 30,
             max_overflow: 30,
             retain_rerun_input_default: false,
-            pool_timeout: 30,
+            pool_timeout_seconds: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
@@ -614,7 +651,7 @@ mod tests {
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -623,7 +660,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         assert!(config.validate().is_empty());
     }
@@ -647,7 +684,7 @@ mod tests {
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -656,7 +693,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         assert!(config.validate().is_empty());
         config.recovery = RecoveryConfig::default();
@@ -691,7 +728,7 @@ mod tests {
                 max_concurrency: Some(5),
             }]),
             broker: valid_broker(),
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -700,7 +737,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -713,7 +750,7 @@ mod tests {
             queue_mode: QueueMode::Custom,
             custom_queues: None,
             broker: valid_broker(),
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -722,7 +759,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -735,7 +772,7 @@ mod tests {
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 5,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -744,7 +781,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -757,7 +794,7 @@ mod tests {
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),
-            cluster_wide_cap: Some(100),
+            cluster_wide_cap: ClusterCapSetting::ClusterCap { tasks: 100 },
             prefetch_buffer: 5,
             // Must be >= 2x claimer_heartbeat_interval_ms (default 30_000ms).
             claim_lease_ms: Some(60_000),
@@ -767,7 +804,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert_eq!(errors.len(), 1);
@@ -781,20 +818,20 @@ mod tests {
             custom_queues: None,
             broker: PostgresConfig {
                 database_url: "mysql://localhost/db".to_owned(),
-                session_database_url: None,
+                session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
                 tcp_user_timeout: Default::default(),
             },
-            cluster_wide_cap: Some(0),
+            cluster_wide_cap: ClusterCapSetting::ClusterCap { tasks: 0 },
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -803,7 +840,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         // custom_queues missing + invalid broker url + cluster_wide_cap=0
@@ -821,7 +858,7 @@ mod tests {
                 max_concurrency: Some(5),
             }]),
             broker: valid_broker(),
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -830,7 +867,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert!(
@@ -851,7 +888,7 @@ mod tests {
                 max_concurrency: Some(5),
             }]),
             broker: valid_broker(),
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -860,7 +897,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let errors = config.validate();
         assert!(
@@ -913,20 +950,20 @@ mod tests {
             custom_queues: None,
             broker: PostgresConfig {
                 database_url: "postgresql://user:secret@localhost/db".to_owned(),
-                session_database_url: None,
+                session_database: crate::core::config::SessionDatabase::SameAsDatabaseUrl,
                 pgbouncer_transaction_mode: false,
                 pool_pre_ping: true,
                 worker_pool_pre_ping: false,
                 pool_size: 30,
                 max_overflow: 30,
                 retain_rerun_input_default: false,
-                pool_timeout: 30,
+                pool_timeout_seconds: 30,
                 pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
                 echo: false,
                 tcp_keepalives: Default::default(),
                 tcp_user_timeout: Default::default(),
             },
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: 180_000,
@@ -935,7 +972,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         };
         let output = config.format_for_logging();
         assert!(!output.contains("secret"), "password should be masked");
@@ -954,7 +991,7 @@ mod tests {
             queue_mode: QueueMode::Default,
             custom_queues: None,
             broker: valid_broker(),
-            cluster_wide_cap: None,
+            cluster_wide_cap: ClusterCapSetting::NoClusterCap,
             prefetch_buffer: 0,
             claim_lease_ms: None,
             max_claim_renew_age_ms: MAX_CLAIM_RENEW_AGE_MS,
@@ -963,7 +1000,7 @@ mod tests {
             resilience: WorkerResilienceConfig::default(),
             worker_profiles: std::collections::BTreeMap::new(),
             schedule: None,
-            resend_on_transient_err: false,
+            resend_on_transient_error: false,
         }
     }
 
@@ -1013,7 +1050,7 @@ mod tests {
     #[test]
     fn defaults_cluster_wide_cap_is_none() {
         let config = default_config();
-        assert!(config.cluster_wide_cap.is_none());
+        assert_eq!(config.cluster_wide_cap, ClusterCapSetting::NoClusterCap);
     }
 
     #[test]
@@ -1032,7 +1069,7 @@ mod tests {
         assert!(config.claim_lease_ms.is_none());
         assert_eq!(config.max_claim_renew_age_ms, MAX_CLAIM_RENEW_AGE_MS);
         assert!(config.schedule.is_none());
-        assert!(!config.resend_on_transient_err);
+        assert!(!config.resend_on_transient_error);
     }
 
     #[test]
@@ -1052,7 +1089,7 @@ mod tests {
     #[test]
     fn multi_error_cluster_cap_and_prefetch() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(10);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 10 };
         config.prefetch_buffer = 5;
         // No claim_lease_ms => prefetch error + cluster_cap+prefetch conflict
         let errors = config.validate();
@@ -1124,7 +1161,7 @@ mod tests {
     #[test]
     fn cluster_wide_cap_zero_raises() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(0);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 0 };
         let errors = config.validate();
         assert!(errors
             .iter()
@@ -1134,14 +1171,14 @@ mod tests {
     #[test]
     fn cluster_wide_cap_minimum_valid() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(1);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 1 };
         assert!(config.validate().is_empty());
     }
 
     #[test]
     fn cluster_wide_cap_with_no_prefetch_valid() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(10);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 10 };
         // prefetch_buffer is 0 (default) — no conflict
         assert!(config.validate().is_empty());
     }
@@ -1151,7 +1188,7 @@ mod tests {
     #[test]
     fn format_for_logging_cluster_wide_cap_displayed() {
         let mut config = default_config();
-        config.cluster_wide_cap = Some(50);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 50 };
         let output = config.format_for_logging();
         assert!(output.contains("cluster_wide_cap: 50"));
     }
@@ -1161,6 +1198,53 @@ mod tests {
         let config = default_config();
         let output = config.format_for_logging();
         assert!(!output.contains("cluster_wide_cap"));
+    }
+
+    /// The JSON form of the cluster cap is tagged by `kind`; a plain number
+    /// (the form before the union) is refused.
+    #[test]
+    fn the_cluster_cap_json_form_is_tagged() {
+        let capped: AppConfig = serde_json::from_str(
+            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+                "cluster_wide_cap": {"kind": "cluster_cap", "tasks": 20}}"#,
+        )
+        .expect("a tagged cap parses");
+        assert_eq!(
+            capped.cluster_wide_cap,
+            ClusterCapSetting::ClusterCap { tasks: 20 }
+        );
+        let uncapped: AppConfig = serde_json::from_str(
+            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+                "cluster_wide_cap": {"kind": "no_cluster_cap"}}"#,
+        )
+        .expect("no cap parses");
+        assert_eq!(uncapped.cluster_wide_cap, ClusterCapSetting::NoClusterCap);
+        assert!(serde_json::from_str::<AppConfig>(
+            r#"{"broker": {"database_url": "postgresql://localhost/db"},
+                "cluster_wide_cap": 20}"#,
+        )
+        .is_err());
+    }
+
+    /// A keepalive value outside its bound is a refusal with
+    /// `CONFIG_INVALID_KEEPALIVE`, not a URL refusal.
+    #[test]
+    fn a_keepalive_value_outside_its_bound_has_the_keepalive_code() {
+        let mut config = default_config();
+        config.broker.tcp_keepalives = super::super::TcpKeepalivesConfig::On {
+            idle_seconds: 0,
+            interval_seconds: 10,
+            probes: 3,
+        };
+        let errors = config.validate();
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(
+            errors[0].error_code(),
+            Some(crate::core::error::ErrorCode::ConfigInvalidKeepalive)
+        );
+        assert!(errors[0]
+            .to_string()
+            .contains("tcp_keepalives.idle_seconds"));
     }
 
     #[test]
@@ -1310,8 +1394,8 @@ mod tests {
         }
 
         let mut config = default_config();
-        config.cluster_wide_cap = Some(0);
-        config.resilience.db_retry_initial_ms = 1;
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 0 };
+        config.resilience.database_retry_initial_ms = 1;
         let codes: Vec<_> = config
             .validate()
             .iter()

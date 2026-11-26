@@ -34,7 +34,7 @@ Change fields with struct update syntax.
 | `queue_mode` | `QueueMode` (`Default`, `Custom`) | `concepts/queue-modes` |
 | `custom_queues` | `Option<Vec<CustomQueueConfig>>` (`name`, `priority`, `max_concurrency`) | `concepts/queue-modes` |
 | `broker` | `PostgresConfig` | `configuration/broker-config` |
-| `cluster_wide_cap` | `Option<u32>` | `workers/concurrency` |
+| `cluster_wide_cap` | `ClusterCapSetting::ClusterCap { tasks }` or `ClusterCapSetting::NoClusterCap` (default) | `workers/concurrency` |
 | `prefetch_buffer` | `u32` | `workers/concurrency` |
 | `claim_lease_ms` | `Option<u32>` | `workers/concurrency` |
 | `max_claim_renew_age_ms` | `u32` | `workers/heartbeats-recovery` |
@@ -44,7 +44,7 @@ Change fields with struct update syntax.
 | `resilience` | `WorkerResilienceConfig` | `workers/worker-architecture` |
 | `worker_profiles` | `BTreeMap<String, WorkerProfile>` | `workers/concurrency` |
 | `schedule` | `Option<ScheduleConfig>` | `scheduling/scheduler-overview` |
-| `resend_on_transient_err` | `bool` | `operations/atomic-enqueue-and-topology` |
+| `resend_on_transient_error` | `bool` | `operations/atomic-enqueue-and-topology` |
 
 ```rust
 use horsies::{AppConfig, CustomQueueConfig, Horsies, HorsiesError, QueueMode};
@@ -65,18 +65,20 @@ fn build_app(database_url: &str) -> Result<Horsies, HorsiesError> {
 ### `PostgresConfig`
 
 `PostgresConfig::from_url(url)` builds the broker config with every
-default. Three fields have Rust types where the Python client has numbers:
+default. Four fields are enums, as the Python classes:
 
 | Field | Type |
 |---|---|
+| `session_database` | `SessionDatabase::SameAsDatabaseUrl` (default) or `SessionDatabase::Separate { url }` |
 | `pool_recycle` | `PoolRecycle::Never` or `PoolRecycle::AfterSeconds { seconds: WholeSeconds }` |
 | `tcp_keepalives` | `TcpKeepalivesConfig::Off` or `TcpKeepalivesConfig::On { idle_seconds, interval_seconds, probes }` |
 | `tcp_user_timeout` | `TcpUserTimeoutConfig::SystemDefault` or `TcpUserTimeoutConfig::After { milliseconds }` |
 
-The other fields have the names and meanings of the shared page
-`configuration/broker-config` (for example `database_url`,
-`session_database_url`, `pgbouncer_transaction_mode`, `pool_size`,
-`max_overflow`).
+The keepalive and user timeout values are plain `u32` numbers; `Horsies::new`
+refuses a value outside its bound with `HRS-215` and names the field (for
+example `tcp_keepalives.probes`). The other fields have the names and
+meanings of the shared page `configuration/broker-config` (for example
+`database_url`, `pgbouncer_transaction_mode`, `pool_size`, `max_overflow`).
 
 `pool_size` (default 5) and `max_overflow` (default 10) size the general
 broker pool: `pool_size` persistent connections, and up to `max_overflow`
@@ -339,8 +341,8 @@ The check stops at the first phase that refuses:
 
 `check_live` adds:
 
-4. Connectivity: `SELECT 1` on `database_url`, then on
-   `session_database_url` when it differs, then, in PgBouncer transaction
+4. Connectivity: `SELECT 1` on `database_url`, then on the URL of a
+   separate `session_database` when it differs, then, in PgBouncer transaction
    mode, a LISTEN probe on the session URL. A refusal is `HRS-203`.
 5. Worker connections: each worker profile against the connection limit of
    the server (`HRS-219`).
@@ -537,7 +539,7 @@ use horsies::{
     // Config
     AppConfig, PostgresConfig, QueueMode, CustomQueueConfig, PayloadPolicy, RecoveryConfig,
     RetentionConfig, WorkerResilienceConfig, PoolRecycle, TcpKeepalivesConfig,
-    TcpUserTimeoutConfig,
+    TcpUserTimeoutConfig, SessionDatabase, ClusterCapSetting,
     // Worker profiles
     WorkerProfile, ChildPreload, ParentCpu, IsolatedSetting, IsolatedChildren, IsolatedRecycle,
     SharedAsyncSetting, SharedAsyncChildren, SharedThreadSetting, SharedThreadChildren,

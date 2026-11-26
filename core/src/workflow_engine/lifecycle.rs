@@ -216,7 +216,7 @@ pub async fn cancel_workflow(broker: &PostgresBroker, workflow_id: Uuid) -> Hand
 /// - The function locks the workflow row, then the live tasks behind its nodes, then its live nodes; it writes
 ///   EXPIRED only while the workflow is PAUSED and older than the age, so a resume that committed first wins.
 ///   The stored error is `WORKFLOW_EXPIRED` with the policy and the age in seconds, and the message
-///   `paused_workflow_auto_cancel_after elapsed: <age>` with Python's `str(timedelta)` of the age.
+///   `paused_workflow_cancel_after elapsed: <age>` with Python's `str(timedelta)` of the age.
 /// - The age goes to the database in exact microseconds (`<micros> * interval '1 microsecond'`, a time interval
 ///   with no day field), as Python sends it: no rounding, and the same age in any session time zone. The config
 ///   reader built the age ([`PausedWorkflowAge::parse`]), so it is a whole number of microseconds from 1 to
@@ -295,7 +295,7 @@ pub async fn expire_paused_workflows(
 fn paused_expiry_error(older_than: PausedWorkflowAge) -> Result<String, WorkflowError> {
     let micros = older_than.micros();
     let message = format!(
-        "paused_workflow_auto_cancel_after elapsed: {}",
+        "paused_workflow_cancel_after elapsed: {}",
         // The age is above zero, so its absolute value is the age.
         python_timedelta_text(micros.unsigned_abs()),
     );
@@ -304,7 +304,7 @@ fn paused_expiry_error(older_than: PausedWorkflowAge) -> Result<String, Workflow
         error_code: crate::core::OutcomeCode::WorkflowExpired.into(),
         data: Some(crate::core::codec::JsonText::of_engine_value(
             &serde_json::json!({
-                "policy": "paused_workflow_auto_cancel_after",
+                "policy": "paused_workflow_cancel_after",
                 "older_than_seconds": micros as f64 / 1_000_000.0,
             }),
         )),
@@ -926,12 +926,12 @@ mod p7_lifecycle_tests {
         assert_eq!(error.error_code, OutcomeCode::WorkflowExpired.into());
         assert_eq!(
             error.message.as_deref(),
-            Some("paused_workflow_auto_cancel_after elapsed: 1:00:00.000250"),
+            Some("paused_workflow_cancel_after elapsed: 1:00:00.000250"),
         );
         assert_eq!(
             error.data_value(),
             Some(serde_json::json!({
-                "policy": "paused_workflow_auto_cancel_after",
+                "policy": "paused_workflow_cancel_after",
                 "older_than_seconds": 3_600.000_25,
             })),
         );
@@ -1146,7 +1146,7 @@ mod p7_lifecycle_tests {
         assert_eq!(error.error_code, OutcomeCode::WorkflowExpired.into());
         assert_eq!(
             error.message.as_deref(),
-            Some("paused_workflow_auto_cancel_after elapsed: 1:00:00"),
+            Some("paused_workflow_cancel_after elapsed: 1:00:00"),
         );
         let archived: (String, String) = sql::query_as(
             "SELECT status, terminalization_kind

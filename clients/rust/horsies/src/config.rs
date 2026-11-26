@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use horsies_core::manifest::{
     DatabaseManifest, DatabaseUrl, ManifestVersion, PoolConnections, PoolSize as PoolSizeValue,
-    ProducerManifest, ReservationWindowMicros, SchemaMode, SendManifest, SessionDatabase,
-    WholeSeconds,
+    ProducerManifest, ReservationWindowMicros, SchemaMode, SendManifest,
+    SessionDatabase as SessionDatabaseManifest, WholeSeconds,
 };
 
 use crate::{ErrorCode, HorsiesError};
@@ -29,8 +29,8 @@ pub use horsies_core::core::config::worker_profile::input::{
     SharedThreadChildren, SharedThreadSetting, TaskLimitSetting, WorkerProfile,
 };
 pub use horsies_core::core::config::{
-    ChildPreload, KeepaliveProbes, KeepaliveSeconds, ParentCpu, TcpKeepalivesConfig,
-    TcpUserTimeoutConfig, TcpUserTimeoutMs,
+    ChildPreload, ClusterCapSetting, ParentCpu, SessionDatabase, SocketValueRefused,
+    TcpKeepalivesConfig, TcpUserTimeoutConfig,
 };
 pub use horsies_core::manifest::PoolRecycle;
 pub use horsies_core::{
@@ -78,7 +78,9 @@ impl BrokerSettingRefused {
 ///
 /// Pure: no I/O. `config` passed `PostgresConfig::validate`. Refuses a pool
 /// size outside 1 to 10,000 and an overflow above 10,000, which the
-/// manifest bounds and the config validation does not.
+/// manifest bounds and the config validation does not, and a TCP keepalive
+/// or user timeout value outside its bound, which `PostgresConfig::validate`
+/// also refuses.
 pub(crate) fn producer_manifest(
     config: &PostgresConfig,
     schema: SchemaMode,
@@ -118,20 +120,27 @@ fn database_manifest(config: &PostgresConfig) -> Result<DatabaseManifest, Broker
         pool_pre_ping: config.pool_pre_ping,
         pool_size,
         max_overflow,
-        pool_timeout: WholeSeconds::from_secs(config.pool_timeout),
+        pool_timeout_seconds: WholeSeconds::from_secs(config.pool_timeout_seconds),
         pool_recycle: config.pool_recycle,
         echo: config.echo,
-        tcp_keepalives: config.tcp_keepalives,
-        tcp_user_timeout: config.tcp_user_timeout,
+        tcp_keepalives: config.tcp_keepalives.checked().map_err(socket_refusal)?,
+        tcp_user_timeout: config.tcp_user_timeout.checked().map_err(socket_refusal)?,
     })
 }
 
-/// No `session_database_url` is the main URL; a URL is the separate session
-/// database, with the scheme that the core reads.
-pub(crate) fn session_database(config: &PostgresConfig) -> SessionDatabase {
-    match &config.session_database_url {
-        None => SessionDatabase::SameAsDatabaseUrl,
-        Some(url) => SessionDatabase::Separate {
+fn socket_refusal(refused: SocketValueRefused) -> BrokerSettingRefused {
+    BrokerSettingRefused {
+        field: refused.field,
+        cause: refused.cause,
+    }
+}
+
+/// The manifest form of the session database: the main URL, or the separate
+/// URL with the scheme that the core reads.
+pub(crate) fn session_database(config: &PostgresConfig) -> SessionDatabaseManifest {
+    match &config.session_database {
+        SessionDatabase::SameAsDatabaseUrl => SessionDatabaseManifest::SameAsDatabaseUrl,
+        SessionDatabase::Separate { url } => SessionDatabaseManifest::Separate {
             url: core_database_url(url),
         },
     }
@@ -229,11 +238,13 @@ mod tests {
     #[test]
     fn the_manifest_holds_the_config_values() {
         let config = PostgresConfig {
-            session_database_url: Some("postgresql://app@session.example/horsies".to_owned()),
+            session_database: SessionDatabase::Separate {
+                url: "postgresql://app@session.example/horsies".to_owned(),
+            },
             pgbouncer_transaction_mode: true,
             pool_size: 7,
             max_overflow: 0,
-            pool_timeout: 0,
+            pool_timeout_seconds: 0,
             pool_recycle: PoolRecycle::Never,
             retain_rerun_input_default: true,
             tcp_keepalives: TcpKeepalivesConfig::Off,
@@ -248,17 +259,20 @@ mod tests {
         );
         assert!(matches!(
             &database.session_database,
-            SessionDatabase::Separate { url } if url.expose() == "postgresql://app@session.example/horsies"
+            SessionDatabaseManifest::Separate { url } if url.expose() == "postgresql://app@session.example/horsies"
         ));
         assert!(database.pgbouncer_transaction_mode);
         assert_eq!(database.pool_size.get(), 7);
         assert_eq!(database.max_overflow.get(), 0);
-        assert_eq!(database.pool_timeout.get(), 0);
+        assert_eq!(database.pool_timeout_seconds.get(), 0);
         assert_eq!(database.pool_recycle, PoolRecycle::Never);
-        assert_eq!(database.tcp_keepalives, TcpKeepalivesConfig::Off);
+        assert_eq!(
+            database.tcp_keepalives,
+            horsies_core::core::config::socket::TcpKeepalivesConfig::Off
+        );
         assert_eq!(
             database.tcp_user_timeout,
-            TcpUserTimeoutConfig::SystemDefault
+            horsies_core::core::config::socket::TcpUserTimeoutConfig::SystemDefault
         );
         assert!(manifest.send.retain_rerun_input_default);
         assert_eq!(

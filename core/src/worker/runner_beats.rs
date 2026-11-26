@@ -5,7 +5,7 @@
 //!   connection outside the shared pool, so a busy pool cannot starve it.
 //! - A beat lands only on a row that is RUNNING, owned by this worker, at the
 //!   claim generation of the dispatch, and without the finalizing marker.
-//! - With `auto_fail_stale_running` on, a watchdog on its own OS thread fails
+//! - With `fail_stale_running` on, a watchdog on its own OS thread fails
 //!   closed when no beat lands for half of `running_stale_threshold_ms`, so
 //!   no task runs without a beat when the reaper fails its row. It closes the
 //!   registry, kills every child that holds a task, and asks the worker to
@@ -528,7 +528,7 @@ pub enum StaleRunningRecovery {
 impl StaleRunningRecovery {
     /// Read the rule from the worker's recovery config.
     pub fn from_config(recovery: &RecoveryConfig) -> Self {
-        match recovery.auto_fail_stale_running {
+        match recovery.fail_stale_running {
             true => Self::On {
                 threshold: Duration::from_millis(recovery.running_stale_threshold_ms),
             },
@@ -1385,7 +1385,7 @@ fn watch_and_log(
             tracing::error!(
                 cause = %reason,
                 "{DEAD_WRITER_LINE}: {reason}. The worker runs on without runner heartbeats, \
-                 because no reaper fails a RUNNING row (auto_fail_stale_running is off, or no \
+                 because no reaper fails a RUNNING row (fail_stale_running is off, or no \
                  recovery config)",
             );
             return;
@@ -1398,7 +1398,7 @@ fn watch_and_log(
                     tracing::warn!(
                         cause = %describe(&verdict),
                         "runner heartbeats are late; the worker runs on, because no \
-                         reaper fails a RUNNING row (auto_fail_stale_running is off)",
+                         reaper fails a RUNNING row (fail_stale_running is off)",
                     );
                 }
             }
@@ -1584,7 +1584,7 @@ mod tests {
         };
         let StaleRunningRecovery::On { threshold } = StaleRunningRecovery::from_config(&recovery)
         else {
-            panic!("auto_fail_stale_running is on by default");
+            panic!("fail_stale_running is on by default");
         };
         assert_eq!(
             fail_closed_window(threshold),
@@ -1594,7 +1594,7 @@ mod tests {
         );
 
         let off = RecoveryConfig {
-            auto_fail_stale_running: false,
+            fail_stale_running: false,
             ..recovery
         };
         assert_eq!(

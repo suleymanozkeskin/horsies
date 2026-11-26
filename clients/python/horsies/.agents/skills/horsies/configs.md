@@ -19,7 +19,7 @@ app = Horsies(config=AppConfig(
 ))
 ```
 
-`database_url` and `session_database_url` are `SecretStr` fields: a plain
+`database_url` and the `url` of `SessionDatabaseSeparate` are `SecretStr` fields: a plain
 string validates at runtime, but strict type checkers reject it — wrap with
 `pydantic.SecretStr` explicitly.
 
@@ -30,7 +30,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `queue_mode` | `QueueMode` | `DEFAULT` | `DEFAULT` or `CUSTOM` |
 | `custom_queues` | `list[CustomQueueConfig] \| None` | `None` | Required if `CUSTOM` mode |
 | `broker` | `PostgresConfig` | required | Database connection config |
-| `cluster_wide_cap` | `int \| None` | `None` | Max RUNNING tasks across cluster; None = unlimited |
+| `cluster_wide_cap` | `ClusterCap \| NoClusterCap` | `NoClusterCap()` | Max RUNNING tasks across the cluster: `ClusterCap(tasks=N)`, N >= 1, or `NoClusterCap()` |
 | `prefetch_buffer` | `int` | `0` | 0 = hard cap; >0 = soft cap with lease |
 | `claim_lease_ms` | `int \| None` | `None` | Claim lease duration; None uses default 60s |
 | `max_claim_renew_age_ms` | `int` | `180_000` (3 min) | Max age of CLAIMED task that heartbeat will renew |
@@ -41,7 +41,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `schedule` | `ScheduleConfig \| None` | `None` | Recurring task schedules |
 | `exception_mapper` | `ExceptionMapper` | `{}` | Global exception-to-error-code mapping |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Must be `UPPER_SNAKE_CASE` |
-| `resend_on_transient_err` | `bool` | `False` | Auto-retry transient ENQUEUE_FAILED |
+| `resend_on_transient_error` | `bool` | `False` | Auto-retry transient ENQUEUE_FAILED |
 | `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()`: spans of the sends and of each attempt, and producer metrics, through the OpenTelemetry API; `parentage=ChildOfSend()` (default) or `LinkedToSend()`; `worker_ended_spans=WorkerEndedSpans.MAKE_SPANS` (default: the handler child makes the span of each attempt that the worker ended) or `NO_SPANS`; needs `horsies[otel]`, else HRS-220. `NoTracing()` imports no `opentelemetry` |
 | `log_format` | `TextLogs \| JsonLogs` | `TextLogs()` | Format of the horsies log records; `JsonLogs()`: one JSON object per line |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings; `horsies worker <app> --profile <name>` runs one. See [Worker profiles](#worker-profiles) |
@@ -434,25 +434,25 @@ config = PostgresConfig(
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
 | `database_url` | `SecretStr` | required | – | Scheme `postgresql://` or `postgres://` (HRS-203 otherwise) |
-| `session_database_url` | `SecretStr \| None` | `None` | – | Direct/session-capable URL for LISTEN and schema setup; required when `database_url` is transaction-pooled |
-| `pgbouncer_transaction_mode` | `bool` | `False` | – | Disable prepared statements for transaction-pooled `database_url`; requires `session_database_url` |
+| `session_database` | `SessionDatabaseSameAsDatabaseUrl \| SessionDatabaseSeparate` | `SessionDatabaseSameAsDatabaseUrl()` | – | Where LISTEN and schema setup connect: `database_url`, or `SessionDatabaseSeparate(url=SecretStr(...))`, a direct/session-capable URL; separate is required when `database_url` is transaction-pooled |
+| `pgbouncer_transaction_mode` | `bool` | `False` | – | Disable prepared statements for transaction-pooled `database_url`; requires a separate `session_database` |
 | `pool_size` | `int` | `5` | 1 to 10,000 | Connection pool size (raise for high-throughput producers) |
 | `max_overflow` | `int` | `10` | 0 to 10,000 | Extra connections beyond pool_size |
 | `retain_rerun_input_default` | `bool` | `False` | – | App-level default for enqueue-time rerun-input retention; a per-task value overrides it and the resolved value is snapshotted at enqueue. A task enqueued without a retained input cannot be rerun later |
-| `pool_timeout` | `int` | `30` | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for a connection |
-| `pool_recycle` | `int` | `1800` | `-1` (never) or 0 to 4,294,967,295 | Seconds before connections are recycled |
+| `pool_timeout_seconds` | `int` | `30` | 0 to 4,294,967,295; `0`: a checkout does not wait | Seconds to wait for a connection |
+| `pool_recycle` | `PoolRecycleAfterSeconds \| PoolRecycleNever` | `PoolRecycleAfterSeconds(seconds=1800)` | `seconds` 0 to 4,294,967,295 | When a pooled connection is replaced by its age: after `seconds`, or never |
 | `pool_pre_ping` | `bool` | `True` | – | Ping a pooled connection at checkout when it waited in the pool for more than 1 s, in every pool but the worker process's |
 | `worker_pool_pre_ping` | `bool` | `False` | – | Ping a pooled connection of the worker process at checkout when it waited in the pool for more than 1 s. Off: a one-statement write is one round trip, and a dead connection fails its first statement as a retryable connection error |
-| `tcp_keepalives` | `bool` | `True` | – | Enable TCP keepalives on every connection of the core: broker, child-process and listener connections |
-| `tcp_keepalives_idle` | `int` | `30` | 1 to 32,767 | Idle seconds before the first keepalive probe (as libpq `keepalives_idle`) |
-| `tcp_keepalives_interval` | `int` | `10` | 1 to 32,767 | Seconds between keepalive probes (as libpq `keepalives_interval`) |
-| `tcp_keepalives_count` | `int` | `3` | 1 to 127 | Unacknowledged probes before the connection is dropped (as libpq `keepalives_count`) |
-| `tcp_user_timeout_ms` | `int` | `30000` | `0` or 1 to 2,147,483,647 | Milliseconds that sent data may stay unacknowledged before the connection is closed (as libpq `tcp_user_timeout`); `0` uses the OS default |
+| `tcp_keepalives` | `TcpKeepalivesOn \| TcpKeepalivesOff` | `TcpKeepalivesOn()` | – | TCP keepalives on every connection of the core: broker, child-process and listener connections |
+| `TcpKeepalivesOn.idle_seconds` | `int` | `30` | 1 to 32,767 | Idle seconds before the first keepalive probe (as libpq `keepalives_idle`) |
+| `TcpKeepalivesOn.interval_seconds` | `int` | `10` | 1 to 32,767 | Seconds between keepalive probes (as libpq `keepalives_interval`) |
+| `TcpKeepalivesOn.probes` | `int` | `3` | 1 to 127 | Unacknowledged probes before the connection is dropped (as libpq `keepalives_count`) |
+| `tcp_user_timeout` | `TcpUserTimeoutAfter \| TcpUserTimeoutSystemDefault` | `TcpUserTimeoutAfter(milliseconds=30000)` | `milliseconds` 1 to 2,147,483,647 | How long sent data may stay unacknowledged before the connection is closed (as libpq `tcp_user_timeout`), or the OS default |
 | `echo` | `bool` | `False` | – | Echo SQL (debug only); bound values are not shown |
 
-A pool value outside its range fails with HRS-213 (`CONFIG_INVALID_BROKER_POOL`); `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. A TCP value outside its range fails with HRS-215 (`CONFIG_INVALID_KEEPALIVE`); the three keepalive values are checked only when `tcp_keepalives` is `True`.
+A pool value outside its range fails with HRS-213 (`CONFIG_INVALID_BROKER_POOL`); `pool_size=0` and `max_overflow=-1` (no limit in SQLAlchemy) are refused, and the help says to give a number. A TCP value outside its range fails with HRS-215 (`CONFIG_INVALID_KEEPALIVE`), and the message names the field (`tcp_keepalives.probes`).
 
-`database_url` and `session_database_url` take the scheme `postgresql://` or `postgres://` and name no driver; the core of horsies opens the database with its own driver, not libpq. A URL that names a driver (`postgresql+psycopg://`, `postgresql+psycopg2://`) is refused with HRS-203, and the error says to use `postgresql://`.
+`database_url` and the `url` of `SessionDatabaseSeparate` take the scheme `postgresql://` or `postgres://` and name no driver; the core of horsies opens the database with its own driver, not libpq. A URL that names a driver (`postgresql+psycopg://`, `postgresql+psycopg2://`) is refused with HRS-203, and the error says to use `postgresql://`.
 
 `worker_child_pool_min_size`, `worker_child_pool_max_size` and
 `worker_child_pool_check` were removed in 0.7.0: each child kind has its own
@@ -492,9 +492,9 @@ keepalives apply to the broker pools, each child-process pool and the
 LISTEN/NOTIFY listener. Without them, the
 OS idle default (often 7200s) outlives a pooler's idle-reap window — e.g.
 PlanetScale's PgBouncer reaps idle connections within ~1–2h. Disabling is rarely
-needed; lower `tcp_keepalives_idle` only for poolers that reap faster than 30s.
+needed; lower `TcpKeepalivesOn.idle_seconds` only for poolers that reap faster than 30s.
 
-`tcp_user_timeout_ms` (default 30000) bounds a write to a dead connection.
+`tcp_user_timeout` (default 30000 ms) bounds a write to a dead connection.
 Keepalives do not probe while sent data is unacknowledged, so without it a
 pool health check on a connection that died without a reset blocks for the
 kernel retransmission limit (about 15 minutes on Linux). It applies to the
@@ -786,22 +786,22 @@ to `AppConfig.retention` — see RetentionConfig below.
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `auto_requeue_stale_claimed` | `bool` | `True` | — | Requeue tasks stuck in CLAIMED |
+| `requeue_stale_claimed` | `bool` | `True` | — | Requeue tasks stuck in CLAIMED |
 | `claimed_stale_threshold_ms` | `int` | `120_000` | 1s–1hr | Ms before CLAIMED task is stale |
-| `auto_terminate_orphaned_workflow_tasks` | `bool` | `True` | — | Cancel CLAIMED workflow tasks with no live workflow_task linkage (orphans) instead of requeuing forever |
-| `auto_fail_stale_running` | `bool` | `True` | — | Fail tasks stuck in RUNNING |
+| `terminate_orphaned_workflow_tasks` | `bool` | `True` | — | Cancel CLAIMED workflow tasks with no live workflow_task linkage (orphans) instead of requeuing forever |
+| `fail_stale_running` | `bool` | `True` | — | Fail tasks stuck in RUNNING |
 | `running_stale_threshold_ms` | `int` | `300_000` | 1s–2hr | Ms before RUNNING task is stale |
 | `finalizing_stale_threshold_ms` | `int` | `300_000` | 1s–2hr | Ms a completed child may remain finalizing before recovery |
 | `crashed_worker_recovery_grace_ms` | `int` | `10_000` | 0–1hr | Grace before recovering a terminal workflow task whose progression was not applied; `0` disables; not heartbeat-coupled |
 | `check_interval_ms` | `int` | `30_000` | 1s–10min | Reaper poll cadence |
-| `orphan_task_audit_interval_ms` | `int` | `60_000` | 1s–24hr | Ms between bounded orphan workflow-task audit pages; the audit runs only when `auto_terminate_orphaned_workflow_tasks` is `True` |
+| `orphan_task_audit_interval_ms` | `int` | `60_000` | 1s–24hr | Ms between bounded orphan workflow-task audit pages; the audit runs only when `terminate_orphaned_workflow_tasks` is `True` |
 | `runner_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | How often the worker process writes the heartbeats of its RUNNING tasks, from one thread that does not run on its event loop |
 | `claimer_heartbeat_interval_ms` | `int` | `30_000` | 1s–2min | Heartbeat for CLAIMED tasks |
 | `worker_state_snapshot_interval_ms` | `int` | `30_000` | 1s–1min | How often each worker inserts a monitoring snapshot row into `horsies_worker_states`. The cap is half the 120 s live window (`WORKER_STATE_LIVE_WINDOW_S`), so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with `HRS-204` |
-| `phase2_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it. A persistent raise counts too, and at the bound the workflow fails closed |
+| `finalization_quarantine_after_attempts` | `int` | `25` | 3–1000 | Recovery passes an unresolvable workflow-progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it. A persistent raise counts too, and at the bound the workflow fails closed |
 | `workflow_recovery_failure_limit` | `int` | `25` | 3–1000 | Reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with `WORKFLOW_RECOVERY_LIMIT_REACHED`. A connection, lock or timeout error does not count. The count is stored. The count has no reset, so a later unrelated raise after a repair reaches the limit sooner |
 
-**Manual passes:** four recovery passes of the reaper also have a `PostgresBroker` method that runs the pass on demand, also when its setting is off: `requeue_stale_claimed()` (`auto_requeue_stale_claimed`), `mark_stale_tasks_as_failed()` (`auto_fail_stale_running`), `terminate_orphaned_workflow_tasks()` (`auto_terminate_orphaned_workflow_tasks`; one page), and `expire_pending_tasks()` (no setting: the reaper runs it on every pass).
+**Manual passes:** four recovery passes of the reaper also have a `PostgresBroker` method that runs the pass on demand, also when its setting is off: `requeue_stale_claimed()` (`requeue_stale_claimed`), `mark_stale_tasks_as_failed()` (`fail_stale_running`), `terminate_orphaned_workflow_tasks()` (`terminate_orphaned_workflow_tasks`; one page), and `expire_pending_tasks()` (no setting: the reaper runs it on every pass).
 
 **Removed in 0.5.0 — setting either fails config construction naming the
 successor:** `heartbeat_retention_hours` (heartbeats live in hourly partitions
@@ -822,8 +822,8 @@ never held up by a stalled consumer.
 
 ### Constraints (HRS-204)
 
-- With `auto_fail_stale_running=True` (default): `running_stale_threshold_ms >= 2 * (runner_heartbeat_interval_ms + 2_000)`. The worker stops when no runner heartbeat lands for half of the threshold; that half holds one interval plus 2 s for the next heartbeat to land.
-- With `auto_fail_stale_running=False`: `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
+- With `fail_stale_running=True` (default): `running_stale_threshold_ms >= 2 * (runner_heartbeat_interval_ms + 2_000)`. The worker stops when no runner heartbeat lands for half of the threshold; that half holds one interval plus 2 s for the next heartbeat to land.
+- With `fail_stale_running=False`: `running_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `finalizing_stale_threshold_ms >= runner_heartbeat_interval_ms * 2`
 - `claimed_stale_threshold_ms >= claimer_heartbeat_interval_ms * 2`
 
@@ -835,13 +835,13 @@ Runs on `check_interval_ms` cadence:
 0. Workers whose liveness lock no session holds: when two passes of one reaper find the lock of a worker free at least 75 s apart at the same generation (no pass between them finds it held or at another generation, and a read after the second pass finds the same generation), its RUNNING tasks are recovered as in 2 (if enabled) and its CLAIMED tasks requeued as in 1 (if enabled), whatever their heartbeats.
 1. CLAIMED tasks without heartbeat for `claimed_stale_threshold_ms` → requeued to PENDING (if enabled).
 2. RUNNING tasks without heartbeat for `running_stale_threshold_ms` → retry on `WORKER_CRASHED` policy or mark FAILED (if enabled). Recent `finalizing_at` suppresses this recovery.
-3. Retention pruning every `retention_sweep_interval_s` seconds (default 5 min): deletes old worker_state rows (`worker_state_retention_hours`) and terminal workflow rows with their workflow task rows (`terminal_record_retention_hours`). Heartbeat rows and terminal task records are not deleted here; partition maintenance drops their expired partitions every `partition_maintenance_interval_s` seconds (default 15 min). Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
+3. Retention pruning every `retention_sweep_interval_seconds` seconds (default 5 min): deletes old worker_state rows (`worker_state_retention_hours`) and terminal workflow rows with their workflow task rows (`terminal_record_retention_hours`). Heartbeat rows and terminal task records are not deleted here; partition maintenance drops their expired partitions every `partition_maintenance_interval_seconds` seconds (default 15 min). Deletes run in `retention_delete_batch_size`-row batches (default 500, one transaction each) under a 60s per-pass budget; a larger backlog drains across consecutive passes.
 
 **Runner heartbeats:** the worker process writes them for each RUNNING task whose child process runs and holds it, fenced on the worker and the claim generation; the child writes none. Only the beats sent since the task's `started_at` count, so a beat of an earlier attempt never counts for a retried task; a task with no such beat counts from `started_at`. A task that holds the GIL does not delay them, so CPU-bound tasks need no extra margin. Beats end at the kill of the child, its exit, its finalizing mark, or the read of its result. The stale threshold is based on missing runner heartbeats, not total task duration.
 
-**Fail-closed exit:** with `auto_fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. The half counts from when the last heartbeat landed. Under a slow database, raise `running_stale_threshold_ms`. With `auto_fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
+**Fail-closed exit:** with `fail_stale_running=True` (default), if the heartbeat thread dies, or no heartbeat lands for half of `running_stale_threshold_ms`, the worker kills every child that holds a task, stops, and exits with code 1 (code 77 if it has not stopped within 120 s). So the reaper does not fail a task that still runs. The half counts from when the last heartbeat landed. Under a slow database, raise `running_stale_threshold_ms`. With `fail_stale_running=False`, or no recovery config, no reaper fails a RUNNING row: the worker logs failed writes (at most once per 60 s) and keeps running.
 
-**Liveness lock:** each worker process holds a session advisory lock on one connection to the session URL, from before its first claim to the end of its stop, and confirms it every 5 s. Each acquisition writes a new generation for the worker id, so two losses of the lock with a hold between them do not count as one loss. A process that ends releases it, so the reaper recovers the tasks of a killed worker in about 1.5 to 2 minutes instead of `running_stale_threshold_ms`. With `auto_fail_stale_running=True`, a worker that holds a task and whose lock is not held for 60 s kills every child that holds a task and exits with code 79 at once. A paused worker keeps its connection and its lock.
+**Liveness lock:** each worker process holds a session advisory lock on one connection to the session URL, from before its first claim to the end of its stop, and confirms it every 5 s. Each acquisition writes a new generation for the worker id, so two losses of the lock with a hold between them do not count as one loss. A process that ends releases it, so the reaper recovers the tasks of a killed worker in about 1.5 to 2 minutes instead of `running_stale_threshold_ms`. With `fail_stale_running=True`, a worker that holds a task and whose lock is not held for 60 s kills every child that holds a task and exits with code 79 at once. A paused worker keeps its connection and its lock.
 
 
 ## RetentionConfig
@@ -855,13 +855,13 @@ Setting any of these on `RecoveryConfig` fails at construction naming
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `paused_workflow_auto_cancel_after` | `timedelta \| None` | `None` | positive duration, at most 365,000 days | Age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); `None` disables the sweep. A longer age is refused with `CONFIG_INVALID_RETENTION`: the expiry subtracts the age from `now()`, and the result must stay inside PostgreSQL's timestamp range |
+| `paused_workflow_cancel_after` | `timedelta \| None` | `None` | positive duration, at most 365,000 days | Age past which a PAUSED workflow is expired by policy (`WorkflowStatus.EXPIRED`); `None` disables the sweep. A longer age is refused with `CONFIG_INVALID_RETENTION`: the expiry subtracts the age from `now()`, and the result must stay inside PostgreSQL's timestamp range |
 | `worker_state_retention_hours` | `int \| None` | `168` (7d) | 1–8760; None disables | Prune old worker_state rows |
 | `terminal_record_retention_hours` | `int \| None` | `720` (30d) | 1–43800; None disables | Prune terminal **workflow** rows (`horsies_workflows`, `horsies_workflow_tasks`) |
 | `history_leaf_horizon_days` | `int` | `3` | 2–14 | Complete future daily history partitions kept ahead of writes; 2 is the coverage-health red line |
 | `heartbeat_leaf_horizon_hours` | `int` | `6` | 2–48 | Complete future hourly heartbeat partitions kept ahead of writes |
-| `partition_maintenance_interval_s` | `int` | `900` | 60–3600 | Seconds between partition-maintenance passes (coverage ensure + pruning of expired partitions; no separate pruning knob exists) |
-| `retention_sweep_interval_s` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
+| `partition_maintenance_interval_seconds` | `int` | `900` | 60–3600 | Seconds between partition-maintenance passes (coverage ensure + pruning of expired partitions; no separate pruning knob exists) |
+| `retention_sweep_interval_seconds` | `int` | `300` (5 min) | 30s–24h | Seconds between retention sweep passes |
 | `retention_delete_batch_size` | `int` | `500` | 50–10000 | Rows per workflow-retention DELETE batch; each batch commits independently |
 | `retention_periods` | `tuple[timedelta, ...]` | `()` | whole days 1–1825; no repeats | Finite periods a send may choose with `with_options(retention=...)` besides the 30-day default and the mapped periods; the maintenance owner registers the class of each at startup and every pass. A period is a minimum — leaves span one day, so a row survives between the period and the period plus one day |
 | `queue_retention` | `dict[str, timedelta \| None]` | `{}` | whole days 1–1825, or None; see [`queue_retention`](#queue_retention) | Per-queue retention period; see [`queue_retention`](#queue_retention) |
@@ -933,20 +933,20 @@ Controls worker retry behavior on transient DB failures.
 
 | Field | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `db_retry_initial_ms` | `int` | `500` | 100ms–60s | Initial backoff |
-| `db_retry_max_ms` | `int` | `30_000` | 500ms–5min | Max backoff cap |
-| `db_retry_max_attempts` | `int` | `0` | 0–10000 | Max retries; 0 = infinite |
+| `database_retry_initial_ms` | `int` | `500` | 100ms–60s | Initial backoff |
+| `database_retry_max_ms` | `int` | `30_000` | 500ms–5min | Max backoff cap |
+| `database_retry_max_attempts` | `int` | `0` | 0–10000 | Max retries; 0 = infinite |
 | `notify_poll_interval_ms` | `int` | `5_000` | 1s–5min | Fallback poll when NOTIFY is silent |
 
 ### Constraint (HRS-208)
 
-`db_retry_max_ms >= db_retry_initial_ms`.
+`database_retry_max_ms >= database_retry_initial_ms`.
 
 ### Retry behavior
 
 Exponential backoff with ±25% jitter:
 ```
-delay = min(db_retry_max_ms, db_retry_initial_ms * 2^(attempt-1))
+delay = min(database_retry_max_ms, database_retry_initial_ms * 2^(attempt-1))
 ```
 
 `notify_poll_interval_ms` is the safety-net polling interval. Primary dispatch uses PostgreSQL `LISTEN/NOTIFY`.
@@ -1136,7 +1136,7 @@ class Month(str, Enum):
     DECEMBER = 'december'
 ```
 
-## `resend_on_transient_err`
+## `resend_on_transient_error`
 
 When `True` on `AppConfig`, enables automatic retry of transient `ENQUEUE_FAILED` errors for both task sends and workflow starts.
 

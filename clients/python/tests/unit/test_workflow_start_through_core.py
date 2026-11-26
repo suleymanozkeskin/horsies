@@ -165,7 +165,7 @@ class TestSpecData:
             spec_json=_spec_json(spec),
             workflow_id=uuid.UUID(WORKFLOW_ID),
             sent_at=SENT_AT,
-            resend_on_transient_err=False,
+            resend_on_transient_error=False,
             trace=core.NoTraceCarrier(),
         )
         assert isinstance(request, core.WorkflowStartRequest)
@@ -179,7 +179,7 @@ class TestSpecData:
                 spec_json='{"data_version": 1}',
                 workflow_id=uuid.UUID(WORKFLOW_ID),
                 sent_at=SENT_AT,
-                resend_on_transient_err=False,
+                resend_on_transient_error=False,
                 trace=core.NoTraceCarrier(),
             )
 
@@ -194,7 +194,7 @@ class TestSpecData:
                 spec_json='{"data_version": 1, "nodes": "one"}',
                 workflow_id=uuid.UUID(WORKFLOW_ID),
                 sent_at=SENT_AT,
-                resend_on_transient_err=False,
+                resend_on_transient_error=False,
                 trace=core.NoTraceCarrier(),
             )
 
@@ -210,7 +210,7 @@ class TestStartAnswers:
         broker = _broker(_record(core.WorkflowStarted))
         with patch('horsies._core.WorkflowStartRequest') as request_class:
             result = await start_workflow_async(
-                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_err=True,
+                _spec(), broker, WORKFLOW_ID, SENT_AT, resend_on_transient_error=True,
             )
 
         assert is_ok(result)
@@ -218,7 +218,7 @@ class TestStartAnswers:
         arguments = request_class.call_args.kwargs
         assert arguments['workflow_id'] == uuid.UUID(WORKFLOW_ID)
         assert arguments['sent_at'] == SENT_AT
-        assert arguments['resend_on_transient_err'] is True
+        assert arguments['resend_on_transient_error'] is True
         assert json.loads(arguments['spec_json'])['name'] == 'start_core.flow'
         broker._core_handle.start_workflow_async.assert_awaited_once_with(  # pyright: ignore[reportPrivateUsage]
             request_class.return_value,

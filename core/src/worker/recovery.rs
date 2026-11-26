@@ -269,9 +269,9 @@ mod p7_maintenance_tests {
     async fn a_pass_after_a_host_sleep_runs_the_partition_maintenance() {
         let pool = crate::test_support::migrated_pool().await;
         let recovery = RecoveryConfig {
-            auto_requeue_stale_claimed: false,
-            auto_fail_stale_running: false,
-            auto_terminate_orphaned_workflow_tasks: false,
+            requeue_stale_claimed: false,
+            fail_stale_running: false,
+            terminate_orphaned_workflow_tasks: false,
             ..RecoveryConfig::default()
         };
         let retention = RetentionConfig {
@@ -279,7 +279,7 @@ mod p7_maintenance_tests {
             terminal_record_retention_hours: None,
             ..RetentionConfig::default()
         };
-        let interval = Duration::from_secs(retention.partition_maintenance_interval_s);
+        let interval = Duration::from_secs(retention.partition_maintenance_interval_seconds);
         let slept = Duration::from_secs(7 * 3600);
         let health = new_reaper_health();
         let mut next_retention_cleanup = tokio::time::Instant::now() + Duration::from_secs(60);
@@ -320,9 +320,9 @@ mod p7_maintenance_tests {
     async fn periodic_maintenance_publishes_all_health_and_contains_coverage_failure() {
         let pool = crate::test_support::migrated_pool().await;
         let recovery = RecoveryConfig {
-            auto_requeue_stale_claimed: false,
-            auto_fail_stale_running: false,
-            auto_terminate_orphaned_workflow_tasks: false,
+            requeue_stale_claimed: false,
+            fail_stale_running: false,
+            terminate_orphaned_workflow_tasks: false,
             ..RecoveryConfig::default()
         };
         let retention = RetentionConfig {
@@ -428,9 +428,9 @@ mod p7_maintenance_tests {
         .await
         .expect("seed a stale claim past its deadline");
         let recovery = RecoveryConfig {
-            auto_requeue_stale_claimed: true,
-            auto_fail_stale_running: false,
-            auto_terminate_orphaned_workflow_tasks: false,
+            requeue_stale_claimed: true,
+            fail_stale_running: false,
+            terminate_orphaned_workflow_tasks: false,
             ..RecoveryConfig::default()
         };
         let retention = RetentionConfig::default();
@@ -492,9 +492,9 @@ mod p7_maintenance_tests {
         .await
         .unwrap();
         let recovery = RecoveryConfig {
-            auto_requeue_stale_claimed: false,
-            auto_fail_stale_running: false,
-            auto_terminate_orphaned_workflow_tasks: false,
+            requeue_stale_claimed: false,
+            fail_stale_running: false,
+            terminate_orphaned_workflow_tasks: false,
             ..RecoveryConfig::default()
         };
         let retention = RetentionConfig::default();
@@ -542,9 +542,9 @@ mod p7_maintenance_tests {
     ) {
         let pool = crate::test_support::migrated_pool().await;
         let recovery = RecoveryConfig {
-            auto_requeue_stale_claimed: false,
-            auto_fail_stale_running: false,
-            auto_terminate_orphaned_workflow_tasks: false,
+            requeue_stale_claimed: false,
+            fail_stale_running: false,
+            terminate_orphaned_workflow_tasks: false,
             ..RecoveryConfig::default()
         };
         let mut retention = RetentionConfig {
@@ -662,7 +662,7 @@ mod p7_maintenance_tests {
         .bind(history_leaves[0].bounds().lower() + chrono::Duration::hours(1))
         .bind(blocked_class)
         .bind(vec![31_u8; 32])
-        .bind(recovery.phase2_quarantine_after_attempts as i32)
+        .bind(recovery.finalization_quarantine_after_attempts as i32)
         .execute(&mut *setup)
         .await
         .unwrap();
@@ -990,8 +990,8 @@ pub fn spawn_reaper(
             ClassCoverageLog::for_reaper_start(tokio::time::Instant::now(), check_interval);
 
         tracing::info!(
-            auto_requeue_claimed = config.auto_requeue_stale_claimed,
-            auto_fail_running = config.auto_fail_stale_running,
+            auto_requeue_claimed = config.requeue_stale_claimed,
+            auto_fail_running = config.fail_stale_running,
             check_interval_ms = config.check_interval_ms,
             orphan_task_audit_interval_ms = config.orphan_task_audit_interval_ms,
             "reaper started",
@@ -1215,7 +1215,7 @@ async fn run_reaper_pass(
 ) {
     // The tasks of workers whose liveness lock stays free, on the main core
     // pool with the reserve. It runs when either recovery of task rows is on.
-    if config.auto_fail_stale_running || config.auto_requeue_stale_claimed {
+    if config.fail_stale_running || config.requeue_stale_claimed {
         let step = match broker.core_pools_for_write() {
             Ok((open, _write)) => {
                 owner_gone_step(
@@ -1254,7 +1254,7 @@ async fn run_reaper_pass(
     // `failure_log` (the first failure, one line per
     // `RECOVERY_FAILURE_LOG_EVERY` failures in a row, the recovery).
     // The stale CLAIMED requeue runs on the main core pool with the reserve.
-    if config.auto_requeue_stale_claimed {
+    if config.requeue_stale_claimed {
         match ThresholdMs::from_millis(config.claimed_stale_threshold_ms) {
             Ok(threshold) => {
                 let requeued = match broker.core_pools_for_write() {
@@ -1289,7 +1289,7 @@ async fn run_reaper_pass(
     // cannot reach RUNNING, so the requeue above skips them and they would
     // otherwise stay CLAIMED forever; cancelling frees claim budget and lets
     // retention sweep them.
-    if config.auto_terminate_orphaned_workflow_tasks {
+    if config.terminate_orphaned_workflow_tasks {
         let now = tokio::time::Instant::now();
         if orphan_state.schedule_if_due(
             now,
@@ -1352,7 +1352,7 @@ async fn run_reaper_pass(
 
     // Stale RUNNING recovery on the main core pool with the reserve: one
     // scan, then one statement per candidate.
-    if config.auto_fail_stale_running {
+    if config.fail_stale_running {
         match stale_running_thresholds(config) {
             Ok(thresholds) => {
                 let recovered = match broker.core_pools_for_write() {
@@ -1446,7 +1446,7 @@ async fn run_reaper_pass(
         child_specs,
         config.crashed_worker_recovery_grace_ms,
         crate::workflow_engine::recovery::GLOBAL_SCAN_ROW_CAP,
-        config.phase2_quarantine_after_attempts,
+        config.finalization_quarantine_after_attempts,
     )
     .await;
     let phase2_health = match phase2 {
@@ -1466,7 +1466,7 @@ async fn run_reaper_pass(
     };
     health.write().await.phase2_recovery = Some(phase2_health);
 
-    // Retention cleanup (runs every retention_sweep_interval_s), then the
+    // Retention cleanup (runs every retention_sweep_interval_seconds), then the
     // liveness rows of ended workers, on the main core pool with the reserve.
     if tokio::time::Instant::now() >= *next_retention_cleanup {
         run_retention_cleanup(broker, retention, failures).await;
@@ -1482,11 +1482,11 @@ async fn run_reaper_pass(
             }
             Err(error) => failures.failed(RecoveryStep::EndedWorkerRows, &error),
         }
-        *next_retention_cleanup =
-            tokio::time::Instant::now() + Duration::from_secs(retention.retention_sweep_interval_s);
+        *next_retention_cleanup = tokio::time::Instant::now()
+            + Duration::from_secs(retention.retention_sweep_interval_seconds);
     }
 
-    if let Some(age) = retention.paused_workflow_auto_cancel_after {
+    if let Some(age) = retention.paused_workflow_cancel_after {
         match crate::workflow_engine::lifecycle::expire_paused_workflows(broker, age, 50).await {
             Ok(count) if count > 0 => {
                 failures.succeeded(RecoveryStep::PausedWorkflowExpiry);
@@ -1604,7 +1604,7 @@ async fn run_reaper_pass(
         };
         health.write().await.partition_pruning = Some(pruning_health);
         *next_partition_maintenance = MaintenanceDue::after(Duration::from_secs(
-            retention.partition_maintenance_interval_s,
+            retention.partition_maintenance_interval_seconds,
         ));
     }
 }
@@ -2336,7 +2336,7 @@ async fn retention_pass(
 /// the batches before it stay committed, and the backlog resumes on the next
 /// pass.
 ///
-/// Called by the reaper loop every `retention_sweep_interval_s`.
+/// Called by the reaper loop every `retention_sweep_interval_seconds`.
 pub async fn run_retention_cleanup(
     broker: &PostgresBroker,
     config: &RetentionConfig,
@@ -2473,7 +2473,7 @@ mod tests {
         );
         config.pool_size = 3;
         config.max_overflow = 0;
-        config.pool_timeout = 1;
+        config.pool_timeout_seconds = 1;
         let broker = PostgresBroker::connect_worker_with(&config, crate::ClientFamily::Rust)
             .await
             .expect("connect the broker of a worker");
@@ -2492,9 +2492,9 @@ mod tests {
         );
 
         let recovery = RecoveryConfig {
-            auto_requeue_stale_claimed: false,
-            auto_terminate_orphaned_workflow_tasks: false,
-            auto_fail_stale_running: true,
+            requeue_stale_claimed: false,
+            terminate_orphaned_workflow_tasks: false,
+            fail_stale_running: true,
             ..RecoveryConfig::default()
         };
         let health = new_reaper_health();

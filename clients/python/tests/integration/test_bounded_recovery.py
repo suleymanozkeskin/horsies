@@ -264,7 +264,7 @@ async def test_terminate_cancels_the_orphans_of_one_page_on_demand(
     bounded_recovery_database: tuple[PostgresBroker, AsyncEngine],
 ) -> None:
     """No worker runs here, so no reaper runs the orphan pass, as with
-    ``auto_terminate_orphaned_workflow_tasks=False``: the call runs one page
+    ``terminate_orphaned_workflow_tasks=False``: the call runs one page
     on demand. Of three PENDING workflow tasks, the one that no node links
     moves to history as CANCELLED; the two linked tasks stay live."""
     broker, engine = bounded_recovery_database

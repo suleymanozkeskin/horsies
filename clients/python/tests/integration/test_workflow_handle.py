@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 from horsies.core.models.outcome import (
     BrokerError,
     Failed,
@@ -85,9 +85,9 @@ async def listener_refused_broker() -> AsyncGenerator[PostgresBroker, None]:
     reader = PostgresBroker(
         PostgresConfig(
             database_url=SecretStr(DB_URL),
-            session_database_url=SecretStr(
+            session_database=SessionDatabaseSeparate(url=SecretStr(
                 f'postgresql://postgres:none@127.0.0.1:1/listener_refused_{uuid.uuid4().hex}',
-            ),
+            )),
         ),
         run_schema_migrations=False,
     )
@@ -1781,7 +1781,7 @@ def _expiry_error_json(older_than: timedelta) -> str:
         encode_task_error(
             TaskError(
                 error_code=OutcomeCode.WORKFLOW_EXPIRED,
-                message=f'paused_workflow_auto_cancel_after elapsed: {older_than}',
+                message=f'paused_workflow_cancel_after elapsed: {older_than}',
             ),
         ),
     ):

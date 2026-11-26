@@ -55,8 +55,8 @@ class TestEnsureSchemaWithRetry:
             ]
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
         )
         logger = logging.getLogger('test')
 
@@ -91,9 +91,9 @@ class TestEnsureSchemaWithRetry:
             ),
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=3,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=3,
         )
         logger = logging.getLogger('test')
 
@@ -125,9 +125,9 @@ class TestEnsureSchemaWithRetry:
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(side_effect=fail_then_succeed)
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 
@@ -148,9 +148,9 @@ class TestEnsureSchemaWithRetry:
             ]
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=1000,
-            db_retry_max_ms=100_000,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=1000,
+            database_retry_max_ms=100_000,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 
@@ -169,7 +169,7 @@ class TestEnsureSchemaWithRetry:
             )
 
     async def test_backoff_capped_at_max_ms(self) -> None:
-        """Delay stops growing once it hits db_retry_max_ms."""
+        """Delay stops growing once it hits database_retry_max_ms."""
         broker = AsyncMock()
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[
@@ -181,9 +181,9 @@ class TestEnsureSchemaWithRetry:
             ]
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=1000,
-            db_retry_max_ms=1500,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=1000,
+            database_retry_max_ms=1500,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 
@@ -214,9 +214,9 @@ class TestEnsureSchemaWithRetry:
             ],
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 
@@ -243,8 +243,8 @@ class TestEnsureSchemaWithRetry:
             ],
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
         )
         logger = logging.getLogger('test')
 
@@ -263,9 +263,9 @@ class TestEnsureSchemaWithRetry:
             ),
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=1,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=1,
         )
         logger = logging.getLogger('test')
 
@@ -287,9 +287,9 @@ class TestEnsureSchemaWithRetry:
             ],
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test.retry_msg')
 
@@ -314,9 +314,9 @@ class TestEnsureSchemaWithRetry:
             ),
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=100,
-            db_retry_max_ms=500,
-            db_retry_max_attempts=1,
+            database_retry_initial_ms=100,
+            database_retry_max_ms=500,
+            database_retry_max_attempts=1,
         )
         logger = logging.getLogger('test.exhaust_msg')
 

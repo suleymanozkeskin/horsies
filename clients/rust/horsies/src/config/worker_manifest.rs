@@ -216,11 +216,17 @@ fn database_manifest(config: &PostgresConfig) -> wire::WorkerDatabaseManifest {
         pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
         pool_pre_ping: config.pool_pre_ping,
         worker_pool_pre_ping: config.worker_pool_pre_ping,
-        pool_timeout: WholeSeconds::from_secs(config.pool_timeout),
+        pool_timeout_seconds: WholeSeconds::from_secs(config.pool_timeout_seconds),
         pool_recycle: config.pool_recycle,
         echo: config.echo,
-        tcp_keepalives: config.tcp_keepalives,
-        tcp_user_timeout: config.tcp_user_timeout,
+        tcp_keepalives: config
+            .tcp_keepalives
+            .checked()
+            .expect("Horsies::new validated the keepalive values"),
+        tcp_user_timeout: config
+            .tcp_user_timeout
+            .checked()
+            .expect("Horsies::new validated the TCP user timeout"),
     }
 }
 
@@ -234,7 +240,10 @@ mod tests {
     use horsies_core::{CancelGraceMs, RegisteredTask, TaskOptions, TaskResult};
 
     use super::*;
-    use crate::{ChildPreload, CustomQueueConfig, IsolatedChildren, QueueMode, WorkerProfile};
+    use crate::{
+        ChildPreload, ClusterCapSetting, CustomQueueConfig, IsolatedChildren, QueueMode,
+        WorkerProfile,
+    };
 
     struct EchoTask;
 
@@ -377,7 +386,7 @@ mod tests {
                 max_concurrency: None,
             },
         ]);
-        config.cluster_wide_cap = Some(20);
+        config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: 20 };
         config.claim_lease_ms = Some(30_000);
         let manifest = build(&config).unwrap();
         let text = serde_json::to_string(&manifest).unwrap();
@@ -482,7 +491,9 @@ mod tests {
                 None,
             ),
             (
-                Box::new(|config: &mut AppConfig| config.cluster_wide_cap = Some(u32::MAX)),
+                Box::new(|config: &mut AppConfig| {
+                    config.cluster_wide_cap = ClusterCapSetting::ClusterCap { tasks: u32::MAX }
+                }),
                 "cluster_wide_cap",
                 Some("4294967295"),
             ),
@@ -564,10 +575,10 @@ mod tests {
     #[test]
     fn no_retry_attempt_limit_is_its_own_variant() {
         let mut config = config();
-        config.resilience.db_retry_max_attempts = 0;
+        config.resilience.database_retry_max_attempts = 0;
         let manifest = build(&config).unwrap();
         assert_eq!(
-            manifest.resilience.db_retry_max_attempts,
+            manifest.resilience.database_retry_max_attempts,
             wire::RetryAttemptLimit::NoLimit
         );
     }

@@ -43,7 +43,7 @@ config = AppConfig(
         check_interval_ms=2_000,              # 2s reaper cycle
         # Disable auto-requeue so the test relies purely on lease expiry +
         # CLAIM_SQL reclaim branch, not the reaper's stale-claim logic.
-        auto_requeue_stale_claimed=False,
+        requeue_stale_claimed=False,
         claimed_stale_threshold_ms=120_000,   # high, won't trigger
     ),
     worker_profiles=E2E_WORKER_PROFILES,

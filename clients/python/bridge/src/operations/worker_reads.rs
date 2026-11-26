@@ -348,7 +348,12 @@ fn worker_state_record<'py>(
         processes: snapshot.processes,
         max_claim_batch: snapshot.max_claim_batch,
         max_claim_per_worker: snapshot.max_claim_per_worker,
-        cluster_wide_cap: snapshot.cluster_wide_cap,
+        // The record holds the cap as an int, or None for no cap; the Python
+        // reader maps it to `ClusterCap` or `NoClusterCap`.
+        cluster_wide_cap: snapshot
+            .cluster_wide_cap
+            .claim_parameter()
+            .map(|tasks| i32::try_from(tasks).expect("a stored cap came from an integer column")),
         queues: snapshot.queues.clone(),
         queue_priorities: snapshot.queue_priorities.clone(),
         queue_max_concurrency: snapshot.queue_max_concurrency.clone(),

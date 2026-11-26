@@ -155,7 +155,9 @@ impl Instance {
         config.broker.pool_size = POOL_SIZE;
         config.broker.max_overflow = POOL_OVERFLOW;
         if let Some(session) = &connection.session_database_url {
-            config.broker.session_database_url = Some(session.clone());
+            config.broker.session_database = horsies::SessionDatabase::Separate {
+                url: session.clone(),
+            };
             config.broker.pgbouncer_transaction_mode = true;
         }
         config.worker_profiles = Profile::ALL
@@ -168,7 +170,11 @@ impl Instance {
                 config.queue_mode = QueueMode::Custom;
                 config.custom_queues = Some(custom_queues(&CUSTOM_QUEUES));
             }
-            Self::ClusterCap => config.cluster_wide_cap = Some(CLUSTER_WIDE_CAP),
+            Self::ClusterCap => {
+                config.cluster_wide_cap = horsies::ClusterCapSetting::ClusterCap {
+                    tasks: CLUSTER_WIDE_CAP,
+                }
+            }
             Self::Recovery => config.recovery = fast_recovery(),
             Self::SoftCap => {
                 config.prefetch_buffer = SOFT_CAP_PREFETCH;

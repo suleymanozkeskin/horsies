@@ -8,7 +8,7 @@
 //! read-back of the input (encode, decode with `A`, encode again, compare),
 //! the payload size limit, a new task id and the sent instant, then one
 //! enqueue through the core with `SendKind::First`. With
-//! `AppConfig.resend_on_transient_err`, a retryable `ENQUEUE_FAILED` is
+//! `AppConfig.resend_on_transient_error`, a retryable `ENQUEUE_FAILED` is
 //! sent again up to 3 times with the same task id and payload as
 //! `SendKind::Repeat`, after 200 ms, 400 ms and 800 ms (at most 2,000 ms):
 //! a send whose commit reply was lost answers with its task id, and a task
@@ -64,7 +64,7 @@ const RESEND_LONGEST_WAIT: Duration = Duration::from_millis(2_000);
 pub(crate) struct SendContext {
     handle: Arc<CoreHandle>,
     suppression: SendSuppression,
-    resend_on_transient_err: bool,
+    resend_on_transient_error: bool,
     payload: PayloadPolicy,
     retention: RetentionConfig,
 }
@@ -75,7 +75,7 @@ impl SendContext {
         Self {
             handle: Arc::clone(app.handle()),
             suppression: app.send_suppression(),
-            resend_on_transient_err: app.config().resend_on_transient_err,
+            resend_on_transient_error: app.config().resend_on_transient_error,
             payload: app.config().payload.clone(),
             retention: app.config().retention.clone(),
         }
@@ -400,7 +400,7 @@ where
         first: SendKind,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
         refuse_in_a_fork(format_args!("send of task '{}'", self.task_name));
-        let resends = match self.context.resend_on_transient_err {
+        let resends = match self.context.resend_on_transient_error {
             true => RESEND_COUNT,
             false => 0,
         };

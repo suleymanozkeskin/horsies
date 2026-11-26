@@ -4,7 +4,11 @@ use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
 use crate::core::error::{ErrorCode, HorsiesError, ValidationReport};
 
-use crate::core::config::socket::{socket_settings, TcpKeepalivesConfig, TcpUserTimeoutConfig};
+use crate::core::config::no_member_after_the_tag;
+use crate::core::config::socket::input::{
+    SocketValueRefused, TcpKeepalivesConfig, TcpUserTimeoutConfig,
+};
+use crate::core::config::socket::socket_settings;
 use crate::db::SocketSettings;
 
 /// The persistent connections of the general broker pool of a config that
@@ -34,23 +38,24 @@ pub struct PostgresConfig {
     /// `pgbouncer_transaction_mode` is true.
     pub database_url: String,
 
-    /// PostgreSQL session connection URL for schema initialization,
-    /// partition maintenance, and LISTEN/NOTIFY.
+    /// Where the session pool connects: schema initialization, partition
+    /// maintenance, and LISTEN/NOTIFY. Default:
+    /// [`SessionDatabase::SameAsDatabaseUrl`].
     ///
     /// PgBouncer transaction pooling cannot preserve session state for
-    /// LISTEN/NOTIFY, so pooled runtime deployments must provide a direct or
-    /// session-pooled URL here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_database_url: Option<String>,
+    /// LISTEN/NOTIFY, so pooled runtime deployments must name a direct or
+    /// session-pooled URL here ([`SessionDatabase::Separate`]).
+    #[serde(default)]
+    pub session_database: SessionDatabase,
 
     /// Configure the runtime pool for PgBouncer transaction pooling.
     ///
     /// SQLx uses protocol-level prepared statements for parameterized
     /// Postgres queries. The PgBouncer endpoint must therefore have prepared
     /// statement tracking enabled (`max_prepared_statements > 0`). This flag
-    /// disables SQLx's local statement cache and requires `session_database_url`
-    /// so schema initialization and LISTEN/NOTIFY continue to use a
-    /// session-capable connection.
+    /// disables SQLx's local statement cache and requires a separate
+    /// `session_database` so schema initialization and LISTEN/NOTIFY continue
+    /// to use a session-capable connection.
     #[serde(default)]
     pub pgbouncer_transaction_mode: bool,
 
@@ -87,8 +92,8 @@ pub struct PostgresConfig {
     pub retain_rerun_input_default: bool,
 
     /// Timeout in seconds for acquiring a connection from the pool.
-    #[serde(default = "default_pool_timeout")]
-    pub pool_timeout: u32,
+    #[serde(default = "default_pool_timeout_seconds")]
+    pub pool_timeout_seconds: u32,
 
     /// When a connection is replaced by its age (SQLAlchemy's
     /// `pool_recycle`): never, or after a number of seconds.
@@ -99,16 +104,45 @@ pub struct PostgresConfig {
     #[serde(default)]
     pub echo: bool,
 
-    /// TCP keepalives of every core connection (Python `tcp_keepalives`,
-    /// `tcp_keepalives_idle`, `tcp_keepalives_interval`,
-    /// `tcp_keepalives_count`). Default: on, 30 s, 10 s, 3 probes.
+    /// TCP keepalives of every core connection (Python `tcp_keepalives`).
+    /// Default: on, 30 s, 10 s, 3 probes. [`Self::validate`] refuses a value
+    /// outside its bound.
     #[serde(default)]
     pub tcp_keepalives: TcpKeepalivesConfig,
 
     /// TCP user timeout of every core connection (Python
-    /// `tcp_user_timeout_ms`; its 0 is `SystemDefault`). Default: 30,000 ms.
+    /// `tcp_user_timeout`). Default: 30,000 ms. [`Self::validate`] refuses a
+    /// value outside its bound.
     #[serde(default)]
     pub tcp_user_timeout: TcpUserTimeoutConfig,
+}
+
+/// Where the session pool connects (Python
+/// `SessionDatabaseSameAsDatabaseUrl`, `SessionDatabaseSeparate`). The JSON
+/// form is `{"kind": "SAME_AS_DATABASE_URL"}` or
+/// `{"kind": "SEPARATE", "url": "..."}`. `Debug` masks the password of the
+/// URL.
+#[derive(Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "SCREAMING_SNAKE_CASE", deny_unknown_fields)]
+pub enum SessionDatabase {
+    /// The session pool uses `database_url`.
+    #[default]
+    #[serde(deserialize_with = "no_member_after_the_tag")]
+    SameAsDatabaseUrl,
+    /// The session pool uses its own direct or session-capable URL.
+    Separate { url: String },
+}
+
+impl std::fmt::Debug for SessionDatabase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SameAsDatabaseUrl => f.write_str("SameAsDatabaseUrl"),
+            Self::Separate { url } => f
+                .debug_struct("Separate")
+                .field("url", &mask_url(url))
+                .finish(),
+        }
+    }
 }
 
 /// Redact the password in a `scheme://user:PASS@host/db` URL, leaving the rest
@@ -130,10 +164,7 @@ impl std::fmt::Debug for PostgresConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PostgresConfig")
             .field("database_url", &mask_url(&self.database_url))
-            .field(
-                "session_database_url",
-                &self.session_database_url.as_deref().map(mask_url),
-            )
+            .field("session_database", &self.session_database)
             .field(
                 "pgbouncer_transaction_mode",
                 &self.pgbouncer_transaction_mode,
@@ -146,7 +177,7 @@ impl std::fmt::Debug for PostgresConfig {
                 "retain_rerun_input_default",
                 &self.retain_rerun_input_default,
             )
-            .field("pool_timeout", &self.pool_timeout)
+            .field("pool_timeout_seconds", &self.pool_timeout_seconds)
             .field("pool_recycle", &self.pool_recycle)
             .field("echo", &self.echo)
             .field("tcp_keepalives", &self.tcp_keepalives)
@@ -164,7 +195,7 @@ fn default_pool_size() -> u32 {
 fn default_max_overflow() -> u32 {
     BROKER_MAX_OVERFLOW_DEFAULT
 }
-fn default_pool_timeout() -> u32 {
+fn default_pool_timeout_seconds() -> u32 {
     30
 }
 fn default_pool_recycle() -> crate::manifest::PoolRecycle {
@@ -178,7 +209,7 @@ fn default_pool_recycle() -> crate::manifest::PoolRecycle {
 struct PostgresConfigWire {
     database_url: String,
     #[serde(default)]
-    session_database_url: Option<String>,
+    session_database: SessionDatabase,
     #[serde(default)]
     pgbouncer_transaction_mode: bool,
     #[serde(default = "default_true")]
@@ -191,8 +222,8 @@ struct PostgresConfigWire {
     max_overflow: u32,
     #[serde(default)]
     retain_rerun_input_default: bool,
-    #[serde(default = "default_pool_timeout")]
-    pool_timeout: u32,
+    #[serde(default = "default_pool_timeout_seconds")]
+    pool_timeout_seconds: u32,
     #[serde(default = "default_pool_recycle")]
     pool_recycle: crate::manifest::PoolRecycle,
     #[serde(default)]
@@ -217,14 +248,14 @@ impl<'de> Deserialize<'de> for PostgresConfig {
         let wire: PostgresConfigWire = serde_json::from_value(value).map_err(D::Error::custom)?;
         Ok(Self {
             database_url: wire.database_url,
-            session_database_url: wire.session_database_url,
+            session_database: wire.session_database,
             pgbouncer_transaction_mode: wire.pgbouncer_transaction_mode,
             pool_pre_ping: wire.pool_pre_ping,
             worker_pool_pre_ping: wire.worker_pool_pre_ping,
             pool_size: wire.pool_size,
             max_overflow: wire.max_overflow,
             retain_rerun_input_default: wire.retain_rerun_input_default,
-            pool_timeout: wire.pool_timeout,
+            pool_timeout_seconds: wire.pool_timeout_seconds,
             pool_recycle: wire.pool_recycle,
             echo: wire.echo,
             tcp_keepalives: wire.tcp_keepalives,
@@ -360,23 +391,28 @@ pub enum PostgresConfigError {
          write 'postgresql://' instead"
     )]
     InvalidUrlScheme(String),
-    /// `session_database_url` does not start with `postgresql://` or
-    /// `postgres://`. The value is the scheme only, as in
+    /// The URL of a separate `session_database` does not start with
+    /// `postgresql://` or `postgres://`. The value is the scheme only, as in
     /// [`PostgresConfigError::InvalidUrlScheme`].
     #[error(
-        "invalid session_database_url scheme {0:?}: the URL must start with 'postgresql://' \
+        "invalid session_database.url scheme {0:?}: the URL must start with 'postgresql://' \
          or 'postgres://'; a driver suffix such as 'postgresql+psycopg://' is refused, \
          write 'postgresql://' instead"
     )]
     InvalidSessionUrlScheme(String),
-    #[error("pgbouncer_transaction_mode=true requires session_database_url for schema initialization, partition maintenance, and LISTEN/NOTIFY")]
-    MissingSessionDatabaseUrl,
+    #[error("pgbouncer_transaction_mode=true requires a separate session_database for schema initialization, partition maintenance, and LISTEN/NOTIFY")]
+    MissingSessionDatabase,
     #[error(
-        "session_database_url must not use the transaction-pool URL: partition maintenance \
+        "session_database must not use the transaction-pool URL: partition maintenance \
          and LISTEN require PostgreSQL session affinity; use a direct or session-capable \
-         URL for session_database_url"
+         URL for session_database"
     )]
     SessionUrlIsTransactionPoolUrl,
+    /// A TCP keepalive or user timeout value is outside its bound
+    /// (Python `CONFIG_INVALID_KEEPALIVE`). The cause names the field and
+    /// the bound, never the value.
+    #[error("{0}")]
+    SocketValueOutOfBounds(SocketValueRefused),
 }
 
 /// The scheme reported for a URL that has no `://`.
@@ -399,14 +435,14 @@ impl PostgresConfig {
     pub fn from_url(url: impl Into<String>) -> Self {
         Self {
             database_url: url.into(),
-            session_database_url: None,
+            session_database: SessionDatabase::SameAsDatabaseUrl,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: default_true(),
             worker_pool_pre_ping: false,
             pool_size: default_pool_size(),
             max_overflow: default_max_overflow(),
             retain_rerun_input_default: false,
-            pool_timeout: default_pool_timeout(),
+            pool_timeout_seconds: default_pool_timeout_seconds(),
             pool_recycle: default_pool_recycle(),
             echo: false,
             tcp_keepalives: TcpKeepalivesConfig::default(),
@@ -422,15 +458,17 @@ impl PostgresConfig {
     /// Create a PostgresConfig for PgBouncer transaction pooling.
     ///
     /// `database_url` should be the transaction-pool endpoint. `session_database_url`
-    /// must be a direct or session-pooled endpoint used for schema work,
-    /// partition maintenance, and LISTEN/NOTIFY. The transaction-pool endpoint must support
+    /// becomes the separate session database: a direct or session-pooled
+    /// endpoint used for schema work, partition maintenance, and LISTEN/NOTIFY. The transaction-pool endpoint must support
     /// protocol-level prepared statement tracking (`max_prepared_statements > 0`).
     pub fn from_pgbouncer_urls(
         database_url: impl Into<String>,
         session_database_url: impl Into<String>,
     ) -> Self {
         let mut config = Self::from_url(database_url);
-        config.session_database_url = Some(session_database_url.into());
+        config.session_database = SessionDatabase::Separate {
+            url: session_database_url.into(),
+        };
         config.pgbouncer_transaction_mode = true;
         config
     }
@@ -438,9 +476,10 @@ impl PostgresConfig {
     /// Return the URL used for schema initialization, partition maintenance,
     /// and LISTEN/NOTIFY.
     pub fn effective_session_database_url(&self) -> &str {
-        self.session_database_url
-            .as_deref()
-            .unwrap_or(&self.database_url)
+        match &self.session_database {
+            SessionDatabase::SameAsDatabaseUrl => &self.database_url,
+            SessionDatabase::Separate { url } => url,
+        }
     }
 
     /// A copy whose pool holds up to `connections` connections with no
@@ -469,29 +508,37 @@ impl PostgresConfig {
     /// Validate the configuration.
     ///
     /// Accepts only the `postgresql://` and `postgres://` schemes for both
-    /// URLs. In PgBouncer transaction mode, requires a session URL that
-    /// differs from `database_url`.
+    /// URLs. In PgBouncer transaction mode, requires a separate session
+    /// database whose URL differs from `database_url`. Then refuses the
+    /// first TCP keepalive or user timeout value outside its bound
+    /// ([`PostgresConfigError::SocketValueOutOfBounds`]).
     pub fn validate(&self) -> Result<(), PostgresConfigError> {
         if !is_postgres_url(&self.database_url) {
             return Err(PostgresConfigError::InvalidUrlScheme(url_scheme(
                 &self.database_url,
             )));
         }
-        if let Some(session_url) = &self.session_database_url {
-            if !is_postgres_url(session_url) {
+        match (&self.session_database, self.pgbouncer_transaction_mode) {
+            (SessionDatabase::Separate { url }, _) if !is_postgres_url(url) => {
                 return Err(PostgresConfigError::InvalidSessionUrlScheme(url_scheme(
-                    session_url,
+                    url,
                 )));
             }
+            (SessionDatabase::SameAsDatabaseUrl, true) => {
+                return Err(PostgresConfigError::MissingSessionDatabase);
+            }
+            (SessionDatabase::Separate { url }, true) if *url == self.database_url => {
+                return Err(PostgresConfigError::SessionUrlIsTransactionPoolUrl);
+            }
+            (SessionDatabase::SameAsDatabaseUrl, false) | (SessionDatabase::Separate { .. }, _) => {
+            }
         }
-        if self.pgbouncer_transaction_mode && self.session_database_url.is_none() {
-            return Err(PostgresConfigError::MissingSessionDatabaseUrl);
-        }
-        if self.pgbouncer_transaction_mode
-            && self.session_database_url.as_deref() == Some(self.database_url.as_str())
-        {
-            return Err(PostgresConfigError::SessionUrlIsTransactionPoolUrl);
-        }
+        self.tcp_keepalives
+            .checked()
+            .map_err(PostgresConfigError::SocketValueOutOfBounds)?;
+        self.tcp_user_timeout
+            .checked()
+            .map_err(PostgresConfigError::SocketValueOutOfBounds)?;
         Ok(())
     }
 }
@@ -525,14 +572,16 @@ mod tests {
     fn debug_does_not_leak_password() {
         let config = PostgresConfig {
             database_url: "postgresql://user:topsecret@localhost/db".to_owned(),
-            session_database_url: Some("postgresql://user:topsecret@localhost/db".to_owned()),
+            session_database: SessionDatabase::Separate {
+                url: "postgresql://user:topsecret@localhost/db".to_owned(),
+            },
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
             pool_size: 30,
             max_overflow: 10,
             retain_rerun_input_default: false,
-            pool_timeout: 30,
+            pool_timeout_seconds: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
@@ -547,14 +596,14 @@ mod tests {
     fn valid_url() {
         let config = PostgresConfig {
             database_url: "postgresql://user:pass@localhost/db".to_owned(),
-            session_database_url: None,
+            session_database: SessionDatabase::SameAsDatabaseUrl,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
             pool_size: 30,
             max_overflow: 30,
             retain_rerun_input_default: false,
-            pool_timeout: 30,
+            pool_timeout_seconds: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
@@ -567,14 +616,14 @@ mod tests {
     fn postgres_scheme_also_valid() {
         let config = PostgresConfig {
             database_url: "postgres://user:pass@localhost/db".to_owned(),
-            session_database_url: None,
+            session_database: SessionDatabase::SameAsDatabaseUrl,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
             pool_size: 30,
             max_overflow: 30,
             retain_rerun_input_default: false,
-            pool_timeout: 30,
+            pool_timeout_seconds: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
@@ -587,14 +636,14 @@ mod tests {
     fn invalid_url_scheme() {
         let config = PostgresConfig {
             database_url: "mysql://user:pass@localhost/db".to_owned(),
-            session_database_url: None,
+            session_database: SessionDatabase::SameAsDatabaseUrl,
             pgbouncer_transaction_mode: false,
             pool_pre_ping: true,
             worker_pool_pre_ping: false,
             pool_size: 30,
             max_overflow: 30,
             retain_rerun_input_default: false,
-            pool_timeout: 30,
+            pool_timeout_seconds: 30,
             pool_recycle: crate::manifest::PoolRecycle::after_seconds(1800),
             echo: false,
             tcp_keepalives: Default::default(),
@@ -609,7 +658,7 @@ mod tests {
         let config: PostgresConfig = serde_json::from_str(json).unwrap();
         assert!(config.pool_pre_ping);
         assert!(!config.echo);
-        assert!(config.session_database_url.is_none());
+        assert_eq!(config.session_database, SessionDatabase::SameAsDatabaseUrl);
         assert!(!config.pgbouncer_transaction_mode);
         assert!(!config.retain_rerun_input_default);
     }
@@ -650,8 +699,52 @@ mod tests {
 
         assert!(matches!(
             config.validate(),
-            Err(PostgresConfigError::MissingSessionDatabaseUrl),
+            Err(PostgresConfigError::MissingSessionDatabase),
         ));
+    }
+
+    /// A TCP keepalive value outside its bound is refused by `validate`,
+    /// with the field path and the bound.
+    #[test]
+    fn a_socket_value_outside_its_bound_is_refused() {
+        let mut config = PostgresConfig::from_url("postgresql://user:pass@localhost/db");
+        config.tcp_keepalives = TcpKeepalivesConfig::On {
+            idle_seconds: 30,
+            interval_seconds: 10,
+            probes: 0,
+        };
+        let Err(PostgresConfigError::SocketValueOutOfBounds(refused)) = config.validate() else {
+            panic!("zero probes are refused");
+        };
+        assert_eq!(refused.field, "tcp_keepalives.probes");
+
+        config.tcp_keepalives = TcpKeepalivesConfig::Off;
+        config.tcp_user_timeout = TcpUserTimeoutConfig::After { milliseconds: 0 };
+        let Err(PostgresConfigError::SocketValueOutOfBounds(refused)) = config.validate() else {
+            panic!("zero milliseconds are refused");
+        };
+        assert_eq!(refused.field, "tcp_user_timeout.milliseconds");
+    }
+
+    /// The JSON form of a separate session database names its URL, and the
+    /// `Debug` form masks its password.
+    #[test]
+    fn a_separate_session_database_parses_and_masks_its_password() {
+        let config: PostgresConfig = serde_json::from_str(
+            r#"{"database_url": "postgresql://localhost/db",
+                "session_database": {"kind": "SEPARATE", "url": "postgresql://u:topsecret@direct/db"}}"#,
+        )
+        .expect("a separate session database parses");
+        assert_eq!(
+            config.effective_session_database_url(),
+            "postgresql://u:topsecret@direct/db"
+        );
+        assert!(!format!("{:?}", config.session_database).contains("topsecret"));
+        assert!(serde_json::from_str::<PostgresConfig>(
+            r#"{"database_url": "postgresql://localhost/db",
+                "session_database_url": "postgresql://localhost/db"}"#,
+        )
+        .is_err());
     }
 
     /// Python `PostgresConfig.validate_pgbouncer_configuration`: in PgBouncer
@@ -669,7 +762,9 @@ mod tests {
 
         // Outside PgBouncer mode the two roles may share one URL.
         let mut direct = PostgresConfig::from_url("postgresql://user:pass@direct/db");
-        direct.session_database_url = Some("postgresql://user:pass@direct/db".to_owned());
+        direct.session_database = SessionDatabase::Separate {
+            url: "postgresql://user:pass@direct/db".to_owned(),
+        };
         assert!(direct.validate().is_ok());
     }
 
@@ -941,7 +1036,9 @@ mod tests {
     #[test]
     fn invalid_session_url_scheme() {
         let mut config = PostgresConfig::from_url("postgresql://user:pass@pooler/db");
-        config.session_database_url = Some("mysql://user:pass@direct/db".to_owned());
+        config.session_database = SessionDatabase::Separate {
+            url: "mysql://user:pass@direct/db".to_owned(),
+        };
 
         assert!(matches!(
             config.validate(),
@@ -972,7 +1069,9 @@ mod tests {
     #[test]
     fn a_driver_suffix_session_scheme_is_refused() {
         let mut config = PostgresConfig::from_url("postgresql://user:pass@pooler/db");
-        config.session_database_url = Some("postgres+asyncpg://user:pass@direct/db".to_owned());
+        config.session_database = SessionDatabase::Separate {
+            url: "postgres+asyncpg://user:pass@direct/db".to_owned(),
+        };
 
         assert_eq!(
             config.validate(),
