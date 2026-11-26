@@ -19,7 +19,10 @@ export type DecodeConversion = (stored: unknown) => Result<unknown, CheckFailure
 /** The stored value, from the value that a sender gives (a zod codec's encode). */
 export type EncodeConversion = (value: unknown) => Result<unknown, CheckFailure>;
 
-/** A check of a value (a zod refinement). It runs before an encode and after a decode in the worker form. */
+/**
+ * A check of a value (a zod refinement). At encode it runs after the writer wrote the value's kind, on the value with
+ * its defaults filled; at decode it runs after the reader read the kind, in the worker form only.
+ */
 export type ValueCheck = (value: unknown) => Result<true, CheckFailure>;
 
 /** The text of the issues of a failure: `<path> <code>`, joined by `; `. It holds no value. Pure. */
