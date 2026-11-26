@@ -39,12 +39,11 @@ use napi_derive::napi;
 use crate::call::guard::sync_call;
 use crate::call::operation::{guarded_start, resolve, EnvelopeResolver};
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::child::body::{ChildBodies, ChildPost, ChildPoster, JsAsyncBody};
+use crate::child::body::{ChildBodies, ChildPost, ChildPoster, JsAsyncBody, JsBlockingBody};
 use crate::child::body_facts::{BodyFacts, BodyFactsMode};
 use crate::child::exit::{child_process_exit, spawn_host_thread, FlushBound};
 use crate::child::handler_slot::take_handler_child;
 use crate::child::loop_watch::make_host_loop;
-use crate::child::seat_slot::seat_body;
 use crate::child::start_hooks::{start_hooks, HookDispatcher, StartHookCall};
 use crate::logging::bridge::child_log_setup;
 
@@ -364,7 +363,10 @@ fn task_registry(
                 meta: TaskMeta::default(),
             },
             BodyForm::Blocking => RegisteredTask::Blocking {
-                task: seat_body(&task.name, bodies),
+                task: Arc::new(JsBlockingBody {
+                    task_name: task.name.clone(),
+                    bodies: Arc::clone(bodies),
+                }),
                 meta: TaskMeta::default(),
             },
         };

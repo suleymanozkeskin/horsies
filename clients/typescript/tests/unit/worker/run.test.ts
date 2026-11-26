@@ -8,7 +8,12 @@ import type { WorkerLogLevel } from "../../../horsies/src/_catalog/worker_manife
 import type { AppContext } from "../../../horsies/src/app/context.ts";
 import { checkReport } from "../../../horsies/src/check/report.ts";
 import { refusal } from "../../../horsies/src/app/refusal.ts";
-import type { NativePreparedWorker, WorkerPreparation, WorkerRunEnded } from "../../../horsies/src/native/worker/addon.ts";
+import type {
+  NativePreparedWorker,
+  SeatIsolateMemory,
+  WorkerPreparation,
+  WorkerRunEnded,
+} from "../../../horsies/src/native/worker/addon.ts";
 import { ClientDefect, CoreStartFailed, CoreStopped } from "../../../horsies/src/thrown-errors.ts";
 import { createHorsies } from "../../../horsies/src/app.ts";
 import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
@@ -16,6 +21,7 @@ import type { LaunchFacts } from "../../../horsies/src/worker/child-command.ts";
 import {
   appHandle,
   processWorkerRunDeps,
+  runtimeSeatIsolateMemory,
   runWorkerOf,
   type WorkerRunDeps,
   type WorkerRunError,
@@ -253,12 +259,12 @@ describe("the worker run", () => {
     ];
 
     assert.equal(texts[3], "claim.prefetchBuffer: outside 0 to 2147483647, the bound of its worker manifest field");
-    assert.ok(texts[5]?.startsWith('workerProfiles["cpu"].sharedThread: '));
+    assert.ok(texts[5]?.startsWith('workerProfiles["cpu"].sharedThread: this runtime does not cap the memory of a worker thread'));
     assert.equal(texts[7], "worker start failed (SCHEMA_REFUSED): schema");
     assert.equal(texts[8], "worker failed (CLAIM_FAILED): claim");
     assert.ok(texts[0]?.startsWith("error[HRS-300]: tasks[0] ping: no implementation"));
   });
-  test("a profile with SHARED_THREAD children is refused with its name", async () => {
+  test("a profile with SHARED_THREAD children is refused with its name where worker threads have no memory cap", async () => {
     assert.deepEqual(
       await runError(contextOf(implementedApp()), { prepare: () => ({ kind: "sharedThreadUnavailable", profile: "cpu" }) }),
       { kind: "sharedThreadUnavailable", profile: "cpu" },
@@ -314,6 +320,30 @@ describe("the worker run of this process", () => {
     assert.equal(handles.length, 1);
     assert.equal(handles[0], handle);
     assert.equal(appHandle(contextOf(created.value)), handle);
+  });
+
+  test("the preparation gets the memory cap of the worker threads of this runtime: capped on Node, not on Bun", () => {
+    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment());
+
+    if (!created.ok) {
+      assert.fail("the app is created");
+    }
+
+    const given: SeatIsolateMemory[] = [];
+
+    const deps = processWorkerRunDeps(contextOf(created.value), () => undefined, {
+      prepareWorker: (_config, _start, seatIsolates) => {
+        given.push(seatIsolates);
+
+        return { kind: "prepared", worker: WORKER };
+      },
+      runWorker: async () => ({ kind: "stopped" }),
+      requestWorkerStop: () => undefined,
+    });
+
+    assert.deepEqual(deps.prepare("{}", "{}"), { kind: "prepared", worker: WORKER });
+    assert.deepEqual(given, ["bun" in process.versions ? "NOT_CAPPED" : "CAPPED"]);
+    assert.equal(runtimeSeatIsolateMemory(), given[0]);
   });
 
   test("the handle of an app without the addon is a defect", () => {

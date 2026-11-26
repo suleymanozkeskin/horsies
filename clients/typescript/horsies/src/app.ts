@@ -67,8 +67,10 @@ export class Horsies {
   /**
    * Add a provider of app state and give its key; `runtime.state(key)` gives the value. Calls nothing: the factory
    * runs in each task child, before the child reports ready, in registration order and before the `onChildStart`
-   * hooks, for at most 10 s. A factory that throws, rejects or runs past its bound stops the worker with
-   * `CHILD_HOOK_FAILED` (exit 173). A call after `cli.run` serves a child is a defect: `ClientDefect`.
+   * hooks, for at most 10 s. In a `SHARED_THREAD` child it runs in each seat isolate instead (a pool cannot cross
+   * isolates, so each seat builds its own), and the 10 s bound holds for the boot of all of them. A factory that
+   * throws, rejects or runs past its bound stops the worker with `CHILD_HOOK_FAILED` (exit 173). A call after
+   * `cli.run` serves a child is a defect: `ClientDefect`.
    */
   provide<T>(factory: ProviderFactory<T>): StateKey<Awaited<T>> {
     return provideFor(this.#context, factory);

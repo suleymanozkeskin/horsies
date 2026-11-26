@@ -4,7 +4,8 @@
 // 2. The static check without the schedules: a refusal prints the `worker-startup` report.
 // 3. The child command of this process.
 // 4. The start members and `prepareWorker`: the manifest bounds, the profile, the connection settings, and no
-//    `SHARED_THREAD` children (the TypeScript worker has no thread seat isolates).
+//    `SHARED_THREAD` children on Bun (Bun does not cap the memory of a worker thread, so a seat isolate out of memory
+//    would not end alone; Node caps it with `resourceLimits`).
 // 5. The run on the core's process runtime, with the core handle that `Horsies.create` built for the app (so the
 //    child spec source that the app registers there builds the sub-workflow children), and the stop on `SIGTERM`
 //    and `SIGINT`. The stop handlers stay until the process ends: `cli.run` ends it after the log wait.
@@ -18,7 +19,14 @@ import type { AppContext } from "../app/context.ts";
 import { type CoreChecks, refusalOfCore } from "../app/core-checks.ts";
 import { type CheckReport, checkReport, reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
-import type { NativePreparedWorker, WorkerBootCauseName, WorkerFailCauseName, WorkerPreparation, WorkerRunEnded } from "../native/worker/addon.ts";
+import type {
+  NativePreparedWorker,
+  SeatIsolateMemory,
+  WorkerBootCauseName,
+  WorkerFailCauseName,
+  WorkerPreparation,
+  WorkerRunEnded,
+} from "../native/worker/addon.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { unreachable } from "../native/call/never.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
@@ -59,7 +67,10 @@ export type WorkerRunError =
   | { readonly kind: "profileRefused"; readonly report: CheckReport }
   /** The connection settings fail the broker config check. Nothing started. */
   | { readonly kind: "connectionSettingsRefused"; readonly cause: string }
-  /** The profile starts `SHARED_THREAD` children; the TypeScript worker has no thread seat isolates. Nothing started. */
+  /**
+   * The profile starts `SHARED_THREAD` children, and the runtime of this process does not cap the memory of a worker
+   * thread (Bun). Nothing started.
+   */
   | { readonly kind: "sharedThreadUnavailable"; readonly profile: string }
   /** The core of this process refused the call: it could not start, it stopped, or this process is a fork. */
   | { readonly kind: "coreRefused"; readonly error: CoreError }
@@ -232,7 +243,7 @@ export function workerRunErrorText(error: WorkerRunError): string {
     case "connectionSettingsRefused":
       return `the connection settings are refused: ${error.cause}`;
     case "sharedThreadUnavailable":
-      return `workerProfiles[${JSON.stringify(error.profile)}].sharedThread: the TypeScript worker has no thread seat isolates, so it does not start SHARED_THREAD children; run the profile's tasks in isolated or shared async children`;
+      return `workerProfiles[${JSON.stringify(error.profile)}].sharedThread: this runtime does not cap the memory of a worker thread (Bun ignores resourceLimits), so a seat isolate out of memory would not end alone, and the worker does not start SHARED_THREAD children here; run the worker on Node, or run the profile's tasks in isolated or shared async children`;
     case "coreRefused":
       return `the core refused the worker: ${error.error.name}: ${error.error.message}`;
     case "bootFailed":
@@ -246,7 +257,7 @@ export function workerRunErrorText(error: WorkerRunError): string {
 
 /** The worker functions of the addon that the worker run calls. A test gives fakes. */
 export interface NativeWorkerCalls {
-  prepareWorker(appConfigJson: string, startJson: string): WorkerPreparation;
+  prepareWorker(appConfigJson: string, startJson: string, seatIsolates: SeatIsolateMemory): WorkerPreparation;
   runWorker(worker: NativePreparedWorker, handle: CoreHandle): Promise<WorkerRunEnded>;
   requestWorkerStop(worker: NativePreparedWorker): void;
 }
@@ -271,11 +282,16 @@ export function processWorkerRunDeps(
     writeLine: (line) => {
       process.stderr.write(`${line}\n`);
     },
-    prepare: (appConfigJson, startJson) => native.prepareWorker(appConfigJson, startJson),
+    prepare: (appConfigJson, startJson) => native.prepareWorker(appConfigJson, startJson, runtimeSeatIsolateMemory()),
     run: async (worker) => native.runWorker(worker, appHandle(context)),
     requestStop: (worker) => native.requestWorkerStop(worker),
     stopOnSignals,
   };
+}
+
+/** Whether the runtime of this process caps the memory of a worker thread: Bun ignores `resourceLimits`. */
+export function runtimeSeatIsolateMemory(): SeatIsolateMemory {
+  return "bun" in process.versions ? "NOT_CAPPED" : "CAPPED";
 }
 
 /**

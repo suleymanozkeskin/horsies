@@ -2,14 +2,15 @@
 //! core's worker parent inside a Node or Bun process (the model: the Python
 //! bridge's `worker.rs` and the Rust client's `worker.rs`).
 //!
-//! - `prepareWorker(appConfigJson, startJson)`: pure; starts no core. It
-//!   reads the config that `Horsies.create` accepted, builds the worker
-//!   manifest (the config sections and the start members), parses it with
-//!   the core's parser and picks the profile (`WorkerPlan::of_manifest`).
+//! - `prepareWorker(appConfigJson, startJson, seatIsolates)`: pure; starts
+//!   no core. It reads the config that `Horsies.create` accepted, builds the
+//!   worker manifest (the config sections and the start members), parses it
+//!   with the core's parser and picks the profile (`WorkerPlan::of_manifest`).
 //!   Answers `prepared`, `manifestBound`, `profileRefused`,
 //!   `connectionSettingsRefused` or `sharedThreadUnavailable` (a profile
-//!   with `SHARED_THREAD` children: this addon has no thread seat isolates). A start member that the core's parser
-//!   refuses is `MANIFEST_REFUSED`, a defect of the package.
+//!   with `SHARED_THREAD` children in a runtime that does not cap the memory
+//!   of a worker thread: Bun). A start member that the core's parser refuses
+//!   is `MANIFEST_REFUSED`, a defect of the package.
 //! - `runWorker(worker, handle)`: a service run on the core's process
 //!   runtime. The worker builds its own broker for the client family
 //!   `TYPESCRIPT`. Its workflow steps build sub-workflow children with the
@@ -128,28 +129,45 @@ pub enum WorkerPreparation {
     /// The connection settings fail the broker config check (for example
     /// PgBouncer transaction mode with no session URL). Nothing started.
     ConnectionSettingsRefused { cause: String },
-    /// The profile `profile` starts `SHARED_THREAD` children, and this addon
-    /// has no thread seat isolates: a child would run each `SHARED_THREAD`
-    /// body on its JavaScript main thread, one at a time, and a body that
-    /// holds that thread for the blocked-loop limit would end the child.
-    /// Nothing started.
+    /// The profile `profile` starts `SHARED_THREAD` children, and the
+    /// runtime of this process does not cap the memory of a worker thread
+    /// (Bun ignores `resourceLimits`): a seat isolate out of memory would
+    /// not end alone. Nothing started.
     SharedThreadUnavailable { profile: String },
+}
+
+/// Whether the runtime of this process caps the memory of a worker thread,
+/// so a `SHARED_THREAD` seat isolate out of memory ends alone.
+#[napi(string_enum = "UPPER_SNAKE")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeatIsolateMemory {
+    /// Node: a worker thread has its `resourceLimits`; at the cap the
+    /// isolate ends with `ERR_WORKER_OUT_OF_MEMORY` and the child lives.
+    Capped,
+    /// Bun: `resourceLimits` is ignored, and an isolate grows with no
+    /// bound.
+    NotCapped,
 }
 
 /// Prepare the worker of the accepted app config `appConfigJson` (the core's
 /// config text that `Horsies.create` checked) and the start members
-/// `startJson`. Pure: starts no core.
+/// `startJson`, in a runtime whose worker threads have `seatIsolates`
+/// memory. Pure: starts no core.
 #[napi(ts_return_type = "NativeEnvelope<WorkerPreparation>")]
 #[allow(
     clippy::needless_pass_by_value,
     reason = "napi-rs passes the arguments of a JavaScript call by value"
 )]
-pub fn prepare_worker(app_config_json: String, start_json: String) -> Envelope<WorkerPreparation> {
+pub fn prepare_worker(
+    app_config_json: String,
+    start_json: String,
+    seat_isolates: SeatIsolateMemory,
+) -> Envelope<WorkerPreparation> {
     sync_call(PREPARE_SUBJECT, || {
         if let Some(refusal) = pure_call_refusal() {
             return Envelope::Thrown(refusal.thrown());
         }
-        match preparation(&app_config_json, &start_json) {
+        match preparation(&app_config_json, &start_json, seat_isolates) {
             Ok(prepared) => Envelope::Value(prepared),
             Err(thrown) => Envelope::Thrown(thrown),
         }
@@ -157,8 +175,12 @@ pub fn prepare_worker(app_config_json: String, start_json: String) -> Envelope<W
 }
 
 /// The preparation of a worker, in order: the config, the start members,
-/// the config sections, the manifest, the plan. Pure.
-fn preparation(app_config_json: &str, start_json: &str) -> Result<WorkerPreparation, NativeThrown> {
+/// the config sections, the manifest, the plan, the seat isolates. Pure.
+fn preparation(
+    app_config_json: &str,
+    start_json: &str,
+    seat_isolates: SeatIsolateMemory,
+) -> Result<WorkerPreparation, NativeThrown> {
     let (config, producer) = accepted_config(app_config_json)?;
     let start = StartPart::parse(start_json).map_err(manifest_refused)?;
     let sections = match config_sections(&config, &producer) {
@@ -167,11 +189,14 @@ fn preparation(app_config_json: &str, start_json: &str) -> Result<WorkerPreparat
     };
     let manifest = worker_manifest(&sections, start).map_err(manifest_refused)?;
     Ok(match WorkerPlan::of_manifest(&manifest) {
-        Ok(plan) => match thread_seats(&plan) {
-            ThreadSeats::NotNeeded => WorkerPreparation::Prepared {
-                worker: PreparedWorker::of(plan),
-            },
-            ThreadSeats::Needed { profile } => {
+        Ok(plan) => match (thread_seats(&plan), seat_isolates) {
+            (ThreadSeats::NotNeeded, _)
+            | (ThreadSeats::Needed { .. }, SeatIsolateMemory::Capped) => {
+                WorkerPreparation::Prepared {
+                    worker: PreparedWorker::of(plan),
+                }
+            }
+            (ThreadSeats::Needed { profile }, SeatIsolateMemory::NotCapped) => {
                 WorkerPreparation::SharedThreadUnavailable { profile }
             }
         },
@@ -597,7 +622,7 @@ mod tests {
     const NAMED_IO: &str = r#"{"kind": "NAMED", "name": "io"}"#;
 
     fn prepared(start_json: &str) -> Result<WorkerPreparation, NativeThrown> {
-        preparation(CONFIG, start_json)
+        preparation(CONFIG, start_json, SeatIsolateMemory::Capped)
     }
 
     #[test]
@@ -658,7 +683,7 @@ mod tests {
         // `AppConfig::validate` runs the broker check that the plan's
         // connection step runs, so the config check refuses the text first.
         let config = r#"{"broker": {"database_url": "postgresql://127.0.0.1:6432/horsies", "pgbouncer_transaction_mode": true}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
-        match preparation(config, &start(NAMED_IO)) {
+        match preparation(config, &start(NAMED_IO), SeatIsolateMemory::Capped) {
             Err(NativeThrown::ClientDefect { rule, .. }) => {
                 assert!(
                     rule.starts_with("the config check refuses the accepted config: ")
@@ -680,20 +705,46 @@ mod tests {
         // connection step sees one URL twice.
         let config = r#"{"broker": {"database_url": "postgres://127.0.0.1:6432/horsies", "session_database_url": "postgresql://127.0.0.1:6432/horsies", "pgbouncer_transaction_mode": true}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
         assert!(matches!(
-            preparation(config, &start(NAMED_IO)),
+            preparation(config, &start(NAMED_IO), SeatIsolateMemory::Capped),
             Ok(WorkerPreparation::ConnectionSettingsRefused { .. })
         ));
     }
 
+    /// An app config with the profile `cpu` of `SHARED_THREAD` children.
+    const THREAD_CONFIG: &str = r#"{"broker": {"database_url": "postgresql://127.0.0.1:55432/horsies"}, "worker_profiles": {"cpu": {"isolated": {"kind": "isolated_children", "count": 1}, "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4}}}}"#;
+
+    const NAMED_CPU: &str = r#"{"kind": "NAMED", "name": "cpu"}"#;
+
     #[test]
-    fn a_profile_with_shared_thread_children_is_refused_with_its_name() {
-        let config = r#"{"broker": {"database_url": "postgresql://127.0.0.1:55432/horsies"}, "worker_profiles": {"cpu": {"isolated": {"kind": "isolated_children", "count": 1}, "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4}}}}"#;
-        match preparation(config, &start(r#"{"kind": "NAMED", "name": "cpu"}"#)) {
+    fn a_profile_with_shared_thread_children_is_prepared_where_worker_threads_have_a_memory_cap() {
+        assert!(matches!(
+            preparation(THREAD_CONFIG, &start(NAMED_CPU), SeatIsolateMemory::Capped),
+            Ok(WorkerPreparation::Prepared { .. })
+        ));
+    }
+
+    #[test]
+    fn a_profile_with_shared_thread_children_is_refused_with_its_name_where_worker_threads_have_no_memory_cap(
+    ) {
+        match preparation(
+            THREAD_CONFIG,
+            &start(NAMED_CPU),
+            SeatIsolateMemory::NotCapped,
+        ) {
             Ok(WorkerPreparation::SharedThreadUnavailable { profile }) => {
                 assert_eq!(profile, "cpu");
             }
             other => panic!("a SHARED_THREAD profile is refused, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_profile_with_no_shared_thread_children_is_prepared_where_worker_threads_have_no_memory_cap(
+    ) {
+        assert!(matches!(
+            preparation(CONFIG, &start(NAMED_IO), SeatIsolateMemory::NotCapped),
+            Ok(WorkerPreparation::Prepared { .. })
+        ));
     }
 
     #[test]
@@ -720,7 +771,11 @@ mod tests {
     #[test]
     fn a_config_text_that_the_check_refuses_is_a_client_defect() {
         assert!(matches!(
-            preparation(r#"{"broker": {}}"#, &start(NAMED_IO)),
+            preparation(
+                r#"{"broker": {}}"#,
+                &start(NAMED_IO),
+                SeatIsolateMemory::Capped
+            ),
             Err(NativeThrown::ClientDefect { .. })
         ));
     }

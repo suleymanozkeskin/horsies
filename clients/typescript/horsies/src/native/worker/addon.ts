@@ -29,7 +29,8 @@ export interface NativePreparedWorker {
  *   writes it, and the value is not kept;
  * - `profileRefused`: the core's report on the profile set or the requested profile;
  * - `connectionSettingsRefused`: the broker config check refuses the connection settings;
- * - `sharedThreadUnavailable`: the profile starts `SHARED_THREAD` children, and the addon has no thread seat isolates.
+ * - `sharedThreadUnavailable`: the profile starts `SHARED_THREAD` children, and the runtime does not cap the memory of
+ *   a worker thread (Bun).
  */
 export type WorkerPreparation =
   | { readonly kind: "prepared"; readonly worker: NativePreparedWorker }
@@ -37,6 +38,12 @@ export type WorkerPreparation =
   | { readonly kind: "profileRefused"; readonly refusals: CoreRefusal[] }
   | { readonly kind: "connectionSettingsRefused"; readonly cause: string }
   | { readonly kind: "sharedThreadUnavailable"; readonly profile: string };
+
+/**
+ * Whether the runtime of this process caps the memory of a worker thread: `CAPPED` on Node (`resourceLimits`; a seat
+ * isolate at its cap ends alone), `NOT_CAPPED` on Bun (it ignores `resourceLimits`).
+ */
+export type SeatIsolateMemory = "CAPPED" | "NOT_CAPPED";
 
 /** Why a worker start failed, as the core names it. */
 export type WorkerBootCauseName =
@@ -88,7 +95,7 @@ export type LogBacklog = "empty" | "waiting" | "noForwarder";
 /** The functions of the `worker` area. */
 export interface WorkerAddon {
   parseListenAddress(text: string): NativeEnvelope<ListenAddressCheck>;
-  prepareWorker(appConfigJson: string, startJson: string): NativeEnvelope<WorkerPreparation>;
+  prepareWorker(appConfigJson: string, startJson: string, seatIsolates: SeatIsolateMemory): NativeEnvelope<WorkerPreparation>;
   runWorker(worker: NativePreparedWorker, handle: NativeCoreHandle): Promise<NativeEnvelope<WorkerRunEnded>>;
   checkLive(handle: NativeCoreHandle, appConfigJson: string): Promise<NativeEnvelope<LiveCheckOutcome>>;
   workerLogBacklog(): NativeEnvelope<LogBacklog>;
