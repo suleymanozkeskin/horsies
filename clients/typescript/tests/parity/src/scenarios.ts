@@ -50,7 +50,7 @@ const NO_KEY: KeyChoice = { kind: "noKey" };
  * One send, by how it is written:
  * - `direct`: one send through the parity app, with its key.
  * - `retryOfRefusedConnection`: a send of `parity.add` through a second app with the same contracts, whose broker
- *   refuses the connection, ends `ENQUEUE_FAILED` with its prepared payload; then two `retrySend` calls with that error
+ *   refuses the connection, ends `ENQUEUE_FAILED` with its prepared payload; then two `resend` calls with that error
  *   on the parity app write one task under the prepared id. Python and Rust reach a send refused before any statement
  *   with a blocking send inside a running event loop (`ASYNC_CONTEXT`); the TypeScript send is async only, so it has
  *   no such refusal. The stored rows are the same.

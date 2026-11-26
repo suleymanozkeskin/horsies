@@ -9,7 +9,7 @@ import { SeatRelayCode } from "../_catalog/task_send.ts";
 /**
  * `SEAT_RELAY_FULL`: the seat relay holds its bound of waiting calls; nothing was sent; retry. Only a call in a
  * `SHARED_THREAD` body gives it. `exception` is a retryable precondition of the seat relay whose text names the bound
- * and its value. A send past the bound minted no row, so `retrySend` does not take it: send again.
+ * and its value. A send past the bound minted no row, so `resend` does not take it: send again.
  */
 export type SeatRelayFull = {
   readonly code: typeof SeatRelayCode.SEAT_RELAY_FULL;

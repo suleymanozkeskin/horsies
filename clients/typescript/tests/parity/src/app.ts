@@ -22,7 +22,7 @@ import {
   h,
   Horsies,
   type HorsiesConfig,
-  type ScheduleEntry,
+  type TaskSchedule,
   type ScheduleSection,
   type TaskOutcome,
   type WorkerProfileInput,
@@ -114,7 +114,7 @@ export const transient = defineTask({
   input: { value: h.int() },
   output: h.int(),
   errorCodes: ["TRANSIENT"],
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], retryFor: ["TRANSIENT"] },
 });
 
 /** An isolated task that the parent kills at its deadline. */
@@ -159,7 +159,7 @@ export const transientAsync = defineTask({
   errorCodes: ["TRANSIENT"],
   execution: "SHARED_ASYNC",
   timeoutMs: SHARED_TIMEOUT_MS,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], retryFor: ["TRANSIENT"] },
 });
 
 /**
@@ -200,7 +200,7 @@ export const transientThread = defineTask({
   errorCodes: ["TRANSIENT"],
   execution: "SHARED_THREAD",
   timeoutMs: SHARED_TIMEOUT_MS,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], retryFor: ["TRANSIENT"] },
 });
 
 /** A thread seat that cannot stop at its deadline: the child is killed when no run of it has time left. */
@@ -270,7 +270,7 @@ export const PROFILES: { readonly [Name in ProfileName]: WorkerProfileInput } = 
 };
 
 /** The schedule `parity_slots`: each slot sends `parity.add` with 2 and 3 (Python `TaskSchedule` of `app.py`). */
-export const PARITY_SCHEDULE: ScheduleEntry<typeof add> = {
+export const PARITY_SCHEDULE: TaskSchedule<typeof add> = {
   name: SCHEDULE_NAME,
   task: add,
   input: { a: 2, b: 3 },

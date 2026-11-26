@@ -117,9 +117,9 @@ describe("an SDK that gives upper-case hex ids, with a database", () => {
     const caller = otel.trace.getTracer("caller").startSpan("caller");
 
     const answer = await otel.context.with(otel.trace.setSpan(otel.context.active(), caller), async () =>
-      tracedApp().rerun(
-        { sourceTaskId, deadline: { kind: "none" } },
-        { retention: { kind: "forever" }, rerunInput: "keep", reservationWindow: Temporal.Duration.from({ days: 1 }) },
+      tracedApp().rerunTask(
+        { sourceTaskId, goodUntil: { kind: "none" } },
+        { retention: { kind: "forever" }, retainRerunInput: "keep", reservationWindow: Temporal.Duration.from({ days: 1 }) },
       ),
     );
 

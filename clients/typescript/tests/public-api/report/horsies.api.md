@@ -917,7 +917,7 @@ export type ContextReadError =
 }
 /** The stored error has a custom code that the contract does not list. */
 | {
-    readonly kind: "unknownUserCode";
+    readonly kind: "unknownCustomCode";
     readonly nodeId: string;
     readonly code: string;
 };
@@ -1164,9 +1164,9 @@ export interface CustomQueueInput {
 // @public
 export interface DailySchedule {
     // (undocumented)
-    readonly at: Temporal.PlainTime;
-    // (undocumented)
     readonly kind: "daily";
+    // (undocumented)
+    readonly time: Temporal.PlainTime;
 }
 
 // @public
@@ -1762,12 +1762,12 @@ export class Horsies {
     pingDatabase(): Promise<Result<DatabasePing, PingDatabaseError>>;
     pingWorkers(options?: PingWorkersOptions): Promise<Result<readonly WorkerPong[], PingWorkersError>>;
     provide<T>(factory: ProviderFactory<T>): StateKey<Awaited<T>>;
-    rerun(command: RerunCommand, policy: RerunPolicy): Promise<Result<RerunOutcome, RerunError>>;
-    rerunIn(transaction: CallerTransaction, command: RerunCommand, policy: RerunPolicy): Promise<Result<RerunOutcome, CallerRerunError>>;
-    retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
+    rerunTask(command: RerunCommand, policy: RerunEnqueuePolicy): Promise<Result<RerunOutcome, RerunError>>;
+    rerunTaskIn(transaction: CallerTransaction, command: RerunCommand, policy: RerunEnqueuePolicy): Promise<Result<RerunOutcome, CallerRerunError>>;
+    resend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
     retryStart<R extends BuildReturn>(error: StartEnqueueFailed<R>): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
     schedules<const T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>, section?: ScheduleSection): void;
-    send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
+    send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: TaskSendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
     start<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, params: NoInfer<SendableInput<P>>, options?: StartOptions): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
     taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
     workflowHandle<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, workflowId: WorkflowId): WorkflowHandleById<R>;
@@ -2226,11 +2226,11 @@ export type Month = "january" | "february" | "march" | "april" | "may" | "june" 
 // @public
 export interface MonthlySchedule {
     // (undocumented)
-    readonly at: Temporal.PlainTime;
-    // (undocumented)
-    readonly day: number;
+    readonly dayOfMonth: number;
     // (undocumented)
     readonly kind: "monthly";
+    // (undocumented)
+    readonly time: Temporal.PlainTime;
 }
 
 // @public
@@ -2794,12 +2794,13 @@ export type ReadError =
 }
 /** The stored result does not read with the contract's types. `cause` holds no value. */
 | {
-    readonly kind: "storedResultUnreadable";
+    readonly kind: "resultDeserializationError";
+    readonly code: "RESULT_DESERIALIZATION_ERROR";
     readonly cause: string;
 }
 /** The stored error has a custom code that the contract's `errorCodes` does not list. */
 | {
-    readonly kind: "unknownUserCode";
+    readonly kind: "unknownCustomCode";
     readonly code: string;
 }
 /** A wait in a process that runs task bodies; nothing was read. */
@@ -2952,8 +2953,8 @@ export interface RerunClientFamilyMismatch {
 
 // @public
 export interface RerunCommand {
-    readonly callerKey?: string;
-    readonly deadline: RerunDeadline;
+    readonly goodUntil: RerunDeadline;
+    readonly idempotencyKey?: string;
     readonly sourceTaskId: TaskId;
 }
 
@@ -3007,6 +3008,15 @@ export interface RerunEnqueued {
     readonly rerunRootTaskId: TaskId;
     // (undocumented)
     readonly sourceTaskId: TaskId;
+}
+
+// @public
+export interface RerunEnqueuePolicy {
+    readonly reservationWindow: Temporal.Duration;
+    // (undocumented)
+    readonly retainRerunInput: RerunInputChoice;
+    // (undocumented)
+    readonly retention: RerunRetention;
 }
 
 // @public
@@ -3105,8 +3115,7 @@ export interface RerunInvalidPolicy {
 export interface RerunKeyConflict {
     // (undocumented)
     readonly kind: "keyConflict";
-    // (undocumented)
-    readonly reservedByTaskId: TaskId;
+    readonly ownerTaskId: TaskId;
     // (undocumented)
     readonly taskId: TaskId;
 }
@@ -3149,15 +3158,6 @@ export type RerunNotEligibleReason = "COMPLETED_SOURCE" | "WORKFLOW_TASK";
 export type RerunOutcome = RerunEnqueued | RerunSourceLive | RerunSourceAbsent | RerunSourceCorrupt | RerunNotEligible | RerunInputUnavailable | RerunInputCorrupt | RerunKeyConflict | RerunKeyReplay;
 
 // @public
-export interface RerunPolicy {
-    // (undocumented)
-    readonly rerunInput: RerunInputChoice;
-    readonly reservationWindow: Temporal.Duration;
-    // (undocumented)
-    readonly retention: RerunRetention;
-}
-
-// @public
 export type RerunRequestRefused = RerunInvalidCommand | RerunInvalidPolicy;
 
 // @public
@@ -3175,7 +3175,7 @@ export interface RerunResultNotText {
 
 // @public
 export type RerunRetention = {
-    readonly kind: "days";
+    readonly kind: "period";
     readonly days: number;
 } | {
     readonly kind: "forever";
@@ -3218,9 +3218,9 @@ export interface RerunStatementFailed {
     // (undocumented)
     readonly message: string;
     // (undocumented)
-    readonly outcome: RerunStatementOutcome;
-    // (undocumented)
     readonly retryable: boolean;
+    // (undocumented)
+    readonly stateAfter: RerunStatementOutcome;
 }
 
 // @public
@@ -3274,14 +3274,6 @@ export type Result<T, E> = Ok<T> | Err<E>;
 export type ResultConstructors<O extends OutputSchema, E extends string> = {
     readonly ok: (value: SchemaSent<O>) => Ok<SchemaSent<O>>;
     readonly err: <const K extends E>(failure: CustomFailure<CustomCode<K>>) => Err<CustomFailure<E>>;
-};
-
-// @public
-export type Retention = {
-    readonly kind: "days";
-    readonly days: number;
-} | {
-    readonly kind: "forever";
 };
 
 // @public
@@ -3350,12 +3342,12 @@ export type RetryPolicy<E extends string> = {
     readonly maxRetries: number;
     readonly jitter?: boolean;
     readonly maxDelaySeconds?: number;
-    readonly autoRetryFor: RetryCodes<E>;
+    readonly retryFor: RetryCodes<E>;
 } | {
     readonly kind: "fixed";
     readonly intervalsSeconds: NonEmpty<number>;
     readonly jitter?: boolean;
-    readonly autoRetryFor: RetryCodes<E>;
+    readonly retryFor: RetryCodes<E>;
 };
 
 // @public
@@ -3495,21 +3487,8 @@ export interface RunTraceNoCarrier {
 
 // @public
 export type ScheduleEntries<T extends readonly AnyTaskContract[]> = {
-    readonly [K in keyof T]: ScheduleEntry<T[K]>;
+    readonly [K in keyof T]: TaskSchedule<T[K]>;
 };
-
-// @public
-export interface ScheduleEntry<C> {
-    readonly catchUpMissed?: boolean;
-    readonly enabled?: boolean;
-    readonly input: NoInfer<ScheduleInput<C>>;
-    readonly maxCatchUpRuns?: number;
-    readonly name: string;
-    readonly pattern: SchedulePattern;
-    readonly queue?: string;
-    readonly task: C;
-    readonly timezone?: string;
-}
 
 // @public
 export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, Execution> ? SendableInput<P> : never;
@@ -3609,12 +3588,12 @@ export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSe
 export type SendInput<P extends ParameterSchemas> = keyof PlainParameters<P> extends never ? EmptyObject : ParametersSent<PlainParameters<P>>;
 
 // @public
-export interface SendOptions {
-    readonly delaySeconds?: number;
-    readonly goodUntil?: Temporal.Instant;
-    readonly idempotencyKey?: string;
-    readonly retention?: Retention;
-}
+export type SendRetention = {
+    readonly kind: "period";
+    readonly days: number;
+} | {
+    readonly kind: "forever";
+};
 
 // @public
 export type SentOf<W extends AnyWire> = W[typeof wireSent];
@@ -4379,6 +4358,19 @@ export class TaskRuntime {
     readonly taskId: TaskId;
 }
 
+// @public
+export interface TaskSchedule<C> {
+    readonly catchUpMissed?: boolean;
+    readonly enabled?: boolean;
+    readonly input: NoInfer<ScheduleInput<C>>;
+    readonly maxCatchUpRuns?: number;
+    readonly name: string;
+    readonly pattern: SchedulePattern;
+    readonly queue?: string;
+    readonly task: C;
+    readonly timezone?: string;
+}
+
 // @public (undocumented)
 export interface TaskSendEnqueueFailed {
     // (undocumented)
@@ -4412,6 +4404,14 @@ export interface TaskSendIdempotencyKeyConflict {
     readonly retryable: true;
     // (undocumented)
     readonly taskId: string;
+}
+
+// @public
+export interface TaskSendOptions {
+    readonly delaySeconds?: number;
+    readonly goodUntil?: Temporal.Instant;
+    readonly idempotencyKey?: string;
+    readonly retention?: SendRetention;
 }
 
 // @public (undocumented)
@@ -4768,11 +4768,11 @@ export type Weekday = "monday" | "tuesday" | "wednesday" | "thursday" | "friday"
 // @public
 export interface WeeklySchedule {
     // (undocumented)
-    readonly at: Temporal.PlainTime;
-    // (undocumented)
-    readonly days: NonEmpty<Weekday>;
-    // (undocumented)
     readonly kind: "weekly";
+    // (undocumented)
+    readonly time: Temporal.PlainTime;
+    // (undocumented)
+    readonly weekdays: NonEmpty<Weekday>;
 }
 
 // @public
@@ -5106,12 +5106,13 @@ export type WorkflowReadError =
 }
 /** The stored value does not read with the handle's types. `cause` holds no value. */
 | {
-    readonly kind: "storedResultUnreadable";
+    readonly kind: "resultDeserializationError";
+    readonly code: "RESULT_DESERIALIZATION_ERROR";
     readonly cause: string;
 }
 /** The stored error has a custom code that the node's contract does not list. */
 | {
-    readonly kind: "unknownUserCode";
+    readonly kind: "unknownCustomCode";
     readonly code: string;
 }
 /** A wait in a process that runs task bodies; nothing was read. */

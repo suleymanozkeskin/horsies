@@ -302,7 +302,7 @@ describe("app.schedules: the order, the disabled schedules and the threads", () 
       [
         { name: "a", task: unlisted, input: {}, pattern: HOURLY, timezone: "Nope/Zone" },
         { name: "b", task: unlisted, input: {}, pattern: HOURLY },
-        { name: "c", task: ping, input: {}, pattern: { kind: "monthly", day: 0.5, at: Temporal.PlainTime.from("08:00") }, timezone: "Nope/Zone" },
+        { name: "c", task: ping, input: {}, pattern: { kind: "monthly", dayOfMonth: 0.5, time: Temporal.PlainTime.from("08:00") }, timezone: "Nope/Zone" },
       ],
       { kind: "core", calls: fakeCore() },
     );
@@ -312,7 +312,7 @@ describe("app.schedules: the order, the disabled schedules and the threads", () 
       [
         ["HRS-205", "schedules[0] a", "timezone"],
         ["HRS-300", "schedules[1] b", "the task unlisted is not in the tasks list of this app"],
-        ["HRS-205", "schedules[2] c", "pattern.day"],
+        ["HRS-205", "schedules[2] c", "pattern.dayOfMonth"],
       ],
     );
   });

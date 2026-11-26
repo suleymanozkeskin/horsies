@@ -16,10 +16,10 @@ folder only when the task needs it:
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `defineTask`, the `h.*` wire types, the zod adapter, the stored input, `app.implement`, `ok` and `err` of the body's second argument, the exception map, `TaskRuntime`, the fencing token, the cancel signal, `runtime.spawn`, app state, retry policies, `app.send`, `TaskSendError`, `retrySend`, `TaskHandle`, `TaskOutcome`, `ReadError`, tests of a body |
+| `tasks.md` | `defineTask`, the `h.*` wire types, the zod adapter, the stored input, `app.implement`, `ok` and `err` of the body's second argument, the exception map, `TaskRuntime`, the fencing token, the cancel signal, `runtime.spawn`, app state, retry policies, `app.send`, `TaskSendError`, `resend`, `TaskHandle`, `TaskOutcome`, `ReadError`, tests of a body |
 | `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.taskOutcome`, joins, the workflow context (`runtime.workflowContext`), the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `retryStart`, `WorkflowHandle`, `app.workflowHandle` |
 | `configs.md` | `Horsies.create` and its refusals, the broker, queues, worker profiles, recovery, retention, `cli.run` and its commands |
-| `monitoring.md` | `app.pingDatabase`, `app.pingWorkers`, `app.monitoring`, the operator cancel, `createMonitoringHandler`, `app.rerun` and `app.rerunIn` |
+| `monitoring.md` | `app.pingDatabase`, `app.pingWorkers`, `app.monitoring`, the operator cancel, `createMonitoringHandler`, `app.rerunTask` and `app.rerunTaskIn` |
 
 The package has four entry points. The `exports` map allows no deep import:
 
@@ -218,7 +218,7 @@ export const dailyReport = defineWorkflow(
 |---|---|
 | Task body | `ok(value)` or `err({ code, message, data })` of its second argument, or a Promise of one |
 | `Horsies.create` | `Result<Horsies, ValidationReport>` |
-| `app.send`, `app.retrySend` | `Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>` |
+| `app.send`, `app.resend` | `Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>` |
 | `handle.get` | `Promise<Result<TaskOutcome<O, E>, ReadError>>` |
 | `handle.info` | `Promise<Result<TaskInfo, ReadError>>` |
 | `app.start`, `app.retryStart` | `Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>` |

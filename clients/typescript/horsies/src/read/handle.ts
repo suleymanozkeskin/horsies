@@ -1,10 +1,10 @@
 // The handle of a sent task: its id, the result read (`get`) and the info read (`info`). Built by a send, by
-// `retrySend`, or by `app.taskHandle` from a stored id; it does no I/O until a read.
+// `resend`, or by `app.taskHandle` from a stored id; it does no I/O until a read.
 
 import { threadId } from "node:worker_threads";
 
 import type { TaskAbsenceReason } from "../_catalog/history.ts";
-import { RetrievalCode } from "../_catalog/task_codes.ts";
+import { OperationalErrorCode, RetrievalCode } from "../_catalog/task_codes.ts";
 import type { CoreAccess } from "../app/core-access.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { decodeEnvelope } from "../codec/reader.ts";
@@ -84,7 +84,7 @@ class Handle<O, E extends string> implements TaskHandle<O, E> {
 
   async get(options: GetOptions = {}): Promise<Result<TaskOutcome<O, E>, ReadError>> {
     // SAFETY: the reader built the value from the contract's output kind, whose value type is `O`, and a custom code is
-    // one of the contract's codes (`E`) or the read is `unknownUserCode`.
+    // one of the contract's codes (`E`) or the read is `unknownCustomCode`.
     return (await this.#read(options)) as Result<TaskOutcome<O, E>, ReadError>;
   }
 
@@ -244,12 +244,12 @@ function cancelledOutcome(taskId: string): TaskOutcome<unknown, string> {
 function decodedOutcome(text: string, form: ReadForm): Outcome {
   switch (form.kind) {
     case "unreadable":
-      return err(Object.freeze({ kind: "storedResultUnreadable", cause: form.cause }));
+      return err(unreadable(form.cause));
     case "readable": {
       const decoded = decodeEnvelope(form.output, jsonTextCheckedByCore(text), "worker");
 
       if (!decoded.ok) {
-        return err(Object.freeze({ kind: "storedResultUnreadable", cause: refusalText(decoded.error) }));
+        return err(unreadable(refusalText(decoded.error)));
       }
 
       return checkedCustomCode(decoded.value, form.codes);
@@ -263,7 +263,12 @@ function decodedOutcome(text: string, form: ReadForm): Outcome {
   }
 }
 
-/** The outcome, or `unknownUserCode` for a custom code that a declared list does not hold. Pure. */
+/** The read error of a stored result that does not read with the contract's types. Pure. */
+function unreadable(cause: string): ReadError {
+  return Object.freeze({ kind: "resultDeserializationError", code: OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, cause });
+}
+
+/** The outcome, or `unknownCustomCode` for a custom code that a declared list does not hold. Pure. */
 function checkedCustomCode(outcome: TaskOutcome<unknown, string>, codes: DeclaredCodes): Outcome {
   if (outcome.kind === "succeeded" || outcome.error.kind === "builtIn" || codes.kind === "open") {
     return ok(outcome);
@@ -271,7 +276,7 @@ function checkedCustomCode(outcome: TaskOutcome<unknown, string>, codes: Declare
 
   return codes.codes.includes(outcome.error.code)
     ? ok(outcome)
-    : err(Object.freeze({ kind: "unknownUserCode", code: outcome.error.code }));
+    : err(Object.freeze({ kind: "unknownCustomCode", code: outcome.error.code }));
 }
 
 /** Whether a read is final, so the handle keeps it: an outcome, or a stored result that never reads. Pure. */
@@ -282,8 +287,8 @@ function isFinal(read: Outcome): boolean {
 
   switch (read.error.kind) {
     case "resultNotAvailable":
-    case "storedResultUnreadable":
-    case "unknownUserCode":
+    case "resultDeserializationError":
+    case "unknownCustomCode":
       return true;
     case "waitTimeout":
     case "taskNotFound":

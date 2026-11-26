@@ -4,7 +4,7 @@ Reference for the health reads on the app, the monitoring reads of
 `app.monitoring`, the task cancel, the web UI (`createMonitoringHandler` and
 the `web` command), the fleet metrics (the `metrics` command and the
 worker's `--metrics-listen`), and the rerun of a terminal task
-(`app.rerun`, `app.rerunIn` and the `pg` and `postgres` adapters). The core
+(`app.rerunTask`, `app.rerunTaskIn` and the `pg` and `postgres` adapters). The core
 serves every route, guard and event of the web UI, so a TypeScript app, a
 Python app and a Rust app answer alike.
 
@@ -500,9 +500,9 @@ export async function rerunFailedCharge(app: Horsies, storedId: string): Promise
     return;
   }
 
-  const rerun = await app.rerun(
-    { sourceTaskId: sourceTaskId.value, deadline: { kind: "none" }, callerKey: `rerun:${storedId}` },
-    { retention: { kind: "days", days: 30 }, rerunInput: "keep", reservationWindow: Temporal.Duration.from({ hours: 24 }) },
+  const rerun = await app.rerunTask(
+    { sourceTaskId: sourceTaskId.value, goodUntil: { kind: "none" }, idempotencyKey: `rerun:${storedId}` },
+    { retention: { kind: "period", days: 30 }, retainRerunInput: "keep", reservationWindow: Temporal.Duration.from({ hours: 24 }) },
   );
 
   if (!rerun.ok) {
@@ -538,24 +538,24 @@ export async function rerunFailedCharge(app: Horsies, storedId: string): Promise
 
 | Method | Returns |
 |---|---|
-| `app.rerun(command, policy)` | `Result<RerunOutcome, RerunError>`: the rerun in a transaction of the app's handle, committed. The handle connects and installs the schema once, as a send does |
-| `app.rerunIn(transaction, command, policy)` | `Result<RerunOutcome, CallerRerunError>`: the rerun in `transaction`, which the caller owns. Nothing commits here |
+| `app.rerunTask(command, policy)` | `Result<RerunOutcome, RerunError>`: the rerun in a transaction of the app's handle, committed. The handle connects and installs the schema once, as a send does |
+| `app.rerunTaskIn(transaction, command, policy)` | `Result<RerunOutcome, CallerRerunError>`: the rerun in `transaction`, which the caller owns. Nothing commits here |
 
 `RerunCommand`:
 
 | Field | Type |
 |---|---|
 | `sourceTaskId` | `TaskId`: the task to run again |
-| `deadline` | `RerunDeadline`: `{ kind: "until", at: Temporal.Instant }` or `{ kind: "none" }`. A part below the microsecond is cut toward the past |
-| `callerKey` | `string`, optional: a second rerun with the same key and the same command answers `keyReplay`. Left out: an unkeyed rerun |
+| `goodUntil` | `RerunDeadline`: `{ kind: "until", at: Temporal.Instant }` or `{ kind: "none" }`. A part below the microsecond is cut toward the past |
+| `idempotencyKey` | `string`, optional: a second rerun with the same key and the same command answers `keyReplay`. Left out: an unkeyed rerun |
 
-`RerunPolicy`:
+`RerunEnqueuePolicy`:
 
 | Field | Type |
 |---|---|
-| `retention` | `RerunRetention`: `{ kind: "days", days }` (1 to 1,825) or `{ kind: "forever" }` |
-| `rerunInput` | `"keep"` or `"drop"`: whether the new task keeps its input for a later rerun |
-| `reservationWindow` | `Temporal.Duration`: how long the caller key holds the rerun. More than 0, at most 30 days, whole microseconds, in days and smaller units only |
+| `retention` | `RerunRetention`: `{ kind: "period", days }` (1 to 1,825) or `{ kind: "forever" }` |
+| `retainRerunInput` | `"keep"` or `"drop"`: whether the new task keeps its input for a later rerun |
+| `reservationWindow` | `Temporal.Duration`: how long the idempotency key holds the rerun. More than 0, at most 30 days, whole microseconds, in days and smaller units only |
 
 `RerunOutcome` (only `enqueued` writes; every other outcome writes
 nothing):
@@ -569,8 +569,8 @@ nothing):
 | `notEligible` | `taskId`, `reason` (`COMPLETED_SOURCE`, `WORKFLOW_TASK`) | The source completed, or it is a workflow task |
 | `inputUnavailable` | `taskId`, `disposition` | The source stores no input, for example `DECLINED_BY_POLICY` |
 | `inputCorrupt` | `taskId`, `detail` | The stored input or its options fail their checks |
-| `keyConflict` | `taskId`, `reservedByTaskId` | The caller key holds another command |
-| `keyReplay` | `existingTaskId` | The caller key holds this command already |
+| `keyConflict` | `taskId`, `ownerTaskId` | The idempotency key holds another command; `ownerTaskId` holds it |
+| `keyReplay` | `existingTaskId` | The idempotency key holds this command already |
 
 Errors (each with `code`, `message`; `RerunErrorCode` names the codes):
 
@@ -578,12 +578,12 @@ Errors (each with `code`, `message`; `RerunErrorCode` names the codes):
 |---|---|---|
 | `INVALID_COMMAND`, `INVALID_POLICY` | both | A field breaks its rule. Nothing ran |
 | `CLASS_NOT_REGISTERED` | both | The retention class of the new task has no class row (`classKey`). Nothing is written |
-| `CALLER_KEY_REFUSED` | both | The caller key is empty or more than 255 UTF-8 bytes |
+| `CALLER_KEY_REFUSED` | both | The idempotency key is empty or more than 255 UTF-8 bytes |
 | `ID_MINT_REFUSED` | both | The task id source refused to mint the new id |
 | `CLIENT_FAMILY_MISMATCH`, `UNKNOWN_STORED_FAMILY` | both | Another client family installed the database, or its family row is not a family |
 | `CONTRACT_VIOLATION` | both | A row or stored data broke the rerun's contract. Nothing committed |
 | `CONNECT_FAILED` | `RerunError` | The app's handle could not connect or install the schema. Nothing ran |
-| `STATEMENT_FAILED` | `RerunError` | A statement failed; `outcome` is `"notCommitted"` or `"unknown"` (the `COMMIT` reply was lost: a keyed rerun sent again answers `keyReplay` if the first one committed) |
+| `STATEMENT_FAILED` | `RerunError` | A statement failed; `stateAfter` is `"notCommitted"` or `"unknown"` (the `COMMIT` reply was lost: a keyed rerun sent again answers `keyReplay` if the first one committed) |
 | `FAMILY_CHECK_FAILED` | `RerunError` | The family row could not be read |
 | `DRIVER_FAILED` | `CallerRerunError` | A statement failed in the caller's driver: `statement`, `driverError`. The transaction is aborted: roll it back |
 | `NO_OPEN_TRANSACTION` | `CallerRerunError` | The connection had no open transaction, so the statement did not run; `state` tells why (`idle`, `failedTransaction`, `notConnected`, `unrecognized`) |
@@ -591,7 +591,7 @@ Errors (each with `code`, `message`; `RerunErrorCode` names the codes):
 
 ### Rerun in the Caller's Transaction
 
-`app.rerunIn` runs the source read and, for an eligible source, the write on
+`app.rerunTaskIn` runs the source read and, for an eligible source, the write on
 the caller's transaction, so the rerun commits or rolls back with the
 caller's own writes. After an error, do not commit. Two adapters give a
 `CallerTransaction`:
@@ -608,19 +608,19 @@ nothing of its driver: it calls the object that the caller passes.
 <!-- ts-check: alone -->
 ```ts
 import type { PoolClient } from "pg";
-import type { Horsies, RerunCommand, RerunPolicy } from "horsies";
+import type { Horsies, RerunCommand, RerunEnqueuePolicy } from "horsies";
 import { pgTransaction } from "horsies/rerun/pg";
 
 export async function rerunWithAudit(
   app: Horsies,
   client: PoolClient,
   command: RerunCommand,
-  policy: RerunPolicy,
+  policy: RerunEnqueuePolicy,
 ): Promise<boolean> {
   await client.query("BEGIN");
   await client.query("INSERT INTO rerun_audit (source_task_id) VALUES ($1)", [command.sourceTaskId]);
 
-  const rerun = await app.rerunIn(pgTransaction(client), command, policy);
+  const rerun = await app.rerunTaskIn(pgTransaction(client), command, policy);
 
   if (!rerun.ok || rerun.value.kind !== "enqueued") {
     await client.query("ROLLBACK");
@@ -637,7 +637,7 @@ export async function rerunWithAudit(
 <!-- ts-check: alone -->
 ```ts
 import type { Sql } from "postgres";
-import type { Horsies, RerunCommand, RerunOutcome, RerunPolicy } from "horsies";
+import type { Horsies, RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "horsies";
 import { postgresTransaction } from "horsies/rerun/postgres";
 
 /** Thrown inside `sql.begin` so that postgres.js rolls the transaction back. */
@@ -654,12 +654,12 @@ export async function rerunInPostgres(
   app: Horsies,
   sql: Sql,
   command: RerunCommand,
-  policy: RerunPolicy,
+  policy: RerunEnqueuePolicy,
 ): Promise<RerunOutcome> {
   return sql.begin(async (transaction) => {
     await transaction`INSERT INTO rerun_audit (source_task_id) VALUES (${command.sourceTaskId})`;
 
-    const rerun = await app.rerunIn(postgresTransaction(transaction), command, policy);
+    const rerun = await app.rerunTaskIn(postgresTransaction(transaction), command, policy);
 
     if (!rerun.ok) {
       throw new RerunRolledBack(rerun.error.code);
@@ -695,11 +695,11 @@ until its deadline.
 **Do not use `allowAll()` without the host's own authentication.** It
 allows every read and every action.
 
-**Do not pass a `pg.Pool` or the root `sql` of postgres.js to `rerunIn`.**
+**Do not pass a `pg.Pool` or the root `sql` of postgres.js to `rerunTaskIn`.**
 The types refuse them: a query of a pool can run outside the caller's
 transaction.
 
-**Do not commit the caller's transaction after a `rerunIn` error.** Roll it
+**Do not commit the caller's transaction after a `rerunTaskIn` error.** Roll it
 back.
 
 ## All Key Imports
@@ -734,7 +734,7 @@ import {
   type TraceLinkRefusal,
   // Rerun
   RerunErrorCode,
-  type RerunCommand, type RerunPolicy, type RerunDeadline, type RerunRetention, type RerunInputChoice,
+  type RerunCommand, type RerunEnqueuePolicy, type RerunDeadline, type RerunRetention, type RerunInputChoice,
   type RerunOutcome, type RerunEnqueued, type RerunError, type CallerRerunError, type CallerTransaction,
 } from "horsies";
 import { pgTransaction } from "horsies/rerun/pg";

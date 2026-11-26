@@ -8,8 +8,8 @@ import type { TaskId, WorkflowId } from "./contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue, SendableInput } from "./contract/schema.ts";
 import { readFormOf, type TaskHandle, taskHandleOf } from "./read/handle.ts";
 import type { RetryableSendError, TaskSendError } from "./send/errors.ts";
-import type { SendOptions } from "./send/options.ts";
-import { retrySend, sendTask } from "./send/send.ts";
+import type { TaskSendOptions } from "./send/options.ts";
+import { resend, sendTask } from "./send/send.ts";
 import { err, ok, type Result } from "./wire/result.ts";
 import type { AppContext } from "./app/context.ts";
 import {
@@ -42,7 +42,7 @@ import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/
 import { type RerunArea, rerunAreaOfCore } from "./rerun/app-area.ts";
 import type { CallerTransaction } from "./rerun/caller.ts";
 import type { CallerRerunError, RerunError } from "./rerun/errors.ts";
-import type { RerunCommand, RerunOutcome, RerunPolicy } from "./rerun/types.ts";
+import type { RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "./rerun/types.ts";
 
 /** The constructor of an app, for `createHorsies` in this module. */
 let constructApp: (context: AppContext) => Horsies;
@@ -166,7 +166,7 @@ export class Horsies {
   async send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(
     contract: TaskContract<P, O, E, X>,
     input: NoInfer<SendableInput<P>>,
-    options: SendOptions = {},
+    options: TaskSendOptions = {},
   ): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>> {
     return sendTask<SchemaValue<O>, E>(this.#context.send, contract, Object(input), options);
   }
@@ -175,8 +175,8 @@ export class Horsies {
    * Send again the payload of `ENQUEUE_FAILED` or `IDEMPOTENCY_KEY_CONFLICT`, under the same task id. Takes an error
    * of another app instance too, when this app lists its task.
    */
-  async retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {
-    return retrySend(this.#context.send, error);
+  async resend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {
+    return resend(this.#context.send, error);
   }
 
   /**
@@ -232,20 +232,20 @@ export class Horsies {
    * installs the schema once, as a send does. Only `enqueued` writes. The new task stores the carrier of the active
    * trace context; the rerun opens no span.
    */
-  async rerun(command: RerunCommand, policy: RerunPolicy): Promise<Result<RerunOutcome, RerunError>> {
-    return this.#rerunArea.rerun(command, policy);
+  async rerunTask(command: RerunCommand, policy: RerunEnqueuePolicy): Promise<Result<RerunOutcome, RerunError>> {
+    return this.#rerunArea.rerunTask(command, policy);
   }
 
   /**
    * Rerun a retained terminal task in `transaction`, which the caller owns, so the rerun commits or rolls back with
    * the caller's own writes. Nothing commits here; after an error the caller does not commit.
    */
-  async rerunIn(
+  async rerunTaskIn(
     transaction: CallerTransaction,
     command: RerunCommand,
-    policy: RerunPolicy,
+    policy: RerunEnqueuePolicy,
   ): Promise<Result<RerunOutcome, CallerRerunError>> {
-    return this.#rerunArea.rerunIn(transaction, command, policy);
+    return this.#rerunArea.rerunTaskIn(transaction, command, policy);
   }
 }
 

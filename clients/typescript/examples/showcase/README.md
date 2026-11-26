@@ -115,7 +115,7 @@ acme cancel <task-id> [--policy include-running|pending-or-claimed-only]
 acme rerun <task-id> [--reason TEXT]         a rerun and its audit row in one transaction
 ```
 
-`rerun` calls `app.rerunIn` with the `pg` adapter of `horsies/rerun/pg` in a transaction of the Acme store, and writes
+`rerun` calls `app.rerunTaskIn` with the `pg` adapter of `horsies/rerun/pg` in a transaction of the Acme store, and writes
 the row of `acme_reruns` in the same transaction: both commit, or neither is written. A second rerun of the same task
 in 24 hours is a replay of the first.
 

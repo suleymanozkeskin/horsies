@@ -213,7 +213,7 @@ describe("Horsies.create: the core's checks of a contract", () => {
       errorCodes: ["PROVIDER_DOWN"],
       execution: "SHARED_ASYNC",
       timeoutMs: 30_000,
-      retryPolicy: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, autoRetryFor: ["PROVIDER_DOWN"] },
+      retryPolicy: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, retryFor: ["PROVIDER_DOWN"] },
     });
 
     assert.equal(createHorsies(config([charge]), fakeEnvironment({ checks })).ok, true);

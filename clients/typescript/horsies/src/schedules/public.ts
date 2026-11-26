@@ -18,4 +18,4 @@ export type {
   WeeklySchedule,
 } from "./pattern.ts";
 
-export type { ScheduleEntries, ScheduleEntry, ScheduleInput, ScheduleSection } from "./entry.ts";
+export type { ScheduleEntries, TaskSchedule, ScheduleInput, ScheduleSection } from "./entry.ts";

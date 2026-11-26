@@ -137,7 +137,7 @@ without it has no such member (typecheck).
   `outputFor(nodeId, workflow)` and `hasSummary(nodeId)`.
 - A read gives `notInContext` for a node that is not in
   `workflowContextFrom` or that did not end, `unreadable` for a value that
-  does not read with the contract, and `unknownUserCode` for a code that the
+  does not read with the contract, and `unknownCustomCode` for a code that the
   contract does not list.
 
 <!-- ts-check: alone -->
@@ -460,8 +460,8 @@ export async function checkoutState(app: Horsies, text: string): Promise<void> {
 | `waitTimeout` | `WAIT_TIMEOUT` | - | The workflow had not ended when the wait ended |
 | `workflowNotFound` | `WORKFLOW_NOT_FOUND` | - | No workflow has the id |
 | `resultNotReady` | `RESULT_NOT_READY` | - | `resultFor`: the node stores no result yet, or the workflow has no node of the id |
-| `storedResultUnreadable` | - | `cause` | The stored value does not read with the handle's types |
-| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the node contract's `errorCodes` |
+| `resultDeserializationError` | - | `cause` | The stored value does not read with the handle's types |
+| `unknownCustomCode` | - | `code` (the stored code) | The stored custom code is not in the node contract's `errorCodes` |
 | `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A wait in a worker child. Nothing was read |
 | `noTypeAvailable` | `NO_TYPE_AVAILABLE` | `workflowName` | The app does not list the workflow, so its output has no type to read with. Nothing was read |
 | `database` | the handle code | `retryable`, `message` | The database or the connection failed |

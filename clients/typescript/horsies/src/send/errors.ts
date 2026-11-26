@@ -1,5 +1,5 @@
 // The errors of a send: the task send catalog of the core, generated (`src/_catalog/task_send_errors.ts`), told apart
-// by `code`. The two errors that `retrySend` takes carry the contract's types and hold the prepared payload in a
+// by `code`. The two errors that `resend` takes carry the contract's types and hold the prepared payload in a
 // member that is not enumerable, so `JSON.stringify` of an error never holds the input.
 
 import type { CoreCause, NoCause } from "../_catalog/error_detail.ts";
@@ -24,11 +24,11 @@ export declare const sentTypes: unique symbol;
 /** The output and code types of the task of a send error. */
 export type SentTypes<O, E extends string> = { readonly output: O; readonly code: E };
 
-/** A send error that carries the types of its task, for the handle that `retrySend` gives. */
+/** A send error that carries the types of its task, for the handle that `resend` gives. */
 export type WithSentTypes<V, O, E extends string> = V & { readonly [sentTypes]?: SentTypes<O, E> };
 
 /**
- * The send errors that `retrySend` takes: the row may or may not exist (`ENQUEUE_FAILED`), or another task holds the
+ * The send errors that `resend` takes: the row may or may not exist (`ENQUEUE_FAILED`), or another task holds the
  * idempotency key (`IDEMPOTENCY_KEY_CONFLICT`; a retry after the key's reservation ends is accepted, a retry before
  * that gives the same error).
  */

@@ -10,7 +10,7 @@ import type { SchedulePattern } from "./pattern.ts";
 export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, Execution> ? SendableInput<P> : never;
 
 /** One schedule: each slot of `pattern` sends `task` with `input`. */
-export interface ScheduleEntry<C> {
+export interface TaskSchedule<C> {
   /** Unique among the schedules of the app: the key of the schedule's state and of its slots' task ids. */
   readonly name: string;
   /** A contract of the app's `tasks` list. The scheduler only sends: the entry needs no implementation. */
@@ -32,17 +32,17 @@ export interface ScheduleEntry<C> {
 }
 
 /** The entries of `app.schedules`: one entry per contract of `T`, in order. */
-export type ScheduleEntries<T extends readonly AnyTaskContract[]> = { readonly [K in keyof T]: ScheduleEntry<T[K]> };
+export type ScheduleEntries<T extends readonly AnyTaskContract[]> = { readonly [K in keyof T]: TaskSchedule<T[K]> };
 
 /** One entry as the declaration reads it: a contract, and the input as the object that it is. */
-export type DeclaredEntry = Omit<ScheduleEntry<AnyTaskContract>, "task" | "input"> & {
+export type DeclaredEntry = Omit<TaskSchedule<AnyTaskContract>, "task" | "input"> & {
   readonly task: AnyTaskContract;
   readonly input: object;
 };
 
 /** The entries of `app.schedules` as the declaration reads them, in order. Pure. */
 export function declaredEntries<T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>): readonly DeclaredEntry[] {
-  return entries.map((entry: ScheduleEntry<T[number]>): DeclaredEntry => ({ ...entry, task: entry.task, input: Object(entry.input) }));
+  return entries.map((entry: TaskSchedule<T[number]>): DeclaredEntry => ({ ...entry, task: entry.task, input: Object(entry.input) }));
 }
 
 /** The section of `app.schedules`: the switches of the scheduler. */

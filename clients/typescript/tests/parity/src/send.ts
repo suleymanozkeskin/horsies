@@ -17,14 +17,14 @@ import {
   type AnyTaskContract,
   Horsies,
   type PingWorkersError,
-  type RerunPolicy,
+  type RerunEnqueuePolicy,
   type TaskError,
   type TaskId,
   type TaskOutcome,
   type WorkflowHandleBase,
   type BuildReturn,
 } from "../../../horsies/src/index.ts";
-import type { SendOptions } from "../../../horsies/src/send/options.ts";
+import type { TaskSendOptions } from "../../../horsies/src/send/options.ts";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import {
   add,
@@ -77,9 +77,9 @@ const REFUSED = "REFUSED";
  * `RerunEnqueuePolicy(retention=timedelta(days=30), retain_rerun_input=True, reservation_window=timedelta(hours=24))`,
  * Rust `RerunEnqueuePolicy::standard(true)`).
  */
-const RERUN_POLICY: RerunPolicy = {
-  retention: { kind: "days", days: 30 },
-  rerunInput: "keep",
+const RERUN_POLICY: RerunEnqueuePolicy = {
+  retention: { kind: "period", days: 30 },
+  retainRerunInput: "keep",
   reservationWindow: Temporal.Duration.from({ hours: 24 }),
 };
 
@@ -229,7 +229,7 @@ async function sendOne(app: Horsies, send: Send): Promise<Result<TaskLine, strin
 }
 
 /** The send options of a key choice. Pure. */
-export function sendOptions(key: KeyChoice): SendOptions {
+export function sendOptions(key: KeyChoice): TaskSendOptions {
   switch (key.kind) {
     case "noKey":
       return {};
@@ -244,7 +244,7 @@ export function sendOptions(key: KeyChoice): SendOptions {
 }
 
 /** The task line of one send of `send` through `app`, with `options`. */
-async function sendDirect(app: Horsies, send: TaskInput, options: SendOptions): Promise<Result<TaskLine, string>> {
+async function sendDirect(app: Horsies, send: TaskInput, options: TaskSendOptions): Promise<Result<TaskLine, string>> {
   switch (send.task) {
     case "parity.add":
       return taskLine(send.task, add, await app.send(add, send.input, options));
@@ -323,7 +323,7 @@ async function sendRetry(app: Horsies, input: PairInput): Promise<Result<TaskLin
   const ids: TaskId[] = [];
 
   for (let attempt = 0; attempt < SEND_RETRIES; attempt += 1) {
-    const retried = await app.retrySend(refused);
+    const retried = await app.resend(refused);
 
     if (!retried.ok) {
       return err(`the retry of ${add.name} was refused: ${failureText(retried.error)}`);
@@ -408,7 +408,7 @@ async function rerunOne(app: Horsies, rerun: Rerun, lines: readonly TaskLine[]):
     return err(`the rerun source ${source.taskId} did not end with ${REFUSED}: ${outcomeText(ended.value)}`);
   }
 
-  const outcome = await app.rerun({ sourceTaskId: source.taskId, deadline: { kind: "none" } }, RERUN_POLICY);
+  const outcome = await app.rerunTask({ sourceTaskId: source.taskId, goodUntil: { kind: "none" } }, RERUN_POLICY);
 
   if (!outcome.ok) {
     return err(`the rerun of ${source.taskId} was refused: ${failureText(outcome.error)}`);

@@ -126,7 +126,7 @@ function retryFacts(retry: RetrySetting): RetryFacts {
         kind: "fixed",
         intervalsSeconds: [...retry.intervalsSeconds],
         jitter: retry.jitter,
-        autoRetryFor: [...retry.autoRetryFor],
+        autoRetryFor: [...retry.retryFor],
       };
     case "exponential":
       return {
@@ -135,7 +135,7 @@ function retryFacts(retry: RetrySetting): RetryFacts {
         maxRetries: retry.maxRetries,
         jitter: retry.jitter,
         maxDelay: retry.maxDelay.kind === "seconds" ? { kind: "seconds", seconds: retry.maxDelay.seconds } : { kind: "noCap" },
-        autoRetryFor: [...retry.autoRetryFor],
+        autoRetryFor: [...retry.retryFor],
       };
     default: {
       const unexpected: never = retry;
