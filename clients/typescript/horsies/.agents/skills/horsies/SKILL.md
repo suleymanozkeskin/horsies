@@ -17,7 +17,7 @@ folder only when the task needs it:
 | File | When to open |
 |---|---|
 | `tasks.md` | `defineTask`, the `h.*` wire types, the zod adapter, the stored input, `app.implement`, `ok` and `err` of the body's second argument, the exception map, `TaskRuntime`, the fencing token, the cancel signal, `runtime.spawn`, app state, retry policies, `app.send`, `TaskSendError`, `resend`, `TaskHandle`, `TaskOutcome`, `ReadError`, tests of a body |
-| `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.taskOutcome`, joins, the workflow context (`runtime.workflowContext`), the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `retryStart`, `WorkflowHandle`, `app.workflowHandle` |
+| `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.taskOutcome`, joins, the workflow context (`runtime.workflowContext`), the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `resendStart`, `WorkflowHandle`, `app.workflowHandle` |
 | `configs.md` | `Horsies.create` and its refusals, the broker, queues, worker profiles, recovery, retention, `cli.run` and its commands |
 | `monitoring.md` | `app.pingDatabase`, `app.pingWorkers`, `app.monitoring`, the operator cancel, `createMonitoringHandler`, `app.rerunTask` and `app.rerunTaskIn` |
 
@@ -192,8 +192,8 @@ export const dailyReport = defineWorkflow(
   {
     name: "daily_report",
     definitionKey: "reports.daily_report.v1",
-    params: { region: h.string() },
-    output: h.int(),
+    parameters: { region: h.string() },
+    outputType: h.int(),
     checkCases: [{ region: "eu" }],
   },
   (w, { region }) => {
@@ -208,7 +208,7 @@ export const dailyReport = defineWorkflow(
 - A parameter declared `h.taskOutcome(contract)` takes an upstream node of
   that contract. The node waits for it, and the body gets the upstream
   outcome, with the output type and the codes of the contract.
-- Every node has a `nodeId`. A workflow with `params` declares `checkCases`.
+- Every node has a `nodeId`. A workflow with `parameters` declares `checkCases`.
 - List the workflow in `Horsies.create({ tasks, workflows })` and start it
   with `app.start(dailyReport, { region: "eu" })`. See `workflows.md`.
 
@@ -221,7 +221,7 @@ export const dailyReport = defineWorkflow(
 | `app.send`, `app.resend` | `Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>` |
 | `handle.get` | `Promise<Result<TaskOutcome<O, E>, ReadError>>` |
 | `handle.info` | `Promise<Result<TaskInfo, ReadError>>` |
-| `app.start`, `app.retryStart` | `Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>` |
+| `app.start`, `app.resendStart` | `Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>` |
 | Workflow `get`, `resultFor` | `Promise<Result<TaskOutcome<O, E>, WorkflowReadError>>` |
 | Workflow `status`, `results`, `tasks`, `pause`, `resume`, `cancel` | `Promise<Result<_, HandleCoreError>>` |
 | Health and monitoring reads | See `monitoring.md` |

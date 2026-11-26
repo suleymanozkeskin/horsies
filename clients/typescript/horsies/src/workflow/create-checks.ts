@@ -101,12 +101,19 @@ export function checkWorkflowsAtCreate(input: WorkflowsAtCreate): WorkflowsCheck
 
 /**
  * The place of a refusal of the params contract in the workflow's terms: the contract's `input` is the workflow's
- * `params`; the declared output keeps its path (`output`, `output.total`). Pure.
+ * `parameters`, and its `output` is the workflow's `outputType` (`outputType.total`). Pure.
  */
 function paramsContractPlace(path: string): string {
-  const inInput = path === "input" || path.startsWith("input.") || path.startsWith("input[");
+  if (isMemberPath(path, "input")) {
+    return `parameters${path.slice("input".length)}`;
+  }
 
-  return inInput ? `params${path.slice("input".length)}` : path;
+  return isMemberPath(path, "output") ? `outputType${path.slice("output".length)}` : path;
+}
+
+/** Whether `path` is `member` or a path inside it (`member.total`, `member[0]`). Pure. */
+function isMemberPath(path: string, member: string): boolean {
+  return path === member || path.startsWith(`${member}.`) || path.startsWith(`${member}[`);
 }
 
 /** The most characters (code points) of a workflow name: the column `horsies_workflows.name` is `varchar(255)`. */
@@ -245,8 +252,8 @@ function recordRefusals(path: string, workflow: object, keys: Map<string, object
 
   if (record.paramNames.length > 0 && record.checkCases.length === 0) {
     refusals.push(
-      refusal(ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED, path, "a workflow with params declares check cases", [
-        "add checkCases: one params value per case that check builds",
+      refusal(ErrorCode.WORKFLOW_CHECK_CASES_REQUIRED, path, "a workflow with parameters declares check cases", [
+        "add checkCases: one parameters value per case that check builds",
       ]),
     );
   }

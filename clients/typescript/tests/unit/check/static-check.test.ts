@@ -26,7 +26,7 @@ function report(outcome: CheckOutcome): CheckReport {
 
 /** A workflow with params whose one check case throws in its build: `HRS-029` at check, nothing at create. */
 const throwingCase = defineWorkflow(
-  { name: "throwing", definitionKey: "tests.throwing.v1", output: h.int(), params: { n: h.int() }, checkCases: [{ n: 1 }] },
+  { name: "throwing", definitionKey: "tests.throwing.v1", outputType: h.int(), parameters: { n: h.int() }, checkCases: [{ n: 1 }] },
   () => {
     throw new RangeError("no build");
   },
@@ -34,7 +34,7 @@ const throwingCase = defineWorkflow(
 
 /** A workflow that includes itself with the same params and no wait between: `HRS-037` at check, nothing at create. */
 const selfNesting: object = defineWorkflow(
-  { name: "loop", definitionKey: "tests.loop.v1", output: h.int(), params: {} },
+  { name: "loop", definitionKey: "tests.loop.v1", outputType: h.int(), parameters: {} },
   (w) => {
     // SAFETY: the workflow nests itself; its contract is complete when the build runs.
     const again = w.subWorkflow(selfNesting as never, {}, { nodeId: "again" });

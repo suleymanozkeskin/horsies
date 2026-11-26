@@ -21,8 +21,8 @@ export const returnsReview = defineWorkflow(
   {
     name: "returns_review",
     definitionKey: "acme.returns_review.v1",
-    params: { returnId: h.string(), orderId: h.string(), sku: h.string(), quantity: h.int() },
-    output: RestockDecision,
+    parameters: { returnId: h.string(), orderId: h.string(), sku: h.string(), quantity: h.int() },
+    outputType: RestockDecision,
     onError: "pause",
     checkCases: [RETURNS_CHECK_PARAMS],
   },

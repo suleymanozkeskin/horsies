@@ -205,7 +205,7 @@ describe("the start span with no SDK or a broken SDK", () => {
 const greet = defineTask({ name: "greet", input: { who: h.string() }, output: h.string() });
 
 const hello = defineWorkflow(
-  { name: "hello", definitionKey: "tests.hello.v1", output: h.string(), params: { who: h.string() }, checkCases: [{ who: "a" }] },
+  { name: "hello", definitionKey: "tests.hello.v1", outputType: h.string(), parameters: { who: h.string() }, checkCases: [{ who: "a" }] },
   (w, { who }) => ({ output: w.task(greet, { who }, { nodeId: "greet" }) }),
 );
 
@@ -245,7 +245,7 @@ describe("Horsies.create and the start span", () => {
     const started = await app.start(hello, { who: "eu" }, { workflowId: workflowId.value });
 
     assert(!started.ok && started.error.code === "ENQUEUE_FAILED");
-    assert((await app.retryStart(started.error)).ok);
+    assert((await app.resendStart(started.error)).ok);
 
     const [first, retry, ...others] = sdk.spans();
 

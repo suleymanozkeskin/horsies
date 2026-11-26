@@ -216,7 +216,7 @@ export const threadPastDeadline = defineTask({
 
 /** Two nodes: the second takes the result of the first (Python `parity_chain`). */
 export const parityChain = defineWorkflow(
-  { name: CHAIN_NAME, definitionKey: CHAIN_DEFINITION_KEY, params: {}, output: h.int(), onError: "fail" },
+  { name: CHAIN_NAME, definitionKey: CHAIN_DEFINITION_KEY, parameters: {}, outputType: h.int(), onError: "fail" },
   (w) => {
     const added = w.task(add, { a: 2, b: 3 }, { nodeId: "add" });
 
@@ -226,13 +226,13 @@ export const parityChain = defineWorkflow(
 
 /** The child of `parity_parent`: one node, its output (Python `ParityChild`). */
 export const parityChild = defineWorkflow(
-  { name: CHILD_NAME, definitionKey: CHILD_DEFINITION_KEY, params: {}, output: h.int(), onError: "fail" },
+  { name: CHILD_NAME, definitionKey: CHILD_DEFINITION_KEY, parameters: {}, outputType: h.int(), onError: "fail" },
   (w) => ({ output: w.task(add, { a: 2, b: 3 }, { nodeId: "add" }) }),
 );
 
 /** A sub-workflow node of `parity_child`, then a node that takes the child's output (Python `parity_parent`). */
 export const parityParent = defineWorkflow(
-  { name: PARENT_NAME, definitionKey: PARENT_DEFINITION_KEY, params: {}, output: h.int(), onError: "fail" },
+  { name: PARENT_NAME, definitionKey: PARENT_DEFINITION_KEY, parameters: {}, outputType: h.int(), onError: "fail" },
   (w) => {
     const child = w.subWorkflow(parityChild, {}, { nodeId: "child" });
 

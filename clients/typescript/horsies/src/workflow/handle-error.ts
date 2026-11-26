@@ -19,7 +19,7 @@ import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 
 /**
- * The error of a handle call (`status`, `results`, `tasks`, `pause`, `resume`, `cancel`): the handle catalog of the
+ * The error of a handle call (`status`, `results`, `nodes`, `pause`, `resume`, `cancel`): the handle catalog of the
  * core, or, in a `SHARED_THREAD` body, the seat relay at its bound (nothing was sent).
  */
 export type WorkflowHandleError = HandleCoreError | SeatRelayFull;

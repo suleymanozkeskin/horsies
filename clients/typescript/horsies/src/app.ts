@@ -180,22 +180,23 @@ export class Horsies {
   }
 
   /**
-   * Start a workflow: its handle, or the start error. The same `workflowId` with the same params returns the existing
-   * run; other params under the id give `WORKFLOW_COMMAND_CONFLICT`; another workflow under it `WORKFLOW_ID_CONFLICT`.
+   * Start a workflow: its handle, or the start error. The same `workflowId` with the same parameters returns the
+   * existing run; other parameters under the id give `WORKFLOW_COMMAND_CONFLICT`; another workflow under it
+   * `WORKFLOW_ID_CONFLICT`.
    */
   async start<P extends ParameterSchemas, R extends BuildReturn>(
     workflow: WorkflowContract<P, R>,
-    params: NoInfer<SendableInput<P>>,
+    parameters: NoInfer<SendableInput<P>>,
     options: StartOptions = {},
   ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
-    return this.#workflows.start(workflow, params, options);
+    return this.#workflows.start(workflow, parameters, options);
   }
 
   /** Send again the spec of `ENQUEUE_FAILED`, under the same workflow id. */
-  async retryStart<R extends BuildReturn>(
+  async resendStart<R extends BuildReturn>(
     error: StartEnqueueFailed<R>,
   ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
-    return this.#workflows.retryStart(error);
+    return this.#workflows.resendStart(error);
   }
 
   /** A typed handle of a stored workflow id, with no I/O. `resultFor` takes the node's contract. */

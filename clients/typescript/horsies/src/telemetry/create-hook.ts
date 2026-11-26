@@ -31,7 +31,7 @@ export type TracingParts = {
   readonly setting: TracingSetting;
   /** Wraps each send of the app; gives the carrier of a rerun. */
   readonly sendObserver: SendObserver;
-  /** Wraps the core's start of each `app.start` and `app.retryStart`; gives the carrier that the tree stores. */
+  /** Wraps the core's start of each `app.start` and `app.resendStart`; gives the carrier that the tree stores. */
   readonly startObserver: StartObserver;
   /** Wraps each task body in a child of the app. */
   readonly bodyObserver: BodyObserver;

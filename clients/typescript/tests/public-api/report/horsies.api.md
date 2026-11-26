@@ -1765,10 +1765,10 @@ export class Horsies {
     rerunTask(command: RerunCommand, policy: RerunEnqueuePolicy): Promise<Result<RerunOutcome, RerunError>>;
     rerunTaskIn(transaction: CallerTransaction, command: RerunCommand, policy: RerunEnqueuePolicy): Promise<Result<RerunOutcome, CallerRerunError>>;
     resend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
-    retryStart<R extends BuildReturn>(error: StartEnqueueFailed<R>): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
+    resendStart<R extends BuildReturn>(error: StartEnqueueFailed<R>): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
     schedules<const T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>, section?: ScheduleSection): void;
     send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: TaskSendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
-    start<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, params: NoInfer<SendableInput<P>>, options?: StartOptions): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
+    start<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, parameters: NoInfer<SendableInput<P>>, options?: StartOptions): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
     taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
     workflowHandle<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, workflowId: WorkflowId): WorkflowHandleById<R>;
 }
@@ -1877,7 +1877,10 @@ export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "taskO
 export type IsZodJson<O> = [undefined] extends [O] ? false : [string | number | boolean | null | O[]] extends [O] ? true : false;
 
 // @public
-export type Join = {
+export type JoinNeedsOptional<K> = `horsies: under an "any" or "quorum" join, parameter '${K & string}' must be declared .optional()`;
+
+// @public
+export type JoinType = {
     readonly kind: "all";
 } | {
     readonly kind: "any";
@@ -1885,9 +1888,6 @@ export type Join = {
     readonly kind: "quorum";
     readonly minSuccess: number;
 };
-
-// @public
-export type JoinNeedsOptional<K> = `horsies: under an "any" or "quorum" join, parameter '${K & string}' must be declared .optional()`;
 
 // @public (undocumented)
 export interface JsonUnreadable {
@@ -2252,14 +2252,14 @@ export type NodeCode<N> = N extends NodeRef<unknown, infer E, string> ? E : neve
 export type NodeEndpointInfo = EndpointNotTerminalInfo | EndpointTerminalInfo;
 
 // @public
-export type NodeInput<P extends ParameterSchemas, J extends Join> = keyof P extends never ? EmptyObject : Flat<{
+export type NodeInput<P extends ParameterSchemas, J extends JoinType> = keyof P extends never ? EmptyObject : Flat<{
     -readonly [K in keyof P as SenderMayLeaveOut<P[K]> extends true ? never : K]: NodeParameter<P[K], J, K>;
 } & {
     -readonly [K in keyof P as SenderMayLeaveOut<P[K]> extends true ? K : never]?: NodeParameter<P[K], J, K>;
 }>;
 
 // @public
-export interface NodeOptionsBase<Id extends string, J extends Join> {
+export interface NodeOptionsBase<Id extends string, J extends JoinType> {
     readonly allowFailedDependencies?: boolean;
     readonly join?: J;
     readonly nodeId: Id;
@@ -2270,7 +2270,7 @@ export interface NodeOptionsBase<Id extends string, J extends Join> {
 export type NodeOutput<N> = N extends NodeRef<infer O, string, string> ? O : never;
 
 // @public
-export type NodeParameter<S, J extends Join, K> = IsUpstreamOutcome<S> extends true ? J extends {
+export type NodeParameter<S, J extends JoinType, K> = IsUpstreamOutcome<S> extends true ? J extends {
     readonly kind: "any";
 } | {
     readonly kind: "quorum";
@@ -3904,7 +3904,7 @@ export type SubWorkflowFailure = {
 };
 
 // @public
-export type SubWorkflowNodeOptions<Id extends string, J extends Join> = NodeOptionsBase<Id, J>;
+export type SubWorkflowNodeOptions<Id extends string, J extends JoinType> = NodeOptionsBase<Id, J>;
 
 // @public
 export type SubWorkflowSummary = {
@@ -4309,7 +4309,7 @@ export interface TaskListQuery extends TaskFilters {
 }
 
 // @public
-export type TaskNodeOptions<Id extends string, J extends Join, C extends ContextUse> = NodeOptionsBase<Id, J> & {
+export type TaskNodeOptions<Id extends string, J extends JoinType, C extends ContextUse> = NodeOptionsBase<Id, J> & {
     readonly queue?: string;
     readonly priority?: number;
     readonly goodUntil?: Temporal.Instant;
@@ -4948,12 +4948,12 @@ export interface WorkerStateSnapshot {
 export const WORKFLOW_STATUSES: readonly ["PENDING", "RUNNING", "COMPLETED", "FAILED", "PAUSED", "CANCELLED", "EXPIRED"];
 
 // @public
-export type WorkflowBuild<P extends ParameterSchemas, R extends BuildReturn> = (w: WorkflowBuilder, params: BodyInput<P>) => R;
+export type WorkflowBuild<P extends ParameterSchemas, R extends BuildReturn> = (w: WorkflowBuilder, parameters: BodyInput<P>) => R;
 
 // @public
 export interface WorkflowBuilder {
-    subWorkflow<P extends ParameterSchemas, R extends BuildReturn, const Id extends string, const J extends Join = DefaultJoin>(workflow: WorkflowContract<P, R>, params: NoInfer<NodeInput<P, J>>, options: SubWorkflowNodeOptions<Id, J>): NodeRef<WorkflowOutput<R>, string, Id>;
-    task<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse, const Id extends string, const J extends Join = DefaultJoin>(contract: TaskContract<P, O, E, X, C>, input: NoInfer<NodeInput<P, J>>, options: TaskNodeOptions<Id, J, C>): NodeRef<SchemaValue<O>, E, Id>;
+    subWorkflow<P extends ParameterSchemas, R extends BuildReturn, const Id extends string, const J extends JoinType = DefaultJoin>(workflow: WorkflowContract<P, R>, parameters: NoInfer<NodeInput<P, J>>, options: SubWorkflowNodeOptions<Id, J>): NodeRef<WorkflowOutput<R>, string, Id>;
+    task<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse, const Id extends string, const J extends JoinType = DefaultJoin>(contract: TaskContract<P, O, E, X, C>, input: NoInfer<NodeInput<P, J>>, options: TaskNodeOptions<Id, J, C>): NodeRef<SchemaValue<O>, E, Id>;
 }
 
 // @public
@@ -4987,8 +4987,8 @@ export interface WorkflowDefinition<P extends ParameterSchemas, O extends Output
     readonly name: string;
     // (undocumented)
     readonly onError?: OnError;
-    readonly output: O;
-    readonly params: P;
+    readonly outputType: O;
+    readonly parameters: P;
 }
 
 // @public (undocumented)
@@ -5011,12 +5011,12 @@ export interface WorkflowHandle<R extends BuildReturn> extends WorkflowHandleBas
 export interface WorkflowHandleBase<R extends BuildReturn> {
     cancel(): Promise<Result<void, WorkflowHandleError>>;
     get(options?: GetOptions): Promise<Result<TaskOutcome<WorkflowOutput<R>, string>, WorkflowReadError>>;
+    nodes(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
     pause(): Promise<Result<boolean, WorkflowHandleError>>;
     results(): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>>;
     resume(): Promise<Result<boolean, WorkflowHandleError>>;
     // (undocumented)
     status(): Promise<Result<WorkflowStatus, WorkflowHandleError>>;
-    tasks(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
     // (undocumented)
     readonly workflowId: WorkflowId;
 }
@@ -5332,7 +5332,7 @@ export type WorkflowTaskStatus = (typeof WorkflowTaskStatus)[keyof typeof Workfl
 
 // @public
 export type WorkflowTypes<P extends ParameterSchemas, R extends BuildReturn> = {
-    readonly params: P;
+    readonly parameters: P;
     readonly build: R;
 };
 

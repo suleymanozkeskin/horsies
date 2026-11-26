@@ -135,8 +135,8 @@ describe("check of a workflow with a required h.taskOutcome param", () => {
     {
       name: "child",
       definitionKey: "tests.child.v1",
-      output: h.int(),
-      params: { price: h.taskOutcome(priced) },
+      outputType: h.int(),
+      parameters: { price: h.taskOutcome(priced) },
       checkCases: [
         { price: { kind: "succeeded", value: { total: 3, currency: "EUR" } } },
         { price: { kind: "failed", error: FAILURE } },
@@ -157,8 +157,8 @@ describe("check of a workflow with a required h.taskOutcome param", () => {
       {
         name: "left_out",
         definitionKey: "tests.left_out.v1",
-        output: h.int(),
-        params: { price: h.taskOutcome(priced) },
+        outputType: h.int(),
+        parameters: { price: h.taskOutcome(priced) },
         // SAFETY: the types require the outcome param; a JavaScript caller can leave it out.
         checkCases: [{} as never],
       },

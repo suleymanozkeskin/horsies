@@ -1,5 +1,5 @@
 // The handle of a started workflow: its status, its result (`get`), the result of one node (`resultFor`), the results
-// and the nodes, and pause, resume and cancel. Built by a start, by `retryStart`, or by `app.workflowHandle` from a
+// and the nodes, and pause, resume and cancel. Built by a start, by `resendStart`, or by `app.workflowHandle` from a
 // stored id; it does no I/O until a call.
 //
 // Every stored text that a read gives passed the core's strict JSON check in the addon; the codec reader then decodes
@@ -74,7 +74,7 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
   /** The stored result of each node that has one, by node id. */
   results(): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>>;
   /** Every node, in index order. */
-  tasks(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
+  nodes(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
   /** Pause a RUNNING workflow: `true` when it paused. */
   pause(): Promise<Result<boolean, WorkflowHandleError>>;
   /** Resume a PAUSED workflow: `true` when it resumed. */
@@ -186,7 +186,7 @@ function handleBase<R extends BuildReturn>(facts: HandleFacts): WorkflowHandleBa
     // SAFETY: the reader decodes with the output form of the workflow, whose value type is `WorkflowOutput<R>`.
     get: async (options: GetOptions = {}) => (await workflowOutcome(facts, options)) as never,
     results: async () => nodeResults(facts),
-    tasks: async () => nodeInfos(facts),
+    nodes: async () => nodeInfos(facts),
     pause: async () => changed(await facts.core.pause(id)),
     resume: async () => changed(await facts.core.resume(id)),
     cancel: async () => {

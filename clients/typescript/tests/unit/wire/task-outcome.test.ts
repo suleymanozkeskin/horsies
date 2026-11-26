@@ -21,7 +21,7 @@ const Total = h.object({ total: h.int() });
 const priced = defineTask({ name: "priced", input: {}, output: Total, errorCodes: ["NO_PRICE"] });
 
 const pricing = defineWorkflow(
-  { name: "pricing", definitionKey: "tests.pricing.v1", params: {}, output: Total },
+  { name: "pricing", definitionKey: "tests.pricing.v1", parameters: {}, outputType: Total },
   (w) => ({ output: w.task(priced, {}, { nodeId: "price" }) }),
 );
 

@@ -44,7 +44,7 @@ function workflowRefusals(registry: WorkflowRegistry, entry: ListedWorkflow): re
       ? rootRefusals(registry, entry, params.value, casePath)
       : [
           refusal(ErrorCode.WORKFLOW_CHECK_CASE_INVALID, casePath, refusalText(params.error), [
-            "give each case the params of the workflow",
+            "give each case the parameters of the workflow",
           ]),
         ];
   });
@@ -144,8 +144,8 @@ function walk(
             refusal(
               ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
               nodePath,
-              `the params of the sub-workflow node do not decode: ${refusalText(params.error)}`,
-              ["make each check of the child's params pure"],
+              `the parameters of the sub-workflow node do not decode: ${refusalText(params.error)}`,
+              ["make each check of the child's parameters pure"],
             ),
           );
 
@@ -191,8 +191,8 @@ function decideNesting(steps: readonly NestingStep[], step: NestingStep, path: s
             refusal(
               ErrorCode.WORKFLOW_SUBWORKFLOW_SELF_NESTING,
               path,
-              "a sub-workflow includes itself with the same params, and no node between the two waits",
-              ["change the params at each level, so that the nesting ends"],
+              "a sub-workflow includes itself with the same parameters, and no node between the two waits",
+              ["change the parameters at each level, so that the nesting ends"],
             ),
           ]
         : [],
