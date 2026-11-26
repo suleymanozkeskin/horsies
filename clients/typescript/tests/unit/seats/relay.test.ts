@@ -18,7 +18,8 @@ import {
 } from "../../../horsies/src/seats/cancel-cells.ts";
 import { IsolateRelay } from "../../../horsies/src/seats/relay.ts";
 import type { SeatAnswer, SeatToMain } from "../../../horsies/src/seats/protocol.ts";
-import { SeatRelayCode, type SeatRelayFull } from "../../../horsies/src/seats/relay-full.ts";
+import { SeatRelayCode } from "../../../horsies/src/_catalog/task_send.ts";
+import type { SeatRelayFull } from "../../../horsies/src/seats/relay-full.ts";
 import { sendTask } from "../../../horsies/src/send/send.ts";
 import { ClientDefect, CoreStopped } from "../../../horsies/src/thrown-errors.ts";
 import { PREPARED, SENT_AT_MICROS, TASK_ID } from "../app/support.ts";

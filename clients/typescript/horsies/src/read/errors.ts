@@ -2,9 +2,10 @@
 
 import type { BrokerErrorCode } from "../_catalog/broker.ts";
 import { brokerCoreErrorFromNative, type NativeBrokerCoreError } from "../_catalog/broker_errors.ts";
+import type { SeatRelayCode } from "../_catalog/task_send.ts";
 import type { AbsenceReason } from "../native/sends/addon.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
-import type { SeatRelayCode, SeatRelayFull } from "../seats/relay-full.ts";
+import type { SeatRelayFull } from "../seats/relay-full.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
 import type { LibraryTaskCode } from "../wire/task-error.ts";
 

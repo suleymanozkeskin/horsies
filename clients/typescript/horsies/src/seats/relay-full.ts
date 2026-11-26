@@ -4,16 +4,7 @@
 // monitoring or health read, a ping, a cancel, a rerun. The Python and Rust clients have no seat relay.
 
 import type { CoreCause } from "../_catalog/error_detail.ts";
-
-/**
- * The failure code of a call that the seat relay did not send: the core's code catalog `SeatRelayCode`
- * (`core/src/core/task/seat_relay.rs`). One constant here until the build renders the catalog into
- * `_catalog/task_send.ts`; the switch then imports it from there, with the same name and members.
- */
-export const SeatRelayCode = { SEAT_RELAY_FULL: "SEAT_RELAY_FULL" } as const;
-
-/** A member of `SeatRelayCode`. */
-export type SeatRelayCode = (typeof SeatRelayCode)[keyof typeof SeatRelayCode];
+import { SeatRelayCode } from "../_catalog/task_send.ts";
 
 /**
  * `SEAT_RELAY_FULL`: the seat relay holds its bound of waiting calls; nothing was sent; retry. Only a call in a

@@ -9,7 +9,8 @@ import { checkContractList, contractLookup } from "../../../horsies/src/app/cont
 import { WorkflowId } from "../../../horsies/src/contract/ids.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { IsolateRelay } from "../../../horsies/src/seats/relay.ts";
-import { SeatRelayCode, type SeatRelayFull } from "../../../horsies/src/seats/relay-full.ts";
+import { SeatRelayCode } from "../../../horsies/src/_catalog/task_send.ts";
+import type { SeatRelayFull } from "../../../horsies/src/seats/relay-full.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 import { createWorkflowArea, type WorkflowArea } from "../../../horsies/src/workflow/app-area.ts";

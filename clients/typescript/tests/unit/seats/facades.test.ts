@@ -15,7 +15,7 @@ import { IsolateRelay } from "../../../horsies/src/seats/relay.ts";
 import { fakeHandle, mainThreadAccess, taskIdOf, valueEnvelope } from "../monitoring/support/fakes.ts";
 import { COMMAND, POLICY } from "../rerun/support.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
-import { SeatRelayCode } from "../../../horsies/src/seats/relay-full.ts";
+import { SeatRelayCode } from "../../../horsies/src/_catalog/task_send.ts";
 import { TEST_RELAY_BOUNDS } from "./support.ts";
 
 const TASK_ID = taskIdOf("01890a5d-ac96-774b-bcce-b302099a8057");
