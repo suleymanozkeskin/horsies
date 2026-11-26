@@ -34,9 +34,10 @@ export type ZodAdapterRefused =
  * The wire type of a zod schema as an object member or a task input parameter: its kind and its presence. The caller
  * checks the member's name (`checkParameters`).
  *
- * Fails with `Zod3Schema`, `ZodVersionNotSupported` or `OtherZodCopy` (the release), `SelfCheckFailed` (the self-check
- * runs at the first call of the process), `SchemaRefused` (the adapter) or `KindRefused` (`checkKind`). Reads each
- * default value twice and calls the getter of each `z.lazy()` once. Does no I/O.
+ * Fails with `Zod3Schema` or `ZodVersionNotSupported` (the release), `SelfCheckFailed` (the self-check runs at the
+ * first call of the process), `SchemaRefused` (the adapter) or `KindRefused` (`checkKind`). A schema of each zod copy
+ * passes (the ES module or the CommonJS build, a bundled copy). Reads each default value twice and calls the getter of
+ * each `z.lazy()` once. Does no I/O.
  */
 export function zodMemberWire(schema: StandardSchemaMarked): Result<ValueWire, ZodAdapterRefused> {
   const member = kindAfterChecks(schema, selfCheckOnce, compileMember, (compiled: ZodMemberKind) =>

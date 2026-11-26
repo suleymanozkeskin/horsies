@@ -34,7 +34,6 @@ export type ZodSelfCheckFailure = { readonly name: string; readonly expected: st
 export type ZodAdapterRefused =
   | { readonly kind: "Zod3Schema"; readonly fix: string }
   | { readonly kind: "ZodVersionNotSupported"; readonly found: ZodVersion; readonly supported: string }
-  | { readonly kind: "OtherZodCopy"; readonly found: ZodVersion; readonly loaded: ZodVersion }
   | { readonly kind: "SelfCheckFailed"; readonly failures: readonly ZodSelfCheckFailure[] }
   | { readonly kind: "SchemaRefused"; readonly refusals: readonly ZodNodeRefused[] }
   | { readonly kind: "KindRefused"; readonly refusals: readonly KindRefused[] };

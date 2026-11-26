@@ -3,6 +3,7 @@
 import { WHOLE_SECONDS_MAX, WHOLE_SECONDS_MIN } from "../_catalog/manifest.ts";
 import type { DeadlineFact, DelayFact, OptionalText, RetentionChoice } from "../native/sends/addon.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import { instantText } from "../codec/temporal-text.ts";
 import { IDEMPOTENCY_KEY_MAX_BYTES } from "./bounds.ts";
 
 /** The retention of the task's history record: a period of whole days that the app registers, or forever. */
@@ -92,6 +93,10 @@ function checkDeadline(goodUntil: Temporal.Instant | undefined): Result<Deadline
 
   if (!(goodUntil instanceof Temporal.Instant)) {
     return refuse("goodUntil", "goodUntil is a Temporal.Instant");
+  }
+
+  if (!instantText(goodUntil).ok) {
+    return refuse("goodUntil", "a deadline is an instant of the years 1 to 9999, the range of a stored date-time");
   }
 
   return ok({ kind: "until", epochMicros: epochMicrosTowardPast(goodUntil) });

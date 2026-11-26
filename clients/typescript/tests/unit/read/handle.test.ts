@@ -89,11 +89,39 @@ describe("TaskHandle.get", () => {
   });
 
   test("a finished task that stores no result is resultNotAvailable with its status", async () => {
-    for (const status of ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"] as const) {
+    for (const status of ["COMPLETED", "FAILED", "EXPIRED"] as const) {
       const { handle } = declaredHandle({ results: [unfinishedRead(status)] });
 
       assert.deepEqual(await readError(handle.get()), { kind: "resultNotAvailable", status });
     }
+  });
+
+  test("a cancelled task with no stored result reads as the failed outcome TASK_CANCELLED, kept", async () => {
+    const { handle, calls } = declaredHandle({ results: [unfinishedRead("CANCELLED")] });
+    const read = await handle.get();
+
+    assert.deepEqual(read, {
+      ok: true,
+      value: {
+        kind: "failed",
+        error: {
+          code: { kind: "library", code: "TASK_CANCELLED" },
+          message: `Task ${TASK_ID} was cancelled before completion`,
+          data: { task_id: TASK_ID },
+          exception: null,
+          subWorkflow: null,
+        },
+      },
+    });
+    await handle.get();
+    assert.equal(calls.getResult, 1);
+  });
+
+  test("a cancelled task with a stored envelope reads as TASK_CANCELLED too, as the Python and Rust clients read it", async () => {
+    const { handle } = declaredHandle({ results: [storedRead("CANCELLED", okEnvelope('{"id":7}'))] });
+    const read = await handle.get();
+
+    assert.equal(read.ok && read.value.kind === "failed" ? read.value.error.code.code : "", "TASK_CANCELLED");
   });
 
   test("a stored value that does not fit the output kind is storedResultUnreadable with no value in the cause", async () => {
@@ -179,15 +207,10 @@ describe("TaskHandle.get", () => {
     const { handle, calls } = declaredHandle({ results: [{ kind: "failed", error: invalidJsonPayloadRaw() }] });
     const error = await readError(handle.get());
 
-    assert.deepEqual(error, {
-      kind: "database",
-      code: "INVALID_JSON_PAYLOAD",
-      retryable: false,
-      message: "result JSON is refused: duplicate key",
-    });
-    // Not kept: a later read asks the core again.
+    // A fact of the stored data, as the Python and Rust clients read it: storedResultUnreadable, kept.
+    assert.deepEqual(error, { kind: "storedResultUnreadable", cause: "result JSON is refused: duplicate key" });
     await handle.get();
-    assert.equal(calls.getResult, 2);
+    assert.equal(calls.getResult, 1);
   });
 
   test("a timeoutMs that is not whole milliseconds from 0 to the limit is invalidWait, before any core call", async () => {
@@ -270,7 +293,7 @@ describe("readErrorCode", () => {
     const cases: readonly (readonly [ReadError, string])[] = [
       [{ kind: "waitTimedOut", status: "PENDING" }, "WAIT_TIMEOUT"],
       [{ kind: "taskNotFound", absence: "notClassified" }, "TASK_NOT_FOUND"],
-      [{ kind: "resultNotAvailable", status: "CANCELLED" }, "RESULT_NOT_AVAILABLE"],
+      [{ kind: "resultNotAvailable", status: "EXPIRED" }, "RESULT_NOT_AVAILABLE"],
       [{ kind: "storedResultUnreadable", cause: "c" }, "RESULT_DESERIALIZATION_ERROR"],
       [{ kind: "unknownUserCode", code: "X" }, "RESULT_DESERIALIZATION_ERROR"],
       [{ kind: "waitInsideTask" }, "WAIT_INSIDE_TASK"],

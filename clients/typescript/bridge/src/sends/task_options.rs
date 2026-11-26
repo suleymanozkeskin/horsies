@@ -468,7 +468,6 @@ fn boundary_text(refusal: &BoundaryRefusal) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sends::refusals::CoreRefusalCode;
 
     /// The facts of an `ISOLATED` task with no options.
     fn facts() -> TaskOptionsFacts {
@@ -492,7 +491,7 @@ mod tests {
         }
     }
 
-    fn codes_of(facts: &TaskOptionsFacts) -> Vec<CoreRefusalCode> {
+    fn codes_of(facts: &TaskOptionsFacts) -> Vec<String> {
         match task_options_check(facts) {
             TaskOptionsCheck::Refused { refusals } => {
                 refusals.into_iter().map(|refusal| refusal.code).collect()
@@ -501,10 +500,8 @@ mod tests {
         }
     }
 
-    fn catalog(code: &str) -> CoreRefusalCode {
-        CoreRefusalCode::Catalog {
-            code: code.to_owned(),
-        }
+    fn catalog(code: &str) -> String {
+        code.to_owned()
     }
 
     #[test]

@@ -1,7 +1,7 @@
 // The worker profiles of the config: the children of each execution class, their recycle limits and pools, the pool
 // of the worker process, the claim limits and the drain timeout (the core's `WorkerProfile`,
 // `core/src/core/config/worker_profile.rs`). A worker runs the profile of its name. The core checks every profile
-// with the app config.
+// with the app config. A refusal of a profile field has the code of a worker profile (`HRS-218`).
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import {
@@ -169,7 +169,7 @@ export function workerProfilesJson(
   return checkedObject(
     Object.entries(profiles).map(([name, profile]) => {
       const at = keyPath(path, name);
-      const checkedName = checkedText(name, at);
+      const checkedName = checkedText(name, ErrorCode.CONFIG_INVALID_WORKER_PROFILE, at);
 
       return checkedName.kind === "refused" ? checkedName : entry(name, profileJson(profile, at));
     }),

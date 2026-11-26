@@ -112,15 +112,18 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
         ? { ok: true, value: DEFAULT_QUEUE_ROUTE }
         : {
             ok: false,
-            error: refusal(ErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "a task names no queue in the default queue mode", [
-              "remove queue, or set queueMode: \"custom\" with customQueues",
-            ]),
+            error: refusal(
+              ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+              path,
+              `the task names the queue "${record.queue.name}", and the default queue mode takes no queue`,
+              ["remove queue, or set queueMode: \"custom\" with customQueues"],
+            ),
           };
     case "custom": {
       if (record.queue.kind === "noQueue") {
         return {
           ok: false,
-          error: refusal(ErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "a task names its queue in the custom queue mode", [
+          error: refusal(ErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "the custom queue mode needs a queue on each task", [
             "set queue to one of the customQueues",
           ]),
         };

@@ -132,13 +132,12 @@ describe("the supported zod releases", () => {
     });
   });
 
-  test("OtherZodCopy: a release inside the range from another copy of zod", () => {
+  test("a release inside the range from another copy of zod passes: the check reads the schema's own release", () => {
     const string = z.string();
     // SAFETY: a stub of a schema of another zod copy: an equal release number in another version object.
     const other = { ...string, _zod: { ...string._zod, version: { ...string._zod.version } } } as typeof string;
-    const outcome = zodSchemaOf(other);
 
-    assert.equal(outcome.ok ? "" : outcome.error.kind, "OtherZodCopy");
+    assert.deepEqual(zodSchemaOf(other), { ok: true, value: other });
   });
 
   test("Zod3Schema: a value with the zod marker and no zod 4 internals", () => {
