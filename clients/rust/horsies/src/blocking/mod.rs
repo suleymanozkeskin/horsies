@@ -29,6 +29,9 @@
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
 //!   start, `HandleErrorCode::AsyncContext`, or
 //!   `WorkflowReadError::AsyncContext`.
+//! - A read that takes a `WaitLimit` checks it first, on any thread: a
+//!   `Within` limit above `MAX_WAIT_LIMIT_MS` is `ReadError::InvalidInput`
+//!   or `WorkflowReadError::InvalidInput`, and nothing runs.
 //! - The thread of a blocking task body in a worker child (a `fn` task)
 //!   drives no async task: a blocking call works there, also where the
 //!   child runtime's handle is set.
@@ -65,6 +68,7 @@ use tokio::runtime::{Handle, Runtime};
 use uuid::Uuid;
 
 use crate::check::{connectivity_report, CHECK};
+use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::send::{RetryOf, SendStart};
 use crate::{
@@ -315,10 +319,13 @@ where
     T: DeserializeOwned + Clone,
     E: UserErrorCode,
 {
-    /// `TaskHandle::get`, blocking. In Python's order: a process that runs
-    /// task bodies refuses the wait; a kept read is returned; a runtime
-    /// thread answers `AsyncContext`, which is not kept.
+    /// `TaskHandle::get`, blocking. The limit is the first check, as in
+    /// the async form: a `Within` limit above `MAX_WAIT_LIMIT_MS` is
+    /// `InvalidInput`. Then, in Python's order: a process that runs task
+    /// bodies refuses the wait; a kept read is returned; a runtime thread
+    /// answers `AsyncContext`, which is not kept.
     pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
+        let _wait = checked_task_wait(self.handle.task_id(), limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "TaskHandle.get() for task {}",
@@ -428,12 +435,14 @@ impl HorsiesView<'_> {
             .get(limit)
     }
 
-    /// `Horsies::get_raw_result`, blocking.
+    /// `Horsies::get_raw_result`, blocking. The limit is the first check,
+    /// before the process and the thread checks.
     pub fn get_raw_result(
         &self,
         task_id: Uuid,
         limit: WaitLimit,
     ) -> Result<StoredResult, ReadError> {
+        let _wait = checked_task_wait(task_id, limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "Horsies.get_raw_result() for task {task_id}"
@@ -664,6 +673,33 @@ mod tests {
         assert!(info
             .to_string()
             .contains("`app.get_task_info(task_id, parts).await`"));
+    }
+
+    /// The limit is the first check of a blocking read: on a runtime
+    /// thread, where the thread check answers `AsyncContext`, a limit above
+    /// the bound is `InvalidInput`. Nothing is kept.
+    #[tokio::test]
+    async fn a_blocking_read_above_the_bound_is_invalid_input_on_any_thread() {
+        let app = app();
+        let task_id = Uuid::from_u128(6);
+        let above = WaitLimit::Within(Duration::from_millis(crate::MAX_WAIT_LIMIT_MS + 1));
+        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let refused = handle.blocking().get(above).unwrap_err();
+        assert_eq!(
+            refused,
+            ReadError::InvalidInput {
+                task_id,
+                cause: crate::WaitLimitRefused,
+            },
+        );
+        assert!(handle.kept().is_none());
+        let typed = app
+            .blocking()
+            .get_result::<u32, Infallible>(task_id, above)
+            .unwrap_err();
+        assert!(matches!(typed, ReadError::InvalidInput { .. }), "{typed}");
+        let raw = app.blocking().get_raw_result(task_id, above).unwrap_err();
+        assert!(matches!(raw, ReadError::InvalidInput { .. }), "{raw}");
     }
 
     #[tokio::test]

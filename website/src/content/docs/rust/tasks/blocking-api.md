@@ -100,10 +100,11 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 ## Order of the Checks
 
 - A refused input is refused before the thread check: a suppressed send is `SendSuppressed`, and an input that does not read back is `ValidationFailed`, on any thread.
-- `TaskHandleView::get` refuses a wait in a worker child with `WaitInsideTask` first, then returns a kept read with no I/O, then checks the thread. An `AsyncContext` answer is not kept.
+- A read that takes a `WaitLimit` checks the limit first, on any thread: a `Within` limit above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `ReadError::InvalidInput` (`get`, `get_result`, `get_raw_result`) or `WorkflowReadError::InvalidInput` (`WorkflowHandleView::get`). Nothing runs.
+- `TaskHandleView::get` then refuses a wait in a worker child with `WaitInsideTask`, then returns a kept read with no I/O, then checks the thread. An `InvalidInput` or `AsyncContext` answer is not kept.
 - A workflow start checks the thread first, as Python's `WorkflowSpec.start`: on a runtime thread the build of a template does not run, and a process-wide start of a definition that this process did not register is `AsyncContext` too.
 - `WorkflowFunctionView::retry_start` checks its error first: an error of another workflow name, or with a code that `retry_start` does not take, is `ValidationFailed` on any thread.
-- `WorkflowHandleView::get` refuses a wait in a worker child with `WaitInsideTask` first. `result_for` is not a wait.
+- `WorkflowHandleView::get` refuses a wait in a worker child with `WaitInsideTask` after the limit check. `result_for` is not a wait.
 - The thread of a `#[horsies::blocking_task]` body in a worker child drives no async task, so a blocking send or a blocking workflow start works there. A result wait in a worker child is `WaitInsideTask`.
 
 ## When the Process Runtime Did Not Start

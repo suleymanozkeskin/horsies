@@ -250,6 +250,26 @@ async fn a_blocking_handle_method_on_a_runtime_thread_is_async_context() {
     );
 }
 
+/// The limit is the first check of a blocking `get`: on a runtime thread,
+/// where the thread check answers `AsyncContext`, a limit above the bound
+/// is `InvalidInput`.
+#[tokio::test]
+async fn a_blocking_outcome_read_above_the_bound_is_invalid_input_on_any_thread() {
+    let workflow_id = Uuid::from_u128(29);
+    let handle = app().workflow_handle::<u32>(workflow_id);
+    let above = WaitLimit::Within(std::time::Duration::from_millis(
+        crate::MAX_WAIT_LIMIT_MS + 1,
+    ));
+    let read = handle.blocking().get(above).unwrap_err();
+    assert_eq!(
+        read,
+        WorkflowReadError::InvalidInput {
+            workflow_id,
+            cause: crate::WaitLimitRefused,
+        },
+    );
+}
+
 /// Python's sync `get` and `result_for` answer `RetrievalCode.ASYNC_CONTEXT`.
 #[tokio::test]
 async fn a_blocking_outcome_read_on_a_runtime_thread_is_async_context() {

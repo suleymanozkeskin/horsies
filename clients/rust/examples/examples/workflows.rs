@@ -124,7 +124,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 async fn demo(_app: Horsies) -> DemoResult {
     let handle = start_workflow::<OrderSummary>().await?;
     println!("started workflow {}", handle.workflow_id());
-    let limit = WaitLimit::parse(Some(Duration::from_secs(60)))?;
+    let limit = WaitLimit::Within(Duration::from_secs(60));
     match handle.get(limit).await? {
         TaskOutcome::Succeeded(summary) => println!("summary: {summary}"),
         TaskOutcome::Failed(error) => println!("the workflow failed: {error}"),

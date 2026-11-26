@@ -548,8 +548,7 @@ use horsies::{ReadError, TaskHandle, TaskOutcome, WaitLimit};
 async fn print_outcome(
     handle: &TaskHandle<String, std::convert::Infallible>,
 ) -> Result<(), ReadError> {
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30))).expect("30 s is within the limit");
-    match handle.get(limit).await? {
+    match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(order_id) => println!("validated {order_id}"),
         TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
     }
@@ -560,8 +559,12 @@ async fn print_outcome(
 | `WaitLimit` | Wait |
 |---|---|
 | `WaitLimit::NoLimit` | Until the task ends |
-| `WaitLimit::parse(Some(duration))` | Up to `duration`. Above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) it is `WaitLimitRefused`, before any read |
-| `WaitLimit::parse(None)` | `NoLimit` |
+| `WaitLimit::Within(duration)` | Up to `duration`. Zero reads once and does not wait |
+
+- The read checks the limit first. A `Within` limit above
+  `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `ReadError::InvalidInput`.
+- This check comes before a kept read, `WaitInsideTask` and
+  `AsyncContext`. No statement runs. The handle keeps nothing.
 
 | `TaskOutcome<T, E>` | The task |
 |---|---|
@@ -575,6 +578,7 @@ async fn print_outcome(
 | `ResultNotAvailable { task_id, status }` | `RESULT_NOT_AVAILABLE` | Terminal status with no stored result | Yes |
 | `StoredResultUnreadable { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read with `T` and `E` | Yes |
 | `UnknownUserCode { task_id, code, code_type }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` | Yes |
+| `InvalidInput { task_id, cause }` | `INVALID_INPUT` | The `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read | No |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a worker child. Nothing was read | No |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread that runs a tokio runtime. Nothing was read | No |
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed | No |
@@ -636,9 +640,11 @@ The process-wide starts have the blocking functions
   task, so a blocking send or workflow start works there. A result wait in
   a worker child is still `WaitInsideTask`.
 - A refused input is refused before the thread check: a suppressed send is
-  `SendSuppressed` on any thread. A workflow start checks the thread
-  first, as Python's `WorkflowSpec.start`: on a runtime thread a
-  template's build does not run. `retry_start` checks its error first.
+  `SendSuppressed` on any thread, and a read with a `Within` limit above
+  `MAX_WAIT_LIMIT_MS` is `InvalidInput` on any thread. A workflow start
+  checks the thread first, as Python's `WorkflowSpec.start`: on a runtime
+  thread a template's build does not run. `retry_start` checks its error
+  first.
 
 ## Rerun a Terminal Task
 
