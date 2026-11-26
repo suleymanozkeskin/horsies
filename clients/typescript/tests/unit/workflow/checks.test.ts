@@ -186,6 +186,8 @@ describe("refused node options", () => {
   const cases: readonly (readonly [string, object, readonly string[]])[] = [
     ["an id with a space", { id: "bad id" }, ["HRS-003"]],
     ["an empty id", { id: "" }, ["HRS-003"]],
+    ["no id", { id: undefined }, ["HRS-003"]],
+    ["an id that is a number", { id: 7 }, ["HRS-003"]],
     ["an id of 129 characters", { id: "n".repeat(129) }, ["HRS-003"]],
     ["the id of another node", { id: "source" }, ["HRS-004"]],
     ["a quorum of 0", { join: { kind: "quorum", minSuccess: 0 } }, ["HRS-013"]],
@@ -203,6 +205,27 @@ describe("refused node options", () => {
       assert.deepEqual(optionCodes(options), codes);
     });
   }
+
+  test("an id that is not a string: HRS-003 at the node's index, with no id in the place, and no throw", () => {
+    for (const id of [undefined, 7]) {
+      const outcome = checked(
+        flow((w) => {
+          w.task(ping, {}, { id: "source" });
+
+          // SAFETY: untyped code can give an id that is not a string; the check refuses it.
+          return { output: w.task(ping, {}, { id } as never) };
+        }),
+        {},
+        view,
+      );
+
+      assert(!outcome.ok);
+      assert.deepEqual(
+        outcome.error.map((found) => [found.code, found.place, found.detail]),
+        [["HRS-003", "nodes[1]", "invalid node id that is not a string"]],
+      );
+    }
+  });
 
   test("a context source that is not a dependency: HRS-009", () => {
     const codes = findingCodes(

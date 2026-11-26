@@ -9,7 +9,7 @@
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import { NODE_INDEX_MAX } from "../_catalog/workflow_spec.ts";
-import { isArray, isObjectLike } from "../codec/values.ts";
+import { isArray, isObjectLike, isString } from "../codec/values.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 import type { Kind, ObjectKind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
@@ -141,24 +141,39 @@ function gateOne(record: WorkflowRecord, session: BuildSession, nodes: readonly 
   return findings;
 }
 
-/** The place of a node in a finding: `nodes[2] charge`. Pure. */
+/** The place of a node in a finding: `nodes[2] charge`; only `nodes[2]` for an id that breaks the id rule. Pure. */
 export function nodePlace(index: number, node: RecordedNode): string {
-  return `nodes[${index}] ${node.options.id}`;
+  const id: unknown = node.options.id;
+
+  return isValidNodeId(id) ? `nodes[${index}] ${id}` : `nodes[${index}]`;
 }
 
+/**
+ * Whether a node id is a string of the id pattern with at most `MAX_NODE_ID_LENGTH` characters. The type gives a
+ * string; untyped code or a cast can give another value, which is not an id. Pure.
+ */
+function isValidNodeId(id: unknown): id is string {
+  return isString(id) && id.length <= MAX_NODE_ID_LENGTH && NODE_ID.test(id);
+}
+
+/** `HRS-003` for each id that breaks the id rule, and `HRS-004` for each valid id that an earlier node has. Pure. */
 function idFindings(nodes: readonly RecordedNode[]): readonly SpecFinding[] {
   const findings: SpecFinding[] = [];
   const seen = new Map<string, number>();
 
   nodes.forEach((node, index) => {
-    const id = node.options.id;
+    const id: unknown = node.options.id;
 
-    if (!NODE_ID.test(id) || id.length > MAX_NODE_ID_LENGTH) {
+    if (!isValidNodeId(id)) {
+      const detail = isString(id) ? `invalid node id ${JSON.stringify(id)}` : "invalid node id that is not a string";
+
       findings.push(
-        finding(ErrorCode.WORKFLOW_INVALID_NODE_ID, `nodes[${index}]`, `invalid node id ${JSON.stringify(id)}`, [
-          `a node id matches [A-Za-z0-9_\\-:.]+ and has at most ${MAX_NODE_ID_LENGTH} characters`,
+        finding(ErrorCode.WORKFLOW_INVALID_NODE_ID, `nodes[${index}]`, detail, [
+          `a node id is a string that matches [A-Za-z0-9_\\-:.]+ and has at most ${MAX_NODE_ID_LENGTH} characters`,
         ]),
       );
+
+      return;
     }
 
     const earlier = seen.get(id);
