@@ -57,6 +57,15 @@ describe("readBoundedBody", () => {
 
     assert.deepEqual(await readBoundedBody(body, 8), { kind: "failed", cause: "connection reset" });
   });
+
+  test("a body that is locked is failed with the cause", async () => {
+    const { body } = chunkedBody(2, 3);
+    const _held = body.getReader();
+    const read = await readBoundedBody(body, 8);
+
+    assert.equal(read.kind, "failed");
+    assert.ok(read.kind === "failed" && read.cause !== "", "the cause is named");
+  });
 });
 
 describe("hexOf", () => {

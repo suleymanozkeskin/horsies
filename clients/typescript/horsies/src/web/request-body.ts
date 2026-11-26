@@ -11,41 +11,46 @@ export type BodyRead =
 
 /**
  * The first `limit` bytes of `body`, or all of a shorter body. The read stops at `limit` bytes and
- * cancels the rest of the body, so it holds at most `limit` bytes. A body that the transfer could
- * not deliver (the client went away, a bad chunk) is `failed` with the cause.
+ * cancels the rest of the body, so it holds at most `limit` bytes. A body that is locked (code
+ * before the handler holds its reader or read it), or that the transfer could not deliver (the
+ * client went away, a bad chunk), is `failed` with the cause.
  */
 export async function readBoundedBody(body: ReadableStream<Uint8Array> | null, limit: number): Promise<BodyRead> {
   if (body === null) {
     return { kind: "read", bytes: new Uint8Array(0) };
   }
 
-  const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
 
   try {
-    while (total < limit) {
-      const read = await reader.read();
+    // A locked body throws here: a stream has one reader at a time.
+    const reader = body.getReader();
 
-      if (read.done) {
-        return { kind: "read", bytes: joined(chunks, total) };
+    try {
+      while (total < limit) {
+        const read = await reader.read();
+
+        if (read.done) {
+          return { kind: "read", bytes: joined(chunks, total) };
+        }
+
+        const chunk = read.value.subarray(0, limit - total);
+
+        chunks.push(chunk);
+        total += chunk.byteLength;
       }
 
-      const chunk = read.value.subarray(0, limit - total);
+      // The bytes past the bound are not read. A cancel that fails changes nothing for the
+      // answer, which holds the bytes up to the bound.
+      await reader.cancel().then(noAnswer, noAnswer);
 
-      chunks.push(chunk);
-      total += chunk.byteLength;
+      return { kind: "read", bytes: joined(chunks, total) };
+    } finally {
+      reader.releaseLock();
     }
-
-    // The bytes past the bound are not read. A cancel that fails changes nothing for the answer,
-    // which holds the bytes up to the bound.
-    await reader.cancel().then(noAnswer, noAnswer);
-
-    return { kind: "read", bytes: joined(chunks, total) };
   } catch (cause) {
     return { kind: "failed", cause: thrownFacts(cause).message };
-  } finally {
-    reader.releaseLock();
   }
 }
 

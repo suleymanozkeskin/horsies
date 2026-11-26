@@ -96,6 +96,52 @@ describe("the policy calls", () => {
   });
 });
 
+describe("the request of the policy", () => {
+  test("a policy that reads the body leaves the body of an action to the core", async () => {
+    const policy: MonitoringAuthPolicy = {
+      canView: async (incoming) => (await incoming.text()) === "",
+      canAct: async (incoming) => (await incoming.text()) === "",
+    };
+
+    const { handler, calls } = handlerWith(policy);
+    const response = await handler(request(`/api/tasks/${TASK_ID}/cancel`, { method: "POST", body: "{}" }));
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls.handled[0]?.grant, { view: "allowed", act: "allowed" });
+    assert.equal(calls.handled[0]?.bodyHex, "7b7d");
+  });
+
+  test("the policy reads the method, the URL, the headers and the signal, and no body", async () => {
+    const seen: Request[] = [];
+
+    const recordSeen = (incoming: Request): boolean => {
+      seen.push(incoming);
+
+      return true;
+    };
+
+    const { handler } = handlerWith({ canView: recordSeen, canAct: recordSeen });
+    const leaving = new AbortController();
+    const path = `/api/tasks/${TASK_ID}/cancel`;
+
+    await handler(
+      request(path, { method: "POST", body: "{}", headers: { cookie: "session=abc" }, signal: leaving.signal }),
+    );
+
+    assert.equal(seen.length, 2);
+
+    for (const incoming of seen) {
+      assert.equal(incoming.method, "POST");
+      assert.equal(incoming.url, `http://monitoring.test${path}`);
+      assert.equal(incoming.headers.get("cookie"), "session=abc");
+      assert.equal(incoming.body, null);
+    }
+
+    leaving.abort();
+    assert.equal(seen[0]?.signal.aborted, true);
+  });
+});
+
 describe("a policy that fails", () => {
   test("a throw answers 500 and logs the route and the error; the core is not asked", async () => {
     const { policy } = recordingPolicy(
@@ -171,6 +217,21 @@ describe("the request body", () => {
 
     assert.equal(response.status, 400);
     assert.deepEqual(await response.json(), { detail: "The request body could not be read: connection reset" });
+    assert.deepEqual(calls.handled, []);
+  });
+
+  test("a body that is locked answers 400 with the cause", async () => {
+    const { handler, calls } = handlerWith(allowAll());
+    const incoming = request(`/api/tasks/${TASK_ID}/cancel`, { method: "POST", body: "{}" });
+
+    // A reader that code before the handler took, and kept.
+    const _held = incoming.body?.getReader();
+    const response = await handler(incoming);
+    const body: unknown = await response.json();
+
+    assert.equal(response.status, 400);
+    assert.ok(body instanceof Object);
+    assert.match(String(Reflect.get(body, "detail")), /^The request body could not be read: ./u);
     assert.deepEqual(calls.handled, []);
   });
 });

@@ -7,7 +7,8 @@
 // 1. The path inside the mount: the URL path with `basePath` removed. A path outside the mount is
 //    answered 404, and no policy runs.
 // 2. The core names the verdicts that the route needs and the form of its answer.
-// 3. The policy is asked those verdicts only, in order; `canAct` only after `canView` allowed. A
+// 3. The policy is asked those verdicts only, in order; `canAct` only after `canView` allowed. The
+//    policy reads a copy of the request with no body, so the body stays unread for the core. A
 //    policy that throws or rejects answers 500, and the error is logged with the route.
 // 4. The event stream after an allowed view is the core's frames. Every other request reads at most
 //    the core's body bound plus one byte, and the core answers it with its verdicts.
@@ -258,28 +259,43 @@ export interface PolicyFailed {
 /** One verdict call of the policy. */
 type VerdictCall = { readonly kind: "verdict"; readonly verdict: "allowed" | "refused" } | PolicyFailed;
 
-/** Ask `policy` the verdicts that `need` names, in order: `canAct` only after `canView` allowed. */
+/**
+ * Ask `policy` the verdicts that `need` names, in order: `canAct` only after `canView` allowed. The
+ * policy reads the request with no body (`policyRequestOf`).
+ */
 export async function askPolicy(need: RouteNeed, policy: MonitoringAuthPolicy, request: Request): Promise<PolicyAnswer> {
   switch (need) {
     case "public":
       return answered("notAsked", "notAsked");
     case "view": {
-      const view = await verdictOf("canView", () => policy.canView(request));
+      const head = policyRequestOf(request);
+      const view = await verdictOf("canView", () => policy.canView(head));
 
       return view.kind === "verdict" ? answered(view.verdict, "notAsked") : view;
     }
 
     case "viewReportAct":
     case "viewAndAct":
-      return askViewThenAct(policy, request);
+      return askViewThenAct(policy, policyRequestOf(request));
     default:
       return unreachable(need);
   }
 }
 
-/** `canView`, then `canAct` when the view was allowed. */
-async function askViewThenAct(policy: MonitoringAuthPolicy, request: Request): Promise<PolicyAnswer> {
-  const view = await verdictOf("canView", () => policy.canView(request));
+/**
+ * The request that the policy reads: the method, the URL, the headers and the signal of `request`,
+ * with no body, so a policy that reads its body leaves the body of `request` unread for the core.
+ * Its signal follows the signal of `request`. Called only for a route that asks the policy: the core
+ * names such routes for `GET`, `HEAD` and `POST` only, and the `Request` constructor takes these
+ * methods on every runtime.
+ */
+function policyRequestOf(request: Request): Request {
+  return new Request(request.url, { method: request.method, headers: request.headers, signal: request.signal });
+}
+
+/** `canView`, then `canAct` when the view was allowed, both on `head`, the request with no body. */
+async function askViewThenAct(policy: MonitoringAuthPolicy, head: Request): Promise<PolicyAnswer> {
+  const view = await verdictOf("canView", () => policy.canView(head));
 
   switch (view.kind) {
     case "policyFailed":
@@ -296,7 +312,7 @@ async function askViewThenAct(policy: MonitoringAuthPolicy, request: Request): P
     case "refused":
       return answered("refused", "notAsked");
     case "allowed": {
-      const act = await verdictOf("canAct", () => policy.canAct(request));
+      const act = await verdictOf("canAct", () => policy.canAct(head));
 
       return act.kind === "verdict" ? answered("allowed", act.verdict) : act;
     }
