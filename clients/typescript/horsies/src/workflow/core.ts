@@ -310,7 +310,8 @@ export function mainThreadWorkflowCore(facts: MainThreadFacts, registry: Workflo
     addonSettlement,
   );
 
-  const registered = native.registerChildSpecSource(facts.handle, source);
+  const definitionKeys = registry.workflows.map((listed) => listed.record.definitionKey);
+  const registered = native.registerChildSpecSource(facts.handle, source, definitionKeys);
 
   if (registered === "alreadySet") {
     throw new ClientDefect({ subject: "registerChildSpecSource", rule: "a new core handle holds a child spec source" });

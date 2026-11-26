@@ -53,7 +53,7 @@ const READER_PATHS: readonly ReaderPath[] = [
     checkedBy: "inputText",
     proof: {
       file: "runtime/native/workflows-addon.test.ts",
-      test: "a merged input that the core's strict check refuses fails the node and never calls the build",
+      test: "a stored input that the core's strict read refuses fails the node and never calls the build",
     },
   },
   {

@@ -4,8 +4,10 @@
 //! (`crate::call::callback`).
 //!
 //! One build, in order (the Rust client's `child_spec_answer`):
-//! 1. A node with no definition key fails with `SUBWORKFLOW_LOAD_FAILED`;
-//!    no call into JavaScript.
+//! 1. A node with no definition key, or with a key that the app does not
+//!    list (the keys are given at the registration), fails with
+//!    `SUBWORKFLOW_LOAD_FAILED`; no input is read and no call goes into
+//!    JavaScript. Both clients look the definition up before the input.
 //! 2. The core merges the node input with its `args_from` envelopes
 //!    (`merged_child_input`). A node failure of the merge fails the node; a
 //!    refusal of the merge is `Raised`.
@@ -27,6 +29,8 @@
 //! (not retryable) with the subject and the cause, and one ERROR record. The
 //! step rolls back, and a start reports `ENQUEUE_FAILED`.
 
+use std::collections::HashSet;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -118,15 +122,34 @@ pub enum SourceRegistration {
 /// The callback of the package's build function.
 type ChildSpecCallback = JsCallback<ChildSpecCall, ChildSpecAnswer, CHILD_SPEC_QUEUE_BOUND>;
 
+/// The definition keys of the workflows that the app lists, fixed at the
+/// registration of the source.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ListedKeys(HashSet<String>);
+
+impl ListedKeys {
+    /// The set of `keys`. Pure.
+    pub fn of(keys: Vec<String>) -> Self {
+        Self(keys.into_iter().collect())
+    }
+
+    /// Whether the app lists a workflow with `key`. Pure.
+    fn holds(&self, key: &str) -> bool {
+        self.0.contains(key)
+    }
+}
+
 /// The registration of the package's build function: the child spec source
 /// of one core handle.
 pub struct JavaScriptChildSpecSource {
     callback: ChildSpecCallback,
+    listed: ListedKeys,
 }
 
-/// Set `source` as the child spec source of `handle`, once. On the
-/// JavaScript thread; starts nothing. The registration is weak: it does not
-/// keep the event loop alive.
+/// Set `source` as the child spec source of `handle`, once, with the
+/// definition keys of the workflows that the app lists. On the JavaScript
+/// thread; starts nothing. The registration is weak: it does not keep the
+/// event loop alive.
 #[napi(ts_return_type = "NativeEnvelope<SourceRegistration>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -135,6 +158,7 @@ pub struct JavaScriptChildSpecSource {
 pub fn register_child_spec_source(
     handle: &CoreHandle,
     source: Function<FnArgs<(BigInt, ChildSpecCall)>, ()>,
+    definition_keys: Vec<String>,
 ) -> Envelope<SourceRegistration> {
     sync_call("register_child_spec_source", || {
         let callback = match ChildSpecCallback::register(&source) {
@@ -149,7 +173,10 @@ pub fn register_child_spec_source(
                 })
             }
         };
-        let registered = Arc::new(JavaScriptChildSpecSource { callback });
+        let registered = Arc::new(JavaScriptChildSpecSource {
+            callback,
+            listed: ListedKeys::of(definition_keys),
+        });
         Envelope::Value(match handle.set_child_spec_source(registered) {
             Ok(()) => SourceRegistration::Registered,
             Err(ChildSpecSourceSet) => SourceRegistration::AlreadySet,
@@ -170,17 +197,26 @@ impl JavaScriptChildSpecSource {
         &self,
         request: ChildSpecRequest,
     ) -> Result<ClientChildSpec, ChildSpecUnavailable> {
-        let (call, input) = match build_step(&request) {
+        let (call, input) = match build_step(&request, &self.listed) {
             BuildStep::Answered(answer) => return answer,
             BuildStep::Call { call, input } => (call, input),
         };
-        let end = match tokio::time::timeout(CHILD_SPEC_WAIT_BOUND, self.callback.call(call)).await
-        {
-            Ok(Ok(answer)) => CallEnd::Answered(answer),
-            Ok(Err(failure)) => CallEnd::Failed(failure),
-            Err(_past_the_bound) => CallEnd::PastBound,
-        };
+        let end = call_end(self.callback.call(call), CHILD_SPEC_WAIT_BOUND).await;
         spec_of_call(&request, &input, end)
+    }
+}
+
+/// How the wait for the answer of `call` ended: its answer or its failure,
+/// or `PastBound` when no answer came within `bound`. The drop of `call` at
+/// the bound ends the wait for it.
+async fn call_end(
+    call: impl Future<Output = Result<ChildSpecAnswer, CallbackFailure>>,
+    bound: Duration,
+) -> CallEnd {
+    match tokio::time::timeout(bound, call).await {
+        Ok(Ok(answer)) => CallEnd::Answered(answer),
+        Ok(Err(failure)) => CallEnd::Failed(failure),
+        Err(_past_the_bound) => CallEnd::PastBound,
     }
 }
 
@@ -203,15 +239,25 @@ enum CallEnd {
     PastBound,
 }
 
-/// Steps 1 to 3 of a build: the definition key, the merge, and the strict
-/// check of the merged text. Pure.
-fn build_step(request: &ChildSpecRequest) -> BuildStep {
+/// Steps 1 to 3 of a build: the definition key and its listing in
+/// `listed`, the merge, and the strict check of the merged text. Pure.
+fn build_step(request: &ChildSpecRequest, listed: &ListedKeys) -> BuildStep {
     let Some(definition_key) = request.definition_key.as_deref() else {
         return BuildStep::Answered(node_fails(
             request,
             subworkflow_load_failed_error(&request.parent_workflow_name, request.task_index, None),
         ));
     };
+    if !listed.holds(definition_key) {
+        return BuildStep::Answered(node_fails(
+            request,
+            subworkflow_load_failed_error(
+                &request.parent_workflow_name,
+                request.task_index,
+                Some(definition_key),
+            ),
+        ));
+    }
     let input = match merged_child_input(request) {
         Ok(NodeInput::Input(input)) => input,
         Ok(NodeInput::NodeFails(error)) => return BuildStep::Answered(node_fails(request, error)),
@@ -436,10 +482,15 @@ fn subject_of(request: &ChildSpecRequest) -> String {
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::SubWorkflowParams;
+    use horsies_core::{ChildStartSource, SubWorkflowParams};
     use uuid::Uuid;
 
     use super::*;
+
+    /// The keys of an app that lists only `tests.report.v1`.
+    fn listed() -> ListedKeys {
+        ListedKeys::of(vec!["tests.report.v1".to_owned()])
+    }
 
     /// The request of the node 2 of `nightly` with the key `definition_key`
     /// and the stored input `node_input`, with no `args_from`.
@@ -461,7 +512,7 @@ mod tests {
     /// merged input.
     fn called() -> (ChildSpecRequest, ChildBuildInput) {
         let request = request(Some("tests.report.v1"), r#"{"day":"2026-11-25"}"#);
-        match build_step(&request) {
+        match build_step(&request, &listed()) {
             BuildStep::Call { call, input } => {
                 assert_eq!(
                     call,
@@ -525,7 +576,7 @@ mod tests {
 
     #[test]
     fn a_node_with_no_definition_key_fails_to_load_with_no_call() {
-        let BuildStep::Answered(answer) = build_step(&request(None, "{}")) else {
+        let BuildStep::Answered(answer) = build_step(&request(None, "{}"), &listed()) else {
             panic!("a node with no key calls no JavaScript");
         };
         let (message, failure_result) = failed_node(answer);
@@ -540,8 +591,78 @@ mod tests {
     }
 
     #[test]
+    fn a_key_that_the_app_does_not_list_fails_to_load_before_the_input_is_read() {
+        // A stored input that the merge refuses, and an `args_from` entry
+        // that does not encode: the lookup comes first, as in both clients.
+        let mut unlisted = request(Some("tests.other.v1"), "");
+        unlisted.args_from = Some("not json".to_owned());
+        let BuildStep::Answered(answer) = build_step(&unlisted, &listed()) else {
+            panic!("a key that the app does not list calls no JavaScript");
+        };
+        let (message, failure_result) = failed_node(answer);
+        assert!(
+            message.starts_with("[SUBWORKFLOW_LOAD_FAILED]"),
+            "{message}"
+        );
+        assert!(
+            failure_result.contains("tests.other.v1"),
+            "{failure_result}"
+        );
+    }
+
+    #[test]
+    fn a_dependency_result_that_repeats_a_key_fails_the_node_with_the_strict_read() {
+        let mut merged = request(Some("tests.report.v1"), "{}");
+        merged.args_from = Some(r#"{"rows": 0}"#.to_owned());
+        merged.sources = vec![ChildStartSource {
+            task_index: 0,
+            node_id: Some("fetch".to_owned()),
+            status: "COMPLETED".to_owned(),
+            task_name: "fetch_rows".to_owned(),
+            definition_key: None,
+            result: Some(r#"{"__h_task_result__":true,"ok":{"a":1,"a":2},"err":null}"#.to_owned()),
+        }];
+        let BuildStep::Answered(answer) = build_step(&merged, &listed()) else {
+            panic!("a merged input that the strict read refuses calls no JavaScript");
+        };
+        let (message, _envelope) = failed_node(answer);
+        assert!(
+            message.starts_with("[WORKFLOW_ENQUEUE_FAILED] Subworkflow build failed: "),
+            "{message}"
+        );
+        assert!(message.contains("repeats the key"), "{message}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_call_with_no_answer_ends_past_the_wait_bound() {
+        let started = tokio::time::Instant::now();
+        let end = call_end(std::future::pending(), CHILD_SPEC_WAIT_BOUND).await;
+        assert!(matches!(end, CallEnd::PastBound));
+        // The paused clock jumps to the timer, which rounds up to the next
+        // millisecond.
+        let waited = started.elapsed();
+        assert!(waited >= CHILD_SPEC_WAIT_BOUND, "{waited:?}");
+        assert!(
+            waited < CHILD_SPEC_WAIT_BOUND + Duration::from_millis(2),
+            "{waited:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_answer_within_the_wait_bound_is_the_answer() {
+        let end = call_end(
+            async { Ok(ChildSpecAnswer::NotListed) },
+            CHILD_SPEC_WAIT_BOUND,
+        )
+        .await;
+        assert!(matches!(end, CallEnd::Answered(ChildSpecAnswer::NotListed)));
+    }
+
+    #[test]
     fn a_stored_input_that_the_merge_refuses_fails_the_node() {
-        let BuildStep::Answered(answer) = build_step(&request(Some("tests.report.v1"), "")) else {
+        let BuildStep::Answered(answer) =
+            build_step(&request(Some("tests.report.v1"), ""), &listed())
+        else {
             panic!("an empty stored input calls no JavaScript");
         };
         let (message, _envelope) = failed_node(answer);

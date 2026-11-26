@@ -5,7 +5,8 @@
 // As in `child-producer.test.ts`: the probe exports of a `test-probes` build give the bridge's choice
 // (`ProducerHandle::chosen`) a child whose child host published a stand-in of the test database. The app's handle names
 // a port where no server listens: the start and the read on it fail; through the probes they succeed, and the stand-in
-// reports that an operation connected it.
+// reports that an operation connected it. A start of a sub-workflow root in a child calls the source of the app's
+// handle once.
 //
 // Runs only where a `build:dev` addon exists (`HORSIES_NATIVE_ADDON_PATH`) and `HORSIES_TEST_DATABASE_URL` names a
 // throwaway PostgreSQL database.
@@ -16,13 +17,20 @@ import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { addonSettlement, settlingCallback } from "../../../horsies/src/native/call/callback.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { TraceArgument } from "../../../horsies/src/native/values/records.ts";
-import { type ChildSpecSourceFunction, workflowsAddon } from "../../../horsies/src/native/workflows/addon.ts";
+import {
+  type ChildSpecAnswer,
+  type ChildSpecCall,
+  type ChildSpecSourceFunction,
+  workflowsAddon,
+} from "../../../horsies/src/native/workflows/addon.ts";
 import { childProducerProbeAddon, type NativeProbeChildProducer } from "./child-producer-probe.ts";
 import { manifestJson, manifestJsonWithPool, testDatabaseUrl } from "./manifest.ts";
+import { subWorkflowRootText } from "./workflow-spec-texts.ts";
 import { workflowsChildProducerProbeAddon } from "./workflows-child-producer-probe.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
@@ -38,6 +46,9 @@ const NO_CARRIER: TraceArgument = { kind: "noCarrier" };
 
 /** A child spec source that the core never calls: the vector has no sub-workflow node. */
 const neverCalled: ChildSpecSourceFunction = () => undefined;
+
+/** The definition key of the child of the sub-workflow root (`workflow-spec-texts.ts`). */
+const CHILD_KEY = "tests.strict_child.v1";
 
 /** The workflow spec data vectors of the core. */
 const VECTOR_FILE = fileURLToPath(
@@ -58,11 +69,15 @@ function vectorText(name: string): string {
   return vector.text;
 }
 
-/** The app's handle, with a child spec source: its database cannot be reached. */
-function unreachableAppHandle(): CoreHandle {
+/** The app's handle, with the child spec source `source` that lists `definitionKeys`: its database cannot be reached. */
+function unreachableAppHandle(
+  source: ChildSpecSourceFunction = neverCalled,
+  definitionKeys: readonly string[] = [],
+): CoreHandle {
   const handle = buildCoreHandle(manifestJson(UNREACHABLE_DATABASE_URL, false), "PRODUCER");
+  const registered = workflowsAddon().registerChildSpecSource(handle.native, source, [...definitionKeys]);
 
-  assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, neverCalled)), "registered");
+  assert.equal(envelopeValue(registered), "registered");
 
   return handle;
 }
@@ -107,6 +122,48 @@ describe("the workflow operations of a task child", () => {
     );
 
     assert.equal(direct.kind === "failed" ? direct.error.class : direct.kind, "WorkflowStartEnqueueFailed");
+    assert.equal(envelopeValue(await child.close()), "CLOSED");
+  });
+
+  test("a start in a child builds a sub-workflow child with the child spec source of the app's handle", async () => {
+    let calls = 0;
+
+    const notListed = settlingCallback((call: ChildSpecCall): ChildSpecAnswer => {
+      calls += 1;
+      assert.equal(call.definitionKey, CHILD_KEY);
+
+      return { kind: "notListed" };
+    }, addonSettlement);
+
+    const app = unreachableAppHandle(notListed, [CHILD_KEY]);
+    const child = newStandIn();
+    const prepared = envelopeValue(workflowsAddon().prepareClientSpec(subWorkflowRootText('{"n":1}')));
+
+    assert(prepared.kind === "prepared");
+
+    const workflowId = randomUUID();
+
+    const started = envelopeValue(
+      await workflowsChildProducerProbeAddon().probeStartWorkflowInChild(
+        app.native,
+        child,
+        prepared.spec,
+        workflowId,
+        1_795_687_200_000_000n,
+        NO_CARRIER,
+        false,
+      ),
+    );
+
+    assert.deepEqual(started, { kind: "started" });
+    assert.equal(calls, 1);
+
+    const reader = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
+    const read = envelopeValue(await workflowsAddon().nodeResult(reader.native, workflowId, "child"));
+
+    await reader.close();
+    assert(read.kind === "stored" && read.result.kind === "checked");
+    assert.match(read.result.text, /"error_code":"SUBWORKFLOW_LOAD_FAILED"/u);
     assert.equal(envelopeValue(await child.close()), "CLOSED");
   });
 

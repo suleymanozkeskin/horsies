@@ -44,9 +44,18 @@ export function prepareClientSpec(specDataText: string): ClientSpecPrepare {
   return nativeValue("prepareClientSpec", () => workflowsAddon().prepareClientSpec(specDataText));
 }
 
-/** Set the child spec source of `handle`, once. On the JavaScript thread; starts nothing. */
-export function registerChildSpecSource(handle: CoreHandle, source: ChildSpecSourceFunction): SourceRegistration {
-  return nativeValue("registerChildSpecSource", () => workflowsAddon().registerChildSpecSource(handle.native, source));
+/**
+ * Set the child spec source of `handle`, once, with the definition keys of the workflows that the app lists. On the
+ * JavaScript thread; starts nothing.
+ */
+export function registerChildSpecSource(
+  handle: CoreHandle,
+  source: ChildSpecSourceFunction,
+  definitionKeys: readonly string[],
+): SourceRegistration {
+  return nativeValue("registerChildSpecSource", () =>
+    workflowsAddon().registerChildSpecSource(handle.native, source, [...definitionKeys]),
+  );
 }
 
 /**

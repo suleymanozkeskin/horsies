@@ -21,6 +21,7 @@ import { DEFAULT_QUEUE_PRIORITY } from "../../../horsies/src/send/bounds.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { addonConversionFacts } from "../../../horsies/src/workflow/core.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+import { subWorkflowRootText } from "./workflow-spec-texts.ts";
 
 /** The workflow spec data vectors of the core. */
 const VECTOR_FILE = fileURLToPath(
@@ -143,8 +144,8 @@ describe("the child spec source registration", () => {
   test("the first registration on a handle is registered, and a second one is alreadySet", () => {
     const handle = buildCoreHandle(manifestJson(UNUSED_DATABASE_URL, false), "PRODUCER");
 
-    assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, neverCalled)), "registered");
-    assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, neverCalled)), "alreadySet");
+    assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, neverCalled, [])), "registered");
+    assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, neverCalled, [])), "alreadySet");
   });
 });
 
@@ -190,72 +191,65 @@ describe("the workflow reads of a workflow that does not exist, with a database"
   });
 });
 
-/** The spec data text of one sub-workflow root of the child `tests.strict_child.v1` with the stored input `input`. */
-function subWorkflowRootText(input: string): string {
-  const node = {
-    index: 0,
-    node_id: "child",
-    task_name: "strict_child",
-    input_json: input,
-    dependencies: [],
-    args_from: {},
-    workflow_ctx_from: [],
-    allow_failed_deps: false,
-    join: { kind: "ALL" },
-    body: { kind: "SUB_WORKFLOW", definition_key: "tests.strict_child.v1", params: "GIVEN" },
+/** Start the sub-workflow root of `input` on a handle whose source lists `definitionKeys`; the child node's result. */
+async function startedChildResult(
+  input: string,
+  definitionKeys: readonly string[],
+): Promise<{ text: string; calls: number }> {
+  const handle = testHandle();
+  let calls = 0;
+
+  const counting: ChildSpecSourceFunction = () => {
+    calls += 1;
   };
 
-  return JSON.stringify({
-    data_version: 1,
-    name: "strict_parent",
-    definition_key: { kind: "KEYED", key: "tests.strict_parent.v1" },
-    on_error: "FAIL",
-    output: { kind: "NODE", index: 0 },
-    success_policy: { kind: "NO_POLICY" },
-    queue_classes: {},
-    nodes: [node],
-  });
+  assert.equal(
+    envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, counting, [...definitionKeys])),
+    "registered",
+  );
+
+  const prepared = envelopeValue(workflowsAddon().prepareClientSpec(subWorkflowRootText(input)));
+
+  assert(prepared.kind === "prepared", "the spec data parse does not read input_json");
+
+  const workflowId = randomUUID();
+
+  const started = envelopeValue(
+    await workflowsAddon().startWorkflow(
+      handle.native,
+      prepared.spec,
+      workflowId,
+      1_795_687_200_000_000n,
+      { kind: "noCarrier" },
+      false,
+    ),
+  );
+
+  assert.equal(started.kind, "started");
+
+  const read = envelopeValue(await workflowsAddon().nodeResult(handle.native, workflowId, "child"));
+
+  await handle.close();
+  assert(read.kind === "stored" && read.result.kind === "checked");
+
+  return { text: read.result.text, calls };
 }
 
 describe("the child spec source and the core's strict check, with a database", () => {
-  test("a merged input that the core's strict check refuses fails the node and never calls the build", async () => {
-    const handle = testHandle();
-    let calls = 0;
+  test("a stored input that the core's strict read refuses fails the node and never calls the build", async () => {
+    // A repeated key in the stored input: the core's strict read of the stored input refuses it first
+    // (`child_static_input`), and the node fails with WORKER_SERIALIZATION_ERROR.
+    const { text, calls } = await startedChildResult('{"n":1,"n":1}', ["tests.strict_child.v1"]);
 
-    const counting: ChildSpecSourceFunction = () => {
-      calls += 1;
-    };
-
-    assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, counting)), "registered");
-
-    // A repeated key: the strict JSON rule of the core refuses it.
-    const prepared = envelopeValue(workflowsAddon().prepareClientSpec(subWorkflowRootText('{"n":1,"n":1}')));
-
-    if (prepared.kind === "prepared") {
-      const workflowId = randomUUID();
-
-      const started = envelopeValue(
-        await workflowsAddon().startWorkflow(
-          handle.native,
-          prepared.spec,
-          workflowId,
-          1_795_687_200_000_000n,
-          { kind: "noCarrier" },
-          false,
-        ),
-      );
-
-      assert.equal(started.kind, "started");
-
-      const read = envelopeValue(await workflowsAddon().nodeResult(handle.native, workflowId, "child"));
-
-      assert(read.kind === "stored" && read.result.kind === "checked");
-      assert.match(read.result.text, /"error_code":"WORKFLOW_ENQUEUE_FAILED"/u);
-    } else {
-      assert.match(prepared.fieldPath, /input_json/u);
-    }
-
+    assert.match(text, /"error_code":"WORKER_SERIALIZATION_ERROR"/u);
+    assert.match(text, /Corrupt kwargs JSON for subworkflow task 0/u);
     assert.equal(calls, 0);
-    await handle.close();
+  });
+
+  test("a child whose definition key the app does not list fails to load and never calls the build", async () => {
+    const { text, calls } = await startedChildResult('{"n":1}', []);
+
+    assert.match(text, /"error_code":"SUBWORKFLOW_LOAD_FAILED"/u);
+    assert.equal(calls, 0);
   });
 });

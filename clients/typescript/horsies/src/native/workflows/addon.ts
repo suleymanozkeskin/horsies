@@ -1,9 +1,10 @@
 // The functions of the `workflows` area of the addon, their records, and the accessor.
 //
 // - `prepareClientSpec` is pure: the core's parse of a spec data text. It starts no core.
-// - `registerChildSpecSource` sets the child spec source of a core handle, once. The core calls the source inside a
-//   workflow step; the source calls the package's build function on the JavaScript thread and waits for its answer up
-//   to the core's `LOOP_BLOCK_LIMIT`.
+// - `registerChildSpecSource` sets the child spec source of a core handle, once, with the definition keys of the
+//   workflows that the app lists. The core calls the source inside a workflow step; a node whose key is not listed
+//   fails with `SUBWORKFLOW_LOAD_FAILED` before its input is read; else the source calls the package's build function
+//   on the JavaScript thread and waits for its answer up to the core's `LOOP_BLOCK_LIMIT`.
 // - `startWorkflow` and the handle operations run on a core handle: they start the core of the process at the first
 //   call and run on its runtime.
 // - Every stored text that a read gives passed the core's strict JSON check (`check_json_text`) in the addon; a text
@@ -192,6 +193,7 @@ export interface WorkflowsAddon {
   registerChildSpecSource(
     handle: NativeCoreHandle,
     source: ChildSpecSourceFunction,
+    definitionKeys: string[],
   ): NativeEnvelope<SourceRegistration>;
   startWorkflow(
     handle: NativeCoreHandle,
