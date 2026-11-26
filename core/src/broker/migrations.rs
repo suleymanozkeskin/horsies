@@ -317,7 +317,7 @@ struct MigrationSource {
 /// The embedded chain, in apply order: the baseline, then the migrations of
 /// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
 /// so both clients apply the same chain.
-const MIGRATION_SOURCES: [MigrationSource; 7] = [
+const MIGRATION_SOURCES: [MigrationSource; 8] = [
     // The baseline creates horsies_client_family with the CHECK
     // horsies_client_family_family_known: family IN ('PYTHON', 'RUST')
     // (baseline `0001_tables.sql`).
