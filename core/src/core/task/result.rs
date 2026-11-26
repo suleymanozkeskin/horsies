@@ -11,15 +11,16 @@ use super::error::{
 use crate::core::codec::user_value::{check_user_value_text, MAX_VALUE_JSON_DEPTH};
 use crate::core::codec::{JsonText, StrictJsonError};
 
-/// Outcome of a task or workflow result retrieval.
+/// The stored result of a task: its value or its error.
 ///
-/// Two-state discriminated union matching Python's `TaskResult[T, TaskError]`:
+/// Two-state discriminated union, the stored form of what a body returns
+/// (Python `Result[T, TaskError]`) and of the outcome that a reader gets
+/// (Python and Rust `TaskOutcome`):
 /// - `Ok(T)`: task completed successfully with a value
-/// - `Err(TaskError)`: task failed, or result could not be retrieved
+/// - `Err(TaskError)`: task failed, with its own error or a library error
 ///
-/// Retrieval failures (timeout, not-found, broker errors) are folded into
-/// `Err(TaskError)` with the appropriate `BuiltInTaskCode` — one result type,
-/// one error taxonomy, one matching shape.
+/// A failed read (timeout, not-found, broker errors) is not a stored result:
+/// each client gives it as a read error, apart from the outcome.
 ///
 /// Stored as Python's result envelope (`encode_task_result`, `core/codec/typed.py:798-859`):
 /// `{"__h_task_result__": true, "ok": <value>, "err": null}` or

@@ -190,7 +190,7 @@ const PHASE_RETRY_MAX_DELAY_S: f64 = 15.0;
 ///   context);
 /// - `WORKFLOW_META_KWARG` is removed;
 /// - an `args_from` entry is replaced by its `inner` result envelope, which
-///   the receiving `TaskResult` field decodes with its own type.
+///   the receiving `TaskOutcome` parameter decodes with its own type.
 ///
 /// Every other member value, and any other input except `null` as one value,
 /// follows the rules of a user value (no engine key, at most

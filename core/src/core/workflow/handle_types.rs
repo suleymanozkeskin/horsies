@@ -9,15 +9,16 @@ use crate::workflow_engine::error::WorkflowError;
 ///
 /// Two error strategies by return type:
 ///
-/// 1. **Wrap strategy** — methods that return non-TaskResult types
+/// 1. **Wrap strategy** — methods that do not read an outcome
 ///    (status, cancel, pause, resume, results, tasks) return
 ///    `HandleResult<T>`. Infrastructure errors are `Err(HandleOperationError)`.
 ///
-/// 2. **Fold strategy** — methods that return `TaskResult`
-///    (`WorkflowHandle::get`, `WorkflowHandle::result_for`) keep that
-///    shape. Infrastructure/query failures fold into
-///    `TaskResult::Err(TaskError(...))` instead of bubbling out as
-///    `HandleResult::Err(...)`.
+/// 2. **Read strategy** — the reads of an outcome (`WorkflowHandle::get`,
+///    `WorkflowHandle::result_for`) return the outcome or a read error:
+///    Python `ReadResult`, Rust `Result<TaskOutcome, WorkflowReadError>`. A
+///    failed read is the read error (`BROKER_ERROR` for an infrastructure or
+///    query failure), apart from the outcome of the workflow or the node,
+///    instead of `HandleResult::Err(...)`.
 ///
 /// Categorized handle operation failure codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, horsies_core_derive::CodeCatalog)]
