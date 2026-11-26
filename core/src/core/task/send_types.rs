@@ -40,9 +40,8 @@ pub enum TaskSendErrorCode {
     /// Nothing was written. The retry methods refuse it.
     PayloadMismatch,
     /// The idempotency key is reserved by another task with a different
-    /// command. Nothing was written. The retry methods accept it: a retry
-    /// after the reservation ends is accepted, one before returns the same
-    /// error.
+    /// command. Nothing was written. Non-retryable: send the same command, or
+    /// use another key. The retry methods refuse it.
     IdempotencyKeyConflict,
     /// Serialized payload exceeded `payload.reject_bytes`; nothing was
     /// written. Non-retryable — shrink the payload (pass a reference to
@@ -241,13 +240,15 @@ pub enum TaskSendError {
     /// The idempotency key is reserved by another task with a different command.
     ///
     /// Nothing was written. ``owner_task_id`` names the task that holds the key.
-    /// ``retryable`` is ``True``: the conflict clears when the reservation ends.
-    /// The retry methods accept this error: a retry after the reservation ends
-    /// is accepted, and a retry before that returns the same error.
+    /// ``retryable`` is ``False``: a repeat of the same send does not complete
+    /// it. While the owner task is live, the repeat meets the same conflict.
+    /// After the reservation ends, the repeat starts a second task under the
+    /// key. To complete the send, send the same command as the owner task, or
+    /// use another key. The retry methods refuse this error.
     #[error_class(
         class = "TaskSendIdempotencyKeyConflict",
         code = "IdempotencyKeyConflict",
-        always_retryable
+        never_retryable
     )]
     IdempotencyKeyConflict {
         #[error_slot(python = "Uuid")]
@@ -276,16 +277,16 @@ impl TaskSendError {
     }
 
     /// Whether the condition may clear, so the same send can succeed later.
-    /// Only an enqueue failure carries a driver classification; a key
-    /// conflict clears when the reservation ends; every refusal stays. An
+    /// Only an enqueue failure carries a driver classification; every
+    /// refusal, the key conflict included, stays. An
     /// async context does not clear on its thread (Python
     /// `TaskSendAsyncContext`, which carries no retry flag): the async forms
     /// complete the send.
     pub fn retryable(&self) -> bool {
         match self {
             Self::EnqueueFailed { retryable, .. } => *retryable,
-            Self::IdempotencyKeyConflict { .. } => true,
             Self::AsyncContext { .. }
+            | Self::IdempotencyKeyConflict { .. }
             | Self::SendSuppressed { .. }
             | Self::ValidationFailed { .. }
             | Self::PayloadMismatch { .. }
@@ -337,18 +338,17 @@ impl TaskSendError {
 
     /// The task id and payload when the retry methods accept this error,
     /// else `None`. Python's accepted set (`TaskSendRetryable`,
-    /// `clients/python/horsies/core/models/task_send_types.py`): an async context, an
-    /// enqueue failure and a key conflict. A refusal is never replayed,
-    /// because the same input meets the same refusal.
+    /// `clients/python/horsies/core/models/task_send_types.py`): an async context
+    /// and an enqueue failure. A refusal is never replayed, because the same
+    /// input meets the same refusal. A key conflict is a refusal: a repeat of
+    /// the same send meets the same conflict, or starts a second task under
+    /// the key once the reservation ends.
     pub fn resend_target(&self) -> Option<ResendTarget<'_>> {
         match self {
             Self::AsyncContext {
                 task_id, payload, ..
             }
             | Self::EnqueueFailed {
-                task_id, payload, ..
-            }
-            | Self::IdempotencyKeyConflict {
                 task_id, payload, ..
             } => Some(ResendTarget {
                 task_id: *task_id,
@@ -357,7 +357,8 @@ impl TaskSendError {
             Self::SendSuppressed { .. }
             | Self::ValidationFailed { .. }
             | Self::PayloadMismatch { .. }
-            | Self::PayloadTooLarge { .. } => None,
+            | Self::PayloadTooLarge { .. }
+            | Self::IdempotencyKeyConflict { .. } => None,
         }
     }
 }
@@ -702,10 +703,12 @@ mod tests {
         );
     }
 
-    /// Python `test_send_idempotency_conflict.py::TestKeyReservedByAnotherTask::
-    /// test_conflict_names_the_owner_and_retry_is_accepted`.
+    /// A key conflict names the owner, is not retryable and is refused for a
+    /// resend. Reverting `Self::IdempotencyKeyConflict { .. } => false` in
+    /// `retryable()` fails the `retryable` assertion; reverting the `None` arm
+    /// in `resend_target()` fails the `resend_target` assertion.
     #[test]
-    fn a_key_conflict_names_the_owner_and_is_accepted_for_a_resend() {
+    fn a_key_conflict_names_the_owner_is_not_retryable_and_is_refused_for_a_resend() {
         let task_id = Uuid::from_u128(1);
         let owner = Uuid::from_u128(2);
         let error = send_error_from_enqueue(
@@ -722,14 +725,13 @@ mod tests {
             error,
             TaskSendError::IdempotencyKeyConflict { owner_task_id, .. } if owner_task_id == owner
         ));
-        let target = error.resend_target().expect("a key conflict is accepted");
-        assert_eq!(target.task_id, task_id);
-        assert!(error.retryable());
+        assert!(error.resend_target().is_none());
+        assert!(!error.retryable());
     }
 
     /// The fixed `retryable` of a class in the catalog is the value of
-    /// `retryable()` for a value of that class: the conflict is retryable,
-    /// and no send class has a `retryable` that never clears.
+    /// `retryable()` for a value of that class: the key conflict is the only
+    /// class with a fixed value, and it never clears.
     #[test]
     fn the_fixed_retry_slot_of_a_class_is_the_retry_rule_of_its_value() {
         use crate::error_catalog::ErrorSlot;
@@ -760,9 +762,9 @@ mod tests {
 
         assert_eq!(
             fixed,
-            [(conflict.python_class(), &ErrorSlot::AlwaysRetryable)]
+            [(conflict.python_class(), &ErrorSlot::NeverRetryable)]
         );
-        assert!(conflict.retryable());
+        assert!(!conflict.retryable());
     }
 
     /// A refused input is never replayed: the same input meets the same

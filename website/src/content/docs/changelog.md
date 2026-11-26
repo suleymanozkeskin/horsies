@@ -57,6 +57,28 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: an idempotency key conflict is not retryable, and `resend`
+  refuses it.** A repeat of the same send does not complete it. While the owner
+  task is live, the repeat meets the same conflict. After the reservation ends,
+  the repeat starts a second task under the key, with the other command. To
+  complete the send, send the same command as the owner task, or use another
+  key.
+  - Core: `TaskSendError::retryable()` returns `false` for
+    `IdempotencyKeyConflict`, and `resend_target()` returns `None` for it.
+    `BrokerError::is_retryable()` was already `false`.
+  - Python: `TaskSendIdempotencyKeyConflict.retryable` is `False`. The alias
+    `TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext`:
+    `retry_send`, `retry_send_async`, `retry_schedule` and
+    `retry_schedule_async` take no `TaskSendIdempotencyKeyConflict`. A caller
+    without a type checker gets an `AssertionError` that names the variant.
+  - Rust: `retry_send` returns `Err(TaskSendError::ValidationFailed)` for
+    the error; nothing is written.
+  - The error class texts in the core catalog state the rule: not retryable
+    means that a repeat of the same call does not complete it; retryable means
+    that the same call, unchanged, can succeed later.
+  - The resend loop of the clients resends only `ENQUEUE_FAILED` with
+    `retryable` true, so it does not change.
+
 - **Breaking: `allow_failed_deps` is `allow_failed_dependencies`, and
   `workflow_ctx_from` is `workflow_context_from`.** Each concept has one name
   in every client. The old names have no alias.
