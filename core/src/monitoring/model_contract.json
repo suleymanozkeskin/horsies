@@ -303,57 +303,6 @@
     "running": "integer",
     "total": "integer"
   },
-  "LeafTaskInfo": {
-    "completed_at": {
-      "nullable": "date-time"
-    },
-    "enqueued_at": {
-      "nullable": "date-time"
-    },
-    "error_code": {
-      "nullable": "string"
-    },
-    "exec_s": {
-      "nullable": "number"
-    },
-    "execution": {
-      "nullable": {
-        "enum": {
-          "name": "Execution",
-          "values": [
-            "ISOLATED",
-            "SHARED_ASYNC",
-            "SHARED_THREAD"
-          ]
-        }
-      }
-    },
-    "failed_at": {
-      "nullable": "date-time"
-    },
-    "failed_reason": {
-      "nullable": "string"
-    },
-    "good_until": {
-      "nullable": "date-time"
-    },
-    "max_retries": "integer",
-    "queue_s": {
-      "nullable": "number"
-    },
-    "retry_count": "integer",
-    "started_at": {
-      "nullable": "date-time"
-    },
-    "status": "string",
-    "task_id": "uuid",
-    "trace_id": {
-      "nullable": "string"
-    },
-    "worker_hostname": {
-      "nullable": "string"
-    }
-  },
   "LivenessReport": {
     "db_latency_ms": {
       "nullable": "number"
@@ -450,7 +399,7 @@
     "count": "integer",
     "status": "string"
   },
-  "TaskAttemptInfo": {
+  "TaskAttemptDetail": {
     "attempt": "integer",
     "error_code": {
       "nullable": "string"
@@ -694,7 +643,7 @@
               "nullable": "string"
             }
           },
-          "name": "TaskAttemptInfo"
+          "name": "TaskAttemptDetail"
         }
       }
     },
@@ -702,7 +651,10 @@
       "nullable": "string"
     },
     "is_workflow_task": "boolean",
-    "leaf": {
+    "priority": "integer",
+    "queue": "string",
+    "task_name": "string",
+    "task_row": {
       "model": {
         "fields": {
           "completed_at": {
@@ -713,9 +665,6 @@
           },
           "error_code": {
             "nullable": "string"
-          },
-          "exec_s": {
-            "nullable": "number"
           },
           "execution": {
             "nullable": {
@@ -729,6 +678,9 @@
               }
             }
           },
+          "execution_seconds": {
+            "nullable": "number"
+          },
           "failed_at": {
             "nullable": "date-time"
           },
@@ -739,7 +691,7 @@
             "nullable": "date-time"
           },
           "max_retries": "integer",
-          "queue_s": {
+          "queue_seconds": {
             "nullable": "number"
           },
           "retry_count": "integer",
@@ -755,16 +707,13 @@
             "nullable": "string"
           }
         },
-        "name": "LeafTaskInfo"
+        "name": "TaskRowInfo"
       }
     },
-    "priority": "integer",
-    "queue_name": "string",
-    "task_name": "string",
     "workflow_id": {
       "nullable": "string"
     },
-    "workflow_task_index": {
+    "workflow_node_index": {
       "nullable": "integer"
     }
   },
@@ -785,18 +734,17 @@
             "error_code": {
               "nullable": "string"
             },
-            "exec_s": {
+            "execution_seconds": {
               "nullable": "number"
             },
             "failed_at": {
               "nullable": "date-time"
             },
-            "id": "uuid",
             "is_workflow_task": "boolean",
             "max_retries": "integer",
             "priority": "integer",
-            "queue_name": "string",
-            "queue_s": {
+            "queue": "string",
+            "queue_seconds": {
               "nullable": "number"
             },
             "retry_count": "integer",
@@ -804,6 +752,7 @@
               "nullable": "date-time"
             },
             "status": "string",
+            "task_id": "uuid",
             "task_name": "string",
             "worker_hostname": {
               "nullable": "string"
@@ -818,6 +767,57 @@
     },
     "total": "integer"
   },
+  "TaskRowInfo": {
+    "completed_at": {
+      "nullable": "date-time"
+    },
+    "enqueued_at": {
+      "nullable": "date-time"
+    },
+    "error_code": {
+      "nullable": "string"
+    },
+    "execution": {
+      "nullable": {
+        "enum": {
+          "name": "Execution",
+          "values": [
+            "ISOLATED",
+            "SHARED_ASYNC",
+            "SHARED_THREAD"
+          ]
+        }
+      }
+    },
+    "execution_seconds": {
+      "nullable": "number"
+    },
+    "failed_at": {
+      "nullable": "date-time"
+    },
+    "failed_reason": {
+      "nullable": "string"
+    },
+    "good_until": {
+      "nullable": "date-time"
+    },
+    "max_retries": "integer",
+    "queue_seconds": {
+      "nullable": "number"
+    },
+    "retry_count": "integer",
+    "started_at": {
+      "nullable": "date-time"
+    },
+    "status": "string",
+    "task_id": "uuid",
+    "trace_id": {
+      "nullable": "string"
+    },
+    "worker_hostname": {
+      "nullable": "string"
+    }
+  },
   "TaskSummary": {
     "completed_at": {
       "nullable": "date-time"
@@ -831,18 +831,17 @@
     "error_code": {
       "nullable": "string"
     },
-    "exec_s": {
+    "execution_seconds": {
       "nullable": "number"
     },
     "failed_at": {
       "nullable": "date-time"
     },
-    "id": "uuid",
     "is_workflow_task": "boolean",
     "max_retries": "integer",
     "priority": "integer",
-    "queue_name": "string",
-    "queue_s": {
+    "queue": "string",
+    "queue_seconds": {
       "nullable": "number"
     },
     "retry_count": "integer",
@@ -850,6 +849,7 @@
       "nullable": "date-time"
     },
     "status": "string",
+    "task_id": "uuid",
     "task_name": "string",
     "worker_hostname": {
       "nullable": "string"
@@ -979,14 +979,14 @@
         ]
       }
     },
-    "snapshot_age_s": {
+    "snapshot_age_seconds": {
       "nullable": "number"
     },
     "snapshot_at": "date-time",
     "stale": "boolean",
     "tasks_claimed": "integer",
     "tasks_running": "integer",
-    "uptime_s": {
+    "uptime_seconds": {
       "nullable": "number"
     },
     "worker_id": "string",
@@ -996,7 +996,204 @@
     "from_index": "integer",
     "to_index": "integer"
   },
-  "WorkflowNodeInfo": {
+  "WorkflowNodeDetail": {
+    "attempts": {
+      "list": {
+        "model": {
+          "fields": {
+            "attempt": "integer",
+            "error_code": {
+              "nullable": "string"
+            },
+            "error_message": {
+              "nullable": "string"
+            },
+            "failed_reason": {
+              "nullable": "string"
+            },
+            "finished_at": {
+              "nullable": "date-time"
+            },
+            "outcome": "string",
+            "phases": {
+              "union": {
+                "name": "AttemptPhasesInfo",
+                "tag": "kind",
+                "variants": {
+                  "captured": {
+                    "fields": {
+                      "claimed_at": "date-time",
+                      "claims": {
+                        "union": {
+                          "name": "AttemptClaimsInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "counted": {
+                              "fields": {
+                                "count": "integer",
+                                "first_claimed_at": "date-time"
+                              },
+                              "name": "AttemptClaimsCountedInfo"
+                            },
+                            "not_counted": {
+                              "fields": {},
+                              "name": "AttemptClaimsNotCountedInfo"
+                            }
+                          }
+                        }
+                      },
+                      "enqueued_at": "date-time",
+                      "finalizing": {
+                        "union": {
+                          "name": "AttemptFinalizingInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "marked": {
+                              "fields": {
+                                "finalizing_at": "date-time"
+                              },
+                              "name": "AttemptFinalizingMarkedInfo"
+                            },
+                            "not_marked": {
+                              "fields": {},
+                              "name": "AttemptFinalizingNotMarkedInfo"
+                            }
+                          }
+                        }
+                      },
+                      "recorded_by": {
+                        "union": {
+                          "name": "AttemptRecordedByInfo",
+                          "tag": "kind",
+                          "variants": {
+                            "cancel": {
+                              "fields": {},
+                              "name": "AttemptRecordedByCancelInfo"
+                            },
+                            "recovery": {
+                              "fields": {
+                                "last_seen_at": "date-time"
+                              },
+                              "name": "AttemptRecordedByRecoveryInfo"
+                            },
+                            "worker": {
+                              "fields": {
+                                "placement": {
+                                  "union": {
+                                    "name": "AttemptPlacementInfo",
+                                    "tag": "kind",
+                                    "variants": {
+                                      "not_observed": {
+                                        "fields": {},
+                                        "name": "AttemptPlacementNotObservedInfo"
+                                      },
+                                      "placed": {
+                                        "fields": {
+                                          "placed_at": "date-time"
+                                        },
+                                        "name": "AttemptPlacementPlacedInfo"
+                                      }
+                                    }
+                                  }
+                                }
+                              },
+                              "name": "AttemptRecordedByWorkerInfo"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "name": "AttemptPhasesCapturedInfo"
+                  },
+                  "not_captured": {
+                    "fields": {},
+                    "name": "AttemptPhasesNotCapturedInfo"
+                  }
+                }
+              }
+            },
+            "started_at": {
+              "nullable": "date-time"
+            },
+            "will_retry": "boolean",
+            "worker_hostname": {
+              "nullable": "string"
+            }
+          },
+          "name": "TaskAttemptDetail"
+        }
+      }
+    },
+    "is_sub_workflow": "boolean",
+    "node_error": {
+      "nullable": "string"
+    },
+    "node_id": {
+      "nullable": "string"
+    },
+    "node_index": "integer",
+    "node_status": "string",
+    "task_name": "string",
+    "task_row": {
+      "nullable": {
+        "model": {
+          "fields": {
+            "completed_at": {
+              "nullable": "date-time"
+            },
+            "enqueued_at": {
+              "nullable": "date-time"
+            },
+            "error_code": {
+              "nullable": "string"
+            },
+            "execution": {
+              "nullable": {
+                "enum": {
+                  "name": "Execution",
+                  "values": [
+                    "ISOLATED",
+                    "SHARED_ASYNC",
+                    "SHARED_THREAD"
+                  ]
+                }
+              }
+            },
+            "execution_seconds": {
+              "nullable": "number"
+            },
+            "failed_at": {
+              "nullable": "date-time"
+            },
+            "failed_reason": {
+              "nullable": "string"
+            },
+            "good_until": {
+              "nullable": "date-time"
+            },
+            "max_retries": "integer",
+            "queue_seconds": {
+              "nullable": "number"
+            },
+            "retry_count": "integer",
+            "started_at": {
+              "nullable": "date-time"
+            },
+            "status": "string",
+            "task_id": "uuid",
+            "trace_id": {
+              "nullable": "string"
+            },
+            "worker_hostname": {
+              "nullable": "string"
+            }
+          },
+          "name": "TaskRowInfo"
+        }
+      }
+    }
+  },
+  "WorkflowNodeSummary": {
     "allow_failed_dependencies": "boolean",
     "child_failed": {
       "nullable": "integer"
@@ -1007,13 +1204,14 @@
     "completed_at": {
       "nullable": "date-time"
     },
-    "exec_s": {
+    "execution_seconds": {
       "nullable": "number"
     },
-    "is_subworkflow": "boolean",
+    "is_sub_workflow": "boolean",
     "node_id": {
       "nullable": "string"
     },
+    "node_index": "integer",
     "node_status": "string",
     "started_at": {
       "nullable": "date-time"
@@ -1021,7 +1219,6 @@
     "sub_workflow_id": {
       "nullable": "string"
     },
-    "task_index": "integer",
     "task_name": "string",
     "timing": {
       "union": {
@@ -1572,13 +1769,14 @@
             "completed_at": {
               "nullable": "date-time"
             },
-            "exec_s": {
+            "execution_seconds": {
               "nullable": "number"
             },
-            "is_subworkflow": "boolean",
+            "is_sub_workflow": "boolean",
             "node_id": {
               "nullable": "string"
             },
+            "node_index": "integer",
             "node_status": "string",
             "started_at": {
               "nullable": "date-time"
@@ -1586,7 +1784,6 @@
             "sub_workflow_id": {
               "nullable": "string"
             },
-            "task_index": "integer",
             "task_name": "string",
             "timing": {
               "union": {
@@ -2107,7 +2304,7 @@
               }
             }
           },
-          "name": "WorkflowNodeInfo"
+          "name": "WorkflowNodeSummary"
         }
       }
     },
@@ -2123,12 +2320,12 @@
           "definition_key": {
             "nullable": "string"
           },
-          "id": "string",
-          "name": "string",
           "status": "string",
-          "wall_s": {
+          "wall_seconds": {
             "nullable": "number"
-          }
+          },
+          "workflow_id": "string",
+          "workflow_name": "string"
         },
         "name": "WorkflowRunSummary"
       }
@@ -2161,7 +2358,7 @@
                               "variants": {
                                 "node": {
                                   "fields": {
-                                    "task_index": "integer"
+                                    "node_index": "integer"
                                   },
                                   "name": "RunConflictNodeInfo"
                                 },
@@ -2377,208 +2574,11 @@
     "definition_key": {
       "nullable": "string"
     },
-    "id": "string",
-    "name": "string",
     "status": "string",
-    "wall_s": {
+    "wall_seconds": {
       "nullable": "number"
-    }
-  },
-  "WorkflowTaskDetail": {
-    "attempts": {
-      "list": {
-        "model": {
-          "fields": {
-            "attempt": "integer",
-            "error_code": {
-              "nullable": "string"
-            },
-            "error_message": {
-              "nullable": "string"
-            },
-            "failed_reason": {
-              "nullable": "string"
-            },
-            "finished_at": {
-              "nullable": "date-time"
-            },
-            "outcome": "string",
-            "phases": {
-              "union": {
-                "name": "AttemptPhasesInfo",
-                "tag": "kind",
-                "variants": {
-                  "captured": {
-                    "fields": {
-                      "claimed_at": "date-time",
-                      "claims": {
-                        "union": {
-                          "name": "AttemptClaimsInfo",
-                          "tag": "kind",
-                          "variants": {
-                            "counted": {
-                              "fields": {
-                                "count": "integer",
-                                "first_claimed_at": "date-time"
-                              },
-                              "name": "AttemptClaimsCountedInfo"
-                            },
-                            "not_counted": {
-                              "fields": {},
-                              "name": "AttemptClaimsNotCountedInfo"
-                            }
-                          }
-                        }
-                      },
-                      "enqueued_at": "date-time",
-                      "finalizing": {
-                        "union": {
-                          "name": "AttemptFinalizingInfo",
-                          "tag": "kind",
-                          "variants": {
-                            "marked": {
-                              "fields": {
-                                "finalizing_at": "date-time"
-                              },
-                              "name": "AttemptFinalizingMarkedInfo"
-                            },
-                            "not_marked": {
-                              "fields": {},
-                              "name": "AttemptFinalizingNotMarkedInfo"
-                            }
-                          }
-                        }
-                      },
-                      "recorded_by": {
-                        "union": {
-                          "name": "AttemptRecordedByInfo",
-                          "tag": "kind",
-                          "variants": {
-                            "cancel": {
-                              "fields": {},
-                              "name": "AttemptRecordedByCancelInfo"
-                            },
-                            "recovery": {
-                              "fields": {
-                                "last_seen_at": "date-time"
-                              },
-                              "name": "AttemptRecordedByRecoveryInfo"
-                            },
-                            "worker": {
-                              "fields": {
-                                "placement": {
-                                  "union": {
-                                    "name": "AttemptPlacementInfo",
-                                    "tag": "kind",
-                                    "variants": {
-                                      "not_observed": {
-                                        "fields": {},
-                                        "name": "AttemptPlacementNotObservedInfo"
-                                      },
-                                      "placed": {
-                                        "fields": {
-                                          "placed_at": "date-time"
-                                        },
-                                        "name": "AttemptPlacementPlacedInfo"
-                                      }
-                                    }
-                                  }
-                                }
-                              },
-                              "name": "AttemptRecordedByWorkerInfo"
-                            }
-                          }
-                        }
-                      }
-                    },
-                    "name": "AttemptPhasesCapturedInfo"
-                  },
-                  "not_captured": {
-                    "fields": {},
-                    "name": "AttemptPhasesNotCapturedInfo"
-                  }
-                }
-              }
-            },
-            "started_at": {
-              "nullable": "date-time"
-            },
-            "will_retry": "boolean",
-            "worker_hostname": {
-              "nullable": "string"
-            }
-          },
-          "name": "TaskAttemptInfo"
-        }
-      }
     },
-    "is_subworkflow": "boolean",
-    "leaf": {
-      "nullable": {
-        "model": {
-          "fields": {
-            "completed_at": {
-              "nullable": "date-time"
-            },
-            "enqueued_at": {
-              "nullable": "date-time"
-            },
-            "error_code": {
-              "nullable": "string"
-            },
-            "exec_s": {
-              "nullable": "number"
-            },
-            "execution": {
-              "nullable": {
-                "enum": {
-                  "name": "Execution",
-                  "values": [
-                    "ISOLATED",
-                    "SHARED_ASYNC",
-                    "SHARED_THREAD"
-                  ]
-                }
-              }
-            },
-            "failed_at": {
-              "nullable": "date-time"
-            },
-            "failed_reason": {
-              "nullable": "string"
-            },
-            "good_until": {
-              "nullable": "date-time"
-            },
-            "max_retries": "integer",
-            "queue_s": {
-              "nullable": "number"
-            },
-            "retry_count": "integer",
-            "started_at": {
-              "nullable": "date-time"
-            },
-            "status": "string",
-            "task_id": "uuid",
-            "trace_id": {
-              "nullable": "string"
-            },
-            "worker_hostname": {
-              "nullable": "string"
-            }
-          },
-          "name": "LeafTaskInfo"
-        }
-      }
-    },
-    "node_error": {
-      "nullable": "string"
-    },
-    "node_id": {
-      "nullable": "string"
-    },
-    "node_status": "string",
-    "task_index": "integer",
-    "task_name": "string"
+    "workflow_id": "string",
+    "workflow_name": "string"
   }
 }
