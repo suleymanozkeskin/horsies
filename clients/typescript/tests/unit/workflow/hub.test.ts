@@ -16,15 +16,24 @@ import { fakeCore, type FakeCore, rawStartEnqueueFailed, WORKFLOW_ID } from "./c
 const greet = defineTask({ name: "greet", input: { who: h.string() }, output: h.string() });
 
 const hello = defineWorkflow(
-  { name: "hello", definitionKey: "tests.hello.v1", params: { who: h.string() }, checkCases: [{ who: "a" }] },
+  {
+    name: "hello",
+    definitionKey: "tests.hello.v1",
+    output: h.string(),
+    params: { who: h.string() },
+    checkCases: [{ who: "a" }],
+  },
   (w, { who }) => ({ output: w.task(greet, { who }, { id: "greet" }) }),
 );
 
-const broken = defineWorkflow({ name: "broken", definitionKey: "tests.broken.v1", params: {} }, (w) => {
-  w.task(greet, { who: "a" }, { id: "same" });
+const broken = defineWorkflow(
+  { name: "broken", definitionKey: "tests.broken.v1", output: h.string(), params: {} },
+  (w) => {
+    w.task(greet, { who: "a" }, { id: "same" });
 
-  return { output: w.task(greet, { who: "b" }, { id: "same" }) };
-});
+    return { output: w.task(greet, { who: "b" }, { id: "same" }) };
+  },
+);
 
 function config(workflows: readonly AnyWorkflowContract[], tasks: HorsiesConfig["tasks"] = [greet]): HorsiesConfig {
   return { broker: { databaseUrl: DATABASE_URL }, tasks, workflows };

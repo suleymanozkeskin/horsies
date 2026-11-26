@@ -32,14 +32,14 @@ import {
 const count = defineTask({ name: "count", input: {}, output: h.int(), errors: ["TOO_MANY"] });
 const name = defineTask({ name: "name", input: { n: h.resultOf(h.int()) }, output: h.string() });
 
-const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", params: {} }, (w) => {
+const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.string(), params: {} }, (w) => {
   const counted = w.task(count, {}, { id: "count" });
 
   return { output: w.task(name, { n: counted }, { id: "name" }), successPolicy: { cases: [{ required: [counted] }] } };
 });
 
 const child = defineWorkflow(
-  { name: "child", definitionKey: "tests.child.v1", params: { n: h.int() }, checkCases: [{ n: 1 }] },
+  { name: "child", definitionKey: "tests.child.v1", output: h.int(), params: { n: h.int() }, checkCases: [{ n: 1 }] },
   (w, { n }) => {
     if (n < 0) {
       throw new RangeError("negative");
@@ -156,6 +156,69 @@ describe("WorkflowHandle.get", () => {
       error: { kind: "invalidWait", maxMs: 4_294_967_295 },
     });
     assert.deepEqual(core.calls, []);
+  });
+});
+
+describe("the read form of a sub-workflow output", () => {
+  test("it is the child's declared output: no build of the child runs, whatever its params", async () => {
+    let builds = 0;
+
+    const counted = defineWorkflow(
+      {
+        name: "counted",
+        definitionKey: "tests.counted.v1",
+        output: h.int(),
+        params: { n: h.int() },
+        checkCases: [{ n: 1 }],
+      },
+      (w) => {
+        builds += 1;
+
+        return { output: w.task(count, {}, { id: "count" }) };
+      },
+    );
+
+    const parent = defineWorkflow(
+      { name: "parent", definitionKey: "tests.parent.v1", output: h.int(), params: {} },
+      (w) => ({
+        output: w.subWorkflow(counted, { n: 2 }, { id: "child" }),
+      }),
+    );
+
+    const listed = [flow, child, counted, parent].map((workflow) => {
+      const entry = listedWorkflowOf(workflow);
+
+      assert(entry.ok);
+
+      return entry.value;
+    });
+
+    const withChild = workflowRegistry(
+      listed,
+      contractLookup(checkContractList([count, name], { kind: "default" }).entries),
+      {
+        kind: "default",
+      },
+    );
+
+    const core = fakeCore({
+      wait: { kind: "completed", result: { kind: "checked", text: okEnvelope("7") } },
+      nodeResult: { kind: "stored", result: { kind: "checked", text: okEnvelope("8") } },
+    });
+
+    const targets = new Map([["child", { kind: "subWorkflow", workflow: counted } as const]]);
+
+    const wf = workflowHandleOf<BuildReturn>({
+      core,
+      registry: withChild,
+      workflow: parent,
+      workflowId: workflowId(),
+      targets,
+    });
+
+    assert.deepEqual(await wf.get(), { ok: true, value: { kind: "succeeded", value: 7 } });
+    assert.deepEqual(await wf.resultFor("child"), { ok: true, value: { kind: "succeeded", value: 8 } });
+    assert.equal(builds, 0);
   });
 });
 

@@ -11,7 +11,7 @@ import { ErrorCode } from "../_catalog/error_codes.ts";
 import { NODE_INDEX_MAX } from "../_catalog/workflow_spec.ts";
 import { isArray, isObjectLike } from "../codec/values.ts";
 import type { NonEmpty } from "../wire/builders.ts";
-import type { ObjectKind } from "../wire/kinds.ts";
+import type { Kind, ObjectKind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import type { ListedLookup } from "../send/send.ts";
 import type { QueueSetup } from "../config/queues.ts";
@@ -19,7 +19,9 @@ import type { BuildRun, BuildSession, RecordedNode } from "./builder.ts";
 import { nodeSlot } from "./builder.ts";
 import type { WorkflowRecord } from "./define.ts";
 import { type CheckedPolicy, type CheckedSpec, finding, type SpecFinding } from "./findings.ts";
-import { checkNodes, type NodeTarget } from "./node-checks.ts";
+import { compileContract } from "../contract/compile.ts";
+import { storedFormsMatch } from "./kind-match.ts";
+import { checkNodes, type NodeTarget, sourceOutputOf } from "./node-checks.ts";
 
 /** The most nodes of one workflow (the core's `MAX_WORKFLOW_NODES`). */
 export const MAX_WORKFLOW_NODES: number = NODE_INDEX_MAX + 1;
@@ -32,7 +34,7 @@ const NODE_ID = /^[A-Za-z0-9_\-:.]+$/;
 
 /** A workflow of the app's list: its record and the kind tree of its params. */
 export type WorkflowLookup =
-  | { readonly kind: "listed"; readonly record: WorkflowRecord; readonly params: ObjectKind }
+  | { readonly kind: "listed"; readonly record: WorkflowRecord; readonly params: ObjectKind; readonly output: Kind }
   | { readonly kind: "notListed" };
 
 /** The facts of the app that the checks read. */
@@ -78,7 +80,8 @@ export function checkBuild(record: WorkflowRecord, run: ReturnedRun, view: SpecA
 
   const checked = checkNodes(nodes, session, view);
   const policy = policyFindings(returnedParts.value.policy);
-  const second = [...(checked.ok ? [] : checked.error), ...policy];
+  const output = outputFindings(record, nodes[returnedParts.value.output], view);
+  const second = [...(checked.ok ? [] : checked.error), ...policy, ...output];
   const [found, ...rest] = second;
 
   if (found !== undefined || !checked.ok) {
@@ -293,6 +296,34 @@ function indexesIn(session: BuildSession, values: readonly object[]): readonly n
 /** Whether every item of a list is an object. Pure. */
 function allObjects(values: readonly unknown[]): values is readonly object[] {
   return values.every((value) => isObjectLike(value));
+}
+
+/**
+ * `HRS-025` when the output node's type is not the workflow's declared output: their kinds do not have the same
+ * stored form. An output node of a contract that the app does not list has a finding of its own. Pure.
+ */
+function outputFindings(
+  record: WorkflowRecord,
+  node: RecordedNode | undefined,
+  view: SpecAppView,
+): readonly SpecFinding[] {
+  const declared = compileContract(record.paramsContract);
+  const output = node === undefined ? { kind: "notKnown" as const } : sourceOutputOf(node, view);
+
+  if (!declared.ok) {
+    return [finding(ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH, "output", "the declared output does not compile", [])];
+  }
+
+  return output.kind === "known" && !storedFormsMatch(output.output, declared.value.output)
+    ? [
+        finding(
+          ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
+          "output",
+          "the output node's type is not the declared output",
+          ["return an output node whose output is the workflow's declared output"],
+        ),
+      ]
+    : [];
 }
 
 /** `HRS-012` for a policy with no case, and for a case with no required node. */

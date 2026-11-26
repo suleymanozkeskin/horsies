@@ -49,35 +49,28 @@ export const registerChildSpecSourceMatches: SameFunction<
   WorkflowsAddon["registerChildSpecSource"]
 > = true;
 
-export const startWorkflowMatches: SameFunction<typeof Generated.startWorkflow, WorkflowsAddon["startWorkflow"]> =
-  true;
+export const startWorkflowMatches: SameFunction<typeof Generated.startWorkflow, WorkflowsAddon["startWorkflow"]> = true;
 
-export const workflowStatusMatches: SameFunction<
-  typeof Generated.workflowStatus,
-  WorkflowsAddon["workflowStatus"]
-> = true;
+export const workflowStatusMatches: SameFunction<typeof Generated.workflowStatus, WorkflowsAddon["workflowStatus"]> =
+  true;
 
 export const workflowNodeResultsMatches: SameFunction<
   typeof Generated.workflowNodeResults,
   WorkflowsAddon["workflowNodeResults"]
 > = true;
 
-export const workflowNodesMatches: SameFunction<typeof Generated.workflowNodes, WorkflowsAddon["workflowNodes"]> =
-  true;
+export const workflowNodesMatches: SameFunction<typeof Generated.workflowNodes, WorkflowsAddon["workflowNodes"]> = true;
 
 export const cancelWorkflowMatches: SameFunction<typeof Generated.cancelWorkflow, WorkflowsAddon["cancelWorkflow"]> =
   true;
 
-export const pauseWorkflowMatches: SameFunction<typeof Generated.pauseWorkflow, WorkflowsAddon["pauseWorkflow"]> =
-  true;
+export const pauseWorkflowMatches: SameFunction<typeof Generated.pauseWorkflow, WorkflowsAddon["pauseWorkflow"]> = true;
 
 export const resumeWorkflowMatches: SameFunction<typeof Generated.resumeWorkflow, WorkflowsAddon["resumeWorkflow"]> =
   true;
 
-export const waitWorkflowEndMatches: SameFunction<
-  typeof Generated.waitWorkflowEnd,
-  WorkflowsAddon["waitWorkflowEnd"]
-> = true;
+export const waitWorkflowEndMatches: SameFunction<typeof Generated.waitWorkflowEnd, WorkflowsAddon["waitWorkflowEnd"]> =
+  true;
 
 export const queuePrioritiesMatches: SameFunction<typeof Generated.queuePriorities, WorkflowsAddon["queuePriorities"]> =
   true;
@@ -112,6 +105,7 @@ export const handleDoneMatches: Mutual<Generated.HandleDone, HandleDone> = true;
 export const handleChangeMatches: Mutual<Generated.HandleChange, HandleChange> = true;
 export const waitReadMatches: Mutual<Generated.WorkflowWaitRead, WorkflowWaitRead> = true;
 export const nodeResultReadMatches: Mutual<Generated.NodeResultRead, NodeResultRead> = true;
+
 // The test exports of a build with the cargo feature `test-probes` (`build:dev`).
 export const probeStartWorkflowInChildMatches: SameFunction<
   typeof Generated.probeStartWorkflowInChild,

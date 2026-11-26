@@ -18,7 +18,7 @@ const ping = defineTask({ name: "ping", input: {}, output: h.int() });
 const add = defineTask({ name: "add", input: { a: h.int(), b: h.resultOf(h.int()) }, output: h.int() });
 const maybe = defineTask({ name: "maybe", input: { first: h.resultOf(h.int()).optional() }, output: h.int() });
 
-const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", params: {} }, (w) => ({
+const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", output: h.int(), params: {} }, (w) => ({
   output: w.task(ping, {}, { id: "ping" }),
 }));
 
@@ -26,6 +26,7 @@ const region = defineWorkflow(
   {
     name: "region",
     definitionKey: "tests.region.v1",
+    output: h.int(),
     params: { name: h.string(), count: h.resultOf(h.int()).optional() },
     checkCases: [{ name: "eu" }],
   },
@@ -52,8 +53,9 @@ function fakeFacts(asked: Asked = []): ConversionFacts {
 
 function textOf(build: (w: WorkflowBuilder) => BuildReturn, facts: ConversionFacts = fakeFacts()): string {
   const workflow = defineWorkflow(
-    { name: "flow", definitionKey: "tests.flow.v1", params: {}, onError: "pause" },
-    build,
+    { name: "flow", definitionKey: "tests.flow.v1", output: h.int(), params: {}, onError: "pause" },
+    // SAFETY: each build of these tests returns an output node of `h.int()`; the checks compare it at run time.
+    build as never,
   );
 
   const text = specDataTextOf(passedSpec(workflow, {}, view), facts);
@@ -186,12 +188,15 @@ describe("specDataTextOf", () => {
 
     const custom = viewOf([urgent, numbered], [], { kind: "custom", queues });
 
-    const workflow = defineWorkflow({ name: "queues", definitionKey: "tests.queues.v1", params: {} }, (w) => {
-      w.task(urgent, {}, { id: "first" });
-      w.task(numbered, {}, { id: "second" });
+    const workflow = defineWorkflow(
+      { name: "queues", definitionKey: "tests.queues.v1", output: h.int(), params: {} },
+      (w) => {
+        w.task(urgent, {}, { id: "first" });
+        w.task(numbered, {}, { id: "second" });
 
-      return { output: w.task(urgent, {}, { id: "third" }) };
-    });
+        return { output: w.task(urgent, {}, { id: "third" }) };
+      },
+    );
 
     const text = specDataTextOf(passedSpec(workflow, {}, custom), fakeFacts());
 
@@ -200,9 +205,12 @@ describe("specDataTextOf", () => {
   });
 
   test("a workflow name with a lone surrogate has no text: LoneSurrogate at its path", () => {
-    const workflow = defineWorkflow({ name: "bad\uD800", definitionKey: "tests.bad.v1", params: {} }, (w) => ({
-      output: w.task(ping, {}, { id: "ping" }),
-    }));
+    const workflow = defineWorkflow(
+      { name: "bad\uD800", definitionKey: "tests.bad.v1", output: h.int(), params: {} },
+      (w) => ({
+        output: w.task(ping, {}, { id: "ping" }),
+      }),
+    );
 
     const text = specDataTextOf(passedSpec(workflow, {}, view), fakeFacts());
 

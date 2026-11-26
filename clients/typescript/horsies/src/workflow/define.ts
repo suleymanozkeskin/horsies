@@ -6,24 +6,32 @@
 
 import type { SpecOnError } from "../_catalog/workflow_spec.ts";
 import { defineTask } from "../contract/define-task.ts";
-import type { BodyInput, ParameterSchemas, SendInput } from "../contract/schema.ts";
-import { h, type NonEmpty } from "../wire/builders.ts";
-import type { BuildReturn } from "./node.ts";
+import type { BodyInput, OutputSchema, ParameterSchemas, SchemaValue, SendInput } from "../contract/schema.ts";
+import type { NonEmpty } from "../wire/builders.ts";
+import type { BuildReturn, NodeRef } from "./node.ts";
 import type { WorkflowBuilder } from "./builder.ts";
 
 /** What the core does when a node fails: fail the workflow (the default), or pause it for a resume. */
 export type OnError = "fail" | "pause";
 
 /** The fields of `defineWorkflow`. */
-export interface WorkflowDefinition<P extends ParameterSchemas> {
+export interface WorkflowDefinition<P extends ParameterSchemas, O extends OutputSchema> {
   /** The workflow name: each start stores it. Not empty. */
   readonly name: string;
   /** The key under which a sub-workflow node finds this workflow. Not empty; unique in the app. */
   readonly definitionKey: string;
   /** One schema per parameter of the build, with the rules of a task input. `{}` for none. */
   readonly params: P;
+  /**
+   * The schema of the workflow's result, with the rules of a task output. The output node of every build has this
+   * type (`HRS-025`), and every read of the workflow's result decodes with it.
+   */
+  readonly output: O;
   readonly onError?: OnError;
 }
+
+/** What a build of a workflow whose declared output value is `V` returns: an output node of that type. */
+export type BuildReturnOf<V> = BuildReturn & { readonly output: NodeRef<V, string, string> };
 
 /**
  * The check cases of a workflow: `check` builds the workflow with each one. Required when `params` has a key; a
@@ -69,7 +77,10 @@ export type WorkflowRecord = {
   readonly name: string;
   readonly definitionKey: string;
   readonly onError: OnErrorSetting;
-  /** The task contract of the params (output `h.null()`): its compiled form is the params' kind tree. */
+  /**
+   * The task contract of the params and the declared output: its compiled form is the params' kind tree and the
+   * output kind.
+   */
   readonly paramsContract: object;
   /** The parameter names of the params, in declaration order. */
   readonly paramNames: readonly string[];
@@ -84,6 +95,7 @@ type DefinitionFields = {
   readonly name: string;
   readonly definitionKey: string;
   readonly params: ParameterSchemas;
+  readonly output: OutputSchema;
   readonly onError?: string;
   readonly checkCases?: readonly object[];
 };
@@ -91,10 +103,11 @@ type DefinitionFields = {
 const records = new WeakMap<object, WorkflowRecord>();
 
 /** The contract of a workflow. Pure apart from the kept facts: no check that can fail and no I/O. */
-export function defineWorkflow<const P extends ParameterSchemas, const R extends BuildReturn>(
-  definition: WorkflowDefinition<P> & NoInfer<CheckCases<P>>,
-  build: WorkflowBuild<P, R>,
-): WorkflowContract<P, R> {
+export function defineWorkflow<
+  const P extends ParameterSchemas,
+  O extends OutputSchema,
+  const R extends BuildReturnOf<SchemaValue<O>>,
+>(definition: WorkflowDefinition<P, O> & NoInfer<CheckCases<P>>, build: WorkflowBuild<P, R>): WorkflowContract<P, R> {
   const contract = { kind: "workflow", name: definition.name, definitionKey: definition.definitionKey };
 
   // SAFETY: `workflowTypes` is a type-only key; the contract's types are the type parameters of this call.
@@ -130,7 +143,7 @@ function recordOf(fields: DefinitionFields, build: (w: WorkflowBuilder, params: 
     name: fields.name,
     definitionKey: fields.definitionKey,
     onError: onErrorSetting(fields.onError),
-    paramsContract: defineTask({ name: fields.name, input: params, output: h.null() }),
+    paramsContract: defineTask({ name: fields.name, input: params, output: fields.output }),
     paramNames: Object.freeze(Object.keys(params)),
     checkCases: Object.freeze([...(fields.checkCases ?? [])]),
     build,
