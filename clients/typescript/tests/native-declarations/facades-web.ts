@@ -23,6 +23,7 @@ import type {
   RouteAccessRecord,
   RouteNeed,
   TraceLinkCheck,
+  TraceLinkRefusalRecord,
   AccessVerdict,
   WebHandlerAddon,
 } from "../../horsies/src/native/facades/web-handler.ts";
@@ -104,6 +105,7 @@ export const responseMatches: Mutual<Generated.MonitoringResponseRecord, Monitor
 export const stepMatches: Mutual<Generated.MonitoringEventStep, MonitoringEventStep> = true;
 export const settingsMatches: Mutual<Generated.MonitoringHandlerSettings, MonitoringHandlerSettings> = true;
 export const traceLinkCheckMatches: Mutual<Generated.TraceLinkCheck, TraceLinkCheck> = true;
+export const traceLinkRefusalMatches: Mutual<Generated.TraceLinkRefusalRecord, TraceLinkRefusalRecord> = true;
 export const listenCheckMatches: Mutual<Generated.MetricsListenAddressCheck, MetricsListenAddressCheck> = true;
 export const fleetSettingsMatches: Mutual<Generated.FleetMetricsSettings, FleetMetricsSettings> = true;
 export const runEndMatches: Mutual<Generated.FleetMetricsRunEnd, FleetMetricsRunEnd> = true;

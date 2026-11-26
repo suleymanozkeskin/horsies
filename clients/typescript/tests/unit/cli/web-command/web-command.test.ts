@@ -69,7 +69,12 @@ function fakeWeb(check: CheckStepOutcome = { kind: "passed" }, bind: FakeBind = 
       return check;
     },
     parseTraceLink: (text) =>
-      traceLinkOf(text, text === "bad" ? { kind: "refused", rule: "the template has no host after its scheme" } : { kind: "accepted" }),
+      traceLinkOf(
+        text,
+        text === "bad"
+          ? { kind: "refused", refusal: { kind: "noHost" }, rule: "the template has no host after its scheme" }
+          : { kind: "accepted" },
+      ),
     createHandler: handlerOf,
     serve: async (_handler, address) => {
       served.push(address);

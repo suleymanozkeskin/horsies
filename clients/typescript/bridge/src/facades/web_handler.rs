@@ -23,7 +23,8 @@
 //!   when it builds its handle; a handle without one is refused with
 //!   `CLIENT_DEFECT` at the build.
 //! - `checkTraceLinkTemplate(text)` (sync, pure) checks the template of the
-//!   trace link of the page with the core's rules.
+//!   trace link of the page with the core's rules. A refusal names the rule
+//!   of the core that the template breaks, with its facts and its text.
 //! - `logMonitoringFailure(message)` (sync) writes one ERROR record of the
 //!   `horsies.web` logger, for a failure that the package handles, such as
 //!   a policy that threw.
@@ -41,7 +42,7 @@ use horsies_core::web::{
     route_access as core_route_access, AccessGrant, AccessNeed, Bytes, EventFrames,
     EventStreamItem, Method, MonitoringHandler as CoreHandler, MonitoringHandlerConfig,
     MonitoringUiConfig, RequestParts, ResponseForm, ResponseParts, RouteAccess, TraceLink,
-    TraceLinkTemplate, Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
+    TraceLinkRefusal, TraceLinkTemplate, Verdict, DEGRADED_FRAME, MAX_REQUEST_BODY_BYTES,
 };
 use horsies_core::{BrokerError, ChildSpecSource};
 use napi::bindgen_prelude::{Object, ToNapiValue, Uint8Array};
@@ -308,13 +309,76 @@ pub struct MonitoringHandlerSettings {
     discriminant_case = "camelCase",
     object_from_js = false
 )]
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TraceLinkCheck {
     Accepted,
-    /// `rule` names the rule that the template breaks.
+    /// `refusal` is the rule that the template breaks; `rule` is the core's
+    /// text of that rule.
     Refused {
+        refusal: TraceLinkRefusalRecord,
         rule: String,
     },
+}
+
+/// The rule of the core that a trace link template breaks, with its facts:
+/// one variant per variant of the core's [`TraceLinkRefusal`].
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_from_js = false
+)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum TraceLinkRefusalRecord {
+    /// The template has 0 bytes or more than the core's bound: `bytes`, its
+    /// UTF-8 byte count.
+    Length { bytes: f64 },
+    /// The template holds a byte outside 0x21 to 0x7e: `byte`, the first one.
+    Character { byte: f64 },
+    /// The template does not start with `https://` or `http://`.
+    Scheme,
+    /// The template has no host after its scheme.
+    NoHost,
+    /// The template does not hold `{trace_id}` once: `count`, the times that
+    /// it holds it.
+    PlaceholderCount { count: f64 },
+    /// The template holds a `{` or `}` outside `{trace_id}`.
+    StrayBrace,
+}
+
+impl TraceLinkRefusalRecord {
+    /// The record of the core's refusal. Pure.
+    fn of(refusal: TraceLinkRefusal) -> Self {
+        match refusal {
+            TraceLinkRefusal::Length { bytes } => Self::Length {
+                bytes: number_of_text_count(bytes),
+            },
+            TraceLinkRefusal::Character { byte } => Self::Character {
+                byte: f64::from(byte),
+            },
+            TraceLinkRefusal::Scheme => Self::Scheme,
+            TraceLinkRefusal::NoHost => Self::NoHost,
+            TraceLinkRefusal::PlaceholderCount { count } => Self::PlaceholderCount {
+                count: number_of_text_count(count),
+            },
+            TraceLinkRefusal::StrayBrace => Self::StrayBrace,
+        }
+    }
+}
+
+/// A count in the UTF-8 form of a text from JavaScript, as a JavaScript
+/// number. A JavaScript string has at most 2^31 - 1 UTF-16 code units
+/// (JavaScriptCore; V8 allows fewer), each at most 3 UTF-8 bytes, so the
+/// count is under 2^53 and the number holds it exactly. A count that the
+/// number does not hold is a defect. Pure.
+fn number_of_text_count(count: usize) -> f64 {
+    let number = count as f64;
+    // A number that converts back to the same count holds it exactly.
+    match number as usize == count {
+        true => number,
+        false => {
+            unreachable!("a count in the UTF-8 form of a JavaScript string is under 2^53: {count}")
+        }
+    }
 }
 
 /// The handler closed its events.
@@ -773,7 +837,8 @@ impl MonitoringEventStream {
 
 /// Check the trace link template `text` with the core's rules: its length,
 /// its characters, its scheme, a host, one `{trace_id}`, and no other
-/// brace. Pure: starts nothing.
+/// brace. A refusal names the rule with its facts and the core's text of
+/// the rule. Pure: starts nothing.
 #[napi(ts_return_type = "NativeEnvelope<TraceLinkCheck>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -784,6 +849,7 @@ pub fn check_trace_link_template(text: String) -> Envelope<TraceLinkCheck> {
         Envelope::Value(match TraceLinkTemplate::parse(&text) {
             Ok(_template) => TraceLinkCheck::Accepted,
             Err(refused) => TraceLinkCheck::Refused {
+                refusal: TraceLinkRefusalRecord::of(refused),
                 rule: refused.to_string(),
             },
         })
@@ -959,18 +1025,84 @@ mod tests {
         assert_eq!(refused.subject, "traceLinkTemplate");
     }
 
+    /// The answer of `checkTraceLinkTemplate` for a text that the core
+    /// refuses with `core`: the record of `core` and its text.
+    fn refused_with(
+        core: TraceLinkRefusal,
+        refusal: TraceLinkRefusalRecord,
+    ) -> Envelope<TraceLinkCheck> {
+        Envelope::Value(TraceLinkCheck::Refused {
+            refusal,
+            rule: core.to_string(),
+        })
+    }
+
     #[test]
-    fn check_trace_link_template_names_the_rule() {
+    fn check_trace_link_template_accepts_a_valid_template() {
         assert_eq!(
             check_trace_link_template("http://jaeger:16686/trace/{trace_id}".to_owned()),
             Envelope::Value(TraceLinkCheck::Accepted)
         );
-        match check_trace_link_template("https://example.com/trace".to_owned()) {
-            Envelope::Value(TraceLinkCheck::Refused { rule }) => {
-                assert!(rule.contains("{trace_id}"), "{rule}");
-            }
-            other => panic!("a template with no placeholder is refused, got {other:?}"),
-        }
+    }
+
+    #[test]
+    fn a_length_refusal_crosses_with_its_byte_count() {
+        assert_eq!(
+            check_trace_link_template(String::new()),
+            refused_with(
+                TraceLinkRefusal::Length { bytes: 0 },
+                TraceLinkRefusalRecord::Length { bytes: 0.0 }
+            )
+        );
+    }
+
+    #[test]
+    fn a_character_refusal_crosses_with_its_byte() {
+        assert_eq!(
+            check_trace_link_template("https://example.com/a b/{trace_id}".to_owned()),
+            refused_with(
+                TraceLinkRefusal::Character { byte: b' ' },
+                TraceLinkRefusalRecord::Character { byte: 32.0 }
+            )
+        );
+    }
+
+    #[test]
+    fn a_scheme_refusal_crosses_as_scheme() {
+        assert_eq!(
+            check_trace_link_template("ftp://example.com/{trace_id}".to_owned()),
+            refused_with(TraceLinkRefusal::Scheme, TraceLinkRefusalRecord::Scheme)
+        );
+    }
+
+    #[test]
+    fn a_no_host_refusal_crosses_as_no_host() {
+        assert_eq!(
+            check_trace_link_template("https:///trace/{trace_id}".to_owned()),
+            refused_with(TraceLinkRefusal::NoHost, TraceLinkRefusalRecord::NoHost)
+        );
+    }
+
+    #[test]
+    fn a_placeholder_count_refusal_crosses_with_its_count() {
+        assert_eq!(
+            check_trace_link_template("https://example.com/{trace_id}/{trace_id}".to_owned()),
+            refused_with(
+                TraceLinkRefusal::PlaceholderCount { count: 2 },
+                TraceLinkRefusalRecord::PlaceholderCount { count: 2.0 }
+            )
+        );
+    }
+
+    #[test]
+    fn a_stray_brace_refusal_crosses_as_stray_brace() {
+        assert_eq!(
+            check_trace_link_template("https://example.com/{span_id}/{trace_id}".to_owned()),
+            refused_with(
+                TraceLinkRefusal::StrayBrace,
+                TraceLinkRefusalRecord::StrayBrace
+            )
+        );
     }
 
     #[test]

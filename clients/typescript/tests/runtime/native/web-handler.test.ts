@@ -1,7 +1,7 @@
 // The monitoring handler with a built addon (`build:dev`) and a database: the page, the access
 // needs, the refusals and the body bound in the core, `/metrics`, the event stream with a short
 // test heartbeat, `close()`, the client's abort, the degraded frame of a broker with no listener,
-// and the refusals of the build.
+// the refusals of the build, and the trace link refusals of the core, one per rule.
 
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
@@ -17,6 +17,7 @@ import {
 } from "../../../horsies/src/web/handler.ts";
 import type { MonitoringHandler, MonitoringHandlerOptions } from "../../../horsies/src/web/handler.ts";
 import { parseTraceLink } from "../../../horsies/src/web/trace-link.ts";
+import type { TraceLinkRefusal } from "../../../horsies/src/web/trace-link.ts";
 import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifest.ts";
 import { probedHandle, testApp } from "./web-probe.ts";
 
@@ -225,15 +226,43 @@ describe("the refusals of the build and of the broker", () => {
     assert.match(String(Reflect.get(body, "detail")), /^The monitoring handler has no broker: /u);
   });
 
-  test("the core accepts a trace link template and refuses one with the rule", () => {
+  test("the core accepts a trace link template", () => {
     assert.equal(parseTraceLink("https://grafana.test/explore?traceId={trace_id}").ok, true);
-    assert.deepEqual(parseTraceLink("https://grafana.test/explore"), {
-      ok: false,
-      error: {
-        kind: "traceLinkRefused",
-        template: "https://grafana.test/explore",
-        rule: "the template holds {trace_id} 0 times; it holds it once",
-      },
-    });
   });
+});
+
+describe("the trace link refusals of the core", () => {
+  /** One template per rule of the core, and the refusal of the core. */
+  const refusals: readonly TraceLinkRefusal[] = [
+    { kind: "length", bytes: 0, template: "", rule: "the template has 0 bytes; a template has 1 to 2048 bytes" },
+    {
+      kind: "character",
+      byte: 0x20,
+      template: "https://grafana.test/a b/{trace_id}",
+      rule: "the template holds the byte 0x20; a template holds printable ASCII with no space (0x21 to 0x7e)",
+    },
+    {
+      kind: "scheme",
+      template: "ftp://grafana.test/{trace_id}",
+      rule: "the template does not start with https:// or http://",
+    },
+    { kind: "noHost", template: "https:///trace/{trace_id}", rule: "the template has no host after its scheme" },
+    {
+      kind: "placeholderCount",
+      count: 0,
+      template: "https://grafana.test/explore",
+      rule: "the template holds {trace_id} 0 times; it holds it once",
+    },
+    {
+      kind: "strayBrace",
+      template: "https://grafana.test/{span_id}/{trace_id}",
+      rule: "the template holds a { or } outside {trace_id}",
+    },
+  ];
+
+  for (const refusal of refusals) {
+    test(`the core refuses with ${refusal.kind}, its facts and the rule`, () => {
+      assert.deepEqual(parseTraceLink(refusal.template), { ok: false, error: refusal });
+    });
+  }
 });

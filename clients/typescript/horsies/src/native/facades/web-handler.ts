@@ -103,8 +103,28 @@ export interface NativeMonitoringHandler {
   closeEvents(): Promise<NativeEnvelope<undefined>>;
 }
 
-/** The answer of the trace link check. `rule`: the rule that the template breaks. */
-export type TraceLinkCheck = { readonly kind: "accepted" } | { readonly kind: "refused"; readonly rule: string };
+/** The rule of the core that a trace link template breaks, with its facts. */
+export type TraceLinkRefusalRecord =
+  /** The template has 0 bytes or more than 2,048 bytes: `bytes`, its UTF-8 byte count. */
+  | { readonly kind: "length"; readonly bytes: number }
+  /** The template holds a byte outside 0x21 to 0x7e: `byte`, the first such byte. */
+  | { readonly kind: "character"; readonly byte: number }
+  /** The template does not start with `https://` or `http://`. */
+  | { readonly kind: "scheme" }
+  /** The template has no host after its scheme. */
+  | { readonly kind: "noHost" }
+  /** The template does not hold `{trace_id}` once: `count`, the times that it holds it. */
+  | { readonly kind: "placeholderCount"; readonly count: number }
+  /** The template holds a `{` or `}` outside `{trace_id}`. */
+  | { readonly kind: "strayBrace" };
+
+/**
+ * The answer of the trace link check. `refusal`: the rule that the template breaks; `rule`: the
+ * core's text of that rule.
+ */
+export type TraceLinkCheck =
+  | { readonly kind: "accepted" }
+  | { readonly kind: "refused"; readonly refusal: TraceLinkRefusalRecord; readonly rule: string };
 
 /** The monitoring handler functions of the `facades` area. */
 export interface WebHandlerAddon {

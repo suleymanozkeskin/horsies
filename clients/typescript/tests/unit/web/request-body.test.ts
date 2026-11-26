@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { hexOf, readBoundedBody } from "../../../horsies/src/web/request-body.ts";
+import type { TraceLinkCheck } from "../../../horsies/src/native/facades/web-handler.ts";
 import { traceLinkOf } from "../../../horsies/src/web/trace-link.ts";
+import type { TraceLinkRefusal } from "../../../horsies/src/web/trace-link.ts";
 
 /** A body of `chunks` chunks of `size` bytes, and the count of chunks that it gave. */
 function chunkedBody(chunks: number, size: number): { readonly body: ReadableStream<Uint8Array>; readonly pulled: () => number } {
@@ -86,14 +88,55 @@ describe("traceLinkOf", () => {
     assert.equal(template.value.text, "https://grafana.test/explore?traceId={trace_id}");
   });
 
-  test("a refused template names the rule", () => {
-    assert.deepEqual(traceLinkOf("ftp://x/{trace_id}", { kind: "refused", rule: "the template does not start with https:// or http://" }), {
-      ok: false,
-      error: {
-        kind: "traceLinkRefused",
+  /** One refusal of the core per rule: the template, the core's answer, and the refusal that the caller gets. */
+  const refusals: readonly {
+    readonly template: string;
+    readonly check: TraceLinkCheck;
+    readonly refusal: TraceLinkRefusal;
+  }[] = [
+    {
+      template: "",
+      check: { kind: "refused", refusal: { kind: "length", bytes: 0 }, rule: "the template has 0 bytes" },
+      refusal: { kind: "length", bytes: 0, template: "", rule: "the template has 0 bytes" },
+    },
+    {
+      template: "https://x/a b/{trace_id}",
+      check: { kind: "refused", refusal: { kind: "character", byte: 0x20 }, rule: "the template holds the byte 0x20" },
+      refusal: { kind: "character", byte: 0x20, template: "https://x/a b/{trace_id}", rule: "the template holds the byte 0x20" },
+    },
+    {
+      template: "ftp://x/{trace_id}",
+      check: { kind: "refused", refusal: { kind: "scheme" }, rule: "the template does not start with https:// or http://" },
+      refusal: {
+        kind: "scheme",
         template: "ftp://x/{trace_id}",
         rule: "the template does not start with https:// or http://",
       },
+    },
+    {
+      template: "https:///{trace_id}",
+      check: { kind: "refused", refusal: { kind: "noHost" }, rule: "the template has no host after its scheme" },
+      refusal: { kind: "noHost", template: "https:///{trace_id}", rule: "the template has no host after its scheme" },
+    },
+    {
+      template: "https://x/trace",
+      check: { kind: "refused", refusal: { kind: "placeholderCount", count: 0 }, rule: "the template holds {trace_id} 0 times" },
+      refusal: { kind: "placeholderCount", count: 0, template: "https://x/trace", rule: "the template holds {trace_id} 0 times" },
+    },
+    {
+      template: "https://x/{span_id}/{trace_id}",
+      check: { kind: "refused", refusal: { kind: "strayBrace" }, rule: "the template holds a { or } outside {trace_id}" },
+      refusal: {
+        kind: "strayBrace",
+        template: "https://x/{span_id}/{trace_id}",
+        rule: "the template holds a { or } outside {trace_id}",
+      },
+    },
+  ];
+
+  for (const { template, check, refusal } of refusals) {
+    test(`a ${refusal.kind} refusal keeps its facts, the template and the rule`, () => {
+      assert.deepEqual(traceLinkOf(template, check), { ok: false, error: refusal });
     });
-  });
+  }
 });
