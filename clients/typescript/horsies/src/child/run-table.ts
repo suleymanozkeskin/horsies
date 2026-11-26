@@ -39,10 +39,18 @@ export interface RunNative {
   endSpawn(workKey: bigint): SpawnEnd;
 }
 
-/** The marks of the loop watch: the run whose synchronous code runs now. */
+/** The run whose code the loop runs now, as the marks hold it. */
+export type LoopHolder = { readonly kind: "noRun" } | { readonly kind: "run"; readonly taskId: string };
+
+/**
+ * The marks of the loop watch: the run whose synchronous code runs now. The core's mark has no nesting, so a caller
+ * puts back the holder that its `hold` gave: a spawn in the synchronous part of a body keeps the body's mark.
+ */
 export interface LoopMarks {
-  hold(taskId: string): void;
-  release(): void;
+  /** The loop runs code of the run of `taskId` now. Gives the holder that was in force. */
+  hold(taskId: string): LoopHolder;
+  /** Put back `holder`, which a `hold` gave. */
+  restore(holder: LoopHolder): void;
 }
 
 /** The facts of one run, from the core's `runBody` post. */
@@ -209,13 +217,13 @@ function abortWith(controller: AbortController, cause: CancelCauseName | WorkSto
 function startedWork<T>(facts: RunFacts, marks: LoopMarks, start: () => Promise<T>): Promise<T> {
   const mark: RunMark = { taskId: facts.taskId, taskName: facts.taskName, attempt: facts.attempt };
 
-  marks.hold(facts.taskId);
+  const before = marks.hold(facts.taskId);
 
   try {
     return Promise.resolve(runStore.run(mark, start));
   } catch (cause) {
     return Promise.reject(cause);
   } finally {
-    marks.release();
+    marks.restore(before);
   }
 }

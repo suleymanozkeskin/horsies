@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { runBody, type StoredBodyOutcome } from "../../../horsies/src/child/body.ts";
 import type { BodyEnd, BodyObservation } from "../../../horsies/src/child/body-observer.ts";
 import { attemptFromCore } from "../../../horsies/src/child/attempt.ts";
-import { type LoopMarks, type RunNative, RunTable } from "../../../horsies/src/child/run-table.ts";
+import { type LoopHolder, type LoopMarks, type RunNative, RunTable } from "../../../horsies/src/child/run-table.ts";
 import { taskRuntimeOf, type TaskRuntime } from "../../../horsies/src/child/runtime.ts";
 import { StateValues } from "../../../horsies/src/child/state.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
@@ -46,16 +46,23 @@ export class FakeRunNative implements RunNative {
   }
 }
 
-/** Loop marks that record each mark. */
+/** Loop marks that record each mark, and keep the holder in force as the child's marks do. */
 export class RecordingMarks implements LoopMarks {
   readonly marks: string[] = [];
+  #current: LoopHolder = { kind: "noRun" };
 
-  hold(taskId: string): void {
+  hold(taskId: string): LoopHolder {
+    const before = this.#current;
+
+    this.#current = { kind: "run", taskId };
     this.marks.push(`hold ${taskId}`);
+
+    return before;
   }
 
-  release(): void {
-    this.marks.push("release");
+  restore(holder: LoopHolder): void {
+    this.#current = holder;
+    this.marks.push(holder.kind === "run" ? `hold ${holder.taskId}` : "release");
   }
 }
 

@@ -10,7 +10,7 @@
 
 import * as v8 from "node:v8";
 
-import type { LoopMarks } from "./run-table.ts";
+import type { LoopHolder, LoopMarks } from "./run-table.ts";
 import { runStore } from "./run-store.ts";
 
 /** How often the turn timer records a turn of the loop. */
@@ -46,14 +46,43 @@ export function startTurns(native: LoopNative, timer: TurnTimer): () => void {
   });
 }
 
-/** The loop marks of the body adapter and of `runtime.spawn`, on the addon. */
+/** The holder of no run. */
+const NO_RUN: LoopHolder = Object.freeze({ kind: "noRun" });
+
+/**
+ * The loop marks of the body adapter, of `runtime.spawn` and of the culprit method, on the addon. They keep the
+ * holder in force, because the core's mark has no nesting: `restore` puts back the holder that a `hold` gave.
+ */
 export function loopMarksOf(native: LoopNative): LoopMarks {
+  let current: LoopHolder = NO_RUN;
+
   return {
     hold: (taskId) => {
+      const before = current;
+
+      current = Object.freeze({ kind: "run", taskId });
       native.loopHold(taskId);
+
+      return before;
     },
-    release: () => {
-      native.loopRelease();
+    restore: (holder) => {
+      current = holder;
+
+      switch (holder.kind) {
+        case "noRun":
+          native.loopRelease();
+
+          return;
+        case "run":
+          native.loopHold(holder.taskId);
+
+          return;
+        default: {
+          const unexpected: never = holder;
+
+          throw new TypeError(`loopMarks.restore: a holder outside its type: ${String(unexpected)}`);
+        }
+      }
     },
   };
 }
@@ -92,13 +121,18 @@ export function runtimeCulpritMethod(): CulpritMethod {
   };
 }
 
-/** Start the culprit method: each Promise that code of a run makes marks that run at its continuations. */
-export function startCulpritMarks(method: CulpritMethod, native: LoopNative): () => void {
+/**
+ * Start the culprit method: each Promise that code of a run makes marks that run at its continuations, and the
+ * holder before the continuation comes back after it. Continuations nest only as calls nest, so the stack of the
+ * holders to put back is as deep as the call stack at most.
+ */
+export function startCulpritMarks(method: CulpritMethod, marks: LoopMarks): () => void {
   switch (method.kind) {
     case "none":
       return () => undefined;
     case "promiseHooks": {
       const owners = new WeakMap<Promise<unknown>, string>();
+      const before: LoopHolder[] = [];
 
       return method.createHook({
         init: (promise) => {
@@ -112,12 +146,12 @@ export function startCulpritMarks(method: CulpritMethod, native: LoopNative): ()
           const taskId = owners.get(promise);
 
           if (taskId !== undefined) {
-            native.loopHold(taskId);
+            before.push(marks.hold(taskId));
           }
         },
         after: (promise) => {
           if (owners.has(promise)) {
-            native.loopRelease();
+            marks.restore(before.pop() ?? NO_RUN);
           }
         },
       });

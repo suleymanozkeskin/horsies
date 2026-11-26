@@ -7,9 +7,9 @@
 // 3. The process events: no-op `SIGINT` and `SIGTERM`; the detached throws and rejections (`process-events.ts`).
 // 4. The plan: each implementation by its task name and body form; the start hooks (the child's own, the providers,
 //    the `onChildStart` hooks); the producer manifest of the app; the host name; the body facts; the flush bound.
-// 5. The serve: the core posts each body, cancel and stop request to the post dispatcher, and runs each start hook
-//    through the hook runner. The turn timer runs from the serve on; the culprit method of Node starts in a shared
-//    async child.
+// 5. The serve: sends from task code are no longer suppressed; the core posts each body, cancel and stop request to
+//    the post dispatcher, and runs each start hook through the hook runner. The turn timer starts at hook 0 (a host
+//    that started); the culprit method of Node starts there in a shared async child.
 // 6. The exit rule: the flush of the body observer, at most its bound, then the end of the process with the host's
 //    code. The child never waits for its event loop to empty.
 
@@ -37,10 +37,10 @@ import { buildTaskError, checkAppConfig } from "../native/sends/sends.ts";
 import type { ChildArgumentsCheck, ChildHostPlan, ChildPost, ChildServeEnd, StartHookCall } from "../native/child/addon.ts";
 import type { AppConfigCheck } from "../native/sends/addon.ts";
 import type { PanicRule } from "../thrown-errors.ts";
-import { ClientDefect, type CoreDefect } from "../thrown-errors.ts";
+import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { type ChildMembersView, servedMembers } from "./app-members.ts";
-import { bodyObserverOf } from "./body-observer.ts";
+import { type BodyObserver, bodyObserverOf, NO_BODY_OBSERVER } from "./body-observer.ts";
 import { CHILD_EXIT_FLUSH_BOUND_MS, ChildEnd } from "./exit.ts";
 import {
   type CulpritMethod,
@@ -52,7 +52,8 @@ import {
   startTurns,
   type TurnTimer,
 } from "./loop-marks.ts";
-import { installProcessEvents, processEventHooks, type ProcessEventHooks } from "./process-events.ts";
+import { installProcessEvents, processEventHooks, type ProcessEventHooks, UNCAUGHT_EXIT_CODE } from "./process-events.ts";
+import { thrownRecord } from "./thrown-error.ts";
 import { currentRun } from "./run-store.ts";
 import { RunTable } from "./run-table.ts";
 import { bodyFormOf, hookRunner, postDispatcher, type ServeNative, startHookNames } from "./serve.ts";
@@ -87,29 +88,92 @@ export interface ChildModeDeps {
   readonly reportDefect: (defect: CoreDefect) => void;
 }
 
-/** Serve `app` as a child with the process arguments after the entry script; the process ends at the child's end. */
+/**
+ * Serve `app` as a child with the process arguments after the entry script; the process ends at the child's end. It
+ * never rejects: a defect of the package goes to the defect rule (stderr, the log sink, the abort), and any other
+ * failure of child mode is written with its type and message, and the child ends with `CHILD_MODE_FAILED_EXIT_CODE`
+ * through the exit rule. So an entry that does not await `cli.run` (a CommonJS entry) does not exit 0 or hang.
+ */
 export async function runChildMode(app: Horsies, processArguments: readonly string[], deps: ChildModeDeps): Promise<never> {
+  const observer = observerOfApp(app);
+  const childEnd = new ChildEnd({ flush: async () => observer.flush(), wait: deps.wait, exit: deps.exit });
+
+  let ended: ChildModeEnd;
+
+  try {
+    ended = await childMode(app, processArguments, deps, childEnd);
+  } catch (cause) {
+    return failedChildMode(cause, deps, childEnd);
+  }
+
+  switch (ended.kind) {
+    case "badArguments":
+      return deps.exit(ended.code);
+    case "served":
+      return childEnd.end(ended.code);
+    default:
+      return unreachable(ended, "runChildMode");
+  }
+}
+
+/** How child mode ended, before the end of the process: bad arguments (no exit rule), or the host's exit code. */
+type ChildModeEnd = { readonly kind: "badArguments"; readonly code: number } | { readonly kind: "served"; readonly code: number };
+
+/** The exit code of a child whose child mode failed outside every run: the code of an uncaught throw there. */
+export const CHILD_MODE_FAILED_EXIT_CODE: number = UNCAUGHT_EXIT_CODE;
+
+/** The body observer of `app`, or the one that does nothing when `app` is not an app (child mode then fails). */
+function observerOfApp(app: Horsies): BodyObserver {
+  try {
+    return bodyObserverOf(appInternals(app));
+  } catch {
+    return NO_BODY_OBSERVER;
+  }
+}
+
+/** The end of a failed child mode: the defect rule, or one stderr line; then the exit with 1. */
+async function failedChildMode(cause: unknown, deps: ChildModeDeps, childEnd: ChildEnd): Promise<never> {
+  if (cause instanceof CoreDefect) {
+    deps.reportDefect(cause);
+  } else {
+    const record = thrownRecord(cause);
+    const traceback = record.traceback === "" ? "" : `\n${record.traceback}`;
+
+    deps.writeLine(`horsies child: child mode failed: ${record.type}: ${record.message}${traceback}`);
+  }
+
+  return childEnd.end(CHILD_MODE_FAILED_EXIT_CODE);
+}
+
+/** Step 1, then steps 2 to 6 for arguments that start a child. */
+async function childMode(
+  app: Horsies,
+  processArguments: readonly string[],
+  deps: ChildModeDeps,
+  childEnd: ChildEnd,
+): Promise<ChildModeEnd> {
   const checked = deps.native.childArguments(processArguments);
 
   switch (checked.kind) {
     case "badArguments":
       deps.writeLine(`horsies child: ${checked.cause}`);
 
-      return deps.exit(checked.code);
+      return { kind: "badArguments", code: checked.code };
     case "child":
-      return servedChild(appInternals(app), processArguments, deps);
+      return servedChild(appInternals(app), processArguments, deps, childEnd);
     default:
       return unreachable(checked, "runChildMode");
   }
 }
 
-/** Steps 2 to 6, for arguments that start a child. */
-async function servedChild(context: AppContext, processArguments: readonly string[], deps: ChildModeDeps): Promise<never> {
+/** Steps 2 to 6. */
+async function servedChild(
+  context: AppContext,
+  processArguments: readonly string[],
+  deps: ChildModeDeps,
+  childEnd: ChildEnd,
+): Promise<ChildModeEnd> {
   deps.native.setPanicRule("ABORT_PROCESS");
-
-  const observer = bodyObserverOf(context);
-  const childEnd = new ChildEnd({ flush: async () => observer.flush(), wait: deps.wait, exit: deps.exit });
-
   installProcessEvents({
     hooks: deps.events,
     writeLine: deps.writeLine,
@@ -127,31 +191,30 @@ async function servedChild(context: AppContext, processArguments: readonly strin
   const post = postDispatcher({
     implementations: context.implementations,
     table,
-    observer,
+    observer: bodyObserverOf(context),
     native: deps.native,
     marks,
     reportDefect: deps.reportDefect,
   });
 
+  // Hook 0 runs only in a host that started, after it made the loop: the turns start there.
   const hooks = hookRunner(members, states, (facts) => {
+    // The turns and the culprit marks run until the process ends.
+    void startTurns(deps.native, deps.timer);
+
     if (facts.kind === "sharedAsync") {
-      // The marks run until the process ends.
-      void startCulpritMarks(deps.culprit, deps.native);
+      void startCulpritMarks(deps.culprit, marks);
     }
   });
 
-  const serving = deps.native.serveChild(
-    childPlan(context, members, processArguments, deps),
-    post,
-    settlingCallback(hooks, deps.settlement),
-  );
+  const plan = childPlan(context, members, processArguments, deps);
 
-  const stopTurns = startTurns(deps.native, deps.timer);
-  const end = await serving;
+  // Task code may send and start workflows from here on: the providers, the hooks and the bodies.
+  context.suppression.startServing();
 
-  stopTurns();
+  const end = await deps.native.serveChild(plan, post, settlingCallback(hooks, deps.settlement));
 
-  return childEnd.end(end.code);
+  return { kind: "served", code: end.code };
 }
 
 /** The plan of the child of `context`. A config that the core refuses again is a defect: `ClientDefect`. */
@@ -210,9 +273,10 @@ export function processChildModeDeps(): ChildModeDeps {
     writeLine: (line) => {
       process.stderr.write(`${line}\n`);
     },
+    // The bound timer is referenced: an unref'd one lets Node end an awaiting entry with 13 before the exit.
     wait: async (milliseconds) =>
       new Promise((resolve) => {
-        setTimeout(resolve, milliseconds).unref();
+        setTimeout(resolve, milliseconds);
       }),
     exit: (code) => process.exit(code),
     reportDefect,

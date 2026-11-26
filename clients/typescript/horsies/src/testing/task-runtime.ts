@@ -44,7 +44,16 @@ export function testRunControls<Keys extends readonly AnyStateKey[]>(options: Te
     attempt: options.attempt,
     signal,
     cancelState: () => NOT_REQUESTED,
-    spawn: <T>(_name: string, work: (signal: AbortSignal) => Promise<T>) => ok(work(new AbortController().signal)),
+    spawn: <T>(_name: string, work: (signal: AbortSignal) => Promise<T>) => ok(startedTestWork(work)),
     state: <T>(key: StateKey<T>): T => states.value(key),
   });
+}
+
+/** Start test work with a signal of its own; a sync throw of `work` is a rejected Promise, as in a child. */
+function startedTestWork<T>(work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  try {
+    return Promise.resolve(work(new AbortController().signal));
+  } catch (cause) {
+    return Promise.reject(cause);
+  }
 }

@@ -7,8 +7,9 @@
 // child with 173, runs no later hook, and stops the worker with `CHILD_HOOK_FAILED`.
 
 import type { AppContext } from "../app/context.ts";
+import { raiseDefect } from "../native/call/defect.ts";
 import { ClientDefect } from "../thrown-errors.ts";
-import { type StateKey, type StateKeyIdentity, stateKeyNamed } from "./state.ts";
+import { type RaiseDefect, type StateKey, type StateKeyIdentity, stateKeyNamed } from "./state.ts";
 
 /** The factory of one provider: it builds the value in each task child, sync or async. */
 export type ProviderFactory<T> = () => T | Promise<T>;
@@ -50,14 +51,14 @@ function membersOf(context: AppContext): ChildMembers {
 }
 
 /** The members of `context`, open for a new member. A new member of a served child is a defect: `ClientDefect`. */
-function openMembers(context: AppContext, subject: string): ChildMembers {
+function openMembers(context: AppContext, subject: string, raise: RaiseDefect): ChildMembers {
   const kept = membersOf(context);
 
   switch (kept.phase) {
     case "open":
       return kept;
     case "serving":
-      throw new ClientDefect({ subject, rule: `${subject} is called before cli.run serves the child` });
+      return raise(new ClientDefect({ subject, rule: `${subject} is called before cli.run serves the child` }));
     default: {
       const unexpected: never = kept.phase;
 
@@ -71,9 +72,13 @@ function memberName(kind: string, position: number, function_: { readonly name: 
   return `${kind} #${String(position)} ${function_.name === "" ? "(anonymous)" : function_.name}`;
 }
 
-/** Add a provider to `context` and give its key. Calls nothing. */
-export function provideFor<T>(context: AppContext, factory: ProviderFactory<T>): StateKey<Awaited<T>> {
-  const open = openMembers(context, "app.provide");
+/** Add a provider to `context` and give its key. Calls nothing. A defect goes to `raise` (the defect rule). */
+export function provideFor<T>(
+  context: AppContext,
+  factory: ProviderFactory<T>,
+  raise: RaiseDefect = raiseDefect,
+): StateKey<Awaited<T>> {
+  const open = openMembers(context, "app.provide", raise);
   const name = memberName("provide", open.providers.length + 1, factory);
   const key = stateKeyNamed<Awaited<T>>(name);
 
@@ -82,9 +87,9 @@ export function provideFor<T>(context: AppContext, factory: ProviderFactory<T>):
   return key;
 }
 
-/** Add a start hook of a task child to `context`. Calls nothing. */
-export function onChildStartFor(context: AppContext, hook: ChildStartHook): void {
-  const open = openMembers(context, "app.onChildStart");
+/** Add a start hook of a task child to `context`. Calls nothing. A defect goes to `raise` (the defect rule). */
+export function onChildStartFor(context: AppContext, hook: ChildStartHook, raise: RaiseDefect = raiseDefect): void {
+  const open = openMembers(context, "app.onChildStart", raise);
 
   open.hooks.push(Object.freeze({ name: memberName("onChildStart", open.hooks.length + 1, hook), hook }));
 }

@@ -92,7 +92,9 @@ export class TaskRuntime {
 
   /**
    * Start `work` as work of this run, named `name` in the reports. The returned Promise settles with the work. A
-   * refusal starts nothing: `runEnded` after the body returned, `tooMuchWork` at the bound of 10,000 pieces.
+   * refusal starts nothing: `runEnded` once the run is over (its body returned and the work it left ended or was
+   * stopped), `tooMuchWork` at the bound of 10,000 pieces. Work that the body spawned may spawn more work after the
+   * body returned: it belongs to the run, as in the Rust and Python clients.
    */
   spawn<T>(name: string, work: SpawnedWork<T>): Result<Promise<T>, SpawnRefused> {
     return this.#controls.spawn(name, work);
