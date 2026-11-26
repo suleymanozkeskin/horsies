@@ -26,7 +26,7 @@ export const authorizePayment = defineTask({
 export const capturePayment = defineTask({
   name: "capture_payment",
   queue: QUEUE_PAYMENTS,
-  input: { orderId: h.string(), authorization: h.resultOf(PaymentAuthorization) },
+  input: { orderId: h.string(), authorization: h.taskOutcome(authorizePayment) },
   output: PaymentCapture,
   errors: ["UPSTREAM_FAILED", "PAYMENT_ALREADY_CAPTURED", "STORE_UNAVAILABLE"],
   retry: CRASH_RETRY,

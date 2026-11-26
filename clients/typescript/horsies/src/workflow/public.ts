@@ -3,6 +3,7 @@
 export {
   type AnyWorkflowContract,
   type BuildReturnOf,
+  type CheckCase,
   type CheckCases,
   defineWorkflow,
   type OnError,
@@ -34,6 +35,7 @@ export {
   type SuccessCase,
   type SuccessPolicy,
   type TaskNodeOptions,
+  type UpstreamCode,
   type UpstreamValue,
   type WorkflowOutput,
 } from "./node.ts";

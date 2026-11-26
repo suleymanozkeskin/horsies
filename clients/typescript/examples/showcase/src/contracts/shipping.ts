@@ -19,7 +19,7 @@ export const bookCourier = defineTask({
 export const printLabel = defineTask({
   name: "print_label",
   queue: QUEUE_FULFILLMENT,
-  input: { orderId: h.string(), booking: h.resultOf(CourierBooking) },
+  input: { orderId: h.string(), booking: h.taskOutcome(bookCourier) },
   output: ShippingLabel,
   errors: ["UPSTREAM_FAILED", "SHIPMENT_NOT_FOUND", "STORE_UNAVAILABLE"],
   retry: CRASH_RETRY,
@@ -29,7 +29,7 @@ export const printLabel = defineTask({
 export const trackingSeed = defineTask({
   name: "tracking_seed",
   queue: QUEUE_FULFILLMENT,
-  input: { orderId: h.string(), label: h.resultOf(ShippingLabel) },
+  input: { orderId: h.string(), label: h.taskOutcome(printLabel) },
   output: TrackingSeed,
   errors: ["UPSTREAM_FAILED", "SHIPMENT_NOT_FOUND", "STORE_UNAVAILABLE"],
   retry: CRASH_RETRY,

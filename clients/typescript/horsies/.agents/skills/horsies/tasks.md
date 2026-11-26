@@ -112,7 +112,7 @@ value reads back to the same value.
 | `h.record(value)` | `Readonly<Record<string, T>>` | A JSON object in the value's own key order |
 | `h.union([a, b])` | `A \| B` | Primitive members, at most one per stored JSON type |
 | `h.union(tag, [objects])` | the member objects | Object members told apart by the string literal member `tag` |
-| `h.resultOf(T)` | `TaskOutcome<T>` | A whole task parameter only, which a workflow node fills (see `workflows.md`) |
+| `h.taskOutcome(contract)` | `TaskOutcome<O, E>` of the contract | A whole task parameter only, which a workflow node fills (see `workflows.md`) |
 
 | Modifier | Does |
 |---|---|
@@ -246,8 +246,8 @@ arguments.
   only the engine writes (`__h_...`, `__horsies_...`), are refused.
 - A sender may leave out an `.optional()` or defaulted parameter. A body
   gets every parameter: a default is filled, an optional one may be absent.
-- A parameter declared `h.resultOf(T)` is not sent. A task with a required
-  `h.resultOf` parameter cannot be sent: `app.send` takes a type that no
+- A parameter declared `h.taskOutcome(contract)` is not sent. A task with a
+  required `h.taskOutcome` parameter cannot be sent: `app.send` takes a type that no
   value has, so only a workflow node runs it.
 - The reader refuses an undeclared key at every depth. A stored input that
   does not decode with the parameters fails the run with
@@ -280,18 +280,18 @@ class StockServiceDown extends Error {}
 
 export const validateOrderBody = app.implement(
   validateOrder,
-  async ({ orderId, lines }) => {
+  async ({ orderId, lines }, { ok, err }) => {
     if (lines.length === 0) {
-      return validateOrder.err({ code: "EMPTY_ORDER", message: "the order has no lines" });
+      return err({ code: "EMPTY_ORDER", message: "the order has no lines" });
     }
 
     const unknownLine = lines.find((line) => !line.sku.startsWith("SKU-"));
 
     if (unknownLine !== undefined) {
-      return validateOrder.err({ code: "UNKNOWN_SKU", data: { sku: unknownLine.sku } });
+      return err({ code: "UNKNOWN_SKU", data: { sku: unknownLine.sku } });
     }
 
-    return validateOrder.ok({ orderId, lineCount: lines.length, validatedAt: Temporal.Now.instant() });
+    return ok({ orderId, lineCount: lines.length, validatedAt: Temporal.Now.instant() });
   },
   { exceptions: [[StockServiceDown, "STOCK_SERVICE_DOWN"]] },
 );
@@ -302,11 +302,15 @@ export const validateOrderBody = app.implement(
   (`HRS-300`) and a second implementation of one contract (`HRS-301`) are
   refusals that `check` and the worker start report.
 - The body is `(input, runtime) => result`. `input` is the decoded input;
-  `runtime` is the `TaskRuntime` of the run. A `SHARED_ASYNC` body returns a
+  `runtime` holds the members of the `TaskRuntime` of the run and the
+  contract's `ok` and `err`. A body may destructure it
+  (`{ ok, err, signal }`) or leave it out. A `SHARED_ASYNC` body returns a
   Promise.
-- `contract.ok(value)` is the success. `contract.err({ code, message, data })`
-  is a failure with a declared code; `message` and `data` may be left out.
-  `data` is a `JsonValue`.
+- `ok(value)` is the success, with a value of the contract's `output` type.
+  `err({ code, message, data })` is a failure with a declared code;
+  `message` and `data` may be left out. `data` is a `JsonValue`. A wrong
+  value or code fails typecheck at the line of the `ok` or `err` call. The
+  contract has no `ok` and no `err`.
 - `exceptions` maps thrown error classes to declared codes. The first entry
   whose class the thrown value is an instance of (a subclass too) gives the
   code. An undeclared code in the map fails typecheck.
@@ -332,11 +336,16 @@ What the library records:
 
 ## `TaskRuntime`
 
-The second argument of a body. The worker's child gives it;
-`TaskRuntime.forTest` gives one to a test.
+The members of the second argument of a body, with `ok` and `err`. The
+second argument is one frozen object per run; each member is an own
+property and each function member is bound to its run, so a destructured
+member works. The worker's child gives it; `TaskRuntime.forTest` gives a
+runtime to a test, and `implementation.run` adds `ok` and `err`.
 
 | Member | Gives |
 |---|---|
+| `ok(value)` | The success of the body: a value of the contract's `output` type |
+| `err({ code, message, data })` | The error of the body: a code of the contract's `errors` |
 | `taskId` | The `TaskId` of the task |
 | `fencingToken` | `{ taskId, value }`: `value` is the attempt number (Fencing Token) |
 | `signal` | An `AbortSignal` that fires at an operator cancel, and at the deadline of a `SHARED_ASYNC` run |
@@ -363,17 +372,16 @@ export const exportReport = defineTask({
   errors: ["STALE_ATTEMPT"],
 });
 
-app.implement(exportReport, async ({ reportId }, runtime) => {
-  const pool = runtime.state(Reports);
-  const token = runtime.fencingToken;
+app.implement(exportReport, async ({ reportId }, { ok, err, state, fencingToken }) => {
+  const pool = state(Reports);
   const written = await pool.query(
     "UPDATE report_exports SET fence = $2, exported_at = now() WHERE report_id = $1 AND fence <= $2",
-    [reportId, token.value],
+    [reportId, fencingToken.value],
   );
 
   return written.rowCount === 0
-    ? exportReport.err({ code: "STALE_ATTEMPT", message: "a later attempt holds the fence" })
-    : exportReport.ok(null);
+    ? err({ code: "STALE_ATTEMPT", message: "a later attempt holds the fence" })
+    : ok(null);
 });
 ```
 
@@ -456,30 +464,30 @@ function importBatch(batchId: string): void {
 }
 
 export function implementFeeds(app: Horsies): void {
-  app.implement(syncFeed, async ({ feedUrl }, runtime) => {
-    const response = await fetch(feedUrl, { signal: runtime.signal });
+  app.implement(syncFeed, async ({ feedUrl }, { ok, err, signal }) => {
+    const response = await fetch(feedUrl, { signal });
 
     if (!response.ok) {
-      return syncFeed.err({ code: "FEED_UNREACHABLE", message: `HTTP ${response.status}` });
+      return err({ code: "FEED_UNREACHABLE", message: `HTTP ${response.status}` });
     }
 
     const items: unknown = await response.json();
 
-    return syncFeed.ok(Array.isArray(items) ? items.length : 0);
+    return ok(Array.isArray(items) ? items.length : 0);
   });
 
-  app.implement(indexFeeds, async ({ feedUrls }, runtime) => {
+  app.implement(indexFeeds, async ({ feedUrls }, { ok, err, spawn }) => {
     const counts: Promise<number>[] = [];
 
     for (const feedUrl of feedUrls) {
-      const started = runtime.spawn(`fetch ${feedUrl}`, async (signal) => {
+      const started = spawn(`fetch ${feedUrl}`, async (signal) => {
         const response = await fetch(feedUrl, { signal });
 
         return response.ok ? 1 : 0;
       });
 
       if (!started.ok) {
-        return indexFeeds.err({ code: "WORK_REFUSED", message: started.error.kind });
+        return err({ code: "WORK_REFUSED", message: started.error.kind });
       }
 
       counts.push(started.value);
@@ -487,14 +495,14 @@ export function implementFeeds(app: Horsies): void {
 
     const reached = await Promise.all(counts);
 
-    return indexFeeds.ok(reached.reduce((sum, count) => sum + count, 0));
+    return ok(reached.reduce((sum, count) => sum + count, 0));
   });
 
-  app.implement(importBatches, ({ batchIds }, runtime) => {
+  app.implement(importBatches, ({ batchIds }, { ok, cancelState }) => {
     let done = 0;
 
     for (const batchId of batchIds) {
-      if (runtime.cancelState().kind === "requested") {
+      if (cancelState().kind === "requested") {
         break;
       }
 
@@ -502,7 +510,7 @@ export function implementFeeds(app: Horsies): void {
       done += 1;
     }
 
-    return importBatches.ok(done);
+    return ok(done);
   });
 }
 ```
@@ -811,7 +819,9 @@ export async function testEmptyOrder(): Promise<boolean> {
 ```
 
 - `implementation.run(input, runtime)` runs the body with no worker, no
-  database and no addon. The input and the output are checked with the
+  database and no addon. The body gets the members of `runtime` and the
+  contract's `ok` and `err`; the runtime of `TaskRuntime.forTest` holds no
+  `ok` and no `err`. The input and the output are checked with the
   contract's types, as a worker checks them, and a thrown value goes
   through the exception map. It gives the outcome as a task read gives it.
 - `TaskRuntime.forTest({ taskId, attempt, state })`: `state` pairs each key
@@ -836,7 +846,7 @@ in each child.
 
 **Wait for no result in a task body.** A result wait in a worker child is
 refused with `waitInsideTask`. Pass the result with a workflow
-(`h.resultOf`).
+(`h.taskOutcome`).
 
 <!-- ts-check: skip elided -- a Wrong / Correct pair of statements -->
 ```ts
@@ -844,7 +854,7 @@ refused with `waitInsideTask`. Pass the result with a workflow
 const total = await otherHandle.get();
 
 // CORRECT: a workflow node receives the upstream outcome
-// input: { total: h.resultOf(h.int()) }
+// input: { total: h.taskOutcome(computeTotals) }
 // w.task(report, { total: totalsNode }, { id: "report" })
 ```
 
@@ -880,7 +890,7 @@ import {
   type Result, type Ok, type Err, type TaskOutcome, type TaskError, type TaskErrorCode,
   type LibraryTaskCode, type ExceptionRecord,
   // Implementations and the runtime
-  type Implementation, type ImplementOptions, type ExceptionMapping,
+  type Implementation, type ImplementOptions, type ExceptionMapping, type ResultConstructors,
   TaskRuntime, AttemptNumber, type CancelState, type CancelCause, type FencingToken,
   type SpawnRefused, type StateKey, type WorkflowTaskRuntime, type StoredWorkflowContext,
   // Sends

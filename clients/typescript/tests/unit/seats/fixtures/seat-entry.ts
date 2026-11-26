@@ -67,70 +67,70 @@ if (!created.ok) {
 const app = created.value;
 const sleepCell = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
 
-app.implement(probe, () => probe.ok(dlopenFiles.length));
+app.implement(probe, (_input, { ok }) => ok(dlopenFiles.length));
 
 app.implement(spin, (_input, runtime) => {
   for (let waited = 0; waited < SPIN_BOUND_MS; waited += 1) {
     const state = runtime.cancelState();
 
     if (state.kind === "requested") {
-      return spin.ok(state.cause === "DEADLINE" ? 1 : 0);
+      return runtime.ok(state.cause === "DEADLINE" ? 1 : 0);
     }
 
     // A sync sleep of 1 ms: the isolate's event loop does not turn while the body holds it.
     Atomics.wait(sleepCell, 0, 0, 1);
   }
 
-  return spin.ok(0);
+  return runtime.ok(0);
 });
 
-app.implement(sendAndWait, async () => {
+app.implement(sendAndWait, async (_input, { ok }) => {
   const sent = await app.send(probe, {});
 
   if (!sent.ok) {
-    return sendAndWait.ok(`send failed: ${sent.error.code}`);
+    return ok(`send failed: ${sent.error.code}`);
   }
 
   const read = await sent.value.get({ timeoutMs: 100 });
 
-  return sendAndWait.ok(`sent ${sent.value.taskId}; ${read.ok ? "read a result" : `read error ${read.error.kind}`}`);
+  return ok(`sent ${sent.value.taskId}; ${read.ok ? "read a result" : `read error ${read.error.kind}`}`);
 });
 
 app.implement(exitNow, () => {
   process.exit(3);
 });
 
-app.implement(throwLater, async () => {
+app.implement(throwLater, async (_input, { ok }) => {
   setTimeout(() => {
     throw new RangeError("a late throw");
   }, 0);
 
   await new Promise((resolve) => setTimeout(resolve, 50));
 
-  return throwLater.ok(5);
+  return ok(5);
 });
 
-app.implement(rejectUnawaited, async () => {
+app.implement(rejectUnawaited, async (_input, { ok }) => {
   void Promise.reject(new TypeError("not awaited"));
 
   await new Promise((resolve) => setTimeout(resolve, 50));
 
-  return rejectUnawaited.ok(7);
+  return ok(7);
 });
 
-app.implement(foreignState, (_input, runtime) => foreignState.ok(runtime.state(foreignKey)));
+app.implement(foreignState, (_input, runtime) => runtime.ok(runtime.state(foreignKey)));
 
-app.implement(facadesProbe, async () => {
+app.implement(facadesProbe, async (_input, { ok }) => {
   const ping = await app.pingDatabase();
   const taskId = TaskId.parse("0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b");
 
   if (!taskId.ok) {
-    return facadesProbe.ok("the task id does not parse");
+    return ok("the task id does not parse");
   }
 
   const cancel = await app.monitoring.cancelTask(taskId.value, { policy: "includeRunning" });
 
-  return facadesProbe.ok(`ping ${ping.ok ? String(ping.value.latencyMs) : ping.error.code}; cancel ${cancel.ok ? "ok" : cancel.error.code}`);
+  return ok(`ping ${ping.ok ? String(ping.value.latencyMs) : ping.error.code}; cancel ${cancel.ok ? "ok" : cancel.error.code}`);
 });
 
 await cli.run(app);

@@ -41,8 +41,8 @@ export function testApp(): Horsies {
 export function implementedApp(): Horsies {
   const app = testApp();
 
-  app.implement(ping, ({ n }) => ping.ok(n));
-  app.implement(charge, async () => charge.ok(null));
+  app.implement(ping, ({ n }, { ok }) => ok(n));
+  app.implement(charge, async (_input, { ok }) => ok(null));
 
   return app;
 }

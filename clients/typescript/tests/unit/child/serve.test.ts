@@ -6,7 +6,6 @@ import { describe, test } from "node:test";
 
 import { type BodyObserver, NO_BODY_OBSERVER } from "../../../horsies/src/child/body-observer.ts";
 import { RunTable } from "../../../horsies/src/child/run-table.ts";
-import type { TaskRuntime } from "../../../horsies/src/child/runtime.ts";
 import { postDispatcher } from "../../../horsies/src/child/serve.ts";
 import { StateValues } from "../../../horsies/src/child/state.ts";
 import { implementationOf, implementationParts, type ImplementationParts } from "../../../horsies/src/contract/implementation.ts";
@@ -14,6 +13,7 @@ import { defineTask } from "../../../horsies/src/contract/public.ts";
 import type { ChildPost } from "../../../horsies/src/native/child/addon.ts";
 import type { CoreDefect } from "../../../horsies/src/thrown-errors.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
+import type { Ok } from "../../../horsies/src/wire/result.ts";
 import { FakeChildNative, settled } from "./child-native.ts";
 import { RecordingMarks, RecordingObservation, RUN_TASK_ID } from "./support.ts";
 
@@ -67,10 +67,10 @@ describe("the cancel post and the body observation", () => {
         implementationParts(
           implementationOf(
             wait,
-            async () => {
+            async (_input, { ok }) => {
               await held;
 
-              return wait.ok("done");
+              return ok("done");
             },
             [],
           ),
@@ -95,7 +95,7 @@ describe("the cancel post and the body observation", () => {
 
 describe("the post dispatcher", () => {
   test("a body that returns settles with the stored text of its value, and the run leaves the table", async () => {
-    const child = served([implementationParts(implementationOf(double, ({ n }) => double.ok(n * 2), []))]);
+    const child = served([implementationParts(implementationOf(double, ({ n }, { ok }) => ok(n * 2), []))]);
 
     child.post(runBody(5n, "double", '{"n":21}'));
     await settled();
@@ -113,10 +113,10 @@ describe("the post dispatcher", () => {
       implementationParts(
         implementationOf(
           echo,
-          (input) => {
+          (input, { ok }) => {
             seen.push(input);
 
-            return echo.ok(null);
+            return ok(null);
           },
           [],
         ),
@@ -153,7 +153,7 @@ describe("the post dispatcher", () => {
 
     native.refusedCodes = new Set(["bad code"]);
 
-    const child = served([implementationParts(implementationOf(double, () => double.err({ code: "bad code" }), []))], native);
+    const child = served([implementationParts(implementationOf(double, (_input, { err }) => err({ code: "bad code" }), []))], native);
 
     child.post(runBody(7n, "double", '{"n":1}'));
     await settled();
@@ -164,15 +164,19 @@ describe("the post dispatcher", () => {
   test("a cancel post aborts the body's signal with its cause", async () => {
     const reasons: unknown[] = [];
 
-    const body = async (_input: object, runtime: TaskRuntime): Promise<ReturnType<typeof wait.ok>> =>
-      new Promise((resolve) => {
-        runtime.signal.addEventListener("abort", () => {
-          reasons.push(runtime.signal.reason);
-          resolve(wait.ok("stopped"));
-        });
-      });
+    const implementation = implementationOf(
+      wait,
+      async (_input, runtime) =>
+        new Promise<Ok<string>>((resolve) => {
+          runtime.signal.addEventListener("abort", () => {
+            reasons.push(runtime.signal.reason);
+            resolve(runtime.ok("stopped"));
+          });
+        }),
+      [],
+    );
 
-    const child = served([{ contract: wait, body, exceptions: [] }]);
+    const child = served([implementationParts(implementation)]);
 
     child.post(runBody(8n, "wait", "{}"));
     child.post({ kind: "cancelRun", runKey: 8n, cause: "DEADLINE" });
@@ -184,20 +188,24 @@ describe("the post dispatcher", () => {
   test("a stop post aborts the signal of the spawned work with LEFT_WORK", async () => {
     const reasons: unknown[] = [];
 
-    const body = async (_input: object, runtime: TaskRuntime): Promise<ReturnType<typeof wait.ok>> => {
-      void runtime.spawn("flush", async (signal) => {
-        await new Promise<void>((resolve) => {
-          signal.addEventListener("abort", () => {
-            reasons.push(signal.reason);
-            resolve();
+    const implementation = implementationOf(
+      wait,
+      async (_input, runtime) => {
+        void runtime.spawn("flush", async (signal) => {
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => {
+              reasons.push(signal.reason);
+              resolve();
+            });
           });
         });
-      });
 
-      return wait.ok("left work");
-    };
+        return runtime.ok("left work");
+      },
+      [],
+    );
 
-    const child = served([{ contract: wait, body, exceptions: [] }]);
+    const child = served([implementationParts(implementation)]);
 
     child.post(runBody(9n, "wait", "{}"));
     await settled();
@@ -212,7 +220,7 @@ describe("the post dispatcher", () => {
 
     native.settle = "unknownRun";
 
-    const child = served([implementationParts(implementationOf(double, ({ n }) => double.ok(n), []))], native);
+    const child = served([implementationParts(implementationOf(double, ({ n }, { ok }) => ok(n), []))], native);
 
     assert.doesNotThrow(() => {
       child.post(runBody(10n, "absent", "{}"));

@@ -44,7 +44,7 @@ export type { LiteralMember } from "./kinds.ts";
 
 export type { Err, Ok, Result } from "./result.ts";
 
-export type { ResultOfWire } from "./result-of.ts";
+export type { TaskOutcomeWire } from "./task-outcome.ts";
 
 export type {
   ExceptionRecord,

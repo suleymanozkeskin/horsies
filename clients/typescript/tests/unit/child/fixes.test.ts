@@ -80,12 +80,12 @@ describe("a served child", () => {
     const sends: string[] = [];
 
     assert.equal(appInternals(app).suppression.current().kind, "suppressed");
-    app.implement(ping, async ({ n }) => {
+    app.implement(ping, async ({ n }, { ok }) => {
       const sent = await app.send(ping, { n: n + 1 });
 
       sends.push(sent.ok ? "sent" : sent.error.code);
 
-      return ping.ok(n);
+      return ok(n);
     });
 
     const native = new FakeChildNative();

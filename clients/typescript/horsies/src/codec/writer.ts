@@ -157,7 +157,7 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
       return writeObject(kind, value, path, depth, sink);
     case "json":
       return writeJsonText(jsonValueText(value, path, depth, MAX_VALUE_JSON_DEPTH), sink);
-    case "resultOf":
+    case "taskOutcome":
       return refuse("WrongType", path, "an upstream outcome: only a workflow node gives it, a sender never does");
     case "conversion":
       return writeConverted(kind, value, path, depth, sink);

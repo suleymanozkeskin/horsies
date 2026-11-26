@@ -57,7 +57,7 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(checksum, ({ data }) => checksum.ok(data.reduce((sum, value) => sum + value, 0)));
+app.implement(checksum, ({ data }, { ok }) => ok(data.reduce((sum, value) => sum + value, 0)));
 
 /** How a wait ended: its time passed, or the signal fired first. */
 type WaitEnd = "elapsed" | "cancelled";
@@ -87,14 +87,14 @@ async function waitOrCancel(ms: number, signal: AbortSignal): Promise<WaitEnd> {
   return promise;
 }
 
-app.implement(fetchPage, async ({ path }, runtime) => {
-  const ended = await waitOrCancel(FETCH_PAGE_MS, runtime.signal);
+app.implement(fetchPage, async ({ path }, { ok, err, signal }) => {
+  const ended = await waitOrCancel(FETCH_PAGE_MS, signal);
 
   switch (ended) {
     case "elapsed":
-      return fetchPage.ok(path.length);
+      return ok(path.length);
     case "cancelled":
-      return fetchPage.err({ code: "INTERRUPTED", message: "cancelled before the page arrived" });
+      return err({ code: "INTERRUPTED", message: "cancelled before the page arrived" });
     default: {
       const unexpected: never = ended;
 

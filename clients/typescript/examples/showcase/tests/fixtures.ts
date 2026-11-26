@@ -1,9 +1,22 @@
 // What the tests of the task logic share: the store of a test, seeded products and orders, a bounded search for an
-// id with a draw, the reads of a body result, and a store that does not connect.
+// id with a draw, the result constructors and the reads of a body result, and a store that does not connect.
 
 import assert from "node:assert/strict";
 
-import type { Err, Ok, TaskError, UserFailure } from "horsies";
+import type {
+  ContextUse,
+  Err,
+  ExecutionClass,
+  Ok,
+  OutputSchema,
+  ParameterSchemas,
+  ResultConstructors,
+  SchemaSent,
+  TaskContract,
+  TaskError,
+  UserCode,
+  UserFailure,
+} from "horsies";
 
 import type { Order, OrderStatus } from "../src/domain.ts";
 import { loadCatalog } from "../src/store/catalog.ts";
@@ -132,6 +145,25 @@ export async function stockOf(store: Store, sku: string): Promise<{ readonly onH
   assert.ok(read.value.kind === "found", `the stock row of ${sku}`);
 
   return { onHand: intColumn(read.value.value, "on_hand"), reserved: intColumn(read.value.value, "reserved") };
+}
+
+/**
+ * The result constructors of a body of `contract`, for a test that calls a function of a body with no runtime: `ok`
+ * and `err` give the frozen result, as the `ok` and `err` of a body's second argument do.
+ */
+export function resultsOf<
+  P extends ParameterSchemas,
+  O extends OutputSchema,
+  E extends string,
+  X extends ExecutionClass,
+  C extends ContextUse,
+>(_contract: TaskContract<P, O, E, X, C>): ResultConstructors<O, E> {
+  return Object.freeze({
+    ok: (value: SchemaSent<O>): Ok<SchemaSent<O>> => Object.freeze({ ok: true, value }),
+    // SAFETY: `UserCode<K>` is `K` for every code that is not built in, and `K extends E`; the tests give declared codes.
+    err: <const K extends E>(failure: UserFailure<UserCode<K>>): Err<UserFailure<E>> =>
+      Object.freeze({ ok: false, error: Object.freeze(failure as UserFailure<E>) }),
+  });
 }
 
 /** The value of a body result that must succeed. */

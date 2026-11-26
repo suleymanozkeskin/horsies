@@ -50,10 +50,10 @@ export const SCHEDULED_CONTRACTS = [scheduledSimple, scheduledWithArgs, catchUpT
 
 /** The implementations of this module on `app`. */
 export function implementScheduled(app: Horsies): void {
-  app.implement(scheduledSimple, () => scheduledSimple.ok("scheduled"));
-  app.implement(scheduledWithArgs, ({ value }) => scheduledWithArgs.ok(value * 2));
-  app.implement(catchUpTask, () => catchUpTask.ok("caught_up"));
-  app.implement(cronTask, () => cronTask.ok("cron"));
+  app.implement(scheduledSimple, (_input, { ok }) => ok("scheduled"));
+  app.implement(scheduledWithArgs, ({ value }, { ok }) => ok(value * 2));
+  app.implement(catchUpTask, (_input, { ok }) => ok("caught_up"));
+  app.implement(cronTask, (_input, { ok }) => ok("cron"));
 }
 
 /** An interval of `seconds`. Pure. */

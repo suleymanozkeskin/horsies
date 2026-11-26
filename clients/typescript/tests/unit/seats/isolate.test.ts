@@ -85,7 +85,7 @@ describe("the boot of a seat isolate", () => {
 
       return 2;
     });
-    app.implement(crunch, ({ n }, runtime) => crunch.ok(n + runtime.state(pool).length));
+    app.implement(crunch, ({ n }, runtime) => runtime.ok(n + runtime.state(pool).length));
 
     const { port } = await served(app, 1);
 
@@ -121,10 +121,10 @@ describe("a run in a seat isolate", () => {
     const app = seatApp();
     const seen: unknown[] = [];
 
-    app.implement(crunch, (input) => {
+    app.implement(crunch, (input, { ok }) => {
       seen.push(input);
 
-      return crunch.ok(1);
+      return ok(1);
     });
 
     const { port } = await served(app);
@@ -180,10 +180,10 @@ describe("a run in a seat isolate", () => {
     };
 
     setSeatBodyObserver(contextOf(app), observer);
-    app.implement(crunch, ({ n }) => {
+    app.implement(crunch, ({ n }, { ok }) => {
       calls.push("body");
 
-      return crunch.ok(n);
+      return ok(n);
     });
 
     const { port } = await served(app);
@@ -206,7 +206,7 @@ describe("cancel in a seat", () => {
     app.implement(crunch, (_input, runtime) => {
       const state = runtime.cancelState();
 
-      return crunch.ok(state.kind === "requested" && state.cause === "DEADLINE" ? 1 : 0);
+      return runtime.ok(state.kind === "requested" && state.cause === "DEADLINE" ? 1 : 0);
     });
 
     const { port, channel } = await served(app, 1);
@@ -228,7 +228,7 @@ describe("cancel in a seat", () => {
         });
       });
 
-      return fetchPage.ok(JSON.stringify(reason));
+      return runtime.ok(JSON.stringify(reason));
     });
 
     const { port } = await served(app);
@@ -265,7 +265,7 @@ describe("cancel in a seat", () => {
         });
       });
 
-      return fetchPage.ok("cancelled");
+      return runtime.ok("cancelled");
     });
 
     const { port } = await served(app);
@@ -404,7 +404,7 @@ describe("the defects of a seat isolate go to the main thread, then the isolate 
         thrown.push(cause);
       }
 
-      return crunch.ok(0);
+      return runtime.ok(0);
     });
 
     const { port } = await served(app);

@@ -104,7 +104,7 @@ function runBodyPost(runKey: bigint): ChildPost {
 async function servedThreadChild(seats: number): Promise<{ readonly native: FakeChildNative; readonly deps: ChildModeDeps & Recorded }> {
   const app = seatApp();
 
-  app.implement(crunch, ({ n }) => crunch.ok(n));
+  app.implement(crunch, ({ n }, { ok }) => ok(n));
 
   const native = new FakeChildNative();
   const deps = threadDeps(native);
@@ -208,7 +208,7 @@ describe("a SHARED_THREAD child", () => {
   test("an isolated child runs a SHARED_THREAD body on its main thread", async () => {
     const app = seatApp();
 
-    app.implement(crunch, ({ n }) => crunch.ok(n + 1));
+    app.implement(crunch, ({ n }, { ok }) => ok(n + 1));
 
     const native = new FakeChildNative();
     const deps = threadDeps(native);

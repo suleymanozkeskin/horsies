@@ -14,11 +14,11 @@ import { defineWorkflow, type WorkflowBuilder } from "../../../horsies/src/workf
 import { checked, DEFAULT_QUEUES, findingCodes, passedSpec, viewOf } from "./support.ts";
 
 const ping = defineTask({ name: "ping", input: {}, output: h.int() });
-const add = defineTask({ name: "add", input: { a: h.int(), b: h.resultOf(h.int()) }, output: h.int() });
-const pair = defineTask({ name: "pair", input: { x: h.resultOf(h.int()), y: h.resultOf(h.int()) }, output: h.int() });
+const add = defineTask({ name: "add", input: { a: h.int(), b: h.taskOutcome(ping) }, output: h.int() });
+const pair = defineTask({ name: "pair", input: { x: h.taskOutcome(ping), y: h.taskOutcome(ping) }, output: h.int() });
 const say = defineTask({ name: "say", input: { text: h.string() }, output: h.string() });
 const audit = defineTask({ name: "audit", input: {}, output: h.null(), workflowContext: true });
-const maybe = defineTask({ name: "maybe", input: { first: h.resultOf(h.int()).optional() }, output: h.int() });
+const maybe = defineTask({ name: "maybe", input: { first: h.taskOutcome(ping).optional() }, output: h.int() });
 const tasks = [ping, add, pair, say, audit, maybe];
 
 const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", output: h.int(), params: {} }, (w) => ({
@@ -490,7 +490,7 @@ describe("the checks", () => {
     );
   });
 
-  test("a node for a plain parameter, a value for h.resultOf, a source of another output type: HRS-024", () => {
+  test("a node for a plain parameter, a value for h.taskOutcome, a source of another output type: HRS-024", () => {
     const codes = findingCodes(
       flow((w) => {
         const number = w.task(ping, {}, { id: "number" });
@@ -543,8 +543,8 @@ describe("the checks", () => {
     assert.deepEqual(codes, ["HRS-025"]);
   });
 
-  test("a sub-workflow node gives its child's declared output: an h.resultOf parameter of another type is HRS-024", () => {
-    const takesText = defineTask({ name: "takes_text", input: { text: h.resultOf(h.string()) }, output: h.int() });
+  test("a sub-workflow node gives its child's declared output: an h.taskOutcome parameter of another type is HRS-024", () => {
+    const takesText = defineTask({ name: "takes_text", input: { text: h.taskOutcome(say) }, output: h.int() });
 
     const codes = findingCodes(
       flow((w) => {
@@ -589,10 +589,14 @@ describe("the checks", () => {
   });
 });
 
-/** The codes of a build whose task of output `source` feeds the `h.resultOf(target)` parameter of the output node. */
+/**
+ * The codes of a build whose task of output `source` feeds the `h.taskOutcome` parameter of the output node, declared
+ * with a contract of output `target`.
+ */
 function fitCodes(source: OutputSchema, target: RequiredWire): readonly string[] {
   const from = defineTask({ name: "from", input: {}, output: source });
-  const into = defineTask({ name: "into", input: { value: h.resultOf(target) }, output: h.int() });
+  const declared = defineTask({ name: "declared", input: {}, output: target });
+  const into = defineTask({ name: "into", input: { value: h.taskOutcome(declared) }, output: h.int() });
 
   const workflow = flow((w) => {
     const value = w.task(from, {}, { id: "from" });
@@ -616,7 +620,7 @@ function outputCodes(source: OutputSchema, declared: OutputSchema): readonly str
 }
 
 describe("the stored-form fit of a source (HRS-024, HRS-025)", () => {
-  test("a string source fits an h.resultOf of a nullable string", () => {
+  test("a string source fits an h.taskOutcome of a nullable string", () => {
     assert.deepEqual(fitCodes(h.string(), h.string().nullable()), []);
   });
 

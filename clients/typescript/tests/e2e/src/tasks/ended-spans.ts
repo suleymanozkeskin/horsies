@@ -43,14 +43,14 @@ export const ENDED_SPANS_CONTRACTS = [endedSpansSleeper, endedSpansSharedSleeper
 
 /** The implementations of this module on `app`. */
 export function implementEndedSpans(app: Horsies): void {
-  app.implement(endedSpansSleeper, () => {
+  app.implement(endedSpansSleeper, (_input, { ok }) => {
     holdThread(SLEEP_MS);
 
-    return endedSpansSleeper.ok("woke");
+    return ok("woke");
   });
-  app.implement(endedSpansSharedSleeper, async (_input, runtime) => {
-    await sleepFor(SLEEP_MS, runtime.signal);
+  app.implement(endedSpansSharedSleeper, async (_input, { ok, signal }) => {
+    await sleepFor(SLEEP_MS, signal);
 
-    return endedSpansSharedSleeper.ok("woke");
+    return ok("woke");
   });
 }

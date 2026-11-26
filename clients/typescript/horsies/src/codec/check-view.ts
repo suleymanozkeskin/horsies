@@ -45,7 +45,7 @@ export function checkView(kind: Kind, value: unknown, path: string, depth: numbe
     case "literal":
     case "union":
     case "json":
-    case "resultOf":
+    case "taskOutcome":
     case "conversion":
       return ok(value);
     case "nullable":

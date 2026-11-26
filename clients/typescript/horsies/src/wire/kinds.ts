@@ -67,10 +67,19 @@ export type TaggedUnionKind = {
 export type JsonKind = { readonly node: "json" };
 
 /**
- * The outcome of an upstream task, which a workflow node gives to a whole input parameter: the stored result
- * envelope, whose `ok` value has the kind `inner`.
+ * The output kind of the upstream contract of an `h.taskOutcome` parameter, or why its output has none: a zod schema
+ * that the adapter refuses, a schema of another vendor, or an output that may be left out (`detail` names the
+ * contract and the refusals).
  */
-export type ResultOfKind = { readonly node: "resultOf"; readonly inner: Kind };
+export type UpstreamOutput =
+  | { readonly state: "compiled"; readonly kind: Kind }
+  | { readonly state: "refused"; readonly detail: string };
+
+/**
+ * The outcome of an upstream task or sub-workflow, which a workflow node gives to a whole input parameter: the stored
+ * result envelope, whose `ok` value has the upstream output kind.
+ */
+export type TaskOutcomeKind = { readonly node: "taskOutcome"; readonly output: UpstreamOutput };
 
 /**
  * A value that a user-side conversion turns into the stored value of `stored` and back (a zod codec). The stored text
@@ -146,7 +155,7 @@ export type Kind =
   | RecordKind
   | ObjectKind
   | JsonKind
-  | ResultOfKind
+  | TaskOutcomeKind
   | ConversionKind
   | CheckedKind;
 

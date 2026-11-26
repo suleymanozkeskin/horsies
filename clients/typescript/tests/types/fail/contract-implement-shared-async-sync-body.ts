@@ -8,4 +8,4 @@ declare const app: Horsies;
 
 const notify = defineTask({ name: "notify", execution: "SHARED_ASYNC", timeoutMs: 10_000, input: {}, output: h.null() });
 
-export const implementation = app.implement(notify, () => notify.ok(null));
+export const implementation = app.implement(notify, (_input, { ok }) => ok(null));

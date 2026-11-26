@@ -496,7 +496,7 @@ function recordKeyOf(kind: Kind): RecordKey {
     case "record":
     case "object":
     case "json":
-    case "resultOf":
+    case "taskOutcome":
     case "conversion":
       return NOT_STRING_KEY;
     default:
@@ -516,7 +516,7 @@ function storedForms(kind: Kind): readonly StoredForm[] {
     case "tuple":
     case "record":
     case "json":
-    case "resultOf":
+    case "taskOutcome":
       return ["container"];
     case "int":
     case "bigint":
@@ -645,7 +645,7 @@ function variantsOf(
     case "tuple":
     case "record":
     case "json":
-    case "resultOf":
+    case "taskOutcome":
     case "conversion":
       return refused("UNION_OPTION", path, zodType);
     default:

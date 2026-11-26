@@ -72,7 +72,7 @@ function auditChild(seen: Seen[]): ReturnType<typeof served> {
         (input, runtime) => {
           seen.push({ input, context: runtime.workflowContext });
 
-          return audit.ok(null);
+          return runtime.ok(null);
         },
         [],
       ),
@@ -131,10 +131,10 @@ describe("the workflow context in a child", () => {
       implementationParts(
         implementationOf(
           plain,
-          (input) => {
+          (input, { ok }) => {
             seen.push(input);
 
-            return plain.ok(null);
+            return ok(null);
           },
           [],
         ),

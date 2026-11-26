@@ -29,7 +29,7 @@ const validate = defineTask({ name: "validate", input: { orderId: h.uuid() }, ou
 
 const charge = defineTask({
   name: "charge",
-  input: { amount: h.resultOf(h.int()) },
+  input: { amount: h.taskOutcome(validate) },
   output: Receipt,
   errors: ["PAYMENT_DECLINED"],
 });

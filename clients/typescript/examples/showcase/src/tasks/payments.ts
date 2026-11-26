@@ -14,7 +14,7 @@ import { countAuthorizationAttempt, setOrderStatus } from "../store/orders.ts";
 import { findPayment, recordPayment } from "../store/payments.ts";
 import { CARD_DECLINE_RATE, PSP_FAILING_ATTEMPTS, PSP_UNAVAILABLE_RATE } from "../tuning.ts";
 import { compensateFailedOrder } from "./inventory.ts";
-import { storeFailure, type StoreKey } from "./support.ts";
+import { type ResultsOf, storeFailure, type StoreKey } from "./support.ts";
 
 /** The fewest and the most authorizations of one reconciliation window. */
 const MIN_WINDOW_AUTHORIZATIONS = 10;
@@ -33,6 +33,10 @@ type RefundResult = BodyResult<typeof PaymentRefund, never>;
 
 type ReconcileResult = BodyResult<typeof ReconciliationReport, never>;
 
+type AuthorizeResults = ResultsOf<typeof authorizePayment>;
+
+type CaptureResults = ResultsOf<typeof capturePayment>;
+
 /** A new reference of the payment provider. */
 function pspReference(): string {
   return `psp_${randomUUID().replaceAll("-", "")}`;
@@ -43,28 +47,33 @@ function pspReference(): string {
  * exists is a replay. `CARD_DECLINED` (the order fails and releases its reservations); `PSP_UNAVAILABLE` on the first
  * attempts of a drawn outage, which the retry policy retries; `ORDER_NOT_FOUND`; `STORE_UNAVAILABLE`.
  */
-export async function authorize(store: Store, orderId: string, amountCents: number): Promise<AuthorizeResult> {
+export async function authorize(
+  store: Store,
+  orderId: string,
+  amountCents: number,
+  { ok, err }: AuthorizeResults,
+): Promise<AuthorizeResult> {
   const counted = await countAuthorizationAttempt(store, orderId);
 
   if (!counted.ok) {
-    return authorizePayment.err({ code: "STORE_UNAVAILABLE", ...storeFailure(counted.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(counted.error) });
   }
 
   if (counted.value.kind === "notFound") {
-    return authorizePayment.err({ code: "ORDER_NOT_FOUND", message: `no order ${orderId}` });
+    return err({ code: "ORDER_NOT_FOUND", message: `no order ${orderId}` });
   }
 
   const attempt = counted.value.value;
   const existing = await findPayment(store, orderId, "authorization");
 
   if (!existing.ok) {
-    return authorizePayment.err({ code: "STORE_UNAVAILABLE", ...storeFailure(existing.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(existing.error) });
   }
 
   if (existing.value.kind === "found") {
     const hold = existing.value.value;
 
-    return authorizePayment.ok({
+    return ok({
       orderId,
       authorizationId: hold.paymentId,
       amountCents: hold.amountCents,
@@ -77,30 +86,36 @@ export async function authorize(store: Store, orderId: string, amountCents: numb
   if (draw(CARD_DECLINE_RATE, [orderId, "card"])) {
     await compensateFailedOrder(store, orderId);
 
-    return authorizePayment.err({ code: "CARD_DECLINED", message: "issuer declined the card" });
+    return err({ code: "CARD_DECLINED", message: "issuer declined the card" });
   }
 
   if (draw(PSP_UNAVAILABLE_RATE, [orderId, "psp"]) && attempt <= PSP_FAILING_ATTEMPTS) {
-    return authorizePayment.err({ code: "PSP_UNAVAILABLE", message: `provider unavailable on attempt ${String(attempt)}` });
+    return err({ code: "PSP_UNAVAILABLE", message: `provider unavailable on attempt ${String(attempt)}` });
   }
 
-  return recordHold(store, orderId, amountCents, attempt);
+  return recordHold(store, orderId, amountCents, attempt, { ok, err });
 }
 
-async function recordHold(store: Store, orderId: string, amountCents: number, attempt: number): Promise<AuthorizeResult> {
+async function recordHold(
+  store: Store,
+  orderId: string,
+  amountCents: number,
+  attempt: number,
+  { ok, err }: AuthorizeResults,
+): Promise<AuthorizeResult> {
   const recorded = await recordPayment(store, orderId, "authorization", amountCents, pspReference());
 
   if (!recorded.ok) {
-    return authorizePayment.err({ code: "STORE_UNAVAILABLE", ...storeFailure(recorded.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(recorded.error) });
   }
 
   switch (recorded.value.kind) {
     case "exists":
-      return authorizePayment.err({ code: "PSP_UNAVAILABLE", message: "another attempt recorded the authorization first" });
+      return err({ code: "PSP_UNAVAILABLE", message: "another attempt recorded the authorization first" });
     case "recorded": {
       const hold = recorded.value.payment;
 
-      return authorizePayment.ok({
+      return ok({
         orderId,
         authorizationId: hold.paymentId,
         amountCents: hold.amountCents,
@@ -119,24 +134,29 @@ async function recordHold(store: Store, orderId: string, amountCents: number, at
 }
 
 /** Settle `hold`, the authorization of `orderId`, and mark the order captured. `PAYMENT_ALREADY_CAPTURED`; `STORE_UNAVAILABLE`. */
-export async function capture(store: Store, orderId: string, hold: PaymentAuthorization): Promise<CaptureResult> {
+export async function capture(
+  store: Store,
+  orderId: string,
+  hold: PaymentAuthorization,
+  { ok, err }: CaptureResults,
+): Promise<CaptureResult> {
   const recorded = await recordPayment(store, orderId, "capture", hold.amountCents, hold.pspReference);
 
   if (!recorded.ok) {
-    return capturePayment.err({ code: "STORE_UNAVAILABLE", ...storeFailure(recorded.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(recorded.error) });
   }
 
   if (recorded.value.kind === "exists") {
-    return capturePayment.err({ code: "PAYMENT_ALREADY_CAPTURED", message: `order ${orderId} is already captured` });
+    return err({ code: "PAYMENT_ALREADY_CAPTURED", message: `order ${orderId} is already captured` });
   }
 
   const marked = await setOrderStatus(store, orderId, "captured");
 
   if (!marked.ok) {
-    return capturePayment.err({ code: "STORE_UNAVAILABLE", ...storeFailure(marked.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(marked.error) });
   }
 
-  return capturePayment.ok({
+  return ok({
     orderId,
     captureId: recorded.value.payment.paymentId,
     authorizationId: hold.authorizationId,
@@ -150,12 +170,13 @@ export async function captureAfter(
   store: Store,
   orderId: string,
   authorization: TaskOutcome<PaymentAuthorization>,
+  { ok, err }: CaptureResults,
 ): Promise<CaptureResult> {
   switch (authorization.kind) {
     case "succeeded":
-      return capture(store, orderId, authorization.value);
+      return capture(store, orderId, authorization.value, { ok, err });
     case "failed":
-      return capturePayment.err({ code: "UPSTREAM_FAILED", ...upstreamFailure(authorization.error) });
+      return err({ code: "UPSTREAM_FAILED", ...upstreamFailure(authorization.error) });
     default: {
       const unexpected: never = authorization;
 
@@ -165,26 +186,33 @@ export async function captureAfter(
 }
 
 /** The refund of the order `orderId`, disputed at `disputedAt`. Pure. */
-export function refund(orderId: string, amountCents: number, disputedAt: Temporal.Instant): RefundResult {
-  return refundPayment.ok({ orderId, refundId: `rfd_${orderId}`, amountCents, disputedAt });
+export function refund(
+  orderId: string,
+  amountCents: number,
+  disputedAt: Temporal.Instant,
+  { ok }: ResultsOf<typeof refundPayment>,
+): RefundResult {
+  return ok({ orderId, refundId: `rfd_${orderId}`, amountCents, disputedAt });
 }
 
 /** The reconciliation report of `window`: draws over the window. Pure. */
-export function reconcile(window: string): ReconcileResult {
+export function reconcile(window: string, { ok }: ResultsOf<typeof reconcilePayments>): ReconcileResult {
   const authorizations = integer(MIN_WINDOW_AUTHORIZATIONS, MAX_WINDOW_AUTHORIZATIONS, [window, "authorizations"]);
   const unmatched = integer(0, MAX_UNMATCHED, [window, "unmatched"]);
 
-  return reconcilePayments.ok({ authorizations, captures: authorizations - unmatched, unmatched });
+  return ok({ authorizations, captures: authorizations - unmatched, unmatched });
 }
 
 /** Implement the payment tasks on `app`; the store-backed ones use the store of `store`. */
 export function implementPaymentTasks(app: Horsies, store: StoreKey): void {
   app.implement(authorizePayment, async ({ orderId, amountCents }, runtime) =>
-    authorize(runtime.state(store), orderId, amountCents),
+    authorize(runtime.state(store), orderId, amountCents, runtime),
   );
   app.implement(capturePayment, async ({ orderId, authorization }, runtime) =>
-    captureAfter(runtime.state(store), orderId, authorization),
+    captureAfter(runtime.state(store), orderId, authorization, runtime),
   );
-  app.implement(refundPayment, async ({ orderId, amountCents, disputedAt }) => refund(orderId, amountCents, disputedAt));
-  app.implement(reconcilePayments, async ({ window }) => reconcile(window));
+  app.implement(refundPayment, async ({ orderId, amountCents, disputedAt }, results) =>
+    refund(orderId, amountCents, disputedAt, results),
+  );
+  app.implement(reconcilePayments, async ({ window }, results) => reconcile(window, results));
 }

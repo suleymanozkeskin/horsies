@@ -41,7 +41,7 @@ import {
   PLAIN_DATE_TIME_KIND,
   PLAIN_TIME_KIND,
 } from "../wire/kinds.ts";
-import { isResultOfKind } from "../wire/result-of.ts";
+import { isTaskOutcomeKind } from "../wire/task-outcome.ts";
 import { ok, type Result } from "../wire/result.ts";
 import { kindOf, presenceOf } from "../wire/wire-type.ts";
 import { brandHz } from "./brand.ts";
@@ -181,7 +181,7 @@ const DECIMAL = codecFunctions<Decimal>({ read: readDecimal, write: decimalText,
 function wireSchema<W extends RequiredWire>(wire: W): WireSchema<W> {
   const kind = kindOf(wire);
 
-  if (presenceOf(wire).mode !== "required" || isResultOfKind(kind)) {
+  if (presenceOf(wire).mode !== "required" || isTaskOutcomeKind(kind)) {
     throw new TypeError("hz.wire: give a required h.* value type; use zod's .optional() and .default() on the result");
   }
 
