@@ -34,7 +34,7 @@ describe("self-check", () => {
       assert.ok(rules.has(rule), rule);
     }
 
-    for (const rule of ["UNDISCRIMINATED_UNION", "MIXED_UNION", "INT_FLOAT_UNION", "RECORD_KEY", "ENGINE_KEY"]) {
+    for (const rule of ["UNION_FALLBACK", "RECORD_KEY", "ENGINE_KEY"]) {
       assert.ok(rules.has(rule), rule);
     }
 

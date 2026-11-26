@@ -1,6 +1,7 @@
 // The refusals of the zod adapter: a zod form that has no stored form, or that the codec cannot read back exactly.
 // `Horsies.create` reports each one with the code of a task signature refusal (`HRS-105`).
 
+import type { KindRefused, KindRule } from "../wire/check.ts";
 import { unreachable } from "../wire/unreachable.ts";
 
 /** Why the adapter refuses a zod schema. */
@@ -24,12 +25,8 @@ export type ZodRule =
    * `z.instanceof()`, `z.custom()` outside a codec output, `z.nan()`, `z.never()`, `z.void()`, `z.undefined()`.
    */
   | "NOT_DATA"
-  /** `z.union()` with an object member, or `z.discriminatedUnion()` that tries each option for an unknown tag. */
-  | "UNDISCRIMINATED_UNION"
-  /** `z.union()` of a primitive and an array or a record. */
-  | "MIXED_UNION"
-  /** A union with an integer member and a float member: one JavaScript `number` cannot say which it is. */
-  | "INT_FLOAT_UNION"
+  /** `z.discriminatedUnion()` with `unionFallback`: it tries each option for an unknown tag. */
+  | "UNION_FALLBACK"
   /** A record key schema that is not a string, a string format, a string enum or a string literal. */
   | "RECORD_KEY"
   /** An object member whose name only the engine writes. */
@@ -115,9 +112,7 @@ function ruleText(refused: ZodSchemaRefused): string {
     case "DATE":
     case "LOOSE_OBJECT":
     case "NOT_DATA":
-    case "UNDISCRIMINATED_UNION":
-    case "MIXED_UNION":
-    case "INT_FLOAT_UNION":
+    case "UNION_FALLBACK":
     case "RECORD_KEY":
     case "ENGINE_KEY":
     case "UNKNOWN_DEFINITION":
@@ -151,12 +146,8 @@ function fixOf(rule: ZodRule): string {
       return "use z.object() or z.strictObject(): undeclared keys are refused";
     case "NOT_DATA":
       return "name a data type";
-    case "UNDISCRIMINATED_UNION":
-      return "use z.discriminatedUnion() for a union of objects";
-    case "MIXED_UNION":
-      return "use z.discriminatedUnion() of objects for a union of a primitive and a container";
-    case "INT_FLOAT_UNION":
-      return "use one number kind: z.int() or z.number()";
+    case "UNION_FALLBACK":
+      return "remove unionFallback: an unknown tag is refused";
     case "RECORD_KEY":
       return "use string keys: z.string(), a string format, or z.enum([...]) of strings";
     case "ENGINE_KEY":
@@ -186,5 +177,34 @@ function fixOf(rule: ZodRule): string {
       return "nest fewer schemas";
     default:
       return unreachable(rule, "fixOf");
+  }
+}
+
+/** A refusal of `checkKind` for a zod schema: the refusal, and the zod forms to use instead (empty: none to name). */
+export type ZodKindRefused = KindRefused & { readonly help: readonly string[] };
+
+/** `refused` with the zod forms to use instead. Pure. */
+export function zodKindRefused(refused: KindRefused): ZodKindRefused {
+  return Object.freeze({ ...refused, help: zodKindHelp(refused.rule) });
+}
+
+/** The zod forms to use instead of a form that breaks a rule of `checkKind`. Pure. */
+function zodKindHelp(rule: KindRule): readonly string[] {
+  switch (rule) {
+    case "AmbiguousUnion":
+      return ["use union members that store different JSON types: one number kind (z.int() or z.number()), not two"];
+    case "UnionMemberNotPrimitive":
+      return ["use z.discriminatedUnion() of objects for a union with an object, array or record member"];
+    case "DefaultNotStored":
+    case "EngineKeyMember":
+    case "IntegerLikeMember":
+    case "KindTooDeep":
+    case "LiteralNotSafeInteger":
+    case "UnionTagInvalid":
+    case "TaskOutcomePlacement":
+    case "UpstreamOutputRefused":
+      return [];
+    default:
+      return unreachable(rule, "zodKindHelp");
   }
 }
