@@ -28,6 +28,10 @@ export * from "./cli/public.ts";
 
 export * from "./child/public.ts";
 
+export * from "./telemetry/public.ts";
+
+export * from "./events/public.ts";
+
 export {
   configureLogging,
   LOGGER_NAMES,

@@ -12,8 +12,8 @@ import type {
   AttemptEnded,
   AttemptRecord,
   AttemptRecorded,
-  Execution,
 } from "../../../horsies/src/_catalog/events.ts";
+import type { Execution } from "../../../horsies/src/_catalog/monitoring_models.ts";
 import type { WireJson } from "../../../horsies/src/_catalog/wire_json.ts";
 import { refusalText, withItem } from "./support/wire-items.ts";
 

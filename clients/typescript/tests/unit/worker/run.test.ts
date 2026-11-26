@@ -275,7 +275,10 @@ describe("the worker run", () => {
 
     const context: AppContext = {
       ...contextOf(implementedApp()),
-      telemetry: { handlers: () => [{ name: "alerts", eventType: "AttemptEnded" }], tracing: "otel" },
+      telemetry: {
+        handlers: () => [{ name: "alerts", eventType: "AttemptEnded" }],
+        tracing: { kind: "otel", parentage: "childOfSend", workerEndedSpans: "makeSpans" },
+      },
     };
 
     void (await runWorkerOf(context, START, deps));

@@ -4,7 +4,8 @@
 // - `runBody`: find the implementation, enter the run in the run table, run the body through the adapter, then settle
 //   the run: `settleBodyValue` with the stored text, or `settleBodyError` with the core's task error. An `err` code
 //   that the core refuses is stored as `RETURN_TYPE_MISMATCH` (`refusedCodeParts`).
-// - `cancelRun` and `stopWork` abort the signals of the run table.
+// - `cancelRun` and `stopWork` abort the signals of the run table; `cancelRun` also reaches the body observation of the
+//   run (its `cancelled`), so the observer can end the run's span at the core's decision.
 // - The post dispatcher never throws: a throw into Node-API ends the process. A defect of the package goes to the
 //   defect rule (in a child: stderr, the log sink, then the abort).
 // - Hook 0 is the child's own: it reads the start facts of the child (its kind). Then the providers, in registration
@@ -23,7 +24,7 @@ import { unreachable } from "../wire/unreachable.ts";
 import type { ChildMembersView } from "./app-members.ts";
 import { attemptFromCore } from "./attempt.ts";
 import { refusedCodeParts, runBody, type StoredBodyOutcome } from "./body.ts";
-import type { BodyObserver } from "./body-observer.ts";
+import type { BodyObservation, BodyObserver } from "./body-observer.ts";
 import type { LoopMarks, RunNative, RunTable } from "./run-table.ts";
 import { taskRuntimeOf } from "./runtime.ts";
 import type { StateValues } from "./state.ts";
@@ -49,25 +50,31 @@ export interface ChildServe {
   readonly reportDefect: (defect: CoreDefect) => void;
 }
 
+/** The body observation of each run whose body has not settled, by run key: at most the seats of the child. */
+type RunObservations = Map<bigint, BodyObservation>;
+
 /** The post dispatcher of a child. It never throws. */
 export function postDispatcher(serve: ChildServe): (post: ChildPost) => void {
+  const observations: RunObservations = new Map();
+
   return (post) => {
     try {
-      dispatch(serve, post);
+      dispatch(serve, observations, post);
     } catch (cause) {
       serve.reportDefect(defectOf("childPost", cause));
     }
   };
 }
 
-function dispatch(serve: ChildServe, post: ChildPost): void {
+function dispatch(serve: ChildServe, observations: RunObservations, post: ChildPost): void {
   switch (post.kind) {
     case "runBody":
-      startRun(serve, post);
+      startRun(serve, observations, post);
 
       return;
     case "cancelRun":
       serve.table.cancel(post.runKey, post.cause);
+      observations.get(post.runKey)?.cancelled(post.cause);
 
       return;
     case "stopWork":
@@ -80,7 +87,7 @@ function dispatch(serve: ChildServe, post: ChildPost): void {
 }
 
 /** Start the run of a `runBody` post; its settle comes when the body ends. */
-function startRun(serve: ChildServe, post: Extract<ChildPost, { kind: "runBody" }>): void {
+function startRun(serve: ChildServe, observations: RunObservations, post: Extract<ChildPost, { kind: "runBody" }>): void {
   const implementation = serve.implementations.get(post.taskName);
 
   if (implementation === undefined) {
@@ -96,6 +103,9 @@ function startRun(serve: ChildServe, post: Extract<ChildPost, { kind: "runBody" 
   const taskId = taskIdFromCore(post.taskId, "runBody");
   const attempt = attemptFromCore(post.attempt, "runBody");
   const controls = serve.table.enter({ runKey: post.runKey, taskId, taskName: post.taskName, attempt });
+  const observation = serve.observer.enter(post.facts);
+
+  observations.set(post.runKey, observation);
 
   void runBody({
     // The core's child host reads each run input with its strict read rule (`build_task_input` in its `prepare`)
@@ -107,9 +117,10 @@ function startRun(serve: ChildServe, post: Extract<ChildPost, { kind: "runBody" 
     runtime: taskRuntimeOf(controls),
     mark: { taskId, taskName: post.taskName, attempt },
     marks: serve.marks,
-    observation: serve.observer.enter(post.facts),
+    observation,
   }).then(
     (outcome) => {
+      observations.delete(post.runKey);
       serve.table.leave(post.runKey);
       settleRun(serve, post.runKey, post.taskName, outcome);
     },
