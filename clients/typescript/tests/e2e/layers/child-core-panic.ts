@@ -68,9 +68,11 @@ async function childAborted(suite: Suite, worker: TestProcess, pid: number): Pro
 function pidLines(suite: Suite, name: string): readonly number[] {
   const read = suite.markers.read(name);
 
-  assert.equal(read.kind, "found", `the marker ${name} exists`);
+  if (read.kind === "absent") {
+    assert.fail(`the marker ${name} exists`);
+  }
 
-  return read.kind === "found" ? read.text.split("\n").filter((line) => line !== "").map(Number) : [];
+  return read.text.split("\n").filter((line) => line !== "").map(Number);
 }
 
 describe("a task child whose core background task panicked", () => {

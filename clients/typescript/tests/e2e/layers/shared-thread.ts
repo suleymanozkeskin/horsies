@@ -109,9 +109,22 @@ async function threadTimeout<O, E extends string>(handle: TaskHandle<O, E>, limi
 async function failedAtMs<O, E extends string>(handle: TaskHandle<O, E>): Promise<number> {
   const info = await infoOf(handle);
 
-  assert.equal(info.failedAt.kind, "recorded", `task ${handle.taskId} has no failed_at`);
+  if (info.failedAt.kind === "notRecorded") {
+    assert.fail(`task ${handle.taskId} has no failed_at`);
+  }
 
-  return info.failedAt.kind === "recorded" ? info.failedAt.value.epochMilliseconds : Number.NaN;
+  return info.failedAt.value.epochMilliseconds;
+}
+
+/** The text of the marker `name`. Fails the test when it is absent. */
+function markerText(suite: Suite, name: string): string {
+  const read = suite.markers.read(name);
+
+  if (read.kind === "absent") {
+    assert.fail(`the marker ${name} exists`);
+  }
+
+  return read.text;
 }
 
 describe("SHARED_THREAD children", () => {
@@ -202,11 +215,7 @@ describe("SHARED_THREAD children", () => {
 
       assert.deepEqual([info.status, info.retryCount], ["FAILED", 3]);
 
-      const lines = suite.markers.read(`${token}-runs`);
-
-      assert.equal(lines.kind, "found", "the runs wrote their lines");
-
-      const runs = runLines(lines.kind === "found" ? lines.text : "");
+      const runs = runLines(markerText(suite, `${token}-runs`));
 
       assert.equal(runs.starts.size, 4, `four runs started: ${JSON.stringify([...runs.starts])}`);
 
@@ -366,12 +375,11 @@ describe("SHARED_THREAD children", () => {
     const token = randomUUID();
     const handle = await sentHandle("e2e_thread_blocks_main", suite.app.send(threads.threadBlocksMain, { token }));
     const retryPid = await succeeded(handle, REPLACED_WAIT_MS);
-    const blocked = suite.markers.read(`${token}-blocked`);
+    const blockedPid = Number(markerText(suite, `${token}-blocked`));
     const info = await infoOf(handle);
     const first = info.attempts.find((attempt) => attempt.attempt === 1);
 
-    assert.equal(blocked.kind, "found", "the first run asked for the block");
-    assert.notEqual(String(retryPid), blocked.kind === "found" ? blocked.text : "", "the retry ran in a new child");
+    assert.notEqual(retryPid, blockedPid, "the retry ran in a new child");
     assert.deepEqual([info.status, info.retryCount], ["COMPLETED", 1]);
     assert.deepEqual(first?.errorCode, { kind: "recorded", value: "WORKER_CRASHED" });
     assert.ok(worker.logCount(LOOP_KILL_LINE) > 0, worker.report());
