@@ -318,6 +318,26 @@ and there is no migration contract between pre-1.0 versions.
   one of `never_retryable` and `always_retryable`. Code that matches on
   `ErrorSlot` takes the new variant.
 
+- **Breaking: the web API refuses an unknown key in an action body.**
+  `POST /api/tasks/{id}/cancel` takes the key `include_running` (no body,
+  or a JSON object), and `POST /api/workflows/{id}/pause`, `/resume` and
+  `/cancel` take no key (no body, or `{}`). A key that the route does not
+  know is refused with 422 before any statement of the action. The response
+  has one issue, for the first unknown key in body order: `type`
+  `extra_forbidden`, `loc` `["body", key]`, `input` the value of the key,
+  and `ctx.known_keys` the keys that the route knows (`[]` for a workflow
+  action); `msg` names the key and the known keys. Before, the task cancel
+  dropped an unknown key (a misspelled `include_running` read as `false`),
+  and a workflow action did not read its body. A workflow action now reads
+  its body as the task cancel does: a body whose content type is not
+  `application/json`, and JSON that is not an object, are refused with 422
+  `value_error`. The task cancel also refuses JSON that is not an object;
+  before, it took an array of the field values (`[true]`). Each action route
+  reads its body before its path id. The 413 of a body over 1 MiB comes
+  before every check of the body, as before. `CancelTaskBody` refuses an
+  unknown key for any serde reader (`#[serde(deny_unknown_fields)]`). The web
+  UI sends known keys only.
+
 ### Fixed
 
 - **A schema install of the `TYPESCRIPT` client family into an empty

@@ -35,6 +35,7 @@ use super::handler::{
     AccessGrant, AccessNeed, GrantedAccess, MonitoringHandler, MonitoringHandlerConfig,
     RequestParts, ResponseForm, ResponseParts, Verdict,
 };
+use super::request_body::WorkflowActionBody;
 use super::routes::task_not_found_text;
 use super::schema::{
     SchemaProbe, SchemaReader, SchemaState, SchemaStatus, SCHEMA_INCOMPATIBLE, SCHEMA_UNKNOWN,
@@ -400,6 +401,229 @@ async fn task_action_body_defaults_when_absent_and_malformed_json_is_422() {
     assert!(body["detail"][0].get("type").is_some());
     assert!(body["detail"][0].get("msg").is_some());
     assert!(body["detail"][0].get("input").is_some());
+}
+
+/// An action request to `uri` with the JSON body text `body`.
+fn json_action_request(uri: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(Method::POST)
+        .uri(uri)
+        .header(INTENT_HEADER, INTENT_VALUE)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_owned()))
+        .expect("action request")
+}
+
+/// The 422 body of the unknown body key `key` with the value `input`: the
+/// `extra_forbidden` issue, its message, and the keys that the body type
+/// declares.
+fn unknown_key_refusal(
+    key: &str,
+    input: &serde_json::Value,
+    message: &str,
+    known_keys: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({"detail": [{
+        "type": "extra_forbidden",
+        "loc": ["body", key],
+        "msg": message,
+        "input": input,
+        "ctx": {"known_keys": known_keys},
+    }]})
+}
+
+/// The router of the action tests: every verdict allows, the schema
+/// matches, and the pool is lazy and unreachable, so a request that passed
+/// the body and the path id answers 503 at its first statement.
+fn allowed_action_router() -> Router {
+    test_router(
+        Arc::new(AllowAll),
+        status(SchemaState::Match, Some(crate::expected_schema_version())),
+        true,
+    )
+}
+
+/// The task cancel body refuses a key that `CancelTaskBody` does not
+/// declare with 422 `extra_forbidden`, before the path id and any
+/// statement. The issue names the first unknown key in body order, its
+/// value and the known keys. The known body, `{}` and no body are accepted:
+/// the refusal is then the path id's. A known key with a value of the wrong
+/// type, and JSON that is not an object, are 422 `value_error`.
+#[tokio::test]
+async fn the_task_cancel_body_refuses_an_unknown_key_and_accepts_the_known_body() {
+    let router = allowed_action_router();
+    let path = format!("/api/tasks/{}/cancel", Uuid::new_v4());
+
+    for (body, key, input) in [
+        (
+            r#"{"include_runing": true}"#,
+            "include_runing",
+            serde_json::json!(true),
+        ),
+        (
+            r#"{"include_running": true, "zeta": 1, "alpha": 2}"#,
+            "zeta",
+            serde_json::json!(1),
+        ),
+    ] {
+        let response = router
+            .clone()
+            .oneshot(json_action_request(&path, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        assert_eq!(
+            json(response).await,
+            unknown_key_refusal(
+                key,
+                &input,
+                &format!("Unknown key \"{key}\". Known keys: \"include_running\"."),
+                &serde_json::json!(["include_running"]),
+            ),
+            "{body}"
+        );
+    }
+
+    for body in [r#"{"include_running": true}"#, "{}", ""] {
+        let response = router
+            .clone()
+            .oneshot(json_action_request("/api/tasks/not-a-uuid/cancel", body))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        assert_eq!(
+            json(response).await,
+            not_a_uuid_refusal("task_id"),
+            "{body}"
+        );
+    }
+
+    let wrong_type = router
+        .clone()
+        .oneshot(json_action_request(&path, r#"{"include_running": "yes"}"#))
+        .await
+        .unwrap();
+    assert_eq!(wrong_type.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let wrong_type = json(wrong_type).await;
+    assert_eq!(wrong_type["detail"][0]["type"], "value_error");
+    assert_eq!(wrong_type["detail"][0]["loc"], serde_json::json!(["body"]));
+    assert!(
+        wrong_type["detail"][0]["msg"]
+            .as_str()
+            .is_some_and(|message| message.starts_with("invalid type: string \"yes\"")),
+        "{wrong_type}"
+    );
+
+    for body in ["[true]", "true", "null"] {
+        let response = router
+            .clone()
+            .oneshot(json_action_request(&path, body))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{body}"
+        );
+        assert_eq!(
+            json(response).await,
+            serde_json::json!({"detail": [{
+                "type": "value_error",
+                "loc": ["body"],
+                "msg": "Input should be a valid JSON object",
+                "input": body,
+            }]}),
+            "{body}"
+        );
+    }
+}
+
+/// A workflow action body has no keys: a key is refused with 422
+/// `extra_forbidden` and the known keys `[]`, before the path id and any
+/// statement. `{}` and no body are accepted: the refusal is then the path
+/// id's.
+async fn assert_the_workflow_body_has_no_keys(action: &str) {
+    let router = allowed_action_router();
+    let path = format!("/api/workflows/{}/{action}", Uuid::new_v4());
+
+    let response = router
+        .clone()
+        .oneshot(json_action_request(&path, r#"{"include_running": true}"#))
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "{action}"
+    );
+    assert_eq!(
+        json(response).await,
+        unknown_key_refusal(
+            "include_running",
+            &serde_json::json!(true),
+            "Unknown key \"include_running\". Known keys: none.",
+            &serde_json::json!([]),
+        ),
+        "{action}"
+    );
+
+    for body in ["{}", ""] {
+        let response = router
+            .clone()
+            .oneshot(json_action_request(
+                &format!("/api/workflows/not-a-uuid/{action}"),
+                body,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "{action} {body}"
+        );
+        assert_eq!(
+            json(response).await,
+            not_a_uuid_refusal("workflow_id"),
+            "{action} {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_workflow_pause_body_refuses_every_key() {
+    assert_the_workflow_body_has_no_keys("pause").await;
+}
+
+#[tokio::test]
+async fn the_workflow_resume_body_refuses_every_key() {
+    assert_the_workflow_body_has_no_keys("resume").await;
+}
+
+#[tokio::test]
+async fn the_workflow_cancel_body_refuses_every_key() {
+    assert_the_workflow_body_has_no_keys("cancel").await;
+}
+
+/// `WorkflowActionBody` refuses every key for any serde reader, and reads
+/// `{}`.
+#[test]
+fn the_workflow_body_type_refuses_every_key() {
+    let refused = serde_json::from_str::<WorkflowActionBody>(r#"{"include_running": true}"#)
+        .expect_err("a key that the type does not declare");
+    assert!(
+        refused
+            .to_string()
+            .starts_with("unknown field `include_running`, there are no fields"),
+        "{refused}"
+    );
+    assert_eq!(
+        serde_json::from_str::<WorkflowActionBody>("{}").ok(),
+        Some(WorkflowActionBody {})
+    );
 }
 
 #[test]
@@ -3060,6 +3284,38 @@ async fn a_body_over_the_bound_is_refused_after_the_verdicts() {
         )
         .await;
     assert_eq!(refused.status, StatusCode::FORBIDDEN);
+}
+
+/// The size bound comes before the key check of the body: on every action
+/// route, a body over the bound whose object has an unknown key is refused
+/// with 413, not with the 422 of the key.
+#[tokio::test]
+async fn a_body_over_the_bound_with_an_unknown_key_is_413_on_every_action_route() {
+    let handler = granted_handler(true);
+    let mut over = br#"{"include_runing": true}"#.to_vec();
+    over.resize(super::handler::MAX_REQUEST_BODY_BYTES + 1, b' ');
+    let over = axum::body::Bytes::from(over);
+
+    for path in failing_actions() {
+        let response = handler
+            .handle(
+                RequestParts {
+                    body: over.clone(),
+                    ..action_parts(&path)
+                },
+                grant(Verdict::Allowed, Verdict::Allowed),
+            )
+            .await;
+        assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+        assert_eq!(
+            body_json(&response),
+            serde_json::json!({"detail": format!(
+                "The request body is over {} bytes.",
+                super::handler::MAX_REQUEST_BODY_BYTES
+            )}),
+            "{path}"
+        );
+    }
 }
 
 /// The free `route_access` is the handler's answer for the same switch.
