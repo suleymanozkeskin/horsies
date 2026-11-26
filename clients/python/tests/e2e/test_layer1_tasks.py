@@ -543,11 +543,11 @@ async def test_retry_precedence_exception_name_collision_no_retry(
 
 
 @pytest.mark.e2e
-def test_default_mode_rejects_queue_name() -> None:
-    # Default instance should reject queue_name at task definition time
+def test_default_mode_rejects_queue() -> None:
+    # Default instance should reject a queue at task definition time
     with pytest.raises(ConfigurationError, match='cannot specify queue_name'):
 
-        @default_instance.app.task(task_name='e2e_default_reject', queue_name='custom')
+        @default_instance.app.task(name='e2e_default_reject', queue='custom')
         def default_reject_task(*, x: int) -> Result[int, TaskError]:
             return basic_tasks.simple_task(x)
 
@@ -651,11 +651,11 @@ async def test_priority_ordering(custom_broker: PostgresBroker) -> None:
 
 
 @pytest.mark.e2e
-def test_custom_mode_requires_queue_name() -> None:
-    """L1.5.5: CUSTOM mode requires queue_name at definition time."""
+def test_custom_mode_requires_queue() -> None:
+    """L1.5.5: CUSTOM mode requires a queue at definition time."""
     with pytest.raises(ConfigurationError, match='queue_name is required'):
 
-        @instance_custom.app.task(task_name='e2e_missing_queue_name')
+        @instance_custom.app.task(name='e2e_missing_queue_name')
         def missing_queue_task() -> Result[str, TaskError]:
             return Ok('test')
 
@@ -775,10 +775,10 @@ async def test_retry_blocked_by_good_until_expiry(
     task_options = json.dumps({
         'retry_policy': {
             'max_retries': 3,
-            'intervals': [60, 60, 60],
+            'intervals_seconds': [60, 60, 60],
             'backoff_strategy': 'fixed',
             'jitter': False,
-            'auto_retry_for': ['TRANSIENT'],
+            'retry_for': ['TRANSIENT'],
         },
         'good_until': good_until.isoformat(),
     })
@@ -822,10 +822,10 @@ async def test_retry_succeeds_within_good_until(
     task_options = json.dumps({
         'retry_policy': {
             'max_retries': 3,
-            'intervals': [1, 1, 1],
+            'intervals_seconds': [1, 1, 1],
             'backoff_strategy': 'fixed',
             'jitter': False,
-            'auto_retry_for': ['TRANSIENT'],
+            'retry_for': ['TRANSIENT'],
         },
         'good_until': good_until.isoformat(),
     })

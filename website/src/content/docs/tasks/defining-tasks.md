@@ -255,14 +255,14 @@ def might_crash() -> Result[str, TaskError]:
 
 ### Configure Retries
 
-`retry_policy` takes a `RetryPolicy`. A failure retries when its error code is in `auto_retry_for` and retries remain. The policy fields, the delay steps and the retry rules are on [Retry Policy](/horsies/tasks/retry-policy/).
+`retry_policy` takes a `RetryPolicy`. A failure retries when its error code is in `retry_for` and retries remain. The policy fields, the delay steps and the retry rules are on [Retry Policy](/horsies/tasks/retry-policy/).
 
 ```python
 from horsies import RetryPolicy, Err, Ok, Result, TaskError, JsonValue
 
 @app.task(
     "flaky_task",
-    retry_policy=RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"]),
+    retry_policy=RetryPolicy.fixed([60, 300, 900], retry_for=["TRANSIENT_ERROR"]),
 )
 def flaky_task() -> Result[str, TaskError]:
     # Retries up to 3 times, after 1 min, 5 min and 15 min
@@ -273,51 +273,51 @@ def flaky_task() -> Result[str, TaskError]:
 
 | Constructor | Policy |
 | ----------- | ------ |
-| `RetryPolicy.fixed(intervals, *, auto_retry_for, jitter=True)` | `fixed` backoff. `max_retries` is `len(intervals)` |
-| `RetryPolicy.exponential(base_seconds, *, max_retries, auto_retry_for, jitter=True, max_delay_seconds=None)` | `exponential` backoff from one base interval |
+| `RetryPolicy.fixed(intervals_seconds, *, retry_for, jitter=True)` | `fixed` backoff. `max_retries` is `len(intervals_seconds)` |
+| `RetryPolicy.exponential(base_seconds, *, max_retries, retry_for, jitter=True, max_delay_seconds=None)` | `exponential` backoff from one base interval |
 | `RetryPolicy(...)` | Every field, with the defaults below |
 
 ```python
 # Fixed: wait 1 min, then 5 min, then 15 min
-RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"])
+RetryPolicy.fixed([60, 300, 900], retry_for=["TRANSIENT_ERROR"])
 
 # Equivalent to:
 RetryPolicy(
     max_retries=3,
-    intervals=[60, 300, 900],
+    intervals_seconds=[60, 300, 900],
     backoff_strategy='fixed',
-    auto_retry_for=["TRANSIENT_ERROR"],
+    retry_for=["TRANSIENT_ERROR"],
 )
 
 # Exponential with base 30 s: retry after 30 s, 60 s, 120 s, 240 s, 480 s
-RetryPolicy.exponential(base_seconds=30, max_retries=5, auto_retry_for=["TRANSIENT_ERROR"])
+RetryPolicy.exponential(base_seconds=30, max_retries=5, retry_for=["TRANSIENT_ERROR"])
 
 # Equivalent to:
 RetryPolicy(
     max_retries=5,
-    intervals=[30],  # one base interval
+    intervals_seconds=[30],  # one base interval
     backoff_strategy='exponential',
-    auto_retry_for=["TRANSIENT_ERROR"],
+    retry_for=["TRANSIENT_ERROR"],
 )
 
 # No jitter, for delays that are the same on each run
-RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"], jitter=False)
+RetryPolicy.fixed([60, 300, 900], retry_for=["TRANSIENT_ERROR"], jitter=False)
 
 # Exponential, but never wait longer than 10 minutes between retries
 RetryPolicy.exponential(
     base_seconds=30,
     max_retries=10,
-    auto_retry_for=["TRANSIENT_ERROR"],
+    retry_for=["TRANSIENT_ERROR"],
     max_delay_seconds=600,
 )
 
 # Equivalent to:
 RetryPolicy(
     max_retries=10,
-    intervals=[30],
+    intervals_seconds=[30],
     backoff_strategy='exponential',
     max_delay_seconds=600,
-    auto_retry_for=["TRANSIENT_ERROR"],
+    retry_for=["TRANSIENT_ERROR"],
 )
 ```
 
@@ -325,14 +325,14 @@ RetryPolicy(
 
 | Field | Type | Default |
 | ----- | ---- | ------- |
-| `auto_retry_for` | `list[str \| BuiltInTaskCode]` | (required) |
+| `retry_for` | `list[str \| BuiltInTaskCode]` | (required) |
 | `max_retries` | `int` | `3` |
-| `intervals` | `list[int]` | `[60, 300, 900]` |
+| `intervals_seconds` | `list[int]` | `[60, 300, 900]` |
 | `backoff_strategy` | `Literal['fixed', 'exponential']` | `'fixed'` |
 | `jitter` | `bool` | `True` |
 | `max_delay_seconds` | `int \| None` | `None` (no cap) |
 
-An `auto_retry_for` entry is a code string or a `BuiltInTaskCode` member. A name in the form of an exception class, such as `"TimeoutError"`, is refused: retries match error codes only.
+A `retry_for` entry is a code string or a `BuiltInTaskCode` member. A name in the form of an exception class, such as `"TimeoutError"`, is refused: retries match error codes only.
 
 A policy that breaks a rule of [Policy Fields](/horsies/tasks/retry-policy/#policy-fields) raises `ValueError` when it is built:
 
@@ -340,23 +340,23 @@ A policy that breaks a rule of [Policy Fields](/horsies/tasks/retry-policy/#poli
 # This raises ValueError:
 RetryPolicy(
     max_retries=3,
-    intervals=[60, 300],  # Only 2 intervals for 3 retries
+    intervals_seconds=[60, 300],  # Only 2 intervals for 3 retries
     backoff_strategy='fixed',
-    auto_retry_for=["TRANSIENT_ERROR"],
+    retry_for=["TRANSIENT_ERROR"],
 )
 
 # This also raises ValueError:
 RetryPolicy(
     max_retries=3,
-    intervals=[60, 300, 900],  # Multiple intervals
+    intervals_seconds=[60, 300, 900],  # Multiple intervals
     backoff_strategy='exponential',  # Exponential needs exactly 1 interval
-    auto_retry_for=["TRANSIENT_ERROR"],
+    retry_for=["TRANSIENT_ERROR"],
 )
 ```
 
 #### Return a Retryable Error
 
-Return a `TaskError` with a code that `auto_retry_for` lists:
+Return a `TaskError` with a code that `retry_for` lists:
 
 ```python
 @app.task(
@@ -364,7 +364,7 @@ Return a `TaskError` with a code that `auto_retry_for` lists:
     retry_policy=RetryPolicy.exponential(
         base_seconds=60,
         max_retries=5,
-        auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
+        retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
     ),
 )
 def call_external_api() -> Result[dict[str, JsonValue], TaskError]:
@@ -383,7 +383,7 @@ def call_external_api() -> Result[dict[str, JsonValue], TaskError]:
         ))
 ```
 
-`auto_retry_for` reads `error_code` only. `message` is optional: `TaskError(error_code="RATE_LIMITED")` retries in the same way.
+`retry_for` reads `error_code` only. `message` is optional: `TaskError(error_code="RATE_LIMITED")` retries in the same way.
 
 #### Map Exceptions to Codes
 
@@ -392,7 +392,7 @@ def call_external_api() -> Result[dict[str, JsonValue], TaskError]:
 ```python
 @app.task(
     "call_api",
-    retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["TIMEOUT", "CONNECTION_ERROR"]),
+    retry_policy=RetryPolicy.fixed([30, 60, 120], retry_for=["TIMEOUT", "CONNECTION_ERROR"]),
     exception_mapper={
         TimeoutError: "TIMEOUT",
         ConnectionError: "CONNECTION_ERROR",
@@ -481,12 +481,12 @@ The decorator refuses:
 - `TaskError[E]` in the return annotation without `error_codes=E`: `HRS-105`;
 - for a task with `TaskError[E]`, a mapper code or a default code that `E` does not name: `HRS-209`.
 
-The task function keeps the codes in `task_error_codes`: the declared codes in the order of the declaration, then each mapper code that is not in the list yet, first the task's mapper, then the app's. `horsies check` lists them.
+The task function keeps the codes in `error_codes`: the declared codes in the order of the declaration, then each mapper code that is not in the list yet, first the task's mapper, then the app's. `horsies check` lists them.
 
 ### Assign to Queue (CUSTOM Mode)
 
 ```python
-@app.task("urgent_task", queue_name="critical")
+@app.task("urgent_task", queue="critical")
 def urgent_task() -> Result[str, TaskError]:
     ...
 ```
@@ -501,13 +501,13 @@ def resize_video(*, video_id: str) -> Result[str, TaskError]:
     ...
 ```
 
-On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. A result that reaches the worker after the deadline does not change this. An `async def` body that returned before the deadline is not timed out while the child waits for the asyncio tasks that it left (see [Async Tasks](#async-tasks)). If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `auto_retry_for`:
+On expiry, the worker kills the child process, waits for it to exit, and then fails the task with `TASK_TIMEOUT`. A result that reaches the worker after the deadline does not change this. An `async def` body that returned before the deadline is not timed out while the child waits for the asyncio tasks that it left (see [Async Tasks](#async-tasks)). If the deadline elapses before user code starts, the task is requeued instead. Timeouts are terminal by default; opt into retries by adding `"TASK_TIMEOUT"` to `retry_for`:
 
 ```python
 @app.task(
     "resize_video",
     timeout_ms=120_000,
-    retry_policy=RetryPolicy.fixed([60, 300], auto_retry_for=["TASK_TIMEOUT"]),
+    retry_policy=RetryPolicy.fixed([60, 300], retry_for=["TASK_TIMEOUT"]),
 )
 def resize_video(*, video_id: str) -> Result[str, TaskError]:
     ...
@@ -734,12 +734,12 @@ def task_two() -> Result[str, TaskError]:
 
 ## API Reference
 
-### `@app.task(task_name, **options)`
+### `@app.task(name, **options)`
 
 | Parameter | Type | Required | Description |
 | --------- | ---- | -------- | ----------- |
-| `task_name` | `str` | Yes | Unique task identifier. An empty name raises `TaskDefinitionError` (`HRS-102`) |
-| `queue_name` | `str` | No | Target queue (CUSTOM mode only) |
+| `name` | `str` | Yes | Unique task identifier. An empty name raises `TaskDefinitionError` (`HRS-102`) |
+| `queue` | `str` | No | Target queue (CUSTOM mode only) |
 | `retry_policy` | `RetryPolicy` | No | Retry timing, backoff, and auto-retry triggers |
 | `exception_mapper` | `dict[type[BaseException], str]` | No | Maps exception classes to error codes |
 | `default_unhandled_error_code` | `str` | No | Error code for unmapped exceptions (overrides global) |

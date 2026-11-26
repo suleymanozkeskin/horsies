@@ -110,7 +110,7 @@ class TestWorkflowRecovery:
         session, broker, app = setup
         task_a = make_simple_task(app, 'recover_unregistered_err_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         spec = make_workflow_spec(
             broker=broker, name='recover_unregistered_err', tasks=[node_a]
         )

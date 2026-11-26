@@ -46,10 +46,10 @@ from . import store_failure
 
 @app.task(
     'reserve_stock',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def reserve_stock(
@@ -103,10 +103,10 @@ def reserve_stock(
 
 @app.task(
     'release_stock',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def release_stock(
@@ -136,10 +136,10 @@ def release_stock(
 
 @app.task(
     'replenish_catalog',
-    queue_name=QUEUE_ANALYTICS,
+    queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def replenish_catalog(*, target_units: int) -> Result[StocktakeSummary, TaskError]:
@@ -182,10 +182,10 @@ def _feed_window() -> str:
 
 @app.task(
     'sync_supplier_feed',
-    queue_name=QUEUE_ANALYTICS,
+    queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.SUPPLIER_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[SUPPLIER_TIMEOUT, OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[SUPPLIER_TIMEOUT, OperationalErrorCode.WORKER_CRASHED],
     ),
     exception_mapper={TimeoutError: SUPPLIER_TIMEOUT},
 )
@@ -222,15 +222,15 @@ def _feed_node(node_id: str) -> TaskNode[SupplierFeed]:
     way to ask whether a result exists without `result_for` raising. A task
     receives node ids as data, not node objects, so it rebuilds the handle.
     """
-    return TaskNode(fn=sync_supplier_feed, node_id=node_id)
+    return TaskNode(function=sync_supplier_feed, node_id=node_id)
 
 
 @app.task(
     'update_stock_levels',
-    queue_name=QUEUE_ANALYTICS,
+    queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def update_stock_levels(

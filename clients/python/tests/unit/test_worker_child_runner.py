@@ -851,7 +851,7 @@ def _make_run_task_patches(
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.__call__ = MagicMock(return_value=task_fn())
-        mock_task._original_fn = task_fn
+        mock_task._original_function = task_fn
         mock_task._fn = task_fn
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
     else:
@@ -1389,7 +1389,7 @@ class TestRunTaskEntryErrorPaths:
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task._original_fn = _constant_surrogate_task
+        mock_task._original_function = _constant_surrogate_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['input_json'] = json.dumps({'x': {'name': 'plain'}})
 
@@ -1622,7 +1622,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Ok('done')
-        mock_task._original_fn = _task_with_ctx
+        mock_task._original_function = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         _run_entry_defaults['input_json'] = json.dumps({
@@ -1661,7 +1661,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Ok('done')
-        mock_task._original_fn = _task_with_ctx
+        mock_task._original_function = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         _run_entry_defaults['input_json'] = json.dumps({
@@ -1698,7 +1698,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Ok('meta_ok')
         mock_task.task_ok_type = str
-        mock_task._original_fn = _task_with_meta
+        mock_task._original_function = _task_with_meta
         mock_task._fn = _task_with_meta
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -2079,7 +2079,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         # own return-encoding too.
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task._original_fn = _takes_upstream
+        mock_task._original_function = _takes_upstream
         mock_task.task_ok_type = str
         mock_task.return_value = Ok('processed')
 
@@ -2124,7 +2124,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.return_value = Ok('ctx_ok')
         mock_task.task_ok_type = str
-        mock_task._original_fn = _task_with_ctx
+        mock_task._original_function = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         valid_tr = json.dumps({
@@ -2195,7 +2195,7 @@ class TestChildWritesNoRunnerHeartbeat:
         task = MagicMock(side_effect=call)
         task.task_body_kind = TaskBodyKind.DEF
         task.task_ok_type = str
-        task._original_fn = body
+        task._original_function = body
         app = MagicMock()
         app.tasks.__getitem__ = MagicMock(return_value=task)
         handle = MagicMock()
@@ -2258,7 +2258,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task._original_fn = _typed_count_task
+        mock_task._original_function = _typed_count_task
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['input_json'] = json.dumps({'count': _INPUT_MARKER})
 
@@ -2354,7 +2354,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         source_task.task_ok_type = str
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task._original_fn = _takes_upstream
+        mock_task._original_function = _takes_upstream
         mock_task.task_ok_type = str
 
         def _task_lookup(name: str) -> Any:
@@ -2397,7 +2397,7 @@ class TestRunTaskEntryStoredErrorRefusal:
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
         mock_task.return_value = Ok('done')
-        mock_task._original_fn = _task_with_ctx
+        mock_task._original_function = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         mock_app.tasks.get = MagicMock(return_value=mock_task)
         _run_entry_defaults['input_json'] = json.dumps({

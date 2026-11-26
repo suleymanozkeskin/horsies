@@ -57,7 +57,7 @@ def _test_app(broker: PostgresBroker) -> Horsies:
         )
         _TEST_APP = Horsies(cfg)
 
-        @_TEST_APP.task(task_name='retention_enqueue_test')
+        @_TEST_APP.task(name='retention_enqueue_test')
         def _retention_enqueue_test(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -87,7 +87,7 @@ def _declaring_app(broker: PostgresBroker) -> Horsies:
         )
         _DECLARING_APP = Horsies(cfg)
 
-        @_DECLARING_APP.task(task_name='retention_declared_test')
+        @_DECLARING_APP.task(name='retention_declared_test')
         def _retention_declared_test(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 

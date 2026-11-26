@@ -30,7 +30,7 @@ pytestmark = [pytest.mark.integration]
 
 
 def _task(app: Horsies, prefix: str) -> Any:
-    @app.task(task_name=f'{prefix}_{uuid.uuid4().hex[:8]}')
+    @app.task(name=f'{prefix}_{uuid.uuid4().hex[:8]}')
     def fn(*, value: int) -> Result[int, TaskError]:
         return Ok(value)
 
@@ -49,7 +49,7 @@ def _child_with_param(app: Horsies) -> type[WorkflowDefinition[int]]:
         def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
             cls, app: Horsies, value: int,
         ) -> Any:
-            node = TaskNode(fn=child_fn, kwargs={'value': value})
+            node = TaskNode(function=child_fn, kwargs={'value': value})
             return app.workflow(cls.name, [node], output=node)
 
     return ChildWithParam
@@ -69,7 +69,7 @@ def _child_with_result(app: Horsies) -> type[WorkflowDefinition[int]]:
         ) -> Any:
             match value:
                 case Succeeded(value=succeeded_value):
-                    node = TaskNode(fn=child_fn, kwargs={'value': succeeded_value})
+                    node = TaskNode(function=child_fn, kwargs={'value': succeeded_value})
                     return app.workflow(cls.name, [node], output=node)
                 case Failed(error=error):
                     raise AssertionError(f'build_with got a failed upstream: {error!r}')
@@ -95,7 +95,7 @@ def _static_child(
             _ = (args, params)
             match nodes:
                 case None:
-                    node = TaskNode(fn=child_fn, kwargs={'value': 1})
+                    node = TaskNode(function=child_fn, kwargs={'value': 1})
                     return app.workflow(cls.name, [node], output=node)
                 case build_nodes:
                     spec_nodes = build_nodes(child_fn)
@@ -126,7 +126,7 @@ class TestSubWorkflowParams:
         broker: PostgresBroker,
         session: AsyncSession,
     ) -> None:
-        producer = TaskNode(fn=_task(app, 'params_producer'), kwargs={'value': 1})
+        producer = TaskNode(function=_task(app, 'params_producer'), kwargs={'value': 1})
         given = SubWorkflowNode(workflow_def=_child_with_param(app), kwargs={'value': 2})
         not_given = SubWorkflowNode(workflow_def=_static_child(app))
         injected = SubWorkflowNode(
@@ -157,7 +157,7 @@ class TestSubWorkflowParams:
         grandchild = _child_with_param(app)
 
         def child_nodes(child_fn: Any) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
-            root = TaskNode(fn=child_fn, kwargs={'value': 1})
+            root = TaskNode(function=child_fn, kwargs={'value': 1})
             nested = SubWorkflowNode(
                 workflow_def=grandchild, kwargs={'value': 3}, waits_for=[root],
             )

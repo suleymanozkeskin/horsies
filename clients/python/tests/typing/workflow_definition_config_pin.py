@@ -21,7 +21,7 @@ from horsies.core.task_decorator import TaskFunction
 
 
 def define(produce: TaskFunction[[], int]) -> None:
-    node = TaskNode(fn=produce)
+    node = TaskNode(function=produce)
     assert_type(WorkflowDefinitionConfig(output=node), WorkflowDefinitionConfig[int])
 
     class Typed(WorkflowDefinition[int]):

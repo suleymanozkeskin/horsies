@@ -1,6 +1,6 @@
 ---
 title: Typed Node Builder
-summary: Build the task nodes of a workflow with task_name::node(), the field tokens of task_name::params, arg_from and the workflow context.
+summary: Build the task nodes of a workflow with task_name::node(), the field tokens of task_name::fields, arg_from and the workflow context.
 related: [workflow-api, subworkflows, ../../tasks/defining-tasks, ../../../concepts/workflows/workflow-semantics]
 tags: [rust, workflow, TaskNode, InputField, arg_from, WorkflowContext]
 ---
@@ -11,7 +11,7 @@ A task node has the types of its task: `TaskNode<T, I>`, with `T` the task's out
 
 ## Build a Node
 
-`#[horsies::task]` generates `task_name::node()` and one field token per parameter, `task_name::params::<name>()`.
+`#[horsies::task]` generates `task_name::node()` and one field token per parameter, `task_name::fields::<name>()`.
 
 ```rust
 use std::convert::Infallible;
@@ -48,13 +48,13 @@ fn checkout_spec(app: &Horsies, order: Order) -> Result<WorkflowSpec, HorsiesErr
     let charged = builder.task(
         charge_order::node()
             .node_id("charge")
-            .set(charge_order::params::order(), order)?,
+            .set(charge_order::fields::order(), order)?,
     )?;
     let receipt = builder.task(
         send_receipt::node()
             .node_id("receipt")
-            .set(send_receipt::params::order_id(), order_id)?
-            .arg_from(send_receipt::params::charged(), charged),
+            .set(send_receipt::fields::order_id(), order_id)?
+            .arg_from(send_receipt::fields::charged(), charged),
     )?;
     builder.output(receipt);
     builder.build()
@@ -65,7 +65,7 @@ fn checkout_spec(app: &Horsies, order: Order) -> Result<WorkflowSpec, HorsiesErr
 |--------|---------|
 | `task_name::node()` | `TaskNode<T, task_name::Input>`: a node of the task. It reads no registration |
 | `function.node()` | `TaskNode<T, A>` of a `TaskFunction<A, T, E>`, the same node |
-| `task_name::params::<name>()` | `InputField<task_name::Input, F>`: the token of the parameter `<name>` of type `F` |
+| `task_name::fields::<name>()` | `InputField<task_name::Input, F>`: the token of the parameter `<name>` of type `F` |
 
 A new node has the input `{}`. Add it with `builder.task(node)`, which returns `Result<TypedNodeRef<T>, HorsiesError>`. `builder.task` gives the node the queue (unless the node names one with `.queue(name)`), the priority of that queue, the options and the workflow context flag of the task's registration on the builder's app. It refuses with `HRS-302` (`ErrorCode::WorkflowUnregisteredTask`) when the builder's app does not register the task, or registers it with another input or output type. The node is then not added.
 
@@ -109,14 +109,14 @@ A `TaskOutcome<S, E>` parameter has no default. A node that joins on any or on a
 
 ## Read Results through the Workflow Context
 
-A task that takes the workflow context has the attribute `workflow_ctx` and a parameter named `workflow_ctx` of type `WorkflowContext`. The node names the dependencies whose results the context holds with `.workflow_context_from(nodes)`.
+A task that takes the workflow context has the attribute `workflow_context` and a parameter named `workflow_ctx` of type `WorkflowContext`. The node names the dependencies whose results the context holds with `.workflow_context_from(nodes)`.
 
 ```rust
 use std::convert::Infallible;
 
 use horsies::{task, NodeKey, TaskError, TaskOutcome, WorkflowContext};
 
-#[task("audit_checkout", workflow_ctx)]
+#[task("audit_checkout", workflow_context)]
 async fn audit_checkout(workflow_ctx: WorkflowContext) -> Result<bool, TaskError<Infallible>> {
     let charged = workflow_ctx.result_for::<u64, Infallible>(&NodeKey::new("charge"));
     Ok(matches!(charged, Ok(TaskOutcome::Succeeded(_))))
@@ -135,7 +135,7 @@ let _audit = builder.task(
 ```
 
 - Each node of `workflow_context_from` must be a dependency of the node: `HRS-009` otherwise. `waits_for` and `arg_from` make a dependency.
-- `workflow_context_from` on a task without the `workflow_ctx` attribute is `HRS-010`.
+- `workflow_context_from` on a task without the `workflow_context` attribute is `HRS-010`.
 - The worker writes the context into the parameter `workflow_ctx` only for a node with `workflow_context_from`. A node of such a task without `workflow_context_from` is `HRS-020`: its parameter has no value.
 - Give each context source a node id, and read it with `NodeKey::new(id)`. `WorkflowSpec::key(node_ref)` and `TaskNode::key()` also give the key.
 

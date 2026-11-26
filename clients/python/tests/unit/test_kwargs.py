@@ -365,7 +365,7 @@ def _mock_workflow_def_task() -> Any:
 
     fn = MagicMock(spec=lambda: None)
     fn.task_name = 'mock_task'
-    fn._original_fn = lambda: Ok(0)
+    fn._original_function = lambda: Ok(0)
     return fn
 
 
@@ -555,7 +555,7 @@ class TestSubworkflowNodeKwargs:
     def test_a_catch_all_takes_no_args_from(
         self, workflow_def: type[WorkflowDefinition[int]],
     ) -> None:
-        source: TaskNode[int] = TaskNode(fn=_int_source)
+        source: TaskNode[int] = TaskNode(function=_int_source)
         node: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=workflow_def,
             waits_for=[source],
@@ -580,7 +580,7 @@ class TestSubworkflowNodeKwargs:
         assert caught.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_the_app_slot_takes_no_args_from_whatever_its_name(self) -> None:
-        source: TaskNode[int] = TaskNode(fn=_int_source)
+        source: TaskNode[int] = TaskNode(function=_int_source)
         node: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=_NamedAppWorkflow,
             waits_for=[source],

@@ -1546,7 +1546,7 @@ class TestDefinitionOfAny:
                     return Err(error)
 
         source = SubWorkflowNode(workflow_def=self._child('any_source'))
-        node = TaskNode(fn=target, waits_for=[source], args_from={'value': source})
+        node = TaskNode(function=target, waits_for=[source], args_from={'value': source})
 
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(name='parent', tasks=[source, node])
@@ -1581,7 +1581,7 @@ class TestDefinitionOfAny:
                     return Err(error)
 
         source = SubWorkflowNode(workflow_def=Child)
-        node = TaskNode(fn=target, waits_for=[source], args_from={'value': source})
+        node = TaskNode(function=target, waits_for=[source], args_from={'value': source})
 
         with pytest.raises(WorkflowValidationError) as refused:
             WorkflowSpec(name='parent', tasks=[source, node])

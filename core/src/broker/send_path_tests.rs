@@ -142,9 +142,9 @@ async fn remove_task_name(pool: &TestPool, task_name: &str) {
 /// `max_retries` (any JSON value), Python's `_options(max_retries=...)`.
 fn options_with_max_retries(max_retries: &str) -> String {
     policy_options(&format!(
-        "\"max_retries\": {max_retries}, \"intervals\": [5], \
+        "\"max_retries\": {max_retries}, \"intervals_seconds\": [5], \
          \"backoff_strategy\": \"exponential\", \"jitter\": true, \
-         \"auto_retry_for\": [\"TRANSIENT\"]"
+         \"retry_for\": [\"TRANSIENT\"]"
     ))
 }
 
@@ -156,8 +156,8 @@ fn policy_options(fields: &str) -> String {
 /// The policies that Python refuses with `INVALID_TASK_OPTIONS`, with the
 /// ids of its parametrization.
 fn malformed_policies() -> Vec<(&'static str, String)> {
-    let valid_rest = "\"intervals\": [5], \"backoff_strategy\": \"exponential\", \
-                      \"jitter\": true, \"auto_retry_for\": [\"TRANSIENT\"]";
+    let valid_rest = "\"intervals_seconds\": [5], \"backoff_strategy\": \"exponential\", \
+                      \"jitter\": true, \"retry_for\": [\"TRANSIENT\"]";
     vec![
         ("negative", options_with_max_retries("-1")),
         (
@@ -169,17 +169,17 @@ fn malformed_policies() -> Vec<(&'static str, String)> {
         (
             "exponential_with_two_intervals",
             policy_options(
-                "\"max_retries\": 3, \"intervals\": [5, 10], \
+                "\"max_retries\": 3, \"intervals_seconds\": [5, 10], \
                  \"backoff_strategy\": \"exponential\", \"jitter\": true, \
-                 \"auto_retry_for\": [\"TRANSIENT\"]",
+                 \"retry_for\": [\"TRANSIENT\"]",
             ),
         ),
         (
             "no_retry_codes",
             policy_options(
-                "\"max_retries\": 3, \"intervals\": [5], \
+                "\"max_retries\": 3, \"intervals_seconds\": [5], \
                  \"backoff_strategy\": \"exponential\", \"jitter\": true, \
-                 \"auto_retry_for\": []",
+                 \"retry_for\": []",
             ),
         ),
         (

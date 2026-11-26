@@ -42,11 +42,11 @@ pub enum OperationalErrorCode {
     /// A child workflow would pass the depth limit (32), so it did not start and its sub-workflow node failed.
     SubworkflowDepthLimitReached,
     /// This task held the event loop of its shared async child past the block limit, before its
-    /// `timeout_ms`. The worker killed the child; a retry (only when `auto_retry_for` names this code)
+    /// `timeout_ms`. The worker killed the child; a retry (only when `retry_for` names this code)
     /// runs in an isolated child.
     TaskBlockedLoop,
     /// Another task held the event loop of this task's shared async child past the block limit, before
-    /// this task's `timeout_ms`. The worker killed the child. A retry runs only when `auto_retry_for`
+    /// this task's `timeout_ms`. The worker killed the child. A retry runs only when `retry_for`
     /// names this code.
     NeighbourBlockedLoop,
     /// A RUNNING workflow has no node rows: its start did not finish. Recovery fails it with this code.
@@ -331,7 +331,7 @@ impl From<OutcomeCode> for BuiltInTaskCode {
 /// task body ran; a task cannot return it, so no finalize path can take a returned error for a stop.
 pub const RESERVED_NON_TASK_CODES: [&str; 1] = ["WORKFLOW_STOPPED"];
 
-// The text rule of an `auto_retry_for` code. `UserCode::parse` does not apply it.
+// The text rule of a `retry_for` code. `UserCode::parse` does not apply it.
 mod code_text;
 
 pub use code_text::{check_error_code_text, CodeTextRefusal};
@@ -348,7 +348,7 @@ pub use declared::{
 ///
 /// Only [`UserCode::parse`] builds one, so a user code never has the name of a built-in code or of a reserved
 /// code (Python `TaskError._validate_error_code`, `core/models/tasks.py:278-311`). A built-in code is carried
-/// only by [`TaskErrorCode::BuiltIn`], so the `error_code` column, `auto_retry_for` and the monitoring
+/// only by [`TaskErrorCode::BuiltIn`], so the `error_code` column, `retry_for` and the monitoring
 /// families see one meaning for each code text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UserCode(String);

@@ -51,9 +51,9 @@ fn report_spec(
     region: String,
 ) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("examples.regional_report.v1");
-    let sales = builder.task(fetch_sales::node().set(fetch_sales::params::region(), region)?)?;
+    let sales = builder.task(fetch_sales::node().set(fetch_sales::fields::region(), region)?)?;
     let report =
-        builder.task(format_report::node().arg_from(format_report::params::sales(), sales))?;
+        builder.task(format_report::node().arg_from(format_report::fields::sales(), sales))?;
     builder.output(report);
     builder.build()
 }

@@ -61,7 +61,7 @@ fn report() -> TaskNode<String, ReportInput> {
 /// The registration of a task whose input takes the workflow context.
 fn context_registration() -> NodeRegistration {
     NodeRegistration {
-        accepts_workflow_ctx: true,
+        accepts_workflow_context: true,
         ..default_registration()
     }
 }

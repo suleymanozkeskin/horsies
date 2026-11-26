@@ -230,9 +230,9 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         class ScrapeWorkflow(WorkflowDefinition[PersistResult]):
             name = "scrape_pipeline"
 
-            fetch = TaskNode(fn=fetch_listing, kwargs={"url": "url"})
-            parse = TaskNode(fn=parse_listing, waits_for=[fetch], args_from={"raw": fetch})
-            persist = TaskNode(fn=persist_listing, waits_for=[parse], args_from={"data": parse})
+            fetch = TaskNode(function=fetch_listing, kwargs={"url": "url"})
+            parse = TaskNode(function=parse_listing, waits_for=[fetch], args_from={"raw": fetch})
+            persist = TaskNode(function=persist_listing, waits_for=[parse], args_from={"data": parse})
 
             config = WorkflowDefinitionConfig(
                 output=persist,  # Output type is PersistResult

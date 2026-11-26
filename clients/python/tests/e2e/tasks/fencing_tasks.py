@@ -24,13 +24,13 @@ RETRY_CODE = 'FENCE_FIRST_ATTEMPT'
 policy retries."""
 
 
-@app.task(task_name='e2e_fence_isolated_def')
+@app.task(name='e2e_fence_isolated_def')
 def fence_isolated_def(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
     """The token of this run, in a ``def`` body on an isolated child."""
     return Ok(runtime.fencing_token)
 
 
-@app.task(task_name='e2e_fence_isolated_async')
+@app.task(name='e2e_fence_isolated_async')
 async def fence_isolated_async(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
     """The token of this run, in an ``async def`` body on an isolated child."""
     await asyncio.sleep(0)
@@ -38,7 +38,7 @@ async def fence_isolated_async(runtime: TaskRuntime) -> Result[FencingToken, Tas
 
 
 @app.task(
-    task_name='e2e_fence_shared_async',
+    name='e2e_fence_shared_async',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -49,7 +49,7 @@ async def fence_shared_async(runtime: TaskRuntime) -> Result[FencingToken, TaskE
 
 
 @app.task(
-    task_name='e2e_fence_shared_thread',
+    name='e2e_fence_shared_thread',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -58,7 +58,7 @@ def fence_shared_thread(runtime: TaskRuntime) -> Result[FencingToken, TaskError]
     return Ok(runtime.fencing_token)
 
 
-@app.task(task_name='e2e_fence_reads_twice')
+@app.task(name='e2e_fence_reads_twice')
 async def fence_reads_twice(runtime: TaskRuntime) -> Result[list[FencingToken], TaskError]:
     """The token read at the start of the body and again after an await."""
     first = runtime.fencing_token
@@ -67,8 +67,8 @@ async def fence_reads_twice(runtime: TaskRuntime) -> Result[list[FencingToken], 
 
 
 @app.task(
-    task_name='e2e_fence_retry',
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=[RETRY_CODE]),
+    name='e2e_fence_retry',
+    retry_policy=RetryPolicy.fixed([1], retry_for=[RETRY_CODE]),
 )
 def fence_retry(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
     """Fail the first attempt with ``RETRY_CODE``; return the token of the

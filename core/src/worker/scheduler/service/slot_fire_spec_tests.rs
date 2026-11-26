@@ -77,9 +77,9 @@ async fn seed_earlier_slot_row(
 fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
     let options = TaskOptions {
         task_name: task_name.to_owned(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for: Some(vec![TaskErrorCode::from(
+        retry_for: Some(vec![TaskErrorCode::from(
             OperationalErrorCode::TaskException,
         )]),
         retry_policy: Some(

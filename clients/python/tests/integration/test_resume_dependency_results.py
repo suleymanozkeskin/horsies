@@ -69,17 +69,17 @@ async def test_resume_injects_real_dependency_results(
          no-app deserialization sentinel.
     """
 
-    @app.task(task_name='resume_dep_producer')
+    @app.task(name='resume_dep_producer')
     def producer() -> Result[int, TaskError]:
         return Ok(42)
 
-    @app.task(task_name='resume_dep_consumer')
+    @app.task(name='resume_dep_consumer')
     def consumer(*, value: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
         return Ok(1)
 
-    node_a: TaskNode[int] = TaskNode(fn=producer)
+    node_a: TaskNode[int] = TaskNode(function=producer)
     node_b: TaskNode[int] = TaskNode(
-        fn=consumer,
+        function=consumer,
         waits_for=[node_a],
         args_from={'value': node_a},
     )

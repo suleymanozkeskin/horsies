@@ -231,9 +231,9 @@ def _key(label: str) -> str:
 
 
 def _quorum(*, min_success: int | None, join: Any = 'quorum') -> None:
-    first = TaskNode(fn=_one, node_id='first')
+    first = TaskNode(function=_one, node_id='first')
     second = TaskNode(
-        fn=_one,
+        function=_one,
         node_id='second',
         waits_for=[first],
         join=join,
@@ -247,7 +247,7 @@ def _quorum_with_no_dependencies(*, min_success: int | None) -> None:
         name='hints_join_empty',
         tasks=[
             TaskNode(
-                fn=_one,
+                function=_one,
                 node_id='only',
                 join='quorum',
                 min_success=min_success,
@@ -261,7 +261,7 @@ def _no_tasks() -> None:
 
 
 def _blank_node_id() -> None:
-    WorkflowSpec(name='hints_blank', tasks=[TaskNode(fn=_one, node_id=' ')])
+    WorkflowSpec(name='hints_blank', tasks=[TaskNode(function=_one, node_id=' ')])
 
 
 def _skip_index_assignment(_spec: object) -> None:
@@ -270,18 +270,18 @@ def _skip_index_assignment(_spec: object) -> None:
 
 def _index_not_set() -> None:
     with patch.object(WorkflowSpec, '_assign_indices', _skip_index_assignment):
-        WorkflowSpec(name='hints_index', tasks=[TaskNode(fn=_one)])
+        WorkflowSpec(name='hints_index', tasks=[TaskNode(function=_one)])
 
 
 def _task_key() -> None:
-    TaskNode(fn=_one).key()
+    TaskNode(function=_one).key()
 
 
 def _subworkflow_key() -> None:
     class Child(WorkflowDefinition[int]):
         name = 'hints_key_child'
         definition_key = _key('key_child')
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
     SubWorkflowNode(workflow_def=Child).key()
 
@@ -289,7 +289,7 @@ def _subworkflow_key() -> None:
 def _no_name() -> None:
     class NoName(WorkflowDefinition[int]):
         definition_key = _key('no_name')
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
     NoName.build(_app)
 
@@ -305,7 +305,7 @@ def _no_nodes() -> None:
 def _no_definition_key() -> None:
     class NoKey(WorkflowDefinition[int]):
         name = 'hints_no_key'
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
     NoKey.build(_app)
 
@@ -316,24 +316,24 @@ def _duplicate_definition_key() -> None:
     class First(WorkflowDefinition[int]):
         name = 'hints_first'
         definition_key = shared
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
     class Second(WorkflowDefinition[int]):
         name = 'hints_second'
         definition_key = shared
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
 
 def _cached_spec() -> None:
     prebuilt: WorkflowSpec[Any] = WorkflowSpec(
         name='hints_cached',
-        tasks=[TaskNode(fn=_one)],
+        tasks=[TaskNode(function=_one)],
     )
 
     class Cached(WorkflowDefinition[Any]):
         name = 'hints_cached'
         definition_key = _key('cached')
-        only = TaskNode(fn=_one)
+        only = TaskNode(function=_one)
 
         @classmethod
         def build_with(cls, app: Any, **params: Any) -> WorkflowSpec[Any]:
@@ -347,7 +347,7 @@ def _value_built_past_validation() -> None:
     WorkflowSpec(
         name='hints_read_back',
         tasks=[
-            TaskNode(fn=_takes_note, kwargs={'note': _Note.model_construct(n='7')}),
+            TaskNode(function=_takes_note, kwargs={'note': _Note.model_construct(n='7')}),
         ],
     )
 
@@ -356,7 +356,7 @@ def _value_with_a_field_the_type_lacks() -> None:
     WorkflowSpec(
         name='hints_fields',
         tasks=[
-            TaskNode(fn=_takes_note, kwargs={'note': _SubNote(n=1, secret='kept')}),
+            TaskNode(function=_takes_note, kwargs={'note': _SubNote(n=1, secret='kept')}),
         ],
     )
 

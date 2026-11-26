@@ -15,7 +15,7 @@ Decorate a function with `@app.task()` to register it. Provide a task name and t
 from horsies import Err, Ok, Result, TaskError
 from .config import app
 
-@app.task("validate_order", queue_name="standard")
+@app.task("validate_order", queue="standard")
 def validate_order(
     *,
     order: Order,

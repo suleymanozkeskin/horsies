@@ -206,12 +206,12 @@ match FAULT:
         assert_never(unreachable)
 
 
-@app.task(task_name='e2e_telemetry_faults_healthcheck')
+@app.task(name='e2e_telemetry_faults_healthcheck')
 def healthcheck() -> Result[str, TaskError]:
     return Ok('ready')
 
 
-@app.task(task_name='e2e_telemetry_faults_add')
+@app.task(name='e2e_telemetry_faults_add')
 def add(*, left: int, right: int) -> Result[int, TaskError]:
     return Ok(left + right)
 

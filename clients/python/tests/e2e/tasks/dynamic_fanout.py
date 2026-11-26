@@ -36,23 +36,23 @@ FANOUT_TENANT_ID = 'tenant-1'
 FANOUT_SHARD_SUFFIXES = ('a', 'b', 'c')
 
 
-@app.task(task_name='e2e_fanout_ready')
+@app.task(name='e2e_fanout_ready')
 def ready_task() -> Result[str, TaskError]:
     """Readiness probe for the fan-out worker."""
     return Ok('ready')
 
 
-@app.task(task_name='e2e_fanout_list_shards')
+@app.task(name='e2e_fanout_list_shards')
 def list_shards(*, tenant_id: str) -> Result[list[str], TaskError]:
     return Ok([f'{tenant_id}-{suffix}' for suffix in FANOUT_SHARD_SUFFIXES])
 
 
-@app.task(task_name='e2e_fanout_count_shard_rows')
+@app.task(name='e2e_fanout_count_shard_rows')
 def count_shard_rows(*, shard: str) -> Result[int, TaskError]:
     return Ok(len(shard))
 
 
-@app.task(task_name='e2e_fanout_sum_shard_rows')
+@app.task(name='e2e_fanout_sum_shard_rows')
 def sum_shard_rows(
     *,
     shard_count: int,

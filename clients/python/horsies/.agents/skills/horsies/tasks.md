@@ -8,9 +8,9 @@ Covers all parameters, error codes, serialization rules, retry patterns, and pit
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 @app.task(
-    task_name: str,
+    name: str,
     *,
-    queue_name: str | None = None,
+    queue: str | None = None,
     retry_policy: RetryPolicy | None = None,
     exception_mapper: dict[type[BaseException], str] | None = None,
     default_unhandled_error_code: str | None = None,
@@ -23,13 +23,13 @@ def my_task(*, ...) -> Result[T, TaskError]: ...
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `task_name` | `str` | required | Unique identifier. An empty name raises `TaskDefinitionError(HRS-102)`. Duplicate names raise `RegistryError(HRS-301)`. |
-| `queue_name` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `HRS-200`); must match a configured queue in CUSTOM mode (unrecognized raises `HRS-103`). |
+| `name` | `str` | required | Unique identifier. An empty name raises `TaskDefinitionError(HRS-102)`. Duplicate names raise `RegistryError(HRS-301)`. |
+| `queue` | `str \| None` | `None` | Must be `None` in DEFAULT mode (raises `HRS-200`); must match a configured queue in CUSTOM mode (unrecognized raises `HRS-103`). |
 | `retry_policy` | `RetryPolicy \| None` | `None` | See RetryPolicy section. |
 | `exception_mapper` | `dict[type[BaseException], str] \| None` | `None` | Per-task exception-to-error-code mapping. See ExceptionMapper section. |
 | `default_unhandled_error_code` | `str \| None` | `None` | Override global default for unmapped exceptions. Must be `UPPER_SNAKE_CASE`. |
-| `error_codes` | `type[Enum] \| tuple[str, ...]` | `()` | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. They are the values of the task's `error_code` metric label besides the built-in codes and `undeclared`; another user code counts as `undeclared` there. The values of the task's `exception_mapper` and of `AppConfig.exception_mapper` are added with no second declaration. The task function keeps the codes in `task_error_codes`; `horsies check` lists them. |
-| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed, and after the child exits the task fails with `TASK_TIMEOUT`; retry is opt-in via `auto_retry_for`, and a retry never runs next to the killed attempt. A deadline that fires before user code starts requeues the task instead, also after the exit. If the child does not exit within 30 s of the kill, nothing is written and stale-task recovery takes the task; with stale RUNNING recovery off, the worker writes the row once it sees the exit (a stop ends that wait). Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
+| `error_codes` | `type[Enum] \| tuple[str, ...]` | `()` | The task's own error codes: an `Enum` class (its member values) or a tuple of strings. They are the values of the task's `error_code` metric label besides the built-in codes and `undeclared`; another user code counts as `undeclared` there. The values of the task's `exception_mapper` and of `AppConfig.exception_mapper` are added with no second declaration. The task function keeps the codes in `error_codes`; `horsies check` lists them. |
+| `timeout_ms` | `int \| None` | `None` | Execution time limit in ms, from 1000 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295, about 49.7 days, the Rust port's `u32` limit), measured from the moment a child takes the task; time waiting for a free child does not count. On expiry the child and the subprocesses in its session are SIGKILLed, and after the child exits the task fails with `TASK_TIMEOUT`; retry is opt-in via `retry_for`, and a retry never runs next to the killed attempt. A deadline that fires before user code starts requeues the task instead, also after the exit. If the child does not exit within 30 s of the kill, nothing is written and stale-task recovery takes the task; with stale RUNNING recovery off, the worker writes the row once it sees the exit (a stop ends that wait). Other tasks on the worker continue. Use it as a hang backstop, not as routine control flow. |
 | `execution` | `Execution` | `Execution.ISOLATED` | How a worker runs the task. `ISOLATED`: `def` or `async def`, `timeout_ms` optional. `SHARED_ASYNC`: `async def` only, `timeout_ms` required. `SHARED_THREAD`: `def` only, `timeout_ms` required. Every task row stores the class (`horsies_tasks.execution`), and a worker claims each class into the budget its claim plan routes it to (a worker with isolated children only runs every class isolated). |
 | `cancel_grace_ms` | `int \| None` | `None` | The time to stop after a cancel, from `MIN_CANCEL_GRACE_MS` (100) to `MAX_CANCEL_GRACE_MS` (10,000). `SHARED_ASYNC`: the time to the second cancel (at the deadline and after an operator cancel); `None` stores `DEFAULT_CANCEL_GRACE_MS` (1,000). `ISOLATED`: the time from an operator cancel to the kill of the child when the task has not stopped; `None` stores nothing, and the cancel is cooperative only. `SHARED_THREAD`: refused (`HRS-110`). The stored options hold the value in effect at send. |
 
@@ -42,9 +42,9 @@ def my_task(*, ...) -> Result[T, TaskError]: ...
 - The function is `def` or `async def`. A function that yields is rejected — `HRS-101`, for a generator and for an async generator.
 - `exception_mapper` keys must be `BaseException` subclasses, values must be `UPPER_SNAKE_CASE`.
 - `error_codes`: a value that is neither an `Enum` class nor a tuple raises `HRS-102`; a code that is empty, not `UPPER_SNAKE_CASE` or an exception class name raises `HRS-112`; a built-in code or `WORKFLOW_STOPPED` raises `HRS-212`; a code given twice raises `HRS-113`. One error per refused code; several come in one `MultipleValidationErrors`. `TaskError[C]` is generic in its custom code type, default `str`. A task with `error_codes=ChargeCode` that returns `Result[T, TaskError[ChargeCode]]` passes members (`ChargeCode.CARD_DECLINED`), and `TaskHandle.get()` and `args_from` parameters annotated `TaskOutcome[T, TaskError[ChargeCode]]` give members back; so do `WorkflowHandle.result_for(node)` and `WorkflowContext.result_for(node)` for a `TaskNode[T, ChargeCode]` (from `task.node()(...)`), the entries of `results()`, `tasks()` and an outputless `get()` map, and `app.get_result()` (typed `TaskError[Any]`). The error of a workflow from `WorkflowHandle.get()` and a `SubWorkflowNode` keep text: the failed node can be any task. `TaskError[E]` without `error_codes=E` raises `HRS-105`; a mapper or default code that `E` does not name raises `HRS-209`. A task that returns `TaskError` keeps `str` codes (`ChargeCode.CARD_DECLINED.value`).
-- `queue_name` cross-validated against `AppConfig.queue_mode`.
+- `queue` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
-- Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
+- Top-level `retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
 - `execution` rules, one code each, checked in this order (the first broken rule is reported): `SHARED_ASYNC` on a `def` function — `HRS-107`; `SHARED_THREAD` on an `async def` function — `HRS-108`; `SHARED_ASYNC` or `SHARED_THREAD` without `timeout_ms` — `HRS-109`; `cancel_grace_ms` with `SHARED_THREAD` — `HRS-110`; `cancel_grace_ms` outside 100 to 10,000 — `HRS-111`. A value that is not an `Execution` member raises `HRS-102`.
 - With `execution` written as a member, a type checker refuses the same declarations: the overloads require `timeout_ms` for a shared class and refuse `cancel_grace_ms` with `SHARED_THREAD`, and the decorator they return accepts only the function kind of the class. A class known only at run time requires `timeout_ms`.
 
@@ -58,7 +58,7 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 - An attempt ends when its coroutine has ended and no work that it started is alive: asyncio tasks it created (itself or through a library, also tasks built with `asyncio.Task(...)`) and default-executor calls (`to_thread`, `run_in_executor(None, ...)`, `getaddrinfo`). The child waits for that work before it reports the end. Work of the start hooks belongs to no task.
 - A return before the deadline (a value, or an exception that the mapper turns into a result) with that work alive keeps what it returned; the deadline no longer applies. The child waits up to G for the work, then cancels it in the cancel rounds below and closes (`CloseReason.LEFTOVER_WORK`; replaced after its tasks end). Work still alive 0.3 s after that cancel is stuck: the task keeps its seat, the worker kills the child when every task left in it is stuck, then writes what the task returned (no `TASK_TIMEOUT`, no isolated retry). Any other end of the child whose exit the worker saw (an out-of-memory kill, a crash) also writes what the task returned. One child log line per such task names the work (up to 10 coroutine names) and how it ended: within the grace, cancelled, or stuck.
 - Timeout (T = deadline, G = `cancel_grace_ms`): at T the child cancels the task. When the attempt has ended, the worker writes `TASK_TIMEOUT`, the retry and the workflow step; neighbours continue. A value returned after the cancel is still `TASK_TIMEOUT`. At T + G, when the attempt is alive: a second cancel to the task and its asyncio tasks, then 2 more rounds 0.1 s apart; the child closes (no new task, replaced after its tasks end). Still alive 0.3 s after the second cancel: stuck; it keeps its seat; the worker kills the child when every task left in it is stuck (no task has time left). Those tasks get `TASK_TIMEOUT`, and a retry runs isolated (`execution = 'ISOLATED'` written with the retry). The `TASK_TIMEOUT` `data` has `task_id`, `timeout_ms` and `cancel_end`: `RETURNED_AFTER_SIGNAL` (ended within G after the cancel at T), `DROPPED_AFTER_GRACE` (alive at T + G, second cancel sent) or `KILLED_WITH_CHILD` (ended when the worker killed the child, before the child reported the end).
-- Blocked loop: a watchdog thread reports a loop that has not turned for 5 s, with the task and source line; the worker kills the child at once. The task that held it: `TASK_BLOCKED_LOOP` (retry isolated); other tasks before their deadline: `NEIGHBOUR_BLOCKED_LOOP` (retry only if `auto_retry_for` names it); tasks past their deadline: `TASK_TIMEOUT`. C code that holds the GIL stops the watchdog too: the worker timer at `timeout_ms + cancel_grace_ms + 10 s` kills a child that reported neither the second cancel nor the end, and a second check at `+ 20.3 s` kills a child that reported that cancel (or the cancel of left work) but neither the task stuck nor its end; tasks past their deadline get `TASK_TIMEOUT`, others the crash path; only a task already reported stuck retries isolated (at every kill by the worker whose exit was seen). A refusal still in flight 145 s after its placement kills its child; its writes are bounded below that. A crash with no known cause: every task `WORKER_CRASHED` (or its retry).
+- Blocked loop: a watchdog thread reports a loop that has not turned for 5 s, with the task and source line; the worker kills the child at once. The task that held it: `TASK_BLOCKED_LOOP` (retry isolated); other tasks before their deadline: `NEIGHBOUR_BLOCKED_LOOP` (retry only if `retry_for` names it); tasks past their deadline: `TASK_TIMEOUT`. C code that holds the GIL stops the watchdog too: the worker timer at `timeout_ms + cancel_grace_ms + 10 s` kills a child that reported neither the second cancel nor the end, and a second check at `+ 20.3 s` kills a child that reported that cancel (or the cancel of left work) but neither the task stuck nor its end; tasks past their deadline get `TASK_TIMEOUT`, others the crash path; only a task already reported stuck retries isolated (at every kill by the worker whose exit was seen). A refusal still in flight 145 s after its placement kills its child; its writes are bounded below that. A crash with no known cause: every task `WORKER_CRASHED` (or its retry).
 - Author rules: let `CancelledError` propagate (catch only to clean up and re-raise; anyio shielded scopes do not stop a `Task.cancel()`); give each client call its own timeout below the task timeout (for `asyncio.to_thread()`, a cancel never stops the thread); open long-lived clients in `@app.on_shared_async_child_start` (a client opened in a task carries that task's mark: its background work is cancelled after the task returns, and each task that opens it costs one child restart); do not block the loop; send with `send_async()`; await what you start; `timeout_ms` is required; module state is shared by the tasks of the child.
 - The RUNNING update and the finalizing marker run on an async connection pool of the child, so they do not block the loop. The worker process writes the runner heartbeats for every task of the child.
 - Recycling: `SharedRecycle.after_per_seat` (`tasks × seats` tasks) or `above` (RSS after a task). The child closes: no new task, its tasks finish, then a new child starts.
@@ -230,7 +230,7 @@ class TaskError(BaseModel):
     exception: dict[str, Any] | BaseException | None = None
 ```
 
-`error_code` is required and must not be null: `auto_retry_for` and outcome routing read it. `message` is optional, and domain errors typically set it. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
+`error_code` is required and must not be null: `retry_for` and outcome routing read it. `message` is optional, and domain errors typically set it. `data` carries structured context. `exception` populated by the library for unhandled exceptions.
 
 **Construction rule**: reserved built-in code values must be passed as enum members, not raw strings. User-defined codes must be plain `str`, not `str, Enum` subclasses.
 
@@ -317,7 +317,7 @@ Terminal lifecycle outcomes for tasks and workflows:
 <!-- members: OutcomeCode -->
 - `TASK_CANCELLED` — task was cancelled
 - `TASK_EXPIRED` — task's `good_until` deadline passed before execution started (PENDING or CLAIMED)
-- `TASK_TIMEOUT` — task exceeded its `timeout_ms`; child process killed, retry opt-in via `auto_retry_for`
+- `TASK_TIMEOUT` — task exceeded its `timeout_ms`; child process killed, retry opt-in via `retry_for`
 - `WORKFLOW_PAUSED` — workflow is paused
 - `WORKFLOW_EXPIRED` — a paused workflow passed `paused_workflow_auto_cancel_after` and expired; `data` holds the policy name and the age
 - `WORKFLOW_FAILED` — workflow has failed
@@ -487,7 +487,7 @@ When used as a kwarg value in the second call of `.node()()`, the `NodeFactory` 
 producer = produce.node()(value=42)
 consumer = consume.node()(data=from_node(producer))
 # Equivalent to:
-# TaskNode(fn=consume, args_from={"data": producer}, waits_for=[producer])
+# TaskNode(function=consume, args_from={"data": producer}, waits_for=[producer])
 ```
 
 Raises `WorkflowValidationError(HRS-008)` if argument is not a `TaskNode` or `SubWorkflowNode`.
@@ -633,11 +633,11 @@ Always use the class methods:
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-# Fixed backoff — intervals length defines max_retries
+# Fixed backoff — the length of intervals_seconds defines max_retries
 RetryPolicy.fixed(
-    intervals: list[int],                              # seconds, e.g. [60, 300, 900]
+    intervals_seconds: list[int],                      # e.g. [60, 300, 900]
     *,
-    auto_retry_for: list[str | BuiltInTaskCode],        # required
+    retry_for: list[str | BuiltInTaskCode],            # required
     jitter: bool = True,
 )
 
@@ -646,7 +646,7 @@ RetryPolicy.exponential(
     base_seconds: int,
     *,
     max_retries: int,
-    auto_retry_for: list[str | BuiltInTaskCode],        # required
+    retry_for: list[str | BuiltInTaskCode],            # required
     jitter: bool = True,
     max_delay_seconds: int | None = None,              # cap on each delay; None = no cap
 )
@@ -654,17 +654,17 @@ RetryPolicy.exponential(
 
 ### Validation rules
 
-- `fixed`: `intervals` must have 1–20 entries. Each entry is 1–86400 seconds. The number of entries is the number of retries.
+- `fixed`: `intervals_seconds` must have 1–20 entries. Each entry is 1–86400 seconds. The number of entries is the number of retries.
 - `exponential`: `base_seconds` is 1–86400. `max_retries` is 1–20.
 - `max_delay_seconds` (`exponential` only): `None` or an integer >= 1. The cap applies last, after backoff and jitter.
-- `auto_retry_for` must have at least 1 entry. Each entry must be `UPPER_SNAKE_CASE` — exception class names like `"TimeoutError"` are rejected.
+- `retry_for` must have at least 1 entry. Each entry must be `UPPER_SNAKE_CASE` — exception class names like `"TimeoutError"` are rejected.
 - A rule violation raises `pydantic.ValidationError` (a `ValueError` subclass) at the constructor call.
 
 ### Jitter
 
 `jitter=True` (default) adds a random 0–25% to each delay; it never shortens a delay. Prevents thundering herd. Disable only in tests.
 
-### `auto_retry_for` valid values
+### `retry_for` valid values
 
 - User-defined domain codes: `"RATE_LIMITED"`, `"DEADLOCK"`, `"SERVICE_UNAVAILABLE"`
 - `BuiltInTaskCode` members that a task failure produces, for example `OperationalErrorCode.UNHANDLED_EXCEPTION`, `OperationalErrorCode.WORKER_CRASHED`, `OutcomeCode.TASK_TIMEOUT`
@@ -677,13 +677,13 @@ Retries only trigger when the error code on the stored result matches and `retry
 <!-- check: skip partial -- uses a name before the page defines it -->
 ```python
 # 3 fixed retries: 1min, 5min, 15min
-RetryPolicy.fixed([60, 300, 900], auto_retry_for=["RATE_LIMITED"])
+RetryPolicy.fixed([60, 300, 900], retry_for=["RATE_LIMITED"])
 
 # 5 exponential retries: 30s, 60s, 120s, 240s, 480s
-RetryPolicy.exponential(base_seconds=30, max_retries=5, auto_retry_for=["TIMEOUT"])
+RetryPolicy.exponential(base_seconds=30, max_retries=5, retry_for=["TIMEOUT"])
 
 # Quick deadlock retries, no jitter
-RetryPolicy.fixed([1, 2, 5], auto_retry_for=["DEADLOCK"], jitter=False)
+RetryPolicy.fixed([1, 2, 5], retry_for=["DEADLOCK"], jitter=False)
 ```
 
 ## `ExceptionMapper`
@@ -826,16 +826,16 @@ def good(*, x: int) -> Result[dict[str, int], TaskError]:
     return Ok({"x": x})
 ```
 
-### `auto_retry_for` at top level
+### `retry_for` at top level
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — rejected at definition time
-@app.task("t", auto_retry_for=["TIMEOUT"])
+@app.task("t", retry_for=["TIMEOUT"])
 def t() -> Result[str, TaskError]: ...
 
 # CORRECT — goes inside RetryPolicy
-@app.task("t", retry_policy=RetryPolicy.fixed([60], auto_retry_for=["TIMEOUT"]))
+@app.task("t", retry_policy=RetryPolicy.fixed([60], retry_for=["TIMEOUT"]))
 def t() -> Result[str, TaskError]: ...
 ```
 
@@ -880,12 +880,12 @@ match handle.get(timeout_ms=5000):
         ...
 ```
 
-### `queue_name` in DEFAULT mode
+### `queue` in DEFAULT mode
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # WRONG — raises HRS-200 at definition time if app uses QueueMode.DEFAULT
-@app.task("t", queue_name="critical")
+@app.task("t", queue="critical")
 def t() -> Result[str, TaskError]: ...
 ```
 

@@ -206,7 +206,7 @@ async fn test_task_timeout_fails_with_task_timeout() {
 
 /// Old Rust `test_task_timeout_retry_opt_in`; Python:
 /// `test_task_timeout.py::test_timeout_fails_task_and_worker_survives` with
-/// `TASK_TIMEOUT` in `auto_retry_for`.
+/// `TASK_TIMEOUT` in `retry_for`.
 #[tokio::test]
 #[serial]
 async fn test_task_timeout_retry_opt_in() {

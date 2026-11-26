@@ -157,9 +157,9 @@ class ETLPipeline(WorkflowDefinition[SaveResult]):
     name = "etl_pipeline"
     definition_key = "myapp.etl_pipeline.v1"
 
-    fetch = TaskNode(fn=fetch_data)
-    process = TaskNode(fn=process_data, waits_for=[fetch], args_from={"data": fetch})
-    save = TaskNode(fn=save_result, waits_for=[process], args_from={"result": process})
+    fetch = TaskNode(function=fetch_data)
+    process = TaskNode(function=process_data, waits_for=[fetch], args_from={"data": fetch})
+    save = TaskNode(function=save_result, waits_for=[process], args_from={"result": process})
 
     config = WorkflowDefinitionConfig(
         output=save,

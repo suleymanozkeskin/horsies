@@ -114,10 +114,10 @@ def _bundle_discount_cents(order: Order) -> int:
 
 @app.task(
     'apply_promotions',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def apply_promotions(*, order_id: str) -> Result[PromotionOutcome, TaskError]:
@@ -125,7 +125,7 @@ def apply_promotions(*, order_id: str) -> Result[PromotionOutcome, TaskError]:
 
     Sent standalone per order, not as a workflow node, so its failures land in
     the task list beside the workflow runs. `UNHANDLED_EXCEPTION` is absent
-    from `auto_retry_for` on purpose: a crash that reproduces every time is
+    from `retry_for` on purpose: a crash that reproduces every time is
     worth looking at, not worth retrying.
     """
     simulate.perform(tuning.APPLY_PROMOTIONS_WORK, order_id, 'promotions')
@@ -170,11 +170,11 @@ def _tier_name(lifetime_points: int) -> str:
 
 @app.task(
     'compute_loyalty_points',
-    queue_name=QUEUE_ANALYTICS,
+    queue=QUEUE_ANALYTICS,
     default_unhandled_error_code=LOYALTY_ENGINE_BUG,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def compute_loyalty_points(
@@ -213,10 +213,10 @@ def compute_loyalty_points(
 
 @app.task(
     'publish_cdn',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def publish_cdn(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError]:
@@ -238,10 +238,10 @@ def publish_cdn(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError]:
 
 @app.task(
     'publish_origin',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def publish_origin(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError]:
@@ -263,10 +263,10 @@ def publish_origin(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError
 
 @app.task(
     'prewarm_search',
-    queue_name=QUEUE_ANALYTICS,
+    queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def prewarm_search(*, campaign_id: str) -> Result[SearchPrewarm, TaskError]:
@@ -296,10 +296,10 @@ def prewarm_search(*, campaign_id: str) -> Result[SearchPrewarm, TaskError]:
 
 @app.task(
     'warm_cache_edge',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def warm_cache_edge(*, campaign_id: str) -> Result[CacheWarm, TaskError]:
@@ -325,10 +325,10 @@ def warm_cache_edge(*, campaign_id: str) -> Result[CacheWarm, TaskError]:
     # sends at ~2.5 s through 2 slots cannot clear a 45 s deadline, so the tail
     # is never claimed. On an 8-slot queue the whole burst drains in ~25 s and
     # nothing expires.
-    queue_name=QUEUE_ANALYTICS,
+    queue=QUEUE_ANALYTICS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def update_price(*, sku: str, campaign_id: str) -> Result[PriceUpdate, TaskError]:

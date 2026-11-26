@@ -58,14 +58,14 @@ class Restock(WorkflowDefinition[RestockPlan]):
         """Build a fresh spec with one feed node per supplier."""
         feeds = [
             TaskNode(
-                fn=sync_supplier_feed,
+                function=sync_supplier_feed,
                 kwargs={'supplier': supplier},
                 node_id=_feed_node_id(supplier),
             )
             for supplier in suppliers
         ]
         aggregate = TaskNode(
-            fn=update_stock_levels,
+            function=update_stock_levels,
             kwargs={'feed_node_ids': [_feed_node_id(s) for s in suppliers]},
             waits_for=feeds,
             workflow_context_from=feeds,

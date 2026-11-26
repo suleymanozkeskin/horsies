@@ -29,16 +29,16 @@ use crate::core::task::error::check_error_code_text;
 /// `max_retries` of a stored policy that leaves the key out (Python
 /// `RetryPolicy.max_retries`).
 const DEFAULT_POLICY_MAX_RETRIES: u32 = 3;
-/// `intervals` of a stored policy that leaves the key out (Python
-/// `RetryPolicy.intervals`).
+/// `intervals_seconds` of a stored policy that leaves the key out (Python
+/// `RetryPolicy.intervals_seconds`).
 const DEFAULT_POLICY_INTERVALS: [u32; 3] = [60, 300, 900];
 /// `jitter` of a stored policy that leaves the key out (Python
 /// `RetryPolicy.jitter`).
 const DEFAULT_POLICY_JITTER: bool = true;
-/// The most items of `intervals` (Python `RetryPolicy.intervals`,
+/// The most items of `intervals_seconds` (Python `RetryPolicy.intervals_seconds`,
 /// `max_length=20`).
 const MAX_POLICY_INTERVALS: usize = 20;
-/// The fewest items of `intervals` and of `auto_retry_for` (Python
+/// The fewest items of `intervals_seconds` and of `retry_for` (Python
 /// `min_length=1`).
 const MIN_POLICY_LIST_ITEMS: usize = 1;
 /// The entries that a refusal text writes; the text then counts the rest
@@ -48,13 +48,13 @@ const MAX_VALIDATION_ERRORS_IN_TEXT: usize = 10;
 /// stored policy is refused (`extra='forbid'`).
 const POLICY_FIELDS: [&str; 6] = [
     "max_retries",
-    "intervals",
+    "intervals_seconds",
     "backoff_strategy",
     "jitter",
     "max_delay_seconds",
-    "auto_retry_for",
+    "retry_for",
 ];
-/// pydantic's location label of the enum member of an `auto_retry_for` item
+/// pydantic's location label of the enum member of a `retry_for` item
 /// (`Union[str, BuiltInTaskCode]`, Python `core/models/tasks.py:58-63`).
 const BUILT_IN_CODE_UNION_LABEL: &str = "union[str-enum[OperationalErrorCode],str-enum[ContractCode],str-enum[RetrievalCode],str-enum[OutcomeCode]]";
 /// The Python classes of the built-in code families, in the order of
@@ -425,28 +425,31 @@ fn summary(entries: &[Entry]) -> String {
 /// The fields of a policy whose field validation passed.
 struct PolicyFields {
     max_retries: u32,
-    intervals: Vec<u32>,
+    intervals_seconds: Vec<u32>,
     backoff: Backoff,
     jitter: bool,
     delay_cap: DelayCap,
-    auto_retry_for: Vec<String>,
+    retry_for: Vec<String>,
 }
 
 /// Validate each field in declaration order, then refuse each key that is
 /// not a field, in the order of the text. Every error is an entry, as
 /// pydantic collects them. A field the policy leaves out takes its default;
-/// `auto_retry_for` has none.
+/// `retry_for` has none.
 fn read_fields(members: &RawMembers<'_>) -> Result<PolicyFields, Vec<Entry>> {
     let mut entries: Vec<Entry> = Vec::new();
     let max_retries = keep_entries(&mut entries, read_max_retries(members.get("max_retries")));
-    let intervals = keep_entries(&mut entries, read_intervals(members.get("intervals")));
+    let intervals_seconds = keep_entries(
+        &mut entries,
+        read_intervals(members.get("intervals_seconds")),
+    );
     let backoff = keep_entries(&mut entries, read_backoff(members.get("backoff_strategy")));
     let jitter = keep_entries(&mut entries, read_jitter(members.get("jitter")));
     let delay_cap = keep_entries(
         &mut entries,
         read_delay_cap(members.get("max_delay_seconds")),
     );
-    let auto_retry_for = keep_entries(&mut entries, read_codes(members.get("auto_retry_for")));
+    let retry_for = keep_entries(&mut entries, read_codes(members.get("retry_for")));
     entries.extend(
         members
             .members
@@ -456,28 +459,28 @@ fn read_fields(members: &RawMembers<'_>) -> Result<PolicyFields, Vec<Entry>> {
     );
     match (
         max_retries,
-        intervals,
+        intervals_seconds,
         backoff,
         jitter,
         delay_cap,
-        auto_retry_for,
+        retry_for,
         entries.is_empty(),
     ) {
         (
             Some(max_retries),
-            Some(intervals),
+            Some(intervals_seconds),
             Some(backoff),
             Some(jitter),
             Some(delay_cap),
-            Some(auto_retry_for),
+            Some(retry_for),
             true,
         ) => Ok(PolicyFields {
             max_retries,
-            intervals,
+            intervals_seconds,
             backoff,
             jitter,
             delay_cap,
-            auto_retry_for,
+            retry_for,
         }),
         _ => {
             assert!(
@@ -570,7 +573,7 @@ fn read_max_retries(raw: Option<&RawValue>) -> Result<u32, Vec<Entry>> {
     }
 }
 
-/// `intervals`: a list of 1 to [`MAX_POLICY_INTERVALS`] ints, each from 1 to
+/// `intervals_seconds`: a list of 1 to [`MAX_POLICY_INTERVALS`] ints, each from 1 to
 /// [`MAX_RETRY_INTERVAL_SECONDS`]. pydantic stops at the item past the
 /// longest list and keeps only the `too_long` entry; the `too_short` entry
 /// comes when no item has an entry.
@@ -585,18 +588,18 @@ fn read_intervals(raw: Option<&RawValue>) -> Result<Vec<u32>, Vec<Entry>> {
             | PythonValue::Float
             | PythonValue::Str(_)
             | PythonValue::Dict,
-        ) => return Err(vec![Entry::at("intervals", EntryError::ListType)]),
+        ) => return Err(vec![Entry::at("intervals_seconds", EntryError::ListType)]),
     };
     if items.len() > MAX_POLICY_INTERVALS {
         return Err(vec![Entry::at(
-            "intervals",
+            "intervals_seconds",
             EntryError::TooLong {
                 max_length: MAX_POLICY_INTERVALS,
                 actual_length: items.len(),
             },
         )]);
     }
-    let mut intervals: Vec<u32> = Vec::with_capacity(items.len());
+    let mut intervals_seconds: Vec<u32> = Vec::with_capacity(items.len());
     let mut entries: Vec<Entry> = Vec::new();
     for (position, item) in items.iter().enumerate() {
         match bounded_int(
@@ -604,11 +607,11 @@ fn read_intervals(raw: Option<&RawValue>) -> Result<Vec<u32>, Vec<Entry>> {
             LowerBound::AboveZero,
             MAX_RETRY_INTERVAL_SECONDS,
         ) {
-            Ok(seconds) => intervals.push(seconds),
-            Err(error) => entries.push(Entry::at(&format!("intervals.{position}"), error)),
+            Ok(seconds) => intervals_seconds.push(seconds),
+            Err(error) => entries.push(Entry::at(&format!("intervals_seconds.{position}"), error)),
         }
     }
-    list_or_entries("intervals", intervals, entries)
+    list_or_entries("intervals_seconds", intervals_seconds, entries)
 }
 
 /// The items of a list field when none has an entry and there are at least
@@ -686,13 +689,13 @@ fn read_delay_cap(raw: Option<&RawValue>) -> Result<DelayCap, Vec<Entry>> {
     }
 }
 
-/// `auto_retry_for`: a list of at least [`MIN_POLICY_LIST_ITEMS`] texts. An
+/// `retry_for`: a list of at least [`MIN_POLICY_LIST_ITEMS`] texts. An
 /// item that is not a text fails each member of `Union[str,
 /// BuiltInTaskCode]`: one entry for `str`, one per built-in code family (a
 /// stored value is never an enum instance). The text bounds the item count.
 fn read_codes(raw: Option<&RawValue>) -> Result<Vec<String>, Vec<Entry>> {
     let items = match raw.map(python_value) {
-        None => return Err(vec![Entry::at("auto_retry_for", EntryError::Missing)]),
+        None => return Err(vec![Entry::at("retry_for", EntryError::Missing)]),
         Some(PythonValue::List(items)) => items,
         Some(
             PythonValue::None
@@ -701,7 +704,7 @@ fn read_codes(raw: Option<&RawValue>) -> Result<Vec<String>, Vec<Entry>> {
             | PythonValue::Float
             | PythonValue::Str(_)
             | PythonValue::Dict,
-        ) => return Err(vec![Entry::at("auto_retry_for", EntryError::ListType)]),
+        ) => return Err(vec![Entry::at("retry_for", EntryError::ListType)]),
     };
     let mut codes: Vec<String> = Vec::with_capacity(items.len());
     let mut entries: Vec<Entry> = Vec::new();
@@ -716,18 +719,18 @@ fn read_codes(raw: Option<&RawValue>) -> Result<Vec<String>, Vec<Entry>> {
             | PythonValue::Dict => entries.extend(not_a_code_entries(position)),
         }
     }
-    list_or_entries("auto_retry_for", codes, entries)
+    list_or_entries("retry_for", codes, entries)
 }
 
-/// The entries of an `auto_retry_for` item that is not a text.
+/// The entries of a `retry_for` item that is not a text.
 fn not_a_code_entries(position: usize) -> Vec<Entry> {
     let mut entries = vec![Entry::at(
-        &format!("auto_retry_for.{position}.str"),
+        &format!("retry_for.{position}.str"),
         EntryError::StringType,
     )];
     entries.extend(BUILT_IN_CODE_FAMILIES.into_iter().map(|family| {
         Entry::at(
-            &format!("auto_retry_for.{position}.{BUILT_IN_CODE_UNION_LABEL}.str-enum[{family}]"),
+            &format!("retry_for.{position}.{BUILT_IN_CODE_UNION_LABEL}.str-enum[{family}]"),
             EntryError::IsInstanceOf(family),
         )
     }));
@@ -742,39 +745,39 @@ fn not_a_code_entries(position: usize) -> Vec<Entry> {
 /// validation (`validate_strategy_consistency`, then
 /// `validate_error_code_fields`, `core/models/tasks.py:569-600`).
 fn rule_from_fields(fields: PolicyFields) -> Result<RetryRule, Entry> {
-    let interval_count = fields.intervals.len();
+    let interval_count = fields.intervals_seconds.len();
     let max_retries = fields.max_retries as usize;
     match fields.backoff {
         Backoff::Fixed if interval_count != max_retries => {
             return Err(Entry::of_model(format!(
-                "Fixed backoff strategy requires intervals length ({interval_count}) to match \
-                 max_retries ({max_retries}). Either adjust intervals list or use exponential \
-                 strategy."
+                "Fixed backoff strategy requires intervals_seconds length ({interval_count}) to \
+                 match max_retries ({max_retries}). Either adjust intervals_seconds list or use \
+                 exponential strategy."
             )))
         }
         Backoff::Exponential if interval_count != 1 => {
             return Err(Entry::of_model(format!(
                 "Exponential backoff strategy requires exactly one base interval, got \
-                 {interval_count} intervals. Use intervals=[base_seconds] for exponential \
+                 {interval_count} intervals. Use intervals_seconds=[base_seconds] for exponential \
                  backoff."
             )))
         }
         Backoff::Fixed | Backoff::Exponential => {}
     }
-    if let Some(refused) = fields.auto_retry_for.iter().find_map(|code| {
+    if let Some(refused) = fields.retry_for.iter().find_map(|code| {
         check_error_code_text(code)
             .err()
-            .map(|refusal| refusal.message("auto_retry_for", code))
+            .map(|refusal| refusal.message("retry_for", code))
     }) {
         return Err(Entry::of_model(refused));
     }
     Ok(RetryRule {
         max_retries: fields.max_retries,
-        intervals: fields.intervals,
+        intervals_seconds: fields.intervals_seconds,
         backoff: fields.backoff,
         jitter: fields.jitter,
         delay_cap: fields.delay_cap,
-        auto_retry_for: fields.auto_retry_for,
+        retry_for: fields.retry_for,
     })
 }
 

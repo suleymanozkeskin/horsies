@@ -484,9 +484,9 @@ async fn a_scheduled_run_stores_the_timeout_and_retry_policy_of_its_task() {
     schedule.task_name = name.clone();
     let options = crate::core::TaskOptions {
         task_name: name.clone(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for: Some(vec![crate::core::TaskErrorCode::from(
+        retry_for: Some(vec![crate::core::TaskErrorCode::from(
             crate::core::OperationalErrorCode::TaskException,
         )]),
         retry_policy: Some(crate::core::RetryPolicy::fixed(vec![60, 120], true).unwrap()),
@@ -527,7 +527,7 @@ async fn a_scheduled_run_stores_the_execution_and_cancel_grace_of_its_task() {
     for (execution, cancel_grace_ms, stored_execution) in [
         (
             crate::core::task::Execution::SharedAsync,
-            Some(crate::core::CancelGraceMs::new(2_000).expect("2000 ms is a grace")),
+            Some(2_000),
             "SHARED_ASYNC",
         ),
         (
@@ -541,9 +541,9 @@ async fn a_scheduled_run_stores_the_execution_and_cancel_grace_of_its_task() {
         schedule.task_name = name.clone();
         let options = crate::core::TaskOptions {
             task_name: name.clone(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: Some(5_000),
             execution,
@@ -904,9 +904,9 @@ fn the_start_write_holds_the_changed_digests_and_not_the_unchanged_ones() {
 fn the_command_of_a_schedule_is_the_send_command_of_its_texts() {
     let options_text = crate::core::TaskOptions {
         task_name: "my_task".to_owned(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for: None,
+        retry_for: None,
         retry_policy: None,
         timeout_ms: Some(30_000),
         execution: crate::core::task::Execution::Isolated,

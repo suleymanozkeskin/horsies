@@ -8,17 +8,17 @@ from horsies.core.types.result import Ok, Result
 from tests.e2e.tasks.instance_custom import app
 
 
-@app.task(task_name='e2e_high', queue_name='high')
+@app.task(name='e2e_high', queue='high')
 def high_task() -> Result[str, TaskError]:
     return Ok('high')
 
 
-@app.task(task_name='e2e_normal', queue_name='normal')
+@app.task(name='e2e_normal', queue='normal')
 def normal_task() -> Result[str, TaskError]:
     return Ok('normal')
 
 
-@app.task(task_name='e2e_low', queue_name='low')
+@app.task(name='e2e_low', queue='low')
 def low_task() -> Result[str, TaskError]:
     import time
 
@@ -26,7 +26,7 @@ def low_task() -> Result[str, TaskError]:
     return Ok('low')
 
 
-@app.task(task_name='e2e_custom_slow', queue_name='high')
+@app.task(name='e2e_custom_slow', queue='high')
 def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Task that sleeps for specified duration (for custom queue tests)."""
     import time

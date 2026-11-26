@@ -255,7 +255,7 @@ async def thread_app(app: Horsies, broker: PostgresBroker) -> Horsies:
     of the suite has fewer connections than ``SEATS``
     (``TEST_CHILD_POOL``)."""
 
-    @app.task(task_name=TASK_NAME, execution=Execution.SHARED_THREAD, timeout_ms=30_000)
+    @app.task(name=TASK_NAME, execution=Execution.SHARED_THREAD, timeout_ms=30_000)
     def thread_lifecycle_sleep() -> Result[str, TaskError]:
         started = time.time()
         time.sleep(BODY_S)

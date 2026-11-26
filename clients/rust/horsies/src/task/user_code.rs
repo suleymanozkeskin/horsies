@@ -118,7 +118,7 @@ pub(crate) const fn is_built_in_code(text: &str) -> bool {
     false
 }
 
-/// Whether `text` may stand in `auto_retry_for` of a task whose code type
+/// Whether `text` may stand in `retry_for` of a task whose code type
 /// has `user_codes`: a built-in code, or one of `user_codes`. The task
 /// attribute asserts it for each entry at compile time.
 pub(crate) const fn is_retry_code(text: &str, user_codes: &[&str]) -> bool {
@@ -135,7 +135,7 @@ pub(crate) const fn is_retry_code(text: &str, user_codes: &[&str]) -> bool {
     false
 }
 
-/// The stored retry code of an `auto_retry_for` entry: the built-in code
+/// The stored retry code of a `retry_for` entry: the built-in code
 /// of that name, else the user code. The task attribute asserted at
 /// compile time that `text` is one of the two, and `E::CODES` holds only
 /// user codes (the registration refuses a set with another name), so a
@@ -145,7 +145,7 @@ pub(crate) fn stored_retry_code(text: &str) -> horsies_core::TaskErrorCode {
         Some(code) => horsies_core::TaskErrorCode::BuiltIn(code),
         None => {
             horsies_core::TaskErrorCode::User(UserCode::parse(text).unwrap_or_else(|refused| {
-                panic!("auto_retry_for code {text:?} is not a retry code: {refused}")
+                panic!("retry_for code {text:?} is not a retry code: {refused}")
             }))
         }
     }

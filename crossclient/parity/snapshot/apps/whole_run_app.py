@@ -105,7 +105,7 @@ PAST_THE_DEADLINE_S: Final = 30.0
 SHARED_TIMEOUT_MS: Final = 30_000
 """The deadline of a shared task that ends in time."""
 
-RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], auto_retry_for=['TRANSIENT'])
+RETRY_POLICY: Final = RetryPolicy.fixed([1, 1], retry_for=['TRANSIENT'])
 """Two retries one second apart for the code `TRANSIENT`."""
 
 
@@ -201,19 +201,19 @@ config = AppConfig(
 app = Horsies(config)
 
 
-@app.task(task_name='whole_run.double')
+@app.task(name='whole_run.double')
 def double(*, value: int) -> Result[int, TaskError]:
     """A plain success."""
     return Ok(value * 2)
 
 
-@app.task(task_name='whole_run.refuse')
+@app.task(name='whole_run.refuse')
 def refuse(*, value: int) -> Result[int, TaskError]:
     """A task error with no retry."""
     return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
 
 
-@app.task(task_name='whole_run.transient', retry_policy=RETRY_POLICY)
+@app.task(name='whole_run.transient', retry_policy=RETRY_POLICY)
 def transient(*, value: int) -> Result[int, TaskError]:
     """A task error that the policy retries until the retries run out."""
     return Err(
@@ -221,21 +221,21 @@ def transient(*, value: int) -> Result[int, TaskError]:
     )
 
 
-@app.task(task_name='whole_run.sleep_past_deadline', timeout_ms=SHORT_TIMEOUT_MS)
+@app.task(name='whole_run.sleep_past_deadline', timeout_ms=SHORT_TIMEOUT_MS)
 def sleep_past_deadline() -> Result[str, TaskError]:
     """An isolated task that the parent kills at its deadline."""
     time.sleep(PAST_THE_DEADLINE_S)
     return Ok('late')
 
 
-@app.task(task_name='whole_run.crash')
+@app.task(name='whole_run.crash')
 def crash() -> Result[str, TaskError]:
     """A child that exits in the middle of its task."""
     os._exit(9)
 
 
 @app.task(
-    task_name='whole_run.double_async',
+    name='whole_run.double_async',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -246,7 +246,7 @@ async def double_async(*, value: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='whole_run.async_past_deadline',
+    name='whole_run.async_past_deadline',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
@@ -257,7 +257,7 @@ async def async_past_deadline() -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='whole_run.double_thread',
+    name='whole_run.double_thread',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -267,7 +267,7 @@ def double_thread(*, value: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='whole_run.async_neighbour',
+    name='whole_run.async_neighbour',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -280,10 +280,10 @@ async def async_neighbour() -> Result[str, TaskError]:
 
 
 @app.task(
-    task_name='whole_run.blocks_loop_once',
+    name='whole_run.blocks_loop_once',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
-    retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_BLOCKED_LOOP']),
+    retry_policy=RetryPolicy.fixed([1], retry_for=['TASK_BLOCKED_LOOP']),
 )
 async def blocks_loop_once() -> Result[str, TaskError]:
     """The first attempt waits until its neighbour runs, then blocks the
@@ -307,7 +307,7 @@ async def _left_work() -> None:
     _write_marker(LEFT_WORK_ENDED)
 
 
-@app.task(task_name='whole_run.leaves_work')
+@app.task(name='whole_run.leaves_work')
 async def leaves_work(*, value: int) -> Result[int, TaskError]:
     """An isolated async task that starts work and returns without awaiting
     it: `body_returned`, then `left_work_ended`."""
@@ -316,7 +316,7 @@ async def leaves_work(*, value: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='whole_run.sleep_then_double',
+    name='whole_run.sleep_then_double',
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
@@ -328,7 +328,7 @@ async def sleep_then_double(*, value: int) -> Result[int, TaskError]:
 
 
 @app.task(
-    task_name='whole_run.thread_past_deadline',
+    name='whole_run.thread_past_deadline',
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
@@ -339,7 +339,7 @@ def thread_past_deadline() -> Result[str, TaskError]:
     return Ok('late')
 
 
-@app.task(task_name='whole_run.waits_for_release')
+@app.task(name='whole_run.waits_for_release')
 def waits_for_release() -> Result[str, TaskError]:
     """The first node of the pause chain: it runs until the runner paused
     the workflow and wrote the release marker."""
@@ -367,7 +367,7 @@ class ChildChain(WorkflowDefinition[int]):
     def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
         cls, app: Horsies, value: int,
     ) -> WorkflowSpec[int]:
-        child = TaskNode(fn=double, kwargs={'value': value})
+        child = TaskNode(function=double, kwargs={'value': value})
         return app.workflow(
             name=cls.name,
             tasks=[child],
@@ -378,7 +378,7 @@ class ChildChain(WorkflowDefinition[int]):
         )
 
 
-_chain_first = TaskNode(fn=double, kwargs={'value': 1}, node_id='first')
+_chain_first = TaskNode(function=double, kwargs={'value': 1}, node_id='first')
 _chain_sub = SubWorkflowNode(
     workflow_def=ChildChain,
     kwargs={'value': 2},
@@ -386,7 +386,7 @@ _chain_sub = SubWorkflowNode(
     node_id='sub',
 )
 _chain_last = TaskNode(
-    fn=double,
+    function=double,
     kwargs={'value': 3},
     waits_for=[_chain_sub],
     node_id='last',
@@ -446,7 +446,7 @@ class RefusedChild(WorkflowDefinition[int]):
         raise ValueError(f'{cls.name} refuses value {value}')
 
 
-_from_first = TaskNode(fn=double, kwargs={'value': 5}, node_id='first')
+_from_first = TaskNode(function=double, kwargs={'value': 5}, node_id='first')
 _from_sub = SubWorkflowNode(
     workflow_def=ChildFromResult,
     waits_for=[_from_first],
@@ -463,7 +463,7 @@ chain_from_result = app.workflow(
 """A task, then a sub-workflow that the worker builds from the task's
 result; the child's start builds a grandchild."""
 
-_refused_first = TaskNode(fn=double, kwargs={'value': 6}, node_id='first')
+_refused_first = TaskNode(function=double, kwargs={'value': 6}, node_id='first')
 _refused_sub = SubWorkflowNode(
     workflow_def=RefusedChild,
     kwargs={'value': 7},
@@ -480,9 +480,9 @@ chain_with_refused_child = app.workflow(
 """A task, then a sub-workflow whose build in the worker raises: the node
 and the workflow fail."""
 
-_pause_first = TaskNode(fn=waits_for_release, node_id='first')
+_pause_first = TaskNode(function=waits_for_release, node_id='first')
 _pause_second = TaskNode(
-    fn=double,
+    function=double,
     kwargs={'value': 4},
     waits_for=[_pause_first],
     node_id='second',

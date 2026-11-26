@@ -486,7 +486,7 @@ pub(super) fn prepare(app: &ChildApp, task_name: &str, input: &TaskInputText) ->
             )))
         }
     };
-    match build_task_input(input.as_str(), task.accepts_workflow_ctx()) {
+    match build_task_input(input.as_str(), task.accepts_workflow_context()) {
         Ok(input) => Prepared::Body {
             task: Box::new(task),
             input,

@@ -23,7 +23,7 @@ fn fixed(intervals: Vec<u32>) -> RetryPolicy {
 #[task(
     "e2e_retry_exhausted",
     retry_policy = fixed(vec![1, 1, 1]),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn retry_exhausted() -> Result<String, TaskError<RetryCode>> {
     Err(TaskError::user(RetryCode::Transient, "always fails"))
@@ -35,7 +35,7 @@ pub async fn retry_exhausted() -> Result<String, TaskError<RetryCode>> {
 #[task(
     "e2e_retry_success",
     retry_policy = fixed(vec![1, 1, 1]),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn retry_success(token: String) -> Result<String, TaskError<RetryCode>> {
     let attempt = markers::next_attempt(&token)
@@ -54,7 +54,7 @@ pub async fn retry_success(token: String) -> Result<String, TaskError<RetryCode>
 #[task(
     "e2e_exponential",
     retry_policy = RetryPolicy::exponential(1, 3, false).expect("a valid exponential policy"),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn exponential() -> Result<String, TaskError<RetryCode>> {
     Err(TaskError::user(RetryCode::Transient, "fail"))
@@ -64,7 +64,7 @@ pub async fn exponential() -> Result<String, TaskError<RetryCode>> {
 #[task(
     "e2e_retry_error_code",
     retry_policy = fixed(vec![1]),
-    auto_retry_for = ["RETRYABLE_ERROR"]
+    retry_for = ["RETRYABLE_ERROR"]
 )]
 pub async fn retry_error_code() -> Result<String, TaskError<RetryCode>> {
     Err(TaskError::user(
@@ -78,12 +78,12 @@ pub async fn retry_error_code() -> Result<String, TaskError<RetryCode>> {
 #[task(
     "e2e_retry_other_code",
     retry_policy = fixed(vec![1, 1]),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn retry_other_code() -> Result<String, TaskError<RetryCode>> {
     Err(TaskError::user(
         RetryCode::RetryableError,
-        "not in auto_retry_for",
+        "not in retry_for",
     ))
 }
 
@@ -93,7 +93,7 @@ pub async fn retry_other_code() -> Result<String, TaskError<RetryCode>> {
 #[task(
     "e2e_retry_long_interval",
     retry_policy = fixed(vec![60, 60, 60]),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn retry_long_interval() -> Result<String, TaskError<RetryCode>> {
     Err(TaskError::user(RetryCode::Transient, "always fails"))

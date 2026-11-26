@@ -16,8 +16,7 @@ use serde_json::Value;
 use super::vector_file;
 use crate::core::history::enqueue::prepare_enqueue_facts;
 use crate::core::task::{
-    BackoffStrategy, BuiltInTaskCode, CancelGraceMs, Execution, RetryPolicy, TaskErrorCode,
-    TaskOptions, UserCode,
+    BackoffStrategy, BuiltInTaskCode, Execution, RetryPolicy, TaskErrorCode, TaskOptions, UserCode,
 };
 use crate::worker::retry::{read_stored_options, stored_max_retries, RunPermit};
 use crate::workflow_engine::merge_good_until_into_options;
@@ -75,7 +74,7 @@ fn core_options(vector: &OptionsVector) -> TaskOptions {
     let name = vector.name.as_str();
     let options = &vector.options;
     let policy = &options["retry_policy"];
-    let (retry_policy, auto_retry_for) = match policy {
+    let (retry_policy, retry_for) = match policy {
         Value::Null => (None, None),
         given => {
             let backoff_strategy = match given["backoff_strategy"].as_str() {
@@ -83,22 +82,22 @@ fn core_options(vector: &OptionsVector) -> TaskOptions {
                 Some("exponential") => BackoffStrategy::Exponential,
                 other => panic!("{name}: backoff_strategy {other:?}"),
             };
-            let intervals = given["intervals"]
+            let intervals_seconds = given["intervals_seconds"]
                 .as_array()
-                .unwrap_or_else(|| panic!("{name}: intervals is a list"))
+                .unwrap_or_else(|| panic!("{name}: intervals_seconds is a list"))
                 .iter()
                 .map(|interval| whole_number(name, interval).expect("an interval"))
                 .collect();
-            let codes = given["auto_retry_for"]
+            let codes = given["retry_for"]
                 .as_array()
-                .unwrap_or_else(|| panic!("{name}: auto_retry_for is a list"))
+                .unwrap_or_else(|| panic!("{name}: retry_for is a list"))
                 .iter()
                 .map(|entry| code(name, entry.as_str().expect("a code text")))
                 .collect();
             (
                 Some(RetryPolicy {
                     max_retries: whole_number(name, &given["max_retries"]).expect("max_retries"),
-                    intervals,
+                    intervals_seconds,
                     backoff_strategy,
                     jitter: given["jitter"].as_bool().expect("jitter is a bool"),
                     max_delay_seconds: whole_number(name, &given["max_delay_seconds"]),
@@ -109,14 +108,13 @@ fn core_options(vector: &OptionsVector) -> TaskOptions {
     };
     TaskOptions {
         task_name: "stored_form_vector".to_owned(),
-        queue_name: None,
+        queue: None,
         good_until: None,
-        auto_retry_for,
+        retry_for,
         retry_policy,
         timeout_ms: whole_number(name, &options["timeout_ms"]),
         execution: execution(name, options),
-        cancel_grace_ms: whole_number(name, &options["cancel_grace_ms"])
-            .map(|grace| CancelGraceMs::new(grace).expect("a grace in its bounds")),
+        cancel_grace_ms: whole_number(name, &options["cancel_grace_ms"]),
     }
 }
 

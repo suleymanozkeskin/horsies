@@ -134,7 +134,7 @@ class WorkflowStartCall:
             return Ok(text)
 
         node = TaskNode(
-            fn=perf_public_workflow_node,
+            function=perf_public_workflow_node,
             kwargs={'text': 'x' * INPUT_TEXT_BYTES},
         )
         self._broker = app.get_broker()

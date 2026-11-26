@@ -31,9 +31,9 @@ first. The attributes after it:
 | `execution` | `isolated` (default), `shared_async`, `shared_thread` | An `async fn` takes `isolated` or `shared_async`; a `fn` takes `isolated` or `shared_thread`. Another class is a compile error |
 | `timeout_ms` | `1000..=4294967295` | The deadline of a run. A shared class without `timeout_ms` is a compile error |
 | `cancel_grace_ms` | `100..=10000` | `shared_async`: the time from the cancel signal (the deadline, or an operator cancel) to the drop of the body; default 1,000. `isolated`: the time from an operator cancel to the kill of the child when the body has not ended; no default, so no kill. On `shared_thread` it is a compile error |
-| `retry_policy` | a `RetryPolicy` expression | Goes with `auto_retry_for` |
-| `auto_retry_for` | `["CODE", ...]` | Goes with `retry_policy`, with at least one code. Each entry is a built-in code or a code of `E`; another entry is a compile error |
-| `workflow_ctx` | no value | The task takes the workflow context in its parameter `workflow_ctx` (see `workflows.md`) |
+| `retry_policy` | a `RetryPolicy` expression | Goes with `retry_for` |
+| `retry_for` | `["CODE", ...]` | Goes with `retry_policy`, with at least one code. Each entry is a built-in code or a code of `E`; another entry is a compile error |
+| `workflow_context` | no value | The task takes the workflow context in its parameter `workflow_ctx` (see `workflows.md`) |
 
 - An unknown attribute is a compile error that lists the known ones.
 - `good_until` is not a task attribute. Set a deadline per send with
@@ -87,8 +87,8 @@ app. Two apps in one process share no registration.
 | `validate_order::send(&app, order)` | Sends now through `app` |
 | `validate_order::with_options(options).send(&app, order)` | Sends through `app` with `TaskSendOptions`; the delay is `TaskSendOptions::delay(WholeSeconds)` |
 | `validate_order::node()` | `TaskNode<T, validate_order::Input>`: a workflow node. `builder.task(node)` resolves it against the builder's app |
-| `validate_order::params::order()` | The field token `InputField<validate_order::Input, Order>` of a workflow node |
-| `validate_order::handle(&runtime)` | `Result<TaskFunction<..>, TaskFunctionNotFound>` from a `TaskRuntime` |
+| `validate_order::fields::order()` | The field token `InputField<validate_order::Input, Order>` of a workflow node |
+| `validate_order::function(&runtime)` | `Result<TaskFunction<..>, TaskFunctionNotFound>` from a `TaskRuntime` |
 
 - `send` and `with_options(..).send` through an app that does not register
   the task return `TaskSendError::ValidationFailed` with the cause
@@ -212,7 +212,7 @@ fn register_mail(app: &mut Horsies) -> Result<(), HorsiesError> {
 | `cancel_state()` | `RunCancelState`: `NotRequested`, `Requested { cause: CancelCause::Operator \| CancelCause::Deadline }`, or `NotInARun` |
 | `spawn(name, future)` | `Result<tokio::task::JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
 | `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id (`task_id()`) and the value (`value().get()`) of the run |
-| `task_handle::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` |
+| `task_function::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` |
 | `workflow_builder(name)` | A `WorkflowSpecBuilder` of the app of the runtime; its task nodes resolve against that app |
 | `start::<T>(&spec)`, `start_with_id::<T>(&spec, workflow_id)` | Starts a workflow that the task built (see `workflows.md`) |
 
@@ -405,7 +405,7 @@ enum FetchCode {
 #[task(
     "fetch_prices",
     retry_policy = RetryPolicy::fixed(vec![30, 60, 120], true).expect("a valid policy"),
-    auto_retry_for = ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
+    retry_for = ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
     timeout_ms = 5_000
 )]
 async fn fetch_prices(symbol: String) -> Result<String, TaskError<FetchCode>> {
@@ -415,12 +415,12 @@ async fn fetch_prices(symbol: String) -> Result<String, TaskError<FetchCode>> {
 
 | Constructor | Policy |
 |---|---|
-| `RetryPolicy::fixed(intervals, jitter)` | One delay per retry, in seconds. The number of intervals is the number of retries |
+| `RetryPolicy::fixed(intervals_seconds, jitter)` | One delay per retry, in seconds. The number of intervals is the number of retries |
 | `RetryPolicy::exponential(base_seconds, max_retries, jitter)` | Delay `base_seconds * 2^(attempt - 1)` |
 | `.with_max_delay_seconds(seconds)` | A cap on the delay, after backoff and jitter |
 
 Each interval is 1 to 86,400 s, and a policy has 1 to 20 retries. A value
-outside is `RetryPolicyError`. A built-in name in `auto_retry_for` is stored
+outside is `RetryPolicyError`. A built-in name in `retry_for` is stored
 as the built-in code. When a retry starts is on the shared docs page
 `tasks/retry-policy`.
 
@@ -438,7 +438,7 @@ as the built-in code. When a retry starts is on the shared docs page
 | `node()` | A workflow node (see `workflows.md`) |
 | `blocking()` | The blocking view (see Blocking API) |
 
-`task_name()`, `queue_name()`, `priority()` and `task_options()` read the
+`task_name()`, `queue()`, `priority()` and `task_options()` read the
 registration.
 
 A send runs these steps in order and stops at the first refusal:
@@ -752,9 +752,12 @@ The rules are on the shared docs page `monitoring/action-semantics`
 `async_task_fn!(function, InputType)` and
 `blocking_task_fn!(function, InputType)` build a `RegisteredTask` from a
 function that takes one input value. `app.register(name, task)` registers
-it; `RegisteredTask::with_task_options(options)` sets its options. Prefer
-the attributes: a task registered by hand has no generated module and no
-typed function.
+it; `RegisteredTask::with_task_options(options)` sets its options. The
+`cancel_grace_ms` of the options is a plain `Option<u32>`: the registration
+refuses a grace outside 100 to 10,000 ms (`HRS-111`), and
+`DEFAULT_CANCEL_GRACE_MS` is the default grace of a `SHARED_ASYNC` task.
+Prefer the attributes: a task registered by hand has no generated module and
+no typed function.
 
 ## Common Pitfalls
 
@@ -772,7 +775,7 @@ let total = other_task_handle.get(WaitLimit::NoLimit).await;
 
 // CORRECT: a workflow node receives the dependency's outcome
 // fn report(total: TaskOutcome<u64, Infallible>) ...
-// builder.task(report::node().arg_from(report::params::total(), totals_node))?
+// builder.task(report::node().arg_from(report::fields::total(), totals_node))?
 ```
 
 **Rename a parameter only when nothing stored holds the old name.** The

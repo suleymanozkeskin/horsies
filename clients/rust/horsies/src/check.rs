@@ -12,7 +12,7 @@
 //!    (Python's phases 3.1 and 3.2).
 //! 2. Task options: the rules of each registered task's options that the
 //!    task attribute checks at compile time, for a task registered by hand,
-//!    and Python's text rule of each `auto_retry_for` code
+//!    and Python's text rule of each `retry_for` code
 //!    (`check_error_code_text`).
 //! 3. Schedules (not for a worker, which never sends a scheduled task): per
 //!    enabled schedule, its task, its queue, its input read back with the
@@ -307,16 +307,16 @@ fn options_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
             "give the retry policy a valid backoff strategy and intervals",
         ));
     }
-    match (&options.retry_policy, &options.auto_retry_for) {
+    match (&options.retry_policy, &options.retry_for) {
         (_, Some(codes)) if codes.is_empty() => refusals.push(option_error(
             name,
-            "auto_retry_for must not be empty".to_owned(),
+            "retry_for must not be empty".to_owned(),
             "list at least one error code that retries the task",
         )),
         (Some(_), None) => refusals.push(option_error(
             name,
-            "retry_policy requires auto_retry_for".to_owned(),
-            "list the error codes that retry the task in auto_retry_for",
+            "retry_policy requires retry_for".to_owned(),
+            "list the error codes that retry the task in retry_for",
         )),
         (None, None) | (_, Some(_)) => {}
     }
@@ -325,13 +325,13 @@ fn options_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
     refusals
 }
 
-/// The refusal of each `auto_retry_for` code whose text the retry code rule
+/// The refusal of each `retry_for` code whose text the retry code rule
 /// refuses (`check_error_code_text`), with Python's text. Python checks the
 /// text of each code, a built-in code's value included, when the
 /// `RetryPolicy` is built (`validate_error_code_fields`). Pure.
 fn retry_code_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
     options
-        .auto_retry_for
+        .retry_for
         .iter()
         .flatten()
         .filter_map(|code| {
@@ -339,8 +339,8 @@ fn retry_code_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
             check_error_code_text(&text).err().map(|refusal| {
                 option_error(
                     name,
-                    refusal.message("auto_retry_for", &text),
-                    "name each auto_retry_for code in UPPER_SNAKE_CASE, as the codes of a \
+                    refusal.message("retry_for", &text),
+                    "name each retry_for code in UPPER_SNAKE_CASE, as the codes of a \
                      UserErrorCode type are named",
                 )
             })
@@ -395,7 +395,7 @@ mod tests {
     use std::sync::Arc;
 
     use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
-    use horsies_core::{CancelGraceMs, RetryPolicy, TaskErrorCode, TaskResult, UserCode};
+    use horsies_core::{RetryPolicy, TaskErrorCode, TaskResult, UserCode, DEFAULT_CANCEL_GRACE_MS};
 
     use super::*;
     use crate::AppConfig;
@@ -411,9 +411,9 @@ mod tests {
     fn options(name: &str) -> TaskOptions {
         TaskOptions {
             task_name: name.to_owned(),
-            queue_name: None,
+            queue: None,
             good_until: None,
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: None,
             execution: Execution::Isolated,
@@ -442,7 +442,7 @@ mod tests {
         let shared = TaskOptions {
             execution: Execution::SharedAsync,
             timeout_ms: Some(5_000),
-            cancel_grace_ms: Some(CancelGraceMs::DEFAULT),
+            cancel_grace_ms: Some(DEFAULT_CANCEL_GRACE_MS),
             ..options("echo")
         };
         assert!(refusal_texts("echo", &shared).is_empty());
@@ -470,7 +470,7 @@ mod tests {
             .map(|error| error.message.as_str())
             .collect();
         assert!(
-            messages.contains(&"retry_policy requires auto_retry_for"),
+            messages.contains(&"retry_policy requires retry_for"),
             "{messages:?}"
         );
         assert!(
@@ -492,12 +492,12 @@ mod tests {
     #[test]
     fn retry_codes_and_policy_go_together() {
         let empty = TaskOptions {
-            auto_retry_for: Some(Vec::new()),
+            retry_for: Some(Vec::new()),
             ..options("echo")
         };
         assert_eq!(
             refusal_texts("echo", &empty),
-            vec!["auto_retry_for must not be empty"]
+            vec!["retry_for must not be empty"]
         );
         let policy_only = TaskOptions {
             retry_policy: Some(RetryPolicy::fixed(vec![1], false).unwrap()),
@@ -505,10 +505,10 @@ mod tests {
         };
         assert_eq!(
             refusal_texts("echo", &policy_only),
-            vec!["retry_policy requires auto_retry_for"]
+            vec!["retry_policy requires retry_for"]
         );
         let both = TaskOptions {
-            auto_retry_for: Some(vec![TaskErrorCode::from(
+            retry_for: Some(vec![TaskErrorCode::from(
                 horsies_core::OutcomeCode::TaskTimeout,
             )]),
             ..policy_only
@@ -517,7 +517,7 @@ mod tests {
     }
 
     /// A user code accepts any text that is not a built-in or reserved name
-    /// (`UserCode::parse`, Python's `TaskError` rule); `auto_retry_for`
+    /// (`UserCode::parse`, Python's `TaskError` rule); `retry_for`
     /// takes only the codes of the retry code rule, as Python's
     /// `RetryPolicy` does.
     #[test]
@@ -529,17 +529,17 @@ mod tests {
             .collect();
         let refused = TaskOptions {
             retry_policy: Some(RetryPolicy::fixed(vec![1], false).unwrap()),
-            auto_retry_for: Some(codes),
+            retry_for: Some(codes),
             ..options("echo")
         };
         assert_eq!(
             refusal_texts("echo", &refused),
             vec![
-                "auto_retry_for 'my_error' is invalid; expected UPPER_SNAKE_CASE (e.g. \
+                "retry_for 'my_error' is invalid; expected UPPER_SNAKE_CASE (e.g. \
                  RATE_LIMITED)",
-                "auto_retry_for 'RateLimitError' looks like an exception class name; retry \
+                "retry_for 'RateLimitError' looks like an exception class name; retry \
                  matching is error-code-only, use UPPER_SNAKE_CASE code names",
-                "auto_retry_for must be a non-empty string, got ''",
+                "retry_for must be a non-empty string, got ''",
             ]
         );
         let error = &options_refusals("echo", &refused)[0];
@@ -561,7 +561,7 @@ mod tests {
             (
                 Execution::SharedThread,
                 Some(1_000),
-                Some(CancelGraceMs::DEFAULT),
+                Some(DEFAULT_CANCEL_GRACE_MS),
                 "is for SHARED_ASYNC and ISOLATED tasks",
             ),
         ];
@@ -582,7 +582,7 @@ mod tests {
     /// cancel), or none.
     #[test]
     fn an_isolated_task_takes_a_cancel_grace_or_none() {
-        for cancel_grace_ms in [Some(CancelGraceMs::DEFAULT), None] {
+        for cancel_grace_ms in [Some(DEFAULT_CANCEL_GRACE_MS), None] {
             let accepted = TaskOptions {
                 execution: Execution::Isolated,
                 timeout_ms: None,

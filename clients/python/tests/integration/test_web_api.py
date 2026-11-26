@@ -892,7 +892,7 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
     key."""
     suffix = uuid.uuid4().hex[:8]
 
-    @app.task(task_name=f'web_corrupt_root_{suffix}')
+    @app.task(name=f'web_corrupt_root_{suffix}')
     def corrupt_root(*, value: int) -> Result[int, TaskError]:
         return Ok(value)
 
@@ -906,7 +906,7 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
         def build_with(cls, app: Horsies, *args: Any, **params: Any) -> WorkflowSpec[int]:
             _ = (args, params)
             node = WorkflowTaskNode(
-                fn=corrupt_root,
+                function=corrupt_root,
                 kwargs={'value': 1},
                 good_until=datetime.now(timezone.utc) + timedelta(hours=1),
             )

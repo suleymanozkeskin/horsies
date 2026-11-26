@@ -582,7 +582,7 @@ def task_options_with_good_until(node: TaskNode[Any, Any], owner: NodeOwner) -> 
         SerializationError: the options do not parse to a JSON object, or
             the merged options do not serialize.
     """
-    options_json = node.fn.task_options_json
+    options_json = node.function.task_options_json
     if node.good_until is None:
         return options_json
     base_options: dict[str, Any] = {}

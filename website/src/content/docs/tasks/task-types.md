@@ -186,9 +186,9 @@ def process_order(
         case Succeeded(order):  # typed Order, not a dict
             return Ok(f"Processed {order.item}")
 
-node_create: TaskNode[Order] = TaskNode(fn=create_order)
+node_create: TaskNode[Order] = TaskNode(function=create_order)
 node_process: TaskNode[str] = TaskNode(
-    fn=process_order,
+    function=process_order,
     waits_for=[node_create],
     args_from={"order_result": node_create},
 )

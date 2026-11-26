@@ -340,7 +340,7 @@ mod tests {
     #[test]
     fn the_options_integer_range_is_i64_min_to_u64_max() {
         let accepted = [
-            r#"{"retry_policy":{"max_retries":1,"intervals":[1],"max_delay_seconds":18446744073709551615,"auto_retry_for":["X"]}}"#,
+            r#"{"retry_policy":{"max_retries":1,"intervals_seconds":[1],"max_delay_seconds":18446744073709551615,"retry_for":["X"]}}"#,
             r#"{"a":[-9223372036854775808,18446744073709551615,-0]}"#,
             r#"{"a":1.8446744073709551616e19,"b":-1e300,"c":0.5}"#,
             r#"{"123456789012345678901234567890":"123456789012345678901234567890"}"#,
@@ -351,7 +351,7 @@ mod tests {
         }
         let long = "9".repeat(400);
         let refused = [
-            r#"{"retry_policy":{"max_retries":1,"intervals":[1],"max_delay_seconds":18446744073709551616,"auto_retry_for":["X"]}}"#.to_owned(),
+            r#"{"retry_policy":{"max_retries":1,"intervals_seconds":[1],"max_delay_seconds":18446744073709551616,"retry_for":["X"]}}"#.to_owned(),
             r#"{"a":[1,{"b":-9223372036854775809}]}"#.to_owned(),
             format!(r#"{{"k":{long}}}"#),
             "18446744073709551616".to_owned(),

@@ -43,7 +43,7 @@ async fn welcome(rt: TaskRuntime, user: String) -> Result<String, TaskError<Welc
     let message = format!("{}, {user}", greeter.greeting);
     // A send from a task body goes through the app of its runtime and the
     // producer pool of the child.
-    let audit_function = audit::handle(&rt)
+    let audit_function = audit::function(&rt)
         .map_err(|missing| TaskError::user(WelcomeCode::AuditNotSent, missing.to_string()))?;
     let _audit = audit_function
         .send(audit::Input {

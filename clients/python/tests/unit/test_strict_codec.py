@@ -1013,7 +1013,7 @@ class TestJsonInput:
                 broker=PostgresConfig(database_url='postgresql://u:p@localhost/x'),
             ),
         )
-        _ = app.task(task_name='json_input_parameter')(pass_on)
+        _ = app.task(name='json_input_parameter')(pass_on)
 
         assert encode_kwargs_read_back(pass_on, {'payload': ['a']}) == {'payload': ['a']}
         with pytest.raises(StrictJsonError, match='tuple'):

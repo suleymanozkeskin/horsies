@@ -122,7 +122,7 @@ fn failed_child_id<T>(outcome: &TaskOutcome<T, WfCode>) -> Option<String> {
 
 /// Python `e2e_sub_probe_failed_child`: what the node saw of a failed child,
 /// through `args_from` and through its context.
-#[task("e2e_sub_probe_failed_child", workflow_ctx)]
+#[task("e2e_sub_probe_failed_child", workflow_context)]
 pub async fn sub_probe_failed_child(
     child_result: TaskOutcome<i64, WfCode>,
     workflow_ctx: Option<WorkflowContext>,
@@ -150,7 +150,7 @@ pub async fn sub_probe_failed_child(
 
 /// Python `e2e_sub_probe_success_ctx`: what the node saw of a completed
 /// child through its context.
-#[task("e2e_sub_probe_success_ctx", workflow_ctx)]
+#[task("e2e_sub_probe_success_ctx", workflow_context)]
 pub async fn sub_probe_success_ctx(
     workflow_ctx: Option<WorkflowContext>,
 ) -> Result<serde_json::Value, TaskError<WfCode>> {
@@ -213,7 +213,7 @@ impl WorkflowDefinition for SubOk {
         let child = builder.task(
             sub_int_ok::node()
                 .node_id("child")
-                .set(sub_int_ok::params::value(), SUB_OK_VALUE)?,
+                .set(sub_int_ok::fields::value(), SUB_OK_VALUE)?,
         )?;
         Ok(WorkflowDefConfig::new().output(child))
     }
@@ -237,7 +237,7 @@ impl WorkflowDefinition for SubFail {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let child = builder.task(sub_int_fail::node().node_id("child").set(
-            sub_int_fail::params::error_code(),
+            sub_int_fail::fields::error_code(),
             SUB_CHILD_FAIL.to_owned(),
         )?)?;
         Ok(WorkflowDefConfig::new().output(child))
@@ -325,7 +325,7 @@ impl WorkflowDefinition for SubParam {
         let child = builder.task(
             sub_int_ok::node()
                 .node_id("child")
-                .set(sub_int_ok::params::value(), value)?,
+                .set(sub_int_ok::fields::value(), value)?,
         )?;
         let _output = builder.output(child);
         builder.build()
@@ -360,12 +360,12 @@ impl WorkflowDefinition for SubFailedInput {
         let child = builder.task(
             sub_report_input::node()
                 .node_id("child")
-                .set(sub_report_input::params::input_is_err(), input_is_err)?
+                .set(sub_report_input::fields::input_is_err(), input_is_err)?
                 .set(
-                    sub_report_input::params::input_error_code(),
+                    sub_report_input::fields::input_error_code(),
                     input_error_code,
                 )?
-                .set(sub_report_input::params::input_value(), input_value)?,
+                .set(sub_report_input::fields::input_value(), input_value)?,
         )?;
         let _output = builder.output(child);
         builder.build()
@@ -406,7 +406,7 @@ impl WorkflowDefinition for SubLabel {
         };
         let mut builder = definition_builder::<Self>(builder);
         let child = builder.task(super::workflow::mark::node().node_id("child").set(
-            super::workflow::mark::params::value(),
+            super::workflow::mark::fields::value(),
             format!("{}={value}", params.label),
         )?)?;
         let _output = builder.output(child);
@@ -459,16 +459,16 @@ impl WorkflowDefinition for SubTypedKwarg {
         let child = builder.task(
             sub_pet_report::node()
                 .node_id("child")
-                .set(sub_pet_report::params::saw_dog_at_build(), saw_dog)?
+                .set(sub_pet_report::fields::saw_dog_at_build(), saw_dog)?
                 .set(
-                    sub_pet_report::params::type_name_at_build(),
+                    sub_pet_report::fields::type_name_at_build(),
                     type_name.to_owned(),
                 )?
                 .set(
-                    sub_pet_report::params::kind_at_build(),
+                    sub_pet_report::fields::kind_at_build(),
                     Some(kind.to_owned()),
                 )?
-                .set(sub_pet_report::params::bark_volume_at_build(), bark_volume)?,
+                .set(sub_pet_report::fields::bark_volume_at_build(), bark_volume)?,
         )?;
         let _output = builder.output(child);
         builder.build()
@@ -506,8 +506,8 @@ impl WorkflowDefinition for SubSlow {
         let child = builder.task(
             slow_mark::node()
                 .node_id("child")
-                .set(slow_mark::params::value(), params.value)?
-                .set(slow_mark::params::delay_ms(), params.delay_ms)?,
+                .set(slow_mark::fields::value(), params.value)?
+                .set(slow_mark::fields::delay_ms(), params.delay_ms)?,
         )?;
         let _output = builder.output(child);
         builder.build()

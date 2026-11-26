@@ -51,17 +51,17 @@ def slugify(value: str) -> str:
     return result or '_'
 
 
-def _get_inspect_target(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Return underlying function for introspection when wrappers expose _original_fn."""
-    inspect_target: Callable[..., Any] = fn
-    original = getattr(fn, '_original_fn', None)
+def _get_inspect_target(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Return underlying function for introspection when wrappers expose _original_function."""
+    inspect_target: Callable[..., Any] = function
+    original = getattr(function, '_original_function', None)
     if callable(original):
         inspect_target = original
     return inspect_target
 
 
-def _task_accepts_workflow_ctx(fn: Callable[..., Any]) -> bool:
-    inspect_target: Callable[..., Any] = _get_inspect_target(fn)
+def _task_accepts_workflow_ctx(function: Callable[..., Any]) -> bool:
+    inspect_target: Callable[..., Any] = _get_inspect_target(function)
     try:
         sig = inspect.signature(inspect_target)
     except (TypeError, ValueError):
@@ -69,9 +69,9 @@ def _task_accepts_workflow_ctx(fn: Callable[..., Any]) -> bool:
     return 'workflow_ctx' in sig.parameters
 
 
-def _get_signature(fn: Callable[..., Any]) -> inspect.Signature | None:
+def _get_signature(function: Callable[..., Any]) -> inspect.Signature | None:
     """Return an inspectable signature for a callable, or None if unavailable."""
-    inspect_target: Callable[..., Any] = _get_inspect_target(fn)
+    inspect_target: Callable[..., Any] = _get_inspect_target(function)
     try:
         return inspect.signature(inspect_target)
     except (TypeError, ValueError):
@@ -120,9 +120,9 @@ def _hint_source(target: Callable[..., Any]) -> Callable[..., Any]:
             return target.__call__
 
 
-def _resolved_type_hints(fn: Callable[..., Any]) -> dict[str, Any]:
+def _resolved_type_hints(function: Callable[..., Any]) -> dict[str, Any]:
     """Return resolved type hints for a callable, or {} when unavailable."""
-    inspect_target: Callable[..., Any] = _get_inspect_target(fn)
+    inspect_target: Callable[..., Any] = _get_inspect_target(function)
     try:
         return get_type_hints(_hint_source(inspect_target))
     except Exception:
@@ -205,25 +205,25 @@ def _normalize_resolved_ok_type(value: Any | None) -> Any | None:
     return value
 
 
-def _resolve_task_fn_ok_type(fn: Callable[..., Any]) -> Any | None:
+def _resolve_task_fn_ok_type(function: Callable[..., Any]) -> Any | None:
     """
     Resolve the ok type of the Result that a task function wrapper returns.
 
     Prefers explicit wrapper metadata (task_ok_type), then falls back to
     return-type annotations.
     """
-    explicit_ok = getattr(fn, 'task_ok_type', None)
+    explicit_ok = getattr(function, 'task_ok_type', None)
     normalized = _normalize_resolved_ok_type(explicit_ok)
     if normalized is not None:
         return normalized
 
-    hints = _resolved_type_hints(fn)
+    hints = _resolved_type_hints(function)
     ok_from_hints = _extract_return_ok_type(hints.get('return'))
     normalized = _normalize_resolved_ok_type(ok_from_hints)
     if normalized is not None:
         return normalized
 
-    sig = _get_signature(fn)
+    sig = _get_signature(function)
     if sig is None or sig.return_annotation is inspect.Parameter.empty:
         return None
     ok_from_sig = _extract_return_ok_type(sig.return_annotation)
@@ -319,7 +319,7 @@ def resolve_source_code_type(
 def _resolve_source_node_ok_type(node: TaskNode[Any, Any] | SubWorkflowNode[Any]) -> Any | None:
     """Resolve output ok-type for TaskNode/SubWorkflowNode source used in args_from."""
     if isinstance(node, TaskNode):
-        return _resolve_task_fn_ok_type(node.fn)
+        return _resolve_task_fn_ok_type(node.function)
     return _resolve_workflow_def_ok_type(node.workflow_def)
 
 

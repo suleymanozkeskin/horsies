@@ -195,7 +195,7 @@ impl<T> Eq for NodeKey<T> {}
 /// workflow: the member name that serde reads.
 ///
 /// `#[horsies::task]` generates one per parameter of a task
-/// (`name::params::field()`), and `#[derive(WorkflowInput)]` one per field
+/// (`name::fields::field()`), and `#[derive(WorkflowInput)]` one per field
 /// of a child workflow's params type (`Params::field_name()`).
 #[derive(Debug, PartialEq, Eq)]
 pub struct InputField<I, F> {
@@ -503,9 +503,9 @@ pub(crate) enum NodeQueue {
 /// when a node is added.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct NodeRegistration {
-    pub(crate) queue_name: String,
+    pub(crate) queue: String,
     pub(crate) task_options: Option<String>,
-    pub(crate) accepts_workflow_ctx: bool,
+    pub(crate) accepts_workflow_context: bool,
 }
 
 /// A workflow node that runs a task with input `I` and output `T` (Python
@@ -648,7 +648,7 @@ impl<T, I> TaskNode<T, I> {
 
     /// Give the task the results of `sources` in its workflow context. Each
     /// source must be a dependency of the node, and the task must take the
-    /// context (`workflow_ctx` on the task attribute).
+    /// context (`workflow_context` on the task attribute).
     pub fn workflow_context_from<D, R>(mut self, sources: D) -> Self
     where
         D: IntoIterator<Item = R>,
@@ -780,9 +780,9 @@ pub(crate) mod tests {
     /// no workflow context.
     pub(crate) fn default_registration() -> NodeRegistration {
         NodeRegistration {
-            queue_name: "default".to_owned(),
+            queue: "default".to_owned(),
             task_options: None,
-            accepts_workflow_ctx: false,
+            accepts_workflow_context: false,
         }
     }
 

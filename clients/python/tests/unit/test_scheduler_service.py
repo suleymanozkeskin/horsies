@@ -62,13 +62,13 @@ def _make_app(
 
 
 def _make_task_mock(fn: object) -> MagicMock:
-    """Create a mock task object with _original_fn pointing to a real function.
+    """Create a mock task object with _original_function pointing to a real function.
 
     The task has no options: ``task_options_json`` is None.
     """
     task = MagicMock()
-    task._original_fn = fn
-    task.task_queue_name = None
+    task._original_function = fn
+    task.queue = None
     task.task_options_json = None
     return task
 
@@ -401,16 +401,16 @@ class TestPreloadTaskModules:
 
 
 # =============================================================================
-# validation._signature_error — no _original_fn
+# validation._signature_error — no _original_function
 # =============================================================================
 
 
 @pytest.mark.unit
 class TestSignatureErrorNoOriginalFn:
-    """Test for _signature_error when task has no _original_fn."""
+    """Test for _signature_error when task has no _original_function."""
 
     def test_no_original_fn_returns_none(self) -> None:
-        """Task without _original_fn → no error (cannot validate)."""
+        """Task without _original_function → no error (cannot validate)."""
         config = ScheduleConfig(
             schedules=[
                 TaskSchedule(
@@ -422,7 +422,7 @@ class TestSignatureErrorNoOriginalFn:
             ],
         )
         task_mock = MagicMock()
-        task_mock._original_fn = None
+        task_mock._original_function = None
         app = _make_app(schedule_config=config, tasks={'task_a': task_mock})
 
         # No error despite kwargs that wouldn't match any real function

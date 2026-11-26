@@ -66,16 +66,16 @@ class PausingChildWorkflow(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-        @app.task(task_name='pausing_child_c')
+        @app.task(name='pausing_child_c')
         def child_task_c() -> Result[int, TaskError]:
             return Ok(1)
 
-        @app.task(task_name='pausing_child_d')
+        @app.task(name='pausing_child_d')
         def child_task_d(*, value: int) -> Result[int, TaskError]:
             return Ok(value * 2)
 
-        node_c: TaskNode[int] = TaskNode(fn=child_task_c)
-        node_d: TaskNode[int] = TaskNode(fn=child_task_d, kwargs={'value': 1}, waits_for=[node_c])
+        node_c: TaskNode[int] = TaskNode(function=child_task_c)
+        node_d: TaskNode[int] = TaskNode(function=child_task_d, kwargs={'value': 1}, waits_for=[node_c])
 
         return app.workflow(
             name=cls.name,
@@ -125,7 +125,7 @@ class TestCascadeResumeMissingCompletionCheck:
 
         parent_task_fn = make_simple_task(app, 'cascade_parent_task_a')
 
-        node_a: TaskNode[int] = TaskNode(fn=parent_task_fn, kwargs={'value': 1})
+        node_a: TaskNode[int] = TaskNode(function=parent_task_fn, kwargs={'value': 1})
         node_child: SubWorkflowNode[int] = SubWorkflowNode(
             workflow_def=PausingChildWorkflow,
         )

@@ -108,7 +108,7 @@ Keep a task `ISOLATED` when one of these is true:
 | An operator cancels the running task | The task code gets the cancel: an async body at its next `await` (Python `asyncio.CancelledError`, Rust `cancelled()`), a sync body through the cancel state of `TaskRuntime`. The task is `CANCELLED` at once | As `ISOLATED` for an async body | The task code gets the cancel state of `TaskRuntime`. The task is `CANCELLED` at once |
 | The cancelled code does not stop | It runs until it returns, or until its `timeout_ms` kill. With `cancel_grace_ms` on the task, the worker kills the child `cancel_grace_ms` after the cancel | After `cancel_grace_ms`: a second cancel and the cancel rounds, and the child takes no new task. Still alive: the task is stuck, and keeps its seat until no task in the child has time left | The thread runs until it returns |
 
-A task retries only when its `auto_retry_for` names the code. In every mode, the worker writes the outcome only after the attempt has ended, so a retry never runs next to the attempt that it replaces. A shared task that the worker names as the cause of a kill or of a stuck stop retries in an isolated child.
+A task retries only when its `retry_for` names the code. In every mode, the worker writes the outcome only after the attempt has ended, so a retry never runs next to the attempt that it replaces. A shared task that the worker names as the cause of a kill or of a stuck stop retries in an isolated child.
 
 ## Rules for Task Authors
 

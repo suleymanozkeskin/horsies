@@ -361,8 +361,8 @@ class TestWiringCompare:
         def target(*, value: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
             return Ok(1)
 
-        first = TaskNode(fn=source)
-        second = TaskNode(fn=target, waits_for=[first], args_from={'value': first})
+        first = TaskNode(function=source)
+        second = TaskNode(function=target, waits_for=[first], args_from={'value': first})
 
         spec = WorkflowSpec(name='wiring', tasks=[first, second])
 

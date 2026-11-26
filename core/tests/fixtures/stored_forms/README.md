@@ -77,7 +77,7 @@ every writer stores as the characters, not as `\u` escapes:
 | Error data | `result_deserialization_error_non_ascii_task_name` (the message), `workflow_output_skipped_non_ascii_task_name` (the data) |
 | Workflow spec data | `non_ascii_text` |
 
-The task options hold no user text: an error code of `auto_retry_for` is
+The task options hold no user text: an error code of `retry_for` is
 UPPER_SNAKE_CASE ASCII in both clients.
 
 ## Value notation
@@ -266,9 +266,9 @@ through `outcome_of_record`.
 
 `{"retry_policy": <policy or null>, "good_until": <instant or null>,
 "timeout_ms": <ms or null>, "execution": <class>, "cancel_grace_ms": <ms or
-null>}`, in this order; the policy holds `max_retries`, `intervals`,
+null>}`, in this order; the policy holds `max_retries`, `intervals_seconds`,
 `backoff_strategy`, `jitter`, `max_delay_seconds` (only when set) and
-`auto_retry_for`, codes by name. Every task stores the text, nulls included.
+`retry_for`, codes by name. Every task stores the text, nulls included.
 A vector's `kind` is `task` (the options of a task), `send` (a send with a
 deadline: the task's text with the deadline in `good_until`, in
 `isoformat()`) or `node` (a workflow

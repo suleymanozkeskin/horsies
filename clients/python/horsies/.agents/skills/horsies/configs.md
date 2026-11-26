@@ -717,12 +717,12 @@ class QueueMode(Enum):
 ### DEFAULT
 
 - Single `"default"` queue.
-- No `queue_name` on `@app.task(...)` — passing one raises HRS-200.
+- No `queue` on `@app.task(...)` — passing one raises HRS-200.
 
 ### CUSTOM
 
 - Named queues via `custom_queues`.
-- Every `@app.task(...)` must include `queue_name` matching a configured queue.
+- Every `@app.task(...)` must include `queue` matching a configured queue.
 
 ## CustomQueueConfig
 

@@ -218,7 +218,8 @@ impl Horsies {
     /// `#[horsies::task]` attribute generates a `register` function that
     /// calls this.
     ///
-    /// Refuses an empty or repeated name, a definition-time `good_until`, and
+    /// Refuses an empty or repeated name, a definition-time `good_until`, a
+    /// `cancel_grace_ms` outside its bounds (`TaskCancelGraceOutOfRange`), and
     /// a queue that the queue mode does not admit. After a refusal nothing is
     /// registered.
     pub fn register(

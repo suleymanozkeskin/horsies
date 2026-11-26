@@ -313,7 +313,7 @@ def from_node(upstream: 'TaskNode[Any, Any] | SubWorkflowNode[Any]') -> Any:
         producer_node = produce.node()(value=42)
         consumer_node = consume.node()(data=from_node(producer_node))
         # Equivalent to:
-        # TaskNode(fn=consume, args_from={"data": producer_node}, waits_for=[producer_node])
+        # TaskNode(function=consume, args_from={"data": producer_node}, waits_for=[producer_node])
     """
     from horsies.core.models.workflow import TaskNode, SubWorkflowNode
 
@@ -360,12 +360,12 @@ def effective_priority(
 def resolve_node_queue(node: 'TaskNode[Any, Any]') -> str:
     """Return the queue name of a workflow ``TaskNode``.
 
-    Rule: ``node.queue``, else the task's declared ``task_queue_name``, else
+    Rule: ``node.queue``, else the task's declared ``queue``, else
     ``'default'``. An empty string counts as not set at each step, so the
     result is never ``''``. It does not check the name against the app's
     queue config: ``resolve_node_queue_and_priority`` does that.
     """
-    return node.queue or node.fn.task_queue_name or 'default'
+    return node.queue or node.function.queue or 'default'
 
 
 def resolve_node_queue_and_priority(
@@ -709,7 +709,7 @@ class NodeFactory(Generic[P, T, C]):
         # Type checker validates 'value' against my_task's signature
     """
 
-    _fn: 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[P, T, C] | AsyncRuntimeTaskFunction[P, T, C]'
+    _function: 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[P, T, C] | AsyncRuntimeTaskFunction[P, T, C]'
     _waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
     _workflow_context_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
     _args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
@@ -723,7 +723,7 @@ class NodeFactory(Generic[P, T, C]):
 
     def __init__(
         self,
-        fn: 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[P, T, C] | AsyncRuntimeTaskFunction[P, T, C]',
+        function: 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[P, T, C] | AsyncRuntimeTaskFunction[P, T, C]',
         *,
         waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None,
         workflow_context_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None,
@@ -736,7 +736,7 @@ class NodeFactory(Generic[P, T, C]):
         good_until: datetime | None,
         node_id: str | None,
     ) -> None:
-        self._fn = fn
+        self._function = function
         self._waits_for = waits_for
         self._workflow_context_from = workflow_context_from
         self._args_from = args_from
@@ -757,7 +757,7 @@ class NodeFactory(Generic[P, T, C]):
                 message='positional arguments not allowed in .node()() calls',
                 code=ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED,
                 notes=[
-                    f"task '{self._fn.task_name}' received {len(args)} positional arg(s)",
+                    f"task '{self._function.task_name}' received {len(args)} positional arg(s)",
                     'workflow nodes use kwargs-only; pass all arguments by keyword',
                 ],
                 help_text='change .node()(val1, val2) to .node()(param1=val1, param2=val2)',
@@ -783,7 +783,7 @@ class NodeFactory(Generic[P, T, C]):
                 message='from_node() marker conflicts with explicit args_from',
                 code=ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
                 notes=[
-                    f"task '{self._fn.task_name}' has key(s) in both from_node() "
+                    f"task '{self._function.task_name}' has key(s) in both from_node() "
                     f"and args_from: {sorted(marker_explicit_overlap)}",
                     'each injected key must come from exactly one source',
                 ],
@@ -801,7 +801,7 @@ class NodeFactory(Generic[P, T, C]):
                 existing_deps.add(id(upstream))
 
         return TaskNode(
-            fn=self._fn,
+            function=self._function,
             kwargs=static_kwargs,
             waits_for=waits_for,
             workflow_context_from=list(self._workflow_context_from)
@@ -832,9 +832,11 @@ class _TaskFunctionMembers(Protocol[P, T, C]):
     """
 
     task_name: str
-    task_queue_name: str | None
+    queue: str | None
+    """The queue that the task declares (`queue=`), or None for the default
+    queue."""
     task_options_json: str | None
-    task_error_codes: tuple[str, ...]
+    error_codes: tuple[str, ...]
     """The user error codes that the task declares (`error_codes=`), in the
     order of the declaration; `()` when it declares none."""
     task_code_type: CustomCodeType
@@ -1007,28 +1009,28 @@ class TaskDecorator(Protocol):
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError[C]]]],
+        function: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError[C]]]],
         /,
     ) -> AsyncRuntimeTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError[C]]],
+        function: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError[C]]],
         /,
     ) -> RuntimeTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
+        function: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
         /,
     ) -> AsyncTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Result[T, TaskError[C]]],
+        function: Callable[P, Result[T, TaskError[C]]],
         /,
     ) -> TaskFunction[P, T, C]: ...
 
@@ -1043,14 +1045,14 @@ class SharedAsyncTaskDecorator(Protocol):
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError[C]]]],
+        function: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError[C]]]],
         /,
     ) -> AsyncRuntimeTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
+        function: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
         /,
     ) -> AsyncTaskFunction[P, T, C]: ...
 
@@ -1065,14 +1067,14 @@ class SharedThreadTaskDecorator(Protocol):
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError[C]]],
+        function: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError[C]]],
         /,
     ) -> RuntimeTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Result[T, TaskError[C]]],
+        function: Callable[P, Result[T, TaskError[C]]],
         /,
     ) -> TaskFunction[P, T, C]: ...
 
@@ -1085,7 +1087,7 @@ class CancelGraceRefusedDecorator(Protocol):
     decorator refuses it at run time too (HRS-110).
     """
 
-    def __call__(self, fn: Never, /) -> Never: ...
+    def __call__(self, function: Never, /) -> Never: ...
 
 
 class TaskSendOptions(Protocol[P, T, C]):
@@ -1212,18 +1214,18 @@ class TaskBodyKind(Enum):
 class _SyncTaskBody(Generic[P, T, C]):
     """A task function defined with `def`."""
 
-    fn: Callable[P, Result[T, TaskError[C]]]
+    function: Callable[P, Result[T, TaskError[C]]]
 
 
 @dataclass(frozen=True, slots=True)
 class _AsyncTaskBody(Generic[P, T, C]):
     """A task function defined with `async def`."""
 
-    fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]]
+    function: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]]
 
 
 def _task_body(
-    fn: Callable[P, Result[T, TaskError[C]]]
+    function: Callable[P, Result[T, TaskError[C]]]
     | Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
 ) -> _SyncTaskBody[P, T, C] | _AsyncTaskBody[P, T, C]:
     """Sort a task function by the way it is called.
@@ -1232,19 +1234,19 @@ def _task_body(
     before this, so a function that is not a coroutine function is a `def`
     function that returns its result.
     """
-    if inspect.iscoroutinefunction(fn):
+    if inspect.iscoroutinefunction(function):
         return _AsyncTaskBody(
-            cast('Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]]', fn),
+            cast('Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]]', function),
         )
-    return _SyncTaskBody(cast('Callable[P, Result[T, TaskError[C]]]', fn))
+    return _SyncTaskBody(cast('Callable[P, Result[T, TaskError[C]]]', function))
 
 
 def _task_body_kind(
-    fn: Callable[P, Result[T, TaskError[C]]]
+    function: Callable[P, Result[T, TaskError[C]]]
     | Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
 ) -> TaskBodyKind:
     """The kind of a task function, as `_task_body` sorts it."""
-    match _task_body(fn):
+    match _task_body(function):
         case _SyncTaskBody():
             return TaskBodyKind.DEF
         case _AsyncTaskBody():
@@ -1713,7 +1715,7 @@ def mapped_code(
 
 @overload
 def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
-    fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError[C]]]],
+    function: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError[C]]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1727,7 +1729,7 @@ def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
 
 @overload
 def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
-    fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError[C]]],
+    function: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError[C]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1741,7 +1743,7 @@ def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
 
 @overload
 def create_task_wrapper(
-    fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
+    function: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1755,7 +1757,7 @@ def create_task_wrapper(
 
 @overload
 def create_task_wrapper(
-    fn: Callable[P, Result[T, TaskError[C]]],
+    function: Callable[P, Result[T, TaskError[C]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1768,7 +1770,7 @@ def create_task_wrapper(
 
 
 def create_task_wrapper(
-    fn: Callable[P, Result[T, TaskError[C]]]
+    function: Callable[P, Result[T, TaskError[C]]]
     | Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
     app: 'Horsies',
     task_name: str,
@@ -1792,22 +1794,22 @@ def create_task_wrapper(
     `error_codes` are the codes that the task declares, which the decorator
     checked (`parse_declared_error_codes`), with the codes of its exception
     mappers (`with_mapper_codes`); the wrapper keeps them as
-    `task_error_codes`. `code_enum` is the `Enum` class of `error_codes=`,
+    `error_codes`. `code_enum` is the `Enum` class of `error_codes=`,
     or None for a tuple or no declaration. A return annotation
     `Result[T, TaskError[E]]` needs `code_enum` to be `E`; the wrapper keeps
     the code type as `task_code_type`.
     """
 
-    fn_location = SourceLocation.from_function(fn)
+    function_location = SourceLocation.from_function(function)
 
     # Strict contract: @app.task() must decorate the raw task function directly.
     # Reject pre-decorated wrappers to keep signature/type contract deterministic.
-    unwrapped = inspect.unwrap(fn)
-    if unwrapped is not fn:
+    unwrapped = inspect.unwrap(function)
+    if unwrapped is not function:
         raise TaskDefinitionError(
             message='task function must not be pre-decorated',
             code=ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED,
-            location=fn_location,
+            location=function_location,
             notes=[
                 f"task '{task_name}' received a callable with __wrapped__ chain",
                 'inner decorators are not supported for @app.task()',
@@ -1817,13 +1819,13 @@ def create_task_wrapper(
 
     # An async generator function returns an async generator, so the body
     # never runs and every run would fail.
-    if inspect.isasyncgenfunction(fn):
+    if inspect.isasyncgenfunction(function):
         raise TaskDefinitionError(
             message='task function must not be an async generator',
             code=ErrorCode.TASK_INVALID_RETURN_TYPE,
-            location=fn_location,
+            location=function_location,
             notes=[
-                f"function '{fn.__name__}' is defined with `async def` and uses `yield`",
+                f"function '{function.__name__}' is defined with `async def` and uses `yield`",
                 'a task returns one Result',
             ],
             help_text='collect the items and return them in one Ok(...)',
@@ -1831,13 +1833,13 @@ def create_task_wrapper(
 
     # A generator function returns a generator, so the body never runs and
     # every run would fail.
-    if inspect.isgeneratorfunction(fn):
+    if inspect.isgeneratorfunction(function):
         raise TaskDefinitionError(
             message='task function must not be a generator',
             code=ErrorCode.TASK_INVALID_RETURN_TYPE,
-            location=fn_location,
+            location=function_location,
             notes=[
-                f"function '{fn.__name__}' uses `yield`",
+                f"function '{function.__name__}' uses `yield`",
                 'a task returns one Result',
             ],
             help_text='collect the items and return them in one Ok(...)',
@@ -1849,15 +1851,15 @@ def create_task_wrapper(
         case None:
             pass
         case declared_options:
-            rules_r = check_execution_rules(_task_body_kind(fn), declared_options)
+            rules_r = check_execution_rules(_task_body_kind(function), declared_options)
             if is_err(rules_r):
                 raise execution_rule_error(
                     rules_r.err_value,
                     task_name=task_name,
-                    location=fn_location,
+                    location=function_location,
                 )
 
-    hints = get_type_hints(fn, include_extras=True)
+    hints = get_type_hints(function, include_extras=True)
 
     # Validate that return type is Result[*, TaskError]
     return_hint = hints.get('return')
@@ -1865,8 +1867,8 @@ def create_task_wrapper(
         raise TaskDefinitionError(
             message='task function must declare an explicit return type',
             code=ErrorCode.TASK_NO_RETURN_TYPE,
-            location=fn_location,
-            notes=[f"function '{fn.__name__}' has no return type annotation"],
+            location=function_location,
+            notes=[f"function '{function.__name__}' has no return type annotation"],
             help_text='add return type annotation: `-> Result[YourType, TaskError]`',
         )
 
@@ -1877,9 +1879,9 @@ def create_task_wrapper(
             raise TaskDefinitionError(
                 message='task function must return Result',
                 code=ErrorCode.TASK_INVALID_RETURN_TYPE,
-                location=fn_location,
+                location=function_location,
                 notes=[
-                    f"function '{fn.__name__}' returns `{return_hint}`",
+                    f"function '{function.__name__}' returns `{return_hint}`",
                     'tasks must return Result[T, TaskError[C]]',
                 ],
                 help_text='change return type to `-> Result[YourType, TaskError]`',
@@ -1897,12 +1899,12 @@ def create_task_wrapper(
     # enforces ErrT is TaskError. Failure here is the documented breaking
     # cut at app construction time.
     try:
-        check_task_signature(fn, task_name=task_name)
+        check_task_signature(function, task_name=task_name)
     except SignatureValidationError as exc:
         raise TaskDefinitionError(
             message=exc.detail.headline,
             code=ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
-            location=fn_location,
+            location=function_location,
             notes=[exc.detail.reason],
             help_text=exc.detail.help_text,
         ) from exc
@@ -1917,7 +1919,7 @@ def create_task_wrapper(
             app.config.default_unhandled_error_code,
         ),
         task_name=task_name,
-        location=fn_location,
+        location=function_location,
     )
 
     ok_type_adapter: TypeAdapter[Any] = TypeAdapter(ok_type)
@@ -1943,7 +1945,7 @@ def create_task_wrapper(
         return Err(TaskError(
             error_code=ContractCode.RETURN_TYPE_MISMATCH,
             message=(
-                f'Task {fn.__name__} returned {wrapper}(<{actual_type}>) '
+                f'Task {function.__name__} returned {wrapper}(<{actual_type}>) '
                 f'but expected type {expected_type}: {summary}'
             ),
             data={
@@ -1972,7 +1974,7 @@ def create_task_wrapper(
         return Err(TaskError(
             error_code=ContractCode.RETURN_TYPE_MISMATCH,
             message=(
-                f'Task {fn.__name__} returned {actual_type}{code_text} '
+                f'Task {function.__name__} returned {actual_type}{code_text} '
                 f'but must return Result[{ok_type}, {err_type}]'
             ),
             data={
@@ -2090,7 +2092,7 @@ def create_task_wrapper(
                 return Err(TaskError(
                     exception=exc,
                     error_code=cast('C | BuiltInTaskCode', mapped_code(resolved_code, code_type)),
-                    message=f'Unhandled exception in task {fn.__name__}: {type(exc).__name__}: {exception_text(exc)}',
+                    message=f'Unhandled exception in task {function.__name__}: {type(exc).__name__}: {exception_text(exc)}',
                     data={'exception_type': type(exc).__name__},
                 ))
 
@@ -2124,7 +2126,7 @@ def create_task_wrapper(
         try:
             send_options = TaskOptions(
                 task_name=task_options.task_name if task_options else task_name,
-                queue_name=task_options.queue_name if task_options else None,
+                queue=task_options.queue if task_options else None,
                 good_until=good_until,
                 retry_policy=task_options.retry_policy if task_options else None,
                 timeout_ms=task_options.timeout_ms if task_options else None,
@@ -2518,7 +2520,7 @@ def create_task_wrapper(
 
         Returns Err(TaskSendError) on validation or serialization failure.
         """
-        queue_name = task_options.queue_name if task_options else None
+        queue_name = task_options.queue if task_options else None
         try:
             validated_queue_name = app.validate_queue_name(queue_name)
             priority = effective_priority(app, validated_queue_name)
@@ -2555,7 +2557,7 @@ def create_task_wrapper(
                 ),
                 exception=NoCause(),
             ))
-        missing = missing_required_kwargs(fn, kwargs_dict)
+        missing = missing_required_kwargs(function, kwargs_dict)
         if missing.workflow_only:
             return Err(TaskSendValidationFailed(
                 message=(
@@ -2574,7 +2576,7 @@ def create_task_wrapper(
                 exception=NoCause(),
             ))
         try:
-            _ = fill_omitted_defaults(fn, kwargs_dict)
+            _ = fill_omitted_defaults(function, kwargs_dict)
         except (StrictJsonError, ValueValidationError) as exc:
             return Err(TaskSendValidationFailed(
                 message=f'A default of {task_name!r} does not fit its type: {exc}',
@@ -2585,7 +2587,7 @@ def create_task_wrapper(
         input_json: str | None = None
         if kwargs_dict:
             try:
-                encoded_kwargs = encode_kwargs_read_back(fn, kwargs_dict)
+                encoded_kwargs = encode_kwargs_read_back(function, kwargs_dict)
             except (StrictJsonError, ValueValidationError) as exc:
                 return Err(TaskSendValidationFailed(
                     message=f'Failed to encode kwargs for {task_name}: {exc}',
@@ -3170,20 +3172,20 @@ def create_task_wrapper(
         def __init__(self, call: Callable[..., object]) -> None:
             # `__getattr__` reads `_call`, so it is set first.
             self._call = call
-            self.__name__ = fn.__name__
-            self.__doc__ = fn.__doc__
-            self.__annotations__ = fn.__annotations__
+            self.__name__ = function.__name__
+            self.__doc__ = function.__doc__
+            self.__annotations__ = function.__annotations__
             self.task_name = task_name
             # Persist the declared queue (validated at definition time) so other components
             # (e.g., scheduler) can infer a task's home queue in CUSTOM mode.
-            self.task_queue_name = task_options.queue_name if task_options else None
+            self.queue = task_options.queue if task_options else None
             # Keep a reference to the original function for introspection (signature checks).
-            self._original_fn = fn
+            self._original_function = function
             # Expose the original function as the wrapped target so
             # inspect.signature(task_func) resolves to the real parameters
-            # instead of TaskFunctionImpl.__call__'s (*args, **kwargs). fn is
+            # instead of TaskFunctionImpl.__call__'s (*args, **kwargs). function is
             # guaranteed unwrapped (pre-decorated callables are rejected above).
-            self.__wrapped__ = fn
+            self.__wrapped__ = function
             # Expose the declared ok type for workflow args_from type checks.
             self.task_ok_type = ok_type
             # The type of the custom codes, for the reads of this task.
@@ -3196,7 +3198,7 @@ def create_task_wrapper(
                 MappingProxyType(exception_mapper) if exception_mapper is not None else None
             )
             self.default_unhandled_error_code: str | None = default_unhandled_error_code
-            self.task_error_codes: tuple[str, ...] = error_codes
+            self.error_codes: tuple[str, ...] = error_codes
             # The exception mapping of this task, for the worker's await of
             # an async call (`await_task_call_in_worker`).
             self._map_exception = exception_result
@@ -3283,7 +3285,7 @@ def create_task_wrapper(
             node_id: str | None = None,
         ) -> NodeFactory[P, T, C]:
             return NodeFactory(
-                fn=self,  # type: ignore[arg-type]
+                function=self,  # type: ignore[arg-type]
                 waits_for=waits_for,
                 workflow_context_from=workflow_context_from,
                 args_from=args_from,
@@ -3310,8 +3312,8 @@ def create_task_wrapper(
                 )
             return getattr(instance_fields['_call'], name)
 
-    match _task_body(fn):
-        case _SyncTaskBody(fn=sync_body):
+    match _task_body(function):
+        case _SyncTaskBody(function=sync_body):
             sync_call = _sync_task_call(sync_body, checked_result, exception_result)
 
             class SyncTaskFunctionImpl(TaskFunctionImpl):
@@ -3325,7 +3327,7 @@ def create_task_wrapper(
                     return sync_call(*args, **kwargs)
 
             return SyncTaskFunctionImpl(sync_call)
-        case _AsyncTaskBody(fn=async_body):
+        case _AsyncTaskBody(function=async_body):
             async_call = _async_task_call(async_body, checked_result, exception_result)
 
             class AsyncTaskFunctionImpl(TaskFunctionImpl):

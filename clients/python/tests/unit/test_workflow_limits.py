@@ -52,14 +52,14 @@ def _app() -> Horsies:
 
 
 def _task_fn() -> Any:
-    return mock.MagicMock(task_name='leaf_task', task_queue_name=QUEUE)
+    return mock.MagicMock(task_name='leaf_task', queue=QUEUE)
 
 
 def _wide_spec(node_count: int) -> WorkflowSpec[Any]:
     fn = _task_fn()
     return WorkflowSpec(
         name='wide',
-        tasks=[TaskNode(fn=fn, node_id=f'node_{index}') for index in range(node_count)],
+        tasks=[TaskNode(function=fn, node_id=f'node_{index}') for index in range(node_count)],
     )
 
 
@@ -151,7 +151,7 @@ class TestNestingFindingsInCheck:
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
                 if level >= LEVEL_WHERE_THE_NESTING_ENDS:
-                    leaf = TaskNode(fn=_task_fn(), node_id='leaf')
+                    leaf = TaskNode(function=_task_fn(), node_id='leaf')
                     return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
                 child = SubWorkflowNode(workflow_def=Ends, kwargs={'level': level + 1})
                 return WorkflowSpec(name=cls.name, tasks=[child])
@@ -182,7 +182,7 @@ class TestNestingBehindADependency:
             def build_with(
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
-                gate = TaskNode(fn=_task_fn(), node_id='gate')
+                gate = TaskNode(function=_task_fn(), node_id='gate')
                 child = SubWorkflowNode(
                     workflow_def=Gated, kwargs={'level': level}, waits_for=[gate],
                 )
@@ -210,7 +210,7 @@ class TestNestingBehindADependency:
             def build_with(
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
-                gate = TaskNode(fn=_task_fn(), node_id='gate')
+                gate = TaskNode(function=_task_fn(), node_id='gate')
                 child = SubWorkflowNode(
                     workflow_def=GatedDeeper,
                     kwargs={'level': level + 1},
@@ -245,7 +245,7 @@ class TestNestingBehindADependency:
                 return WorkflowSpec(name=cls.name, tasks=[child])
 
         def root() -> WorkflowSpec[Any]:
-            gate = TaskNode(fn=_task_fn(), node_id='gate')
+            gate = TaskNode(function=_task_fn(), node_id='gate')
             child = SubWorkflowNode(
                 workflow_def=Same, kwargs={'level': 0}, waits_for=[gate],
             )
@@ -281,7 +281,7 @@ class TestNestingBehindADependency:
                 return WorkflowSpec(name=cls.name, tasks=[child])
 
         def root() -> WorkflowSpec[Any]:
-            gate = TaskNode(fn=_task_fn(), node_id='gate')
+            gate = TaskNode(function=_task_fn(), node_id='gate')
             child = SubWorkflowNode(
                 workflow_def=Deeper, kwargs={'level': 0}, waits_for=[gate],
             )

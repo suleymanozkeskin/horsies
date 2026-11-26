@@ -1,6 +1,6 @@
 //! The expansion of `#[horsies::task]` and `#[horsies::blocking_task]`: the
 //! function as written, the compile-time checks of its retry codes, and a
-//! module of the same name with `register`, the send helpers, `handle`,
+//! module of the same name with `register`, the send helpers, `function`,
 //! `node` and the input field tokens.
 //!
 //! The module holds no state. Each send helper takes the app that it sends
@@ -113,12 +113,12 @@ fn task_module(
     // of the expansion, so a task parameter named `app` binds apart from it.
     let app = syn::Ident::new("app", proc_macro2::Span::mixed_site());
     let input_items = input_struct(signature);
-    let params_items = params_module(signature);
+    let fields_items = fields_module(signature);
     let send_params = send_params(signature);
     let build_input = build_input(signature);
     let registered = registered_task(signature, fn_name, input, code, kind);
-    let workflow_ctx = match attrs.workflow_ctx {
-        true => quote! { .with_workflow_ctx() },
+    let workflow_context = match attrs.workflow_context {
+        true => quote! { .with_workflow_context() },
         false => quote! {},
     };
     let runtime_capture = match signature.takes_runtime {
@@ -137,7 +137,7 @@ fn task_module(
 
             #input_items
 
-            #params_items
+            #fields_items
 
             const TASK_NAME: &str = #task_name;
 
@@ -148,16 +148,16 @@ fn task_module(
                 app: &mut ::horsies::Horsies,
             ) -> ::std::result::Result<#function_type, ::horsies::HorsiesError> {
                 #runtime_capture
-                let task = #registered #workflow_ctx .with_task_options(#options);
+                let task = #registered #workflow_context .with_task_options(#options);
                 app.register(TASK_NAME, task)?;
                 <#function_type>::__registered(app, TASK_NAME)
             }
 
             /// The typed function of the task in the app of `runtime`.
-            pub fn handle(
+            pub fn function(
                 runtime: &::horsies::TaskRuntime,
             ) -> ::std::result::Result<#function_type, ::horsies::TaskFunctionNotFound> {
-                runtime.task_handle::<#input, #output, #code>(TASK_NAME)
+                runtime.task_function::<#input, #output, #code>(TASK_NAME)
             }
 
             /// Send the task now through `app`, the app that registered
@@ -218,13 +218,13 @@ fn task_module(
 /// The `TaskOptions` of the registration: the attribute values, with the
 /// default class `ISOLATED` and the default grace of a `SHARED_ASYNC` task.
 fn task_options(attrs: &TaskAttrs) -> TokenStream {
-    let queue_name = match &attrs.queue {
+    let queue = match &attrs.queue {
         Some(queue) => {
             quote! { ::std::option::Option::Some(::std::string::String::from(#queue)) }
         }
         None => quote! { ::std::option::Option::None },
     };
-    let (retry_policy, auto_retry_for) = match &attrs.retry {
+    let (retry_policy, retry_for) = match &attrs.retry {
         Retry::NoRetry => (
             quote! { ::std::option::Option::None },
             quote! { ::std::option::Option::None },
@@ -253,9 +253,7 @@ fn task_options(attrs: &TaskAttrs) -> TokenStream {
             let value = proc_macro2::Literal::u32_suffixed(grace.value);
             (
                 quote! { ::horsies::Execution::Isolated },
-                quote! {
-                    ::std::option::Option::Some(::horsies::__private::cancel_grace(#value))
-                },
+                quote! { ::std::option::Option::Some(#value) },
             )
         }
         (ExecutionClass::Isolated, None) => (
@@ -270,24 +268,20 @@ fn task_options(attrs: &TaskAttrs) -> TokenStream {
             let value = proc_macro2::Literal::u32_suffixed(grace.value);
             (
                 quote! { ::horsies::Execution::SharedAsync },
-                quote! {
-                    ::std::option::Option::Some(::horsies::__private::cancel_grace(#value))
-                },
+                quote! { ::std::option::Option::Some(#value) },
             )
         }
         (ExecutionClass::SharedAsync, None) => (
             quote! { ::horsies::Execution::SharedAsync },
-            quote! {
-                ::std::option::Option::Some(::horsies::__private::DEFAULT_CANCEL_GRACE)
-            },
+            quote! { ::std::option::Option::Some(::horsies::DEFAULT_CANCEL_GRACE_MS) },
         ),
     };
     quote! {
         ::horsies::TaskOptions {
             task_name: ::std::string::String::from(TASK_NAME),
-            queue_name: #queue_name,
+            queue: #queue,
             good_until: ::std::option::Option::None,
-            auto_retry_for: #auto_retry_for,
+            retry_for: #retry_for,
             retry_policy: #retry_policy,
             timeout_ms: #timeout_ms,
             execution: #execution,
@@ -296,7 +290,7 @@ fn task_options(attrs: &TaskAttrs) -> TokenStream {
     }
 }
 
-/// One `const` assertion per `auto_retry_for` code: a built-in code, or a
+/// One `const` assertion per `retry_for` code: a built-in code, or a
 /// code of the task's code type `E`. The assertions sit next to the
 /// function, so `E` resolves as in its signature.
 fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -> TokenStream {
@@ -308,7 +302,7 @@ fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -
         let literal = &entry.code;
         // `assert!` reads its message as a format string with no argument.
         let message = format!(
-            "auto_retry_for of task '{}': {} is neither a built-in code nor a code of {}",
+            "retry_for of task '{}': {} is neither a built-in code nor a code of {}",
             attrs.name.value(),
             literal.value(),
             code_type_text
@@ -495,10 +489,10 @@ fn input_struct(signature: &Signature) -> TokenStream {
     }
 }
 
-/// `params::<name>()`: the field token of each parameter of a wrapped
+/// `fields::<name>()`: the field token of each parameter of a wrapped
 /// input. The key is the name that serde reads: a raw identifier without
 /// its `r#`.
-fn params_module(signature: &Signature) -> TokenStream {
+fn fields_module(signature: &Signature) -> TokenStream {
     let InputShape::Wrapped(params) = &signature.input else {
         return quote! {};
     };
@@ -514,7 +508,7 @@ fn params_module(signature: &Signature) -> TokenStream {
     });
     quote! {
         /// The field tokens of the task's input, for workflow nodes.
-        pub mod params {
+        pub mod fields {
             use super::*;
             #(#tokens)*
         }

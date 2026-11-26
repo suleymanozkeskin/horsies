@@ -145,7 +145,7 @@ async def clean_workflow_tables(
 def make_simple_task(app: Horsies, name: str = 'simple_task') -> Any:
     """Create a simple task that doubles its input."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def simple_task(*, value: int) -> Result[int, TaskError]:
         return Ok(value * 2)
 
@@ -155,7 +155,7 @@ def make_simple_task(app: Horsies, name: str = 'simple_task') -> Any:
 def make_simple_ctx_task(app: Horsies, name: str = 'simple_ctx_task') -> Any:
     """Create a simple task that accepts workflow_ctx and doubles its input."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def simple_ctx_task(
         *, value: int,
         workflow_ctx: WorkflowContext | None = None,
@@ -168,7 +168,7 @@ def make_simple_ctx_task(app: Horsies, name: str = 'simple_ctx_task') -> Any:
 def make_failing_task(app: Horsies, name: str = 'failing_task') -> Any:
     """Create a task that always fails."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def failing_task() -> Result[int, TaskError]:
         return Err(TaskError(error_code='DELIBERATE_FAIL', message='Test failure'))
 
@@ -178,7 +178,7 @@ def make_failing_task(app: Horsies, name: str = 'failing_task') -> Any:
 def make_identity_task(app: Horsies, name: str = 'identity_task') -> Any:
     """Create a task that returns its input unchanged."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def identity_task(*, value: JsonValue = None) -> Result[JsonValue, TaskError]:
         return Ok(value)
 
@@ -188,7 +188,7 @@ def make_identity_task(app: Horsies, name: str = 'identity_task') -> Any:
 def make_args_receiver_task(app: Horsies, name: str = 'args_receiver') -> Any:
     """Create a task that receives args_from injection."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def args_receiver(
         *, input_result: TaskOutcome[int, TaskError],
     ) -> Result[int, TaskError]:
@@ -210,7 +210,7 @@ def make_args_receiver_task(app: Horsies, name: str = 'args_receiver') -> Any:
 def make_recovery_task(app: Horsies, name: str = 'recovery_task') -> Any:
     """Create a task that can recover from upstream failures."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def recovery_task(
         *, input_result: TaskOutcome[int, TaskError],
     ) -> Result[int, TaskError]:
@@ -227,7 +227,7 @@ def make_recovery_task(app: Horsies, name: str = 'recovery_task') -> Any:
 def make_ctx_receiver_task(app: Horsies, name: str = 'ctx_receiver') -> Any:
     """Create a task that receives workflow_ctx."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def ctx_receiver(
         *, workflow_ctx: WorkflowContext | None = None,
     ) -> Result[dict[str, JsonValue], TaskError]:
@@ -248,7 +248,7 @@ def make_ctx_receiver_task(app: Horsies, name: str = 'ctx_receiver') -> Any:
 def make_no_ctx_task(app: Horsies, name: str = 'no_ctx_task') -> Any:
     """Create a task that does NOT declare workflow_ctx param."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def no_ctx_task(*, value: int = 0) -> Result[int, TaskError]:
         return Ok(value + 1)
 
@@ -260,7 +260,7 @@ def make_multi_args_receiver_task(
 ) -> Any:
     """Create a task that receives multiple args_from injections."""
 
-    @app.task(task_name=name)
+    @app.task(name=name)
     def multi_args_receiver(
         *, first: TaskOutcome[int, TaskError],
         second: TaskOutcome[int, TaskError],
@@ -290,8 +290,8 @@ def make_retryable_task(
     intervals = [60] * max_retries
 
     @app.task(
-        task_name=name,
-        retry_policy=RetryPolicy.fixed(intervals, auto_retry_for=['TASK_EXCEPTION']),
+        name=name,
+        retry_policy=RetryPolicy.fixed(intervals, retry_for=['TASK_EXCEPTION']),
     )
     def retryable_task(*, value: int) -> Result[int, TaskError]:
         return Ok(value * 2)
@@ -542,7 +542,7 @@ def make_workflow_spec(
     # Resolve queue and priority for each task (mimics app.workflow() behavior)
     for task in tasks:
         if task.queue is None:
-            task.queue = getattr(task.fn, 'task_queue_name', None) or 'default'
+            task.queue = getattr(task.function, 'queue', None) or 'default'
         if task.priority is None:
             task.priority = 100  # DEFAULT mode priority
 

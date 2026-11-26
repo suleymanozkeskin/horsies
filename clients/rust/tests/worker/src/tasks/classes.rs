@@ -103,7 +103,7 @@ pub async fn shared_cooperative(rt: TaskRuntime) -> Result<String, TaskError<Cla
     execution = shared_async,
     timeout_ms = 30_000,
     retry_policy = retry_on(1),
-    auto_retry_for = ["TASK_BLOCKED_LOOP"]
+    retry_for = ["TASK_BLOCKED_LOOP"]
 )]
 pub async fn shared_blocks_once(token: String) -> Result<u32, TaskError<ClassCode>> {
     let first = markers::create_once(&format!("{token}-blocked"), &std::process::id().to_string())
@@ -123,7 +123,7 @@ pub async fn shared_blocks_once(token: String) -> Result<u32, TaskError<ClassCod
     timeout_ms = 2_000,
     cancel_grace_ms = 100,
     retry_policy = retry_on(1),
-    auto_retry_for = ["TASK_TIMEOUT"]
+    retry_for = ["TASK_TIMEOUT"]
 )]
 pub async fn shared_stuck_once(token: String) -> Result<u32, TaskError<ClassCode>> {
     let first = markers::create_once(&format!("{token}-stuck"), &std::process::id().to_string())
@@ -160,7 +160,7 @@ pub fn thread_hang() -> Result<String, TaskError<Infallible>> {
     execution = shared_thread,
     timeout_ms = 1_000,
     retry_policy = RetryPolicy::fixed(vec![1, 1, 1], false).expect("a valid policy"),
-    auto_retry_for = ["TASK_TIMEOUT"]
+    retry_for = ["TASK_TIMEOUT"]
 )]
 #[expect(
     clippy::needless_pass_by_value,

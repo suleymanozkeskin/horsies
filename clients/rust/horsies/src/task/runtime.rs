@@ -104,12 +104,12 @@ impl TaskRuntime {
     }
 
     /// The typed function of task `task_name` in this app, as its
-    /// `register` returned it. The generated `name::handle(&runtime)` calls
+    /// `register` returned it. The generated `name::function(&runtime)` calls
     /// it.
     ///
     /// Errors: [`TaskFunctionNotFound`] for a name that no task attribute
     /// registered on this app, or one registered with other types.
-    pub fn task_handle<A, T, E>(
+    pub fn task_function<A, T, E>(
         &self,
         task_name: &str,
     ) -> Result<TaskFunction<A, T, E>, TaskFunctionNotFound>

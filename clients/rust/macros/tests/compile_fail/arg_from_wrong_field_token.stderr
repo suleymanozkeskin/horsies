@@ -1,7 +1,7 @@
 error[E0308]: mismatched types
   --> tests/compile_fail/arg_from_wrong_field_token.rs:28:19
    |
-28 |         .arg_from(other_number::params::value(), produced);
+28 |         .arg_from(other_number::fields::value(), produced);
    |          -------- ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `InputField<Input, TaskOutcome<i64, _>>`, found `InputField<Input, TaskOutcome<i64, ...>>`
    |          |
    |          arguments to this method are incorrect

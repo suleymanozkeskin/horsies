@@ -5,7 +5,7 @@ pyright checks this file through ``pyrightconfig.clean.json``. pytest does
 not collect it (no ``test_`` prefix), and nothing imports it.
 ``error_codes`` takes an ``Enum`` class or a tuple of strings with every
 execution class, and the task function exposes the declared codes as
-``task_error_codes: tuple[str, ...]``. Each wrong use below has an ignore
+``error_codes: tuple[str, ...]``. Each wrong use below has an ignore
 comment, and the config makes an unneeded ignore comment an error. So an
 overload set that accepts one of these uses fails the check.
 """
@@ -54,8 +54,8 @@ def register(app: Horsies, chosen: Execution) -> None:
     def chosen_at_run_time(*, value: int) -> Result[int, TaskError]:
         return Ok(value)
 
-    assert_type(charge.task_error_codes, tuple[str, ...])
-    assert_type(send_mail.task_error_codes, tuple[str, ...])
+    assert_type(charge.error_codes, tuple[str, ...])
+    assert_type(send_mail.error_codes, tuple[str, ...])
     del shared_async, shared_thread, chosen_at_run_time
 
     @app.task('pin_codes_list', error_codes=['RATE_LIMITED'])  # pyright: ignore[reportArgumentType]

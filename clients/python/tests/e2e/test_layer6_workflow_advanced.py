@@ -615,7 +615,7 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
 
     # Create dynamic spec with counter file
     node_retry = TaskNode(
-        fn=retry_then_ok_task,
+        function=retry_then_ok_task,
         kwargs={'counter_file': str(counter_file), 'succeed_on_attempt': 2},
     )
 
@@ -669,7 +669,7 @@ async def test_workflow_task_retries_exhausted(
 
     # succeed_on_attempt=10 but max_retries=3 → 4 attempts total, never succeeds
     node_retry = TaskNode(
-        fn=retry_then_ok_task,
+        function=retry_then_ok_task,
         kwargs={'counter_file': str(counter_file), 'succeed_on_attempt': 10},
     )
 

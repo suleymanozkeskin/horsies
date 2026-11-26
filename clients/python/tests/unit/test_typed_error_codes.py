@@ -294,7 +294,7 @@ def test_args_from_source_with_other_codes_is_refused() -> None:
         return Ok('x')
 
     refusal = _args_from_code_type_error(
-        'report', 'sent', TaskNode(fn=produce), TaskOutcome[str, TaskError[WelcomeCode]],
+        'report', 'sent', TaskNode(function=produce), TaskOutcome[str, TaskError[WelcomeCode]],
     )
 
     assert refusal is not None
@@ -309,7 +309,7 @@ def test_args_from_source_with_the_same_codes_is_accepted() -> None:
         return Ok('x')
 
     refusal = _args_from_code_type_error(
-        'report', 'sent', TaskNode(fn=produce), TaskOutcome[str, TaskError[WelcomeCode]],
+        'report', 'sent', TaskNode(function=produce), TaskOutcome[str, TaskError[WelcomeCode]],
     )
 
     assert refusal is None

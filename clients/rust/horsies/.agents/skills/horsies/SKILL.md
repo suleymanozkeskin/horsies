@@ -271,10 +271,10 @@ impl WorkflowDefinition for DailyReport {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let fetched = builder.task(
-            fetch_report::node().set(fetch_report::params::region(), "eu".to_owned())?,
+            fetch_report::node().set(fetch_report::fields::region(), "eu".to_owned())?,
         )?;
         let published = builder.task(
-            publish_report::node().arg_from(publish_report::params::report(), fetched),
+            publish_report::node().arg_from(publish_report::fields::report(), fetched),
         )?;
         Ok(WorkflowDefConfig::new().output(published))
     }

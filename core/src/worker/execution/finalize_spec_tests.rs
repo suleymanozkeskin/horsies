@@ -82,20 +82,15 @@ struct Seeded {
 }
 
 /// Stored options with a retry policy (Python's stored layout).
-fn retry_options(
-    max_retries: u32,
-    backoff: &str,
-    intervals: &[u32],
-    auto_retry_for: &[&str],
-) -> String {
+fn retry_options(max_retries: u32, backoff: &str, intervals: &[u32], retry_for: &[&str]) -> String {
     serde_json::json!({
         "retry_policy": {
             "max_retries": max_retries,
-            "intervals": intervals,
+            "intervals_seconds": intervals,
             "backoff_strategy": backoff,
             "jitter": false,
             "max_delay_seconds": null,
-            "auto_retry_for": auto_retry_for,
+            "retry_for": retry_for,
         }
     })
     .to_string()

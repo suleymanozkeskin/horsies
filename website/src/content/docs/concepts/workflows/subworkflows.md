@@ -34,12 +34,12 @@ app = Horsies(AppConfig(
     broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
-@app.task(task_name="fetch_data")
+@app.task(name="fetch_data")
 def fetch_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
     # fetch logic...
     return Ok({"data": "..."})
 
-@app.task(task_name="transform")
+@app.task(name="transform")
 def transform(*, raw: TaskOutcome[dict[str, JsonValue], TaskError]) -> Result[str, TaskError]:
     # With the defaults, a failed `fetch` makes this node SKIPPED, so the Failed
     # arm runs only on a decode failure. A failed upstream also arrives with
@@ -50,7 +50,7 @@ def transform(*, raw: TaskOutcome[dict[str, JsonValue], TaskError]) -> Result[st
         case Succeeded(value):
             return Ok(str(value))
 
-@app.task(task_name="store")
+@app.task(name="store")
 def store(*, transformed: str) -> Result[bool, TaskError]:
     # store logic...
     return Ok(True)
@@ -65,14 +65,14 @@ class DataPipeline(WorkflowDefinition[bool]):
     name = "data_pipeline"
     definition_key = "myapp.data_pipeline.v1"
 
-    fetch = TaskNode(fn=fetch_data, kwargs={'url': "https://api.example.com"})
+    fetch = TaskNode(function=fetch_data, kwargs={'url': "https://api.example.com"})
     transform = TaskNode(
-        fn=transform,
+        function=transform,
         waits_for=[fetch],
         args_from={"raw": fetch},
     )
     store = TaskNode(
-        fn=store,
+        function=store,
         waits_for=[transform],
         args_from={"transformed": transform},
     )
@@ -123,8 +123,8 @@ For simple DAGs without conditions or subworkflows:
 ```python
 from horsies import Err, Ok
 
-node_a = TaskNode(fn=task_a, kwargs={'value': 1})
-node_b = TaskNode(fn=task_b, waits_for=[node_a])
+node_a = TaskNode(function=task_a, kwargs={'value': 1})
+node_b = TaskNode(function=task_b, waits_for=[node_a])
 
 spec = app.workflow(
     name="simple_workflow",
@@ -158,10 +158,10 @@ class DiamondDAG(WorkflowDefinition[str]):
     # A ──┤     ├→ D
     #     └→ C ─┘
 
-    a = TaskNode(fn=task_a)
-    b = TaskNode(fn=task_b, waits_for=[a])
-    c = TaskNode(fn=task_c, waits_for=[a])
-    d = TaskNode(fn=task_d, waits_for=[b, c])  # Waits for BOTH b and c
+    a = TaskNode(function=task_a)
+    b = TaskNode(function=task_b, waits_for=[a])
+    c = TaskNode(function=task_c, waits_for=[a])
+    d = TaskNode(function=task_d, waits_for=[b, c])  # Waits for BOTH b and c
 
     config = WorkflowDefinitionConfig(output=d)
 ```
@@ -178,11 +178,11 @@ Use `allow_failed_dependencies=True` to run anyway (see Section 6).
 
 <!-- check: skip partial -- uses a name before the page defines it -->
 ```python
-@app.task(task_name="add")
+@app.task(name="add")
 def add(*, a: int, b: int) -> Result[int, TaskError]:
     return Ok(a + b)
 
-@app.task(task_name="multiply")
+@app.task(name="multiply")
 def multiply(
     *,
     sum_result: TaskOutcome[int, TaskError],
@@ -199,9 +199,9 @@ class MathWorkflow(WorkflowDefinition[int]):
     name = "math"
     definition_key = "myapp.math.v1"
 
-    add_node = TaskNode(fn=add, kwargs={'a': 5, 'b': 3})
+    add_node = TaskNode(function=add, kwargs={'a': 5, 'b': 3})
     multiply_node = TaskNode(
-        fn=multiply,
+        function=multiply,
         waits_for=[add_node],
         args_from={"sum_result": add_node},  # Receives TaskOutcome[int, TaskError]
         kwargs={"factor": 10},
@@ -224,7 +224,7 @@ use `workflow_context_from` instead of multiple `args_from` entries.
 ```python
 from horsies import WorkflowContext
 
-@app.task(task_name="aggregate")
+@app.task(name="aggregate")
 def aggregate(
     *,
     workflow_ctx: WorkflowContext | None = None,
@@ -247,10 +247,10 @@ class AggregationWorkflow(WorkflowDefinition[Summary]):
     name = "aggregation"
     definition_key = "myapp.aggregation.v1"
 
-    node_a = TaskNode(fn=produce_int)
-    node_b = TaskNode(fn=produce_str)
+    node_a = TaskNode(function=produce_int)
+    node_b = TaskNode(function=produce_str)
     agg = TaskNode(
-        fn=aggregate,
+        function=aggregate,
         waits_for=[node_a, node_b],
         workflow_context_from=[node_a, node_b],  # Both results available in context
     )
@@ -299,8 +299,8 @@ class ChildPipeline(WorkflowDefinition[int]):
     name = "child_pipeline"
     definition_key = "myapp.child_pipeline.v1"
 
-    step1 = TaskNode(fn=produce_int, kwargs={'value': 5})
-    step2 = TaskNode(fn=double, waits_for=[step1], args_from={"value": step1})
+    step1 = TaskNode(function=produce_int, kwargs={'value': 5})
+    step2 = TaskNode(function=double, waits_for=[step1], args_from={"value": step1})
 
     config = WorkflowDefinitionConfig(output=step2)
 
@@ -351,9 +351,9 @@ class DataProcessor(WorkflowDefinition[ProcessedData]):
         **_kwargs: Any,
     ) -> WorkflowSpec:
         """Build workflow with runtime parameters."""
-        fetch = TaskNode(fn=fetch_raw_data, kwargs={'source_url': source_url})
-        clean = TaskNode(fn=clean_data, waits_for=[fetch], args_from={"raw": fetch})
-        process = TaskNode(fn=process_data, waits_for=[clean], args_from={"clean": clean})
+        fetch = TaskNode(function=fetch_raw_data, kwargs={'source_url': source_url})
+        clean = TaskNode(function=clean_data, waits_for=[fetch], args_from={"raw": fetch})
+        process = TaskNode(function=process_data, waits_for=[clean], args_from={"clean": clean})
 
         return WorkflowSpec(
             name=cls.name,
@@ -372,7 +372,7 @@ If the parent has `on_error=OnError.PAUSE`, the start takes the `SubWorkflowNode
 A `build_with()` that returns a `WorkflowSpec(...)` directly does not run the
 queue/priority binding that `app.workflow()` applies. A `TaskNode` left without
 an explicit `priority` inherits its queue's configured priority, and one
-without an explicit `queue` inherits `fn.task_queue_name` — but that resolution
+without an explicit `queue` inherits `function.queue` — but that resolution
 happens when the subworkflow is enqueued, not at construction time. So a node
 built this way carries `queue=None, priority=None` until enqueue.
 
@@ -406,7 +406,7 @@ class MultiSourceAggregation(WorkflowDefinition[Report]):
         kwargs={"source_url": "https://api2.example.com"},
     )
     aggregate = TaskNode(
-        fn=aggregate_results,
+        function=aggregate_results,
         waits_for=[source1, source2],
         args_from={"result1": source1, "result2": source2},
     )
@@ -552,7 +552,7 @@ When you need visibility into child workflow internals:
 ```python
 from horsies import WorkflowContext, SubWorkflowSummary
 
-@app.task(task_name="report_health")
+@app.task(name="report_health")
 def report_health(
     *,
     workflow_ctx: WorkflowContext | None = None,
@@ -580,7 +580,7 @@ class MonitoredPipeline(WorkflowDefinition[HealthReport]):
 
     child = SubWorkflowNode(workflow_def=ChildPipeline)
     reporter = TaskNode(
-        fn=report_health,
+        function=report_health,
         waits_for=[child],
         workflow_context_from=[child],   # Required for summary_for()
         allow_failed_dependencies=True,  # Run even if child fails
@@ -607,7 +607,7 @@ SubWorkflowNode results flow like TaskNode results:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-@app.task(task_name="process_child_result")
+@app.task(name="process_child_result")
 def process_child_result(
     *,
     child_result: TaskOutcome[ChildOutput, TaskError],
@@ -627,7 +627,7 @@ class ParentWithDataFlow(WorkflowDefinition[ParentOutput]):
 
     child = SubWorkflowNode(workflow_def=ChildPipeline)
     processor = TaskNode(
-        fn=process_child_result,
+        function=process_child_result,
         waits_for=[child],
         args_from={"child_result": child},  # Receives TaskOutcome[ChildOutput, TaskError]
     )
@@ -670,7 +670,7 @@ Use this for recovery tasks or aggregators that handle failures:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-@app.task(task_name="recovery_handler")
+@app.task(name="recovery_handler")
 def recovery_handler(
     *,
     primary_result: TaskOutcome[Data, TaskError],
@@ -687,9 +687,9 @@ class RecoveryWorkflow(WorkflowDefinition[Data]):
     name = "recovery"
     definition_key = "myapp.recovery.v1"
 
-    primary = TaskNode(fn=fetch_data)
+    primary = TaskNode(function=fetch_data)
     recovery = TaskNode(
-        fn=recovery_handler,
+        function=recovery_handler,
         waits_for=[primary],
         args_from={"primary_result": primary},
         allow_failed_dependencies=True,  # Run even if primary fails
@@ -736,7 +736,7 @@ When a task runs with `allow_failed_dependencies=True` and its dependency was SK
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-@app.task(task_name="handle_any_failure")
+@app.task(name="handle_any_failure")
 def handle_any_failure(
     *,
     upstream: TaskOutcome[Data, TaskError],
@@ -765,7 +765,7 @@ Task runs when ALL dependencies reach terminal state:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 aggregate = TaskNode(
-    fn=aggregate,
+    function=aggregate,
     waits_for=[branch_a, branch_b, branch_c],
     join="all",  # Default - wait for all
 )
@@ -780,7 +780,7 @@ Task runs when ANY dependency completes successfully:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 first_success = TaskNode(
-    fn=use_first_result,
+    function=use_first_result,
     waits_for=[fast_source, slow_source, backup_source],
     join="any",  # Run as soon as one succeeds
 )
@@ -796,7 +796,7 @@ Task runs when a minimum number of dependencies succeed:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 quorum_result = TaskNode(
-    fn=quorum_handler,
+    function=quorum_handler,
     waits_for=[replica_a, replica_b, replica_c],
     join="quorum",
     min_success=2,  # Need at least 2 of 3
@@ -822,10 +822,10 @@ class DeliveryWorkflow(WorkflowDefinition[str]):
     name = "delivery"
     definition_key = "myapp.delivery.v1"
 
-    pickup = TaskNode(fn=pickup_package)
-    deliver_door = TaskNode(fn=deliver_to_door, waits_for=[pickup])
-    deliver_neighbor = TaskNode(fn=deliver_to_neighbor, waits_for=[pickup])
-    deliver_locker = TaskNode(fn=deliver_to_locker, waits_for=[pickup])
+    pickup = TaskNode(function=pickup_package)
+    deliver_door = TaskNode(function=deliver_to_door, waits_for=[pickup])
+    deliver_neighbor = TaskNode(function=deliver_to_neighbor, waits_for=[pickup])
+    deliver_locker = TaskNode(function=deliver_to_locker, waits_for=[pickup])
 
     config = WorkflowDefinitionConfig(
         output=deliver_door,
@@ -917,13 +917,13 @@ class MyWorkflow(WorkflowDefinition[Output]):
     ...
 
 # Use args_from for direct data flow
-node_b = TaskNode(fn=task_b, waits_for=[node_a], args_from={"data": node_a})
+node_b = TaskNode(function=task_b, waits_for=[node_a], args_from={"data": node_a})
 
 # Use workflow_context_from when accessing multiple results
-node_c = TaskNode(fn=aggregate, waits_for=[a, b], workflow_context_from=[a, b])
+node_c = TaskNode(function=aggregate, waits_for=[a, b], workflow_context_from=[a, b])
 
 # Use allow_failed_dependencies for recovery tasks
-recovery = TaskNode(fn=recover, waits_for=[primary], allow_failed_dependencies=True)
+recovery = TaskNode(function=recover, waits_for=[primary], allow_failed_dependencies=True)
 
 # Use SubWorkflowNode for reusable workflow modules
 child = SubWorkflowNode(workflow_def=ReusablePipeline)
@@ -941,7 +941,7 @@ def build_with(cls, app, param, *_args, **_kwargs):
 ```python
 # Don't access results not in workflow_context_from
 node = TaskNode(
-    fn=task,
+    function=task,
     waits_for=[a, b, c],
     workflow_context_from=[a],  # Only 'a' is available
 )
@@ -985,7 +985,7 @@ workflow can continue deterministic failure propagation without leaving the node
 **Fix**: Add the parameter:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-@app.task(task_name="my_task")
+@app.task(name="my_task")
 def my_task(
     *,
     workflow_ctx: WorkflowContext | None = None,  # Add this
@@ -1001,7 +1001,7 @@ def my_task(
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 node_b = TaskNode(
-    fn=task_b,
+    function=task_b,
     waits_for=[node_a],  # Must include node_a
     args_from={"data": node_a},
 )
@@ -1093,12 +1093,12 @@ class AggregatedReport(BaseModel):
 
 # --- Task Functions ---
 
-@app.task(task_name="fetch_from_api")
+@app.task(name="fetch_from_api")
 def fetch_from_api(*, url: str) -> Result[RawData, TaskError]:
     # Simulate fetch
     return Ok(RawData(source=url, content="..."))
 
-@app.task(task_name="parse_and_validate")
+@app.task(name="parse_and_validate")
 def parse_and_validate(
     *,
     raw: TaskOutcome[RawData, TaskError],
@@ -1110,7 +1110,7 @@ def parse_and_validate(
             # Simulate parsing
             return Ok(ProcessedData(source=data.source, records=[{"id": 1}]))
 
-@app.task(task_name="aggregate_sources")
+@app.task(name="aggregate_sources")
 def aggregate_sources(
     *,
     workflow_ctx: WorkflowContext | None = None,
@@ -1157,9 +1157,9 @@ class DataSourcePipeline(WorkflowDefinition[ProcessedData]):
         *_args: Any,
         **_kwargs: Any,
     ) -> WorkflowSpec:
-        fetch = TaskNode(fn=fetch_from_api, kwargs={'url': source_url})
+        fetch = TaskNode(function=fetch_from_api, kwargs={'url': source_url})
         process = TaskNode(
-            fn=parse_and_validate,
+            function=parse_and_validate,
             waits_for=[fetch],
             args_from={"raw": fetch},
         )
@@ -1182,7 +1182,7 @@ source2_node = SubWorkflowNode(
     kwargs={"source_url": "https://api2.example.com/data"},
 )
 aggregate_node = TaskNode(
-    fn=aggregate_sources,
+    function=aggregate_sources,
     waits_for=[source1_node, source2_node],
     workflow_context_from=[source1_node, source2_node],
     allow_failed_dependencies=True,  # Aggregate even if some sources fail

@@ -5044,11 +5044,11 @@ mod tests {
             "timeout_ms": 4_294_967_296_u64,
             "retry_policy": {
                 "max_retries": 2,
-                "intervals": [1, 1],
+                "intervals_seconds": [1, 1],
                 "backoff_strategy": "fixed",
                 "jitter": false,
                 "max_delay_seconds": null,
-                "auto_retry_for": ["WORKER_SERIALIZATION_ERROR"]
+                "retry_for": ["WORKER_SERIALIZATION_ERROR"]
             }
         })
         .to_string();
@@ -5076,17 +5076,17 @@ mod tests {
         clean(&pool).await;
 
         let task_id = Uuid::new_v4();
-        // Python's stored layout: auto_retry_for lives inside retry_policy.
+        // Python's stored layout: retry_for lives inside retry_policy.
         // The retry is 60 s away, so the check of a future next_retry_at
         // holds when the finalize and the reads are slow.
         let task_options = serde_json::json!({
             "retry_policy": {
                 "max_retries": 3,
-                "intervals": [60, 60, 60],
+                "intervals_seconds": [60, 60, 60],
                 "backoff_strategy": "fixed",
                 "jitter": false,
                 "max_delay_seconds": null,
-                "auto_retry_for": ["RETRY_ME"]
+                "retry_for": ["RETRY_ME"]
             }
         })
         .to_string();
@@ -5207,11 +5207,11 @@ mod tests {
         let task_options = serde_json::json!({
             "retry_policy": {
                 "max_retries": 3,
-                "intervals": [1, 1, 1],
+                "intervals_seconds": [1, 1, 1],
                 "backoff_strategy": "fixed",
                 "jitter": false,
                 "max_delay_seconds": null,
-                "auto_retry_for": ["RETRY_ME"]
+                "retry_for": ["RETRY_ME"]
             }
         })
         .to_string();

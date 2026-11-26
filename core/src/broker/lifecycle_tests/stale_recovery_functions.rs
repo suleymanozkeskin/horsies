@@ -140,11 +140,11 @@ fn crash_retry_options() -> String {
     serde_json::json!({
         "retry_policy": {
             "max_retries": 1,
-            "intervals": [5],
+            "intervals_seconds": [5],
             "backoff_strategy": "fixed",
             "jitter": false,
             "max_delay_seconds": null,
-            "auto_retry_for": ["WORKER_CRASHED"]
+            "retry_for": ["WORKER_CRASHED"]
         }
     })
     .to_string()

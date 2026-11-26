@@ -236,8 +236,8 @@ def _make_node(
     node.queue = queue
     node.priority = priority
     node.name = name
-    node.fn = MagicMock()
-    node.fn.task_queue_name = fn_queue
+    node.function = MagicMock()
+    node.function.queue = fn_queue
     return node
 
 
@@ -270,7 +270,7 @@ class TestResolveNodeQueueAndPriority:
         assert resolve_node_queue_and_priority(app, node) == ('scraping', 5)
 
     def test_queue_override_beats_fn_queue(self) -> None:
-        """node.queue takes precedence over fn.task_queue_name."""
+        """node.queue takes precedence over function.queue."""
         app = _custom_app(('scraping', 30), ('normal', 50))
         node = _make_node(queue='normal', fn_queue='scraping')
 
@@ -2990,7 +2990,7 @@ class TestDefinitionLevelGoodUntil:
 
         with pytest.raises(TaskDefinitionError) as exc_info:
             decorator = app.task(
-                task_name='test.bad_deadline',
+                name='test.bad_deadline',
                 **{'good_until': deadline},
             )
             decorator(bad_deadline)
@@ -3053,7 +3053,7 @@ class TestFromNodeMarker:
         """from_node() wraps the upstream node in a FromNodeMarker."""
         from horsies.core.models.workflow import TaskNode
 
-        upstream_node = TaskNode(fn=_make_task_fn(), kwargs={'value': 1})
+        upstream_node = TaskNode(function=_make_task_fn(), kwargs={'value': 1})
 
         result = from_node(upstream_node)
 
@@ -3157,7 +3157,7 @@ class TestNodeFactoryFromNodeConversion:
         def produce(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
-        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+        producer_node = TaskNode(function=producer_fn, kwargs={'value': 42})
 
         # Consumer
         def consume(*, data: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
@@ -3179,7 +3179,7 @@ class TestNodeFactoryFromNodeConversion:
         def produce(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
-        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+        producer_node = TaskNode(function=producer_fn, kwargs={'value': 42})
 
         def consume(*, data: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
             return Ok(0)
@@ -3199,7 +3199,7 @@ class TestNodeFactoryFromNodeConversion:
         def produce(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
-        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+        producer_node = TaskNode(function=producer_fn, kwargs={'value': 42})
 
         def consume(*, data: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
             return Ok(0)
@@ -3221,12 +3221,12 @@ class TestNodeFactoryFromNodeConversion:
         def produce_a(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         fn_a = create_task_wrapper(produce_a, app, 'test.produce_a')
-        node_a = TaskNode(fn=fn_a, kwargs={'value': 1})
+        node_a = TaskNode(function=fn_a, kwargs={'value': 1})
 
         def produce_b(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         fn_b = create_task_wrapper(produce_b, app, 'test.produce_b')
-        node_b = TaskNode(fn=fn_b, kwargs={'value': 2})
+        node_b = TaskNode(function=fn_b, kwargs={'value': 2})
 
         def consume(
             *, first: TaskOutcome[int, TaskError],
@@ -3252,7 +3252,7 @@ class TestNodeFactoryFromNodeConversion:
         def produce(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
-        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+        producer_node = TaskNode(function=producer_fn, kwargs={'value': 42})
 
         def consume(
             *, data: TaskOutcome[int, TaskError],
@@ -3288,7 +3288,7 @@ class TestNodeFactoryFromNodeConflicts:
         def produce(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
-        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+        producer_node = TaskNode(function=producer_fn, kwargs={'value': 42})
 
         def consume(*, data: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
             return Ok(0)
@@ -3312,12 +3312,12 @@ class TestNodeFactoryFromNodeConflicts:
         def produce_a(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         fn_a = create_task_wrapper(produce_a, app, 'test.produce_a')
-        node_a = TaskNode(fn=fn_a, kwargs={'value': 1})
+        node_a = TaskNode(function=fn_a, kwargs={'value': 1})
 
         def produce_b(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         fn_b = create_task_wrapper(produce_b, app, 'test.produce_b')
-        node_b = TaskNode(fn=fn_b, kwargs={'value': 2})
+        node_b = TaskNode(function=fn_b, kwargs={'value': 2})
 
         def consume(
             *, first: TaskOutcome[int, TaskError],
@@ -3356,7 +3356,7 @@ class TestNodeFactoryManualArgsFrom:
         def produce(*, value: int) -> Result[int, TaskError]:
             return Ok(value)
         producer_fn = create_task_wrapper(produce, app, 'test.produce')
-        producer_node = TaskNode(fn=producer_fn, kwargs={'value': 42})
+        producer_node = TaskNode(function=producer_fn, kwargs={'value': 42})
 
         def consume(*, data: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
             return Ok(0)

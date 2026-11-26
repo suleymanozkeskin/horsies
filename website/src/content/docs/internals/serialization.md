@@ -90,7 +90,7 @@ The core reads and writes JSON text with these rules:
 
 ## The Error Path
 
-An error is the report of a failure, and `auto_retry_for` and outcome routing read its code. So an error always encodes, and its code and message stay.
+An error is the report of a failure, and `retry_for` and outcome routing read its code. So an error always encodes, and its code and message stay.
 
 - A lone surrogate in the code, the message or the exception text is escaped.
 - The `data` of an error must be JSON-native. A value that is not, or that a reader cannot read, is replaced with `{'data_refused': <cause>}`. The cause names a type, never the value.

@@ -3,7 +3,7 @@
 //!
 //! A node names the dependencies with `workflow_context_from`, and its task
 //! takes the context as the input field `workflow_ctx` (the task attribute's
-//! `workflow_ctx`). The child of the worker writes the context into that
+//! `workflow_context`). The child of the worker writes the context into that
 //! field; its form is the core's `WorkflowContext`.
 
 use std::collections::BTreeMap;

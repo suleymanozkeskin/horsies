@@ -185,7 +185,7 @@ const PHASE_RETRY_MAX_DELAY_S: f64 = 15.0;
 /// The input must pass the core's strict JSON read rule; a refused text fails
 /// the task before user code runs. An object input is Python's keyword input;
 /// its engine members (Python `core/worker/child_runner.py:1362-1580`):
-/// - `WORKFLOW_CTX_KWARG` becomes `workflow_ctx` when `accepts_workflow_ctx`,
+/// - `WORKFLOW_CTX_KWARG` becomes `workflow_ctx` when `accepts_workflow_context`,
 ///   and is removed otherwise (check-time callers pass `false`: no runtime
 ///   context);
 /// - `WORKFLOW_META_KWARG` is removed;
@@ -206,7 +206,7 @@ const PHASE_RETRY_MAX_DELAY_S: f64 = 15.0;
 /// Python's `loads_json` reads any integer (`core/codec/json_io.py:97`).
 pub(crate) fn build_task_input(
     input: &str,
-    accepts_workflow_ctx: bool,
+    accepts_workflow_context: bool,
 ) -> Result<Vec<u8>, TaskError> {
     check_json_text(input)
         .map_err(|e| serialization_error(format!("stored input refused: {e}")))?;
@@ -241,7 +241,7 @@ pub(crate) fn build_task_input(
         .collect();
     check_input_members(&user_members, &args_from_names)
         .map_err(|refusal| input_refused(&refusal))?;
-    let workflow_ctx = match (members.workflow_ctx, accepts_workflow_ctx) {
+    let workflow_ctx = match (members.workflow_ctx, accepts_workflow_context) {
         (Some(payload), true) => Some(workflow_ctx_text(payload.get())?),
         (Some(_), false) | (None, _) => None,
     };

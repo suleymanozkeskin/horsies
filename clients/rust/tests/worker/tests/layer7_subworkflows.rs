@@ -384,7 +384,7 @@ async fn test_failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
             .node()
             .node_id("e2e_sub_failure_probe")
             .arg_from(
-                subworkflow::sub_probe_failed_child::params::child_result(),
+                subworkflow::sub_probe_failed_child::fields::child_result(),
                 node,
             )
             .workflow_context_from([node])
@@ -422,7 +422,7 @@ async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
             .function(workflow::mark::handle)
             .node()
             .node_id("e2e_sub_outputless_ok")
-            .set(workflow::mark::params::value(), "required_ok".to_owned())
+            .set(workflow::mark::fields::value(), "required_ok".to_owned())
             .expect("a mark input"),
     );
     let optional = spec.sub_workflow(child::<SubFail>("e2e_sub_outputless_fail_child"));
@@ -580,7 +580,7 @@ async fn test_subworkflow_build_with_args_from_receives_typed_task_result() {
             .function(workflow::produce_int::handle)
             .node()
             .node_id("e2e_sub_param_source")
-            .set(workflow::produce_int::params::value(), 37)
+            .set(workflow::produce_int::fields::value(), 37)
             .expect("a produce input"),
     );
     let node = spec.sub_workflow(
@@ -609,7 +609,7 @@ async fn test_subworkflow_allow_failed_dependencies_passes_failed_task_result_to
             .node()
             .node_id("e2e_sub_failed_input_source")
             .set(
-                workflow::fail_with::params::error_code(),
+                workflow::fail_with::fields::error_code(),
                 "E2E_UPSTREAM_FAIL".to_owned(),
             )
             .expect("a fail input"),

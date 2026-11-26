@@ -56,7 +56,7 @@ def _task(app: Horsies, name: str, annotation: Any) -> Any:
         'value': annotation,
         'return': Result[int, TaskError],
     }
-    return app.task(task_name=name)(take)
+    return app.task(name=name)(take)
 
 
 def _child(name: str, build_with: Any) -> Any:
@@ -98,7 +98,7 @@ class TestWireForm:
         self, label: str, annotation: Any, value: Any, wire: Any,
     ) -> None:
         app = _app()
-        node = TaskNode(fn=_task(app, label, annotation), kwargs={'value': value})
+        node = TaskNode(function=_task(app, label, annotation), kwargs={'value': value})
         spec = app.workflow(name=label, tasks=[node], definition_key=f'd.{label}')
 
         assert stored_kwargs(spec.tasks[0]) == {'value': wire}
@@ -122,7 +122,7 @@ class TestWireForm:
 
     def test_a_node_of_an_earlier_spec_keeps_its_wire_form(self) -> None:
         app = _app()
-        node = TaskNode(fn=_task(app, 'reused', list[int]), kwargs={'value': [1, 2]})
+        node = TaskNode(function=_task(app, 'reused', list[int]), kwargs={'value': [1, 2]})
         first = app.workflow(name='first', tasks=[node], definition_key='d.first')
         second = app.workflow(
             name='second',
@@ -136,7 +136,7 @@ class TestWireForm:
     def test_a_later_change_to_the_source_does_not_reach_the_wire(self) -> None:
         app = _app()
         values = [1, 2]
-        node = TaskNode(fn=_task(app, 'detached', list[int]), kwargs={'value': values})
+        node = TaskNode(function=_task(app, 'detached', list[int]), kwargs={'value': values})
         spec = app.workflow(name='detached', tasks=[node], definition_key='d.detached')
 
         values.append(3)
@@ -145,7 +145,7 @@ class TestWireForm:
 
     def test_a_node_that_no_spec_took_is_a_defect(self) -> None:
         app = _app()
-        node = TaskNode(fn=_task(app, 'no_spec', list[int]), kwargs={'value': [1]})
+        node = TaskNode(function=_task(app, 'no_spec', list[int]), kwargs={'value': [1]})
 
         with pytest.raises(AssertionError, match='did not pass through a WorkflowSpec'):
             stored_kwargs(node)
@@ -155,7 +155,7 @@ class TestWireForm:
             return value
 
         scaffold.task_name = 'scaffold'  # type: ignore[attr-defined]
-        node = TaskNode(fn=scaffold, kwargs={'value': [1, 2]})
+        node = TaskNode(function=scaffold, kwargs={'value': [1, 2]})
 
         with pytest.raises(WorkflowValidationError) as caught:
             WorkflowSpec(name='s', tasks=[node])
@@ -167,7 +167,7 @@ class TestWireForm:
             _ = value
 
         scaffold.task_name = 'scaffold'  # type: ignore[attr-defined]
-        node = TaskNode(fn=scaffold, kwargs={'value': 1})
+        node = TaskNode(function=scaffold, kwargs={'value': 1})
 
         with pytest.raises(WorkflowValidationError, match='no readable hints') as caught:
             WorkflowSpec(name='s', tasks=[node])
@@ -179,7 +179,7 @@ class TestWireForm:
             return value
 
         scaffold.task_name = 'scaffold'  # type: ignore[attr-defined]
-        spec = WorkflowSpec(name='s', tasks=[TaskNode(fn=scaffold)])
+        spec = WorkflowSpec(name='s', tasks=[TaskNode(function=scaffold)])
 
         assert stored_kwargs(spec.tasks[0]) == {}
 
@@ -188,7 +188,7 @@ class TestWireForm:
         task = _task(app, 'compared', list[int])
         spec = app.workflow(
             name='compared',
-            tasks=[TaskNode(fn=task, kwargs={'value': [1]})],
+            tasks=[TaskNode(function=task, kwargs={'value': [1]})],
             definition_key='d.compared',
         )
 

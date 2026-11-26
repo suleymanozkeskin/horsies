@@ -8,13 +8,16 @@
 //!
 //! The user error codes that a task declares (`UserErrorCode::CODES` of its
 //! code type, which the task macros fill) follow the rules of a declared
-//! set (`DeclaredErrorCodes::parse`).
+//! set (`DeclaredErrorCodes::parse`). The cancel grace of a task's options is
+//! checked here, once, against its bounds (`check_cancel_grace_ms`).
 //!
 //! Every function is pure: it reads the config and changes only the registry
 //! it is given.
 
 use horsies_core::core::task::error::CodeTextRefusal;
-use horsies_core::{DeclaredCodeRefusal, DeclaredErrorCodes, RegisteredTask, TaskRegistry};
+use horsies_core::{
+    check_cancel_grace_ms, DeclaredCodeRefusal, DeclaredErrorCodes, RegisteredTask, TaskRegistry,
+};
 
 use crate::{AppConfig, ErrorCode, HorsiesError, QueueMode, ValidationReport};
 
@@ -28,7 +31,7 @@ pub(crate) const DEFAULT_PRIORITY: u32 = 100;
 /// Where a registration takes the queue of its task from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QueueSource<'a> {
-    /// The `queue_name` of the task's options; no options name no queue.
+    /// The `queue` of the task's options; no options name no queue.
     TaskOptions,
     /// The queue that the registration call names.
     Named(&'a str),
@@ -37,7 +40,8 @@ pub(crate) enum QueueSource<'a> {
 /// Register `task` as `name` in `tasks`, with the queue that `source` gives
 /// and its priority.
 ///
-/// Refuses: a definition-time `good_until` (`TaskInvalidOptions`); a set
+/// Refuses: a definition-time `good_until` (`TaskInvalidOptions`); a
+/// `cancel_grace_ms` outside its bounds (`TaskCancelGraceOutOfRange`); a set
 /// of declared error codes that breaks a rule of a declared set
 /// (`CheckReservedCodeCollision`, `TaskInvalidErrorCode`,
 /// `TaskDuplicateErrorCode`; [`refuse_bad_error_codes`]); a queue that the
@@ -52,16 +56,17 @@ pub(crate) fn register_task(
     source: QueueSource<'_>,
 ) -> Result<(), HorsiesError> {
     refuse_definition_deadline(&name, &task)?;
+    refuse_cancel_grace_out_of_range(&name, &task)?;
     refuse_bad_error_codes(&name, &task)?;
     let requested = match source {
         QueueSource::TaskOptions => task
             .task_options()
-            .and_then(|options| options.queue_name.clone()),
+            .and_then(|options| options.queue.clone()),
         QueueSource::Named(queue) => Some(queue.to_owned()),
     };
     let queue = resolve_task_queue(config, requested.as_deref())?;
     let priority = queue_priority(config, &queue);
-    task.set_queue_name(queue);
+    task.set_queue(queue);
     task.set_priority(priority);
     tasks.register(name, task)
 }
@@ -163,6 +168,27 @@ fn refuse_definition_deadline(name: &str, task: &RegisteredTask) -> Result<(), H
     }
 }
 
+/// The cancel grace of `task`'s options is from `MIN_CANCEL_GRACE_MS` to
+/// `MAX_CANCEL_GRACE_MS` (Python `_check_cancel_grace`). A task with no
+/// options or no grace passes. The task attribute checks the bounds at
+/// compile time; a hand-built `TaskOptions` is checked here.
+///
+/// Errors: `TaskCancelGraceOutOfRange` (`HRS-111`), with the bounds.
+fn refuse_cancel_grace_out_of_range(name: &str, task: &RegisteredTask) -> Result<(), HorsiesError> {
+    let Some(options) = task.task_options() else {
+        return Ok(());
+    };
+    match options.cancel_grace_ms.map(check_cancel_grace_ms) {
+        None | Some(Ok(_)) => Ok(()),
+        Some(Err(refused)) => Err(HorsiesError::new("cancel_grace_ms is out of range")
+            .with_code(ErrorCode::TaskCancelGraceOutOfRange)
+            .with_note(format!("task '{name}'"))
+            .with_note(refused.to_string())
+            .with_note(format!("execution is {}", options.execution))
+            .with_help("set a value in the range, or remove cancel_grace_ms")),
+    }
+}
+
 /// The error codes that `task` declares follow the rules of a declared
 /// set: the code-text rule, no built-in or reserved name, each code once.
 /// A derived code type keeps the last two rules at compile time; a code
@@ -240,9 +266,9 @@ mod tests {
     fn task_with_options(queue: Option<&str>, good_until: bool) -> RegisteredTask {
         plain_task().with_task_options(TaskOptions {
             task_name: "echo".to_owned(),
-            queue_name: queue.map(str::to_owned),
+            queue: queue.map(str::to_owned),
             good_until: good_until.then(chrono::Utc::now),
-            auto_retry_for: None,
+            retry_for: None,
             retry_policy: None,
             timeout_ms: None,
             execution: horsies_core::Execution::Isolated,
@@ -285,7 +311,7 @@ mod tests {
         )
         .unwrap();
         let task = tasks.get("echo").unwrap();
-        assert_eq!(task.queue_name(), Some(DEFAULT_QUEUE));
+        assert_eq!(task.queue(), Some(DEFAULT_QUEUE));
         assert_eq!(task.priority(), Some(DEFAULT_PRIORITY));
     }
 
@@ -326,7 +352,7 @@ mod tests {
         )
         .unwrap();
         let task = tasks.get("echo").unwrap();
-        assert_eq!(task.queue_name(), Some("bulk"));
+        assert_eq!(task.queue(), Some("bulk"));
         assert_eq!(task.priority(), Some(90));
     }
 
@@ -341,7 +367,7 @@ mod tests {
             QueueSource::Named("critical"),
         )
         .unwrap();
-        assert_eq!(tasks.get("echo").unwrap().queue_name(), Some("critical"));
+        assert_eq!(tasks.get("echo").unwrap().queue(), Some("critical"));
     }
 
     #[test]
@@ -357,6 +383,68 @@ mod tests {
         .unwrap_err();
         assert_eq!(refused.code, Some(ErrorCode::TaskInvalidOptions));
         assert!(tasks.is_empty());
+    }
+
+    fn task_with_grace(execution: horsies_core::Execution, grace: u32) -> RegisteredTask {
+        plain_task().with_task_options(TaskOptions {
+            task_name: "echo".to_owned(),
+            queue: None,
+            good_until: None,
+            retry_for: None,
+            retry_policy: None,
+            timeout_ms: Some(5_000),
+            execution,
+            cancel_grace_ms: Some(grace),
+        })
+    }
+
+    /// The registration checks the cancel grace once: a grace outside 100 to
+    /// 10,000 ms is `HRS-111`, and nothing is registered.
+    #[test]
+    fn a_cancel_grace_outside_its_bounds_is_refused_and_nothing_is_registered() {
+        for (execution, grace) in [
+            (horsies_core::Execution::SharedAsync, 99),
+            (horsies_core::Execution::Isolated, 10_001),
+        ] {
+            let mut tasks = TaskRegistry::new();
+            let refused = register_task(
+                &mut tasks,
+                &default_config(),
+                "echo".to_owned(),
+                task_with_grace(execution, grace),
+                QueueSource::TaskOptions,
+            )
+            .unwrap_err();
+            assert_eq!(
+                refused.code,
+                Some(ErrorCode::TaskCancelGraceOutOfRange),
+                "{execution} {grace}"
+            );
+            assert!(tasks.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_cancel_grace_at_its_bounds_registers() {
+        for grace in [100, 10_000] {
+            let mut tasks = TaskRegistry::new();
+            register_task(
+                &mut tasks,
+                &default_config(),
+                "echo".to_owned(),
+                task_with_grace(horsies_core::Execution::SharedAsync, grace),
+                QueueSource::TaskOptions,
+            )
+            .unwrap();
+            assert_eq!(
+                tasks
+                    .get("echo")
+                    .unwrap()
+                    .task_options()
+                    .and_then(|options| options.cancel_grace_ms),
+                Some(grace)
+            );
+        }
     }
 
     #[test]

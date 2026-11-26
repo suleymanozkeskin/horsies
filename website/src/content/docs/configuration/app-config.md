@@ -70,7 +70,7 @@ def cleanup_sessions() -> Result[str, TaskError]:
 
 ### CUSTOM Mode
 
-Each task names its queue with `queue_name`.
+Each task names its queue with `queue`.
 
 ```python
 from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError, QueueMode, CustomQueueConfig
@@ -86,26 +86,26 @@ config = AppConfig(
 )
 app = Horsies(config)
 
-@app.task("urgent_alert", queue_name="critical")
+@app.task("urgent_alert", queue="critical")
 def urgent_alert() -> Result[str, TaskError]:
     return Ok("alerted")
 
-@app.task("process_order", queue_name="normal")
+@app.task("process_order", queue="normal")
 def process_order() -> Result[str, TaskError]:
     return Ok("processed")
 
-@app.task("ship_item", queue_name="low")
+@app.task("ship_item", queue="low")
 def ship_to_address() -> Result[str, TaskError]:
     return Ok("shipped")
 ```
 
 ### Unknown Queue Names
 
-A `queue_name` that the config does not list raises `ConfigurationError` with code `HRS-103` when the decorator runs:
+A `queue` that the config does not list raises `ConfigurationError` with code `HRS-103` when the decorator runs:
 
 ```python
 # This raises ConfigurationError (HRS-103) at definition time:
-@app.task("bad_task", queue_name="nonexistent")
+@app.task("bad_task", queue="nonexistent")
 def bad_task() -> Result[str, TaskError]:
     ...
 ```
@@ -114,7 +114,7 @@ def bad_task() -> Result[str, TaskError]:
 error[HRS-103]: invalid queue_name 'nonexistent'
   --> /app/tasks.py:12
    |
-12 | @app.task("bad_task", queue_name="nonexistent")
+12 | @app.task("bad_task", queue="nonexistent")
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    = note: valid queues: ['critical', 'normal', 'low']
 

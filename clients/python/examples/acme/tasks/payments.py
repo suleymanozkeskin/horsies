@@ -71,11 +71,11 @@ def _stored_authorization(
 
 @app.task(
     'authorize_payment',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.exponential(
         base_seconds=tuning.PSP_RETRY_BASE_SECONDS,
         max_retries=tuning.PSP_MAX_RETRIES,
-        auto_retry_for=[PSP_UNAVAILABLE, OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[PSP_UNAVAILABLE, OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def authorize_payment(
@@ -162,10 +162,10 @@ def authorize_payment(
 
 @app.task(
     'capture_payment',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def capture_payment(
@@ -256,10 +256,10 @@ def _capture_of(
 
 @app.task(
     'refund_payment',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def refund_payment(
@@ -300,10 +300,10 @@ def refund_payment(
 
 @app.task(
     'reconcile_payments',
-    queue_name=QUEUE_PAYMENTS,
+    queue=QUEUE_PAYMENTS,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def reconcile_payments(*, window: str) -> Result[ReconciliationReport, TaskError]:

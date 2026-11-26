@@ -42,10 +42,10 @@ from . import store_failure
 
 @app.task(
     'receive_return',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def receive_return(
@@ -83,10 +83,10 @@ def receive_return(
 
 @app.task(
     'inspect_item',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def inspect_item(*, return_id: str) -> Result[Inspection, TaskError]:
@@ -94,7 +94,7 @@ def inspect_item(*, return_id: str) -> Result[Inspection, TaskError]:
 
     Damage is recorded either way — the inspector saw what they saw — but a
     damaged item is reported as an error, which is what pauses the workflow.
-    `DAMAGED_ITEM` is deliberately absent from `auto_retry_for`: re-inspecting
+    `DAMAGED_ITEM` is deliberately absent from `retry_for`: re-inspecting
     would find the same damage.
     """
     simulate.perform(tuning.INSPECT_ITEM_WORK, return_id, 'inspect')
@@ -144,10 +144,10 @@ def inspect_item(*, return_id: str) -> Result[Inspection, TaskError]:
 
 @app.task(
     'restock_or_writeoff',
-    queue_name=QUEUE_FULFILLMENT,
+    queue=QUEUE_FULFILLMENT,
     retry_policy=RetryPolicy.fixed(
         tuning.CRASH_RETRY_INTERVALS_SECONDS,
-        auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
+        retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
 def restock_or_writeoff(

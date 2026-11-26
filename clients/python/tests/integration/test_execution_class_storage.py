@@ -273,7 +273,7 @@ class TestWorkflowPaths:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = args, params
-                node = TaskNode(fn=child_task, kwargs={'value': 1})
+                node = TaskNode(function=child_task, kwargs={'value': 1})
                 return app.workflow(name=cls.name, tasks=[node], output=node)
 
         parent = app.workflow(

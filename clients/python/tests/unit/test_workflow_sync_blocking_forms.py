@@ -74,7 +74,7 @@ APP: Final = Horsies(
 )
 
 
-@APP.task(task_name=TASK_NAME)
+@APP.task(name=TASK_NAME)
 def value_task(*, value: int) -> Result[int, TaskError]:
     return Ok(value)
 
@@ -448,7 +448,7 @@ def test_get_with_no_limit_passes_no_limit() -> None:
 def test_result_for_refuses_a_node_without_an_id_as_its_async_form() -> None:
     """A node with no node_id is WORKFLOW_CTX_MISSING_ID before any core call."""
     answers = _answering('workflow_node_result', _record(core.NodeResultNotStored))
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
 
     blocking = _workflow_handle().result_for(node)
     awaited = asyncio.run(_workflow_handle().result_for_async(node))
@@ -466,7 +466,7 @@ def _spec(
     name: str = 'blocking_forms.flow',
     definition_key: str = 'blocking_forms.flow.v1',
 ) -> WorkflowSpec[int]:
-    node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
+    node: TaskNode[int] = TaskNode(function=value_task, kwargs={'value': 1})
     return APP.workflow(name, [node], output=node, definition_key=definition_key)
 
 

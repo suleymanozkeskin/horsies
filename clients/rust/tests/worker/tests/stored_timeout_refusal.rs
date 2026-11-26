@@ -159,7 +159,7 @@ fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
         .function(workflow::step::handle)
         .node()
         .node_id(id)
-        .set(workflow::step::params::step(), id.to_owned())
+        .set(workflow::step::fields::step(), id.to_owned())
         .expect("a step input")
 }
 

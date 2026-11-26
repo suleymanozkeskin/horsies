@@ -30,13 +30,13 @@ impl WorkflowDefinition for DailyReport {
         let rollup = builder.task(
             sales_rollup::node()
                 .node_id("sales_rollup")
-                .set(sales_rollup::params::window(), WINDOW.to_owned())?,
+                .set(sales_rollup::fields::window(), WINDOW.to_owned())?,
         )?;
         let sweep = builder.task(
             abandoned_cart_sweep::node()
                 .node_id("abandoned_cart_sweep")
                 .set(
-                    abandoned_cart_sweep::params::older_than_minutes(),
+                    abandoned_cart_sweep::fields::older_than_minutes(),
                     tuning::ABANDONED_CART_AGE_MINUTES,
                 )?
                 .waits_for(rollup),
@@ -45,10 +45,10 @@ impl WorkflowDefinition for DailyReport {
             winback_blast::node()
                 .node_id("winback_blast")
                 .set(
-                    winback_blast::params::segment(),
+                    winback_blast::fields::segment(),
                     format!("winback-{WINDOW}"),
                 )?
-                .arg_from(winback_blast::params::sweep(), sweep),
+                .arg_from(winback_blast::fields::sweep(), sweep),
         )?;
         Ok(WorkflowDefConfig::new().output(sweep))
     }

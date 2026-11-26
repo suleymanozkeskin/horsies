@@ -35,15 +35,15 @@ impl WorkflowDefinition for FraudReview {
             reconcile_payments::node()
                 .node_id("reconcile_payments")
                 .set(
-                    reconcile_payments::params::window(),
+                    reconcile_payments::fields::window(),
                     format!("dispute-{ORDER_ID}"),
                 )?,
         )?;
         let refund = builder.task(
             refund_payment::node()
                 .node_id("refund_payment")
-                .set(refund_payment::params::order_id(), ORDER_ID.to_owned())?
-                .set(refund_payment::params::amount_cents(), AMOUNT_CENTS)?
+                .set(refund_payment::fields::order_id(), ORDER_ID.to_owned())?
+                .set(refund_payment::fields::amount_cents(), AMOUNT_CENTS)?
                 .waits_for(reconcile),
         )?;
         Ok(WorkflowDefConfig::new().output(refund))

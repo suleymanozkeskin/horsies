@@ -105,7 +105,7 @@ pub async fn fence_reads_twice(rt: TaskRuntime) -> Result<Vec<Fence>, TaskError<
 #[task(
     "e2e_fence_retry",
     retry_policy = one_retry(),
-    auto_retry_for = ["TRANSIENT"]
+    retry_for = ["TRANSIENT"]
 )]
 pub async fn fence_retry(
     rt: TaskRuntime,

@@ -128,7 +128,7 @@ pub async fn async_timeout_sleeper(duration_ms: u64) -> Result<String, TaskError
     "e2e_timeout_retry_sleeper",
     timeout_ms = 1_000,
     retry_policy = horsies::RetryPolicy::fixed(vec![1], false).expect("a valid policy"),
-    auto_retry_for = ["TASK_TIMEOUT"]
+    retry_for = ["TASK_TIMEOUT"]
 )]
 pub async fn timeout_retry_sleeper(duration_ms: u64) -> Result<String, TaskError<Infallible>> {
     tokio::time::sleep(Duration::from_millis(duration_ms)).await;
@@ -175,7 +175,7 @@ pub async fn idempotent(token: String) -> Result<String, TaskError<BasicCode>> {
 /// refused with `WAIT_INSIDE_TASK`.
 #[task("e2e_wait_inside_task")]
 pub async fn wait_inside_task(rt: TaskRuntime) -> Result<bool, TaskError<BasicCode>> {
-    let function = simple::handle(&rt)
+    let function = simple::function(&rt)
         .map_err(|missing| TaskError::user(BasicCode::SendFailed, missing.to_string()))?;
     let handle = function
         .send(simple::Input { x: 1 })
@@ -191,7 +191,7 @@ pub async fn wait_inside_task(rt: TaskRuntime) -> Result<bool, TaskError<BasicCo
 /// the typed function of its runtime. The output is the sent task id.
 #[task("e2e_async_sends")]
 pub async fn async_sends(rt: TaskRuntime, x: i64) -> Result<String, TaskError<BasicCode>> {
-    let function = simple::handle(&rt)
+    let function = simple::function(&rt)
         .map_err(|missing| TaskError::user(BasicCode::SendFailed, missing.to_string()))?;
     let handle = function
         .send(simple::Input { x })

@@ -1,6 +1,6 @@
 //! The typed functions that an app's task attributes registered, by task
 //! name: the generated sends (`name::send(&app, ...)`), the generated
-//! `name::handle(&runtime)`, `TaskRuntime::task_handle` and the task nodes
+//! `name::function(&runtime)`, `TaskRuntime::task_function` and the task nodes
 //! of the app's workflow builders read them.
 //!
 //! Each app has its own catalog, and no catalog is process-wide: a send, a
@@ -70,11 +70,11 @@ impl TaskFunctions {
         E: UserErrorCode,
     {
         let node = NodeRegistration {
-            queue_name: function.queue_name().to_owned(),
+            queue: function.queue().to_owned(),
             task_options: function
                 .task_options()
                 .map(TaskOptions::stored_options_text),
-            accepts_workflow_ctx: function.accepts_workflow_ctx(),
+            accepts_workflow_context: function.accepts_workflow_context(),
         };
         let stored = StoredFunction {
             type_name: type_name::<TaskFunction<A, T, E>>(),

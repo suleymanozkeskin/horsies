@@ -124,9 +124,9 @@ class TestArgsFromInjection:
         task_a = make_simple_task(app, 'single_args_a')
         task_b = make_args_receiver_task(app, 'single_args_b')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
         )
@@ -162,10 +162,10 @@ class TestArgsFromInjection:
         task_b = make_simple_task(app, 'multi_args_b')
         task_c = make_multi_args_receiver_task(app, 'multi_args_c')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 10})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
+        node_b = TaskNode(function=task_b, kwargs={'value': 10})
         node_c = TaskNode(
-            fn=task_c,
+            function=task_c,
             waits_for=[node_a, node_b],
             args_from={'first': node_a, 'second': node_b},
         )
@@ -196,9 +196,9 @@ class TestArgsFromInjection:
         task_a = make_failing_task(app, 'err_result_a')
         task_b = make_recovery_task(app, 'err_result_b')
 
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
             allow_failed_dependencies=True,  # Required to receive failed result
@@ -243,7 +243,7 @@ class TestArgsFromInjection:
         session, broker, app = setup
 
         # Create a task that accepts both static and injected args
-        @app.task(task_name='static_and_injected')
+        @app.task(name='static_and_injected')
         def static_and_injected(
             *, static_value: int,
             input_result: TaskOutcome[int, TaskError] | None = None,
@@ -257,9 +257,9 @@ class TestArgsFromInjection:
 
         task_a = make_simple_task(app, 'static_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         node_b = TaskNode(
-            fn=static_and_injected,
+            function=static_and_injected,
             kwargs={'static_value': 100},  # Static kwarg
             waits_for=[node_a],
             args_from={'input_result': node_a},  # Injected kwarg
@@ -286,7 +286,7 @@ class TestArgsFromInjection:
         """Same dep mapped to multiple kwargs (unusual but valid)."""
         session, broker, app = setup
 
-        @app.task(task_name='dual_receiver')
+        @app.task(name='dual_receiver')
         def dual_receiver(
             *, first_copy: TaskOutcome[int, TaskError],
             second_copy: TaskOutcome[int, TaskError],
@@ -299,9 +299,9 @@ class TestArgsFromInjection:
 
         task_a = make_simple_task(app, 'same_dep_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 25})
+        node_a = TaskNode(function=task_a, kwargs={'value': 25})
         node_b = TaskNode(
-            fn=dual_receiver,
+            function=dual_receiver,
             waits_for=[node_a],
             # Same node mapped to two different kwargs
             args_from={'first_copy': node_a, 'second_copy': node_a},
@@ -340,10 +340,10 @@ class TestArgsFromInjection:
         # A -> B -> C (with allow_failed_dependencies=True and args_from)
         # When A fails, B is SKIPPED
         # C should receive UPSTREAM_SKIPPED for B (which is SKIPPED)
-        node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a)
+        node_b = TaskNode(function=task_b, kwargs={'value': 1}, waits_for=[node_a])
         node_c = TaskNode(
-            fn=task_c,
+            function=task_c,
             waits_for=[node_b],
             args_from={'input_result': node_b},
             allow_failed_dependencies=True,
@@ -390,9 +390,9 @@ class TestArgsFromInjection:
 
         # A -> B (with allow_failed_dependencies=True and args_from)
         # A fails, B should receive A's actual error
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
             allow_failed_dependencies=True,
@@ -434,7 +434,7 @@ class TestArgsFromInjection:
         """Worker reconstructs TaskOutcome values from args_from injection."""
         session, broker, app = setup
 
-        @app.task(task_name='worker_args_from_b')
+        @app.task(name='worker_args_from_b')
         def worker_args_from_b(
             *, input_result: TaskOutcome[int, TaskError],
         ) -> Result[int, TaskError]:
@@ -445,9 +445,9 @@ class TestArgsFromInjection:
                     return Err(TaskError(error_code='UPSTREAM_FAILED', message=error.message))
 
         task_a = make_simple_task(app, 'worker_args_from_a')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         node_b = TaskNode(
-            fn=worker_args_from_b,
+            function=worker_args_from_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
         )
@@ -517,7 +517,7 @@ class TestArgsFromInjection:
         """
         session, broker, app = setup
 
-        @app.task(task_name='quorum_optional_target')
+        @app.task(name='quorum_optional_target')
         def quorum_optional_target(
             *,
             input_result: TaskOutcome[int, TaskError] | None = None,
@@ -532,10 +532,10 @@ class TestArgsFromInjection:
 
         task_a = make_simple_task(app, 'quorum_optional_a')
         task_b = make_simple_task(app, 'quorum_optional_b')
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 7})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
+        node_b = TaskNode(function=task_b, kwargs={'value': 7})
         node_c = TaskNode(
-            fn=quorum_optional_target,
+            function=quorum_optional_target,
             waits_for=[node_a, node_b],
             args_from={'input_result': node_a},
             join='quorum',
@@ -607,9 +607,9 @@ class TestArgsFromInjection:
         task_a = make_failing_task(app, 'skip_no_inject_a')
         task_b = make_args_receiver_task(app, 'skip_no_inject_b')
 
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=task_b,
+            function=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
             # allow_failed_dependencies defaults to False
@@ -651,7 +651,7 @@ class TestArgsFromInjection:
         """Empty args_from={} does not interfere with static kwargs."""
         session, broker, app = setup
 
-        @app.task(task_name='empty_args_from_b')
+        @app.task(name='empty_args_from_b')
         def static_only(
             *, static_value: int,
         ) -> Result[int, TaskError]:
@@ -659,9 +659,9 @@ class TestArgsFromInjection:
 
         task_a = make_simple_task(app, 'empty_args_from_a')
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
         node_b = TaskNode(
-            fn=static_only,
+            function=static_only,
             kwargs={'static_value': 100},
             waits_for=[node_a],
             args_from={},  # Explicitly empty
@@ -691,7 +691,7 @@ class TestArgsFromInjection:
         """Worker deserializes a failed outcome from args_from injection."""
         session, broker, app = setup
 
-        @app.task(task_name='worker_err_args_b')
+        @app.task(name='worker_err_args_b')
         def worker_err_args_b(
             *, input_result: TaskOutcome[int, TaskError],
         ) -> Result[int, TaskError]:
@@ -702,9 +702,9 @@ class TestArgsFromInjection:
                     return Ok(value)
 
         task_a = make_failing_task(app, 'worker_err_args_a')
-        node_a = TaskNode(fn=task_a)
+        node_a = TaskNode(function=task_a)
         node_b = TaskNode(
-            fn=worker_err_args_b,
+            function=worker_err_args_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
             allow_failed_dependencies=True,
@@ -773,7 +773,7 @@ class TestArgsFromInjection:
         """Worker deserializes UPSTREAM_SKIPPED sentinel from skipped dep."""
         session, broker, app = setup
 
-        @app.task(task_name='worker_skipped_c')
+        @app.task(name='worker_skipped_c')
         def worker_skipped_c(
             *, input_result: TaskOutcome[int, TaskError],
         ) -> Result[str, TaskError]:
@@ -787,10 +787,10 @@ class TestArgsFromInjection:
         task_b = make_simple_task(app, 'worker_skipped_b')
 
         # A -> B -> C: A fails, B skipped, C receives UPSTREAM_SKIPPED for B
-        node_a = TaskNode(fn=task_a)
-        node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
+        node_a = TaskNode(function=task_a)
+        node_b = TaskNode(function=task_b, kwargs={'value': 1}, waits_for=[node_a])
         node_c = TaskNode(
-            fn=worker_skipped_c,
+            function=worker_skipped_c,
             waits_for=[node_b],
             args_from={'input_result': node_b},
             allow_failed_dependencies=True,
@@ -863,7 +863,7 @@ class TestArgsFromInjection:
         task_a = make_simple_task(app, 'partial_map_a')
         task_b = make_simple_task(app, 'partial_map_b')
 
-        @app.task(task_name='partial_map_c')
+        @app.task(name='partial_map_c')
         def partial_receiver(
             *, from_a: TaskOutcome[int, TaskError],
         ) -> Result[int, TaskError]:
@@ -873,10 +873,10 @@ class TestArgsFromInjection:
                 case Failed(error=error):
                     return Err(TaskError(error_code='UPSTREAM_FAILED', message=error.message))
 
-        node_a = TaskNode(fn=task_a, kwargs={'value': 5})
-        node_b = TaskNode(fn=task_b, kwargs={'value': 10})
+        node_a = TaskNode(function=task_a, kwargs={'value': 5})
+        node_b = TaskNode(function=task_b, kwargs={'value': 10})
         node_c = TaskNode(
-            fn=partial_receiver,
+            function=partial_receiver,
             waits_for=[node_a, node_b],
             args_from={'from_a': node_a},  # Only A mapped, not B
         )
