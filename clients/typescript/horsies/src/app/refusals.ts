@@ -4,7 +4,7 @@
 import type { Refusal } from "./refusal.ts";
 
 /** The area of the app whose registration a refusal names. */
-export type RefusalArea = "contracts";
+export type RefusalArea = "contracts" | "schedules" | "events";
 
 /** A refusal with its area. */
 export type AreaRefusal = { readonly area: RefusalArea; readonly refusal: Refusal };

@@ -18,6 +18,7 @@ import { type MainToSeat, SEAT_PROTOCOL_VERSION, type SeatMarker } from "../../.
 import { ClientDefect, type CoreDefect, CoreStopped, ForkedAfterCoreStart, TooManyPendingCalls } from "../../../horsies/src/thrown-errors.ts";
 import type { CoreAccess, ProducerCore } from "../../../horsies/src/app/core-access.ts";
 import { ENQUEUED, fakeCoreHandle, fakeProducer, PREPARED, TASK_ID } from "../app/support.ts";
+import { noWorkflowCore, type WorkflowCore } from "../../../horsies/src/workflow/core.ts";
 import { FakeChildNative, settled } from "../child/child-native.ts";
 import { contextOf, crunch, ENDED_AT, seatApp, TEST_SEAT_BOUNDS } from "./support.ts";
 
@@ -275,6 +276,27 @@ describe("the operations of the isolates on the main thread", () => {
       producer.enqueues.map((call) => call.sendKind),
       ["REPEAT"],
     );
+  });
+
+  test("a workflows operation runs on the workflow core of the main thread's producer", async () => {
+    const asked: string[] = [];
+
+    const workflows: WorkflowCore = {
+      ...noWorkflowCore(),
+      status: async (workflowId) => {
+        asked.push(workflowId);
+
+        return { kind: "status", status: "RUNNING" };
+      },
+    };
+
+    const access = addonAccess({ ...fakeProducer(), workflows });
+
+    assert.deepEqual(await serveSeatOperation(access, { area: "workflows", operation: { kind: "status", workflowId: "wf-1" } }), {
+      kind: "reply",
+      reply: { area: "workflows", reply: { kind: "status", read: { kind: "status", status: "RUNNING" } } },
+    });
+    assert.deepEqual(asked, ["wf-1"]);
   });
 
   test("a CoreError of the main thread answers refused, and the isolate rebuilds the same class", async () => {

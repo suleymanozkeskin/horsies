@@ -156,10 +156,6 @@ impl CoreHandle {
     }
 
     /// The child spec source, or `None` before the workflows area set it.
-    #[allow(
-        dead_code,
-        reason = "the workflow operations of the workflows area read it"
-    )]
     pub fn child_spec_source(&self) -> Option<Arc<dyn ChildSpecSource>> {
         self.child_spec_source.get().map(Arc::clone)
     }

@@ -1,0 +1,12 @@
+{
+  // A project of one file, for `tsc --extendedDiagnostics` (the command is in the file's header).
+  "extends": "../../../../horsies/tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "isolatedDeclarations": false,
+    "declaration": false,
+    "composite": false,
+    "noUnusedLocals": false
+  },
+  "include": ["*.ts"]
+}

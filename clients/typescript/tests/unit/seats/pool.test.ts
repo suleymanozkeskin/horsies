@@ -23,11 +23,29 @@ import {
   type SeatAnswer,
   type SeatMarker,
   type SeatOutcome,
+  type SeatRequest,
   type SeatToMain,
 } from "../../../horsies/src/seats/protocol.ts";
 import { ClientDefect, type CoreDefect } from "../../../horsies/src/thrown-errors.ts";
+import { unreachable } from "../../../horsies/src/wire/unreachable.ts";
 import { PREPARED, TASK_ID } from "../app/support.ts";
 import { ENDED_AT, settled, TEST_SEAT_BOUNDS } from "./support.ts";
+
+/** The name of the operation of `request`, for the record of the served operations. */
+function operationName(request: SeatRequest): string {
+  const area = request.area;
+
+  switch (area) {
+    case "sends":
+      return request.operation.kind;
+    case "facades":
+      return request.operation.part;
+    case "workflows":
+      return request.operation.kind;
+    default:
+      return unreachable(area, "operationName");
+  }
+}
 
 const REPLACEMENT_BOOT_BOUND_MS = TEST_SEAT_BOUNDS.replacementBootBoundMs;
 
@@ -76,7 +94,7 @@ class PoolFakes {
         this.settles.push([runKey, taskName, outcome]);
       },
       serve: async (request): Promise<SeatAnswer> => {
-        this.served.push(request.area === "sends" ? request.operation.kind : request.operation.part);
+        this.served.push(operationName(request));
 
         return { kind: "reply", reply: { area: "sends", reply: { kind: "prepareSend", prepared: PREPARED } } };
       },

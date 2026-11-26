@@ -63,7 +63,7 @@ export type SeatMarker = {
 export type SeatArea = keyof SeatOperationMap;
 
 /** Each area by itself: the record names each member of `SeatArea` once, so a new area is a type change here. */
-const SEAT_AREA_SET: { readonly [Area in SeatArea]: Area } = { sends: "sends", facades: "facades" };
+const SEAT_AREA_SET: { readonly [Area in SeatArea]: Area } = { sends: "sends", facades: "facades", workflows: "workflows" };
 
 /** The areas of the seat operations. */
 export const SEAT_AREAS: readonly SeatArea[] = Object.values(SEAT_AREA_SET);
@@ -428,6 +428,9 @@ function requestOf(request: object): SeatRequest {
     case "facades":
       // SAFETY: the relay of an isolate built the operation with the facades area's own operation type.
       return { area, operation: operation as SeatOperationMap["facades"]["operation"] };
+    case "workflows":
+      // SAFETY: the relay of an isolate built the operation with the workflows area's own operation type.
+      return { area, operation: operation as SeatOperationMap["workflows"]["operation"] };
     default:
       return unreachable(area, "requestOf");
   }
@@ -444,6 +447,9 @@ function replyOf(reply: object): SeatReply {
     case "facades":
       // SAFETY: the main thread built the reply with the facades area's own reply type.
       return { area, reply: value as SeatOperationMap["facades"]["reply"] };
+    case "workflows":
+      // SAFETY: the main thread built the reply with the workflows area's own reply type.
+      return { area, reply: value as SeatOperationMap["workflows"]["reply"] };
     default:
       return unreachable(area, "replyOf");
   }

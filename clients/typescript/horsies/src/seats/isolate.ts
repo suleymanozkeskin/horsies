@@ -239,6 +239,7 @@ class SeatRuns implements SeatRunHandler {
       case "running":
         if (current.runKey === message.runKey && !current.controller.signal.aborted) {
           current.controller.abort(Object.freeze({ cause: message.cause }));
+          current.observation.cancelled(message.cause);
         }
 
         return;

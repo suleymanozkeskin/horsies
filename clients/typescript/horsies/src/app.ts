@@ -2,8 +2,8 @@
 // the package adds its members in one block here.
 
 import { implementationOf, type BodyFor, type Implementation, type ImplementOptions } from "./contract/implementation.ts";
-import type { ExecutionClass, TaskContract } from "./contract/define-task.ts";
-import type { TaskId } from "./contract/ids.ts";
+import type { AnyTaskContract, ExecutionClass, TaskContract } from "./contract/define-task.ts";
+import type { TaskId, WorkflowId } from "./contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue, SendableInput } from "./contract/schema.ts";
 import { readFormOf, type TaskHandle, taskHandleOf } from "./read/handle.ts";
 import type { RetryableSendError, TaskSendError } from "./send/errors.ts";
@@ -20,8 +20,20 @@ import {
 } from "./app/create.ts";
 import { registerImplementation } from "./app/implement.ts";
 import { recordAppContext } from "./app/internals.ts";
+import { createWorkflowArea, type WorkflowArea } from "./workflow/app-area.ts";
+import { workflowCoreOf } from "./workflow/core.ts";
+import type { WorkflowContract } from "./workflow/define.ts";
+import type { WorkflowHandle, WorkflowHandleById } from "./workflow/handle.ts";
+import type { BuildReturn } from "./workflow/node.ts";
+import { NO_OP_START_OBSERVER, type StartOptions } from "./workflow/start.ts";
+import type { StartEnqueueFailed, WorkflowStartError } from "./workflow/start-error.ts";
 import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
 import type { StateKey } from "./child/state.ts";
+import { declareSchedules, scheduleCoreAccess } from "./schedules/app-member.ts";
+import { declaredEntries, type ScheduleEntries, type ScheduleSection } from "./schedules/entry.ts";
+import type { EventTypeName } from "./_catalog/worker_manifest.ts";
+import { onEventFor, onHandlerChildStartFor } from "./events/register.ts";
+import type { EventHandler, EventHandlerOptions, HandlerChildStartHook } from "./events/types.ts";
 import { createMonitoringArea, type Monitoring, type MonitoringArea } from "./monitoring/app-area.ts";
 import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts";
 import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/health-types.ts";
@@ -36,6 +48,7 @@ let constructApp: (context: AppContext) => Horsies;
 /** A horsies app. `Horsies.create` builds it. */
 export class Horsies {
   readonly #context: AppContext;
+  readonly #workflows: WorkflowArea;
   readonly #monitoringArea: MonitoringArea;
   readonly #rerunArea: RerunArea;
 
@@ -48,6 +61,13 @@ export class Horsies {
 
   private constructor(context: AppContext) {
     this.#context = context;
+    this.#workflows = createWorkflowArea({
+      core: workflowCoreOf(context.core),
+      registry: context.workflows,
+      observer: NO_OP_START_OBSERVER,
+      now: () => Temporal.Now.instant(),
+      newWorkflowId: () => crypto.randomUUID(),
+    });
     this.#monitoringArea = createMonitoringArea(context.core);
     this.monitoring = this.#monitoringArea.monitoring;
     this.#rerunArea = rerunAreaOfCore(context.core, () => context.observer.activeCarrier());
@@ -100,6 +120,40 @@ export class Horsies {
     onChildStartFor(this.#context, hook);
   }
 
+  /**
+   * Declare the schedules of the app, in one call. Each slot of a schedule's pattern sends its task with its input;
+   * the `scheduler` command runs them. Calls no I/O and never throws: each refusal (a contract that the app does not
+   * list, a queue that it does not admit, an input that does not fit the task or is over the payload bound, a zone
+   * that the runtime does not know, a pattern that breaks a rule, a repeated name, a second call) reaches the check
+   * of `check` and of the scheduler start; the worker start skips them.
+   */
+  schedules<const T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>, section: ScheduleSection = {}): void {
+    declareSchedules(this.#context, declaredEntries(entries), section, scheduleCoreAccess(this.#context));
+  }
+
+  /**
+   * Run `handler` for each event of `eventType` in the handler child of a worker, never in the worker parent. Several
+   * handlers may take one type; each has its own queue of 10,000 events, and a full queue drops the event for that
+   * handler and counts it. A throw or a rejection is counted and logged with `name`; the handler takes its next event.
+   * Calls nothing and never throws: a refused registration (an unknown type, a handler that is not a function, a
+   * name outside the name rule or repeated, a 33rd handler) goes to the refusal list, which `check` reports and the
+   * worker start refuses. A call after `cli.run` serves the handler child is a defect: `ClientDefect`.
+   */
+  onEvent<T extends EventTypeName>(eventType: T, options: EventHandlerOptions, handler: NoInfer<EventHandler<T>>): void {
+    onEventFor(this.#context, eventType, options, handler);
+  }
+
+  /**
+   * Run `hook` once in each handler child, before it takes its first event, in registration order, for at most 10 s.
+   * A hook that throws, rejects or runs past its bound ends the handler child with 173; it stays down until the worker
+   * restarts, and the worker runs its tasks on. The `onChildStart` hooks do not run there. Set the OpenTelemetry SDK
+   * of the handler child here, or at the top of the entry. A call after `cli.run` serves the handler child is a
+   * defect: `ClientDefect`.
+   */
+  onHandlerChildStart(hook: HandlerChildStartHook): void {
+    onHandlerChildStartFor(this.#context, hook);
+  }
+
   /** Send a task: its handle, or the send error. A delay is the only start option. */
   async send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(
     contract: TaskContract<P, O, E, X>,
@@ -115,6 +169,33 @@ export class Horsies {
    */
   async retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {
     return retrySend(this.#context.send, error);
+  }
+
+  /**
+   * Start a workflow: its handle, or the start error. The same `workflowId` with the same params returns the existing
+   * run; other params under the id give `WORKFLOW_COMMAND_CONFLICT`; another workflow under it `WORKFLOW_ID_CONFLICT`.
+   */
+  async start<P extends ParameterSchemas, R extends BuildReturn>(
+    workflow: WorkflowContract<P, R>,
+    params: NoInfer<SendableInput<P>>,
+    options: StartOptions = {},
+  ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
+    return this.#workflows.start(workflow, params, options);
+  }
+
+  /** Send again the spec of `ENQUEUE_FAILED`, under the same workflow id. */
+  async retryStart<R extends BuildReturn>(
+    error: StartEnqueueFailed<R>,
+  ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
+    return this.#workflows.retryStart(error);
+  }
+
+  /** A typed handle of a stored workflow id, with no I/O. `resultFor` takes the node's contract. */
+  workflowHandle<P extends ParameterSchemas, R extends BuildReturn>(
+    workflow: WorkflowContract<P, R>,
+    workflowId: WorkflowId,
+  ): WorkflowHandleById<R> {
+    return this.#workflows.workflowHandle(workflow, workflowId);
   }
 
   /** A typed handle of a stored task id, with no I/O. The contract gives the types only; the app need not list it. */

@@ -8,10 +8,13 @@
 // from the run's cancel cause (a deadline is `timedOut`, an operator cancel `cancelled`) and from its outcome, at its
 // settle; `endedAt` is the main thread's time of that settle. A sync body that runs past its deadline ends late in the
 // isolate, and its observation ends at its settle.
+// `cancelled` comes when the `cancel` message of the run comes, before or after the other calls: the core then decided
+// the end of the run (`TASK_TIMEOUT` at the deadline, `TASK_CANCELLED` at an operator cancel), whatever the body does
+// later.
 
 import type { AppContext } from "../app/context.ts";
 import type { BodyEnd, BodyObservation } from "../child/body-observer.ts";
-import type { BodyFactsRecord } from "../native/child/addon.ts";
+import type { BodyFactsRecord, CancelCauseName } from "../native/child/addon.ts";
 
 /** The observation of one body in a seat isolate. No method may throw: a throw ends the isolate. */
 export interface SeatBodyObservation {
@@ -21,6 +24,8 @@ export interface SeatBodyObservation {
   thrown(cause: unknown): void;
   /** The run ended with the verdict `end` at `endedAt` (the main thread's time of its settle). */
   end(end: BodyEnd, endedAt: Temporal.Instant): void;
+  /** The run's cancel signal fired with `cause`: the core decided the end of the run, whatever the body does later. */
+  cancelled(cause: CancelCauseName): void;
 }
 
 /** The observer of the task bodies of a seat isolate. */
@@ -33,6 +38,7 @@ const NO_SEAT_OBSERVATION: SeatBodyObservation = Object.freeze({
   run: <T>(call: () => T): T => call(),
   thrown: (): void => undefined,
   end: (): void => undefined,
+  cancelled: (): void => undefined,
 });
 
 /** The observer that does nothing: `run` calls the body. */
@@ -53,8 +59,8 @@ export function seatBodyObserverOf(context: AppContext): SeatBodyObserver {
 }
 
 /**
- * The observation of the body adapter for `observation`: `run` and `thrown` pass on; the adapter's `end` passes
- * nothing, because the observation ends at the main thread's verdict (`bodyEnded`).
+ * The observation of the body adapter for `observation`: `run`, `thrown` and `cancelled` pass on; the adapter's `end`
+ * passes nothing, because the observation ends at the main thread's verdict (`bodyEnded`).
  */
 export function bodyObservationOf(observation: SeatBodyObservation): BodyObservation {
   return Object.freeze({
@@ -63,5 +69,8 @@ export function bodyObservationOf(observation: SeatBodyObservation): BodyObserva
       observation.thrown(cause);
     },
     end: (): void => undefined,
+    cancelled: (cause: CancelCauseName): void => {
+      observation.cancelled(cause);
+    },
   });
 }

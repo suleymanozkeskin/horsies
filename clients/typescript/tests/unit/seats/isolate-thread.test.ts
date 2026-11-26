@@ -62,6 +62,8 @@ function answerOf(request: SeatRequest): SeatAnswer {
               },
             },
           };
+    case "workflows":
+      return assert.fail("the fixture entry sends no workflows operation");
     default:
       return assert.fail("an operation of an unknown area");
   }
@@ -74,6 +76,8 @@ function operationName(request: SeatRequest): string {
       return `sends ${request.operation.kind}`;
     case "facades":
       return `facades ${request.operation.part} ${request.operation.call.method}`;
+    case "workflows":
+      return `workflows ${request.operation.kind}`;
     default:
       return assert.fail("an operation of an unknown area");
   }

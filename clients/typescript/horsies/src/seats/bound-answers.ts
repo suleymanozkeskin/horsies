@@ -7,7 +7,12 @@
 //   - `enqueue`: `ENQUEUE_FAILED`, retryable, with the task id and the payload of the request. A resend of the same task
 //     id (`retrySend`, or the resend of `resendOnTransientErr`) is safe: no row exists;
 //   - `taskInfo`: `TASK_INFO_QUERY_FAILED`, retryable (a read has no send failure);
-//   - a facade call: the retryable database failure of its own type (`monitoring/seat-calls.ts`).
+//   - a facade call: the retryable database failure of its own type (`monitoring/seat-calls.ts`);
+//   - a workflow handle operation (a status, node or result read, a cancel, a pause, a resume): `DB_OPERATION_FAILED`
+//     of the handle catalog, retryable, with the workflow id;
+//   - a workflow start or restart: the relay's refusal, `TooManyPendingCalls`, the class that a core call of a main
+//     thread throws at the bound of its calls in flight. The `ENQUEUE_FAILED` of a start keeps the spec data text for
+//     `retryStart`, and only the main thread makes that text from the checked spec (#2541).
 // - The prepare of a send does no I/O: the main thread computes the facts of a send at once. It goes at once and takes
 //   no place of the in-flight bound, but the prepares that wait for their answer have their own bound of the same value
 //   (`opsWaiting`). A prepare past it gets `seatRelayFull`, and the send fails with `SEAT_RELAY_FULL`, retryable: the
@@ -21,6 +26,7 @@ import { facadeBoundAnswer } from "../monitoring/seat-calls.ts";
 import type { DeadlineFact, DelayFact, EnqueueRequest, OptionalText, RetentionRecord } from "../native/sends/addon.ts";
 import type { ExceptionRecord, RawCatalogError, RawRecordField, RawRecordValue } from "../native/values/records.ts";
 import { unreachable } from "../wire/unreachable.ts";
+import type { WorkflowsSeatOperation, WorkflowsSeatReply } from "../workflow/seat-operations.ts";
 import type { SeatAnswer, SeatRequest } from "./protocol.ts";
 
 /** The subject of the failures that the relay of a seat isolate gives. */
@@ -51,6 +57,12 @@ export function operationLane(request: SeatRequest): OperationLane {
           reply: { area: "facades", reply: facadeBoundAnswer(operation, boundMessage("operations", bound)) },
         }),
       };
+    }
+
+    case "workflows": {
+      const operation = request.operation;
+
+      return { kind: "waitsForIo", boundAnswer: (bound) => workflowsBoundAnswer(operation, bound) };
     }
 
     default:
@@ -95,6 +107,50 @@ function sendsLane(operation: SendsSeatOperation): OperationLane {
 
 function sendsReply(reply: SendsSeatReply): SeatAnswer {
   return { kind: "reply", reply: { area: "sends", reply } };
+}
+
+/** The answer of the `workflows` area to `operation` past the bound `bound`. Pure. */
+function workflowsBoundAnswer(operation: WorkflowsSeatOperation, bound: number): SeatAnswer {
+  const message = boundMessage("operations", bound);
+
+  switch (operation.kind) {
+    case "start":
+    case "restart":
+      return { kind: "refused", refusal: { code: "TOO_MANY_PENDING_CALLS", subject: `${RELAY_SUBJECT}: workflow ${operation.kind}`, bound } };
+    case "status":
+      return workflowsReply({ kind: "status", read: { kind: "failed", error: handleDbFailed(operation.workflowId, message) } });
+    case "nodeResults":
+      return workflowsReply({ kind: "nodeResults", read: { kind: "failed", error: handleDbFailed(operation.workflowId, message) } });
+    case "nodes":
+      return workflowsReply({ kind: "nodes", read: { kind: "failed", error: handleDbFailed(operation.workflowId, message) } });
+    case "cancel":
+      return workflowsReply({ kind: "cancel", done: { kind: "failed", error: handleDbFailed(operation.workflowId, message) } });
+    case "pause":
+      return workflowsReply({ kind: "pause", change: { kind: "failed", error: handleDbFailed(operation.workflowId, message) } });
+    case "resume":
+      return workflowsReply({ kind: "resume", change: { kind: "failed", error: handleDbFailed(operation.workflowId, message) } });
+    case "nodeResult":
+      return workflowsReply({ kind: "nodeResult", read: { kind: "failed", error: handleDbFailed(operation.workflowId, message) } });
+    default:
+      return unreachable(operation, "workflowsBoundAnswer");
+  }
+}
+
+function workflowsReply(reply: WorkflowsSeatReply): SeatAnswer {
+  return { kind: "reply", reply: { area: "workflows", reply } };
+}
+
+/** `DB_OPERATION_FAILED` of the workflow `workflowId`, retryable, in the form of the workflow handle catalog. Pure. */
+function handleDbFailed(workflowId: string, message: string): RawCatalogError {
+  return {
+    class: "HandleDbOperationFailed",
+    slots: [
+      { name: "message", value: { kind: "text", text: message } },
+      { name: "retryable", value: { kind: "flag", value: true } },
+      { name: "workflow_id", value: { kind: "uuid", text: workflowId } },
+      { name: "exception", value: { kind: "exception", exception: boundCause(message) } },
+    ],
+  };
 }
 
 /** The cause of a failure at the bound: a precondition of the operation that can clear. Pure. */

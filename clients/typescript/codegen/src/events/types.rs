@@ -7,7 +7,7 @@ use horsies_core::events::{
     NamedShape, NamedType, ValueForm, VariantType,
 };
 
-use super::code_union_type;
+use super::{code_union_type, is_shared};
 use crate::model::event_variant_type_name;
 use crate::ts_text::{
     camel_case_of_pascal, camel_case_of_snake, integer_literal, is_identifier, is_safe_integer,
@@ -152,13 +152,19 @@ pub fn form_type(form: ValueForm) -> &'static str {
 }
 
 /// The sections of the types, in the model's order: the contract version,
-/// each closed type, each event type, `AnyEvent` and `EVENT_TYPES`. Pure.
+/// each closed type that is not shared (`super::SHARED_TYPES`: another
+/// module declares it, and `events.ts` imports it), each event type,
+/// `AnyEvent` and `EVENT_TYPES`. Pure.
 pub fn type_sections(contract: &EventContract) -> Vec<String> {
     let mut sections = vec![format!(
         "{VERSION_DOC}\nexport const EVENT_CONTRACT_VERSION = {};",
         integer_literal(i128::from(contract.version))
     )];
-    for named in contract.value_types {
+    for named in contract
+        .value_types
+        .iter()
+        .filter(|named| !is_shared(named.name))
+    {
         sections.extend(named_type_sections(named));
     }
     for event in contract.events {
@@ -167,6 +173,12 @@ pub fn type_sections(contract: &EventContract) -> Vec<String> {
     sections.push(any_event_section(contract.events));
     sections.push(event_types_section(contract.events));
     sections
+}
+
+/// The declaration of the closed type `named`, as `events.ts` writes it: its
+/// sections, each after a blank line. Pure.
+pub fn declaration_text(named: &NamedType) -> String {
+    named_type_sections(named).join("\n\n")
 }
 
 /// A choice as the union of its wire values; a variant type as one
@@ -538,9 +550,13 @@ mod tests {
             );
         }
         for named in EVENT_CONTRACT.value_types {
+            let declared = match is_shared(named.name) {
+                true => 0,
+                false => 1,
+            };
             assert_eq!(
                 count(&format!("export type {} =", named.name)),
-                1,
+                declared,
                 "{}",
                 named.name
             );

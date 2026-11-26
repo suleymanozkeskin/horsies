@@ -42,16 +42,18 @@ import {
   type UsageError,
 } from "./usage.ts";
 import { processMetricsCommandDeps, runMetricsCommand } from "./metrics-command.ts";
+import { processSchedulerCommandDeps, runSchedulerCommand } from "./scheduler-command.ts";
 import { processWebCommandDeps, runWebCommand } from "./web-command.ts";
 import { processWorkerCommandDeps, runWorkerCommand } from "./worker-command.ts";
 
 /** The commands of `cli.run`. */
-export type CommandName = "worker" | "check" | "web" | "metrics";
+export type CommandName = "worker" | "check" | "scheduler" | "web" | "metrics";
 
 /** Each command name, by itself: the record names each member of `CommandName` once. */
 const COMMAND_NAME_SET: { readonly [Name in CommandName]: Name } = {
   worker: "worker",
   check: "check",
+  scheduler: "scheduler",
   web: "web",
   metrics: "metrics",
 };
@@ -69,6 +71,7 @@ export type CommandTable = { readonly [Name in CommandName]: CommandRunner };
 export const COMMANDS: CommandTable = {
   worker: async (app, args) => runWorkerCommand(args, processWorkerCommandDeps(appInternals(app))),
   check: async (app, args) => runCheckCommand(args, processCheckCommandDeps(appInternals(app))),
+  scheduler: async (app, args) => runSchedulerCommand(args, processSchedulerCommandDeps(appInternals(app))),
   web: async (app, args) => runWebCommand(args, processWebCommandDeps(appInternals(app))),
   metrics: async (app, args) => runMetricsCommand(args, processMetricsCommandDeps(appInternals(app))),
 };

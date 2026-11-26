@@ -17,6 +17,7 @@ import { serveSeat } from "../../../horsies/src/seats/isolate.ts";
 import type { SeatOutcome } from "../../../horsies/src/seats/protocol.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { PREPARED, TASK_ID } from "../app/support.ts";
+import { RUN_TASK_ID } from "../child/support.ts";
 import {
   bodyEndedMessage,
   cancelMessage,
@@ -173,6 +174,7 @@ describe("a run in a seat isolate", () => {
           end: (end: BodyEnd, endedAt) => {
             calls.push(`end ${end.kind} ${endedAt.toString()}`);
           },
+          cancelled: () => undefined,
         };
       },
     };
@@ -239,13 +241,49 @@ describe("cancel in a seat", () => {
     await settled();
     assert.deepEqual(outcomes(port), [{ kind: "value", json: JSON.stringify(JSON.stringify({ cause: "OPERATOR" })) }]);
   });
+
+  test("the seat body observer gets the cause of the run's cancel once; a cancel of another run is left", async () => {
+    const app = seatApp();
+    const causes: string[] = [];
+
+    const observer: SeatBodyObserver = {
+      enter: () => ({
+        run: (call) => call(),
+        thrown: () => undefined,
+        end: () => undefined,
+        cancelled: (cause) => {
+          causes.push(cause);
+        },
+      }),
+    };
+
+    setSeatBodyObserver(contextOf(app), observer);
+    app.implement(fetchPage, async (_input, runtime) => {
+      await new Promise<void>((resolve) => {
+        runtime.signal.addEventListener("abort", () => {
+          resolve();
+        });
+      });
+
+      return fetchPage.ok("cancelled");
+    });
+
+    const { port } = await served(app);
+
+    port.deliver(runMessage(9n, "fetch_page", '{"url":"https://example.org"}'));
+    port.deliver(cancelMessage(98n, "OPERATOR"));
+    port.deliver(cancelMessage(9n, "DEADLINE"));
+    port.deliver(cancelMessage(9n, "OPERATOR"));
+    await settled();
+    assert.deepEqual(causes, ["DEADLINE"]);
+  });
 });
 
 describe("the process events of a seat isolate", () => {
   test("a detached throw in code of a run is logged with the run; the isolate lives", async () => {
     const { port, events } = await served(seatApp());
 
-    runStore.run({ taskId: TASK_ID, taskName: "crunch", attempt: 2 }, () => {
+    runStore.run({ taskId: RUN_TASK_ID, taskName: "crunch", attempt: 2 }, () => {
       events.uncaught[0]?.(new TypeError("late"));
     });
     assert.match(port.postsOf("log")[0]?.line ?? "", /a callback threw in the run of task crunch .*attempt 2.*TypeError: late.*; the child lives/s);
@@ -339,6 +377,7 @@ describe("the defects of a seat isolate go to the main thread, then the isolate 
           throw new TypeError("the observer broke");
         },
         end: () => undefined,
+        cancelled: () => undefined,
       }),
     });
     app.implement(crunch, () => {

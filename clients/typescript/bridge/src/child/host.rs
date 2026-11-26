@@ -9,7 +9,8 @@
 //!   JavaScript thread it reads the arguments, registers the post dispatcher
 //!   and the hook dispatcher, builds the task registry (one body form per
 //!   task), the start hooks, the producer manifest and the loop, and starts
-//!   the host thread (`exit`). It resolves with the exit code when the host
+//!   the host thread (`exit`), which keeps a duplicate of the child's socket
+//!   until the process ends. It resolves with the exit code when the host
 //!   returns; the host thread's backstop waits for the plan's flush bound.
 //! - The child app: family `TYPESCRIPT`; the bridge's log setup at the
 //!   level of the init frame; the body scope of the plan's body facts; the
@@ -41,7 +42,7 @@ use crate::call::operation::{guarded_start, resolve, EnvelopeResolver};
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::child::body::{ChildBodies, ChildPost, ChildPoster, JsAsyncBody, JsBlockingBody};
 use crate::child::body_facts::{BodyFacts, BodyFactsMode};
-use crate::child::exit::{child_process_exit, spawn_host_thread, FlushBound};
+use crate::child::exit::{child_process_exit, hold_socket, spawn_host_thread, FlushBound};
 use crate::child::handler_slot::take_handler_child;
 use crate::child::loop_watch::make_host_loop;
 use crate::child::start_hooks::{start_hooks, HookDispatcher, StartHookCall};
@@ -239,8 +240,9 @@ fn resolve_once(slot: &Mutex<Option<ServeDeferred>>, envelope: Envelope<ChildSer
     }
 }
 
-/// Start the host thread; a thread that the OS refuses resolves with
-/// `CORE_START_FAILED`, and nothing runs.
+/// Start the host thread with a duplicate of the child's socket; a socket
+/// that the OS refuses to duplicate or a thread that the OS refuses resolves
+/// with `CORE_START_FAILED`, and nothing runs.
 fn start_host(deferred: ServeDeferred, served: ServedApp) {
     let ServedApp {
         app,
@@ -248,11 +250,24 @@ fn start_host(deferred: ServeDeferred, served: ServedApp) {
         flush_bound,
     } = served;
     let slot = Arc::new(Mutex::new(Some(deferred)));
+    let socket = match hold_socket(args.socket_fd()) {
+        Ok(socket) => socket,
+        Err(error) => {
+            resolve_once(
+                &slot,
+                Envelope::Thrown(NativeThrown::CoreStartFailed {
+                    cause: format!("the child socket could not be kept open: {error}"),
+                }),
+            );
+            return;
+        }
+    };
     let thread_slot = Arc::clone(&slot);
     let started = spawn_host_thread(
         move || run_child_host(app, args),
         move |exit| resolve_once(&thread_slot, Envelope::Value(serve_end(exit))),
         flush_bound,
+        socket,
     );
     if let Err(error) = started {
         resolve_once(

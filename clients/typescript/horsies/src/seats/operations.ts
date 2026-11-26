@@ -4,6 +4,7 @@
 // - `sends`: the prepared facts of a send, an enqueue, a task info read (`ProducerCore`).
 // - `facades`: one function of a facade part of the addon (the monitoring and health reads, the cancel, the rerun),
 //   or the database ping of the core handle, with the app's own core handle; the reply is the envelope that it gave.
+// - `workflows`: a workflow start, restart, read or handle change (`ProducerCore.workflows`).
 // - A core call that throws a `CoreError` (a process-state refusal) answers `refused` with the facts of the error; the
 //   relay of the isolate throws the same class. A defect of the package rejects: the pool gives it to the defect rule.
 
@@ -23,6 +24,7 @@ import {
   type TooManyPendingCalls,
 } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
+import { serveWorkflowsSeatOperation } from "../workflow/core.ts";
 import type { RelayedRefusal, SeatAnswer, SeatReply, SeatRequest } from "./protocol.ts";
 
 /** The facade parts of the addon that the main thread runs for the isolates, each loaded at its first use. */
@@ -79,6 +81,8 @@ async function areaReply(core: CoreAccess, facades: FacadeAddons, request: SeatR
       return { area, reply: await sendsReply(producerOf(core), request.operation) };
     case "facades":
       return { area, reply: await facadesReply(appCoreHandle(core).native, facades, request.operation) };
+    case "workflows":
+      return { area, reply: await serveWorkflowsSeatOperation(producerOf(core).workflows, request.operation) };
     default:
       return unreachable(area, "areaReply");
   }
