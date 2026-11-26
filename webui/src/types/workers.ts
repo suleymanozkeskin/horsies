@@ -26,11 +26,11 @@ export interface WorkerState {
   pid: number;
   snapshot_at: string;
   /** Seconds since `snapshot_at`, exact to the microsecond. */
-  snapshot_age_s: number | null;
+  snapshot_age_seconds: number | null;
   stale: boolean;
   worker_started_at: string;
   /** Seconds since `worker_started_at`, exact to the microsecond. */
-  uptime_s: number | null;
+  uptime_seconds: number | null;
   processes: number;
   queues: string[];
   queue_max_concurrency: Record<string, number>;

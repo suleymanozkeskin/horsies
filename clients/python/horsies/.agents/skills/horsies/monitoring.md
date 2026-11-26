@@ -147,7 +147,8 @@ probed (cached 60 s):
 
 ## Query API — `horsies.monitoring`
 
-All functions are async, take `broker: PostgresBroker` first, and return
+All functions are async, take `app: Horsies` first (they read through
+`app.get_broker()`), and return
 `MonitoringResult[T] = Result[T, MonitoringQueryError]`. **An absent row is
 `Ok(None)`, not an error;** `get_task_detail` returns
 `Ok(TaskDetailNotFound(task_id, reason))` instead. `MonitoringQueryError` is a union of frozen
@@ -159,21 +160,26 @@ error changes stored data. HTTP is the status of the web read routes.
 | Code | Variant | Fields | `retryable` | HTTP | When |
 |---|---|---|---|---|---|
 | `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the core's class of the cause: `CoreServerError`, `CoreConnectionError`, ...; or `TooManyPendingCalls`, `CoreCallTimedOut`, `CoreStartFailed`) | the core's classification | 503 when `retryable`, else 500 | The database operation failed |
-| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_run` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
+| `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_status_counts`, `list_tasks`, `get_task_detail`, `get_workflow_run` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-task_stats(broker, *, window, task_names, queues, workers, error_codes, error_categories, retried_only)
-task_facets(broker, *, window, statuses, retried_only)          # + error_categories scoping of the code list
-task_breakdown(broker, *, window, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
-list_tasks(broker, *, window, statuses, ..., sort_by, sort_dir, page)  # page: TaskPage
-get_task_detail(broker, task_id)                        # task_id: uuid.UUID; Ok(TaskDetailNotFound) when absent; leaf.trace_id: 32 hex digits or None
-list_workflow_names(broker)                             # at most 10,000 names; a cut is logged as a warning
-list_workflow_runs(broker, *, name, status, limit)      # limit: WorkflowRunsLimit
-get_workflow_run(broker, workflow_id)                   # full DAG: nodes, edges, failed_indices, trace_id of the start, timing
-get_workflow_node(broker, workflow_id, task_index)
-list_schedules(broker)                                  # next run, then name; at most 10,000; a cut is logged
+task_status_counts(app, *, window, task_names, queues, workers, error_codes, error_categories, retried_only)
+task_facets(app, *, window, statuses, retried_only)          # + error_categories scoping of the code list
+task_breakdown(app, *, window, group_by, ..., limit)         # limit: BreakdownLimit; group_by: 'worker' | 'task_name' | 'queue'
+list_tasks(app, *, window, statuses, ..., sort_field, sort_direction, page)  # sort_direction: SortDirection; page: TaskPage
+get_task_detail(app, task_id)                        # task_id: uuid.UUID; TaskDetailRead: TaskDetail, or TaskDetailNotFound when absent; task_row.trace_id: 32 hex digits or None
+list_workflow_names(app)                             # at most 10,000 names; a cut is logged as a warning
+list_workflow_runs(app, *, workflow_name, status, limit)  # limit: WorkflowRunsLimit
+get_workflow_run(app, workflow_id)                   # full DAG: nodes, edges, failed_indices, trace_id of the start, timing
+get_workflow_node(app, workflow_id, node_index)
+list_schedules(app)                                  # next run, then name; at most 10,000; a cut is logged
 ```
+
+- `sort_field` (`TaskSortField`) is one of `enqueued_at`, `started_at`,
+  `completed_at`, `failed_at`, `status`, `task_name`, `queue`, `priority`,
+  `retry_count`, `queue_seconds`, `execution_seconds`. `SortDirection` is
+  `ASCENDING` or `DESCENDING`.
 
 - `task_breakdown` groups: each `GroupRow.group` is `BreakdownValueGroup(value)`
   or, for `group_by='worker'` only, `BreakdownUnclaimedGroup()` (tasks no worker
@@ -285,7 +291,7 @@ timing in the core from the rows of one statement; no statement runs per
 node or per task. Each model holds times, not durations: subtract the two
 times of a segment. Every union is told apart by `kind`.
 
-- `TaskAttemptInfo.phases`: `PhasesNotCapturedInfo()` (a row written before
+- `TaskAttemptDetail.phases`: `PhasesNotCapturedInfo()` (a row written before
   the record, or a version-1 archive in history) or
   `PhasesCapturedInfo(enqueued_at, claimed_at, claims, finalizing,
   recorded_by)`. `claims` is `ClaimsCountedInfo(count, first_claimed_at)` or
@@ -297,7 +303,7 @@ times of a segment. Every union is told apart by `kind`.
   `RecordedByRecoveryInfo(last_seen_at)` (stale RUNNING recovery wrote the
   row) or `RecordedByCancelInfo()` (the cancel of a RUNNING task wrote the
   row, with the outcome `CANCELLED`; its `finished_at` is the cancel time).
-- `WorkflowNodeInfo.timing` is tagged by its coverage label:
+- `WorkflowNodeSummary.timing` is tagged by its coverage label:
   `NodeTimingExactInfo(segments, endpoint)` (every boundary is a recorded
   time), `NodeTimingPartialInfo(reasons, segments, endpoint)` (at least one
   `unknown` segment), `NodeTimingUnavailableInfo(reason)` or
@@ -331,7 +337,7 @@ times of a segment. Every union is told apart by `kind`.
   database time of the read (an open segment ends there for drawing);
   `captured_since` is the install time of migration 1001. `coverage` is
   `RunCoverageExactInfo()`, `RunCoveragePartialInfo(reasons)` or
-  `RunCoverageInconsistentInfo(conflicts)` (`RunConflictNodeInfo(task_index)`,
+  `RunCoverageInconsistentInfo(conflicts)` (`RunConflictNodeInfo(node_index)`,
   `RunConflictPauseInfo(conflict)`). A pause ends `PauseResumedInfo(at)`,
   `PauseRunEndedInfo(at)` or `PauseOpenInfo()`.
 
@@ -356,13 +362,16 @@ the node then shows `HISTORY_PRUNED`.
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-cancel_task(broker, task_id: uuid.UUID, *, include_running=False) -> Result[TaskCancelled, TaskActionError]
+cancel_task(app, task_id: uuid.UUID, *, policy=CancelPolicy.PENDING_OR_CLAIMED_ONLY) -> Result[TaskCancelled, TaskActionError]
 ```
 
 - Single-transaction compare-and-set. A committed CANCELLED cannot be
   overwritten by claim, finalize, auto-retry, or reaper paths.
 - Cancel eligibility: PENDING, CLAIMED; RUNNING only with
-  `include_running=True`. For a RUNNING task, one statement writes the
+  `policy=CancelPolicy.INCLUDE_RUNNING`. `CancelPolicy`: `PENDING_OR_CLAIMED_ONLY`,
+  `INCLUDE_RUNNING`. The web body is `{"policy": "INCLUDE_RUNNING"}` or
+  `{"policy": "PENDING_OR_CLAIMED_ONLY"}`; a body with no `policy` key
+  cancels with `PENDING_OR_CLAIMED_ONLY`. For a RUNNING task, one statement writes the
   attempt row with outcome `CANCELLED` (`recorded_by` `CANCEL`), moves the
   task to history, and sends a notice to the worker that holds the run. The
   worker gives the cancel to the task code: `asyncio.CancelledError` at the
@@ -390,8 +399,8 @@ cancel_task(broker, task_id: uuid.UUID, *, include_running=False) -> Result[Task
 | Code | Variant | Fields | `retryable` | HTTP | When |
 |---|---|---|---|---|---|
 | `TASK_NOT_FOUND` | `TaskActionNotFound` | — | `False` | 404 | No live or history row has the id; nothing changed |
-| `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` without `include_running=True`; nothing changed |
-| `TASK_IS_WORKFLOW_TASK` | `TaskActionWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
+| `TASK_NOT_CANCELLABLE` | `TaskActionNotCancellable` | `current_status: TaskStatus` | `False` | 409 | The task is terminal, or `RUNNING` with `CancelPolicy.PENDING_OR_CLAIMED_ONLY`; nothing changed |
+| `TASK_IS_WORKFLOW_TASK` | `TaskActionIsWorkflowTask` | `current_status: TaskStatus` | `False` | 400 | The task belongs to a workflow; nothing changed |
 | `DB_OPERATION_FAILED` | `TaskActionDbOperationFailed` | `exception` (the core's class of the cause, or the refusal of the core boundary) | the core's classification | 503 when `retryable`, else 500 | The cancel statement failed: it wrote nothing, or it committed and its reply was lost. A repeated cancel tells which: a committed cancel answers `TASK_NOT_CANCELLABLE` with `CANCELLED` |
 | `STORED_DATA_INVALID` | `TaskActionStoredDataInvalid` | `exception` (the `OutcomeDecodeError`) | `False` | 500 | Stored data does not parse: the cancel outcome row does not decode, for example a history status that is not a `TaskStatus` member; nothing changed |
 
@@ -428,13 +437,13 @@ schedules table always polls (its table has no trigger). A task's start
 ```python
 from horsies.monitoring import (
     # Queries
-    task_stats, task_facets, task_breakdown, list_tasks, get_task_detail,
+    task_status_counts, task_facets, task_breakdown, list_tasks, get_task_detail,
     list_workflow_names, list_workflow_runs, get_workflow_run,
     get_workflow_node, list_schedules,
     # Actions
-    cancel_task, TaskCancelled,
+    cancel_task, CancelPolicy, TaskCancelled,
     TaskActionError, TaskActionErrorCode,
-    TaskActionNotFound, TaskActionNotCancellable, TaskActionWorkflowTask,
+    TaskActionNotFound, TaskActionNotCancellable, TaskActionIsWorkflowTask,
     TaskActionDbOperationFailed, TaskActionStoredDataInvalid,
     # Result / errors
     MonitoringResult, MonitoringQueryError, MonitoringQueryErrorCode,
@@ -442,11 +451,12 @@ from horsies.monitoring import (
     # Vocabularies
     ErrorCategory, TaskSortField, TaskGroupBy, SortDirection,
     # Response models (unstable pre-1.0)
-    TaskSummary, TaskListPage, TaskDetail, LeafTaskInfo, TaskAttemptInfo,
+    TaskSummary, TaskListPage, TaskDetail, TaskDetailRead, TaskRowInfo,
+    TaskAttemptDetail,
     StatusCount, FacetValue, ErrorFacet, Facets, GroupRow, Breakdown,
     BreakdownCounts, BreakdownGroup, BreakdownValueGroup, BreakdownUnclaimedGroup,
-    WorkflowRunSummary, WorkflowNodeInfo, WorkflowEdge, WorkflowRunDetail,
-    WorkflowTaskDetail, WorkerStateInfo, WorkerPingInfo, LivenessReport,
+    WorkflowRunSummary, WorkflowNodeSummary, WorkflowEdge, WorkflowRunDetail,
+    WorkflowNodeDetail, WorkerStateInfo, WorkerPingInfo, LivenessReport,
     ScheduleStateInfo, WorkerHistoryPoint, DownSlotInfo, ClassReportInfo,
     PendingStreamInfo, WorkerClassLoadInfo, BudgetLoadInfo, StreamServedInfo,
     StreamNoCapacityInfo, StreamUnservedInfo, StreamWaitingInfo,

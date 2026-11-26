@@ -16,13 +16,13 @@ import type { WorkflowRunSummary } from '@/types/workflows';
  */
 
 const run = (id: string): WorkflowRunSummary => ({
-  id,
-  name: 'nightly_rollup',
+  workflow_id: id,
+  workflow_name: 'nightly_rollup',
   definition_key: 'nightly_rollup:v1',
   status: 'COMPLETED',
   created_at: '2026-08-12T10:00:00Z',
   completed_at: '2026-08-12T10:04:00Z',
-  wall_s: 240,
+  wall_seconds: 240,
 });
 
 const stubFetch = (byQuery: (url: string) => WorkflowRunSummary[] | 'pending'): void => {
@@ -75,6 +75,6 @@ describe('useWorkflowRuns', () => {
 
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     expect(result.current.runs).toHaveLength(1);
-    expect(result.current.runs[0]?.id).toBe('run-1');
+    expect(result.current.runs[0]?.workflow_id).toBe('run-1');
   });
 });

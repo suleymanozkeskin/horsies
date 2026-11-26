@@ -1,7 +1,7 @@
 """Typed read queries over a horsies deployment's own tables.
 
 This package is part of horsies core: it needs no optional extra and never
-imports the web layer. Every query takes a ``PostgresBroker``, is async, and
+imports the web layer. Every query takes the app (``Horsies``), is async, and
 returns ``MonitoringResult[T]``. ``Err`` holds a ``MonitoringQueryError``
 variant: a database failure, or history data that does not decode. A
 missing row is ``Ok(None)``; ``get_task_detail`` returns
@@ -15,11 +15,11 @@ The response models are the wire contract for the monitoring UI and are
 unstable pre-1.0.
 
 ```python
-from horsies import Err, Ok, TaskStatus
-from horsies.core.brokers.postgres import PostgresBroker
+from horsies import Err, Horsies, Ok, TaskStatus
 from horsies.monitoring import (
     MonitoringResult,
     MonitoringWindow,
+    SortDirection,
     TaskListPage,
     TaskPage,
     WindowRefused,
@@ -29,7 +29,7 @@ from horsies.monitoring import (
 
 
 async def failed_in_the_last_day(
-    broker: PostgresBroker,
+    app: Horsies,
 ) -> MonitoringResult[TaskListPage]:
     match resolve_monitoring_window(since=None, until=None):
         case MonitoringWindow() as window:
@@ -42,7 +42,7 @@ async def failed_in_the_last_day(
         case Err(err_value=refused):
             raise AssertionError(f'offset 0, limit 50 is in bounds: {refused.reason}')
     return await list_tasks(
-        broker,
+        app,
         window=window,
         statuses=[TaskStatus.FAILED],
         task_names=[],
@@ -51,8 +51,8 @@ async def failed_in_the_last_day(
         error_codes=[],
         error_categories=[],
         retried_only=False,
-        sort_by='enqueued_at',
-        sort_dir='desc',
+        sort_field='enqueued_at',
+        sort_direction=SortDirection.DESCENDING,
         page=page,
     )
 ```
@@ -96,7 +96,6 @@ from horsies.monitoring.models import (
     FinalizingMarkedInfo,
     FinalizingNotMarkedInfo,
     GroupRow,
-    LeafTaskInfo,
     LivenessReport,
     MissingRecord,
     NodeEndpointInfo,
@@ -157,10 +156,12 @@ from horsies.monitoring.models import (
     StreamUnservedInfo,
     StreamWaitingInfo,
     TaskAbsenceReason,
-    TaskAttemptInfo,
+    TaskAttemptDetail,
     TaskDetail,
     TaskDetailNotFound,
+    TaskDetailRead,
     TaskListPage,
+    TaskRowInfo,
     TaskSummary,
     TimingBoundary,
     TimingConflictInfo,
@@ -173,19 +174,20 @@ from horsies.monitoring.models import (
     WorkerStateInfo,
     WorkflowEdge,
     WorkflowEventKind,
-    WorkflowNodeInfo,
+    WorkflowNodeDetail,
+    WorkflowNodeSummary,
     WorkflowRunDetail,
     WorkflowRunSummary,
-    WorkflowTaskDetail,
 )
 from horsies.monitoring.task_actions import (
+    CancelPolicy,
     TaskActionDbOperationFailed,
     TaskActionError,
     TaskActionErrorCode,
+    TaskActionIsWorkflowTask,
     TaskActionNotCancellable,
     TaskActionNotFound,
     TaskActionStoredDataInvalid,
-    TaskActionWorkflowTask,
     TaskCancelled,
     cancel_task,
 )
@@ -212,7 +214,8 @@ from horsies.monitoring.queries import (
     TaskSortField,
     as_utc,
     categorize_error_code,
-    elapsed_s,
+    duration_seconds,
+    elapsed_seconds,
     get_task_detail,
     get_workflow_node,
     get_workflow_run,
@@ -220,11 +223,10 @@ from horsies.monitoring.queries import (
     list_tasks,
     list_workflow_names,
     list_workflow_runs,
-    nz,
-    span_s,
+    none_if_blank,
     task_breakdown,
     task_facets,
-    task_stats,
+    task_status_counts,
 )
 
 __all__ = [
@@ -238,10 +240,11 @@ __all__ = [
     'TaskActionError',
     'TaskActionErrorCode',
     'TaskActionNotCancellable',
+    'TaskActionIsWorkflowTask',
     'TaskActionNotFound',
     'TaskActionStoredDataInvalid',
-    'TaskActionWorkflowTask',
     # Actions
+    'CancelPolicy',
     'TaskCancelled',
     'cancel_task',
     # Query parameter vocabularies
@@ -272,13 +275,13 @@ __all__ = [
     'list_workflow_runs',
     'task_breakdown',
     'task_facets',
-    'task_stats',
+    'task_status_counts',
     # Derivation helpers
     'as_utc',
     'categorize_error_code',
-    'elapsed_s',
-    'nz',
-    'span_s',
+    'duration_seconds',
+    'elapsed_seconds',
+    'none_if_blank',
     # Response models
     'Breakdown',
     'BreakdownCounts',
@@ -293,7 +296,6 @@ __all__ = [
     'FacetValue',
     'Facets',
     'GroupRow',
-    'LeafTaskInfo',
     'LivenessReport',
     'PendingStreamInfo',
     'ProfileNamedInfo',
@@ -307,20 +309,22 @@ __all__ = [
     'StreamUnservedInfo',
     'StreamWaitingInfo',
     'TaskAbsenceReason',
-    'TaskAttemptInfo',
+    'TaskAttemptDetail',
     'TaskDetail',
     'TaskDetailNotFound',
+    'TaskDetailRead',
     'TaskListPage',
+    'TaskRowInfo',
     'TaskSummary',
     'WorkerClassLoadInfo',
     'WorkerHistoryPoint',
     'WorkerPingInfo',
     'WorkerStateInfo',
     'WorkflowEdge',
-    'WorkflowNodeInfo',
+    'WorkflowNodeDetail',
+    'WorkflowNodeSummary',
     'WorkflowRunDetail',
     'WorkflowRunSummary',
-    'WorkflowTaskDetail',
     # Lifecycle record: attempt phases and run timing
     'AttemptClaimsInfo',
     'AttemptFinalizingInfo',

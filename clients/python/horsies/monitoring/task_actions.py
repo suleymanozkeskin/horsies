@@ -11,9 +11,9 @@ Two boundaries are deliberate:
 
 * Workflow-bound rows are refused. They are managed exclusively by the
   workflow primitives; resetting one would orphan or hang its node.
-* Cancelling a RUNNING task (``include_running=True``) moves the row to
-  history at once and records the running attempt with the outcome
-  ``CANCELLED`` in the same statement. The worker that runs it gets the
+* Cancelling a RUNNING task (``policy=CancelPolicy.INCLUDE_RUNNING``) moves
+  the row to history at once and records the running attempt with the
+  outcome ``CANCELLED`` in the same statement. The worker that runs it gets the
   cancel notice at commit and gives the cancel to the task code: an async
   body gets ``asyncio.CancelledError`` at its next ``await``, and
   ``TaskRuntime.cancel_state()`` reads ``CancelRequested(OPERATOR)``. Code
@@ -37,6 +37,7 @@ exception; this module returns it as it is.
 
 from __future__ import annotations
 
+import enum
 import uuid
 from dataclasses import dataclass
 from typing import assert_never
@@ -46,16 +47,26 @@ from horsies._catalog.monitoring import TaskActionErrorCode as TaskActionErrorCo
 from horsies._catalog.monitoring_errors import (
     TaskActionCoreError as TaskActionCoreError,
     TaskActionDbOperationFailed as TaskActionDbOperationFailed,
+    TaskActionIsWorkflowTask as TaskActionIsWorkflowTask,
     TaskActionNotCancellable as TaskActionNotCancellable,
     TaskActionNotFound as TaskActionNotFound,
     TaskActionStoredDataInvalid as TaskActionStoredDataInvalid,
-    TaskActionWorkflowTask as TaskActionWorkflowTask,
 )
 from horsies._core import CoreError, TaskCancelledRecord
-from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.app import Horsies
 from horsies.core.types.core_failure import call_refusal_or_raise, core_error_retryable
 from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
+
+
+class CancelPolicy(str, enum.Enum):
+    """The task statuses that ``cancel_task`` acts on."""
+
+    PENDING_OR_CLAIMED_ONLY = 'PENDING_OR_CLAIMED_ONLY'
+    """A PENDING or CLAIMED task is cancelled; a RUNNING task is not
+    cancellable."""
+    INCLUDE_RUNNING = 'INCLUDE_RUNNING'
+    """A RUNNING task is cancelled too."""
 
 
 type TaskActionError = TaskActionCoreError
@@ -104,7 +115,7 @@ def _cancel_answer(
         case (
             TaskActionNotFound()
             | TaskActionNotCancellable()
-            | TaskActionWorkflowTask()
+            | TaskActionIsWorkflowTask()
             | TaskActionDbOperationFailed()
             | TaskActionStoredDataInvalid()
         ):
@@ -114,16 +125,17 @@ def _cancel_answer(
 
 
 async def cancel_task(
-    broker: PostgresBroker,
+    app: Horsies,
     task_id: uuid.UUID,
     *,
-    include_running: bool = False,
+    policy: CancelPolicy = CancelPolicy.PENDING_OR_CLAIMED_ONLY,
 ) -> Result[TaskCancelled, TaskActionError]:
     """Move a non-workflow task to CANCELLED.
 
     PENDING and CLAIMED tasks are always eligible: neither has begun user
     code, and a claimed task's worker aborts before starting when its
-    pre-start ownership check fails. RUNNING requires ``include_running``,
+    pre-start ownership check fails. RUNNING requires
+    ``CancelPolicy.INCLUDE_RUNNING``,
     because the code of the run may already have side effects: the same
     statement records the running attempt with the outcome ``CANCELLED``,
     and the worker gives the cancel to the task code (cooperative; a hard
@@ -132,10 +144,12 @@ async def cancel_task(
     Waiting result handles unblock on commit: the move fires ``task_done``
     and a CANCELLED row is reported as TASK_CANCELLED, so no result payload
     is written here. One ``horsies_cancel_task`` statement that the core
-    runs on the broker's core handle; a cancel of the caller does not stop
-    it.
+    runs on the core handle of the app's broker; a cancel of the caller does
+    not stop it.
 
     Raises:
+        HorsiesError: the app cannot build its broker
+            (``BROKER_INIT_FAILED``, ``Horsies.get_broker``). Nothing ran.
         ForkedAfterCoreStart, CoreStopped: the core of this process refuses
             every call (``call_refusal_or_raise``). Nothing ran.
         PanicException: the cancel outcome contradicts the function (a lost
@@ -143,8 +157,8 @@ async def cancel_task(
             not outcomes.
     """
     try:
-        outcome = await broker._core_handle.cancel_task_async(  # pyright: ignore[reportPrivateUsage]
-            task_id, include_running=include_running,
+        outcome = await app.get_broker()._core_handle.cancel_task_async(  # pyright: ignore[reportPrivateUsage]
+            task_id, policy=policy.value,
         )
     except CoreError as exc:
         refusal = call_refusal_or_raise(exc)

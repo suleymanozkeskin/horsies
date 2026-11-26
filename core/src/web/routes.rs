@@ -20,9 +20,10 @@ use crate::monitoring::{
     cancel_task_action, cancel_workflow_action, get_task_detail, get_workflow_node,
     get_workflow_run, list_schedules, list_tasks, list_workflow_names, list_workflow_runs,
     pause_workflow_action, resolve_monitoring_window, resume_workflow_action, task_breakdown,
-    task_facets, task_stats, CancelTaskBody, LivenessReport, TaskAbsenceReason, TaskBreakdownQuery,
-    TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters, TaskListQuery,
-    TaskStatsQuery, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo, WorkflowRunsQuery,
+    task_facets, task_status_counts, CancelTaskBody, LivenessReport, TaskAbsenceReason,
+    TaskBreakdownQuery, TaskDetailNotFound, TaskDetailRead, TaskFacetsQuery, TaskFilters,
+    TaskListQuery, TaskStatusCountsQuery, WorkerHistoryPoint, WorkerPingInfo, WorkerStateInfo,
+    WorkflowRunsQuery,
 };
 use crate::monitoring::{
     class_report_info, slot_health_info, snapshot_profile_info, ClassReportInfo,
@@ -83,7 +84,7 @@ impl WindowParams {
         }
     }
 
-    fn resolve(self) -> Result<crate::core::history::reads::pages::HistoryWindow, ApiError> {
+    fn resolve(self) -> Result<crate::core::history::reads::pages::MonitoringWindow, ApiError> {
         resolve_monitoring_window(
             parse_window_bound("since", self.since.as_deref())?,
             parse_window_bound("until", self.until.as_deref())?,
@@ -164,7 +165,7 @@ impl TaskStatsParams {
         })
     }
 
-    fn window(&self) -> Result<crate::core::history::reads::pages::HistoryWindow, ApiError> {
+    fn window(&self) -> Result<crate::core::history::reads::pages::MonitoringWindow, ApiError> {
         WindowParams {
             since: self.window.since.clone(),
             until: self.window.until.clone(),
@@ -180,10 +181,10 @@ async fn read_task_stats(
     let cache_key = raw.clone().unwrap_or_default();
     let values = QueryValues::parse(raw.as_deref());
     let params = TaskStatsParams::from_values(&values)?;
-    let query = TaskStatsQuery::new(params.window()?).with_filters(params.filters()?);
+    let query = TaskStatusCountsQuery::new(params.window()?).with_filters(params.filters()?);
     state
         .task_stats_cache
-        .get_or_try_init(cache_key, || task_stats(&state.broker, &query))
+        .get_or_try_init(cache_key, || task_status_counts(&state.broker, &query))
         .await
         .map(Json)
         .map_err(|error| query_failed("Task stats", &error))
@@ -398,9 +399,11 @@ async fn read_workflow_names(State(state): State<WebState>) -> Result<Json<Vec<S
         .map_err(|error| query_failed("Workflow names", &error))
 }
 
+/// The query of `GET /api/workflows`. The query parameter `name` keeps its
+/// HTTP name; it is the workflow name filter.
 #[derive(Debug)]
 struct WorkflowParams {
-    name: Option<String>,
+    workflow_name: Option<String>,
     status: Option<String>,
     limit: i64,
 }
@@ -409,7 +412,7 @@ impl WorkflowParams {
     fn from_values(values: &QueryValues) -> Result<Self, ApiError> {
         let limit = parse_i64(values, "limit", 30)?;
         Ok(Self {
-            name: values.last("name").map(str::to_owned),
+            workflow_name: values.last("name").map(str::to_owned),
             status: values.last("status").map(str::to_owned),
             limit: validate_i64_range(values, "limit", limit, 1, 200)?,
         })
@@ -423,7 +426,7 @@ async fn read_workflows(
     let values = QueryValues::parse(raw.as_deref());
     let params = WorkflowParams::from_values(&values)?;
     let query = WorkflowRunsQuery::new()
-        .with_name(params.name)
+        .with_workflow_name(params.workflow_name)
         .with_status(params.status)
         .with_limit(params.limit)
         .map_err(|error| pagination_refused(error, &values, "limit", params.limit))?;
@@ -470,7 +473,7 @@ async fn read_workflow(
 async fn read_workflow_task(
     State(state): State<WebState>,
     Path((workflow_id, task_index)): Path<(String, String)>,
-) -> Result<Json<crate::monitoring::WorkflowTaskDetail>, ApiError> {
+) -> Result<Json<crate::monitoring::WorkflowNodeDetail>, ApiError> {
     let task_index = match parse_path_integer(&task_index) {
         PathInteger::Fits(task_index) => Some(task_index),
         PathInteger::OutsideI32 => None,
@@ -592,10 +595,10 @@ pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
         hostname: snapshot.hostname,
         pid: snapshot.pid,
         snapshot_at: snapshot.snapshot_at,
-        snapshot_age_s: Some(age),
+        snapshot_age_seconds: Some(age),
         stale: age > STALE_SNAPSHOT_THRESHOLD,
         worker_started_at: snapshot.worker_started_at,
-        uptime_s: Some(read_at - snapshot.worker_started_at),
+        uptime_seconds: Some(read_at - snapshot.worker_started_at),
         processes: snapshot.processes,
         queues: snapshot.queues,
         queue_max_concurrency: snapshot.queue_max_concurrency,
@@ -757,7 +760,7 @@ async fn cancel_task(
     action_response(
         "tasks.cancel",
         task_uuid,
-        cancel_task_action(&state.broker, task_uuid, body.include_running).await,
+        cancel_task_action(&state.broker, task_uuid, body.policy).await,
     )
 }
 

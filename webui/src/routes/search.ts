@@ -24,11 +24,11 @@ const SORT_COLUMNS: ReadonlySet<string> = new Set([
   'failed_at',
   'status',
   'task_name',
-  'queue_name',
+  'queue',
   'priority',
   'retry_count',
-  'queue_s',
-  'exec_s',
+  'queue_seconds',
+  'execution_seconds',
 ]);
 
 /** Taxonomy family names. Only the names: expanding one to its error codes is
@@ -165,7 +165,7 @@ export const hasActiveFilters = (search: TaskSearch): boolean =>
 export interface WorkflowSearch {
   /** Selected run id. */
   run?: string;
-  /** Open node's `task_index` within the selected run. */
+  /** Open node's `node_index` within the selected run. */
   node?: number;
 }
 

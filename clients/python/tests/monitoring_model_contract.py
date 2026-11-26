@@ -70,8 +70,8 @@ CONTRACT_PATH: Final = (
 # The models whose JSON the core writes for a read or a web response, by the
 # name of both the Pydantic class and the Rust type.
 CONTRACT_MODELS: Final[tuple[type[BaseModel], ...]] = (
-    models.TaskAttemptInfo,
-    models.LeafTaskInfo,
+    models.TaskAttemptDetail,
+    models.TaskRowInfo,
     models.StatusCount,
     models.FacetValue,
     models.ErrorFacet,
@@ -83,10 +83,10 @@ CONTRACT_MODELS: Final[tuple[type[BaseModel], ...]] = (
     models.TaskListPage,
     models.TaskDetail,
     models.WorkflowRunSummary,
-    models.WorkflowNodeInfo,
+    models.WorkflowNodeSummary,
     models.WorkflowEdge,
     models.WorkflowRunDetail,
-    models.WorkflowTaskDetail,
+    models.WorkflowNodeDetail,
     models.DownSlotInfo,
     models.WorkerStateInfo,
     models.BudgetLoadInfo,

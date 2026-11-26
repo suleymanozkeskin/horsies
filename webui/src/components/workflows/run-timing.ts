@@ -109,7 +109,7 @@ function decides(candidate: TimedNode, best: TimedNode | undefined): boolean {
   if (candidate.activeMs !== best.activeMs) {
     return candidate.activeMs > best.activeMs;
   }
-  return candidate.node.task_index < best.node.task_index;
+  return candidate.node.node_index < best.node.node_index;
 }
 
 function timedNodes(nodes: readonly WorkflowNode[], drawAtMs: number): Map<number, TimedNode> {
@@ -118,7 +118,7 @@ function timedNodes(nodes: readonly WorkflowNode[], drawAtMs: number): Map<numbe
     const end = nodeEnd(node.timing, drawAtMs);
     switch (end.kind) {
       case 'measured':
-        timed.set(node.task_index, {
+        timed.set(node.node_index, {
           node,
           endMs: end.endMs,
           activeMs: activeMs(timedSegments(node.timing), drawAtMs),
@@ -158,12 +158,12 @@ export function longestChain(
   }
   const dependencies = dependenciesByNode(edges);
   const chain: TimedNode[] = [last];
-  const visited = new Set<number>([last.node.task_index]);
+  const visited = new Set<number>([last.node.node_index]);
   // A walk in a DAG visits each node once at most: the node count bounds it.
   let current = last;
   for (let step = 0; step < nodes.length; step += 1) {
     let release: TimedNode | undefined;
-    for (const index of dependencies.get(current.node.task_index) ?? []) {
+    for (const index of dependencies.get(current.node.node_index) ?? []) {
       const candidate = timed.get(index);
       if (candidate !== undefined && !visited.has(index) && decides(candidate, release)) {
         release = candidate;
@@ -172,7 +172,7 @@ export function longestChain(
     if (release === undefined) {
       break;
     }
-    visited.add(release.node.task_index);
+    visited.add(release.node.node_index);
     chain.unshift(release);
     current = release;
   }
@@ -182,7 +182,7 @@ export function longestChain(
   const phases = phaseComposition(segments, drawAtMs);
   return {
     kind: 'chain',
-    taskIndices: chain.map(entry => entry.node.task_index),
+    taskIndices: chain.map(entry => entry.node.node_index),
     lengthMs: phases.reduce((sum, total) => sum + total.ms, 0),
     phases,
   };

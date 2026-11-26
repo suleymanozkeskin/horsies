@@ -8,7 +8,7 @@ import type { KeyLight, KeyPhase } from '@/components/workflows/timing-key';
 import { earlierClaimsText, placementText, unknownReasonText } from '@/components/workflows/timing-text';
 import { clockText, clockTextFrom } from '@/lib/clock-text';
 import { assertNever } from '@/lib/exhaustive';
-import type { LeafTask } from '@/types/workflows';
+import type { TaskRow } from '@/types/workflows';
 
 import {
   attemptPhaseKind,
@@ -297,7 +297,7 @@ export function rangeText(numbers: readonly number[]): string {
 
 /** The failure of the task that no attempt has as its message (an expiry,
  * or a failure outside an attempt), or null when the attempts show it. */
-export function taskOnlyFailure(leaf: LeafTask, attempts: readonly RecordedAttempt[]): string | null {
+export function taskOnlyFailure(leaf: TaskRow, attempts: readonly RecordedAttempt[]): string | null {
   const reason = leaf.failed_reason;
   return reason === null || attempts.some(attempt => attempt.message === reason) ? null : reason;
 }

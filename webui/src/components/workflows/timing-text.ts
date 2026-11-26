@@ -121,7 +121,7 @@ export function nodeCoverageText(timing: NodeTiming): string {
 function runConflictText(conflict: RunConflict): string {
   switch (conflict.kind) {
     case 'node':
-      return `node #${conflict.task_index}`;
+      return `node #${conflict.node_index}`;
     case 'pause':
       return `pause record: ${conflictText(conflict.conflict)}`;
     default:

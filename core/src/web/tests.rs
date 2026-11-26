@@ -1167,16 +1167,16 @@ fn worker_list_ages_are_measured_to_the_read_time() {
         Some("default".to_owned()),
     ));
 
-    assert_eq!(fresh.snapshot_age_s, Some(fresh_age));
+    assert_eq!(fresh.snapshot_age_seconds, Some(fresh_age));
     assert!(!fresh.stale);
     assert_eq!(
-        fresh.uptime_s,
+        fresh.uptime_seconds,
         Some(chrono::TimeDelta::hours(1) + fresh_age)
     );
-    assert_eq!(at_threshold.snapshot_age_s, Some(threshold));
+    assert_eq!(at_threshold.snapshot_age_seconds, Some(threshold));
     assert!(!at_threshold.stale, "stale only past the live window");
     assert_eq!(
-        past_threshold.snapshot_age_s,
+        past_threshold.snapshot_age_seconds,
         Some(threshold + one_microsecond)
     );
     assert!(
@@ -1184,8 +1184,8 @@ fn worker_list_ages_are_measured_to_the_read_time() {
         "stale one microsecond past the live window"
     );
     let encoded = serde_json::to_value(&fresh).expect("serialize the worker state");
-    assert_eq!(encoded["snapshot_age_s"], serde_json::json!(30.00025));
-    assert_eq!(encoded["uptime_s"], serde_json::json!(3630.00025));
+    assert_eq!(encoded["snapshot_age_seconds"], serde_json::json!(30.00025));
+    assert_eq!(encoded["uptime_seconds"], serde_json::json!(3630.00025));
 }
 
 /// The `profile` of a worker state is an object tagged by `kind`: a stored
@@ -1321,15 +1321,17 @@ async fn a_snapshot_ten_minutes_old_in_database_time_is_stale() {
         .expect("the worker is listed");
     assert_eq!(worker["stale"], true);
     assert!(
-        worker["snapshot_age_s"].is_f64() && worker["uptime_s"].is_f64(),
+        worker["snapshot_age_seconds"].is_f64() && worker["uptime_seconds"].is_f64(),
         "the durations are JSON floats: {worker}"
     );
-    let age = worker["snapshot_age_s"]
+    let age = worker["snapshot_age_seconds"]
         .as_f64()
         .expect("an age in seconds");
-    assert!(age >= 600.0, "snapshot_age_s {age}");
-    let uptime = worker["uptime_s"].as_f64().expect("an uptime in seconds");
-    assert!(uptime >= 3_600.0, "uptime_s {uptime}");
+    assert!(age >= 600.0, "snapshot_age_seconds {age}");
+    let uptime = worker["uptime_seconds"]
+        .as_f64()
+        .expect("an uptime in seconds");
+    assert!(uptime >= 3_600.0, "uptime_seconds {uptime}");
 }
 
 /// Python `test_web_api.py::TestWorkerReads::test_class_report_answers_with_streams_and_budgets`.
@@ -2313,7 +2315,7 @@ async fn the_run_route_answers_the_run_its_failed_indices_and_its_edges() {
         .unwrap();
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["run"]["id"], run_id.to_string());
+    assert_eq!(body["run"]["workflow_id"], run_id.to_string());
     assert_eq!(body["failed_indices"], serde_json::json!([0]));
     assert_eq!(body["edges"], serde_json::json!([]));
     // The run and each node carry their timing. The run began 120 s before

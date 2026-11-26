@@ -267,7 +267,7 @@ async fn export_report(
 The cancel signal of a run fires for two causes. The first cause stays.
 
 - `CancelCause::Operator`: an operator cancel of the task
-  (`horsies::monitoring::cancel_task` with `include_running = true`, or the
+  (`horsies::monitoring::cancel_task` with `CancelPolicy::IncludeRunning`, or the
   web UI), in every execution class. One statement writes the attempt row
   with outcome `Cancelled` and moves the task to history as `CANCELLED`; a
   waiting `TaskHandle::get` returns `Failed` with `TASK_CANCELLED`. What the

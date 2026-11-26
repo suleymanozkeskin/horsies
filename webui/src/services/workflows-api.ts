@@ -2,7 +2,7 @@ import { apiGet } from '@/lib/http';
 import type {
   WorkflowRunDetail,
   WorkflowRunSummary,
-  WorkflowTaskDetail,
+  WorkflowNodeDetail,
 } from '@/types/workflows';
 
 /** Distinct root-workflow names, for the run-picker filter. */
@@ -29,7 +29,7 @@ export const getWorkflowRun = (
 export const getWorkflowTask = (
   workflowId: string,
   taskIndex: number
-): Promise<WorkflowTaskDetail> =>
-  apiGet<WorkflowTaskDetail>(
+): Promise<WorkflowNodeDetail> =>
+  apiGet<WorkflowNodeDetail>(
     `/workflows/${encodeURIComponent(workflowId)}/tasks/${taskIndex}`
   );

@@ -18,7 +18,8 @@ from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
-from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.app import Horsies
+from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import TaskStatus
 from horsies.core.types.result import is_err
@@ -45,43 +46,41 @@ class TestTaskDetailFromHistory:
         self, make_database: MakeDatabase
     ) -> None:
         url = await make_database()
-        broker = PostgresBroker(
-            PostgresConfig(database_url=SecretStr(url))
-        )
+        app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(url))))
+        broker = app.get_broker()
         try:
             await broker.ensure_schema_initialized()
             completed, cancelled = await populated_history(url)
 
-            outcome = await get_task_detail(broker, uuid.UUID(completed))
+            outcome = await get_task_detail(app, uuid.UUID(completed))
             assert not is_err(outcome), outcome
             detail = outcome.ok_value
             assert isinstance(detail, TaskDetail)
             assert detail.task_name == 'legacy.task'
-            assert detail.leaf.status == 'COMPLETED'
-            assert detail.leaf.completed_at is not None
-            assert detail.leaf.failed_at is None
+            assert detail.task_row.status == 'COMPLETED'
+            assert detail.task_row.completed_at is not None
+            assert detail.task_row.failed_at is None
 
-            outcome = await get_task_detail(broker, uuid.UUID(cancelled))
+            outcome = await get_task_detail(app, uuid.UUID(cancelled))
             assert not is_err(outcome), outcome
             detail = outcome.ok_value
             assert isinstance(detail, TaskDetail)
-            assert detail.leaf.status == 'CANCELLED'
-            assert detail.leaf.failed_at is not None
+            assert detail.task_row.status == 'CANCELLED'
+            assert detail.task_row.failed_at is not None
 
-            missing = await get_task_detail(broker, uuid.uuid4())
+            missing = await get_task_detail(app, uuid.uuid4())
             assert not is_err(missing), missing
             assert isinstance(missing.ok_value, TaskDetailNotFound)
         finally:
             await broker.close_async()
 
     @pytest.mark.asyncio
-    async def test_workflow_node_leaf_resolves_from_history(
+    async def test_workflow_node_task_row_resolves_from_history(
         self, make_database: MakeDatabase
     ) -> None:
         url = await make_database()
-        broker = PostgresBroker(
-            PostgresConfig(database_url=SecretStr(url))
-        )
+        app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(url))))
+        broker = app.get_broker()
         try:
             await broker.ensure_schema_initialized()
             engine = create_async_engine(sqlalchemy_url(url))
@@ -131,12 +130,12 @@ class TestTaskDetailFromHistory:
             finally:
                 await engine.dispose()
 
-            outcome = await get_workflow_node(broker, workflow_id, 0)
+            outcome = await get_workflow_node(app, workflow_id, 0)
             assert not is_err(outcome), outcome
             node = outcome.ok_value
             assert node is not None
-            assert node.leaf is not None
-            assert node.leaf.status == 'COMPLETED'
-            assert node.leaf.completed_at is not None
+            assert node.task_row is not None
+            assert node.task_row.status == 'COMPLETED'
+            assert node.task_row.completed_at is not None
         finally:
             await broker.close_async()

@@ -1,7 +1,8 @@
 """Read queries backing the monitoring UI.
 
-Every query takes the broker and returns a ``MonitoringResult``. Each runs
-in the core, on the broker's core handle (``horsies._core``): the core sends
+Every query takes the app (``Horsies``) and returns a ``MonitoringResult``.
+Each runs in the core, on the core handle of the app's broker
+(``app.get_broker()``, ``horsies._core``): the core sends
 the one statement of the read's 0007 function in autocommit, and the query
 validates the JSON text of the core's model into the response model with
 ``validate_core_model_json`` of the codec. The error side has two states
@@ -10,12 +11,14 @@ that a read gives:
 * ``MonitoringQueryDbOperationFailed``: a database failure that the core
   reports, or a core boundary error of the call (``CoreCallRefusal``).
 * ``MonitoringQueryHistoryContractViolation``: stored history data that
-  does not decode, in ``task_stats``, ``list_tasks``, ``get_task_detail``
-  and ``get_workflow_node``.
+  does not decode, in ``task_status_counts``, ``list_tasks``,
+  ``get_task_detail`` and ``get_workflow_node``.
 
 Every read raises ``ForkedAfterCoreStart`` and ``CoreStopped``: they are
-states of the process, never a result (``call_refusal_or_raise``). Nothing
-else is caught. A row that does not exist is ``Ok(None)``, not an error.
+states of the process, never a result (``call_refusal_or_raise``). The first
+read of a process raises ``HorsiesError`` (``BROKER_INIT_FAILED``) when the
+app cannot build its broker (``Horsies.get_broker``). Nothing else is caught.
+A row that does not exist is ``Ok(None)``, not an error.
 ``get_task_detail`` names it: ``Ok(TaskDetailNotFound)`` with the reason the
 reads know. Each read sends one statement, so the live read and the history
 read see the same rows.
@@ -29,16 +32,17 @@ task moves to history when it ends. The live side reads these facts as NULL,
 a sort on them sorts every live row as NULL, and an error-code or category
 filter selects no live row.
 
-Load characteristics: ``task_stats``, ``task_facets`` and ``task_breakdown``
-aggregate the live table plus the bounded history window. Each facet dimension
-groups both lifecycle sides and applies its cap only after their counts are
-summed. Retention and the explicit history window bound the visited partitions;
-the UI's refresh cadences are deliberately spaced because each open dashboard
-multiplies the load.
+Load characteristics: ``task_status_counts``, ``task_facets`` and
+``task_breakdown`` aggregate the live table plus the bounded history window.
+Each facet dimension groups both lifecycle sides and applies its cap only
+after their counts are summed. Retention and the explicit history window bound
+the visited partitions; the UI's refresh cadences are deliberately spaced
+because each open dashboard multiplies the load.
 """
 
 from __future__ import annotations
 
+import enum
 import uuid
 from datetime import datetime, timezone
 from typing import Final, Literal
@@ -52,10 +56,10 @@ from horsies._core import (
     TaskDetailAbsent,
     TaskFacetsQuery as CoreTaskFacetsQuery,
     TaskListQuery as CoreTaskListQuery,
-    TaskStatsQuery as CoreTaskStatsQuery,
+    TaskStatusCountsQuery as CoreTaskStatusCountsQuery,
     WorkflowRunsQuery as CoreWorkflowRunsQuery,
 )
-from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.app import Horsies
 from horsies.core.codec.json_io import validate_core_model_json
 from horsies.core.models.tasks import (
     ContractCode,
@@ -86,10 +90,11 @@ from horsies.monitoring.models import (
     TaskAbsenceReason,
     TaskDetail,
     TaskDetailNotFound,
+    TaskDetailRead,
     TaskListPage,
+    WorkflowNodeDetail,
     WorkflowRunDetail,
     WorkflowRunSummary,
-    WorkflowTaskDetail,
 )
 
 
@@ -103,16 +108,20 @@ type TaskSortField = Literal[
     'failed_at',
     'status',
     'task_name',
-    'queue_name',
+    'queue',
     'priority',
     'retry_count',
-    'queue_s',
-    'exec_s',
+    'queue_seconds',
+    'execution_seconds',
 ]
 
 type TaskGroupBy = Literal['worker', 'task_name', 'queue']
 
-type SortDirection = Literal['asc', 'desc']
+class SortDirection(str, enum.Enum):
+    """The direction of the task list sort."""
+
+    ASCENDING = 'ASCENDING'
+    DESCENDING = 'DESCENDING'
 
 # Built from horsies' own error-code enums so the mapping never drifts from
 # the library. Any non-null code absent here is user-defined -> DOMAIN.
@@ -138,8 +147,8 @@ _WORKFLOW_RUNS: Final = TypeAdapter(list[WorkflowRunSummary])
 _WORKFLOW_RUN: Final[TypeAdapter[WorkflowRunDetail | None]] = TypeAdapter(
     WorkflowRunDetail | None,
 )
-_WORKFLOW_NODE: Final[TypeAdapter[WorkflowTaskDetail | None]] = TypeAdapter(
-    WorkflowTaskDetail | None,
+_WORKFLOW_NODE: Final[TypeAdapter[WorkflowNodeDetail | None]] = TypeAdapter(
+    WorkflowNodeDetail | None,
 )
 _SCHEDULES: Final = TypeAdapter(list[ScheduleStateInfo])
 
@@ -147,7 +156,7 @@ _SCHEDULES: Final = TypeAdapter(list[ScheduleStateInfo])
 # --------------------------------------------------------------------------- #
 # Value helpers
 # --------------------------------------------------------------------------- #
-def nz(value: str | None) -> str | None:
+def none_if_blank(value: str | None) -> str | None:
     """Normalize empty/whitespace text to None (horsies stores '' for cleared text)."""
     if value is None:
         return None
@@ -165,7 +174,7 @@ def as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
-def elapsed_s(start: datetime | None, end: datetime | None) -> float | None:
+def elapsed_seconds(start: datetime | None, end: datetime | None) -> float | None:
     """Seconds between ``start`` and ``end``, using now when ``end`` is None.
 
     The value is exact to the microsecond, as the duration fields of the
@@ -178,7 +187,7 @@ def elapsed_s(start: datetime | None, end: datetime | None) -> float | None:
     return (finish - as_utc(start)).total_seconds()
 
 
-def span_s(start: datetime | None, end: datetime | None, *, live: bool) -> float | None:
+def duration_seconds(start: datetime | None, end: datetime | None, *, live: bool) -> float | None:
     """Seconds between two timestamps, exact to the microsecond.
 
     When ``end`` is missing, use now only if ``live`` says the span is still
@@ -187,8 +196,8 @@ def span_s(start: datetime | None, end: datetime | None, *, live: bool) -> float
     if start is None:
         return None
     if end is None:
-        return elapsed_s(start, None) if live else None
-    return elapsed_s(start, end)
+        return elapsed_seconds(start, None) if live else None
+    return elapsed_seconds(start, end)
 
 
 def categorize_error_code(code: str | None) -> ErrorCategory | None:
@@ -197,7 +206,7 @@ def categorize_error_code(code: str | None) -> ErrorCategory | None:
     Returns None when there is no error. A built-in code maps to its family;
     any other non-empty code is a user-defined domain error.
     """
-    normalized = nz(code)
+    normalized = none_if_blank(code)
     if normalized is None:
         return None
     return _CODE_TO_CATEGORY.get(normalized, ErrorCategory.DOMAIN)
@@ -230,8 +239,8 @@ def _core_call_failed(
 # --------------------------------------------------------------------------- #
 # Task queries
 # --------------------------------------------------------------------------- #
-async def task_stats(
-    broker: PostgresBroker,
+async def task_status_counts(
+    app: Horsies,
     *,
     window: MonitoringWindow,
     task_names: list[str],
@@ -258,7 +267,7 @@ async def task_stats(
     The core runs the statement on the broker's core handle; the read
     validates the JSON text of the core's model.
     """
-    query = CoreTaskStatsQuery(
+    query = CoreTaskStatusCountsQuery(
         window_lower=window.lower,
         window_upper=window.upper,
         task_names=list(task_names),
@@ -268,9 +277,9 @@ async def task_stats(
         error_categories=[category.value for category in error_categories],
         retried_only=retried_only,
     )
-    operation = 'task stats query'
+    operation = 'task status counts query'
     try:
-        outcome = await broker._core_handle.monitoring_task_stats_async(query)  # pyright: ignore[reportPrivateUsage]
+        outcome = await app.get_broker()._core_handle.monitoring_task_status_counts_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
@@ -281,7 +290,7 @@ async def task_stats(
 
 
 async def task_facets(
-    broker: PostgresBroker,
+    app: Horsies,
     *,
     window: MonitoringWindow,
     statuses: list[TaskStatus],
@@ -314,7 +323,7 @@ async def task_facets(
     )
     operation = 'task facets query'
     try:
-        outcome = await broker._core_handle.monitoring_task_facets_async(query)  # pyright: ignore[reportPrivateUsage]
+        outcome = await app.get_broker()._core_handle.monitoring_task_facets_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
@@ -325,7 +334,7 @@ async def task_facets(
 
 
 async def task_breakdown(
-    broker: PostgresBroker,
+    app: Horsies,
     *,
     window: MonitoringWindow,
     group_by: TaskGroupBy,
@@ -368,7 +377,7 @@ async def task_breakdown(
     )
     operation = 'task breakdown query'
     try:
-        outcome = await broker._core_handle.monitoring_task_breakdown_async(query)  # pyright: ignore[reportPrivateUsage]
+        outcome = await app.get_broker()._core_handle.monitoring_task_breakdown_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
@@ -379,7 +388,7 @@ async def task_breakdown(
 
 
 async def list_tasks(
-    broker: PostgresBroker,
+    app: Horsies,
     *,
     window: MonitoringWindow,
     statuses: list[TaskStatus],
@@ -389,8 +398,8 @@ async def list_tasks(
     error_codes: list[str],
     error_categories: list[ErrorCategory],
     retried_only: bool,
-    sort_by: TaskSortField,
-    sort_dir: SortDirection,
+    sort_field: TaskSortField,
+    sort_direction: SortDirection,
     page: TaskPage,
 ) -> MonitoringResult[TaskListPage]:
     """A paginated, server-sorted, server-filtered slice of tasks.
@@ -428,14 +437,14 @@ async def list_tasks(
         error_codes=list(error_codes),
         error_categories=[category.value for category in error_categories],
         retried_only=retried_only,
-        sort_by=sort_by,
-        sort_dir=sort_dir,
+        sort_field=sort_field,
+        sort_direction=sort_direction.value,
         offset=page.offset,
         limit=page.limit,
     )
     operation = 'task list query'
     try:
-        outcome = await broker._core_handle.monitoring_list_tasks_async(query)  # pyright: ignore[reportPrivateUsage]
+        outcome = await app.get_broker()._core_handle.monitoring_list_tasks_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
@@ -446,9 +455,9 @@ async def list_tasks(
 
 
 async def get_task_detail(
-    broker: PostgresBroker,
+    app: Horsies,
     task_id: uuid.UUID,
-) -> MonitoringResult[TaskDetail | TaskDetailNotFound]:
+) -> MonitoringResult[TaskDetailRead]:
     """A single task with its attempt history.
 
     The attempt history is where a task's cause lives: ``error_message``
@@ -473,7 +482,7 @@ async def get_task_detail(
     """
     operation = 'task detail query'
     try:
-        outcome = await broker._core_handle.monitoring_task_detail_async(task_id)  # pyright: ignore[reportPrivateUsage]
+        outcome = await app.get_broker()._core_handle.monitoring_task_detail_async(task_id)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
@@ -489,7 +498,7 @@ async def get_task_detail(
 # Workflow queries
 # --------------------------------------------------------------------------- #
 async def list_workflow_names(
-    broker: PostgresBroker,
+    app: Horsies,
 ) -> MonitoringResult[list[str]]:
     """Distinct names of root workflow runs, for the run-picker filter.
 
@@ -503,7 +512,7 @@ async def list_workflow_names(
     """
     operation = 'workflow names query'
     try:
-        outcome = await broker._core_handle.monitoring_workflow_names_async()  # pyright: ignore[reportPrivateUsage]
+        outcome = await app.get_broker()._core_handle.monitoring_workflow_names_async()  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
@@ -514,26 +523,28 @@ async def list_workflow_names(
 
 
 async def list_workflow_runs(
-    broker: PostgresBroker,
+    app: Horsies,
     *,
-    name: str | None,
+    workflow_name: str | None,
     status: str | None,
     limit: WorkflowRunsLimit,
 ) -> MonitoringResult[list[WorkflowRunSummary]]:
     """Recent root workflow runs, newest first.
 
     Runs created at one time come by id, highest first, so a page does not
-    reorder between polls. ``name`` and ``status`` are independent
+    reorder between polls. ``workflow_name`` and ``status`` are independent
     exact-match filters combined with AND; a status no run carries yields an
     empty list. One statement (``horsies_monitoring_workflow_runs``).
 
     The core runs the statement on the broker's core handle; the read
     validates the JSON text of the core's model.
     """
-    query = CoreWorkflowRunsQuery(name=name, status=status, limit=limit.value)
+    query = CoreWorkflowRunsQuery(
+        workflow_name=workflow_name, status=status, limit=limit.value,
+    )
     operation = 'workflow runs query'
     try:
-        outcome = await broker._core_handle.monitoring_workflow_runs_async(query)  # pyright: ignore[reportPrivateUsage]
+        outcome = await app.get_broker()._core_handle.monitoring_workflow_runs_async(query)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
@@ -544,7 +555,7 @@ async def list_workflow_runs(
 
 
 async def get_workflow_run(
-    broker: PostgresBroker,
+    app: Horsies,
     workflow_id: str,
 ) -> MonitoringResult[WorkflowRunDetail | None]:
     """A run's DAG — metadata, nodes, and dependency edges — or None if absent.
@@ -566,7 +577,7 @@ async def get_workflow_run(
             return Ok(None)
     operation = 'workflow run detail query'
     try:
-        outcome = await broker._core_handle.monitoring_workflow_run_async(run_id)  # pyright: ignore[reportPrivateUsage]
+        outcome = await app.get_broker()._core_handle.monitoring_workflow_run_async(run_id)  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:
@@ -577,10 +588,10 @@ async def get_workflow_run(
 
 
 async def get_workflow_node(
-    broker: PostgresBroker,
+    app: Horsies,
     workflow_id: str,
-    task_index: int,
-) -> MonitoringResult[WorkflowTaskDetail | None]:
+    node_index: int,
+) -> MonitoringResult[WorkflowNodeDetail | None]:
     """Detail for one node: node error, backing task, and attempt history.
 
     ``node_error`` is the message of the error that the node's stored
@@ -588,7 +599,7 @@ async def get_workflow_node(
     ``MonitoringQueryHistoryContractViolation``.
 
     Returns None when the run has no node at that index. Subworkflow nodes
-    have no backing task; drill into the child run instead. ``leaf`` is
+    have no backing task; drill into the child run instead. ``task_row`` is
     None, with no attempts, when no table holds the backing task (retention
     removed it). A history row of the backing task that does not decode
     returns ``MonitoringQueryHistoryContractViolation``.
@@ -607,11 +618,11 @@ async def get_workflow_node(
             pass
         case None:
             return Ok(None)
-    if not _INT4_MIN <= task_index <= _INT4_MAX:
+    if not _INT4_MIN <= node_index <= _INT4_MAX:
         return Ok(None)
     try:
-        outcome = await broker._core_handle.monitoring_workflow_node_async(  # pyright: ignore[reportPrivateUsage]
-            run_id, task_index=task_index,
+        outcome = await app.get_broker()._core_handle.monitoring_workflow_node_async(  # pyright: ignore[reportPrivateUsage]
+            run_id, node_index=node_index,
         )
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
@@ -626,7 +637,7 @@ async def get_workflow_node(
 # Schedules
 # --------------------------------------------------------------------------- #
 async def list_schedules(
-    broker: PostgresBroker,
+    app: Horsies,
 ) -> MonitoringResult[list[ScheduleStateInfo]]:
     """Recurring schedule states, soonest next-run first, then by name.
 
@@ -641,7 +652,7 @@ async def list_schedules(
     """
     operation = 'schedule state query'
     try:
-        outcome = await broker._core_handle.monitoring_schedules_async()  # pyright: ignore[reportPrivateUsage]
+        outcome = await app.get_broker()._core_handle.monitoring_schedules_async()  # pyright: ignore[reportPrivateUsage]
     except CoreError as exc:
         return _core_call_failed(operation, call_refusal_or_raise(exc))
     match outcome:

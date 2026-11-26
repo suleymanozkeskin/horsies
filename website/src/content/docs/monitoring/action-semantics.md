@@ -38,7 +38,7 @@ against a cancelled row and cannot overwrite it.
 
 ### Cancelling a RUNNING task
 
-With `include_running`, one statement does these steps in one transaction:
+With the policy `INCLUDE_RUNNING`, one statement does these steps in one transaction:
 
 - It writes one attempt row for the run: outcome `CANCELLED`, `will_retry`
   false, the start time of the run, `finished_at` at the time of the cancel,
@@ -97,12 +97,16 @@ The task API is on the client pages:
 curl -X POST "$BASE/api/tasks/$TASK_ID/cancel" \
   -H 'Content-Type: application/json' \
   -H 'X-Horsies-Intent: action' \
-  -d '{"include_running": true}'
+  -d '{"policy": "INCLUDE_RUNNING"}'
 ```
 
-Without `include_running`, a `RUNNING` task is refused with 409 like any other
-ineligible state. The flag keeps a cancel of running code deliberate; the UI
-gates it behind a checkbox.
+The body key `policy` is `PENDING_OR_CLAIMED_ONLY` or `INCLUDE_RUNNING`. An
+empty body, and a body with no `policy` key, cancel with
+`PENDING_OR_CLAIMED_ONLY`: a `RUNNING` task is then refused with 409 like any
+other ineligible state. The policy keeps a cancel of running code deliberate;
+the UI gates it behind a checkbox. Python: `cancel_task(app, task_id,
+policy=CancelPolicy.INCLUDE_RUNNING)`. Rust: `cancel_task(&app, task_id,
+CancelPolicy::IncludeRunning)`.
 
 **Settled when:** the task reads `CANCELLED` with its `CANCELLED` attempt. That
 is immediate. The task code stops when it reads the cancel, or at the kill of an

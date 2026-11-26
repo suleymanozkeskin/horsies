@@ -186,7 +186,7 @@ export type RunCoverage =
   | { kind: 'inconsistent'; conflicts: RunConflict[] };
 
 export type RunConflict =
-  | { kind: 'node'; task_index: number }
+  | { kind: 'node'; node_index: number }
   | { kind: 'pause'; conflict: TimingConflict };
 
 /** One pause of a run: from a `WORKFLOW_PAUSED` event to `end`. */

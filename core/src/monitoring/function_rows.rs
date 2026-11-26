@@ -32,12 +32,12 @@ use crate::db::{ParameterType, Row, TypedStatement};
 use crate::telemetry::trace_carrier::stored_trace_id_text;
 
 use super::models::{
-    Breakdown, BreakdownCounts, BreakdownGroup, ErrorCategory, GroupRow, LeafTaskInfo,
-    ScheduleStateInfo, StatusCount, TaskAttemptInfo, TaskDetail, TaskDetailNotFound,
-    TaskDetailRead, TaskSummary, WorkflowEdge, WorkflowNodeInfo, WorkflowRunDetail,
-    WorkflowRunSummary, WorkflowTaskDetail,
+    Breakdown, BreakdownCounts, BreakdownGroup, ErrorCategory, GroupRow, ScheduleStateInfo,
+    StatusCount, TaskAttemptDetail, TaskDetail, TaskDetailNotFound, TaskDetailRead, TaskRowInfo,
+    TaskSummary, WorkflowEdge, WorkflowNodeDetail, WorkflowNodeSummary, WorkflowRunDetail,
+    WorkflowRunSummary,
 };
-use super::queries::{elapsed, normalize_optional_text, span, TaskGroupBy};
+use super::queries::{duration, elapsed, normalize_optional_text, TaskGroupBy};
 use super::timing::{
     attempt_phases_info, compose_run, ChildRun, LiveStatus, LiveTask, MovedRecord, MovedTask,
     NodeEntry, NodeEventKind, NodeFacts, NodeStatus, NodeWork, RunEvent, RunEventKind, RunFacts,
@@ -406,41 +406,43 @@ struct SummaryFields {
 /// now while it waits or runs. A history row has its terminal time. Pure
 /// apart from the clock read of a live span.
 fn summary_from_fields(fields: SummaryFields) -> Result<TaskSummary, String> {
-    let (completed_at, failed_at, queue_s, exec_s) = match (fields.location, fields.terminal_at) {
-        (Location::Live, None) => (
-            None,
-            None,
-            span(
-                Some(fields.enqueued_at),
-                fields.started_at,
-                matches!(fields.status.as_str(), "PENDING" | "CLAIMED"),
+    let (completed_at, failed_at, queue_seconds, execution_seconds) =
+        match (fields.location, fields.terminal_at) {
+            (Location::Live, None) => (
+                None,
+                None,
+                duration(
+                    Some(fields.enqueued_at),
+                    fields.started_at,
+                    matches!(fields.status.as_str(), "PENDING" | "CLAIMED"),
+                ),
+                duration(fields.started_at, None, fields.status.as_str() == "RUNNING"),
             ),
-            span(fields.started_at, None, fields.status.as_str() == "RUNNING"),
-        ),
-        (Location::History, Some(terminal)) => (
-            (fields.status == "COMPLETED").then_some(terminal),
-            (fields.status != "COMPLETED").then_some(terminal),
-            span(
-                Some(fields.enqueued_at),
-                fields.started_at.or(Some(terminal)),
-                false,
+            (Location::History, Some(terminal)) => (
+                (fields.status == "COMPLETED").then_some(terminal),
+                (fields.status != "COMPLETED").then_some(terminal),
+                duration(
+                    Some(fields.enqueued_at),
+                    fields.started_at.or(Some(terminal)),
+                    false,
+                ),
+                duration(fields.started_at, Some(terminal), false),
             ),
-            span(fields.started_at, Some(terminal), false),
-        ),
-        (Location::Live, Some(_)) => {
-            return Err(format!("live task {} has a terminal time", fields.task_id))
-        }
-        (Location::History, None) => {
-            return Err(format!(
-                "history task {} has no terminal time",
-                fields.task_id
-            ))
-        }
-    };
+            (Location::Live, Some(_)) => {
+                return Err(format!("live task {} has a terminal time", fields.task_id))
+            }
+            (Location::History, None) => {
+                return Err(format!(
+                    "history task {} has no terminal time",
+                    fields.task_id
+                ))
+            }
+        };
     Ok(TaskSummary {
-        id: fields.task_id,
+        task_id: fields.task_id,
         task_name: fields.task_name,
-        queue_name: fields.queue_name,
+        // The column keeps its schema name `queue_name`.
+        queue: fields.queue_name,
         status: fields.status,
         priority: fields.priority,
         retry_count: fields.retry_count,
@@ -455,8 +457,8 @@ fn summary_from_fields(fields: SummaryFields) -> Result<TaskSummary, String> {
         started_at: fields.started_at,
         completed_at,
         failed_at,
-        queue_s,
-        exec_s,
+        queue_seconds,
+        execution_seconds,
     })
 }
 
@@ -548,16 +550,17 @@ pub(super) fn task_detail_row(
             )))
         }
     };
-    let (completed_at, failed_at, queue_s, exec_s) = match (location, terminal_at) {
+    let (completed_at, failed_at, queue_seconds, execution_seconds) = match (location, terminal_at)
+    {
         (Location::Live, None) => (
             None,
             None,
-            span(
+            duration(
                 Some(enqueued_at),
                 started_at,
                 matches!(status.as_str(), "PENDING" | "CLAIMED"),
             ),
-            span(started_at, None, status.as_str() == "RUNNING"),
+            duration(started_at, None, status.as_str() == "RUNNING"),
         ),
         (Location::History, Some(terminal)) => {
             if status.parse::<TaskStatus>().is_err() {
@@ -569,8 +572,8 @@ pub(super) fn task_detail_row(
             (
                 (status == "COMPLETED").then_some(terminal),
                 (status != "COMPLETED").then_some(terminal),
-                span(Some(enqueued_at), started_at.or(Some(terminal)), false),
-                span(started_at, Some(terminal), false),
+                duration(Some(enqueued_at), started_at.or(Some(terminal)), false),
+                duration(started_at, Some(terminal), false),
             )
         }
         (Location::Live, Some(_)) | (Location::History, None) => {
@@ -593,7 +596,7 @@ pub(super) fn task_detail_row(
         }
         Location::History => None,
     };
-    let leaf = LeafTaskInfo {
+    let task_row = TaskRowInfo {
         task_id,
         status,
         error_code: normalize_optional_text(error_code.as_deref()),
@@ -604,24 +607,26 @@ pub(super) fn task_detail_row(
         started_at,
         completed_at,
         failed_at,
-        queue_s,
-        exec_s,
+        queue_seconds,
+        execution_seconds,
         worker_hostname: column(row, statement, "worker_hostname")?,
         good_until: column(row, statement, "good_until")?,
         execution,
         trace_id,
     };
     Ok(TaskDetailRead::Found(Box::new(TaskDetail {
-        leaf,
+        task_row,
         task_name: column(row, statement, "task_name")?,
-        queue_name: column(row, statement, "queue_name")?,
+        // The columns keep their schema names `queue_name` and
+        // `workflow_task_index`.
+        queue: column(row, statement, "queue_name")?,
         priority: column(row, statement, "priority")?,
         is_workflow_task: column(row, statement, "is_workflow_task")?,
         error_category: super::queries::categorize_error_code(error_code.as_deref())
             .map(|category| category.as_str().to_owned()),
         attempts: records.iter().map(attempt_info).collect(),
         workflow_id: column(row, statement, "workflow_id")?,
-        workflow_task_index: column(row, statement, "workflow_task_index")?,
+        workflow_node_index: column(row, statement, "workflow_task_index")?,
     })))
 }
 
@@ -638,8 +643,8 @@ fn absent_task(
     Ok(TaskDetailNotFound { task_id, reason })
 }
 
-fn attempt_info(record: &AttemptRecord) -> TaskAttemptInfo {
-    TaskAttemptInfo {
+fn attempt_info(record: &AttemptRecord) -> TaskAttemptDetail {
+    TaskAttemptDetail {
         attempt: record.attempt(),
         outcome: record.outcome().to_owned(),
         will_retry: record.will_retry(),
@@ -853,13 +858,13 @@ fn run_summary(
     let created_at: DateTime<Utc> = column(row, statement, "created_at")?;
     let completed_at: Option<DateTime<Utc>> = column(row, statement, "completed_at")?;
     Ok(WorkflowRunSummary {
-        id: column(row, statement, "workflow_id")?,
-        name: column(row, statement, "workflow_name")?,
+        workflow_id: column(row, statement, "workflow_id")?,
+        workflow_name: column(row, statement, "workflow_name")?,
         definition_key: column(row, statement, "definition_key")?,
         status: column(row, statement, "status")?,
         created_at: Some(created_at),
         completed_at,
-        wall_s: elapsed(Some(created_at), completed_at),
+        wall_seconds: elapsed(Some(created_at), completed_at),
     })
 }
 
@@ -874,7 +879,7 @@ pub(super) fn workflow_runs(
 /// The execution time of a node: a RUNNING node counts up to now; a finished
 /// node with a completion time is closed; any other node has none. Exact,
 /// as [`elapsed`].
-fn node_exec_s(
+fn node_execution_seconds(
     status: &str,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
@@ -890,7 +895,7 @@ fn node_exec_s(
 
 /// One node of a run with the indexes it depends on.
 struct RunNode {
-    info: WorkflowNodeInfo,
+    info: WorkflowNodeSummary,
     dependencies: Vec<i32>,
 }
 
@@ -902,19 +907,20 @@ struct NodeRow {
     facts: NodeFacts,
 }
 
-/// The fields of [`WorkflowNodeInfo`] that the `NODE` row holds, before the
-/// timing of the node is composed.
+/// The fields of [`WorkflowNodeSummary`] that the `NODE` row holds, before
+/// the timing of the node is composed. The columns `task_index` and
+/// `is_subworkflow` keep their schema names; the fields take the API names.
 struct NodeColumns {
-    task_index: i32,
+    node_index: i32,
     node_id: Option<String>,
     task_name: String,
     node_status: String,
-    is_subworkflow: bool,
+    is_sub_workflow: bool,
     sub_workflow_id: Option<Uuid>,
     allow_failed_deps: bool,
     started_at: Option<DateTime<Utc>>,
     completed_at: Option<DateTime<Utc>>,
-    exec_s: Option<TimeDelta>,
+    execution_seconds: Option<TimeDelta>,
     child_total: Option<i64>,
     child_failed: Option<i64>,
 }
@@ -923,17 +929,17 @@ impl NodeRow {
     fn into_run_node(self, timing: NodeTimingInfo) -> RunNode {
         let columns = self.columns;
         RunNode {
-            info: WorkflowNodeInfo {
-                task_index: columns.task_index,
+            info: WorkflowNodeSummary {
+                node_index: columns.node_index,
                 node_id: columns.node_id,
                 task_name: columns.task_name,
                 node_status: columns.node_status,
-                is_subworkflow: columns.is_subworkflow,
+                is_sub_workflow: columns.is_sub_workflow,
                 sub_workflow_id: columns.sub_workflow_id,
                 allow_failed_deps: columns.allow_failed_deps,
                 started_at: columns.started_at,
                 completed_at: columns.completed_at,
-                exec_s: columns.exec_s,
+                execution_seconds: columns.execution_seconds,
                 child_total: columns.child_total,
                 child_failed: columns.child_failed,
                 timing,
@@ -976,19 +982,19 @@ fn node_row(row: &Row, statement: &TypedStatement) -> Result<NodeRow, RowDecodeE
         },
         work,
     };
-    let exec_s = node_exec_s(&node_status, started_at, completed_at);
+    let execution_seconds = node_execution_seconds(&node_status, started_at, completed_at);
     Ok(NodeRow {
         columns: NodeColumns {
-            task_index,
+            node_index: task_index,
             node_id: column(row, statement, "node_id")?,
             task_name: column(row, statement, "task_name")?,
             node_status,
-            is_subworkflow,
+            is_sub_workflow: is_subworkflow,
             sub_workflow_id,
             allow_failed_deps: column(row, statement, "allow_failed_deps")?,
             started_at,
             completed_at,
-            exec_s,
+            execution_seconds,
             child_total: column(row, statement, "child_total")?,
             child_failed: column(row, statement, "child_failed")?,
         },
@@ -1030,7 +1036,7 @@ fn run_detail(
     trace_id: Option<String>,
     timing: RunTimingInfo,
 ) -> WorkflowRunDetail {
-    let known: HashSet<i32> = nodes.iter().map(|node| node.info.task_index).collect();
+    let known: HashSet<i32> = nodes.iter().map(|node| node.info.node_index).collect();
     let mut edges = Vec::new();
     for node in &nodes {
         for dependency in node
@@ -1040,15 +1046,15 @@ fn run_detail(
         {
             edges.push(WorkflowEdge {
                 from_index: *dependency,
-                to_index: node.info.task_index,
+                to_index: node.info.node_index,
             });
         }
     }
-    let nodes: Vec<WorkflowNodeInfo> = nodes.into_iter().map(|node| node.info).collect();
+    let nodes: Vec<WorkflowNodeSummary> = nodes.into_iter().map(|node| node.info).collect();
     let failed_indices: Vec<i32> = nodes
         .iter()
         .filter(|node| node.node_status == "FAILED")
-        .map(|node| node.task_index)
+        .map(|node| node.node_index)
         .collect();
     WorkflowRunDetail {
         run,
@@ -1123,8 +1129,12 @@ fn found_run(
 ) -> Result<WorkflowRunDetail, DetailRowError> {
     let run = run_summary(first, statement)?;
     let stored_trace_id: Option<Vec<u8>> = column(first, statement, "trace_id")?;
-    let trace_id = stored_trace_id_text(stored_trace_id.as_deref())
-        .map_err(|refused| shape(statement, format!("workflow run {}: {refused}", run.id)))?;
+    let trace_id = stored_trace_id_text(stored_trace_id.as_deref()).map_err(|refused| {
+        shape(
+            statement,
+            format!("workflow run {}: {refused}", run.workflow_id),
+        )
+    })?;
     let timing_rows: String = column(first, statement, "timing_rows")?;
     let timing_rows = match timing_rows.as_str() {
         "INCLUDED" => TimingRows::Included,
@@ -1476,7 +1486,7 @@ fn node_error_from_result(task_index: i32, result: Option<&str>) -> Result<Optio
 /// The answer of the node function.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) enum NodeRead {
-    Found(Box<WorkflowTaskDetail>),
+    Found(Box<WorkflowNodeDetail>),
     /// The run has no node at the index.
     Absent,
 }
@@ -1506,31 +1516,33 @@ pub(super) fn workflow_node(
 /// A `NODE` row: the node, its error, and its backing task with the task's
 /// attempts. A node with no backing task (a sub-workflow node, or a task
 /// node before its task exists: `location` is `NULL`) and a node whose task
-/// is in neither place (`ABSENT`) have no leaf and no attempt.
+/// is in neither place (`ABSENT`) have no task row and no attempt. The
+/// columns `node_task_index` and `node_is_subworkflow` keep their schema
+/// names; the fields take the API names.
 fn node_detail(
     row: &Row,
     statement: &TypedStatement,
-) -> Result<WorkflowTaskDetail, DetailRowError> {
-    let task_index: i32 = column(row, statement, "node_task_index")?;
+) -> Result<WorkflowNodeDetail, DetailRowError> {
+    let node_index: i32 = column(row, statement, "node_task_index")?;
     let node_result: Option<String> = column(row, statement, "node_result")?;
-    let node_error = node_error_from_result(task_index, node_result.as_deref())
+    let node_error = node_error_from_result(node_index, node_result.as_deref())
         .map_err(DetailRowError::StoredData)?;
     let location: Option<String> = column(row, statement, "location")?;
-    let (leaf, attempts) = match location {
+    let (task_row, attempts) = match location {
         None => (None, Vec::new()),
         Some(_) => match task_detail_row(row, statement)? {
-            TaskDetailRead::Found(detail) => (Some(detail.leaf), detail.attempts),
+            TaskDetailRead::Found(detail) => (Some(detail.task_row), detail.attempts),
             TaskDetailRead::NotFound(_) => (None, Vec::new()),
         },
     };
-    Ok(WorkflowTaskDetail {
-        task_index,
+    Ok(WorkflowNodeDetail {
+        node_index,
         node_id: column(row, statement, "node_id")?,
         task_name: column(row, statement, "node_task_name")?,
         node_status: column(row, statement, "node_status")?,
-        is_subworkflow: column(row, statement, "node_is_subworkflow")?,
+        is_sub_workflow: column(row, statement, "node_is_subworkflow")?,
         node_error,
-        leaf,
+        task_row,
         attempts,
     })
 }
@@ -1573,8 +1585,8 @@ mod tests {
             .expect("history summary");
         assert_eq!(completed.completed_at, Some(terminal));
         assert_eq!(completed.failed_at, None);
-        assert_eq!(completed.queue_s, Some(TimeDelta::seconds(3)));
-        assert_eq!(completed.exec_s, Some(TimeDelta::seconds(7)));
+        assert_eq!(completed.queue_seconds, Some(TimeDelta::seconds(3)));
+        assert_eq!(completed.execution_seconds, Some(TimeDelta::seconds(7)));
         assert_eq!(completed.error_code.as_deref(), Some("TASK_EXCEPTION"));
 
         let failed = summary_from_fields(fields(Location::History, "FAILED", Some(terminal)))
@@ -1588,8 +1600,8 @@ mod tests {
         let live = summary_from_fields(fields(Location::Live, "RUNNING", None)).expect("live");
         assert_eq!(live.completed_at, None);
         assert_eq!(live.failed_at, None);
-        assert_eq!(live.queue_s, Some(TimeDelta::seconds(3)));
-        assert!(live.exec_s.is_some());
+        assert_eq!(live.queue_seconds, Some(TimeDelta::seconds(3)));
+        assert!(live.execution_seconds.is_some());
 
         assert!(summary_from_fields(fields(Location::Live, "RUNNING", Some(Utc::now()))).is_err());
         assert!(summary_from_fields(fields(Location::History, "FAILED", None)).is_err());
@@ -1607,11 +1619,17 @@ mod tests {
 
         let summary = summary_from_fields(stored).expect("history summary");
 
-        assert_eq!(summary.queue_s, Some(TimeDelta::microseconds(2_310_417)));
-        assert_eq!(summary.exec_s, Some(TimeDelta::microseconds(3_189_583)));
+        assert_eq!(
+            summary.queue_seconds,
+            Some(TimeDelta::microseconds(2_310_417))
+        );
+        assert_eq!(
+            summary.execution_seconds,
+            Some(TimeDelta::microseconds(3_189_583))
+        );
         let encoded = serde_json::to_value(&summary).expect("the row serializes");
-        assert_eq!(encoded["queue_s"], serde_json::json!(2.310417));
-        assert_eq!(encoded["exec_s"], serde_json::json!(3.189583));
+        assert_eq!(encoded["queue_seconds"], serde_json::json!(2.310417));
+        assert_eq!(encoded["execution_seconds"], serde_json::json!(3.189583));
     }
 
     #[test]
@@ -1753,29 +1771,29 @@ mod tests {
 
     fn run() -> WorkflowRunSummary {
         WorkflowRunSummary {
-            id: Uuid::nil(),
-            name: "flow".to_owned(),
+            workflow_id: Uuid::nil(),
+            workflow_name: "flow".to_owned(),
             definition_key: None,
             status: "RUNNING".to_owned(),
             created_at: None,
             completed_at: None,
-            wall_s: None,
+            wall_seconds: None,
         }
     }
 
-    fn node(task_index: i32, status: &str, dependencies: Vec<i32>) -> RunNode {
+    fn node(node_index: i32, status: &str, dependencies: Vec<i32>) -> RunNode {
         RunNode {
-            info: WorkflowNodeInfo {
-                task_index,
+            info: WorkflowNodeSummary {
+                node_index,
                 node_id: None,
                 task_name: "t".to_owned(),
                 node_status: status.to_owned(),
-                is_subworkflow: false,
+                is_sub_workflow: false,
                 sub_workflow_id: None,
                 allow_failed_deps: false,
                 started_at: None,
                 completed_at: None,
-                exec_s: None,
+                execution_seconds: None,
                 child_total: None,
                 child_failed: None,
                 timing: NodeTimingInfo::Unavailable {
@@ -1824,7 +1842,7 @@ mod tests {
             detail
                 .nodes
                 .iter()
-                .map(|node| node.task_index)
+                .map(|node| node.node_index)
                 .collect::<Vec<_>>(),
             vec![0, 1, 2]
         );

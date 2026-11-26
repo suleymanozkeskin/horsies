@@ -23,7 +23,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use horsies::monitoring::{cancel_task, list_workflow_names, pause_workflow_action};
+use horsies::monitoring::{cancel_task, list_workflow_names, pause_workflow_action, CancelPolicy};
 use horsies::rerun::{RerunEnqueuePolicy, RerunTask};
 use horsies::{
     task, AppConfig, Horsies, TaskError, TaskInfoParts, WaitLimit, WorkflowHandle, WorkflowSpec,
@@ -153,7 +153,11 @@ fn child_report(app: &mut Horsies) -> Vec<String> {
             let _never = first_poll(list_workflow_names(app));
         }),
         refusal_of("monitoring::cancel_task", || {
-            let _never = first_poll(cancel_task(app, TASK_ID, false));
+            let _never = first_poll(cancel_task(
+                app,
+                TASK_ID,
+                CancelPolicy::PendingOrClaimedOnly,
+            ));
         }),
         refusal_of("monitoring::pause_workflow_action", || {
             let _never = first_poll(pause_workflow_action(app, WORKFLOW_ID));

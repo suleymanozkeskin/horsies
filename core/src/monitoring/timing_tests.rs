@@ -1617,7 +1617,7 @@ fn the_run_coverage_aggregates_the_nodes_and_the_pauses() {
     assert_eq!(
         coverage(vec![pruned], &[exact, partial, broken]),
         RunCoverageInfo::Inconsistent {
-            conflicts: vec![RunConflictInfo::Node { task_index: 2 }],
+            conflicts: vec![RunConflictInfo::Node { node_index: 2 }],
         }
     );
     assert_eq!(
@@ -1925,7 +1925,7 @@ fn example_run_timings() -> Vec<RunTimingInfo> {
         composed(
             RunCoverageInfo::Inconsistent {
                 conflicts: vec![
-                    RunConflictInfo::Node { task_index: 2 },
+                    RunConflictInfo::Node { node_index: 2 },
                     RunConflictInfo::Pause {
                         conflict: TimingConflictInfo::UnexpectedEvent {
                             event_id: 4,

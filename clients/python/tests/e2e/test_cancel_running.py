@@ -1,5 +1,5 @@
 """E2E: an operator cancels a RUNNING task (``cancel_task`` with
-``include_running=True``).
+``policy=CancelPolicy.INCLUDE_RUNNING``).
 
 One worker with an isolated, a shared async and a shared thread child runs a
 task of each execution mode and body kind. The cancel statement moves the
@@ -25,11 +25,11 @@ from typing import Any, Final
 
 import pytest
 
-from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.app import Horsies
 from horsies.core.models.tasks import OutcomeCode
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
-from horsies.monitoring import TaskDetail, cancel_task, get_task_detail
+from horsies.monitoring import CancelPolicy, TaskDetail, cancel_task, get_task_detail
 from horsies.monitoring.models import PhasesCapturedInfo, RecordedByCancelInfo
 
 from tests.e2e.helpers.assertions import assert_failed, read_succeeded, unwrap_send
@@ -73,14 +73,14 @@ async def _wait_for_file(path: Path, timeout_s: float) -> str:
     return path.read_text()
 
 
-async def _cancel_running(broker: PostgresBroker, task_id: uuid.UUID) -> None:
-    cancelled = await cancel_task(broker, task_id, include_running=True)
+async def _cancel_running(app: Horsies, task_id: uuid.UUID) -> None:
+    cancelled = await cancel_task(app, task_id, policy=CancelPolicy.INCLUDE_RUNNING)
     if is_err(cancelled):
         pytest.fail(f'the cancel of a RUNNING task was refused: {cancelled.err_value}')
 
 
-async def _detail(broker: PostgresBroker, task_id: uuid.UUID) -> TaskDetail:
-    read = await get_task_detail(broker, task_id)
+async def _detail(app: Horsies, task_id: uuid.UUID) -> TaskDetail:
+    read = await get_task_detail(app, task_id)
     if is_err(read):
         pytest.fail(f'the task detail read failed: {read.err_value}')
     detail = read.ok_value
@@ -91,7 +91,7 @@ async def _detail(broker: PostgresBroker, task_id: uuid.UUID) -> TaskDetail:
 def _assert_cancelled_attempt(detail: TaskDetail) -> None:
     """History holds the task as ``CANCELLED`` with one ``CANCELLED`` attempt
     that the cancel statement recorded."""
-    assert detail.leaf.status == 'CANCELLED'
+    assert detail.task_row.status == 'CANCELLED'
     [attempt] = detail.attempts
     assert attempt.attempt == 1
     assert attempt.outcome == 'CANCELLED'
@@ -128,7 +128,7 @@ def _process_is_gone(pid: int) -> bool:
     ],
 )
 async def test_the_code_of_each_mode_sees_the_cancel_and_history_records_it(
-    broker: PostgresBroker,
+    app: Horsies,
     tmp_path: Path,
     task_name: str,
 ) -> None:
@@ -141,11 +141,11 @@ async def test_the_code_of_each_mode_sees_the_cancel_and_history_records_it(
         handle = unwrap_send(await task.send_async(marker_dir=str(tmp_path)))
         _ = await _wait_for_file(tmp_path / 'started', START_TIMEOUT_S)
         cancelled_at = time.monotonic()
-        await _cancel_running(broker, handle.task_id)
+        await _cancel_running(app, handle.task_id)
         cause = await _wait_for_file(tmp_path / 'cancelled', SEEN_WITHIN_S + 1.0)
         seen_after_s = time.monotonic() - cancelled_at
         await _result_is_cancelled(handle)
-        detail = await _detail(broker, handle.task_id)
+        detail = await _detail(app, handle.task_id)
 
     assert cause == 'OPERATOR'
     assert seen_after_s <= SEEN_WITHIN_S
@@ -155,7 +155,7 @@ async def test_the_code_of_each_mode_sees_the_cancel_and_history_records_it(
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_an_isolated_task_with_a_grace_is_killed_after_the_grace(
-    broker: PostgresBroker,
+    app: Horsies,
     tmp_path: Path,
 ) -> None:
     with run_worker(
@@ -168,14 +168,14 @@ async def test_an_isolated_task_with_a_grace_is_killed_after_the_grace(
         )
         pid = int(await _wait_for_file(tmp_path / 'started', START_TIMEOUT_S))
         cancelled_at = time.monotonic()
-        await _cancel_running(broker, handle.task_id)
+        await _cancel_running(app, handle.task_id)
         ends_at = cancelled_at + KILL_WAIT_S
         while not _process_is_gone(pid):
             assert time.monotonic() < ends_at, 'the child was not killed after its grace'
             await asyncio.sleep(0.05)
         gone_after_s = time.monotonic() - cancelled_at
         await _result_is_cancelled(handle)
-        detail = await _detail(broker, handle.task_id)
+        detail = await _detail(app, handle.task_id)
 
     assert gone_after_s >= cancel_tasks.HARD_STOP_GRACE_MS / 1000
     assert not (tmp_path / 'returned').exists()
@@ -185,7 +185,7 @@ async def test_an_isolated_task_with_a_grace_is_killed_after_the_grace(
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_an_isolated_task_with_no_grace_is_not_killed(
-    broker: PostgresBroker,
+    app: Horsies,
     tmp_path: Path,
 ) -> None:
     """The cancel is cooperative only: the body that ignores it returns, and
@@ -199,13 +199,13 @@ async def test_an_isolated_task_with_no_grace_is_not_killed(
             await cancel_tasks.cancel_isolated_no_grace.send_async(marker_dir=str(tmp_path)),
         )
         pid = int(await _wait_for_file(tmp_path / 'started', START_TIMEOUT_S))
-        await _cancel_running(broker, handle.task_id)
+        await _cancel_running(app, handle.task_id)
         _ = await _wait_for_file(
             tmp_path / 'returned',
             cancel_tasks.IGNORED_CANCEL_RUN_S + START_TIMEOUT_S,
         )
         await _result_is_cancelled(handle)
-        detail = await _detail(broker, handle.task_id)
+        detail = await _detail(app, handle.task_id)
         alive_after_return = not _process_is_gone(pid)
 
     assert alive_after_return

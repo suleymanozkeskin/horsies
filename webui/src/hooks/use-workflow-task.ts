@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { fallbackInterval, useLiveMode } from '@/events/live-provider';
 import { queryKeys } from '@/lib/query-keys';
 import { getWorkflowTask } from '@/services/workflows-api';
-import type { WorkflowTaskDetail } from '@/types/workflows';
+import type { WorkflowNodeDetail } from '@/types/workflows';
 
 const ACTIVE_STATUSES: ReadonlySet<string> = new Set([
   'PENDING',
@@ -17,7 +17,7 @@ const POLL_WHILE_ACTIVE_MS = 4_000;
 export function useWorkflowTask(
   workflowId: string | null,
   taskIndex: number | null
-): { detail: WorkflowTaskDetail | undefined; isLoading: boolean } {
+): { detail: WorkflowNodeDetail | undefined; isLoading: boolean } {
   const mode = useLiveMode();
   const enabled = workflowId !== null && taskIndex !== null;
   const { data, isLoading } = useQuery({
@@ -67,6 +67,6 @@ export function useNodeErrorCode(
   if (!enabled || data === undefined) {
     return { kind: 'not_loaded' };
   }
-  const code = data.leaf?.error_code ?? null;
+  const code = data.task_row?.error_code ?? null;
   return code === null ? { kind: 'none' } : { kind: 'code', code };
 }

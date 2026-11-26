@@ -45,16 +45,16 @@ export function workflowNode(
   timing: NodeTiming
 ): WorkflowNode {
   return {
-    task_index: taskIndex,
+    node_index: taskIndex,
     node_id: nodeId,
     task_name: `tasks.${nodeId}`,
     node_status: nodeStatus,
-    is_subworkflow: false,
+    is_sub_workflow: false,
     sub_workflow_id: null,
     allow_failed_deps: false,
     started_at: null,
     completed_at: null,
-    exec_s: null,
+    execution_seconds: null,
     child_total: null,
     child_failed: null,
     timing,
@@ -68,13 +68,13 @@ export function workflowRun(
 ): WorkflowRunDetail {
   return {
     run: {
-      id: 'run-1',
-      name: 'nightly_rollup',
+      workflow_id: 'run-1',
+      workflow_name: 'nightly_rollup',
       definition_key: null,
       status,
       created_at: '2026-11-22T12:00:00Z',
       completed_at: null,
-      wall_s: null,
+      wall_seconds: null,
     },
     nodes,
     edges: [],

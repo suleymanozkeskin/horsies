@@ -172,7 +172,7 @@ function longestTotalMs(nodes: readonly WorkflowNode[], chain: LongestChain, dra
 }
 
 function tableModel(detail: WorkflowRunDetail, drawAtMs: number): TableModel {
-  const nodes = [...detail.nodes].sort((a, b) => a.task_index - b.task_index);
+  const nodes = [...detail.nodes].sort((a, b) => a.node_index - b.node_index);
   const chain = longestChain(detail.nodes, detail.edges, drawAtMs);
   return {
     nodes,
@@ -497,7 +497,7 @@ function chainSegments(nodes: readonly WorkflowNode[], chain: LongestChain): Cha
       return [];
     case 'chain':
       return chain.taskIndices.flatMap(taskIndex => {
-        const node = nodes.find(candidate => candidate.task_index === taskIndex);
+        const node = nodes.find(candidate => candidate.node_index === taskIndex);
         const segments = node === undefined ? [] : timedSegments(node.timing);
         return segments.map((segment, segmentIndex) => ({ taskIndex, segmentIndex, segment }));
       });
@@ -625,10 +625,10 @@ function NodeRows({
     <ul aria-label="Nodes of the run" aria-describedby={hintId} className="relative m-0 list-none p-0" style={{ height: nodes.length * rows.rowPx }}>
       {nodes.slice(rowRange.start, rowRange.end).map((node, offset) => {
         const index = rowRange.start + offset;
-        const membership = chainMembership(model.chain, node.task_index);
+        const membership = chainMembership(model.chain, node.node_index);
         return (
           <NodeRow
-            key={node.task_index}
+            key={node.node_index}
             node={node}
             index={index}
             rowCount={nodes.length}
@@ -642,14 +642,14 @@ function NodeRows({
             timeText={frame.kind === 'composed' ? nodeTimeText(nodeTime(node.timing, drawAtMs)) : '—'}
             accessibleName={rowAccessibleName(node, frame, drawAtMs, membership)}
             membership={membership}
-            selected={node.task_index === props.selectedIndex}
+            selected={node.node_index === props.selectedIndex}
             dimmed={props.statusFilter.size > 0 && !props.statusFilter.has(node.node_status)}
-            lit={lit.has(node.task_index)}
-            described={inspection.kind === 'row' && inspection.taskIndex === node.task_index}
+            lit={lit.has(node.node_index)}
+            described={inspection.kind === 'row' && inspection.taskIndex === node.node_index}
             tooltipId={props.tooltipId}
             onSelect={() => props.onSelectNode(node)}
             onKeyDown={event => onRowKeyDown(event, node, index)}
-            onPointerMove={event => onInspect(rowInspection(event, node.task_index, frame))}
+            onPointerMove={event => onInspect(rowInspection(event, node.node_index, frame))}
             onLeave={() => onInspect({ kind: 'none' })}
           />
         );

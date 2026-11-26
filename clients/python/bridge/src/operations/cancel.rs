@@ -4,7 +4,7 @@
 //! The outcome is `TaskCancelledRecord`, or the refusal or failure as the
 //! generated class of the core's `TaskActionError`
 //! (`horsies._catalog.monitoring_errors`: `TaskActionNotFound`,
-//! `TaskActionNotCancellable`, `TaskActionWorkflowTask`,
+//! `TaskActionNotCancellable`, `TaskActionIsWorkflowTask`,
 //! `TaskActionDbOperationFailed` or `TaskActionStoredDataInvalid`), built in
 //! Rust (`catalog_errors`). The core gives each class its message, so the
 //! Python client returns it as it is. An outcome that contradicts the
@@ -12,7 +12,9 @@
 //! raises `RuntimeError`.
 
 use horsies_core::catalog::CodeEnum;
-use horsies_core::monitoring::{cancel_task, TaskActionError, TaskActionResult, TaskCancelled};
+use horsies_core::monitoring::{
+    cancel_task, CancelPolicy, TaskActionError, TaskActionResult, TaskCancelled,
+};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -66,13 +68,26 @@ fn cancel_outcome(answer: TaskActionResult<TaskCancelled>) -> CancelOutcome {
     }
 }
 
+/// The cancel policy of its Python text, the value of a
+/// `horsies.monitoring.CancelPolicy` member: `PENDING_OR_CLAIMED_ONLY` or
+/// `INCLUDE_RUNNING`. Any other text is the refusal, as a message. Pure.
+pub fn cancel_policy(text: &str) -> Result<CancelPolicy, String> {
+    match text {
+        "PENDING_OR_CLAIMED_ONLY" => Ok(CancelPolicy::PendingOrClaimedOnly),
+        "INCLUDE_RUNNING" => Ok(CancelPolicy::IncludeRunning),
+        other => Err(format!(
+            "policy: {other:?} is not 'PENDING_OR_CLAIMED_ONLY' or 'INCLUDE_RUNNING'"
+        )),
+    }
+}
+
 /// Cancel one plain task. Writes, in one statement; a caller that leaves
 /// early does not stop the statement, and sees its outcome as unknown. A
 /// failed connect is `TaskActionDbOperationFailed`: nothing was sent.
 pub async fn cancel_task_operation(
     connection: BrokerConnection,
     task_id: Uuid,
-    include_running: bool,
+    policy: CancelPolicy,
 ) -> CancelOutcome {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
@@ -80,7 +95,7 @@ pub async fn cancel_task_operation(
             return CancelOutcome::Refused(TaskActionError::cancel_failed(task_id, error))
         }
     };
-    cancel_outcome(cancel_task(&broker, task_id, include_running).await)
+    cancel_outcome(cancel_task(&broker, task_id, policy).await)
 }
 
 #[cfg(test)]
@@ -91,6 +106,20 @@ mod tests {
 
     fn task() -> Uuid {
         Uuid::from_u128(3)
+    }
+
+    #[test]
+    fn each_policy_text_is_its_policy_and_other_text_is_refused() {
+        assert_eq!(
+            cancel_policy("PENDING_OR_CLAIMED_ONLY"),
+            Ok(CancelPolicy::PendingOrClaimedOnly)
+        );
+        assert_eq!(
+            cancel_policy("INCLUDE_RUNNING"),
+            Ok(CancelPolicy::IncludeRunning)
+        );
+        let refused = cancel_policy("include_running").expect_err("the text is upper case");
+        assert!(refused.contains("\"include_running\""), "{refused}");
     }
 
     #[test]

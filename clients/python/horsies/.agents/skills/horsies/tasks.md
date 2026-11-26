@@ -86,7 +86,7 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 
 ### Cancellation
 
-- An operator cancel of a running task (`cancel_task(broker, task_id, include_running=True)`, or the web UI) moves the task to history as `CANCELLED` at once, and writes its attempt row with outcome `CANCELLED` (`finished_at` = the cancel time, `recorded_by` `CANCEL`), in one statement. A waiting `handle.get()` returns `Ok(Failed(task_error))` with `error_code` `TASK_CANCELLED`. What the task returns after the cancel is dropped.
+- An operator cancel of a running task (`cancel_task(app, task_id, policy=CancelPolicy.INCLUDE_RUNNING)`, or the web UI) moves the task to history as `CANCELLED` at once, and writes its attempt row with outcome `CANCELLED` (`finished_at` = the cancel time, `recorded_by` `CANCEL`), in one statement. A waiting `handle.get()` returns `Ok(Failed(task_error))` with `error_code` `TASK_CANCELLED`. What the task returns after the cancel is dropped.
 - The worker gives the cancel to the task code: a `NOTIFY` on `horsies_task_cancel`; a lost notice is found by one read after a listener reconnect, or after a runner heartbeat of the run that does not land (at most `runner_heartbeat_interval_ms`, default 30 s).
 - `async def` body (isolated or shared async): `asyncio.CancelledError` at the next `await`. Let it propagate; catch it only to clean up, then raise it again.
 - `def` body (isolated or shared thread): read the cancel state. The first parameter `runtime: TaskRuntime` (before the `*`) gives the run; `runtime.cancel_state()` returns `CancelNotRequested()` or `CancelRequested(cause)`. `CancelCause`: `OPERATOR` (an operator cancel), `DEADLINE` (the deadline of a `SHARED_ASYNC` or `SHARED_THREAD` run). The first cause stays.

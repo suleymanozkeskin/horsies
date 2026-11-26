@@ -6,9 +6,9 @@ conventions hold across every model:
 * Datetimes are timezone-aware UTC.
 * Optional text is normalized before it reaches a model: horsies stores ``''``
   for cleared text, and empty strings arrive here as ``None``.
-* A measured duration (``queue_s``, ``exec_s``, ``wall_s``,
-  ``snapshot_age_s``, ``uptime_s``, ``wait_s``) is a float of seconds,
-  exact to the microsecond.
+* A measured duration (``queue_seconds``, ``execution_seconds``,
+  ``wall_seconds``, ``snapshot_age_seconds``, ``uptime_seconds``,
+  ``wait_s``) is a float of seconds, exact to the microsecond.
 
 These models are unstable pre-1.0.
 """
@@ -623,12 +623,12 @@ class PauseIntervalInfo(BaseModel):
 
 
 class RunConflictNodeInfo(BaseModel):
-    """The node at ``task_index`` is ``inconsistent``; its timing names the conflict."""
+    """The node at ``node_index`` is ``inconsistent``; its timing names the conflict."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
     kind: Literal['node'] = 'node'
-    task_index: int
+    node_index: int
 
 
 class RunConflictPauseInfo(BaseModel):
@@ -727,7 +727,7 @@ RunTimingInfo = Annotated[
 # --------------------------------------------------------------------------- #
 # Tasks
 # --------------------------------------------------------------------------- #
-class TaskAttemptInfo(BaseModel):
+class TaskAttemptDetail(BaseModel):
     """One immutable execution attempt of a task (from horsies_task_attempts).
 
     ``phases`` is the phase record of the attempt row.
@@ -745,13 +745,13 @@ class TaskAttemptInfo(BaseModel):
     phases: AttemptPhasesInfo
 
 
-class LeafTaskInfo(BaseModel):
+class TaskRowInfo(BaseModel):
     """The task row backing a list entry or a workflow node.
 
-    ``queue_s`` is dispatch-to-start wait; ``exec_s`` is start-to-finish run
-    time. Both are split so queue wait is never conflated with run time, and
-    both are ``None`` when the span cannot be determined. Both are seconds,
-    exact to the microsecond.
+    ``queue_seconds`` is dispatch-to-start wait; ``execution_seconds`` is
+    start-to-finish run time. Both are split so queue wait is never conflated
+    with run time, and both are ``None`` when the span cannot be determined.
+    Both are seconds, exact to the microsecond.
 
     ``execution`` is the stored ``Execution`` of a live task, and ``None``
     for a task read from history, which does not keep the class.
@@ -771,8 +771,8 @@ class LeafTaskInfo(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     failed_at: datetime | None
-    queue_s: float | None
-    exec_s: float | None
+    queue_seconds: float | None
+    execution_seconds: float | None
     worker_hostname: str | None
     good_until: datetime | None
     execution: Execution | None
@@ -884,13 +884,14 @@ class TaskSummary(BaseModel):
     """One task row, shaped for the list view.
 
     ``error_category`` names the error family; ``None`` when there is no
-    error. ``worker_id`` is the claiming worker. ``queue_s`` and ``exec_s``
-    are the spans of ``LeafTaskInfo``: seconds, exact to the microsecond.
+    error. ``worker_id`` is the claiming worker. ``queue_seconds`` and
+    ``execution_seconds`` are the spans of ``TaskRowInfo``: seconds, exact to
+    the microsecond.
     """
 
-    id: UUID
+    task_id: UUID
     task_name: str
-    queue_name: str
+    queue: str
     status: str
     priority: int
     retry_count: int
@@ -904,8 +905,8 @@ class TaskSummary(BaseModel):
     started_at: datetime | None
     completed_at: datetime | None
     failed_at: datetime | None
-    queue_s: float | None
-    exec_s: float | None
+    queue_seconds: float | None
+    execution_seconds: float | None
 
 
 class TaskListPage(BaseModel):
@@ -922,20 +923,20 @@ class TaskListPage(BaseModel):
 class TaskDetail(BaseModel):
     """A single task with its full attempt history, ordered by attempt.
 
-    ``workflow_id`` and ``workflow_task_index`` locate the node a
+    ``workflow_id`` and ``workflow_node_index`` locate the node a
     workflow-bound task belongs to, so a UI can link to the run rather than
     offering task actions it must refuse. Both are null for standalone tasks.
     """
 
-    leaf: LeafTaskInfo
+    task_row: TaskRowInfo
     task_name: str
-    queue_name: str
+    queue: str
     priority: int
     is_workflow_task: bool
     error_category: str | None
-    attempts: list[TaskAttemptInfo]
+    attempts: list[TaskAttemptDetail]
     workflow_id: str | None
-    workflow_task_index: int | None
+    workflow_node_index: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -946,46 +947,50 @@ class TaskDetailNotFound:
     reason: TaskAbsenceReason
 
 
+type TaskDetailRead = TaskDetail | TaskDetailNotFound
+"""The answer of the task detail read: the task, or why no table holds it."""
+
+
 # --------------------------------------------------------------------------- #
 # Workflows
 # --------------------------------------------------------------------------- #
 class WorkflowRunSummary(BaseModel):
     """One workflow run, root or subworkflow.
 
-    ``wall_s`` counts up while ``completed_at`` is null, including for PAUSED
-    runs. It is seconds, exact to the microsecond.
+    ``wall_seconds`` counts up while ``completed_at`` is null, including for
+    PAUSED runs. It is seconds, exact to the microsecond.
     """
 
-    id: str
-    name: str
+    workflow_id: str
+    workflow_name: str
     definition_key: str | None
     status: str
     created_at: datetime | None
     completed_at: datetime | None
-    wall_s: float | None
+    wall_seconds: float | None
 
 
-class WorkflowNodeInfo(BaseModel):
-    """A single node in a run's DAG. ``task_index`` is the stable key.
+class WorkflowNodeSummary(BaseModel):
+    """A single node in a run's DAG. ``node_index`` is the stable key.
 
-    ``exec_s`` is execution time only, in seconds, exact to the microsecond:
-    null until the node starts running, so a node sitting in the queue does
-    not accrue a misleading duration.
+    ``execution_seconds`` is execution time only, in seconds, exact to the
+    microsecond: null until the node starts running, so a node sitting in the
+    queue does not accrue a misleading duration.
     ``child_total`` / ``child_failed`` roll up a subworkflow node's direct
     children and are both null for leaf nodes and for child runs with no task
     rows yet. ``timing`` is the phase timing of the node.
     """
 
-    task_index: int
+    node_index: int
     node_id: str | None
     task_name: str
     node_status: str
-    is_subworkflow: bool
+    is_sub_workflow: bool
     sub_workflow_id: str | None
     allow_failed_deps: bool
     started_at: datetime | None
     completed_at: datetime | None
-    exec_s: float | None
+    execution_seconds: float | None
     child_total: int | None
     child_failed: int | None
     timing: NodeTimingInfo
@@ -1001,7 +1006,7 @@ class WorkflowEdge(BaseModel):
 class WorkflowRunDetail(BaseModel):
     """A run's metadata plus its full node/edge graph.
 
-    ``failed_indices`` lists the ``task_index`` of every FAILED node in
+    ``failed_indices`` lists the ``node_index`` of every FAILED node in
     ascending order, so the UI can navigate failures without scanning the
     graph; ``failed_count`` is its length. ``trace_id`` is the trace id of
     the span that started the run, as 32 lowercase hex digits; ``None`` for
@@ -1009,7 +1014,7 @@ class WorkflowRunDetail(BaseModel):
     """
 
     run: WorkflowRunSummary
-    nodes: list[WorkflowNodeInfo]
+    nodes: list[WorkflowNodeSummary]
     edges: list[WorkflowEdge]
     failed_count: int
     failed_indices: list[int]
@@ -1017,21 +1022,21 @@ class WorkflowRunDetail(BaseModel):
     timing: RunTimingInfo
 
 
-class WorkflowTaskDetail(BaseModel):
+class WorkflowNodeDetail(BaseModel):
     """Per-node detail: node-level error, backing task, and attempt history.
 
     Subworkflow nodes carry no backing task; their detail lives in the child
-    run. ``leaf`` is also null when the backing task row no longer exists.
+    run. ``task_row`` is also null when the backing task row no longer exists.
     """
 
-    task_index: int
+    node_index: int
     node_id: str | None
     task_name: str
     node_status: str
-    is_subworkflow: bool
+    is_sub_workflow: bool
     node_error: str | None
-    leaf: LeafTaskInfo | None
-    attempts: list[TaskAttemptInfo]
+    task_row: TaskRowInfo | None
+    attempts: list[TaskAttemptDetail]
 
 
 # --------------------------------------------------------------------------- #
@@ -1079,8 +1084,8 @@ SnapshotProfileInfo = Annotated[
 class WorkerStateInfo(BaseModel):
     """Latest state snapshot for one worker (from horsies_worker_states).
 
-    ``snapshot_age_s`` is how long ago the snapshot was written, and
-    ``uptime_s`` how long the worker has run; both are seconds, exact to the
+    ``snapshot_age_seconds`` is how long ago the snapshot was written, and
+    ``uptime_seconds`` how long the worker has run; both are seconds, exact to the
     microsecond. ``stale`` is True once that age exceeds the snapshot
     threshold, signalling a worker that stopped reporting. Liveness is proven
     separately by an active ping.
@@ -1097,10 +1102,10 @@ class WorkerStateInfo(BaseModel):
     hostname: str
     pid: int
     snapshot_at: datetime
-    snapshot_age_s: float | None
+    snapshot_age_seconds: float | None
     stale: bool
     worker_started_at: datetime
-    uptime_s: float | None
+    uptime_seconds: float | None
     processes: int
     queues: list[str]
     queue_max_concurrency: dict[str, int]

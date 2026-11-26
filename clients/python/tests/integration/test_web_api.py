@@ -336,8 +336,8 @@ class TestTaskReads:
 
         body = (await api.get(f'/api/tasks/{task.id}')).json()
 
-        assert body['leaf']['task_id'] == task.id
-        assert body['leaf']['good_until'] is None
+        assert body['task_row']['task_id'] == task.id
+        assert body['task_row']['good_until'] is None
         assert body['error_category'] == 'OPERATIONAL'
         assert body['attempts'] == []
 
@@ -432,7 +432,7 @@ class TestWorkflowReads:
 
         assert names == ['alpha_flow']
         assert len(runs) == 1
-        assert runs[0]['name'] == 'alpha_flow'
+        assert runs[0]['workflow_name'] == 'alpha_flow'
 
     async def test_run_detail_carries_nodes_and_edges(
         self, api: AsyncClient, session: AsyncSession
@@ -446,7 +446,7 @@ class TestWorkflowReads:
 
         body = (await api.get(f'/api/workflows/{run.id}')).json()
 
-        assert body['run']['id'] == run.id
+        assert body['run']['workflow_id'] == run.id
         assert body['failed_indices'] == [0]
         assert body['edges'] == []
 
@@ -483,7 +483,7 @@ class TestWorkflowReads:
         response = await api.get(f'/api/workflows/{run.id}/tasks/0')
 
         assert response.status_code == 200
-        assert response.json()['leaf'] is None
+        assert response.json()['task_row'] is None
 
 
 @pytest.mark.usefixtures('clean_tables')
@@ -707,7 +707,7 @@ class TestTaskActionMapping:
         refused = await api.post(f'/api/tasks/{task.id}/cancel', headers=ACT)
         allowed = await api.post(
             f'/api/tasks/{task.id}/cancel',
-            json={'include_running': True},
+            json={'policy': 'INCLUDE_RUNNING'},
             headers=ACT,
         )
 
@@ -726,7 +726,7 @@ class TestTaskActionMapping:
 
         cancel = await api.post(
             f'/api/tasks/{task.id}/cancel',
-            json={'include_running': True},
+            json={'policy': 'INCLUDE_RUNNING'},
             headers=ACT,
         )
         detail = await api.get(f'/api/tasks/{task.id}')
@@ -734,7 +734,7 @@ class TestTaskActionMapping:
         assert cancel.status_code == 200
         assert detail.status_code == 200
         body = detail.json()
-        assert body['leaf']['status'] == 'CANCELLED'
+        assert body['task_row']['status'] == 'CANCELLED'
         [attempt] = body['attempts']
         assert attempt['attempt'] == 1
         assert attempt['outcome'] == 'CANCELLED'

@@ -2,7 +2,7 @@
 title: Monitoring Queries
 summary: Read task, workflow and schedule state with the functions of horsies::monitoring, cancel a task, and run the workflow actions as the web routes answer them.
 related: [health-reads, web-ui-mount, ../../monitoring/action-semantics, ../../monitoring/web-ui-overview]
-tags: [rust, monitoring, task_stats, list_tasks, get_task_detail, get_workflow_run, RunTimingInfo, NodeTimingInfo, AttemptPhasesInfo, cancel_task, MonitoringQueryError]
+tags: [rust, monitoring, task_status_counts, list_tasks, get_task_detail, get_workflow_run, RunTimingInfo, NodeTimingInfo, AttemptPhasesInfo, cancel_task, MonitoringQueryError]
 ---
 
 # Monitoring Queries
@@ -13,14 +13,14 @@ tags: [rust, monitoring, task_stats, list_tasks, get_task_detail, get_workflow_r
 
 ```rust
 use horsies::monitoring::{
-    list_tasks, resolve_monitoring_window, task_stats, SortDirection, TaskFilters, TaskListQuery,
-    TaskSortField, TaskStatsQuery,
+    list_tasks, resolve_monitoring_window, task_status_counts, SortDirection, TaskFilters, TaskListQuery,
+    TaskSortField, TaskStatusCountsQuery,
 };
 use horsies::{Horsies, TaskStatus};
 
 async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::error::Error>> {
     let window = resolve_monitoring_window(None, None, None)?;
-    for count in task_stats(app, &TaskStatsQuery::new(window)).await? {
+    for count in task_status_counts(app, &TaskStatusCountsQuery::new(window)).await? {
         println!("{}: {}", count.status, count.count);
     }
     let filters = TaskFilters { statuses: vec![TaskStatus::Failed], ..TaskFilters::default() };
@@ -30,7 +30,7 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
         .with_pagination(0, 50)?;
     let page = list_tasks(app, &query).await?;
     for task in &page.rows {
-        println!("{} {} {:?}", task.id, task.task_name, task.error_code);
+        println!("{} {} {:?}", task.task_id, task.task_name, task.error_code);
     }
     Ok(())
 }
@@ -40,7 +40,7 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 
 | Function | Returns (`MonitoringResult<_>`) |
 |----------|---------------------------------|
-| `task_stats(&app, &TaskStatsQuery)` | `Vec<StatusCount>` (`status`, `count`): each of the seven task statuses in a fixed order, over the live table and the history window |
+| `task_status_counts(&app, &TaskStatusCountsQuery)` | `Vec<StatusCount>` (`status`, `count`): each of the seven task statuses in a fixed order, over the live table and the history window |
 | `task_facets(&app, &TaskFacetsQuery)` | `Facets`: `workers`, `task_names`, `queues` and `error_codes` with counts, and `error_category_totals` |
 | `task_breakdown(&app, &TaskBreakdownQuery)` | `Breakdown`: the counts per group, highest total first, with the total and the number of groups |
 | `list_tasks(&app, &TaskListQuery)` | `TaskListPage`: `rows: Vec<TaskSummary>` and `total` |
@@ -48,14 +48,14 @@ async fn failed_tasks_of_last_day(app: &Horsies) -> Result<(), Box<dyn std::erro
 | `list_workflow_names(&app)` | `Vec<String>`: the distinct names of the root runs, at most `LIST_ROW_BOUND` (10,000) |
 | `list_workflow_runs(&app, &WorkflowRunsQuery)` | `Vec<WorkflowRunSummary>`: the newest root runs |
 | `get_workflow_run(&app, workflow_id)` | `Option<WorkflowRunDetail>`: the run with its nodes, edges and phase timing; `None` when no run has the id |
-| `get_workflow_node(&app, workflow_id, task_index)` | `Option<WorkflowTaskDetail>`: the node with its task and the task's attempts; `None` when the run has no such node |
+| `get_workflow_node(&app, workflow_id, node_index)` | `Option<WorkflowNodeDetail>`: the node with its task and the task's attempts; `None` when the run has no such node |
 | `list_schedules(&app)` | `Vec<ScheduleStateInfo>`: every schedule state, soonest next run first, at most `LIST_ROW_BOUND` (10,000) |
 
 - `TaskListPage.total` is exact when any filter is set. With no filter it is the live estimate plus the planner's estimate of the history window.
 - A detail read looks in the live table and in the history, so a task that ended still answers. `TaskDetailNotFound.reason` is a `TaskAbsenceReason`: see [Retrieving Results](/horsies/rust/tasks/retrieving-results/#readerror).
-- `TaskDetail` has the task's `leaf` (status, times, retry counts, worker, deadline, execution class), its name, queue and priority, its error category, its `attempts`, and its workflow and node index when it is a workflow task.
-- Each `TaskAttemptInfo` has `phases`, the phase record of the attempt row (`AttemptPhasesInfo`).
-- `WorkflowRunDetail` has `timing` (`RunTimingInfo`), and each `WorkflowNodeInfo` has `timing` (`NodeTimingInfo`). See [Phase Timing](#phase-timing).
+- `TaskDetail` has the task's `task_row` (status, times, retry counts, worker, deadline, execution class), its name, queue and priority, its error category, its `attempts`, and its workflow and node index when it is a workflow task.
+- Each `TaskAttemptDetail` has `phases`, the phase record of the attempt row (`AttemptPhasesInfo`).
+- `WorkflowRunDetail` has `timing` (`RunTimingInfo`), and each `WorkflowNodeSummary` has `timing` (`NodeTimingInfo`). See [Phase Timing](#phase-timing).
 
 ## Phase Timing
 
@@ -63,7 +63,7 @@ The lifecycle record keeps the phase times of each attempt and the events of eac
 
 ### Attempt Phases
 
-`TaskAttemptInfo.phases` is an `AttemptPhasesInfo`:
+`TaskAttemptDetail.phases` is an `AttemptPhasesInfo`:
 
 | Variant | Fields |
 |---------|--------|
@@ -74,7 +74,7 @@ A count above 1 holds lost leases and released claims. `placed_at` is the claim 
 
 ### Node Timing
 
-`WorkflowNodeInfo.timing` is a `NodeTimingInfo`. Its variant is the coverage label of the node:
+`WorkflowNodeSummary.timing` is a `NodeTimingInfo`. Its variant is the coverage label of the node:
 
 | Variant | Fields | When |
 |---------|--------|------|
@@ -116,7 +116,7 @@ Each `TimingSegmentInfo` has `phase`, `started_at`, `end` (`Ended { at }` or `Op
 - `Composed { as_of, captured_since, coverage, range_started_at, range_ended_at, open_segments, pauses }`:
   - `as_of` is the database time of the read. An open segment ends there for drawing.
   - `captured_since` is the start of the lifecycle record: the install time of migration 1001.
-  - `coverage` is `Exact`, `Partial { reasons }` or `Inconsistent { conflicts }`. Each `RunConflictInfo` is `Node { task_index }` or `Pause { conflict }`.
+  - `coverage` is `Exact`, `Partial { reasons }` or `Inconsistent { conflicts }`. Each `RunConflictInfo` is `Node { node_index }` or `Pause { conflict }`.
   - `range_started_at` is the creation of the run. `range_ended_at` is the latest segment end (an open segment at `as_of`), endpoint, pause end and run end. A task that runs on after a workflow cancel makes the range longer than the run.
   - `open_segments` is true when a segment or a pause is open.
   - `pauses` holds one `PauseIntervalInfo { started_at, end }` per pause. `end` is `Resumed { at }`, `RunEnded { at }` (a cancel or a paused expiry ended the run) or `Open`.
@@ -125,17 +125,17 @@ The events of a run and its nodes are deleted with the run. A history class shor
 
 ## Queries
 
-The list and aggregate reads take a query built on a `HistoryWindow`: the history rows of tasks that ended in the window, and every live row.
+The list and aggregate reads take a query built on a `MonitoringWindow`: the history rows of tasks that ended in the window, and every live row.
 
 | Query | Builders | Defaults |
 |-------|----------|----------|
-| `TaskStatsQuery::new(window)` | `.with_filters(filters)`: the `statuses` filter is dropped, because the read counts every status | – |
+| `TaskStatusCountsQuery::new(window)` | `.with_filters(filters)`: the `statuses` filter is dropped, because the read counts every status | – |
 | `TaskFacetsQuery::new(window)` | `.with_filters(filters)`, `.with_statuses(statuses)`, `.with_error_categories(categories)`, `.retried_only(bool)` | – |
 | `TaskBreakdownQuery::new(window, group_by)` | `.with_filters(filters)`, `.with_limit(limit)` | 50 groups |
 | `TaskListQuery::new(window)` | `.with_filters(filters)`, `.with_sort(TaskSortField, SortDirection)`, `.with_pagination(offset, limit)` | `EnqueuedAt`, `Descending`, offset 0, limit 50 |
-| `WorkflowRunsQuery::new()` | `.with_name(Option<String>)`, `.with_status(Option<String>)`, `.with_limit(limit)` | 30 runs |
+| `WorkflowRunsQuery::new()` | `.with_workflow_name(Option<String>)`, `.with_status(Option<String>)`, `.with_limit(limit)` | 30 runs |
 
-The bounded builders return `Result<_, PaginationRefused>`:
+The bounded builders return `Result<_, PageRefused>`:
 
 | Builder | Accepts |
 |---------|---------|
@@ -146,20 +146,20 @@ The bounded builders return `Result<_, PaginationRefused>`:
 | Type | Values |
 |------|--------|
 | `TaskFilters` | `statuses: Vec<TaskStatus>`, `task_names`, `queues`, `workers`, `error_codes: Vec<String>`, `error_categories: Vec<ErrorCategory>`, `retried_only: bool`. `TaskFilters::default()` filters nothing |
-| `TaskSortField` | `EnqueuedAt`, `StartedAt`, `CompletedAt`, `FailedAt`, `Status`, `TaskName`, `QueueName`, `Priority`, `RetryCount`, `QueueSeconds`, `ExecutionSeconds` |
+| `TaskSortField` | `EnqueuedAt`, `StartedAt`, `CompletedAt`, `FailedAt`, `Status`, `TaskName`, `Queue`, `Priority`, `RetryCount`, `QueueSeconds`, `ExecutionSeconds` |
 | `SortDirection` | `Ascending`, `Descending` |
 | `TaskGroupBy` | `Worker`, `TaskName`, `Queue` |
 | `ErrorCategory` | `Operational`, `Contract`, `Retrieval`, `Outcome`, `Domain` |
 
 ### The Window
 
-`resolve_monitoring_window(since, until, now)` returns `Result<HistoryWindow, WindowRefused>`. Each argument is an `Option<DateTime<Utc>>`:
+`resolve_monitoring_window(since, until, now)` returns `Result<MonitoringWindow, WindowRefused>`. Each argument is an `Option<DateTime<Utc>>`:
 
 - `now` defaults to the current time, `until` to `now`, and `since` to `until` minus `MONITORING_WINDOW_DEFAULT` (24 hours).
 - `since` at or after `until` is refused.
 - A window longer than `MONITORING_WINDOW_MAX` (30 days) is refused.
 
-`HistoryWindow` is `Copy`; one window can build several queries.
+`MonitoringWindow` is `Copy`; one window can build several queries.
 
 ## MonitoringQueryError
 
@@ -168,21 +168,21 @@ Every read returns `MonitoringResult<T>`: `Result<T, MonitoringQueryError>`. `Mo
 | Variant | `code()` | When |
 |---------|----------|------|
 | `DbOperationFailed { retryable, .. }` | `DbOperationFailed` | The connect or the statement failed. No statement ran after a failed connect. `retryable` is the classification of the cause |
-| `HistoryContractViolation` | `HistoryContractViolation` | A stored history row does not decode (`task_stats`, `task_facets`, `task_breakdown`, `list_tasks`, `get_task_detail`, `get_workflow_run`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable: a repeat gives the same result until the row changes |
+| `HistoryContractViolation` | `HistoryContractViolation` | A stored history row does not decode (`task_status_counts`, `task_facets`, `task_breakdown`, `list_tasks`, `get_task_detail`, `get_workflow_run`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable: a repeat gives the same result until the row changes |
 
 ## Cancel a Task
 
 ```rust
-use horsies::monitoring::{cancel_task, TaskActionError};
+use horsies::monitoring::{cancel_task, CancelPolicy, TaskActionError};
 use horsies::Horsies;
 use uuid::Uuid;
 
 async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
-    match cancel_task(app, task_id, false).await {
+    match cancel_task(app, task_id, CancelPolicy::PendingOrClaimedOnly).await {
         Ok(_cancelled) => Ok(true),
         Err(TaskActionError::NotCancellable { .. } | TaskActionError::NotFound { .. }) => Ok(false),
         Err(
-            error @ (TaskActionError::WorkflowTask { .. }
+            error @ (TaskActionError::IsWorkflowTask { .. }
             | TaskActionError::DbOperationFailed { .. }
             | TaskActionError::StoredDataInvalid { .. }),
         ) => Err(error.message().to_owned()),
@@ -190,9 +190,10 @@ async fn cancel_pending(app: &Horsies, task_id: Uuid) -> Result<bool, String> {
 }
 ```
 
-`cancel_task(&app, task_id, include_running)` moves a task that is not a workflow task to CANCELLED. It returns `TaskActionResult<TaskCancelled>`: `Result<TaskCancelled, TaskActionError>`. `TaskCancelled` has `task_id` and `was_status`.
+`cancel_task(&app, task_id, policy)` moves a task that is not a workflow task to CANCELLED. It returns `TaskActionResult<TaskCancelled>`: `Result<TaskCancelled, TaskActionError>`. `TaskCancelled` has `task_id` and `was_status`.
 
-- PENDING and CLAIMED tasks are cancelled. A RUNNING task is cancelled only with `include_running = true`: the row becomes CANCELLED with an attempt of outcome `Cancelled`, and the worker gives the cancel to the task code (`TaskRuntime::cancelled()`, `is_cancelled()` and `cancel_state()`; Python `asyncio.CancelledError` and `runtime.cancel_state()`). The code stops when it reads the cancel. An `isolated` task with `cancel_grace_ms` is killed when it has not stopped `cancel_grace_ms` later.
+- `policy` is a `CancelPolicy`: `PendingOrClaimedOnly` or `IncludeRunning`. The web body is `{"policy": "INCLUDE_RUNNING"}` or `{"policy": "PENDING_OR_CLAIMED_ONLY"}`; a body with no `policy` key cancels with `PendingOrClaimedOnly`.
+- PENDING and CLAIMED tasks are cancelled. A RUNNING task is cancelled only with `CancelPolicy::IncludeRunning`: the row becomes CANCELLED with an attempt of outcome `Cancelled`, and the worker gives the cancel to the task code (`TaskRuntime::cancelled()`, `is_cancelled()` and `cancel_state()`; Python `asyncio.CancelledError` and `runtime.cancel_state()`). The code stops when it reads the cancel. An `isolated` task with `cancel_grace_ms` is killed when it has not stopped `cancel_grace_ms` later.
 - A workflow task is refused: use `WorkflowHandle::cancel`, `pause` and `resume`. See [Workflow API](/horsies/rust/concepts/workflows/workflow-api/#workflowhandle).
 
 The rules are on [Action Semantics](/horsies/monitoring/action-semantics/#task-cancel).
@@ -202,8 +203,8 @@ The rules are on [Action Semantics](/horsies/monitoring/action-semantics/#task-c
 | Variant | `code()` | When |
 |---------|----------|------|
 | `NotFound` | `TaskNotFound` | No live or history row has the id. Nothing changed |
-| `NotCancellable { current_status, .. }` | `TaskNotCancellable` | The task is terminal, or RUNNING without `include_running`; `current_status` is the status that the cancel found. Nothing changed |
-| `WorkflowTask { current_status, .. }` | `TaskIsWorkflowTask` | The task belongs to a workflow. Nothing changed |
+| `NotCancellable { current_status, .. }` | `TaskNotCancellable` | The task is terminal, or RUNNING with `CancelPolicy::PendingOrClaimedOnly`; `current_status` is the status that the cancel found. Nothing changed |
+| `IsWorkflowTask { current_status, .. }` | `TaskIsWorkflowTask` | The task belongs to a workflow. Nothing changed |
 | `DbOperationFailed { retryable, cause, .. }` | `DbOperationFailed` | The connect or the statement failed; `cause` is the `Box<BrokerError>`. Nothing was written, or the commit reply was lost. A cancel again tells which: a committed cancel answers `NotCancellable` with `Cancelled` |
 | `StoredDataInvalid { cause, .. }` | `StoredDataInvalid` | Stored data does not parse; `cause` is the `OutcomeDecodeError`. Nothing changed. Not retryable |
 
@@ -213,7 +214,7 @@ These functions write, and return the `ActionOutcome` that the web route returns
 
 | Function | Web route |
 |----------|-----------|
-| `cancel_task_action(&app, task_id, include_running)` | `POST /api/tasks/{id}/cancel` |
+| `cancel_task_action(&app, task_id, policy)` | `POST /api/tasks/{id}/cancel` |
 | `pause_workflow_action(&app, workflow_id)` | `POST /api/workflows/{id}/pause` |
 | `resume_workflow_action(&app, workflow_id)` | `POST /api/workflows/{id}/resume` |
 | `cancel_workflow_action(&app, workflow_id)` | `POST /api/workflows/{id}/cancel` |

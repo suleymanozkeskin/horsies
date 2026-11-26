@@ -404,7 +404,7 @@ export const TIMING_EXAMPLES: TimingExamples = {
         conflicts: [
           {
             kind: 'node',
-            task_index: 2,
+            node_index: 2,
           },
           {
             kind: 'pause',
