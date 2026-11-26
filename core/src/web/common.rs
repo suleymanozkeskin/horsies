@@ -370,7 +370,7 @@ pub(crate) fn parse_error_categories(values: Vec<String>) -> Result<Vec<ErrorCat
             "CONTRACT" => Ok(ErrorCategory::Contract),
             "RETRIEVAL" => Ok(ErrorCategory::Retrieval),
             "OUTCOME" => Ok(ErrorCategory::Outcome),
-            "DOMAIN" => Ok(ErrorCategory::Domain),
+            "CUSTOM" => Ok(ErrorCategory::Custom),
             _ => Err(ApiError::bad_request(format!(
                 "Unknown error category '{value}'."
             ))),

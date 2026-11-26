@@ -855,7 +855,7 @@ Each entry: Title -- summary -> URL
 - Tracing Setup -- horsies[otel], AppConfig(tracing=OtelTracing()), the SDK of the sending process and of each worker child, the propagator, producer metrics -> /horsies/observability/tracing-setup/
 - Logs -- the task_id, attempt and trace_id fields of the worker's records, the log context of a task body, the JSON format of each client -> /horsies/observability/logs/
 - Log Setup -- AppConfig(log_format=JsonLogs()), TaskContextFilter, JsonLogsFormatter -> /horsies/observability/log-setup/
-- Lifecycle Events -- the event contract (version 8) and its types, best-effort delivery, the handler child, drops, stats and start hook -> /horsies/observability/events/
+- Lifecycle Events -- the event contract (version 9) and its types, best-effort delivery, the handler child, drops, stats and start hook -> /horsies/observability/events/
 - Dashboards and Alerts -- the Grafana dashboard and the Prometheus alert rules in deploy/, what each alert means -> /horsies/observability/dashboards-and-alerts/
 - OpenTelemetry Collector -- deploy/otel-collector/collector.yaml: scrape the endpoints, export OTLP -> /horsies/observability/opentelemetry-collector/
 - Observability Deployment -- Kubernetes and docker compose: workers with probes, one fleet collector, Prometheus, the Collector -> /horsies/observability/deployment/

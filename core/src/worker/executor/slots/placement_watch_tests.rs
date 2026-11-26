@@ -1,6 +1,6 @@
 //! The placement watch of a submitted task: the child that took the task,
-//! told once, with the kind of the child; a task that reached no child is
-//! not placed; the placement that the attempt row keeps.
+//! told once, with the execution class of the child; a task that reached no
+//! child is not placed; the placement that the attempt row keeps.
 
 use std::time::Duration;
 
@@ -49,7 +49,7 @@ async fn a_watched_task_is_placed_once_on_the_child_that_took_it() {
     match placement {
         ChildPlacement::Placed(placed) => {
             assert_eq!(placed.child_pid, pid);
-            assert_eq!(placed.child_kind, ExecutionClass::Isolated);
+            assert_eq!(placed.child_execution, ExecutionClass::Isolated);
             assert!(placed.at >= before);
         }
         other => panic!("the child took the task, not {other:?}"),
@@ -105,7 +105,7 @@ fn a_placed_task_gives_its_attempt_the_slot_wait_from_the_read() {
     let read = ClaimRead::now();
     let placed = Placed {
         child_pid: ProcessId::new(4242).unwrap(),
-        child_kind: ExecutionClass::Isolated,
+        child_execution: ExecutionClass::Isolated,
         at: read.at + Duration::from_micros(2_500),
         wall: read.wall,
     };

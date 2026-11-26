@@ -13,7 +13,7 @@ use serde_json::value::RawValue;
 use super::bounds::{MAX_EVENTS_PER_FRAME, MAX_EVENT_WIRE_BYTES};
 use super::metadata::{text_body, MalformedFrame};
 use crate::core::codec::{check_json_text, to_json_bytes};
-use crate::events::{encode_event, Event, EventEncodeError};
+use crate::events::{encode_event, AnyEvent, EventEncodeError};
 
 /// One event in its wire form: the compact JSON text of [`encode_event`],
 /// at most [`MAX_EVENT_WIRE_BYTES`] bytes. Only [`WireEvent::of`] builds it.
@@ -42,7 +42,7 @@ impl WireEvent {
     /// Errors: [`WireEventRefusal::NotEncoded`] for an event with no wire
     /// form; [`WireEventRefusal::OverBound`] for a wire form over
     /// [`MAX_EVENT_WIRE_BYTES`].
-    pub fn of(event: &Event) -> Result<WireEvent, WireEventRefusal> {
+    pub fn of(event: &AnyEvent) -> Result<WireEvent, WireEventRefusal> {
         let wire = encode_event(event).map_err(WireEventRefusal::NotEncoded)?;
         let bytes = to_json_bytes(&wire).expect(
             "the wire value of an event holds only texts, whole numbers and arrays, so its \

@@ -257,4 +257,4 @@ The meaning of each field is on [Snapshot Fields](/horsies/monitoring/worker-hea
 | `class_capacity` | `ClassBudgets(budgets)`, where `budgets` holds one `ClassBudget(budget, capacity, serves)` per budget, in `Execution` order |
 | `profile` | `ProfileNamed(name)` or `ProfileNotRecorded()` |
 
-`DownSlot` fields: `slot` (index), `cause` (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), `detail` (`str`), `down_since` (aware `datetime`), `failed_boots` (`int`, at least 1).
+`DownSlot` fields: `slot` (index), `cause` (`ResourceShortage(errno)` or `ThreadStartRefused()`), `detail` (`str`), `down_since` (aware `datetime`), `failed_boots` (`int`, at least 1).

@@ -81,7 +81,7 @@ class EventHandler:
 
     name: str
     event_type: KnownEventType
-    kind: HandlerKind
+    handler_kind: HandlerKind
     function: HandlerFunction
 
 
@@ -252,7 +252,7 @@ def _event_annotation(function: HandlerFunction, parameter: str) -> EventAnnotat
     return NoEventAnnotation()
 
 
-def _function_and_kind(
+def _function_and_handler_kind(
     handler: object,
     event_type: KnownEventType,
 ) -> Result[tuple[HandlerFunction, HandlerKind], SignatureRefusal]:
@@ -284,12 +284,12 @@ def _function_and_kind(
             )
         case AnnotatedWith() | NoEventAnnotation():
             pass
-    kind = (
+    handler_kind = (
         HandlerKind.ASYNC_DEF
         if inspect.iscoroutinefunction(function)
         else HandlerKind.DEF
     )
-    return Ok((function, kind))
+    return Ok((function, handler_kind))
 
 
 def handler_name(function: HandlerFunction) -> Result[str, NameRefusal]:
@@ -321,8 +321,8 @@ def check_event_handler(
     (`SignatureRefusal`), the name (`NameRefusal`), a name of `registered`
     (`NameTaken`), the bound of `MAX_EVENT_HANDLERS` (`HandlerLimitReached`).
     """
-    match _function_and_kind(handler, event_type):
-        case Ok((function, kind)):
+    match _function_and_handler_kind(handler, event_type):
+        case Ok((function, handler_kind)):
             pass
         case Err(signature_refused):
             return Err(signature_refused)
@@ -336,7 +336,12 @@ def check_event_handler(
     if len(registered) >= MAX_EVENT_HANDLERS:
         return Err(HandlerLimitReached())
     return Ok(
-        EventHandler(name=name, event_type=event_type, kind=kind, function=function)
+        EventHandler(
+            name=name,
+            event_type=event_type,
+            handler_kind=handler_kind,
+            function=function,
+        ),
     )
 
 

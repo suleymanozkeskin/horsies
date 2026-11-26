@@ -33,7 +33,7 @@ use super::ended_spans::{EndedSpanScope, NODE_READER_STOP_BOUND};
 use super::host::ChildStartHook;
 use super::panic::{catch_body_panic, CatchPanic, PanicRecord};
 use crate::core::error::ErrorCode;
-use crate::events::{Event, EventTypeName, UnionEvent};
+use crate::events::{AnyEvent, EventTypeName, UnionEvent};
 use crate::worker::executor::protocol::{
     HandlerCounts, HandlerCountsList, HandlerName, MAX_EVENT_HANDLERS,
 };
@@ -457,11 +457,11 @@ pub(super) enum Offer {
 trait HandlerInlet: Send + Sync {
     /// Offer `event` with no wait: the handler takes it when it is of its
     /// type and its queue has room.
-    fn offer(&self, event: &Event) -> Offer;
+    fn offer(&self, event: &AnyEvent) -> Offer;
 }
 
 impl<E: UnionEvent + Clone + Send + 'static> HandlerInlet for mpsc::Sender<E> {
-    fn offer(&self, event: &Event) -> Offer {
+    fn offer(&self, event: &AnyEvent) -> Offer {
         let Some(record) = E::of_event(event) else {
             return Offer::OtherType;
         };
@@ -645,7 +645,7 @@ pub(super) struct RunningHandlers {
 
 impl RunningHandlers {
     /// Offer `event` to each handler, with no wait; count the drops.
-    pub(super) fn offer(&self, event: &Event) {
+    pub(super) fn offer(&self, event: &AnyEvent) {
         for handler in &self.handlers {
             match handler.inlet.offer(event) {
                 Offer::Queued | Offer::OtherType => {}

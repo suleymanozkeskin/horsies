@@ -155,7 +155,7 @@ def ended_attempt_attributes(
             task_name=ended.task_name,
             queue_name=ended.queue,
             attempt=ended.attempt,
-            execution=decided.child_kind,
+            execution=decided.child_execution,
             worker_id=decided.worker_id,
         ),
         **ended_workflow_attributes(workflow),

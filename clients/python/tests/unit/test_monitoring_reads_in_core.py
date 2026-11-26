@@ -82,7 +82,7 @@ PAGE_JSON: Final = (
     '{"rows": [{"id": "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b", "task_name": "t", '
     '"queue_name": "default", "status": "FAILED", "priority": 100, "retry_count": 1, '
     '"max_retries": 3, "is_workflow_task": false, "error_code": "ORDER_REJECTED", '
-    '"error_category": "DOMAIN", "worker_hostname": "host-1", "worker_id": "worker-1", '
+    '"error_category": "CUSTOM", "worker_hostname": "host-1", "worker_id": "worker-1", '
     '"enqueued_at": "2026-11-17T11:00:00Z", "started_at": "2026-11-17T11:00:05.250000Z", '
     '"completed_at": null, "failed_at": "2026-11-17T11:00:09Z", "queue_s": 5.25, "exec_s": 3.75}], '
     '"total": 7}'
@@ -90,8 +90,8 @@ PAGE_JSON: Final = (
 FACETS_JSON: Final = (
     '{"workers": [{"value": "worker-1", "count": 2}], "task_names": [], '
     '"queues": [{"value": "default", "count": 2}], '
-    '"error_codes": [{"value": "ORDER_REJECTED", "count": 1, "category": "DOMAIN"}], '
-    '"error_category_totals": {"DOMAIN": 1}}'
+    '"error_codes": [{"value": "ORDER_REJECTED", "count": 1, "category": "CUSTOM"}], '
+    '"error_category_totals": {"CUSTOM": 1}}'
 )
 DETAIL_JSON: Final = (
     '{"leaf": {"task_id": "0190a1b2-c3d4-7e5f-8a6b-7c8d9e0f1a2b", "status": "RUNNING", '
@@ -148,7 +148,7 @@ async def _list(answer: object) -> tuple[MonitoringResult[TaskListPage], AsyncMo
         queues=[],
         workers=[],
         error_codes=[],
-        error_categories=[ErrorCategory.DOMAIN],
+        error_categories=[ErrorCategory.CUSTOM],
         retried_only=False,
         sort_by='enqueued_at',
         sort_dir='desc',
@@ -180,7 +180,7 @@ class TestAnswers:
             broker,
             window=WINDOW,
             statuses=[],
-            error_categories=[ErrorCategory.DOMAIN],
+            error_categories=[ErrorCategory.CUSTOM],
             retried_only=True,
         )
 

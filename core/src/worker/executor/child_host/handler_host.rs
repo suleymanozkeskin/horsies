@@ -51,7 +51,7 @@ use super::host::{
 use super::link::{start_control_thread, Flushed, FrameWriter};
 use super::rss::read_rss;
 use super::seats::ServeEnd;
-use crate::events::{decode_event, Event, EventDecodeError, WireValue};
+use crate::events::{decode_event, AnyEvent, EventDecodeError, WireValue};
 use crate::process_exit::ProcessExit;
 use crate::worker::executor::protocol::{
     ChildFrame, FrameReader, HandlerStatsFrame, ParentFrame, ProcessId, ReadyFrame,
@@ -305,7 +305,7 @@ pub(super) enum UndecodedEvent {
 /// Pure.
 ///
 /// Errors: [`UndecodedEvent`].
-pub(super) fn decode_wire_event(text: &str) -> Result<Event, UndecodedEvent> {
+pub(super) fn decode_wire_event(text: &str) -> Result<AnyEvent, UndecodedEvent> {
     let wire: WireValue =
         serde_json::from_str(text).map_err(|error| UndecodedEvent::NotJson(error.to_string()))?;
     decode_event(&wire).map_err(UndecodedEvent::Refused)

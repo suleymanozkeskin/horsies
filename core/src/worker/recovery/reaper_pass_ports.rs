@@ -966,13 +966,13 @@ async fn an_orphan_audit_whose_page_cannot_run_is_an_error() {
 /// The recovery events of `task_ids` in `events`: the task id and the
 /// action of each, sorted by task id. The events of other rows are left out.
 fn recoveries_of(
-    events: Vec<crate::events::Event>,
+    events: Vec<crate::events::AnyEvent>,
     task_ids: &[Uuid],
 ) -> Vec<(Uuid, RecoveryAction)> {
     let mut told: Vec<(Uuid, RecoveryAction)> = events
         .into_iter()
         .filter_map(|event| match event {
-            crate::events::Event::TaskRecovered(recovered)
+            crate::events::AnyEvent::TaskRecovered(recovered)
                 if task_ids.contains(&recovered.task_id) =>
             {
                 Some((recovered.task_id, recovered.action))

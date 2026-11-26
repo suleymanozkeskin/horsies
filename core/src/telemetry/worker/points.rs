@@ -117,7 +117,7 @@ impl TelemetryOn {
             queue: events::QueueName::cut(&task.queue_name),
             execution: task.execution,
             attempt: task.retry.attempt(),
-            child_kind: placed.child_kind,
+            child_execution: placed.child_execution,
             child_pid: placed.child_pid,
             slot_wait,
         });

@@ -182,7 +182,7 @@ fn event_end(
             error_code: reason.error_code(),
             trace: task.trace.clone(),
             placed_at: placed.wall,
-            child_kind: placed.child_kind,
+            child_execution: placed.child_execution,
             worker_id: worker_id.clone(),
             workflow: workflow_place(task.kind),
         },

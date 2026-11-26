@@ -64,8 +64,8 @@ describe('task search validation', () => {
   });
 
   it('round-trips one or many error categories', () => {
-    expect(validateTaskSearch({ error_category: 'DOMAIN' })).toEqual({
-      error_category: ['DOMAIN'],
+    expect(validateTaskSearch({ error_category: 'CUSTOM' })).toEqual({
+      error_category: ['CUSTOM'],
     });
     expect(
       validateTaskSearch({ error_category: ['OPERATIONAL', 'OUTCOME'] })
@@ -109,7 +109,7 @@ describe('filters extracted from the URL', () => {
 
   it('counts an error category as an active filter', () => {
     expect(
-      hasActiveFilters(validateTaskSearch({ error_category: 'DOMAIN' }))
+      hasActiveFilters(validateTaskSearch({ error_category: 'CUSTOM' }))
     ).toBe(true);
   });
 

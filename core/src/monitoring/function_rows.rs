@@ -236,7 +236,7 @@ pub(super) static MONITORING_SCHEDULES: TypedStatement = TypedStatement::new(
 );
 
 /// The built-in error-code taxonomy as the two parallel arrays the functions
-/// take: code `i` belongs to category `i`. A code outside it is a `DOMAIN`
+/// take: code `i` belongs to category `i`. A code outside it is a `CUSTOM`
 /// code.
 pub(super) struct BuiltinTaxonomy {
     pub(super) codes: Vec<String>,

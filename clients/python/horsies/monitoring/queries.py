@@ -115,7 +115,7 @@ type TaskGroupBy = Literal['worker', 'task_name', 'queue']
 type SortDirection = Literal['asc', 'desc']
 
 # Built from horsies' own error-code enums so the mapping never drifts from
-# the library. Any non-null code absent here is user-defined -> DOMAIN.
+# the library. Any non-null code absent here is a custom code -> CUSTOM.
 _CODE_TO_CATEGORY: dict[str, ErrorCategory] = {
     **{member.value: ErrorCategory.OPERATIONAL for member in OperationalErrorCode},
     **{member.value: ErrorCategory.CONTRACT for member in ContractCode},
@@ -195,12 +195,12 @@ def categorize_error_code(code: str | None) -> ErrorCategory | None:
     """Resolve an error code to its taxonomy family.
 
     Returns None when there is no error. A built-in code maps to its family;
-    any other non-empty code is a user-defined domain error.
+    any other non-empty code is a custom code (``CUSTOM``).
     """
     normalized = nz(code)
     if normalized is None:
         return None
-    return _CODE_TO_CATEGORY.get(normalized, ErrorCategory.DOMAIN)
+    return _CODE_TO_CATEGORY.get(normalized, ErrorCategory.CUSTOM)
 
 
 def _workflow_uuid(workflow_id: str) -> uuid.UUID | None:
