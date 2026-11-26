@@ -10,6 +10,8 @@
 //! start. The client resolves its
 //! user config (Pydantic in Python) into it; the core picks and checks the
 //! profile ([`select_worker_profile`]), so one resolver serves every client.
+//! A client that holds the core's `AppConfig` builds the sections that the
+//! config gives with [`config_sections`].
 //!
 //! As the producer manifest ([`crate::manifest`]), it holds values only: no
 //! field has a default, and an unknown field is refused. A manifest that the
@@ -142,8 +144,13 @@ bounded_count!(
     Milliseconds(BoundedU32<1, { u32::MAX }>) as "MILLISECONDS"
 );
 
+mod config_sections;
 mod sections;
 
+pub use config_sections::{
+    config_sections, ConfigField, ConfigSections, CustomQueueField, FieldSegment,
+    ManifestBoundRefused, PayloadField, RecoveryField, ResilienceField, RetentionField,
+};
 pub use sections::{
     AuditIntervalMs, CheckIntervalMs, ClaimedStaleThresholdMs, DeleteBatchSize,
     HeartbeatIntervalMs, HeartbeatLeafHorizonHours, HistoryLeafHorizonDays,
