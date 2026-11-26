@@ -46,7 +46,9 @@ async fn welcome(rt: TaskRuntime, user: String) -> Result<String, TaskError<Welc
     let audit_function = audit::handle(&rt)
         .map_err(|missing| TaskError::user(WelcomeCode::AuditNotSent, missing.to_string()))?;
     let _audit = audit_function
-        .send(message.clone())
+        .send(audit::Input {
+            entry: message.clone(),
+        })
         .await
         .map_err(|error| TaskError::user(WelcomeCode::AuditNotSent, error.to_string()))?;
     Ok(message)

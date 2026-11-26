@@ -178,24 +178,29 @@ fn task_module(
                 SendOptions { options }
             }
 
-            /// Per-send options of this task's send helpers.
+            /// Per-send options of this task's send helpers. A send takes
+            /// them; clone them for one more send.
+            #[derive(::std::clone::Clone, ::std::fmt::Debug)]
             pub struct SendOptions {
                 options: ::horsies::TaskSendOptions,
             }
 
             impl SendOptions {
                 /// Send the task through `app` with these options: now, or
-                /// after their delay.
+                /// after their delay. The send owns the options, so its
+                /// future borrows only `app`:
+                /// `name::with_options(options).send(&app, ..)` is one
+                /// expression, also when the future is kept in a binding.
                 ///
                 /// Errors: as `send`.
                 pub async fn send(
-                    &self,
+                    self,
                     #app: &::horsies::Horsies,
                     #send_params
                 ) -> #send_result {
                     let input: #input = #build_input;
                     ::horsies::__private::send_function::<#input, #output, #code>(#app, TASK_NAME)?
-                        .send_with_options(::std::clone::Clone::clone(&self.options), input)
+                        .send_with_options(self.options, input)
                         .await
                 }
             }

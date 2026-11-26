@@ -124,7 +124,9 @@ there is no migration contract between pre-1.0 versions.
   two apps every generated send and node used the first app.
   - `task_name::send(&app, ...)` and
     `task_name::with_options(options).send(&app, ...)` take the app that
-    they send through. A send through an app that does not register the
+    they send through. `SendOptions::send` takes the options by value, so
+    its future borrows only the app; `SendOptions` is `Clone` for one more
+    send. A send through an app that does not register the
     task returns `TaskSendError::ValidationFailed` with the cause
     `PreconditionFailed`, and writes nothing. The TypeScript client gives
     the same code for a contract that the app does not list.
