@@ -1,4 +1,5 @@
-// The public API gate of the published entry points (`horsies`, `horsies/zod`). Run from `clients/typescript/`:
+// The public API gate of the published entry points (`horsies`, `horsies/zod`, `horsies/rerun/pg`,
+// `horsies/rerun/postgres`). Run from `clients/typescript/`:
 //
 //   bun tests/public-api/run.ts check   compares the API report of each entry point with the committed report,
 //                                       refuses each type that a public declaration names and the entry point does
