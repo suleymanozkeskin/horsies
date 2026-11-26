@@ -8,7 +8,6 @@ import {
   type ChildLaunchManifest,
   eventHandlersToWire,
   type EventHandlers,
-  type EventTypeName,
   metricsEndpointToWire,
   type MetricsEndpoint,
   profileRequestToWire,
@@ -20,8 +19,9 @@ import {
 } from "../_catalog/worker_manifest.ts";
 import type { WireJson } from "../_catalog/wire_json.ts";
 import type { AppContext } from "../app/context.ts";
+import type { HandlerRegistration, TracingKind } from "../app/telemetry.ts";
 import { contractRecord } from "../contract/definition.ts";
-import { unreachable } from "../wire/unreachable.ts";
+import { unreachable } from "../native/call/never.ts";
 import type { ChildCommand } from "./child-command.ts";
 import { manifestText } from "./manifest-text.ts";
 
@@ -34,12 +34,6 @@ export type StartMembers = {
   readonly workerEndedSpans: WorkerEndedSpans;
   readonly childLaunch: ChildLaunchManifest;
 };
-
-/** One event handler of the app: its unique name and the one event type that it takes. */
-export type HandlerRegistration = { readonly name: string; readonly eventType: EventTypeName };
-
-/** The tracing of the app: the OpenTelemetry spans, or none. */
-export type TracingKind = "otel" | "none";
 
 /** The JSON text of the start members, in the manifest's own member names and forms. Pure. */
 export function startMembersText(members: StartMembers): string {
@@ -85,7 +79,7 @@ export function workerEndedSpans(tracing: TracingKind): WorkerEndedSpans {
     case "none":
       return "NO_SPANS";
     default:
-      return unreachable(tracing, "workerEndedSpans");
+      return unreachable(tracing);
   }
 }
 

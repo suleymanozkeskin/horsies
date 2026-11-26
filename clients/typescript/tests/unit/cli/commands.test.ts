@@ -5,12 +5,19 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { refusal } from "../../../horsies/src/app/refusal.ts";
-import { type CheckCommandDeps, parseCheckFlags, runCheckCommand } from "../../../horsies/src/cli/check-command.ts";
+import {
+  type CheckCommandDeps,
+  liveSteps,
+  type LiveStepsOutcome,
+  parseCheckFlags,
+  runCheckCommand,
+} from "../../../horsies/src/cli/check-command.ts";
 import type { CommandOutput } from "../../../horsies/src/cli/usage.ts";
 import { parseWorkerStart, runWorkerCommand, type WorkerCommandDeps } from "../../../horsies/src/cli/worker-command.ts";
 import { type CheckOutcome, checkReport } from "../../../horsies/src/check/report.ts";
 import type { WorkerLogLevel } from "../../../horsies/src/_catalog/worker_manifest.ts";
 import type { ListenAddressCheck } from "../../../horsies/src/native/worker/addon.ts";
+import { CoreStartFailed } from "../../../horsies/src/thrown-errors.ts";
 import { err, ok } from "../../../horsies/src/wire/result.ts";
 import type { WorkerRunError, WorkerStart } from "../../../horsies/src/worker/run.ts";
 
@@ -79,9 +86,10 @@ describe("the worker command", () => {
     const errors: readonly WorkerRunError[] = [
       { kind: "checkRefused", report: REPORT },
       { kind: "childCommandRefused", refused: { kind: "noEntryScript" } },
-      { kind: "manifestBound", path: "prefetchBuffer", min: 0n, max: 2_147_483_647n },
+      { kind: "manifestBound", path: "claim.prefetchBuffer", min: 0n, max: 2_147_483_647n },
       { kind: "profileRefused", report: REPORT },
       { kind: "connectionSettingsRefused", cause: "no session URL" },
+      { kind: "sharedThreadUnavailable", profile: "cpu" },
       { kind: "bootFailed", cause: "SCHEMA_REFUSED", message: "schema" },
       { kind: "failed", cause: "CLAIM_FAILED", message: "claim" },
     ];
@@ -112,7 +120,7 @@ describe("the worker command", () => {
 });
 
 /** Fake deps of `check` with the outcomes of the static and the live check. */
-function checkDeps(staticOutcome: CheckOutcome, liveOutcome: CheckOutcome): CheckCommandDeps & {
+function checkDeps(staticOutcome: CheckOutcome, liveOutcome: LiveStepsOutcome): CheckCommandDeps & {
   readonly output: ReturnType<typeof recordingOutput>;
   readonly levels: WorkerLogLevel[];
   readonly lives: number[];
@@ -170,5 +178,35 @@ describe("the check command", () => {
 
     assert.equal(await runCheckCommand(["--profile", "io"], deps), 2);
     assert.deepEqual(deps.levels, []);
+  });
+  test("a core that refuses the live steps gives 1 with its name and message", async () => {
+    const deps = checkDeps(PASSED, { kind: "coreRefused", error: new CoreStartFailed({ cause: "no threads" }) });
+
+    assert.equal(await runCheckCommand(["--live"], deps), 1);
+    assert.deepEqual(deps.output.errors, [
+      "horsies check: the core refused the live check: CoreStartFailed: the core could not start: no threads",
+    ]);
+  });
+
+  test("the live steps map a core refusal; a passing live check keeps the summary", async () => {
+    const passed = { taskCount: 1, declaredErrorCodes: new Map() };
+    const refusedByCore = new CoreStartFailed({ cause: "no threads" });
+
+    assert.deepEqual(
+      await liveSteps(passed, async () => {
+        throw refusedByCore;
+      }),
+      { kind: "coreRefused", error: refusedByCore },
+    );
+    assert.deepEqual(await liveSteps(passed, async () => ({ kind: "passed" })), { kind: "passed", passed });
+  });
+
+  test("another throw of the live steps passes on", async () => {
+    await assert.rejects(
+      liveSteps({ taskCount: 0, declaredErrorCodes: new Map() }, async () => {
+        throw new RangeError("not a core refusal");
+      }),
+      RangeError,
+    );
   });
 });

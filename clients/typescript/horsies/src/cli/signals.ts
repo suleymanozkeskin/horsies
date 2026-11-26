@@ -1,10 +1,10 @@
 // The stop signals of a service command (the worker): the first `SIGTERM` or `SIGINT` asks the service to stop once;
-// each later signal is written to stderr and does nothing more. The handlers stay installed until the run ends, so
-// the default action of a later signal (the end of the process) does not run while the service drains. The addon
-// installs no signal handler: the runtime of this process owns the signals.
+// each later signal is written to stderr and does nothing more. The handlers stay installed until the process ends
+// (`cli.run` ends it after the log wait), so the default action of a later signal (the end of the process by the
+// signal) does not run while the service drains or while the last log records go out, as in the Rust client. The
+// addon installs no signal handler: the runtime of this process owns the signals.
 
-import type { StopHandlers } from "../worker/run.ts";
-import { unreachable } from "../wire/unreachable.ts";
+import { unreachable } from "../native/call/never.ts";
 
 /** A signal that stops a service command. */
 export type StopSignalName = "SIGINT" | "SIGTERM";
@@ -15,7 +15,6 @@ const STOP_SIGNALS: readonly StopSignalName[] = ["SIGTERM", "SIGINT"];
 /** Where the handlers of the stop signals go: the process, or a fake in a test. */
 export interface SignalSource {
   on(signal: StopSignalName, listener: () => void): void;
-  off(signal: StopSignalName, listener: () => void): void;
 }
 
 /** The signals of this process. */
@@ -23,9 +22,6 @@ export function processSignals(): SignalSource {
   return {
     on: (signal, listener) => {
       process.on(signal, listener);
-    },
-    off: (signal, listener) => {
-      process.off(signal, listener);
     },
   };
 }
@@ -35,17 +31,17 @@ type StopState = { readonly kind: "waiting" } | { readonly kind: "stopAsked"; re
 
 /**
  * Call `requestStop` at the first stop signal of `source`, and write one line for each signal to `writeLine`. The
- * handlers stay until `remove()`. `command` names the command in the lines.
+ * handlers stay until the process ends. `command` names the command in the lines.
  */
 export function stopOnSignals(
   source: SignalSource,
   command: string,
   requestStop: () => void,
   writeLine: (line: string) => void,
-): StopHandlers {
+): void {
   let state: StopState = { kind: "waiting" };
 
-  const listeners = STOP_SIGNALS.map((signal) => {
+  for (const signal of STOP_SIGNALS) {
     const listener = (): void => {
       switch (state.kind) {
         case "waiting":
@@ -59,20 +55,10 @@ export function stopOnSignals(
 
           return;
         default:
-          unreachable(state, "stopOnSignals");
+          unreachable(state);
       }
     };
 
     source.on(signal, listener);
-
-    return [signal, listener] as const;
-  });
-
-  return {
-    remove: () => {
-      for (const [signal, listener] of listeners) {
-        source.off(signal, listener);
-      }
-    },
-  };
+  }
 }

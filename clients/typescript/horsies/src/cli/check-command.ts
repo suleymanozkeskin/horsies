@@ -6,8 +6,8 @@
 //   profile. It installs no schema.
 // - `--loglevel`: the lowest level of the core records of this process; default `WARNING`.
 //
-// Exit codes: 0 for a passing check (its summary on stdout); 1 for a check report (on stderr); 2 for arguments that
-// do not parse. Sends stay suppressed in this command.
+// Exit codes: 0 for a passing check (its summary on stdout); 1 for a check report, or a core that refused the live
+// steps (on stderr); 2 for arguments that do not parse. Sends stay suppressed in this command.
 
 import type { WorkerLogLevel } from "../_catalog/worker_manifest.ts";
 import type { AppContext } from "../app/context.ts";
@@ -16,10 +16,12 @@ import { type CheckOutcome, type CheckPassed, passedText, reportText } from "../
 import { staticCheck } from "../check/static-check.ts";
 import { configureLogging } from "../logging.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
+import type { LiveCheckOutcome } from "../native/worker/addon.ts";
 import { checkLive } from "../native/worker/worker.ts";
 import { ok, type Result } from "../wire/result.ts";
-import { unreachable } from "../wire/unreachable.ts";
-import { appCoreHandle } from "../worker/run.ts";
+import { unreachable } from "../native/call/never.ts";
+import { CoreError } from "../thrown-errors.ts";
+import { appHandle } from "../worker/run.ts";
 import {
   type CommandExitCode,
   type CommandOutput,
@@ -53,13 +55,19 @@ export type CheckSteps = "staticOnly" | "staticAndLive";
 /** The parsed flags of `check`. */
 export type CheckFlags = { readonly steps: CheckSteps; readonly logLevel: WorkerLogLevel };
 
+/**
+ * How the live steps ended: the outcome of the check, or the refusal of the core of this process (it could not start,
+ * it stopped, or this process is a fork).
+ */
+export type LiveStepsOutcome = CheckOutcome | { readonly kind: "coreRefused"; readonly error: CoreError };
+
 /** What `check` calls that has effects. */
 export interface CheckCommandDeps {
   readonly output: CommandOutput;
   setLogLevel(level: WorkerLogLevel): void;
   staticCheck(): CheckOutcome;
   /** The live steps after a static check that passed with `passed`. */
-  liveCheck(passed: CheckPassed): Promise<CheckOutcome>;
+  liveCheck(passed: CheckPassed): Promise<LiveStepsOutcome>;
 }
 
 /** The dependencies of `check` for the app of `context` in this process. */
@@ -70,8 +78,24 @@ export function processCheckCommandDeps(context: AppContext): CheckCommandDeps {
     output: processOutput(),
     setLogLevel: (level) => configureLogging({ levels: { default: level } }),
     staticCheck: () => staticCheck(context, checks, "withSchedules", "check"),
-    liveCheck: async (passed) => liveCheckOutcome(passed, await checkLive(appCoreHandle(context, "PRODUCER"), context.config.coreConfigJson)),
+    liveCheck: async (passed) => liveSteps(passed, async () => checkLive(appHandle(context), context.config.coreConfigJson)),
   };
+}
+
+/** The outcome of the live steps that `run` gives, or the core refusal that it rejects with. A defect passes on. */
+export async function liveSteps(
+  passed: CheckPassed,
+  run: () => Promise<LiveCheckOutcome>,
+): Promise<LiveStepsOutcome> {
+  try {
+    return liveCheckOutcome(passed, await run());
+  } catch (cause) {
+    if (cause instanceof CoreError) {
+      return { kind: "coreRefused", error: cause };
+    }
+
+    throw cause;
+  }
 }
 
 /** Run `check` with the arguments after the command name. Resolves with the exit code. */
@@ -89,7 +113,9 @@ export async function runCheckCommand(args: readonly string[], deps: CheckComman
   deps.setLogLevel(flags.value.logLevel);
 
   const checked = deps.staticCheck();
-  const outcome = checked.kind === "passed" && flags.value.steps === "staticAndLive" ? await deps.liveCheck(checked.passed) : checked;
+
+  const outcome: LiveStepsOutcome =
+    checked.kind === "passed" && flags.value.steps === "staticAndLive" ? await deps.liveCheck(checked.passed) : checked;
 
   switch (outcome.kind) {
     case "passed":
@@ -100,8 +126,12 @@ export async function runCheckCommand(args: readonly string[], deps: CheckComman
       deps.output.writeError(reportText(outcome.report));
 
       return EXIT_FAILED;
+    case "coreRefused":
+      deps.output.writeError(`horsies check: the core refused the live check: ${outcome.error.name}: ${outcome.error.message}`);
+
+      return EXIT_FAILED;
     default:
-      return unreachable(outcome, "runCheckCommand");
+      return unreachable(outcome);
   }
 }
 

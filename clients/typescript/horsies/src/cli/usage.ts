@@ -4,6 +4,8 @@
 import { parseArgs, type ParseArgsOptionsConfig } from "node:util";
 
 import type { WorkerLogLevel } from "../_catalog/worker_manifest.ts";
+import { raiseDefect } from "../native/call/defect.ts";
+import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 
 /** The exit code of a command: 0 after an operator stop or a passing check, 1 for a failure, 2 for a usage error. */
@@ -101,18 +103,18 @@ const PARSE_ARGS_ERROR_CODES: readonly string[] = [
   "ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL",
 ];
 
-/** The text value of `name`, or none. A non-text value is a defect of the flag table: `TypeError`. Pure. */
+/** The text value of `name`, or none. A non-text value is a defect of the flag table: `ClientDefect`. Pure. */
 export function textFlag(values: FlagValues, name: string): string | undefined {
   const value = values[name];
 
   if (value === true || value === false || Array.isArray(value)) {
-    throw new TypeError(`textFlag: --${name} is not a single text flag in the flag table`);
+    return raiseDefect(new ClientDefect({ subject: "textFlag", rule: `--${name} is a single text flag in the flag table` }));
   }
 
   return value;
 }
 
-/** Whether the switch `name` was given. A text value is a defect of the flag table: `TypeError`. Pure. */
+/** Whether the switch `name` was given. A text value is a defect of the flag table: `ClientDefect`. Pure. */
 export function switchFlag(values: FlagValues, name: string): boolean {
   const value = values[name];
 
@@ -124,5 +126,5 @@ export function switchFlag(values: FlagValues, name: string): boolean {
     return value;
   }
 
-  throw new TypeError(`switchFlag: --${name} is not a single switch in the flag table`);
+  return raiseDefect(new ClientDefect({ subject: "switchFlag", rule: `--${name} is a single switch in the flag table` }));
 }

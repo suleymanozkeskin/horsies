@@ -7,6 +7,9 @@
 // - Each flag of the runtime is kept, so each child has the same loaders and limits, except a closed list of flags
 //   that must not reach a child: a child must not restart itself on a file change, and must not bind the debugger
 //   port of the worker. The environment and the working directory reach the children unchanged.
+// - `NODE_OPTIONS` is part of the environment, so its flags reach each child as they are: with
+//   `NODE_OPTIONS=--inspect`, each child tries to bind the same debugger port and writes one error line for it. Put a
+//   flag that a child must not get on the command line of the worker, not in `NODE_OPTIONS`.
 // - A start with no entry script (code from `-e`, a REPL, a script from stdin) and a compiled executable are
 //   refused: nothing starts.
 
@@ -14,7 +17,7 @@ import { isAbsolute } from "node:path";
 
 import { CHILD_MODE_FLAG } from "../app/suppression.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import { unreachable } from "../wire/unreachable.ts";
+import { unreachable } from "../native/call/never.ts";
 
 /** How this process was packaged: a script that a runtime runs, or a compiled executable with the code inside. */
 export type Packaging = "script" | "nodeSingleExecutable" | "bunCompiled";
@@ -162,6 +165,6 @@ export function childCommandRefusedText(refused: ChildCommandRefused): string {
     case "compiledExecutable":
       return `a ${refused.packaging === "bunCompiled" ? "Bun compiled executable" : "Node single executable application"} is not a supported worker entry; run the entry script with the runtime`;
     default:
-      return unreachable(refused, "childCommandRefusedText");
+      return unreachable(refused);
   }
 }

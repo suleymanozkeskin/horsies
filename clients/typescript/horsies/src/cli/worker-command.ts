@@ -14,7 +14,7 @@ import type { AppContext } from "../app/context.ts";
 import type { ListenAddressCheck } from "../native/worker/addon.ts";
 import { parseListenAddress } from "../native/worker/worker.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import { unreachable } from "../wire/unreachable.ts";
+import { unreachable } from "../native/call/never.ts";
 import {
   processWorkerRunDeps,
   runWorkerOf,
@@ -142,6 +142,6 @@ function metricsEndpointOf(checked: ListenAddressCheck): Result<MetricsEndpoint,
     case "refused":
       return err(usageError(`--metrics-listen: ${checked.cause}`));
     default:
-      return unreachable(checked, "metricsEndpointOf");
+      return unreachable(checked);
   }
 }

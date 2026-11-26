@@ -28,13 +28,15 @@ export interface NativePreparedWorker {
  * - `manifestBound`: a config value outside the bound of its manifest field; `path` names the field as the config
  *   writes it, and the value is not kept;
  * - `profileRefused`: the core's report on the profile set or the requested profile;
- * - `connectionSettingsRefused`: the broker config check refuses the connection settings.
+ * - `connectionSettingsRefused`: the broker config check refuses the connection settings;
+ * - `sharedThreadUnavailable`: the profile starts `SHARED_THREAD` children, and the addon has no thread seat isolates.
  */
 export type WorkerPreparation =
   | { readonly kind: "prepared"; readonly worker: NativePreparedWorker }
   | { readonly kind: "manifestBound"; readonly path: string; readonly min: bigint; readonly max: bigint }
   | { readonly kind: "profileRefused"; readonly refusals: CoreRefusal[] }
-  | { readonly kind: "connectionSettingsRefused"; readonly cause: string };
+  | { readonly kind: "connectionSettingsRefused"; readonly cause: string }
+  | { readonly kind: "sharedThreadUnavailable"; readonly profile: string };
 
 /** Why a worker start failed, as the core names it. */
 export type WorkerBootCauseName =

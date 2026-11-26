@@ -14,6 +14,7 @@ import {
   workerEndedSpans,
 } from "../../../horsies/src/worker/start-members.ts";
 import { contextOf, implementedApp } from "./support.ts";
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 
 const COMMAND = { program: "/usr/local/bin/node", args: ["/srv/app/main.js", "--horsies-child"] };
 
@@ -129,8 +130,8 @@ describe("the manifest text", () => {
     );
   });
 
-  test("a number is a defect: a manifest wire value holds no float", () => {
-    assert.throws(() => manifestText([1.5]), TypeError);
+  test("a number is a defect of the package: a manifest wire value holds no float", () => {
+    assert.throws(() => manifestText([1.5]), ClientDefect);
   });
 
   test("a value deeper than the bound is a defect", () => {
@@ -140,6 +141,6 @@ describe("the manifest text", () => {
       deep = [deep];
     }
 
-    assert.throws(() => manifestText(deep), TypeError);
+    assert.throws(() => manifestText(deep), ClientDefect);
   });
 });

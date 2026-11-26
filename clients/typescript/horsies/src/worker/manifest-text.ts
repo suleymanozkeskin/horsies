@@ -2,6 +2,9 @@
 // core's manifest parser.
 
 import type { WireJson } from "../_catalog/wire_json.ts";
+import { raiseDefect } from "../native/call/defect.ts";
+import { unreachable } from "../native/call/never.ts";
+import { ClientDefect } from "../thrown-errors.ts";
 
 /** The most nesting levels of a manifest wire value. The worker manifest nests at most 8 levels. */
 export const MAX_MANIFEST_DEPTH = 32;
@@ -9,7 +12,7 @@ export const MAX_MANIFEST_DEPTH = 32;
 /**
  * The compact JSON text of `value`: map members in their order, a `bigint` as its digits, a text through
  * `JSON.stringify`. A manifest wire value holds no float, so a `number`, and a value that nests deeper than
- * `MAX_MANIFEST_DEPTH`, is a defect of the package: `TypeError`. Pure.
+ * `MAX_MANIFEST_DEPTH`, is a defect of the package: `ClientDefect`, under the defect rule. Pure.
  */
 export function manifestText(value: WireJson): string {
   return valueText(value, 0);
@@ -17,7 +20,9 @@ export function manifestText(value: WireJson): string {
 
 function valueText(value: WireJson, depth: number): string {
   if (depth > MAX_MANIFEST_DEPTH) {
-    throw new TypeError(`manifestText: the value nests deeper than ${String(MAX_MANIFEST_DEPTH)} levels`);
+    return raiseDefect(
+      new ClientDefect({ subject: "manifestText", rule: `a manifest wire value nests at most ${String(MAX_MANIFEST_DEPTH)} levels` }),
+    );
   }
 
   if (value === null) {
@@ -32,14 +37,13 @@ function valueText(value: WireJson, depth: number): string {
     case "string":
       return JSON.stringify(value);
     case "number":
-      throw new TypeError(`manifestText: ${String(value)} is a number, which a manifest wire value never holds`);
+      return raiseDefect(
+        new ClientDefect({ subject: "manifestText", rule: `a manifest wire value holds no number, and ${String(value)} is one` }),
+      );
     case "object":
       return containerText(value, depth);
-    default: {
-      const unexpected: never = value;
-
-      throw new TypeError(`manifestText: a value outside its type: ${String(unexpected)}`);
-    }
+    default:
+      return unreachable(value);
   }
 }
 

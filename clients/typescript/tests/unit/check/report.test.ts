@@ -7,6 +7,7 @@ import { refusal } from "../../../horsies/src/app/refusal.ts";
 import { liveCheckOutcome } from "../../../horsies/src/check/live-check.ts";
 import { type CheckPassed, checkReport, passedText, reportText } from "../../../horsies/src/check/report.ts";
 import { catalogRefusal } from "../app/support.ts";
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 
 const PASSED: CheckPassed = { taskCount: 2, declaredErrorCodes: new Map() };
 
@@ -77,6 +78,6 @@ describe("the live steps", () => {
   });
 
   test("a connections refusal with no refusal is a defect", () => {
-    assert.throws(() => liveCheckOutcome(PASSED, { kind: "connectionsRefused", refusals: [] }), TypeError);
+    assert.throws(() => liveCheckOutcome(PASSED, { kind: "connectionsRefused", refusals: [] }), ClientDefect);
   });
 });

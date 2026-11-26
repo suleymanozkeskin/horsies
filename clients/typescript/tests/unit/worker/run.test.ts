@@ -9,17 +9,20 @@ import type { AppContext } from "../../../horsies/src/app/context.ts";
 import { checkReport } from "../../../horsies/src/check/report.ts";
 import { refusal } from "../../../horsies/src/app/refusal.ts";
 import type { NativePreparedWorker, WorkerPreparation, WorkerRunEnded } from "../../../horsies/src/native/worker/addon.ts";
-import { CoreStartFailed, CoreStopped } from "../../../horsies/src/thrown-errors.ts";
+import { ClientDefect, CoreStartFailed, CoreStopped } from "../../../horsies/src/thrown-errors.ts";
+import { createHorsies } from "../../../horsies/src/app.ts";
+import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { LaunchFacts } from "../../../horsies/src/worker/child-command.ts";
 import {
+  appHandle,
+  processWorkerRunDeps,
   runWorkerOf,
-  type StopHandlers,
   type WorkerRunDeps,
   type WorkerRunError,
   workerRunErrorText,
   type WorkerStart,
 } from "../../../horsies/src/worker/run.ts";
-import { catalogRefusal, fakeChecks } from "../app/support.ts";
+import { catalogRefusal, DATABASE_URL, fakeChecks, fakeCoreHandle, fakeEnvironment } from "../app/support.ts";
 import { contextOf, implementedApp, testApp } from "./support.ts";
 
 const START: WorkerStart = {
@@ -43,8 +46,7 @@ type Step =
   | { readonly kind: "prepare"; readonly startJson: string }
   | { readonly kind: "handlers" }
   | { readonly kind: "run" }
-  | { readonly kind: "stop" }
-  | { readonly kind: "removed" };
+  | { readonly kind: "stop" };
 
 type Script = {
   readonly launch?: LaunchFacts;
@@ -89,15 +91,9 @@ function fakeDeps(script: Script = {}): { readonly deps: WorkerRunDeps; readonly
       assert.equal(worker, WORKER);
       steps.push({ kind: "stop" });
     },
-    stopOnSignals: (requestStop): StopHandlers => {
+    stopOnSignals: (requestStop) => {
       steps.push({ kind: "handlers" });
       stopHandler = requestStop;
-
-      return {
-        remove: () => {
-          steps.push({ kind: "removed" });
-        },
-      };
     },
   };
 
@@ -127,7 +123,7 @@ describe("the worker run", () => {
     assert.deepEqual(await runWorkerOf(contextOf(implementedApp()), START, deps), { ok: true, value: { kind: "stopped" } });
     assert.deepEqual(
       steps.map((step) => step.kind),
-      ["panicRule", "logLevel", "line", "prepare", "handlers", "run", "stop", "removed"],
+      ["panicRule", "logLevel", "line", "prepare", "handlers", "run", "stop"],
     );
     assert.deepEqual(steps[1], { kind: "logLevel", level: "INFO" });
     assert.deepEqual(steps[2], { kind: "line", line: "horsies worker: the children start without the runtime flag --inspect" });
@@ -180,8 +176,8 @@ describe("the worker run", () => {
     const context = contextOf(implementedApp());
 
     assert.deepEqual(
-      await runError(context, { prepare: () => ({ kind: "manifestBound", path: "prefetchBuffer", min: 0n, max: 2_147_483_647n }) }),
-      { kind: "manifestBound", path: "prefetchBuffer", min: 0n, max: 2_147_483_647n },
+      await runError(context, { prepare: () => ({ kind: "manifestBound", path: "claim.prefetchBuffer", min: 0n, max: 2_147_483_647n }) }),
+      { kind: "manifestBound", path: "claim.prefetchBuffer", min: 0n, max: 2_147_483_647n },
     );
     assert.deepEqual(await runError(context, { prepare: () => ({ kind: "connectionSettingsRefused", cause: "no session URL" }) }), {
       kind: "connectionSettingsRefused",
@@ -222,7 +218,7 @@ describe("the worker run", () => {
     );
   });
 
-  test("a failed start and a failed worker are their errors; the stop handlers are removed", async () => {
+  test("a failed start and a failed worker are their errors; the stop handlers stay after the run", async () => {
     const context = contextOf(implementedApp());
     const { deps, steps } = fakeDeps({ run: async () => ({ kind: "bootFailed", cause: "SCHEMA_REFUSED", message: "schema" }) });
 
@@ -230,7 +226,10 @@ describe("the worker run", () => {
       ok: false,
       error: { kind: "bootFailed", cause: "SCHEMA_REFUSED", message: "schema" },
     });
-    assert.equal(steps.at(-1)?.kind, "removed");
+    assert.deepEqual(
+      steps.slice(-2).map((step) => step.kind),
+      ["handlers", "run"],
+    );
     assert.deepEqual(await runError(context, { run: async () => ({ kind: "failed", cause: "CLAIM_FAILED", message: "claim" }) }), {
       kind: "failed",
       cause: "CLAIM_FAILED",
@@ -245,16 +244,88 @@ describe("the worker run", () => {
       workerRunErrorText({ kind: "checkRefused", report }),
       workerRunErrorText({ kind: "profileRefused", report }),
       workerRunErrorText({ kind: "childCommandRefused", refused: { kind: "stdinScript" } }),
-      workerRunErrorText({ kind: "manifestBound", path: "prefetchBuffer", min: 0n, max: 2_147_483_647n }),
+      workerRunErrorText({ kind: "manifestBound", path: "claim.prefetchBuffer", min: 0n, max: 2_147_483_647n }),
       workerRunErrorText({ kind: "connectionSettingsRefused", cause: "no session URL" }),
+      workerRunErrorText({ kind: "sharedThreadUnavailable", profile: "cpu" }),
       workerRunErrorText({ kind: "coreRefused", error: new CoreStartFailed({ cause: "no threads" }) }),
       workerRunErrorText({ kind: "bootFailed", cause: "SCHEMA_REFUSED", message: "schema" }),
       workerRunErrorText({ kind: "failed", cause: "CLAIM_FAILED", message: "claim" }),
     ];
 
-    assert.equal(texts[3], "prefetchBuffer: outside 0 to 2147483647, the bound of its worker manifest field");
-    assert.equal(texts[6], "worker start failed (SCHEMA_REFUSED): schema");
-    assert.equal(texts[7], "worker failed (CLAIM_FAILED): claim");
+    assert.equal(texts[3], "claim.prefetchBuffer: outside 0 to 2147483647, the bound of its worker manifest field");
+    assert.ok(texts[5]?.startsWith('workerProfiles["cpu"].sharedThread: '));
+    assert.equal(texts[7], "worker start failed (SCHEMA_REFUSED): schema");
+    assert.equal(texts[8], "worker failed (CLAIM_FAILED): claim");
     assert.ok(texts[0]?.startsWith("error[HRS-300]: tasks[0] ping: no implementation"));
+  });
+  test("a profile with SHARED_THREAD children is refused with its name", async () => {
+    assert.deepEqual(
+      await runError(contextOf(implementedApp()), { prepare: () => ({ kind: "sharedThreadUnavailable", profile: "cpu" }) }),
+      { kind: "sharedThreadUnavailable", profile: "cpu" },
+    );
+  });
+
+  test("a profile refusal with no refusal is a defect of the package", async () => {
+    await assert.rejects(runWorkerOf(contextOf(implementedApp()), START, fakeDeps({ prepare: () => ({ kind: "profileRefused", refusals: [] }) }).deps), ClientDefect);
+  });
+
+  test("the start members take the event handlers and the tracing of the app", async () => {
+    const { deps, steps } = fakeDeps();
+
+    const context: AppContext = {
+      ...contextOf(implementedApp()),
+      telemetry: { handlers: () => [{ name: "alerts", eventType: "AttemptEnded" }], tracing: "otel" },
+    };
+
+    await runWorkerOf(context, START, deps);
+
+    const prepared = steps.find((step) => step.kind === "prepare");
+    const members: unknown = JSON.parse(prepared?.kind === "prepare" ? prepared.startJson : "null");
+
+    assert.deepEqual(
+      [Reflect.get(Object(members), "handlers"), Reflect.get(Object(members), "worker_ended_spans")],
+      [{ kind: "HANDLERS", handlers: [{ name: "alerts", event_type: "AttemptEnded" }] }, "MAKE_SPANS"],
+    );
+  });
+});
+
+describe("the worker run of this process", () => {
+  test("the run gets the core handle that Horsies.create built for the app", async () => {
+    const handle = fakeCoreHandle();
+    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment({ handle }));
+
+    if (!created.ok) {
+      assert.fail("the app is created");
+    }
+
+    const handles: CoreHandle[] = [];
+
+    const deps = processWorkerRunDeps(contextOf(created.value), () => undefined, {
+      prepareWorker: () => ({ kind: "prepared", worker: WORKER }),
+      runWorker: async (_worker, given) => {
+        handles.push(given);
+
+        return { kind: "stopped" };
+      },
+      requestWorkerStop: () => undefined,
+    });
+
+    assert.deepEqual(await deps.run(WORKER), { kind: "stopped" });
+    assert.equal(handles.length, 1);
+    assert.equal(handles[0], handle);
+    assert.equal(appHandle(contextOf(created.value)), handle);
+  });
+
+  test("the handle of an app without the addon is a defect", () => {
+    const created = createHorsies(
+      { broker: { databaseUrl: DATABASE_URL }, tasks: [] },
+      fakeEnvironment({ mainThread: false }),
+    );
+
+    if (!created.ok) {
+      assert.fail("the app is created");
+    }
+
+    assert.throws(() => appHandle(contextOf(created.value)), ClientDefect);
   });
 });
