@@ -3,6 +3,8 @@
 export {
   type AnyTaskContract,
   type BodyResult,
+  type ContextUse,
+  type ContextUseOf,
   type ContractTypes,
   defineTask,
   type ExecutionClass,

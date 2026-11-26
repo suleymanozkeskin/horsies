@@ -12,6 +12,8 @@ export const settleReturnedMatches: SameFunction<
   CallAddon["settleCallbackReturned"]
 > = true;
 
+export const takeCallbackMatches: SameFunction<typeof Generated.takeCallback, CallAddon["takeCallback"]> = true;
+
 export const settleThrewMatches: SameFunction<typeof Generated.settleCallbackThrew, CallAddon["settleCallbackThrew"]> =
   true;
 

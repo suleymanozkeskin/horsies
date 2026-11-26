@@ -42,6 +42,11 @@ chrono-tz = "0.10"
 [build-dependencies]
 napi-build = "=2.7.0"
 
+[dev-dependencies]
+# `test-util`: the unit tests of the wait bounds run on a paused clock
+# (`tokio::time::pause`), so a bound of seconds takes no wall time.
+tokio = { version = "1", features = ["test-util"] }
+
 [features]
 default = []
 # Test code only: the exports that only the native tests call
