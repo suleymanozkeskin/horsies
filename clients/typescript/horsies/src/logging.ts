@@ -1,6 +1,6 @@
 // The log output of the core in this process.
 //
-// The core writes its records to 18 named loggers of the `horsies` namespace. Each logger forwards
+// The core writes its records to 19 named loggers of the `horsies` namespace. Each logger forwards
 // the records at or above its threshold. The default threshold is WARNING, and the default sink
 // writes one line per record to stderr. `configureLogging` sets the thresholds and the sink for the
 // whole process; a change applies to later records.
@@ -30,6 +30,7 @@ export const LOGGER_NAMES = [
   "horsies.scheduler",
   "horsies.scheduler.state",
   "horsies.sql",
+  "horsies.telemetry",
   "horsies.web",
   "horsies.worker",
   "horsies.workflow.engine",

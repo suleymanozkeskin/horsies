@@ -5,7 +5,8 @@
 // A queued row can hold options that the current worker refuses: an older version accepted any `timeout_ms` of at
 // least 1000, and a `SHARED_ASYNC` row needs `timeout_ms` and `cancel_grace_ms`. Each test changes the stored options
 // before its worker starts, so the first claim of the row reads them. The worker fails the row with
-// `WORKER_SERIALIZATION_ERROR` before the task resolves; its body never runs, and no later claim takes it.
+// `WORKER_SERIALIZATION_ERROR` before the task resolves; its body never runs, and no later claim takes it. The task of
+// a workflow node fails its node the same way, and the workflow goes on from that failure.
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -16,9 +17,12 @@ import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import type { Profile } from "../src/instances.ts";
 import * as basic from "../src/tasks/basic.ts";
 import * as shared from "../src/tasks/shared.ts";
+import { linear } from "../src/workflows/structure.ts";
 import { errorCode, failed, infoOf, sentHandle, succeeded } from "../support/outcome.ts";
 import { sqlText, type TaskRow } from "../support/rows.ts";
 import { e2eTest, type Suite } from "../support/suite.ts";
+import { startedHandle } from "../support/workflow-reads.ts";
+import { endedNodes, nodeById, statusesOf, taskOfNode, workflowNodes } from "../support/workflow-rows.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
@@ -85,6 +89,27 @@ describe("stored options that a worker refuses", () => {
 
     assert.equal(ended.isWorkflowTask, false);
     await notClaimedAgain(suite, handle.taskId, ended);
+  });
+
+  e2eTest("a refused timeout of a root node fails the node in one claim; the nodes after it are skipped", "default", async (suite) => {
+    const handle = await startedHandle("linear", suite.app.start(linear, {}));
+    const taskId = await taskOfNode(suite.rows, handle.workflowId, "a", RESULT_WAIT_MS);
+
+    await suite.rows.changeStoredOptions(taskId, { kind: "set", key: "timeout_ms", value: TIMEOUT_BOUND_MS + 1 });
+    await suite.worker("isolated-1");
+
+    const nodes = await endedNodes(suite.rows, handle.workflowId, "FAILED", RESULT_WAIT_MS);
+    const root = nodeById(nodes, "a");
+
+    assert.deepEqual(statusesOf(nodes), ["FAILED", "SKIPPED", "SKIPPED"]);
+    assert.equal(root.taskId, taskId);
+    assert.ok(root.result?.includes(REFUSAL_CODE), `node a stores the refusal: ${String(root.result)}`);
+
+    const ended = await refusedInOneClaim(suite, taskId);
+
+    assert.equal(ended.isWorkflowTask, true);
+    await notClaimedAgain(suite, taskId, ended);
+    assert.deepEqual(await workflowNodes(suite.rows, handle.workflowId), nodes, "the nodes did not change after the end");
   });
 
   for (const profile of ["split-isolated-1-shared-1x4", "shared-only-1x4"] as const satisfies readonly Profile[]) {

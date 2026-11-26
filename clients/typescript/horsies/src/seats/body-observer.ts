@@ -10,7 +10,8 @@
 // isolate, and its observation ends at its settle.
 // `cancelled` comes when the `cancel` message of the run comes, before or after the other calls: the core then decided
 // the end of the run (`TASK_TIMEOUT` at the deadline, `TASK_CANCELLED` at an operator cancel), whatever the body does
-// later.
+// later. `flush` comes with the `flush` message of the main thread at the child's stop; the isolate answers `flushed`
+// when it settles.
 
 import type { AppContext } from "../app/context.ts";
 import type { BodyEnd, BodyObservation } from "../child/body-observer.ts";
@@ -32,18 +33,22 @@ export interface SeatBodyObservation {
 export interface SeatBodyObserver {
   /** The observation of one body, before the body runs. `facts` is `notRecorded` when the app traces no body. */
   enter(facts: BodyFactsRecord): SeatBodyObservation;
+  /** Send what the observer holds. Never rejects; the exit rule of the child bounds the wait for it. */
+  flush(): Promise<void>;
 }
 
-const NO_SEAT_OBSERVATION: SeatBodyObservation = Object.freeze({
+/** The observation that does nothing: `run` calls the body. */
+export const NO_SEAT_OBSERVATION: SeatBodyObservation = Object.freeze({
   run: <T>(call: () => T): T => call(),
   thrown: (): void => undefined,
   end: (): void => undefined,
   cancelled: (): void => undefined,
 });
 
-/** The observer that does nothing: `run` calls the body. */
+/** The observer that does nothing: `run` calls the body, `flush` resolves at once. */
 export const NO_SEAT_BODY_OBSERVER: SeatBodyObserver = Object.freeze({
   enter: (): SeatBodyObservation => NO_SEAT_OBSERVATION,
+  flush: async (): Promise<void> => undefined,
 });
 
 const observers = new WeakMap<AppContext, SeatBodyObserver>();

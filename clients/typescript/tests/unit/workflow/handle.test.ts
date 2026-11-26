@@ -24,10 +24,12 @@ import {
   type FakeCore,
   okEnvelope,
   rawDbFailed,
+  SPEC_DATA,
   userErrorEnvelope,
   userErrorText,
   WORKFLOW_ID,
 } from "./core-support.ts";
+import { passedSpec } from "./support.ts";
 
 const count = defineTask({ name: "count", input: {}, output: h.int(), errors: ["TOO_MANY"] });
 const name = defineTask({ name: "name", input: { n: h.taskOutcome(count) }, output: h.string() });
@@ -455,8 +457,13 @@ describe("the seat operations", () => {
     assert.deepEqual(await core.pause(WORKFLOW_ID), { kind: "changed", changed: true });
     assert.deepEqual(await core.resume(WORKFLOW_ID), { kind: "changed", changed: true });
     assert.equal((await core.nodeResult(WORKFLOW_ID, "count")).kind, "stored");
+
+    const spec = passedSpec(flow, {}, registry().view);
+
+    assert.deepEqual(await core.prepare(spec), { kind: "prepared", specData: SPEC_DATA });
+    assert.equal(mainThread.prepares[0], spec);
     assert.equal(
-      (await core.restart({ specData: "{}", workflowId: WORKFLOW_ID, sentAtMicros: 1n, trace: { kind: "noCarrier" } }))
+      (await core.start({ specData: SPEC_DATA, workflowId: WORKFLOW_ID, sentAtMicros: 1n, trace: { kind: "noCarrier" } }))
         .kind,
       "outcome",
     );
@@ -468,7 +475,8 @@ describe("the seat operations", () => {
       "workflows pause",
       "workflows resume",
       "workflows nodeResult",
-      "workflows restart",
+      "workflows prepare",
+      "workflows start",
     ]);
   });
 

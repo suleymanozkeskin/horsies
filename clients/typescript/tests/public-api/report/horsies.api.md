@@ -1954,7 +1954,7 @@ export type LogFieldValue = {
 };
 
 // @public
-export const LOGGER_NAMES: readonly ["horsies.app", "horsies.bridge", "horsies.broker", "horsies.cli", "horsies.codec", "horsies.core", "horsies.db", "horsies.lifecycle", "horsies.listener", "horsies.monitoring", "horsies.scheduler", "horsies.scheduler.state", "horsies.sql", "horsies.web", "horsies.worker", "horsies.workflow.engine", "horsies.workflow.handle", "horsies.workflow.recovery"];
+export const LOGGER_NAMES: readonly ["horsies.app", "horsies.bridge", "horsies.broker", "horsies.cli", "horsies.codec", "horsies.core", "horsies.db", "horsies.lifecycle", "horsies.listener", "horsies.monitoring", "horsies.scheduler", "horsies.scheduler.state", "horsies.sql", "horsies.telemetry", "horsies.web", "horsies.worker", "horsies.workflow.engine", "horsies.workflow.handle", "horsies.workflow.recovery"];
 
 // @public
 export const LOGGER_PARENTS: readonly ["horsies", "horsies.workflow"];

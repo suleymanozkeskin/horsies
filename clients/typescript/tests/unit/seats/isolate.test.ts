@@ -1,8 +1,8 @@
 // The seat isolate side: the providers and `ready`, a provider failure, a run and its result, the reader's input, the
 // seat body observer (enter at the run, end at the main thread's verdict), cancel in a seat (a sync body reads the
 // cell, an async body sees the signal), a cancel of another run, the process events of an isolate (a detached throw in
-// a run, a throw outside every run, an unhandled rejection), and each defect path (to the main thread, then the
-// throw).
+// a run, a throw outside every run, an unhandled rejection), the flush at the child's stop, and each defect path (to
+// the main thread, then the throw).
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -177,6 +177,7 @@ describe("a run in a seat isolate", () => {
           cancelled: () => undefined,
         };
       },
+      flush: async () => undefined,
     };
 
     setSeatBodyObserver(contextOf(app), observer);
@@ -196,6 +197,43 @@ describe("a run in a seat isolate", () => {
     port.deliver(runMessage(7n, "crunch", '{"n":2}', RECORDED));
     await settled();
     assert.equal(outcomes(port).length, 2);
+  });
+});
+
+describe("the flush of a seat isolate", () => {
+  test("flush flushes the seat body observer, then the isolate answers flushed", async () => {
+    const app = seatApp();
+    const flush = Promise.withResolvers<void>();
+
+    setSeatBodyObserver(contextOf(app), {
+      enter: () => ({ run: (call) => call(), thrown: () => undefined, end: () => undefined, cancelled: () => undefined }),
+      flush: async () => flush.promise,
+    });
+
+    const { port } = await served(app);
+
+    port.deliver({ kind: "flush", protocol: 1 });
+    await settled();
+    assert.deepEqual(port.postsOf("flushed"), []);
+    flush.resolve();
+    await settled();
+    assert.deepEqual(port.postsOf("flushed"), [{ kind: "flushed", protocol: 1 }]);
+  });
+
+  test("a flush of the seat body observer that rejects is a defect", async () => {
+    const app = seatApp();
+
+    setSeatBodyObserver(contextOf(app), {
+      enter: () => ({ run: (call) => call(), thrown: () => undefined, end: () => undefined, cancelled: () => undefined }),
+      flush: async () => Promise.reject(new TypeError("the observer broke")),
+    });
+
+    const { port } = await served(app);
+
+    port.deliver({ kind: "flush", protocol: 1 });
+    await settled();
+    assert.match(defects(port)[0] ?? "", /the flush of the seat body observer failed with TypeError: the observer broke/);
+    assert.deepEqual(port.postsOf("flushed"), []);
   });
 });
 
@@ -255,6 +293,7 @@ describe("cancel in a seat", () => {
           causes.push(cause);
         },
       }),
+      flush: async () => undefined,
     };
 
     setSeatBodyObserver(contextOf(app), observer);
@@ -379,6 +418,7 @@ describe("the defects of a seat isolate go to the main thread, then the isolate 
         end: () => undefined,
         cancelled: () => undefined,
       }),
+      flush: async () => undefined,
     });
     app.implement(crunch, () => {
       throw new RangeError("body");

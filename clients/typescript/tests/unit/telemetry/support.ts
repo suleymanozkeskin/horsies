@@ -14,6 +14,7 @@ import {
   TracerProvider,
 } from "@opentelemetry/sdk-trace";
 
+import { type NotMadeSpan, SpansNotMade } from "../../../horsies/src/telemetry/not-made.ts";
 import { type OtelApi, requireOtelApi } from "../../../horsies/src/telemetry/otel-api.ts";
 import { TelemetryWarnings } from "../../../horsies/src/telemetry/warnings.ts";
 
@@ -127,6 +128,36 @@ export function recordedWarnings(): { readonly warnings: TelemetryWarnings; read
   const lines: string[] = [];
 
   return { warnings: new TelemetryWarnings((line) => lines.push(line)), lines };
+}
+
+/** The id of a span that was not made: the workflow id of a start, the task id of the other kinds. */
+function notMadeId(span: NotMadeSpan): string {
+  switch (span.kind) {
+    case "workflowStart":
+      return span.workflowId;
+    case "send":
+    case "attempt":
+    case "seatAttempt":
+    case "workerEnded":
+      return span.taskId;
+    default: {
+      const unexpected: never = span;
+
+      throw new TypeError(`notMadeId: a span outside its type: ${String(unexpected)}`);
+    }
+  }
+}
+
+/** Reports of spans that were not made that the test reads: each written one as `<kind> <id> <cause>`. */
+export function recordedNotMade(): { readonly notMade: SpansNotMade; readonly written: string[] } {
+  const written: string[] = [];
+
+  return {
+    notMade: new SpansNotMade((span, cause) => {
+      written.push(`${span.kind} ${notMadeId(span)} ${cause}`);
+    }),
+    written,
+  };
 }
 
 /** The one span of `spans` named `name`. */

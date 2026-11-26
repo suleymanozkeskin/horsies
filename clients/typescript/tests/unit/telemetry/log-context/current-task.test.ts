@@ -11,7 +11,7 @@ import { taskIdFromCore } from "../../../../horsies/src/contract/ids.ts";
 import type { BodyFactsRecord } from "../../../../horsies/src/native/child/addon.ts";
 import { otelBodyObserver } from "../../../../horsies/src/telemetry/attempt-span.ts";
 import { currentTask, type CurrentTask } from "../../../../horsies/src/telemetry/log-context.ts";
-import { installSdk, loadedApi, onlySpan, recordedWarnings, type TestSdk } from "../support.ts";
+import { installSdk, loadedApi, onlySpan, recordedNotMade, recordedWarnings, type TestSdk } from "../support.ts";
 
 const MARK: RunMark = {
   taskId: taskIdFromCore("0192f6a1-7b3c-7d4e-8f00-0123456789ab", "the currentTask tests"),
@@ -66,7 +66,7 @@ describe("currentTask with tracing", () => {
   });
 
   test("running inside a body, after an await and in a timer, with the ids of the attempt span", async () => {
-    const observer = otelBodyObserver({ api: loadedApi(), parentage: "childOfSend", warnings: recordedWarnings().warnings });
+    const observer = otelBodyObserver({ api: loadedApi(), parentage: "childOfSend", warnings: recordedWarnings().warnings, notMade: recordedNotMade().notMade });
     const seen = await seenInBody(observer, FACTS);
     const { traceId, spanId } = onlySpan(sdk.spans(), "run resize").spanContext();
     const expected: CurrentTask = { kind: "running", ...MARK, span: { kind: "spanIds", traceId, spanId } };
@@ -87,7 +87,7 @@ describe("currentTask with an SDK that gives upper-case hex ids", () => {
   });
 
   test("the span ids are lower-case hex", async () => {
-    const observer = otelBodyObserver({ api: loadedApi(), parentage: "childOfSend", warnings: recordedWarnings().warnings });
+    const observer = otelBodyObserver({ api: loadedApi(), parentage: "childOfSend", warnings: recordedWarnings().warnings, notMade: recordedNotMade().notMade });
     const [seen] = await seenInBody(observer, FACTS);
     const { traceId, spanId } = onlySpan(sdk.spans(), "run resize").spanContext();
 

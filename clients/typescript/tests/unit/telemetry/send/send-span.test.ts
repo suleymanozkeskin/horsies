@@ -15,16 +15,16 @@ import type { OtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import { otelSendObserver } from "../../../../horsies/src/telemetry/send-span.ts";
 import { err, ok } from "../../../../horsies/src/wire/result.ts";
 import { rawEnqueueFailed, TASK_ID } from "../../app/support.ts";
-import { installSdk, loadedApi, onlySpan, recordedWarnings, type TestSdk } from "../support.ts";
+import { installSdk, loadedApi, onlySpan, recordedNotMade, recordedWarnings, type TestSdk } from "../support.ts";
 
 const FACTS = { taskName: "report", queueName: "default", taskId: TASK_ID };
 const SENT: SendCallResult = ok(taskIdFromCore(TASK_ID, "the send span test"));
 const FAILED: SendCallResult = err(sendErrorOfRaw(rawEnqueueFailed("report", false)));
 
-function observerOf(api: OtelApi = loadedApi()): { readonly observer: SendObserver; readonly lines: string[] } {
-  const { warnings, lines } = recordedWarnings();
+function observerOf(api: OtelApi = loadedApi()): { readonly observer: SendObserver; readonly written: string[] } {
+  const { notMade, written } = recordedNotMade();
 
-  return { observer: otelSendObserver({ api, warnings, clock: () => performance.now() }), lines };
+  return { observer: otelSendObserver({ api, warnings: recordedWarnings().warnings, notMade, clock: () => performance.now() }), written };
 }
 
 /** Run one send through `observer`, keeping the trace that the core would get. */
@@ -165,7 +165,7 @@ describe("the send span with no SDK or a broken SDK", () => {
     assert.deepEqual(traces, [{ kind: "noCarrier" }]);
   });
 
-  test("a tracer that throws gives no carrier and one warning; the send result is unchanged", async () => {
+  test("a tracer that throws gives no carrier and one report of a span not made per process; the send result is unchanged", async () => {
     const api = loadedApi();
 
     const broken: OtelApi = {
@@ -178,7 +178,7 @@ describe("the send span with no SDK or a broken SDK", () => {
       },
     };
 
-    const { observer, lines } = observerOf(broken);
+    const { observer, written } = observerOf(broken);
     const traces: TraceArgument[] = [];
 
     for (let send = 0; send < 2; send += 1) {
@@ -192,8 +192,7 @@ describe("the send span with no SDK or a broken SDK", () => {
     }
 
     assert.deepEqual(traces, [{ kind: "noCarrier" }, { kind: "noCarrier" }]);
-    assert.equal(lines.length, 1);
-    assert.match(lines[0] ?? "", /the span of a send did not open.*the SDK is broken/u);
+    assert.deepEqual(written, [`send ${TASK_ID} Error: the SDK is broken`]);
   });
 });
 

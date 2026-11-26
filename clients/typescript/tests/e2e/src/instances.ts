@@ -30,6 +30,15 @@ export const CUSTOM_QUEUES = [
   { name: "low", priority: 100, cap: 20 },
 ] as const;
 
+/**
+ * The queue of the `recovery_queues` instance that runs one task at a time. Its priority 30 is the one of the serial
+ * queue of Python `instance_priority_binding.py`, so a stored priority tells it from the default queue's 1 and from 100.
+ */
+export const SERIAL_QUEUE = { name: "recovery", priority: 30, cap: 1 } as const;
+
+/** The custom queues of the `recovery_queues` instance: name, priority, cap (Rust `RECOVERY_QUEUES`, Python `instance_recovery.py`). */
+export const RECOVERY_QUEUES = [{ name: "default", priority: 1, cap: 5 }, SERIAL_QUEUE] as const;
+
 /** How long a stopping worker of a test profile waits for its tasks. */
 export const TEST_DRAIN_TIMEOUT_MS = 5_000;
 
@@ -75,13 +84,19 @@ export const INSTANCES = [
   // The default tasks with an `AttemptEnded` handler and a handler child start hook (Python
   // `instance_event_handlers.py`).
   "handlers",
-  // The default tasks with OpenTelemetry tracing and a span SDK in each child (Python
-  // `instance_worker_ended_spans.py`).
+  // The default tasks with OpenTelemetry tracing, a span SDK in each child and in each seat isolate, and the thread
+  // profiles (Python `instance_worker_ended_spans.py`).
   "worker_ended_spans",
+  // The custom queues `default` and `recovery` with short heartbeats and stale thresholds (Rust
+  // `Instance::RecoveryQueues`, Python `instance_recovery.py` and `instance_priority_binding.py`).
+  "recovery_queues",
 ] as const;
 
 /** One app instance. */
 export type Instance = (typeof INSTANCES)[number];
+
+/** An instance whose app has the default tasks: every instance but the two of custom queues. */
+export type DefaultTaskInstance = Exclude<Instance, "custom_queues" | "recovery_queues">;
 
 /** The worker profiles that every instance defines (Python `profiles.py`). */
 export const PROFILES = [
@@ -164,7 +179,9 @@ export function instanceConfig(instance: Instance, connection: Connection): AppC
     case "worker_ended_spans":
       return { ...base, tracing: { kind: "otel" } };
     case "custom_queues":
-      return { ...base, queueMode: "custom", customQueues: customQueues() };
+      return { ...base, queueMode: "custom", customQueues: customQueues(CUSTOM_QUEUES) };
+    case "recovery_queues":
+      return { ...base, queueMode: "custom", customQueues: customQueues(RECOVERY_QUEUES), recovery: fastRecovery() };
     case "cluster_cap":
       return { ...base, clusterWideCap: { kind: "cap", tasks: CLUSTER_WIDE_CAP } };
     case "recovery":
@@ -213,13 +230,16 @@ function brokerOf(connection: Connection): BrokerConfigInput {
   }
 }
 
-function customQueues(): readonly [CustomQueueInput, ...CustomQueueInput[]] {
-  const [first, ...rest] = CUSTOM_QUEUES.map(
+/** A queue of a custom queue instance: name, priority, cap. */
+type QueueEntry = { readonly name: string; readonly priority: number; readonly cap: number };
+
+function customQueues(queues: readonly QueueEntry[]): readonly [CustomQueueInput, ...CustomQueueInput[]] {
+  const [first, ...rest] = queues.map(
     (queue): CustomQueueInput => ({ name: queue.name, priority: queue.priority, maxConcurrency: { kind: "cap", tasks: queue.cap } }),
   );
 
   if (first === undefined) {
-    throw new TypeError("CUSTOM_QUEUES is empty");
+    throw new TypeError("customQueues: the queue list is empty");
   }
 
   return [first, ...rest];
@@ -229,19 +249,22 @@ function customQueues(): readonly [CustomQueueInput, ...CustomQueueInput[]] {
  * Python `instance_recovery.py`: 1 s heartbeats and checks, the smallest stale thresholds that the validation admits,
  * and a worker state snapshot each second.
  */
+export const FAST_RECOVERY = {
+  runnerHeartbeatIntervalMs: 1_000,
+  claimerHeartbeatIntervalMs: 1_000,
+  runningStaleThresholdMs: 6_000,
+  claimedStaleThresholdMs: 2_000,
+  crashedWorkerRecoveryGraceMs: 2_000,
+  checkIntervalMs: 1_000,
+  workerStateSnapshotIntervalMs: 1_000,
+} as const satisfies RecoveryConfigInput;
+
+/** The recovery settings `FAST_RECOVERY`. Pure. */
 export function fastRecovery(): RecoveryConfigInput {
-  return {
-    runnerHeartbeatIntervalMs: 1_000,
-    claimerHeartbeatIntervalMs: 1_000,
-    runningStaleThresholdMs: 6_000,
-    claimedStaleThresholdMs: 2_000,
-    crashedWorkerRecoveryGraceMs: 2_000,
-    checkIntervalMs: 1_000,
-    workerStateSnapshotIntervalMs: 1_000,
-  };
+  return FAST_RECOVERY;
 }
 
-/** The profiles of `instance`: every `Profile`, and the thread profiles for `thread_profiles`. */
+/** The profiles of `instance`: every `Profile`, and the thread profiles for `thread_profiles` and `worker_ended_spans`. */
 function workerProfiles(instance: Instance): Readonly<Record<string, WorkerProfileInput>> {
   const profiles: Record<string, WorkerProfileInput> = {};
 
@@ -249,7 +272,7 @@ function workerProfiles(instance: Instance): Readonly<Record<string, WorkerProfi
     profiles[profile] = workerProfile(profile);
   }
 
-  if (instance === "thread_profiles") {
+  if (instance === "thread_profiles" || instance === "worker_ended_spans") {
     for (const profile of THREAD_PROFILES) {
       profiles[profile] = threadProfile(profile);
     }
