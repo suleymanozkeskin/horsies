@@ -305,6 +305,18 @@ impl TaskListQuery {
         self.limit = limit;
         Ok(self)
     }
+
+    /// The first row of the page, counted from 0: the default of
+    /// [`TaskListQuery::new`] or the value of `with_pagination`. Pure.
+    pub fn offset(&self) -> i64 {
+        self.offset
+    }
+
+    /// The most rows of the page: the default of [`TaskListQuery::new`] or
+    /// the value of `with_pagination`. Pure.
+    pub fn limit(&self) -> i64 {
+        self.limit
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

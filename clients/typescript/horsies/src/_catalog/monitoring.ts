@@ -16,3 +16,9 @@ export const TaskActionErrorCode = {
 } as const;
 
 export type TaskActionErrorCode = (typeof TaskActionErrorCode)[keyof typeof TaskActionErrorCode];
+
+export const MonitoringQueryRefusalCode = {
+  QUERY_REFUSED: "QUERY_REFUSED",
+} as const;
+
+export type MonitoringQueryRefusalCode = (typeof MonitoringQueryRefusalCode)[keyof typeof MonitoringQueryRefusalCode];

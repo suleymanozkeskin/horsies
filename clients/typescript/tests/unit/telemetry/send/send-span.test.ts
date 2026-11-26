@@ -31,11 +31,13 @@ function observerOf(api: OtelApi = loadedApi()): { readonly observer: SendObserv
 async function sendThrough(observer: SendObserver, result: SendCallResult): Promise<TraceArgument[]> {
   const traces: TraceArgument[] = [];
 
-  await observer.observeSend(FACTS, async (trace) => {
+  const returned = await observer.observeSend(FACTS, async (trace) => {
     traces.push(trace);
 
     return result;
   });
+
+  assert.equal(returned, result, "the observer gives the result of the send call unchanged");
 
   return traces;
 }
