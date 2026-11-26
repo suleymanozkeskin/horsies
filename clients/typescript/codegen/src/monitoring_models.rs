@@ -10,14 +10,11 @@
 //!   (`kind`) holds the variant's tag text in camelCase (`not_recorded` gives
 //!   `"notRecorded"`). An enum is a union of its texts, which keep the core's
 //!   spelling.
-//! - The contract gives no name to a model, a union or an enum inside a
-//!   field. Its type name is the name of the type that holds the field, then
-//!   the field key in PascalCase (`TaskAttemptInfo.phases` gives
-//!   `TaskAttemptInfoPhases`). The interface of a variant is the union name,
-//!   then the tag text in PascalCase (`TaskAttemptInfoPhasesNotCaptured`). A
-//!   list, a map and a nullable value add nothing to the name. Each inline
-//!   copy of a kind gets its own name; two copies give two types with the
-//!   same members.
+//! - Each model, union, variant and enum has the name that the contract
+//!   gives it: the name of its Python and Rust type (`AttemptPhasesInfo`),
+//!   the Python class name for a variant (`PhasesNotCapturedInfo`). A type
+//!   that several fields hold is rendered once; two kinds of one name with
+//!   different shapes are a defect of the contract.
 //! - `string` and `uuid` are `string`; `integer` and `number` are `number`;
 //!   `boolean` is `boolean`; `date-time` is `Temporal.Instant`. A nullable
 //!   kind is `T | null`, a list `ReadonlyArray<T>`, a map
@@ -26,7 +23,10 @@
 //! Decoders: one exported `decode<Model>(value: WireJson):
 //! DecodeResult<Model, MonitoringDecodeError>` per model, over the lossless
 //! `WireJson` tree (integers are `bigint`, floats `number`, objects `Map`).
-//! The decode rules, in the fixed text of [`decode_support`]:
+//! It reads the input at the place `$` of the model. Each named type has a
+//! module-private `read<Name>` decoder of a value at a place of the input;
+//! the one of a variant reads the fields that its union read. The decode
+//! rules, in the fixed text of [`decode_support`]:
 //!
 //! - A key of the contract that is not in the object is `fieldMissing`; a
 //!   key that the contract does not have is `fieldUnknown`. The core writes
@@ -49,7 +49,7 @@
 mod contract;
 mod decode_support;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use contract::{
     parse_contract, ContractField, ContractKind, ContractModel, ContractVariant, LeafKind,
@@ -57,8 +57,7 @@ use contract::{
 
 use crate::output::{catalog_file, GeneratedFile};
 use crate::ts_text::{
-    camel_case_of_snake, import_types, is_identifier, module_text, pascal_case_of_snake,
-    string_literal, union_alias,
+    camel_case_of_snake, import_types, is_identifier, module_text, string_literal, union_alias,
 };
 use crate::wire_json::WIRE_JSON_MODULE;
 
@@ -74,7 +73,8 @@ const MODEL_NAME_COMMENT: &str = "/** The models of the core's monitoring JSON. 
 
 /// The names that a rendered type must not take: the types of the fixed
 /// text, the global types that the module uses, and the names whose
-/// decoder would be a leaf decoder of the fixed text (`decodeString`).
+/// decoder would be a function of the fixed text (`decodeString`,
+/// `readObject`).
 const RESERVED_TYPE_NAMES: &[&str] = &[
     "DecodeResult",
     "WireJson",
@@ -101,6 +101,7 @@ const RESERVED_TYPE_NAMES: &[&str] = &[
     "Map",
     "Set",
     "Extract",
+    "Object",
     "String",
     "Boolean",
     "Number",
@@ -115,7 +116,8 @@ const RESERVED_TYPE_NAMES: &[&str] = &[
 enum RecordPlace<'a> {
     /// A model of the contract: the module exports its decoder.
     Model,
-    /// A model in a field of another type.
+    /// A model in a field of another type that is not a model of the
+    /// contract.
     Nested,
     /// A variant of the union with the tag field `tag`; the tag member
     /// holds `tag_value` in camelCase.
@@ -150,8 +152,8 @@ impl NamedType<'_> {
     }
 }
 
-/// What a decoder takes. It decides the parameters of the decoder and
-/// whether the module exports it.
+/// What a decoder takes. It decides the name and the parameters of the
+/// decoder and whether the module exports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DecoderInput {
     /// The whole input: the exported decoder of a model.
@@ -160,6 +162,22 @@ enum DecoderInput {
     AtPlace,
     /// The fields of an object that a union decoder read for a variant.
     VariantFields,
+}
+
+/// Whether [`TypeWalk::push_new`] added a type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pushed {
+    /// No type had the name: the type is added.
+    New,
+    /// A type of the name and the same shape is known.
+    Known,
+}
+
+/// The walk of [`named_types`]: the fields of each model of the contract by
+/// name, and the types found so far.
+struct TypeWalk<'a> {
+    models: BTreeMap<&'a str, &'a [ContractField]>,
+    types: Vec<NamedType<'a>>,
 }
 
 /// The files of the monitoring read types, in a fixed order:
@@ -202,79 +220,127 @@ fn model_name_union(models: &[ContractModel]) -> String {
     )
 }
 
-/// Every named type of `models`: each model, then the types in its fields,
-/// depth first, in contract order. Pure. The walk is as deep as the
-/// contract, which [`parse_contract`] bounds.
+/// Every named type of `models`, once: each model, then the types in its
+/// fields that no earlier type gave, depth first, in contract order. A
+/// model of the contract in a field of another type is not walked there:
+/// its own turn renders it. Pure. The walk is as deep as the contract,
+/// which [`parse_contract`] bounds.
 ///
-/// A type name or a member name that is not an identifier, a type name of
-/// [`RESERVED_TYPE_NAMES`], and a name given twice are defects: the render
-/// panics.
+/// One name for two shapes, a type name or a member name that is not an
+/// identifier, and a type name of [`RESERVED_TYPE_NAMES`] are defects: the
+/// render panics.
 fn named_types(models: &[ContractModel]) -> Vec<NamedType<'_>> {
-    let mut types = Vec::new();
+    let mut walk = TypeWalk {
+        models: models
+            .iter()
+            .map(|model| (model.name.as_str(), model.fields.as_slice()))
+            .collect(),
+        types: Vec::new(),
+    };
     for model in models {
-        types.push(NamedType::Record {
+        walk.types.push(NamedType::Record {
             name: model.name.clone(),
             fields: &model.fields,
             place: RecordPlace::Model,
         });
-        push_field_types(&model.name, &model.fields, &mut types);
+        walk.push_field_types(&model.fields);
     }
-    assert_names_distinct(&types);
-    types
+    assert_names_distinct(&walk.types);
+    walk.types
 }
 
-/// Push the named types in `fields` of the type `owner`.
-fn push_field_types<'a>(owner: &str, fields: &'a [ContractField], types: &mut Vec<NamedType<'a>>) {
-    for field in fields {
-        push_kind_types(&nested_type_name(owner, &field.key), &field.kind, types);
+impl<'a> TypeWalk<'a> {
+    /// Push the named types in `fields` that are not known.
+    fn push_field_types(&mut self, fields: &'a [ContractField]) {
+        for field in fields {
+            self.push_kind_types(&field.kind);
+        }
     }
-}
 
-/// Push the named types of `kind`, whose type name is `name`.
-fn push_kind_types<'a>(name: &str, kind: &'a ContractKind, types: &mut Vec<NamedType<'a>>) {
-    match kind {
-        ContractKind::Leaf(_) => {}
-        ContractKind::Nullable(inner) | ContractKind::List(inner) | ContractKind::Map(inner) => {
-            push_kind_types(name, inner, types);
-        }
-        ContractKind::Enum(values) => types.push(NamedType::Enum {
-            name: name.to_owned(),
-            values,
-        }),
-        ContractKind::Model(fields) => {
-            types.push(NamedType::Record {
-                name: name.to_owned(),
-                fields,
-                place: RecordPlace::Nested,
-            });
-            push_field_types(name, fields, types);
-        }
-        ContractKind::Union { tag, variants } => {
-            types.push(NamedType::Union {
-                name: name.to_owned(),
+    /// Push the named types of `kind` that are not known. A model of the
+    /// contract must have the fields of the contract's model.
+    fn push_kind_types(&mut self, kind: &'a ContractKind) {
+        match kind {
+            ContractKind::Leaf(_) => {}
+            ContractKind::Nullable(inner)
+            | ContractKind::List(inner)
+            | ContractKind::Map(inner) => {
+                self.push_kind_types(inner);
+            }
+            ContractKind::Enum { name, values } => {
+                let _pushed = self.push_new(NamedType::Enum {
+                    name: name.clone(),
+                    values,
+                });
+            }
+            ContractKind::Model { name, fields } => match self.models.get(name.as_str()) {
+                Some(model_fields) => assert_eq!(
+                    *model_fields,
+                    fields.as_slice(),
+                    "the contract gives the model {name} two shapes"
+                ),
+                None => self.push_record(name, fields, RecordPlace::Nested),
+            },
+            ContractKind::Union {
+                name,
                 tag,
                 variants,
-            });
-            for variant in variants {
-                let variant_name = nested_type_name(name, &variant.tag_value);
-                types.push(NamedType::Record {
-                    name: variant_name.clone(),
-                    fields: &variant.fields,
-                    place: RecordPlace::Variant {
-                        tag,
-                        tag_value: &variant.tag_value,
-                    },
-                });
-                push_field_types(&variant_name, &variant.fields, types);
+            } => match self.push_new(NamedType::Union {
+                name: name.clone(),
+                tag,
+                variants,
+            }) {
+                Pushed::New => {
+                    for variant in variants {
+                        let place = RecordPlace::Variant {
+                            tag,
+                            tag_value: &variant.tag_value,
+                        };
+                        self.push_record(&variant.name, &variant.fields, place);
+                    }
+                }
+                Pushed::Known => {}
+            },
+        }
+    }
+
+    /// Push the record `name` and the types of its fields, unless the
+    /// record is known.
+    fn push_record(&mut self, name: &str, fields: &'a [ContractField], place: RecordPlace<'a>) {
+        let record = NamedType::Record {
+            name: name.to_owned(),
+            fields,
+            place,
+        };
+        match self.push_new(record) {
+            Pushed::New => self.push_field_types(fields),
+            Pushed::Known => {}
+        }
+    }
+
+    /// Add `named` when no type has its name. A known name must have the
+    /// same shape: two shapes of one name are a defect.
+    fn push_new(&mut self, named: NamedType<'a>) -> Pushed {
+        match self
+            .types
+            .iter()
+            .position(|known| known.name() == named.name())
+        {
+            Some(index) => {
+                assert_eq!(
+                    self.types[index],
+                    named,
+                    "the contract gives the type {} two shapes",
+                    named.name()
+                );
+                Pushed::Known
+            }
+            None => {
+                self.types.push(named);
+                Pushed::New
             }
         }
     }
-}
-
-/// The type name of the part `snake_part` of the type `owner`: a field key
-/// or a variant tag, in PascalCase after the owner's name. Pure.
-fn nested_type_name(owner: &str, snake_part: &str) -> String {
-    format!("{owner}{}", pascal_case_of_snake(snake_part))
 }
 
 /// Assert that every type name is an identifier, is not reserved and is
@@ -345,7 +411,7 @@ fn type_section(named: &NamedType<'_>) -> String {
         NamedType::Union { name, variants, .. } => {
             let members: Vec<String> = variants
                 .iter()
-                .map(|variant| nested_type_name(name, &variant.tag_value))
+                .map(|variant| variant.name.clone())
                 .collect();
             union_alias(name, &members)
         }
@@ -370,26 +436,23 @@ fn record_interface(name: &str, fields: &[ContractField], place: RecordPlace<'_>
         lines.push(format!(
             "  readonly {}: {};",
             camel_case_of_snake(&field.key),
-            type_expression(&nested_type_name(name, &field.key), &field.kind)
+            type_expression(&field.kind)
         ));
     }
     lines.push("}".to_owned());
     lines.join("\n")
 }
 
-/// The TypeScript type of `kind`, whose type name is `name` when the kind
-/// is named. Pure.
-fn type_expression(name: &str, kind: &ContractKind) -> String {
+/// The TypeScript type of `kind`. Pure.
+fn type_expression(kind: &ContractKind) -> String {
     match kind {
         ContractKind::Leaf(leaf) => leaf_type(*leaf).to_owned(),
-        ContractKind::Nullable(inner) => format!("{} | null", type_expression(name, inner)),
-        ContractKind::List(inner) => format!("ReadonlyArray<{}>", type_expression(name, inner)),
-        ContractKind::Map(inner) => {
-            format!("ReadonlyMap<string, {}>", type_expression(name, inner))
-        }
-        ContractKind::Enum(_) | ContractKind::Model(_) | ContractKind::Union { .. } => {
-            name.to_owned()
-        }
+        ContractKind::Nullable(inner) => format!("{} | null", type_expression(inner)),
+        ContractKind::List(inner) => format!("ReadonlyArray<{}>", type_expression(inner)),
+        ContractKind::Map(inner) => format!("ReadonlyMap<string, {}>", type_expression(inner)),
+        ContractKind::Enum { name, .. }
+        | ContractKind::Model { name, .. }
+        | ContractKind::Union { name, .. } => name.clone(),
     }
 }
 
@@ -403,17 +466,17 @@ fn leaf_type(leaf: LeafKind) -> &'static str {
     }
 }
 
-/// The decoder of `kind`, whose type name is `name` when the kind is named:
-/// a decoder function, or a call that builds one. Pure.
-fn decoder_expression(name: &str, kind: &ContractKind) -> String {
+/// The decoder of `kind` at a place: a decoder function, or a call that
+/// builds one. Pure.
+fn decoder_expression(kind: &ContractKind) -> String {
     match kind {
         ContractKind::Leaf(leaf) => leaf_decoder(*leaf).to_owned(),
-        ContractKind::Nullable(inner) => format!("nullableOf({})", decoder_expression(name, inner)),
-        ContractKind::List(inner) => format!("listOf({})", decoder_expression(name, inner)),
-        ContractKind::Map(inner) => format!("mapOf({})", decoder_expression(name, inner)),
-        ContractKind::Enum(_) | ContractKind::Model(_) | ContractKind::Union { .. } => {
-            format!("decode{name}")
-        }
+        ContractKind::Nullable(inner) => format!("nullableOf({})", decoder_expression(inner)),
+        ContractKind::List(inner) => format!("listOf({})", decoder_expression(inner)),
+        ContractKind::Map(inner) => format!("mapOf({})", decoder_expression(inner)),
+        ContractKind::Enum { name, .. }
+        | ContractKind::Model { name, .. }
+        | ContractKind::Union { name, .. } => format!("read{name}"),
     }
 }
 
@@ -429,14 +492,29 @@ fn leaf_decoder(leaf: LeafKind) -> &'static str {
     }
 }
 
-/// The decoder function of `named`. Pure.
+/// The decoder functions of `named`: for a model, its exported decoder and
+/// its decoder at a place. Pure.
 fn decoder_section(named: &NamedType<'_>) -> String {
     match named {
         NamedType::Record {
             name,
             fields,
-            place,
-        } => record_decoder(name, fields, *place),
+            place: RecordPlace::Model,
+        } => format!(
+            "{}\n\n{}",
+            model_decoder(name),
+            object_decoder(name, fields, RecordPlace::Model)
+        ),
+        NamedType::Record {
+            name,
+            fields,
+            place: place @ RecordPlace::Nested,
+        } => object_decoder(name, fields, *place),
+        NamedType::Record {
+            name,
+            fields,
+            place: place @ RecordPlace::Variant { .. },
+        } => variant_decoder(name, fields, *place),
         NamedType::Union {
             name,
             tag,
@@ -450,61 +528,68 @@ fn decoder_section(named: &NamedType<'_>) -> String {
 /// per line. Pure.
 fn decoder_head(name: &str, input: DecoderInput) -> String {
     let (keyword, parameters) = match input {
-        DecoderInput::Whole => ("export function", "  value: WireJson,\n"),
-        DecoderInput::AtPlace => ("function", "  value: WireJson,\n  place: DecodePlace,\n"),
-        DecoderInput::VariantFields => ("function", "  fields: FieldReader,\n"),
+        DecoderInput::Whole => ("export function decode", "  value: WireJson,\n"),
+        DecoderInput::AtPlace => (
+            "function read",
+            "  value: WireJson,\n  place: DecodePlace,\n",
+        ),
+        DecoderInput::VariantFields => ("function read", "  fields: FieldReader,\n"),
     };
-    format!(
-        "{keyword} decode{name}(\n{parameters}): DecodeResult<{name}, MonitoringDecodeError> {{"
-    )
+    format!("{keyword}{name}(\n{parameters}): DecodeResult<{name}, MonitoringDecodeError> {{")
 }
 
-/// The decoder of the record `name`. Pure.
-fn record_decoder(name: &str, fields: &[ContractField], place: RecordPlace<'_>) -> String {
-    let mut lines = Vec::new();
-    match place {
-        RecordPlace::Model => {
-            lines.push(decoder_head(name, DecoderInput::Whole));
-            let root = format!("{{ model: {}, path: \"$\" }}", string_literal(name));
-            lines.extend(read_object_lines(&root));
-            lines.extend(record_body(name, fields, place, "fields.value"));
-        }
-        RecordPlace::Nested => {
-            lines.push(decoder_head(name, DecoderInput::AtPlace));
-            lines.extend(read_object_lines("place"));
-            lines.extend(record_body(name, fields, place, "fields.value"));
-        }
-        RecordPlace::Variant { .. } => {
-            lines.push(decoder_head(name, DecoderInput::VariantFields));
-            lines.extend(record_body(name, fields, place, "fields"));
-        }
-    }
+/// The exported decoder of the model `name`: its decoder at the place `$`
+/// of the model. Pure.
+fn model_decoder(name: &str) -> String {
+    [
+        decoder_head(name, DecoderInput::Whole),
+        format!(
+            "  return read{name}(value, {{ model: {}, path: \"$\" }});",
+            string_literal(name)
+        ),
+        "}".to_owned(),
+    ]
+    .join("\n")
+}
+
+/// The decoder of the record `name` at a place: it reads the value as an
+/// object. Pure.
+fn object_decoder(name: &str, fields: &[ContractField], place: RecordPlace<'_>) -> String {
+    let mut lines = vec![decoder_head(name, DecoderInput::AtPlace)];
+    lines.extend(read_object_lines());
+    lines.extend(record_body(fields, place, "fields.value"));
     lines.push("}".to_owned());
     lines.join("\n")
 }
 
-/// The lines that read the input value of a decoder as an object at the
-/// place `place_expression`, and return a refusal. Pure.
-fn read_object_lines(place_expression: &str) -> Vec<String> {
-    vec![
-        format!("  const fields = readObject(value, {place_expression});"),
-        String::new(),
-        "  if (!fields.ok) {".to_owned(),
-        "    return fields;".to_owned(),
-        "  }".to_owned(),
-        String::new(),
-    ]
+/// The decoder of the variant `name`: it reads the fields that its union
+/// read. Pure.
+fn variant_decoder(name: &str, fields: &[ContractField], place: RecordPlace<'_>) -> String {
+    let mut lines = vec![decoder_head(name, DecoderInput::VariantFields)];
+    lines.extend(record_body(fields, place, "fields"));
+    lines.push("}".to_owned());
+    lines.join("\n")
 }
 
-/// The lines that decode the fields of the record `name` through the field
-/// reader `reader`, refuse an unknown key and return the frozen record.
-/// Pure.
-fn record_body(
-    name: &str,
-    fields: &[ContractField],
-    place: RecordPlace<'_>,
-    reader: &str,
-) -> Vec<String> {
+/// The lines that read the input value of a decoder as an object at its
+/// place, and return a refusal. Pure.
+fn read_object_lines() -> Vec<String> {
+    Vec::from(
+        [
+            "  const fields = readObject(value, place);",
+            "",
+            "  if (!fields.ok) {",
+            "    return fields;",
+            "  }",
+            "",
+        ]
+        .map(str::to_owned),
+    )
+}
+
+/// The lines that decode `fields` through the field reader `reader`, refuse
+/// an unknown key and return the frozen record. Pure.
+fn record_body(fields: &[ContractField], place: RecordPlace<'_>, reader: &str) -> Vec<String> {
     let mut lines = Vec::new();
     if !fields.is_empty() {
         lines.push("  const results = {".to_owned());
@@ -513,7 +598,7 @@ fn record_body(
                 "    {}: {reader}.read({}, {}),",
                 camel_case_of_snake(&field.key),
                 string_literal(&field.key),
-                decoder_expression(&nested_type_name(name, &field.key), &field.kind)
+                decoder_expression(&field.kind)
             ));
         }
         lines.extend(
@@ -557,7 +642,7 @@ fn record_body(
 fn union_decoder(name: &str, tag: &str, variants: &[ContractVariant]) -> String {
     let tag_key = string_literal(tag);
     let mut lines = vec![decoder_head(name, DecoderInput::AtPlace)];
-    lines.extend(read_object_lines("place"));
+    lines.extend(read_object_lines());
     lines.extend([
         format!("  const tag = fields.value.read({tag_key}, decodeString);"),
         String::new(),
@@ -569,10 +654,7 @@ fn union_decoder(name: &str, tag: &str, variants: &[ContractVariant]) -> String 
     ]);
     for variant in variants {
         lines.push(format!("    case {}:", string_literal(&variant.tag_value)));
-        lines.push(format!(
-            "      return decode{}(fields.value);",
-            nested_type_name(name, &variant.tag_value)
-        ));
+        lines.push(format!("      return read{}(fields.value);", variant.name));
     }
     lines.push("    default:".to_owned());
     lines.push(format!(
@@ -627,6 +709,14 @@ mod tests {
             .collect()
     }
 
+    /// The type names of the contract `text`, in module order.
+    fn names_of(text: &str) -> Vec<String> {
+        rendered(text)
+            .into_iter()
+            .map(|(name, _, _)| name)
+            .collect()
+    }
+
     /// The type text and the decoder text of the one named type `name`.
     fn texts_of(rendered: &[(String, String, String)], name: &str) -> (String, String) {
         let (_, type_text, decoder_text) = rendered
@@ -636,10 +726,23 @@ mod tests {
         (type_text.clone(), decoder_text.clone())
     }
 
+    /// A contract with the union `State` of the variants `Named` and
+    /// `NotRecorded`.
+    const UNION_CONTRACT: &str = r#"{"Sample": {"state": {"union": {"name": "State", "tag": "kind",
+        "variants": {"named": {"fields": {"name": "string"}, "name": "Named"},
+        "not_recorded": {"fields": {}, "name": "NotRecorded"}}}}}}"#;
+
     const SAMPLE_COUNT_DECODER: &str = r#"export function decodeSample(
   value: WireJson,
 ): DecodeResult<Sample, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "Sample", path: "$" });
+  return readSample(value, { model: "Sample", path: "$" });
+}
+
+function readSample(
+  value: WireJson,
+  place: DecodePlace,
+): DecodeResult<Sample, MonitoringDecodeError> {
+  const fields = readObject(value, place);
 
   if (!fields.ok) {
     return fields;
@@ -673,11 +776,12 @@ mod tests {
                 "ok": "boolean", "share": "number"}}"#,
         );
 
+        let (type_text, decoder_text) = texts_of(&rendered, "Sample");
+
         assert_eq!(rendered.len(), 1);
         assert_eq!(
-            texts_of(&rendered, "Sample"),
-            (
-                r#"export interface Sample {
+            type_text,
+            r#"export interface Sample {
   readonly at: Temporal.Instant;
   readonly count: number;
   readonly id: string;
@@ -685,17 +789,10 @@ mod tests {
   readonly ok: boolean;
   readonly share: number;
 }"#
-                .to_owned(),
-                r#"export function decodeSample(
-  value: WireJson,
-): DecodeResult<Sample, MonitoringDecodeError> {
-  const fields = readObject(value, { model: "Sample", path: "$" });
-
-  if (!fields.ok) {
-    return fields;
-  }
-
-  const results = {
+        );
+        assert!(
+            decoder_text.contains(
+                r#"  const results = {
     at: fields.value.read("at", decodeDateTime),
     count: fields.value.read("count", decodeInteger),
     id: fields.value.read("id", decodeUuid),
@@ -703,19 +800,13 @@ mod tests {
     ok: fields.value.read("ok", decodeBoolean),
     share: fields.value.read("share", decodeNumber),
   };
-
-  if (!allDecoded(results)) {
-    return firstFailure(results);
-  }
-
-  const unread = fields.value.unread();
-
-  if (!unread.ok) {
-    return unread;
-  }
-
-  return ok(
-    Object.freeze({
+"#
+            ),
+            "{decoder_text}"
+        );
+        assert!(
+            decoder_text.contains(
+                r#"    Object.freeze({
       at: results.at.value,
       count: results.count.value,
       id: results.id.value,
@@ -723,11 +814,17 @@ mod tests {
       ok: results.ok.value,
       share: results.share.value,
     }),
-  );
-}"#
-                .to_owned(),
-            )
+"#
+            ),
+            "{decoder_text}"
         );
+    }
+
+    #[test]
+    fn a_model_has_an_exported_decoder_that_reads_at_the_place_of_the_model() {
+        let rendered = rendered(r#"{"Sample": {"count": "integer"}}"#);
+
+        assert_eq!(texts_of(&rendered, "Sample").1, SAMPLE_COUNT_DECODER);
     }
 
     #[test]
@@ -765,20 +862,21 @@ mod tests {
 
     #[test]
     fn an_enum_is_a_union_of_its_texts_with_a_switch_decoder() {
-        let rendered =
-            rendered(r#"{"Sample": {"mode": {"enum": ["SHARED_ASYNC", "all_serving"]}}}"#);
+        let rendered = rendered(
+            r#"{"Sample": {"mode": {"enum": {"name": "Mode", "values": ["SHARED_ASYNC", "all_serving"]}}}}"#,
+        );
 
         assert_eq!(
-            texts_of(&rendered, "SampleMode"),
+            texts_of(&rendered, "Mode"),
             (
-                r#"export type SampleMode =
+                r#"export type Mode =
   | "SHARED_ASYNC"
   | "all_serving";"#
                     .to_owned(),
-                r#"function decodeSampleMode(
+                r#"function readMode(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<SampleMode, MonitoringDecodeError> {
+): DecodeResult<Mode, MonitoringDecodeError> {
   switch (value) {
     case "SHARED_ASYNC":
     case "all_serving":
@@ -792,38 +890,27 @@ mod tests {
         );
         assert!(texts_of(&rendered, "Sample")
             .0
-            .contains("  readonly mode: SampleMode;\n"));
+            .contains("  readonly mode: Mode;\n"));
     }
 
     #[test]
     fn a_union_has_one_interface_per_variant_with_its_tag_in_camel_case() {
-        let rendered = rendered(
-            r#"{"Sample": {"state": {"union": {"tag": "kind", "variants": {
-                "named": {"name": "string"}, "not_recorded": {}}}}}}"#,
-        );
+        let rendered = rendered(UNION_CONTRACT);
 
         let names: Vec<&str> = rendered.iter().map(|(name, _, _)| name.as_str()).collect();
 
+        assert_eq!(names, ["Sample", "State", "Named", "NotRecorded"]);
         assert_eq!(
-            names,
-            [
-                "Sample",
-                "SampleState",
-                "SampleStateNamed",
-                "SampleStateNotRecorded"
-            ]
-        );
-        assert_eq!(
-            texts_of(&rendered, "SampleState"),
+            texts_of(&rendered, "State"),
             (
-                r#"export type SampleState =
-  | SampleStateNamed
-  | SampleStateNotRecorded;"#
+                r#"export type State =
+  | Named
+  | NotRecorded;"#
                     .to_owned(),
-                r#"function decodeSampleState(
+                r#"function readState(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<SampleState, MonitoringDecodeError> {
+): DecodeResult<State, MonitoringDecodeError> {
   const fields = readObject(value, place);
 
   if (!fields.ok) {
@@ -838,9 +925,9 @@ mod tests {
 
   switch (tag.value) {
     case "named":
-      return decodeSampleStateNamed(fields.value);
+      return readNamed(fields.value);
     case "not_recorded":
-      return decodeSampleStateNotRecorded(fields.value);
+      return readNotRecorded(fields.value);
     default:
       return tagUnknown(fields.value, "kind", tag.value);
   }
@@ -852,22 +939,19 @@ mod tests {
 
     #[test]
     fn a_variant_decodes_the_fields_that_its_union_read() {
-        let rendered = rendered(
-            r#"{"Sample": {"state": {"union": {"tag": "kind", "variants": {
-                "named": {"name": "string"}, "not_recorded": {}}}}}}"#,
-        );
+        let rendered = rendered(UNION_CONTRACT);
 
         assert_eq!(
-            texts_of(&rendered, "SampleStateNamed"),
+            texts_of(&rendered, "Named"),
             (
-                r#"export interface SampleStateNamed {
+                r#"export interface Named {
   readonly kind: "named";
   readonly name: string;
 }"#
                 .to_owned(),
-                r#"function decodeSampleStateNamed(
+                r#"function readNamed(
   fields: FieldReader,
-): DecodeResult<SampleStateNamed, MonitoringDecodeError> {
+): DecodeResult<Named, MonitoringDecodeError> {
   const results = {
     name: fields.read("name", decodeString),
   };
@@ -896,21 +980,18 @@ mod tests {
 
     #[test]
     fn a_variant_without_fields_holds_only_its_tag() {
-        let rendered = rendered(
-            r#"{"Sample": {"state": {"union": {"tag": "kind", "variants": {
-                "named": {"name": "string"}, "not_recorded": {}}}}}}"#,
-        );
+        let rendered = rendered(UNION_CONTRACT);
 
         assert_eq!(
-            texts_of(&rendered, "SampleStateNotRecorded"),
+            texts_of(&rendered, "NotRecorded"),
             (
-                r#"export interface SampleStateNotRecorded {
+                r#"export interface NotRecorded {
   readonly kind: "notRecorded";
 }"#
                 .to_owned(),
-                r#"function decodeSampleStateNotRecorded(
+                r#"function readNotRecorded(
   fields: FieldReader,
-): DecodeResult<SampleStateNotRecorded, MonitoringDecodeError> {
+): DecodeResult<NotRecorded, MonitoringDecodeError> {
   const unread = fields.unread();
 
   if (!unread.ok) {
@@ -929,29 +1010,63 @@ mod tests {
     }
 
     #[test]
-    fn a_nested_model_takes_the_name_of_its_field_and_decodes_at_its_place() {
-        let rendered = rendered(r#"{"Sample": {"total": {"model": {"count": "integer"}}}}"#);
+    fn a_nested_model_takes_its_contract_name_and_reads_at_its_place() {
+        let rendered = rendered(
+            r#"{"Sample": {"total": {"model": {"fields": {"count": "integer"}, "name": "Counts"}}}}"#,
+        );
 
-        let (type_text, decoder_text) = texts_of(&rendered, "SampleTotal");
+        let (type_text, decoder_text) = texts_of(&rendered, "Counts");
 
         assert_eq!(
             type_text,
-            "export interface SampleTotal {\n  readonly count: number;\n}"
+            "export interface Counts {\n  readonly count: number;\n}"
         );
         assert!(
             decoder_text.starts_with(
-                r#"function decodeSampleTotal(
+                r#"function readCounts(
   value: WireJson,
   place: DecodePlace,
-): DecodeResult<SampleTotal, MonitoringDecodeError> {
+): DecodeResult<Counts, MonitoringDecodeError> {
   const fields = readObject(value, place);
 "#
             ),
             "{decoder_text}"
         );
         assert!(texts_of(&rendered, "Sample")
+            .0
+            .contains("  readonly total: Counts;\n"));
+        assert!(texts_of(&rendered, "Sample")
             .1
-            .contains("    total: fields.value.read(\"total\", decodeSampleTotal),\n"));
+            .contains("    total: fields.value.read(\"total\", readCounts),\n"));
+    }
+
+    #[test]
+    fn a_type_that_two_fields_hold_is_rendered_once() {
+        let names = names_of(
+            r#"{"Sample": {
+                "first": {"model": {"fields": {"count": "integer"}, "name": "Counts"}},
+                "second": {"list": {"model": {"fields": {"count": "integer"}, "name": "Counts"}}}}}"#,
+        );
+
+        assert_eq!(names, ["Sample", "Counts"]);
+    }
+
+    #[test]
+    fn a_model_of_the_contract_in_a_field_is_rendered_at_its_own_turn() {
+        let rendered = rendered(
+            r#"{"Report": {"rows": {"list": {"model": {"fields": {"count": "integer"}, "name": "Row"}}}},
+                "Row": {"count": "integer"}}"#,
+        );
+
+        let names: Vec<&str> = rendered.iter().map(|(name, _, _)| name.as_str()).collect();
+
+        assert_eq!(names, ["Report", "Row"]);
+        assert!(texts_of(&rendered, "Report")
+            .1
+            .contains("    rows: fields.value.read(\"rows\", listOf(readRow)),\n"));
+        assert!(texts_of(&rendered, "Row")
+            .1
+            .starts_with("export function decodeRow(\n"));
     }
 
     #[test]
@@ -991,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn the_nested_types_of_the_core_contract_take_the_names_of_their_paths() {
+    fn the_types_of_the_core_contract_have_their_python_and_rust_names_once() {
         let models = parse_contract(MODEL_CONTRACT);
 
         let names: Vec<String> = named_types(&models)
@@ -999,18 +1114,22 @@ mod tests {
             .map(|named| named.name().to_owned())
             .collect();
 
-        assert_eq!(names.len(), 305);
+        assert_eq!(names.len(), 113);
         for expected in [
-            "TaskAttemptInfoPhases",
-            "TaskAttemptInfoPhasesNotCaptured",
-            "TaskAttemptInfoPhasesCapturedRecordedByWorkerPlacement",
-            "TaskDetailAttempts",
-            "WorkerStateInfoProfileNotRecorded",
-            "BudgetLoadInfoBudget",
-            "WorkflowRunDetailNodesTimingExactSegmentsPhaseClaimedClaimRecordedPlacementPlaced",
+            "TaskAttemptInfo",
+            "AttemptPhasesInfo",
+            "PhasesNotCapturedInfo",
+            "AttemptPlacementInfo",
+            "TimingSegmentInfo",
+            "SnapshotProfileInfo",
+            "Execution",
+            "StreamCoverageInfo",
+            "SlotHealthKind",
+            "TerminalNodeStatus",
         ] {
             assert!(names.iter().any(|name| name == expected), "{expected}");
         }
+        assert!(!names.iter().any(|name| name == "TaskDetailAttempts"));
     }
 
     #[test]
@@ -1028,13 +1147,31 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "the type name ABC is given twice")]
-    fn a_type_name_that_two_paths_give_is_a_defect() {
-        let models = parse_contract(
-            r#"{"A": {"b_c": {"model": {"x": "string"}}}, "AB": {"c": {"model": {"x": "string"}}}}"#,
+    #[should_panic(expected = "the contract gives the type Counts two shapes")]
+    fn a_name_that_two_shapes_give_is_a_defect() {
+        let _names = names_of(
+            r#"{"Sample": {
+                "first": {"model": {"fields": {"count": "integer"}, "name": "Counts"}},
+                "second": {"model": {"fields": {"count": "number"}, "name": "Counts"}}}}"#,
         );
+    }
 
-        let _types = named_types(&models);
+    #[test]
+    #[should_panic(expected = "the contract gives the model Row two shapes")]
+    fn a_model_of_the_contract_with_other_fields_in_a_field_is_a_defect() {
+        let _names = names_of(
+            r#"{"Report": {"row": {"model": {"fields": {"count": "number"}, "name": "Row"}}},
+                "Row": {"count": "integer"}}"#,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "the type name Row is given twice")]
+    fn a_type_name_that_two_kinds_give_is_a_defect() {
+        let _names = names_of(
+            r#"{"Report": {"mode": {"enum": {"name": "Row", "values": ["A"]}}},
+                "Row": {"count": "integer"}}"#,
+        );
     }
 
     #[test]
