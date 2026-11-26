@@ -11,3 +11,9 @@ export const TaskSendErrorCode = {
 } as const;
 
 export type TaskSendErrorCode = (typeof TaskSendErrorCode)[keyof typeof TaskSendErrorCode];
+
+export const SeatRelayCode = {
+  SEAT_RELAY_FULL: "SEAT_RELAY_FULL",
+} as const;
+
+export type SeatRelayCode = (typeof SeatRelayCode)[keyof typeof SeatRelayCode];

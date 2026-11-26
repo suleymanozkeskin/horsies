@@ -1,9 +1,10 @@
 // The core operations of the send and read paths, through the core access of this thread: the addon's producer on a
-// main thread, the relay in a seat isolate. A core operation in any other worker thread is a defect.
+// main thread, the relay in a seat isolate. A core operation in any other worker thread is a defect. In a seat isolate
+// each operation can answer `seatRelayFull`: the relay held its bound and sent nothing.
 
 import { threadId } from "node:worker_threads";
 
-import type { CoreAccess, SeatRelay, SendsSeatOperation, SendsSeatReply } from "../app/core-access.ts";
+import type { CoreAccess, RelayAnswer, SeatRelay, SendsSeatOperation, SendsSeatReply } from "../app/core-access.ts";
 import type {
   EnqueueOutcome,
   EnqueueRequest,
@@ -13,17 +14,34 @@ import type {
   TaskInfoRead,
 } from "../native/sends/addon.ts";
 import type { TraceArgument } from "../native/values/records.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import { AddonOutsideMainThread, ClientDefect } from "../thrown-errors.ts";
 
+/** The answer to a prepare: the core's prepared facts, or the seat relay at its bound (nothing was sent). */
+export type PrepareAnswer = PreparedSend | SeatRelayFullOutcome;
+
+/** The answer to an enqueue: the core's outcome, or the seat relay at its bound (nothing was written). */
+export type EnqueueAnswer = EnqueueOutcome | SeatRelayFullOutcome;
+
+/** The answer to a task info read: the core's read, or the seat relay at its bound (nothing was read). */
+export type TaskInfoAnswer = TaskInfoRead | SeatRelayFullOutcome;
+
 /** The prepared facts of one send of `taskName`. Throws `AddonOutsideMainThread` in a worker thread with no core. */
-export async function prepareSend(core: CoreAccess, taskName: string, facts: SendFacts): Promise<PreparedSend> {
+export async function prepareSend(core: CoreAccess, taskName: string, facts: SendFacts): Promise<PrepareAnswer> {
   switch (core.kind) {
     case "addon":
       return core.producer.prepareSend(taskName, facts);
     case "seatRelay": {
-      const reply = await relayed(core.relay, { kind: "prepareSend", taskName, facts });
+      const answer = await relayed(core.relay, { kind: "prepareSend", taskName, facts });
 
-      return reply.kind === "prepareSend" ? reply.prepared : wrongReply("prepareSend", reply);
+      switch (answer.kind) {
+        case "reply":
+          return answer.reply.kind === "prepareSend" ? answer.reply.prepared : wrongReply("prepareSend", answer.reply);
+        case "seatRelayFull":
+          return answer;
+        default:
+          return unexpectedAccess(answer);
+      }
     }
 
     case "noCore":
@@ -39,14 +57,21 @@ export async function enqueue(
   request: EnqueueRequest,
   sendKind: SendKind,
   trace: TraceArgument,
-): Promise<EnqueueOutcome> {
+): Promise<EnqueueAnswer> {
   switch (core.kind) {
     case "addon":
       return core.producer.enqueue(request, sendKind, trace);
     case "seatRelay": {
-      const reply = await relayed(core.relay, { kind: "enqueue", request, sendKind, trace });
+      const answer = await relayed(core.relay, { kind: "enqueue", request, sendKind, trace });
 
-      return reply.kind === "enqueue" ? reply.outcome : wrongReply("enqueue", reply);
+      switch (answer.kind) {
+        case "reply":
+          return answer.reply.kind === "enqueue" ? answer.reply.outcome : wrongReply("enqueue", answer.reply);
+        case "seatRelayFull":
+          return answer;
+        default:
+          return unexpectedAccess(answer);
+      }
     }
 
     case "noCore":
@@ -57,14 +82,21 @@ export async function enqueue(
 }
 
 /** One task info read. Throws `AddonOutsideMainThread` in a worker thread with no core. */
-export async function taskInfo(core: CoreAccess, taskId: string): Promise<TaskInfoRead> {
+export async function taskInfo(core: CoreAccess, taskId: string): Promise<TaskInfoAnswer> {
   switch (core.kind) {
     case "addon":
       return core.producer.taskInfo(taskId);
     case "seatRelay": {
-      const reply = await relayed(core.relay, { kind: "taskInfo", taskId });
+      const answer = await relayed(core.relay, { kind: "taskInfo", taskId });
 
-      return reply.kind === "taskInfo" ? reply.read : wrongReply("taskInfo", reply);
+      switch (answer.kind) {
+        case "reply":
+          return answer.reply.kind === "taskInfo" ? answer.reply.read : wrongReply("taskInfo", answer.reply);
+        case "seatRelayFull":
+          return answer;
+        default:
+          return unexpectedAccess(answer);
+      }
     }
 
     case "noCore":
@@ -74,7 +106,7 @@ export async function taskInfo(core: CoreAccess, taskId: string): Promise<TaskIn
   }
 }
 
-async function relayed(relay: SeatRelay, operation: SendsSeatOperation): Promise<SendsSeatReply> {
+async function relayed(relay: SeatRelay, operation: SendsSeatOperation): Promise<RelayAnswer<SendsSeatReply>> {
   return relay.request("sends", operation);
 }
 

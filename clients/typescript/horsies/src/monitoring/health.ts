@@ -4,7 +4,7 @@
 //   The database ping reads only.
 // - Expected failures are values: the broker codes that each read lists (`errors.ts`), or `QUERY_REFUSED` for a
 //   worker id that is not well-formed text. A count or threshold outside its rule is the core's `INVALID_INPUT`,
-//   answered before any connect.
+//   answered before any connect. In a `SHARED_THREAD` body, `SEAT_RELAY_FULL` when the seat relay sent nothing.
 
 import type { NativeEnvelope } from "../native/call/envelope.ts";
 import { nativeValueAsync } from "../native/call/envelope.ts";
@@ -12,6 +12,7 @@ import { unreachable } from "../native/call/never.ts";
 import type { HealthAddon, PingTargetArg } from "../native/facades/health.ts";
 import type { NativeCoreHandle } from "../native/handle/addon.ts";
 import type { NativeOutcome, RawCatalogError } from "../native/values/records.ts";
+import type { SeatRelayFull, SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import {
   type HealthInputError,
@@ -41,21 +42,22 @@ import type {
   WorkerStateSnapshot,
 } from "./health-types.ts";
 import { classCoverage, classReport, expiredTaskList, staleTaskList, workerStateSnapshot } from "./health-values.ts";
+import type { RelayedAddon, RelayedPing } from "./seat-calls.ts";
 
 /** The window of a worker ping when the options name none: the default of the Python client. */
 export const DEFAULT_PING_TIMEOUT_MS = 2_000;
 
 /** The addon and the handle that the health reads call. */
 export interface HealthTarget {
-  readonly addon: HealthAddon;
+  readonly addon: RelayedAddon<HealthAddon>;
   readonly handle: NativeCoreHandle;
 }
 
-/** A timed `SELECT 1` round trip: the latency of the database. */
-export async function pingDatabase(handle: NativeCoreHandle): Promise<Result<DatabasePing, PingDatabaseError>> {
+/** A timed `SELECT 1` round trip: the latency of the database. `ping` is the database ping of the app's core handle. */
+export async function pingDatabase(ping: RelayedPing): Promise<Result<DatabasePing, PingDatabaseError>> {
   return healthCall(
     "pingDatabase",
-    () => handle.pingDatabase(),
+    ping,
     (record) => Object.freeze({ ...record }),
     pingDatabaseError,
   );
@@ -192,10 +194,10 @@ export async function readClassReport(target: HealthTarget): Promise<Result<Clas
 /** Call the addon once and give the converted record or the read's error. */
 async function healthCall<Raw, Value, Failure>(
   read: string,
-  answer: () => Promise<NativeEnvelope<NativeOutcome<Raw>>>,
+  answer: () => Promise<NativeEnvelope<NativeOutcome<Raw> | SeatRelayFullOutcome>>,
   convert: (record: Raw) => Value,
   failure: (raw: RawCatalogError) => Failure,
-): Promise<Result<Value, Failure>> {
+): Promise<Result<Value, Failure | SeatRelayFull>> {
   const outcome = await nativeValueAsync(read, answer);
 
   switch (outcome.kind) {
@@ -203,6 +205,8 @@ async function healthCall<Raw, Value, Failure>(
       return ok(convert(outcome.record));
     case "failed":
       return err(failure(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default:
       return unreachable(outcome);
   }

@@ -1,14 +1,16 @@
-// The test helpers: `TaskRuntime.forTest` and `implementation.run` with no worker, no database and no addon; the app
-// members `provide` and `onChildStart` of the hub.
+// The test helpers: `TaskRuntime.forTest` (with and without a workflow context) and `implementation.run` with no
+// worker, no database and no addon; the app members `provide` and `onChildStart` of the hub.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { servedMembers } from "../../../horsies/src/child/app-members.ts";
 import { AttemptNumber } from "../../../horsies/src/child/attempt.ts";
-import { TaskRuntime } from "../../../horsies/src/child/runtime.ts";
+import { TaskRuntime, type WorkflowTaskRuntime } from "../../../horsies/src/child/runtime.ts";
 import { taskIdFromCore } from "../../../horsies/src/contract/ids.ts";
+import { implementationOf } from "../../../horsies/src/contract/implementation.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
+import type { StoredWorkflowContext } from "../../../horsies/src/testing/task-runtime.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { contextOf, testApp } from "../worker/support.ts";
 
@@ -26,6 +28,20 @@ const charge = defineTask({
   cancelGraceMs: 1_000,
 });
 
+/** The task of a context node. */
+const produce = defineTask({ name: "produce", input: {}, output: h.int() });
+
+/** A task that takes the workflow context. */
+const audit = defineTask({ name: "audit", input: {}, output: h.int(), workflowContext: true });
+
+/** The stored form of the context of a node whose `ctxFrom` names the node `produce`, which returned 10. */
+const STORED_CONTEXT: StoredWorkflowContext = {
+  workflow_id: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5d",
+  task_index: 1,
+  task_name: "audit",
+  results_by_id: { produce: { __h_task_result__: true, ok: 10, err: null } },
+};
+
 class CardDeclined extends Error {
   override readonly name = "CardDeclined";
 }
@@ -36,7 +52,7 @@ function attempt(value: number): AttemptNumber {
   return parsed.ok ? parsed.value : assert.fail(parsed.error.reason);
 }
 
-function runtime(): TaskRuntime {
+function runtime(): WorkflowTaskRuntime {
   return TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(3) });
 }
 
@@ -62,6 +78,41 @@ describe("TaskRuntime.forTest", () => {
     assert.deepEqual(forTest.state(pool), { size: 4 });
     assert.equal(forTest.state(region), "eu-1");
     assert.throws(() => forTest.state(other), /belongs to another app/u);
+  });
+
+  test("a stored workflow context is the runtime's context", () => {
+    const forTest = TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(1), workflowContext: STORED_CONTEXT });
+    const context = forTest.workflowContext.kind === "context" ? forTest.workflowContext.context : assert.fail("no context");
+
+    assert.deepEqual([context.taskIndex, context.taskName], [1, "audit"]);
+    assert.deepEqual(context.resultFor("produce", produce), { ok: true, value: { kind: "succeeded", value: 10 } });
+  });
+
+  test("no workflow context is noContext, as a run outside a workflow", () => {
+    assert.deepEqual(runtime().workflowContext, { kind: "noContext" });
+  });
+
+  test("a stored form that the context reader refuses throws TypeError with the member and the rule", () => {
+    assert.throws(
+      () => TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(1), workflowContext: { ...STORED_CONTEXT, task_index: -1 } }),
+      { name: "TypeError", message: "horsies: TaskRuntime.forTest: workflowContext.task_index: not an integer of 0 or more" },
+    );
+  });
+
+  test("the stored workflow context of a test runtime is written by the codec writer, which makes strict JSON only", () => {
+    // Each value would break the strict read rule in a text: a float that is not finite, a lone surrogate, a value
+    // that is not JSON. The writer refuses each, so the reader never gets such a text.
+    const values: readonly unknown[] = [Number.NaN, Number.POSITIVE_INFINITY, "\ud800", undefined];
+
+    for (const value of values) {
+      // SAFETY: the test gives a stored result outside `JsonValue` on purpose: the writer refuses it.
+      const workflowContext = { ...STORED_CONTEXT, results_by_id: { produce: value as never } };
+
+      assert.throws(() => TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(1), workflowContext }), {
+        name: "TypeError",
+        message: /^horsies: TaskRuntime\.forTest: the workflowContext is not storable: /u,
+      });
+    }
   });
 });
 
@@ -128,6 +179,24 @@ describe("implementation.run", () => {
     assert.equal(calls, 0);
     assert.deepEqual(outcome.kind === "failed" ? outcome.error.code : undefined, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
     assert.doesNotMatch(JSON.stringify(outcome), /secret-text/u);
+  });
+
+  test("the body of a task that takes the context reads the workflow context of the test runtime", async () => {
+    const implementation = implementationOf(
+      audit,
+      (_input, runtime) => {
+        const context = runtime.workflowContext;
+        const produced = context.kind === "context" ? context.context.resultFor("produce", produce) : undefined;
+
+        return audit.ok(produced?.ok === true && produced.value.kind === "succeeded" ? produced.value.value + 1 : 0);
+      },
+      [],
+    );
+
+    const withContext = TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(1), workflowContext: STORED_CONTEXT });
+
+    assert.deepEqual(await implementation.run({}, withContext), { kind: "succeeded", value: 11 });
+    assert.deepEqual(await implementation.run({}, runtime()), { kind: "succeeded", value: 0 });
   });
 
   test("an output that does not read back is WORKER_SERIALIZATION_ERROR", async () => {

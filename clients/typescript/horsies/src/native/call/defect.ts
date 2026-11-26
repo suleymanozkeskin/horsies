@@ -6,6 +6,10 @@
 // 2. this module gives the record to the package's log sink, on this thread;
 // 3. `abortForDefect` sends the records still in the channel to stderr, drains, and aborts.
 // Under `STOP_CORE` the defect is thrown. No step here throws: a step that fails leaves the throw.
+//
+// A thread with no addon (a `worker_threads` isolate) has no rule of its own. A seat isolate of a `SHARED_THREAD`
+// child sends each defect to the main thread of its child, which applies this rule (in a worker process it aborts);
+// the seat registers that report (`reportDefectsToMainThread`). Another worker thread throws the defect.
 
 import { ClientDefect } from "../../thrown-errors.ts";
 import type { CoreDefect } from "../../thrown-errors.ts";
@@ -29,6 +33,21 @@ export interface DefectAddon {
   abortForDefect(handoff: RecordHandoff): NativeEnvelope<undefined>;
 }
 
+/** Where a defect of a thread with no addon goes: nowhere (it is thrown), or to the main thread of the process. */
+type ThreadDefectReport =
+  | { readonly kind: "throwOnly" }
+  | { readonly kind: "toMainThread"; readonly report: (defect: CoreDefect) => void };
+
+let threadDefectReport: ThreadDefectReport = { kind: "throwOnly" };
+
+/**
+ * Send each defect of this thread to the main thread of the process with `report`: the seat isolate of a
+ * `SHARED_THREAD` child calls it once, when its channel opens. `report` must not throw.
+ */
+export function reportDefectsToMainThread(report: (defect: CoreDefect) => void): void {
+  threadDefectReport = { kind: "toMainThread", report };
+}
+
 /** Apply the defect rule to `defect`, then throw it. In a worker process the throw is not reached. */
 export function raiseDefect(defect: CoreDefect): never {
   reportDefect(defect);
@@ -48,14 +67,34 @@ export function reportDefect(defect: CoreDefect): void {
 
       return;
     case "outsideMainThread":
+      reportFromThread(defect);
+
+      return;
     case "platformUnsupported":
     case "loadFailed":
-      // No addon in this thread: the defect is thrown.
+      // No addon in this process: the defect is thrown.
       return;
     default: {
       const unexpected: never = load;
 
       throw new ClientDefect({ subject: "exhaustive switch", rule: `a load outcome outside its type: ${String(unexpected)}` });
+    }
+  }
+}
+
+/** A defect of a thread with no addon: to the main thread when this thread reports there, else only the throw. */
+function reportFromThread(defect: CoreDefect): void {
+  switch (threadDefectReport.kind) {
+    case "throwOnly":
+      return;
+    case "toMainThread":
+      threadDefectReport.report(defect);
+
+      return;
+    default: {
+      const unexpected: never = threadDefectReport;
+
+      throw new ClientDefect({ subject: "exhaustive switch", rule: `a thread report outside its type: ${String(unexpected)}` });
     }
   }
 }

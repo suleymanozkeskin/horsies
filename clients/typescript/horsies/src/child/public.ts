@@ -10,6 +10,8 @@ export {
   type SpawnRefused,
   TaskRuntime,
   type ThreadTaskRuntime,
+  type ThreadWorkflowTaskRuntime,
+  type WorkflowTaskRuntime,
   type WorkStopReason,
 } from "./runtime.ts";
 
@@ -19,4 +21,4 @@ export type { AnyStateKey, StateKey, StateValueOf } from "./state.ts";
 
 export type { ChildStartHook, ProviderFactory } from "./app-members.ts";
 
-export type { TestStateEntries, TestStateEntry, TestRuntimeOptions } from "../testing/task-runtime.ts";
+export type { StoredWorkflowContext, TestStateEntries, TestStateEntry, TestRuntimeOptions } from "../testing/task-runtime.ts";

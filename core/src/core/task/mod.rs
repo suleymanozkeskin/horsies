@@ -6,6 +6,7 @@ pub mod fn_trait;
 pub mod info;
 pub mod options;
 pub mod result;
+pub mod seat_relay;
 pub mod send_types;
 
 pub use error::{
@@ -23,4 +24,5 @@ pub use options::{
     TaskOptions,
 };
 pub use result::TaskResult;
+pub use seat_relay::SeatRelayCode;
 pub use send_types::{TaskSendError, TaskSendErrorCode, TaskSendPayload, TaskSendResult};

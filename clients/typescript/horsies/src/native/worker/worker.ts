@@ -9,6 +9,7 @@ import type {
   LiveCheckOutcome,
   LogBacklog,
   NativePreparedWorker,
+  SeatIsolateMemory,
   WorkerPreparation,
   WorkerRunEnded,
 } from "./addon.ts";
@@ -19,12 +20,12 @@ export function parseListenAddress(text: string): ListenAddressCheck {
 }
 
 /**
- * The worker of the accepted app config text `appConfigJson` and the start members `startJson`, or why it does not
- * start. Pure: starts no core. Throws `ManifestRefused` for a start member that the core's parser refuses (a defect of
+ * The worker of the accepted app config text `appConfigJson` and the start members `startJson`, in a runtime whose
+ * worker threads have `seatIsolates` memory, or why it does not start. Pure: starts no core. Throws `ManifestRefused` for a start member that the core's parser refuses (a defect of
  * the package) and `ClientDefect` for a config text that the core does not accept again.
  */
-export function prepareWorker(appConfigJson: string, startJson: string): WorkerPreparation {
-  return nativeValue("prepareWorker", () => workerAddon().prepareWorker(appConfigJson, startJson));
+export function prepareWorker(appConfigJson: string, startJson: string, seatIsolates: SeatIsolateMemory): WorkerPreparation {
+  return nativeValue("prepareWorker", () => workerAddon().prepareWorker(appConfigJson, startJson, seatIsolates));
 }
 
 /**

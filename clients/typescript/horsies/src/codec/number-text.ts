@@ -118,6 +118,19 @@ export function numberNode(text: string): number | bigint | IntegralFloat {
   return Number.isInteger(parsed) ? new IntegralFloat(parsed) : parsed;
 }
 
+/** The members of `node` except `key`, as a tree object with no prototype. Pure. */
+export function treeObjectWithout(node: TreeObject, key: string): TreeObject {
+  const kept = newTreeObject();
+
+  for (const [name, value] of Object.entries(node)) {
+    if (name !== key) {
+      kept[name] = value;
+    }
+  }
+
+  return kept;
+}
+
 function newTreeObject(): Record<string, TreeValue> {
   // SAFETY: `Object.create(null)` returns an empty object with no prototype; it has no member until one is set.
   return Object.create(null) as Record<string, TreeValue>;

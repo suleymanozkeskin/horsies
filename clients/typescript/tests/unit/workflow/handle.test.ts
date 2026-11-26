@@ -434,13 +434,15 @@ describe("the seat operations", () => {
 
     const relay: SeatRelay = {
       request: async <A extends keyof SeatOperationMap>(area: A, operation: SeatOperationMap[A]["operation"]) => {
-        asked.push(`${area} ${operation.kind}`);
-
         // SAFETY: this relay serves the workflows area only; the test asks only its operations.
-        return (await serveWorkflowsSeatOperation(
-          mainThread,
-          operation as SeatOperationMap["workflows"]["operation"],
-        )) as SeatOperationMap[A]["reply"];
+        const workflowsOperation = operation as SeatOperationMap["workflows"]["operation"];
+
+        asked.push(`${area} ${workflowsOperation.kind}`);
+
+        // SAFETY: the reply of a workflows operation is the workflows area's reply.
+        const reply = (await serveWorkflowsSeatOperation(mainThread, workflowsOperation)) as SeatOperationMap[A]["reply"];
+
+        return { kind: "reply", reply };
       },
     };
 

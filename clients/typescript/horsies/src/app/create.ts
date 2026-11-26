@@ -1,11 +1,12 @@
 // `Horsies.create`: the checks of the config and of each listed contract, in order, and the app context.
 //
-// Order of the refusals: the config (the TypeScript parse, then the core's check), then the contracts in list order
-// (the list, the queue, the wire types, then the core's checks of the codes and the options).
+// Order of the refusals: the config (the TypeScript parse and the tracing step, then the core's check), then the
+// contracts in list order (the list, the queue, the wire types, then the core's checks of the codes and the options).
 //
 // The thread rule: the addon loads only on the main thread of a process. On a main thread every check runs; the core's
 // checks call the addon's pure check functions, which start no core. On a worker thread only the checks that are
-// TypeScript code run, and no addon loads.
+// TypeScript code run, and no addon loads: a seat isolate reaches the core through the relay of its seat, another
+// worker thread has no core.
 
 import { isMainThread } from "node:worker_threads";
 
@@ -25,6 +26,16 @@ import {
   processRole,
   taskInfo,
 } from "../native/sends/sends.ts";
+import { workerThreadCore } from "../seats/channel.ts";
+import {
+  processTracingEnvironment,
+  recordTracingParts,
+  type TracingParts,
+  tracingPartsOf,
+} from "../telemetry/create-hook.ts";
+import { type OtelApiLoader, requireOtelApi } from "../telemetry/otel-api.ts";
+import { tracingSettingOf } from "../telemetry/tracing-config.ts";
+import { registeredHandlers } from "../events/register.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import type { AnyWorkflowContract } from "../workflow/define.ts";
@@ -43,10 +54,8 @@ import {
 } from "./contract-list.ts";
 import { type AcceptedConfig, checkConfigWithCore, checkTaskWithCore, type CoreChecks } from "./core-checks.ts";
 import type { AddonCore, CoreAccess, ProducerCore } from "./core-access.ts";
-import { NO_OP_OBSERVER } from "./observers.ts";
 import type { Refusal } from "./refusal.ts";
 import { RefusalSink } from "./refusals.ts";
-import { NO_TELEMETRY } from "./telemetry.ts";
 import { initialSuppression, type ProcessStart, processStart, SuppressionState } from "./suppression.ts";
 
 /** The config of `Horsies.create`: the app config and the contract lists. */
@@ -76,6 +85,8 @@ export interface CreateEnvironment {
     options: ReadonlyMap<string, NativeTaskOptions>,
     workflows: WorkflowsOnMainThread,
   ) => AddonCore;
+  /** The load of the OpenTelemetry API; called only for `tracing: { kind: "otel" }`, on every thread. */
+  readonly otelApi: OtelApiLoader;
 }
 
 /** The facts of this process. Effects: reads the thread, the environment and the arguments. */
@@ -86,12 +97,14 @@ export function processEnvironment(): CreateEnvironment {
     processStart: processStart(),
     coreChecks: () => ({ checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions }),
     addonCore: addonCoreOf,
+    otelApi: requireOtelApi,
   };
 }
 
 /** The app context of `config`, or every refusal in order. */
 export function createApp(config: HorsiesConfig, environment: CreateEnvironment): Result<AppContext, CreateRefused> {
   const parsed = parseAppConfig(config, environment.environment);
+  const tracing = tracingPartsOf(tracingSettingOf(config.tracing), processTracingEnvironment(environment.otelApi));
   // The queue check reads only the queue fields of the input, so a refused config adds no false queue refusal.
   const queues = queueSetupOf(config);
   const list = checkContractList(config.tasks, queues);
@@ -102,14 +115,19 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
     queues,
   });
 
-  if (!parsed.ok) {
-    return refused([...parsed.error, ...inListOrder(list.refusals), ...workflows.refusals]);
+  if (!parsed.ok || !tracing.ok) {
+    return refused([
+      ...(parsed.ok ? [] : parsed.error),
+      ...(tracing.ok ? [] : [tracing.error]),
+      ...inListOrder(list.refusals),
+      ...workflows.refusals,
+    ]);
   }
 
   if (!environment.mainThread) {
     return list.refusals.length > 0 || workflows.refusals.length > 0
       ? refused([...inListOrder(list.refusals), ...workflows.refusals])
-      : ok(contextOf(parsed.value, list.entries, { kind: "noCore" }, environment, workflows.registry));
+      : ok(contextOf(parsed.value, list.entries, workerThreadCore(), environment, tracing.value, workflows.registry));
   }
 
   const checks = environment.coreChecks();
@@ -134,7 +152,7 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
 
   const core: CoreAccess = { kind: "addon", ...environment.addonCore(accepted.value, options.options, onMainThread) };
 
-  return ok(contextOf(parsed.value, list.entries, core, environment, workflows.registry));
+  return ok(contextOf(parsed.value, list.entries, core, environment, tracing.value, workflows.registry));
 }
 
 /** The core checks of each listed contract, in list order, and the checked options by task name. */
@@ -175,30 +193,35 @@ function contextOf(
   listed: readonly ListedEntry[],
   core: CoreAccess,
   environment: CreateEnvironment,
+  tracing: TracingParts,
   workflows: WorkflowRegistry,
 ): AppContext {
   const suppression = new SuppressionState(initialSuppression(environment.processStart), environment.environment);
 
-  return {
+  const context: AppContext = {
     config,
     listed,
     core,
     refusals: new RefusalSink(),
-    observer: NO_OP_OBSERVER,
+    observer: tracing.sendObserver,
     suppression,
     send: {
       contracts: contractLookupOf(listed),
       resendOnTransientErr: resendOnTransientErr(config),
       core,
-      observer: NO_OP_OBSERVER,
+      observer: tracing.sendObserver,
       suppression,
       pause: async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       now: () => Temporal.Now.instant(),
     },
     implementations: new Map(),
     workflows,
-    telemetry: NO_TELEMETRY,
+    telemetry: { handlers: () => registeredHandlers(context), tracing: tracing.setting },
   };
+
+  recordTracingParts(context, tracing);
+
+  return context;
 }
 
 /** The facts of the app's workflows that the core operations on a main thread read. */

@@ -50,6 +50,7 @@ fn the_marker_takes_the_socket_and_the_worker_pid() {
     match child_mode(arguments(&["app", CHILD_MODE_ARGUMENT, "7", "4242"])) {
         ChildMode::Child(args) => {
             assert_eq!(args.socket_fd, 7);
+            assert_eq!(args.socket_fd(), 7);
             assert_eq!(args.worker_pid.get(), 4242);
         }
         other => panic!("expected child mode, got {other:?}"),
@@ -141,9 +142,12 @@ fn a_task_error_becomes_the_error_envelope() {
 
 #[test]
 fn a_refusal_fails_the_task_with_its_reason() {
-    let envelope = envelope_of(refusal_end(&StoredOptionsRefusal::TimeoutValueInvalid(
-        RefusalReason::cut("stored timeout_ms is below 1000 ms"),
-    )));
+    let envelope = envelope_of(refusal_end(
+        "app.tasks.work",
+        &StoredOptionsRefusal::TimeoutValueInvalid(RefusalReason::cut(
+            "stored timeout_ms is below 1000 ms",
+        )),
+    ));
     assert!(
         envelope.contains("WORKER_SERIALIZATION_ERROR"),
         "{envelope}"
