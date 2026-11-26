@@ -48,6 +48,15 @@ const READER_PATHS: readonly ReaderPath[] = [
     },
   },
   {
+    module: "child/serve.ts",
+    maker: "jsonTextCheckedByCore",
+    checkedBy: "build_task_input",
+    proof: {
+      file: "unit/child/serve.test.ts",
+      test: "the reader of a child gets only the input text that the core posts after its strict check",
+    },
+  },
+  {
     module: "codec/error-data.ts",
     maker: "writtenJsonText",
     checkedBy: "errorDataText",
