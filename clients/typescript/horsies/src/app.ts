@@ -22,6 +22,9 @@ import { registerImplementation } from "./app/implement.ts";
 import { recordAppContext } from "./app/internals.ts";
 import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
 import type { StateKey } from "./child/state.ts";
+import type { EventTypeName } from "./_catalog/worker_manifest.ts";
+import { onEventFor, onHandlerChildStartFor } from "./events/register.ts";
+import type { EventHandler, EventHandlerOptions, HandlerChildStartHook } from "./events/types.ts";
 
 /** The constructor of an app, for `createHorsies` in this module. */
 let constructApp: (context: AppContext) => Horsies;
@@ -81,6 +84,29 @@ export class Horsies {
    */
   onChildStart(hook: ChildStartHook): void {
     onChildStartFor(this.#context, hook);
+  }
+
+  /**
+   * Run `handler` for each event of `eventType` in the handler child of a worker, never in the worker parent. Several
+   * handlers may take one type; each has its own queue of 10,000 events, and a full queue drops the event for that
+   * handler and counts it. A throw or a rejection is counted and logged with `name`; the handler takes its next event.
+   * Calls nothing and never throws: a refused registration (an unknown type, a handler that is not a function, a
+   * name outside the name rule or repeated, a 33rd handler) goes to the refusal list, which `check` reports and the
+   * worker start refuses. A call after `cli.run` serves the handler child is a defect: `ClientDefect`.
+   */
+  onEvent<T extends EventTypeName>(eventType: T, options: EventHandlerOptions, handler: NoInfer<EventHandler<T>>): void {
+    onEventFor(this.#context, eventType, options, handler);
+  }
+
+  /**
+   * Run `hook` once in each handler child, before it takes its first event, in registration order, for at most 10 s.
+   * A hook that throws, rejects or runs past its bound ends the handler child with 173; it stays down until the worker
+   * restarts, and the worker runs its tasks on. The `onChildStart` hooks do not run there. Set the OpenTelemetry SDK
+   * of the handler child here, or at the top of the entry. A call after `cli.run` serves the handler child is a
+   * defect: `ClientDefect`.
+   */
+  onHandlerChildStart(hook: HandlerChildStartHook): void {
+    onHandlerChildStartFor(this.#context, hook);
   }
 
   /** Send a task: its handle, or the send error. A delay is the only start option. */

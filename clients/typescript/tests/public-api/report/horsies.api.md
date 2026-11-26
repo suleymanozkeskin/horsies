@@ -20,6 +20,9 @@ export class AddonOutsideMainThread extends CoreDefect {
 }
 
 // @public
+export type AnyEvent = TaskClaimed | ClaimReleased | AttemptPlaced | AttemptNotStarted | AttemptEnded | AttemptRecorded | TaskRecovered | ChildStarted | ChildReplaced | SlotDown | SlotRecovered;
+
+// @public
 export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, string, ExecutionClass>;
 
 // @public
@@ -53,6 +56,100 @@ export type AppConfigInput = QueueConfigInput & {
     readonly tracing?: TracingConfigInput;
 };
 
+// @public (undocumented)
+export type AttemptEnd = AttemptEndReportedByChild | AttemptEndDecidedByWorker | AttemptEndNotKnown;
+
+// @public (undocumented)
+export interface AttemptEndDecidedByWorker {
+    // (undocumented)
+    readonly kind: "decidedByWorker";
+    // (undocumented)
+    readonly reason: WorkerDecision;
+}
+
+// @public (undocumented)
+export interface AttemptEnded {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly attempt: number;
+    // (undocumented)
+    readonly end: AttemptEnd;
+    // (undocumented)
+    readonly execution: Execution;
+    // (undocumented)
+    readonly kind: "AttemptEnded";
+    // (undocumented)
+    readonly queue: string;
+    // (undocumented)
+    readonly runDuration: Temporal.Duration;
+    // (undocumented)
+    readonly taskId: string;
+    // (undocumented)
+    readonly taskName: string;
+}
+
+// @public (undocumented)
+export interface AttemptEndNotKnown {
+    // (undocumented)
+    readonly childPid: number;
+    // (undocumented)
+    readonly kind: "notKnown";
+}
+
+// @public (undocumented)
+export interface AttemptEndReportedByChild {
+    // (undocumented)
+    readonly kind: "reportedByChild";
+    // (undocumented)
+    readonly result: ChildResult;
+    // (undocumented)
+    readonly start: AttemptStart;
+}
+
+// @public (undocumented)
+export type AttemptErrorCode = AttemptErrorCodeBuiltIn | AttemptErrorCodeUser | AttemptErrorCodeUserOverBound;
+
+// @public (undocumented)
+export interface AttemptErrorCodeBuiltIn {
+    // (undocumented)
+    readonly code: BuiltInTaskCode;
+    // (undocumented)
+    readonly kind: "library";
+}
+
+// @public (undocumented)
+export interface AttemptErrorCodeUser {
+    // (undocumented)
+    readonly code: string;
+    // (undocumented)
+    readonly kind: "user";
+}
+
+// @public (undocumented)
+export interface AttemptErrorCodeUserOverBound {
+    // (undocumented)
+    readonly kind: "userOverBound";
+}
+
+// @public (undocumented)
+export interface AttemptNotStarted {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly attempt: number;
+    // (undocumented)
+    readonly kind: "AttemptNotStarted";
+    // (undocumented)
+    readonly queue: string;
+    // (undocumented)
+    readonly reason: StopReason;
+    // (undocumented)
+    readonly taskId: string;
+    // (undocumented)
+    readonly taskName: string;
+}
+
 // @public
 export type AttemptNumber = number & {
     readonly [attemptBrand]: "AttemptNumber";
@@ -68,11 +165,139 @@ export const AttemptNumber: {
 // @public
 export type AttemptParentage = "childOfSend" | "linkedToSend";
 
+// @public (undocumented)
+export interface AttemptPlaced {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly attempt: number;
+    // (undocumented)
+    readonly childKind: Execution;
+    // (undocumented)
+    readonly childPid: number;
+    // (undocumented)
+    readonly execution: Execution;
+    // (undocumented)
+    readonly kind: "AttemptPlaced";
+    // (undocumented)
+    readonly queue: string;
+    // (undocumented)
+    readonly slotWait: Temporal.Duration;
+    // (undocumented)
+    readonly taskId: string;
+    // (undocumented)
+    readonly taskName: string;
+}
+
+// @public (undocumented)
+export type AttemptRecord = AttemptRecordCompleted | AttemptRecordFailed | AttemptRecordRetryScheduled | AttemptRecordClaimReleased | AttemptRecordNothingOwed | AttemptRecordNotHeld | AttemptRecordRecordedByCancel | AttemptRecordLeftToRecovery | AttemptRecordRetriesExhausted | AttemptRecordWriteFailed;
+
+// @public (undocumented)
+export interface AttemptRecordClaimReleased {
+    // (undocumented)
+    readonly kind: "claimReleased";
+}
+
+// @public (undocumented)
+export interface AttemptRecordCompleted {
+    // (undocumented)
+    readonly kind: "completed";
+}
+
+// @public (undocumented)
+export interface AttemptRecorded {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly attempt: number;
+    // (undocumented)
+    readonly kind: "AttemptRecorded";
+    // (undocumented)
+    readonly queue: string;
+    // (undocumented)
+    readonly record: AttemptRecord;
+    // (undocumented)
+    readonly recordDuration: Temporal.Duration;
+    // (undocumented)
+    readonly taskId: string;
+    // (undocumented)
+    readonly taskName: string;
+}
+
+// @public (undocumented)
+export interface AttemptRecordFailed {
+    // (undocumented)
+    readonly kind: "failed";
+}
+
+// @public (undocumented)
+export interface AttemptRecordLeftToRecovery {
+    // (undocumented)
+    readonly kind: "leftToRecovery";
+}
+
+// @public (undocumented)
+export interface AttemptRecordNotHeld {
+    // (undocumented)
+    readonly kind: "notHeld";
+}
+
+// @public (undocumented)
+export interface AttemptRecordNothingOwed {
+    // (undocumented)
+    readonly kind: "nothingOwed";
+}
+
+// @public (undocumented)
+export interface AttemptRecordRecordedByCancel {
+    // (undocumented)
+    readonly kind: "recordedByCancel";
+}
+
+// @public (undocumented)
+export interface AttemptRecordRetriesExhausted {
+    // (undocumented)
+    readonly kind: "retriesExhausted";
+}
+
+// @public (undocumented)
+export interface AttemptRecordRetryScheduled {
+    // (undocumented)
+    readonly kind: "retryScheduled";
+    // (undocumented)
+    readonly nextRetryAt: Temporal.Instant;
+    // (undocumented)
+    readonly retryCount: number;
+}
+
+// @public (undocumented)
+export interface AttemptRecordWriteFailed {
+    // (undocumented)
+    readonly kind: "writeFailed";
+}
+
 // @public
 export type AttemptRefused = {
     readonly kind: "notAnAttempt";
     readonly reason: string;
 };
+
+// @public (undocumented)
+export type AttemptStart = AttemptStartReported | AttemptStartNotReported;
+
+// @public (undocumented)
+export interface AttemptStartNotReported {
+    // (undocumented)
+    readonly kind: "notReported";
+}
+
+// @public (undocumented)
+export interface AttemptStartReported {
+    // (undocumented)
+    readonly kind: "reported";
+    // (undocumented)
+    readonly startedAt: Temporal.Instant;
+}
 
 // @public
 export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> = [
@@ -152,6 +377,9 @@ export const BrokerErrorCode: {
 // @public (undocumented)
 export type BrokerErrorCode = (typeof BrokerErrorCode)[keyof typeof BrokerErrorCode];
 
+// @public (undocumented)
+export type BuiltInTaskCode = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode;
+
 // @public
 export type CancelCause = "DEADLINE" | "OPERATOR";
 
@@ -167,6 +395,75 @@ export type CancelState = {
     readonly kind: "requested";
     readonly cause: CancelCause;
 };
+
+// @public (undocumented)
+export interface ChildReplaced {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly childKind: Execution;
+    // (undocumented)
+    readonly childPid: number;
+    // (undocumented)
+    readonly kind: "ChildReplaced";
+    // (undocumented)
+    readonly reason: ReplaceReason;
+    // (undocumented)
+    readonly slot: number;
+}
+
+// @public (undocumented)
+export type ChildResult = ChildResultCompleted | ChildResultFailed | ChildResultWorkerFailure | ChildResultTimedOut | ChildResultCancelled;
+
+// @public (undocumented)
+export interface ChildResultCancelled {
+    // (undocumented)
+    readonly end: OperatorCancelEnd;
+    // (undocumented)
+    readonly kind: "cancelled";
+}
+
+// @public (undocumented)
+export interface ChildResultCompleted {
+    // (undocumented)
+    readonly kind: "completed";
+}
+
+// @public (undocumented)
+export interface ChildResultFailed {
+    // (undocumented)
+    readonly errorCode: AttemptErrorCode;
+    // (undocumented)
+    readonly kind: "failed";
+}
+
+// @public (undocumented)
+export interface ChildResultTimedOut {
+    // (undocumented)
+    readonly kind: "timedOut";
+}
+
+// @public (undocumented)
+export interface ChildResultWorkerFailure {
+    // (undocumented)
+    readonly kind: "workerFailure";
+}
+
+// @public (undocumented)
+export interface ChildStarted {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly bootDuration: Temporal.Duration;
+    // (undocumented)
+    readonly childKind: Execution;
+    // (undocumented)
+    readonly childPid: number;
+    // (undocumented)
+    readonly kind: "ChildStarted";
+    // (undocumented)
+    readonly slot: number;
+}
 
 // @public
 export type ChildStartHook = () => void | Promise<void>;
@@ -186,6 +483,22 @@ export type ClaimMode = {
     readonly prefetchBuffer: number;
     readonly leaseMs: number;
 };
+
+// @public (undocumented)
+export interface ClaimReleased {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "ClaimReleased";
+    // (undocumented)
+    readonly queue: string;
+    // (undocumented)
+    readonly reason: ReleaseReason;
+    // (undocumented)
+    readonly taskId: string;
+    // (undocumented)
+    readonly taskName: string;
+}
 
 // @public
 export interface Cli {
@@ -216,6 +529,16 @@ export type CodecRefused = EncodeRefused | DecodeRefused | ReadBackRefused | Rea
 
 // @public
 export function configureLogging(options: LoggingOptions): void;
+
+// @public (undocumented)
+export const ContractCode: {
+    readonly RETURN_TYPE_MISMATCH: "RETURN_TYPE_MISMATCH";
+    readonly WORKFLOW_CTX_MISSING_ID: "WORKFLOW_CTX_MISSING_ID";
+    readonly NO_TYPE_AVAILABLE: "NO_TYPE_AVAILABLE";
+};
+
+// @public (undocumented)
+export type ContractCode = (typeof ContractCode)[keyof typeof ContractCode];
 
 // @public
 export interface ContractTypes<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
@@ -619,6 +942,22 @@ export const ErrorCode: {
 export type ErrorCode = (typeof ErrorCode)[keyof typeof ErrorCode];
 
 // @public
+export type EventHandler<T extends EventTypeName> = (event: EventOf<T>) => void | Promise<void>;
+
+// @public
+export type EventHandlerOptions = {
+    readonly name: string;
+};
+
+// @public
+export type EventOf<T extends EventTypeName> = Extract<AnyEvent, {
+    readonly kind: T;
+}>;
+
+// @public (undocumented)
+export type EventTypeName = "TaskClaimed" | "ClaimReleased" | "AttemptPlaced" | "AttemptNotStarted" | "AttemptEnded" | "AttemptRecorded" | "TaskRecovered" | "ChildStarted" | "ChildReplaced" | "SlotDown" | "SlotRecovered";
+
+// @public
 export type ExceptionMapping<E extends string> = readonly [ErrorClass, E];
 
 // @public
@@ -629,6 +968,9 @@ export type ExceptionRecord = {
     readonly repr: string;
     readonly traceback: string;
 };
+
+// @public (undocumented)
+export type Execution = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
 
 // @public
 export type ExecutionClass = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
@@ -697,6 +1039,9 @@ export namespace h {
 }
 
 // @public
+export type HandlerChildStartHook = () => void | Promise<void>;
+
+// @public
 export type HasRequiredUpstreamOutcome<P extends ParameterSchemas> = true extends {
     [K in keyof P]: IsUpstreamOutcome<P[K]> extends true ? (LeftOutBySender<P[K]> extends true ? false : true) : false;
 }[keyof P] ? true : false;
@@ -714,6 +1059,8 @@ export class Horsies {
     static create(config: HorsiesConfig): Result<Horsies, CreateRefused>;
     implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, body: NoInfer<BodyFor<P, O, E, X>>, options?: ImplementOptions<NoInfer<E>>): Implementation<P, O, E, X>;
     onChildStart(hook: ChildStartHook): void;
+    onEvent<T extends EventTypeName>(eventType: T, options: EventHandlerOptions, handler: NoInfer<EventHandler<T>>): void;
+    onHandlerChildStart(hook: HandlerChildStartHook): void;
     provide<T>(factory: ProviderFactory<T>): StateKey<Awaited<T>>;
     retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
     send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
@@ -966,6 +1313,48 @@ export type Ok<T> = {
 };
 
 // @public (undocumented)
+export const OperationalErrorCode: {
+    readonly UNHANDLED_EXCEPTION: "UNHANDLED_EXCEPTION";
+    readonly TASK_EXCEPTION: "TASK_EXCEPTION";
+    readonly WORKER_CRASHED: "WORKER_CRASHED";
+    readonly BROKER_ERROR: "BROKER_ERROR";
+    readonly WORKER_RESOLUTION_ERROR: "WORKER_RESOLUTION_ERROR";
+    readonly WORKER_SERIALIZATION_ERROR: "WORKER_SERIALIZATION_ERROR";
+    readonly RESULT_DESERIALIZATION_ERROR: "RESULT_DESERIALIZATION_ERROR";
+    readonly WORKFLOW_ENQUEUE_FAILED: "WORKFLOW_ENQUEUE_FAILED";
+    readonly SUBWORKFLOW_LOAD_FAILED: "SUBWORKFLOW_LOAD_FAILED";
+    readonly WORKFLOW_RECOVERY_LIMIT_REACHED: "WORKFLOW_RECOVERY_LIMIT_REACHED";
+    readonly SUBWORKFLOW_DEPTH_LIMIT_REACHED: "SUBWORKFLOW_DEPTH_LIMIT_REACHED";
+    readonly TASK_BLOCKED_LOOP: "TASK_BLOCKED_LOOP";
+    readonly NEIGHBOUR_BLOCKED_LOOP: "NEIGHBOUR_BLOCKED_LOOP";
+    readonly WORKFLOW_START_INCOMPLETE: "WORKFLOW_START_INCOMPLETE";
+};
+
+// @public (undocumented)
+export type OperationalErrorCode = (typeof OperationalErrorCode)[keyof typeof OperationalErrorCode];
+
+// @public (undocumented)
+export type OperatorCancelEnd = "RETURNED_AFTER_SIGNAL" | "DROPPED_AFTER_GRACE" | "BEFORE_BODY";
+
+// @public (undocumented)
+export const OutcomeCode: {
+    readonly TASK_CANCELLED: "TASK_CANCELLED";
+    readonly TASK_EXPIRED: "TASK_EXPIRED";
+    readonly TASK_TIMEOUT: "TASK_TIMEOUT";
+    readonly WORKFLOW_PAUSED: "WORKFLOW_PAUSED";
+    readonly WORKFLOW_EXPIRED: "WORKFLOW_EXPIRED";
+    readonly WORKFLOW_FAILED: "WORKFLOW_FAILED";
+    readonly WORKFLOW_CANCELLED: "WORKFLOW_CANCELLED";
+    readonly UPSTREAM_SKIPPED: "UPSTREAM_SKIPPED";
+    readonly SUBWORKFLOW_FAILED: "SUBWORKFLOW_FAILED";
+    readonly WORKFLOW_SUCCESS_CASE_NOT_MET: "WORKFLOW_SUCCESS_CASE_NOT_MET";
+    readonly WORKFLOW_OUTPUT_SKIPPED: "WORKFLOW_OUTPUT_SKIPPED";
+};
+
+// @public (undocumented)
+export type OutcomeCode = (typeof OutcomeCode)[keyof typeof OutcomeCode];
+
+// @public (undocumented)
 export interface OutcomeDecodeError {
     // (undocumented)
     readonly kind: "outcomeDecode";
@@ -1166,6 +1555,9 @@ export type Recorded<T> = {
     readonly kind: "notRecorded";
 };
 
+// @public (undocumented)
+export type RecoveryAction = "RUNNING_FAILED" | "RUNNING_RETRIED" | "CLAIM_REQUEUED" | "ORPHAN_CANCELLED" | "PENDING_EXPIRED";
+
 // @public
 export interface RecoveryConfigInput {
     // (undocumented)
@@ -1208,6 +1600,12 @@ export type Refusal = {
 
 // @public
 export type RefusalCode = ErrorCode;
+
+// @public (undocumented)
+export type ReleaseReason = "POOL_STOPPING" | "POOL_FAILED" | "QUEUE_FULL" | "NO_CHILD_OF_ITS_KIND" | "RUNNER_BEATS_FAILED_CLOSED" | "HELD_FOR_QUEUE_CAP" | "WORKFLOW_NOT_RUNNABLE" | "RETURNED_AS_ISOLATED";
+
+// @public (undocumented)
+export type ReplaceReason = "CHILD_DIED" | "CHANNEL_LOST" | "PROTOCOL_VIOLATION" | "PROTOCOL_MISMATCH" | "KILLED_BY_PARENT" | "SLOT_DEFECT" | "SPAWNER_STOPPED" | "TASK_COUNT" | "MEMORY_LIMIT" | "SECOND_CANCEL" | "LOOP_BLOCKED" | "LEFTOVER_WORK" | "AT_DEADLINE" | "CORE_STOPPED";
 
 // @public
 export type RequiredWire = Wire<unknown, unknown, "required", "value">;
@@ -1277,6 +1675,21 @@ export type RetentionPeriod = {
     readonly days: number;
 };
 
+// @public (undocumented)
+export const RetrievalCode: {
+    readonly WAIT_TIMEOUT: "WAIT_TIMEOUT";
+    readonly TASK_NOT_FOUND: "TASK_NOT_FOUND";
+    readonly WORKFLOW_NOT_FOUND: "WORKFLOW_NOT_FOUND";
+    readonly RESULT_NOT_AVAILABLE: "RESULT_NOT_AVAILABLE";
+    readonly RESULT_NOT_READY: "RESULT_NOT_READY";
+    readonly ASYNC_CONTEXT: "ASYNC_CONTEXT";
+    readonly INVALID_INPUT: "INVALID_INPUT";
+    readonly WAIT_INSIDE_TASK: "WAIT_INSIDE_TASK";
+};
+
+// @public (undocumented)
+export type RetrievalCode = (typeof RetrievalCode)[keyof typeof RetrievalCode];
+
 // @public
 export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed, O, E>;
 
@@ -1331,6 +1744,23 @@ export type RunningTask = {
 
 // @public
 export type RuntimeOf<X extends ExecutionClass> = BodyRuntimes[X];
+
+// @public (undocumented)
+export type RunTrace = RunTraceCarrier | RunTraceNoCarrier;
+
+// @public (undocumented)
+export interface RunTraceCarrier {
+    // (undocumented)
+    readonly kind: "carrier";
+    // (undocumented)
+    readonly text: string;
+}
+
+// @public (undocumented)
+export interface RunTraceNoCarrier {
+    // (undocumented)
+    readonly kind: "noCarrier";
+}
 
 // @public
 export type SchemaSent<S> = S extends AnyWire ? SentOf<S> : ZodSentOf<S>;
@@ -1435,6 +1865,52 @@ export interface SharedThreadChildrenInput {
     readonly taskSendPool?: PoolSize;
 }
 
+// @public (undocumented)
+export type ShortageErrno = "EMFILE" | "ENFILE" | "ENOMEM" | "EAGAIN";
+
+// @public (undocumented)
+export interface SlotDown {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly cause: SlotDownCause;
+    // (undocumented)
+    readonly childKind: Execution;
+    // (undocumented)
+    readonly kind: "SlotDown";
+    // (undocumented)
+    readonly slot: number;
+}
+
+// @public (undocumented)
+export type SlotDownCause = SlotDownCauseResourceShortage | SlotDownCauseThreadStartRefused;
+
+// @public (undocumented)
+export interface SlotDownCauseResourceShortage {
+    // (undocumented)
+    readonly errno: ShortageErrno;
+    // (undocumented)
+    readonly kind: "resourceShortage";
+}
+
+// @public (undocumented)
+export interface SlotDownCauseThreadStartRefused {
+    // (undocumented)
+    readonly kind: "threadStartRefused";
+}
+
+// @public (undocumented)
+export interface SlotRecovered {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly childKind: Execution;
+    // (undocumented)
+    readonly kind: "SlotRecovered";
+    // (undocumented)
+    readonly slot: number;
+}
+
 // @public
 export type SpanIds = {
     readonly kind: "spanIds";
@@ -1473,6 +1949,9 @@ export interface StateKey<T> extends AnyStateKey {
 
 // @public
 export type StateValueOf<K extends AnyStateKey> = K extends StateKey<infer T> ? T : never;
+
+// @public (undocumented)
+export type StopReason = "CLAIM_LOST" | "OWNERSHIP_UNCONFIRMED" | "WORKFLOW_STOPPED" | "TASK_EXPIRED" | "NODE_NOT_LINKED" | "ORPHAN_CANCELLED";
 
 // @public
 export type SubWorkflowFailure = {
@@ -1546,6 +2025,28 @@ export type TaskCap = {
 } | {
     readonly kind: "noCap";
 };
+
+// @public (undocumented)
+export interface TaskClaimed {
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly attempt: number;
+    // (undocumented)
+    readonly execution: Execution;
+    // (undocumented)
+    readonly kind: "TaskClaimed";
+    // (undocumented)
+    readonly priority: number;
+    // (undocumented)
+    readonly queue: string;
+    // (undocumented)
+    readonly queueWait: Temporal.Duration;
+    // (undocumented)
+    readonly taskId: string;
+    // (undocumented)
+    readonly taskName: string;
+}
 
 // @public
 export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
@@ -1670,6 +2171,22 @@ export type TaskOutcome<O, E extends string = string> = {
     readonly kind: "failed";
     readonly error: TaskError<E>;
 };
+
+// @public (undocumented)
+export interface TaskRecovered {
+    // (undocumented)
+    readonly action: RecoveryAction;
+    // (undocumented)
+    readonly at: Temporal.Instant;
+    // (undocumented)
+    readonly kind: "TaskRecovered";
+    // (undocumented)
+    readonly queue: string;
+    // (undocumented)
+    readonly taskId: string;
+    // (undocumented)
+    readonly taskName: string;
+}
 
 // @public
 export class TaskRuntime {
@@ -1955,6 +2472,9 @@ export type WithSentTypes<V, O, E extends string> = V & {
     readonly [sentTypes]?: SentTypes<O, E>;
 };
 
+// @public (undocumented)
+export type WorkerDecision = "TIMED_OUT" | "TASK_BLOCKED_LOOP" | "NEIGHBOUR_BLOCKED_LOOP" | "CHILD_LOST" | "KILLED_AFTER_CANCEL" | "LOST_AFTER_CANCEL";
+
 // @public
 export type WorkerEndedSpans = "makeSpans" | "noSpans";
 
@@ -1990,6 +2510,9 @@ export const WorkflowId: {
 
 // @public
 export type WorkflowNodeOnly = "horsies: this task takes an upstream result (h.resultOf); only a workflow node can run it";
+
+// @public (undocumented)
+export type WorkflowPlace = "NOT_IN_WORKFLOW" | "WORKFLOW_NOT_KNOWN";
 
 // @public
 export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
