@@ -131,7 +131,8 @@ describe("implementation.run", () => {
     assert.deepEqual(await implementation.run({ amount: 5 }, runtime()), {
       kind: "failed",
       error: {
-        code: { kind: "user", code: "BANK_DOWN" },
+        kind: "custom",
+        code: "BANK_DOWN",
         message: "retry later",
         data: { wait: 30 },
         exception: null,
@@ -157,7 +158,7 @@ describe("implementation.run", () => {
 
     const error = outcome.kind === "failed" ? outcome.error : assert.fail("the run failed");
 
-    assert.deepEqual(error.code, { kind: "user", code: "CARD_DECLINED" });
+    assert.deepEqual([error.kind, error.code], ["custom", "CARD_DECLINED"]);
     assert.equal(error.message, "Unhandled exception in task charge: CardDeclined: declined by the bank");
     assert.deepEqual(error.data, { exception_type: "CardDeclined" });
     assert.equal(error.exception?.type, "CardDeclined");
@@ -177,7 +178,7 @@ describe("implementation.run", () => {
     const outcome = await implementation.run({ n: "secret-text" } as never, runtime());
 
     assert.equal(calls, 0);
-    assert.deepEqual(outcome.kind === "failed" ? outcome.error.code : undefined, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
+    assert.deepEqual(outcome.kind === "failed" ? [outcome.error.kind, outcome.error.code] : undefined, ["builtIn", "WORKER_SERIALIZATION_ERROR"]);
     assert.doesNotMatch(JSON.stringify(outcome), /secret-text/u);
   });
 
@@ -205,7 +206,7 @@ describe("implementation.run", () => {
     const implementation = app.implement(add, (_input, { ok }) => ok("not an int" as never));
     const outcome = await implementation.run({ n: 1 }, runtime());
 
-    assert.deepEqual(outcome.kind === "failed" ? outcome.error.code : undefined, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
+    assert.deepEqual(outcome.kind === "failed" ? [outcome.error.kind, outcome.error.code] : undefined, ["builtIn", "WORKER_SERIALIZATION_ERROR"]);
     assert.match(outcome.kind === "failed" ? (outcome.error.message ?? "") : "", /^task returned a value of type ping\.output/u);
   });
 });

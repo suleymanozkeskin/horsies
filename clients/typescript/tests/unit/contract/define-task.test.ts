@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 
 import { z } from "zod";
 
-import { defineTask, type UserFailure } from "../../../horsies/src/contract/public.ts";
+import { defineTask, type CustomFailure } from "../../../horsies/src/contract/public.ts";
 import { resultConstructorsOf } from "../../../horsies/src/contract/define-task.ts";
 import { contractRecord } from "../../../horsies/src/contract/definition.ts";
 import type { OutputSchema } from "../../../horsies/src/contract/schema.ts";
@@ -114,7 +114,7 @@ describe("result constructors", () => {
 
   test("err with data: undefined gives an error with no data member, as a left-out data does", () => {
     // SAFETY: a project without exactOptionalPropertyTypes, or a JavaScript caller, can pass `data: undefined`.
-    const failure = { code: "EMPTY_ORDER", message: "no lines", data: undefined } as unknown as UserFailure<"EMPTY_ORDER">;
+    const failure = { code: "EMPTY_ORDER", message: "no lines", data: undefined } as unknown as CustomFailure<"EMPTY_ORDER">;
     const value = constructors.err(failure);
 
     assert.deepEqual(value, { ok: false, error: { code: "EMPTY_ORDER", message: "no lines" } });

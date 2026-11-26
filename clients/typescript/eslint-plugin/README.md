@@ -89,7 +89,7 @@ Write a `case` for each member, and a `never` check in `default`, so that a new 
 
 ```ts
 switch (error.kind) {
-  case "waitTimedOut":
+  case "waitTimeout":
     return "the task is still running";
   // ... a case for each other kind
   default: {

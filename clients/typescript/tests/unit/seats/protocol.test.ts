@@ -47,7 +47,7 @@ describe("the messages of a seat isolate", () => {
       outcome: {
         kind: "error",
         parts: {
-          code: { kind: "user", code: "TOO_BIG" },
+          code: { kind: "custom", code: "TOO_BIG" },
           message: { kind: "none" },
           data: { kind: "noData" },
           exception: { kind: "noException" },

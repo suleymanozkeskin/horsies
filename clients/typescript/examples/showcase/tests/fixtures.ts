@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 
 import type {
   ContextUse,
+  CustomCode,
+  CustomFailure,
   Err,
   ExecutionClass,
   Ok,
@@ -14,8 +16,6 @@ import type {
   SchemaSent,
   TaskContract,
   TaskError,
-  UserCode,
-  UserFailure,
 } from "horsies";
 
 import type { Order, OrderStatus } from "../src/domain.ts";
@@ -160,14 +160,14 @@ export function resultsOf<
 >(_contract: TaskContract<P, O, E, X, C>): ResultConstructors<O, E> {
   return Object.freeze({
     ok: (value: SchemaSent<O>): Ok<SchemaSent<O>> => Object.freeze({ ok: true, value }),
-    // SAFETY: `UserCode<K>` is `K` for every code that is not built in, and `K extends E`; the tests give declared codes.
-    err: <const K extends E>(failure: UserFailure<UserCode<K>>): Err<UserFailure<E>> =>
-      Object.freeze({ ok: false, error: Object.freeze(failure as UserFailure<E>) }),
+    // SAFETY: `CustomCode<K>` is `K` for every code that is not built in, and `K extends E`; the tests give declared codes.
+    err: <const K extends E>(failure: CustomFailure<CustomCode<K>>): Err<CustomFailure<E>> =>
+      Object.freeze({ ok: false, error: Object.freeze(failure as CustomFailure<E>) }),
   });
 }
 
 /** The value of a body result that must succeed. */
-export function succeeded<T, E extends string>(result: Ok<T> | Err<UserFailure<E>>): T {
+export function succeeded<T, E extends string>(result: Ok<T> | Err<CustomFailure<E>>): T {
   if (!result.ok) {
     assert.fail(`expected a success, got ${result.error.code}: ${result.error.message ?? "no message"}`);
   }
@@ -176,7 +176,7 @@ export function succeeded<T, E extends string>(result: Ok<T> | Err<UserFailure<E
 }
 
 /** The error of a body result that must fail. */
-export function failed<T, E extends string>(result: Ok<T> | Err<UserFailure<E>>): UserFailure<E> {
+export function failed<T, E extends string>(result: Ok<T> | Err<CustomFailure<E>>): CustomFailure<E> {
   if (result.ok) {
     assert.fail(`expected an error, got ${JSON.stringify(result.value)}`);
   }
@@ -186,5 +186,5 @@ export function failed<T, E extends string>(result: Ok<T> | Err<UserFailure<E>>)
 
 /** A failed upstream outcome of a node whose task returned `code`. */
 export function upstreamError(code: string): TaskError {
-  return { code: { kind: "user", code }, message: "the upstream node failed", data: null, exception: null, subWorkflow: null };
+  return { kind: "custom", code, message: "the upstream node failed", data: null, exception: null, subWorkflow: null };
 }

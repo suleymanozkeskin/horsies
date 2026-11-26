@@ -1,6 +1,8 @@
 // The errors of a send: the task send catalog of the core, generated (`src/_catalog/task_send_errors.ts`), told apart
 // by `code`. The two errors that `retrySend` takes carry the contract's types and hold the prepared payload in a
-// member that is not enumerable, so `JSON.stringify` of an error never holds the input.
+// member that is not enumerable, so `JSON.stringify` of an error never holds the input. A key conflict carries
+// `retryable: true`, the core's retry rule of the conflict (`TaskSendError::retryable`): it clears when the key's
+// reservation ends.
 
 import type { CoreCause, NoCause } from "../_catalog/error_detail.ts";
 import {
@@ -27,14 +29,16 @@ export type SentTypes<O, E extends string> = { readonly output: O; readonly code
 /** A send error that carries the types of its task, for the handle that `retrySend` gives. */
 export type WithSentTypes<V, O, E extends string> = V & { readonly [sentTypes]?: SentTypes<O, E> };
 
-/** The one send error that `retrySend` takes: the row may or may not exist (`ENQUEUE_FAILED`). */
-export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed, O, E>;
-
 /**
- * `IDEMPOTENCY_KEY_CONFLICT`: another task holds the key. It is not retryable (`retryable` is `false`): a resend under
- * this task id meets the same reservation.
+ * The send errors that `retrySend` takes: the row may or may not exist (`ENQUEUE_FAILED`), or another task holds the
+ * idempotency key (`IDEMPOTENCY_KEY_CONFLICT`; a retry after the key's reservation ends is accepted, a retry before
+ * that gives the same error).
  */
-export type TaskSendKeyConflict = TaskSendIdempotencyKeyConflict & { readonly retryable: false };
+export type RetryableSendError<O, E extends string> = WithSentTypes<
+  TaskSendEnqueueFailed | (TaskSendIdempotencyKeyConflict & { readonly retryable: true }),
+  O,
+  E
+>;
 
 /** A send error of the task send catalog, with the fixed `retryable` of a key conflict, or the seat relay at its bound. */
 export type SendFailure =
@@ -43,7 +47,7 @@ export type SendFailure =
   | TaskSendEnqueueFailed
   | TaskSendPayloadMismatch
   | TaskSendPayloadTooLarge
-  | TaskSendKeyConflict
+  | (TaskSendIdempotencyKeyConflict & { readonly retryable: true })
   | SeatRelayFull;
 
 /** The error of a send, told apart by `code`. */
@@ -52,7 +56,6 @@ export type TaskSendError<O, E extends string> =
   | TaskSendValidationFailed
   | TaskSendPayloadMismatch
   | TaskSendPayloadTooLarge
-  | TaskSendKeyConflict
   | SeatRelayFull
   | RetryableSendError<O, E>;
 
@@ -63,15 +66,19 @@ export function sendErrorOfRaw(raw: RawCatalogError): SendFailure {
   // throws for a class name that it does not know.
   const error = taskSendCoreErrorFromNative(nativeCatalogValue(raw) as unknown as NativeTaskSendCoreError);
 
-  return error.code === "IDEMPOTENCY_KEY_CONFLICT" ? notRetryable(error) : error;
+  return error.code === "IDEMPOTENCY_KEY_CONFLICT" ? retryableConflict(error) : error;
 }
 
-/** The key conflict with `retryable: false`; its other members keep their enumerability (the payload stays hidden). */
-function notRetryable(error: TaskSendIdempotencyKeyConflict): TaskSendKeyConflict {
-  const members = { ...Object.getOwnPropertyDescriptors(error), retryable: { value: false, enumerable: true } };
+/** The key conflict with `retryable: true`; its other members keep their enumerability (the payload stays hidden). */
+function retryableConflict(
+  error: TaskSendIdempotencyKeyConflict,
+): TaskSendIdempotencyKeyConflict & { readonly retryable: true } {
+  const members = { ...Object.getOwnPropertyDescriptors(error), retryable: { value: true, enumerable: true } };
 
-  // SAFETY: the object holds every member of the conflict, with the same descriptors, and `retryable: false`.
-  return Object.freeze(Object.create(Object.prototype, members) as TaskSendKeyConflict);
+  // SAFETY: the object holds every member of the conflict, with the same descriptors, and `retryable: true`.
+  return Object.freeze(
+    Object.create(Object.prototype, members) as TaskSendIdempotencyKeyConflict & { readonly retryable: true },
+  );
 }
 
 /** `SEND_SUPPRESSED`: the process does not send now. Nothing is written. Pure. */

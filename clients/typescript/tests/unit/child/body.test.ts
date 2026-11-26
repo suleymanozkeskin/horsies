@@ -54,7 +54,7 @@ describe("the input of a body", () => {
     const run = await adapterRun(parts(add, (_input, { ok }) => ok(0)), '{"a":"secret-text","b":3}');
     const error = errorParts(run.outcome);
 
-    assert.deepEqual(error.code, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
+    assert.deepEqual(error.code, { kind: "builtIn", code: "WORKER_SERIALIZATION_ERROR" });
     assert.equal(error.message.kind === "text" ? error.message.text : "", "task input does not decode as add.input: $.a: expected an integer [WrongType]");
     assert.doesNotMatch(dataText(error), /secret-text/u);
     assert.match(dataText(error), /"expected_type":"add\.input"/u);
@@ -74,7 +74,7 @@ describe("the value of a body", () => {
     const run = await adapterRun(parts(greet, (_input, { ok }) => ok({ text: 7 } as never)), '{"name":"x"}');
     const error = errorParts(run.outcome);
 
-    assert.deepEqual(error.code, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
+    assert.deepEqual(error.code, { kind: "builtIn", code: "WORKER_SERIALIZATION_ERROR" });
     assert.match(error.message.kind === "text" ? error.message.text : "", /^task returned a value of type greet\.output: \$\.text/u);
   });
 
@@ -82,7 +82,7 @@ describe("the value of a body", () => {
     const run = await adapterRun(parts(add, () => 5), '{"a":1,"b":1}');
     const error = errorParts(run.outcome);
 
-    assert.deepEqual(error.code, { kind: "library", code: "RETURN_TYPE_MISMATCH" });
+    assert.deepEqual(error.code, { kind: "builtIn", code: "RETURN_TYPE_MISMATCH" });
     assert.equal(error.message.kind === "text" ? error.message.text : "", "Task add returned number but must return ok(value) or err({ code })");
   });
 });
@@ -97,7 +97,7 @@ describe("the errors of a body", () => {
     assert.deepEqual(run.outcome, {
       kind: "error",
       parts: {
-        code: { kind: "user", code: "TOO_BIG" },
+        code: { kind: "custom", code: "TOO_BIG" },
         message: { kind: "text", text: "over the cap" },
         data: { kind: "text", text: '{"cap":10}' },
         exception: { kind: "noException" },
@@ -120,7 +120,7 @@ describe("the errors of a body", () => {
 
     const error = errorParts(run.outcome);
 
-    assert.deepEqual(error.code, { kind: "user", code: "TOO_BIG" });
+    assert.deepEqual(error.code, { kind: "custom", code: "TOO_BIG" });
     assert.equal(error.message.kind === "text" ? error.message.text : "", "Unhandled exception in task add: CardDeclined: the card was declined");
     assert.equal(dataText(error), '{"exception_type":"CardDeclined"}');
     assert.equal(error.exception.kind === "record" ? error.exception.className : "", "CardDeclined");
@@ -138,7 +138,7 @@ describe("the errors of a body", () => {
 
     const error = errorParts(run.outcome);
 
-    assert.deepEqual(error.code, { kind: "library", code: "UNHANDLED_EXCEPTION" });
+    assert.deepEqual(error.code, { kind: "builtIn", code: "UNHANDLED_EXCEPTION" });
     assert.equal(error.message.kind === "text" ? error.message.text : "", "Unhandled exception in task add: RangeError: out of range");
 
     if (error.exception.kind !== "record") {
@@ -178,10 +178,10 @@ describe("the errors of a body", () => {
     assert.deepEqual(errorDataPart(deep), { kind: "text", text: '{"data_refused":"ValueValidationError"}' });
   });
 
-  test("a user code that the core refuses is RETURN_TYPE_MISMATCH that names the task and the rule", () => {
+  test("a custom code that the core refuses is RETURN_TYPE_MISMATCH that names the task and the rule", () => {
     const refused = refusedCodeParts("add", "bad code", "a code has no space");
 
-    assert.deepEqual(refused.code, { kind: "library", code: "RETURN_TYPE_MISMATCH" });
+    assert.deepEqual(refused.code, { kind: "builtIn", code: "RETURN_TYPE_MISMATCH" });
     assert.match(refused.message.kind === "text" ? refused.message.text : "", /^Task add returned err with the error code "bad code"/u);
   });
 });

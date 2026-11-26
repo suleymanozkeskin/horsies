@@ -53,7 +53,8 @@ export const UpstreamSeen = h.union("kind", [
 
 /** The upstream failure of a check case: a skipped upstream node, as the engine gives it. */
 const CHECK_UPSTREAM_FAILURE: TaskError<never> = {
-  code: { kind: "library", code: "UPSTREAM_SKIPPED" },
+  kind: "builtIn",
+  code: "UPSTREAM_SKIPPED",
   message: null,
   data: null,
   exception: null,

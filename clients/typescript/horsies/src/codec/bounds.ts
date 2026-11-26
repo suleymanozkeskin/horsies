@@ -41,10 +41,11 @@ export const SUMMARY_COUNT_MAX = 2_147_483_647;
 export const SUMMARY_COUNT_MIN = -2_147_483_648;
 
 /**
- * The library's task error codes: the four built-in code families of the core (`BuiltInTaskCode`,
- * `core/src/core/task/error.rs`: operational, contract, retrieval, outcome).
+ * The built-in task error codes of horsies: the four built-in code families of the core (`BUILT_IN_TASK_CODES`,
+ * `core/src/events/values.rs`; `BuiltInTaskCode`, `core/src/core/task/error.rs`: operational, contract, retrieval,
+ * outcome).
  */
-export const LIBRARY_TASK_CODES = [
+export const BUILT_IN_TASK_CODES = [
   "UNHANDLED_EXCEPTION",
   "TASK_EXCEPTION",
   "WORKER_CRASHED",
@@ -97,8 +98,8 @@ export const WORKFLOW_STATUSES = [
   "EXPIRED",
 ] as const;
 
-// `horsies` exports LIBRARY_TASK_CODES and WORKFLOW_STATUSES (the public types name them), so both lists are frozen.
-void Object.freeze(LIBRARY_TASK_CODES);
+// `horsies` exports BUILT_IN_TASK_CODES and WORKFLOW_STATUSES (the public types name them), so both lists are frozen.
+void Object.freeze(BUILT_IN_TASK_CODES);
 
 void Object.freeze(WORKFLOW_STATUSES);
 

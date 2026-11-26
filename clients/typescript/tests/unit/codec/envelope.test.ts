@@ -54,7 +54,7 @@ describe("stored task error rules", () => {
     assert.equal(errorRule("[1]"), "ErrorNotAnObject");
   });
 
-  test("ErrorFieldInvalid: a code that is null, a number, a library or reserved name as a user code", () => {
+  test("ErrorFieldInvalid: a code that is null, a number, a built-in or reserved name as a custom code", () => {
     for (const code of ["null", "1", '"BROKER_ERROR"', '"WORKFLOW_STOPPED"', '{"__builtin_task_code__":"X","a":1}']) {
       assert.equal(errorRule(`{"error_code":${code}}`), "ErrorFieldInvalid", code);
     }
@@ -70,7 +70,8 @@ describe("stored task error rules", () => {
 
     assert(outcome.kind === "failed");
     assert.deepEqual(outcome.error, {
-      code: { kind: "user", code: "X" },
+      kind: "custom",
+      code: "X",
       message: null,
       data: null,
       exception: null,
@@ -156,7 +157,7 @@ describe("h.taskOutcome parameters", () => {
       "worker",
     );
 
-    const error = { code: { kind: "user", code: "X" }, message: null, data: null, exception: null, subWorkflow: null };
+    const error = { kind: "custom", code: "X", message: null, data: null, exception: null, subWorkflow: null };
 
     assert.deepEqual(failed, { ok: true, value: { order: { kind: "failed", error }, note: "x" } });
   });

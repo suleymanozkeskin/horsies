@@ -72,7 +72,7 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`send welcome: ${sendErrorText(sent.error)}`);
   }
 
-  printLine(readLine("welcome", await sent.value.get({ timeoutMs: RESULT_WAIT_MS }), (message) => message));
+  printLine(readLine("welcome", await sent.value.get({ waitMs: RESULT_WAIT_MS }), (message) => message));
 
   return DEMO_DONE;
 }

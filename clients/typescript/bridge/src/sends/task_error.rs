@@ -1,8 +1,8 @@
 //! The core's task error of a body, built from its parts.
 //!
-//! - The code: a user code that `UserCode::parse` accepts (a built-in or a
-//!   reserved name is refused, as Python and Rust refuse it when the error
-//!   is built), or a library code.
+//! - The code: a custom code that `UserCode::parse` accepts (a built-in or
+//!   a reserved name is refused, as Python and Rust refuse it when the error
+//!   is built), or a built-in code.
 //! - The data: none, the codec's stored `data` text, or data that the codec
 //!   cannot write. The bridge stores data that the codec cannot write as
 //!   `{"data_refused": "<cause>"}`, with the cause that Python stores, and
@@ -39,10 +39,10 @@ const CODEC_TARGET: &str = LoggerName::Codec.dotted_name();
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ErrorCodePart {
-    /// A code that the task chose.
-    User { code: String },
+    /// A custom code: a code that the task chose.
+    Custom { code: String },
     /// A built-in code, as its text (`UNHANDLED_EXCEPTION`).
-    Library { code: String },
+    BuiltIn { code: String },
 }
 
 /// The exception record of a body error.
@@ -160,14 +160,14 @@ pub enum TaskErrorBuild {
     Built {
         error: TaskErrorRecord,
     },
-    /// The core refuses the user code: the cause names the rule.
+    /// The core refuses the custom code: the cause names the rule.
     Refused {
         cause: String,
     },
 }
 
-/// Build the core's task error of a body from its parts. A library code that
-/// is not a built-in code, or a data text that is not strict JSON, throws
+/// Build the core's task error of a body from its parts. A built-in code part
+/// that is not a built-in code, or a data text that is not strict JSON, throws
 /// `CLIENT_DEFECT`: the package gives only the codes of its catalog and the
 /// texts of its codec. Starts no core; starts the log bridge of the process,
 /// and a forwarder thread that cannot start throws `CORE_START_FAILED`.
@@ -195,15 +195,15 @@ fn task_error_build(
     log: &LogBridge,
 ) -> Result<TaskErrorBuild, BoundaryRefusal> {
     let error_code = match parts.code {
-        ErrorCodePart::User { code } => match UserCode::parse(code) {
-            Ok(user) => TaskErrorCode::User(user),
+        ErrorCodePart::Custom { code } => match UserCode::parse(code) {
+            Ok(custom) => TaskErrorCode::User(custom),
             Err(refused) => {
                 return Ok(TaskErrorBuild::Refused {
                     cause: refused.to_string(),
                 })
             }
         },
-        ErrorCodePart::Library { code } => {
+        ErrorCodePart::BuiltIn { code } => {
             TaskErrorCode::BuiltIn(BuiltInTaskCode::parse(&code).ok_or_else(|| {
                 BoundaryRefusal::new("code.code", "the text of a built-in task code")
             })?)
@@ -280,8 +280,8 @@ mod tests {
         log
     }
 
-    fn user_code(code: &str) -> ErrorCodePart {
-        ErrorCodePart::User {
+    fn custom_code(code: &str) -> ErrorCodePart {
+        ErrorCodePart::Custom {
             code: code.to_owned(),
         }
     }
@@ -314,9 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn a_user_code_with_data_is_stored_with_its_four_keys() {
+    fn a_custom_code_with_data_is_stored_with_its_four_keys() {
         let build = task_error_build(
-            parts(user_code("CARD_DECLINED"), data_text(r#"{"attempt":2}"#)),
+            parts(custom_code("CARD_DECLINED"), data_text(r#"{"attempt":2}"#)),
             &quiet_log(),
         )
         .expect("the parts cross");
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn an_error_with_no_data_stores_null_data() {
         let build = task_error_build(
-            parts(user_code("CARD_DECLINED"), ErrorDataPart::NoData),
+            parts(custom_code("CARD_DECLINED"), ErrorDataPart::NoData),
             &quiet_log(),
         )
         .expect("the parts cross");
@@ -337,9 +337,9 @@ mod tests {
     }
 
     #[test]
-    fn a_built_in_name_as_a_user_code_is_refused_with_the_cause() {
+    fn a_built_in_name_as_a_custom_code_is_refused_with_the_cause() {
         let build = task_error_build(
-            parts(user_code("TASK_TIMEOUT"), ErrorDataPart::NoData),
+            parts(custom_code("TASK_TIMEOUT"), ErrorDataPart::NoData),
             &quiet_log(),
         )
         .expect("the parts cross");
@@ -350,9 +350,9 @@ mod tests {
 
     /// `WORKFLOW_STOPPED` is a reserved name: only the engine writes it.
     #[test]
-    fn a_reserved_name_as_a_user_code_is_refused_with_the_cause() {
+    fn a_reserved_name_as_a_custom_code_is_refused_with_the_cause() {
         let build = task_error_build(
-            parts(user_code("WORKFLOW_STOPPED"), ErrorDataPart::NoData),
+            parts(custom_code("WORKFLOW_STOPPED"), ErrorDataPart::NoData),
             &quiet_log(),
         )
         .expect("the parts cross");
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn a_library_code_with_an_exception_record_is_stored_with_its_tag() {
+    fn a_built_in_code_with_an_exception_record_is_stored_with_its_tag() {
         let build = task_error_build(
             TaskErrorParts {
                 exception: ExceptionPart::Record {
@@ -373,7 +373,7 @@ mod tests {
                     traceback: "TypeError: x is not a function\n    at body".to_owned(),
                 },
                 ..parts(
-                    ErrorCodePart::Library {
+                    ErrorCodePart::BuiltIn {
                         code: "UNHANDLED_EXCEPTION".to_owned(),
                     },
                     ErrorDataPart::NoData,
@@ -393,7 +393,10 @@ mod tests {
     #[test]
     fn data_with_an_engine_key_is_replaced_by_the_core_and_the_code_stays() {
         let build = task_error_build(
-            parts(user_code("CARD_DECLINED"), data_text(r#"{"__h_secret":1}"#)),
+            parts(
+                custom_code("CARD_DECLINED"),
+                data_text(r#"{"__h_secret":1}"#),
+            ),
             &quiet_log(),
         )
         .expect("the parts cross");
@@ -410,7 +413,7 @@ mod tests {
         let (log, records) = LogBridge::new();
         let build = task_error_build(
             parts(
-                user_code("CARD_DECLINED"),
+                custom_code("CARD_DECLINED"),
                 ErrorDataPart::NotStorable {
                     reason: DataRefusedReason::NotJsonNative,
                 },
@@ -437,7 +440,7 @@ mod tests {
     fn an_integer_that_is_too_long_is_stored_with_the_serialization_error_cause() {
         let build = task_error_build(
             parts(
-                user_code("CARD_DECLINED"),
+                custom_code("CARD_DECLINED"),
                 ErrorDataPart::NotStorable {
                     reason: DataRefusedReason::IntegerTooLong,
                 },
@@ -452,10 +455,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_library_code_and_a_data_text_that_is_not_json_are_boundary_refusals() {
+    fn an_unknown_built_in_code_and_a_data_text_that_is_not_json_are_boundary_refusals() {
         let unknown = task_error_build(
             parts(
-                ErrorCodePart::Library {
+                ErrorCodePart::BuiltIn {
                     code: "NOT_A_CODE".to_owned(),
                 },
                 ErrorDataPart::NoData,
@@ -464,7 +467,7 @@ mod tests {
         );
         assert!(matches!(unknown, Err(refusal) if refusal.subject == "code.code"));
         let not_json = task_error_build(
-            parts(user_code("CARD_DECLINED"), data_text("{not json")),
+            parts(custom_code("CARD_DECLINED"), data_text("{not json")),
             &quiet_log(),
         );
         assert!(matches!(not_json, Err(refusal) if refusal.subject == "data.text"));

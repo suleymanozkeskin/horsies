@@ -140,7 +140,7 @@ export function implementationOf<
     kind: "implementation",
     contract,
     run: async (input: BodyInput<P>, runtime: RuntimeOf<X, C>): Promise<TaskOutcome<SchemaValue<O>, E>> =>
-      // SAFETY: the runner decodes the value with the contract's output kind, and a user code of the error is a code
+      // SAFETY: the runner decodes the value with the contract's output kind, and a custom code of the error is a code
       // of the contract (a declared code, by typecheck of `err` and of the exception map).
       runImplementation(kept, input, runtime) as Promise<TaskOutcome<SchemaValue<O>, E>>,
   });

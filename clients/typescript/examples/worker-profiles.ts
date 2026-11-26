@@ -122,10 +122,10 @@ async function demo(): Promise<Result<void, string>> {
     pages.push(sent.value);
   }
 
-  printLine(readLine("checksum", await sum.value.get({ timeoutMs: RESULT_WAIT_MS }), String));
+  printLine(readLine("checksum", await sum.value.get({ waitMs: RESULT_WAIT_MS }), String));
 
   for (const page of pages) {
-    printLine(readLine("fetch_page", await page.get({ timeoutMs: RESULT_WAIT_MS }), String));
+    printLine(readLine("fetch_page", await page.get({ waitMs: RESULT_WAIT_MS }), String));
   }
 
   return DEMO_DONE;

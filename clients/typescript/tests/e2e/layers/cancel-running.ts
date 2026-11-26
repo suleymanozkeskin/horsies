@@ -95,7 +95,7 @@ async function assertSeenInTime(suite: Suite, token: string, cancelAt: number): 
  * recorded by the cancel statement. Its result reads as `TASK_CANCELLED`.
  */
 async function assertCancelledWithOneAttempt<O, E extends string>(suite: Suite, handle: TaskHandle<O, E>): Promise<void> {
-  assert.deepEqual(errorCode(await failed(handle, RESULT_WAIT_MS)), { source: "library", code: "TASK_CANCELLED" });
+  assert.deepEqual(errorCode(await failed(handle, RESULT_WAIT_MS)), { source: "builtIn", code: "TASK_CANCELLED" });
 
   const info = await infoOf(handle);
 

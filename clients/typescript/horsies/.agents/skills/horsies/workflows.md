@@ -317,7 +317,7 @@ export async function runCheckout(app: Horsies, orderId: string): Promise<void> 
   }
 
   const handle = started.value;
-  const result = await handle.get({ timeoutMs: 60_000 });
+  const result = await handle.get({ waitMs: 60_000 });
 
   if (!result.ok) {
     console.error(`the read failed: ${result.error.kind}`);
@@ -332,16 +332,16 @@ export async function runCheckout(app: Horsies, orderId: string): Promise<void> 
       console.log(`receipt ${outcome.value.receiptId}`);
       break;
     case "failed":
-      console.log(`checkout ended with ${outcome.error.code.code}`);
+      console.log(`checkout ended with ${outcome.error.code}`);
       break;
   }
 
   const charged = await handle.resultFor("charge");
 
   if (charged.ok && charged.value.kind === "failed") {
-    const code = charged.value.error.code;
+    const error = charged.value.error;
 
-    console.log(code.kind === "user" ? `declined: ${code.code}` : `library: ${code.code}`);
+    console.log(error.kind === "custom" ? `declined: ${error.code}` : `built in: ${error.code}`);
   }
 }
 ```
@@ -391,7 +391,7 @@ process gave; another error is `VALIDATION_FAILED`.
 | Member | Gives |
 |---|---|
 | `workflowId` | The `WorkflowId` |
-| `get({ timeoutMs })` | `Result<TaskOutcome<O, string>, WorkflowReadError>`: waits while the workflow runs, at most `timeoutMs` (0 to 4,294,967,295; left out: no bound) |
+| `get({ waitMs })` | `Result<TaskOutcome<O, string>, WorkflowReadError>`: waits while the workflow runs, at most `waitMs` (0 to 4,294,967,295; left out: no bound) |
 | `resultFor(id)` | `Result<TaskOutcome<O, E>, WorkflowReadError>`: one node of the returned object (the output and the success policy nodes), typed by its contract. Not a wait |
 | `status()` | `Result<WorkflowStatus, HandleCoreError>` |
 | `results()` | `Result<ReadonlyMap<string, NodeResult>, HandleCoreError>`: the stored result of each node that has one, by node id |
@@ -400,9 +400,9 @@ process gave; another error is `VALIDATION_FAILED`.
 | `resume()` | `Result<boolean, HandleCoreError>`: `true` when a PAUSED workflow resumed |
 | `cancel()` | `Result<void, HandleCoreError>`: cancels the workflow and its descendants |
 
-- `get` reads user codes as open text (`string`), because a workflow holds
+- `get` reads custom codes as open text (`string`), because a workflow holds
   the codes of many tasks. A FAILED, CANCELLED or EXPIRED workflow is
-  `failed` with its stored error, or with the library code of its status
+  `failed` with its stored error, or with the built-in code of its status
   (`WORKFLOW_FAILED`, `WORKFLOW_CANCELLED`, `WORKFLOW_EXPIRED`). A PAUSED
   workflow is `failed` with `WORKFLOW_PAUSED`; a resume can continue it.
 - `NodeResult` is `{ kind: "outcome", outcome }` (a
@@ -450,21 +450,22 @@ export async function checkoutState(app: Horsies, text: string): Promise<void> {
 - `app.workflowHandle(workflow, workflowId)` does no I/O. It has no build,
   so `resultFor(id, contract)` takes what the node runs: the task contract
   of a task node, or the workflow contract of a sub-workflow node (read
-  with the child's declared output and open user codes).
-- A read of a workflow that the app does not list is `workflowNotListed`,
+  with the child's declared output and open custom codes).
+- A read of a workflow that the app does not list is `noTypeAvailable`,
   before any statement.
 
-| `WorkflowReadError` `kind` | Fields | When |
-|---|---|---|
-| `waitTimedOut` | - | The workflow had not ended when the wait ended |
-| `workflowNotFound` | - | No workflow has the id |
-| `resultNotReady` | - | `resultFor`: the node stores no result yet, or the workflow has no node of the id |
-| `storedResultUnreadable` | `cause` | The stored value does not read with the handle's types |
-| `unknownUserCode` | `code` | The stored user code is not in the node contract's `errors` |
-| `waitInsideTask` | - | A wait in a worker child. Nothing was read |
-| `workflowNotListed` | `workflowName` | The app does not list the workflow. Nothing was read |
-| `database` | `code`, `retryable`, `message` | The database or the connection failed |
-| `invalidWait` | `maxMs` | `timeoutMs` outside its range. Nothing was read |
+| `WorkflowReadError` `kind` | `code` | Fields | When |
+|---|---|---|---|
+| `waitTimeout` | `WAIT_TIMEOUT` | - | The workflow had not ended when the wait ended |
+| `workflowNotFound` | `WORKFLOW_NOT_FOUND` | - | No workflow has the id |
+| `resultNotReady` | `RESULT_NOT_READY` | - | `resultFor`: the node stores no result yet, or the workflow has no node of the id |
+| `storedResultUnreadable` | - | `cause` | The stored value does not read with the handle's types |
+| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the node contract's `errors` |
+| `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A wait in a worker child. Nothing was read |
+| `noTypeAvailable` | `NO_TYPE_AVAILABLE` | `workflowName` | The app does not list the workflow, so its output has no type to read with. Nothing was read |
+| `database` | the handle code | `retryable`, `message` | The database or the connection failed |
+| `invalidInput` | `INVALID_INPUT` | `maxMs` | `waitMs` outside its range. Nothing was read |
+| `seatRelayFull` | `SEAT_RELAY_FULL` | `retryable: true`, `message` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was read |
 
 `HandleCoreError` (from `status`, `results`, `tasks`, `pause`, `resume`,
 `cancel`), told apart by `code`; every variant has `message`, `workflowId`

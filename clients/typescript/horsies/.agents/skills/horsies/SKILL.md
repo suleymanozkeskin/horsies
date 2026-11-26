@@ -139,7 +139,7 @@ export async function sendSum(producer: Horsies): Promise<void> {
     return;
   }
 
-  const read = await sent.value.get({ timeoutMs: 30_000 });
+  const read = await sent.value.get({ waitMs: 30_000 });
 
   if (!read.ok) {
     console.error(`the read failed: ${read.error.kind}`);
@@ -154,7 +154,7 @@ export async function sendSum(producer: Horsies): Promise<void> {
       console.log(`sum = ${outcome.value}`);
       break;
     case "failed":
-      console.log(`failed with ${outcome.error.code.code}`);
+      console.log(`failed with ${outcome.error.code}`);
       break;
   }
 }

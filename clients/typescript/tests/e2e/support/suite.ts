@@ -181,7 +181,7 @@ export class Suite {
     const handle = await this.#sendReadiness(profile);
 
     await worker.waitUntil(READY_LIMIT_MS, "the worker runs its readiness task", async () => {
-      const read = await handle.get({ timeoutMs: READY_PROBE_MS });
+      const read = await handle.get({ waitMs: READY_PROBE_MS });
 
       return read.ok && read.value.kind === "succeeded";
     });

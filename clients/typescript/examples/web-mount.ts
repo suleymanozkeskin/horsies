@@ -266,7 +266,7 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`send ping: ${sendErrorText(sent.error)}`);
   }
 
-  printLine(readLine("ping", await sent.value.get({ timeoutMs: RESULT_WAIT_MS }), (text) => text));
+  printLine(readLine("ping", await sent.value.get({ waitMs: RESULT_WAIT_MS }), (text) => text));
 
   return DEMO_DONE;
 }

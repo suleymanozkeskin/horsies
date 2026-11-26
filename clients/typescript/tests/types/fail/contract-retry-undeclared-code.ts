@@ -1,5 +1,5 @@
 // expect: TS2820 at 12
-// With `errors`, a user code in `autoRetryFor` must be declared.
+// With `errors`, a custom code in `autoRetryFor` must be declared.
 
 import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { h } from "../../../horsies/src/wire/public.ts";

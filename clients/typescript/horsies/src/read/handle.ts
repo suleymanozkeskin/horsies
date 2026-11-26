@@ -3,6 +3,8 @@
 
 import { threadId } from "node:worker_threads";
 
+import type { TaskAbsenceReason } from "../_catalog/history.ts";
+import { RetrievalCode } from "../_catalog/task_codes.ts";
 import type { CoreAccess } from "../app/core-access.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { decodeEnvelope } from "../codec/reader.ts";
@@ -17,13 +19,13 @@ import type { Kind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import type { TaskError, TaskOutcome } from "../wire/task-error.ts";
 import { MAX_WAIT_LIMIT_MS } from "../send/bounds.ts";
-import { brokerReadError, type ReadError, taskAbsence } from "./errors.ts";
+import { brokerReadError, type ReadError, seatRelayFullRead } from "./errors.ts";
 import { type TaskInfo, taskInfoOf } from "./info.ts";
 
 /** The options of a result read. */
 export interface GetOptions {
   /** The longest wait for a task that has not finished: whole milliseconds, 0 to 4,294,967,295. Left out: no bound. */
-  readonly timeoutMs?: number;
+  readonly waitMs?: number;
 }
 
 /** The handle of a sent task. `O` is the output type, `E` the type of the task's codes. */
@@ -81,13 +83,13 @@ class Handle<O, E extends string> implements TaskHandle<O, E> {
   }
 
   async get(options: GetOptions = {}): Promise<Result<TaskOutcome<O, E>, ReadError>> {
-    // SAFETY: the reader built the value from the contract's output kind, whose value type is `O`, and a user code is
+    // SAFETY: the reader built the value from the contract's output kind, whose value type is `O`, and a custom code is
     // one of the contract's codes (`E`) or the read is `unknownUserCode`.
     return (await this.#read(options)) as Result<TaskOutcome<O, E>, ReadError>;
   }
 
   async #read(options: GetOptions): Promise<Outcome> {
-    const wait = waitBound(options.timeoutMs);
+    const wait = waitBound(options.waitMs);
 
     if (!wait.ok) {
       return wait;
@@ -100,7 +102,7 @@ class Handle<O, E extends string> implements TaskHandle<O, E> {
     const read = await resultRead(this.#core, this.taskId, wait.value);
 
     if (read.kind === "waitInsideTask") {
-      return err(Object.freeze({ kind: "waitInsideTask" }));
+      return err(Object.freeze({ kind: "waitInsideTask", code: RetrievalCode.WAIT_INSIDE_TASK }));
     }
 
     const outcome = outcomeOfRead(read.read, this.#form);
@@ -124,11 +126,11 @@ class Handle<O, E extends string> implements TaskHandle<O, E> {
       case "found":
         return ok(taskInfoOf(read.record));
       case "absent":
-        return err(Object.freeze({ kind: "taskNotFound", absence: taskAbsence(read.reason) }));
+        return err(taskNotFound(read.reason));
       case "failed":
         return err(brokerReadError(read.error));
       case "seatRelayFull":
-        return err(Object.freeze({ kind: "seatRelayFull", error: read.error }));
+        return err(seatRelayFullRead(read.error));
       default: {
         const unexpected: never = read;
 
@@ -138,15 +140,20 @@ class Handle<O, E extends string> implements TaskHandle<O, E> {
   }
 }
 
-/** The wait of a `timeoutMs`, or `invalidWait`. Pure. */
-export function waitBound(timeoutMs: number | undefined): Result<WaitBound, ReadError> {
-  if (timeoutMs === undefined) {
+/** The wait of a `waitMs`, or `invalidInput`. Pure. */
+export function waitBound(waitMs: number | undefined): Result<WaitBound, ReadError> {
+  if (waitMs === undefined) {
     return ok({ kind: "untilEnd" });
   }
 
-  return Number.isSafeInteger(timeoutMs) && timeoutMs >= 0 && timeoutMs <= MAX_WAIT_LIMIT_MS
-    ? ok({ kind: "upTo", milliseconds: timeoutMs })
-    : err(Object.freeze({ kind: "invalidWait", maxMs: MAX_WAIT_LIMIT_MS }));
+  return Number.isSafeInteger(waitMs) && waitMs >= 0 && waitMs <= MAX_WAIT_LIMIT_MS
+    ? ok({ kind: "upTo", milliseconds: waitMs })
+    : err(Object.freeze({ kind: "invalidInput", code: RetrievalCode.INVALID_INPUT, maxMs: MAX_WAIT_LIMIT_MS }));
+}
+
+/** `TASK_NOT_FOUND` with the core's reason of the absence. Pure. */
+function taskNotFound(reason: TaskAbsenceReason): ReadError {
+  return Object.freeze({ kind: "taskNotFound", code: RetrievalCode.TASK_NOT_FOUND, reason });
 }
 
 /** A result read, or `waitInsideTask` when this process runs task bodies (decided before any statement). */
@@ -178,7 +185,7 @@ export function outcomeOfRead(read: ResultRead, form: ReadForm): Outcome {
     case "found":
       return outcomeOfRecord(read.record, form);
     case "absent":
-      return err(Object.freeze({ kind: "taskNotFound", absence: taskAbsence(read.reason) }));
+      return err(taskNotFound(read.reason));
     case "failed":
       return err(brokerReadError(read.error));
     default: {
@@ -190,7 +197,7 @@ export function outcomeOfRead(read: ResultRead, form: ReadForm): Outcome {
 }
 
 /**
- * The outcome of a found task, by the stage of its stored result: a wait that ended first is `waitTimedOut`; a
+ * The outcome of a found task, by the stage of its stored result: a wait that ended first is `waitTimeout`; a
  * cancelled task is its outcome (`TASK_CANCELLED`), with a stored envelope or none; another finished task with no
  * result is `resultNotAvailable`; a stored envelope reads with the contract's form. Pure.
  */
@@ -199,11 +206,13 @@ function outcomeOfRecord(record: ResultRecord, form: ReadForm): Outcome {
 
   switch (envelope.kind) {
     case "waitEnded":
-      return err(Object.freeze({ kind: "waitTimedOut", status: envelope.status }));
+      return err(Object.freeze({ kind: "waitTimeout", code: RetrievalCode.WAIT_TIMEOUT, status: envelope.status }));
     case "finishedWithoutResult":
       return envelope.status === "CANCELLED"
         ? ok(cancelledOutcome(record.taskId))
-        : err(Object.freeze({ kind: "resultNotAvailable", status: envelope.status }));
+        : err(
+            Object.freeze({ kind: "resultNotAvailable", code: RetrievalCode.RESULT_NOT_AVAILABLE, status: envelope.status }),
+          );
     case "stored":
       return envelope.status === "CANCELLED" ? ok(cancelledOutcome(record.taskId)) : decodedOutcome(envelope.text, form);
     default: {
@@ -215,12 +224,13 @@ function outcomeOfRecord(record: ResultRecord, form: ReadForm): Outcome {
 }
 
 /**
- * The outcome of a cancelled task, whatever the row stores: the library code `TASK_CANCELLED`, as the Python and Rust
+ * The outcome of a cancelled task, whatever the row stores: the built-in code `TASK_CANCELLED`, as the Python and Rust
  * clients read it (`Task <id> was cancelled before completion`, data `{ task_id }`). Pure.
  */
 function cancelledOutcome(taskId: string): TaskOutcome<unknown, string> {
   const error: TaskError<string> = {
-    code: Object.freeze({ kind: "library", code: "TASK_CANCELLED" }),
+    kind: "builtIn",
+    code: "TASK_CANCELLED",
     message: `Task ${taskId} was cancelled before completion`,
     data: Object.freeze({ task_id: taskId }),
     exception: null,
@@ -242,7 +252,7 @@ function decodedOutcome(text: string, form: ReadForm): Outcome {
         return err(Object.freeze({ kind: "storedResultUnreadable", cause: refusalText(decoded.error) }));
       }
 
-      return checkedUserCode(decoded.value, form.codes);
+      return checkedCustomCode(decoded.value, form.codes);
     }
 
     default: {
@@ -253,15 +263,15 @@ function decodedOutcome(text: string, form: ReadForm): Outcome {
   }
 }
 
-/** The outcome, or `unknownUserCode` for a user code that a declared list does not hold. Pure. */
-function checkedUserCode(outcome: TaskOutcome<unknown, string>, codes: DeclaredCodes): Outcome {
-  if (outcome.kind === "succeeded" || outcome.error.code.kind === "library" || codes.kind === "open") {
+/** The outcome, or `unknownUserCode` for a custom code that a declared list does not hold. Pure. */
+function checkedCustomCode(outcome: TaskOutcome<unknown, string>, codes: DeclaredCodes): Outcome {
+  if (outcome.kind === "succeeded" || outcome.error.kind === "builtIn" || codes.kind === "open") {
     return ok(outcome);
   }
 
-  return codes.codes.includes(outcome.error.code.code)
+  return codes.codes.includes(outcome.error.code)
     ? ok(outcome)
-    : err(Object.freeze({ kind: "unknownUserCode", code: outcome.error.code.code }));
+    : err(Object.freeze({ kind: "unknownUserCode", code: outcome.error.code }));
 }
 
 /** Whether a read is final, so the handle keeps it: an outcome, or a stored result that never reads. Pure. */
@@ -275,11 +285,11 @@ function isFinal(read: Outcome): boolean {
     case "storedResultUnreadable":
     case "unknownUserCode":
       return true;
-    case "waitTimedOut":
+    case "waitTimeout":
     case "taskNotFound":
     case "waitInsideTask":
     case "database":
-    case "invalidWait":
+    case "invalidInput":
     case "seatRelayFull":
       return false;
     default: {

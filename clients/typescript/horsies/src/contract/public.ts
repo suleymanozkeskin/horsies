@@ -6,6 +6,8 @@ export {
   type ContextUse,
   type ContextUseOf,
   type ContractTypes,
+  type CustomCode,
+  type CustomFailure,
   defineTask,
   type ExecutionClass,
   type ExecutionRules,
@@ -15,8 +17,6 @@ export {
   type RetryPolicy,
   type TaskContract,
   type TaskDefinition,
-  type UserCode,
-  type UserFailure,
   type WidenedCodes,
 } from "./define-task.ts";
 

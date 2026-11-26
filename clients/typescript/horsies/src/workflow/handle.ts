@@ -3,10 +3,11 @@
 // stored id; it does no I/O until a call.
 //
 // Every stored text that a read gives passed the core's strict JSON check in the addon; the codec reader then decodes
-// it with the types of the handle. `get` reads open user codes (a workflow holds the codes of many tasks); `resultFor`
+// it with the types of the handle. `get` reads open custom codes (a workflow holds the codes of many tasks); `resultFor`
 // reads one node with that node's contract.
 
 import { WorkflowTaskStatus } from "../_catalog/status.ts";
+import { ContractCode, RetrievalCode } from "../_catalog/task_codes.ts";
 import type { HandleCoreError } from "../_catalog/workflow_handle_errors.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { readStoredError } from "../codec/envelope.ts";
@@ -19,6 +20,7 @@ import type { ExecutionClass, TaskContract, ContextUse } from "../contract/defin
 import type { WorkflowId } from "../contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
 import type { CheckedText, StoredNodeRecord, StoredTextFact, WorkflowWaitRead } from "../native/workflows/addon.ts";
+import { seatRelayFullRead } from "../read/errors.ts";
 import type { GetOptions, ReadForm } from "../read/handle.ts";
 import { instantOfMicros, type Recorded } from "../read/info.ts";
 import { JSON_KIND } from "../wire/kinds.ts";
@@ -66,7 +68,7 @@ export interface WorkflowTaskInfo {
 export interface WorkflowHandleBase<R extends BuildReturn> {
   readonly workflowId: WorkflowId;
   status(): Promise<Result<WorkflowStatus, WorkflowHandleError>>;
-  /** The workflow's outcome, waiting while it runs, up to `timeoutMs`. The user code is open. */
+  /** The workflow's outcome, waiting while it runs, up to `waitMs`. The custom code is open. */
   get(options?: GetOptions): Promise<Result<TaskOutcome<WorkflowOutput<R>, string>, WorkflowReadError>>;
   /** The stored result of each node that has one, by node id. */
   results(): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>>;
@@ -95,8 +97,8 @@ export interface WorkflowHandle<R extends BuildReturn> extends WorkflowHandleBas
 
 /**
  * The handle of a stored workflow id: it has no build, so `resultFor` takes what the node runs: a task contract, or
- * the workflow contract of a sub-workflow node (read with the child's declared output and open user codes; the app
- * lists the child, else `workflowNotListed`).
+ * the workflow contract of a sub-workflow node (read with the child's declared output and open custom codes; the app
+ * lists the child, else `noTypeAvailable`).
  */
 export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandleBase<R> {
   /** The outcome of the task node `id`, read with the output type and the codes of `contract`. Not a wait. */
@@ -142,7 +144,7 @@ export function workflowHandleOf<R extends BuildReturn>(facts: HandleFacts): Wor
 
       // SAFETY: the reader decodes with the node's contract: its output type and its codes are the node's types.
       return (
-        target === undefined ? err(Object.freeze({ kind: "resultNotReady" })) : targetOutcome(facts, id, target)
+        target === undefined ? err(resultNotReady()) : targetOutcome(facts, id, target)
       ) as never;
     },
   });
@@ -214,11 +216,11 @@ function changed(read: Awaited<ReturnType<WorkflowCore["pause"]>>): Result<boole
 }
 
 /**
- * `get`: the wait, then the outcome of the ended workflow. `invalidWait`, `workflowNotListed` and `waitInsideTask`
- * are decided before any statement.
+ * `get`: the wait, then the outcome of the ended workflow. `invalidInput`, `noTypeAvailable` and `waitInsideTask` are
+ * decided before any statement.
  */
 async function workflowOutcome(facts: HandleFacts, options: GetOptions): Promise<ReadOutcome> {
-  const wait = workflowWait(options.timeoutMs);
+  const wait = workflowWait(options.waitMs);
 
   if (!wait.ok) {
     return wait;
@@ -236,7 +238,7 @@ async function workflowOutcome(facts: HandleFacts, options: GetOptions): Promise
   }
 
   if ((await facts.core.processRole()) === "RUNS_TASK_BODIES") {
-    return err(Object.freeze({ kind: "waitInsideTask" }));
+    return err(Object.freeze({ kind: "waitInsideTask", code: RetrievalCode.WAIT_INSIDE_TASK }));
   }
 
   const read = await facts.core.waitEnd(facts.workflowId, wait.value);
@@ -244,7 +246,7 @@ async function workflowOutcome(facts: HandleFacts, options: GetOptions): Promise
   return endOutcome(read, output.form);
 }
 
-/** The outcome of one node of the build: the read with its form, or `workflowNotListed` at once, with no read. */
+/** The outcome of one node of the build: the read with its form, or `noTypeAvailable` at once, with no read. */
 async function targetOutcome(facts: HandleFacts, nodeId: string, target: NodeTarget): Promise<ReadOutcome> {
   const output = nodeTargetForm(target, facts.registry);
 
@@ -265,9 +267,14 @@ function targetOf(contract: object): NodeTarget {
     : Object.freeze({ kind: "task", contract });
 }
 
-/** The read error of a workflow that the app does not list. Pure. */
+/** The read error of a workflow that the app does not list: its output has no type to read with. Pure. */
 function notListedError(workflowName: string): WorkflowReadError {
-  return Object.freeze({ kind: "workflowNotListed", workflowName });
+  return Object.freeze({ kind: "noTypeAvailable", code: ContractCode.NO_TYPE_AVAILABLE, workflowName });
+}
+
+/** `RESULT_NOT_READY`: the node stores no result yet, or the workflow has no node of the id. Pure. */
+function resultNotReady(): WorkflowReadError {
+  return Object.freeze({ kind: "resultNotReady", code: RetrievalCode.RESULT_NOT_READY });
 }
 
 /** The outcome of what a wait found, read with the output form `form`. Pure. */
@@ -278,11 +285,11 @@ export function endOutcome(read: WorkflowWaitRead, form: ReadForm): ReadOutcome 
     case "endedWithError":
       return erroredOutcome(read.status, read.error);
     case "paused":
-      return ok(libraryFailure("WORKFLOW_PAUSED", WORKFLOW_PAUSED_MESSAGE));
+      return ok(builtInFailure("WORKFLOW_PAUSED", WORKFLOW_PAUSED_MESSAGE));
     case "timedOut":
-      return err(Object.freeze({ kind: "waitTimedOut" }));
+      return err(Object.freeze({ kind: "waitTimeout", code: RetrievalCode.WAIT_TIMEOUT }));
     case "notFound":
-      return err(Object.freeze({ kind: "workflowNotFound" }));
+      return err(Object.freeze({ kind: "workflowNotFound", code: RetrievalCode.WORKFLOW_NOT_FOUND }));
     case "failed":
       return err(readErrorOfHandle(handleErrorOfRaw(read.error)));
     default:
@@ -306,7 +313,7 @@ function completedOutcome(result: StoredTextFact, form: ReadForm): ReadOutcome {
 function erroredOutcome(status: "FAILED" | "CANCELLED" | "EXPIRED", error: StoredTextFact): ReadOutcome {
   switch (error.kind) {
     case "none":
-      return ok(libraryFailure(`WORKFLOW_${status}`, statusMessage(status)));
+      return ok(builtInFailure(`WORKFLOW_${status}`, statusMessage(status)));
     case "refused":
       return unreadable(error.cause);
     case "checked": {
@@ -336,14 +343,15 @@ function statusMessage(status: "FAILED" | "CANCELLED" | "EXPIRED"): string {
   }
 }
 
-function libraryFailure(
+function builtInFailure(
   code: "WORKFLOW_PAUSED" | "WORKFLOW_FAILED" | "WORKFLOW_CANCELLED" | "WORKFLOW_EXPIRED",
   message: string,
 ): TaskOutcome<unknown, string> {
   return Object.freeze({
     kind: "failed",
     error: Object.freeze({
-      code: Object.freeze({ kind: "library", code }),
+      kind: "builtIn",
+      code,
       message,
       data: null,
       exception: null,
@@ -352,7 +360,7 @@ function libraryFailure(
   });
 }
 
-/** Codes of the reader: open (every user code), or the declared codes of the read form. */
+/** Codes of the reader: open (every custom code), or the declared codes of the read form. */
 type CodeRule = "open" | "declared";
 
 /** The outcome of a stored envelope under a read form. Pure. */
@@ -372,15 +380,15 @@ function envelopeOutcome(text: string, form: ReadForm, codes: CodeRule): ReadOut
       if (
         codes === "open" ||
         outcome.kind === "succeeded" ||
-        outcome.error.code.kind === "library" ||
+        outcome.error.kind === "builtIn" ||
         form.codes.kind === "open"
       ) {
         return ok(outcome);
       }
 
-      return form.codes.codes.includes(outcome.error.code.code)
+      return form.codes.codes.includes(outcome.error.code)
         ? ok(outcome)
-        : err(Object.freeze({ kind: "unknownUserCode", code: outcome.error.code.code }));
+        : err(Object.freeze({ kind: "unknownUserCode", code: outcome.error.code }));
     }
 
     default:
@@ -394,11 +402,11 @@ async function nodeOutcome(facts: HandleFacts, nodeId: string, form: ReadForm): 
 
   switch (read.kind) {
     case "notReady":
-      return err(Object.freeze({ kind: "resultNotReady" }));
+      return err(resultNotReady());
     case "failed":
       return err(readErrorOfHandle(handleErrorOfRaw(read.error)));
     case "seatRelayFull":
-      return err(Object.freeze({ kind: "seatRelayFull", error: read.error }));
+      return err(seatRelayFullRead(read.error));
     case "stored":
       return checkedOutcome(read.result, form);
     default:

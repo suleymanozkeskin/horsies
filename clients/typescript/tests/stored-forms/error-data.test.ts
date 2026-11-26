@@ -1,5 +1,5 @@
 // error_data.json: the core writes these library errors; this client reads each one, in the form that it is stored,
-// to the task error with its library code and its `data`.
+// to the task error with its built-in code and its `data`.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";

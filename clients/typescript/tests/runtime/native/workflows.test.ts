@@ -73,7 +73,7 @@ describe("the child spec source of the app", () => {
 });
 
 describe("the workflow start with a database", () => {
-  test("a start gives a handle; RUNNING; a bounded wait is waitTimedOut", async () => {
+  test("a start gives a handle; RUNNING; a bounded wait is waitTimeout", async () => {
     const app = testApp();
     const started = await app.start(hello, { who: "eu" });
 
@@ -82,7 +82,7 @@ describe("the workflow start with a database", () => {
     }
 
     assert.deepEqual(await started.value.status(), { ok: true, value: "RUNNING" });
-    assert.deepEqual(await started.value.get({ timeoutMs: 200 }), { ok: false, error: { kind: "waitTimedOut" } });
+    assert.deepEqual(await started.value.get({ waitMs: 200 }), { ok: false, error: { kind: "waitTimeout", code: "WAIT_TIMEOUT" } });
   });
 
   test("a start whose root is a sub-workflow node builds the child inside the start", async () => {
@@ -97,7 +97,7 @@ describe("the workflow start with a database", () => {
 
     assert(nodes.ok);
     assert.equal(nodes.value[0]?.subWorkflowId.kind, "recorded");
-    assert.deepEqual(await started.value.get({ timeoutMs: 200 }), { ok: false, error: { kind: "waitTimedOut" } });
+    assert.deepEqual(await started.value.get({ waitMs: 200 }), { ok: false, error: { kind: "waitTimeout", code: "WAIT_TIMEOUT" } });
   });
 
   test("start once: the same id and params give the run; other params give WORKFLOW_COMMAND_CONFLICT", async () => {

@@ -74,7 +74,7 @@ describe("the second argument of a body in a child run", () => {
     const failed = (await adapterRun(parts, '{"a":20,"b":3}')).outcome;
 
     assert.equal(failed.kind, "error");
-    assert.deepEqual(failed.kind === "error" ? failed.parts.code : undefined, { kind: "user", code: "TOO_BIG" });
+    assert.deepEqual(failed.kind === "error" ? failed.parts.code : undefined, { kind: "custom", code: "TOO_BIG" });
   });
 });
 
@@ -96,7 +96,7 @@ describe("the second argument of a body in a test run", () => {
     const outcome = await implementation.run({ a: 1, b: 2 }, runtime);
 
     assert.equal(outcome.kind, "failed");
-    assert.deepEqual(outcome.kind === "failed" ? outcome.error.code : undefined, { kind: "user", code: "TOO_BIG" });
+    assert.deepEqual(outcome.kind === "failed" ? [outcome.error.kind, outcome.error.code] : undefined, ["custom", "TOO_BIG"]);
     assert.deepEqual(outcome.kind === "failed" ? outcome.error.data : undefined, { sum: 3 });
     assert.equal(Object.isFrozen(seen[0]), true);
     assert.deepEqual(Object.keys(seen[0] ?? {}).toSorted(), MEMBERS.toSorted());

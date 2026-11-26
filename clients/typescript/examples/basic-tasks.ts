@@ -77,11 +77,11 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`a send failed: ${failed.join("; ")}`);
   }
 
-  printLine(readLine("add", await sum.value.get({ timeoutMs: RESULT_WAIT_MS }), jsonText));
-  printLine(readLine("word_count", await words.value.get({ timeoutMs: RESULT_WAIT_MS }), jsonText));
-  printLine(readLine("charge 500", await small.value.get({ timeoutMs: RESULT_WAIT_MS }), jsonText));
+  printLine(readLine("add", await sum.value.get({ waitMs: RESULT_WAIT_MS }), jsonText));
+  printLine(readLine("word_count", await words.value.get({ waitMs: RESULT_WAIT_MS }), jsonText));
+  printLine(readLine("charge 500", await small.value.get({ waitMs: RESULT_WAIT_MS }), jsonText));
 
-  const refused = await large.value.get({ timeoutMs: RESULT_WAIT_MS });
+  const refused = await large.value.get({ waitMs: RESULT_WAIT_MS });
 
   if (refused.ok && refused.value.kind === "failed") {
     const error = refused.value.error;

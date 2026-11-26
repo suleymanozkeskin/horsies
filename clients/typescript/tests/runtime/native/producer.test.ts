@@ -31,7 +31,7 @@ function testApp(): Horsies {
 }
 
 describe("the producer with a database", () => {
-  test("a send gives a handle; info gives PENDING; a bounded wait is waitTimedOut", async () => {
+  test("a send gives a handle; info gives PENDING; a bounded wait is waitTimeout", async () => {
     const app = testApp();
     const sent = await app.send(ping, { n: 1 });
 
@@ -51,9 +51,9 @@ describe("the producer with a database", () => {
     assert.equal(info.value.queueName, "default");
     assert.deepEqual(info.value.attempts, []);
 
-    assert.deepEqual(await sent.value.get({ timeoutMs: 200 }), {
+    assert.deepEqual(await sent.value.get({ waitMs: 200 }), {
       ok: false,
-      error: { kind: "waitTimedOut", status: "PENDING" },
+      error: { kind: "waitTimeout", code: "WAIT_TIMEOUT", status: "PENDING" },
     });
   });
 

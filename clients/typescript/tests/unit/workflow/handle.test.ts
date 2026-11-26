@@ -20,13 +20,13 @@ import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";
 import { listedWorkflowOf, type WorkflowRegistry, workflowRegistry } from "../../../horsies/src/workflow/registry.ts";
 import {
   type CoreScript,
+  customErrorEnvelope,
+  customErrorText,
   fakeCore,
   type FakeCore,
   okEnvelope,
   rawDbFailed,
   SPEC_DATA,
-  userErrorEnvelope,
-  userErrorText,
   WORKFLOW_ID,
 } from "./core-support.ts";
 import { passedSpec } from "./support.ts";
@@ -97,12 +97,12 @@ describe("WorkflowHandle.get", () => {
       wait: { kind: "completed", result: { kind: "checked", text: okEnvelope('"seven"') } },
     });
 
-    assert.deepEqual(await wf.get({ timeoutMs: 10 }), { ok: true, value: { kind: "succeeded", value: "seven" } });
+    assert.deepEqual(await wf.get({ waitMs: 10 }), { ok: true, value: { kind: "succeeded", value: "seven" } });
   });
 
-  test("an error end: the stored error with an open user code; no stored error: the code of the status", async () => {
+  test("an error end: the stored error with an open custom code; no stored error: the code of the status", async () => {
     const stored = await handle({
-      wait: { kind: "endedWithError", status: "FAILED", error: { kind: "checked", text: userErrorText("ANY_CODE") } },
+      wait: { kind: "endedWithError", status: "FAILED", error: { kind: "checked", text: customErrorText("ANY_CODE") } },
     }).handle.get();
 
     const none = await handle({
@@ -110,20 +110,20 @@ describe("WorkflowHandle.get", () => {
     }).handle.get();
 
     assert(stored.ok && stored.value.kind === "failed");
-    assert.deepEqual(stored.value.error.code, { kind: "user", code: "ANY_CODE" });
+    assert.deepEqual([stored.value.error.kind, stored.value.error.code], ["custom", "ANY_CODE"]);
     assert(none.ok && none.value.kind === "failed");
-    assert.deepEqual(none.value.error.code, { kind: "library", code: "WORKFLOW_CANCELLED" });
+    assert.deepEqual([none.value.error.kind, none.value.error.code], ["builtIn", "WORKFLOW_CANCELLED"]);
   });
 
   test("a paused workflow: WORKFLOW_PAUSED", async () => {
     const read = await handle({ wait: { kind: "paused" } }).handle.get();
 
     assert(read.ok && read.value.kind === "failed");
-    assert.deepEqual(read.value.error.code, { kind: "library", code: "WORKFLOW_PAUSED" });
+    assert.deepEqual([read.value.error.kind, read.value.error.code], ["builtIn", "WORKFLOW_PAUSED"]);
   });
 
   const errors: readonly (readonly [string, CoreScript, string])[] = [
-    ["a wait that ends first", { wait: { kind: "timedOut" } }, "waitTimedOut"],
+    ["a wait that ends first", { wait: { kind: "timedOut" } }, "waitTimeout"],
     ["no workflow of the id", { wait: { kind: "notFound" } }, "workflowNotFound"],
     [
       "a text that the strict check refused",
@@ -146,16 +146,16 @@ describe("WorkflowHandle.get", () => {
   test("in a process that runs task bodies: waitInsideTask before any wait", async () => {
     const { core, handle: wf } = handle({ role: "RUNS_TASK_BODIES" });
 
-    assert.deepEqual(await wf.get(), { ok: false, error: { kind: "waitInsideTask" } });
+    assert.deepEqual(await wf.get(), { ok: false, error: { kind: "waitInsideTask", code: "WAIT_INSIDE_TASK" } });
     assert.deepEqual(core.calls, ["processRole"]);
   });
 
-  test("a timeoutMs out of range: invalidWait, and nothing is read", async () => {
+  test("a waitMs out of range: invalidInput, and nothing is read", async () => {
     const { core, handle: wf } = handle();
 
-    assert.deepEqual(await wf.get({ timeoutMs: -1 }), {
+    assert.deepEqual(await wf.get({ waitMs: -1 }), {
       ok: false,
-      error: { kind: "invalidWait", maxMs: 4_294_967_295 },
+      error: { kind: "invalidInput", code: "INVALID_INPUT", maxMs: 4_294_967_295 },
     });
     assert.deepEqual(core.calls, []);
   });
@@ -230,7 +230,7 @@ describe("a workflow that the app does not list", () => {
     (w) => ({ output: w.task(count, {}, { id: "count" }) }),
   );
 
-  test("get answers workflowNotListed with the name at once: no wait, no read", async () => {
+  test("get answers noTypeAvailable with the name at once: no wait, no read", async () => {
     const core = fakeCore({ wait: { kind: "completed", result: { kind: "checked", text: okEnvelope("7") } } });
 
     const wf = workflowHandleOf<BuildReturn>({
@@ -241,14 +241,14 @@ describe("a workflow that the app does not list", () => {
       targets: new Map(),
     });
 
-    assert.deepEqual(await wf.get({ timeoutMs: 60_000 }), {
+    assert.deepEqual(await wf.get({ waitMs: 60_000 }), {
       ok: false,
-      error: { kind: "workflowNotListed", workflowName: "other" },
+      error: { kind: "noTypeAvailable", code: "NO_TYPE_AVAILABLE", workflowName: "other" },
     });
     assert.deepEqual(core.calls, []);
   });
 
-  test("resultFor of a sub-workflow node of that child answers workflowNotListed at once: no read", async () => {
+  test("resultFor of a sub-workflow node of that child answers noTypeAvailable at once: no read", async () => {
     const core = fakeCore({ nodeResult: { kind: "stored", result: { kind: "checked", text: okEnvelope("7") } } });
 
     const wf = workflowHandleOf<BuildReturn>({
@@ -261,7 +261,7 @@ describe("a workflow that the app does not list", () => {
 
     assert.deepEqual(await wf.resultFor("child"), {
       ok: false,
-      error: { kind: "workflowNotListed", workflowName: "other" },
+      error: { kind: "noTypeAvailable", code: "NO_TYPE_AVAILABLE", workflowName: "other" },
     });
     assert.deepEqual(core.calls, []);
   });
@@ -276,16 +276,16 @@ describe("WorkflowHandle.resultFor", () => {
     assert.deepEqual(read, { ok: true, value: { kind: "succeeded", value: 7 } });
   });
 
-  test("a user code that the contract does not list: unknownUserCode", async () => {
+  test("a custom code that the contract does not list: unknownUserCode", async () => {
     const read = await handle({
-      nodeResult: { kind: "stored", result: { kind: "checked", text: userErrorEnvelope("OTHER") } },
+      nodeResult: { kind: "stored", result: { kind: "checked", text: customErrorEnvelope("OTHER") } },
     }).handle.resultFor("count");
 
     assert.deepEqual(read, { ok: false, error: { kind: "unknownUserCode", code: "OTHER" } });
   });
 
   test("no stored result: resultNotReady; a failed read: database", async () => {
-    assert.deepEqual(await handle().handle.resultFor("count"), { ok: false, error: { kind: "resultNotReady" } });
+    assert.deepEqual(await handle().handle.resultFor("count"), { ok: false, error: { kind: "resultNotReady", code: "RESULT_NOT_READY" } });
 
     const failed = await handle({ nodeResult: { kind: "failed", error: rawDbFailed() } }).handle.resultFor("count");
 
@@ -345,7 +345,7 @@ describe("WorkflowHandle.resultFor", () => {
     assert.equal(read.error.kind, "storedResultUnreadable");
   });
 
-  test("a sub-workflow node by id of a child that the app does not list: workflowNotListed, no read", async () => {
+  test("a sub-workflow node by id of a child that the app does not list: noTypeAvailable, no read", async () => {
     const other = defineWorkflow(
       { name: "other", definitionKey: "tests.other_child.v1", output: h.int(), params: {} },
       (w) => ({ output: w.task(count, {}, { id: "count" }) }),
@@ -355,7 +355,7 @@ describe("WorkflowHandle.resultFor", () => {
 
     assert.deepEqual(await byId.resultFor("child", other), {
       ok: false,
-      error: { kind: "workflowNotListed", workflowName: "other" },
+      error: { kind: "noTypeAvailable", code: "NO_TYPE_AVAILABLE", workflowName: "other" },
     });
     assert.deepEqual(core.calls, []);
   });
@@ -501,7 +501,7 @@ describe("the seat operations", () => {
       targets: new Map(),
     });
 
-    assert.deepEqual(await wf.get(), { ok: false, error: { kind: "waitInsideTask" } });
+    assert.deepEqual(await wf.get(), { ok: false, error: { kind: "waitInsideTask", code: "WAIT_INSIDE_TASK" } });
     assert.deepEqual(asked, []);
   });
 });
@@ -549,7 +549,7 @@ describe("the workflow context", () => {
 
   const text = writtenJsonText(
     `{"workflow_id":"${WORKFLOW_ID}","task_index":2,"task_name":"audit","results_by_id":` +
-      `{"count":${okEnvelope("7")},"other":${userErrorEnvelope("OTHER")},"bad":${okEnvelope('"x"')}},` +
+      `{"count":${okEnvelope("7")},"other":${customErrorEnvelope("OTHER")},"bad":${okEnvelope('"x"')}},` +
       `"summaries_by_id":{"child":${summary("COMPLETED", "8", "null")},` +
       `"failedChild":${summary("FAILED", "null", '"boom"')},"textChild":${summary("COMPLETED", '"eight"', "null")}}}`,
   );

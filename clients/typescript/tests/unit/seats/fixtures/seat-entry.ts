@@ -91,7 +91,7 @@ app.implement(sendAndWait, async (_input, { ok }) => {
     return ok(`send failed: ${sent.error.code}`);
   }
 
-  const read = await sent.value.get({ timeoutMs: 100 });
+  const read = await sent.value.get({ waitMs: 100 });
 
   return ok(`sent ${sent.value.taskId}; ${read.ok ? "read a result" : `read error ${read.error.kind}`}`);
 });

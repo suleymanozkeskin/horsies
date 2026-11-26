@@ -276,7 +276,7 @@ function implementSends(app: Horsies): void {
       return err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
     }
 
-    const read = await sent.value.get({ timeoutMs: INSIDE_WAIT_MS });
+    const read = await sent.value.get({ waitMs: INSIDE_WAIT_MS });
 
     return ok(!read.ok && read.error.kind === "waitInsideTask");
   });

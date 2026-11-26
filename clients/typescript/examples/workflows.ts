@@ -143,7 +143,7 @@ async function demo(): Promise<Result<void, string>> {
 
   printLine(`started workflow ${started.value.workflowId}`);
 
-  const read = await started.value.get({ timeoutMs: LONG_RESULT_WAIT_MS });
+  const read = await started.value.get({ waitMs: LONG_RESULT_WAIT_MS });
 
   if (!read.ok) {
     return demoFailed(`read order_summary: ${workflowReadErrorText(read.error)}`);

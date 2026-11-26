@@ -24,7 +24,8 @@ const priced = defineTask({
 });
 
 const FAILURE: TaskError<"NO_PRICE"> = Object.freeze({
-  code: Object.freeze({ kind: "user", code: "NO_PRICE" }),
+  kind: "custom",
+  code: "NO_PRICE",
   message: "no price",
   data: null,
   exception: null,

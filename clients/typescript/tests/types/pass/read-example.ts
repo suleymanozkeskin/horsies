@@ -1,7 +1,8 @@
 // Compile-pass case: a read through `app.taskHandle`: a read error switch over every
-// kind, the outcome switch, and the two-level code with a full match on the declared user codes.
+// kind with the catalog code of each, the outcome switch, and the tag of the task error with a full match on the
+// declared custom codes.
 
-import { defineTask, h, type Horsies, type ReadError, TaskId } from "../../../horsies/src/index.ts";
+import { defineTask, h, type Horsies, type ReadError, type TaskAbsenceReason, TaskId } from "../../../horsies/src/index.ts";
 
 function assertNever(value: never): never {
   throw new TypeError(`unexpected: ${String(value)}`);
@@ -16,30 +17,56 @@ const validateOrder = defineTask({
 
 function describeReadError(error: ReadError): string {
   switch (error.kind) {
-    case "waitTimedOut":
-      return error.status;
-    case "taskNotFound":
-      return error.absence;
-    case "resultNotAvailable":
-      return error.status;
+    case "waitTimeout": {
+      const code: "WAIT_TIMEOUT" = error.code;
+
+      return `${code} ${error.status}`;
+    }
+
+    case "taskNotFound": {
+      const code: "TASK_NOT_FOUND" = error.code;
+      const reason: TaskAbsenceReason = error.reason;
+
+      return `${code} ${reason}`;
+    }
+
+    case "resultNotAvailable": {
+      const code: "RESULT_NOT_AVAILABLE" = error.code;
+
+      return `${code} ${error.status}`;
+    }
+
     case "storedResultUnreadable":
       return error.cause;
     case "unknownUserCode":
       return error.code;
-    case "waitInsideTask":
-      return "inside a task";
+    case "waitInsideTask": {
+      const code: "WAIT_INSIDE_TASK" = error.code;
+
+      return code;
+    }
+
     case "database":
       return `${error.code} ${String(error.retryable)}`;
-    case "invalidWait":
-      return String(error.maxMs);
-    case "seatRelayFull":
-      return error.error.code;
+    case "invalidInput": {
+      const code: "INVALID_INPUT" = error.code;
+
+      return `${code} ${String(error.maxMs)}`;
+    }
+
+    case "seatRelayFull": {
+      const code: "SEAT_RELAY_FULL" = error.code;
+      const retryable: true = error.retryable;
+
+      return `${code} ${String(retryable)} ${error.message}`;
+    }
+
     default:
       return assertNever(error);
   }
 }
 
-function userCodeText(code: "EMPTY_ORDER" | "INVALID_EMAIL"): string {
+function customCodeText(code: "EMPTY_ORDER" | "INVALID_EMAIL"): string {
   switch (code) {
     case "EMPTY_ORDER":
       return "empty";
@@ -58,7 +85,7 @@ export async function readOrder(app: Horsies, text: string): Promise<string> {
   }
 
   const handle = app.taskHandle(validateOrder, taskId.value);
-  const read = await handle.get({ timeoutMs: 5_000 });
+  const read = await handle.get({ waitMs: 5_000 });
 
   if (!read.ok) {
     return describeReadError(read.error);
@@ -70,14 +97,14 @@ export async function readOrder(app: Horsies, text: string): Promise<string> {
     case "succeeded":
       return outcome.value.total.toString();
     case "failed":
-      switch (outcome.error.code.kind) {
-        case "user":
-          return userCodeText(outcome.error.code.code);
+      switch (outcome.error.kind) {
+        case "custom":
+          return customCodeText(outcome.error.code);
 
-        case "library":
-          return outcome.error.code.code;
+        case "builtIn":
+          return outcome.error.code;
         default:
-          return assertNever(outcome.error.code);
+          return assertNever(outcome.error);
       }
 
     default:
