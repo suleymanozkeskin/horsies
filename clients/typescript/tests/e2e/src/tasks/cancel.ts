@@ -97,35 +97,35 @@ const RAN_TO_ITS_END = "ran to its end";
 
 /** The implementations of this module on `app`. */
 export function implementCancel(app: Horsies): void {
-  app.implement(cancelIsolatedAsync, async ({ token }, runtime) => {
-    const waited = await awaitCancel(token, runtime.signal);
+  app.implement(cancelIsolatedAsync, async ({ token }, { ok, err, signal }) => {
+    const waited = await awaitCancel(token, signal);
 
-    return waited.ok ? cancelIsolatedAsync.ok(RETURNED) : cancelIsolatedAsync.err({ code: "MARKER_FAILED", message: waited.error });
+    return waited.ok ? ok(RETURNED) : err({ code: "MARKER_FAILED", message: waited.error });
   });
-  app.implement(cancelIsolatedSync, ({ token }, runtime) => {
-    const waited = holdUntilCancel(token, () => runtime.cancelState());
+  app.implement(cancelIsolatedSync, ({ token }, { ok, err, cancelState }) => {
+    const waited = holdUntilCancel(token, () => cancelState());
 
-    return waited.ok ? cancelIsolatedSync.ok(RETURNED) : cancelIsolatedSync.err({ code: "MARKER_FAILED", message: waited.error });
+    return waited.ok ? ok(RETURNED) : err({ code: "MARKER_FAILED", message: waited.error });
   });
-  app.implement(cancelSharedAsync, async ({ token }, runtime) => {
-    const waited = await awaitCancel(token, runtime.signal);
+  app.implement(cancelSharedAsync, async ({ token }, { ok, err, signal }) => {
+    const waited = await awaitCancel(token, signal);
 
-    return waited.ok ? cancelSharedAsync.ok(RETURNED) : cancelSharedAsync.err({ code: "MARKER_FAILED", message: waited.error });
+    return waited.ok ? ok(RETURNED) : err({ code: "MARKER_FAILED", message: waited.error });
   });
-  app.implement(cancelSharedThread, ({ token }, runtime) => {
-    const waited = holdUntilCancel(token, () => runtime.cancelState());
+  app.implement(cancelSharedThread, ({ token }, { ok, err, cancelState }) => {
+    const waited = holdUntilCancel(token, () => cancelState());
 
-    return waited.ok ? cancelSharedThread.ok(RETURNED) : cancelSharedThread.err({ code: "MARKER_FAILED", message: waited.error });
+    return waited.ok ? ok(RETURNED) : err({ code: "MARKER_FAILED", message: waited.error });
   });
-  app.implement(cancelIgnoredWithGrace, ({ token }) => {
+  app.implement(cancelIgnoredWithGrace, ({ token }, { ok, err }) => {
     const ran = holdIgnoringCancel(token, CANCEL_WAIT_MS);
 
-    return ran.ok ? cancelIgnoredWithGrace.ok(RAN_TO_ITS_END) : cancelIgnoredWithGrace.err({ code: "MARKER_FAILED", message: ran.error });
+    return ran.ok ? ok(RAN_TO_ITS_END) : err({ code: "MARKER_FAILED", message: ran.error });
   });
-  app.implement(cancelIgnoredNoGrace, ({ token }) => {
+  app.implement(cancelIgnoredNoGrace, ({ token }, { ok, err }) => {
     const ran = holdIgnoringCancel(token, IGNORED_RUN_MS);
 
-    return ran.ok ? cancelIgnoredNoGrace.ok(RAN_TO_ITS_END) : cancelIgnoredNoGrace.err({ code: "MARKER_FAILED", message: ran.error });
+    return ran.ok ? ok(RAN_TO_ITS_END) : err({ code: "MARKER_FAILED", message: ran.error });
   });
 }
 

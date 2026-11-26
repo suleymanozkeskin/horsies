@@ -15,7 +15,10 @@
 //   class type does not name it, so a body of a task that takes no context cannot read it.
 //
 // A runtime asks its run for each of these (`RunControls`): the run table of a child, or the fixed answers of
-// `TaskRuntime.forTest`. The workflow context is a fact of the run's input, given when the runtime is built.
+// `TaskRuntime.forTest`. The workflow context is a fact of the run's input, given when the runtime is built. Each
+// member is an own property of the frozen runtime object, and each function member is bound to its run, so a body
+// may destructure its runtime (`{ signal, spawn, state }`). The body adapter gives the body these members together
+// with the contract's `ok` and `err`.
 
 import type { TaskId } from "../contract/ids.ts";
 import { testRunControls, type TestRuntimeOptions, testWorkflowContext } from "../testing/task-runtime.ts";
@@ -66,7 +69,17 @@ export class TaskRuntime {
   readonly fencingToken: FencingToken;
   /** Fires at an operator cancel, and at the deadline of a `SHARED_ASYNC` run. */
   readonly signal: AbortSignal;
-  readonly #controls: RunControls;
+  /** Whether a cancel was requested, and its first cause. Reads with no turn of the event loop. */
+  readonly cancelState: () => CancelState;
+  /**
+   * Start `work` as work of this run, named `name` in the reports. The returned Promise settles with the work. A
+   * refusal starts nothing: `runEnded` once the run is over (its body returned and the work it left ended or was
+   * stopped), `tooMuchWork` at the bound of 10,000 pieces. Work that the body spawned may spawn more work after the
+   * body returned: it belongs to the run, as in the Rust and Python clients.
+   */
+  readonly spawn: <T>(name: string, work: SpawnedWork<T>) => Result<Promise<T>, SpawnRefused>;
+  /** The value that the provider of `key` built in this process. A key of another app is a defect: `ClientDefect`. */
+  readonly state: <T>(key: StateKey<T>) => T;
 
   static {
     constructRuntime = (controls: RunControls, context: RuntimeWorkflowContext): WorkflowTaskRuntime =>
@@ -78,7 +91,10 @@ export class TaskRuntime {
     this.taskId = controls.taskId;
     this.fencingToken = Object.freeze({ taskId: controls.taskId, value: controls.attempt });
     this.signal = controls.signal;
-    this.#controls = controls;
+    this.cancelState = (): CancelState => controls.cancelState();
+    this.spawn = <T>(name: string, work: SpawnedWork<T>): Result<Promise<T>, SpawnRefused> =>
+      controls.spawn(name, work);
+    this.state = <T>(key: StateKey<T>): T => controls.state(key);
     // The member of `WorkflowTaskRuntime`. The class type does not name it: a body of a task that takes no context has
     // the type `TaskRuntime`, with no `workflowContext`.
     Object.defineProperty(this, "workflowContext", { value: context, enumerable: true });
@@ -94,26 +110,6 @@ export class TaskRuntime {
    */
   static forTest<const Keys extends readonly AnyStateKey[]>(options: TestRuntimeOptions<Keys>): WorkflowTaskRuntime {
     return constructRuntime(testRunControls(options), testWorkflowContext(options.workflowContext));
-  }
-
-  /** Whether a cancel was requested, and its first cause. Reads with no turn of the event loop. */
-  cancelState(): CancelState {
-    return this.#controls.cancelState();
-  }
-
-  /**
-   * Start `work` as work of this run, named `name` in the reports. The returned Promise settles with the work. A
-   * refusal starts nothing: `runEnded` once the run is over (its body returned and the work it left ended or was
-   * stopped), `tooMuchWork` at the bound of 10,000 pieces. Work that the body spawned may spawn more work after the
-   * body returned: it belongs to the run, as in the Rust and Python clients.
-   */
-  spawn<T>(name: string, work: SpawnedWork<T>): Result<Promise<T>, SpawnRefused> {
-    return this.#controls.spawn(name, work);
-  }
-
-  /** The value that the provider of `key` built in this process. A key of another app is a defect: `ClientDefect`. */
-  state<T>(key: StateKey<T>): T {
-    return this.#controls.state(key);
   }
 }
 

@@ -1,8 +1,10 @@
 // The core operations of workflow starts and handles in this thread: the addon on a main thread, the seat relay in a
 // seat isolate, or no core in any other worker thread (where an operation is a defect).
 //
-// A start sends a checked spec: on a main thread the conversion to spec data (with the core's facts), the core's parse
-// and the start run here; a seat isolate sends the checked spec to its child's main thread, which runs the same steps.
+// A start runs in two calls. `prepare` converts a checked spec to spec data (with the core's facts) and runs the core's
+// parse, with no I/O; `start` parses that text again and writes the tree. A seat isolate sends each call to its child's
+// main thread, which runs the same steps. So a spec that the conversion or the parse refuses is refused before the
+// start observer opens its span, as in the Rust client.
 
 import { threadId } from "node:worker_threads";
 
@@ -38,32 +40,33 @@ import { specDataTextOf } from "./spec-data.ts";
 import type { SpecTextRefused } from "./spec-text.ts";
 import type { WorkflowsSeatOperation, WorkflowsSeatReply } from "./seat-operations.ts";
 
-/** One start of a checked spec. */
+/** One start of a prepared spec data text: a new start, or a retry of a start that failed. */
 export type StartRequest = {
-  readonly spec: CheckedSpec;
-  readonly workflowId: string;
-  readonly sentAtMicros: bigint;
-  readonly trace: TraceArgument;
-};
-
-/** One start of a spec data text again (a retry of a start that failed). */
-export type RestartRequest = {
   readonly specData: string;
   readonly workflowId: string;
   readonly sentAtMicros: bigint;
   readonly trace: TraceArgument;
 };
 
+/** The parse of the core refused the spec data; nothing was sent. */
+export type SpecParseRefused = { readonly kind: "specRefused"; readonly fieldPath: string; readonly cause: string };
+
+/**
+ * Why a spec has no spec data that the core takes:
+ * - `textRefused`: a string of the spec has no text (a lone surrogate);
+ * - `specRefused`: the core's parse refused the spec data.
+ */
+export type SpecRefusal = { readonly kind: "textRefused"; readonly refused: SpecTextRefused } | SpecParseRefused;
+
+/** The end of one prepare call: the spec data text that the core's parse takes, or why the spec has none. */
+export type SpecPrepare = { readonly kind: "prepared"; readonly specData: string } | SpecRefusal;
+
 /**
  * The end of one start call:
  * - `outcome`: the core's outcome, with the spec data text that it started;
- * - `textRefused`: a string of the spec has no text (a lone surrogate); nothing was sent;
- * - `specRefused`: the core's parse refused the spec data; nothing was sent.
+ * - `specRefused`: the core's parse refused the spec data; nothing was sent (a text that `prepare` gave parses).
  */
-export type StartCall =
-  | { readonly kind: "outcome"; readonly specData: string; readonly outcome: WorkflowStartOutcome }
-  | { readonly kind: "textRefused"; readonly refused: SpecTextRefused }
-  | { readonly kind: "specRefused"; readonly fieldPath: string; readonly cause: string };
+export type StartCall = { readonly kind: "outcome"; readonly specData: string; readonly outcome: WorkflowStartOutcome } | SpecParseRefused;
 
 /**
  * The core operations of workflow starts and handles. Each is async, so every form has one shape. `Relay` is what a
@@ -71,8 +74,10 @@ export type StartCall =
  * whose relay sends nothing past its bound. `waitEnd` and `processRole` are never relayed.
  */
 export interface WorkflowCoreOf<Relay> {
+  /** The spec data of `spec` that the core's parse takes, or why it has none. No I/O. */
+  prepare(spec: CheckedSpec): Promise<SpecPrepare | Relay>;
+  /** Parse the spec data of `request` and write the tree. */
   start(request: StartRequest): Promise<StartCall | Relay>;
-  restart(request: RestartRequest): Promise<StartCall | Relay>;
   status(workflowId: string): Promise<WorkflowStatusRead | Relay>;
   nodeResults(workflowId: string): Promise<NodeResultsRead | Relay>;
   nodes(workflowId: string): Promise<NodesRead | Relay>;
@@ -146,8 +151,8 @@ export function addonConversionFacts(facts: MainThreadFacts): ConversionFacts {
 export function addonWorkflowCore(facts: MainThreadFacts, conversion: ConversionFacts): AddonWorkflowCore {
   const handle = facts.handle;
 
-  const startText = async (specData: string, request: Omit<RestartRequest, "specData">): Promise<StartCall> => {
-    const prepared = native.prepareClientSpec(specData);
+  const start = async (request: StartRequest): Promise<StartCall> => {
+    const prepared = native.prepareClientSpec(request.specData);
 
     switch (prepared.kind) {
       case "refused":
@@ -162,21 +167,17 @@ export function addonWorkflowCore(facts: MainThreadFacts, conversion: Conversion
           facts.resendOnTransientErr,
         );
 
-        return { kind: "outcome", specData, outcome };
+        return { kind: "outcome", specData: request.specData, outcome };
       }
 
       default:
-        return unreachable(prepared, "startText");
+        return unreachable(prepared, "addonWorkflowCore.start");
     }
   };
 
   const core: AddonWorkflowCore = {
-    start: async (request) => {
-      const text = specDataTextOf(request.spec, conversion);
-
-      return text.ok ? startText(text.value, request) : { kind: "textRefused", refused: text.error };
-    },
-    restart: async (request) => startText(request.specData, request),
+    prepare: async (spec) => preparedSpec(spec, conversion),
+    start,
     status: async (workflowId) => native.workflowStatus(handle, workflowId),
     nodeResults: async (workflowId) => native.workflowNodeResults(handle, workflowId),
     nodes: async (workflowId) => native.workflowNodes(handle, workflowId),
@@ -191,16 +192,36 @@ export function addonWorkflowCore(facts: MainThreadFacts, conversion: Conversion
   return Object.freeze(core);
 }
 
+/** The spec data of `spec` and the core's parse of it, with no I/O. Pure apart from the addon's pure parse. */
+function preparedSpec(spec: CheckedSpec, conversion: ConversionFacts): SpecPrepare {
+  const text = specDataTextOf(spec, conversion);
+
+  if (!text.ok) {
+    return { kind: "textRefused", refused: text.error };
+  }
+
+  const parsed = native.prepareClientSpec(text.value);
+
+  switch (parsed.kind) {
+    case "refused":
+      return { kind: "specRefused", fieldPath: parsed.fieldPath, cause: parsed.cause };
+    case "prepared":
+      return { kind: "prepared", specData: text.value };
+    default:
+      return unreachable(parsed, "preparedSpec");
+  }
+}
+
 /** The main-thread side of one seat operation: the same calls as a main-thread call. */
 export async function serveWorkflowsSeatOperation(
   core: AddonWorkflowCore,
   operation: WorkflowsSeatOperation,
 ): Promise<WorkflowsSeatReply> {
   switch (operation.kind) {
+    case "prepare":
+      return { kind: "prepare", prepared: await core.prepare(operation.spec) };
     case "start":
       return { kind: "start", call: await core.start(operation.request) };
-    case "restart":
-      return { kind: "restart", call: await core.restart(operation.request) };
     case "status":
       return { kind: "status", read: await core.status(operation.workflowId) };
     case "nodeResults":
@@ -236,10 +257,10 @@ export function relayedWorkflowCore(relay: SeatRelay): WorkflowCore {
   };
 
   const core: WorkflowCore = {
+    prepare: async (spec) =>
+      fullOr(await ask({ kind: "prepare", spec }), (reply) => (reply.kind === "prepare" ? reply.prepared : wrong("prepare", reply))),
     start: async (request) =>
       fullOr(await ask({ kind: "start", request }), (reply) => (reply.kind === "start" ? reply.call : wrong("start", reply))),
-    restart: async (request) =>
-      fullOr(await ask({ kind: "restart", request }), (reply) => (reply.kind === "restart" ? reply.call : wrong("restart", reply))),
     status: async (workflowId) =>
       fullOr(await ask({ kind: "status", workflowId }), (reply) => (reply.kind === "status" ? reply.read : wrong("status", reply))),
     nodeResults: async (workflowId) =>
@@ -282,8 +303,8 @@ export function noWorkflowCore(): AddonWorkflowCore {
   };
 
   return Object.freeze({
+    prepare: refuse,
     start: refuse,
-    restart: refuse,
     status: refuse,
     nodeResults: refuse,
     nodes: refuse,

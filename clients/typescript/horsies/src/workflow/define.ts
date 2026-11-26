@@ -8,7 +8,9 @@
 
 import type { SpecOnError } from "../_catalog/workflow_spec.ts";
 import { defineTask } from "../contract/define-task.ts";
-import type { BodyInput, OutputSchema, ParameterSchemas, SchemaValue, SendInput } from "../contract/schema.ts";
+import type { BodyInput, IsUpstreamOutcome, OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
+import type { EmptyObject, Flat } from "../wire/infer.ts";
+import type { ParameterSent, ParameterValue, SenderMayLeaveOut } from "../zod/infer.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 import type { BuildReturn, NodeRef } from "./node.ts";
 import type { WorkflowBuilder } from "./builder.ts";
@@ -36,12 +38,29 @@ export interface WorkflowDefinition<P extends ParameterSchemas, O extends Output
 export type BuildReturnOf<V> = BuildReturn & { readonly output: NodeRef<V, string, string> };
 
 /**
+ * The params of one check case: every param of the build, as in the Python and Rust clients. A plain param takes the
+ * value that a start gives; an `h.taskOutcome` param takes the outcome that its upstream node would give
+ * (`{ kind: "succeeded", value }` or `{ kind: "failed", error }`). An optional or defaulted param may be left out.
+ */
+export type CheckCase<P extends ParameterSchemas> = keyof P extends never
+  ? EmptyObject
+  : Flat<
+      {
+        -readonly [K in keyof P as SenderMayLeaveOut<P[K]> extends true ? never : K]:
+          IsUpstreamOutcome<P[K]> extends true ? ParameterValue<P[K]> : ParameterSent<P[K]>;
+      } & {
+        -readonly [K in keyof P as SenderMayLeaveOut<P[K]> extends true ? K : never]?:
+          IsUpstreamOutcome<P[K]> extends true ? ParameterValue<P[K]> : ParameterSent<P[K]>;
+      }
+    >;
+
+/**
  * The check cases of a workflow: `check` builds the workflow with each one. Required when `params` has a key; a
  * workflow with no params takes none.
  */
 export type CheckCases<P extends ParameterSchemas> = keyof P extends never
   ? { readonly checkCases?: readonly [] }
-  : { readonly checkCases: NonEmpty<SendInput<P>> };
+  : { readonly checkCases: NonEmpty<CheckCase<P>> };
 
 /** Type-only key of the types of a workflow contract. It does not exist at run time. */
 export declare const workflowTypes: unique symbol;

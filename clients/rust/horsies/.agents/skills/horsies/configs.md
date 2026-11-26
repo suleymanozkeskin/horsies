@@ -142,31 +142,27 @@ recycling, the pools, the claim limits and the drain timeout.
 use std::collections::BTreeMap;
 
 use horsies::{
-    AppConfig, IsolatedChildCount, IsolatedChildren, IsolatedRecycle,
-    IsolatedSetting, MemoryLimitSetting, MemoryMb, SharedAsyncChildCount, SharedAsyncChildren,
-    SharedAsyncSeats, SharedAsyncSetting, TaskCount, TaskLimitSetting, WorkerProfile,
+    AppConfig, IsolatedChildren, IsolatedRecycle, MemoryLimitSetting, SharedAsyncChildren,
+    TaskLimitSetting, WorkerProfile,
 };
 
-fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Error>> {
+fn with_profiles(config: AppConfig) -> AppConfig {
     let isolated = IsolatedChildren {
         recycle: IsolatedRecycle {
-            after: TaskLimitSetting::TaskLimit { tasks: TaskCount::try_from(500)? },
-            above: MemoryLimitSetting::MemoryLimit { mb: MemoryMb::try_from(1024)? },
+            after: TaskLimitSetting::TaskLimit { tasks: 500 },
+            above: MemoryLimitSetting::MemoryLimit { mb: 1024 },
         },
-        ..IsolatedChildren::new(IsolatedChildCount::try_from(2)?)
+        ..IsolatedChildren::new(2)
     };
     let default_profile = WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(isolated),
-        shared_async: SharedAsyncSetting::SharedAsyncChildren(SharedAsyncChildren::new(
-            SharedAsyncChildCount::try_from(4)?,
-            SharedAsyncSeats::try_from(25)?,
-        )),
+        isolated: isolated.into(),
+        shared_async: SharedAsyncChildren::new(4, 25).into(),
         ..WorkerProfile::default()
     };
-    Ok(AppConfig {
+    AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), default_profile)]),
         ..config
-    })
+    }
 }
 ```
 
@@ -177,17 +173,23 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 | `shared_thread` | `SharedThreadSetting::SharedThreadChildren(SharedThreadChildren)` or `NoSharedThreadChildren {}` |
 | `pool` | `ParentPool` (`max_size: PoolSizeSetting`) |
 | `claim` | `ClaimLimits` (`per_queue_per_pass`, `claimed_per_worker`: `TaskLimitSetting`) |
-| `drain_timeout` | `DrainTimeout`: `DrainTimeout::try_from(Duration)`, above 0 and at most 24 hours, default 300 s |
+| `drain_timeout` | `Duration`, above 0 and at most 24 hours, default 300 s |
 | `preload` | `ChildPreload`, default `NoPreload`: the only value that a Rust app takes |
 | `parent_cpu` | `ParentCpu::Shared` (default) or `OwnCore` (Linux) |
 
 - `WorkerProfile::default()` has no children. A profile needs at least one
   child.
-- The counts are bounded types: build them with `try_from(u32)`, which
-  returns `OutOfBounds` for a value outside the bounds.
-  `IsolatedChildCount`, `SharedAsyncChildCount` and `SharedThreadChildCount`
-  are 1 to 1,024; `SharedAsyncSeats` 1 to 1,000; `SharedThreadSeats` 1 to
-  256.
+- Each count, size and task limit is a plain number. `Horsies::new`
+  checks each value against its bounds and refuses the config with every
+  refusal in one error, `HRS-218`. Each refusal names the field path and
+  the bounds, for example
+  `worker_profiles['default'].isolated.count: 0 is outside the bounds 1 to 1024`.
+  The `count` of each child kind is 1 to 1,024; `SharedAsyncChildren.seats`
+  1 to 1,000; `SharedThreadChildren.seats` 1 to 256. The other bounds are on
+  the docs page `rust/workers/worker-setup`.
+- `IsolatedChildren::new(2).into()` is
+  `IsolatedSetting::IsolatedChildren(IsolatedChildren::new(2))`: `From`
+  builds each setting from its children.
 - `IsolatedChildren::new(count)`, `SharedAsyncChildren::new(count, seats)`
   and `SharedThreadChildren::new(count, seats)` take the default recycle
   and pools. `IsolatedRecycle` has `after` (default 100 tasks) and `above`
@@ -212,6 +214,8 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 | `on_event::<E>(name, handler)`, `on_event_blocking::<E>(name, handler)` | Registers a handler of the events of type `E`; it runs in the worker's handler child (monitoring.md, Event Handlers) |
 | `on_handler_child_start(hook)` | Runs an async hook once in every handler child |
 | `task_runtime()` | The `TaskRuntime` that task bodies take |
+| `workflow_builder(name)` | A `WorkflowSpecBuilder` whose task nodes resolve against the tasks of this app (see `workflows.md`) |
+| `start_workflow::<D>()`, `start_workflow_with::<D>(params)` | Starts the definition `D` through its registration on this app; `VALIDATION_FAILED` when this app does not register `D` (see `workflows.md`) |
 
 ```rust
 use horsies::{Horsies, HorsiesError};
@@ -537,9 +541,8 @@ use horsies::{
     // Worker profiles
     WorkerProfile, ChildPreload, ParentCpu, IsolatedSetting, IsolatedChildren, IsolatedRecycle,
     SharedAsyncSetting, SharedAsyncChildren, SharedThreadSetting, SharedThreadChildren,
-    SharedRecycle, ClaimLimits, ParentPool, DrainTimeout, TaskLimitSetting, MemoryLimitSetting,
-    IsolatedChildCount, SharedAsyncChildCount, SharedAsyncSeats, SharedThreadChildCount,
-    SharedThreadSeats, TaskCount, MemoryMb, OutOfBounds,
+    SharedRecycle, ClaimLimits, ParentPool, TaskLimitSetting, MemoryLimitSetting,
+    ProfileValueRefused,
     // Schedules
     ScheduleConfig, TaskSchedule, SchedulePattern, IntervalSchedule, HourlySchedule,
     DailySchedule, WeeklySchedule, MonthlySchedule, CronSchedule, Weekday, Month,

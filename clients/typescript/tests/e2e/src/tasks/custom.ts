@@ -27,16 +27,16 @@ export const CUSTOM_CONTRACTS = [customHealthcheck, high, normal, low, slowHigh,
 
 /** The implementations of this module on `app`. */
 export function implementCustom(app: Horsies): void {
-  app.implement(customHealthcheck, () => customHealthcheck.ok("ready"));
-  app.implement(high, () => high.ok("high"));
-  app.implement(normal, () => normal.ok("normal"));
-  app.implement(low, () => low.ok("low"));
+  app.implement(customHealthcheck, (_input, { ok }) => ok("ready"));
+  app.implement(high, (_input, { ok }) => ok("high"));
+  app.implement(normal, (_input, { ok }) => ok("normal"));
+  app.implement(low, (_input, { ok }) => ok("low"));
 
   for (const contract of [slowHigh, slowNormal, slowLow]) {
-    app.implement(contract, ({ durationMs }) => {
+    app.implement(contract, ({ durationMs }, { ok }) => {
       holdThread(durationMs);
 
-      return contract.ok(`slept_${String(durationMs)}`);
+      return ok(`slept_${String(durationMs)}`);
     });
   }
 }

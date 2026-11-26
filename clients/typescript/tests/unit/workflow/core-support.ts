@@ -13,7 +13,8 @@ import type {
   WorkflowStatusRead,
   WorkflowWaitRead,
 } from "../../../horsies/src/native/workflows/addon.ts";
-import type { AddonWorkflowCore, RestartRequest, StartCall, StartRequest } from "../../../horsies/src/workflow/core.ts";
+import type { AddonWorkflowCore, SpecRefusal, StartRequest } from "../../../horsies/src/workflow/core.ts";
+import type { CheckedSpec } from "../../../horsies/src/workflow/findings.ts";
 
 /** A canonical workflow id of the fakes. */
 export const WORKFLOW_ID = "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b";
@@ -24,8 +25,8 @@ export const SPEC_DATA = '{"data_version":1}';
 /** The scripted answers of a fake core. Each answer left out is a quiet default. */
 export type CoreScript = {
   readonly started?: readonly WorkflowStartOutcome[];
-  /** A start call that never reaches the core's start: the writer or the core's parse refused the spec. */
-  readonly refusedCall?: Exclude<StartCall, { readonly kind: "outcome" }>;
+  /** The answer of each prepare: the writer or the core's parse refused the spec, so no start follows. */
+  readonly refusedPrepare?: SpecRefusal;
   readonly status?: WorkflowStatusRead;
   readonly nodeResults?: NodeResultsRead;
   readonly nodes?: NodesRead;
@@ -38,24 +39,23 @@ export type CoreScript = {
 
 /** A fake core with its recorded calls. */
 export type FakeCore = AddonWorkflowCore & {
+  /** Each spec that a start prepared. */
+  readonly prepares: CheckedSpec[];
+  /** Each write of a spec data text: the starts and the retries, in order. */
   readonly starts: StartRequest[];
-  readonly restarts: RestartRequest[];
   readonly calls: string[];
   readonly waits: WaitBound[];
 };
 
 /** A fake of the core operations: each call is recorded by name; a start answers the scripted outcomes in order. */
 export function fakeCore(script: CoreScript = {}): FakeCore {
+  const prepares: CheckedSpec[] = [];
   const starts: StartRequest[] = [];
-  const restarts: RestartRequest[] = [];
   const calls: string[] = [];
   const waits: WaitBound[] = [];
 
   const outcome = (index: number): WorkflowStartOutcome =>
     script.started?.[Math.min(index, (script.started?.length ?? 1) - 1)] ?? { kind: "started" };
-
-  const startCall = (index: number): StartCall =>
-    script.refusedCall ?? { kind: "outcome", specData: SPEC_DATA, outcome: outcome(index) };
 
   const record = <T>(name: string, value: T): T => {
     calls.push(name);
@@ -64,19 +64,19 @@ export function fakeCore(script: CoreScript = {}): FakeCore {
   };
 
   return {
+    prepares,
     starts,
-    restarts,
     calls,
     waits,
+    prepare: async (spec) => {
+      prepares.push(spec);
+
+      return script.refusedPrepare ?? { kind: "prepared", specData: SPEC_DATA };
+    },
     start: async (request) => {
       starts.push(request);
 
-      return startCall(starts.length + restarts.length - 1);
-    },
-    restart: async (request) => {
-      restarts.push(request);
-
-      return startCall(starts.length + restarts.length - 1);
+      return { kind: "outcome", specData: request.specData, outcome: outcome(starts.length - 1) };
     },
     status: async () => record("status", script.status ?? { kind: "status", status: "RUNNING" }),
     nodeResults: async () => record("nodeResults", script.nodeResults ?? { kind: "nodes", nodes: [] }),
@@ -175,12 +175,12 @@ export function okEnvelope(okText: string): string {
   return `{"__h_task_result__":true,"ok":${okText},"err":null}`;
 }
 
-/** A stored result envelope of a failure with the user code `code`. */
-export function userErrorEnvelope(code: string): string {
-  return `{"__h_task_result__":true,"ok":null,"err":${userErrorText(code)}}`;
+/** A stored result envelope of a failure with the custom code `code`. */
+export function customErrorEnvelope(code: string): string {
+  return `{"__h_task_result__":true,"ok":null,"err":${customErrorText(code)}}`;
 }
 
-/** A stored error object with the user code `code`. */
-export function userErrorText(code: string): string {
+/** A stored error object with the custom code `code`. */
+export function customErrorText(code: string): string {
   return `{"exception":null,"error_code":"${code}","data":null,"message":"failed"}`;
 }

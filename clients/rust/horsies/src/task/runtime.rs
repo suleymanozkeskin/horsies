@@ -1,10 +1,11 @@
 //! `TaskRuntime`: what a task body reads while it runs.
 //!
 //! A body that takes `TaskRuntime` as its first parameter gets the app's
-//! state, the cancel signal and the cancel state of its run, the fencing
-//! token of its run, and a way to start work that belongs to its run. The
-//! app builds the runtime when the task registers, so every worker child,
-//! which runs `main` again, has its own.
+//! state, the typed functions and the workflow builders of the app, the
+//! cancel signal and the cancel state of its run, the fencing token of its
+//! run, and a way to start work that belongs to its run. The app builds the
+//! runtime when the task registers, so every worker child, which runs
+//! `main` again, has its own.
 
 use std::future::Future;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ use crate::send::TaskFunctions;
 use crate::workflow::WorkflowStarter;
 use crate::{
     TaskFunction, TaskFunctionNotFound, UserErrorCode, WorkflowHandle, WorkflowSpec,
-    WorkflowStartError,
+    WorkflowSpecBuilder, WorkflowStartError,
 };
 
 /// What a task body reads while it runs.
@@ -57,6 +58,13 @@ impl TaskRuntime {
             functions,
             workflows,
         }
+    }
+
+    /// A workflow builder of the workflow `name` on the app of this runtime,
+    /// as `Horsies::workflow_builder` gives it: each task node resolves
+    /// against the tasks of that app when it is added.
+    pub fn workflow_builder(&self, name: impl Into<String>) -> WorkflowSpecBuilder {
+        WorkflowSpecBuilder::new(name, Arc::clone(&self.functions))
     }
 
     /// Start `spec`, a workflow that the task built, with a new id and the
@@ -318,8 +326,11 @@ mod tests {
     #[tokio::test]
     async fn a_start_from_the_runtime_checks_the_spec_first() {
         let runtime = app().task_runtime();
-        let mut builder = crate::WorkflowSpecBuilder::new("keyless");
-        let tick = builder.task(crate::workflow::tests_support::unit_task_node("tick"));
+        let mut builder = crate::workflow::tests_support::test_builder("keyless");
+        let tick = crate::workflow::tests_support::add(
+            &mut builder,
+            crate::workflow::tests_support::unit_task_node("tick"),
+        );
         builder.output(tick);
         let spec = builder.build().unwrap();
         let refused = runtime.start::<u32>(&spec).await.unwrap_err();

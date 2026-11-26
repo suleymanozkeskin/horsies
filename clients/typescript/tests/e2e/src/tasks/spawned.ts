@@ -46,8 +46,8 @@ export const SPAWNED_CONTRACTS = [isolatedLeftWork, isolatedLeftWorkSignal, isol
 
 /** The implementations of this module on `app`. */
 export function implementSpawned(app: Horsies): void {
-  app.implement(isolatedLeftWork, async ({ token, workMs }, runtime) => {
-    const work = runtime.spawn("left_work", async () => {
+  app.implement(isolatedLeftWork, async ({ token, workMs }, { ok, err, spawn }) => {
+    const work = spawn("left_work", async () => {
       await sleepFor(workMs, "noSignal");
 
       const written = appendLine(`${token}-work-end`, String(unixMillis()));
@@ -56,11 +56,11 @@ export function implementSpawned(app: Horsies): void {
     });
 
     return work.ok
-      ? isolatedLeftWork.ok("returned")
-      : isolatedLeftWork.err({ code: "WORK_FAILED", message: `spawn refused: ${work.error.kind}` });
+      ? ok("returned")
+      : err({ code: "WORK_FAILED", message: `spawn refused: ${work.error.kind}` });
   });
-  app.implement(isolatedLeftWorkSignal, async ({ token }, runtime) => {
-    const work = runtime.spawn("left_work_waits_for_signal", async (signal) => {
+  app.implement(isolatedLeftWorkSignal, async ({ token }, { ok, err, spawn }) => {
+    const work = spawn("left_work_waits_for_signal", async (signal) => {
       const end = await sleepFor(PAST_THE_DEADLINE_MS, signal);
       const written = appendLine(`${token}-work`, end.kind === "aborted" ? end.reason : "slept");
 
@@ -68,11 +68,11 @@ export function implementSpawned(app: Horsies): void {
     });
 
     return work.ok
-      ? isolatedLeftWorkSignal.ok("returned")
-      : isolatedLeftWorkSignal.err({ code: "WORK_FAILED", message: `spawn refused: ${work.error.kind}` });
+      ? ok("returned")
+      : err({ code: "WORK_FAILED", message: `spawn refused: ${work.error.kind}` });
   });
-  app.implement(isolatedDeadline, async ({ token }, runtime) => {
-    runtime.signal.addEventListener(
+  app.implement(isolatedDeadline, async ({ token }, { ok, signal }) => {
+    signal.addEventListener(
       "abort",
       () => {
         const written = appendLine(`${token}-signal`, "fired");
@@ -85,6 +85,6 @@ export function implementSpawned(app: Horsies): void {
     );
     await sleepFor(PAST_THE_DEADLINE_MS, "noSignal");
 
-    return isolatedDeadline.ok("never");
+    return ok("never");
   });
 }

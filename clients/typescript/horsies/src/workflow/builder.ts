@@ -23,7 +23,7 @@ import type {
 
 /** The builder of a workflow build. */
 export interface WorkflowBuilder {
-  /** A node that runs the task of `contract`. Each parameter takes a value, or a node for an `h.resultOf` one. */
+  /** A node that runs the task of `contract`. Each parameter takes a value, or a node for an `h.taskOutcome` one. */
   task<
     P extends ParameterSchemas,
     O extends OutputSchema,

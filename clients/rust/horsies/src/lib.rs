@@ -158,26 +158,38 @@ pub mod __private {
         }
     }
 
-    /// The refusal of `name::send` and `name::schedule` before
-    /// `name::register(&mut app)` in this process: `VALIDATION_FAILED`,
-    /// nothing written.
-    pub fn send_before_register(task_name: &str) -> crate::TaskSendError {
-        crate::TaskSendError::ValidationFailed {
-            message: format!(
-                "task '{task_name}' is not registered in this process; call \
-                 {task_name}::register(&mut app) when main builds the app"
-            ),
-            cause: horsies_core::FailureCause::PreconditionFailed,
-        }
+    /// The typed function of the task `task_name` on `app`, for the
+    /// generated `name::send` and `name::with_options(..).send`.
+    ///
+    /// Errors: `VALIDATION_FAILED` with the cause `PreconditionFailed` when
+    /// `app` holds no task of this name with these types; nothing is
+    /// written. The message is the text of the [`crate::TaskFunctionNotFound`]
+    /// cause.
+    pub fn send_function<A, T, E>(
+        app: &crate::Horsies,
+        task_name: &str,
+    ) -> Result<crate::TaskFunction<A, T, E>, crate::TaskSendError>
+    where
+        A: serde::Serialize + serde::de::DeserializeOwned + 'static,
+        T: serde::Serialize + serde::de::DeserializeOwned + 'static,
+        E: crate::UserErrorCode,
+    {
+        app.functions()
+            .get::<A, T, E>(task_name)
+            .map_err(|not_found| crate::TaskSendError::ValidationFailed {
+                message: not_found.to_string(),
+                cause: horsies_core::FailureCause::PreconditionFailed,
+            })
     }
 
-    /// The refusal of `name::node()` before `name::register(&mut app)`:
-    /// `HRS-302`, the task of the node is not registered in this process.
-    pub fn node_before_register(task_name: &str) -> crate::HorsiesError {
-        crate::HorsiesError::new(format!(
-            "task '{task_name}' is not registered in this process; call \
-             {task_name}::register(&mut app) when main builds the app"
-        ))
-        .with_code(crate::ErrorCode::WorkflowUnregisteredTask)
+    /// A workflow node of the task `task_name` with the output `T`, the
+    /// input `I` and an empty input `{}`, for the generated `name::node()`.
+    /// The workflow builder resolves the rest from its app when the node is
+    /// added.
+    pub fn task_node<T, I>(task_name: &str) -> crate::TaskNode<T, I>
+    where
+        I: serde::Serialize + serde::de::DeserializeOwned + 'static,
+    {
+        crate::TaskNode::of_task(task_name)
     }
 }

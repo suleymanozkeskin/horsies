@@ -40,9 +40,4 @@ export const PENDING_SCENARIOS: readonly PendingScenarios[] = [
       "the result of the terminal nodes of a workflow with no output: Python test_layer4_workflow_structure.py::test_default_terminal_results, the outputless reads of test_layer7_subworkflows.py (test_outputless_success_policy_keeps_failed_subworkflow_result, test_subworkflow_recovery_outputless_recovery, test_subworkflow_deep_outputless_nested_failed_optional, test_subworkflow_deep_outputless_all_failed_required, test_subworkflow_deep_mixed_paths); layers 4 and 7 run each of these cases with an output node",
     ],
   },
-  {
-    issue: 2500,
-    needs: "the start span of a workflow start, whose carrier the workflow rows store",
-    mirrors: ["Python test_worker_ended_spans.py::test_a_workflow_task_killed_at_its_timeout_gets_a_span_with_its_node: the span is in the trace of the start"],
-  },
 ];

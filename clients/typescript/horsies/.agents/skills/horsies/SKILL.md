@@ -16,8 +16,8 @@ folder only when the task needs it:
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `defineTask`, the `h.*` wire types, the zod adapter, the stored input, `app.implement`, `ok` and `err`, the exception map, `TaskRuntime`, the fencing token, the cancel signal, `runtime.spawn`, app state, retry policies, `app.send`, `TaskSendError`, `retrySend`, `TaskHandle`, `TaskOutcome`, `ReadError`, tests of a body |
-| `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.resultOf`, joins, the workflow context (`runtime.workflowContext`), the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `retryStart`, `WorkflowHandle`, `app.workflowHandle` |
+| `tasks.md` | `defineTask`, the `h.*` wire types, the zod adapter, the stored input, `app.implement`, `ok` and `err` of the body's second argument, the exception map, `TaskRuntime`, the fencing token, the cancel signal, `runtime.spawn`, app state, retry policies, `app.send`, `TaskSendError`, `retrySend`, `TaskHandle`, `TaskOutcome`, `ReadError`, tests of a body |
+| `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.taskOutcome`, joins, the workflow context (`runtime.workflowContext`), the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `retryStart`, `WorkflowHandle`, `app.workflowHandle` |
 | `configs.md` | `Horsies.create` and its refusals, the broker, queues, worker profiles, recovery, retention, `cli.run` and its commands |
 | `monitoring.md` | `app.pingDatabase`, `app.pingWorkers`, `app.monitoring`, the operator cancel, `createMonitoringHandler`, `app.rerun` and `app.rerunIn` |
 
@@ -103,7 +103,7 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(addNumbers, ({ a, b }) => addNumbers.ok(a + b));
+app.implement(addNumbers, ({ a, b }, { ok }) => ok(a + b));
 
 process.exitCode = await cli.run(app);
 ```
@@ -139,7 +139,7 @@ export async function sendSum(producer: Horsies): Promise<void> {
     return;
   }
 
-  const read = await sent.value.get({ timeoutMs: 30_000 });
+  const read = await sent.value.get({ waitMs: 30_000 });
 
   if (!read.ok) {
     console.error(`the read failed: ${read.error.kind}`);
@@ -154,7 +154,7 @@ export async function sendSum(producer: Horsies): Promise<void> {
       console.log(`sum = ${outcome.value}`);
       break;
     case "failed":
-      console.log(`failed with ${outcome.error.code.code}`);
+      console.log(`failed with ${outcome.error.code}`);
       break;
   }
 }
@@ -184,7 +184,7 @@ const fetchReport = defineTask({
 
 const publishReport = defineTask({
   name: "publish_report",
-  input: { report: h.resultOf(h.string()) },
+  input: { report: h.taskOutcome(fetchReport) },
   output: h.int(),
 });
 
@@ -205,8 +205,9 @@ export const dailyReport = defineWorkflow(
 );
 ```
 
-- A parameter declared `h.resultOf(T)` takes an upstream node. The node
-  waits for it, and the body gets the upstream outcome.
+- A parameter declared `h.taskOutcome(contract)` takes an upstream node of
+  that contract. The node waits for it, and the body gets the upstream
+  outcome, with the output type and the codes of the contract.
 - Every node has an `id`. A workflow with `params` declares `checkCases`.
 - List the workflow in `Horsies.create({ tasks, workflows })` and start it
   with `app.start(dailyReport, { region: "eu" })`. See `workflows.md`.
@@ -215,7 +216,7 @@ export const dailyReport = defineWorkflow(
 
 | Operation | Returns |
 |---|---|
-| Task body | `contract.ok(value)` or `contract.err({ code, message, data })`, or a Promise of one |
+| Task body | `ok(value)` or `err({ code, message, data })` of its second argument, or a Promise of one |
 | `Horsies.create` | `Result<Horsies, CreateRefused>` |
 | `app.send`, `app.retrySend` | `Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>` |
 | `handle.get` | `Promise<Result<TaskOutcome<O, E>, ReadError>>` |

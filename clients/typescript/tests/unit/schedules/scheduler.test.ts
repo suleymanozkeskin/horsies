@@ -44,7 +44,7 @@ function unimplementedSchedulerApp(): Horsies {
 function schedulerApp(): Horsies {
   const app = unimplementedSchedulerApp();
 
-  app.implement(ping, () => ping.ok(null));
+  app.implement(ping, (_input, { ok }) => ok(null));
 
   return app;
 }

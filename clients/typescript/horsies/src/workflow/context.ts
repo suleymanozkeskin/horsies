@@ -7,7 +7,7 @@
 
 import { isTreeObject, readTree, type TreeObject, type TreeValue } from "../codec/number-text.ts";
 import type { JsonText } from "../codec/json-text.ts";
-import { decodeNode } from "../codec/reader.ts";
+import { decodeEnvelopeNode, decodeNode } from "../codec/reader.ts";
 import { refusalText, ROOT_PATH } from "../codec/refusal.ts";
 import { isNumber, isString, isUuidText } from "../codec/values.ts";
 import type { ContextUse, ExecutionClass, TaskContract } from "../contract/define-task.ts";
@@ -30,7 +30,7 @@ export type ContextReadError =
   | { readonly kind: "notInContext"; readonly nodeId: string }
   /** The stored value does not read with the contract's types. `cause` holds no value. */
   | { readonly kind: "unreadable"; readonly nodeId: string; readonly cause: string }
-  /** The stored error has a user code that the contract does not list. */
+  /** The stored error has a custom code that the contract does not list. */
   | { readonly kind: "unknownUserCode"; readonly nodeId: string; readonly code: string };
 
 /** The workflow context of one task run. */
@@ -238,22 +238,21 @@ function contextOutcome(
     case "unreadable":
       return err(Object.freeze({ kind: "unreadable", nodeId, cause: form.cause }));
     case "readable": {
-      const decoded = decodeNode({ node: "resultOf", inner: form.output }, node, ROOT_PATH, 0, "worker");
+      const decoded = decodeEnvelopeNode(form.output, node, ROOT_PATH, "worker");
 
       if (!decoded.ok) {
         return err(Object.freeze({ kind: "unreadable", nodeId, cause: refusalText(decoded.error) }));
       }
 
-      // SAFETY: the reader decodes a `resultOf` kind into a task outcome.
-      const outcome = decoded.value as TaskOutcome<unknown, string>;
+      const outcome = decoded.value;
 
-      if (outcome.kind === "succeeded" || outcome.error.code.kind === "library" || form.codes.kind === "open") {
+      if (outcome.kind === "succeeded" || outcome.error.kind === "builtIn" || form.codes.kind === "open") {
         return ok(outcome);
       }
 
-      return form.codes.codes.includes(outcome.error.code.code)
+      return form.codes.codes.includes(outcome.error.code)
         ? ok(outcome)
-        : err(Object.freeze({ kind: "unknownUserCode", nodeId, code: outcome.error.code.code }));
+        : err(Object.freeze({ kind: "unknownUserCode", nodeId, code: outcome.error.code }));
     }
 
     default:

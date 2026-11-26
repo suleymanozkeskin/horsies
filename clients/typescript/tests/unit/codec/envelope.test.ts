@@ -9,6 +9,7 @@ import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { decodeEnvelope, decodeParameters } from "../../../horsies/src/codec/reader.ts";
 import type { DecodeRefused, EnvelopeRule } from "../../../horsies/src/codec/refusal.ts";
 import { encodeParameters } from "../../../horsies/src/codec/writer.ts";
+import { defineTask } from "../../../horsies/src/contract/define-task.ts";
 import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import type { Kind } from "../../../horsies/src/wire/kinds.ts";
 import type { TaskOutcome } from "../../../horsies/src/wire/task-error.ts";
@@ -53,7 +54,7 @@ describe("stored task error rules", () => {
     assert.equal(errorRule("[1]"), "ErrorNotAnObject");
   });
 
-  test("ErrorFieldInvalid: a code that is null, a number, a library or reserved name as a user code", () => {
+  test("ErrorFieldInvalid: a code that is null, a number, a built-in or reserved name as a custom code", () => {
     for (const code of ["null", "1", '"BROKER_ERROR"', '"WORKFLOW_STOPPED"', '{"__builtin_task_code__":"X","a":1}']) {
       assert.equal(errorRule(`{"error_code":${code}}`), "ErrorFieldInvalid", code);
     }
@@ -69,7 +70,8 @@ describe("stored task error rules", () => {
 
     assert(outcome.kind === "failed");
     assert.deepEqual(outcome.error, {
-      code: { kind: "user", code: "X" },
+      kind: "custom",
+      code: "X",
       message: null,
       data: null,
       exception: null,
@@ -136,8 +138,9 @@ describe("stored task error rules", () => {
   });
 });
 
-describe("h.resultOf parameters", () => {
-  const parameters = parametersKind({ order: h.resultOf(h.object({ id: h.int() })), note: h.string() });
+describe("h.taskOutcome parameters", () => {
+  const upstream = defineTask({ name: "upstream", input: {}, output: h.object({ id: h.int() }) });
+  const parameters = parametersKind({ order: h.taskOutcome(upstream), note: h.string() });
 
   test("a workflow node's input: the upstream outcome, succeeded or failed", () => {
     const succeeded = decodeParameters(
@@ -154,7 +157,7 @@ describe("h.resultOf parameters", () => {
       "worker",
     );
 
-    const error = { code: { kind: "user", code: "X" }, message: null, data: null, exception: null, subWorkflow: null };
+    const error = { kind: "custom", code: "X", message: null, data: null, exception: null, subWorkflow: null };
 
     assert.deepEqual(failed, { ok: true, value: { order: { kind: "failed", error }, note: "x" } });
   });

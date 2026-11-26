@@ -1,4 +1,4 @@
-// The workflow calls of a seat body past the bound of the relay: a start, a restart (`retryStart`) and each handle call
+// The workflow calls of a seat body past the bound of the relay: a start, a retry (`retryStart`) and each handle call
 // give `SEAT_RELAY_FULL`, retryable, through the error union of the call, with the bound in the text and in the cause.
 // Nothing goes to the main thread.
 
@@ -114,7 +114,7 @@ describe("each workflow call kind past the bound of the relay gives SEAT_RELAY_F
     assert.deepEqual(sent, []);
   });
 
-  test("a restart (retryStart of an ENQUEUE_FAILED)", async () => {
+  test("a retry of a start (retryStart of an ENQUEUE_FAILED)", async () => {
     const failing = fakeCore({ started: [{ kind: "failed", error: rawStartEnqueueFailed("hello", true) }] });
     const first = errorOf(await areaOn(failing).start(hello, { who: "a" }));
 
@@ -155,12 +155,15 @@ describe("each workflow call kind past the bound of the relay gives SEAT_RELAY_F
     assert.deepEqual(sent, []);
   });
 
-  test("a node result read: the read error seatRelayFull", async () => {
+  test("a node result read: the read error seatRelayFull with the code, retryable and the message, no nested error", async () => {
     const { core, sent } = fullCore();
     const error = errorOf(await handleOn(core).resultFor("greet"));
 
     assert.ok(error.kind === "seatRelayFull", error.kind);
-    assertRelayFull(error.error);
+    assert.deepEqual(Object.keys(error).toSorted(), ["code", "kind", "message", "retryable"]);
+    assert.equal(error.code, SeatRelayCode.SEAT_RELAY_FULL);
+    assert.equal(error.retryable, true);
+    assert.ok(error.message.includes(BOUND_TEXT) && error.message.includes("nothing was sent; retry"), error.message);
     assert.deepEqual(sent, []);
   });
 

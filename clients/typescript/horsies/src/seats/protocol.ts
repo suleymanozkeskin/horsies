@@ -13,6 +13,8 @@
 // - `bodyEnded`: the verdict of the run `runKey` (how its body ended, from the run's cancel cause and its outcome)
 //   and the main thread's time of its settle, for the seat body observer. No answer.
 // - `opReply`: the answer to the operation `requestId`.
+// - `flush`: the child stops; the isolate flushes its seat body observer (the tracer provider of its SDK). The answer
+//   is `flushed`.
 //
 // Seat to main thread:
 // - `ready`: the isolate ran every provider of the app; it takes runs.
@@ -22,6 +24,9 @@
 //   is `opReply`.
 // - `defect`: a defect of the package in the isolate; the main thread applies the defect rule (the child aborts).
 // - `log`: one line that the isolate's process events write (a detached throw, a rejection that no body awaits).
+// - `flushed`: the flush of the seat body observer settled.
+// - `spanNotMade`: the user's SDK threw at a span of the isolate (a send, a workflow start, or the attempt span of a
+//   run); the main thread writes the record of the process (`src/telemetry/not-made.ts`).
 //
 // A message of another kind or of another protocol version, or a field that is missing or of another type, is a defect
 // of the package: the parse throws `ClientDefect`. On the main thread the defect rule then ends the child; in an
@@ -34,6 +39,7 @@ import { isBigint, isNumber, isObjectLike, isString } from "../codec/values.ts";
 import type { BodyEnd } from "../child/body-observer.ts";
 import type { BodyFactsRecord, CancelCauseName } from "../native/child/addon.ts";
 import type { NativeThrown } from "../native/call/envelope.ts";
+import type { NotMadeSpan } from "../native/logging/addon.ts";
 import type { TaskErrorParts } from "../native/sends/addon.ts";
 import { SEAT_MARKER_KEY } from "../app/suppression.ts";
 import { ClientDefect, type CoreDefectCode, type CoreErrorCode } from "../thrown-errors.ts";
@@ -122,7 +128,8 @@ export type MainToSeat =
       readonly protocol: SeatProtocolVersion;
       readonly requestId: number;
       readonly answer: SeatAnswer;
-    };
+    }
+  | { readonly kind: "flush"; readonly protocol: SeatProtocolVersion };
 
 /** A message of a seat isolate to the main thread. */
 export type SeatToMain =
@@ -153,7 +160,9 @@ export type SeatToMain =
       readonly name: string;
       readonly message: string;
     }
-  | { readonly kind: "log"; readonly protocol: SeatProtocolVersion; readonly line: string };
+  | { readonly kind: "log"; readonly protocol: SeatProtocolVersion; readonly line: string }
+  | { readonly kind: "flushed"; readonly protocol: SeatProtocolVersion }
+  | { readonly kind: "spanNotMade"; readonly protocol: SeatProtocolVersion; readonly span: NotMadeSpan; readonly cause: string };
 
 /** The message of a seat isolate in `message`, as a port gave it. A message outside the protocol: `ClientDefect`. */
 export function parseSeatToMain(message: object): SeatToMain {
@@ -185,6 +194,10 @@ export function parseSeatToMain(message: object): SeatToMain {
       };
     case "log":
       return { kind, protocol, line: textField(message, "line") };
+    case "flushed":
+      return { kind, protocol };
+    case "spanNotMade":
+      return { kind, protocol, span: notMadeSpanOf(objectField(message, "span")), cause: textField(message, "cause") };
     default:
       throw protocolDefect(`a message of a seat isolate has the unknown kind ${String(kind)}`);
   }
@@ -219,6 +232,8 @@ export function parseMainToSeat(message: object): MainToSeat {
       };
     case "opReply":
       return { kind, protocol, requestId: requestIdField(message), answer: answerOf(objectField(message, "answer")) };
+    case "flush":
+      return { kind, protocol };
     default:
       throw protocolDefect(`a message of the main thread has the unknown kind ${String(kind)}`);
   }
@@ -356,6 +371,22 @@ function bodyEndOf(end: object): BodyEnd {
       return { kind, code: textField(end, "code") };
     default:
       throw protocolDefect(`the verdict of a run has the unknown kind ${String(kind)}`);
+  }
+}
+
+function notMadeSpanOf(span: object): NotMadeSpan {
+  const kind: unknown = Reflect.get(span, "kind");
+
+  switch (kind) {
+    case "workflowStart":
+      return { kind, workflowId: textField(span, "workflowId") };
+    case "send":
+    case "attempt":
+    case "seatAttempt":
+    case "workerEnded":
+      return { kind, taskId: textField(span, "taskId") };
+    default:
+      throw protocolDefect(`the span that a seat isolate did not make has the unknown kind ${String(kind)}`);
   }
 }
 

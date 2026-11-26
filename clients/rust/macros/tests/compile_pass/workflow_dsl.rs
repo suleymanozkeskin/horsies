@@ -1,11 +1,12 @@
 // The workflow DSL over the generated helpers: a node per task, a result
 // passed with `arg_from` (the receiving type `TaskOutcome`), the workflow
-// context, and a definition with its sub-workflow node.
+// context, a builder of the app, and a definition with its sub-workflow
+// node.
 use std::convert::Infallible;
 
 use horsies::{
-    task, HorsiesError, SubWorkflowParams, TaskError, TaskOutcome, WorkflowContext,
-    WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    task, AppConfig, Horsies, HorsiesError, SubWorkflowParams, TaskError, TaskOutcome,
+    WorkflowContext, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
 };
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -47,18 +48,28 @@ impl WorkflowDefinition for Pipeline {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let produced =
-            builder.task(produce::node()?.set(produce::params::order(), Order { order_id: 7 })?);
-        let consumed = builder.task(consume::node()?.arg_from(consume::params::total(), produced));
+            builder.task(produce::node().set(produce::params::order(), Order { order_id: 7 })?)?;
+        let consumed =
+            builder.task(consume::node().arg_from(consume::params::total(), produced))?;
         let _summary = builder.task(
-            summarize::node()?
+            summarize::node()
                 .waits_for(consumed)
                 .workflow_ctx_from([consumed]),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(consumed))
     }
 }
 
 fn main() {
-    let _spec = Pipeline::build();
+    let Ok(mut app) = Horsies::new(AppConfig::for_database_url(
+        "postgresql://localhost/horsies",
+    )) else {
+        return;
+    };
+    let _produce = produce::register(&mut app);
+    let _consume = consume::register(&mut app);
+    let _summarize = summarize::register(&mut app);
+    let _spec = Pipeline::build(app.workflow_builder(Pipeline::name()));
+    let _function = app.register_workflow_definition::<Pipeline>();
     let _node = Pipeline::node(SubWorkflowParams::NotGiven);
 }

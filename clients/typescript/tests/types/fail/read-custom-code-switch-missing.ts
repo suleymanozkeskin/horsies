@@ -1,5 +1,5 @@
 // expect: TS2345 at 25
-// A switch over the declared user codes that misses one fails at the `assertNever` line.
+// A switch over the declared custom codes that misses one fails at the `assertNever` line.
 
 import { defineTask, h, type Horsies, type TaskId } from "../../../horsies/src/index.ts";
 
@@ -12,11 +12,11 @@ const validateOrder = defineTask({ name: "v", input: {}, output: h.null(), error
 export async function codeOf(app: Horsies, taskId: TaskId): Promise<string> {
   const read = await app.taskHandle(validateOrder, taskId).get();
 
-  if (!read.ok || read.value.kind === "succeeded" || read.value.error.code.kind === "library") {
+  if (!read.ok || read.value.kind === "succeeded" || read.value.error.kind === "builtIn") {
     return "";
   }
 
-  const code = read.value.error.code.code;
+  const code = read.value.error.code;
 
   switch (code) {
     case "EMPTY_ORDER":

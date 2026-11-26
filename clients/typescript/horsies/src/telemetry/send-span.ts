@@ -7,8 +7,9 @@
 // - A result that failed sets the status ERROR and `error.type` to the error code; a success leaves the status unset.
 // - A throw of the send path (a defect) ends the span with ERROR and `error.type` = the thrown value's type
 //   (`thrownRecord`), records no metric, and passes on.
-// - Telemetry never changes the send: a throw of the user's SDK at the open gives no span, no carrier and no metric;
-//   a throw at the end is written once per process (`TelemetryWarnings`).
+// - Telemetry never changes the send: a throw of the user's SDK at the open gives no span, no carrier and no metric.
+//   A throw at the open or the end is a span not made: one WARNING record per process on `horsies.telemetry`
+//   (`not-made.ts`). A throw of a metric or of the carrier of a rerun is one warning per process (`TelemetryWarnings`).
 
 import type { SendCallResult, SendObserver, SendSpanFacts } from "../app/observers.ts";
 import { thrownRecord } from "../child/thrown-error.ts";
@@ -27,6 +28,7 @@ import {
   TASK_NAME_KEY,
 } from "./attributes.ts";
 import { NO_CARRIER, sendTraceOf } from "./carrier.ts";
+import type { SpansNotMade } from "./not-made.ts";
 import { INSTRUMENTATION_SCOPE, type OtelApi, type OtelSpan } from "./otel-api.ts";
 import { recordSendPoint, type SendPoint, type SendResultLabel } from "./producer-metrics.ts";
 import type { TelemetryWarnings } from "./warnings.ts";
@@ -38,6 +40,7 @@ export type MonotonicClock = () => number;
 export type SendTelemetryDeps = {
   readonly api: OtelApi;
   readonly warnings: TelemetryWarnings;
+  readonly notMade: SpansNotMade;
   readonly clock: MonotonicClock;
 };
 
@@ -77,7 +80,7 @@ async function observedSend(
   try {
     result = await run(opened.trace);
   } catch (cause) {
-    endSendSpan(deps, opened.span, { kind: "threw", errorType: thrownRecord(cause).type });
+    endSendSpan(deps, opened.span, facts.taskId, { kind: "threw", errorType: thrownRecord(cause).type });
 
     throw cause;
   }
@@ -85,7 +88,7 @@ async function observedSend(
   const seconds = (deps.clock() - started) / MILLISECONDS_PER_SECOND;
   const label: SendResultLabel = result.ok ? { kind: "sent" } : { kind: "failed", code: result.error.code };
 
-  endSendSpan(deps, opened.span, { kind: "returned", result: label });
+  endSendSpan(deps, opened.span, facts.taskId, { kind: "returned", result: label });
   recordPoint(deps, { taskName: facts.taskName, queueName: facts.queueName, result: label, seconds });
 
   return result;
@@ -118,14 +121,14 @@ function openSendSpan(deps: SendTelemetryDeps, facts: SendSpanFacts): OpenedSend
 
     return { kind: "open", span, trace: sendTraceOf(api, api.trace.setSpan(parent, span)) };
   } catch (cause) {
-    deps.warnings.warnOnce("sendSpanOpen", cause);
+    deps.notMade.report({ kind: "send", taskId: facts.taskId }, cause);
 
     return { kind: "notOpen" };
   }
 }
 
-/** End `span` by how the send call ended. */
-function endSendSpan(deps: SendTelemetryDeps, span: OtelSpan, end: SendCallEnd): void {
+/** End `span` of a send of task `taskId` by how the send call ended. */
+function endSendSpan(deps: SendTelemetryDeps, span: OtelSpan, taskId: string, end: SendCallEnd): void {
   try {
     switch (end.kind) {
       case "returned":
@@ -146,7 +149,7 @@ function endSendSpan(deps: SendTelemetryDeps, span: OtelSpan, end: SendCallEnd):
 
     span.end();
   } catch (cause) {
-    deps.warnings.warnOnce("sendSpanEnd", cause);
+    deps.notMade.report({ kind: "send", taskId }, cause);
   }
 }
 

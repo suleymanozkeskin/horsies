@@ -44,15 +44,22 @@ mod workflow_input;
 ///   error.
 /// - `workflow_ctx`: the input gets the workflow context.
 ///
-/// The attribute generates a module of the same name:
+/// The attribute generates a module of the same name. It holds no state:
+/// each send names the app that it goes through, and a workflow builder
+/// resolves a node against its own app.
 ///
 /// ```ignore
 /// let validate = validate_order::register(&mut app)?;   // TaskFunction<validate_order::Input, ValidatedOrder, OrderCode>
 /// let order_field = validate_order::params::order();    // InputField<validate_order::Input, Order>
-/// let handle = validate_order::send(order).await?;      // after the first register in the process
-/// let later = validate_order::schedule(WholeSeconds::from_secs(30), order).await?;
+/// let handle = validate_order::send(&app, order).await?;
+/// let options = TaskSendOptions::new().delay(WholeSeconds::from_secs(30));
+/// let later = validate_order::with_options(options).send(&app, order).await?;
+/// let node = validate_order::node();                    // TaskNode<ValidatedOrder, validate_order::Input>
 /// let function = validate_order::handle(&runtime)?;     // from a TaskRuntime
 /// ```
+///
+/// A send through an app that does not register the task is
+/// `VALIDATION_FAILED` and writes nothing.
 #[proc_macro_attribute]
 pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     let attrs = parse_macro_input!(attr as parse::TaskAttrs);

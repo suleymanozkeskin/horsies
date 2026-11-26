@@ -21,7 +21,7 @@ Use a handler to send what a worker does to another system: your own metrics, an
 
 The core defines each event type once. The Python client generates its classes from the core, and the Rust client re-exports the core types, so both clients read the same events.
 
-- The contract has a version. This release has version 7: `core/tests/fixtures/event_contract/v7.txt` in the repository holds its text. Version 7 adds the variants of an operator cancel of a running task. A change of an event type, a field or a closed type of a field is a new version.
+- The contract has a version. This release has version 8: `core/tests/fixtures/event_contract/v8.txt` in the repository holds its text. Version 8 renames the variants of an error code that the task chose to `Custom` and `CustomOverBound`. A change of an event type, a field or a closed type of a field is a new version.
 - An event holds ids, names, codes, numbers and times. It never holds task input, a task result, a failed reason or an exception text.
 - Each field has a closed type or a bound. A duration is a duration type, a time is a UTC time, and a state that can be missing or not known is a named variant.
 - A handler takes the events of one type, never the union of the types. A later version can add an event type, and that changes no handler of another type.
@@ -60,7 +60,7 @@ Each event also has `at`: the wall-clock time of the worker at the step.
 | `DecidedByWorker` | The worker ended it, with no result frame of the child | `reason`: `TIMED_OUT` (the worker killed the child at the deadline), `TASK_BLOCKED_LOOP`, `NEIGHBOUR_BLOCKED_LOOP`, `CHILD_LOST`, `KILLED_AFTER_CANCEL` (the worker killed the child after an operator cancel: the kill after `cancel_grace_ms` of an `ISOLATED` task, the deadline, a blocked loop or the stop of the worker) or `LOST_AFTER_CANCEL` (the child was lost after an operator cancel, with its exit seen) |
 | `NotKnown` | The worker killed the child and did not see its exit; recovery decides the row | `child_pid` |
 
-An error code is a built-in code, a user code of at most 128 characters, or `UserOverBound` for a longer user code. `start` is `Reported` with the time of the `RUNNING` write, or `NotReported`. `DecidedByWorker` also has internal fields for the span of the attempt; they are not part of the stable contract.
+An error code is `BuiltIn` with a built-in code, `Custom` with a code that the task chose, of at most 128 characters, or `CustomOverBound` for a longer code that the task chose. `start` is `Reported` with the time of the `RUNNING` write, or `NotReported`. `DecidedByWorker` also has internal fields for the span of the attempt; they are not part of the stable contract.
 
 The `end` of `Cancelled` tells how the run ended after the cancel:
 

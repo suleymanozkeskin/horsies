@@ -1,6 +1,7 @@
 // The errors of a workflow handle: the handle catalog of the core, generated (`src/_catalog/workflow_handle_errors.ts`),
 // told apart by `code`; and the errors of a read of an outcome (`get`, `resultFor`), told apart by `kind`.
 
+import { RetrievalCode } from "../_catalog/task_codes.ts";
 import type { HandleErrorCode } from "../_catalog/workflow_handle.ts";
 import {
   type HandleCoreError,
@@ -23,21 +24,26 @@ import { unreachable } from "../wire/unreachable.ts";
  */
 export type WorkflowHandleError = HandleCoreError | SeatRelayFull;
 
-/** Why a read of a workflow outcome failed. A read error is not the workflow's outcome. */
+/**
+ * Why a read of a workflow outcome failed, told apart by `kind`, which is named after the catalog code in `code`. A
+ * read error is not the workflow's outcome. Two variants have no `code` member, `storedResultUnreadable` and
+ * `unknownUserCode` (both `RESULT_DESERIALIZATION_ERROR`), and `database` holds the handle code in `code`
+ * (`BROKER_ERROR`).
+ */
 export type WorkflowReadError =
   /** The workflow had not ended when the wait ended; it may still run. */
-  | { readonly kind: "waitTimedOut" }
-  | { readonly kind: "workflowNotFound" }
+  | { readonly kind: "waitTimeout"; readonly code: "WAIT_TIMEOUT" }
+  | { readonly kind: "workflowNotFound"; readonly code: "WORKFLOW_NOT_FOUND" }
   /** The node stores no result yet, or the workflow has no node of this id. */
-  | { readonly kind: "resultNotReady" }
+  | { readonly kind: "resultNotReady"; readonly code: "RESULT_NOT_READY" }
   /** The stored value does not read with the handle's types. `cause` holds no value. */
   | { readonly kind: "storedResultUnreadable"; readonly cause: string }
-  /** The stored error has a user code that the node's contract does not list. */
+  /** The stored error has a custom code that the node's contract does not list. */
   | { readonly kind: "unknownUserCode"; readonly code: string }
   /** A wait in a process that runs task bodies; nothing was read. */
-  | { readonly kind: "waitInsideTask" }
-  /** The app does not list the workflow, so its output has no read form; nothing was read. */
-  | { readonly kind: "workflowNotListed"; readonly workflowName: string }
+  | { readonly kind: "waitInsideTask"; readonly code: "WAIT_INSIDE_TASK" }
+  /** The app does not list the workflow, so its output has no type to read with; nothing was read. */
+  | { readonly kind: "noTypeAvailable"; readonly code: "NO_TYPE_AVAILABLE"; readonly workflowName: string }
   /** The database or the connection failed. */
   | {
       readonly kind: "database";
@@ -45,10 +51,18 @@ export type WorkflowReadError =
       readonly retryable: boolean;
       readonly message: string;
     }
-  /** A `timeoutMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
-  | { readonly kind: "invalidWait"; readonly maxMs: number }
-  /** In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. */
-  | { readonly kind: "seatRelayFull"; readonly error: SeatRelayFull };
+  /** A `waitMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
+  | { readonly kind: "invalidInput"; readonly code: "INVALID_INPUT"; readonly maxMs: number }
+  /**
+   * In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. `message` names
+   * the bound and its value.
+   */
+  | {
+      readonly kind: "seatRelayFull";
+      readonly code: "SEAT_RELAY_FULL";
+      readonly retryable: true;
+      readonly message: string;
+    };
 
 /** The public error of a raw record of the handle catalog. An unknown class throws (a build defect). */
 export function handleErrorOfRaw(raw: RawCatalogError): HandleCoreError {
@@ -82,7 +96,7 @@ export function storedDataInvalid(workflowId: string, message: string): HandleSt
 export function readErrorOfHandle(error: HandleCoreError): WorkflowReadError {
   switch (error.code) {
     case "WORKFLOW_NOT_FOUND":
-      return Object.freeze({ kind: "workflowNotFound" });
+      return Object.freeze({ kind: "workflowNotFound", code: RetrievalCode.WORKFLOW_NOT_FOUND });
     case "STORED_DATA_INVALID":
       return Object.freeze({ kind: "storedResultUnreadable", cause: error.message });
     case "DB_OPERATION_FAILED":
@@ -93,15 +107,15 @@ export function readErrorOfHandle(error: HandleCoreError): WorkflowReadError {
   }
 }
 
-/** The wait of a `timeoutMs`, or `invalidWait`. Left out: no bound. Pure. */
-export function workflowWait(timeoutMs: number | undefined): Result<WaitBound, WorkflowReadError> {
-  if (timeoutMs === undefined) {
+/** The wait of a `waitMs`, or `invalidInput`. Left out: no bound. Pure. */
+export function workflowWait(waitMs: number | undefined): Result<WaitBound, WorkflowReadError> {
+  if (waitMs === undefined) {
     return ok({ kind: "untilEnd" });
   }
 
-  return Number.isSafeInteger(timeoutMs) && timeoutMs >= 0 && timeoutMs <= MAX_WAIT_LIMIT_MS
-    ? ok({ kind: "upTo", milliseconds: timeoutMs })
-    : err(Object.freeze({ kind: "invalidWait", maxMs: MAX_WAIT_LIMIT_MS }));
+  return Number.isSafeInteger(waitMs) && waitMs >= 0 && waitMs <= MAX_WAIT_LIMIT_MS
+    ? ok({ kind: "upTo", milliseconds: waitMs })
+    : err(Object.freeze({ kind: "invalidInput", code: RetrievalCode.INVALID_INPUT, maxMs: MAX_WAIT_LIMIT_MS }));
 }
 
 function wrongCode(error: HandleCoreError): never {

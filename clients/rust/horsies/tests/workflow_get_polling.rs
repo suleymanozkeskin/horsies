@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use horsies::{
     task, AppConfig, Horsies, SchemaMode, TaskError, TaskOutcome, WaitLimit, WorkflowHandle,
-    WorkflowReadError, WorkflowSpecBuilder, WorkflowStatus,
+    WorkflowReadError, WorkflowStatus,
 };
 use horsies_core::core::lifecycle::{OwnedClaim, WorkflowSuccessOutcome};
 use horsies_core::{
@@ -112,9 +112,11 @@ async fn covered_database() -> (TestDatabase, PostgresBroker) {
 async fn start_one_node_workflow(url: &str, name: &str) -> Uuid {
     let mut writer = Horsies::new(AppConfig::for_database_url(url)).expect("the writing app");
     let answer_function = answer::register(&mut writer).expect("register the task");
-    let mut builder = WorkflowSpecBuilder::new(name);
+    let mut builder = writer.workflow_builder(name);
     builder.definition_key(format!("tests.workflow_get_polling.{name}.v1"));
-    let output = builder.task(answer_function.node());
+    let output = builder
+        .task(answer_function.node())
+        .expect("the writing app registers answer");
     builder.output(output);
     let spec = builder.build().expect("the spec builds");
     let started: WorkflowHandle<u32> = writer.start(&spec).await.expect("the workflow starts");
@@ -234,7 +236,7 @@ async fn get_polls_to_the_end_when_the_listener_connect_is_refused() {
     let (database, worker) = covered_database().await;
     let workflow_id = start_one_node_workflow(database.url(), "listen_refused_poll").await;
     let handle = listener_refused_handle(database.url(), workflow_id).await;
-    let limit = WaitLimit::parse(Some(POLLED_WAIT_LIMIT)).expect("a wait limit in bounds");
+    let limit = WaitLimit::Within(POLLED_WAIT_LIMIT);
 
     let wait = handle.get(limit);
     tokio::pin!(wait);
@@ -264,7 +266,7 @@ async fn get_answers_wait_timed_out_when_the_limit_passes_while_polling() {
     let (database, worker) = covered_database().await;
     let workflow_id = start_one_node_workflow(database.url(), "listen_refused_timeout").await;
     let handle = listener_refused_handle(database.url(), workflow_id).await;
-    let limit = WaitLimit::parse(Some(SHORT_WAIT_LIMIT)).expect("a wait limit in bounds");
+    let limit = WaitLimit::Within(SHORT_WAIT_LIMIT);
 
     let started = Instant::now();
     let answered = tokio::time::timeout(WAIT_ANSWER_BOUND, handle.get(limit))

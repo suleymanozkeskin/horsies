@@ -28,19 +28,19 @@ impl WorkflowDefinition for CustomerWinback {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let sweep = builder.task(
-            abandoned_cart_sweep::node()?
+            abandoned_cart_sweep::node()
                 .node_id("abandoned_cart_sweep")
                 .set(
                     abandoned_cart_sweep::params::older_than_minutes(),
                     tuning::ABANDONED_CART_AGE_MINUTES,
                 )?,
-        );
+        )?;
         let blast = builder.task(
-            winback_blast::node()?
+            winback_blast::node()
                 .node_id("winback_blast")
                 .set(winback_blast::params::segment(), SEGMENT.to_owned())?
                 .arg_from(winback_blast::params::sweep(), sweep),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(blast))
     }
 }

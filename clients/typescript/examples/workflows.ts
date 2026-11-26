@@ -37,21 +37,21 @@ const loadPrices = defineTask({ name: "load_prices", input: { orderId: h.int() }
 /** A node's dependency result arrives as an outcome, bound by the parameter's name. */
 const sumPrices = defineTask({
   name: "sum_prices",
-  input: { prices: h.resultOf(Prices) },
+  input: { prices: h.taskOutcome(loadPrices) },
   output: h.int(),
   errors: ["UPSTREAM_FAILED"],
 });
 
 const countItems = defineTask({
   name: "count_items",
-  input: { prices: h.resultOf(Prices) },
+  input: { prices: h.taskOutcome(loadPrices) },
   output: h.int(),
   errors: ["UPSTREAM_FAILED"],
 });
 
 const summarize = defineTask({
   name: "summarize",
-  input: { total: h.resultOf(h.int()), count: h.resultOf(h.int()) },
+  input: { total: h.taskOutcome(sumPrices), count: h.taskOutcome(countItems) },
   output: h.string(),
   errors: ["UPSTREAM_FAILED"],
 });
@@ -103,35 +103,35 @@ function succeededValue<T>(outcome: TaskOutcome<T>): Result<T, string> {
   }
 }
 
-app.implement(loadPrices, async ({ orderId }) => loadPrices.ok([orderId, ...OTHER_PRICES_CENTS]));
+app.implement(loadPrices, async ({ orderId }, { ok }) => ok([orderId, ...OTHER_PRICES_CENTS]));
 
-app.implement(sumPrices, async ({ prices }) => {
+app.implement(sumPrices, async ({ prices }, { ok, err }) => {
   const loaded = succeededValue(prices);
 
   return loaded.ok
-    ? sumPrices.ok(loaded.value.reduce((sum, price) => sum + price, 0))
-    : sumPrices.err({ code: "UPSTREAM_FAILED", message: loaded.error });
+    ? ok(loaded.value.reduce((sum, price) => sum + price, 0))
+    : err({ code: "UPSTREAM_FAILED", message: loaded.error });
 });
 
-app.implement(countItems, async ({ prices }) => {
+app.implement(countItems, async ({ prices }, { ok, err }) => {
   const loaded = succeededValue(prices);
 
-  return loaded.ok ? countItems.ok(loaded.value.length) : countItems.err({ code: "UPSTREAM_FAILED", message: loaded.error });
+  return loaded.ok ? ok(loaded.value.length) : err({ code: "UPSTREAM_FAILED", message: loaded.error });
 });
 
-app.implement(summarize, async ({ total, count }) => {
+app.implement(summarize, async ({ total, count }, { ok, err }) => {
   const sum = succeededValue(total);
   const items = succeededValue(count);
 
   if (!sum.ok) {
-    return summarize.err({ code: "UPSTREAM_FAILED", message: sum.error });
+    return err({ code: "UPSTREAM_FAILED", message: sum.error });
   }
 
   if (!items.ok) {
-    return summarize.err({ code: "UPSTREAM_FAILED", message: items.error });
+    return err({ code: "UPSTREAM_FAILED", message: items.error });
   }
 
-  return summarize.ok(`${String(items.value)} items, ${String(sum.value)} cents`);
+  return ok(`${String(items.value)} items, ${String(sum.value)} cents`);
 });
 
 async function demo(): Promise<Result<void, string>> {
@@ -143,7 +143,7 @@ async function demo(): Promise<Result<void, string>> {
 
   printLine(`started workflow ${started.value.workflowId}`);
 
-  const read = await started.value.get({ timeoutMs: LONG_RESULT_WAIT_MS });
+  const read = await started.value.get({ waitMs: LONG_RESULT_WAIT_MS });
 
   if (!read.ok) {
     return demoFailed(`read order_summary: ${workflowReadErrorText(read.error)}`);

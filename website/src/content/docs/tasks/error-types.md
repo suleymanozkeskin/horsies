@@ -256,14 +256,14 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `TaskSendEnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `exception` |
 | `TaskSendPayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` |
 | `TaskSendPayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` |
-| `TaskSendIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` |
+| `TaskSendIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id`; `retryable` is `True` |
 
 | Field | Type | Description |
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
 | `task_id` | `uuid.UUID` | Task id of the prepared send |
 | `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
-| `retryable` | `bool` | The core's classification of the cause: `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls` |
+| `retryable` | `bool` | `TaskSendEnqueueFailed`: the core's classification of the cause, `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `TaskSendIdempotencyKeyConflict`: a class variable that is always `True`, because the conflict clears when the reservation ends |
 | `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `size_bytes` | `int` | Bytes of the UTF-8 text of the serialized input |

@@ -111,20 +111,20 @@ export function exportRunOf(exportId: string, attempt: number): ExportRun {
 
 /** Implement the analytics tasks on `app`. */
 export function implementAnalyticsTasks(app: Horsies): void {
-  app.implement(salesRollup, async ({ window }) => salesRollup.ok(salesFigures(window)));
-  app.implement(abandonedCartSweep, async ({ olderThanMinutes }) => abandonedCartSweep.ok(abandonedCarts(olderThanMinutes)));
-  app.implement(regionalRollup, async ({ region }) => regionalRollup.ok(regionalFigures(region)));
-  app.implement(retentionAudit, async ({ olderThanDays }) => retentionAudit.ok(retentionFigures(olderThanDays)));
-  app.implement(catalogImportChunk, async ({ importId, chunkIndex }) => catalogImportChunk.ok(importedChunk(importId, chunkIndex)));
-  app.implement(flakyExport, ({ exportId }, runtime) => {
-    const run = exportRunOf(exportId, runtime.fencingToken.value);
+  app.implement(salesRollup, async ({ window }, { ok }) => ok(salesFigures(window)));
+  app.implement(abandonedCartSweep, async ({ olderThanMinutes }, { ok }) => ok(abandonedCarts(olderThanMinutes)));
+  app.implement(regionalRollup, async ({ region }, { ok }) => ok(regionalFigures(region)));
+  app.implement(retentionAudit, async ({ olderThanDays }, { ok }) => ok(retentionFigures(olderThanDays)));
+  app.implement(catalogImportChunk, async ({ importId, chunkIndex }, { ok }) => ok(importedChunk(importId, chunkIndex)));
+  app.implement(flakyExport, ({ exportId }, { ok, fencingToken }) => {
+    const run = exportRunOf(exportId, fencingToken.value);
 
     switch (run) {
       case "crash":
         // The child ends here, as a native crash ends it: the worker records WORKER_CRASHED for this attempt.
         return process.exit(EXPORT_CRASH_EXIT_CODE);
       case "write":
-        return flakyExport.ok(exportManifest(exportId));
+        return ok(exportManifest(exportId));
       default: {
         const unexpected: never = run;
 

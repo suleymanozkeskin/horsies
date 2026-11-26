@@ -386,9 +386,9 @@ describe("the schedules refusal list and the static check", () => {
   test("check reads the list; the worker start skips it", () => {
     const app = defaultModeApp();
 
-    app.implement(report, () => report.ok(null));
-    app.implement(ping, () => ping.ok(null));
-    app.implement(upstreamOnly, () => upstreamOnly.ok(null));
+    app.implement(report, (_input, { ok }) => ok(null));
+    app.implement(ping, (_input, { ok }) => ok(null));
+    app.implement(upstreamOnly, (_input, { ok }) => ok(null));
 
     const context = declare(app, [{ name: "ghost", task: unlisted, input: {}, pattern: HOURLY }], { kind: "core", calls: fakeCore() });
     const checked = staticCheck(context, fakeChecks(), "withSchedules", "check");

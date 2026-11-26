@@ -47,7 +47,7 @@ describe("the messages of a seat isolate", () => {
       outcome: {
         kind: "error",
         parts: {
-          code: { kind: "user", code: "TOO_BIG" },
+          code: { kind: "custom", code: "TOO_BIG" },
           message: { kind: "none" },
           data: { kind: "noData" },
           exception: { kind: "noException" },
@@ -68,6 +68,9 @@ describe("the messages of a seat isolate", () => {
     },
     { kind: "defect", protocol: SEAT_PROTOCOL_VERSION, code: "CLIENT_DEFECT", name: "ClientDefect", message: "seat run: a rule" },
     { kind: "log", protocol: SEAT_PROTOCOL_VERSION, line: "horsies child: a callback threw" },
+    { kind: "flushed", protocol: SEAT_PROTOCOL_VERSION },
+    { kind: "spanNotMade", protocol: SEAT_PROTOCOL_VERSION, span: { kind: "seatAttempt", taskId: "t-1" }, cause: "TypeError: x" },
+    { kind: "spanNotMade", protocol: SEAT_PROTOCOL_VERSION, span: { kind: "workflowStart", workflowId: "w-1" }, cause: "Error: y" },
   ];
 
   for (const message of messages) {
@@ -91,6 +94,7 @@ describe("the messages of a seat isolate", () => {
       () => parseSeatToMain({ kind: "op", protocol: 1, requestId: 1, request: { area: "web", operation: {} } }),
       /unknown area web/,
     );
+    assert.throws(() => parseSeatToMain({ kind: "spanNotMade", protocol: 1, span: { kind: "metric" }, cause: "c" }), /unknown kind metric/);
   });
 });
 
@@ -109,6 +113,7 @@ describe("the messages of the main thread", () => {
     }),
     replyMessage(1, { kind: "reply", reply: { area: "sends", reply: { kind: "prepareSend", prepared: PREPARED } } }),
     replyMessage(2, { kind: "refused", refusal: { code: "CORE_START_FAILED", cause: "no addon file" } }),
+    { kind: "flush", protocol: SEAT_PROTOCOL_VERSION },
   ];
 
   for (const message of messages) {

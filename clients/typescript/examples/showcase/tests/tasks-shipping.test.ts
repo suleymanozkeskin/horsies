@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { bookCourier, printLabel, trackingSeed } from "../src/contracts/shipping.ts";
 import { draw } from "../src/simulate.ts";
 import type { Store } from "../src/store/connection.ts";
 import { getOrder } from "../src/store/orders.ts";
@@ -13,7 +14,21 @@ import { countCourierAttempt, getShipment, type Shipment } from "../src/store/sh
 import { book, label, labelAfter, track, trackAfter } from "../src/tasks/shipping.ts";
 import { COURIER_FAILING_ATTEMPTS, COURIER_FLAKE_RATE } from "../src/tuning.ts";
 import { uniqueId } from "./support.ts";
-import { failed, idWhere, seedOrder, seedProduct, succeeded, upstreamError, withStore, withUnreachableStore } from "./fixtures.ts";
+import {
+  failed,
+  idWhere,
+  resultsOf,
+  seedOrder,
+  seedProduct,
+  succeeded,
+  upstreamError,
+  withStore,
+  withUnreachableStore,
+} from "./fixtures.ts";
+
+const bookCourierResults = resultsOf(bookCourier);
+const printLabelResults = resultsOf(printLabel);
+const trackingSeedResults = resultsOf(trackingSeed);
 
 const COURIER = "fleetline";
 
@@ -43,7 +58,7 @@ describe("book", () => {
 
       await seedShippableOrder(store, orderId);
 
-      const booking = succeeded(await book(store, { orderId, courier: COURIER, express: false }));
+      const booking = succeeded(await book(store, { orderId, courier: COURIER, express: false }, bookCourierResults));
 
       assert.equal(booking.attempt, 1);
       assert.equal(booking.replayed, false);
@@ -58,8 +73,8 @@ describe("book", () => {
 
       await seedShippableOrder(store, orderId);
 
-      const first = succeeded(await book(store, { orderId, courier: COURIER, express: false }));
-      const replay = succeeded(await book(store, { orderId, courier: COURIER, express: false }));
+      const first = succeeded(await book(store, { orderId, courier: COURIER, express: false }, bookCourierResults));
+      const replay = succeeded(await book(store, { orderId, courier: COURIER, express: false }, bookCourierResults));
 
       assert.equal(replay.replayed, true);
       assert.equal(replay.attempt, 2);
@@ -74,10 +89,16 @@ describe("book", () => {
       await seedShippableOrder(store, orderId);
 
       for (let attempt = 1; attempt <= COURIER_FAILING_ATTEMPTS; attempt += 1) {
-        assert.equal(failed(await book(store, { orderId, courier: COURIER, express: false })).code, "COURIER_UNAVAILABLE");
+        assert.equal(
+          failed(await book(store, { orderId, courier: COURIER, express: false }, bookCourierResults)).code,
+          "COURIER_UNAVAILABLE",
+        );
       }
 
-      assert.equal(succeeded(await book(store, { orderId, courier: COURIER, express: false })).attempt, COURIER_FAILING_ATTEMPTS + 1);
+      assert.equal(
+        succeeded(await book(store, { orderId, courier: COURIER, express: false }, bookCourierResults)).attempt,
+        COURIER_FAILING_ATTEMPTS + 1,
+      );
       assert.equal((await shipmentOf(store, orderId)).attempts, COURIER_FAILING_ATTEMPTS + 1);
     });
   });
@@ -92,15 +113,15 @@ describe("label", () => {
       await seedShippableOrder(store, standard);
       await seedShippableOrder(store, express);
 
-      const booking = succeeded(await book(store, { orderId: standard, courier: COURIER, express: false }));
+      const booking = succeeded(await book(store, { orderId: standard, courier: COURIER, express: false }, bookCourierResults));
 
-      succeeded(await book(store, { orderId: express, courier: COURIER, express: true }));
+      succeeded(await book(store, { orderId: express, courier: COURIER, express: true }, bookCourierResults));
 
-      const printed = succeeded(await label(store, standard));
+      const printed = succeeded(await label(store, standard, printLabelResults));
 
       assert.equal(printed.labelUrl, `https://labels.acme.invalid/${booking.bookingReference}.pdf`);
       assert.equal(printed.labelFormat, "A5");
-      assert.equal(succeeded(await label(store, express)).labelFormat, "A6");
+      assert.equal(succeeded(await label(store, express, printLabelResults)).labelFormat, "A6");
       assert.deepEqual((await shipmentOf(store, standard)).labelUrl, { kind: "set", value: printed.labelUrl });
     });
   });
@@ -110,7 +131,7 @@ describe("label", () => {
       const orderId = steadyId();
 
       await seedShippableOrder(store, orderId);
-      assert.equal(failed(await label(store, orderId)).code, "SHIPMENT_NOT_FOUND");
+      assert.equal(failed(await label(store, orderId, printLabelResults)).code, "SHIPMENT_NOT_FOUND");
     });
   });
 
@@ -124,7 +145,7 @@ describe("label", () => {
 
       assert.ok(counted.ok);
 
-      const error = failed(await label(store, orderId));
+      const error = failed(await label(store, orderId, printLabelResults));
 
       assert.equal(error.code, "SHIPMENT_NOT_FOUND");
       assert.match(error.message ?? "", /has no booking/u);
@@ -133,7 +154,12 @@ describe("label", () => {
 
   test("a failed booking node: UPSTREAM_FAILED", async () => {
     await withUnreachableStore(async (store) => {
-      const error = failed(await labelAfter(store, "t1-any", { kind: "failed", error: upstreamError("COURIER_UNAVAILABLE") }));
+      const error = failed(await labelAfter(
+        store,
+        "t1-any",
+        { kind: "failed", error: upstreamError("COURIER_UNAVAILABLE") },
+        printLabelResults,
+      ));
 
       assert.equal(error.code, "UPSTREAM_FAILED");
       assert.deepEqual(error.data, { upstreamCode: "COURIER_UNAVAILABLE" });
@@ -147,9 +173,9 @@ describe("track", () => {
       const orderId = steadyId();
 
       await seedShippableOrder(store, orderId);
-      succeeded(await book(store, { orderId, courier: COURIER, express: false }));
+      succeeded(await book(store, { orderId, courier: COURIER, express: false }, bookCourierResults));
 
-      const seeded = succeeded(await track(store, orderId));
+      const seeded = succeeded(await track(store, orderId, trackingSeedResults));
 
       assert.match(seeded.trackingCode, /^ACME[0-9]{8}$/u);
       assert.equal(seeded.trackingUrl, `https://track.${COURIER}.invalid/${seeded.trackingCode}`);
@@ -167,13 +193,15 @@ describe("track", () => {
       const orderId = steadyId();
 
       await seedShippableOrder(store, orderId);
-      assert.equal(failed(await track(store, orderId)).code, "SHIPMENT_NOT_FOUND");
+      assert.equal(failed(await track(store, orderId, trackingSeedResults)).code, "SHIPMENT_NOT_FOUND");
     });
   });
 
   test("a failed label node: UPSTREAM_FAILED", async () => {
     await withUnreachableStore(async (store) => {
-      assert.equal(failed(await trackAfter(store, "t1-any", { kind: "failed", error: upstreamError("SHIPMENT_NOT_FOUND") })).code, "UPSTREAM_FAILED");
+      const failedLabel = { kind: "failed", error: upstreamError("SHIPMENT_NOT_FOUND") } as const;
+
+      assert.equal(failed(await trackAfter(store, "t1-any", failedLabel, trackingSeedResults)).code, "UPSTREAM_FAILED");
     });
   });
 });
@@ -181,9 +209,12 @@ describe("track", () => {
 describe("a store that does not connect", () => {
   test("each store-backed shipping function: STORE_UNAVAILABLE", async () => {
     await withUnreachableStore(async (store) => {
-      assert.equal(failed(await book(store, { orderId: "t1-any", courier: COURIER, express: false })).code, "STORE_UNAVAILABLE");
-      assert.equal(failed(await label(store, "t1-any")).code, "STORE_UNAVAILABLE");
-      assert.equal(failed(await track(store, "t1-any")).code, "STORE_UNAVAILABLE");
+      assert.equal(
+        failed(await book(store, { orderId: "t1-any", courier: COURIER, express: false }, bookCourierResults)).code,
+        "STORE_UNAVAILABLE",
+      );
+      assert.equal(failed(await label(store, "t1-any", printLabelResults)).code, "STORE_UNAVAILABLE");
+      assert.equal(failed(await track(store, "t1-any", trackingSeedResults)).code, "STORE_UNAVAILABLE");
     });
   });
 });

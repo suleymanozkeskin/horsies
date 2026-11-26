@@ -58,31 +58,31 @@ function fenceOf(runtime: Pick<TaskRuntime, "fencingToken">): Fence {
 
 /** The implementations of this module on `app`. */
 export function implementFencing(app: Horsies): void {
-  app.implement(fenceIsolatedAsync, async (_input, runtime) => fenceIsolatedAsync.ok(fenceOf(runtime)));
-  app.implement(fenceIsolatedSync, (_input, runtime) => fenceIsolatedSync.ok(fenceOf(runtime)));
-  app.implement(fenceSharedAsync, async (_input, runtime) => fenceSharedAsync.ok(fenceOf(runtime)));
-  app.implement(fenceSharedThread, (_input, runtime) => fenceSharedThread.ok(fenceOf(runtime)));
+  app.implement(fenceIsolatedAsync, async (_input, runtime) => runtime.ok(fenceOf(runtime)));
+  app.implement(fenceIsolatedSync, (_input, runtime) => runtime.ok(fenceOf(runtime)));
+  app.implement(fenceSharedAsync, async (_input, runtime) => runtime.ok(fenceOf(runtime)));
+  app.implement(fenceSharedThread, (_input, runtime) => runtime.ok(fenceOf(runtime)));
   app.implement(fenceReadsTwice, async (_input, runtime) => {
     const first = fenceOf(runtime);
     const second = fenceOf(runtime);
     const work = runtime.spawn("read_fence", async () => fenceOf(runtime));
 
     if (!work.ok) {
-      return fenceReadsTwice.err({ code: "WORK_FAILED", message: `spawn refused: ${work.error.kind}` });
+      return runtime.err({ code: "WORK_FAILED", message: `spawn refused: ${work.error.kind}` });
     }
 
-    return fenceReadsTwice.ok([first, second, await work.value]);
+    return runtime.ok([first, second, await work.value]);
   });
   app.implement(fenceRetry, ({ marker }, runtime) => {
     const read = fenceOf(runtime);
     const counted = nextAttempt(marker);
 
     if (!counted.ok) {
-      return fenceRetry.err({ code: "MARKER_FAILED", message: markerErrorText(counted.error) });
+      return runtime.err({ code: "MARKER_FAILED", message: markerErrorText(counted.error) });
     }
 
     return counted.value === 1
-      ? fenceRetry.err({ code: "TRANSIENT", message: `run 1 read the fence value ${String(read.value)}` })
-      : fenceRetry.ok({ fence: read, countedRun: counted.value });
+      ? runtime.err({ code: "TRANSIENT", message: `run 1 read the fence value ${String(read.value)}` })
+      : runtime.ok({ fence: read, countedRun: counted.value });
   });
 }

@@ -81,7 +81,7 @@ describe("the static check", () => {
   test("an implementation of a contract that is not in the list is refused (a registration refusal)", () => {
     const app = implementedApp();
 
-    app.implement(unlisted, () => unlisted.ok(null));
+    app.implement(unlisted, (_input, { ok }) => ok(null));
 
     const refused = report(staticCheck(contextOf(app), fakeChecks(), "withoutSchedules", "worker-startup"));
 
@@ -95,7 +95,7 @@ describe("the static check", () => {
   test("a listed contract with no implementation is refused with its place in the list", () => {
     const app = testApp();
 
-    app.implement(ping, ({ n }) => ping.ok(n));
+    app.implement(ping, ({ n }, { ok }) => ok(n));
 
     const refused = report(staticCheck(contextOf(app), fakeChecks(), "withoutSchedules", "worker-startup"));
 
@@ -108,8 +108,8 @@ describe("the static check", () => {
   test("an exception code that the core's code rules refuse is refused", () => {
     const app = testApp();
 
-    app.implement(ping, ({ n }) => ping.ok(n), { exceptions: [[RateLimited, "rate limited"]] });
-    app.implement(charge, async () => charge.ok(null));
+    app.implement(ping, ({ n }, { ok }) => ok(n), { exceptions: [[RateLimited, "rate limited"]] });
+    app.implement(charge, async (_input, { ok }) => ok(null));
 
     const checks = fakeChecks({ codes: [catalogRefusal("HRS-112", "'rate limited' is invalid")] });
     const refused = report(staticCheck(contextOf(app), checks, "withSchedules", "check"));
@@ -123,7 +123,7 @@ describe("the static check", () => {
   test("the check stops at the first phase that refuses", () => {
     const app = testApp();
 
-    app.implement(unlisted, () => unlisted.ok(null));
+    app.implement(unlisted, (_input, { ok }) => ok(null));
 
     const refused = report(staticCheck(contextOf(app), fakeChecks(), "withSchedules", "check"));
 
@@ -137,8 +137,8 @@ describe("the static check", () => {
     for (const [scope, phase] of EACH_CHECK) {
       const app = workflowApp();
 
-      app.implement(ping, ({ n }) => ping.ok(n));
-      app.implement(charge, async () => charge.ok(null));
+      app.implement(ping, ({ n }, { ok }) => ok(n));
+      app.implement(charge, async (_input, { ok }) => ok(null));
 
       const refused = report(staticCheck(contextOf(app), fakeChecks(), scope, phase));
 
@@ -156,7 +156,7 @@ describe("the static check", () => {
   test("the workflows phase comes after the registrations and before the implementations", () => {
     const registered = workflowApp();
 
-    registered.implement(unlisted, () => unlisted.ok(null));
+    registered.implement(unlisted, (_input, { ok }) => ok(null));
 
     const first = report(staticCheck(contextOf(registered), fakeChecks(), "withSchedules", "check"));
     const second = report(staticCheck(contextOf(workflowApp()), fakeChecks(), "withoutSchedules", "worker-startup"));

@@ -38,7 +38,7 @@ pub const MAX_EVENT_TASK_NAME_CHARS: usize = 255;
 pub const MAX_EVENT_QUEUE_NAME_CHARS: usize = MAX_QUEUE_NAME_BYTES;
 
 /// The most characters of a user error code that an event carries. A longer
-/// code is [`AttemptErrorCode::UserOverBound`].
+/// code is [`AttemptErrorCode::CustomOverBound`].
 pub const MAX_EVENT_USER_CODE_CHARS: usize = 128;
 
 /// The most characters of a stored trace carrier that an event carries: the
@@ -140,10 +140,10 @@ pub enum AttemptErrorCode {
     /// A built-in code of horsies.
     BuiltIn { code: BuiltInTaskCode },
     /// A code that the task chose, of at most 128 characters.
-    User { code: UserCodeText },
+    Custom { code: UserCodeText },
     /// A code that the task chose, of more than 128 characters. The event
     /// does not carry it; the attempt row and the history row keep it.
-    UserOverBound,
+    CustomOverBound,
 }
 
 impl From<&TaskErrorCode> for AttemptErrorCode {
@@ -153,8 +153,8 @@ impl From<&TaskErrorCode> for AttemptErrorCode {
                 code: built_in.clone(),
             },
             TaskErrorCode::User(user) => match UserCodeText::new(user.as_str().to_owned()) {
-                Ok(text) => Self::User { code: text },
-                Err(_over_bound) => Self::UserOverBound,
+                Ok(text) => Self::Custom { code: text },
+                Err(_over_bound) => Self::CustomOverBound,
             },
         }
     }

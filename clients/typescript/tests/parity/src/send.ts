@@ -19,7 +19,6 @@ import {
   type PingWorkersError,
   type RerunPolicy,
   type TaskError,
-  type TaskErrorCode,
   type TaskId,
   type TaskOutcome,
   type WorkflowHandleBase,
@@ -342,18 +341,18 @@ async function sendRetry(app: Horsies, input: PairInput): Promise<Result<TaskLin
   return ok({ taskId: written, contract: add });
 }
 
-/** The code of a stored task error: who chose it (`library` or `user`) and the code. */
-export type StoredCode = { readonly origin: TaskErrorCode["kind"]; readonly code: string };
+/** The code of a stored task error: who chose it (`builtIn` or `custom`) and the code. */
+export type StoredCode = { readonly origin: TaskError["kind"]; readonly code: string };
 
 /**
  * The code of the stored error `error`. The one place of this program that reads the code of an error in a read, so
  * a change of the read form of `TaskError` changes this function only. Pure.
  */
 export function storedCode(error: TaskError): StoredCode {
-  return { origin: error.code.kind, code: error.code.code };
+  return { origin: error.kind, code: error.code };
 }
 
-/** Whether `outcome` is a failure with the user code `REFUSED`. Pure. */
+/** Whether `outcome` is a failure with the custom code `REFUSED`. Pure. */
 export function endedRefused(outcome: TaskOutcome<unknown, string>): boolean {
   switch (outcome.kind) {
     case "succeeded":
@@ -361,7 +360,7 @@ export function endedRefused(outcome: TaskOutcome<unknown, string>): boolean {
     case "failed": {
       const code = storedCode(outcome.error);
 
-      return code.origin === "user" && code.code === REFUSED;
+      return code.origin === "custom" && code.code === REFUSED;
     }
 
     default: {
@@ -399,7 +398,7 @@ async function rerunOne(app: Horsies, rerun: Rerun, lines: readonly TaskLine[]):
     return err(`the rerun of task line ${String(rerun.source)} names no earlier task line`);
   }
 
-  const ended = await app.taskHandle(source.contract, source.taskId).get({ timeoutMs: RESULT_WAIT_MS });
+  const ended = await app.taskHandle(source.contract, source.taskId).get({ waitMs: RESULT_WAIT_MS });
 
   if (!ended.ok) {
     return err(`the rerun source ${source.taskId} was not read: ${ended.error.kind}`);

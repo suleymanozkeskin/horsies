@@ -11,5 +11,5 @@ export const implementation = app.implement(plain, (_input, runtime) => {
   // The member is in the runtime type of a task with `workflowContext: true` only.
   void runtime.workflowContext;
 
-  return plain.ok(null);
+  return runtime.ok(null);
 });

@@ -8,10 +8,6 @@ export type BuiltInTaskCode =
   | RetrievalCode
   | OutcomeCode;
 
-export type TaskErrorCode<U extends string> =
-  | { readonly kind: "library"; readonly code: BuiltInTaskCode }
-  | { readonly kind: "user"; readonly code: U };
-
 export const BUILT_IN_TASK_CODES: ReadonlyArray<BuiltInTaskCode> = Object.freeze([
   OperationalErrorCode.UNHANDLED_EXCEPTION,
   OperationalErrorCode.TASK_EXCEPTION,

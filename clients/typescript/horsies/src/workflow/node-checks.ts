@@ -108,7 +108,7 @@ function nodeTarget(node: RecordedNode): NodeTarget {
 }
 
 /**
- * What a node gives to an `h.resultOf` parameter and as an output: the output kind of a listed task, or the declared
+ * What a node gives to an `h.taskOutcome` parameter and as an output: the output kind of a listed task, or the declared
  * output of a listed child workflow; not known for a contract that the app does not list (a finding of its own).
  */
 export function sourceOutputOf(node: RecordedNode, view: SpecAppView): SourceOutput {

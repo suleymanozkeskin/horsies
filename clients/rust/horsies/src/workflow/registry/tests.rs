@@ -5,10 +5,16 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
-use crate::workflow::node::tests::task_node;
+use crate::workflow::node::tests::{add, task_node, test_builder};
 use crate::workflow::{
     OutputlessResults, SubWorkflowParams, WorkflowDefConfig, WorkflowSpecBuilder,
 };
+
+/// The typed functions of an app with no task: the definitions here add
+/// their task nodes with `add`, which needs no registration.
+fn tasks() -> Arc<TaskFunctions> {
+    Arc::new(TaskFunctions::new())
+}
 
 fn registry() -> WorkflowRegistry {
     WorkflowRegistry::new(AppConfig::for_database_url(
@@ -53,19 +59,18 @@ struct Level {
     n: u32,
 }
 
-/// A spec of one task node and, when `child` is given, one sub-workflow
-/// node of `D` after it (`waits` true) or as a root.
+/// A spec of one task node on `builder` and, when `child` is given, one
+/// sub-workflow node of `D` after it (`waits` true) or as a root.
 fn spec_with<D>(
-    name: &str,
+    mut builder: WorkflowSpecBuilder,
     key: &str,
     child: Option<(SubWorkflowParams<D::Params>, bool)>,
 ) -> Result<WorkflowSpec, HorsiesError>
 where
     D: WorkflowDefinition,
 {
-    let mut builder = WorkflowSpecBuilder::new(name);
     builder.definition_key(key);
-    let tick = builder.task(task_node::<u32, ()>("tick"));
+    let tick = add(&mut builder, task_node::<u32, ()>("tick"));
     if let Some((params, waits)) = child {
         let node = D::node(params)?;
         let node = match waits {
@@ -92,12 +97,15 @@ impl WorkflowDefinition for Countdown {
         "tests.countdown.v1"
     }
 
-    fn build_with(params: Level) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        params: Level,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         let child = match params.n {
             0 => None,
             n => Some((SubWorkflowParams::Given(Level { n: n - 1 }), false)),
         };
-        spec_with::<Countdown>("countdown", "tests.countdown.v1", child)
+        spec_with::<Countdown>(builder, "tests.countdown.v1", child)
     }
 }
 
@@ -116,9 +124,12 @@ impl WorkflowDefinition for Countup {
         "tests.countup.v1"
     }
 
-    fn build_with(params: Level) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        params: Level,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         let next = SubWorkflowParams::Given(Level { n: params.n + 1 });
-        spec_with::<Countup>("countup", "tests.countup.v1", Some((next, false)))
+        spec_with::<Countup>(builder, "tests.countup.v1", Some((next, false)))
     }
 }
 
@@ -138,9 +149,12 @@ impl WorkflowDefinition for Mirror {
         "tests.mirror.v1"
     }
 
-    fn build_with(params: Level) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        params: Level,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         let same = SubWorkflowParams::Given(params);
-        spec_with::<Mirror>("mirror", "tests.mirror.v1", Some((same, false)))
+        spec_with::<Mirror>(builder, "tests.mirror.v1", Some((same, false)))
     }
 }
 
@@ -158,9 +172,12 @@ impl WorkflowDefinition for Waiting {
         "tests.waiting.v1"
     }
 
-    fn build_with(params: Level) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        params: Level,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         let same = SubWorkflowParams::Given(params);
-        spec_with::<Waiting>("waiting", "tests.waiting.v1", Some((same, true)))
+        spec_with::<Waiting>(builder, "tests.waiting.v1", Some((same, true)))
     }
 }
 
@@ -204,7 +221,7 @@ impl WorkflowDefinition for Plain {
     }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        builder.task(task_node::<u32, ()>("tick"));
+        add(builder, task_node::<u32, ()>("tick"));
         Ok(WorkflowDefConfig::new())
     }
 }
@@ -213,15 +230,15 @@ impl WorkflowDefinition for Plain {
 fn a_definition_registers_once_by_key_and_by_name() {
     let registry = registry();
     registry
-        .register(Definition::without_params::<Plain>().unwrap())
+        .register(Definition::without_params::<Plain>(&tasks()).unwrap())
         .unwrap();
     let again = registry
-        .register(Definition::without_params::<Plain>().unwrap())
+        .register(Definition::without_params::<Plain>(&tasks()).unwrap())
         .unwrap_err();
     assert_eq!(again.code, Some(ErrorCode::WorkflowDuplicateDefinitionKey));
     let same_name = Definition {
         definition_key: "tests.plain.v2".to_owned(),
-        ..Definition::without_params::<Plain>().unwrap()
+        ..Definition::without_params::<Plain>(&tasks()).unwrap()
     };
     assert_eq!(
         registry.register(same_name).unwrap_err().code,
@@ -235,7 +252,7 @@ fn an_empty_name_or_key_is_refused() {
     let registry = registry();
     let no_key = Definition {
         definition_key: " ".to_owned(),
-        ..Definition::with_params::<Countdown>()
+        ..Definition::with_params::<Countdown>(&tasks())
     };
     assert_eq!(
         registry.register(no_key).unwrap_err().code,
@@ -243,7 +260,7 @@ fn an_empty_name_or_key_is_refused() {
     );
     let no_name = Definition {
         name: String::new(),
-        ..Definition::with_params::<Countdown>()
+        ..Definition::with_params::<Countdown>(&tasks())
     };
     assert_eq!(
         registry.register(no_name).unwrap_err().code,
@@ -254,11 +271,11 @@ fn an_empty_name_or_key_is_refused() {
 #[test]
 fn a_spec_with_an_unregistered_child_is_refused() {
     let registry = registry();
-    let spec = Root::<Countdown>::build().unwrap();
+    let spec = Root::<Countdown>::build(test_builder(Root::<Countdown>::name())).unwrap();
     let refused = registry.prepare(&spec).unwrap_err();
     assert_eq!(refused.code, Some(ErrorCode::WorkflowMissingRequiredParams));
     registry
-        .register(Definition::with_params::<Countdown>())
+        .register(Definition::with_params::<Countdown>(&tasks()))
         .unwrap();
     let client = registry.prepare(&spec).unwrap();
     assert_eq!(client.name(), "root");
@@ -274,10 +291,13 @@ fn params_for_a_definition_without_params_are_refused() {
         .register(Definition {
             name: "countdown".to_owned(),
             definition_key: "tests.countdown.v1".to_owned(),
-            kind: DefinitionKind::WithoutParams(Arc::new(Plain::build().unwrap())),
+            definition_type: TypeId::of::<Plain>(),
+            kind: DefinitionKind::WithoutParams(Arc::new(
+                Plain::build(test_builder(Plain::name())).unwrap(),
+            )),
         })
         .unwrap();
-    let spec = Root::<Countdown>::build().unwrap();
+    let spec = Root::<Countdown>::build(test_builder(Root::<Countdown>::name())).unwrap();
     assert_eq!(
         registry.prepare(&spec).unwrap_err().code,
         Some(ErrorCode::WorkflowSubworkflowParamsRequireBuildWith)
@@ -293,10 +313,10 @@ fn params_for_a_definition_without_params_are_refused() {
 fn the_child_build_answers_each_definition_from_the_node_input() {
     let registry = registry();
     registry
-        .register(Definition::with_params::<Countdown>())
+        .register(Definition::with_params::<Countdown>(&tasks()))
         .unwrap();
     registry
-        .register(Definition::without_params::<Plain>().unwrap())
+        .register(Definition::without_params::<Plain>(&tasks()).unwrap())
         .unwrap();
 
     match registry.child_spec_answer(&child_request("tests.countdown.v1", r#"{"n": 0}"#)) {
@@ -359,7 +379,7 @@ fn request_data() -> serde_json::Value {
 fn a_member_that_no_params_field_takes_fails_the_node() {
     let registry = registry();
     registry
-        .register(Definition::with_params::<Countdown>())
+        .register(Definition::with_params::<Countdown>(&tasks()))
         .unwrap();
     let error = node_error(registry.child_spec_answer(&child_request(
         "tests.countdown.v1",
@@ -396,8 +416,8 @@ impl WorkflowDefinition for NoParams {
         "tests.no_params.v1"
     }
 
-    fn build_with(_params: ()) -> Result<WorkflowSpec, HorsiesError> {
-        spec_with::<NoParams>("no_params", "tests.no_params.v1", None)
+    fn build_with(builder: WorkflowSpecBuilder, _params: ()) -> Result<WorkflowSpec, HorsiesError> {
+        spec_with::<NoParams>(builder, "tests.no_params.v1", None)
     }
 }
 
@@ -408,7 +428,7 @@ impl WorkflowDefinition for NoParams {
 fn a_member_for_unit_params_fails_the_node() {
     let registry = registry();
     registry
-        .register(Definition::with_params::<NoParams>())
+        .register(Definition::with_params::<NoParams>(&tasks()))
         .unwrap();
     let error = node_error(
         registry.child_spec_answer(&child_request("tests.no_params.v1", r#"{"colour": "red"}"#)),
@@ -525,7 +545,7 @@ fn params_that_fit_decode() {
 fn a_params_field_with_no_member_fails_the_build_with_the_decode_text() {
     let registry = registry();
     registry
-        .register(Definition::with_params::<Countdown>())
+        .register(Definition::with_params::<Countdown>(&tasks()))
         .unwrap();
     let error = node_error(registry.child_spec_answer(&child_request("tests.countdown.v1", "{}")));
     let expected = format!(
@@ -552,10 +572,10 @@ fn a_params_field_with_no_member_fails_the_build_with_the_decode_text() {
 fn a_nesting_that_ends_has_no_finding() {
     let registry = registry();
     registry
-        .register(Definition::with_params::<Countdown>())
+        .register(Definition::with_params::<Countdown>(&tasks()))
         .unwrap();
     registry
-        .register(Definition::without_params::<Root<Countdown>>().unwrap())
+        .register(Definition::without_params::<Root<Countdown>>(&tasks()).unwrap())
         .unwrap();
     assert_eq!(codes(&registry.check_findings()), Vec::new());
 }
@@ -566,10 +586,10 @@ fn a_nesting_that_ends_has_no_finding() {
 fn a_repeat_after_a_dependency_has_no_finding() {
     let registry = registry();
     registry
-        .register(Definition::with_params::<Waiting>())
+        .register(Definition::with_params::<Waiting>(&tasks()))
         .unwrap();
     registry
-        .register(Definition::without_params::<Root<Waiting>>().unwrap())
+        .register(Definition::without_params::<Root<Waiting>>(&tasks()).unwrap())
         .unwrap();
     assert_eq!(codes(&registry.check_findings()), Vec::new());
 }
@@ -578,10 +598,10 @@ fn a_repeat_after_a_dependency_has_no_finding() {
 fn a_repeat_with_the_same_params_at_once_is_reported() {
     let registry = registry();
     registry
-        .register(Definition::with_params::<Mirror>())
+        .register(Definition::with_params::<Mirror>(&tasks()))
         .unwrap();
     registry
-        .register(Definition::without_params::<Root<Mirror>>().unwrap())
+        .register(Definition::without_params::<Root<Mirror>>(&tasks()).unwrap())
         .unwrap();
     assert_eq!(
         codes(&registry.check_findings()),
@@ -593,10 +613,10 @@ fn a_repeat_with_the_same_params_at_once_is_reported() {
 fn a_nesting_past_the_depth_limit_at_once_is_reported() {
     let registry = registry();
     registry
-        .register(Definition::with_params::<Countup>())
+        .register(Definition::with_params::<Countup>(&tasks()))
         .unwrap();
     registry
-        .register(Definition::without_params::<Root<Countup>>().unwrap())
+        .register(Definition::without_params::<Root<Countup>>(&tasks()).unwrap())
         .unwrap();
     assert_eq!(
         codes(&registry.check_findings()),
@@ -652,14 +672,14 @@ fn a_check_case_without_a_definition_key_is_reported() {
         CheckCase {
             builder_name: "keyless".to_owned(),
             build: Arc::new(|| -> Result<WorkflowSpec, HorsiesError> {
-                let mut builder = WorkflowSpecBuilder::new("keyless");
-                builder.task(task_node::<u32, ()>("tick"));
+                let mut builder = test_builder("keyless");
+                add(&mut builder, task_node::<u32, ()>("tick"));
                 builder.build()
             }),
         },
         CheckCase {
             builder_name: "blank".to_owned(),
-            build: Arc::new(|| spec_with::<Plain>("blank_key", " ", None)),
+            build: Arc::new(|| spec_with::<Plain>(test_builder("blank_key"), " ", None)),
         },
     ]);
     let findings = registry.check_findings();
@@ -717,7 +737,10 @@ impl WorkflowDefinition for Panicking {
         "tests.panicking.v1"
     }
 
-    fn build_with(params: Level) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        _builder: WorkflowSpecBuilder,
+        params: Level,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         panic!("no spec for level {}", params.n)
     }
 }
@@ -728,7 +751,7 @@ impl WorkflowDefinition for Panicking {
 fn a_builder_panic_is_a_failed_build() {
     let registry = registry();
     registry
-        .register(Definition::with_params::<Panicking>())
+        .register(Definition::with_params::<Panicking>(&tasks()))
         .unwrap();
     let error =
         node_error(registry.child_spec_answer(&child_request("tests.panicking.v1", r#"{"n": 4}"#)));

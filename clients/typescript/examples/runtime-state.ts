@@ -1,5 +1,6 @@
-// App state and the task runtime: `provide` gives a value to task bodies, which read it with `runtime.state(key)`;
-// `onChildStart` runs once in each worker child before its first task; a task body sends another task.
+// App state and the task runtime: `provide` gives a value to task bodies, which read it with `state(key)` of their
+// second argument; `onChildStart` runs once in each worker child before its first task; a task body sends another
+// task.
 //
 // Every worker child runs this entry again, so each child builds its own state.
 //
@@ -54,15 +55,15 @@ app.onChildStart(() => {
   process.stderr.write(`worker child ${String(process.pid)} is ready\n`);
 });
 
-app.implement(welcome, async ({ user }, runtime) => {
-  const message = `${runtime.state(greeterKey).greeting}, ${user}`;
+app.implement(welcome, async ({ user }, { ok, err, state }) => {
+  const message = `${state(greeterKey).greeting}, ${user}`;
   // A send from a task body goes through the send pool of the child.
   const sent = await app.send(audit, { entry: message });
 
-  return sent.ok ? welcome.ok(message) : welcome.err({ code: "AUDIT_NOT_SENT", message: sendErrorText(sent.error) });
+  return sent.ok ? ok(message) : err({ code: "AUDIT_NOT_SENT", message: sendErrorText(sent.error) });
 });
 
-app.implement(audit, async ({ entry }) => audit.ok(entry.length));
+app.implement(audit, async ({ entry }, { ok }) => ok(entry.length));
 
 async function demo(): Promise<Result<void, string>> {
   const sent = await app.send(welcome, { user: "ada" });
@@ -71,7 +72,7 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`send welcome: ${sendErrorText(sent.error)}`);
   }
 
-  printLine(readLine("welcome", await sent.value.get({ timeoutMs: RESULT_WAIT_MS }), (message) => message));
+  printLine(readLine("welcome", await sent.value.get({ waitMs: RESULT_WAIT_MS }), (message) => message));
 
   return DEMO_DONE;
 }

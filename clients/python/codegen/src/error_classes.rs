@@ -336,6 +336,7 @@ fn render_slot(slot: &ErrorSlot, code: &CodeCatalog) -> String {
         ),
         ErrorSlot::CodeSubset { subset } => format!("code: {subset}"),
         ErrorSlot::NeverRetryable => "retryable: ClassVar[bool] = False".to_owned(),
+        ErrorSlot::AlwaysRetryable => "retryable: ClassVar[bool] = True".to_owned(),
         ErrorSlot::Field {
             name,
             python_type,
@@ -514,6 +515,24 @@ mod tests {
         assert_eq!(
             render_class(&MISMATCH, &CODES),
             "@dataclass(slots=True, frozen=True)\nclass BrokerPayloadMismatch:\n    \"\"\"Nothing was written.\"\"\"\n\n    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.PAYLOAD_MISMATCH\n    retryable: ClassVar[bool] = False\n    message: str = field(repr=False)\n    owner_task_id: uuid.UUID\n    exception: BaseException | NoCause = field(repr=False)\n"
+        );
+    }
+
+    #[test]
+    fn a_class_whose_state_may_clear_has_a_retryable_that_is_always_true() {
+        let class = ErrorClass {
+            python_class: "Sample",
+            doc: "The state may clear.",
+            slots: &[
+                ErrorSlot::CodeMember {
+                    member: "PAYLOAD_MISMATCH",
+                },
+                ErrorSlot::AlwaysRetryable,
+            ],
+        };
+        assert_eq!(
+            render_class(&class, &CODES),
+            "@dataclass(slots=True, frozen=True)\nclass Sample:\n    \"\"\"The state may clear.\"\"\"\n\n    code: ClassVar[BrokerErrorCode] = BrokerErrorCode.PAYLOAD_MISMATCH\n    retryable: ClassVar[bool] = True\n"
         );
     }
 

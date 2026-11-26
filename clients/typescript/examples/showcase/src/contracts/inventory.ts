@@ -62,9 +62,9 @@ export const updateStockLevels = defineTask({
   execution: "SHARED_ASYNC",
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: {
-    atlasFeed: h.resultOf(SupplierFeed).optional(),
-    breraFeed: h.resultOf(SupplierFeed).optional(),
-    coastlineFeed: h.resultOf(SupplierFeed).optional(),
+    atlasFeed: h.taskOutcome(syncSupplierFeed).optional(),
+    breraFeed: h.taskOutcome(syncSupplierFeed).optional(),
+    coastlineFeed: h.taskOutcome(syncSupplierFeed).optional(),
   },
   output: StockUpdate,
   errors: ["QUORUM_NOT_MET"],

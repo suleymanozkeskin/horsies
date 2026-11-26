@@ -296,7 +296,7 @@ send at module level does not run once per child start.
 
 ## Logging — `configureLogging`
 
-The core writes its records to 18 named loggers (`LOGGER_NAMES`, from
+The core writes its records to 19 named loggers (`LOGGER_NAMES`, from
 `horsies.app` to `horsies.workflow.recovery`). The default threshold is
 `WARNING`, and the default sink writes one line per record to stderr.
 
@@ -410,7 +410,7 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(greet, ({ name }) => greet.ok(`hello, ${name}`));
+app.implement(greet, ({ name }, { ok }) => ok(`hello, ${name}`));
 
 process.exitCode = await cli.run(app);
 ```

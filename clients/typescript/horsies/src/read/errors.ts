@@ -2,12 +2,12 @@
 
 import type { BrokerErrorCode } from "../_catalog/broker.ts";
 import { brokerCoreErrorFromNative, type NativeBrokerCoreError } from "../_catalog/broker_errors.ts";
+import type { TaskAbsenceReason } from "../_catalog/history.ts";
 import type { SeatRelayCode } from "../_catalog/task_send.ts";
-import type { AbsenceReason } from "../native/sends/addon.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
 import type { SeatRelayFull } from "../seats/relay-full.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
-import type { LibraryTaskCode } from "../wire/task-error.ts";
+import type { BuiltInTaskCode } from "../wire/task-error.ts";
 
 /** The status of a task that has not finished. */
 export type UnfinishedStatus = "PENDING" | "CLAIMED" | "RUNNING";
@@ -18,28 +18,24 @@ export type UnfinishedStatus = "PENDING" | "CLAIMED" | "RUNNING";
  */
 export type FinishedStatus = "COMPLETED" | "FAILED" | "EXPIRED";
 
-/** Why neither the live table nor the task history holds a task. */
-export type TaskAbsence =
-  /** The task is older than the oldest history that retention keeps: retention can have removed it. */
-  | "predatesRetainedHistory"
-  /** No removed history can have held the task: it did not exist, or its history was removed out of band. */
-  | "withinRetainedHistory"
-  /** The id is not a UUIDv7, so it tells no time of birth. */
-  | "notClassified";
-
-/** Why a read of a task failed. */
+/**
+ * Why a read of a task failed, told apart by `kind`, which is named after the catalog code in `code`. Two variants have
+ * no `code` member, `storedResultUnreadable` and `unknownUserCode` (both `RESULT_DESERIALIZATION_ERROR`), and
+ * `database` holds the broker code in `code` (`BROKER_ERROR`).
+ */
 export type ReadError =
   /** The task had not finished when the wait ended; it may still run. */
-  | { readonly kind: "waitTimedOut"; readonly status: UnfinishedStatus }
-  | { readonly kind: "taskNotFound"; readonly absence: TaskAbsence }
+  | { readonly kind: "waitTimeout"; readonly code: "WAIT_TIMEOUT"; readonly status: UnfinishedStatus }
+  /** Neither the live table nor the task history holds the task; `reason` tells whether retention can have removed it. */
+  | { readonly kind: "taskNotFound"; readonly code: "TASK_NOT_FOUND"; readonly reason: TaskAbsenceReason }
   /** The task finished and stores no result. */
-  | { readonly kind: "resultNotAvailable"; readonly status: FinishedStatus }
+  | { readonly kind: "resultNotAvailable"; readonly code: "RESULT_NOT_AVAILABLE"; readonly status: FinishedStatus }
   /** The stored result does not read with the contract's types. `cause` holds no value. */
   | { readonly kind: "storedResultUnreadable"; readonly cause: string }
-  /** The stored error has a user code that the contract's `errors` does not list. */
+  /** The stored error has a custom code that the contract's `errors` does not list. */
   | { readonly kind: "unknownUserCode"; readonly code: string }
   /** A wait in a process that runs task bodies; nothing was read. */
-  | { readonly kind: "waitInsideTask" }
+  | { readonly kind: "waitInsideTask"; readonly code: "WAIT_INSIDE_TASK" }
   /** The database or the connection failed. */
   | {
       readonly kind: "database";
@@ -47,34 +43,38 @@ export type ReadError =
       readonly retryable: boolean;
       readonly message: string;
     }
-  /** A `timeoutMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
-  | { readonly kind: "invalidWait"; readonly maxMs: number }
-  /** In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. */
-  | { readonly kind: "seatRelayFull"; readonly error: SeatRelayFull };
+  /** A `waitMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
+  | { readonly kind: "invalidInput"; readonly code: "INVALID_INPUT"; readonly maxMs: number }
+  /**
+   * In a `SHARED_THREAD` body: the seat relay held its bound of waiting calls; nothing was read; retry. `message` names
+   * the bound and its value.
+   */
+  | {
+      readonly kind: "seatRelayFull";
+      readonly code: "SEAT_RELAY_FULL";
+      readonly retryable: true;
+      readonly message: string;
+    };
 
 /**
- * The library code of a read error, as the Python and Rust clients name it; `SEAT_RELAY_FULL` for the seat relay at its
- * bound, which those clients do not have. Pure.
+ * The catalog code of a read error, as the Python and Rust clients name it: the `code` member of a variant that has
+ * one; `RESULT_DESERIALIZATION_ERROR` for `storedResultUnreadable` and `unknownUserCode`, `BROKER_ERROR` for
+ * `database`. `SEAT_RELAY_FULL` is a code that those clients do not have. Pure.
  */
-export function readErrorCode(error: ReadError): LibraryTaskCode | SeatRelayCode {
+export function readErrorCode(error: ReadError): BuiltInTaskCode | SeatRelayCode {
   switch (error.kind) {
-    case "waitTimedOut":
-      return "WAIT_TIMEOUT";
+    case "waitTimeout":
     case "taskNotFound":
-      return "TASK_NOT_FOUND";
     case "resultNotAvailable":
-      return "RESULT_NOT_AVAILABLE";
+    case "waitInsideTask":
+    case "invalidInput":
+    case "seatRelayFull":
+      return error.code;
     case "storedResultUnreadable":
     case "unknownUserCode":
       return "RESULT_DESERIALIZATION_ERROR";
-    case "waitInsideTask":
-      return "WAIT_INSIDE_TASK";
     case "database":
       return "BROKER_ERROR";
-    case "invalidWait":
-      return "INVALID_INPUT";
-    case "seatRelayFull":
-      return error.error.code;
     default: {
       const unexpected: never = error;
 
@@ -83,21 +83,9 @@ export function readErrorCode(error: ReadError): LibraryTaskCode | SeatRelayCode
   }
 }
 
-/** The absence of a task, as the core names its reason. Pure. */
-export function taskAbsence(reason: AbsenceReason): TaskAbsence {
-  switch (reason) {
-    case "PREDATES_RETAINED_HISTORY":
-      return "predatesRetainedHistory";
-    case "WITHIN_RETAINED_HISTORY":
-      return "withinRetainedHistory";
-    case "NOT_CLASSIFIED":
-      return "notClassified";
-    default: {
-      const unexpected: never = reason;
-
-      throw new TypeError(`taskAbsence: a reason outside its type: ${String(unexpected)}`);
-    }
-  }
+/** The read error of a call that the seat relay did not send: the members of `error` but its cause. Pure. */
+export function seatRelayFullRead(error: SeatRelayFull): Extract<ReadError, { readonly kind: "seatRelayFull" }> {
+  return Object.freeze({ kind: "seatRelayFull", code: error.code, retryable: error.retryable, message: error.message });
 }
 
 /**

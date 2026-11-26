@@ -45,7 +45,7 @@ export function isolateEndOutcome(run: EndedRun): SeatOutcome {
   return {
     kind: "error",
     parts: {
-      code: { kind: "library", code: "WORKER_CRASHED" },
+      code: { kind: "builtIn", code: "WORKER_CRASHED" },
       message: {
         kind: "text",
         text: `Seat isolate ${String(run.seat)} exited with code ${String(run.end.exitCode)} before the task ended: ${record.type}: ${record.message}`,

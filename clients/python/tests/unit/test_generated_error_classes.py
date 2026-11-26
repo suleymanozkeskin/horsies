@@ -15,6 +15,7 @@ the classes that they replaced.
 from __future__ import annotations
 
 import dataclasses
+from enum import Enum
 from typing import Final, NamedTuple
 
 import pytest
@@ -189,6 +190,17 @@ def test_each_public_union_is_the_generated_union_and_its_client_only_classes() 
     )
 
 
+class SendRetry(Enum):
+    """Where a send class has its ``retryable``."""
+
+    #: A ``retryable`` field of the value.
+    FIELD = 'field'
+    #: The class value ``retryable: ClassVar[bool] = True``.
+    ALWAYS = 'always'
+    #: No ``retryable``.
+    ABSENT = 'absent'
+
+
 class SendClassShape(NamedTuple):
     public: type
     generated: type
@@ -196,23 +208,25 @@ class SendClassShape(NamedTuple):
     fields: tuple[tuple[str, bool], ...]
     #: The member name of the `code` class value.
     code_member: str
+    retry: SendRetry
 
 
 SEND_SHAPES: Final[tuple[SendClassShape, ...]] = (
-    SendClassShape(task_send_types.TaskSendSuppressed, task_send_errors.TaskSendSuppressed, (('message', False),), 'SEND_SUPPRESSED'),
-    SendClassShape(task_send_types.TaskSendAsyncContext, task_send_errors.TaskSendAsyncContext, (('task_id', True), ('payload', False), ('message', False)), 'ASYNC_CONTEXT'),
-    SendClassShape(task_send_types.TaskSendValidationFailed, task_send_errors.TaskSendValidationFailed, (('message', False), ('exception', False)), 'VALIDATION_FAILED'),
-    SendClassShape(task_send_types.TaskSendEnqueueFailed, task_send_errors.TaskSendEnqueueFailed, (('task_id', True), ('payload', False), ('message', False), ('retryable', True), ('exception', False)), 'ENQUEUE_FAILED'),
-    SendClassShape(task_send_types.TaskSendPayloadMismatch, task_send_errors.TaskSendPayloadMismatch, (('task_id', True), ('payload', False), ('message', False)), 'PAYLOAD_MISMATCH'),
-    SendClassShape(task_send_types.TaskSendPayloadTooLarge, task_send_errors.TaskSendPayloadTooLarge, (('message', False), ('size_bytes', True), ('limit_bytes', True)), 'PAYLOAD_TOO_LARGE'),
-    SendClassShape(task_send_types.TaskSendIdempotencyKeyConflict, task_send_errors.TaskSendIdempotencyKeyConflict, (('task_id', True), ('payload', False), ('message', False), ('owner_task_id', True)), 'IDEMPOTENCY_KEY_CONFLICT'),
+    SendClassShape(task_send_types.TaskSendSuppressed, task_send_errors.TaskSendSuppressed, (('message', False),), 'SEND_SUPPRESSED', SendRetry.ABSENT),
+    SendClassShape(task_send_types.TaskSendAsyncContext, task_send_errors.TaskSendAsyncContext, (('task_id', True), ('payload', False), ('message', False)), 'ASYNC_CONTEXT', SendRetry.ABSENT),
+    SendClassShape(task_send_types.TaskSendValidationFailed, task_send_errors.TaskSendValidationFailed, (('message', False), ('exception', False)), 'VALIDATION_FAILED', SendRetry.ABSENT),
+    SendClassShape(task_send_types.TaskSendEnqueueFailed, task_send_errors.TaskSendEnqueueFailed, (('task_id', True), ('payload', False), ('message', False), ('retryable', True), ('exception', False)), 'ENQUEUE_FAILED', SendRetry.FIELD),
+    SendClassShape(task_send_types.TaskSendPayloadMismatch, task_send_errors.TaskSendPayloadMismatch, (('task_id', True), ('payload', False), ('message', False)), 'PAYLOAD_MISMATCH', SendRetry.ABSENT),
+    SendClassShape(task_send_types.TaskSendPayloadTooLarge, task_send_errors.TaskSendPayloadTooLarge, (('message', False), ('size_bytes', True), ('limit_bytes', True)), 'PAYLOAD_TOO_LARGE', SendRetry.ABSENT),
+    SendClassShape(task_send_types.TaskSendIdempotencyKeyConflict, task_send_errors.TaskSendIdempotencyKeyConflict, (('task_id', True), ('payload', False), ('message', False), ('owner_task_id', True)), 'IDEMPOTENCY_KEY_CONFLICT', SendRetry.ALWAYS),
 )
 
 
 @pytest.mark.parametrize('shape', SEND_SHAPES, ids=lambda shape: shape.generated.__name__)
 class TestGeneratedSendClass:
-    """The send classes have no ``retryable`` class value: only
-    ``TaskSendEnqueueFailed`` has a ``retryable`` field."""
+    """``TaskSendEnqueueFailed`` has a ``retryable`` field, and
+    ``TaskSendIdempotencyKeyConflict`` the class value ``retryable = True``.
+    The other send classes have no ``retryable``."""
 
     def test_the_public_names_are_the_generated_class(self, shape: SendClassShape) -> None:
         assert shape.public is shape.generated
@@ -226,15 +240,20 @@ class TestGeneratedSendClass:
 
         assert fields == shape.fields
 
-    def test_the_code_is_the_old_one_and_no_retryable_class_value_exists(
+    def test_the_code_is_the_old_one_and_the_retryable_is_in_its_place(
         self,
         shape: SendClassShape,
     ) -> None:
+        field_names = {item.name for item in dataclasses.fields(shape.generated)}
+
         assert getattr(shape.generated, 'code').name == shape.code_member
-        match ('retryable', True) in shape.fields:
-            case True:
-                assert 'retryable' in {item.name for item in dataclasses.fields(shape.generated)}
-            case False:
+        match shape.retry:
+            case SendRetry.FIELD:
+                assert 'retryable' in field_names
+            case SendRetry.ALWAYS:
+                assert 'retryable' not in field_names
+                assert getattr(shape.generated, 'retryable') is True
+            case SendRetry.ABSENT:
                 assert not hasattr(shape.generated, 'retryable')
 
     def test_the_class_is_a_frozen_dataclass_with_slots(self, shape: SendClassShape) -> None:

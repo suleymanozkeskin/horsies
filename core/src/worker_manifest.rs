@@ -33,7 +33,7 @@ use crate::core::config::bounded::BoundedU32;
 use crate::core::config::no_member_after_the_tag;
 use crate::core::config::socket::{TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::core::config::worker_profile::{
-    select_worker_profile, ChildPreload, ClaimLimits, DrainTimeout, ExecutorThreadCount,
+    input, select_worker_profile, ChildPreload, ClaimLimits, DrainTimeout, ExecutorThreadCount,
     ExecutorThreadsSetting, IsolatedChildCount, IsolatedChildren, IsolatedPool, IsolatedRecycle,
     IsolatedSetting, MemoryLimitSetting, MemoryMb, ParentCpu, ParentPool, PoolConnectionCount,
     PoolMinSize, PoolSize, PoolSizeSetting, ProfileRequest, ProfileSelectionRefused,
@@ -917,6 +917,15 @@ impl WorkerManifest {
         self.profiles
             .iter()
             .map(|(name, profile)| (name.clone(), profile.to_profile()))
+            .collect()
+    }
+
+    /// Every profile of the manifest in the config form, by name: the form
+    /// that `AppConfig.worker_profiles` holds, with the same values. Pure.
+    pub fn config_profiles(&self) -> BTreeMap<String, input::WorkerProfile> {
+        self.profile_set()
+            .into_iter()
+            .map(|(name, profile)| (name, input::WorkerProfile::from(profile)))
             .collect()
     }
 

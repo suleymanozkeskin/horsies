@@ -11,8 +11,8 @@
 //! The handle keeps the first final read, as Python does: an outcome,
 //! `RESULT_NOT_AVAILABLE`, a stored result that does not read, and a stored
 //! user code that `E` does not name. A wait that timed out, a task not
-//! found, a refused wait and a database failure are not kept: a later read
-//! may succeed.
+//! found, a wait limit above the bound, a refused wait and a database
+//! failure are not kept: a later read may succeed.
 
 use std::marker::PhantomData;
 use std::sync::{Arc, OnceLock};
@@ -27,9 +27,10 @@ use horsies_core::core::task::result::{
 use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
 use horsies_core::{
-    process_role, wait_inside_task_message, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BuiltInTaskCode, JsonText, OperationalErrorCode, OutcomeCode, ProcessRole, RawResultRead,
-    RawResultRecord, RetrievalCode, StoredEnvelopeText, TaskInfoRead, TaskResult,
+    process_role, wait_inside_task_message, BoundedWait, BrokerError, BrokerErrorCode,
+    BrokerOperationError, BuiltInTaskCode, JsonText, OperationalErrorCode, OutcomeCode,
+    ProcessRole, RawResultRead, RawResultRecord, RetrievalCode, StoredEnvelopeText, TaskInfoRead,
+    TaskResult,
 };
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
@@ -40,11 +41,12 @@ use crate::{TaskError, UserErrorCode};
 
 /// Why neither the live table nor the task history holds a task.
 pub use horsies_core::TaskAbsenceReason;
-/// The limit of a result wait: `WaitLimit::parse(Some(duration))` refuses
-/// a limit above `MAX_WAIT_LIMIT_MS` (about 49.7 days) before any read.
-pub use horsies_core::{BoundedWait, WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 /// The info of an attempt of a task, and the status of a task.
 pub use horsies_core::{TaskAttemptInfo, TaskStatus};
+/// The limit of a result wait. A read refuses a `WaitLimit::Within` limit
+/// above `MAX_WAIT_LIMIT_MS` (about 49.7 days) with `InvalidInput`, before
+/// any statement.
+pub use horsies_core::{WaitLimit, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
 /// The info of a task. Its `result` is the stored result read as a
 /// `TaskResult`: the `ok` slot as its stored text (`JsonText::decode` reads
@@ -105,6 +107,14 @@ pub enum ReadError {
         code: String,
         code_type: &'static str,
     },
+    /// `INVALID_INPUT`: the `WaitLimit::Within` limit is above
+    /// `MAX_WAIT_LIMIT_MS`. It is the first check of a read: nothing was
+    /// read and nothing is kept. The same limit is refused again.
+    #[error("invalid input for the read of task {task_id}: {cause}")]
+    InvalidInput {
+        task_id: Uuid,
+        cause: WaitLimitRefused,
+    },
     /// `WAIT_INSIDE_TASK`: a result wait in a process that runs task bodies.
     /// Nothing was read.
     #[error("{message}")]
@@ -136,6 +146,7 @@ impl ReadError {
             Self::StoredResultUnreadable { .. } | Self::UnknownUserCode { .. } => {
                 OperationalErrorCode::ResultDeserializationError.into()
             }
+            Self::InvalidInput { .. } => RetrievalCode::InvalidInput.into(),
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
             Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
             Self::Database { .. } => OperationalErrorCode::BrokerError.into(),
@@ -151,6 +162,7 @@ impl ReadError {
             | Self::UnknownUserCode { .. } => true,
             Self::WaitTimedOut { .. }
             | Self::TaskNotFound { .. }
+            | Self::InvalidInput { .. }
             | Self::WaitInsideTask { .. }
             | Self::AsyncContext { .. }
             | Self::Database { .. } => false,
@@ -245,12 +257,15 @@ where
     /// The outcome of the task, waiting while it has not finished, up to
     /// `limit` (`WaitLimit::NoLimit` waits until it ends).
     ///
-    /// The first final read is kept, and later calls return it with no
-    /// read. In a process that runs task bodies the wait is refused with
+    /// The limit is the first check: a `Within` limit above
+    /// `MAX_WAIT_LIMIT_MS` is `InvalidInput`, also when a read is kept. The
+    /// first final read is kept, and later calls return it with no read. In
+    /// a process that runs task bodies the wait is refused with
     /// `WaitInsideTask` before any statement.
     ///
     /// Errors: [`ReadError`].
     pub async fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
+        let wait = checked_task_wait(self.task_id, limit)?;
         if let Some(kept) = self.kept.get() {
             return kept.clone();
         }
@@ -260,7 +275,7 @@ where
                 self.task_id
             )));
         }
-        let read = self.read(limit).await;
+        let read = self.read(wait).await;
         match &read {
             Ok(_) => self.keep(read),
             Err(failure) if failure.is_final() => self.keep(read),
@@ -277,13 +292,17 @@ where
         read_task_info(&self.reads, self.task_id, parts).await
     }
 
-    /// The result read of the task, up to `limit`.
+    /// The result read of the task, up to `wait`: a limit that
+    /// [`checked_wait`] returned.
     ///
     /// # Panics
     ///
     /// In a fork, without `exec`, of the process that started the core's
     /// process runtime. Nothing ran.
-    async fn read(&self, limit: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
+    async fn read(
+        &self,
+        wait: Option<std::time::Duration>,
+    ) -> Result<TaskOutcome<T, E>, ReadError> {
         refuse_in_a_fork(format_args!("TaskHandle::get for task {}", self.task_id));
         let broker = self
             .reads
@@ -291,7 +310,7 @@ where
             .await
             .map_err(|error| ReadError::of_broker(&error))?;
         let record = broker
-            .get_raw_result_record(self.task_id, limit_duration(limit))
+            .get_raw_result_record(self.task_id, wait)
             .await
             .map_err(|error| ReadError::of_operation(self.task_id, error))?;
         match record {
@@ -367,12 +386,31 @@ fn task_info_of_stored(
     })
 }
 
-/// The duration of a wait limit, as the core's read takes it.
-pub(crate) fn limit_duration(limit: WaitLimit) -> Option<std::time::Duration> {
+/// A wait limit as the core's reads take it: `None` waits until the end,
+/// `Some` waits at most that long. A read calls it first, before any
+/// statement. Pure.
+///
+/// Errors: [`WaitLimitRefused`] for a `Within` limit above
+/// `MAX_WAIT_LIMIT_MS`.
+pub(crate) fn checked_wait(
+    limit: WaitLimit,
+) -> Result<Option<std::time::Duration>, WaitLimitRefused> {
     match limit {
-        WaitLimit::NoLimit => None,
-        WaitLimit::Within(bounded) => Some(bounded.duration()),
+        WaitLimit::NoLimit => Ok(None),
+        WaitLimit::Within(duration) => {
+            BoundedWait::try_from(duration).map(|bounded| Some(bounded.duration()))
+        }
     }
+}
+
+/// [`checked_wait`] for a read of task `task_id`. Pure.
+///
+/// Errors: `InvalidInput` with the task id and the refusal.
+pub(crate) fn checked_task_wait(
+    task_id: Uuid,
+    limit: WaitLimit,
+) -> Result<Option<std::time::Duration>, ReadError> {
+    checked_wait(limit).map_err(|cause| ReadError::InvalidInput { task_id, cause })
 }
 
 /// The outcome of a stored record (Python `_record_to_task_result`). Pure.
@@ -831,6 +869,10 @@ mod tests {
                 task_id: task(),
                 reason: TaskAbsenceReason::WithinRetainedHistory,
             },
+            ReadError::InvalidInput {
+                task_id: task(),
+                cause: WaitLimitRefused,
+            },
             ReadError::wait_inside_task("TaskHandle.get()"),
             ReadError::AsyncContext {
                 message: "blocking get on a runtime thread".to_owned(),
@@ -874,6 +916,10 @@ mod tests {
                 task_id: task(),
                 status: TaskStatus::Failed,
             },
+            ReadError::InvalidInput {
+                task_id: task(),
+                cause: WaitLimitRefused,
+            },
             ReadError::wait_inside_task("TaskHandle.get()"),
             ReadError::AsyncContext {
                 message: "blocking get on a runtime thread".to_owned(),
@@ -888,9 +934,27 @@ mod tests {
                 "WAIT_TIMEOUT",
                 "TASK_NOT_FOUND",
                 "RESULT_NOT_AVAILABLE",
+                "INVALID_INPUT",
                 "WAIT_INSIDE_TASK",
                 "ASYNC_CONTEXT"
             ]
+        );
+    }
+
+    /// The text of `InvalidInput` names the task and the bound.
+    #[test]
+    fn an_invalid_input_names_the_task_and_the_bound() {
+        let error = ReadError::InvalidInput {
+            task_id: task(),
+            cause: WaitLimitRefused,
+        };
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "invalid input for the read of task {}: the wait limit is above 4294967295 ms \
+                 (about 49.7 days)",
+                task()
+            ),
         );
     }
 
@@ -1027,12 +1091,105 @@ mod tests {
         }
     }
 
+    /// One millisecond above the bound of a wait.
+    fn above_the_bound() -> WaitLimit {
+        WaitLimit::Within(Duration::from_millis(MAX_WAIT_LIMIT_MS + 1))
+    }
+
     #[test]
-    fn a_wait_limit_above_the_bound_is_refused_and_no_limit_has_no_duration() {
-        assert!(WaitLimit::parse(Some(Duration::MAX)).is_err());
-        assert_eq!(limit_duration(WaitLimit::NoLimit), None);
-        let limit = WaitLimit::parse(Some(Duration::from_secs(2))).unwrap();
-        assert_eq!(limit_duration(limit), Some(Duration::from_secs(2)));
+    fn no_limit_is_no_core_wait_and_a_limit_up_to_the_bound_is_its_duration() {
+        assert_eq!(checked_wait(WaitLimit::NoLimit), Ok(None));
+        for duration in [
+            Duration::ZERO,
+            Duration::from_secs(2),
+            Duration::from_millis(MAX_WAIT_LIMIT_MS),
+        ] {
+            assert_eq!(
+                checked_wait(WaitLimit::Within(duration)),
+                Ok(Some(duration))
+            );
+        }
+    }
+
+    #[test]
+    fn a_limit_above_the_bound_is_invalid_input_with_the_task_id() {
+        assert_eq!(
+            checked_wait(WaitLimit::Within(Duration::MAX)),
+            Err(WaitLimitRefused)
+        );
+        assert_eq!(
+            checked_task_wait(task(), above_the_bound()),
+            Err(ReadError::InvalidInput {
+                task_id: task(),
+                cause: WaitLimitRefused,
+            }),
+        );
+    }
+
+    /// The limit is checked before any statement: the app's address has
+    /// no database, so a read that ran would fail as `Database`. Nothing
+    /// is kept.
+    #[tokio::test]
+    async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
+        let app = Horsies::new(AppConfig::for_database_url(
+            "postgresql://127.0.0.1:1/nothing",
+        ))
+        .unwrap();
+        let handle: TaskHandle<u32, ChargeCode> = app.task_handle_of(task());
+        let refused = handle.get(above_the_bound()).await.unwrap_err();
+        assert_eq!(
+            refused,
+            ReadError::InvalidInput {
+                task_id: task(),
+                cause: WaitLimitRefused,
+            },
+        );
+        assert_eq!(refused.code().value(), "INVALID_INPUT");
+        assert!(handle.kept().is_none());
+    }
+
+    /// A kept read does not hide a limit above the bound, as in Python and
+    /// TypeScript; a later read within the bound returns the kept read.
+    #[tokio::test]
+    async fn a_kept_read_does_not_hide_a_limit_above_the_bound() {
+        let app = Horsies::new(AppConfig::for_database_url(
+            "postgresql://127.0.0.1:1/nothing",
+        ))
+        .unwrap();
+        let handle: TaskHandle<u32, ChargeCode> = app.task_handle_of(task());
+        let _kept = handle.keep(Ok(TaskOutcome::Succeeded(4)));
+        assert!(matches!(
+            handle.get(above_the_bound()).await,
+            Err(ReadError::InvalidInput { .. })
+        ));
+        assert_eq!(
+            handle
+                .get(WaitLimit::Within(Duration::from_millis(MAX_WAIT_LIMIT_MS)))
+                .await,
+            Ok(TaskOutcome::Succeeded(4))
+        );
+    }
+
+    /// `Horsies::get_result` and `Horsies::get_raw_result` check the limit
+    /// first, as `TaskHandle::get`.
+    #[tokio::test]
+    async fn the_reads_by_task_id_above_the_bound_are_invalid_input_before_any_statement() {
+        let app = Horsies::new(AppConfig::for_database_url(
+            "postgresql://127.0.0.1:1/nothing",
+        ))
+        .unwrap();
+        let typed = app
+            .get_result::<u32, ChargeCode>(task(), above_the_bound())
+            .await;
+        assert!(
+            matches!(typed, Err(ReadError::InvalidInput { task_id, .. }) if task_id == task()),
+            "{typed:?}"
+        );
+        let raw = app.get_raw_result(task(), above_the_bound()).await;
+        assert!(
+            matches!(raw, Err(ReadError::InvalidInput { task_id, .. }) if task_id == task()),
+            "{raw:?}"
+        );
     }
 
     /// A handle prints and crosses threads: Debug, Send and Sync.

@@ -26,7 +26,7 @@ export type RoleOf<W extends AnyWire> = W[typeof wireRole];
 /** The members of an object: a wire type of a plain value per member name, in declaration order. */
 export type WireMembers = { readonly [name: string]: ValueWire };
 
-/** The parameters of a task input: a wire type per parameter, which may be an upstream outcome (`h.resultOf`). */
+/** The parameters of a task input: a wire type per parameter, which may be an upstream outcome (`h.taskOutcome`). */
 export type ParameterWires = { readonly [name: string]: AnyWire };
 
 declare const noMembers: unique symbol;

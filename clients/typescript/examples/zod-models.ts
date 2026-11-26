@@ -89,10 +89,10 @@ function decimalOfCents(cents: bigint): Decimal {
   return parsed.value;
 }
 
-app.implement(priceOrder, async ({ order }) => {
+app.implement(priceOrder, async ({ order }, { ok }) => {
   const totalCents = order.items.reduce((sum, item) => sum + BigInt(item.quantity) * item.unitCents, 0n);
 
-  return priceOrder.ok({
+  return ok({
     orderId: order.orderId,
     itemCount: order.items.length,
     total: decimalOfCents(totalCents),
@@ -120,7 +120,7 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`send price_order: ${sendErrorText(sent.error)}`);
   }
 
-  const read = await sent.value.get({ timeoutMs: RESULT_WAIT_MS });
+  const read = await sent.value.get({ waitMs: RESULT_WAIT_MS });
 
   printLine(readLine("price_order", read, (priced) => `${String(priced.itemCount)} items, total ${priced.total.toString()}`));
 

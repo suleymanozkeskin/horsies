@@ -233,24 +233,24 @@ function computeFor(milliseconds: number): number {
 
 /** The implementations of this module on `app`. */
 export function implementThreads(app: Horsies): void {
-  app.implement(threadHealthcheck, () => threadHealthcheck.ok("ready"));
-  app.implement(threadSleep, ({ milliseconds }) => {
+  app.implement(threadHealthcheck, (_input, { ok }) => ok("ready"));
+  app.implement(threadSleep, ({ milliseconds }, { ok }) => {
     const start = unixMillis();
 
     holdThread(milliseconds);
 
-    return threadSleep.ok(stampSince(start));
+    return ok(stampSince(start));
   });
-  app.implement(threadHang, () => {
+  app.implement(threadHang, (_input, { ok }) => {
     holdThread(PAST_THE_DEADLINE_MS);
 
-    return threadHang.ok("never");
+    return ok("never");
   });
-  app.implement(threadOverrun, ({ token }) => {
+  app.implement(threadOverrun, ({ token }, { ok, err }) => {
     const attempt = nextAttempt(token);
 
     if (!attempt.ok) {
-      return threadOverrun.err({ code: "MARKER_FAILED", message: markerErrorText(attempt.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(attempt.error) });
     }
 
     const runs = `${token}-runs`;
@@ -261,7 +261,7 @@ export function implementThreads(app: Horsies): void {
     const started = line("start");
 
     if (!started.ok) {
-      return threadOverrun.err({ code: "MARKER_FAILED", message: markerErrorText(started.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(started.error) });
     }
 
     for (let tick = 0; tick < OVERRUN_TICKS; tick += 1) {
@@ -270,83 +270,83 @@ export function implementThreads(app: Horsies): void {
       const written = line("tick");
 
       if (!written.ok) {
-        return threadOverrun.err({ code: "MARKER_FAILED", message: markerErrorText(written.error) });
+        return err({ code: "MARKER_FAILED", message: markerErrorText(written.error) });
       }
     }
 
-    return threadOverrun.ok(`ran ${String(attempt.value)}`);
+    return ok(`ran ${String(attempt.value)}`);
   });
-  app.implement(threadPlace, () => threadPlace.ok(placeHere()));
-  app.implement(threadPlaceAsync, async () => {
+  app.implement(threadPlace, (_input, { ok }) => ok(placeHere()));
+  app.implement(threadPlaceAsync, async (_input, { ok }) => {
     await sleepFor(CANCEL_READ_MS, "noSignal");
 
-    return threadPlaceAsync.ok(placeHere());
+    return ok(placeHere());
   });
-  app.implement(threadCpuWork, ({ milliseconds }) => {
+  app.implement(threadCpuWork, ({ milliseconds }, { ok }) => {
     const start = unixMillis();
     const turns = computeFor(milliseconds);
 
-    return threadCpuWork.ok({ stamp: stampSince(start), turns });
+    return ok({ stamp: stampSince(start), turns });
   });
   implementCancels(app);
   implementSeatCalls(app);
 }
 
 function implementCancels(app: Horsies): void {
-  app.implement(threadSyncCooperative, ({ token }, runtime) => {
+  app.implement(threadSyncCooperative, ({ token }, { ok, err, cancelState }) => {
     for (let read = 0; read < CANCEL_READS; read += 1) {
-      const state = runtime.cancelState();
+      const state = cancelState();
 
       if (state.kind === "requested") {
         const written = appendLine(`${token}-cause`, state.cause);
 
         return written.ok
-          ? threadSyncCooperative.err({ code: "INTERRUPTED", message: `cancelled: ${state.cause}` })
-          : threadSyncCooperative.err({ code: "MARKER_FAILED", message: markerErrorText(written.error) });
+          ? err({ code: "INTERRUPTED", message: `cancelled: ${state.cause}` })
+          : err({ code: "MARKER_FAILED", message: markerErrorText(written.error) });
       }
 
       holdThread(CANCEL_READ_MS);
     }
 
-    return threadSyncCooperative.ok("never");
+    return ok("never");
   });
-  app.implement(threadAsyncCooperative, async ({ token }, runtime) => {
-    const end = await sleepFor(PAST_THE_DEADLINE_MS, runtime.signal);
+  app.implement(threadAsyncCooperative, async ({ token }, { ok, err, signal }) => {
+    const end = await sleepFor(PAST_THE_DEADLINE_MS, signal);
 
     if (end.kind === "slept") {
-      return threadAsyncCooperative.ok("never");
+      return ok("never");
     }
 
     const written = appendLine(`${token}-cause`, end.reason);
 
     return written.ok
-      ? threadAsyncCooperative.err({ code: "INTERRUPTED", message: `cancelled: ${end.reason}` })
-      : threadAsyncCooperative.err({ code: "MARKER_FAILED", message: markerErrorText(written.error) });
+      ? err({ code: "INTERRUPTED", message: `cancelled: ${end.reason}` })
+      : err({ code: "MARKER_FAILED", message: markerErrorText(written.error) });
   });
 }
 
 function implementSeatCalls(app: Horsies): void {
-  app.implement(threadSendsFromSeat, async ({ x }) => {
+  app.implement(threadSendsFromSeat, async ({ x }, { ok, err }) => {
     const sent = await app.send(simple, { x });
 
     if (!sent.ok) {
-      return threadSendsFromSeat.err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
+      return err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
     }
 
     const loads = addonLoads();
 
     switch (loads.kind) {
       case "mainThread":
-        return threadSendsFromSeat.err({ code: "NOT_IN_SEAT", message: "the body ran on the main thread of its child" });
+        return err({ code: "NOT_IN_SEAT", message: "the body ran on the main thread of its child" });
       case "counted":
-        return threadSendsFromSeat.ok({ place: placeHere(), addonLoads: loads.loads, sentId: sent.value.taskId });
+        return ok({ place: placeHere(), addonLoads: loads.loads, sentId: sent.value.taskId });
     }
   });
-  app.implement(threadBlocksMain, ({ token }) => {
+  app.implement(threadBlocksMain, ({ token }, { ok, err }) => {
     const first = createOnce(`${token}-blocked`, String(process.pid));
 
     if (!first.ok) {
-      return threadBlocksMain.err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
     }
 
     if (first.value === "created") {
@@ -357,6 +357,6 @@ function implementSeatCalls(app: Horsies): void {
       channel.close();
     }
 
-    return threadBlocksMain.ok(process.pid);
+    return ok(process.pid);
   });
 }

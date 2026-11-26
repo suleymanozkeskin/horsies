@@ -1,6 +1,9 @@
 // The `h.*` builders of the wire types.
 
 import type { JsonValue } from "../codec/json-value.ts";
+import type { AnyTaskContract } from "../contract/define-task.ts";
+import { upstreamOutputOf } from "../contract/upstream-output.ts";
+import type { AnyWorkflowContract } from "../workflow/define.ts";
 import type { Decimal } from "./decimal.ts";
 import type {
   AnyWire,
@@ -36,7 +39,7 @@ import {
   taggedUnionKind,
   UUID_KIND,
 } from "./kinds.ts";
-import { isResultOfKind, type ResultOfWire, resultOfWire } from "./result-of.ts";
+import { isTaskOutcomeKind, taskOutcomeKind, type TaskOutcomeWire } from "./task-outcome.ts";
 import { kindOf, presenceOf, type Wire, wireOf } from "./wire-type.ts";
 
 /** A list with at least one item. */
@@ -105,11 +108,12 @@ export interface WireBuilders {
     members: T,
   ): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
   /**
-   * A task input parameter that a workflow node fills with the outcome of an upstream task: `{ kind: "succeeded",
-   * value }` or `{ kind: "failed", error }`. Valid only as a whole parameter (optional or nullable too); a sender
-   * never gives it.
+   * A task input parameter that a workflow node fills with the outcome of an upstream node: `{ kind: "succeeded",
+   * value }` or `{ kind: "failed", error }`, typed by `contract`. For a task contract the value has its output type and
+   * the error its codes; for a workflow contract (a sub-workflow node) the value has its output type and the code is
+   * any code. Valid only as a whole parameter (optional or nullable too); a sender never gives it.
    */
-  resultOf<W extends RequiredWire>(inner: W): ResultOfWire<W>;
+  taskOutcome<C extends AnyTaskContract | AnyWorkflowContract>(contract: C): TaskOutcomeWire<C>;
   /** A JSON array of one item type. */
   array<W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]>;
   /** A JSON array with one value per item type. */
@@ -124,8 +128,8 @@ export interface WireBuilders {
 function valueKindOf(wire: AnyWire, place: string): Kind {
   const kind = kindOf(wire);
 
-  if (isResultOfKind(kind)) {
-    throw new TypeError(`h.${place}: h.resultOf is valid only as a whole task input parameter`);
+  if (isTaskOutcomeKind(kind)) {
+    throw new TypeError(`h.${place}: h.taskOutcome is valid only as a whole task input parameter`);
   }
 
   return kind;
@@ -219,7 +223,7 @@ function literalWire<const L extends NonEmpty<LiteralMember>>(members: L): Wire<
   return wireOf(Object.freeze({ node: "literal", members: Object.freeze([...members]) }));
 }
 
-/** The kind of a task input: one member per parameter, in declaration order. A parameter may be `h.resultOf`. */
+/** The kind of a task input: one member per parameter, in declaration order. A parameter may be `h.taskOutcome`. */
 export function parametersKind(parameters: ParameterWires): ObjectKind {
   return objectKind(membersOf(parameters, kindOf));
 }
@@ -242,7 +246,8 @@ export const h: WireBuilders = Object.freeze({
   literal: <const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]> => literalWire(members),
   enum: <const L extends NonEmpty<string>>(members: L): Wire<L[number]> => literalWire(members),
   union,
-  resultOf: <W extends RequiredWire>(inner: W): ResultOfWire<W> => resultOfWire(inner),
+  taskOutcome: <C extends AnyTaskContract | AnyWorkflowContract>(contract: C): TaskOutcomeWire<C> =>
+    wireOf(taskOutcomeKind(upstreamOutputOf(contract))),
   object: <const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>> =>
     wireOf(objectKind(membersOf(members, (wire) => valueKindOf(wire, "object")))),
   array: <W extends RequiredWire>(item: W): Wire<ValueOf<W>[], SentOf<W>[]> =>

@@ -21,10 +21,21 @@ const BIN: &str = env!("CARGO_BIN_EXE_horsies-test-worker");
 /// The longest wait for a workflow to end.
 const WORKFLOW_WAIT: Duration = Duration::from_secs(30);
 
-fn builder(name: &str) -> WorkflowSpecBuilder {
-    let mut builder = WorkflowSpecBuilder::new(name);
+fn builder(suite: &Suite, name: &str) -> WorkflowSpecBuilder {
+    let mut builder = suite.app.workflow_builder(name);
     let _key = builder.definition_key(format!("tests.e2e.{name}.v1"));
     builder
+}
+
+/// Add `node` to `spec`, a workflow builder of the suite's app. The app
+/// registers every task of the test binary, so a refusal is a defect of the
+/// test.
+fn add<T: 'static, I: 'static>(
+    spec: &mut WorkflowSpecBuilder,
+    node: TaskNode<T, I>,
+) -> TypedNodeRef<T> {
+    spec.task(node)
+        .expect("the app of the suite registers the task of the node")
 }
 
 /// A node `id` that returns `value`.
@@ -101,9 +112,9 @@ fn statuses(nodes: &[NodeRow]) -> Vec<&str> {
 async fn test_args_from_single_dependency() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("args_from_single");
-    let a = spec.task(produce(&suite, "a", 5));
-    let b = spec.task(double(&suite, "b", a));
+    let mut spec = builder(&suite, "args_from_single");
+    let a = add(&mut spec, produce(&suite, "a", 5));
+    let b = add(&mut spec, double(&suite, "b", a));
     let _output = spec.output(b);
     let handle = start::<i64>(&suite, spec).await;
     assert_eq!(output(&handle).await, 10);
@@ -115,10 +126,11 @@ async fn test_args_from_single_dependency() {
 async fn test_args_from_multiple_dependencies() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
-    let mut spec = builder("args_from_multiple");
-    let a = spec.task(produce(&suite, "a", 3));
-    let b = spec.task(produce(&suite, "b", 4));
-    let sum = spec.task(
+    let mut spec = builder(&suite, "args_from_multiple");
+    let a = add(&mut spec, produce(&suite, "a", 3));
+    let b = add(&mut spec, produce(&suite, "b", 4));
+    let sum = add(
+        &mut spec,
         suite
             .function(workflow::sum_two::handle)
             .node()
@@ -138,9 +150,9 @@ async fn test_args_from_multiple_dependencies() {
 async fn test_failed_propagation_via_args_from() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("failed_propagation");
-    let a = spec.task(fail(&suite, "a"));
-    let b = spec.task(double(&suite, "b", a).allow_failed_deps(true));
+    let mut spec = builder(&suite, "failed_propagation");
+    let a = add(&mut spec, fail(&suite, "a"));
+    let b = add(&mut spec, double(&suite, "b", a).allow_failed_deps(true));
     let _output = spec.output(b);
     let handle = start::<i64>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
@@ -167,10 +179,11 @@ async fn test_failed_propagation_via_args_from() {
 async fn test_skipped_propagation() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("skipped_propagation");
-    let a = spec.task(fail(&suite, "a"));
-    let b = spec.task(double(&suite, "b", a));
-    let c = spec.task(
+    let mut spec = builder(&suite, "skipped_propagation");
+    let a = add(&mut spec, fail(&suite, "a"));
+    let b = add(&mut spec, double(&suite, "b", a));
+    let c = add(
+        &mut spec,
         suite
             .function(workflow::check_upstream_skipped::handle)
             .node()
@@ -198,10 +211,10 @@ async fn test_skipped_propagation() {
 async fn test_args_from_transitive_chain() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("transitive_chain");
-    let a = spec.task(produce(&suite, "a", 2));
-    let b = spec.task(double(&suite, "b", a));
-    let c = spec.task(double(&suite, "c", b));
+    let mut spec = builder(&suite, "transitive_chain");
+    let a = add(&mut spec, produce(&suite, "a", 2));
+    let b = add(&mut spec, double(&suite, "b", a));
+    let c = add(&mut spec, double(&suite, "c", b));
     let _output = spec.output(c);
     let handle = start::<i64>(&suite, spec).await;
     assert_eq!(output(&handle).await, 8);
@@ -213,9 +226,9 @@ async fn test_args_from_transitive_chain() {
 async fn test_args_from_failed_dep_skips_and_fails() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("failed_dep_skips");
-    let a = spec.task(fail(&suite, "a"));
-    let _b = spec.task(double(&suite, "b", a));
+    let mut spec = builder(&suite, "failed_dep_skips");
+    let a = add(&mut spec, fail(&suite, "a"));
+    let _b = add(&mut spec, double(&suite, "b", a));
     let handle = start::<OutputlessResults>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(statuses(&nodes), vec!["FAILED", "SKIPPED"]);
@@ -229,9 +242,10 @@ async fn test_args_from_failed_dep_skips_and_fails() {
 async fn test_dual_injection_same_node() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("dual_injection");
-    let a = spec.task(produce(&suite, "a", 5));
-    let reader = spec.task(
+    let mut spec = builder(&suite, "dual_injection");
+    let a = add(&mut spec, produce(&suite, "a", 5));
+    let reader = add(
+        &mut spec,
         suite
             .function(workflow::mixed_reader::handle)
             .node()
@@ -256,9 +270,10 @@ async fn test_dual_injection_same_node() {
 async fn test_workflow_ctx_single_dependency() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("ctx_single");
-    let a = spec.task(produce(&suite, "a", 7));
-    let reader = spec.task(
+    let mut spec = builder(&suite, "ctx_single");
+    let a = add(&mut spec, produce(&suite, "a", 7));
+    let reader = add(
+        &mut spec,
         suite
             .function(workflow::ctx_reader::handle)
             .node()
@@ -279,10 +294,11 @@ async fn test_workflow_ctx_single_dependency() {
 async fn test_workflow_ctx_multiple_dependencies() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
-    let mut spec = builder("ctx_multiple");
-    let a = spec.task(produce(&suite, "a", 3));
-    let b = spec.task(produce(&suite, "b", 4));
-    let sum = spec.task(
+    let mut spec = builder(&suite, "ctx_multiple");
+    let a = add(&mut spec, produce(&suite, "a", 3));
+    let b = add(&mut spec, produce(&suite, "b", 4));
+    let sum = add(
+        &mut spec,
         suite
             .function(workflow::ctx_sum::handle)
             .node()
@@ -304,10 +320,11 @@ async fn test_workflow_ctx_multiple_dependencies() {
 async fn test_mixed_args_from_and_ctx() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
-    let mut spec = builder("mixed_args_ctx");
-    let a = spec.task(produce(&suite, "a", 10));
-    let b = spec.task(produce(&suite, "b", 20));
-    let reader = spec.task(
+    let mut spec = builder(&suite, "mixed_args_ctx");
+    let a = add(&mut spec, produce(&suite, "a", 10));
+    let b = add(&mut spec, produce(&suite, "b", 20));
+    let reader = add(
+        &mut spec,
         suite
             .function(workflow::mixed_reader::handle)
             .node()
@@ -332,8 +349,9 @@ async fn test_mixed_args_from_and_ctx() {
 async fn test_args_from_dict_serialization() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("dict_serialization");
-    let a = spec.task(
+    let mut spec = builder(&suite, "dict_serialization");
+    let a = add(
+        &mut spec,
         suite
             .function(workflow::produce_dict::handle)
             .node()
@@ -341,7 +359,8 @@ async fn test_args_from_dict_serialization() {
             .set(workflow::produce_dict::params::value(), "hello".to_owned())
             .expect("a dict input"),
     );
-    let b = spec.task(
+    let b = add(
+        &mut spec,
         suite
             .function(workflow::receive_dict::handle)
             .node()
@@ -364,10 +383,11 @@ async fn test_args_from_dict_serialization() {
 async fn test_join_ctx_gating() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
-    let mut spec = builder("join_ctx_gating");
-    let a = spec.task(fail(&suite, "a"));
-    let b = spec.task(produce(&suite, "b", 9));
-    let reader = spec.task(
+    let mut spec = builder(&suite, "join_ctx_gating");
+    let a = add(&mut spec, fail(&suite, "a"));
+    let b = add(&mut spec, produce(&suite, "b", 9));
+    let reader = add(
+        &mut spec,
         suite
             .function(workflow::ctx_reader::handle)
             .node()
@@ -401,10 +421,11 @@ async fn test_join_ctx_gating() {
 async fn wrapped_input_args_from_deserializes_under_strict() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
-    let mut spec = builder("wrapped_strict");
-    let a = spec.task(produce(&suite, "a", 6));
-    let b = spec.task(produce(&suite, "b", 1));
-    let sum = spec.task(
+    let mut spec = builder(&suite, "wrapped_strict");
+    let a = add(&mut spec, produce(&suite, "a", 6));
+    let b = add(&mut spec, produce(&suite, "b", 1));
+    let sum = add(
+        &mut spec,
         suite
             .function(workflow::sum_two::handle)
             .node()
@@ -424,7 +445,7 @@ async fn wrapped_input_args_from_deserializes_under_strict() {
 #[serial]
 async fn wrapped_input_extra_kwarg_is_refused_at_build() {
     let suite = Suite::start(BIN, Instance::Default).await;
-    let mut spec = builder("wrapped_extra_kwarg");
+    let mut spec = builder(&suite, "wrapped_extra_kwarg");
     let refused = match suite
         .function(workflow::produce_int::handle)
         .node()
@@ -433,7 +454,7 @@ async fn wrapped_input_extra_kwarg_is_refused_at_build() {
     {
         Err(refused) => refused,
         Ok(node) => {
-            let _a = spec.task(node);
+            let _a = add(&mut spec, node);
             spec.build()
                 .expect_err("an input key that the task does not have")
         }

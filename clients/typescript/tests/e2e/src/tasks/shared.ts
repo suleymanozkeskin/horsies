@@ -173,104 +173,104 @@ export const SHARED_CONTRACTS = [
 
 /** The implementations of this module on `app`. */
 export function implementShared(app: Horsies): void {
-  app.implement(sharedHealthcheck, async () => sharedHealthcheck.ok("ready"));
-  app.implement(sharedSleep, async ({ milliseconds }) => {
+  app.implement(sharedHealthcheck, async (_input, { ok }) => ok("ready"));
+  app.implement(sharedSleep, async ({ milliseconds }, { ok }) => {
     const start = unixMillis();
 
     await sleepFor(milliseconds, "noSignal");
 
-    return sharedSleep.ok(stampSince(start));
+    return ok(stampSince(start));
   });
-  app.implement(sharedSleepRetried, async ({ milliseconds }) => {
+  app.implement(sharedSleepRetried, async ({ milliseconds }, { ok }) => {
     const start = unixMillis();
 
     await sleepFor(milliseconds, "noSignal");
 
-    return sharedSleepRetried.ok(stampSince(start));
+    return ok(stampSince(start));
   });
-  app.implement(sharedHang, async () => {
+  app.implement(sharedHang, async (_input, { ok }) => {
     await sleepFor(PAST_THE_DEADLINE_MS, "noSignal");
 
-    return sharedHang.ok("never");
+    return ok("never");
   });
-  app.implement(sharedCooperative, async ({ token }, runtime) => {
-    const end = await sleepFor(PAST_THE_DEADLINE_MS, runtime.signal);
+  app.implement(sharedCooperative, async ({ token }, { ok, err, signal }) => {
+    const end = await sleepFor(PAST_THE_DEADLINE_MS, signal);
 
     if (end.kind === "slept") {
-      return sharedCooperative.ok("never");
+      return ok("never");
     }
 
     const written = appendLine(`${token}-cause`, end.reason);
 
     return written.ok
-      ? sharedCooperative.err({ code: "INTERRUPTED", message: `cancelled: ${end.reason}` })
-      : sharedCooperative.err({ code: "MARKER_FAILED", message: markerErrorText(written.error) });
+      ? err({ code: "INTERRUPTED", message: `cancelled: ${end.reason}` })
+      : err({ code: "MARKER_FAILED", message: markerErrorText(written.error) });
   });
   implementBlocks(app);
   implementLeftBehind(app);
 }
 
 function implementBlocks(app: Horsies): void {
-  app.implement(sharedBlocksOnce, async ({ token }) => {
+  app.implement(sharedBlocksOnce, async ({ token }, { ok, err }) => {
     const first = createOnce(`${token}-blocked`, String(process.pid));
 
     if (!first.ok) {
-      return sharedBlocksOnce.err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
     }
 
     if (first.value === "created") {
       holdThread(BLOCK_DURATION_MS);
     }
 
-    return sharedBlocksOnce.ok(process.pid);
+    return ok(process.pid);
   });
-  app.implement(sharedBlocksAfterAwait, async ({ token }) => {
+  app.implement(sharedBlocksAfterAwait, async ({ token }, { ok, err }) => {
     await sleepFor(LEFT_BEHIND_THROW_MS, "noSignal");
 
     const first = createOnce(`${token}-blocked`, String(process.pid));
 
     if (!first.ok) {
-      return sharedBlocksAfterAwait.err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
     }
 
     if (first.value === "created") {
       holdThread(BLOCK_DURATION_MS);
     }
 
-    return sharedBlocksAfterAwait.ok(process.pid);
+    return ok(process.pid);
   });
-  app.implement(sharedStuckOnce, async ({ token }) => {
+  app.implement(sharedStuckOnce, async ({ token }, { ok, err }) => {
     const first = createOnce(`${token}-stuck`, String(process.pid));
 
     if (!first.ok) {
-      return sharedStuckOnce.err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(first.error) });
     }
 
     if (first.value === "created") {
       await sleepFor(PAST_THE_DEADLINE_MS, "noSignal");
     }
 
-    return sharedStuckOnce.ok(process.pid);
+    return ok(process.pid);
   });
 }
 
 function implementLeftBehind(app: Horsies): void {
-  app.implement(sharedSends, async ({ x }) => {
+  app.implement(sharedSends, async ({ x }, { ok, err }) => {
     const sent = await app.send(simple, { x });
 
     return sent.ok
-      ? sharedSends.ok(sent.value.taskId)
-      : sharedSends.err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
+      ? ok(sent.value.taskId)
+      : err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
   });
-  app.implement(sharedDetachedThrow, async () => {
+  app.implement(sharedDetachedThrow, async (_input, { ok }) => {
     setTimeout(() => {
       throw new Error("e2e detached throw");
     }, LEFT_BEHIND_THROW_MS);
     await sleepFor(LEFT_BEHIND_WAIT_MS, "noSignal");
 
-    return sharedDetachedThrow.ok(process.pid);
+    return ok(process.pid);
   });
-  app.implement(sharedUntrackedRejection, async () => {
+  app.implement(sharedUntrackedRejection, async (_input, { ok }) => {
     const rejecting = async (): Promise<never> => {
       await sleepFor(LEFT_BEHIND_THROW_MS, "noSignal");
 
@@ -281,10 +281,10 @@ function implementLeftBehind(app: Horsies): void {
     void rejecting();
     await sleepFor(LEFT_BEHIND_WAIT_MS, "noSignal");
 
-    return sharedUntrackedRejection.ok(process.pid);
+    return ok(process.pid);
   });
-  app.implement(sharedSpawnAtDeadline, async ({ token }, runtime) => {
-    const work = runtime.spawn("wait_for_signal", async (signal) => {
+  app.implement(sharedSpawnAtDeadline, async ({ token }, { ok, err, spawn }) => {
+    const work = spawn("wait_for_signal", async (signal) => {
       const end = await sleepFor(PAST_THE_DEADLINE_MS, signal);
       const cause = end.kind === "aborted" ? end.reason : "slept";
       const written = appendLine(`${token}-work`, cause);
@@ -293,9 +293,9 @@ function implementLeftBehind(app: Horsies): void {
     });
 
     if (!work.ok) {
-      return sharedSpawnAtDeadline.err({ code: "WORK_FAILED", message: `spawn refused: ${work.error.kind}` });
+      return err({ code: "WORK_FAILED", message: `spawn refused: ${work.error.kind}` });
     }
 
-    return sharedSpawnAtDeadline.ok(await work.value);
+    return ok(await work.value);
   });
 }

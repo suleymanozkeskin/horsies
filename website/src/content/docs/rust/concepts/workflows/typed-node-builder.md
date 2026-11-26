@@ -7,7 +7,7 @@ tags: [rust, workflow, TaskNode, InputField, arg_from, WorkflowContext]
 
 # Typed Node Builder
 
-A task node has the types of its task: `TaskNode<T, I>`, with `T` the task's output type and `I` its input type. The input is set through field tokens of the task's own module, so a field of another task, a value of another type, or a source of another output type is a compile error.
+A task node has the types of its task: `TaskNode<T, I>`, with `T` the task's output type and `I` its input type. The input is set through field tokens of the task's own module, so a field of another task, a value of another type, or a source of another output type is a compile error. A node names its task and reads no registration: the workflow builder of an app resolves it against that app when the node is added.
 
 ## Build a Node
 
@@ -16,7 +16,7 @@ A task node has the types of its task: `TaskNode<T, I>`, with `T` the task's out
 ```rust
 use std::convert::Infallible;
 
-use horsies::{task, HorsiesError, TaskError, TaskOutcome, WorkflowSpec, WorkflowSpecBuilder};
+use horsies::{task, Horsies, HorsiesError, TaskError, TaskOutcome, WorkflowSpec};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,21 +41,21 @@ async fn send_receipt(
     }
 }
 
-fn checkout_spec(order: Order) -> Result<WorkflowSpec, HorsiesError> {
-    let mut builder = WorkflowSpecBuilder::new("checkout");
+fn checkout_spec(app: &Horsies, order: Order) -> Result<WorkflowSpec, HorsiesError> {
+    let mut builder = app.workflow_builder("checkout");
     builder.definition_key("shop.checkout.v1");
     let order_id = order.order_id.clone();
     let charged = builder.task(
-        charge_order::node()?
+        charge_order::node()
             .node_id("charge")
             .set(charge_order::params::order(), order)?,
-    );
+    )?;
     let receipt = builder.task(
-        send_receipt::node()?
+        send_receipt::node()
             .node_id("receipt")
             .set(send_receipt::params::order_id(), order_id)?
             .arg_from(send_receipt::params::charged(), charged),
-    );
+    )?;
     builder.output(receipt);
     builder.build()
 }
@@ -63,11 +63,11 @@ fn checkout_spec(order: Order) -> Result<WorkflowSpec, HorsiesError> {
 
 | Source | Returns |
 |--------|---------|
-| `task_name::node()` | `Result<TaskNode<T, task_name::Input>, HorsiesError>`: the node of the function of the first `task_name::register` in the process. Refuses before it with `HRS-302` (`ErrorCode::WorkflowUnregisteredTask`) |
-| `function.node()` | `TaskNode<T, A>` of a `TaskFunction<A, T, E>` |
+| `task_name::node()` | `TaskNode<T, task_name::Input>`: a node of the task. It reads no registration |
+| `function.node()` | `TaskNode<T, A>` of a `TaskFunction<A, T, E>`, the same node |
 | `task_name::params::<name>()` | `InputField<task_name::Input, F>`: the token of the parameter `<name>` of type `F` |
 
-A new node has the queue, the priority and the options of the task's registration, and the input `{}`. Add it with `builder.task(node)`, which returns its `TypedNodeRef<T>`.
+A new node has the input `{}`. Add it with `builder.task(node)`, which returns `Result<TypedNodeRef<T>, HorsiesError>`. `builder.task` gives the node the queue (unless the node names one with `.queue(name)`), the priority of that queue, the options and the workflow context flag of the task's registration on the builder's app. It refuses with `HRS-302` (`ErrorCode::WorkflowUnregisteredTask`) when the builder's app does not register the task, or registers it with another input or output type. The node is then not added.
 
 ## Set the Input
 
@@ -128,10 +128,10 @@ In the spec of [Build a Node](#build-a-node):
 <!-- rust-check: skip partial -- a fragment of checkout_spec above: builder and charged are its locals -->
 ```rust
 let _audit = builder.task(
-    audit_checkout::node()?
+    audit_checkout::node()
         .waits_for(charged)
         .workflow_ctx_from([charged]),
-);
+)?;
 ```
 
 - Each node of `workflow_ctx_from` must be a dependency of the node: `HRS-009` otherwise. `waits_for` and `arg_from` make a dependency.
@@ -190,10 +190,12 @@ let _audit = builder.task(
 <!-- rust-check: skip elided -- a Wrong / Correct pair of expressions -->
 ```rust
 // Wrong
-audit_checkout::node()?.workflow_ctx_from([charged])
+audit_checkout::node().workflow_ctx_from([charged])
 
 // Correct
-audit_checkout::node()?.waits_for(charged).workflow_ctx_from([charged])
+audit_checkout::node().waits_for(charged).workflow_ctx_from([charged])
 ```
+
+**Do not add a node to a builder of an app that does not register its task.** `builder.task(node)` is then `HRS-302`. Register the task on the app that makes the builder.
 
 **Do not write the fields of a struct parameter at the top level of `input_json`.** A task `fn charge_order(order: Order)` reads `{"order": {...}}`.

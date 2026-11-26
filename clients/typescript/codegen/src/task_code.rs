@@ -1,6 +1,5 @@
-//! `task_code.ts`: the built-in task codes, the two-level code of a task
-//! error, the reserved code names and the metric label of an undeclared
-//! code.
+//! `task_code.ts`: the built-in task codes, the reserved code names and
+//! the metric label of an undeclared code.
 //!
 //! `BuiltInTaskCode` is the union of the literal types of the catalogs of
 //! the core's `BUILT_IN_TASK_CODES`; this module holds no list of its own.
@@ -20,15 +19,6 @@ use crate::ts_text::{import_values, module_text, string_literal, union_alias};
 
 /// The stem of the module, for a renderer that imports from it.
 pub const TASK_CODE_MODULE: &str = "task_code";
-
-/// The type of the two-level code of a task error.
-const TASK_ERROR_CODE_TYPE: &str = "TaskErrorCode";
-
-/// The tag of a code of the library's catalogs in [`TASK_ERROR_CODE_TYPE`].
-const LIBRARY_TAG: &str = "library";
-
-/// The tag of a code that the task declares in [`TASK_ERROR_CODE_TYPE`].
-const USER_TAG: &str = "user";
 
 /// The constant of the values of the built-in codes (the core's union
 /// constant).
@@ -55,8 +45,8 @@ pub fn generated_files() -> Vec<GeneratedFile> {
 }
 
 /// The sections of the module: the imports of the catalogs, the built-in
-/// code type, the two-level code type, the built-in code values, the
-/// reserved names and the undeclared label. Pure.
+/// code type, the built-in code values, the reserved names and the
+/// undeclared label. Pure.
 fn task_code_sections(
     built_in: &CodeUnion,
     reserved: &[&str],
@@ -65,7 +55,6 @@ fn task_code_sections(
     vec![
         catalog_imports(built_in),
         built_in_code_type(built_in),
-        task_error_code_type(built_in),
         built_in_code_values(built_in),
         reserved_codes(reserved),
         format!(
@@ -103,19 +92,6 @@ fn built_in_code_type(union: &CodeUnion) -> String {
         .map(|catalog| catalog_type_reference(catalog).1.to_owned())
         .collect();
     union_alias(code_union_alias_name(union), &members)
-}
-
-/// `TaskErrorCode<U>`: a code of the library's catalogs or a code of the
-/// task's own codes, told apart by `kind`. Pure.
-fn task_error_code_type(union: &CodeUnion) -> String {
-    let built_in = code_union_alias_name(union);
-    union_alias(
-        &format!("{TASK_ERROR_CODE_TYPE}<U extends string>"),
-        &[
-            format!("{{ readonly kind: \"{LIBRARY_TAG}\"; readonly code: {built_in} }}"),
-            format!("{{ readonly kind: \"{USER_TAG}\"; readonly code: U }}"),
-        ],
-    )
 }
 
 /// The frozen array of every member of the catalogs of `union`, catalogs in
@@ -218,10 +194,6 @@ mod tests {
                  import {{ ContractCode, OutcomeCode }} from \"./task_codes.ts\";\n\
                  \n\
                  export type SampleCode =\n  | OutcomeCode\n  | WaitCode\n  | ContractCode;\n\
-                 \n\
-                 export type TaskErrorCode<U extends string> =\n  \
-                 | {{ readonly kind: \"library\"; readonly code: SampleCode }}\n  \
-                 | {{ readonly kind: \"user\"; readonly code: U }};\n\
                  \n\
                  export const BUILT_IN_TASK_CODES: ReadonlyArray<SampleCode> = Object.freeze([\n  \
                  OutcomeCode.TASK_TIMEOUT,\n  WaitCode.ASYNC_CONTEXT,\n  \

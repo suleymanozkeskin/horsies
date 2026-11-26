@@ -13,14 +13,12 @@ use std::time::Duration;
 
 use horsies::rerun::{RerunEnqueuePolicy, RerunOutcome, RerunTask};
 use horsies::{
-    blocking_task, task, AppConfig, ChildPreload, DrainTimeout, Horsies, HorsiesError,
-    IntervalSchedule, IsolatedChildCount, IsolatedChildren, IsolatedSetting, PingTarget,
-    RetryPolicy, ScheduleConfig, SchedulePattern, SharedAsyncChildCount, SharedAsyncChildren,
-    SharedAsyncSeats, SharedAsyncSetting, SharedThreadChildCount, SharedThreadChildren,
-    SharedThreadSeats, SharedThreadSetting, SubWorkflowParams, TaskError, TaskErrorCode,
-    TaskOutcome, TaskRuntime, TaskSchedule, TaskSendError, TaskSendOptions, UserErrorCode,
-    WaitLimit, WorkerPong, WorkerProfile, WorkflowDefConfig, WorkflowDefinition, WorkflowFunction,
-    WorkflowHandle, WorkflowSpecBuilder,
+    blocking_task, task, AppConfig, ChildPreload, Horsies, HorsiesError, IntervalSchedule,
+    IsolatedChildren, IsolatedSetting, PingTarget, RetryPolicy, ScheduleConfig, SchedulePattern,
+    SharedAsyncChildren, SharedAsyncSetting, SharedThreadChildren, SharedThreadSetting,
+    SubWorkflowParams, TaskError, TaskErrorCode, TaskOutcome, TaskRuntime, TaskSchedule,
+    TaskSendError, TaskSendOptions, UserErrorCode, WaitLimit, WorkerPong, WorkerProfile,
+    WorkflowDefConfig, WorkflowDefinition, WorkflowFunction, WorkflowHandle, WorkflowSpecBuilder,
 };
 use uuid::Uuid;
 
@@ -222,16 +220,16 @@ impl WorkflowDefinition for ParityChain {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let first = builder.task(
-            add::node()?
+            add::node()
                 .node_id("add")
                 .set(add::params::a(), 2)?
                 .set(add::params::b(), 3)?,
-        );
+        )?;
         let second = builder.task(
-            double::node()?
+            double::node()
                 .node_id("double")
                 .arg_from(double::params::upstream(), first),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(second))
     }
 }
@@ -254,11 +252,11 @@ impl WorkflowDefinition for ParityChild {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let added = builder.task(
-            add::node()?
+            add::node()
                 .node_id("add")
                 .set(add::params::a(), 2)?
                 .set(add::params::b(), 3)?,
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(added))
     }
 }
@@ -283,10 +281,10 @@ impl WorkflowDefinition for ParityParent {
         let child =
             builder.sub_workflow(ParityChild::node(SubWorkflowParams::NotGiven)?.node_id("child"));
         let doubled = builder.task(
-            double::node()?
+            double::node()
                 .node_id("double")
                 .arg_from(double::params::upstream(), child),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(doubled))
     }
 }
@@ -359,39 +357,28 @@ fn profiles() -> BTreeMap<String, WorkerProfile> {
         shared_async: SharedAsyncSetting::NoSharedAsyncChildren {},
         shared_thread: SharedThreadSetting::NoSharedThreadChildren {},
         preload: ChildPreload::NoPreload,
-        drain_timeout: DrainTimeout::try_from(DRAIN_TIMEOUT)
-            .expect("5 s is above 0 and below 24 hours"),
+        drain_timeout: DRAIN_TIMEOUT,
         ..WorkerProfile::default()
     };
     BTreeMap::from([
         (
             ISOLATED.to_owned(),
             WorkerProfile {
-                isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-                    IsolatedChildCount::from_constant(1),
-                )),
+                isolated: IsolatedChildren::new(1).into(),
                 ..base
             },
         ),
         (
             SHARED_ASYNC.to_owned(),
             WorkerProfile {
-                shared_async: SharedAsyncSetting::SharedAsyncChildren(SharedAsyncChildren::new(
-                    SharedAsyncChildCount::from_constant(1),
-                    SharedAsyncSeats::from_constant(4),
-                )),
+                shared_async: SharedAsyncChildren::new(1, 4).into(),
                 ..base
             },
         ),
         (
             SHARED_THREAD.to_owned(),
             WorkerProfile {
-                shared_thread: SharedThreadSetting::SharedThreadChildren(
-                    SharedThreadChildren::new(
-                        SharedThreadChildCount::from_constant(1),
-                        SharedThreadSeats::from_constant(4),
-                    ),
-                ),
+                shared_thread: SharedThreadChildren::new(1, 4).into(),
                 ..base
             },
         ),
@@ -913,7 +900,7 @@ async fn rerun_one(app: &Horsies, rerun: &Rerun, sent: &[Uuid]) -> Result<Uuid, 
     let source = *sent
         .get(rerun.source)
         .ok_or_else(|| SendRefused(format!("{rerun:?} names no earlier task line")))?;
-    let limit = WaitLimit::parse(Some(RESULT_WAIT)).expect("30 s is below the wait bound");
+    let limit = WaitLimit::Within(RESULT_WAIT);
     match app.get_result::<i64, ParityCode>(source, limit).await {
         Ok(TaskOutcome::Failed(error))
             if *error.code() == TaskErrorCode::User(ParityCode::Refused) => {}

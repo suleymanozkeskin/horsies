@@ -153,15 +153,15 @@ function implementDefault(app: Horsies, instance: DefaultTaskInstance): void {
   app.onChildStart(() => {
     markedStart("hook");
   });
-  app.implement(providedState, (_input, runtime) =>
-    providedState.ok({ bodyPid: process.pid, providerPid: runtime.state(key).pid }),
+  app.implement(providedState, (_input, { ok, state }) =>
+    ok({ bodyPid: process.pid, providerPid: state(key).pid }),
   );
-  app.implement(threadProvidedState, ({ holdMs }, runtime) => {
-    const provided = runtime.state(key);
+  app.implement(threadProvidedState, ({ holdMs }, { ok, state }) => {
+    const provided = state(key);
 
     holdThread(holdMs);
 
-    return threadProvidedState.ok({ bodyPid: process.pid, bodyThreadId: threadId, providerPid: provided.pid, providerThreadId: provided.threadId });
+    return ok({ bodyPid: process.pid, bodyThreadId: threadId, providerPid: provided.pid, providerThreadId: provided.threadId });
   });
   addFailingStartMember(app, instance);
   addInstanceMembers(app, instance);

@@ -84,7 +84,7 @@ def outcome_passed_on(read: ReadResult[str, TaskError]) -> str:
 
 def no_ok_value_on_every_member(read: ReadResult[str, TaskError]) -> object:
     if read.is_ok():
-        return read.ok_value  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
+        return read.ok_value  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]
     return None
 
 

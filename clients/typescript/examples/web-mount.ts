@@ -63,7 +63,7 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(ping, async () => ping.ok("pong"));
+app.implement(ping, async (_input, { ok }) => ok("pong"));
 
 /** Where a request path goes in the app's server. */
 type Route = "home" | "monitoring" | "notFound";
@@ -266,7 +266,7 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`send ping: ${sendErrorText(sent.error)}`);
   }
 
-  printLine(readLine("ping", await sent.value.get({ timeoutMs: RESULT_WAIT_MS }), (text) => text));
+  printLine(readLine("ping", await sent.value.get({ waitMs: RESULT_WAIT_MS }), (text) => text));
 
   return DEMO_DONE;
 }

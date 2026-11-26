@@ -135,11 +135,13 @@ class TaskSendIdempotencyKeyConflict:
     """The idempotency key is reserved by another task with a different command.
 
     Nothing was written. ``owner_task_id`` names the task that holds the key.
+    ``retryable`` is ``True``: the conflict clears when the reservation ends.
     The retry methods accept this error: a retry after the reservation ends
     is accepted, and a retry before that returns the same error.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
+    retryable: ClassVar[bool] = True
     task_id: uuid.UUID
     payload: TaskSendPayload = field(repr=False)
     message: str = field(repr=False)

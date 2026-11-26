@@ -2,8 +2,8 @@
 // top) boots and is ready; it loads no `.node` file (a spy on `process.dlopen`); a sync body that holds the isolate
 // reads the cancel cell that this thread writes; a send goes through the relay as operations of this thread, and a
 // result wait is refused in the isolate; an unawaited rejected Promise is logged and the run keeps its value; a package
-// defect in a body goes to this thread as a `defect`; the database ping and the cancel of a body go through the relay.
-// This thread plays the main thread of the child.
+// defect in a body goes to this thread as a `defect`; the database ping and the cancel of a body go through the relay;
+// the isolate answers the flush of the child's stop. This thread plays the main thread of the child.
 
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
@@ -219,5 +219,10 @@ describe("a seat isolate in a worker thread", () => {
 
     assert.deepEqual(isolate.operations.splice(0), ["facades database pingDatabase", "facades cancel cancelTask"]);
     assert.deepEqual(result.outcome, { kind: "value", json: JSON.stringify("ping 3; cancel TASK_NOT_FOUND") });
+  });
+
+  test("the flush of the child's stop: the isolate answers flushed", async () => {
+    isolate.post({ kind: "flush", protocol: SEAT_PROTOCOL_VERSION });
+    assert.deepEqual(await isolate.next("flushed"), { kind: "flushed", protocol: SEAT_PROTOCOL_VERSION });
   });
 });

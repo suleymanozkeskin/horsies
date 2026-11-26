@@ -55,9 +55,9 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(sendAlert, async ({ message }) => sendAlert.ok(`alert sent: ${message}`));
+app.implement(sendAlert, async ({ message }, { ok }) => ok(`alert sent: ${message}`));
 
-app.implement(rebuildIndex, async ({ shard }) => rebuildIndex.ok(shard));
+app.implement(rebuildIndex, async ({ shard }, { ok }) => ok(shard));
 
 async function demo(): Promise<Result<void, string>> {
   const shards: TaskHandle<number, string>[] = [];
@@ -79,10 +79,10 @@ async function demo(): Promise<Result<void, string>> {
     return demoFailed(`send send_alert: ${sendErrorText(alert.error)}`);
   }
 
-  printLine(readLine("send_alert", await alert.value.get({ timeoutMs: LONG_RESULT_WAIT_MS }), (text) => text));
+  printLine(readLine("send_alert", await alert.value.get({ waitMs: LONG_RESULT_WAIT_MS }), (text) => text));
 
   for (const shard of shards) {
-    const read = await shard.get({ timeoutMs: LONG_RESULT_WAIT_MS });
+    const read = await shard.get({ waitMs: LONG_RESULT_WAIT_MS });
 
     printLine(readLine("rebuild_index", read, (done) => `rebuilt shard ${String(done)}`));
   }
