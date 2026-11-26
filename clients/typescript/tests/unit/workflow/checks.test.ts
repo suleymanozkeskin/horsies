@@ -5,10 +5,10 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { defineTask, type OutputSchema } from "../../../horsies/src/contract/public.ts";
-import { h } from "../../../horsies/src/wire/public.ts";
+import { h, type RequiredWire } from "../../../horsies/src/wire/public.ts";
 import type { AnyNode, BuildReturn } from "../../../horsies/src/workflow/node.ts";
 import { defineWorkflow, type WorkflowBuilder } from "../../../horsies/src/workflow/public.ts";
-import { DEFAULT_QUEUES, findingCodes, passedSpec, viewOf } from "./support.ts";
+import { checked, DEFAULT_QUEUES, findingCodes, passedSpec, viewOf } from "./support.ts";
 
 const ping = defineTask({ name: "ping", input: {}, output: h.int() });
 const add = defineTask({ name: "add", input: { a: h.int(), b: h.resultOf(h.int()) }, output: h.int() });
@@ -505,5 +505,83 @@ describe("the checks", () => {
     );
 
     assert.deepEqual(codes, ["HRS-034", "HRS-014"]);
+  });
+});
+
+/** The codes of a build whose task of output `source` feeds the `h.resultOf(target)` parameter of the output node. */
+function fitCodes(source: OutputSchema, target: RequiredWire): readonly string[] {
+  const from = defineTask({ name: "from", input: {}, output: source });
+  const into = defineTask({ name: "into", input: { value: h.resultOf(target) }, output: h.int() });
+
+  const workflow = flow((w) => {
+    const value = w.task(from, {}, { id: "from" });
+
+    // SAFETY: the target's type is not inferred here; the check compares the stored forms at run time.
+    return { output: w.task(into, { value } as never, { id: "into" }) };
+  });
+
+  const outcome = checked(workflow, {}, viewOf([from, into], []));
+
+  return outcome.ok ? [] : outcome.error.map((found) => found.code);
+}
+
+/** The codes of a build whose output node is a task of output `source`, in a workflow that declares `declared`. */
+function outputCodes(source: OutputSchema, declared: OutputSchema): readonly string[] {
+  const from = defineTask({ name: "from", input: {}, output: source });
+  const workflow = flow((w) => ({ output: w.task(from, {}, { id: "from" }) }), "flow", declared);
+  const outcome = checked(workflow, {}, viewOf([from], []));
+
+  return outcome.ok ? [] : outcome.error.map((found) => found.code);
+}
+
+describe("the stored-form fit of a source (HRS-024, HRS-025)", () => {
+  test("a string source fits an h.resultOf of a nullable string", () => {
+    assert.deepEqual(fitCodes(h.string(), h.string().nullable()), []);
+  });
+
+  test("a literal source fits its base scalar", () => {
+    assert.deepEqual(fitCodes(h.literal("a", "b"), h.string()), []);
+    assert.deepEqual(fitCodes(h.literal(1, 2), h.int()), []);
+  });
+
+  test("an int source fits a float parameter", () => {
+    assert.deepEqual(fitCodes(h.int(), h.float()), []);
+  });
+
+  test("a union source fits a wider union", () => {
+    assert.deepEqual(fitCodes(h.union([h.string(), h.int()]), h.union([h.boolean(), h.int(), h.string()])), []);
+  });
+
+  test("a string output node fits a declared nullable string", () => {
+    assert.deepEqual(outputCodes(h.string(), h.string().nullable()), []);
+  });
+
+  test("a source of another scalar is HRS-024", () => {
+    assert.deepEqual(fitCodes(h.string(), h.int()), ["HRS-024"]);
+  });
+
+  test("a float source for an int parameter is HRS-024: not every float text reads as an int", () => {
+    assert.deepEqual(fitCodes(h.float(), h.int()), ["HRS-024"]);
+  });
+
+  test("a nullable source for a parameter that is not nullable is HRS-024", () => {
+    assert.deepEqual(fitCodes(h.string().nullable(), h.string()), ["HRS-024"]);
+  });
+
+  test("a literal source outside the parameter's literals or base scalar is HRS-024", () => {
+    assert.deepEqual(fitCodes(h.literal("a"), h.literal("b")), ["HRS-024"]);
+    assert.deepEqual(fitCodes(h.literal("a"), h.int()), ["HRS-024"]);
+  });
+
+  test("a wider union source for a narrower union is HRS-024", () => {
+    assert.deepEqual(fitCodes(h.union([h.string(), h.int()]), h.union([h.string()])), ["HRS-024"]);
+  });
+
+  test("an output node of another scalar than the declared output is HRS-025", () => {
+    assert.deepEqual(outputCodes(h.float(), h.int()), ["HRS-025"]);
+  });
+
+  test("a nullable output node for a declared output that is not nullable is HRS-025", () => {
+    assert.deepEqual(outputCodes(h.string().nullable(), h.string()), ["HRS-025"]);
   });
 });

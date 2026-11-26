@@ -20,7 +20,7 @@ import { nodeSlot } from "./builder.ts";
 import type { WorkflowRecord } from "./define.ts";
 import { type CheckedPolicy, type CheckedSpec, finding, type SpecFinding } from "./findings.ts";
 import { compileContract } from "../contract/compile.ts";
-import { storedFormsMatch } from "./kind-match.ts";
+import { storedFormFits } from "./kind-match.ts";
 import { checkNodes, type NodeTarget, sourceOutputOf } from "./node-checks.ts";
 
 /** The most nodes of one workflow (the core's `MAX_WORKFLOW_NODES`). */
@@ -314,7 +314,7 @@ function outputFindings(
     return [finding(ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH, "output", "the declared output does not compile", [])];
   }
 
-  return output.kind === "known" && !storedFormsMatch(output.output, declared.value.output)
+  return output.kind === "known" && !storedFormFits(output.output, declared.value.output)
     ? [
         finding(
           ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,

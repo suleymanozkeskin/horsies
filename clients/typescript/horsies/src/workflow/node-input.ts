@@ -18,7 +18,7 @@ import { unreachable } from "../wire/unreachable.ts";
 import { type BuildSession, nodeSlot } from "./builder.ts";
 import type { CheckedJoin, SpecFinding } from "./findings.ts";
 import { finding } from "./findings.ts";
-import { storedFormsMatch } from "./kind-match.ts";
+import { storedFormFits } from "./kind-match.ts";
 
 /** The stored input of a node with no static member: `{}`, as the codec's writer writes it. */
 export const NO_STATIC_MEMBERS: JsonText = noStaticMembers();
@@ -182,7 +182,7 @@ function upstreamFindings(
 
   switch (output.kind) {
     case "known":
-      if (!storedFormsMatch(output.output, upstreamInner(member.kind))) {
+      if (!storedFormFits(output.output, upstreamInner(member.kind))) {
         findings.push(
           finding(
             ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
