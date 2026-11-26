@@ -1,5 +1,6 @@
 {
   "name": "horsies",
+  "private": true,
   "version": "0.8.1",
   "description": "TypeScript client of the horsies task queue and workflow engine, for Node and Bun",
   "license": "MIT",

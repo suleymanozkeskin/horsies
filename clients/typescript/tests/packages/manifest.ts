@@ -70,7 +70,13 @@ export function optionalDependenciesOf(rows: readonly ReleasePlatform[], version
   return Object.fromEntries(rows.filter((row) => row.release === "publish").map((row) => [platformPackageOf(row), version]));
 }
 
-/** The manifest that the packed `horsies` carries: the committed manifest with the optional dependencies. Pure. */
+/**
+ * The manifest that the packed `horsies` carries: the committed manifest without the field `private`, with the optional
+ * dependencies. The committed file stays private until the release, so no publish from the source folder can happen;
+ * the packed tarball is the publishable form that the checks read. Pure.
+ */
 export function packedManifestOf(manifest: HorsiesManifest, rows: readonly ReleasePlatform[]): JsonObject {
-  return { ...manifest.document, optionalDependencies: optionalDependenciesOf(rows, manifest.version) };
+  const publishable = Object.fromEntries(Object.entries(manifest.document).filter(([field]) => field !== "private"));
+
+  return { ...publishable, optionalDependencies: optionalDependenciesOf(rows, manifest.version) };
 }

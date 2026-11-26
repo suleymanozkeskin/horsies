@@ -52,8 +52,8 @@ describe("optionalDependenciesOf and packedManifestOf", () => {
     assert.deepEqual(optionalDependenciesOf([PUBLISHED, HELD], "0.8.1"), { "@horsies/native-linux-x64-gnu": "0.8.1" });
   });
 
-  test("the packed manifest is the committed one with the optional dependencies", () => {
-    const manifest = { version: "0.8.1", document: { name: "horsies", version: "0.8.1" } };
+  test("the packed manifest is the committed one without private, with the optional dependencies", () => {
+    const manifest = { version: "0.8.1", document: { name: "horsies", private: true, version: "0.8.1" } };
 
     assert.deepEqual(packedManifestOf(manifest, [PUBLISHED, HELD]), {
       name: "horsies",
@@ -62,12 +62,16 @@ describe("optionalDependenciesOf and packedManifestOf", () => {
     });
   });
 
-  test("the committed manifest has no optional dependencies: the pack writes them", () => {
+  test("the committed manifest is private and has no optional dependencies: the pack writes the publishable form", () => {
     const read = readHorsiesManifest();
+
+    assert.ok(read.ok);
+    assert.equal(read.value.document["private"], true);
+    assert.equal(read.value.document["optionalDependencies"], undefined);
+
     const rows = readPlatformList();
 
-    assert.ok(read.ok && rows.ok);
-    assert.equal(read.value.document["optionalDependencies"], undefined);
-    assert.equal(read.value.document["private"], undefined);
+    assert.ok(rows.ok);
+    assert.equal("private" in packedManifestOf(read.value, rows.value), false);
   });
 });
