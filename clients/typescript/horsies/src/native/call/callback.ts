@@ -7,6 +7,9 @@
 // - The wrapper never throws and never rejects: a throw into Node-API ends the process.
 // - A thrown value stays in this module, keyed by the call id. The core gets its name and message;
 //   when the operation ends, the package takes the value back (`takeThrown`) and throws it again.
+// - The take form (`takingCallback`): the wrapper first tells the core that the JavaScript thread took
+//   the call (`takeCallback(callId)`). A core that no longer waits answers `unknownCall`, and the
+//   function does not run.
 
 import { ClientDefect, CoreError } from "../../thrown-errors.ts";
 import type { CoreDefect } from "../../thrown-errors.ts";
@@ -25,6 +28,7 @@ export type NotRunCause = "queueFull" | "envClosing";
 
 /** The functions of the `call` area. */
 export interface CallAddon {
+  takeCallback(callId: bigint): NativeEnvelope<SettleOutcome>;
   settleCallbackReturned<Answer>(callId: bigint, value: Answer): NativeEnvelope<SettleOutcome>;
   settleCallbackThrew(callId: bigint, name: string, message: string): NativeEnvelope<SettleOutcome>;
 }
@@ -70,6 +74,36 @@ export function settlingCallback<Argument, Answer>(
       },
     );
   };
+}
+
+/**
+ * The wrapper of `run`, a settling wrapper, in the take form: it calls `take` with the call id first, and runs `run`
+ * only when the core still waits for the call (`settled`). It never throws.
+ */
+export function takingCallback<Argument>(
+  run: (callId: bigint, argument: Argument) => void,
+  take: (callId: bigint) => SettleEnd,
+): (callId: bigint, argument: Argument) => void {
+  return (callId, argument) => {
+    const taken = take(callId);
+
+    switch (taken) {
+      case "settled":
+        run(callId, argument);
+
+        return;
+      case "unknownCall":
+      case "notSettled":
+        return;
+      default:
+        unreachable(taken);
+    }
+  };
+}
+
+/** The take call of the addon; a failed take call is a defect, which goes to the defect rule. Never throws. */
+export function addonTake(callId: bigint): SettleEnd {
+  return settleSafely(() => callAddon().takeCallback(callId), reportDefect);
 }
 
 /** The settle calls of the addon. */

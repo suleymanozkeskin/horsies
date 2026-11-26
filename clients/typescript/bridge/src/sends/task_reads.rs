@@ -324,7 +324,8 @@ pub enum RecordedText {
 }
 
 impl RecordedText {
-    fn of(text: Option<String>) -> Self {
+    /// The fact of a text that a row may not hold. Pure.
+    pub fn of(text: Option<String>) -> Self {
         match text {
             None => Self::NotRecorded,
             Some(text) => Self::Recorded { text },
@@ -346,7 +347,8 @@ pub enum RecordedInstant {
 }
 
 impl RecordedInstant {
-    fn of(instant: Option<DateTime<Utc>>) -> Self {
+    /// The fact of an instant that a row may not hold. Pure.
+    pub fn of(instant: Option<DateTime<Utc>>) -> Self {
         match instant {
             None => Self::NotRecorded,
             Some(instant) => Self::Recorded {

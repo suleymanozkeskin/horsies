@@ -45,7 +45,7 @@
     },
     {
       "path": "NodeById",
-      "form": "N extends NodeRef<unknown, string, infer NodeId> ? ... : never",
+      "form": "N extends NodeRef<unknown, string, infer NodeId> ? (Id extends NodeId ? N : never) : never",
       "role": "Match position",
       "model": "NodeById<N, Id>"
     }

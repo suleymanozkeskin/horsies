@@ -9,7 +9,7 @@ import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { allowAll } from "../../../horsies/src/web/auth.ts";
 import { serveOnBun } from "../../../horsies/src/web/bun-server.ts";
-import { createMonitoringHandler, EVENT_HEARTBEAT_MS } from "../../../horsies/src/web/handler.ts";
+import { EVENT_HEARTBEAT_MS, monitoringHandlerOf } from "../../../horsies/src/web/handler.ts";
 import { serveOnNode } from "../../../horsies/src/web/node-server.ts";
 import type { HandlerFailureReport, RunningServer, ServeOutcome } from "../../../horsies/src/web/server.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
@@ -41,7 +41,7 @@ describe("the servers of the web command with a built addon and a database", () 
   });
 
   test("it serves the page on Node's server", async () => {
-    const handler = createMonitoringHandler(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
+    const handler = monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
       auth: allowAll(),
     });
 
@@ -59,7 +59,7 @@ describe("the servers of the web command with a built addon and a database", () 
   });
 
   test("on Bun an idle event stream lives past one heartbeat", { skip: notOnBun, timeout: IDLE_STREAM_TEST_MS }, async () => {
-    const handler = createMonitoringHandler(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
+    const handler = monitoringHandlerOf(testApp(probedHandle(manifestJson(testDatabaseUrl(), false))), {
       auth: allowAll(),
     });
 

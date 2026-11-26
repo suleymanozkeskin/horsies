@@ -39,6 +39,24 @@ const TESTS_DIR: string = fileURLToPath(new URL("../../", import.meta.url));
 
 const READER_PATHS: readonly ReaderPath[] = [
   {
+    module: "workflow/handle.ts",
+    maker: "jsonTextCheckedByCore",
+    checkedBy: "nodeResult",
+    proof: {
+      file: "unit/workflow/handle.test.ts",
+      test: "a stored text that the core's strict check refuses ends as storedResultUnreadable and never reaches the reader",
+    },
+  },
+  {
+    module: "workflow/child-spec.ts",
+    maker: "jsonTextCheckedByCore",
+    checkedBy: "inputText",
+    proof: {
+      file: "runtime/native/workflows-addon.test.ts",
+      test: "a stored input that the core's strict read refuses fails the node and never calls the build",
+    },
+  },
+  {
     module: "read/handle.ts",
     maker: "jsonTextCheckedByCore",
     checkedBy: "getResult",

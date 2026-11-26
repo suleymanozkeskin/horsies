@@ -12,6 +12,7 @@ import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { processCoreAddon } from "../../../horsies/src/native/process-core/addon.ts";
 import { nativeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
 import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
@@ -43,7 +44,14 @@ function access(handle: CoreHandle): CoreAccess {
   return {
     kind: "addon",
     handle,
-    producer: { prepareSend: noSend, enqueue: noSend, getResult: noSend, taskInfo: noSend, processRole: noSend },
+    producer: {
+      prepareSend: noSend,
+      enqueue: noSend,
+      getResult: noSend,
+      taskInfo: noSend,
+      processRole: noSend,
+      workflows: noWorkflowCore(),
+    },
   };
 }
 

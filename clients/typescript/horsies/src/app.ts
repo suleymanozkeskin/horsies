@@ -3,7 +3,7 @@
 
 import { implementationOf, type BodyFor, type Implementation, type ImplementOptions } from "./contract/implementation.ts";
 import type { ExecutionClass, TaskContract } from "./contract/define-task.ts";
-import type { TaskId } from "./contract/ids.ts";
+import type { TaskId, WorkflowId } from "./contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue, SendableInput } from "./contract/schema.ts";
 import { readFormOf, type TaskHandle, taskHandleOf } from "./read/handle.ts";
 import type { RetryableSendError, TaskSendError } from "./send/errors.ts";
@@ -21,6 +21,13 @@ import {
 import { registerImplementation } from "./app/implement.ts";
 import { recordAppContext } from "./app/internals.ts";
 import { appCoreHandle } from "./app/core-access.ts";
+import { createWorkflowArea, type WorkflowArea } from "./workflow/app-area.ts";
+import { workflowCoreOf } from "./workflow/core.ts";
+import type { WorkflowContract } from "./workflow/define.ts";
+import type { WorkflowHandle, WorkflowHandleById } from "./workflow/handle.ts";
+import type { BuildReturn } from "./workflow/node.ts";
+import { NO_OP_START_OBSERVER, type StartOptions } from "./workflow/start.ts";
+import type { StartEnqueueFailed, WorkflowStartError } from "./workflow/start-error.ts";
 import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
 import type { StateKey } from "./child/state.ts";
 import type { EventTypeName } from "./_catalog/worker_manifest.ts";
@@ -40,6 +47,7 @@ let constructApp: (context: AppContext) => Horsies;
 /** A horsies app. `Horsies.create` builds it. */
 export class Horsies {
   readonly #context: AppContext;
+  readonly #workflows: WorkflowArea;
   readonly #monitoringArea: MonitoringArea;
   readonly #rerunArea: RerunArea;
 
@@ -52,6 +60,13 @@ export class Horsies {
 
   private constructor(context: AppContext) {
     this.#context = context;
+    this.#workflows = createWorkflowArea({
+      core: workflowCoreOf(context.core),
+      registry: context.workflows,
+      observer: NO_OP_START_OBSERVER,
+      now: () => Temporal.Now.instant(),
+      newWorkflowId: () => crypto.randomUUID(),
+    });
     this.#monitoringArea = createMonitoringArea(context.core);
     this.monitoring = this.#monitoringArea.monitoring;
     this.#rerunArea = createRerunArea({
@@ -143,6 +158,33 @@ export class Horsies {
    */
   async retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {
     return retrySend(this.#context.send, error);
+  }
+
+  /**
+   * Start a workflow: its handle, or the start error. The same `workflowId` with the same params returns the existing
+   * run; other params under the id give `WORKFLOW_COMMAND_CONFLICT`; another workflow under it `WORKFLOW_ID_CONFLICT`.
+   */
+  async start<P extends ParameterSchemas, R extends BuildReturn>(
+    workflow: WorkflowContract<P, R>,
+    params: NoInfer<SendableInput<P>>,
+    options: StartOptions = {},
+  ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
+    return this.#workflows.start(workflow, params, options);
+  }
+
+  /** Send again the spec of `ENQUEUE_FAILED`, under the same workflow id. */
+  async retryStart<R extends BuildReturn>(
+    error: StartEnqueueFailed<R>,
+  ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
+    return this.#workflows.retryStart(error);
+  }
+
+  /** A typed handle of a stored workflow id, with no I/O. `resultFor` takes the node's contract. */
+  workflowHandle<P extends ParameterSchemas, R extends BuildReturn>(
+    workflow: WorkflowContract<P, R>,
+    workflowId: WorkflowId,
+  ): WorkflowHandleById<R> {
+    return this.#workflows.workflowHandle(workflow, workflowId);
   }
 
   /** A typed handle of a stored task id, with no I/O. The contract gives the types only; the app need not list it. */

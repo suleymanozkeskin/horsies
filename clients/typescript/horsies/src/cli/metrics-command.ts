@@ -21,6 +21,7 @@ import { nativeValue, nativeValueAsync } from "../native/call/envelope.ts";
 import { unreachable } from "../native/call/never.ts";
 import { fleetMetricsAddon } from "../native/facades/fleet-metrics.ts";
 import type { FleetMetricsRunEnd, MetricsListenAddressCheck } from "../native/facades/fleet-metrics.ts";
+import { monitoringAppOf } from "../web/app-facts.ts";
 import type { MonitoringHandlerApp } from "../web/handler.ts";
 import { err, ok } from "../wire/result.ts";
 import type { Result } from "../wire/result.ts";
@@ -39,7 +40,6 @@ import {
   type UsageError,
   usageErrorLines,
 } from "./usage.ts";
-import { monitoringAppOf } from "./web-command.ts";
 
 /** The usage line of `metrics`. */
 export const METRICS_USAGE = "<entry> metrics --listen HOST:PORT [--loglevel LEVEL]";
