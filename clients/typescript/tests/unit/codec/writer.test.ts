@@ -278,8 +278,8 @@ describe("writer: the check in front of the reader", () => {
 });
 
 describe("writer: the declared member list", () => {
-  // A kind with the members `b`, then `10`, in this order. An object literal cannot hold that order: JavaScript puts
-  // the integer-like key `10` first in `{ b: ..., "10": ... }`.
+  // A kind with the members `b`, then `10`, in this order, built without `h.object`: `checkKind` refuses the
+  // integer-like name `10` of `h.object` (`IntegerLikeMember`). The writer follows the member list in any case.
   const declared = objectKind([
     { name: "b", kind: INT_KIND, presence: REQUIRED },
     { name: "10", kind: INT_KIND, presence: REQUIRED },
