@@ -39,8 +39,32 @@ function storedKind(kind: Kind, depth: number): Kind {
       return storedKind(kind.inner, depth + 1);
     case "conversion":
       return storedKind(kind.stored, depth + 1);
-    default:
+    case "null":
+    case "boolean":
+    case "int":
+    case "bigint":
+    case "float":
+    case "string":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "json":
+    case "literal":
+    case "union":
+    case "taggedUnion":
+    case "nullable":
+    case "resultOf":
+    case "array":
+    case "tuple":
+    case "record":
+    case "object":
       return kind;
+    default:
+      return unreachable(kind, "storedKind");
   }
 }
 
@@ -175,8 +199,31 @@ function fitsAt(sourceGiven: Kind, targetGiven: Kind, depth: number): boolean {
       return source.variants.every((variant) => fitsAt(variant, target, depth + 1));
     case "nullable":
       return fitsAt(source.inner, target, depth + 1) && fitsAt(NULL_KIND, target, depth + 1);
-    default:
+    case "null":
+    case "boolean":
+    case "int":
+    case "bigint":
+    case "float":
+    case "string":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "json":
+    case "checked":
+    case "conversion":
+    case "literal":
+    case "resultOf":
+    case "array":
+    case "tuple":
+    case "record":
+    case "object":
       return fitsTarget(source, target, depth);
+    default:
+      return unreachable(source, "fitsAt");
   }
 }
 
@@ -189,8 +236,31 @@ function fitsTarget(source: Kind, target: Kind, depth: number): boolean {
       return target.members.some((member) => fitsAt(source, member, depth + 1));
     case "taggedUnion":
       return target.variants.some((variant) => fitsAt(source, variant, depth + 1));
-    default:
+    case "null":
+    case "boolean":
+    case "int":
+    case "bigint":
+    case "float":
+    case "string":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "json":
+    case "checked":
+    case "conversion":
+    case "literal":
+    case "resultOf":
+    case "array":
+    case "tuple":
+    case "record":
+    case "object":
       return fitsSameNode(source, target, depth);
+    default:
+      return unreachable(target, "fitsTarget");
   }
 }
 
@@ -215,9 +285,28 @@ function fitsSameNode(source: Kind, target: Kind, depth: number): boolean {
       return target.node === "object" && objectFits(source, target, depth);
     case "resultOf":
       return target.node === "resultOf" && fitsAt(source.inner, target.inner, depth + 1);
-    default:
+    case "null":
+    case "boolean":
+    case "bigint":
+    case "float":
+    case "string":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "json":
+    case "checked":
+    case "conversion":
+    case "nullable":
+    case "union":
+    case "taggedUnion":
       // Every other form fits only its own form, which `matchAt` compared.
       return false;
+    default:
+      return unreachable(source, "fitsSameNode");
   }
 }
 
@@ -235,8 +324,28 @@ function literalFits(member: LiteralMember, target: Kind): boolean {
       return isBoolean(member);
     case "null":
       return member === null;
-    default:
+    case "bigint":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "json":
+    case "checked":
+    case "conversion":
+    case "nullable":
+    case "union":
+    case "taggedUnion":
+    case "resultOf":
+    case "array":
+    case "tuple":
+    case "record":
+    case "object":
       return false;
+    default:
+      return unreachable(target, "literalFits");
   }
 }
 

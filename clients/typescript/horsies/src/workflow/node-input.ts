@@ -218,7 +218,31 @@ function upstreamInner(kind: Kind): Kind {
       return kind.inner;
     case "nullable":
       return upstreamInner(kind.inner);
-    default:
+    case "null":
+    case "boolean":
+    case "int":
+    case "bigint":
+    case "float":
+    case "string":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "json":
+    case "checked":
+    case "conversion":
+    case "literal":
+    case "union":
+    case "taggedUnion":
+    case "array":
+    case "tuple":
+    case "record":
+    case "object":
       throw new TypeError(`upstreamInner: the kind ${kind.node} is not an upstream outcome`);
+    default:
+      return unreachable(kind, "upstreamInner");
   }
 }
