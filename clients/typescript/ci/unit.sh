@@ -144,7 +144,8 @@ bun run --cwd eslint-plugin test
 
 # The ESLint config of the lint rule package (horsies/no-dropped-result and
 # @typescript-eslint/switch-exhaustiveness-check) on the client's own code:
-# the files of horsies/tsconfig.json and tests/tsconfig.json. A dropped Result
+# the files of horsies/tsconfig.json, tests/tsconfig.json, examples/tsconfig.json
+# and examples/showcase/tsconfig.json. A dropped Result
 # or a switch that misses a member of a union fails the step.
 print_step_title "Lint the client's own code with ESLint: dropped results and switch cases"
 node eslint-plugin/lint-client.ts
