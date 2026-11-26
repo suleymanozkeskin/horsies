@@ -63,6 +63,4 @@ export type {
   WorkflowPlace,
 } from "../_catalog/events.ts";
 
-export type { BuiltInTaskCode } from "../_catalog/task_code.ts";
-
 export type { ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode } from "../_catalog/task_codes.ts";

@@ -113,7 +113,7 @@ export type AttemptErrorCode = AttemptErrorCodeBuiltIn | AttemptErrorCodeUser | 
 // @public (undocumented)
 export interface AttemptErrorCodeBuiltIn {
     // (undocumented)
-    readonly code: BuiltInTaskCode;
+    readonly code: LibraryTaskCode;
     // (undocumented)
     readonly kind: "library";
 }
@@ -376,9 +376,6 @@ export const BrokerErrorCode: {
 
 // @public (undocumented)
 export type BrokerErrorCode = (typeof BrokerErrorCode)[keyof typeof BrokerErrorCode];
-
-// @public (undocumented)
-export type BuiltInTaskCode = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode;
 
 // @public
 export type CancelCause = "DEADLINE" | "OPERATOR";
@@ -1154,8 +1151,8 @@ export type LeftOutBySender<S> = S extends AnyWire ? (PresenceOf<S> extends "req
 // @public
 export const LIBRARY_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "BROKER_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CTX_MISSING_ID", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUBWORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
 
-// @public
-export type LibraryTaskCode = (typeof LIBRARY_TASK_CODES)[number];
+// @public (undocumented)
+export type LibraryTaskCode = OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode;
 
 // @public
 export type LiteralMember = string | number | boolean | null;
