@@ -343,7 +343,7 @@ def _task_row(summary: str | None, result_json: str | None = None) -> MagicMock:
         completed_at=None,
         sub_workflow_id=uuid.UUID('00000000-0000-0000-0000-0000000000c1'),
         sub_workflow_summary_json=summary,
-        is_subworkflow=True,
+        is_sub_workflow=True,
         sub_definition_key=None,
     )
 

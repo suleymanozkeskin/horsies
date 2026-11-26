@@ -49,7 +49,7 @@ from horsies.web.schema import (  # noqa: E402 - must follow the extra guard
     SchemaState,
     SchemaStatus,
 )
-from horsies.web.auth import (  # noqa: E402 - must follow the extra guard
+from horsies.web.authorization import (  # noqa: E402 - must follow the extra guard
     INTENT_HEADER,
     INTENT_VALUE,
     Actions,

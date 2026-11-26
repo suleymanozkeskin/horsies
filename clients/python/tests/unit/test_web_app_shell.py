@@ -141,7 +141,7 @@ class TestAuthorizationGate:
         [
             '/api/meta',
             '/api/tasks',
-            '/api/tasks/stats',
+            '/api/tasks/status-counts',
             '/api/tasks/facets',
             '/api/tasks/breakdown',
             '/api/tasks/00000000-0000-4000-8000-000000000001',
@@ -237,7 +237,7 @@ class TestUnreachableDatabase:
         'path,surface',
         [
             ('/api/tasks', 'Task list'),
-            ('/api/tasks/stats', 'Task stats'),
+            ('/api/tasks/status-counts', 'Task stats'),
             ('/api/tasks/facets', 'Task facets'),
             ('/api/tasks/breakdown', 'Task breakdown'),
             (
@@ -278,7 +278,7 @@ class TestRequestValidation:
         'path',
         [
             '/api/tasks?status=NOT_A_STATUS',
-            '/api/tasks?sort_by=drop_table',
+            '/api/tasks?sort_field=drop_table',
             '/api/tasks/breakdown?group_by=nonsense',
             '/api/tasks/facets?status=NOPE',
         ],
@@ -294,7 +294,7 @@ class TestRequestValidation:
     @pytest.mark.parametrize(
         'path',
         [
-            '/api/tasks?sort_dir=sideways',
+            '/api/tasks?sort_direction=sideways',
             '/api/tasks?limit=0',
             '/api/tasks?limit=201',
             '/api/tasks?offset=-1',
@@ -313,9 +313,9 @@ class TestRequestValidation:
         assert response.status_code == 422
 
 
-    @pytest.mark.parametrize('task_index', ['2147483648', '-2147483649', '1' * 40])
+    @pytest.mark.parametrize('node_index', ['2147483648', '-2147483649', '1' * 40])
     async def test_a_node_index_outside_the_integer_column_is_not_found(
-        self, task_index: str,
+        self, node_index: str,
     ) -> None:
         """An index that names no node is 404 with no read: with an
         unreachable database a read would answer 503."""
@@ -323,7 +323,7 @@ class TestRequestValidation:
 
         async with client_for(app) as client:
             response = await client.get(
-                f'/api/workflows/{uuid.uuid4()}/tasks/{task_index}',
+                f'/api/workflows/{uuid.uuid4()}/tasks/{node_index}',
             )
 
         assert response.status_code == 404
@@ -490,7 +490,7 @@ class TestMountedAnywhere:
         )
 
         async with client_for(host) as client:
-            response = await client.get('/monitoring/api/tasks/stats')
+            response = await client.get('/monitoring/api/tasks/status-counts')
 
         assert response.status_code == 503
 

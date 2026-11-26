@@ -1,6 +1,6 @@
 //! The access policy of the monitoring mount: user code that decides, per
 //! request, whether the request may read and whether it may act (Python
-//! `horsies.web.auth`).
+//! `horsies.web.authorization`).
 
 use std::future::Future;
 

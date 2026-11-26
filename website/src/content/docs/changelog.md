@@ -173,8 +173,17 @@ there is no migration contract between pre-1.0 versions.
     keys.
   - The sort values of `GET /api/tasks` are `queue`, `queue_seconds` and
     `execution_seconds` (were `queue_name`, `queue_s` and `exec_s`). An old
-    value gets 400. The query parameter names (`sort_by`, `sort_dir`, `name`)
-    do not change.
+    value gets 400.
+  - Query parameters of the web routes: `sort_field` (was `sort_by`),
+    `sort_direction` (was `sort_dir`) with the values `ASCENDING` and
+    `DESCENDING` (were `asc` and `desc`), and `workflow_name` (was `name`) on
+    `GET /api/workflows`. Another `sort_direction` value gets 422.
+  - Path segment `{node_index}` (was `{task_index}`) of
+    `GET /api/workflows/{workflow_id}/tasks/{node_index}`. The route
+    `GET /api/tasks/status-counts` replaces `GET /api/tasks/stats`.
+  - Python: the module `horsies.web.authorization` replaces
+    `horsies.web.auth`. The members `is_sub_workflow` of the stored node
+    records replace `is_subworkflow`.
   - The SQL functions and their output columns keep their names. There is no
     migration.
 - **Breaking: the operator cancel takes a `CancelPolicy`.** The old

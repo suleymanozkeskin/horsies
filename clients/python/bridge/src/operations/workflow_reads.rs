@@ -75,7 +75,7 @@ pub struct StoredNodeResultRecord {
     pub task_name: String,
     /// The stored result envelope.
     pub result_json: String,
-    pub is_subworkflow: bool,
+    pub is_sub_workflow: bool,
     pub sub_definition_key: Option<String>,
 }
 
@@ -85,7 +85,7 @@ impl From<StoredNodeResult> for StoredNodeResultRecord {
             node_id: node.node_id,
             task_name: node.task_name,
             result_json: node.result,
-            is_subworkflow: node.is_subworkflow,
+            is_sub_workflow: node.is_subworkflow,
             sub_definition_key: node.sub_definition_key,
         }
     }
@@ -131,7 +131,7 @@ pub struct StoredNodeRecord {
     pub completed_at: Option<DateTime<Utc>>,
     pub sub_workflow_id: Option<Uuid>,
     pub sub_workflow_summary_json: Option<String>,
-    pub is_subworkflow: bool,
+    pub is_sub_workflow: bool,
     pub sub_definition_key: Option<String>,
 }
 
@@ -147,7 +147,7 @@ impl From<StoredNode> for StoredNodeRecord {
             completed_at: node.completed_at,
             sub_workflow_id: node.sub_workflow_id,
             sub_workflow_summary_json: node.sub_workflow_summary,
-            is_subworkflow: node.is_subworkflow,
+            is_sub_workflow: node.is_subworkflow,
             sub_definition_key: node.sub_definition_key,
         }
     }

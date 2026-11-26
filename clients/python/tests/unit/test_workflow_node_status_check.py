@@ -82,7 +82,7 @@ def _node_row(status: str) -> MagicMock:
         completed_at=None,
         sub_workflow_id=None,
         sub_workflow_summary_json=None,
-        is_subworkflow=False,
+        is_sub_workflow=False,
         sub_definition_key=None,
     )
 

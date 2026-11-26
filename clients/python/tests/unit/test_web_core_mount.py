@@ -238,7 +238,7 @@ class TestBoundedBody:
 REFUSED_VIEW_PATHS: Final = (
     ('GET', '/api/meta'),
     ('GET', '/api/tasks'),
-    ('GET', '/api/tasks/stats'),
+    ('GET', '/api/tasks/status-counts'),
     ('GET', '/api/tasks/00000000-0000-4000-8000-000000000001'),
     ('GET', '/api/workflows'),
     ('GET', '/api/workflows/00000000-0000-4000-8000-000000000002/tasks/0'),
@@ -289,7 +289,7 @@ READ_REFUSALS: Final = (
             'detail': [
                 {
                     'type': 'int_parsing',
-                    'loc': ['path', 'task_index'],
+                    'loc': ['path', 'node_index'],
                     'msg': 'Input should be a valid integer, unable to parse string as an integer',
                     'input': 'x',
                 },

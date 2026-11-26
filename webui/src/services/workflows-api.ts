@@ -14,7 +14,7 @@ export const listWorkflowRuns = (
   params: { name?: string; status?: string; limit?: number } = {}
 ): Promise<WorkflowRunSummary[]> =>
   apiGet<WorkflowRunSummary[]>('/workflows', {
-    ...(params.name === undefined ? {} : { name: params.name }),
+    ...(params.name === undefined ? {} : { workflow_name: params.name }),
     ...(params.status === undefined ? {} : { status: params.status }),
     ...(params.limit === undefined ? {} : { limit: params.limit }),
   });

@@ -258,7 +258,7 @@ class TestTaskReads:
     ) -> None:
         await persist(session, make_task(status=TaskStatus.FAILED))
 
-        response = await api.get('/api/tasks/stats')
+        response = await api.get('/api/tasks/status-counts')
 
         assert response.status_code == 200
         body = response.json()
@@ -278,11 +278,11 @@ class TestTaskReads:
     ) -> None:
         """A second poll of the same scope inside the TTL is the cached answer."""
         await persist(session, make_task(status=TaskStatus.FAILED))
-        first = (await api.get('/api/tasks/stats')).json()
+        first = (await api.get('/api/tasks/status-counts')).json()
 
         await persist(session, make_task(status=TaskStatus.FAILED))
-        second = (await api.get('/api/tasks/stats')).json()
-        other_scope = (await api.get('/api/tasks/stats?retried_only=false&queue=default')).json()
+        second = (await api.get('/api/tasks/status-counts')).json()
+        other_scope = (await api.get('/api/tasks/status-counts?retried_only=false&queue=default')).json()
 
         failed = {row['status']: row['count'] for row in first}['FAILED']
         assert failed == 1
@@ -371,7 +371,7 @@ class TestTaskReads:
         scope = 'error_category=OPERATIONAL'
 
         listing = (await api.get(f'/api/tasks?{scope}')).json()
-        stats = (await api.get(f'/api/tasks/stats?{scope}')).json()
+        stats = (await api.get(f'/api/tasks/status-counts?{scope}')).json()
         breakdown = (
             await api.get(f'/api/tasks/breakdown?group_by=task_name&{scope}')
         ).json()
@@ -406,7 +406,7 @@ class TestTaskReads:
 
     @pytest.mark.parametrize(
         'path',
-        ['/api/tasks', '/api/tasks/stats', '/api/tasks/breakdown', '/api/tasks/facets'],
+        ['/api/tasks', '/api/tasks/status-counts', '/api/tasks/breakdown', '/api/tasks/facets'],
     )
     async def test_unknown_error_category_is_a_bad_request(
         self, api: AsyncClient, path: str
@@ -1065,7 +1065,7 @@ class TestMountedUnderAHost:
         async with AsyncClient(
             transport=ASGITransport(app=host), base_url='http://test'
         ) as client:
-            stats = await client.get('/monitoring/api/tasks/stats')
+            stats = await client.get('/monitoring/api/tasks/status-counts')
             meta = await client.get('/monitoring/api/meta')
 
         assert stats.status_code == 200

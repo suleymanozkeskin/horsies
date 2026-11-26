@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 from starlette.requests import Request
 
-from horsies.web.auth import (
+from horsies.web.authorization import (
     Actions,
     AllowAll,
     TrustedHeader,

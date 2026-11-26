@@ -32,8 +32,8 @@ use crate::monitoring::{ActionBody, ActionOutcome, INTERNAL_SERVER_ERROR_TEXT};
 use super::app::WebState;
 use super::common::{
     broker_read_failed, pagination_refused, parse_error_categories, parse_f64, parse_fastapi_bool,
-    parse_group_by, parse_i64, parse_path_integer, parse_path_uuid, parse_sort_by,
-    parse_sort_direction, parse_statuses, query_failed, validate_f64_range, validate_i64_range,
+    parse_group_by, parse_i64, parse_path_integer, parse_path_uuid, parse_sort_direction,
+    parse_sort_field, parse_statuses, query_failed, validate_f64_range, validate_i64_range,
     ApiError, PathInteger, QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
@@ -42,7 +42,7 @@ use super::stdlib_uuid_text::parse_stdlib_uuid_text;
 
 pub(crate) fn read_router() -> Router<WebState> {
     Router::new()
-        .route("/tasks/stats", get(read_task_stats))
+        .route("/tasks/status-counts", get(read_task_stats))
         .route("/tasks/facets", get(read_task_facets))
         .route("/tasks/breakdown", get(read_task_breakdown))
         .route("/tasks", get(read_tasks))
@@ -51,7 +51,7 @@ pub(crate) fn read_router() -> Router<WebState> {
         .route("/workflows", get(read_workflows))
         .route("/workflows/{workflow_id}", get(read_workflow))
         .route(
-            "/workflows/{workflow_id}/tasks/{task_index}",
+            "/workflows/{workflow_id}/tasks/{node_index}",
             get(read_workflow_task),
         )
         .route("/workers/ping", get(read_worker_ping))
@@ -300,8 +300,8 @@ struct TaskListParams {
     error_code: Vec<String>,
     error_category: Vec<String>,
     retried_only: bool,
-    sort_by: String,
-    sort_dir: String,
+    sort_field: String,
+    sort_direction: String,
     offset: i64,
     limit: i64,
 }
@@ -319,8 +319,14 @@ impl TaskListParams {
             error_code: values.all("error_code"),
             error_category: values.all("error_category"),
             retried_only: parse_fastapi_bool(values, "retried_only", false)?,
-            sort_by: values.last("sort_by").unwrap_or("enqueued_at").to_owned(),
-            sort_dir: values.last("sort_dir").unwrap_or("desc").to_owned(),
+            sort_field: values
+                .last("sort_field")
+                .unwrap_or("enqueued_at")
+                .to_owned(),
+            sort_direction: values
+                .last("sort_direction")
+                .unwrap_or("DESCENDING")
+                .to_owned(),
             offset: validate_i64_range(values, "offset", offset, 0, i64::MAX)?,
             limit: validate_i64_range(values, "limit", limit, 1, 200)?,
         })
@@ -352,8 +358,8 @@ async fn read_tasks(
     let query = TaskListQuery::new(window)
         .with_filters(filters)
         .with_sort(
-            parse_sort_by(&params.sort_by)?,
-            parse_sort_direction(&params.sort_dir)?,
+            parse_sort_field(&params.sort_field)?,
+            parse_sort_direction(&params.sort_direction)?,
         )
         .with_pagination(params.offset, params.limit)
         .map_err(|error| pagination_refused(error, &values, "limit", params.limit))?;
@@ -412,7 +418,7 @@ impl WorkflowParams {
     fn from_values(values: &QueryValues) -> Result<Self, ApiError> {
         let limit = parse_i64(values, "limit", 30)?;
         Ok(Self {
-            workflow_name: values.last("name").map(str::to_owned),
+            workflow_name: values.last("workflow_name").map(str::to_owned),
             status: values.last("status").map(str::to_owned),
             limit: validate_i64_range(values, "limit", limit, 1, 200)?,
         })
@@ -472,33 +478,33 @@ async fn read_workflow(
 /// no node: 404, with no database call.
 async fn read_workflow_task(
     State(state): State<WebState>,
-    Path((workflow_id, task_index)): Path<(String, String)>,
+    Path((workflow_id, node_index)): Path<(String, String)>,
 ) -> Result<Json<crate::monitoring::WorkflowNodeDetail>, ApiError> {
-    let task_index = match parse_path_integer(&task_index) {
-        PathInteger::Fits(task_index) => Some(task_index),
+    let node_index = match parse_path_integer(&node_index) {
+        PathInteger::Fits(node_index) => Some(node_index),
         PathInteger::OutsideI32 => None,
         PathInteger::NotAnInteger => {
             return Err(ApiError::Validation(vec![ApiError::path_issue(
-                "task_index",
+                "node_index",
                 "int_parsing",
                 "Input should be a valid integer, unable to parse string as an integer",
-                task_index.as_str(),
+                node_index.as_str(),
             )]))
         }
         PathInteger::TooLong => {
             return Err(ApiError::Validation(vec![ApiError::path_issue(
-                "task_index",
+                "node_index",
                 "int_parsing_size",
                 "Unable to parse input string as an integer, exceeded maximum size",
-                task_index.as_str(),
+                node_index.as_str(),
             )]))
         }
     };
-    let (Some(workflow_id), Some(task_index)) = (parse_stdlib_uuid_text(&workflow_id), task_index)
+    let (Some(workflow_id), Some(node_index)) = (parse_stdlib_uuid_text(&workflow_id), node_index)
     else {
         return Err(workflow_task_not_found());
     };
-    get_workflow_node(&state.broker, workflow_id, task_index)
+    get_workflow_node(&state.broker, workflow_id, node_index)
         .await
         .map_err(|error| query_failed("Workflow task", &error))?
         .map(Json)

@@ -26,7 +26,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.web import TraceLinkText, TraceLinkTemplate
-from horsies.web.auth import Actions, AllowAll, TrustedHeader, ViewOnly
+from horsies.web.authorization import Actions, AllowAll, TrustedHeader, ViewOnly
 
 pytestmark = [pytest.mark.unit]
 

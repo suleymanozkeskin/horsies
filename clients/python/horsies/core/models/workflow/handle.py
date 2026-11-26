@@ -1162,7 +1162,7 @@ class WorkflowHandle(Generic[OutT]):
             task_name=record.task_name,
             node_id=node_id,
             sub_definition_key=(
-                record.sub_definition_key if record.is_subworkflow else None
+                record.sub_definition_key if record.is_sub_workflow else None
             ),
         )
         return _node_read(decoded)
@@ -1265,7 +1265,7 @@ class WorkflowHandle(Generic[OutT]):
                 task_name=node.task_name,
                 node_id=node_id,
                 sub_definition_key=(
-                    node.sub_definition_key if node.is_subworkflow else None
+                    node.sub_definition_key if node.is_sub_workflow else None
                 ),
             ))
         return Ok(out)
@@ -1366,7 +1366,7 @@ class WorkflowHandle(Generic[OutT]):
                 task_name=row.task_name,
                 node_id=node_id,
                 sub_definition_key=(
-                    row.sub_definition_key if row.is_subworkflow else None
+                    row.sub_definition_key if row.is_sub_workflow else None
                 ),
             )
 

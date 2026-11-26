@@ -943,7 +943,7 @@ def resolve_web_authorization_policy(args: argparse.Namespace) -> Any:
     default posture is that anyone who can reach the port can read the
     deployment's task data.
     """
-    from horsies.web.auth import AllowAll, TrustedHeader, ViewOnly
+    from horsies.web.authorization import AllowAll, TrustedHeader, ViewOnly
 
     host: str = args.host
     enable_actions: bool = args.enable_actions
@@ -970,7 +970,7 @@ def resolve_web_authorization_policy(args: argparse.Namespace) -> Any:
 def web_actions(args: argparse.Namespace) -> Any:
     """The actions switch of a ``horsies web`` invocation: ``ENABLED`` with
     ``--enable-actions``, else ``DISABLED``. Pure."""
-    from horsies.web.auth import Actions
+    from horsies.web.authorization import Actions
 
     enable_actions: bool = args.enable_actions
     match enable_actions:

@@ -263,7 +263,7 @@ async fn every_declared_api_route_is_view_authorized() {
     );
     let reads = [
         "/api/meta",
-        "/api/tasks/stats",
+        "/api/tasks/status-counts",
         "/api/tasks/facets",
         "/api/tasks/breakdown",
         "/api/tasks",
@@ -687,7 +687,7 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
                 .clone()
                 .oneshot(request(
                     Method::GET,
-                    &format!("/api/tasks/stats?{field}={value}"),
+                    &format!("/api/tasks/status-counts?{field}={value}"),
                 ))
                 .await
                 .unwrap();
@@ -720,13 +720,13 @@ async fn query_and_path_validation_preserve_location_input_and_window_refusals()
         ),
         (
             "/api/workflows/00000000-0000-0000-0000-000000000000/tasks/not-an-int",
-            serde_json::json!(["path", "task_index"]),
+            serde_json::json!(["path", "node_index"]),
             serde_json::json!("not-an-int"),
             "int_parsing",
         ),
         (
             "/api/workflows/not-a-uuid/tasks/not-an-int",
-            serde_json::json!(["path", "task_index"]),
+            serde_json::json!(["path", "node_index"]),
             serde_json::json!("not-an-int"),
             "int_parsing",
         ),
@@ -1774,7 +1774,7 @@ async fn task_stats_route_reuses_a_successful_scope_within_the_ttl() {
     clean_w4(&migrated_pool().await, &prefix).await;
     let task_id = seed_pending(&migrated_pool().await, &prefix).await;
     let task_name = format!("{prefix}task_{}", task_id.simple());
-    let path = format!("/api/tasks/stats?task_name={task_name}");
+    let path = format!("/api/tasks/status-counts?task_name={task_name}");
     let router = build_router(state.clone());
 
     let first = router
@@ -1808,7 +1808,7 @@ async fn all_http_surfaces_route_to_the_monitoring_and_action_layers() {
 
     let checks = [
         "/api/meta",
-        "/api/tasks/stats?retried_only=1",
+        "/api/tasks/status-counts?retried_only=1",
         "/api/tasks/facets?retried_only=ON",
         "/api/tasks/breakdown?retried_only=yes",
         "/api/tasks?status=PENDING&status=RUNNING&retried_only=true",
@@ -2090,7 +2090,7 @@ async fn a_task_path_id_that_is_not_a_uuid_is_invalid_input() {
 /// routes: 404 with the not-found text of the Python web app, which takes
 /// the id as text (`get_workflow_run`, `get_workflow_node`), and no database
 /// call (the router's pool is lazy and unreachable). An index that is not an
-/// integer is still FastAPI's 422, and it names only `task_index`.
+/// integer is still FastAPI's 422, and it names only `node_index`.
 #[tokio::test]
 async fn a_workflow_read_path_id_that_is_not_a_uuid_is_not_found() {
     let router = test_router(
@@ -2133,7 +2133,7 @@ async fn a_workflow_read_path_id_that_is_not_a_uuid_is_not_found() {
         .as_array()
         .expect("the 422 body lists the refused parameters");
     assert_eq!(issues.len(), 1, "{body}");
-    assert_eq!(issues[0]["loc"], serde_json::json!(["path", "task_index"]));
+    assert_eq!(issues[0]["loc"], serde_json::json!(["path", "node_index"]));
     assert_eq!(issues[0]["type"], "int_parsing");
 }
 
@@ -2236,7 +2236,7 @@ async fn a_node_index_outside_the_integer_column_is_not_found() {
     assert_eq!(body["detail"][0]["type"], "int_parsing_size", "{body}");
     assert_eq!(
         body["detail"][0]["loc"],
-        serde_json::json!(["path", "task_index"])
+        serde_json::json!(["path", "node_index"])
     );
 }
 
@@ -2457,7 +2457,7 @@ async fn the_stats_route_answers_the_seven_status_cards_in_a_fixed_order() {
     let state = migrated_state().await;
 
     let response = build_router(state)
-        .oneshot(request(Method::GET, "/api/tasks/stats"))
+        .oneshot(request(Method::GET, "/api/tasks/status-counts"))
         .await
         .unwrap();
 
@@ -2496,7 +2496,7 @@ async fn an_unknown_error_category_is_a_bad_request_on_every_task_route() {
 
     for path in [
         "/api/tasks?error_category=NOT_A_FAMILY",
-        "/api/tasks/stats?error_category=NOT_A_FAMILY",
+        "/api/tasks/status-counts?error_category=NOT_A_FAMILY",
         "/api/tasks/facets?error_category=NOT_A_FAMILY",
         "/api/tasks/breakdown?group_by=worker&error_category=NOT_A_FAMILY",
     ] {
@@ -3025,7 +3025,11 @@ async fn the_handler_asks_the_verdicts_of_the_python_routes() {
             AccessNeed::ViewReportAct,
         ),
         (Method::GET, "/api/tasks".to_owned(), AccessNeed::View),
-        (Method::GET, "/api/tasks/stats".to_owned(), AccessNeed::View),
+        (
+            Method::GET,
+            "/api/tasks/status-counts".to_owned(),
+            AccessNeed::View,
+        ),
         (
             Method::GET,
             "/api/tasks/facets".to_owned(),

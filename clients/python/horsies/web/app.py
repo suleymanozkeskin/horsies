@@ -49,7 +49,7 @@ from horsies._core import (
 from horsies.core.app import Horsies
 from horsies.core.fleet_metrics import fleet_label_names
 from horsies.core.errors import ConfigurationError, ErrorCode
-from horsies.web.auth import INTENT_HEADER, Actions, MonitoringAuthorizationPolicy
+from horsies.web.authorization import INTENT_HEADER, Actions, MonitoringAuthorizationPolicy
 from horsies.web.schema import SchemaState
 
 EVENT_HEARTBEAT_MS: Final = 15_000
