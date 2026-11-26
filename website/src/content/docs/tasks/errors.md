@@ -8,7 +8,7 @@ tags: [errors, BuiltInTaskCode, ErrorCode, reference]
 
 # Errors Reference
 
-Horsies has two kinds of error codes: the **task error codes** that a task ends with, and the **HRS codes** of config, task definition and workflow definition errors, which stop an app before it runs. The client calls (send, workflow start, workflow handle) have their own code catalogs. The two clients use the same codes and names.
+Horsies has two kinds of error codes: the **task error codes** that a task ends with, and the **HRS codes** of config, task definition and workflow definition errors, which stop an app before it runs. The client calls (send, workflow start, workflow handle) have their own code catalogs. The three clients use the same codes and names.
 
 The API of the error types is on the client pages: [Error Types](/horsies/tasks/error-types/) (Python) and [Task Errors](/horsies/rust/tasks/errors/) (Rust).
 

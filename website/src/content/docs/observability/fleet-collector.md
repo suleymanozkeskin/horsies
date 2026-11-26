@@ -20,7 +20,8 @@ Run the collector as a process of its own, or scrape the web UI:
 |-------|------------------|
 | Python | `horsies metrics <app> --listen HOST:PORT` |
 | Rust | `<binary> metrics --listen HOST:PORT`, the app's own binary through `horsies::cli::run` |
-| Web UI | `GET /metrics` of `horsies web` and of a mounted monitoring app, in both clients |
+| TypeScript | `<entry> metrics --listen HOST:PORT`, the app's own entry through `cli.run(app)` |
+| Web UI | `GET /metrics` of `horsies web` and of a mounted monitoring app, in each client |
 
 ```bash
 horsies metrics myapp.instance:app --listen 0.0.0.0:9465

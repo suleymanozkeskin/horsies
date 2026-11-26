@@ -1,10 +1,10 @@
 ---
 title: Horsies
 section: site
-description: A PostgreSQL-backed background task queue and workflow engine for Python and Rust.
+description: A PostgreSQL-backed background task queue and workflow engine for Python, Rust and TypeScript.
 head:
   - tag: title
-    content: Horsies | PostgreSQL Task Queue & Workflow Engine for Python and Rust
+    content: Horsies | PostgreSQL Task Queue & Workflow Engine for Python, Rust and TypeScript
 ---
 
 import { CardGrid, LinkCard } from '@astrojs/starlight/components';
@@ -27,19 +27,20 @@ import subworkflowLight from '../../assets/screenshots/web-ui-subworkflow-light.
   </video>
 </div>
 
-**PostgreSQL-backed background task queue and workflow engine for Python and Rust.**
+**PostgreSQL-backed background task queue and workflow engine for Python, Rust and TypeScript.**
 
 Most businesses need durable, observable systems with strong execution guarantees. Traditional queues do not give you that out of the box. You end up writing tedious state machines around them, and your execution state gets mixed into your business logic, because your execution layer was never durable.
 
 Horsies lets you declare your conditional business logic as tasks and workflows, without managing execution state on top of it.
 
-The Python client and the Rust client run on one core, written in Rust. The docs have three sections:
+The Python client, the Rust client and the TypeScript client run on one core, written in Rust. The docs have four sections:
 
-- **Shared: Behaviour** states the behaviour and the guarantees of the core, for both clients.
+- **Shared: Behaviour** states the behaviour and the guarantees of the core, for every client.
 - **Python API** states the API of the Python package.
 - **[Rust API](/horsies/rust/)** states the API of the `horsies` crate.
+- **[TypeScript API](/horsies/typescript/)** states the API of the `horsies` npm package, for Node and Bun.
 
-A database belongs to one client: the core refuses a database that the other client installed.
+A database belongs to one client: the core refuses a database that another client installed.
 
 <CardGrid>
   <LinkCard title="Get Started" href="/horsies/quick-start/getting-started/" description="Install Horsies and run your first task" />
@@ -121,4 +122,4 @@ match add_numbers.send(a=5, b=3):
 
 ## For AI agents
 
-[`llms.txt`](/horsies/llms.txt) lists every page of these docs with keywords. The package ships a skill folder for coding agents; copy it with `horsies skills install --target DIR`.
+[`llms.txt`](/horsies/llms.txt) lists every page of these docs with keywords; [`rust/llms.txt`](/horsies/rust/llms.txt) and [`typescript/llms.txt`](/horsies/typescript/llms.txt) list the pages of each client. The package of each client ships a skill folder for coding agents; copy it with `horsies skills install --target DIR` (`npx horsies skills install --target DIR` for the npm package).

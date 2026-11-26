@@ -6,7 +6,7 @@ related: [metrics, fleet-collector, tracing, deployment]
 tags: [observability, opentelemetry, collector, otlp, metrics]
 ---
 
-The core serves its metrics as Prometheus endpoints and pushes nothing. For an OpenTelemetry pipeline, an OpenTelemetry Collector scrapes the endpoints with its `prometheus` receiver and exports the series through OTLP. The core needs no OpenTelemetry dependency for its metrics, and the Python client and the Rust client use one path.
+The core serves its metrics as Prometheus endpoints and pushes nothing. For an OpenTelemetry pipeline, an OpenTelemetry Collector scrapes the endpoints with its `prometheus` receiver and exports the series through OTLP. The core needs no OpenTelemetry dependency for its metrics, and the Python, Rust and TypeScript clients use one path.
 
 The spans and the producer metrics do not take this path: the client records them with the OpenTelemetry SDK of your process. See [Tracing](/horsies/observability/tracing/).
 
