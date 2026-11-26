@@ -31,11 +31,11 @@ export function checkReport(phase: CheckPhaseName, first: Refusal, rest: readonl
 
 /**
  * Each refusal, then the count: `error[HRS-300]: <message>`, one `  = help: <line>` per help line, and
- * `error: aborting due to <n> previous errors`. A refusal with no catalog code is `error: <message>`. Pure.
+ * `error: aborting due to <n> previous errors`. Pure.
  */
 export function reportText(report: CheckReport): string {
   const lines = report.refusals.flatMap((refused) => [
-    refused.code === "FIELD_BOUND" ? `error: ${refused.message}` : `error[${refused.code}]: ${refused.message}`,
+    `error[${refused.code}]: ${refused.message}`,
     ...refused.help.map((line) => `  = help: ${line}`),
   ]);
 

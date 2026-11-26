@@ -1,8 +1,8 @@
-// zod is an optional peer dependency: the main entry point (`src/index.ts`) must load and type check without it.
-// This test walks the module imports of each entry point (`import`, `export ... from`, `import(...)`, `require(...)`,
-// with either quote). No module that `src/index.ts` reaches imports zod, also as a type. The only modules of the
-// adapter (`src/zod/**`) that it may reach are the zod-free ones (the static types of `src/zod/infer.ts`); the
-// `horsies/zod` entry point (`src/zod.ts`) reaches zod.
+// zod is an optional peer dependency: the main entry point (`src/index.ts`) must load, bundle and type check without
+// it. This test walks the module imports of each entry point (`import`, `export ... from`, `import(...)`,
+// `require(...)`, with either quote). No module that `src/index.ts` reaches imports zod, also as a type. The main entry
+// point imports the zod adapter statically (the contract compile), so it reaches the zod-free modules of `src/zod/`
+// below and no other module there; the `horsies/zod` entry point (`src/zod.ts`, the `hz.*` builders) reaches zod.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -12,11 +12,35 @@ import { fileURLToPath } from "node:url";
 
 const SOURCE_DIR = fileURLToPath(new URL("../../../horsies/src/", import.meta.url));
 
-/** The module specifiers of `import ... from`, `export ... from`, `import "..."`, `import(...)` and `require(...)`. */
-const SPECIFIER = /(?:\bfrom\s+|\bimport\s+|\bimport\s*\(\s*|\brequire\s*\(\s*)(["'])([^"']+)\1/g;
+/**
+ * The module specifiers of the statements `import ... from`, `export ... from` and `import "..."` (at the start of a
+ * line, so a text in a string or a comment that reads `from "zod"` is not one), and of the calls `import(...)` and
+ * `require(...)`. The specifier is the first group that matched (`specifierOf`).
+ */
+const SPECIFIER =
+  /^\s*(?:import|export)\b[^;"'`]*?\bfrom\s+(["'])([^"']+)\1|^\s*import\s+(["'])([^"']+)\3|\bimport\s*\(\s*(["'])([^"']+)\5|\brequire\s*\(\s*(["'])([^"']+)\7/gm;
 
-/** The modules of the adapter that import no zod: the main entry may reach them for their types. */
-const ZOD_FREE_MODULES: ReadonlySet<string> = new Set(["zod/infer.ts"]);
+/** The specifier of one match of `SPECIFIER`. */
+function specifierOf(match: RegExpMatchArray): string {
+  return match[2] ?? match[4] ?? match[6] ?? match[8] ?? "";
+}
+
+/**
+ * The modules of `src/zod/` that import no zod: the adapter (the release check, the definition reader, the walk, the
+ * zod runs, the `hz.*` brand reader) and the static types. The main entry point may reach them.
+ */
+const ZOD_FREE_MODULES: ReadonlySet<string> = new Set([
+  "zod/adapter.ts",
+  "zod/brand.ts",
+  "zod/definition.ts",
+  "zod/infer.ts",
+  "zod/internals.ts",
+  "zod/kind.ts",
+  "zod/known-fields.ts",
+  "zod/rules.ts",
+  "zod/runs.ts",
+  "zod/version.ts",
+]);
 
 /** The most modules one walk visits: far more than the package holds, so a walk always ends. */
 const MAX_MODULES = 2000;
@@ -24,7 +48,7 @@ const MAX_MODULES = 2000;
 type Reach = { readonly modules: ReadonlySet<string>; readonly packages: ReadonlySet<string> };
 
 function specifiersOf(file: string): readonly string[] {
-  return [...readFileSync(file, "utf8").matchAll(SPECIFIER)].map((match) => match[2] ?? "");
+  return [...readFileSync(file, "utf8").matchAll(SPECIFIER)].map(specifierOf);
 }
 
 /** The source modules (relative to `src/`) and the package specifiers that an entry point reaches. */
@@ -58,7 +82,7 @@ function reachOf(entry: string): Reach {
 }
 
 describe("entry points", () => {
-  test("src/index.ts reaches no zod import and no module of the adapter", () => {
+  test("src/index.ts reaches no zod import, and of src/zod/ only the zod-free modules", () => {
     const reach = reachOf("index.ts");
 
     assert.deepEqual(
@@ -70,6 +94,14 @@ describe("entry points", () => {
       [],
     );
     assert.ok(reach.modules.has("wire/public.ts"));
+  });
+
+  test("src/index.ts reaches the zod adapter statically: the contract compile imports it", () => {
+    const reach = reachOf("index.ts");
+
+    assert.ok(reach.modules.has("contract/compile.ts"));
+    assert.ok(reach.modules.has("zod/kind.ts"));
+    assert.ok(reach.modules.has("zod/brand.ts"));
   });
 
   test("each zod-free module of the adapter reaches no zod import", () => {
@@ -87,24 +119,39 @@ describe("entry points", () => {
     }
   });
 
-  test("the specifier pattern finds both quotes, require and a dynamic import", () => {
+  test("the specifier pattern finds both quotes, require, a dynamic import and an import over lines", () => {
     const text = [
       "import a from 'zod';",
       'const b = require("zod/v4/core");',
       "await import('zod/mini');",
       'export * from "./x.ts";',
+      "import {",
+      "  y,",
+      '} from "./y.ts";',
+      'import "./z.ts";',
+      'import type { W } from "zod/v4";',
     ].join("\n");
 
     assert.deepEqual(
-      [...text.matchAll(SPECIFIER)].map((match) => match[2]),
-      ["zod", "zod/v4/core", "zod/mini", "./x.ts"],
+      [...text.matchAll(SPECIFIER)].map(specifierOf),
+      ["zod", "zod/v4/core", "zod/mini", "./x.ts", "./y.ts", "./z.ts", "zod/v4"],
     );
   });
 
-  test("src/zod.ts reaches zod and the adapter", () => {
+  test("the specifier pattern does not read a text in a string or a comment as an import", () => {
+    const text = [
+      "const fix = 'import { z } from \"zod\", not from \"zod/v3\"';",
+      '// a schema built with import { z } from "zod"',
+    ].join("\n");
+
+    assert.deepEqual([...text.matchAll(SPECIFIER)].map(specifierOf), []);
+  });
+
+  test("src/zod.ts reaches zod and the hz.* builders", () => {
     const reach = reachOf("zod.ts");
 
     assert.ok(reach.packages.has("zod"));
     assert.ok(reach.modules.has("zod/public.ts"));
+    assert.ok(reach.modules.has("zod/codecs.ts"));
   });
 });

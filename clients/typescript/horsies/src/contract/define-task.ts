@@ -2,8 +2,8 @@
 // does no I/O, so an API server can import it without the worker's code.
 //
 // `defineTask` builds a frozen contract and keeps its facts (`definition.ts`). It refuses nothing with a throw: what it
-// finds wrong (a member that is no schema, a schema of another vendor, a wire type that `checkKind` refuses) is a
-// definition refusal, which `Horsies.create` reports. The result constructors `ok` and `err` are bound to the
+// finds wrong (a task name that cannot be stored, a parameter name, a schema of another vendor, a wire type that
+// `checkKind` refuses) is a contract refusal, which `Horsies.create` reports. The result constructors `ok` and `err` are bound to the
 // contract, so a wrong value or code fails typecheck at its own line.
 
 import { LIBRARY_TASK_CODES, RESERVED_NON_TASK_CODES } from "../codec/bounds.ts";
@@ -23,7 +23,13 @@ export type ReservedCode = LibraryTaskCode | (typeof RESERVED_NON_TASK_CODES)[nu
 /** A code that a task may choose. A built-in name fails typecheck with this text as the expected type. */
 export type UserCode<C extends string> = C extends ReservedCode ? `horsies: "${C}" is a built-in error code` : C;
 
-/** The error that a body returns: a code that the task chose, an optional message and optional data. */
+/** The element type of an `errors` list whose codes the types cannot know (`string[]`): no code fits it. */
+export type WidenedCodes = "horsies: declare errors as literal codes, not as a string[]";
+
+/**
+ * The error that a body returns: a code that the task chose, an optional message and optional data. `data: undefined`
+ * is no data, as a left-out `data` is: `err` gives an error with no `data` member.
+ */
 export type UserFailure<E extends string> = {
   readonly code: E;
   readonly message?: string;
@@ -69,8 +75,11 @@ export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSche
   /** One schema per parameter, stored under its name. `{}` for a task with no parameters. */
   readonly input: P;
   readonly output: O;
-  /** The codes that the task may return. Left out: any code that is not a built-in name. */
-  readonly errors?: readonly UserCode<E>[];
+  /**
+   * The codes that the task may return, as literals (no `as const` needed). Left out: any code that is not a built-in
+   * name. A list of the type `string[]` fails typecheck: its codes would not be known to the types.
+   */
+  readonly errors?: string extends E ? readonly WidenedCodes[] : readonly UserCode<E>[];
   readonly execution?: X;
   readonly retry?: RetryPolicy<NoInfer<E>>;
 }
@@ -109,13 +118,18 @@ export type BodyResult<O extends OutputSchema, E extends string> = Ok<SchemaSent
 /** The codes that `err` refuses at run time: the built-in names and the reserved names. */
 const RESERVED_CODES: ReadonlySet<string> = new Set<string>([...LIBRARY_TASK_CODES, ...RESERVED_NON_TASK_CODES]);
 
-/** The error of a body. Throws `TypeError` for a reserved code (a defect that the static type refuses for a literal). */
+/**
+ * The error of a body, frozen. `data: undefined` is left out: the error holds no `data` member. Throws `TypeError` for
+ * a reserved code (a defect that the static type refuses for a literal).
+ */
 function failureOf<E extends string>(taskName: string, failure: UserFailure<E>): Err<UserFailure<E>> {
   if (RESERVED_CODES.has(failure.code)) {
     throw new TypeError(`${taskName}.err: "${failure.code}" is a built-in error code; a task cannot return it`);
   }
 
-  return Object.freeze(errOf(Object.freeze({ ...failure })));
+  const { data, ...withoutData } = failure;
+
+  return Object.freeze(errOf(Object.freeze(data === undefined ? withoutData : { ...withoutData, data })));
 }
 
 /**

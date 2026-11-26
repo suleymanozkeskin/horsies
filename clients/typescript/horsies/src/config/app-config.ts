@@ -5,7 +5,10 @@
 //   source.
 // - The parse checks only what the core's config reader needs before it can read the text (`checked.ts`); the core
 //   checks every rule of the config (the bridge's `checkAppConfig`).
+// - A refusal of the cluster cap has the code `HRS-201`; a refusal of a claim field has the code of the prefetch
+//   setting (`HRS-202`).
 
+import { ErrorCode } from "../_catalog/error_codes.ts";
 import type { Refusal } from "../app/refusal.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -13,12 +16,17 @@ import { type BrokerConfigInput, brokerJson } from "./broker.ts";
 import {
   accepted,
   type Checked,
+  checkedEntries,
   checkedInteger,
   checkedObject,
   type ConfigObject,
   entry,
+  type IntegerBound,
+  type JsonEntry,
+  memberPath,
   optionalEntry,
-  U32_FIELD,
+  U32_MAX,
+  u32Field,
 } from "./checked.ts";
 import { type PayloadPolicyInput, payloadJson } from "./payload.ts";
 import { type QueueConfigInput, queueEntries, type QueueSetup, queueSetupOf, type TaskCap, taskCapJson } from "./queues.ts";
@@ -29,6 +37,17 @@ import type { EnvironmentRead } from "./secret.ts";
 import { type WorkerProfileInput, workerProfilesJson } from "./worker-profiles.ts";
 
 /**
+ * How a worker claims tasks:
+ * - `hardCap`: a worker claims no task past its free seats. `leaseMs`: how long a claim holds before it expires, in
+ *   milliseconds; left out, the core's default.
+ * - `softCap`: a worker claims up to `prefetchBuffer` tasks (at least 1) past its free seats, and each claim holds for
+ *   `leaseMs` milliseconds.
+ */
+export type ClaimMode =
+  | { readonly kind: "hardCap"; readonly leaseMs?: number }
+  | { readonly kind: "softCap"; readonly prefetchBuffer: number; readonly leaseMs: number };
+
+/**
  * The config of an app, without its task and workflow lists. Only `broker.databaseUrl` is required; every field left
  * out has the core's default.
  */
@@ -36,10 +55,7 @@ export type AppConfigInput = QueueConfigInput & {
   readonly broker: BrokerConfigInput;
   /** The most tasks that run at once in the whole cluster, or no cap. */
   readonly clusterWideCap?: TaskCap;
-  /** Tasks that a worker claims past its free seats: 0 is the hard cap mode; above 0 needs `claimLeaseMs`. */
-  readonly prefetchBuffer?: number;
-  /** How long a claim holds before it expires, in milliseconds. */
-  readonly claimLeaseMs?: number;
+  readonly claim?: ClaimMode;
   /** The age of a claimed task past which a heartbeat no longer renews it, in milliseconds. */
   readonly maxClaimRenewAgeMs?: number;
   readonly payload?: PayloadPolicyInput;
@@ -59,6 +75,25 @@ export type AppConfig = {
   /** The JSON text of the core's `AppConfig`. It holds the database URLs. */
   readonly coreConfigJson: string;
 };
+
+/** A `u32` field of the cluster cap. */
+const CLUSTER_CAP_U32 = u32Field(ErrorCode.CONFIG_INVALID_CLUSTER_CAP);
+
+/** A `u32` field of the claim settings. */
+const PREFETCH_U32 = u32Field(ErrorCode.CONFIG_INVALID_PREFETCH);
+
+/** The core's value of `prefetch_buffer` in the hard cap mode. */
+const HARD_CAP_PREFETCH_BUFFER = 0;
+
+/**
+ * A prefetch buffer of the soft cap mode: at least 1, because the core reads `0` as the hard cap mode (`ClaimMode`
+ * gives that mode its own variant).
+ */
+const SOFT_CAP_PREFETCH_BUFFER: IntegerBound = Object.freeze({
+  min: 1,
+  max: U32_MAX,
+  code: ErrorCode.CONFIG_INVALID_PREFETCH,
+});
 
 /**
  * The parsed config of `input`, or every refusal in field order. Reads each `fromEnv` secret through `environment`.
@@ -97,13 +132,12 @@ function coreConfigObject(input: AppConfigInput, environment: EnvironmentRead): 
   return checkedObject([
     queueEntries(input),
     entry("broker", brokerJson(input.broker, environment, "broker")),
-    optionalEntry("cluster_wide_cap", input.clusterWideCap, (cap) => taskCapJson(cap, "clusterWideCap.tasks")),
-    optionalEntry("prefetch_buffer", input.prefetchBuffer, (value) =>
-      checkedInteger(value, U32_FIELD, "prefetchBuffer"),
+    optionalEntry("cluster_wide_cap", input.clusterWideCap, (cap) =>
+      taskCapJson(cap, CLUSTER_CAP_U32, "clusterWideCap.tasks"),
     ),
-    optionalEntry("claim_lease_ms", input.claimLeaseMs, (value) => checkedInteger(value, U32_FIELD, "claimLeaseMs")),
+    claimEntries(input.claim, "claim"),
     optionalEntry("max_claim_renew_age_ms", input.maxClaimRenewAgeMs, (value) =>
-      checkedInteger(value, U32_FIELD, "maxClaimRenewAgeMs"),
+      checkedInteger(value, PREFETCH_U32, "maxClaimRenewAgeMs"),
     ),
     optionalEntry("payload", input.payload, (payload) => payloadJson(payload, "payload")),
     optionalEntry("recovery", input.recovery, (recovery) => recoveryJson(recovery, "recovery")),
@@ -114,6 +148,36 @@ function coreConfigObject(input: AppConfigInput, environment: EnvironmentRead): 
     ),
     entry("resend_on_transient_err", accepted(input.resendOnTransientErr === true)),
   ]);
+}
+
+/**
+ * The core's members `prefetch_buffer` and `claim_lease_ms` of a claim mode; none when the config leaves the mode out.
+ * Pure.
+ */
+function claimEntries(claim: ClaimMode | undefined, path: string): Checked<readonly JsonEntry[]> {
+  if (claim === undefined) {
+    return accepted([]);
+  }
+
+  switch (claim.kind) {
+    case "hardCap":
+      return checkedEntries([
+        accepted([["prefetch_buffer", HARD_CAP_PREFETCH_BUFFER]]),
+        optionalEntry("claim_lease_ms", claim.leaseMs, (value) =>
+          checkedInteger(value, PREFETCH_U32, memberPath(path, "leaseMs")),
+        ),
+      ]);
+    case "softCap":
+      return checkedEntries([
+        entry(
+          "prefetch_buffer",
+          checkedInteger(claim.prefetchBuffer, SOFT_CAP_PREFETCH_BUFFER, memberPath(path, "prefetchBuffer")),
+        ),
+        entry("claim_lease_ms", checkedInteger(claim.leaseMs, PREFETCH_U32, memberPath(path, "leaseMs"))),
+      ]);
+    default:
+      return unreachable(claim, "claimEntries");
+  }
 }
 
 /** The parsed config of an accepted input and its core object. Pure. */
