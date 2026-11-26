@@ -21,7 +21,7 @@ import pytest
 
 from horsies._core import (
     CoreConnectionError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     TaskCancelledRecord,
     TooManyPendingCalls,
 )
@@ -235,7 +235,7 @@ class TestCancelFailures:
         ('error', 'retryable'),
         [
             (TooManyPendingCalls('CoreHandle.cancel_task_async', 65_536), True),
-            (CoreStartFailed('the core runtime could not start'), False),
+            (RuntimeStartFailed('the core runtime could not start'), False),
         ],
         ids=['too-many-calls', 'core-start-failed'],
     )

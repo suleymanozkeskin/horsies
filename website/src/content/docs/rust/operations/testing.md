@@ -173,7 +173,7 @@ fn the_app_passes_its_check() {
 }
 ```
 
-`build_app` is the function that `main` calls to build the app. `CheckReport` holds the refusals of the first phase that refused; `errors()` returns them with their `HRS-xxx` codes. See [CLI Reference](/horsies/rust/cli/#check).
+`build_app` is the function that `main` calls to build the app. `ValidationReport` holds the refusals of the first phase that refused; `refusals()` returns them with their `HRS-xxx` codes. See [CLI Reference](/horsies/rust/cli/#check).
 
 ## Suppress Sends
 

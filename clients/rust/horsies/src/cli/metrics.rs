@@ -1,4 +1,4 @@
-//! `<binary> metrics --listen HOST:PORT`: serve the fleet metrics of the
+//! `<binary> metrics --metrics-listen HOST:PORT`: serve the fleet metrics of the
 //! app's database at `GET /metrics` (Python `horsies metrics`).
 //!
 //! - The fleet state is read at once and then at most once per
@@ -23,7 +23,7 @@ use horsies_core::telemetry::endpoint::{bind_endpoint, EndpointFailed};
 use horsies_core::telemetry::listen::ListenAddress;
 
 use crate::signals::stop_on_signals;
-use crate::{Horsies, HorsiesError, SchemaMode};
+use crate::{Horsies, SchemaMode, ValidationReport};
 
 /// Why `metrics` did not serve, or stopped serving with a failure. Each
 /// ends the command with exit status 1.
@@ -31,17 +31,20 @@ use crate::{Horsies, HorsiesError, SchemaMode};
 pub(super) enum MetricsFailed {
     /// The config does not build a handle.
     #[error("invalid application configuration: {0}")]
-    Config(HorsiesError),
+    Config(ValidationReport),
     /// The address did not bind.
     #[error("{0}")]
     Endpoint(EndpointFailed),
 }
 
-/// Serve the fleet metrics of the database of `app` on `listen` until
+/// Serve the fleet metrics of the database of `app` on `metrics_listen` until
 /// `SIGTERM` or `SIGINT`.
 ///
 /// Errors: [`MetricsFailed`].
-pub(super) async fn serve(app: &Horsies, listen: &ListenAddress) -> Result<(), MetricsFailed> {
+pub(super) async fn serve(
+    app: &Horsies,
+    metrics_listen: &ListenAddress,
+) -> Result<(), MetricsFailed> {
     let Folded {
         declared: labels,
         folded,
@@ -49,7 +52,7 @@ pub(super) async fn serve(app: &Horsies, listen: &ListenAddress) -> Result<(), M
     warn_folded_names(&"the fleet metrics", &folded);
     let reader = Horsies::with_schema_mode(app.config().clone(), SchemaMode::AssumeInitialized)
         .map_err(MetricsFailed::Config)?;
-    let endpoint = bind_endpoint(listen)
+    let endpoint = bind_endpoint(metrics_listen)
         .await
         .map_err(MetricsFailed::Endpoint)?;
     serve_fleet_metrics(

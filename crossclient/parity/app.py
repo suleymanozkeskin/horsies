@@ -125,19 +125,19 @@ config = AppConfig(
     worker_profiles={
         ISOLATED: WorkerProfile(
             isolated=IsolatedChildren(count=1),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=DRAIN_TIMEOUT,
         ),
         SHARED_ASYNC: WorkerProfile(
             isolated=NoIsolatedChildren(),
             shared_async=SharedAsyncChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=DRAIN_TIMEOUT,
         ),
         SHARED_THREAD: WorkerProfile(
             isolated=NoIsolatedChildren(),
             shared_thread=SharedThreadChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=DRAIN_TIMEOUT,
         ),
     },

@@ -334,7 +334,7 @@ horsies web horsies.toml --host 0.0.0.0 --auth trusted-header --enable-actions
 | `--trusted-header NAME` | `X-Forwarded-User` | The identity header that the proxy sets |
 | `--enable-actions` | off | Allow task cancel and workflow pause, resume and cancel |
 | `--custom-css-url URL` | none | A stylesheet that the page loads after its own |
-| `--loglevel LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
+| `--log-level LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL` |
 
 - The server never installs or migrates the schema (`ObserveOnly`).
 - `--auth none` on a host that is not a loopback address exits with code 2.
@@ -516,7 +516,7 @@ use horsies::events::{
     // Event handlers
     TaskClaimed, ClaimReleased, AttemptPlaced, AttemptNotStarted, AttemptEnded,
     AttemptRecorded, TaskRecovered, ChildStarted, ChildReplaced, SlotDown, SlotRecovered,
-    AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
+    AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS, HANDLER_STATISTICS_INTERVAL,
 };
 use horsies::web::{  // feature `web`
     router, Actions, MonitoringConfig, MonitoringUiConfig, MonitoringAuthPolicy,

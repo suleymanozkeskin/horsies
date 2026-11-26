@@ -54,8 +54,8 @@ def _make_app(
     app.config.schedule = schedule_config
     app.config.payload = PayloadPolicy()
     app.tasks = tasks or {}
-    # Default validate_queue_name returns 'default'
-    app.validate_queue_name = MagicMock(return_value='default')
+    # Default validate_queue returns 'default'
+    app.validate_queue = MagicMock(return_value='default')
     # Default queue mode so effective_priority returns 100
     app.config.queue_mode.name = 'DEFAULT'
     return app

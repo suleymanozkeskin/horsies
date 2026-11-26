@@ -36,7 +36,7 @@ DB_URL = 'postgresql://user:pw@localhost:5432/horsies'
 def web_args(**overrides: Any) -> argparse.Namespace:
     """A namespace shaped like the web subparser's output."""
     values: dict[str, Any] = {
-        'app_path': None,
+        'module': None,
         'database_url': None,
         'session_database_url': None,
         'pgbouncer_transaction_mode': False,
@@ -46,7 +46,7 @@ def web_args(**overrides: Any) -> argparse.Namespace:
         'trusted_header': 'X-Forwarded-User',
         'enable_actions': False,
         'trace_link': None,
-        'loglevel': 'INFO',
+        'log_level': 'INFO',
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -72,7 +72,7 @@ class TestAppSourceIsExclusive:
     def test_both_sources_is_a_usage_error(self) -> None:
         with pytest.raises(SystemExit) as raised:
             cli.resolve_web_app(
-                web_args(app_path='myapp.tasks:app', database_url=DB_URL)
+                web_args(module='myapp.tasks:app', database_url=DB_URL)
             )
 
         assert raised.value.code == 2
@@ -203,22 +203,22 @@ class TestAppPathBootLoadsTheRegistry:
         monkeypatch.setitem(sys.modules, 'uvicorn', fake_uvicorn)
         return captured
 
-    def test_app_path_boot_imports_the_discovered_task_modules(
+    def test_module_boot_imports_the_discovered_task_modules(
         self,
         monkeypatch: pytest.MonkeyPatch,
         sentinel_app: Horsies,
         served: list[Horsies],
     ) -> None:
-        assert 'web_cli_sentinel_task' not in sentinel_app.list_tasks()
+        assert 'web_cli_sentinel_task' not in sentinel_app.registered_task_names()
 
         def fake_discover(_locator: str) -> tuple[Horsies, str, str, None]:
             return (sentinel_app, 'app', 'sentinel', None)
 
         monkeypatch.setattr(cli, 'discover_app', fake_discover)
 
-        cli.web_command(web_args(app_path='tests.unit.web_cli_sentinel:app'))
+        cli.web_command(web_args(module='tests.unit.web_cli_sentinel:app'))
 
-        assert 'web_cli_sentinel_task' in sentinel_app.list_tasks()
+        assert 'web_cli_sentinel_task' in sentinel_app.registered_task_names()
         assert served == [sentinel_app]
 
     def test_a_failing_check_refuses_to_serve(
@@ -242,7 +242,7 @@ class TestAppPathBootLoadsTheRegistry:
         monkeypatch.setattr(cli, 'discover_app', fake_discover)
 
         with pytest.raises(SystemExit) as raised:
-            cli.web_command(web_args(app_path='broken:app'))
+            cli.web_command(web_args(module='broken:app'))
 
         assert raised.value.code == 1
         assert 'no_such_task_module.py' in capsys.readouterr().err
@@ -256,7 +256,7 @@ class TestAppPathBootLoadsTheRegistry:
         cli.web_command(web_args(database_url=DB_URL))
 
         assert len(served) == 1
-        assert served[0].list_tasks() == []
+        assert served[0].registered_task_names() == []
 
 
 GRAFANA_TEMPLATE = 'https://grafana.example.com/explore?traceId={trace_id}'
@@ -330,7 +330,7 @@ class TestParserDefaults:
         assert captured['enable_actions'] is False
         assert captured['trusted_header'] == 'X-Forwarded-User'
         assert captured['trace_link'] is None
-        assert captured['app_path'] == 'myapp.tasks:app'
+        assert captured['module'] == 'myapp.tasks:app'
 
     def test_flags_are_parsed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         captured: dict[str, Any] = {}

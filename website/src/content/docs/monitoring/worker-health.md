@@ -61,7 +61,7 @@ A down slot has its slot index, its cause (a resource shortage with its errno na
 
 ### Which profile does a worker run?
 
-`profile` names the worker profile that the worker runs: the `--profile` value of `horsies worker`, or the profile of `WorkerStart` in the Rust client.
+`profile` names the worker profile that the worker runs: the `--profile` value of `horsies worker`, or the profile of `WorkerRunOptions` in the Rust client.
 
 | `profile` | Meaning |
 | --------- | ------- |

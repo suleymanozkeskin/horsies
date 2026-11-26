@@ -165,7 +165,7 @@ class WorkerTelemetry:
                 assert_never(unreachable)
 
     def worker_arguments(self) -> tuple[str, ...]:
-        """The arguments of ``horsies worker`` after ``--loglevel``."""
+        """The arguments of ``horsies worker`` after ``--log-level``."""
         match self.endpoint:
             case ListenOn() as listen:
                 return (f'--metrics-listen={listen.argument()}',)

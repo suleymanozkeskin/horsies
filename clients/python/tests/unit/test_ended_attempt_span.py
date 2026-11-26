@@ -775,7 +775,7 @@ class TestNoSpans:
             imports=(),
             sys_path_roots=(),
             profile='default',
-            loglevel='INFO',
+            log_level='INFO',
             metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         )
 

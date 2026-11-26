@@ -4,9 +4,10 @@ from importlib.metadata import version as _pkg_version
 
 __version__: str = _pkg_version("horsies")
 
-from .core.app import Horsies, ChildProcessStartHook, SharedAsyncChildStartHook
+from .core.app import Horsies, ChildStartHook, SharedAsyncChildStartHook
 from .core.event_handlers import HandlerChildStartHook
 from .core.models.app import AppConfig
+from .core.models.schema_mode import AppRole, SchemaMode
 from .core.models.broker import PostgresConfig
 from .core.models.tasks import (
     TaskError,
@@ -132,7 +133,7 @@ from .core.models.tracing import (
     OtelTracing,
     WorkerEndedSpans,
 )
-from .core.models.log_format import JsonLogs, TextLogs
+from .core.models.log_format import JsonLogs, LogFormat, TextLogs
 from .core.logging import JsonLogsFormatter, TaskContextFilter
 from .core.task_runtime import (
     AttemptNumber,
@@ -199,7 +200,7 @@ from ._core import (
     CoreContractViolation,
     CorePreconditionFailed,
     CoreServerError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     CoreStopped,
     ForkedAfterCoreStart,
     TooManyPendingCalls,
@@ -291,7 +292,9 @@ __all__ = [
     '__version__',
     # Core
     'Horsies',
-    'ChildProcessStartHook',
+    'SchemaMode',
+    'AppRole',
+    'ChildStartHook',
     'SharedAsyncChildStartHook',
     'HandlerChildStartHook',
     'AppConfig',
@@ -429,6 +432,7 @@ __all__ = [
     'LinkedToSend',
     'WorkerEndedSpans',
     # Log format and task context of log records
+    'LogFormat',
     'TextLogs',
     'JsonLogs',
     'TaskContextFilter',
@@ -509,7 +513,7 @@ __all__ = [
     'CoreStopped',
     'TooManyPendingCalls',
     'CoreCallTimedOut',
-    'CoreStartFailed',
+    'RuntimeStartFailed',
     # Health / liveness API
     'DatabasePing',
     'WorkerPong',

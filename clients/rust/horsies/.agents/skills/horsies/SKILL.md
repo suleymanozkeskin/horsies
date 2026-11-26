@@ -305,7 +305,7 @@ impl WorkflowDefinition for DailyReport {
 | `WorkflowHandle::status`, `cancel`, `pause`, `resume` | `HandleResult<_>` (`Result<_, HandleOperationError>`) |
 | Health reads on the app | `Result<_, BrokerOperationError>` |
 | Config, registration, `provide` | `Result<_, HorsiesError>` (`HRS-xxx` codes) |
-| `check`, `check_live` | `Result<CheckPassed, CheckReport>` |
+| `check`, `check_live` | `Result<CheckPassed, ValidationReport>` |
 
 Every error type is a closed catalog. Match on the variant or on the code.
 `retryable: true` means the cause may clear; it does not mean that a repeat
@@ -333,10 +333,10 @@ owns. See `tasks.md`, Rerun a Terminal Task.
 ## CLI
 
 ```bash
-./myapp worker --profile <name> [--loglevel LEVEL] [--metrics-listen HOST:PORT]   # the app's own binary
-./myapp scheduler [--loglevel LEVEL]
-./myapp check [--live] [--loglevel LEVEL]
-./myapp metrics --listen HOST:PORT [--loglevel LEVEL]   # the fleet metrics at GET /metrics
+./myapp worker --profile <name> [--log-level LEVEL] [--metrics-listen HOST:PORT]   # the app's own binary
+./myapp scheduler [--log-level LEVEL]
+./myapp check [--live] [--log-level LEVEL]
+./myapp metrics --metrics-listen HOST:PORT [--log-level LEVEL]   # the fleet metrics at GET /metrics
 horsies web --database-url URL                       # the shipped binary (feature web)
 horsies get-docs [--output DIR] [--ref main]
 horsies skills install --target DIR [--force]        # copy this skill folder to DIR/horsies/

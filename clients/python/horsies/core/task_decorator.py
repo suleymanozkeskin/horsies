@@ -2330,7 +2330,7 @@ def create_task_wrapper(
                 priority=payload.priority,
                 good_until=payload.good_until,
                 sent_at=payload.sent_at,
-                enqueue_delay_seconds=payload.enqueue_delay_seconds,
+                delay_seconds=payload.enqueue_delay_seconds,
                 task_options=payload.task_options,
                 idempotency_key=payload.idempotency_key,
                 retention_class_key=payload.retention_class_key,
@@ -2391,7 +2391,7 @@ def create_task_wrapper(
                 priority=payload.priority,
                 good_until=payload.good_until,
                 sent_at=payload.sent_at,
-                enqueue_delay_seconds=payload.enqueue_delay_seconds,
+                delay_seconds=payload.enqueue_delay_seconds,
                 task_options=payload.task_options,
                 idempotency_key=payload.idempotency_key,
                 retention_class_key=payload.retention_class_key,
@@ -2520,7 +2520,7 @@ def create_task_wrapper(
         """
         queue_name = task_options.queue_name if task_options else None
         try:
-            validated_queue_name = app.validate_queue_name(queue_name)
+            validated_queue_name = app.validate_queue(queue_name)
             priority = effective_priority(app, validated_queue_name)
         except Exception as exc:
             # Exception, not BaseException: a KeyboardInterrupt/SystemExit

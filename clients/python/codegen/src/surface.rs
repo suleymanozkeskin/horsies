@@ -1195,7 +1195,7 @@ const EXCEPTIONS: &[StubException] = &[
         body: ExceptionBody::ArgsOnly,
     },
     StubException {
-        name: "CoreStartFailed",
+        name: "RuntimeStartFailed",
         base: "CoreError",
         doc: "The core runtime or its log forwarder could not start. args: (cause,).",
         body: ExceptionBody::ArgsOnly,

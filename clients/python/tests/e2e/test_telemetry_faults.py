@@ -184,7 +184,7 @@ def _worker(
             'worker',
             INSTANCE,
             f'--profile={PROFILE}',
-            '--loglevel=warning',
+            '--log-level=warning',
             *extra_arguments,
         ],
         stdout=handle,

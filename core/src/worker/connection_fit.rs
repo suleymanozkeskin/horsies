@@ -52,7 +52,7 @@ use crate::core::config::worker_profile::{
 use crate::core::config::{AppConfig, PostgresConfig};
 use crate::core::error::{ErrorCode, HorsiesError};
 use crate::db::{CheckoutClass, CorePool, StatementBound, TypedStatement};
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 
 /// Connections of the process listener of a worker: one connection carries
 /// every LISTEN of the process.
@@ -653,7 +653,7 @@ pub async fn check_worker_connections(
 /// read. Every error has the code `CHECK_WORKER_CONNECTIONS`.
 pub async fn check_handle_worker_connections(
     profiles: &BTreeMap<String, WorkerProfile>,
-    handle: &CoreHandle,
+    handle: &CoreConnection,
 ) -> Vec<HorsiesError> {
     let manifest = handle.manifest();
     let broker_config = manifest

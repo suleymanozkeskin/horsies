@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
 from horsies.core.models.tasks import TaskError
@@ -1081,7 +1082,7 @@ def web_args(**overrides: Any) -> Any:
     import argparse
 
     values: dict[str, Any] = {
-        'app_path': None,
+        'module': None,
         'database_url': None,
         'session_database_url': None,
         'pgbouncer_transaction_mode': False,
@@ -1090,7 +1091,7 @@ def web_args(**overrides: Any) -> Any:
         'auth': 'none',
         'trusted_header': 'X-Forwarded-User',
         'enable_actions': False,
-        'loglevel': 'INFO',
+        'log_level': 'INFO',
     }
     values.update(overrides)
     return argparse.Namespace(**values)
@@ -1152,7 +1153,7 @@ class TestTheToolNeverRunsDdl:
         call simply never reached the migration seam.
         """
         enabled = cli.resolve_web_app(web_args(database_url=fresh_database))
-        enabled.run_schema_migrations = True
+        enabled.schema_mode = SchemaMode.MIGRATE_AND_VALIDATE
 
         initialized = await enabled.get_broker().ensure_schema_initialized()
 

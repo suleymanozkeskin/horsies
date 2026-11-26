@@ -692,7 +692,7 @@ pub enum SchemaInitializationMode {
     MigrateAndValidate,
     /// Connect for monitoring reads without executing schema DDL or fleet
     /// gates. The broker keeps its listener, as Python's web tool, which runs
-    /// with `run_schema_migrations=False`.
+    /// with `SchemaMode.OBSERVE_ONLY`.
     ObserveOnly,
 }
 
@@ -839,7 +839,7 @@ impl<'a> CheckedSend<'a> {
         {
             return Err(BrokerError::EnqueueContract(EnqueueRefusal::by_rule(
                 SendPart::Input,
-                "sent_at is in the future without enqueued_at or enqueue_delay_seconds; sent_at is a call-site timestamp".to_owned(),
+                "sent_at is in the future without enqueued_at or delay_seconds; sent_at is a call-site timestamp".to_owned(),
             )));
         }
         check_sent_input(input)?;
@@ -1244,8 +1244,8 @@ impl PostgresBroker {
         self
     }
 
-    /// The same handle with no listener (Python's
-    /// `PostgresBroker(assume_initialized=True)`): a result wait reads again
+    /// The same handle with no listener (the schema mode
+    /// `ASSUME_INITIALIZED`): a result wait reads again
     /// every 200 ms (`TASK_RESULT_REPOLL_POLLING`), and an operation that
     /// needs a listener answers `LISTENER_DISABLED`. Opens and closes
     /// nothing: the listener of a connected broker opens its connection at
@@ -4737,7 +4737,7 @@ mod result_wait_tests {
     }
 
     /// An observe-only broker keeps its listener, as Python's web tool
-    /// (`run_schema_migrations=False`): its waits subscribe and it can ping.
+    /// (`SchemaMode.OBSERVE_ONLY`): its waits subscribe and it can ping.
     #[tokio::test]
     async fn an_observe_only_broker_keeps_its_listener() {
         let config = PostgresConfig {

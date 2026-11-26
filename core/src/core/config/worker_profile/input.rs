@@ -109,7 +109,7 @@ impl PoolSize {
 /// - `min_size`: connections that the pool keeps open, 0 to
 ///   [`super::MAX_CHILD_POOL_CONNECTIONS`].
 /// - `max_size`: the most connections.
-/// - `check`: check each connection when a write takes it from the pool.
+/// - `pre_ping`: check each connection when a write takes it from the pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IsolatedPool {
@@ -118,7 +118,7 @@ pub struct IsolatedPool {
     #[serde(default = "default_isolated_pool_size")]
     pub max_size: PoolSize,
     #[serde(default)]
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 impl Default for IsolatedPool {
@@ -126,7 +126,7 @@ impl Default for IsolatedPool {
         Self {
             min_size: NO_OPEN_CONNECTIONS,
             max_size: default_isolated_pool_size(),
-            check: false,
+            pre_ping: false,
         }
     }
 }
@@ -136,7 +136,7 @@ impl Default for IsolatedPool {
 /// - `min_size`: connections that the pool keeps open, 0 to
 ///   [`super::MAX_CHILD_POOL_CONNECTIONS`].
 /// - `max_size`: a set size, or one that follows the seats (the default).
-/// - `check`: as for [`IsolatedPool`].
+/// - `pre_ping`: as for [`IsolatedPool`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SharedPool {
@@ -145,7 +145,7 @@ pub struct SharedPool {
     #[serde(default = "pool_size_from_seats")]
     pub max_size: PoolSizeSetting,
     #[serde(default)]
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 impl Default for SharedPool {
@@ -153,7 +153,7 @@ impl Default for SharedPool {
         Self {
             min_size: NO_OPEN_CONNECTIONS,
             max_size: pool_size_from_seats(),
-            check: false,
+            pre_ping: false,
         }
     }
 }
@@ -760,7 +760,7 @@ fn shared_pool(
     Some(super::SharedPool {
         min_size,
         max_size,
-        check: pool.check,
+        pre_ping: pool.pre_ping,
     })
 }
 
@@ -792,7 +792,7 @@ fn isolated_children(
         pool: super::IsolatedPool {
             min_size,
             max_size,
-            check: children.pool.check,
+            pre_ping: children.pool.pre_ping,
         },
         task_send_pool,
     })
@@ -962,7 +962,7 @@ impl From<super::SharedPool> for SharedPool {
         Self {
             min_size: pool.min_size.get(),
             max_size: pool.max_size.into(),
-            check: pool.check,
+            pre_ping: pool.pre_ping,
         }
     }
 }
@@ -978,7 +978,7 @@ impl From<super::IsolatedChildren> for IsolatedChildren {
             pool: IsolatedPool {
                 min_size: children.pool.min_size.get(),
                 max_size: children.pool.max_size.into(),
-                check: children.pool.check,
+                pre_ping: children.pool.pre_ping,
             },
             task_send_pool: children.task_send_pool.into(),
         }

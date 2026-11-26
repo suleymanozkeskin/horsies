@@ -73,7 +73,7 @@ pub enum WorkerError {
     #[error("worker child start failed: the preload parent refused: {reason}")]
     PreloadRefused { reason: String },
 
-    /// An `on_child_process_start` hook failed in a child at the start
+    /// An `on_child_start` hook failed in a child at the start
     /// (Python `ChildHookFailedError`). Never retried: every new child runs
     /// the hook again.
     #[error("{}", crate::worker::worker::CHILD_HOOK_FAILURE_MESSAGE)]

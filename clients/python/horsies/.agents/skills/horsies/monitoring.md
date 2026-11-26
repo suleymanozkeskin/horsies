@@ -87,7 +87,7 @@ to serve). The `--database-url` form is registry-less by design:
 ## Fleet Metrics — `horsies metrics` and `GET /metrics`
 
 ```bash
-horsies metrics myapp.tasks:app --listen 0.0.0.0:9465   # --listen is required, no default
+horsies metrics myapp.tasks:app --metrics-listen 0.0.0.0:9465   # --metrics-listen is required, no default
 ```
 
 - Serves the fleet gauges of the app's database at `GET /metrics`
@@ -158,7 +158,7 @@ error changes stored data. HTTP is the status of the web read routes.
 <!-- members: MonitoringQueryErrorCode -->
 | Code | Variant | Fields | `retryable` | HTTP | When |
 |---|---|---|---|---|---|
-| `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the core's class of the cause: `CoreServerError`, `CoreConnectionError`, ...; or `TooManyPendingCalls`, `CoreCallTimedOut`, `CoreStartFailed`) | the core's classification | 503 when `retryable`, else 500 | The database operation failed |
+| `DB_OPERATION_FAILED` | `MonitoringQueryDbOperationFailed` | `exception` (the core's class of the cause: `CoreServerError`, `CoreConnectionError`, ...; or `TooManyPendingCalls`, `CoreCallTimedOut`, `RuntimeStartFailed`) | the core's classification | 503 when `retryable`, else 500 | The database operation failed |
 | `HISTORY_CONTRACT_VIOLATION` | `MonitoringQueryHistoryContractViolation` | `exception` (the `HistoryContractError`) | `False` | 500 | `task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_run` or `get_workflow_node` read history data that does not decode, for example a history status that is not a `TaskStatus` member; or the detail read found the task live inside its own snapshot, where the live read had missed it (the staged function and the live read disagree); a repeat gives the same result until the stored row or the server changes |
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
@@ -406,7 +406,7 @@ of its own; subscriptions start at the first stream) to `horsies_task_status`,
 `horsies_workflow_status`, and `horsies_worker_state`, coalesces notifies
 (250 ms), and fans out over `GET /api/events` (SSE). After a listener
 reconnect each stream gets one event with no ids per topic; a broker with
-`assume_initialized=True` has no listener, and its stream sends `degraded`.
+`SchemaMode.ASSUME_INITIALIZED` has no listener, and its stream sends `degraded`.
 Events are invalidation signals — `{"topic", "ids"}` — never data. Client
 polling is a fallback that activates only while the stream is down; the
 schedules table always polls (its table has no trigger). A task's start

@@ -21,6 +21,7 @@ import horsies._core as core
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.outcome import (
     BrokerError,
     Failed,
@@ -66,7 +67,7 @@ async def unreachable_broker() -> AsyncGenerator[PostgresBroker, None]:
     the core's retryable database failure for each call."""
     broken = PostgresBroker(
         PostgresConfig(database_url=SecretStr(UNREACHABLE_DATABASE_URL)),
-        assume_initialized=True,
+        schema_mode=SchemaMode.ASSUME_INITIALIZED,
     )
     yield broken
     _ = await broken.close_async()
@@ -80,7 +81,7 @@ async def listener_refused_broker() -> AsyncGenerator[PostgresBroker, None]:
     the workflow row. The session URL names a database of its own, so the
     listener of the process for it is new.
 
-    The broker runs no schema install (``run_schema_migrations=False``):
+    The broker runs no schema install (``SchemaMode.OBSERVE_ONLY``):
     the install runs on the session URL."""
     reader = PostgresBroker(
         PostgresConfig(
@@ -89,7 +90,7 @@ async def listener_refused_broker() -> AsyncGenerator[PostgresBroker, None]:
                 f'postgresql://postgres:none@127.0.0.1:1/listener_refused_{uuid.uuid4().hex}',
             ),
         ),
-        run_schema_migrations=False,
+        schema_mode=SchemaMode.OBSERVE_ONLY,
     )
     yield reader
     _ = await reader.close_async()

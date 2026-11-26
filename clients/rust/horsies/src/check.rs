@@ -82,45 +82,6 @@ impl std::fmt::Display for CheckPassed {
     }
 }
 
-/// The refusals of the first phase of the check that refused, each with
-/// its code, notes and help.
-#[derive(Debug, Clone)]
-pub struct CheckReport {
-    report: ValidationReport,
-}
-
-impl CheckReport {
-    /// A report of `errors`, which hold at least one refusal.
-    pub(crate) fn of(phase: &str, errors: Vec<HorsiesError>) -> Self {
-        assert!(!errors.is_empty(), "a check report holds a refusal");
-        let mut report = ValidationReport::new(phase);
-        for error in errors {
-            report.add(error);
-        }
-        Self { report }
-    }
-
-    /// The refusals, in the order the phase found them.
-    pub fn errors(&self) -> &[HorsiesError] {
-        &self.report.errors
-    }
-
-    /// The phase that refused: `check`, `worker-startup` or
-    /// `scheduler-startup`.
-    pub fn phase(&self) -> &str {
-        &self.report.phase_name
-    }
-}
-
-impl std::fmt::Display for CheckReport {
-    /// Each refusal, then the count (Python `format_rust_style`).
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}", self.report)
-    }
-}
-
-impl std::error::Error for CheckReport {}
-
 /// The phase name of `horsies check` (Python's report name).
 pub(crate) const CHECK: &str = "check";
 /// The phase name of the check before a worker starts.
@@ -152,9 +113,9 @@ impl Horsies {
     /// The static check: the phases of the module docs for the role of
     /// this process (a worker skips the schedules). No I/O.
     ///
-    /// Errors: [`CheckReport`] with the refusals of the first phase that
+    /// Errors: [`ValidationReport`] with the refusals of the first phase that
     /// refused.
-    pub fn check(&self) -> Result<CheckPassed, CheckReport> {
+    pub fn check(&self) -> Result<CheckPassed, ValidationReport> {
         self.check_scope(CheckScope::of_role(self.role()), CHECK)
     }
 
@@ -163,14 +124,14 @@ impl Horsies {
     /// writes nothing but the LISTEN probe's one NOTIFY in PgBouncer
     /// transaction mode. Installs no schema.
     ///
-    /// Errors: [`CheckReport`] with the refusals of the first phase that
+    /// Errors: [`ValidationReport`] with the refusals of the first phase that
     /// refused.
     ///
     /// # Panics
     ///
     /// After the static check passed, in a process that was forked without
     /// `exec` after the core's process runtime started. Nothing connected.
-    pub async fn check_live(&self) -> Result<CheckPassed, CheckReport> {
+    pub async fn check_live(&self) -> Result<CheckPassed, ValidationReport> {
         let passed = self.check()?;
         refuse_in_a_fork(format_args!("Horsies::check_live"));
         let broker = match self.handle().broker().await {
@@ -182,7 +143,7 @@ impl Horsies {
         }
         match check_worker_connections(self.config(), &broker).await {
             errors if errors.is_empty() => Ok(passed),
-            errors => Err(CheckReport::of(CHECK, errors)),
+            errors => Err(ValidationReport::of(CHECK, errors)),
         }
     }
 
@@ -192,14 +153,14 @@ impl Horsies {
         &self,
         scope: CheckScope,
         phase: &'static str,
-    ) -> Result<CheckPassed, CheckReport> {
+    ) -> Result<CheckPassed, ValidationReport> {
         let workflow_errors = self.workflow_check_findings();
         if !workflow_errors.is_empty() {
-            return Err(CheckReport::of(phase, workflow_errors));
+            return Err(ValidationReport::of(phase, workflow_errors));
         }
         let option_errors = task_option_refusals(self.tasks().iter());
         if !option_errors.is_empty() {
-            return Err(CheckReport::of(phase, option_errors));
+            return Err(ValidationReport::of(phase, option_errors));
         }
         let schedule_errors = match (scope, &self.config().schedule) {
             (CheckScope::WithoutSchedules, _) | (CheckScope::WithSchedules, None) => Vec::new(),
@@ -210,7 +171,7 @@ impl Horsies {
                 task_count: self.tasks().len(),
                 declared_error_codes: declared_error_codes(self.tasks().iter()),
             }),
-            false => Err(CheckReport::of(phase, schedule_errors)),
+            false => Err(ValidationReport::of(phase, schedule_errors)),
         }
     }
 }
@@ -228,8 +189,8 @@ fn declared_error_codes<'a>(
 
 /// The report of a failed connect or ping (Python
 /// `_check_broker_connectivity`). Pure.
-pub(crate) fn connectivity_report(cause: &str) -> CheckReport {
-    CheckReport::of(
+pub(crate) fn connectivity_report(cause: &str) -> ValidationReport {
+    ValidationReport::of(
         CHECK,
         vec![HorsiesError::new("broker connectivity check failed")
             .with_code(ErrorCode::BrokerInvalidUrl)
@@ -241,7 +202,7 @@ pub(crate) fn connectivity_report(cause: &str) -> CheckReport {
 /// The report of a refused connectivity step, with Python's two answers:
 /// the listener probe's, and the connectivity failure's for every other
 /// step. Pure.
-fn refusal_report(refused: &ConnectivityRefusal) -> CheckReport {
+fn refusal_report(refused: &ConnectivityRefusal) -> ValidationReport {
     match refused {
         ConnectivityRefusal::ListenerNotCapable(failure) => listener_report(&failure.to_string()),
         ConnectivityRefusal::PoolSettings(_)
@@ -253,8 +214,8 @@ fn refusal_report(refused: &ConnectivityRefusal) -> CheckReport {
 /// The report of a session URL that does not deliver a NOTIFY to a LISTEN
 /// in PgBouncer transaction mode (Python `_run_listener_probe`), with the
 /// probe's cause as a second note. Pure.
-fn listener_report(cause: &str) -> CheckReport {
-    CheckReport::of(
+fn listener_report(cause: &str) -> ValidationReport {
+    ValidationReport::of(
         CHECK,
         vec![HorsiesError::new("broker listener capability check failed")
             .with_code(ErrorCode::BrokerInvalidUrl)
@@ -463,9 +424,9 @@ mod tests {
         };
         app.register("bad_retry", task(policy_only)).unwrap();
         let report = app.check_live().await.unwrap_err();
-        assert_eq!(report.phase(), CHECK);
+        assert_eq!(report.phase_name(), CHECK);
         let messages: Vec<&str> = report
-            .errors()
+            .refusals()
             .iter()
             .map(|error| error.message.as_str())
             .collect();
@@ -475,7 +436,7 @@ mod tests {
         );
         assert!(
             report
-                .errors()
+                .refusals()
                 .iter()
                 .all(|error| error.code != Some(ErrorCode::BrokerInvalidUrl)),
             "{report}"
@@ -651,12 +612,12 @@ mod tests {
 
     #[test]
     fn a_report_names_its_phase_and_each_refusal() {
-        let report = CheckReport::of(
+        let report = ValidationReport::of(
             "worker-startup",
             vec![HorsiesError::new("first"), HorsiesError::new("second")],
         );
-        assert_eq!(report.phase(), "worker-startup");
-        assert_eq!(report.errors().len(), 2);
+        assert_eq!(report.phase_name(), "worker-startup");
+        assert_eq!(report.refusals().len(), 2);
         assert!(report
             .to_string()
             .ends_with("aborting due to 2 previous errors"));
@@ -680,7 +641,7 @@ mod tests {
             horsies_core::ListenProbeFailure::Interrupted(horsies_core::CheckInterruption::Stopped),
         );
         let report = refusal_report(&refused);
-        let error = &report.errors()[0];
+        let error = &report.refusals()[0];
         assert_eq!(error.message, "broker listener capability check failed");
         assert_eq!(error.code, Some(ErrorCode::BrokerInvalidUrl));
         assert!(error.notes[0].contains("transaction-pooled"));
@@ -690,7 +651,7 @@ mod tests {
     #[test]
     fn a_failed_connect_is_python_s_connectivity_refusal() {
         let report = connectivity_report("connection refused");
-        assert_eq!(report.errors()[0].code, Some(ErrorCode::BrokerInvalidUrl));
-        assert_eq!(report.errors()[0].notes, vec!["connection refused"]);
+        assert_eq!(report.refusals()[0].code, Some(ErrorCode::BrokerInvalidUrl));
+        assert_eq!(report.refusals()[0].notes, vec!["connection refused"]);
     }
 }

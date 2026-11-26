@@ -13,7 +13,7 @@ from unittest import mock
 import pytest
 from pydantic import SecretStr
 
-from horsies._core import CoreStartFailed
+from horsies._core import RuntimeStartFailed
 from horsies.core.app import Horsies
 from horsies.core.errors import ErrorCode
 from horsies.core.models.app import AppConfig
@@ -129,7 +129,7 @@ class TestCheckLiveWorkerConnections:
         )
 
         with _live_core(refusals=[refusal]):
-            errors = app.check(live=True)
+            errors = app.check(live=True).refusals
 
         assert [error.code for error in errors] == [ErrorCode.CHECK_WORKER_CONNECTIONS]
         assert errors[0].message == refusal.message
@@ -146,7 +146,7 @@ class TestCheckLiveWorkerConnections:
         )
 
         with _live_core(refusals=[]) as built:
-            assert app.check(live=True) == []
+            assert app.check(live=True).refusals == []
 
         [handle] = built
         [profiles] = handle.profiles
@@ -158,7 +158,7 @@ class TestCheckLiveWorkerConnections:
 
     def test_no_profiles_sends_an_empty_set_for_the_core_to_skip(self) -> None:
         with _live_core(refusals=[]) as built:
-            assert _app({}).check(live=True) == []
+            assert _app({}).check(live=True).refusals == []
         assert built[0].profiles == [{}]
 
     def test_a_transaction_pooler_is_in_the_manifest_that_the_core_reads(self) -> None:
@@ -170,16 +170,16 @@ class TestCheckLiveWorkerConnections:
             ),
         )
         with _live_core(refusals=[]) as built:
-            assert app.check(live=True) == []
+            assert app.check(live=True).refusals == []
         assert built[0].manifest['database']['pgbouncer_transaction_mode'] is True
 
     def test_a_core_that_cannot_run_the_call_is_one_unread_limit_error(self) -> None:
         app = _app({'small': WorkerProfile(isolated=IsolatedChildren(count=1))})
 
         with _live_core(
-            refusals=CoreStartFailed('the core runtime could not start'),
+            refusals=RuntimeStartFailed('the core runtime could not start'),
         ) as built:
-            errors = app.check(live=True)
+            errors = app.check(live=True).refusals
 
         assert [(error.code, error.notes) for error in errors] == [
             (ErrorCode.CHECK_WORKER_CONNECTIONS, ['the core runtime could not start']),
@@ -194,7 +194,7 @@ class TestCheckLiveWorkerConnections:
             refusals=AssertionError('the worker phase must not run'),
             connectivity=_Refused(step='MAIN_URL', message='db down'),
         ) as built:
-            errors = app.check(live=True)
+            errors = app.check(live=True).refusals
 
         assert [error.code for error in errors] == [ErrorCode.BROKER_INVALID_URL]
         assert built[0].profiles == []
@@ -203,5 +203,5 @@ class TestCheckLiveWorkerConnections:
     def test_check_without_live_builds_no_handle(self) -> None:
         app = _app({'big': WorkerProfile(isolated=IsolatedChildren(count=20))})
         with _live_core(refusals=AssertionError('no live phase')) as built:
-            assert app.check(live=False) == []
+            assert app.check(live=False).refusals == []
         assert built == []

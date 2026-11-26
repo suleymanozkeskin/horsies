@@ -854,7 +854,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='no_roots', tasks=[node_a, node_b])
 
-        codes = [e.code for e in exc_info.value.report.errors]
+        codes = [e.code for e in exc_info.value.report.refusals]
         assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
         assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
 
@@ -872,7 +872,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='cycle', tasks=[node_a, node_b])
 
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         codes = [e.code for e in errors]
         assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
         assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
@@ -897,7 +897,7 @@ class TestWorkflowSpecValidation:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='indirect_cycle', tasks=[node_a, node_b, node_c])
 
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         codes = [e.code for e in errors]
         assert ErrorCode.WORKFLOW_NO_ROOT_TASKS in codes
         assert ErrorCode.WORKFLOW_CYCLE_DETECTED in codes
@@ -2884,7 +2884,7 @@ class TestMultiErrorWorkflowCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='cycle_test', tasks=[node_a, node_b])
 
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert len(errors) == 2
         messages = [e.message for e in errors]
         assert 'no root tasks found' in messages
@@ -2902,7 +2902,7 @@ class TestMultiErrorWorkflowCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='bad_joins', tasks=[root, node_a, node_b])
 
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert len(errors) == 2
 
     def test_node_id_errors_gate_remaining_validation(self) -> None:
@@ -2965,7 +2965,7 @@ class TestMultiErrorWorkflowCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='overlap_no_mask', tasks=[node_a, node_b])
 
-        codes = {e.code for e in exc_info.value.report.errors}
+        codes = {e.code for e in exc_info.value.report.refusals}
         assert ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP in codes
         assert ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
 
@@ -2993,7 +2993,7 @@ class TestMultiErrorWorkflowCollection:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='nondep_no_mask', tasks=[node_dep, node_orphan, node_b])
 
-        codes = {e.code for e in exc_info.value.report.errors}
+        codes = {e.code for e in exc_info.value.report.refusals}
         assert ErrorCode.WORKFLOW_INVALID_ARGS_FROM in codes
         assert ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH in codes
 
@@ -3855,7 +3855,7 @@ class TestTaskNodeOptionValidation:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             WorkflowSpec(name='both_rules', tasks=[node])
 
-        codes = [error.code for error in exc_info.value.report.errors]
+        codes = [error.code for error in exc_info.value.report.refusals]
         assert codes == [
             ErrorCode.WORKFLOW_INVALID_PRIORITY,
             ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,

@@ -286,6 +286,6 @@ class TestPreloadModulesMain:
             patch('horsies.core.app.importlib.import_module') as import_module,
         ):
             with pytest.raises(RuntimeError, match='suppress broken'):
-                app.check(live=False)
+                app.check(live=False).refusals
 
         import_module.assert_not_called()

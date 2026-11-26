@@ -32,7 +32,7 @@ Every task id parameter and field of these methods is a `uuid.UUID`.
 
 ## Methods
 
-### `get_raw_result_record_async(task_id: UUID, timeout_ms: int | None = None) -> BrokerResult[RawResultRecord | None]`
+### `get_raw_result_record_async(task_id: UUID, wait_ms: int | None = None) -> BrokerResult[RawResultRecord | None]`
 
 Fetch the raw stored result envelope for a task by ID, waiting if necessary. This is the broker's infrastructure-level result-fetch surface: it does no typed decoding and imports no user code. Callers that want a typed `ReadResult[T, TaskError]` should use [`app.get_result_async`](#app-level-typed-result-apis) instead — it composes a typed decode on top of this call.
 
@@ -41,17 +41,17 @@ Waits on PostgreSQL `LISTEN/NOTIFY`, and reads the row again at least every 5 se
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `task_id` | `UUID` | — | Task ID to retrieve result for |
-| `timeout_ms` | `int \| None` | `None` | Max wait time in milliseconds, from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295); `None` waits indefinitely. Any other value returns `Err(BrokerInvalidInput)` (`INVALID_INPUT`) before any read |
+| `wait_ms` | `int \| None` | `None` | Max wait time in milliseconds, from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295); `None` waits indefinitely. Any other value returns `Err(BrokerInvalidInput)` (`INVALID_INPUT`) before any read |
 
 In a worker child, where task bodies run, it returns `Err(BrokerWaitInsideTask)` (`WAIT_INSIDE_TASK`) at once, as its first check, and waits for nothing. See [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task).
 
 **Returns:** `BrokerResult[RawResultRecord | None]` — `Ok(None)` if no task row exists for that ID; `Err(BrokerOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
 
-Sync variant: `get_raw_result_record(task_id, timeout_ms)`. It runs on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(BrokerAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
+Sync variant: `get_raw_result_record(task_id, wait_ms)`. It runs on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(BrokerAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
 
 ```python
 # Async — broker-level raw fetch (no typed decode)
-result = await broker.get_raw_result_record_async(task_id, timeout_ms=5000)
+result = await broker.get_raw_result_record_async(task_id, wait_ms=5000)
 if is_ok(result):
     record = result.ok_value
     if record is None:

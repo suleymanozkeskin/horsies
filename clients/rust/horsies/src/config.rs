@@ -333,7 +333,7 @@ mod tests {
     }
 
     /// `Horsies::new` refuses a config with two profile values outside
-    /// their bounds in one error that holds both refusals, each with its
+    /// their bounds in one report that holds both refusals, each with its
     /// path and its bounds.
     #[test]
     fn horsies_new_refuses_every_profile_value_outside_its_bound_at_once() {
@@ -349,16 +349,19 @@ mod tests {
 
         let refused = crate::Horsies::new(config).expect_err("two values are outside their bounds");
 
-        assert_eq!(refused.code, Some(ErrorCode::ConfigInvalidWorkerProfile));
-        assert_eq!(refused.notes.len(), 2, "{refused}");
+        let refusals = refused.refusals();
+        assert_eq!(refusals.len(), 2, "{refused}");
+        assert!(refusals
+            .iter()
+            .all(|refusal| refusal.code == Some(ErrorCode::ConfigInvalidWorkerProfile)));
         assert!(
-            refused.notes[0].contains(
+            refusals[0].to_string().contains(
                 "worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024"
             ),
             "{refused}",
         );
         assert!(
-            refused.notes[1].contains(
+            refusals[1].to_string().contains(
                 "worker_profiles['web'].shared_async.seats: 1001 is outside the bounds 1 to 1000"
             ),
             "{refused}",

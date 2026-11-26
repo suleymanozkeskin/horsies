@@ -1,6 +1,6 @@
-//! The lazy handle of a client process: a producer manifest, the pool
-//! profile of the process and the client family, and the broker that the
-//! first operation connects.
+//! The lazy core connection of a client process: a producer manifest, the
+//! pool profile of the process and the client family, and the broker that
+//! the first operation connects.
 //!
 //! Building a handle starts nothing: no runtime, no thread, no connection.
 //! The first operation connects the broker; a failed connect is not kept,
@@ -8,11 +8,11 @@
 //! handle, before its first operation that needs it, unless the manifest's
 //! schema mode is `ObserveOnly` or `AssumeInitialized`. The install ends with
 //! the startup coverage pass of the handle's coverage request
-//! ([`CoreHandle::with_install_coverage`]). The broker checks the client
+//! ([`CoreConnection::with_install_coverage`]). The broker checks the client
 //! family of the database before its first write.
 //!
-//! The Python bridge (`CoreHandle`, `CoreChildHandle`) and the Rust client
-//! (`Horsies`) each hold one.
+//! The Python bridge (its classes `CoreHandle`, `CoreChildHandle`) and the
+//! Rust client (`Horsies`) each hold one.
 
 use std::sync::Arc;
 
@@ -39,7 +39,7 @@ pub enum HandleListener {
     /// first subscription.
     Process,
     /// The broker has no listener (`AssumeInitialized`, Python's
-    /// `assume_initialized=True`): a result wait polls, and an operation that
+    /// `SchemaMode.ASSUME_INITIALIZED`): a result wait polls, and an operation that
     /// needs the listener answers `LISTENER_DISABLED`.
     Disabled,
 }
@@ -54,7 +54,7 @@ impl HandleListener {
     }
 }
 
-/// How [`CoreHandle::close`] ended.
+/// How [`CoreConnection::close`] ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HandleClose {
     /// The handle never connected: nothing was started, nothing closed.
@@ -64,25 +64,29 @@ pub enum HandleClose {
     Closed,
 }
 
-/// The lazy handle of one producer manifest, one pool profile and one
-/// client family.
-pub struct CoreHandle {
+/// The lazy core connection of one producer manifest, one pool profile and
+/// one client family. One or more apps can share it.
+pub struct CoreConnection {
     manifest: ProducerManifest,
-    profile: PoolProfile,
+    pool_profile: PoolProfile,
     family: ClientFamily,
     /// The coverage pass of the schema install of the handle's broker.
     install_coverage: CoverageRequest,
     broker: OnceCell<Arc<PostgresBroker>>,
 }
 
-impl CoreHandle {
-    /// A handle of `manifest` with the pools of `profile`, writing as
-    /// `family`, whose install covers the classes of the default retention
-    /// config. Starts nothing: no runtime, no connection.
-    pub fn new(manifest: ProducerManifest, profile: PoolProfile, family: ClientFamily) -> Self {
+impl CoreConnection {
+    /// A connection of `manifest` with the pools of `pool_profile`, writing
+    /// as `family`, whose install covers the classes of the default
+    /// retention config. Starts nothing: no runtime, no connection.
+    pub fn new(
+        manifest: ProducerManifest,
+        pool_profile: PoolProfile,
+        family: ClientFamily,
+    ) -> Self {
         Self {
             manifest,
-            profile,
+            pool_profile,
             family,
             install_coverage: default_install_coverage(),
             broker: OnceCell::new(),
@@ -109,8 +113,8 @@ impl CoreHandle {
     }
 
     /// The pool profile of the handle's process.
-    pub fn profile(&self) -> PoolProfile {
-        self.profile
+    pub fn pool_profile(&self) -> PoolProfile {
+        self.pool_profile
     }
 
     /// The client family the handle writes as.
@@ -137,7 +141,7 @@ impl CoreHandle {
             .get_or_try_init(|| {
                 connect(
                     &self.manifest,
-                    self.profile,
+                    self.pool_profile,
                     self.family,
                     &self.install_coverage,
                 )
@@ -187,7 +191,7 @@ impl CoreHandle {
 
 /// Connect the broker of a manifest, whose install ends with the coverage
 /// pass of `install_coverage`. `AssumeInitialized` runs no schema step, as
-/// `ObserveOnly`, and has no listener (Python's `assume_initialized=True`):
+/// `ObserveOnly`, and has no listener (Python's `SchemaMode.ASSUME_INITIALIZED`):
 /// a result wait polls.
 ///
 /// Errors: the [`BrokerError`] of the connect.
@@ -249,16 +253,16 @@ mod tests {
         }
     }"#;
 
-    fn handle(family: ClientFamily) -> CoreHandle {
+    fn handle(family: ClientFamily) -> CoreConnection {
         let manifest = parse_producer_manifest(MANIFEST).expect("the manifest is complete");
-        CoreHandle::new(manifest, PoolProfile::Producer, family)
+        CoreConnection::new(manifest, PoolProfile::Producer, family)
     }
 
     /// Building a handle starts nothing; it keeps what it was built with.
     #[test]
     fn a_new_handle_keeps_its_inputs_and_starts_nothing() {
         let rust = handle(ClientFamily::Rust);
-        assert_eq!(rust.profile(), PoolProfile::Producer);
+        assert_eq!(rust.pool_profile(), PoolProfile::Producer);
         assert_eq!(rust.family(), ClientFamily::Rust);
         assert_eq!(rust.schema_mode(), SchemaMode::ObserveOnly);
         assert_eq!(rust.manifest().manifest_version.get(), 1);
@@ -351,7 +355,7 @@ mod tests {
     async fn the_first_install_of_a_handle_records_the_family_of_its_client() {
         for family in [ClientFamily::Python, ClientFamily::Rust] {
             let database = TestDatabase::create_empty().await;
-            let handle = CoreHandle::new(
+            let handle = CoreConnection::new(
                 installing_manifest_on(database.url()),
                 PoolProfile::Producer,
                 family,

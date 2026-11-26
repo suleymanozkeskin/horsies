@@ -31,8 +31,8 @@ pub struct WorkerConfig {
 
     /// Log level for this worker. Stored in the config so that it can be
     /// propagated or inspected at runtime (mirrors Python's
-    /// `WorkerConfig.loglevel`). Defaults to `Info`.
-    pub loglevel: LogLevel,
+    /// `WorkerConfig.log_level`). Defaults to `Info`.
+    pub log_level: LogLevel,
 }
 
 impl Default for WorkerConfig {
@@ -42,7 +42,7 @@ impl Default for WorkerConfig {
             queue_priorities: HashMap::new(),
             queue_max_concurrency: HashMap::new(),
             coalesce_notifies: 100,
-            loglevel: LogLevel::Info,
+            log_level: LogLevel::Info,
         }
     }
 }

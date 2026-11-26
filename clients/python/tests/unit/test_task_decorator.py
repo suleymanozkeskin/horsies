@@ -161,7 +161,7 @@ def _make_app(
     app.config.payload = payload_policy or PayloadPolicy()
     app.are_sends_suppressed.return_value = suppress_sends
     app.send_telemetry.return_value = NO_SEND_TELEMETRY
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     return app
 
 
@@ -1749,7 +1749,7 @@ class TestCreateTaskWrapperSend:
             return Ok(x)
 
         app = _make_app()
-        app.validate_queue_name.side_effect = ConfigurationError(
+        app.validate_queue.side_effect = ConfigurationError(
             message='bad queue',
             code=ErrorCode.TASK_INVALID_QUEUE,
         )
@@ -2315,7 +2315,7 @@ class TestCreateTaskWrapperSendAsync:
             return Ok(x)
 
         app = _make_app()
-        app.validate_queue_name.side_effect = ConfigurationError(
+        app.validate_queue.side_effect = ConfigurationError(
             message='bad queue',
             code=ErrorCode.TASK_INVALID_QUEUE,
         )
@@ -2423,7 +2423,7 @@ class TestCreateTaskWrapperSchedule:
             return Ok(x)
 
         app = _make_app()
-        app.validate_queue_name.side_effect = ConfigurationError(
+        app.validate_queue.side_effect = ConfigurationError(
             message='bad',
             code=ErrorCode.TASK_INVALID_QUEUE,
         )

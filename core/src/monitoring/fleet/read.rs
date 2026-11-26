@@ -13,7 +13,7 @@ use crate::db::{
     BoundStatement, CheckoutClass, RefusalCause, Row, StatementBound, StatementFailure, Transience,
     UnknownOutcomeCause,
 };
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 use crate::telemetry::labels::FleetQuery;
 use crate::{BrokerError, ClassCoverage, PostgresBroker};
 
@@ -55,13 +55,13 @@ pub async fn read_fleet_state(broker: &PostgresBroker) -> FleetState {
 }
 
 /// The fleet state through `handle`: its broker, connected at the first
-/// call that succeeds ([`CoreHandle::broker`]), then [`read_fleet_state`].
+/// call that succeeds ([`CoreConnection::broker`]), then [`read_fleet_state`].
 ///
 /// When the connect fails, every part answers
 /// [`FleetQueryFailure::DatabaseFailed`] with the cause of the connect, and
 /// `took` of each part is the time of the connect; the next call connects
 /// again. The connect runs no schema step.
-pub async fn read_fleet_state_through(handle: &CoreHandle) -> FleetState {
+pub async fn read_fleet_state_through(handle: &CoreConnection) -> FleetState {
     let started = Instant::now();
     match handle.broker().await {
         Ok(broker) => read_fleet_state(&broker).await,

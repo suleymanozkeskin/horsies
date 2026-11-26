@@ -147,7 +147,7 @@ impl Suite {
                 "worker",
                 "--profile",
                 profile.name(),
-                "--loglevel",
+                "--log-level",
                 LOG_LEVEL,
             ],
         )
@@ -209,7 +209,7 @@ impl Suite {
 
     /// Start the scheduler and wait until it wrote a schedule state row.
     pub async fn scheduler(&self) -> TestProcess {
-        let mut scheduler = self.spawn("scheduler", &["scheduler", "--loglevel", LOG_LEVEL]);
+        let mut scheduler = self.spawn("scheduler", &["scheduler", "--log-level", LOG_LEVEL]);
         let client = self.client().await;
         scheduler
             .wait_until(

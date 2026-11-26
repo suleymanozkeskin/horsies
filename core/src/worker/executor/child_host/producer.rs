@@ -12,16 +12,16 @@ use std::sync::{Arc, OnceLock};
 
 use crate::broker::client_family::ClientFamily;
 use crate::broker::PoolProfile;
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 use crate::manifest::{PoolConnections, PoolSize, ProducerManifest};
 use crate::worker::executor::protocol::{ChildKind, TaskSendPool};
 
-static CHILD_PRODUCER: OnceLock<Arc<CoreHandle>> = OnceLock::new();
+static CHILD_PRODUCER: OnceLock<Arc<CoreConnection>> = OnceLock::new();
 
 /// The producer handle of this process, if it is a worker child.
 pub enum ChildProducer {
     /// The child host published the handle: task code sends through it.
-    InChild(Arc<CoreHandle>),
+    InChild(Arc<CoreConnection>),
     /// No child host runs in this process: the app sends through its own
     /// handle.
     NotInAChild,
@@ -68,7 +68,7 @@ pub(super) fn task_send_manifest(
 /// nothing. The child host publishes once per process; a second publish is a
 /// defect of the host and crashes loud.
 pub(super) fn publish_child_producer(manifest: ProducerManifest, family: ClientFamily) {
-    let handle = Arc::new(CoreHandle::new(manifest, PoolProfile::Producer, family));
+    let handle = Arc::new(CoreConnection::new(manifest, PoolProfile::Producer, family));
     if CHILD_PRODUCER.set(handle).is_err() {
         panic!("the producer handle of this child was published twice");
     }

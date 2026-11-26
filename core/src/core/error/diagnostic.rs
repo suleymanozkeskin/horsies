@@ -54,12 +54,12 @@ pub fn format_diagnostic(error: &super::HorsiesError) -> String {
 /// Format a ValidationReport using miette's diagnostic rendering.
 pub fn format_report_diagnostic(report: &super::ValidationReport) -> String {
     let mut parts = Vec::new();
-    for error in &report.errors {
+    for error in report.refusals() {
         parts.push(format_diagnostic(error));
     }
     parts.push(format!(
         "error: aborting due to {} previous errors",
-        report.errors.len()
+        report.refusals().len()
     ));
     parts.join("\n")
 }

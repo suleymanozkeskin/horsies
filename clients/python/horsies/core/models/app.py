@@ -19,7 +19,7 @@ from horsies.core.models.tracing import (
     tracing_errors,
     tracing_label,
 )
-from horsies.core.models.log_format import LogFormatSetting, TextLogs
+from horsies.core.models.log_format import LogFormat, TextLogs
 from horsies.core.models.schedule import ScheduleConfig, SchedulePattern
 from horsies.core.models.worker_profile import (
     WorkerProfile,
@@ -150,7 +150,7 @@ class AppConfig(BaseModel):
     tracing: TracingSetting = Field(default_factory=NoTracing)
     # The format of the horsies log records in the processes that load the
     # app: one line of text (`TextLogs`) or one JSON object (`JsonLogs`).
-    log_format: LogFormatSetting = Field(default_factory=TextLogs)
+    log_format: LogFormat = Field(default_factory=TextLogs)
 
     @model_validator(mode='after')
     def validate_queue_configuration(self):
@@ -366,7 +366,7 @@ class AppConfig(BaseModel):
         # never routed into — while the queue the adopter meant keeps
         # the 30-day default. Neither the policy nor an error.
         # 'default' is the only queue a DEFAULT-mode app has; it is what
-        # Horsies.validate_queue_name returns for that mode.
+        # Horsies.validate_queue returns for that mode.
         configured_queues = (
             {queue.name for queue in self.custom_queues}
             if self.queue_mode == QueueMode.CUSTOM and self.custom_queues

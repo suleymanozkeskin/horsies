@@ -23,7 +23,7 @@ from horsies._core import (
     CoreContractViolation,
     CorePreconditionFailed,
     CoreServerError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     DatabasePingRecord,
     Enqueued,
     EnqueueRequest,
@@ -73,6 +73,7 @@ from horsies.core.models.health import (
     DatabasePing,
 )
 from horsies.core.models.payload import PayloadPolicy
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.task_send_types import (
     TaskSendErrorCode,
     TaskSendValidationFailed,
@@ -236,20 +237,20 @@ class TestEnqueueAsync:
 
     @pytest.mark.asyncio
     async def test_both_scheduling_parameters_are_refused_as_invalid_input(self) -> None:
-        """enqueued_at and enqueue_delay_seconds together → INVALID_INPUT; nothing is written."""
+        """enqueued_at and delay_seconds together → INVALID_INPUT; nothing is written."""
         result = await _refusing_broker().enqueue_async(
             'my_task',
             task_id=SEND_TASK_ID,
             send_kind=SendKind.FIRST,
             sent_at=datetime.now(timezone.utc),
             enqueued_at=datetime.now(timezone.utc),
-            enqueue_delay_seconds=30,
+            delay_seconds=30,
         )
 
         assert is_err(result)
         match result.err_value:
             case BrokerInvalidInput(message=message, exception=cause):
-                assert 'enqueued_at and enqueue_delay_seconds' in message
+                assert 'enqueued_at and delay_seconds' in message
                 assert cause == NoCause()
             case other:
                 raise AssertionError(f'expected INVALID_INPUT, got {other!r}')
@@ -271,7 +272,7 @@ class TestEnqueueAsync:
 
     @pytest.mark.asyncio
     async def test_future_sent_at_without_scheduling_params_rejected(self) -> None:
-        """Future sent_at without enqueued_at or enqueue_delay_seconds must error.
+        """Future sent_at without enqueued_at or delay_seconds must error.
 
         sent_at is an immutable call-site timestamp, not a scheduling mechanism.
         Passing a future value without explicit scheduling params is ambiguous
@@ -761,7 +762,7 @@ class TestGetRawResultRecordAsync:
         envelope = '{"__h_task_result__":true,"ok":7,"err":null}'
         broker = self._broker_answering(self._record('COMPLETED', envelope))
 
-        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=5_000)
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, wait_ms=5_000)
 
         assert result == Ok(RawResultRecord(
             task_id=RESULT_TASK_ID,
@@ -778,7 +779,7 @@ class TestGetRawResultRecordAsync:
     async def test_a_record_without_a_result_has_no_payload(self, status: str) -> None:
         broker = self._broker_answering(self._record(status, None))
 
-        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=10)
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, wait_ms=10)
 
         assert is_ok(result)
         record = result.ok_value
@@ -866,7 +867,7 @@ class TestGetRawResultRecordAsync:
     async def test_a_refused_limit_is_invalid_input_before_the_core(self) -> None:
         broker = self._broker_answering(None)
 
-        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=-1)
+        result = await broker.get_raw_result_record_async(RESULT_TASK_ID, wait_ms=-1)
 
         assert is_err(result)
         assert isinstance(result.err_value, BrokerInvalidInput)
@@ -900,7 +901,7 @@ class TestGetRawResultRecordAsync:
         )
         broker._core_handle = handle
 
-        result = broker.get_raw_result_record(RESULT_TASK_ID, timeout_ms=5_000)
+        result = broker.get_raw_result_record(RESULT_TASK_ID, wait_ms=5_000)
 
         assert result == Ok(None)
         handle.raw_result_record.assert_called_once_with(RESULT_TASK_ID, timeout_ms=5_000)
@@ -997,7 +998,7 @@ class TestPingWorkers:
         config = PostgresConfig(
             database_url='postgresql://u:p@localhost/db'
         )
-        broker = PostgresBroker(config, assume_initialized=True)
+        broker = PostgresBroker(config, schema_mode=SchemaMode.ASSUME_INITIALIZED)
 
         result = await broker.ping_workers_async(timeout_seconds=1.0)
 
@@ -1813,7 +1814,7 @@ class TestClose:
 
     def test_a_core_that_cannot_run_the_close_is_close_failed(self) -> None:
         """A core boundary error of the blocking close is CLOSE_FAILED with the error."""
-        refused = CoreStartFailed('the core runtime could not start')
+        refused = RuntimeStartFailed('the core runtime could not start')
         broker = self._broker_closing(MagicMock(side_effect=refused))
 
         result = broker.close()
@@ -2138,7 +2139,7 @@ class TestEnqueueInputRefusal:
         app.config.payload = PayloadPolicy()
         app.are_sends_suppressed.return_value = False
         app.send_telemetry.return_value = NO_SEND_TELEMETRY
-        app.validate_queue_name.return_value = 'default'
+        app.validate_queue.return_value = 'default'
         app.get_broker.return_value = broker
 
         def good_fn(*, x: int) -> Result[int, TaskError]:

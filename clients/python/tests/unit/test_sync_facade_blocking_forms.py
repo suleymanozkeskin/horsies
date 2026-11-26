@@ -28,7 +28,7 @@ from horsies._core import (
     ClassCoverageRecord,
     ClassReportRecord,
     CoreConnectionError,
-    CoreStartFailed,
+    RuntimeStartFailed,
     DatabasePingRecord,
     HandleClosed,
     OldestWaitingRecord,
@@ -383,7 +383,7 @@ def _closing_broker(core_answer: object) -> Any:
 CLOSE_CASES: Final[dict[str, Callable[[], Any]]] = {
     'closed': lambda: _closing_broker(MagicMock(spec=HandleClosed)),
     'core_cannot_run_the_close': lambda: _closing_broker(
-        CoreStartFailed('the core runtime could not start'),
+        RuntimeStartFailed('the core runtime could not start'),
     ),
 }
 

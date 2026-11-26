@@ -25,7 +25,7 @@
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
 //!   so `retry_send(&error).await` completes the same send),
 //!   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
-//!   `CheckReport` with `HRS-217`,
+//!   `ValidationReport` with `HRS-217`,
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
 //!   start, `HandleErrorCode::AsyncContext`, or
 //!   `WorkflowReadError::AsyncContext`.
@@ -68,9 +68,9 @@ use crate::check::{connectivity_report, CHECK};
 use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::{
-    CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
-    StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
-    UserErrorCode, WaitLimit, WorkerHistoryLimit,
+    CheckPassed, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError, StoredResult,
+    TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions, UserErrorCode,
+    ValidationReport, WaitLimit, WorkerHistoryLimit,
 };
 
 /// Where a blocking call can run.
@@ -503,7 +503,7 @@ impl HorsiesView<'_> {
     /// `Horsies::check_live`, blocking. The static check runs anywhere; on
     /// a runtime thread the live phases do not run, and the report holds
     /// `HRS-217` (Python `CHECK_LIVE_ASYNC_CONTEXT`).
-    pub fn check_live(&self) -> Result<CheckPassed, CheckReport> {
+    pub fn check_live(&self) -> Result<CheckPassed, ValidationReport> {
         let _static_passed = self.app.check()?;
         match place(format_args!("blocking Horsies::check_live()")) {
             Place::Runs(runtime) => runtime.block_on(self.app.check_live()),
@@ -517,8 +517,8 @@ impl HorsiesView<'_> {
 
 /// The report of a blocking live check on a runtime thread (Python
 /// `_check_broker_connectivity` in a running event loop). Pure.
-fn live_check_in_async_context() -> CheckReport {
-    CheckReport::of(
+fn live_check_in_async_context() -> ValidationReport {
+    ValidationReport::of(
         CHECK,
         vec![HorsiesError::new(
             "live broker check cannot run on a thread that runs a tokio runtime",
@@ -663,7 +663,7 @@ mod tests {
     async fn a_blocking_live_check_on_a_runtime_thread_runs_the_static_check_only() {
         let report = app().blocking().check_live().unwrap_err();
         assert_eq!(
-            report.errors()[0].code,
+            report.refusals()[0].code,
             Some(ErrorCode::CheckLiveAsyncContext)
         );
     }

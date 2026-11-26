@@ -77,7 +77,7 @@ class TestRecoveryConfigMultiError:
                 claimer_heartbeat_interval_ms=30_000,
                 claimed_stale_threshold_ms=1_000,
             )
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert len(errors) == 2
         messages = [e.message for e in errors]
         assert (
@@ -149,7 +149,7 @@ class TestRecoveryConfigMultiError:
                 claimer_heartbeat_interval_ms=30_000,
                 claimed_stale_threshold_ms=1_000,
             )
-        for error in exc_info.value.report.errors:
+        for error in exc_info.value.report.refusals:
             assert error.code == ErrorCode.CONFIG_INVALID_RECOVERY
 
     def test_single_error_code_is_config_invalid_recovery(self) -> None:
@@ -170,7 +170,7 @@ class TestRecoveryConfigMultiError:
                 claimer_heartbeat_interval_ms=30_000,
                 claimed_stale_threshold_ms=1_000,
             )
-        running, claimed = exc_info.value.report.errors
+        running, claimed = exc_info.value.report.refusals
         assert len(running.notes) == 4
         assert running.help_text is not None
         assert len(claimed.notes) == 3

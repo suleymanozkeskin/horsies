@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowSpec,
@@ -407,7 +408,7 @@ class TestWorkflowStartErrors:
         spec = make_workflow_spec('db_err_wf', [TaskNode(fn=task_a, kwargs={'value': 1})], broker)
         unreachable = PostgresBroker(
             PostgresConfig(database_url=SecretStr(UNREACHABLE_DATABASE_URL)),
-            assume_initialized=True,
+            schema_mode=SchemaMode.ASSUME_INITIALIZED,
         )
 
         try:

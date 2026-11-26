@@ -181,7 +181,7 @@ def _resolve_queue_error(
         schedule.queue_name if schedule.queue_name is not None else task_queue
     )
     try:
-        app.validate_queue_name(queue_name)
+        app.validate_queue(queue_name)
     except Exception as exc:
         return ConfigurationError(
             message=f"invalid queue configuration for schedule '{schedule.name}'",

@@ -19,7 +19,7 @@ pub(crate) fn full_profile() -> Value {
                 "after": {"kind": "TASKS", "tasks": 50},
                 "above": {"kind": "MEGABYTES", "mb": 512}
             },
-            "pool": {"min_size": 0, "max_size": 3, "check": true},
+            "pool": {"min_size": 0, "max_size": 3, "pre_ping": true},
             "task_send_pool": 2
         },
         "shared_async": {
@@ -30,7 +30,7 @@ pub(crate) fn full_profile() -> Value {
                 "after_per_seat": {"kind": "NO_LIMIT"},
                 "above": {"kind": "NO_LIMIT"}
             },
-            "pool": {"min_size": 1, "max_size": {"kind": "FROM_SEATS"}, "check": false},
+            "pool": {"min_size": 1, "max_size": {"kind": "FROM_SEATS"}, "pre_ping": false},
             "executor": {"kind": "THREADS", "threads": 4},
             "task_send_pool": 3
         },
@@ -250,7 +250,7 @@ fn a_profile_maps_to_the_config_profile_field_by_field() {
             pool: IsolatedPool {
                 min_size: bounded(0),
                 max_size: PoolSize::new(bounded(3)),
-                check: true,
+                pre_ping: true,
             },
             task_send_pool: PoolSize::new(bounded(2)),
         }),
@@ -264,7 +264,7 @@ fn a_profile_maps_to_the_config_profile_field_by_field() {
             pool: SharedPool {
                 min_size: bounded(1),
                 max_size: PoolSizeSetting::PoolSizeFromSeats {},
-                check: false,
+                pre_ping: false,
             },
             executor: ExecutorThreadsSetting::ExecutorThreads {
                 threads: bounded(4),

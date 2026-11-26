@@ -26,7 +26,7 @@ horsies worker <module> --profile NAME [OPTIONS]
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `--profile NAME` | (required) | Name of the worker profile in `AppConfig.worker_profiles`. The profile holds the settings of the worker: children, recycling, claim limits, drain timeout and preload. See [Worker Profiles](workers/worker-profiles) |
-| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--log-level LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 There is no default profile. A missing or unknown `--profile` exits with code 1 and lists the defined profile names. The flags `--processes`, `--max-claim-batch`, `--max-claim-per-worker`, `--max-tasks-per-child`, `--max-memory-per-child-mb`, `--drain-timeout` and `--child-preload` were removed in 0.7.0; each one exits with code 2 and names the profile field that replaces it.
 
@@ -37,7 +37,7 @@ There is no default profile. A missing or unknown `--profile` exits with code 1 
 horsies worker myapp.instance:app --profile default
 
 # Debug logging
-horsies worker myapp.instance:app --profile default --loglevel=DEBUG
+horsies worker myapp.instance:app --profile default --log-level=DEBUG
 
 # Using file path (also supported)
 horsies worker app/configs/instance.py:app --profile default
@@ -61,7 +61,7 @@ horsies scheduler <module> [OPTIONS]
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--log-level LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 **Examples:**
 
@@ -70,7 +70,7 @@ horsies scheduler <module> [OPTIONS]
 horsies scheduler myapp.instance:app
 
 # Debug logging
-horsies scheduler myapp.instance:app --loglevel=DEBUG
+horsies scheduler myapp.instance:app --log-level=DEBUG
 ```
 
 ### horsies check
@@ -91,7 +91,7 @@ horsies check <module> [OPTIONS]
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--loglevel LEVEL` | WARNING | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--log-level LEVEL` | WARNING | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | `--live` | false | Also test broker connectivity (SELECT 1), and compare each worker profile with the server connection limit |
 
 **Examples:**
@@ -109,16 +109,16 @@ horsies check myapp.instance:app --live
 Serve the monitoring web UI. Requires the `horsies[web]` extra. For the UI itself, see the [web UI overview](monitoring/web-ui-overview).
 
 ```bash
-horsies web [app_path] [OPTIONS]
+horsies web [module] [OPTIONS]
 ```
 
 **Arguments:**
 
 | Argument | Description |
 | -------- | ----------- |
-| `app_path` | App locator (for example `myapp.tasks:app`). Omit it when you use `--database-url` |
+| `module` | App locator (for example `myapp.tasks:app`). Omit it when you use `--database-url` |
 
-Pass either `app_path` or `--database-url`, not both. With `--database-url` the UI has no task registry and does not run schema migrations.
+Pass either `module` or `--database-url`, not both. With `--database-url` the UI has no task registry and does not run schema migrations.
 
 **Options:**
 
@@ -132,7 +132,7 @@ Pass either `app_path` or `--database-url`, not both. With `--database-url` the 
 | `--auth MODE` | none | `none` (loopback hosts only) or `trusted-header` |
 | `--trusted-header NAME` | X-Forwarded-User | Identity header that the proxy sets |
 | `--enable-actions` | false | Allow task cancel, and workflow pause, resume and cancel (default is view-only) |
-| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--log-level LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 **Examples:**
 

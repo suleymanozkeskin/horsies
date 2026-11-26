@@ -82,12 +82,13 @@ from horsies.core.brokers.result_types import (
 )
 from horsies.core.manifest import (
     install_coverage_of,
-    schema_mode_of,
     to_producer_manifest,
+    wire_schema_mode,
 )
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.recovery import OrphanTaskAuditReport
 from horsies.core.models.retention import RetentionConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.types.core_failure import (
     CoreCallRefusal,
     call_refusal_or_raise,
@@ -662,11 +663,11 @@ def _enqueue_start_of(
     task_name: str,
     sent_at: datetime,
     enqueued_at: datetime | None,
-    enqueue_delay_seconds: int | None,
+    delay_seconds: int | None,
     good_until: datetime | None,
 ) -> Result[CoreEnqueueStart, BrokerInvalidInput]:
     """The start of a send, after the rules that the core's request cannot
-    state: one of ``enqueued_at`` and ``enqueue_delay_seconds``, aware
+    state: one of ``enqueued_at`` and ``delay_seconds``, aware
     instants, and a delay that fits in 64 bits. Pure but for the
     construction of the start value; nothing is written on a refusal.
 
@@ -675,14 +676,14 @@ def _enqueue_start_of(
     have no cause. The core refuses a ``sent_at`` in the future of a send
     that starts now.
     """
-    if enqueued_at is not None and enqueue_delay_seconds is not None:
-        return _invalid_input('Cannot specify both enqueued_at and enqueue_delay_seconds')
+    if enqueued_at is not None and delay_seconds is not None:
+        return _invalid_input('Cannot specify both enqueued_at and delay_seconds')
     for label, instant in (('sent_at', sent_at), ('enqueued_at', enqueued_at)):
         if instant is not None and instant.tzinfo is None:
             return _invalid_input(f'{label} must be timezone-aware')
     if good_until is not None and good_until.tzinfo is None:
         return _command_rule_refused(task_name, 'good_until must be timezone-aware')
-    match (enqueued_at, enqueue_delay_seconds):
+    match (enqueued_at, delay_seconds):
         case (None, None):
             return Ok(CoreStartNow())
         case (datetime() as at, None):
@@ -691,11 +692,11 @@ def _enqueue_start_of(
             return Ok(CoreStartAfterDelay(delay_s))
         case (None, int() as delay_s) if delay_s < SIGNED_64_BIT_MIN:
             return _command_rule_refused(
-                task_name, 'enqueue_delay_seconds must be non-negative',
+                task_name, 'delay_seconds must be non-negative',
             )
         case (None, int() as delay_s):
             return _invalid_input(
-                f'enqueue_delay_seconds {delay_s} is not a 64-bit integer',
+                f'delay_seconds {delay_s} is not a 64-bit integer',
             )
         case _:
             raise AssertionError('both start values are refused above')
@@ -745,7 +746,7 @@ def _enqueue_request(
     input_json: str | None,
     sent_at: datetime,
     enqueued_at: datetime | None,
-    enqueue_delay_seconds: int | None,
+    delay_seconds: int | None,
     good_until: datetime | None,
     task_options: str | None,
     retention_class_key: str,
@@ -773,7 +774,7 @@ def _enqueue_request(
         task_name=task_name,
         sent_at=sent_at,
         enqueued_at=enqueued_at,
-        enqueue_delay_seconds=enqueue_delay_seconds,
+        delay_seconds=delay_seconds,
         good_until=good_until,
     ):
         case Err() as refused:
@@ -867,8 +868,10 @@ class PostgresBroker:
       - Connection pooling and health monitoring
       - Operational monitoring (stale tasks, worker stats)
 
-    ``retention`` is the retention config of the app that sends through the
-    broker (``Horsies.get_broker`` passes ``AppConfig.retention``). The
+    ``schema_mode`` decides what the broker does with the schema
+    (``SchemaMode``); the default migrates and validates. ``retention`` is the
+    retention config of the app that sends through the broker
+    (``Horsies.get_broker`` passes ``AppConfig.retention``). The
     schema install ends with the startup coverage pass of its classes and
     horizons; with ``None`` the pass covers the classes of the default
     ``RetentionConfig``.
@@ -886,8 +889,7 @@ class PostgresBroker:
         self,
         config: PostgresConfig,
         *,
-        assume_initialized: bool = False,
-        run_schema_migrations: bool = True,
+        schema_mode: SchemaMode = SchemaMode.MIGRATE_AND_VALIDATE,
         idempotency_reservation_window: Optional[timedelta] = None,
         retention: RetentionConfig | None = None,
     ):
@@ -907,15 +909,17 @@ class PostgresBroker:
             if idempotency_reservation_window is not None
             else IDEMPOTENCY_WINDOW_DEFAULT
         )
-        # False makes this broker incapable of executing DDL. Read-only
-        # tooling that constructs its own broker sets it so that pointing
-        # the tool at a database can never migrate that database. Owning
-        # the schema stays the app's and the worker's job.
-        self.run_schema_migrations = run_schema_migrations
+        # OBSERVE_ONLY and ASSUME_INITIALIZED make this broker incapable of
+        # executing DDL. Read-only tooling that constructs its own broker
+        # sets one so that pointing the tool at a database can never migrate
+        # that database. Owning the schema stays the app's and the worker's
+        # job.
+        self.schema_mode: SchemaMode = schema_mode
         self.logger: logging.Logger = get_logger('broker')
         self._app: Horsies | None = None  # Set by Horsies.get_broker()
 
-        self._initialized = assume_initialized
+        # An ASSUME_INITIALIZED broker never calls the core's schema step.
+        self._initialized = schema_mode is SchemaMode.ASSUME_INITIALIZED
         # True once this broker saw the staged result function. Only a
         # positive answer is kept: until a worker publishes the readers,
         # each result probe checks again.
@@ -936,10 +940,7 @@ class PostgresBroker:
             dump_producer_manifest(
                 to_producer_manifest(
                     config,
-                    schema=schema_mode_of(
-                        run_schema_migrations=run_schema_migrations,
-                        assume_initialized=assume_initialized,
-                    ),
+                    schema=wire_schema_mode(schema_mode),
                     idempotency_reservation_window=self.idempotency_reservation_window,
                 ),
             ),
@@ -1037,10 +1038,10 @@ class PostgresBroker:
         readers. The install ends with the startup coverage pass that the
         worker start runs, so the history leaves of the current UTC day and
         of the lookahead exist before any terminal write, with or without a
-        worker. A handle with migrations off or ``assume_initialized`` runs
-        no schema statement. After a success the broker does not call the
-        core again; a broker built with ``assume_initialized=True`` never
-        calls it.
+        worker. A handle of ``SchemaMode.OBSERVE_ONLY`` or
+        ``ASSUME_INITIALIZED`` runs no schema statement. After a success the
+        broker does not call the core again; a broker of
+        ``SchemaMode.ASSUME_INITIALIZED`` never calls it.
 
         Raises:
             CoreFailure: the core answered ``BrokerOperationFailed`` with
@@ -1104,7 +1105,7 @@ class PostgresBroker:
         priority: int = 100,
         sent_at: datetime,
         enqueued_at: Optional[datetime] = None,
-        enqueue_delay_seconds: Optional[int] = None,
+        delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
         retention_class_key: RetentionClassKey | None = DEFAULT_RETENTION_CLASS_KEY,
@@ -1160,7 +1161,7 @@ class PostgresBroker:
             input_json=input_json,
             sent_at=sent_at,
             enqueued_at=enqueued_at,
-            enqueue_delay_seconds=enqueue_delay_seconds,
+            delay_seconds=delay_seconds,
             good_until=good_until,
             task_options=task_options,
             retention_class_key=resolve_retention_class_key(retention_class_key),
@@ -1182,7 +1183,7 @@ class PostgresBroker:
     async def get_raw_result_record_async(
         self,
         task_id: UUID,
-        timeout_ms: Optional[int] = None,
+        wait_ms: Optional[int] = None,
     ) -> BrokerResult[RawResultRecord | None]:
         """Raw broker fetch of a task's stored result envelope, through
         ``CoreHandle.raw_result_record_async``.
@@ -1193,10 +1194,10 @@ class PostgresBroker:
 
         The core installs the schema once per handle first, then reads the
         live row or the history record. While the task has not finished it
-        waits up to ``timeout_ms`` (no limit for ``None``) for a
+        waits up to ``wait_ms`` (no limit for ``None``) for a
         ``task_done`` notification on the process listener of the session
         URL, reading again at each wake and at the core's interval; a broker
-        built with ``assume_initialized=True`` has no listener and reads
+        of ``SchemaMode.ASSUME_INITIALIZED`` has no listener and reads
         again every 200 ms. Reads only: a cancel of the caller drops the
         wait.
 
@@ -1212,7 +1213,7 @@ class PostgresBroker:
         - ``Err(BrokerInvalidJsonPayload)``: the stored result does not read
           (malformed, non-finite number, not an object, a history digest
           that differs). The same read fails again.
-        - ``Err(BrokerInvalidInput)``: ``timeout_ms`` is not None or an int
+        - ``Err(BrokerInvalidInput)``: ``wait_ms`` is not None or an int
           from 0 to ``MAX_TASK_TIMEOUT_MS``. This is the first check, as in
           every client. Nothing ran.
         - ``Err(BrokerWaitInsideTask)``: the call runs in a process that
@@ -1223,7 +1224,7 @@ class PostgresBroker:
           core of this process cannot run the call (``exception`` is the
           ``CoreCallRefusal``).
         """
-        match wait_timeout_seconds(timeout_ms):
+        match wait_timeout_seconds(wait_ms):
             case Err(err_value=refused):
                 return Err(BrokerInvalidInput(
                     message=f'raw result fetch of task {task_id}: {refused.message}',
@@ -1237,7 +1238,7 @@ class PostgresBroker:
             )
         try:
             outcome = await self._core_handle.raw_result_record_async(
-                task_id, timeout_ms=timeout_ms,
+                task_id, timeout_ms=wait_ms,
             )
         except CoreError as exc:
             return self._raw_result_core_error(task_id, call_refusal_or_raise(exc))
@@ -1246,7 +1247,7 @@ class PostgresBroker:
     def get_raw_result_record(
         self,
         task_id: UUID,
-        timeout_ms: Optional[int] = None,
+        wait_ms: Optional[int] = None,
     ) -> BrokerResult[RawResultRecord | None]:
         """The blocking form of ``get_raw_result_record_async``:
         ``CoreHandle.raw_result_record`` on the calling thread, with the GIL
@@ -1259,7 +1260,7 @@ class PostgresBroker:
         limit plus the core's bound of a blocking call; a wait with no limit
         has no call bound, as before.
         """
-        match wait_timeout_seconds(timeout_ms):
+        match wait_timeout_seconds(wait_ms):
             case Err(err_value=refused):
                 return Err(BrokerInvalidInput(
                     message=f'raw result fetch of task {task_id}: {refused.message}',
@@ -1277,7 +1278,7 @@ class PostgresBroker:
                 'broker.get_raw_result_record_async(...)',
             )
         try:
-            outcome = self._core_handle.raw_result_record(task_id, timeout_ms=timeout_ms)
+            outcome = self._core_handle.raw_result_record(task_id, timeout_ms=wait_ms)
         except CoreError as exc:
             return self._raw_result_core_error(task_id, call_refusal_or_raise(exc))
         return self._raw_result_of_outcome(task_id, outcome)
@@ -1522,7 +1523,7 @@ class PostgresBroker:
           ``min_responses`` is below 1; ``target_worker_id`` is not a
           ``str``. Nothing ran.
         - ``Err(LISTENER_DISABLED)``: the broker was built with
-          ``assume_initialized=True`` and has no listener. Nothing ran.
+          ``SchemaMode.ASSUME_INITIALIZED`` and has no listener. Nothing ran.
         - ``Err(WORKER_PING_FAILED)``: the reply subscribe, the NOTIFY or the
           wait failed, or the core of this process cannot run the ping
           (``CoreCallRefusal``). The NOTIFY may have been sent.
@@ -2142,7 +2143,7 @@ class PostgresBroker:
         priority: int = 100,
         sent_at: datetime,
         enqueued_at: Optional[datetime] = None,
-        enqueue_delay_seconds: Optional[int] = None,
+        delay_seconds: Optional[int] = None,
         good_until: Optional[datetime] = None,
         task_options: Optional[str] = None,
         idempotency_key: Optional[str] = None,
@@ -2173,7 +2174,7 @@ class PostgresBroker:
             input_json=input_json,
             sent_at=sent_at,
             enqueued_at=enqueued_at,
-            enqueue_delay_seconds=enqueue_delay_seconds,
+            delay_seconds=delay_seconds,
             good_until=good_until,
             task_options=task_options,
             retention_class_key=resolve_retention_class_key(retention_class_key),

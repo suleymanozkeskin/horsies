@@ -639,7 +639,7 @@ The starts of a definition by its type are methods of the app view:
   `TaskSendError::AsyncContext` (with the prepared task id and payload, so
   `retry_send(&error).await` completes the same send),
   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
-  `CheckReport` with `HRS-217`,
+  `ValidationReport` with `HRS-217`,
   `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
   start; `retry_start(&error).await` completes the same start from async
   code), `HandleOperationError::AsyncContext`, or

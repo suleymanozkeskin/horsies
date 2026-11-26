@@ -118,5 +118,5 @@ Or export the decorated functions from `myapp.tasks.__init__.py` so importing `m
 ## Running the Worker
 
 ```bash
-horsies worker myapp.config:app --profile default --loglevel=INFO
+horsies worker myapp.config:app --profile default --log-level=INFO
 ```

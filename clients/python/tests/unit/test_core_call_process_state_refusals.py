@@ -336,7 +336,7 @@ class TestAppLiveCheck:
 
         with _live_check(step, refusal) as built:
             with pytest.raises(type(refusal)) as raised:
-                _ = app.check(live=True)
+                _ = app.check(live=True).refusals
 
         assert raised.value is refusal
         [handle] = built

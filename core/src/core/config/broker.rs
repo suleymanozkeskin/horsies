@@ -285,7 +285,7 @@ impl RemovedPoolField {
             Self::WorkerChildPoolMaxSize => {
                 child_pool_refusal(refusal, "max_size=PoolSize(connections=N)")
             }
-            Self::WorkerChildPoolCheck => child_pool_refusal(refusal, "check=False"),
+            Self::WorkerChildPoolCheck => child_pool_refusal(refusal, "pre_ping=False"),
             Self::WorkerPoolSize => parent_pool_refusal(
                 refusal,
                 "the worker process opens its pool with the resolved pool.max_size \
@@ -805,7 +805,7 @@ mod tests {
             (
                 RemovedPoolField::WorkerChildPoolCheck,
                 "false",
-                "check=False",
+                "pre_ping=False",
             ),
         ];
         for (field, value, pool_argument) in cases {

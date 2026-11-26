@@ -87,7 +87,7 @@ The CLI fails closed on the argument combination.
 
 | Condition | Result |
 |---|---|
-| Both `<app_path>` and `--database-url`, or neither | Argument error |
+| Both `<module>` and `--database-url`, or neither | Argument error |
 | Non-loopback `--host` with `--auth none` | Exit 2 with an explanatory error |
 | Non-loopback `--host` | Requires `--auth trusted-header` and a header name |
 | `--auth none` on loopback, without `--enable-actions` | Policy is `ViewOnly` |

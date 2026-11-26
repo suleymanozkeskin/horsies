@@ -16,6 +16,6 @@ class ChildPreload(str, Enum):
     # Library and app. Children share module state from the app's import.
     APP = 'app'
     # No preload parent. Every child starts with ``exec``.
-    NONE = 'none'
+    NO_PRELOAD = 'no_preload'
 
 

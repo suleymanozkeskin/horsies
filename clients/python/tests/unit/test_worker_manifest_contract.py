@@ -265,14 +265,14 @@ def _full_profile() -> WorkerProfile:
             recycle=IsolatedRecycle(
                 after=TaskLimit(tasks=50), above=MemoryLimit(mb=512)
             ),
-            pool=IsolatedPool(min_size=1, max_size=PoolSize(connections=3), check=True),
+            pool=IsolatedPool(min_size=1, max_size=PoolSize(connections=3), pre_ping=True),
             task_send_pool=PoolSize(connections=4),
         ),
         shared_async=SharedAsyncChildren(
             count=1,
             seats=20,
             recycle=SharedRecycle(after_per_seat=NoTaskLimit(), above=NoMemoryLimit()),
-            pool=SharedPool(min_size=0, max_size=PoolSize(connections=5), check=False),
+            pool=SharedPool(min_size=0, max_size=PoolSize(connections=5), pre_ping=False),
             executor=ExecutorThreads(threads=6),
             task_send_pool=PoolSize(connections=2),
         ),
@@ -335,7 +335,7 @@ class TestProfile:
                     after=wire.TaskLimitTasks(tasks=50),
                     above=wire.MemoryLimitMegabytes(mb=512),
                 ),
-                pool=wire.IsolatedPoolManifest(min_size=1, max_size=3, check=True),
+                pool=wire.IsolatedPoolManifest(min_size=1, max_size=3, pre_ping=True),
                 task_send_pool=4,
             ),
             shared_async=wire.SharedAsyncChildren(
@@ -348,7 +348,7 @@ class TestProfile:
                 pool=wire.SharedPoolManifest(
                     min_size=0,
                     max_size=wire.PoolMaxSizeConnections(connections=5),
-                    check=False,
+                    pre_ping=False,
                 ),
                 executor=wire.DefaultExecutorThreads(threads=6),
                 task_send_pool=2,
@@ -365,7 +365,7 @@ class TestProfile:
                 pool=wire.SharedPoolManifest(
                     min_size=0,
                     max_size=wire.PoolMaxSizeFromSeats(),
-                    check=False,
+                    pre_ping=False,
                 ),
                 task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
             ),
@@ -395,7 +395,7 @@ class TestProfile:
                 pool=wire.IsolatedPoolManifest(
                     min_size=0,
                     max_size=DEFAULT_ISOLATED_POOL_CONNECTIONS,
-                    check=False,
+                    pre_ping=False,
                 ),
                 task_send_pool=DEFAULT_TASK_SEND_POOL_CONNECTIONS,
             ),
@@ -421,7 +421,7 @@ class TestProfile:
         assert values == {
             ChildPreload.LIBRARY: 'LIBRARY',
             ChildPreload.APP: 'APP',
-            ChildPreload.NONE: 'NO_PRELOAD',
+            ChildPreload.NO_PRELOAD: 'NO_PRELOAD',
         }
         cpus = {
             cpu: worker_profile_manifest(

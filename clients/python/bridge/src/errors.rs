@@ -39,7 +39,7 @@ create_exception!(
 );
 create_exception!(
     horsies._core,
-    CoreStartFailed,
+    RuntimeStartFailed,
     CoreError,
     "The core runtime or its log forwarder could not start. args: (cause,)."
 );
@@ -97,7 +97,7 @@ pub fn refusal_error(refusal: CallRefusal) -> PyErr {
         }
         CallRefusal::Stopped(report) => CoreStopped::new_err((report.subject, report.cause)),
         CallRefusal::StartFailed(failure) => {
-            CoreStartFailed::new_err((start_failure_text(&failure),))
+            RuntimeStartFailed::new_err((start_failure_text(&failure),))
         }
     }
 }
@@ -131,7 +131,7 @@ pub fn add_errors(module: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<ForkedAfterCoreStart>(),
     )?;
     module.add("CoreStopped", py.get_type::<CoreStopped>())?;
-    module.add("CoreStartFailed", py.get_type::<CoreStartFailed>())?;
+    module.add("RuntimeStartFailed", py.get_type::<RuntimeStartFailed>())?;
     module.add("CoreCallTimedOut", py.get_type::<CoreCallTimedOut>())?;
     module.add("TooManyPendingCalls", py.get_type::<TooManyPendingCalls>())?;
     module.add("CoreDefect", py.get_type::<CoreDefect>())?;

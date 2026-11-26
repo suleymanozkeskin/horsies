@@ -95,7 +95,7 @@ pub const OUTCOME_WRITE_DRAIN: Duration = Duration::from_secs(30);
 pub const SPAWNER_STOP_WAIT: Duration = CHILD_KILL_WAIT;
 
 /// The error text of a failed start hook (Python `_HOOK_FAILURE_MESSAGE`).
-pub const CHILD_HOOK_FAILURE_MESSAGE: &str = "on_child_process_start hook failed in a worker \
+pub const CHILD_HOOK_FAILURE_MESSAGE: &str = "on_child_start hook failed in a worker \
      child (see the child log line above for the hook name); fix the hook, the worker will not \
      restart-loop on it";
 

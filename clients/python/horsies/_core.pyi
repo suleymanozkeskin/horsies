@@ -31,7 +31,7 @@ class CoreStopped(CoreError):
     """
 
 
-class CoreStartFailed(CoreError):
+class RuntimeStartFailed(CoreError):
     """The core runtime or its log forwarder could not start. args: (cause,)."""
 
 

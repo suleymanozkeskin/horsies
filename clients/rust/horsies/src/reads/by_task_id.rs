@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::{
     child_producer, process_role, ChildProducer, ProcessRole, RawResultRead, RawResultRecord,
     TaskStatus, WaitLimit,
@@ -110,7 +110,7 @@ impl Horsies {
 
     /// The handle a read goes through: the child's producer handle in a
     /// worker child, else the app's.
-    pub(crate) fn reads_handle(&self) -> Arc<CoreHandle> {
+    pub(crate) fn reads_handle(&self) -> Arc<CoreConnection> {
         match child_producer() {
             ChildProducer::InChild(handle) => handle,
             ChildProducer::NotInAChild => Arc::clone(self.handle()),

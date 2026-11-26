@@ -602,7 +602,7 @@ pub struct IsolatedPoolManifest {
     /// The most connections of the pool.
     pub max_size: ChildPoolConnections,
     /// Check each connection when a write takes it from the pool.
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 /// The connection pool that each shared child opens. Its seats share it.
@@ -615,7 +615,7 @@ pub struct SharedPoolManifest {
     pub min_size: ChildPoolMinSize,
     pub max_size: PoolMaxSize,
     /// Check each connection when a write takes it from the pool.
-    pub check: bool,
+    pub pre_ping: bool,
 }
 
 /// The isolated children of a profile.
@@ -856,7 +856,7 @@ pub enum ChildProgram {
     Rust,
 }
 
-/// The log level of the worker and its children (`horsies worker --loglevel`).
+/// The log level of the worker and its children (`horsies worker --log-level`).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
@@ -1035,7 +1035,7 @@ impl SharedPoolManifest {
         SharedPool {
             min_size: self.min_size.0,
             max_size: self.max_size.setting(),
-            check: self.check,
+            pre_ping: self.pre_ping,
         }
     }
 }
@@ -1057,7 +1057,7 @@ impl Isolated {
                 pool: IsolatedPool {
                     min_size: pool.min_size.0,
                     max_size: PoolSize::new(pool.max_size.0),
-                    check: pool.check,
+                    pre_ping: pool.pre_ping,
                 },
                 task_send_pool: PoolSize::new(task_send_pool.0),
             }),

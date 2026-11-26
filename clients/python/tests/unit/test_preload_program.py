@@ -135,7 +135,7 @@ def _run_worker(directory: Path, mode: str) -> dict[str, Any]:
             with open({str(imports)!r}, 'a') as out:
                 out.write('x')
 
-            @app.on_child_process_start
+            @app.on_child_start
             def count_child() -> None:
                 with open({str(hooks)!r}, 'a') as out:
                     out.write(f'{{gc.get_freeze_count()}}\\n')

@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use clap::{Args, ValueEnum};
 
 use crate::cli::LogLevel;
-use crate::{AppConfig, HorsiesError};
+use crate::{AppConfig, ValidationReport};
 
 /// The largest TOML config file that `web` reads.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -73,7 +73,7 @@ pub(super) struct WebArgs {
     #[arg(long, value_name = "TEMPLATE")]
     trace_link: Option<String>,
     #[arg(long, value_enum, ignore_case = true, default_value = "INFO")]
-    loglevel: LogLevel,
+    log_level: LogLevel,
 }
 
 /// The `--auth` values.
@@ -134,9 +134,9 @@ enum WebError {
         cause: toml::de::Error,
     },
     #[error("invalid application configuration: {0}")]
-    ConfigInvalid(HorsiesError),
-    #[error("the core runtime is not available: {0}")]
-    RuntimeUnavailable(String),
+    ConfigInvalid(ValidationReport),
+    #[error("the core runtime could not start: {0}")]
+    RuntimeStartFailed(String),
     #[error("could not bind the monitoring server to {host}:{port}: {cause}")]
     Bind {
         host: String,
@@ -162,7 +162,7 @@ impl WebError {
             | Self::ConfigTooLarge { .. }
             | Self::ConfigParse { .. }
             | Self::ConfigInvalid(_)
-            | Self::RuntimeUnavailable(_)
+            | Self::RuntimeStartFailed(_)
             | Self::Bind { .. }
             | Self::Serve(_) => 1,
         }
@@ -213,7 +213,10 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
             TRUSTED_HEADER_WARNING.replace("{header}", &args.trusted_header)
         );
     }
-    crate::cli::logging::install_logs(args.loglevel.child_level(), crate::cli::LogFormat::Text);
+    crate::cli::logging::install_logs(
+        args.log_level.child_level(),
+        crate::cli::LogFormat::TextLogs,
+    );
     let config = resolve_config(&config_source(args))?;
     let app = Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)
         .map_err(WebError::ConfigInvalid)?;
@@ -233,7 +236,7 @@ fn serve(args: &WebArgs) -> Result<(), WebError> {
         BuiltPolicy::TrustedHeader(policy) => crate::web::router(&app, monitoring, policy),
     };
     let runtime = runtime_for(format_args!("horsies web"))
-        .map_err(|failed| WebError::RuntimeUnavailable(failed.to_string()))?;
+        .map_err(|failed| WebError::RuntimeStartFailed(failed.to_string()))?;
     runtime
         .runtime()
         .block_on(serve_router(router, &args.host, args.port))

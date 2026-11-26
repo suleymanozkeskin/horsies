@@ -21,6 +21,7 @@ import pytest
 from pydantic import SecretStr, ValidationError
 
 from horsies.core.cli import check_command
+from horsies.core.errors import ValidationReport
 from horsies.core.logging import (
     TASK_CONTEXT_FIELDS,
     ColoredFormatter,
@@ -267,12 +268,12 @@ class TestTheCliUsesTheFormatOfTheApp:
         mock_logging: MagicMock,
     ) -> None:
         app = MagicMock()
-        app.check.return_value = []
-        app.list_tasks.return_value = []
+        app.check.return_value = ValidationReport('check')
+        app.registered_task_names.return_value = []
         app.declared_error_codes.return_value = {}
         app.config = AppConfig(broker=_BROKER, log_format=JsonLogs())
         mock_discover.return_value = (app, 'app', 'my.mod', None)
-        args = argparse.Namespace(module='my.mod:app', module_pos=None, loglevel='INFO', live=False)
+        args = argparse.Namespace(module='my.mod:app', module_positional=None, log_level='INFO', live=False)
 
         with pytest.raises(SystemExit):
             check_command(args)

@@ -24,7 +24,7 @@ use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
 use crate::core::task::Execution;
-use crate::handle::CoreHandle;
+use crate::handle::CoreConnection;
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{DeclaredNames, ErrorCodeValues, Folded, QueueName, ScheduleName};
 use crate::telemetry::exposition::render;
@@ -386,7 +386,7 @@ pub async fn collect_fleet_state(
 /// a read in which every part failed.
 pub async fn collect_fleet_state_through(
     collector: &FleetCollector,
-    handle: &CoreHandle,
+    handle: &CoreConnection,
     stop: &CancellationToken,
 ) {
     collect_with(collector, || read_fleet_state_through(handle), stop).await;

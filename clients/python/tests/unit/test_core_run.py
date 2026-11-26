@@ -56,7 +56,7 @@ def _launch(profile: str) -> WorkerLaunch:
         imports=(),
         sys_path_roots=(),
         profile=profile,
-        loglevel='INFO',
+        log_level='INFO',
         metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
     )
 

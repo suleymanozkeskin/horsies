@@ -386,7 +386,7 @@ class TestHandlerChildStartHook:
         app.on_handler_child_start(first)
 
         assert app.get_handler_child_start_hooks() == [first, second]
-        assert app.get_child_process_start_hooks() == []
+        assert app.get_child_start_hooks() == []
 
     def test_an_async_hook_is_refused(self) -> None:
         app = _make_app()
@@ -447,7 +447,7 @@ class TestWorkerManifest:
             imports=(),
             sys_path_roots=(),
             profile='default',
-            loglevel='INFO',
+            log_level='INFO',
             metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         )
 
@@ -472,7 +472,7 @@ class TestWorkerManifest:
             imports=(),
             sys_path_roots=(),
             profile='default',
-            loglevel='INFO',
+            log_level='INFO',
             metrics_endpoint=wire.MetricsEndpointNoMetricsEndpoint(),
         )
 

@@ -11,7 +11,7 @@ call:
 - ``ForkedAfterCoreStart`` and ``CoreStopped`` are states of the process.
   Every core call raises them (``call_refusal_or_raise``); no call answers
   them as a result.
-- ``TooManyPendingCalls``, ``CoreCallTimedOut`` and ``CoreStartFailed``
+- ``TooManyPendingCalls``, ``CoreCallTimedOut`` and ``RuntimeStartFailed``
   (``CoreCallRefusal``) are the failure of one call: the call answers its
   failure code with the error as ``exception``. ``core_error_retryable``
   classifies them.
@@ -29,13 +29,13 @@ from horsies._core import (
     CoreError,
     CoreFailure,
     CorePreconditionFailed,
-    CoreStartFailed,
+    RuntimeStartFailed,
     CoreStopped,
     ForkedAfterCoreStart,
     TooManyPendingCalls,
 )
 
-type CoreCallRefusal = TooManyPendingCalls | CoreCallTimedOut | CoreStartFailed
+type CoreCallRefusal = TooManyPendingCalls | CoreCallTimedOut | RuntimeStartFailed
 """A core boundary error that one call answers as its own failure: the
 event loop has too many core calls in flight, a sync call did not end
 within its bound, or the core runtime could not start."""
@@ -45,7 +45,7 @@ def call_refusal_or_raise(exc: CoreError) -> CoreCallRefusal:
     """The core boundary error ``exc`` as the failure of one call. Every
     ``except CoreError`` of a core call passes its error through this.
 
-    - ``TooManyPendingCalls``, ``CoreCallTimedOut``, ``CoreStartFailed``:
+    - ``TooManyPendingCalls``, ``CoreCallTimedOut``, ``RuntimeStartFailed``:
       returned; the caller answers its failure code with it.
     - ``ForkedAfterCoreStart`` (the process was forked without exec after
       the core started) and ``CoreStopped`` (a core background task
@@ -59,7 +59,7 @@ def call_refusal_or_raise(exc: CoreError) -> CoreCallRefusal:
             not define (a defect).
     """
     match exc:
-        case TooManyPendingCalls() | CoreCallTimedOut() | CoreStartFailed():
+        case TooManyPendingCalls() | CoreCallTimedOut() | RuntimeStartFailed():
             return exc
         case ForkedAfterCoreStart() | CoreStopped():
             raise exc
@@ -75,13 +75,13 @@ def core_error_retryable(exc: CoreError) -> bool:
 
     - ``TooManyPendingCalls``: yes, the calls in flight end.
     - ``CoreCallTimedOut``: yes, a later call can end within its bound.
-    - ``CoreStopped``, ``CoreStartFailed``, ``ForkedAfterCoreStart``: no, the
+    - ``CoreStopped``, ``RuntimeStartFailed``, ``ForkedAfterCoreStart``: no, the
       state stays for the life of the process.
     """
     match exc:
         case TooManyPendingCalls() | CoreCallTimedOut():
             return True
-        case CoreStopped() | CoreStartFailed() | ForkedAfterCoreStart():
+        case CoreStopped() | RuntimeStartFailed() | ForkedAfterCoreStart():
             return False
         case _:
             return False

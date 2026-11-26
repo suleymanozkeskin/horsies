@@ -64,7 +64,7 @@ def parsed_metrics_args(
 
 
 class TestListenAddress:
-    """`--listen` is HOST:PORT or [IPV6]:PORT, the port 1 to 65535."""
+    """`--metrics-listen` is HOST:PORT or [IPV6]:PORT, the port 1 to 65535."""
 
     @pytest.mark.parametrize(
         ('text', 'host', 'port'),
@@ -99,34 +99,44 @@ class TestListenAddress:
 class TestParser:
     """The parser refuses the arguments before the app is discovered."""
 
-    def test_listen_and_the_app_reach_the_command(
+    def test_metrics_listen_and_the_app_reach_the_command(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         captured = parsed_metrics_args(
-            monkeypatch, ['metrics', 'myapp.tasks:app', '--listen', '0.0.0.0:9100']
+            monkeypatch, ['metrics', 'myapp.tasks:app', '--metrics-listen', '0.0.0.0:9100']
         )
 
-        listen = captured['listen']
+        listen = captured['metrics_listen']
         assert isinstance(listen, ListenAddress)
         assert (listen.host, listen.port) == ('0.0.0.0', 9100)
-        assert captured['module_pos'] == 'myapp.tasks:app'
-        assert captured['loglevel'] == 'INFO'
+        assert captured['module_positional'] == 'myapp.tasks:app'
+        assert captured['log_level'] == 'INFO'
 
-    def test_no_listen_is_a_usage_error(
+    def test_no_metrics_listen_is_a_usage_error(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit) as raised:
             parsed_metrics_args(monkeypatch, ['metrics', 'myapp.tasks:app'])
 
         assert raised.value.code == 2
-        assert '--listen' in capsys.readouterr().err
+        assert '--metrics-listen' in capsys.readouterr().err
+
+    def test_the_old_listen_flag_is_a_usage_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(SystemExit) as raised:
+            parsed_metrics_args(
+                monkeypatch, ['metrics', 'myapp.tasks:app', '--listen', '0.0.0.0:9100']
+            )
+
+        assert raised.value.code == 2
 
     def test_an_address_that_does_not_parse_is_a_usage_error(
         self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
     ) -> None:
         with pytest.raises(SystemExit) as raised:
             parsed_metrics_args(
-                monkeypatch, ['metrics', 'myapp.tasks:app', '--listen', 'localhost:0']
+                monkeypatch, ['metrics', 'myapp.tasks:app', '--metrics-listen', 'localhost:0']
             )
 
         assert raised.value.code == 2

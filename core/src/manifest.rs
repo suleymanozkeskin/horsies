@@ -289,10 +289,8 @@ impl ManifestValue for WholeSeconds {
 
 /// Schema behaviour of a handle.
 ///
-/// The Python broker flags map to it: `assume_initialized=True` is
-/// `ASSUME_INITIALIZED`, whatever `run_schema_migrations` says; otherwise
-/// `run_schema_migrations=True` is `MIGRATE_AND_VALIDATE` and `False` is
-/// `OBSERVE_ONLY`.
+/// Python's `SchemaMode` has the same three members, with the manifest text
+/// as their values.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, horsies_core_derive::ManifestSchema,
 )]
