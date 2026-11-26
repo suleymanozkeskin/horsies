@@ -785,6 +785,7 @@ export class Horsies {
     onChildStart(hook: ChildStartHook): void;
     provide<T>(factory: ProviderFactory<T>): StateKey<Awaited<T>>;
     retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
+    schedules<const T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>, section?: ScheduleSection): void;
     send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
     taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
 }
@@ -1412,7 +1413,34 @@ export interface RuleRefused {
 export type RuntimeOf<X extends ExecutionClass> = BodyRuntimes[X];
 
 // @public
+export type ScheduleEntries<T extends readonly AnyTaskContract[]> = {
+    readonly [K in keyof T]: ScheduleEntry<T[K]>;
+};
+
+// @public
+export interface ScheduleEntry<C> {
+    readonly catchUpMissed?: boolean;
+    readonly enabled?: boolean;
+    readonly input: NoInfer<ScheduleInput<C>>;
+    readonly maxCatchUpRuns?: number;
+    readonly name: string;
+    readonly pattern: SchedulePattern;
+    readonly queue?: string;
+    readonly task: C;
+    readonly timezone?: string;
+}
+
+// @public
+export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, ExecutionClass> ? SendableInput<P> : never;
+
+// @public
 export type SchedulePattern = IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule | CronSchedule;
+
+// @public
+export interface ScheduleSection {
+    readonly checkIntervalSeconds?: number;
+    readonly enabled?: boolean;
+}
 
 // @public
 export type SchemaSent<S> = S extends AnyWire ? SentOf<S> : ZodSentOf<S>;

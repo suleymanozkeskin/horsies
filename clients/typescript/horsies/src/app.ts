@@ -2,7 +2,7 @@
 // the package adds its members in one block here.
 
 import { implementationOf, type BodyFor, type Implementation, type ImplementOptions } from "./contract/implementation.ts";
-import type { ExecutionClass, TaskContract } from "./contract/define-task.ts";
+import type { AnyTaskContract, ExecutionClass, TaskContract } from "./contract/define-task.ts";
 import type { TaskId } from "./contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue, SendableInput } from "./contract/schema.ts";
 import { readFormOf, type TaskHandle, taskHandleOf } from "./read/handle.ts";
@@ -22,6 +22,8 @@ import { registerImplementation } from "./app/implement.ts";
 import { recordAppContext } from "./app/internals.ts";
 import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
 import type { StateKey } from "./child/state.ts";
+import { declareSchedules, scheduleCoreAccess } from "./schedules/app-member.ts";
+import { declaredEntries, type ScheduleEntries, type ScheduleSection } from "./schedules/entry.ts";
 
 /** The constructor of an app, for `createHorsies` in this module. */
 let constructApp: (context: AppContext) => Horsies;
@@ -81,6 +83,17 @@ export class Horsies {
    */
   onChildStart(hook: ChildStartHook): void {
     onChildStartFor(this.#context, hook);
+  }
+
+  /**
+   * Declare the schedules of the app, in one call. Each slot of a schedule's pattern sends its task with its input;
+   * the `scheduler` command runs them. Calls no I/O and never throws: each refusal (a contract that the app does not
+   * list, a queue that it does not admit, an input that does not fit the task or is over the payload bound, a zone
+   * that the runtime does not know, a pattern that breaks a rule, a repeated name, a second call) reaches the check
+   * of `check` and of the scheduler start; the worker start skips them.
+   */
+  schedules<const T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>, section: ScheduleSection = {}): void {
+    declareSchedules(this.#context, declaredEntries(entries), section, scheduleCoreAccess(this.#context));
   }
 
   /** Send a task: its handle, or the send error. A delay is the only start option. */
