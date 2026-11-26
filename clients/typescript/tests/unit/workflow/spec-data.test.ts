@@ -37,7 +37,7 @@ const view = viewOf([ping, add, maybe], [leaf, region]);
 /** The deadlines that the fake facts were asked for, by task name. */
 type Asked = { readonly taskName: string; readonly deadline: NodeDeadline }[];
 
-/** Facts that write a short options text and give the class `class_<queue>`. */
+/** Facts that write a short options text, give the class `class_<queue>`, and the priority 100 of each queue. */
 function fakeFacts(asked: Asked = []): ConversionFacts {
   return {
     taskOptionsText: (taskName, deadline) => {
@@ -46,6 +46,7 @@ function fakeFacts(asked: Asked = []): ConversionFacts {
       return `{"task":"${taskName}"}`;
     },
     queueClass: (queueName) => `class_${queueName}`,
+    queuePriority: () => 100,
   };
 }
 
@@ -128,6 +129,19 @@ describe("specDataTextOf", () => {
     );
   });
 
+  test("a node's own priority, and the priority of its queue from the core's facts", () => {
+    const facts = { ...fakeFacts(), queuePriority: () => 37 };
+
+    const text = textOf((w) => {
+      w.task(ping, {}, { id: "own", priority: 5 });
+
+      return { output: w.task(ping, {}, { id: "queue" }) };
+    }, facts);
+
+    assert.match(text, /"node_id":"own".*?"priority":5,/);
+    assert.match(text, /"node_id":"queue".*?"priority":37,/);
+  });
+
   test("a node deadline: the core's facts give the options text with it", () => {
     const asked: Asked = [];
 
@@ -166,8 +180,8 @@ describe("specDataTextOf", () => {
     const numbered = defineTask({ name: "numbered", queue: "10", input: {}, output: h.int() });
 
     const queues = new Map([
-      ["b", { name: "b", priority: 5, maxConcurrency: { kind: "coreDefault" as const } }],
-      ["10", { name: "10", priority: 6, maxConcurrency: { kind: "coreDefault" as const } }],
+      ["b", { name: "b", maxConcurrency: { kind: "coreDefault" as const } }],
+      ["10", { name: "10", maxConcurrency: { kind: "coreDefault" as const } }],
     ]);
 
     const custom = viewOf([urgent, numbered], [], { kind: "custom", queues });
