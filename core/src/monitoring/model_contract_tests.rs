@@ -11,6 +11,11 @@
 //! kinds and compares them. The fields must be the same; each kind must be
 //! the same, but for the differences named in [`COMPATIBLE_DIFFERENCES`],
 //! where every value of the Rust kind validates into the Pydantic kind.
+//!
+//! The contract names each nested model, union and enum, and the TypeScript
+//! client takes its type names from it. The name must be the name of the
+//! Rust type. A variant of a union has the name of its Pydantic class; a
+//! Rust variant has no type of its own, so its name is not compared.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -106,6 +111,15 @@ const COMPATIBLE_DIFFERENCES: &[(&str, CompatibleDifference)] = &[
     ),
 ];
 
+/// The name of a Rust type in its JSON schema.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RustName {
+    /// The schema is the definition of this name in `$defs`.
+    Defined(String),
+    /// The schema is written in the place of its use: it has no name.
+    Inline,
+}
+
 /// The kind of one Rust schema, with the schemas inside it still to read.
 #[derive(Debug)]
 enum RustKind {
@@ -119,12 +133,21 @@ enum RustKind {
     Boolean,
     List(Value),
     Map(Value),
-    Enum(BTreeSet<String>),
-    /// A struct: its owner name and its schema.
-    Model(String, Value),
-    /// A tagged enum: the tag name, and per tag value the variant owner and
-    /// the variant schema.
-    Union(String, BTreeMap<String, (String, Value)>),
+    /// An enum of texts: its name and its values.
+    Enum(RustName, BTreeSet<String>),
+    /// A struct: the owner name of its fields, its name and its schema.
+    Model {
+        owner: String,
+        name: RustName,
+        schema: Value,
+    },
+    /// A tagged enum: its name, the tag name, and per tag value the variant
+    /// owner and the variant schema.
+    Union {
+        name: String,
+        tag: String,
+        variants: BTreeMap<String, (String, Value)>,
+    },
 }
 
 /// The string values of an enum schema: `enum`, or `oneOf` of string
@@ -224,16 +247,44 @@ impl Comparison {
         self.mismatches.push(format!("{owner}.{field}: {cause}"));
     }
 
+    /// Record a mismatch when the Rust type of `<owner>.<field>` does not
+    /// have the name of the named kind `contract` (an enum, a model or a
+    /// union of the contract).
+    fn compare_name(&mut self, owner: &str, field: &str, rust: &RustName, contract: &Value) {
+        let expected = contract.get("name").and_then(Value::as_str);
+        match rust {
+            RustName::Defined(name) if Some(name.as_str()) == expected => {}
+            RustName::Defined(name) => self.mismatch(
+                owner,
+                field,
+                &format!("type {name} in Rust, {expected:?} in Pydantic"),
+            ),
+            RustName::Inline => self.mismatch(
+                owner,
+                field,
+                &format!("a type with no name in Rust, {expected:?} in Pydantic"),
+            ),
+        }
+    }
+
     fn rust_kind(&self, owner: &str, schema: &Value) -> RustKind {
         if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
             let (name, definition) = self.definition(reference);
             if let Some(values) = enum_values(&definition) {
-                return RustKind::Enum(values);
+                return RustKind::Enum(RustName::Defined(name), values);
             }
             if let Some((tag, variants)) = union_variants(&name, &definition) {
-                return RustKind::Union(tag, variants);
+                return RustKind::Union {
+                    name,
+                    tag,
+                    variants,
+                };
             }
-            return RustKind::Model(name, definition);
+            return RustKind::Model {
+                owner: name.clone(),
+                name: RustName::Defined(name),
+                schema: definition,
+            };
         }
         if let Some([single]) = schema
             .get("allOf")
@@ -256,7 +307,7 @@ impl Comparison {
             return RustKind::Nullable(others[0].clone());
         }
         if let Some(values) = enum_values(schema) {
-            return RustKind::Enum(values);
+            return RustKind::Enum(RustName::Inline, values);
         }
         match schema.get("type") {
             Some(Value::Array(types)) => {
@@ -287,7 +338,11 @@ impl Comparison {
                 "array" => RustKind::List(schema.get("items").expect("an array has items").clone()),
                 "object" => match schema.get("additionalProperties") {
                     Some(values @ Value::Object(_)) => RustKind::Map(values.clone()),
-                    _ => RustKind::Model(owner.to_owned(), schema.clone()),
+                    _ => RustKind::Model {
+                        owner: owner.to_owned(),
+                        name: RustName::Inline,
+                        schema: schema.clone(),
+                    },
                 },
                 other => panic!("{owner}: a schema of type {other}"),
             },
@@ -405,30 +460,55 @@ impl Comparison {
             (RustKind::Map(values), Value::Object(object)) if object.contains_key("map") => {
                 self.kind(owner, field, &values, &object["map"], depth + 1);
             }
-            (RustKind::Enum(values), Value::Object(object)) if object.contains_key("enum") => {
-                let expected: Option<BTreeSet<String>> = object["enum"].as_array().map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.as_str().map(str::to_owned))
-                        .collect()
-                });
+            (RustKind::Enum(name, values), Value::Object(object))
+                if object.contains_key("enum") =>
+            {
+                let contract_enum = &object["enum"];
+                self.compare_name(owner, field, &name, contract_enum);
+                let expected: Option<BTreeSet<String>> =
+                    contract_enum["values"].as_array().map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| item.as_str().map(str::to_owned))
+                            .collect()
+                    });
                 if expected.as_ref() != Some(&values) {
                     self.mismatch(
                         owner,
                         field,
-                        &format!("enum {values:?} in Rust, {} in Pydantic", object["enum"]),
+                        &format!("enum {values:?} in Rust, {contract_enum} in Pydantic"),
                     );
                 }
             }
-            (RustKind::Model(name, model), Value::Object(object))
-                if object.contains_key("model") =>
-            {
-                self.fields(&name, &model, None, &object["model"], depth + 1);
+            (
+                RustKind::Model {
+                    owner: model_owner,
+                    name,
+                    schema: model,
+                },
+                Value::Object(object),
+            ) if object.contains_key("model") => {
+                let contract_model = &object["model"];
+                self.compare_name(owner, field, &name, contract_model);
+                self.fields(
+                    &model_owner,
+                    &model,
+                    None,
+                    &contract_model["fields"],
+                    depth + 1,
+                );
             }
-            (RustKind::Union(tag, variants), Value::Object(object))
-                if object.contains_key("union") =>
-            {
-                self.union(owner, field, &tag, &variants, &object["union"], depth + 1);
+            (
+                RustKind::Union {
+                    name,
+                    tag,
+                    variants,
+                },
+                Value::Object(object),
+            ) if object.contains_key("union") => {
+                let contract_union = &object["union"];
+                self.compare_name(owner, field, &RustName::Defined(name), contract_union);
+                self.union(owner, field, &tag, &variants, contract_union, depth + 1);
             }
             (actual, expected) => {
                 self.mismatch(
@@ -477,7 +557,7 @@ impl Comparison {
                 variant_owner,
                 variant,
                 Some(tag),
-                &expected[value],
+                &expected[value]["fields"],
                 depth + 1,
             );
         }
@@ -605,4 +685,26 @@ fn the_comparison_sees_an_extra_field_and_an_unnamed_difference() {
     let count = compare::<StatusCount>("StatusCount", &contract);
     assert_eq!(count.mismatches.len(), 1, "{:?}", count.mismatches);
     assert!(count.mismatches[0].starts_with("StatusCount.count: "));
+}
+
+/// The comparison sees a named kind whose name is not the name of the Rust
+/// type.
+#[test]
+fn the_comparison_sees_a_name_that_is_not_the_rust_name() {
+    let mut contract = contract();
+    let mut budget_load = contract["BudgetLoadInfo"].clone();
+    *budget_load
+        .pointer_mut("/budget/enum/name")
+        .expect("the enum of budget has a name") = Value::String("Budget".to_owned());
+    let _ = contract.insert("BudgetLoadInfo".to_owned(), budget_load);
+
+    let load = compare::<BudgetLoadInfo>("BudgetLoadInfo", &contract);
+
+    assert_eq!(
+        load.mismatches,
+        vec![
+            "BudgetLoadInfo.budget: type Execution in Rust, Some(\"Budget\") in Pydantic"
+                .to_owned()
+        ]
+    );
 }
