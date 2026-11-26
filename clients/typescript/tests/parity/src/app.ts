@@ -10,6 +10,9 @@
 // - `shared-async-1x4`: one shared async child with 4 seats.
 // - `shared-thread-1x4`: one shared thread child with 4 seats (Node only: a worker on Bun refuses it at its start).
 //
+// The schedule `parity_slots` sends `parity.add` (2 + 3) every hour and catches up missed runs, at most two slots per
+// check. Only the scheduler process of the `schedule_slots` scenario runs it.
+//
 // Every send retains its input (`retainRerunInputDefault`), so a failed task can be rerun. Each task ends the same way
 // on every run: no task reads the clock, a random source, or the state of another task.
 
@@ -19,6 +22,8 @@ import {
   h,
   Horsies,
   type HorsiesConfig,
+  type ScheduleEntry,
+  type ScheduleSection,
   type TaskOutcome,
   type WorkerProfileInput,
 } from "../../../horsies/src/index.ts";
@@ -65,6 +70,18 @@ export const PARENT_DEFINITION_KEY = "crossclient.parity.parent.v1";
 
 /** A workflow that the send process starts. */
 export type WorkflowName = typeof CHAIN_NAME | typeof PARENT_NAME;
+
+/** The schedule of the `schedule_slots` scenario. */
+export const SCHEDULE_NAME = "parity_slots";
+
+/** Longer than any run: a slot is due only after the runner moves the schedule back. */
+const SCHEDULE_INTERVAL = Temporal.Duration.from({ hours: 1 });
+
+/** The most slots that one check of the scheduler sends. */
+const SCHEDULE_MAX_CATCH_UP_RUNS = 2;
+
+/** The wait between two checks of the scheduler, in seconds. */
+const SCHEDULE_CHECK_INTERVAL_S = 1;
 
 /** The broker URL of the second app of `send_retry`: nothing listens on port 1, so a connect is refused at once. */
 export const REFUSED_BROKER_URL = "postgresql://postgres@127.0.0.1:1/parity_refused";
@@ -252,6 +269,20 @@ export const PROFILES: { readonly [Name in ProfileName]: WorkerProfileInput } = 
   [SHARED_THREAD]: { sharedThread: { count: 1, seats: SHARED_SEATS }, drainTimeoutMs: DRAIN_TIMEOUT_MS },
 };
 
+/** The schedule `parity_slots`: each slot sends `parity.add` with 2 and 3 (Python `TaskSchedule` of `app.py`). */
+export const PARITY_SCHEDULE: ScheduleEntry<typeof add> = {
+  name: SCHEDULE_NAME,
+  task: add,
+  input: { a: 2, b: 3 },
+  pattern: { kind: "interval", every: SCHEDULE_INTERVAL },
+  timezone: "UTC",
+  catchUpMissed: true,
+  maxCatchUpRuns: SCHEDULE_MAX_CATCH_UP_RUNS,
+};
+
+/** The schedule section of the parity app (Python `ScheduleConfig(check_interval_seconds=1)`). */
+export const SCHEDULE_SECTION: ScheduleSection = { checkIntervalSeconds: SCHEDULE_CHECK_INTERVAL_S };
+
 /** The config of the parity app on `databaseUrl`. Pure. */
 export function parityConfig(databaseUrl: string): HorsiesConfig {
   return {
@@ -278,8 +309,9 @@ export function refusedBrokerConfig(): HorsiesConfig {
 }
 
 /**
- * The parity app on `databaseUrl` with the implementation of every task, or the text of every refusal of
- * `Horsies.create`. On a main thread the core checks the config and each contract (the addon loads; nothing connects).
+ * The parity app on `databaseUrl` with the implementation of every task and the schedule, or the text of every refusal
+ * of `Horsies.create`. On a main thread the core checks the config, each contract and the schedule (the addon loads;
+ * nothing connects). A refusal of the schedule reaches `check` and the scheduler start, which report it.
  */
 export function buildApp(databaseUrl: string): Result<Horsies, string> {
   const created = Horsies.create(parityConfig(databaseUrl));
@@ -289,6 +321,7 @@ export function buildApp(databaseUrl: string): Result<Horsies, string> {
   }
 
   implementTasks(created.value);
+  created.value.schedules([PARITY_SCHEDULE], SCHEDULE_SECTION);
 
   return ok(created.value);
 }
