@@ -140,12 +140,12 @@ describe("stored options that a worker refuses", () => {
 
         const error = await failed(handle, RESULT_WAIT_MS);
 
-        // The core's child host writes the refusal with no data; its message names the key (Python's child runner
-        // writes the key in `data.field`).
+        // The core's child host writes the data of Python's child runner: the key in `data.field`, and the reason as
+        // the message.
         assert.equal(errorCode(error).code, REFUSAL_CODE);
         assert.equal((await infoOf(handle)).retryCount, 0);
         assert.equal(error.message, `stored ${key} is absent for execution SHARED_ASYNC`);
-        assert.equal(error.data, null);
+        assert.ok(JSON.stringify(error).includes(`"field":"${key}"`), `the refusal names the field ${key}: ${JSON.stringify(error)}`);
       });
     }
   }
