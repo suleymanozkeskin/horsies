@@ -74,6 +74,7 @@ export function initialSuppression(start: ProcessStart): SendSuppression {
       return { kind: "suppressed", reason: "schedulerBeforeServe" };
     case CHECK_COMMAND:
       return { kind: "suppressed", reason: "checkCommand" };
+    case undefined:
     default:
       return { kind: "open" };
   }

@@ -21,7 +21,7 @@ import { checkLive } from "../native/worker/worker.ts";
 import { ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../native/call/never.ts";
 import { CoreError } from "../thrown-errors.ts";
-import { appHandle } from "../worker/run.ts";
+import { appCoreHandle } from "../app/core-access.ts";
 import {
   type CommandExitCode,
   type CommandOutput,
@@ -78,7 +78,7 @@ export function processCheckCommandDeps(context: AppContext): CheckCommandDeps {
     output: processOutput(),
     setLogLevel: (level) => configureLogging({ levels: { default: level } }),
     staticCheck: () => staticCheck(context, checks, "withSchedules", "check"),
-    liveCheck: async (passed) => liveSteps(passed, async () => checkLive(appHandle(context), context.config.coreConfigJson)),
+    liveCheck: async (passed) => liveSteps(passed, async () => checkLive(appCoreHandle(context.core), context.config.coreConfigJson)),
   };
 }
 
