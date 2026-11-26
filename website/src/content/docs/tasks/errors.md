@@ -132,15 +132,15 @@ The codes of the client calls. The error types that carry them are on the client
 ### Send Error Codes
 
 <!-- members: TaskSendErrorCode -->
-| Code | Description | Retry methods |
+| Code | Description | Resend methods |
 | ---- | ----------- | ------------- |
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | Refused |
-| `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; `retry_*_async(err)` completes the same dispatch (or call the `*_async` entry point with the original args) | Accepted |
-| `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), a retry method refused the payload (another task; in Python also a schedule payload sent to a send retry), or the app that a Rust send names does not register the task | Refused |
+| `ASYNC_CONTEXT` | Sync send (or sync resend) called inside a running event loop -- the blocking enqueue would stall the loop; `resend_async(err)` completes the same dispatch (or call the `*_async` entry point with the original args) | Accepted |
+| `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), a resend method refused the payload (the error of another task), or the app that a Rust send names does not register the task | Refused |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue, or the core of the process could not run the send ([Python: Calls That Run on the Core](/horsies/tasks/error-types/#calls-that-run-on-the-core)); the row may or may not exist | Accepted |
-| `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | Refused |
+| `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and resend | Refused |
 | `PAYLOAD_TOO_LARGE` | The serialized input exceeds `payload.reject_bytes` bytes of UTF-8 text; nothing was enqueued | Refused |
-| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A retry after the reservation ends is accepted | Accepted |
+| `IDEMPOTENCY_KEY_CONFLICT` | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. A resend after the reservation ends is accepted | Accepted |
 
 ### Workflow Start Error Codes
 

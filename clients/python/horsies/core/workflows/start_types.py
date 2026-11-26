@@ -11,7 +11,7 @@ variant.
 minted for the start when the caller gave none.
 
 The retry methods ``WorkflowSpec.retry_start`` / ``retry_start_async`` take a
-``WorkflowStartRetryable`` and start the workflow again with its id.
+``WorkflowStartResendable`` and start the workflow again with its id.
 
 The classes of the core's start catalog are generated from horsies-core into
 ``horsies._catalog.workflow_start_errors`` and re-exported here.
@@ -58,7 +58,7 @@ type WorkflowStartError = WorkflowStartCoreError | WorkflowStartBrokerNotConfigu
 The classes of the core's catalog, and ``WorkflowStartBrokerNotConfigured``,
 which only this client produces."""
 
-type WorkflowStartRetryable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext
+type WorkflowStartResendable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext
 """The variants that the retry methods accept. Each carries the id of its start."""
 
 type WorkflowStartResult[T] = Result[T, WorkflowStartError]

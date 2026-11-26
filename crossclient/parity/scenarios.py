@@ -29,7 +29,7 @@ class SendForm(Enum):
 
     RETRY_OF_ASYNC_CONTEXT = 'retry_of_async_context'
     """A blocking send on the thread of the running event loop, refused with
-    `ASYNC_CONTEXT` before any statement; then two `retry_send` calls with
+    `ASYNC_CONTEXT` before any statement; then two `resend` calls with
     its error, which write one task under the prepared id."""
 
 

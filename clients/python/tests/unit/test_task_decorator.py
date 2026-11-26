@@ -2290,8 +2290,8 @@ class TestCreateTaskWrapperSendAsync:
         assert broker.enqueue_async.await_count == 1  # no resend
 
     @pytest.mark.asyncio
-    async def test_schedule_async_enqueue_exception_propagates(self) -> None:
-        """An exception raised by the async broker enqueue for schedule_async() propagates."""
+    async def test_delayed_send_async_enqueue_exception_propagates(self) -> None:
+        """An exception raised by the async broker enqueue for a delayed send_async() propagates."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2303,7 +2303,7 @@ class TestCreateTaskWrapperSendAsync:
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
         with pytest.raises(TypeError) as exc_info:
-            await wrapper.schedule_async(5, x=1)
+            await wrapper.with_options(delay_seconds=5).send_async(x=1)
 
         assert exc_info.value is defect
         assert broker.enqueue_async.await_count == 1  # no resend
@@ -2328,29 +2328,29 @@ class TestCreateTaskWrapperSendAsync:
 
 
 # =============================================================================
-# create_task_wrapper — schedule() paths
+# create_task_wrapper — with_options(delay_seconds=...) paths
 # =============================================================================
 
 
 @pytest.mark.unit
-class TestCreateTaskWrapperSchedule:
-    """Tests for wrapper.schedule() method."""
+class TestCreateTaskWrapperDelayedSend:
+    """Tests for wrapper.with_options(delay_seconds=...).send()."""
 
-    def test_schedule_suppressed_returns_send_suppressed(self) -> None:
-        """When sends suppressed, schedule() returns SEND_SUPPRESSED error."""
+    def test_delayed_send_suppressed_returns_send_suppressed(self) -> None:
+        """When sends suppressed, a delayed send returns SEND_SUPPRESSED error."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
         app = _make_app(suppress_sends=True)
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(60, x=1)
+        result = wrapper.with_options(delay_seconds=60).send(x=1)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendSuppressed)
 
-    def test_schedule_success(self) -> None:
-        """Successful schedule returns broker-mode handle with delay."""
+    def test_delayed_send_success(self) -> None:
+        """A successful delayed send returns broker-mode handle with delay."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2360,7 +2360,7 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(60, x=1)
+        result = wrapper.with_options(delay_seconds=60).send(x=1)
 
         assert is_ok(result)
         handle = result.ok_value
@@ -2372,8 +2372,8 @@ class TestCreateTaskWrapperSchedule:
         assert call_kwargs.kwargs['send_kind'] is SendKind.FIRST
         assert call_kwargs.kwargs.get('enqueue_delay_seconds') == 60
 
-    def test_with_options_schedule_sets_good_until(self) -> None:
-        """with_options(good_until=...) is honored by schedule()."""
+    def test_with_options_delay_and_good_until(self) -> None:
+        """with_options(good_until=..., delay_seconds=...) sends both."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2389,7 +2389,7 @@ class TestCreateTaskWrapperSchedule:
         )
         deadline = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
-        result = wrapper.with_options(good_until=deadline).schedule(60, x=1)
+        result = wrapper.with_options(good_until=deadline, delay_seconds=60).send(x=1)
 
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
@@ -2397,8 +2397,8 @@ class TestCreateTaskWrapperSchedule:
         assert call_kwargs['enqueue_delay_seconds'] == 60
         assert json.loads(call_kwargs['task_options'])['good_until'] == deadline.isoformat()
 
-    def test_schedule_broker_exception_returns_enqueue_failed(self) -> None:
-        """Broker Err result during schedule returns ENQUEUE_FAILED."""
+    def test_delayed_send_broker_exception_returns_enqueue_failed(self) -> None:
+        """Broker Err result during a delayed send returns ENQUEUE_FAILED."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2412,13 +2412,13 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(60, x=1)
+        result = wrapper.with_options(delay_seconds=60).send(x=1)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendEnqueueFailed)
 
-    def test_schedule_queue_validation_failure(self) -> None:
-        """Queue validation error in schedule returns VALIDATION_FAILED."""
+    def test_delayed_send_queue_validation_failure(self) -> None:
+        """Queue validation error in a delayed send returns VALIDATION_FAILED."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2429,12 +2429,12 @@ class TestCreateTaskWrapperSchedule:
         )
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(60, x=1)
+        result = wrapper.with_options(delay_seconds=60).send(x=1)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
 
-    def test_schedule_negative_delay_rejected(self) -> None:
+    def test_negative_delay_rejected(self) -> None:
         """A negative delay is rejected before reaching the broker."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
@@ -2445,14 +2445,15 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(-5, x=1)
+        result = wrapper.with_options(delay_seconds=-5).send(x=1)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert 'delay_seconds must not be negative' in result.err_value.message
         broker.enqueue.assert_not_called()
 
-    def test_schedule_zero_delay_allowed(self) -> None:
-        """delay=0 is valid (enqueue now) so dynamically computed delays need no branch."""
+    def test_zero_delay_allowed(self) -> None:
+        """delay_seconds=0 is valid (enqueue now) so dynamically computed delays need no branch."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2462,13 +2463,13 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(0, x=1)
+        result = wrapper.with_options(delay_seconds=0).send(x=1)
 
         assert is_ok(result)
         assert broker.enqueue.call_args.kwargs.get('enqueue_delay_seconds') == 0
 
-    def test_schedule_none_delay_rejected(self) -> None:
-        """A None delay returns Err(VALIDATION_FAILED), not a raw TypeError."""
+    def test_none_delay_sends_now(self) -> None:
+        """delay_seconds=None, the default, sends with no delay."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2478,13 +2479,14 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(None, x=1)  # type: ignore[arg-type]
+        for options in (wrapper.with_options(delay_seconds=None), wrapper.with_options()):
+            result = options.send(x=1)
+            assert is_ok(result)
+            assert broker.enqueue.call_args.kwargs['enqueue_delay_seconds'] is None
+        assert is_ok(wrapper.send(x=1))
+        assert broker.enqueue.call_args.kwargs['enqueue_delay_seconds'] is None
 
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskSendValidationFailed)
-        broker.enqueue.assert_not_called()
-
-    def test_schedule_string_delay_rejected(self) -> None:
+    def test_string_delay_rejected(self) -> None:
         """A str delay returns Err(VALIDATION_FAILED), not a raw TypeError."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
@@ -2495,14 +2497,14 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule('5', x=1)  # type: ignore[arg-type]
+        result = wrapper.with_options(delay_seconds='5').send(x=1)  # type: ignore[arg-type]
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
         broker.enqueue.assert_not_called()
 
-    def test_schedule_bool_delay_rejected(self) -> None:
-        """A bool delay is rejected: schedule(False) silently meaning 0 is a footgun."""
+    def test_bool_delay_rejected(self) -> None:
+        """A bool delay is rejected: delay_seconds=False silently meaning 0 is a footgun."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2513,12 +2515,12 @@ class TestCreateTaskWrapperSchedule:
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
         for bad in (True, False):
-            result = wrapper.schedule(bad, x=1)  # type: ignore[arg-type]
+            result = wrapper.with_options(delay_seconds=bad).send(x=1)
             assert is_err(result), bad
             assert isinstance(result.err_value, TaskSendValidationFailed)
         broker.enqueue.assert_not_called()
 
-    def test_schedule_float_delay_rejected(self) -> None:
+    def test_float_delay_rejected(self) -> None:
         """A float delay is rejected (signature is int)."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
@@ -2529,32 +2531,16 @@ class TestCreateTaskWrapperSchedule:
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
-        result = wrapper.schedule(2.5, x=1)  # type: ignore[arg-type]
+        result = wrapper.with_options(delay_seconds=2.5).send(x=1)  # type: ignore[arg-type]
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        broker.enqueue.assert_not_called()
-
-    def test_with_options_schedule_negative_delay_rejected(self) -> None:
-        """The with_options(...).schedule() path validates the delay too."""
-        def good_fn(*, x: int) -> Result[int, TaskError]:
-            return Ok(x)
-
-        app = _make_app()
-        broker = MagicMock()
-        broker.enqueue.return_value = Ok('sched-1')
-        app.get_broker.return_value = broker
-        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-
-        result = wrapper.with_options().schedule(-1, x=1)
-
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskSendValidationFailed)
+        assert 'delay_seconds must be an int number of seconds' in result.err_value.message
         broker.enqueue.assert_not_called()
 
 
 # =============================================================================
-# create_task_wrapper — retry_send / retry_send_async / retry_schedule
+# create_task_wrapper — resend / resend_async
 # =============================================================================
 
 
@@ -2564,7 +2550,7 @@ def _make_enqueue_failed_error(
     task_id: str = 'retry-id-1',
     enqueue_delay_seconds: int | None = None,
 ) -> TaskSendEnqueueFailed:
-    """Build an ENQUEUE_FAILED error with full payload for retry tests."""
+    """Build an ENQUEUE_FAILED error with full payload for resend tests."""
     from datetime import datetime, timezone
     payload = TaskSendPayload(
         task_name=task_name,
@@ -2586,11 +2572,11 @@ def _make_enqueue_failed_error(
 
 
 @pytest.mark.unit
-class TestRetrySend:
-    """Tests for retry_send / retry_send_async / retry_schedule."""
+class TestResend:
+    """Tests for resend / resend_async."""
 
-    def test_retry_send_reuses_task_id_and_payload(self) -> None:
-        """retry_send passes the same task_id and input to the broker."""
+    def test_resend_reuses_task_id_and_payload(self) -> None:
+        """resend passes the same task_id and input to the broker."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2601,17 +2587,18 @@ class TestRetrySend:
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
         error = _make_enqueue_failed_error()
-        result = wrapper.retry_send(error)
+        result = wrapper.resend(error)
 
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
         assert call_kwargs['task_id'] == 'retry-id-1'
         assert call_kwargs['input_json'] == '{"x":1}'
+        assert call_kwargs['enqueue_delay_seconds'] is None
         assert call_kwargs['send_kind'] is SendKind.REPEAT
 
     @pytest.mark.asyncio
-    async def test_retry_send_async_reuses_task_id_and_payload(self) -> None:
-        """retry_send_async passes the same task_id and payload to broker."""
+    async def test_resend_async_reuses_task_id_and_payload(self) -> None:
+        """resend_async passes the same task_id and payload to broker."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2622,7 +2609,7 @@ class TestRetrySend:
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
         error = _make_enqueue_failed_error()
-        result = await wrapper.retry_send_async(error)
+        result = await wrapper.resend_async(error)
 
         assert is_ok(result)
         call_kwargs = broker.enqueue_async.call_args.kwargs
@@ -2630,8 +2617,8 @@ class TestRetrySend:
         assert call_kwargs['input_json'] == '{"x":1}'
         assert call_kwargs['send_kind'] is SendKind.REPEAT
 
-    def test_retry_send_cross_task_returns_validation_error(self) -> None:
-        """retry_send rejects errors from a different task."""
+    def test_resend_cross_task_returns_validation_error(self) -> None:
+        """resend rejects errors from a different task."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2639,14 +2626,14 @@ class TestRetrySend:
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
         error = _make_enqueue_failed_error(task_name='other.task')
-        result = wrapper.retry_send(error)
+        result = wrapper.resend(error)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert 'cross-task retry' in result.err_value.message
+        assert 'cross-task resend' in result.err_value.message
 
-    def test_retry_schedule_reuses_task_id_and_delay(self) -> None:
-        """retry_schedule passes same task_id and enqueue_delay_seconds."""
+    def test_resend_of_a_delayed_send_keeps_task_id_and_delay(self) -> None:
+        """resend of a delayed send passes the same task_id and enqueue_delay_seconds."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2657,7 +2644,7 @@ class TestRetrySend:
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
         error = _make_enqueue_failed_error(enqueue_delay_seconds=60)
-        result = wrapper.retry_schedule(error)
+        result = wrapper.resend(error)
 
         assert is_ok(result)
         call_kwargs = broker.enqueue.call_args.kwargs
@@ -2665,51 +2652,26 @@ class TestRetrySend:
         assert call_kwargs['enqueue_delay_seconds'] == 60
         assert call_kwargs['send_kind'] is SendKind.REPEAT
 
-    def test_retry_schedule_without_delay_returns_validation_error(self) -> None:
-        """retry_schedule rejects errors with no enqueue_delay_seconds."""
-        def good_fn(*, x: int) -> Result[int, TaskError]:
-            return Ok(x)
-
-        app = _make_app()
-        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-
-        error = _make_enqueue_failed_error(enqueue_delay_seconds=None)
-        result = wrapper.retry_schedule(error)
-
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert 'missing enqueue_delay_seconds' in result.err_value.message
-
-    def test_retry_send_rejects_scheduled_payload(self) -> None:
-        """retry_send rejects errors with enqueue_delay_seconds (use retry_schedule instead)."""
-        def good_fn(*, x: int) -> Result[int, TaskError]:
-            return Ok(x)
-
-        app = _make_app()
-        wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
-
-        error = _make_enqueue_failed_error(enqueue_delay_seconds=60)
-        result = wrapper.retry_send(error)
-
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert 'use retry_schedule instead' in result.err_value.message
-
     @pytest.mark.asyncio
-    async def test_retry_send_async_rejects_scheduled_payload(self) -> None:
-        """retry_send_async rejects errors with enqueue_delay_seconds."""
+    async def test_resend_async_of_a_delayed_send_keeps_the_delay(self) -> None:
+        """resend_async of a delayed send passes its enqueue_delay_seconds."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
         app = _make_app()
+        broker = MagicMock()
+        broker.enqueue_async = AsyncMock(return_value=Ok('retry-id-1'))
+        app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
         error = _make_enqueue_failed_error(enqueue_delay_seconds=60)
-        result = await wrapper.retry_send_async(error)
+        result = await wrapper.resend_async(error)
 
-        assert is_err(result)
-        assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert 'use retry_schedule instead' in result.err_value.message
+        assert is_ok(result)
+        call_kwargs = broker.enqueue_async.call_args.kwargs
+        assert call_kwargs['task_id'] == 'retry-id-1'
+        assert call_kwargs['enqueue_delay_seconds'] == 60
+        assert call_kwargs['send_kind'] is SendKind.REPEAT
 
 
 # =============================================================================
@@ -2828,8 +2790,8 @@ class TestAutoRetry:
         assert exc_info.value is defect
         assert broker.enqueue.call_count == 1  # no resend
 
-    def test_exception_from_sync_broker_schedule_propagates(self) -> None:
-        """An exception raised by the sync broker enqueue for schedule() propagates."""
+    def test_exception_from_sync_broker_delayed_send_propagates(self) -> None:
+        """An exception raised by the sync broker enqueue for a delayed send() propagates."""
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2841,7 +2803,7 @@ class TestAutoRetry:
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 
         with pytest.raises(TypeError) as exc_info:
-            wrapper.schedule(5, x=1)
+            wrapper.with_options(delay_seconds=5).send(x=1)
 
         assert exc_info.value is defect
         assert broker.enqueue.call_count == 1  # no resend
@@ -2925,7 +2887,7 @@ class TestIdempotencyKeyConflictClassification:
         assert result.err_value.owner_task_id == 'owner-task-1'
         assert result.err_value.payload.task_name == 'test.good_fn'
 
-    def test_retry_send_accepts_the_conflict(self) -> None:
+    def test_resend_accepts_the_conflict(self) -> None:
         def good_fn(*, x: int) -> Result[int, TaskError]:
             return Ok(x)
 
@@ -2942,7 +2904,7 @@ class TestIdempotencyKeyConflictClassification:
             owner_task_id='owner-task-1',
         )
 
-        result = wrapper.retry_send(conflict)
+        result = wrapper.resend(conflict)
 
         assert is_ok(result)
         assert broker.enqueue.call_args.kwargs['task_id'] == 'retry-id-1'
@@ -3374,7 +3336,7 @@ class TestNodeFactoryManualArgsFrom:
 
 
 # =============================================================================
-# Async-context guard + schedule_async / retry_schedule_async
+# Async-context guard + delayed send_async / resend_async
 # =============================================================================
 
 
@@ -3402,7 +3364,7 @@ def _failed_send_error(
     task: Any,
     broker: MagicMock,
     *,
-    schedule_delay: int | None = None,
+    delay_seconds: int | None = None,
 ) -> TaskSendEnqueueFailed:
     """Produce a real ENQUEUE_FAILED error (with payload) outside any loop."""
     ok_return = broker.enqueue.return_value
@@ -3411,10 +3373,7 @@ def _failed_send_error(
         retryable=False,
         exception=NoCause(),
     ))
-    if schedule_delay is None:
-        res = task.send(value=1)
-    else:
-        res = task.schedule(schedule_delay, value=1)
+    res = task.with_options(delay_seconds=delay_seconds).send(value=1)
     broker.enqueue.return_value = ok_return
     assert is_err(res)
     assert isinstance(res.err_value, TaskSendEnqueueFailed)
@@ -3423,7 +3382,7 @@ def _failed_send_error(
 
 @pytest.mark.unit
 class TestAsyncContextGuard:
-    """Sync send/schedule fail closed with ASYNC_CONTEXT on a running loop."""
+    """Sync sends fail closed with ASYNC_CONTEXT on a running loop."""
 
     def test_sync_send_inside_event_loop_returns_async_context(self) -> None:
         broker = _ok_broker()
@@ -3438,17 +3397,18 @@ class TestAsyncContextGuard:
         assert 'send_async' in res.err_value.message
         broker.enqueue.assert_not_called()
 
-    def test_sync_schedule_inside_event_loop_returns_async_context(self) -> None:
+    def test_sync_delayed_send_inside_event_loop_returns_async_context(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
 
         async def call_inside_loop() -> Any:
-            return task.schedule(5, value=1)
+            return task.with_options(delay_seconds=5).send(value=1)
 
         res = asyncio.run(call_inside_loop())
         assert is_err(res)
         assert isinstance(res.err_value, TaskSendAsyncContext)
-        assert 'schedule_async' in res.err_value.message
+        assert 'send_async' in res.err_value.message
+        assert res.err_value.payload.enqueue_delay_seconds == 5
         broker.enqueue.assert_not_called()
 
     def test_with_options_send_inside_event_loop_returns_async_context(self) -> None:
@@ -3463,23 +3423,24 @@ class TestAsyncContextGuard:
         assert isinstance(res.err_value, TaskSendAsyncContext)
         broker.enqueue.assert_not_called()
 
-    def test_retry_send_inside_event_loop_returns_async_context(self) -> None:
+    def test_resend_inside_event_loop_returns_async_context(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
         failed = _failed_send_error(task, broker)
 
         async def call_inside_loop() -> Any:
-            return task.retry_send(failed)
+            return task.resend(failed)
 
         res = asyncio.run(call_inside_loop())
         assert is_err(res)
         assert isinstance(res.err_value, TaskSendAsyncContext)
+        assert 'resend_async' in res.err_value.message
         # The guarded error keeps the payload so the caller can still
-        # retry via the async variant.
+        # resend via the async variant.
         assert res.err_value.payload is not None
 
-    def test_retry_send_async_completes_async_context_error(self) -> None:
-        """ASYNC_CONTEXT carries the prepared payload; retry_send_async
+    def test_resend_async_completes_async_context_error(self) -> None:
+        """ASYNC_CONTEXT carries the prepared payload; resend_async
         completes the same task_id dispatch on the loop."""
         broker = _ok_broker()
         task = _make_guard_task(broker)
@@ -3493,7 +3454,7 @@ class TestAsyncContextGuard:
         assert guarded.err_value.task_id is not None
         assert guarded.err_value.payload is not None
 
-        res = asyncio.run(task.retry_send_async(guarded.err_value))
+        res = asyncio.run(task.resend_async(guarded.err_value))
         assert is_ok(res)
         broker.enqueue_async.assert_awaited_once()
         assert (
@@ -3501,26 +3462,26 @@ class TestAsyncContextGuard:
             == guarded.err_value.task_id
         )
 
-    def test_retry_schedule_inside_event_loop_returns_async_context(self) -> None:
+    def test_resend_of_a_delayed_send_inside_event_loop_returns_async_context(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
-        failed = _failed_send_error(task, broker, schedule_delay=7)
+        failed = _failed_send_error(task, broker, delay_seconds=7)
 
         async def call_inside_loop() -> Any:
-            return task.retry_schedule(failed)
+            return task.resend(failed)
 
         res = asyncio.run(call_inside_loop())
         assert is_err(res)
         assert isinstance(res.err_value, TaskSendAsyncContext)
 
-    def test_retry_schedule_async_completes_async_context_error(self) -> None:
-        """ASYNC_CONTEXT from sync schedule completes via retry_schedule_async
+    def test_resend_async_completes_a_delayed_async_context_error(self) -> None:
+        """ASYNC_CONTEXT from a sync delayed send completes via resend_async
         with the same task_id and delay."""
         broker = _ok_broker()
         task = _make_guard_task(broker)
 
         async def call_inside_loop() -> Any:
-            return task.schedule(7, value=1)
+            return task.with_options(delay_seconds=7).send(value=1)
 
         guarded = asyncio.run(call_inside_loop())
         assert is_err(guarded)
@@ -3529,7 +3490,7 @@ class TestAsyncContextGuard:
         assert guarded.err_value.payload is not None
         assert guarded.err_value.payload.enqueue_delay_seconds == 7
 
-        res = asyncio.run(task.retry_schedule_async(guarded.err_value))
+        res = asyncio.run(task.resend_async(guarded.err_value))
         assert is_ok(res)
         broker.enqueue_async.assert_awaited_once()
         assert (
@@ -3546,11 +3507,11 @@ class TestAsyncContextGuard:
         assert is_ok(res)
         broker.enqueue.assert_called_once()
 
-    def test_sync_schedule_outside_loop_unaffected(self) -> None:
+    def test_sync_delayed_send_outside_loop_unaffected(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
 
-        res = task.schedule(5, value=1)
+        res = task.with_options(delay_seconds=5).send(value=1)
         assert is_ok(res)
         broker.enqueue.assert_called_once()
         assert broker.enqueue.call_args.kwargs['enqueue_delay_seconds'] == 5
@@ -3565,69 +3526,70 @@ class TestAsyncContextGuard:
 
 
 @pytest.mark.unit
-class TestScheduleAsync:
-    """schedule_async / retry_schedule_async mirror the sync semantics."""
+class TestDelayedSendAsync:
+    """A delayed send_async and resend_async mirror the sync semantics."""
 
-    def test_schedule_async_happy_path(self) -> None:
+    def test_delayed_send_async_happy_path(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
 
-        res = asyncio.run(task.schedule_async(9, value=1))
+        res = asyncio.run(task.with_options(delay_seconds=9).send_async(value=1))
         assert is_ok(res)
         broker.enqueue_async.assert_awaited_once()
         assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 9
 
-    def test_schedule_async_rejects_negative_delay(self) -> None:
+    def test_delayed_send_async_rejects_negative_delay(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
 
-        res = asyncio.run(task.schedule_async(-1, value=1))
+        res = asyncio.run(task.with_options(delay_seconds=-1).send_async(value=1))
         assert is_err(res)
         assert isinstance(res.err_value, TaskSendValidationFailed)
         broker.enqueue_async.assert_not_awaited()
 
-    def test_schedule_async_rejects_bool_delay(self) -> None:
+    def test_delayed_send_async_rejects_bool_delay(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
 
-        res = asyncio.run(task.schedule_async(True, value=1))  # type: ignore[arg-type]
+        res = asyncio.run(task.with_options(delay_seconds=True).send_async(value=1))
         assert is_err(res)
         assert isinstance(res.err_value, TaskSendValidationFailed)
         broker.enqueue_async.assert_not_awaited()
 
-    def test_schedule_async_zero_delay_allowed(self) -> None:
+    def test_delayed_send_async_zero_delay_allowed(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
 
-        res = asyncio.run(task.schedule_async(0, value=1))
+        res = asyncio.run(task.with_options(delay_seconds=0).send_async(value=1))
         assert is_ok(res)
 
-    def test_with_options_schedule_async(self) -> None:
+    def test_with_options_good_until_and_delay_send_async(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
 
         res = asyncio.run(
-            task.with_options(good_until=None).schedule_async(3, value=1)
+            task.with_options(good_until=None, delay_seconds=3).send_async(value=1)
         )
         assert is_ok(res)
         assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 3
 
-    def test_retry_schedule_async_reuses_payload(self) -> None:
+    def test_resend_async_of_a_delayed_send_reuses_payload(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
-        failed = _failed_send_error(task, broker, schedule_delay=7)
+        failed = _failed_send_error(task, broker, delay_seconds=7)
 
-        res = asyncio.run(task.retry_schedule_async(failed))
+        res = asyncio.run(task.resend_async(failed))
         assert is_ok(res)
         broker.enqueue_async.assert_awaited_once()
         assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] == 7
         assert broker.enqueue_async.call_args.kwargs['task_id'] == failed.task_id
 
-    def test_retry_schedule_async_rejects_sendless_error(self) -> None:
+    def test_resend_async_of_a_send_now_sends_no_delay(self) -> None:
         broker = _ok_broker()
         task = _make_guard_task(broker)
         failed = _failed_send_error(task, broker)  # plain send, no delay
 
-        res = asyncio.run(task.retry_schedule_async(failed))
-        assert is_err(res)
-        assert isinstance(res.err_value, TaskSendValidationFailed)
+        res = asyncio.run(task.resend_async(failed))
+        assert is_ok(res)
+        assert broker.enqueue_async.call_args.kwargs['enqueue_delay_seconds'] is None
+        assert broker.enqueue_async.call_args.kwargs['task_id'] == failed.task_id

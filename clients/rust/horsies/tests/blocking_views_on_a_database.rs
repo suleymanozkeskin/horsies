@@ -1,6 +1,6 @@
 //! The blocking views of the Rust client on PostgreSQL: each view method
 //! runs its async method on the core's process runtime and returns its
-//! answer (Python's sync calls: `send` and `schedule`, `retry_send`,
+//! answer (Python's sync calls: `send`, `resend`,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
 //! reads, `check(live=True)`, the workflow starts and `retry_start`, and the
 //! sync methods of `WorkflowHandle`). One test per outcome of the database.
@@ -105,7 +105,7 @@ const ENDED_WAIT: Duration = Duration::from_secs(10);
 const PING_WINDOW: Duration = Duration::from_millis(300);
 
 /// The delay of a delayed send (`TaskSendOptions::delay`).
-const SCHEDULE_DELAY_SECS: u32 = 3_600;
+const SEND_DELAY_SECS: u32 = 3_600;
 
 /// A worker id that never reported a state.
 const ABSENT_WORKER: &str = "blocking-views-absent-worker";
@@ -485,20 +485,20 @@ fn assert_workflow_not_found<V: Debug>(answer: HandleResult<V>, workflow_id: Uui
 }
 
 /// A send now and a send with a delay write PENDING tasks with the sent
-/// input; the delayed one is due after its delay. `retry_send` of a send
+/// input; the delayed one is due after its delay. `resend` of a send
 /// refused on a runtime thread writes the task id of the refused send.
 #[tokio::test]
 async fn blocking_sends_write_their_tasks() {
     let (database, worker) = covered_database().await;
     let url = database.url().to_owned();
-    let (sent, delayed, retried) = off_the_runtime(move || {
+    let (sent, delayed, resent) = off_the_runtime(move || {
         let (_app, echo_function) = app_on(&url);
         let sent = echo_function
             .blocking()
             .send(echo_input())
             .expect("the blocking send")
             .task_id();
-        let delayed = TaskSendOptions::new().delay(WholeSeconds::from_secs(SCHEDULE_DELAY_SECS));
+        let delayed = TaskSendOptions::new().delay(WholeSeconds::from_secs(SEND_DELAY_SECS));
         let delayed_id = echo_function
             .blocking()
             .with_options(delayed)
@@ -512,17 +512,17 @@ async fn blocking_sends_write_their_tasks() {
         let refused_id = refused
             .task_id()
             .expect("the refused send keeps its task id");
-        let retried = echo_function
+        let resent = echo_function
             .blocking()
-            .retry_send(&refused)
-            .expect("the blocking retry of the refused send")
+            .resend(&refused)
+            .expect("the blocking resend of the refused send")
             .task_id();
-        assert_eq!(retried, refused_id);
-        (sent, delayed_id, retried)
+        assert_eq!(resent, refused_id);
+        (sent, delayed_id, resent)
     })
     .await;
 
-    for (task_id, due_later) in [(sent, false), (delayed, true), (retried, false)] {
+    for (task_id, due_later) in [(sent, false), (delayed, true), (resent, false)] {
         let row = database
             .client()
             .query_one(

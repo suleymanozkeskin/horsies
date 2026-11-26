@@ -276,7 +276,7 @@ match spec.start():
 
 ### Retry
 
-`retry_start()` / `retry_start_async()` take `WorkflowStartRetryable` = `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext` and start again with the error's `workflow_id`. Another variant is a type error and fails an assertion at run time. An error of another workflow returns `Err(WorkflowStartValidationFailed)`. The retry methods refuse `WorkflowStartCommandConflict` and `WorkflowStartIdConflict`.
+`retry_start()` / `retry_start_async()` take `WorkflowStartResendable` = `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext` and start again with the error's `workflow_id`. Another variant is a type error and fails an assertion at run time. An error of another workflow returns `Err(WorkflowStartValidationFailed)`. The retry methods refuse `WorkflowStartCommandConflict` and `WorkflowStartIdConflict`.
 
 ### Start with an existing `workflow_id`
 
@@ -752,7 +752,7 @@ from horsies import (
     HandleResumeRecoveryFailed, HandleAsyncContext,
     # Start result types
     WorkflowStartResult, WorkflowStartError, WorkflowStartErrorCode,
-    WorkflowStartRetryable, WorkflowStartBrokerNotConfigured,
+    WorkflowStartResendable, WorkflowStartBrokerNotConfigured,
     WorkflowStartValidationFailed, WorkflowStartIdConflict, WorkflowStartCommandConflict,
     WorkflowStartEnqueueFailed, WorkflowStartAsyncContext,
     # Result primitives

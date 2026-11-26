@@ -116,7 +116,7 @@ They also require `send_kind` (`from horsies import SendKind`): `SendKind.FIRST`
 
 ### Calls That Run on the Core
 
-These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ensure_schema_initialized()`, `get_task_info()`, `get_task_info_async()`, `get_raw_result_record()`, `get_raw_result_record_async()`, `ping_database_async()`, `ping_workers_async()`, and the task sends (`send()`, `send_async()`, `schedule()`, `schedule_async()` and the four retry methods). The core has one set of pools per broker, for every thread and event loop.
+These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ensure_schema_initialized()`, `get_task_info()`, `get_task_info_async()`, `get_raw_result_record()`, `get_raw_result_record_async()`, `ping_database_async()`, `ping_workers_async()`, and the task sends (`send()`, `send_async()` and the two resend methods). The core has one set of pools per broker, for every thread and event loop.
 
 - The sync forms `enqueue()`, `get_task_info()` and `get_raw_result_record()` call the core on the calling thread. They return `ASYNC_CONTEXT` on a thread that runs an event loop.
 
@@ -135,7 +135,7 @@ Two more core errors are never a result: see [Process-State Refusals](#process-s
 `ForkedAfterCoreStart` and `CoreStopped` are states of the process, not of one call. The core refuses every later call in the process, so a retry in the same process gets the same refusal. Import both from `horsies`.
 
 - Every call that runs on the core raises them. No call returns them as a result, and no result type has a variant for them.
-- This covers the task sends and the four retry methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow()` and `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
+- This covers the task sends and the two resend methods, `enqueue()`, the task, result and health reads of the app and the broker, the broker's task lists and recovery passes, `ensure_schema_initialized()`, `check(live=True)`, the workflow start and its retry, every `WorkflowHandle` method that reads or changes the workflow, `pause_workflow()` and `resume_workflow()`, the reads and `cancel_task()` of `horsies.monitoring`, and the schema probe of `horsies web`. Each sync form and each `*_async` form raises them.
 - Nothing ran. `close()` and `close_async()` raise them from the close of the core handle.
 - In a worker child, the child ends itself at its next core call and the worker replaces it. The child exits with code 80; its last log line names the cause.
   - At the start of a task, before task code ran: the worker releases the claim with no attempt charged, and a new child runs the task.
@@ -242,11 +242,11 @@ def raise_broker_error(err: BrokerOperationError) -> None:
 
 ## Send Errors (TaskSendResult)
 
-Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.send_async()`, `.schedule()` and `.schedule_async()`. These are separate from the result of the task: they indicate that enqueuing the task itself failed, not that task execution failed.
+Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.send_async()`, `.resend()` and `.resend_async()`. These are separate from the result of the task: they indicate that enqueuing the task itself failed, not that task execution failed.
 
 ### TaskSendError
 
-`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](/horsies/tasks/sending-tasks/#retrying-failed-sends).
+`TaskSendError` is a union with one frozen variant per `TaskSendErrorCode` member. Each variant has only the fields of its failure, and `err.code` names its member. Match on the variant; a `match` that omits a variant fails pyright's exhaustiveness check. The handling pattern is in [Sending Tasks](/horsies/tasks/sending-tasks/#resending-failed-sends).
 
 | Variant | `code` | Fields |
 | ------- | ------ | ------ |
@@ -262,7 +262,7 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
 | `task_id` | `uuid.UUID` | Task id of the prepared send |
-| `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
+| `payload` | `TaskSendPayload` | Serialized envelope that the resend methods send again |
 | `retryable` | `bool` | `TaskSendEnqueueFailed`: the core's classification of the cause, `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `TaskSendIdempotencyKeyConflict`: a class variable that is always `True`, because the conflict clears when the reservation ends |
 | `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
@@ -291,13 +291,13 @@ def log_enqueue_failure(err: TaskSendEnqueueFailed) -> None:
 
 For a validation failure, the cause names the field, the message and the type, not the value. Text from your own validators is kept as written ([Validation Failure Text](#validation-failure-text)).
 
-`TaskSendRetryable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict`. It is the parameter type of `.retry_send()`, `.retry_send_async()`, `.retry_schedule()` and `.retry_schedule_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These three variants carry a `TaskSendPayload`, and the retry methods send that exact payload again: the same task id, command and `sent_at`. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row, also when the task already finished (a retry reads the task history).
+`TaskSendResendable` is `TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict`. It is the parameter type of `.resend()` and `.resend_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. These three variants carry a `TaskSendPayload`, and the resend methods send that exact payload again: the same task id, command, `sent_at` and delay. If the first send was written, the broker finds the same command fingerprint and `sent_at` on that task id and answers with the task id instead of writing a second row, also when the task already finished (a resend reads the task history).
 
 ## Workflow Start Errors (WorkflowStartResult)
 
 `spec.start()`, `start_async()`, `retry_start()` and `retry_start_async()` return `WorkflowStartResult[WorkflowHandle[T]]` = `Result[WorkflowHandle[T], WorkflowStartError]`. `WorkflowStartError` is a union with one frozen variant per code; the variants and their fields are on the [Workflow API](/horsies/concepts/workflows/workflow-api/) page.
 
-The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartRetryable`).
+The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartResendable`).
 
 ## Workflow Handle Errors (HandleResult)
 

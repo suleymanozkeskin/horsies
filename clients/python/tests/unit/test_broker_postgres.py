@@ -2151,10 +2151,10 @@ class TestEnqueueInputRefusal:
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
         assert result.err_value.code == TaskSendErrorCode.VALIDATION_FAILED
-        # TaskSendRetryable excludes this variant, so a retry is a type error,
+        # TaskSendResendable excludes this variant, so a resend is a type error,
         # and at run time it is a defect that crashes loud.
         with pytest.raises(AssertionError, match='unreachable'):
-            await wrapper.retry_send_async(result.err_value)  # pyright: ignore[reportArgumentType]
+            await wrapper.resend_async(result.err_value)  # pyright: ignore[reportArgumentType]
 
     @pytest.mark.asyncio
     async def test_refused_input_needs_no_schema_init(self) -> None:

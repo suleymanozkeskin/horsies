@@ -24,8 +24,8 @@ Use this page for the exact method signatures and return types used by workflows
 | `.resend_on_transient_err` | `bool` | Auto-retry transient start errors (default `False`) |
 | `.start(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (sync) |
 | `.start_async(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (async) |
-| `.retry_start(error)` | `(WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (sync) |
-| `.retry_start_async(error)` | `(WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (async) |
+| `.retry_start(error)` | `(WorkflowStartResendable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (sync) |
+| `.retry_start_async(error)` | `(WorkflowStartResendable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (async) |
 
 ### Module-Level Start Functions
 
@@ -88,7 +88,7 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error. Any other exception in the start transaction is a defect and propagates |
 | `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` was called on a thread that runs an event loop; nothing was written. Call `await spec.retry_start_async(err)` to complete the start with the error's id |
 
-`WorkflowStartRetryable` is `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext`. It is the parameter type of `.retry_start()` and `.retry_start_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. The retry methods start the workflow again with the error's `workflow_id`. An error of another workflow returns `WorkflowStartValidationFailed`.
+`WorkflowStartResendable` is `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext`. It is the parameter type of `.retry_start()` and `.retry_start_async()`; another variant is a type error, and at run time it fails an assertion that names the variant. The retry methods start the workflow again with the error's `workflow_id`. An error of another workflow returns `WorkflowStartValidationFailed`.
 
 **Usage:**
 

@@ -62,7 +62,7 @@ A failover promotes a standby to primary. Under asynchronous replication, the st
 A commit whose reply did not arrive is a different case. The write fails with a retryable connection error, and it is sent again on a new connection:
 
 - The worker sends a failed write of a task end again, up to the retry bound of its stage.
-- A send returns a retryable error. `resend_on_transient_err`, or the retry method of the client, sends it again with the same task id.
+- A send returns a retryable error. `resend_on_transient_err`, or the resend method of the client, sends it again with the same task id.
 
 The repeat applies the write once. A write that reached the new primary is not applied a second time.
 

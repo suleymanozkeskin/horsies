@@ -149,7 +149,7 @@ if TYPE_CHECKING:
     from horsies.core.types.result import Result
     from horsies.core.workflows.start_types import (
         WorkflowStartResult,
-        WorkflowStartRetryable,
+        WorkflowStartResendable,
         WorkflowStartValidationFailed,
     )
 
@@ -1850,7 +1850,7 @@ class WorkflowSpec(Generic[OutT]):
         ))
 
     def _validate_start_retry(
-        self, error: 'WorkflowStartRetryable',
+        self, error: 'WorkflowStartResendable',
     ) -> 'Result[str, WorkflowStartValidationFailed]':
         """Check that a retryable start error belongs to this workflow.
 
@@ -1885,7 +1885,7 @@ class WorkflowSpec(Generic[OutT]):
         return _Ok(error.workflow_id)
 
     def retry_start(
-        self, error: 'WorkflowStartRetryable',
+        self, error: 'WorkflowStartResendable',
     ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
         """Retry a failed workflow start using the stored workflow_id.
 
@@ -1897,7 +1897,7 @@ class WorkflowSpec(Generic[OutT]):
         ``WorkflowStartCommandConflict``.
 
         Accepts ``ENQUEUE_FAILED`` and ``ASYNC_CONTEXT`` errors
-        (``WorkflowStartRetryable``). The start runs as in ``start()``.
+        (``WorkflowStartResendable``). The start runs as in ``start()``.
 
         Args:
             error: The retryable error from a previous ``start()`` call.
@@ -1916,7 +1916,7 @@ class WorkflowSpec(Generic[OutT]):
         return self.start(workflow_id=v.ok_value)
 
     async def retry_start_async(
-        self, error: 'WorkflowStartRetryable',
+        self, error: 'WorkflowStartResendable',
     ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
         """Async variant of ``retry_start()``.
 

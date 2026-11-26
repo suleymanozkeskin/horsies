@@ -3,8 +3,8 @@
 
 ``ForkedAfterCoreStart`` (this process was forked without exec after the
 core started) and ``CoreStopped`` (a core background task panicked) are
-states of the process, not of one send. The four sends, the four retry
-methods and ``PostgresBroker.enqueue`` / ``enqueue_async`` raise them; none
+states of the process, not of one send. The four sends, the four resend
+calls and ``PostgresBroker.enqueue`` / ``enqueue_async`` raise them; none
 answers them as ``ENQUEUE_FAILED``. Every other core error keeps its
 ``ENQUEUE_FAILED`` mapping. The core handle is a stand-in; touches no
 database.
@@ -50,7 +50,7 @@ pytestmark = [pytest.mark.unit]
 _URL: Final = 'postgresql://u:p@localhost:5432/db'
 _TASK_NAME: Final = 'test.refused_fn'
 _TASK_ID: Final = UUID('0198c0de-0000-7000-8000-0000000019a8')
-_SCHEDULE_DELAY_S: Final = 5
+_SEND_DELAY_S: Final = 5
 
 
 def _refusals() -> list[Any]:
@@ -95,7 +95,7 @@ def _wrapper(app: MagicMock) -> Any:
 
 
 def _failed_send(delay_seconds: int | None) -> TaskSendEnqueueFailed:
-    """The error of an earlier send, as a retry method takes it."""
+    """The error of an earlier send, as a resend method takes it."""
     return TaskSendEnqueueFailed(
         task_id=_TASK_ID,
         payload=TaskSendPayload(
@@ -121,27 +121,28 @@ def _run_send(wrapper: Any, form: str) -> object:
             return wrapper.send(x=1)
         case 'send_async':
             return asyncio.run(wrapper.send_async(x=1))
-        case 'schedule':
-            return wrapper.schedule(_SCHEDULE_DELAY_S, x=1)
-        case 'schedule_async':
-            return asyncio.run(wrapper.schedule_async(_SCHEDULE_DELAY_S, x=1))
+        case 'delayed_send':
+            return wrapper.with_options(delay_seconds=_SEND_DELAY_S).send(x=1)
+        case 'delayed_send_async':
+            return asyncio.run(wrapper.with_options(delay_seconds=_SEND_DELAY_S).send_async(x=1))
         case _:
             raise AssertionError(f'unknown send form: {form}')
 
 
-def _run_retry(wrapper: Any, form: str) -> object:
-    """Call one retry method of ``wrapper`` with the error it accepts."""
+def _run_resend(wrapper: Any, form: str) -> object:
+    """Call one resend method of ``wrapper`` with the error it accepts: of
+    a send now, or of a send with a delay."""
     match form:
-        case 'retry_send':
-            return wrapper.retry_send(_failed_send(None))
-        case 'retry_send_async':
-            return asyncio.run(wrapper.retry_send_async(_failed_send(None)))
-        case 'retry_schedule':
-            return wrapper.retry_schedule(_failed_send(_SCHEDULE_DELAY_S))
-        case 'retry_schedule_async':
-            return asyncio.run(wrapper.retry_schedule_async(_failed_send(_SCHEDULE_DELAY_S)))
+        case 'resend':
+            return wrapper.resend(_failed_send(None))
+        case 'resend_async':
+            return asyncio.run(wrapper.resend_async(_failed_send(None)))
+        case 'delayed_resend':
+            return wrapper.resend(_failed_send(_SEND_DELAY_S))
+        case 'delayed_resend_async':
+            return asyncio.run(wrapper.resend_async(_failed_send(_SEND_DELAY_S)))
         case _:
-            raise AssertionError(f'unknown retry form: {form}')
+            raise AssertionError(f'unknown resend form: {form}')
 
 
 def _enqueue_calls(handle: MagicMock, form: str) -> int:
@@ -239,7 +240,7 @@ class TestBrokerEnqueue:
 
 
 class TestTaskSends:
-    @pytest.mark.parametrize('form', ['send', 'send_async', 'schedule', 'schedule_async'])
+    @pytest.mark.parametrize('form', ['send', 'send_async', 'delayed_send', 'delayed_send_async'])
     @pytest.mark.parametrize('refusal', _refusals())
     def test_a_send_raises_the_refusal_of_the_enqueue(
         self, form: str, refusal: CoreError,
@@ -253,7 +254,7 @@ class TestTaskSends:
         assert raised.value is refusal
         assert _enqueue_calls(handle, form) == 1
 
-    @pytest.mark.parametrize('form', ['send', 'send_async', 'schedule', 'schedule_async'])
+    @pytest.mark.parametrize('form', ['send', 'send_async', 'delayed_send', 'delayed_send_async'])
     @pytest.mark.parametrize('refusal', _refusals())
     def test_a_send_raises_the_refusal_of_the_id_mint(
         self, form: str, refusal: CoreError,
@@ -274,19 +275,19 @@ class TestTaskSends:
         handle.enqueue_async.assert_not_awaited()
 
 
-class TestRetryMethods:
+class TestResendMethods:
     @pytest.mark.parametrize(
-        'form', ['retry_send', 'retry_send_async', 'retry_schedule', 'retry_schedule_async'],
+        'form', ['resend', 'resend_async', 'delayed_resend', 'delayed_resend_async'],
     )
     @pytest.mark.parametrize('refusal', _refusals())
-    def test_a_retry_raises_the_refusal_of_the_enqueue(
+    def test_a_resend_raises_the_refusal_of_the_enqueue(
         self, form: str, refusal: CoreError,
     ) -> None:
         broker, handle = _broker_raising(refusal)
         wrapper = _wrapper(_app_with(broker))
 
         with pytest.raises(type(refusal)) as raised:
-            _ = _run_retry(wrapper, form)
+            _ = _run_resend(wrapper, form)
 
         assert raised.value is refusal
         assert _enqueue_calls(handle, form) == 1

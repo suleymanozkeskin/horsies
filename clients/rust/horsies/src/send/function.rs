@@ -1,8 +1,8 @@
 //! `TaskFunction<A, T, E>`: the typed function of a registered task, and its
-//! sends (Python `TaskFunction.send`, `schedule`, `retry_send`,
-//! `retry_schedule`, `core/task_decorator.py`). A delay is a send option
+//! sends (Python `TaskFunction.send`, `with_options(delay_seconds=...)`,
+//! `resend`, `core/task_decorator.py`). A delay is a send option
 //! ([`TaskSendOptions::delay`]), so one send method covers a send now and a
-//! send after a delay, and one retry method covers both.
+//! send after a delay, and one resend method covers both.
 //!
 //! A send, in order: the suppression check, the retention of the send, the
 //! read-back of the input (encode, decode with `A`, encode again, compare),
@@ -97,7 +97,7 @@ impl SendContext {
 ///
 /// # Panics
 ///
-/// Every send and retry method, and their blocking forms, panic in a
+/// Every send and resend method, and their blocking forms, panic in a
 /// process that was forked without `exec` after the core's process runtime
 /// started in its parent. The fork is a state of the process: no send in it
 /// can run, so it is never a [`TaskSendError`].
@@ -228,8 +228,8 @@ where
     }
 
     /// The sends of this task with `options`.
-    pub fn with_options(&self, options: TaskSendOptions) -> TaskFunctionSendOptions<'_, A, T, E> {
-        TaskFunctionSendOptions {
+    pub fn with_options(&self, options: TaskSendOptions) -> TaskFunctionWithOptions<'_, A, T, E> {
+        TaskFunctionWithOptions {
             function: self,
             options,
         }
@@ -240,15 +240,12 @@ where
     /// task that an earlier call wrote answers with its id, also after it
     /// finished.
     ///
-    /// Errors: `VALIDATION_FAILED` for an error the retry does not accept
+    /// Errors: `VALIDATION_FAILED` for an error the resend does not accept
     /// (only `ASYNC_CONTEXT`, `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`
     /// carry a payload to send again) and for the error of another task;
     /// else the errors of a send.
-    pub async fn retry_send(
-        &self,
-        error: &TaskSendError,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.retry_target(error)?;
+    pub async fn resend(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
+        let (task_id, payload) = self.checked_resend_target(error)?;
         self.enqueue_with_resends(task_id, payload, SendKind::Repeat)
             .await
     }
@@ -360,23 +357,23 @@ where
         }
     }
 
-    /// The task id and payload of an error that `retry_send` accepts
-    /// (Python `_validate_retry`): the payload of a send now or of a send
+    /// The task id and payload of an error that `resend` accepts
+    /// (Python `_validate_resend`): the payload of a send now or of a send
     /// after a delay, each sent again as it was.
-    pub(crate) fn retry_target(
+    pub(crate) fn checked_resend_target(
         &self,
         error: &TaskSendError,
     ) -> Result<(Uuid, TaskSendPayload), TaskSendError> {
         let Some(target) = error.resend_target() else {
             return Err(self.validation_failed(&format!(
-                "cannot retry a send that failed with {}: only ASYNC_CONTEXT, \
+                "cannot resend a send that failed with {}: only ASYNC_CONTEXT, \
                  ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT carry a payload to send again",
                 error.code()
             )));
         };
         if target.payload.task_name != self.task_name {
             return Err(self.validation_failed(&format!(
-                "cross-task retry: error is for '{}' but this task is '{}'",
+                "cross-task resend: error is for '{}' but this task is '{}'",
                 target.payload.task_name, self.task_name
             )));
         }
@@ -545,12 +542,12 @@ fn isolated_options(task_name: &str) -> TaskOptions {
 }
 
 /// The sends of one task with per-send options.
-pub struct TaskFunctionSendOptions<'a, A, T, E> {
+pub struct TaskFunctionWithOptions<'a, A, T, E> {
     function: &'a TaskFunction<A, T, E>,
     options: TaskSendOptions,
 }
 
-impl<A, T, E> TaskFunctionSendOptions<'_, A, T, E>
+impl<A, T, E> TaskFunctionWithOptions<'_, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
@@ -882,26 +879,26 @@ mod tests {
         }
     }
 
-    /// The retry of a send with a delay sends its payload again with the
-    /// delay; the retry of a send now sends it with none.
+    /// The resend of a send with a delay sends its payload again with the
+    /// delay; the resend of a send now sends it with none.
     #[test]
-    fn a_retry_takes_the_task_id_and_payload_of_the_failed_send() {
+    fn a_resend_takes_the_task_id_and_payload_of_the_failed_send() {
         let app = app_with(config());
         let error = enqueue_failed("send_invoice", None);
-        let (task_id, payload) = function(&app).retry_target(&error).unwrap();
+        let (task_id, payload) = function(&app).checked_resend_target(&error).unwrap();
         assert_eq!(Some(task_id), error.task_id());
         assert_eq!(payload.input_json, r#"{"id":7,"amount":12.5}"#);
         assert_eq!(payload.enqueue_delay_seconds, None);
         let delayed = enqueue_failed("send_invoice", Some(30));
-        let (delayed_id, delayed_payload) = function(&app).retry_target(&delayed).unwrap();
+        let (delayed_id, delayed_payload) = function(&app).checked_resend_target(&delayed).unwrap();
         assert_eq!(Some(delayed_id), delayed.task_id());
         assert_eq!(delayed_payload.enqueue_delay_seconds, Some(30));
     }
 
-    /// Python `_validate_retry` accepts `TaskSendAsyncContext`: the
+    /// Python `_validate_resend` accepts `TaskSendAsyncContext`: the
     /// prepared task id and payload of a blocking send on a runtime thread.
     #[test]
-    fn a_retry_takes_the_task_id_and_payload_of_an_async_context() {
+    fn a_resend_takes_the_task_id_and_payload_of_an_async_context() {
         let app = app_with(config());
         let (task_id, payload) = function(&app)
             .prepare(&TaskSendOptions::new(), &invoice())
@@ -911,13 +908,13 @@ mod tests {
             payload: Box::new(payload),
             message: "blocking send on a runtime thread".to_owned(),
         };
-        let (retried_id, retried) = function(&app).retry_target(&error).unwrap();
-        assert_eq!(retried_id, task_id);
-        assert_eq!(retried.input_json, r#"{"id":7,"amount":12.5}"#);
+        let (resent_id, resent) = function(&app).checked_resend_target(&error).unwrap();
+        assert_eq!(resent_id, task_id);
+        assert_eq!(resent.input_json, r#"{"id":7,"amount":12.5}"#);
     }
 
     #[test]
-    fn a_retry_refuses_errors_that_carry_no_payload_and_errors_of_another_task() {
+    fn a_resend_refuses_errors_that_carry_no_payload_and_errors_of_another_task() {
         let app = app_with(config());
         let function = function(&app);
         let refusals = [
@@ -928,11 +925,11 @@ mod tests {
                 },
                 "VALIDATION_FAILED",
             ),
-            (enqueue_failed("other_task", None), "cross-task retry"),
-            (enqueue_failed("other_task", Some(30)), "cross-task retry"),
+            (enqueue_failed("other_task", None), "cross-task resend"),
+            (enqueue_failed("other_task", Some(30)), "cross-task resend"),
         ];
         for (error, expected) in refusals {
-            let message = validation_message(function.retry_target(&error).unwrap_err());
+            let message = validation_message(function.checked_resend_target(&error).unwrap_err());
             assert!(message.contains(expected), "{message}");
         }
     }

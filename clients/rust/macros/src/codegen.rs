@@ -174,18 +174,18 @@ fn task_module(
 
             /// The send helpers with per-send options: a delay, a deadline,
             /// an idempotency key, a retention.
-            pub fn with_options(options: ::horsies::TaskSendOptions) -> SendOptions {
-                SendOptions { options }
+            pub fn with_options(options: ::horsies::TaskSendOptions) -> WithOptions {
+                WithOptions { options }
             }
 
             /// Per-send options of this task's send helpers. A send takes
             /// them; clone them for one more send.
             #[derive(::std::clone::Clone, ::std::fmt::Debug)]
-            pub struct SendOptions {
+            pub struct WithOptions {
                 options: ::horsies::TaskSendOptions,
             }
 
-            impl SendOptions {
+            impl WithOptions {
                 /// Send the task through `app` with these options: now, or
                 /// after their delay. The send owns the options, so its
                 /// future borrows only `app`:

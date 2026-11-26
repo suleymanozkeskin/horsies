@@ -55,7 +55,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - schedule: ScheduleConfig | None
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
 - default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
-- resend_on_transient_err: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
+- resend_on_transient_err: bool (default False, auto-resend transient ENQUEUE_FAILED for both task send and workflow start)
 - tracing: OtelTracing(parentage: ChildOfSend() | LinkedToSend()) | NoTracing() (default NoTracing(); OtelTracing() traces the sends and each attempt that a worker runs with the OpenTelemetry API and records the producer metrics with its meter; the attempt span is a child of the send span with ChildOfSend() (default), or a new trace with a link to it with LinkedToSend(); needs the extra horsies[otel], else HRS-220; with NoTracing() horsies does not import opentelemetry)
 - log_format: TextLogs() | JsonLogs() (default TextLogs(); JsonLogs() writes one JSON object per line with the keys ts, level, logger, message, process, task_id, task_name, attempt, trace_id, span_id, exc)
 - worker_profiles: dict[str, WorkerProfile] (default {}; `horsies worker <app> --profile <name>` runs one; every profile is validated at construction, HRS-218)
@@ -218,7 +218,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### TaskRuntime (first task parameter) and FencingToken
 - def f(runtime: TaskRuntime, *, x: int) -> Result[T, TaskError]: the worker passes the runtime of each run as the first argument; the runtime gives fencing_token and cancel_state()
 - Rules: first parameter, before the *; annotation exactly TaskRuntime (not | None); no default; any name; TaskRuntime in any other place raises HRS-105 at definition
-- Not part of the wire contract: .send(), .schedule(), .node()(), schedules and workflow nodes do not supply it; a kwarg with its name is refused
+- Not part of the wire contract: .send(), .node()(), schedules and workflow nodes do not supply it; a kwarg with its name is refused
 - runtime.fencing_token -> FencingToken(task_id: uuid.UUID, value: int), frozen; same token for two reads in one attempt; strictly greater value for each later attempt of the task; no clock; today value = attempt number (1 to 21)
 - Direct call in a test: f(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=second_attempt), x=1); attempt is an AttemptNumber (default the first attempt); cancel_state is a RunCancelState (default CancelNotRequested()); AttemptNumber.parse(2) -> Ok(AttemptNumber) | Err(AttemptNumberRefused) outside 1 to 2**31; for_test cannot fail
 - Limits: a rerun or a workflow node started again after a pause gets a new task id (value from 1); a stale attempt with no later attempt is not refused
@@ -228,19 +228,17 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - AsyncTaskFunction[P, T] has the same members; its .__call__ returns a coroutine of Result[T, TaskError]
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (enqueue for background execution)
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
-- .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
-- .with_options(*, good_until=None, idempotency_key=None, retention=<unset>) -> TaskSendOptions[P, T] (per-send options builder; retention: timedelta in whole days, or None for forever)
-- .retry_send(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed send with stored payload)
-- .retry_send_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (async retry)
-- .retry_schedule(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]] (retry failed schedule with stored payload)
+- .with_options(*, good_until=None, idempotency_key=None, retention=<unset>, delay_seconds=None) -> TaskFunctionWithOptions[P, T] (per-send options builder; retention: SendRetention, a timedelta in whole days, or None for forever; delay_seconds: whole seconds, 0 or more, None sends now)
+- .resend(error: TaskSendResendable) -> TaskSendResult[TaskHandle[T]] (send a failed send again with its stored payload, its delay included)
+- .resend_async(error: TaskSendResendable) -> TaskSendResult[TaskHandle[T]] (async resend)
 - .node(**workflow_opts) -> NodeFactory[P, T] (typed workflow node builder)
 - .task_name -> str
 
-### TaskSendOptions[P, T] (per-send options)
-- Returned by task.with_options(good_until=None, idempotency_key=None, retention=<unset>)
+### TaskFunctionWithOptions[P, T] (per-send options)
+- Returned by task.with_options(good_until=None, idempotency_key=None, retention=<unset>, delay_seconds=None)
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]]
-- .schedule(delay, *args, **kwargs) -> TaskSendResult[TaskHandle[T]]
+- Delayed send: task.with_options(delay_seconds=60).send(**kwargs); delay_seconds=0 sends now; a negative value, a bool, a float or a str returns Err(VALIDATION_FAILED)
 - good_until must be timezone-aware datetime; naive datetimes return Err(VALIDATION_FAILED)
 - Passing good_until=None explicitly clears any inherited deadline
 - For workflow nodes, use .node(good_until=...) instead
@@ -252,13 +250,13 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .info(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
 - .info_async(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
 
-### TaskSendResult[T] (send/schedule Result type)
+### TaskSendResult[T] (send Result type)
 - type TaskSendResult[T] = Result[T, TaskSendError]
-- .send() / .send_async() / .schedule() return TaskSendResult[TaskHandle[T]]
+- .send() / .send_async() / .resend() / .resend_async() return TaskSendResult[TaskHandle[T]]
 - Ok(TaskHandle): task enqueued successfully
 - Err(TaskSendError): enqueue failed with categorized error
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
-- .retry_send(error) / .retry_send_async(error) / .retry_schedule(error): replay stored payload
+- .resend(error) / .resend_async(error): replay stored payload (same task id, sent_at and delay)
 
 ### TaskSendError (union, one frozen variant per TaskSendErrorCode member)
 - Match on the variant; err.code (class variable) names its member; payload, message and exception are not in the repr
@@ -271,7 +269,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str); retryable is True (a class variable: the conflict clears when the reservation ends)
 - exception (TaskSendValidationFailed, TaskSendEnqueueFailed): BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
 - Validation failure text: `<loc>: <msg> [<type>]`, at most 10 entries, no input values (`<input>` replaces an input part of a message; validator-written text is kept). A caught pydantic ValidationError is kept as ValueValidationError (horsies.core.codec). RETURN_TYPE_MISMATCH data: variant, expected_type, actual_type, validation_errors, validation_error_count; the returned value is not stored
-- TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the retry methods' parameter type; another variant is a type error and fails an assertion at run time
+- TaskSendResendable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the resend methods' parameter type; another variant is a type error and fails an assertion at run time
 
 ### TaskSendErrorCode (enum)
 <!-- members: TaskSendErrorCode -->
@@ -279,12 +277,12 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - VALIDATION_FAILED: argument serialization or validation failed
 - ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (exception is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; CoreStartFailed is not); the row may or may not exist; retryable is the core's classification
 - PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
-- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; the retry methods accept it
+- IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; the resend methods accept it
 - PAYLOAD_TOO_LARGE: the serialized input exceeds payload.reject_bytes bytes of UTF-8 text; nothing was enqueued
-- ASYNC_CONTEXT: sync send/schedule (or sync retry) called inside a running event loop; nothing was enqueued; the error keeps the payload for retry_send_async / retry_schedule_async
+- ASYNC_CONTEXT: sync send (or sync resend) called inside a running event loop; nothing was enqueued; the error keeps the payload for resend_async
 
 ### Raised, never returned: ForkedAfterCoreStart, CoreStopped (from horsies)
-- Both are states of the process: the core refuses every later call in it. Every call that runs on the core raises them, sync and async forms alike: the sends and their retry methods, PostgresBroker.enqueue, the task, result and health reads, the broker's task lists and recovery passes, ensure_schema_initialized, close, check(live=True), the workflow start, WorkflowHandle, pause_workflow / resume_workflow, horsies.monitoring and the horsies web schema probe. No call returns them as a result; no result type has a variant for them. Nothing ran; a retry in the same process raises again
+- Both are states of the process: the core refuses every later call in it. Every call that runs on the core raises them, sync and async forms alike: the sends and their resend methods, PostgresBroker.enqueue, the task, result and health reads, the broker's task lists and recovery passes, ensure_schema_initialized, close, check(live=True), the workflow start, WorkflowHandle, pause_workflow / resume_workflow, horsies.monitoring and the horsies web schema probe. No call returns them as a result; no result type has a variant for them. Nothing ran; a retry in the same process raises again
 - ForkedAfterCoreStart: the process was forked without exec after the core started in its parent (for example a fork-start multiprocessing pool inside a task). Fix: start child processes that call horsies with the spawn or forkserver start method, or fork before the parent's first call
 - CoreStopped: a background task of the core panicked (a defect in horsies, not a database failure); args are the (subject, cause) of the first panic. Fix: restart the process; report the panic's subject and cause as a defect
 
@@ -350,9 +348,9 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .resend_on_transient_err -> bool (auto-retry transient start errors, default False)
 - .start(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - .start_async(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
-- .retry_start(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, sync)
-- .retry_start_async(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, async)
-- retry_start: builds the same spec again and starts with the error's workflow_id; a committed first attempt comes back as the existing handle; WorkflowStartRetryable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext; another variant fails an assertion; another workflow's error returns WorkflowStartValidationFailed
+- .retry_start(error: WorkflowStartResendable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, sync)
+- .retry_start_async(error: WorkflowStartResendable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, async)
+- retry_start: builds the same spec again and starts with the error's workflow_id; a committed first attempt comes back as the existing handle; WorkflowStartResendable = WorkflowStartEnqueueFailed | WorkflowStartAsyncContext; another variant fails an assertion; another workflow's error returns WorkflowStartValidationFailed
 - Validates DAG on construction (cycles, deps, args_from, node_ids, etc.)
 
 ### WorkflowHandle
@@ -913,7 +911,7 @@ PostgresConfig, psycopg, libpq, event loop, ASYNC_CONTEXT, connection ceiling ->
 stale, requeue, crash recovery, recovery fields -> /horsies/configuration/recovery-config/
 RecoveryConfig, HRS-204 example, disable recovery -> /horsies/configuration/app-config/#recovery-configuration
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
-send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
+send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, resend -> /horsies/tasks/sending-tasks/
 Result, Ok, Err, TaskError, Ok(Failed), Err(ReadError), error patterns -> /horsies/tasks/error-handling/
 BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
 TaskHandle, get, get_async, timeout, result, ReadResult, WaitTimeout, TaskNotFound -> /horsies/tasks/retrieving-results/
@@ -941,8 +939,8 @@ FencingToken, fencing token, stale attempt, conditional write -> /horsies/concep
 TaskRuntime.for_test, AttemptNumber, direct call with a runtime -> /horsies/operations/testing/#pass-a-task-runtime
 WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts/workflows/subworkflows/
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
-good_until, task expiry, deadline, with_options, TaskSendOptions -> /horsies/tasks/sending-tasks/
-schedule, delay, TaskFunction.schedule, resend_on_transient_err, idempotency_reservation_window -> /horsies/tasks/sending-tasks/
+good_until, task expiry, deadline, with_options, TaskFunctionWithOptions -> /horsies/tasks/sending-tasks/
+delay, delay_seconds, delayed send, resend_on_transient_err, idempotency_reservation_window -> /horsies/tasks/sending-tasks/
 worker, child process, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/

@@ -42,7 +42,7 @@ pub const CHILD_DEFINITION_KEY: &str = "crossclient.parity.child.v1";
 pub const PARENT_NAME: &str = "parity_parent";
 pub const PARENT_DEFINITION_KEY: &str = "crossclient.parity.parent.v1";
 
-/// The retries of a send of the form [`SendForm::RetryOfAsyncContext`].
+/// The resends of a send of the form [`SendForm::RetryOfAsyncContext`].
 const SEND_RETRIES: usize = 2;
 
 pub const SCHEDULE_NAME: &str = "parity_slots";
@@ -393,7 +393,7 @@ pub enum SendForm {
     /// One send.
     Direct,
     /// A blocking send on a thread of the running tokio runtime, refused
-    /// with `ASYNC_CONTEXT` before any statement; then two `retry_send`
+    /// with `ASYNC_CONTEXT` before any statement; then two `resend`
     /// calls with its error, which write one task under the prepared id.
     RetryOfAsyncContext,
 }
@@ -712,7 +712,7 @@ fn member(send: &Send, name: &str) -> Result<i64, SendRefused> {
         .ok_or_else(|| SendRefused(format!("{} has no input {name}", send.task_name)))
 }
 
-/// The id of the task that two retries of a refused blocking send wrote.
+/// The id of the task that two resends of a refused blocking send wrote.
 /// Only `parity.add` has this form.
 async fn send_retry(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
     let runtime = app.task_runtime();
@@ -720,7 +720,7 @@ async fn send_retry(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
         "parity.add" => {
             add::handle(&runtime).map_err(|missing| SendRefused(missing.to_string()))?
         }
-        other => return Err(SendRefused(format!("the retry form has no task {other}"))),
+        other => return Err(SendRefused(format!("the resend form has no task {other}"))),
     };
     let input = add::Input {
         a: member(send, "a")?,
@@ -746,9 +746,9 @@ async fn send_retry(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
     };
     let mut ids = Vec::with_capacity(SEND_RETRIES);
     for _attempt in 0..SEND_RETRIES {
-        let handle = function.retry_send(&refused).await.map_err(|error| {
+        let handle = function.resend(&refused).await.map_err(|error| {
             SendRefused(format!(
-                "the retry of {} was refused: {error}",
+                "the resend of {} was refused: {error}",
                 send.task_name
             ))
         })?;
@@ -757,7 +757,7 @@ async fn send_retry(app: &Horsies, send: &Send) -> Result<Uuid, SendRefused> {
     match ids.as_slice() {
         [first, second] if first == second => Ok(*first),
         _ => Err(SendRefused(format!(
-            "the retries of {} wrote other tasks: {ids:?}",
+            "the resends of {} wrote other tasks: {ids:?}",
             send.task_name
         ))),
     }

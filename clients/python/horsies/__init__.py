@@ -92,7 +92,7 @@ from .core.workflows.start_types import (
     WorkflowStartErrorCode,
     WorkflowStartIdConflict,
     WorkflowStartResult,
-    WorkflowStartRetryable,
+    WorkflowStartResendable,
     WorkflowStartValidationFailed,
 )
 from .core.models.schedule import (
@@ -174,16 +174,16 @@ from .core.errors import ErrorCode, ValidationReport, MultipleValidationErrors
 from .core.exception_mapper import ExceptionMapper
 from .core.task_decorator import (
     from_node,
-    RetentionChoice,
+    SendRetention,
     TaskHandle,
-    TaskSendOptions,
+    TaskFunctionWithOptions,
 )
 from .core.models.task_send_types import (
     TaskSendErrorCode,
     TaskSendPayload,
     TaskSendError,
     TaskSendResult,
-    TaskSendRetryable,
+    TaskSendResendable,
     TaskSendSuppressed,
     TaskSendAsyncContext,
     TaskSendValidationFailed,
@@ -388,7 +388,7 @@ __all__ = [
     'WorkflowStartErrorCode',
     'WorkflowStartIdConflict',
     'WorkflowStartResult',
-    'WorkflowStartRetryable',
+    'WorkflowStartResendable',
     'WorkflowStartValidationFailed',
     # Scheduling
     'Weekday',
@@ -419,7 +419,7 @@ __all__ = [
     'PayloadPolicy',
     # Recovery
     'RecoveryConfig',
-    'RetentionChoice',
+    'SendRetention',
     'RetentionConfig',
     'WorkerResilienceConfig',
     # Tracing
@@ -461,7 +461,7 @@ __all__ = [
     'ExceptionMapper',
     # Task handle
     'TaskHandle',
-    'TaskSendOptions',
+    'TaskFunctionWithOptions',
     # Node injection
     'from_node',
     # Task send types
@@ -469,7 +469,7 @@ __all__ = [
     'TaskSendPayload',
     'TaskSendError',
     'TaskSendResult',
-    'TaskSendRetryable',
+    'TaskSendResendable',
     'TaskSendSuppressed',
     'TaskSendAsyncContext',
     'TaskSendValidationFailed',

@@ -1,6 +1,6 @@
 """The sent_at of a task that the workflow engine creates.
 
-``sent_at`` is the call time of ``.send()``, ``.schedule()`` or ``.start()``.
+``sent_at`` is the call time of ``.send()`` (with or without a delay) or ``.start()``.
 A task that the engine creates for a workflow node stores the ``sent_at`` of
 its workflow row: the call time of the start of that workflow. This holds for
 a root task written at the start, for a dependent promoted later, and for the

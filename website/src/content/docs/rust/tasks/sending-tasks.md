@@ -45,7 +45,7 @@ async fn send_receipts(app: &mut Horsies) -> Result<(), Box<dyn std::error::Erro
 |--------|-------|
 | `send(input)` | Now |
 | `send_with_options(options, input)` | With `TaskSendOptions`: now, or after the delay of `TaskSendOptions::delay` |
-| `with_options(options)` | A `TaskFunctionSendOptions` with `send(input)` |
+| `with_options(options)` | A `TaskFunctionWithOptions` with `send(input)` |
 
 `task_name()`, `queue_name()`, `priority()` and `task_options()` read the task's registration.
 
@@ -109,7 +109,7 @@ The meaning of the reservation window and of retention is on [Retention Config](
 
 `TaskSendError` is the closed catalog of the send codes. Each variant has only the facts of its state.
 
-| Variant | Code | Fields | Retry methods |
+| Variant | Code | Fields | `resend` |
 |---------|------|--------|---------------|
 | `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
 | `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
@@ -128,7 +128,7 @@ The meaning of the reservation window and of retention is on [Retention Config](
 
 The meaning of each code is on the [Errors Reference](/horsies/tasks/errors/#send-error-codes).
 
-### Retry a Failed Send
+### Resend a Failed Send
 
 <!-- rust-check: alone -->
 ```rust
@@ -140,18 +140,18 @@ async fn send_receipt(order_id: String) -> Result<(), TaskError<std::convert::In
     Ok(())
 }
 
-async fn send_with_one_retry(
+async fn send_with_one_resend(
     receipt: &TaskFunction<send_receipt::Input, (), std::convert::Infallible>,
     order_id: String,
 ) -> Result<TaskHandle<(), std::convert::Infallible>, TaskSendError> {
     match receipt.send(send_receipt::Input { order_id }).await {
-        Err(error @ TaskSendError::EnqueueFailed { retryable: true, .. }) => receipt.retry_send(&error).await,
+        Err(error @ TaskSendError::EnqueueFailed { retryable: true, .. }) => receipt.resend(&error).await,
         other => other,
     }
 }
 ```
 
-`retry_send(&error)` sends again the task of a failed send: the same task id and the same payload, as a repeat. The payload of a send with a delay keeps its delay. A task that an earlier call wrote answers with its task id, also after it finished, and does not run again. It refuses with `ValidationFailed`:
+`resend(&error)` sends again the task of a failed send: the same task id and the same payload, as a repeat. The payload of a send with a delay keeps its delay. A task that an earlier call wrote answers with its task id, also after it finished, and does not run again. It refuses with `ValidationFailed`:
 
 - an error that carries no payload (only `AsyncContext`, `EnqueueFailed` and `IdempotencyKeyConflict` carry one);
 - the error of another task.

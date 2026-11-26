@@ -1,6 +1,6 @@
 """Unit tests for WorkflowSpec.retry_start / retry_start_async.
 
-Tests that _validate_start_retry accepts the ``WorkflowStartRetryable``
+Tests that _validate_start_retry accepts the ``WorkflowStartResendable``
 variants, fails an assertion on another variant, refuses another workflow's
 error, and that retry_start / retry_start_async delegate to start /
 start_async with the stored workflow_id.
@@ -23,7 +23,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartEnqueueFailed,
     WorkflowStartError,
     WorkflowStartIdConflict,
-    WorkflowStartRetryable,
+    WorkflowStartResendable,
     WorkflowStartValidationFailed,
 )
 
@@ -51,7 +51,7 @@ def _enqueue_failed(
     )
 
 
-def _retryable_variants(workflow_id: str) -> list[WorkflowStartRetryable]:
+def _retryable_variants(workflow_id: str) -> list[WorkflowStartResendable]:
     return [
         _enqueue_failed(workflow_id),
         WorkflowStartAsyncContext(
@@ -101,7 +101,7 @@ class TestValidateStartRetry:
     """Tests for _validate_start_retry validation logic."""
 
     @pytest.mark.parametrize('error', _retryable_variants('wf-123'), ids=_variant_id)
-    def test_accepts_each_retryable_variant(self, error: WorkflowStartRetryable) -> None:
+    def test_accepts_each_retryable_variant(self, error: WorkflowStartResendable) -> None:
         spec = _make_spec()
 
         result = spec._validate_start_retry(error)
@@ -116,7 +116,7 @@ class TestValidateStartRetry:
         spec = _make_spec()
 
         with pytest.raises(AssertionError, match=type(error).__name__):
-            spec._validate_start_retry(cast(WorkflowStartRetryable, error))
+            spec._validate_start_retry(cast(WorkflowStartResendable, error))
 
     def test_rejects_cross_workflow_name(self) -> None:
         """Error from a different workflow name is rejected."""
@@ -144,7 +144,7 @@ class TestRetryStart:
     @pytest.mark.parametrize(
         'error', _retryable_variants('wf-retry-123'), ids=_variant_id,
     )
-    def test_happy_path_delegates_to_start(self, error: WorkflowStartRetryable) -> None:
+    def test_happy_path_delegates_to_start(self, error: WorkflowStartResendable) -> None:
         """Successful retry delegates to start() with stored workflow_id."""
         spec = _make_spec()
 
@@ -183,7 +183,7 @@ class TestRetryStartAsync:
         'error', _retryable_variants('wf-retry-456'), ids=_variant_id,
     )
     async def test_happy_path_delegates_to_start_async(
-        self, error: WorkflowStartRetryable,
+        self, error: WorkflowStartResendable,
     ) -> None:
         """Successful async retry delegates to start_async() with stored workflow_id."""
         spec = _make_spec()

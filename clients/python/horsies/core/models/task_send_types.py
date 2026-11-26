@@ -1,12 +1,12 @@
-"""Typed errors of task send and schedule operations.
+"""Typed errors of task send operations.
 
-``send()``, ``send_async()``, ``schedule()`` and ``schedule_async()`` return
+``send()`` and ``send_async()``, with or without ``with_options(...)``, return
 ``TaskSendResult[TaskHandle[T]]``. The error side is ``TaskSendError``: a
 union with one frozen variant per ``TaskSendErrorCode`` member. Each variant
 holds only the fields of its failure, and its ``code`` class variable names
 its member. Callers match on the variant.
 
-The retry methods take a ``TaskSendRetryable`` and send its stored
+The resend methods take a ``TaskSendResendable`` and send its stored
 ``TaskSendPayload`` again; they need no user arguments.
 
 The classes of the core's send catalog and ``TaskSendPayload`` are generated
@@ -32,14 +32,14 @@ from horsies.core.types.result import Result
 
 
 type TaskSendError = TaskSendCoreError
-"""Every failure of a send or schedule: one variant per ``TaskSendErrorCode``,
+"""Every failure of a send: one variant per ``TaskSendErrorCode``,
 each a class of the core's catalog."""
 
-type TaskSendRetryable = (
+type TaskSendResendable = (
     TaskSendEnqueueFailed
     | TaskSendAsyncContext
     | TaskSendIdempotencyKeyConflict
 )
-"""The variants that the retry methods accept. Each carries its task id and payload."""
+"""The variants that the resend methods accept. Each carries its task id and payload."""
 
 type TaskSendResult[T] = Result[T, TaskSendError]

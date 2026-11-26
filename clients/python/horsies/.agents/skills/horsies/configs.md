@@ -41,7 +41,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `schedule` | `ScheduleConfig \| None` | `None` | Recurring task schedules |
 | `exception_mapper` | `ExceptionMapper` | `{}` | Global exception-to-error-code mapping |
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Must be `UPPER_SNAKE_CASE` |
-| `resend_on_transient_err` | `bool` | `False` | Auto-retry transient ENQUEUE_FAILED |
+| `resend_on_transient_err` | `bool` | `False` | Auto-resend transient ENQUEUE_FAILED |
 | `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()`: spans of the sends and of each attempt, and producer metrics, through the OpenTelemetry API; `parentage=ChildOfSend()` (default) or `LinkedToSend()`; `worker_ended_spans=WorkerEndedSpans.MAKE_SPANS` (default: the handler child makes the span of each attempt that the worker ended) or `NO_SPANS`; needs `horsies[otel]`, else HRS-220. `NoTracing()` imports no `opentelemetry` |
 | `log_format` | `TextLogs \| JsonLogs` | `TextLogs()` | Format of the horsies log records; `JsonLogs()`: one JSON object per line |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings; `horsies worker <app> --profile <name>` runs one. See [Worker profiles](#worker-profiles) |
@@ -761,7 +761,7 @@ against the already-serialized JSON string (no extra serialization pass).
 | `warn_bytes` | `int \| None` | `1_048_576` (1 MiB) | >=1; None disables | Warn when a serialized payload exceeds this size in bytes of its UTF-8 text; rate-limited to once per (task_name, kind) per process |
 | `reject_bytes` | `int \| None` | `None` (off) | >=1; None disables | Reject an enqueue whose serialized kwargs exceed this size in bytes of their UTF-8 text before anything is written. A schedule over this size fails scheduler start and `horsies check` |
 
-Coverage: `.send()`/`.schedule()` kwargs warn and reject
+Coverage: `.send()`/`.send_async()` kwargs warn and reject
 (`Err(PAYLOAD_TOO_LARGE)`); scheduled fires warn and reject (slot fails
 via the schedule's enqueue-failure logging); running-flow workflow-node
 enqueues (including `args_from` injection) warn only; task results warn
@@ -1138,15 +1138,15 @@ class Month(str, Enum):
 
 ## `resend_on_transient_err`
 
-When `True` on `AppConfig`, enables automatic retry of transient `ENQUEUE_FAILED` errors for both task sends and workflow starts.
+When `True` on `AppConfig`, enables automatic resend of transient `ENQUEUE_FAILED` errors for both task sends and workflow starts.
 
-**Retry parameters** (hardcoded, not user-configurable):
-- 3 retries after initial attempt (4 total)
+**Resend parameters** (hardcoded, not user-configurable):
+- 3 resends after the first call (4 total)
 - Initial backoff: 200ms
 - Max backoff: 2000ms
 - Exponential backoff (no jitter)
 
-Only retries `ENQUEUE_FAILED` errors with `retryable=True`. Permanent errors (validation, serialization) and an `IDEMPOTENCY_KEY_CONFLICT` return immediately.
+Only resends `ENQUEUE_FAILED` errors with `retryable=True`. Permanent errors (validation, serialization) and an `IDEMPOTENCY_KEY_CONFLICT` return immediately.
 
 `app.workflow()` copies this setting onto each `WorkflowSpec` automatically.
 

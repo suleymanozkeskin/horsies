@@ -35,7 +35,7 @@ from horsies.core.models.task_send_types import (
     TaskSendPayload,
     TaskSendPayloadMismatch,
     TaskSendPayloadTooLarge,
-    TaskSendRetryable,
+    TaskSendResendable,
     TaskSendSuppressed,
     TaskSendValidationFailed,
 )
@@ -91,7 +91,7 @@ def _every_variant() -> list[TaskSendError]:
 
 
 def _refused_variants() -> list[TaskSendError]:
-    accepted = set(get_args(TaskSendRetryable.__value__))
+    accepted = set(get_args(TaskSendResendable.__value__))
     return [error for error in _every_variant() if type(error) not in accepted]
 
 
@@ -133,8 +133,8 @@ class TestVariantCatalog:
 
         assert built == set(union_members(TaskSendError))
 
-    def test_retryable_alias_lists_the_accepted_variants(self) -> None:
-        assert set(get_args(TaskSendRetryable.__value__)) == {
+    def test_resendable_alias_lists_the_accepted_variants(self) -> None:
+        assert set(get_args(TaskSendResendable.__value__)) == {
             TaskSendEnqueueFailed,
             TaskSendAsyncContext,
             TaskSendIdempotencyKeyConflict,
@@ -218,11 +218,11 @@ class TestEnqueueFailedCause:
         assert result.err_value.exception is cause
         assert result.err_value.retryable is True
 
-    @pytest.mark.parametrize('form', ['send', 'send_async', 'schedule', 'schedule_async'])
+    @pytest.mark.parametrize('form', ['send', 'send_async', 'delayed_send', 'delayed_send_async'])
     def test_broker_init_failure_propagates(self, form: str) -> None:
         """``get_broker()`` raises ``BROKER_INIT_FAILED`` as a fail-fast error.
 
-        Every send and schedule form lets it propagate; no form turns it
+        Every send form, with or without a delay, lets it propagate; no form turns it
         into ``TaskSendEnqueueFailed``.
         """
         app = _make_app()
@@ -239,10 +239,10 @@ class TestEnqueueFailedCause:
                     wrapper.send(x=1)
                 case 'send_async':
                     asyncio.run(wrapper.send_async(x=1))
-                case 'schedule':
-                    wrapper.schedule(5, x=1)
-                case 'schedule_async':
-                    asyncio.run(wrapper.schedule_async(5, x=1))
+                case 'delayed_send':
+                    wrapper.with_options(delay_seconds=5).send(x=1)
+                case 'delayed_send_async':
+                    asyncio.run(wrapper.with_options(delay_seconds=5).send_async(x=1))
                 case _:
                     raise AssertionError(f'unknown form: {form}')
 
@@ -251,7 +251,7 @@ class TestEnqueueFailedCause:
 
 
 @pytest.mark.unit
-class TestRetryRefusesOtherVariants:
+class TestResendRefusesOtherVariants:
     """A caller without a type checker can pass a refused variant."""
 
     def test_the_fixture_has_four_refused_variants(self) -> None:
@@ -260,13 +260,13 @@ class TestRetryRefusesOtherVariants:
     @pytest.mark.parametrize(
         'error', _refused_variants(), ids=lambda error: type(error).__name__,
     )
-    def test_retry_send_fails_an_assertion_that_names_the_variant(
+    def test_resend_fails_an_assertion_that_names_the_variant(
         self, error: TaskSendError,
     ) -> None:
         app = _make_app()
 
         with pytest.raises(AssertionError) as raised:
-            _wrapper(app).retry_send(error)
+            _wrapper(app).resend(error)
 
         text = str(raised.value)
         assert f'got: {type(error).__name__}(' in text

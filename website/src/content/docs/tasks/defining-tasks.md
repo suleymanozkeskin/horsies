@@ -91,7 +91,7 @@ A child creates its event loop at boot, before it reports ready, when the app ha
 - An `OSError` with `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (the process has no file descriptor left, for example) can clear, so the slot is down: it takes no task, and the worker starts a new child for it after a growing wait. Other children continue. When every slot is down, the worker exits non-zero after three failed attempts, so its supervisor restarts it. The log names the slot and the cause, for example `Slot 1 is down: the OS ran short of a resource (EMFILE): OSError: [Errno 24] Too many open files`.
 - Any other failure, such as an event loop policy that raises, is the same on every start, so it repeats (`TaskLoopCreateFailed`): each failed start counts one of three attempts, also while other children serve, and the third stops the worker. See [Child Start Failures](/horsies/workers/worker-architecture/#child-start-failures).
 
-In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.send()` and `.schedule()` refuse a running event loop: they return `Err(TaskSendAsyncContext)` and enqueue nothing. See [Sending Tasks](/horsies/tasks/sending-tasks/).
+In an async task, send with `.send_async()`. The sync `.send()` refuses a running event loop: it returns `Err(TaskSendAsyncContext)` and enqueues nothing. See [Sending Tasks](/horsies/tasks/sending-tasks/).
 
 ```python
 from horsies import Ok, Err
@@ -139,7 +139,7 @@ The rules of the parameter:
 - It is the first parameter, before the `*`. Its name is free; the pages use `runtime`.
 - Its annotation is exactly `TaskRuntime`. A run always has a runtime, so `TaskRuntime | None` is refused.
 - It has no default.
-- It is not part of the wire contract. `.send()`, `.schedule()`, a workflow node and a schedule do not supply it, and a kwarg with its name is refused.
+- It is not part of the wire contract. `.send()`, a workflow node and a schedule do not supply it, and a kwarg with its name is refused.
 
 `TaskRuntime` in any other place (a keyword-only parameter, a second positional parameter, a field of a model, the ok type of the result) is refused at registration with `HRS-105` (`TASK_STRICT_SIGNATURE_VIOLATION`).
 

@@ -5,7 +5,7 @@
 core started) and ``CoreStopped`` (a core background task panicked) are
 states of the process, not of one call. Each call family below raises them
 unchanged after one call of the core handle; none answers them as its
-failure code. The sends, the retry methods and ``PostgresBroker.enqueue``
+failure code. The sends, the resend methods and ``PostgresBroker.enqueue``
 are in ``test_send_process_state_refusals.py``. The core handle is a
 stand-in; touches no database.
 """

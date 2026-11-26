@@ -17,10 +17,10 @@ __all__ = ['TaskSendPayload', 'TaskSendSuppressed', 'TaskSendAsyncContext', 'Tas
 
 @dataclass(slots=True, frozen=True)
 class TaskSendPayload:
-    """Serialized envelope for idempotent retry.
+    """Serialized envelope for an idempotent resend.
 
     All value fields are pre-serialized to avoid round-trip issues.
-    The retry methods extract this payload directly — no user args needed.
+    The resend methods extract this payload directly — no user args needed.
     """
 
     task_name: str
@@ -49,7 +49,7 @@ class TaskSendSuppressed:
     """Sends are suppressed in this process. Nothing was serialized or written.
 
     Suppression is active during the worker and scheduler import phase,
-    during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The retry
+    during ``check()``, and under ``HORSIES_SUPPRESS_SENDS=1``. The resend
     methods refuse this error.
     """
 
@@ -59,11 +59,11 @@ class TaskSendSuppressed:
 
 @dataclass(slots=True, frozen=True)
 class TaskSendAsyncContext:
-    """A sync send or schedule ran inside a running event loop. Nothing was written.
+    """A sync send ran inside a running event loop. Nothing was written.
 
-    The payload is prepared. ``retry_send_async(err)`` or
-    ``retry_schedule_async(err)`` completes the same dispatch with the same
-    task id. A sync retry from the same loop returns this error again.
+    The payload is prepared. ``resend_async(err)`` completes the same
+    dispatch with the same task id. A sync resend from the same loop returns
+    this error again.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.ASYNC_CONTEXT
@@ -77,7 +77,7 @@ class TaskSendValidationFailed:
     """The input was refused before anything was written.
 
     ``exception`` is the cause, or ``NoCause()`` when a check refused the
-    input without a Python exception. The retry methods refuse this error.
+    input without a Python exception. The resend methods refuse this error.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.VALIDATION_FAILED
@@ -89,7 +89,7 @@ class TaskSendValidationFailed:
 class TaskSendEnqueueFailed:
     """The broker or the database failed during enqueue. The row may or may not exist.
 
-    ``retryable`` is the core's classification of the cause. ``retry_send(err)``
+    ``retryable`` is the core's classification of the cause. ``resend(err)``
     sends the same task id and payload again; the broker returns the existing
     task for a duplicate. ``exception`` is ``NoCause()`` when the broker found
     the failure by a data check.
@@ -107,7 +107,7 @@ class TaskSendEnqueueFailed:
 class TaskSendPayloadMismatch:
     """The task id exists with a different command or idempotency key. Nothing was written.
 
-    The message names which one differs. The retry methods refuse this error.
+    The message names which one differs. The resend methods refuse this error.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.PAYLOAD_MISMATCH
@@ -121,7 +121,7 @@ class TaskSendPayloadTooLarge:
     """The serialized kwargs exceed ``payload.reject_bytes``. Nothing was written.
 
     ``size_bytes`` is the length of the serialized kwargs and ``limit_bytes``
-    the configured limit. The retry methods refuse this error.
+    the configured limit. The resend methods refuse this error.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.PAYLOAD_TOO_LARGE
@@ -136,8 +136,8 @@ class TaskSendIdempotencyKeyConflict:
 
     Nothing was written. ``owner_task_id`` names the task that holds the key.
     ``retryable`` is ``True``: the conflict clears when the reservation ends.
-    The retry methods accept this error: a retry after the reservation ends
-    is accepted, and a retry before that returns the same error.
+    The resend methods accept this error: a resend after the reservation ends
+    is accepted, and a resend before that returns the same error.
     """
 
     code: ClassVar[TaskSendErrorCode] = TaskSendErrorCode.IDEMPOTENCY_KEY_CONFLICT
@@ -157,4 +157,4 @@ type TaskSendCoreError = (
     | TaskSendPayloadTooLarge
     | TaskSendIdempotencyKeyConflict
 )
-"""Every failure of a send or schedule that the core records."""
+"""Every failure of a send that the core records."""

@@ -130,7 +130,7 @@ class TestSendPaths:
         def delayed(*, n: int) -> Result[int, TaskError]:
             return Ok(n)
 
-        task_id = _sent_id(await delayed.schedule_async(600, n=1))
+        task_id = _sent_id(await delayed.with_options(delay_seconds=600).send_async(n=1))
 
         assert await _stored_class(session, task_id) == 'SHARED_THREAD'
 

@@ -92,12 +92,12 @@ match add_numbers.send(a=5, b=3):
 `handle.get()` returns `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error that the task returned or that the library recorded (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...). `Err(read_error)` means the read gave no outcome: `read_error` is one class of the `ReadError` union, for example `WaitTimeout`.
 
 Async: `send_async()` / `handle.get_async()`. Inside a coroutine or a Jupyter cell, use only the `*_async` forms: every sync call there returns `ASYNC_CONTEXT` and runs nothing.
-Delayed: `add_numbers.schedule(60, a=5, b=3)` dispatches after 60 seconds.
+Delayed: `add_numbers.with_options(delay_seconds=60).send(a=5, b=3)` dispatches after 60 seconds.
 Deadline: `add_numbers.with_options(good_until=deadline).send(a=5, b=3)` expires if not executed in time.
 
-### Retry a Failed Send
+### Resend a Failed Send
 
-`TaskSendError` is a union with one variant per code; match on the variant. `TaskSendEnqueueFailed` has the field `retryable` (`True` for a transient cause); `TaskSendIdempotencyKeyConflict` has the class value `retryable = True` (the conflict clears when the reservation ends). The retry methods take a `TaskSendRetryable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a retry is accepted after the reservation ends:
+`TaskSendError` is a union with one variant per code; match on the variant. `TaskSendEnqueueFailed` has the field `retryable` (`True` for a transient cause); `TaskSendIdempotencyKeyConflict` has the class value `retryable = True` (the conflict clears when the reservation ends). The resend methods take a `TaskSendResendable` (`TaskSendEnqueueFailed`, `TaskSendAsyncContext`, `TaskSendIdempotencyKeyConflict`); another variant is a type error and fails an assertion at run time. For a key conflict, `owner_task_id` names the task that holds the key; a resend is accepted after the reservation ends:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -105,16 +105,16 @@ match my_task.send(**kwargs):
     case Ok(handle):
         ...
     case Err(TaskSendEnqueueFailed(retryable=True) as err):
-        match my_task.retry_send(err):
+        match my_task.resend(err):
             case Ok(handle):
                 ...
-            case Err(retry_err):
+            case Err(resend_err):
                 ...  # permanent failure
     case Err(err):
         ...  # permanent failure
 ```
 
-`retry_send` / `retry_send_async` replay the exact stored payload (SHA-verified).
+`resend` / `resend_async` replay the exact stored payload (SHA-verified), with the delay of the first send when it had one.
 
 ## Define a Workflow
 
@@ -198,7 +198,7 @@ Async: `spec.start_async()`.
 
 ### Retry a Failed Start
 
-`retry_start` takes `WorkflowStartRetryable`: `WorkflowStartEnqueueFailed` or `WorkflowStartAsyncContext`. It starts again with the error's `workflow_id`:
+`retry_start` takes `WorkflowStartResendable`: `WorkflowStartEnqueueFailed` or `WorkflowStartAsyncContext`. It starts again with the error's `workflow_id`:
 
 ```python
 match spec.start():
@@ -349,7 +349,7 @@ The free `rerun_task` stores no carrier.
 |---|---|---|---|
 | Task execution | `Result[T, TaskError]` | value `T` | `TaskError` |
 | `get()` / `get_result()` / `result_for()` | `ReadResult[T, TaskError]` | `Succeeded(value)` or `Failed(task_error)` | `ReadError` |
-| `send()` / `schedule()` | `TaskSendResult[TaskHandle[T]]` | `TaskHandle` | `TaskSendError` |
+| `send()` / `resend()` | `TaskSendResult[TaskHandle[T]]` | `TaskHandle` | `TaskSendError` |
 | `start()` | `WorkflowStartResult[WorkflowHandle[T]]` | `WorkflowHandle` | `WorkflowStartError` |
 | Broker infra | `BrokerResult[T]` | value `T` | `BrokerOperationError` |
 | Handle ops | `HandleResult[T]` | value `T` | `HandleOperationError` |
@@ -373,7 +373,7 @@ Every call runs on the core of the process: one pool for every thread and event 
 
 ### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
 
-These two core errors (import them from `horsies`) are states of the process, not of one call: the core refuses every later call in the process. Every call that runs on the core raises them, sync and async forms alike: the sends and their retry methods, the task, result and health reads, `check(live=True)`, the workflow start, `WorkflowHandle`, `horsies.monitoring` and the `horsies web` schema probe. No call returns them as a result, and no result type has a variant for them. Nothing ran, and a retry in the same process raises again.
+These two core errors (import them from `horsies`) are states of the process, not of one call: the core refuses every later call in the process. Every call that runs on the core raises them, sync and async forms alike: the sends and their resend methods, the task, result and health reads, `check(live=True)`, the workflow start, `WorkflowHandle`, `horsies.monitoring` and the `horsies web` schema probe. No call returns them as a result, and no result type has a variant for them. Nothing ran, and a retry in the same process raises again.
 
 | Raised | Cause | Fix |
 |---|---|---|

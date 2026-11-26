@@ -16,7 +16,7 @@ Every leaf of `horsies_task_history` has these btree indexes:
 
 | Columns | Used by |
 |---------|---------|
-| `(task_id)` | Point reads of one task: result reads, task info, the rerun source read, the duplicate guard of a send retry |
+| `(task_id)` | Point reads of one task: result reads, task info, the rerun source read, the duplicate guard of a resend |
 | `(enqueued_at)` | The monitoring task list and its default sort |
 
 Partition coverage creates both indexes when it creates a leaf. See [Database Schema](/horsies/internals/database-schema/#horsies_task_history) for the partition layout.

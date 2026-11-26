@@ -81,7 +81,7 @@ Returns `TaskFunction[P, T]` for a `def` function, and `AsyncTaskFunction[P, T]`
 - A child creates its event loop at boot, before it reports ready, when the app has an `async def` task; an app with none gets no loop. When the loop cannot be created, the child fails its boot and no task reaches it. EMFILE / ENFILE / ENOMEM / EAGAIN can clear, so only that slot is down: it takes no task and boots again after a growing wait, while other children serve; when every slot is down, the worker exits non-zero after three failed starts. The log names the slot and the cause: `Slot <n> is down: the OS ran short of a resource (EMFILE): <error>`. Any other failure, such as an event loop policy that raises, repeats (`TaskLoopCreateFailed`): each failed start counts one of three attempts, also while other children serve.
 - A task that cancels a helper task in `finally` must also await it, for example `helper.cancel()` then `await asyncio.gather(helper, return_exceptions=True)`. Without the await, a helper that awaits while it stops (a close) is still on the loop when the task returns: the outcome waits for it, and the worker replaces the child. One worker log line per such task names the coroutine of each task left (up to 10) and how that work ended: `Task <name> (<id>) returned and left <n> task(s) on the event loop of child pid=<pid> (<names>); that work <end>`.
 - A thread of `asyncio.to_thread()` that outlives its task is not waited for and does not cause a replacement. At the stop, the child does not wait for it past the close (at most 7 seconds): it exits, and `atexit` handlers do not run. An idle executor does not count: its shutdown gets at least 1 second, and so does the close of the async generators.
-- In an `async def` task, send with `.send_async()` / `.schedule_async()`. The sync `.send()` / `.schedule()` return `Err(TaskSendAsyncContext)` there and enqueue nothing.
+- In an `async def` task, send with `.send_async()`. The sync `.send()` returns `Err(TaskSendAsyncContext)` there and enqueues nothing.
 - An exception, a wrong return, and the exception mappers give the same result as in a `def` task.
 
 ### Cancellation
@@ -130,7 +130,7 @@ def read_fence(runtime: TaskRuntime, *, order_id: str) -> Result[FencingToken, T
 ```
 
 - Rules: the first parameter, before the `*`; the annotation is exactly `TaskRuntime` (not `TaskRuntime | None`); no default; any name. `TaskRuntime` in any other place (keyword-only, a second positional parameter, a model field, the ok type) raises `HRS-105`.
-- Not part of the wire contract: `.send()`, `.schedule()`, `.node()()`, a schedule and a workflow node do not supply it. A kwarg with its name is refused (`TaskSendValidationFailed`, `HRS-205` for a schedule, `WORKFLOW_KWARGS_NOT_SERIALIZABLE` for a node).
+- Not part of the wire contract: `.send()`, `.node()()`, a schedule and a workflow node do not supply it. A kwarg with its name is refused (`TaskSendValidationFailed`, `HRS-205` for a schedule, `WORKFLOW_KWARGS_NOT_SERIALIZABLE` for a node).
 - Direct call (tests): `read_fence(TaskRuntime.for_test(task_id=uuid.uuid4(), attempt=second_attempt), order_id='o-1')`. `attempt` is an `AttemptNumber` (default the first attempt). `cancel_state` is a `RunCancelState` (default `CancelNotRequested()`). `AttemptNumber.parse(2)` returns `Ok(AttemptNumber)`, or `Err(AttemptNumberRefused)` for a number outside 1 to `2**31`. `for_test` cannot fail.
 - `runtime.fencing_token` is a frozen `FencingToken(task_id: uuid.UUID, value: int)`. Two reads in one attempt give the same token. An attempt that runs after another attempt of the same task gives a strictly greater `value`. No clock. Today `value` is the attempt number (1 to 21); compare values of one task id, do not depend on the number.
 - Pattern: use the task id in the fence key; at the start of the body take the fence (write the token when the stored value is lower or equal; no row changed means a later attempt holds it: stop); make each later write conditional on the stored value (one conditional statement, or a transaction that locks the fence row `FOR SHARE`). A read with no lock, then a write, is not enough.
@@ -355,24 +355,16 @@ def __call__(*args: P.args, **kwargs: P.kwargs) -> Result[T, TaskError]
 def send(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
 async def send_async(*args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
 
-# Enqueue with delay
-def schedule(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
-async def schedule_async(delay: int, *args: P.args, **kwargs: P.kwargs) -> TaskSendResult[TaskHandle[T]]
-
-# Per-send options builder (returns TaskSendOptions with .send/.send_async/.schedule/.schedule_async)
-def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None, retention: timedelta | None = <unset>) -> TaskSendOptions[P, T]
+# Per-send options builder (returns TaskFunctionWithOptions with .send/.send_async)
+def with_options(*, good_until: datetime | None = None, idempotency_key: str | None = None, retention: SendRetention = <unset>, delay_seconds: int | None = None) -> TaskFunctionWithOptions[P, T]
 # retention's default is absence, not 30 days: omitting it takes the
 # queue's mapping, while choosing timedelta(days=30) overrides one.
+# delay_seconds: whole seconds, 0 or more; None (the default) sends now.
 
-# Replay failed send with stored payload; another variant is a type error
-# (and fails an assertion at run time)
-def retry_send(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
-async def retry_send_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
-
-# Replay failed schedule with stored payload; another variant is a type error
-# (and fails an assertion at run time)
-def retry_schedule(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
-async def retry_schedule_async(error: TaskSendRetryable) -> TaskSendResult[TaskHandle[T]]
+# Replay failed send with stored payload (the delay of the first send
+# included); another variant is a type error (and fails an assertion at run time)
+def resend(error: TaskSendResendable) -> TaskSendResult[TaskHandle[T]]
+async def resend_async(error: TaskSendResendable) -> TaskSendResult[TaskHandle[T]]
 
 # Workflow node builder (returns NodeFactory, call with task kwargs to get TaskNode)
 def node(
@@ -392,9 +384,9 @@ def node(
 
 **Direct call vs `.send()`**: Direct call runs in current process, no queue, no retry, no persistence. For an `async def` task, the direct call returns a coroutine: `await` it. `.send()` enqueues for background execution by a worker.
 
-## `TaskSendOptions[P, T]` — Per-Send Options
+## `TaskFunctionWithOptions[P, T]` — Per-Send Options
 
-Returned by `task.with_options(...)`. Exposes `.send()`, `.send_async()`, `.schedule()`, and `.schedule_async()` with overridden options applied to this specific send.
+Returned by `task.with_options(...)`. Exposes `.send()` and `.send_async()` with overridden options applied to this specific send.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -404,9 +396,12 @@ opts = my_task.with_options(good_until=deadline)
 
 opts.send(**kwargs)              # sync
 await opts.send_async(**kwargs)  # async
-opts.schedule(60, **kwargs)      # delayed
-await opts.schedule_async(60, **kwargs)  # delayed, async
+
+# Send after a delay of 60 seconds
+my_task.with_options(delay_seconds=60).send(**kwargs)
 ```
+
+**`delay_seconds`**: a whole number of seconds, `0` or more; the task becomes claimable after it. `None` (the default) and `0` send now. A negative value, a `bool`, a `float` or a `str` returns `Err(VALIDATION_FAILED)` before anything is written.
 
 **`good_until`**: timezone-aware `datetime` or `None`. Naive datetimes return `Err(VALIDATION_FAILED)`. Passing `good_until=None` explicitly clears any inherited deadline.
 
@@ -417,8 +412,8 @@ rows; a resend under the same key with a *different* request returns
 `Err(TaskSendIdempotencyKeyConflict)`. Its `owner_task_id` names the task
 that holds the key. While the owner task is
 live, the key stays reserved. After the owner task finishes, the key clears
-when the reservation window (24 h by default) has passed. The retry methods
-accept the error. A retry that changes the key of a sent task id returns
+when the reservation window (24 h by default) has passed. The resend methods
+accept the error. A resend that changes the key of a sent task id returns
 `PAYLOAD_MISMATCH`. Keys are not a rerun contract — they deduplicate enqueues.
 
 **`retention`**: how long the terminal record is kept. Precedence,
@@ -432,11 +427,10 @@ highest first:
 So omitting the argument means "the queue's mapping if there is one, and
 30 days otherwise" — not 30 days unconditionally.
 
-This precedence holds on EVERY enqueue path — `.send()`, `.send_async()`,
-`.schedule()`, `.schedule_async()`, a `TaskSchedule` firing on its cron,
-and a workflow node's backing task. A cron fire resolves from the
-scheduler process's own config; a workflow node from the queue its node
-runs on. `.schedule*()` also carries `idempotency_key`.
+This precedence holds on EVERY enqueue path — `.send()`, `.send_async()`
+with or without a delay, a `TaskSchedule` firing on its cron, and a
+workflow node's backing task. A cron fire resolves from the scheduler
+process's own config; a workflow node from the queue its node runs on.
 
 A retention class is its period: the key is `standard_<days>d`
 (`standard_7d`, `standard_30d`). Valid values are `None` and a whole-day
@@ -458,7 +452,7 @@ await my_task.with_options(retention=None).send_async(**kwargs)
 await my_task.with_options(retention=timedelta(days=30)).send_async(**kwargs)
 ```
 
-**When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`, `.schedule()`, `.schedule_async()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
+**When to use `with_options()` vs `.node(good_until=...)`**: `with_options()` is for ad-hoc sends (`.send()`, `.send_async()`). For workflow nodes, use `.node(good_until=...)` — the deadline is evaluated at workflow start time, not at definition time.
 
 ### Task Expiry Lifecycle
 
@@ -494,7 +488,7 @@ Raises `WorkflowValidationError(HRS-008)` if argument is not a `TaskNode` or `Su
 
 ## `TaskHandle[T]`
 
-Returned by successful `.send()` / `.send_async()` / `.schedule()` / `.schedule_async()`.
+Returned by successful `.send()` / `.send_async()` / `.resend()` / `.resend_async()`.
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -569,7 +563,7 @@ type TaskSendError = (
     | TaskSendPayloadTooLarge        # message, size_bytes, limit_bytes
     | TaskSendIdempotencyKeyConflict # task_id, payload, message, owner_task_id; retryable is True
 )
-type TaskSendRetryable = (
+type TaskSendResendable = (
     TaskSendEnqueueFailed
     | TaskSendAsyncContext
     | TaskSendIdempotencyKeyConflict
@@ -583,14 +577,14 @@ Validation failure text never contains the refused value: each failure is `<loc>
 ### `TaskSendErrorCode`
 
 <!-- members: TaskSendErrorCode -->
-| Code | Retry methods | When |
+| Code | Resend methods | When |
 |---|---|---|
 | `SEND_SUPPRESSED` | Refused | `.send()` called during worker import/discovery |
-| `ASYNC_CONTEXT` | Accepted | Sync `.send()` / `.schedule()` (or a sync retry) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `retry_send_async(err)` / `retry_schedule_async(err)` completes the same send |
-| `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or cross-method retry attempted |
-| `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`exception` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStartFailed` is not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command and `sent_at` for the retry, which returns the task id if the first send was written; `retryable` is the core's classification |
-| `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and retry |
-| `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. `retryable` is `True`: a retry after the reservation ends is accepted |
+| `ASYNC_CONTEXT` | Accepted | Sync `.send()` (or a sync resend) called inside a running event loop; nothing was enqueued — the error keeps the payload, so `resend_async(err)` completes the same send |
+| `VALIDATION_FAILED` | Refused | Serialization failed, invalid queue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or a resend of another task's error |
+| `ENQUEUE_FAILED` | Accepted | Broker/DB failure, or the core of this process could not run the send (`exception` is the core error: `TooManyPendingCalls` and `CoreCallTimedOut` are retryable; `CoreStartFailed` is not). The row may or may not exist. The `TaskSendPayload` keeps the task id, command, `sent_at` and delay for the resend, which returns the task id if the first send was written; `retryable` is the core's classification |
+| `PAYLOAD_MISMATCH` | Refused | The task id exists, and the command or the idempotency key differs from the original send — the payload was altered between send and resend |
+| `IDEMPOTENCY_KEY_CONFLICT` | Accepted | The idempotency key is reserved by another task with a different command; nothing was enqueued. `owner_task_id` names the owner task. `retryable` is `True`: a resend after the reservation ends is accepted |
 | `PAYLOAD_TOO_LARGE` | Refused | The serialized input exceeded `payload.reject_bytes` bytes of UTF-8 text (off by default); nothing was enqueued — shrink the payload (pass a reference to external storage) or raise the limit |
 
 ### `TaskSendPayload`
@@ -608,7 +602,7 @@ class TaskSendPayload:
 
 Pre-serialized at send time. Never construct manually — created by the library internally.
 
-### Retry guard pattern
+### Resend guard pattern
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -616,16 +610,16 @@ match my_task.send(**kwargs):
     case Ok(handle):
         result = handle.get(timeout_ms=5000)
     case Err(TaskSendEnqueueFailed(retryable=True) as err):
-        match my_task.retry_send(err):
+        match my_task.resend(err):
             case Ok(handle):
                 result = handle.get(timeout_ms=5000)
-            case Err(retry_err):
-                log_permanent_failure(retry_err)
+            case Err(resend_err):
+                log_permanent_failure(resend_err)
     case Err(err):
         log_permanent_failure(err)
 ```
 
-Cross-method retry is blocked: `retry_send` on a scheduled-task error returns `VALIDATION_FAILED`. `retry_schedule` on a non-scheduled error also returns `VALIDATION_FAILED`.
+`resend` takes the error of a send with a delay too, and sends it again with the same delay. The error of another task returns `VALIDATION_FAILED`.
 
 ## `RetryPolicy`
 
@@ -927,8 +921,8 @@ from horsies import (
     # Retry
     RetryPolicy,
     # Send types
-    TaskHandle, TaskSendOptions, TaskSendResult, TaskSendError, TaskSendErrorCode, TaskSendPayload,
-    TaskSendRetryable, NoCause, TaskSendSuppressed, TaskSendAsyncContext, TaskSendValidationFailed,
+    TaskHandle, TaskFunctionWithOptions, TaskSendResult, TaskSendError, TaskSendErrorCode, TaskSendPayload,
+    TaskSendResendable, NoCause, TaskSendSuppressed, TaskSendAsyncContext, TaskSendValidationFailed,
     TaskSendEnqueueFailed, TaskSendPayloadMismatch, TaskSendPayloadTooLarge,
     TaskSendIdempotencyKeyConflict,
     # Exception mapper

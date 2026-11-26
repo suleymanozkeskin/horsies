@@ -92,7 +92,7 @@ async def _send_retry(send: Send) -> str:
         case 'parity.add':
             pass
         case other:
-            raise SendRefused(f'the retry form has no task {other!r}')
+            raise SendRefused(f'the resend form has no task {other!r}')
     match parity.add.send(a=_int(kwargs, 'a'), b=_int(kwargs, 'b')):
         case Err(TaskSendAsyncContext() as refused):
             pass
@@ -100,13 +100,13 @@ async def _send_retry(send: Send) -> str:
             raise SendRefused(f'the blocking send of {send.task_name} answered {other}')
     ids: list[str] = []
     for _attempt in range(2):
-        match await parity.add.retry_send_async(refused):
+        match await parity.add.resend_async(refused):
             case Ok(handle):
                 ids.append(str(handle.task_id))
             case Err(error):
-                raise SendRefused(f'the retry of {send.task_name} was refused: {error}')
+                raise SendRefused(f'the resend of {send.task_name} was refused: {error}')
     if ids[0] != ids[1]:
-        raise SendRefused(f'the two retries of {send.task_name} wrote two tasks: {ids}')
+        raise SendRefused(f'the two resends of {send.task_name} wrote two tasks: {ids}')
     return ids[0]
 
 

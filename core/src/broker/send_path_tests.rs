@@ -402,7 +402,7 @@ async fn a_shared_task_with_a_timeout_is_enqueued() {
 }
 
 /// Python `test_send_idempotency_conflict.py::TestKeyReservedByAnotherTask::
-/// test_conflict_names_the_owner_and_retry_is_accepted`: a key that another
+/// test_conflict_names_the_owner_and_resend_is_accepted`: a key that another
 /// command holds is `IDEMPOTENCY_KEY_CONFLICT` naming the owner task. The
 /// resend methods accept it; a resend while the reservation is active meets
 /// the same conflict with the same owner. Nothing more is written.

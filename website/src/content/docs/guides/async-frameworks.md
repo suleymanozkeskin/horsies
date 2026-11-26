@@ -68,7 +68,7 @@ async def welcome(address: str) -> dict[str, str]:
             raise HTTPException(status_code=503, detail=send_error.code.value)
 ```
 
-A sync call in this endpoint returns `Err` with `ASYNC_CONTEXT`. Nothing is enqueued. The error keeps the payload, so `retry_send_async()` can send it.
+A sync call in this endpoint returns `Err` with `ASYNC_CONTEXT`. Nothing is enqueued. The error keeps the payload, so `resend_async()` can send it.
 
 ### Use the Sync Forms Only in Plain `def` Endpoints
 

@@ -1,13 +1,14 @@
 //! Sending a task: the typed send with its options (the delay among them),
-//! the read-back of the input before any statement, the send retry, the
-//! typed functions of each app, and the closed catalog of send errors.
+//! the read-back of the input before any statement, the resend of a failed
+//! send, the typed functions of each app, and the closed catalog of send
+//! errors.
 
 mod catalog;
 mod function;
 mod options;
 
 pub use catalog::TaskFunctionNotFound;
-pub use function::{TaskFunction, TaskFunctionSendOptions};
+pub use function::{TaskFunction, TaskFunctionWithOptions};
 pub use options::{SendRetention, TaskSendOptions};
 
 pub(crate) use catalog::TaskFunctions;
@@ -20,7 +21,7 @@ pub use horsies_core::manifest::WholeSeconds;
 /// A retention period of whole days, for `SendRetention::Period`.
 pub use horsies_core::RetentionDays;
 /// The send catalog of the core: one variant per send code, each with the
-/// facts of its state. `retry_send` accepts the three that carry the
+/// facts of its state. `resend` accepts the three that carry the
 /// payload (`resend_target`): `AsyncContext`, `EnqueueFailed` and
 /// `IdempotencyKeyConflict`.
 pub use horsies_core::{TaskSendError, TaskSendErrorCode, TaskSendPayload};

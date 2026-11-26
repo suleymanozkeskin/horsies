@@ -22,10 +22,10 @@ class TaskSendErrorCode(str, Enum):
     """
 
     ASYNC_CONTEXT = 'ASYNC_CONTEXT'
-    """A sync (Python) or blocking (Rust) send, schedule or retry was called
+    """A sync (Python) or blocking (Rust) send or resend was called
     on a thread that runs an event loop (Python) or a tokio runtime
     (Rust); the blocking enqueue would stall it, so nothing was written.
-    A blocking retry on the same thread returns this code again; the
+    A blocking resend on the same thread returns this code again; the
     async forms complete the dispatch with the same task id.
     """
 
@@ -37,12 +37,12 @@ class TaskSendErrorCode(str, Enum):
 
     PAYLOAD_MISMATCH = 'PAYLOAD_MISMATCH'
     """The task id exists with a different command or idempotency key.
-    Nothing was written. The retry methods refuse it.
+    Nothing was written. The resend methods refuse it.
     """
 
     IDEMPOTENCY_KEY_CONFLICT = 'IDEMPOTENCY_KEY_CONFLICT'
     """The idempotency key is reserved by another task with a different
-    command. Nothing was written. The retry methods accept it: a retry
+    command. Nothing was written. The resend methods accept it: a resend
     after the reservation ends is accepted, one before returns the same
     error.
     """

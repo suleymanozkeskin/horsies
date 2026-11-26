@@ -19,7 +19,7 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import Succeeded, TaskOutcome
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
-from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions
+from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskFunctionWithOptions
 from horsies.core.types.result import Ok, Result
 from horsies.core.errors import MultipleValidationErrors
 from horsies.core.models.workflow import (
@@ -51,25 +51,13 @@ class MockFn(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(self, **kwargs: Any) -> NodeFactory[Any, Any]:
@@ -99,25 +87,13 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
     async def send_async(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    def schedule(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def schedule_async(self, delay: int, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def with_options(self, **kwargs: Any) -> TaskSendOptions[Any, Any]:
+    def with_options(self, **kwargs: Any) -> TaskFunctionWithOptions[Any, Any]:
         return self
 
-    def retry_send(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    def resend(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
-    async def retry_send_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    def retry_schedule(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
-        return Ok(TaskHandle('mock'))
-
-    async def retry_schedule_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
+    async def resend_async(self, error: TaskSendError) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
 
     def node(self, **kwargs: Any) -> NodeFactory[Any, Any]:

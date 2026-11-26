@@ -107,7 +107,7 @@ class TestEveryPathStampsThePeriodClass:
         engine = current_resources(broker).engine
         _app, email_task, _alert_task = _mapped_app(broker)
 
-        delayed = await email_task.schedule_async(60, x=3)
+        delayed = await email_task.with_options(delay_seconds=60).send_async(x=3)
 
         assert is_ok(delayed), delayed
         assert await _row_class(engine, delayed.ok_value.task_id) == _PERIOD_KEY

@@ -46,7 +46,7 @@ def run() -> int:
         will_crash = simulate.draw(tuning.CHAOS_EXPORT_CRASH_RATE, export_id, 'crash')
         crashing += 1 if will_crash else 0
         delay = index * tuning.CHAOS_EXPORT_SPACING_SECONDS
-        match flaky_export.schedule(delay, export_id=export_id):
+        match flaky_export.with_options(delay_seconds=delay).send(export_id=export_id):
             case Ok(handle):
                 say(
                     f'{export_id}  +{delay:3d}s  {"CRASHES" if will_crash else "clean"}'

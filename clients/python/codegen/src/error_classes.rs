@@ -616,7 +616,7 @@ mod tests {
     fn a_record_renders_its_notes_its_annotations_and_its_defaults() {
         let text = render_record(&horsies_core::error_catalog::TASK_SEND_PAYLOAD);
         assert!(text.starts_with(
-            "@dataclass(slots=True, frozen=True)\nclass TaskSendPayload:\n    \"\"\"Serialized envelope for idempotent retry.\n"
+            "@dataclass(slots=True, frozen=True)\nclass TaskSendPayload:\n    \"\"\"Serialized envelope for an idempotent resend.\n"
         ));
         assert!(text.contains(
             "    task_options: str | None\n    # The caller's idempotency key, distinct from task identity. Riding the\n"

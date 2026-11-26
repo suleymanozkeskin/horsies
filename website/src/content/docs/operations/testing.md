@@ -209,8 +209,8 @@ Rules:
 
 - The variable is read on each send. The value must be exactly `1` after trimming spaces. Any other value does not suppress.
 - The effect is local to the process. It does not affect other producers or workers.
-- It applies to `.send()`, `.send_async()`, `.schedule()` and `.schedule_async()`.
-- The retry methods refuse a `TaskSendSuppressed` error.
+- It applies to `.send()` and `.send_async()`, with or without `with_options(...)`.
+- The resend methods refuse a `TaskSendSuppressed` error.
 - Horsies turns on the same suppression by itself when it imports modules in a worker or scheduler, and during `app.check()`. A `.send()` at module level is a no-op in those phases.
 
 Code under test must treat `Err(TaskSendSuppressed)` as a normal return. A test that needs `Ok(handle)` needs a database.

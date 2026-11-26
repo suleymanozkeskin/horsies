@@ -1,5 +1,5 @@
 //! Blocking forms of the async API, for a program that does not run a
-//! tokio runtime (Python's sync calls: `send` and `schedule`, the retries,
+//! tokio runtime (Python's sync calls: `send`, `resend`,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
 //! reads, `check(live=True)`, the workflow starts and the sync methods of
 //! `WorkflowHandle`).
@@ -23,7 +23,7 @@
 //!   runtime, so it runs nothing and answers the `ASYNC_CONTEXT` member of
 //!   its catalog, as a Python sync call inside a running event loop does:
 //!   `TaskSendError::AsyncContext` (with the prepared task id and payload,
-//!   so `retry_send(&error).await` completes the same send),
+//!   so `resend(&error).await` completes the same send),
 //!   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
 //!   `CheckReport` with `HRS-217`,
 //!   `WorkflowStartErrorCode::AsyncContext` with the workflow id of the
@@ -153,18 +153,18 @@ where
     pub fn with_options(
         &self,
         options: TaskSendOptions,
-    ) -> TaskFunctionSendOptionsView<'a, A, T, E> {
-        TaskFunctionSendOptionsView {
+    ) -> TaskFunctionWithOptionsView<'a, A, T, E> {
+        TaskFunctionWithOptionsView {
             function: self.function,
             options,
         }
     }
 
-    /// `TaskFunction::retry_send`, blocking. On a runtime thread it answers
+    /// `TaskFunction::resend`, blocking. On a runtime thread it answers
     /// `AsyncContext` again, with the same task id and payload.
-    pub fn retry_send(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.function.retry_target(error)?;
-        self.enqueue(task_id, payload, SendKind::Repeat, "retry_send")
+    pub fn resend(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
+        let (task_id, payload) = self.function.checked_resend_target(error)?;
+        self.enqueue(task_id, payload, SendKind::Repeat, "resend")
     }
 
     /// The checks of a first send, then the enqueue. A refused input is
@@ -204,7 +204,7 @@ where
                 message: format!(
                     "blocking {call} of task '{}' was called on a thread that runs a tokio \
                      runtime; its wait would stall the runtime, so nothing was written. Use \
-                     `{call}(...).await`; an async retry with this error sends the same task \
+                     `{call}(...).await`; an async resend with this error sends the same task \
                      id and payload.",
                     self.function.task_name()
                 ),
@@ -232,12 +232,12 @@ fn start_failed_send(
 }
 
 /// The blocking sends of one task with per-send options.
-pub struct TaskFunctionSendOptionsView<'a, A, T, E> {
+pub struct TaskFunctionWithOptionsView<'a, A, T, E> {
     function: &'a TaskFunction<A, T, E>,
     options: TaskSendOptions,
 }
 
-impl<A, T, E> TaskFunctionSendOptionsView<'_, A, T, E>
+impl<A, T, E> TaskFunctionWithOptionsView<'_, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
@@ -570,7 +570,7 @@ mod tests {
 
     /// Python `TaskSendAsyncContext`: a blocking send on a runtime thread
     /// writes nothing and keeps the prepared task id and payload, which an
-    /// async retry accepts.
+    /// async resend accepts.
     #[tokio::test]
     async fn a_blocking_send_on_a_runtime_thread_keeps_its_prepared_send() {
         let app = app();
@@ -584,9 +584,9 @@ mod tests {
         };
         assert_eq!(payload.input_json, r#"{"id":7}"#);
         assert!(refused.message().contains("blocking send of task 'bill'"));
-        let (retried_id, _payload) = function.retry_target(&refused).unwrap();
-        assert_eq!(retried_id, *task_id);
-        let again = function.blocking().retry_send(&refused).unwrap_err();
+        let (resent_id, _payload) = function.checked_resend_target(&refused).unwrap();
+        assert_eq!(resent_id, *task_id);
+        let again = function.blocking().resend(&refused).unwrap_err();
         assert_eq!(again.task_id(), Some(*task_id));
         assert_eq!(again.code(), horsies_core::TaskSendErrorCode::AsyncContext);
     }

@@ -89,15 +89,15 @@ match await validate_order.send_async(order=order):
 
 ## Delayed Execution
 
-`schedule()` dispatches the task after a delay (in seconds):
+`with_options(delay_seconds=...)` dispatches the task after a delay (in seconds):
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from horsies import Ok, Err
 
-match validate_order.schedule(5, order=order):
+match validate_order.with_options(delay_seconds=5).send(order=order):
     case Ok(handle):
-        print(f"Scheduled: {handle.task_id}")
+        print(f"Sent with a delay: {handle.task_id}")
     case Err(err):
-        print(f"Schedule failed: {err.code}")
+        print(f"Send failed: {err.code}")
 ```

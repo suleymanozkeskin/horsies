@@ -100,7 +100,7 @@ A changed period is another class:
 | Friday | 14 days | `standard_14d` | still in `standard_7d`, dropped on their 7-day promise |
 
 The class is decided **when the task is sent** and recorded on the row. A
-retry replays the class its original send chose, so editing the map
+resend replays the class its original send chose, so editing the map
 governs later sends and never reaches a task already in flight.
 
 ### What each class costs

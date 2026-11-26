@@ -297,7 +297,7 @@ impl WorkflowDefinition for DailyReport {
 | Operation | Returns |
 |---|---|
 | Task body | `Result<T, TaskError<E>>` |
-| `send`, `send_with_options`, `retry_send` | `Result<TaskHandle<T, E>, TaskSendError>` |
+| `send`, `send_with_options`, `resend` | `Result<TaskHandle<T, E>, TaskSendError>` |
 | `TaskHandle::get`, `Horsies::get_result` | `Result<TaskOutcome<T, E>, ReadError>` |
 | `TaskHandle::info`, `Horsies::get_task_info` | `Result<TaskInfo, ReadError>` |
 | Workflow start | `Result<WorkflowHandle<T>, WorkflowStartError>` |

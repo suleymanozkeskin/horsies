@@ -433,8 +433,8 @@ as the built-in code. When a retry starts is on the shared docs page
 |---|---|
 | `send(input)` | Now |
 | `send_with_options(options, input)` | With `TaskSendOptions`: now, or after `TaskSendOptions::delay(WholeSeconds::from_secs(300))` |
-| `with_options(options)` | A `TaskFunctionSendOptions` with `send(input)` |
-| `retry_send(&error)` | The task of a failed send again, the delay included (below) |
+| `with_options(options)` | A `TaskFunctionWithOptions` with `send(input)` |
+| `resend(&error)` | The task of a failed send again, the delay included (below) |
 | `node()` | A workflow node (see `workflows.md`) |
 | `blocking()` | The blocking view (see Blocking API) |
 
@@ -488,7 +488,7 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 
 ### `TaskSendError`
 
-| Variant | Code | Fields | Retry methods |
+| Variant | Code | Fields | `resend` |
 |---|---|---|---|
 | `SendSuppressed` | `SEND_SUPPRESSED` | `message` | Refused |
 | `AsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` | Accepted |
@@ -524,20 +524,20 @@ async fn send_receipt(order_id: String) -> Result<(), TaskError<std::convert::In
     Ok(())
 }
 
-async fn send_with_one_retry(
+async fn send_with_one_resend(
     receipt: &TaskFunction<send_receipt::Input, (), std::convert::Infallible>,
     order_id: String,
 ) -> Result<TaskHandle<(), std::convert::Infallible>, TaskSendError> {
     match receipt.send(send_receipt::Input { order_id }).await {
         Err(error @ TaskSendError::EnqueueFailed { retryable: true, .. }) => {
-            receipt.retry_send(&error).await
+            receipt.resend(&error).await
         }
         other => other,
     }
 }
 ```
 
-`retry_send` sends the same task id and payload again, as a repeat. The
+`resend` sends the same task id and payload again, as a repeat. The
 payload of a send with a delay keeps its delay. A task that an earlier call
 wrote answers with its id, also after it finished, and does not run again.
 It refuses with `ValidationFailed` an error with no payload and the error of
@@ -623,7 +623,7 @@ calling thread.
 
 | View | From | Methods |
 |---|---|---|
-| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `retry_send` |
+| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `resend` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
 | `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
 | `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
@@ -637,7 +637,7 @@ The starts of a definition by its type are methods of the app view:
 - On a thread that runs a tokio runtime, a blocking call runs nothing and
   returns the `ASYNC_CONTEXT` member of its catalog:
   `TaskSendError::AsyncContext` (with the prepared task id and payload, so
-  `retry_send(&error).await` completes the same send),
+  `resend(&error).await` completes the same send),
   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
   `CheckReport` with `HRS-217`,
   `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
@@ -813,7 +813,7 @@ use horsies::{
     BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode,
     ExceptionRecord, SubWorkflowFailure, UserCode, UserCodeRefused, UnknownUserCode,
     // Sends
-    TaskFunction, TaskFunctionSendOptions, TaskFunctionNotFound, TaskSendOptions,
+    TaskFunction, TaskFunctionWithOptions, TaskFunctionNotFound, TaskSendOptions,
     SendRetention, RetentionDays, WholeSeconds, TaskSendError, TaskSendErrorCode,
     TaskSendPayload,
     // Reads
