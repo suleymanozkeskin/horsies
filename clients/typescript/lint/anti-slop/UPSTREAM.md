@@ -7,11 +7,12 @@ engine under `vendor/eslint-stylistic/` keeps its own `LICENSE` and `UPSTREAM.md
 ## Rules in this folder
 
 `@cloudflare/oxlint-config` 0.2.0 is the base rule set of the client. These are the anti-slop rules that it does not
-contain. Until #2354 installs that package, the base set is the `correctness` category of Oxlint
+contain, and the one local rule change. Until #2354 installs that package, the base set is the `correctness` category of Oxlint
 (`oxlint.config.ts`):
 
 | Rule | Note |
 |---|---|
+| `no-module-mocking` | Local change: also reports `mock.module(...)` and `<namespace>.mock.module(...)` when `mock` or the namespace comes from `bun:test`. A `mock(fn)` function mock stays allowed |
 | `no-runtime-typeof` | Off in `horsies/src/codec/**` (`oxlint.config.ts`): the codec parses unparsed input |
 | `no-shape-in-symbol-names` | |
 | `no-unknown-parameters` | Off in `horsies/src/codec/**`, for the same reason. A parameter named `cause` and the subject of a type predicate stay allowed |
@@ -21,7 +22,6 @@ contain. Until #2354 installs that package, the base set is the `correctness` ca
 Not copied:
 - The 12 generic rules that `@cloudflare/oxlint-config` contains as `quality/*` (through `@nkzw/oxlint-config`
   4.1.0), and `oxc/no-accumulating-spread`, which it enables.
-- `no-module-mocking`: it matches only Vitest `vi` and Jest `jest`. The client's tests run on `bun test`.
 - The five Effect rules (`src/effect/`): the client does not use Effect.
 - `require-readable-spacing-cli.test.ts`: it runs `pnpm exec oxlint`.
 - The shared helpers that only the rules above use.
@@ -29,11 +29,13 @@ Not copied:
 ## Copied files
 
 From upstream `src/`, unchanged:
-- `rules/<rule>.ts` and `rules/<rule>.test.ts` for each rule in the table
-- `shared/function-parameters.ts`
+- `rules/<rule>.ts` and `rules/<rule>.test.ts` for each rule in the table, except `no-module-mocking`
+- `shared/function-parameters.ts` and `shared/scope.ts`
 - `vendor/eslint-stylistic/` (all five files)
 
-Changed: `index.ts` registers only the five rules of the table. Upstream registers 18.
+Changed:
+- `index.ts` registers only the six rules of the table. Upstream registers 18.
+- `rules/no-module-mocking.ts` and its test file: the `bun:test` helpers (`bunModuleMockCall` and the binding checks) and the cases for them. The Vitest and Jest code is upstream's.
 
 ## Tests
 

@@ -43,3 +43,12 @@ import { h } from "horsies";
 
 export const orderTotal: number = h.decimal();
 ```
+
+A block for the Bun runtime. It calls `Bun.serve`, so it compiles only when the blocks see the types of Bun.
+
+<!-- ts-check: alone -->
+```ts
+const server = Bun.serve({ port: 0, fetch: () => new Response("ok") });
+
+await server.stop();
+```
