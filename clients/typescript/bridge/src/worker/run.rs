@@ -157,7 +157,7 @@ fn preparation(app_config_json: &str, start_json: &str) -> Result<WorkerPreparat
         Ok(sections) => sections,
         Err(refused) => return Ok(bound_refusal(refused)),
     };
-    let manifest = worker_manifest(sections, start).map_err(manifest_refused)?;
+    let manifest = worker_manifest(&sections, start).map_err(manifest_refused)?;
     Ok(match WorkerPlan::of_manifest(&manifest) {
         Ok(plan) => WorkerPreparation::Prepared {
             worker: PreparedWorker::of(plan),
@@ -250,7 +250,7 @@ fn bound_refusal(refused: ManifestBoundRefused) -> WorkerPreparation {
 ///
 /// Errors: [`ManifestRefused`] for a start member that the parser refuses.
 fn worker_manifest(
-    sections: ConfigSections,
+    sections: &ConfigSections,
     start: StartPart,
 ) -> Result<WorkerManifest, ManifestRefused> {
     let mut members = start.into_members();
@@ -263,10 +263,10 @@ fn worker_manifest(
         ("send", serde_json::to_value(sections.send)),
         ("profiles", serde_json::to_value(&sections.profiles)),
         ("claim", serde_json::to_value(&sections.claim)),
-        ("recovery", serde_json::to_value(&sections.recovery)),
+        ("recovery", serde_json::to_value(sections.recovery)),
         ("retention", serde_json::to_value(&sections.retention)),
-        ("resilience", serde_json::to_value(&sections.resilience)),
-        ("payload", serde_json::to_value(&sections.payload)),
+        ("resilience", serde_json::to_value(sections.resilience)),
+        ("payload", serde_json::to_value(sections.payload)),
     ];
     for (name, written) in config_members {
         // A section writes as JSON: every map has text keys, and every value
