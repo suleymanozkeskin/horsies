@@ -55,19 +55,25 @@ function hasBrandProperty(checker: ts.TypeChecker, type: ts.Type): boolean {
   return checker.getPropertiesOfType(type).some((property) => isBrandProperty(checker, property));
 }
 
+/** The element types of an array or a tuple type, or none for any other type. Pure. */
+function elementTypesOf(checker: ts.TypeChecker, type: ts.Type): readonly ts.Type[] {
+  if (!checker.isArrayType(type) && !checker.isTupleType(type)) {
+    return [];
+  }
+
+  // SAFETY: the checker builds an array type and a tuple type as a `TypeReference`, and `isArrayType` / `isTupleType` returned true.
+  return checker.getTypeArguments(type as ts.TypeReference);
+}
+
 /** A member of `type` (the type itself, or a member of its union) has the brand property, or is a collection of such. Pure. */
 function carriesBrand(checker: ts.TypeChecker, type: ts.Type, depth: number = 0): boolean {
   const members = type.isUnion() ? type.types : [type];
 
-  return members.some((member) => {
-    if (hasBrandProperty(checker, member)) {
-      return true;
-    }
-
-    const isCollection = checker.isArrayType(member) || checker.isTupleType(member);
-
-    return isCollection && depth < MAX_COLLECTION_DEPTH && checker.getTypeArguments(member as ts.TypeReference).some((element) => carriesBrand(checker, element, depth + 1));
-  });
+  return members.some(
+    (member) =>
+      hasBrandProperty(checker, member) ||
+      (depth < MAX_COLLECTION_DEPTH && elementTypesOf(checker, member).some((element) => carriesBrand(checker, element, depth + 1))),
+  );
 }
 
 /** The horsies `Result` that a value of `type` holds. Pure. */
