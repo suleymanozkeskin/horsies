@@ -628,12 +628,22 @@ mod tests {
     }
 
     #[test]
-    fn pgbouncer_transaction_mode_with_no_session_url_is_a_connection_settings_refusal() {
+    fn pgbouncer_transaction_mode_with_no_session_url_is_refused_by_the_config_check_first() {
+        // `AppConfig::validate` runs the broker check that the plan's
+        // connection step runs, so the config check refuses the text first.
         let config = r#"{"broker": {"database_url": "postgresql://127.0.0.1:6432/horsies", "pgbouncer_transaction_mode": true}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
-        assert!(matches!(
-            preparation(config, &start(NAMED_IO)),
-            Ok(WorkerPreparation::ConnectionSettingsRefused { .. })
-        ));
+        match preparation(config, &start(NAMED_IO)) {
+            Err(NativeThrown::ClientDefect { rule, .. }) => {
+                assert!(
+                    rule.starts_with("the config check refuses the accepted config: ")
+                        && rule.contains(
+                            "pgbouncer_transaction_mode=true requires session_database_url"
+                        ),
+                    "{rule}"
+                );
+            }
+            other => panic!("the config check refuses the text first, got {other:?}"),
+        }
     }
 
     #[test]

@@ -18,6 +18,7 @@ import {
   requestWorkerStop,
   workerLogBacklog,
 } from "../../../horsies/src/native/worker/worker.ts";
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
@@ -70,7 +71,8 @@ describe("the worker area of the addon", () => {
       worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
     });
 
-    assert.equal(prepareWorker(pooled, startText({ kind: "NAMED", name: "io" })).kind, "connectionSettingsRefused");
+    // The config check runs the broker check of the plan's connection step, so it refuses this text first.
+    assert.throws(() => prepareWorker(pooled, startText({ kind: "NAMED", name: "io" })), ClientDefect);
 
     const capped = JSON.stringify({
       broker: { database_url: "postgresql://127.0.0.1:55432/horsies" },
