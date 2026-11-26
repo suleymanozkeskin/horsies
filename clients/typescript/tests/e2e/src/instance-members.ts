@@ -1,12 +1,14 @@
 // The members of an app instance besides its tasks and its failing start members (`app.ts`): the schedules of the
 // scheduler instances, the event handlers of `handlers`, the OpenTelemetry SDK of the children of
-// `worker_ended_spans`, and the workflows of an instance.
+// `worker_ended_spans`, the main-thread block of the children of `thread_profiles` (a thread body asks for it,
+// `tasks/threads.ts`), and the workflows of an instance.
 
 import type { AnyWorkflowContract, Horsies } from "../../../horsies/src/index.ts";
 import { registerHandlers } from "./handlers.ts";
 import type { Instance } from "./instances.ts";
 import { declareInvalidRuleSchedules, declareSchedules, declareUnlistedTaskSchedule } from "./tasks/scheduled.ts";
 import { endedSpansFlow } from "./tasks/ended-spans.ts";
+import { blockMainThreadOnAsk } from "./tasks/threads.ts";
 
 /** Set the span line SDK in this process. The import runs only in the processes that set it. */
 async function installSpanLinesSdk(): Promise<void> {
@@ -39,6 +41,10 @@ export function addInstanceMembers(app: Horsies, instance: Exclude<Instance, "cu
       app.onHandlerChildStart(installSpanLinesSdk);
 
       return;
+    case "thread_profiles":
+      app.onChildStart(blockMainThreadOnAsk);
+
+      return;
     case "default":
     case "cluster_cap":
     case "recovery":
@@ -48,7 +54,6 @@ export function addInstanceMembers(app: Horsies, instance: Exclude<Instance, "cu
     case "hook_throws":
     case "provider_throws":
     case "hook_past_bound":
-    case "thread_profiles":
       return;
   }
 }

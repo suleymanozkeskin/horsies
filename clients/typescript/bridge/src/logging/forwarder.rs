@@ -11,7 +11,9 @@
 //!   the bridge logger, when the bridge logger's threshold lets it through.
 //! - A panic in the forwarder is a panic in a core background task: the
 //!   process panic rule applies. The batch and the records still in the
-//!   channel go to stderr first.
+//!   channel go to stderr first. A build with the cargo feature
+//!   `test-probes` reads the probe of `forwarder_probe` before each batch, so
+//!   a test can cause such a panic.
 //! - It ends only when the channel closes. The sender lives in a static, so
 //!   it runs for the life of the process.
 
@@ -63,6 +65,8 @@ fn run(records: &Receiver<CoreLogRecord>, sink: &LogSink) {
             return;
         };
         let delivered = std::panic::catch_unwind(AssertUnwindSafe(|| {
+            #[cfg(feature = "test-probes")]
+            super::forwarder_probe::FORWARDER_PANIC_PROBE.panic_if_armed();
             deliver(sink, &batch);
             report_drop_counts(sink);
         }));

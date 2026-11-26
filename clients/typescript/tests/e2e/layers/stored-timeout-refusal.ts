@@ -35,49 +35,6 @@ const REFUSAL_CODE = "WORKER_SERIALIZATION_ERROR";
 /** The message of the refusal of a stored timeout above `TIMEOUT_BOUND_MS` (core `worker::retry::timeout_refusal_message`). */
 const ABOVE_BOUND_MESSAGE = `stored timeout_ms is above the limit of ${String(TIMEOUT_BOUND_MS)} ms (about 49.7 days)`;
 
-/** A change of the stored options of a task. */
-type OptionsChange = { readonly kind: "set"; readonly key: string; readonly value: number } | { readonly kind: "remove"; readonly key: string };
-
-/** Change the stored options of task `taskId`, which must be a PENDING live row (Python `_store_timeout`). */
-async function changeStoredOptions(suite: Suite, taskId: TaskId, change: OptionsChange): Promise<void> {
-  const read = await suite.rows.query(
-    `read the options of task ${taskId}`,
-    `SELECT task_options FROM horsies_tasks WHERE id = ${sqlText(taskId)} AND status = 'PENDING'`,
-  );
-
-  const [row] = read.rows;
-
-  assert.ok(row !== undefined, `task ${taskId} is a PENDING live row`);
-
-  const stored = row[0];
-  const options: Record<string, unknown> = stored === null || stored === undefined ? {} : storedObject(stored, taskId);
-
-  switch (change.kind) {
-    case "set":
-      options[change.key] = change.value;
-      break;
-    case "remove":
-      assert.ok(change.key in options, `the options of task ${taskId} hold ${change.key}`);
-      delete options[change.key];
-      break;
-  }
-
-  const written = await suite.rows.query(
-    `store the options of task ${taskId}`,
-    `UPDATE horsies_tasks SET task_options = ${sqlText(JSON.stringify(options))} WHERE id = ${sqlText(taskId)} AND status = 'PENDING'`,
-  );
-
-  assert.equal(written.tag, "UPDATE 1", `task ${taskId} is a PENDING live row`);
-}
-
-function storedObject(text: string, taskId: TaskId): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(text);
-
-  assert.ok(parsed instanceof Object && !Array.isArray(parsed), `the options of task ${taskId} are not an object: ${text}`);
-
-  return { ...parsed };
-}
-
 /** Check that task `taskId` ended FAILED with the refusal in one claim: one attempt, which does not retry. */
 async function refusedInOneClaim(suite: Suite, taskId: TaskId): Promise<TaskRow> {
   const info = await infoOf(suite.app.taskHandle(basic.idempotent, taskId));
@@ -115,7 +72,7 @@ describe("stored options that a worker refuses", () => {
     const token = randomUUID();
     const handle = await sentHandle("e2e_idempotent", suite.app.send(basic.idempotent, { token }));
 
-    await changeStoredOptions(suite, handle.taskId, { kind: "set", key: "timeout_ms", value: TIMEOUT_BOUND_MS + 1 });
+    await suite.rows.changeStoredOptions(handle.taskId, { kind: "set", key: "timeout_ms", value: TIMEOUT_BOUND_MS + 1 });
     await suite.worker("isolated-1");
 
     const error = await failed(handle, RESULT_WAIT_MS);
@@ -135,7 +92,7 @@ describe("stored options that a worker refuses", () => {
       e2eTest(`a shared async row with no ${key} fails once (${profile})`, "default", async (suite) => {
         const handle = await sentHandle("e2e_shared_sleep", suite.app.send(shared.sharedSleep, { milliseconds: 0 }));
 
-        await changeStoredOptions(suite, handle.taskId, { kind: "remove", key });
+        await suite.rows.changeStoredOptions(handle.taskId, { kind: "remove", key });
         await suite.worker(profile);
 
         const error = await failed(handle, RESULT_WAIT_MS);
