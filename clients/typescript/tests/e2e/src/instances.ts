@@ -100,8 +100,8 @@ export const THREAD_PROFILES = ["thread-only-1x4", "split-isolated-1-thread-1x4"
 /** A profile with `SHARED_THREAD` children. */
 export type ThreadProfile = (typeof THREAD_PROFILES)[number];
 
-/** Which task proves that a worker of a profile is ready. */
-export type ReadyClass = "ISOLATED" | "SHARED_ASYNC";
+/** Which task proves that a worker of a profile is ready: one of the class of a child that the profile starts. */
+export type ReadyClass = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
 
 /** The instance of `name`, or the rule it breaks. Pure. */
 export function parseInstance(name: string): Result<Instance, string> {
@@ -111,10 +111,12 @@ export function parseInstance(name: string): Result<Instance, string> {
 }
 
 /** The class of the readiness task of a worker of `profile`. Pure. */
-export function readyClass(profile: Profile): ReadyClass {
+export function readyClass(profile: Profile | ThreadProfile): ReadyClass {
   switch (profile) {
     case "shared-only-1x4":
       return "SHARED_ASYNC";
+    case "thread-only-1x4":
+      return "SHARED_THREAD";
     case "isolated-1":
     case "isolated-2":
     case "isolated-4":
@@ -122,6 +124,7 @@ export function readyClass(profile: Profile): ReadyClass {
     case "claim-batch-1":
     case "recycle-after-2-tasks":
     case "split-isolated-1-shared-1x4":
+    case "split-isolated-1-thread-1x4":
       return "ISOLATED";
   }
 }

@@ -155,6 +155,11 @@ describe("the instances", () => {
     assert.equal(readyQueue("default"), "default");
   });
 
+  test("a profile with only shared thread children is made ready by a shared thread task; a split one by an isolated task", () => {
+    assert.equal(readyClass("thread-only-1x4"), "SHARED_THREAD");
+    assert.equal(readyClass("split-isolated-1-thread-1x4"), "ISOLATED");
+  });
+
   test("a transaction pool connection gives the PgBouncer mode with its session URL", () => {
     const config = instanceConfig("default", { kind: "transactionPool", poolUrl: "postgresql://p@h:6432/d", sessionUrl: SERVER });
 

@@ -11,6 +11,8 @@ export const LAYER_FILES: readonly LayerFile[] = [
   { name: "layer2-cluster", boundSeconds: 1_500 },
   { name: "child-model", boundSeconds: 1_200 },
   { name: "typescript-child", boundSeconds: 1_200 },
+  { name: "shared-thread", boundSeconds: 1_200 },
+  { name: "child-core-panic", boundSeconds: 600 },
   { name: "stored-timeout-refusal", boundSeconds: 600 },
   { name: "retention", boundSeconds: 600 },
   { name: "check-live-command", boundSeconds: 600 },
@@ -49,24 +51,8 @@ export const PENDING_SCENARIOS: readonly PendingScenarios[] = [
     ],
   },
   {
-    issue: 2335,
-    needs: "SHARED_THREAD seats on worker threads (Node only; SHARED_THREAD stays off on Bun)",
-    mirrors: [
-      "Rust child_model.rs::thread_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished",
-      "Rust child_model.rs::a_timed_out_thread_does_not_overlap_its_retry",
-      "Rust child_model.rs::shared_thread_runs_read_their_own_fencing_tokens",
-      "Python test_shared_thread_tasks.py (3)",
-      "sync and async thread bodies; a provider runs once in each seat isolate; a seat isolate loads no addon; two CPU-heavy bodies at once; a blocked main thread gives loop_blocked",
-    ],
-  },
-  {
     issue: 2338,
     needs: "observability client parts",
     mirrors: ["the attempt spans and the worker-ended spans (Python test_worker_ended_spans.py)"],
-  },
-  {
-    issue: 2492,
-    needs: "a way to stop the core of a task child for a test",
-    mirrors: ["Python test_child_core_stopped.py (3)"],
   },
 ];

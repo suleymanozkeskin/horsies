@@ -1,6 +1,9 @@
 // The app of the end-to-end tests: the contracts and implementations of an instance, and its start members (a
 // provider and an `onChildStart` hook that mark each child start). The test process and every process of the worker
 // entry build the same app for one instance, so the stored input of a send decodes in the child that runs it.
+//
+// A `SHARED_THREAD` child runs the provider once in each of its seat isolates and the `onChildStart` hooks on its main
+// thread, so the provided value names the thread that built it.
 
 import { isMainThread, threadId } from "node:worker_threads";
 
@@ -11,18 +14,20 @@ import { entryThread, type StartMember, startMarkerName } from "./entry-thread.t
 import { type Instance, instanceConfig } from "./instances.ts";
 import { createOnce, markerErrorText } from "./markers.ts";
 import { BASIC_CONTRACTS, implementBasic } from "./tasks/basic.ts";
+import { CORE_PANIC_CONTRACTS, implementCorePanic } from "./tasks/core-panic.ts";
 import { CUSTOM_CONTRACTS, implementCustom } from "./tasks/custom.ts";
 import { FENCING_CONTRACTS, implementFencing } from "./tasks/fencing.ts";
 import { implementRetry, RETRY_CONTRACTS } from "./tasks/retry.ts";
 import { implementShared, SHARED_CONTRACTS } from "./tasks/shared.ts";
 import { implementSpawned, SPAWNED_CONTRACTS } from "./tasks/spawned.ts";
+import { blockMainThreadOnAsk, implementThreads, THREAD_CONTRACTS } from "./tasks/threads.ts";
 import { holdThread } from "./tasks/waits.ts";
 
 /** How long the hook of `hook_past_bound` holds its child: past the 10 s bound of a start hook. */
 export const HOOK_HOLD_MS = 15_000;
 
-/** The value that the provider of the default tasks builds in each task child. */
-export type ProvidedValue = { readonly pid: number };
+/** The value that the provider of the default tasks builds in each task child, or in each seat isolate. */
+export type ProvidedValue = { readonly pid: number; readonly threadId: number };
 
 /** The process id of the child that ran the body, and the one that the provider of its state ran in. */
 export const providedState = defineTask({
@@ -31,8 +36,27 @@ export const providedState = defineTask({
   output: h.object({ bodyPid: h.int(), providerPid: h.int() }),
 });
 
+/** The process and the thread of a `SHARED_THREAD` body, and the ones that the provider of its state ran in. */
+export const threadProvidedState = defineTask({
+  name: "e2e_thread_provided_state",
+  input: { holdMs: h.int() },
+  output: h.object({ bodyPid: h.int(), bodyThreadId: h.int(), providerPid: h.int(), providerThreadId: h.int() }),
+  execution: "SHARED_THREAD",
+  timeoutMs: 30_000,
+});
+
 /** The contracts of the default tasks: every instance but `custom_queues`. */
-const DEFAULT_CONTRACTS = [...BASIC_CONTRACTS, ...RETRY_CONTRACTS, ...SHARED_CONTRACTS, ...FENCING_CONTRACTS, ...SPAWNED_CONTRACTS, providedState];
+const DEFAULT_CONTRACTS = [
+  ...BASIC_CONTRACTS,
+  ...RETRY_CONTRACTS,
+  ...SHARED_CONTRACTS,
+  ...THREAD_CONTRACTS,
+  ...FENCING_CONTRACTS,
+  ...SPAWNED_CONTRACTS,
+  ...CORE_PANIC_CONTRACTS,
+  providedState,
+  threadProvidedState,
+];
 
 /** The app of `instance` on `connection`, with its tasks and start members. No I/O: the app connects at its first use. */
 export function buildApp(instance: Instance, connection: Connection): Result<Horsies, string> {
@@ -58,8 +82,10 @@ function implementDefault(app: Horsies, instance: Exclude<Instance, "custom_queu
   implementBasic(app);
   implementRetry(app);
   implementShared(app);
+  implementThreads(app);
   implementFencing(app);
   implementSpawned(app);
+  implementCorePanic(app);
 
   const key = app.provide(() => markedStart("provider"));
 
@@ -69,11 +95,21 @@ function implementDefault(app: Horsies, instance: Exclude<Instance, "custom_queu
   app.implement(providedState, (_input, runtime) =>
     providedState.ok({ bodyPid: process.pid, providerPid: runtime.state(key).pid }),
   );
-  addFailingStartMember(app, instance);
+  app.implement(threadProvidedState, ({ holdMs }, runtime) => {
+    const provided = runtime.state(key);
+
+    holdThread(holdMs);
+
+    return threadProvidedState.ok({ bodyPid: process.pid, bodyThreadId: threadId, providerPid: provided.pid, providerThreadId: provided.threadId });
+  });
+  addInstanceStartMember(app, instance);
 }
 
-/** The failing start member of a hook instance; none for the others. */
-function addFailingStartMember(app: Horsies, instance: Exclude<Instance, "custom_queues">): void {
+/**
+ * The start member of an instance: the failing member of a hook instance, and the main-thread block of
+ * `thread_profiles` (a thread body asks for it, `tasks/threads.ts`); none for the others.
+ */
+function addInstanceStartMember(app: Horsies, instance: Exclude<Instance, "custom_queues">): void {
   switch (instance) {
     case "hook_throws":
       app.onChildStart(() => {
@@ -94,13 +130,18 @@ function addFailingStartMember(app: Horsies, instance: Exclude<Instance, "custom
       });
 
       return;
+    case "thread_profiles":
+      app.onChildStart(() => {
+        blockMainThreadOnAsk();
+      });
+
+      return;
     case "default":
     case "cluster_cap":
     case "recovery":
     case "soft_cap":
     case "queue_retention":
     case "declared_retention":
-    case "thread_profiles":
       return;
   }
 }
@@ -121,5 +162,5 @@ function markedStart(member: StartMember): ProvidedValue {
     throw new Error(`the ${member} ran twice in one thread: the marker ${name} exists`);
   }
 
-  return { pid: process.pid };
+  return { pid: process.pid, threadId };
 }

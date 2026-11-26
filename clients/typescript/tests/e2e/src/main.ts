@@ -8,10 +8,13 @@
 // the marker `entry-<child|parent>-<pid>`, so a test can count the starts of this entry.
 //
 // A seat isolate of a `SHARED_THREAD` child runs this entry on a worker thread, where no addon loads. So the marker
-// and the load of the addon run on the main thread of each process only (`entry-thread.ts`).
+// and the load of the addon run on the main thread of each process only (`entry-thread.ts`). The first import counts
+// each addon load of a seat isolate (`addon-loads.ts`), so it comes before every other module of the entry.
 //
 // The entry imports the source entry of the package and loads the dev build of the addon; the form through the built
 // package and its platform package belongs to the CI lanes (#2493).
+
+import "./addon-loads.ts";
 
 import { isMainThread } from "node:worker_threads";
 
