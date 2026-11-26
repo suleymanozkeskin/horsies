@@ -107,12 +107,7 @@ export function fakeChecks(script: CheckScript = {}): FakeChecks {
 
 /** A core refusal with a catalog code. */
 export function catalogRefusal(code: string, message: string): CoreRefusal {
-  return { code: { kind: "catalog", code }, message, notes: [], help: [] };
-}
-
-/** A core refusal with no code. */
-export function uncodedRefusal(message: string): CoreRefusal {
-  return { code: { kind: "noCode" }, message, notes: [], help: [] };
+  return { code, message, notes: [], help: [] };
 }
 
 /** One recorded enqueue of the fake producer. */

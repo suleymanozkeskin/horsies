@@ -8,15 +8,10 @@ import { createHorsies } from "../../../horsies/src/app.ts";
 import type { HorsiesConfig } from "../../../horsies/src/app/create.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
+import type { AppConfigCheck } from "../../../horsies/src/native/sends/addon.ts";
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
-import {
-  catalogRefusal,
-  DATABASE_URL,
-  fakeChecks,
-  fakeEnvironment,
-  type FakeEnvironment,
-  uncodedRefusal,
-} from "./support.ts";
+import { catalogRefusal, DATABASE_URL, fakeChecks, fakeEnvironment, type FakeEnvironment } from "./support.ts";
 
 const ping = defineTask({ name: "ping", input: {}, output: h.string() });
 
@@ -65,10 +60,17 @@ describe("Horsies.create: the config", () => {
     assert.deepEqual(refusalsOf(config([ping]), environment), [["HRS-201", "config"]]);
   });
 
-  test("a core config refusal with no code is FIELD_BOUND", () => {
-    const environment = fakeEnvironment({ checks: fakeChecks({ config: [uncodedRefusal("payload.warn_bytes must be >= 1")] }) });
+  test("a config text that the core's reader refuses is a defect: the ClientDefect reaches the caller", () => {
+    const defect = new ClientDefect({ subject: "checkAppConfig", rule: "the config text reads as the core's AppConfig" });
 
-    assert.deepEqual(refusalsOf(config([ping]), environment), [["FIELD_BOUND", "config"]]);
+    const checks = {
+      ...fakeChecks(),
+      checkAppConfig: (_json: string): AppConfigCheck => {
+        throw defect;
+      },
+    };
+
+    assert.throws(() => createHorsies(config([ping]), fakeEnvironment({ checks })), (thrown) => thrown === defect);
   });
 
   test("a core refusal with a code that the catalog does not hold is a defect: TypeError", () => {

@@ -7,7 +7,6 @@ import type {
   AppConfigCheck,
   AttemptOutcomeName,
   CoreRefusal,
-  CoreRefusalCode,
   DeadlineFact,
   DeclaredCodesCheck,
   DeclaredCodesFact,
@@ -92,7 +91,6 @@ export const errorTextMatches: SameFunction<Generated.TaskErrorRecord["storedTex
 
 export const taskErrorMatches: Mutual<Generated.TaskErrorRecord, NativeTaskError> = true;
 
-export const refusalCodeMatches: Mutual<Generated.CoreRefusalCode, CoreRefusalCode> = true;
 export const refusalMatches: Mutual<Generated.CoreRefusal, CoreRefusal> = true;
 export const appConfigCheckMatches: Mutual<Generated.AppConfigCheck, AppConfigCheck> = true;
 export const declaredCodesCheckMatches: Mutual<Generated.DeclaredCodesCheck, DeclaredCodesCheck> = true;

@@ -1,6 +1,8 @@
 // The queue mode of the config: one default queue, or the custom queues (the core's `QueueMode` and
-// `CustomQueueConfig`, `core/src/core/config/queue.rs`).
+// `CustomQueueConfig`, `core/src/core/config/queue.rs`). A refusal of a queue field has the code of the queue mode
+// (`HRS-200`).
 
+import { ErrorCode } from "../_catalog/error_codes.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import {
   accepted,
@@ -11,12 +13,13 @@ import {
   checkedText,
   type ConfigJson,
   entry,
+  type IntegerBound,
   itemPath,
   type JsonEntry,
   mapChecked,
   memberPath,
   optionalEntry,
-  U32_FIELD,
+  u32Field,
 } from "./checked.ts";
 
 /** A cap on a number of tasks, or no cap. */
@@ -53,6 +56,9 @@ export type QueueSetup =
   | { readonly kind: "default" }
   | { readonly kind: "custom"; readonly queues: ReadonlyMap<string, CustomQueue> };
 
+/** A `u32` field of a custom queue. */
+const QUEUE_U32 = u32Field(ErrorCode.CONFIG_INVALID_QUEUE_MODE);
+
 /** The core's members `queue_mode` and `custom_queues` of `input`. Pure. */
 export function queueEntries(input: QueueConfigInput): Checked<readonly JsonEntry[]> {
   switch (input.queueMode) {
@@ -80,19 +86,19 @@ function customEntries(queues: readonly CustomQueueInput[]): Checked<readonly Js
 
 function customQueueJson(queue: CustomQueueInput, path: string): Checked<ConfigJson> {
   return checkedObject([
-    entry("name", checkedText(queue.name, memberPath(path, "name"))),
-    entry("priority", checkedInteger(queue.priority, U32_FIELD, memberPath(path, "priority"))),
+    entry("name", checkedText(queue.name, ErrorCode.CONFIG_INVALID_QUEUE_MODE, memberPath(path, "name"))),
+    entry("priority", checkedInteger(queue.priority, QUEUE_U32, memberPath(path, "priority"))),
     optionalEntry("max_concurrency", queue.maxConcurrency, (cap) =>
-      taskCapJson(cap, memberPath(path, "maxConcurrency.tasks")),
+      taskCapJson(cap, QUEUE_U32, memberPath(path, "maxConcurrency.tasks")),
     ),
   ]);
 }
 
-/** The core's form of a cap: the number, or `null` for no cap. Pure. */
-export function taskCapJson(cap: TaskCap, path: string): Checked<ConfigJson> {
+/** The core's form of a cap: the number inside `bound`, or `null` for no cap. Pure. */
+export function taskCapJson(cap: TaskCap, bound: IntegerBound, path: string): Checked<ConfigJson> {
   switch (cap.kind) {
     case "cap":
-      return checkedInteger(cap.tasks, U32_FIELD, path);
+      return checkedInteger(cap.tasks, bound, path);
     case "noCap":
       return accepted(null);
     default:

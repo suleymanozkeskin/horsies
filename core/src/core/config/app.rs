@@ -137,8 +137,9 @@ pub enum AppConfigError {
 impl AppConfigError {
     /// The catalog code of the refusal, as Python's config models report it.
     ///
-    /// `Payload` has none: Python refuses a payload threshold below 1 through
-    /// a field bound (`Field(ge=1)`), which carries no catalog code.
+    /// Every refusal has a code. `Payload` has `CONFIG_INVALID_PAYLOAD`;
+    /// Python refuses the same thresholds through a field bound
+    /// (`Field(ge=1)`).
     pub fn error_code(&self) -> Option<crate::core::error::ErrorCode> {
         use crate::core::error::ErrorCode;
         match self {
@@ -150,7 +151,7 @@ impl AppConfigError {
             Self::Retention(_) => Some(ErrorCode::ConfigInvalidRetention),
             Self::Resilience(_) => Some(ErrorCode::ConfigInvalidResilience),
             Self::Schedule(_) => Some(ErrorCode::ConfigInvalidSchedule),
-            Self::Payload(_) => None,
+            Self::Payload(_) => Some(ErrorCode::ConfigInvalidPayload),
             Self::WorkerProfile(_) => Some(ErrorCode::ConfigInvalidWorkerProfile),
         }
     }
@@ -1294,7 +1295,10 @@ mod tests {
                 AppConfigError::Schedule(String::new()),
                 Some(ErrorCode::ConfigInvalidSchedule),
             ),
-            (AppConfigError::Payload(String::new()), None),
+            (
+                AppConfigError::Payload(String::new()),
+                Some(ErrorCode::ConfigInvalidPayload),
+            ),
         ];
         for (error, code) in cases {
             assert_eq!(error.error_code(), code, "{error:?}");
