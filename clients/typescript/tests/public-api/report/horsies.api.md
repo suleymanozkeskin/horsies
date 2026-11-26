@@ -128,6 +128,11 @@ export interface BuildReturn {
 }
 
 // @public
+export type BuildReturnOf<V> = BuildReturn & {
+    readonly output: NodeRef<V, string, string>;
+};
+
+// @public
 export type CheckCases<P extends ParameterSchemas> = keyof P extends never ? {
     readonly checkCases?: readonly [];
 } : {
@@ -408,7 +413,7 @@ export type DefaultJoin = {
 export function defineTask<const P extends ParameterSchemas, O extends OutputSchema, const E extends string = string, const X extends ExecutionClass = "ISOLATED", const C extends boolean = false>(definition: TaskDefinition<P, O, E, X, C> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X, ContextUseOf<C>>;
 
 // @public
-export function defineWorkflow<const P extends ParameterSchemas, const R extends BuildReturn>(definition: WorkflowDefinition<P> & NoInfer<CheckCases<P>>, build: WorkflowBuild<P, R>): WorkflowContract<P, R>;
+export function defineWorkflow<const P extends ParameterSchemas, O extends OutputSchema, const R extends BuildReturnOf<SchemaValue<O>>>(definition: WorkflowDefinition<P, O> & NoInfer<CheckCases<P>>, build: WorkflowBuild<P, R>): WorkflowContract<P, R>;
 
 // @public
 export interface EmptyObject {
@@ -2081,11 +2086,12 @@ export interface WorkflowContract<P extends ParameterSchemas, R extends BuildRet
 }
 
 // @public
-export interface WorkflowDefinition<P extends ParameterSchemas> {
+export interface WorkflowDefinition<P extends ParameterSchemas, O extends OutputSchema> {
     readonly definitionKey: string;
     readonly name: string;
     // (undocumented)
     readonly onError?: OnError;
+    readonly output: O;
     readonly params: P;
 }
 

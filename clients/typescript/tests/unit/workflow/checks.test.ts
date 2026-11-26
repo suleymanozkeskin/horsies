@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { defineTask } from "../../../horsies/src/contract/public.ts";
+import { defineTask, type OutputSchema } from "../../../horsies/src/contract/public.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import type { AnyNode, BuildReturn } from "../../../horsies/src/workflow/node.ts";
 import { defineWorkflow, type WorkflowBuilder } from "../../../horsies/src/workflow/public.ts";
@@ -18,20 +18,28 @@ const audit = defineTask({ name: "audit", input: {}, output: h.null(), workflowC
 const maybe = defineTask({ name: "maybe", input: { first: h.resultOf(h.int()).optional() }, output: h.int() });
 const tasks = [ping, add, pair, say, audit, maybe];
 
-const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", params: {} }, (w) => ({
+const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", output: h.int(), params: {} }, (w) => ({
   output: w.task(ping, {}, { id: "ping" }),
 }));
 
 const region = defineWorkflow(
-  { name: "region", definitionKey: "tests.region.v1", params: { name: h.string().optional() }, checkCases: [{}] },
+  {
+    name: "region",
+    definitionKey: "tests.region.v1",
+    output: h.int(),
+    params: { name: h.string().optional() },
+    checkCases: [{}],
+  },
   (w) => ({ output: w.task(ping, {}, { id: "ping" }) }),
 );
 
 const view = viewOf(tasks, [leaf, region]);
 
 /** A workflow whose build is `build`, with no params. */
-function flow(build: (w: WorkflowBuilder) => BuildReturn, name = "flow"): object {
-  return defineWorkflow({ name, definitionKey: `tests.${name}.v1`, params: {} }, build);
+function flow(build: (w: WorkflowBuilder) => BuildReturn, name = "flow", output: OutputSchema = h.int()): object {
+  // SAFETY: the builds of these tests return nodes of several types; the checks compare the output node with the
+  // declared output at run time (HRS-025), and each test declares the output of its output node.
+  return defineWorkflow({ name, definitionKey: `tests.${name}.v1`, output, params: {} }, build as never);
 }
 
 describe("the builder", () => {
@@ -112,24 +120,28 @@ describe("the builder", () => {
     const at = Temporal.Instant.from("2026-08-12T09:10:12.654321789Z");
 
     const spec = passedSpec(
-      flow((w) => {
-        const one = w.task(urgentPing, {}, { id: "one" });
-        const two = w.task(urgentPing, {}, { id: "two", queue: "slow", priority: 7, goodUntil: at });
+      flow(
+        (w) => {
+          const one = w.task(urgentPing, {}, { id: "one" });
+          const two = w.task(urgentPing, {}, { id: "two", queue: "slow", priority: 7, goodUntil: at });
 
-        return {
-          output: w.task(
-            urgentAudit,
-            {},
-            {
-              id: "audit",
-              waitsFor: [one, two],
-              ctxFrom: [two],
-              allowFailedDeps: true,
-              join: { kind: "quorum", minSuccess: 2 },
-            },
-          ),
-        };
-      }),
+          return {
+            output: w.task(
+              urgentAudit,
+              {},
+              {
+                id: "audit",
+                waitsFor: [one, two],
+                ctxFrom: [two],
+                allowFailedDeps: true,
+                join: { kind: "quorum", minSuccess: 2 },
+              },
+            ),
+          };
+        },
+        "flow",
+        h.null(),
+      ),
       {},
       custom,
     );
@@ -155,12 +167,16 @@ describe("the builder", () => {
 /** The codes of a flow whose one node is `ping` with the options `options`, after a source node. */
 function optionCodes(options: object): readonly string[] {
   return findingCodes(
-    flow((w) => {
-      const source = w.task(ping, {}, { id: "source" });
+    flow(
+      (w) => {
+        const source = w.task(ping, {}, { id: "source" });
 
-      // SAFETY: the test gives option values that the types refuse or that only the checks see.
-      return { output: w.task(audit, {}, { id: "node", waitsFor: [source], ...options } as never) };
-    }),
+        // SAFETY: the test gives option values that the types refuse or that only the checks see.
+        return { output: w.task(audit, {}, { id: "node", waitsFor: [source], ...options } as never) };
+      },
+      "flow",
+      h.null(),
+    ),
     {},
     view,
   );
@@ -190,11 +206,15 @@ describe("refused node options", () => {
 
   test("a context source that is not a dependency: HRS-009", () => {
     const codes = findingCodes(
-      flow((w) => {
-        const source = w.task(ping, {}, { id: "source" });
+      flow(
+        (w) => {
+          const source = w.task(ping, {}, { id: "source" });
 
-        return { output: w.task(audit, {}, { id: "audit", ctxFrom: [source] }) };
-      }),
+          return { output: w.task(audit, {}, { id: "audit", ctxFrom: [source] }) };
+        },
+        "flow",
+        h.null(),
+      ),
       {},
       view,
     );
@@ -327,9 +347,12 @@ describe("the checks", () => {
   });
 
   test("a child workflow that the app does not list: HRS-020", () => {
-    const unlisted = defineWorkflow({ name: "unlisted", definitionKey: "tests.unlisted.v1", params: {} }, (w) => ({
-      output: w.task(ping, {}, { id: "a" }),
-    }));
+    const unlisted = defineWorkflow(
+      { name: "unlisted", definitionKey: "tests.unlisted.v1", output: h.int(), params: {} },
+      (w) => ({
+        output: w.task(ping, {}, { id: "a" }),
+      }),
+    );
 
     assert.deepEqual(
       findingCodes(
@@ -362,7 +385,7 @@ describe("the checks", () => {
 
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(say, unknown, { id: "a" }) })),
+        flow((w) => ({ output: w.task(say, unknown, { id: "a" }) }), "flow", h.string()),
         {},
         view,
       ),
@@ -370,7 +393,7 @@ describe("the checks", () => {
     );
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(say, missing, { id: "a" }) })),
+        flow((w) => ({ output: w.task(say, missing, { id: "a" }) }), "flow", h.string()),
         {},
         view,
       ),
@@ -378,7 +401,7 @@ describe("the checks", () => {
     );
     assert.deepEqual(
       findingCodes(
-        flow((w) => ({ output: w.task(say, wrong, { id: "a" }) })),
+        flow((w) => ({ output: w.task(say, wrong, { id: "a" }) }), "flow", h.string()),
         {},
         view,
       ),
@@ -427,6 +450,33 @@ describe("the checks", () => {
       {},
       view,
     );
+  });
+
+  test("an output node of another type than the declared output: HRS-025", () => {
+    const codes = findingCodes(
+      flow((w) => ({ output: w.task(say, { text: "a" }, { id: "say" }) }), "flow", h.int()),
+      {},
+      view,
+    );
+
+    assert.deepEqual(codes, ["HRS-025"]);
+  });
+
+  test("a sub-workflow node gives its child's declared output: an h.resultOf parameter of another type is HRS-024", () => {
+    const takesText = defineTask({ name: "takes_text", input: { text: h.resultOf(h.string()) }, output: h.int() });
+
+    const codes = findingCodes(
+      flow((w) => {
+        const child = w.subWorkflow(leaf, {}, { id: "leaf" });
+
+        // SAFETY: the types refuse a source of another output type; the check refuses it at run time too.
+        return { output: w.task(takesText, { text: child } as never, { id: "take" }) };
+      }),
+      {},
+      viewOf([...tasks, takesText], [leaf, region]),
+    );
+
+    assert.deepEqual(codes, ["HRS-024"]);
   });
 
   test("gate 1 stops before gate 2", () => {

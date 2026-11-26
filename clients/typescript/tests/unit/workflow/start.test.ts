@@ -27,29 +27,44 @@ import {
 const greet = defineTask({ name: "greet", input: { who: h.string() }, output: h.string() });
 
 const hello = defineWorkflow(
-  { name: "hello", definitionKey: "tests.hello.v1", params: { who: h.string() }, checkCases: [{ who: "a" }] },
+  {
+    name: "hello",
+    definitionKey: "tests.hello.v1",
+    output: h.string(),
+    params: { who: h.string() },
+    checkCases: [{ who: "a" }],
+  },
   (w, { who }) => ({ output: w.task(greet, { who }, { id: "greet" }) }),
 );
 
-const thrower = defineWorkflow({ name: "thrower", definitionKey: "tests.thrower.v1", params: {} }, () => {
-  throw new RangeError("no node today");
-});
+const thrower = defineWorkflow(
+  { name: "thrower", definitionKey: "tests.thrower.v1", output: h.null(), params: {} },
+  () => {
+    throw new RangeError("no node today");
+  },
+);
 
 // SAFETY: the test returns a thenable from a build, which the types refuse; the start refuses it at run time too.
 const later = defineWorkflow(
-  { name: "later", definitionKey: "tests.later.v1", params: {} },
+  { name: "later", definitionKey: "tests.later.v1", output: h.null(), params: {} },
   (async () => ({})) as never,
 );
 
-const duplicate = defineWorkflow({ name: "duplicate", definitionKey: "tests.duplicate.v1", params: {} }, (w) => {
-  w.task(greet, { who: "a" }, { id: "same" });
+const duplicate = defineWorkflow(
+  { name: "duplicate", definitionKey: "tests.duplicate.v1", output: h.string(), params: {} },
+  (w) => {
+    w.task(greet, { who: "a" }, { id: "same" });
 
-  return { output: w.task(greet, { who: "b" }, { id: "same" }) };
-});
+    return { output: w.task(greet, { who: "b" }, { id: "same" }) };
+  },
+);
 
-const unlisted = defineWorkflow({ name: "unlisted", definitionKey: "tests.unlisted.v1", params: {} }, (w) => ({
-  output: w.task(greet, { who: "a" }, { id: "greet" }),
-}));
+const unlisted = defineWorkflow(
+  { name: "unlisted", definitionKey: "tests.unlisted.v1", output: h.string(), params: {} },
+  (w) => ({
+    output: w.task(greet, { who: "a" }, { id: "greet" }),
+  }),
+);
 
 const SENT_AT = Temporal.Instant.from("2026-11-26T10:00:00.123456Z");
 

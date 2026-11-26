@@ -34,9 +34,9 @@ function noStaticMembers(): JsonText {
 }
 
 /**
- * What a source node gives to an `h.resultOf` parameter: an output of a known kind, or one that the checks do not
- * know (a child workflow's output, known only after its build; a task that the app does not list, a finding of its
- * own).
+ * What a source node gives to an `h.resultOf` parameter: an output of a known kind (a task's output, a child
+ * workflow's declared output), or one that the checks do not know (a contract that the app does not list, a finding
+ * of its own).
  */
 export type SourceOutput = { readonly kind: "known"; readonly output: Kind } | { readonly kind: "notKnown" };
 

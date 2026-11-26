@@ -44,7 +44,7 @@ function listedWorkflow(workflow: object): WorkflowLookup {
 
   assert(compiled.ok, `the params of ${record.name} compile`);
 
-  return { kind: "listed", record, params: compiled.value.parameters };
+  return { kind: "listed", record, params: compiled.value.parameters, output: compiled.value.output };
 }
 
 /** The checks of one build of `workflow` with `params`. The build must return. */
