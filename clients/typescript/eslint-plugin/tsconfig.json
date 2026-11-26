@@ -1,0 +1,14 @@
+{
+  // The type check of the plugin and its tests (`bun check` and the floor compiler read it through the workspace
+  // tsconfig.json). The compiler checks of the client's package apply here too.
+  "extends": "../horsies/tsconfig.json",
+  "compilerOptions": {
+    // The plugin runs in ESLint on Node.
+    "types": ["node"],
+    // `src/index.ts` reads the name and version of package.json.
+    "resolveJsonModule": true
+  },
+  "include": ["src", "tests"],
+  // A project of its own: the TypeScript 7 project that the tests lint and compile (tests/fixtures/tsconfig.json).
+  "exclude": ["tests/fixtures"]
+}
