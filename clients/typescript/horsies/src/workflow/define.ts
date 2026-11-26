@@ -1,8 +1,10 @@
 // `defineWorkflow`: the contract of a workflow. It holds the name, the definition key, the params and the build
 // function. Like a task contract it does no I/O, so a sender can import it without the worker's code.
 //
-// `defineWorkflow` refuses nothing with a throw: `Horsies.create` and `check` report what the definition breaks. The
-// params are compiled with the rules of a task input (the same parameter names, wire types and zod schemas).
+// `defineWorkflow` refuses no rule of the definition with a throw: `Horsies.create` and `check` report what the
+// definition breaks. The params are compiled with the rules of a task input (the same parameter names, wire types and
+// zod schemas). A call that leaves out a field that the type requires (untyped code with no `output`) is a defect of
+// the call: `defineTask` throws `TypeError` for the params contract.
 
 import type { SpecOnError } from "../_catalog/workflow_spec.ts";
 import { defineTask } from "../contract/define-task.ts";
