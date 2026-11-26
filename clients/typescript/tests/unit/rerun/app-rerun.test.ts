@@ -40,7 +40,9 @@ describe("app.rerun", () => {
   test("passes the parsed request, the app's handle and the active carrier to the addon", async () => {
     const { bridge, calls } = fakeBridge(ENQUEUED_ANSWERS);
 
-    await rerunAreaOn(HOST, bridge).rerun({ ...COMMAND, callerKey: "order-7" }, POLICY);
+    const answer = await rerunAreaOn(HOST, bridge).rerun({ ...COMMAND, callerKey: "order-7" }, POLICY);
+
+    assert.ok(answer.ok);
     assert.deepEqual(calls, [
       {
         call: "rerunTask",

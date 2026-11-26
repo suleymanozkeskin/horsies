@@ -119,7 +119,9 @@ describe("each read decodes the core's text", () => {
   test("the list read passes the handle and its argument to the addon", async () => {
     const { target, calls } = fakeTarget(jsonOutcome(sample("TaskListPage")));
 
-    await listTasks(target, { limit: 7 });
+    const read = await listTasks(target, { limit: 7 });
+
+    assert.ok(read.ok);
 
     const [arg] = calls.get("readTaskList") ?? [];
 

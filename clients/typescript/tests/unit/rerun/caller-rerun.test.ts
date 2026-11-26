@@ -85,11 +85,12 @@ describe("app.rerunIn", () => {
     const { bridge, calls } = fakeBridge(ENQUEUED_ANSWERS);
     const { transaction } = fakeTransaction([rowOf("t"), rowOf("INSERTED", NEW_TASK_ID)]);
 
-    await rerunAreaOn({ coreHandle: unusedCoreHandle, activeCarrier: () => NO_ACTIVE_CARRIER }, bridge).rerunIn(
-      transaction,
-      COMMAND,
-      POLICY,
-    );
+    const answer = await rerunAreaOn(
+      { coreHandle: unusedCoreHandle, activeCarrier: () => NO_ACTIVE_CARRIER },
+      bridge,
+    ).rerunIn(transaction, COMMAND, POLICY);
+
+    assert.ok(answer.ok);
     assert.deepEqual(calls[1]?.call === "prepareWrite" && calls[1].trace, { kind: "noCarrier" });
   });
 

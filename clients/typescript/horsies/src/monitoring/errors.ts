@@ -22,6 +22,7 @@ import type {
 } from "../_catalog/monitoring_errors.ts";
 import { monitoringQueryCoreErrorFromNative, taskActionCoreErrorFromNative } from "../_catalog/monitoring_errors.ts";
 import { raiseDefect } from "../native/call/defect.ts";
+import { unreachable } from "../native/call/never.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
 import { ClientDefect } from "../thrown-errors.ts";
@@ -108,57 +109,87 @@ export function brokerError(raw: RawCatalogError): BrokerCoreError {
 
 /** The error of a database ping. Another code is a defect. */
 export function pingDatabaseError(raw: RawCatalogError): PingDatabaseError {
-  const error = brokerError(raw);
-
-  return operationFailedWith(error, "DB_PING_FAILED") ?? unexpectedCode("pingDatabase", error);
+  return readError("pingDatabase", brokerError(raw), PING_DATABASE_CODES);
 }
 
 /** The error of a worker ping. Another code is a defect. */
 export function pingWorkersError(raw: RawCatalogError): PingWorkersError {
-  const error = brokerError(raw);
+  const error = readError("pingWorkers", brokerError(raw), PING_WORKERS_CODES);
 
   switch (error.code) {
     case "INVALID_INPUT":
     case "LISTENER_DISABLED":
+    case "WORKER_PING_FAILED":
       return error;
     default:
-      return operationFailedWith(error, "WORKER_PING_FAILED") ?? unexpectedCode("pingWorkers", error);
+      return unreachable(error);
   }
 }
 
 /** The error of a health read with no argument to refuse. Another code is a defect. */
 export function healthReadError(read: string, raw: RawCatalogError): HealthReadError {
-  const error = brokerError(raw);
-
-  return operationFailedWith(error, "MONITORING_QUERY_FAILED") ?? unexpectedCode(read, error);
+  return readError(read, brokerError(raw), HEALTH_READ_CODES);
 }
 
 /** The error of a health read with a count or a threshold. Another code is a defect. */
 export function healthInputError(read: string, raw: RawCatalogError): HealthInputError {
-  const error = brokerError(raw);
+  const error = readError(read, brokerError(raw), HEALTH_INPUT_CODES);
 
   switch (error.code) {
     case "INVALID_INPUT":
+    case "MONITORING_QUERY_FAILED":
       return error;
     default:
-      return operationFailedWith(error, "MONITORING_QUERY_FAILED") ?? unexpectedCode(read, error);
+      return unreachable(error);
   }
 }
 
-/** `error` when it is `BrokerOperationFailed` with `code`, else `undefined`. Pure. */
-function operationFailedWith<Code extends BrokerOperationFailed["code"]>(
+/** A code of the core's broker catalog. */
+type BrokerCode = BrokerCoreError["code"];
+
+/**
+ * The broker errors whose code is one of `Code`: each class of the union with its code narrowed to `Code`, so
+ * `BrokerOperationFailed` keeps only the operation codes of `Code`. A class with no code in `Code` drops out.
+ */
+type BrokerErrorWith<Code extends BrokerCode> = BrokerCoreError extends infer Error_
+  ? Error_ extends { readonly code: infer Member }
+    ? [Extract<Member, Code>] extends [never]
+      ? never
+      : Error_ & { readonly code: Extract<Member, Code> }
+    : never
+  : never;
+
+/** The one code that a database ping can give. */
+const PING_DATABASE_CODES: readonly "DB_PING_FAILED"[] = ["DB_PING_FAILED"];
+
+/** The codes that a worker ping can give. */
+const PING_WORKERS_CODES: readonly ("INVALID_INPUT" | "LISTENER_DISABLED" | "WORKER_PING_FAILED")[] = [
+  "INVALID_INPUT",
+  "LISTENER_DISABLED",
+  "WORKER_PING_FAILED",
+];
+
+/** The one code that a health read with no argument to refuse can give. */
+const HEALTH_READ_CODES: readonly "MONITORING_QUERY_FAILED"[] = ["MONITORING_QUERY_FAILED"];
+
+/** The codes that a health read with a count or a threshold can give. */
+const HEALTH_INPUT_CODES: readonly ("INVALID_INPUT" | "MONITORING_QUERY_FAILED")[] = [
+  "INVALID_INPUT",
+  "MONITORING_QUERY_FAILED",
+];
+
+/** `error` narrowed to the codes `codes` that the read `read` can give; another code is a defect. */
+function readError<Code extends BrokerCode>(
+  read: string,
   error: BrokerCoreError,
-  code: Code,
-): BrokerOperationFailedWith<Code> | undefined {
-  return isOperationFailedWith(error, code) ? error : undefined;
+  codes: readonly Code[],
+): BrokerErrorWith<Code> {
+  return hasCodeIn(error, codes) ? error : unexpectedCode(read, error);
 }
 
-/** Whether `error` is `BrokerOperationFailed` with `code`. Pure. */
-function isOperationFailedWith<Code extends BrokerOperationFailed["code"]>(
-  error: BrokerCoreError,
-  code: Code,
-): error is BrokerOperationFailedWith<Code> {
-  return error.code === code;
+/** Whether the code of `error` is one of `codes`. Pure. */
+function hasCodeIn<Code extends BrokerCode>(error: BrokerCoreError, codes: readonly Code[]): error is BrokerErrorWith<Code> {
+  return codes.some((code) => code === error.code);
 }
 
 /** The defect of a broker code that the read `read` cannot give. */

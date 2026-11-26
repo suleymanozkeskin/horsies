@@ -71,7 +71,9 @@ describe("pgTransaction", () => {
   test("sends the SQL text and each parameter as text or null, in array row mode", async () => {
     const { client, queries } = fakeClient(async () => textResult([["INSERTED", "01890a5d-ac96-774b-bcce-b302099a8058"]]));
 
-    await pgTransaction(client).queryOne(STATEMENT);
+    const answer = await pgTransaction(client).queryOne(STATEMENT);
+
+    assert.ok(answer.ok);
     assert.equal(queries.length, 1);
     assert.equal(queries[0]?.text, STATEMENT.sql);
     assert.deepEqual(queries[0]?.values, STATEMENT.parameters);
@@ -81,7 +83,8 @@ describe("pgTransaction", () => {
   test("reads each cell of every type as the text that the server sent", async () => {
     const { client, queries } = fakeClient(async () => textResult([]));
 
-    await pgTransaction(client).queryOne(STATEMENT);
+    // The test reads the type parsers of the query; the answer to no row is the subject of other tests.
+    void (await pgTransaction(client).queryOne(STATEMENT));
 
     const types = queries[0]?.types;
 

@@ -62,7 +62,9 @@ describe("postgresTransaction", () => {
   test("sends each parameter typed as text, and null as null", async () => {
     const { sql, queries } = fakeSql(async () => [[bytesOf("INSERTED"), null]]);
 
-    await postgresTransaction(sql).queryOne(STATEMENT);
+    const answer = await postgresTransaction(sql).queryOne(STATEMENT);
+
+    assert.ok(answer.ok);
     assert.deepEqual(queries, [
       {
         query: STATEMENT.sql,
