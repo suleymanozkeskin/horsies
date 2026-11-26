@@ -23,6 +23,14 @@
       "types": "./dist/zod.d.ts",
       "default": "./dist/zod.js"
     },
+    "./rerun/pg": {
+      "types": "./dist/rerun/pg.d.ts",
+      "default": "./dist/rerun/pg.js"
+    },
+    "./rerun/postgres": {
+      "types": "./dist/rerun/postgres.d.ts",
+      "default": "./dist/rerun/postgres.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -36,13 +44,21 @@
   },
   "peerDependencies": {
     "@opentelemetry/api": ">=1.7.0 <2",
-    "zod": ">=4.1.13 <4.7.0"
+    "zod": ">=4.1.13 <4.7.0",
+    "pg": ">=8.23.1 <8.24.0",
+    "postgres": ">=3.4.9 <3.5.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {
       "optional": true
     },
     "zod": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "postgres": {
       "optional": true
     }
   },

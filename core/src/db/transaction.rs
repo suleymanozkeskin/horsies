@@ -37,6 +37,41 @@ pub enum IsolationLevel {
     Serializable,
 }
 
+/// The name of `COMMIT` in errors and logs: the
+/// [`StatementFailure::statement`] of a failed [`Transaction::commit`].
+pub const COMMIT_STATEMENT_NAME: &str = "commit";
+
+/// What a statement failure of a transaction leaves of the transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FailedTransactionOutcome {
+    /// Nothing of the transaction committed.
+    NotCommitted,
+    /// The reply to `COMMIT` was lost: the transaction may have committed.
+    Unknown,
+}
+
+impl FailedTransactionOutcome {
+    /// The outcome of the transaction that `failure` ended: a failure of
+    /// [`PooledConnection::begin`], of a statement of the [`Transaction`], or
+    /// of [`Transaction::commit`]. Only a lost reply to `COMMIT` leaves it
+    /// unknown: a lost reply to an earlier statement discards the connection
+    /// with the transaction open, and the server rolls it back. A statement
+    /// outside a transaction is not in this rule: a lost reply to it can have
+    /// committed it. Pure.
+    pub fn of(failure: &StatementFailure) -> Self {
+        match failure {
+            StatementFailure::OutcomeUnknown { statement, .. }
+                if *statement == COMMIT_STATEMENT_NAME =>
+            {
+                Self::Unknown
+            }
+            StatementFailure::OutcomeUnknown { .. }
+            | StatementFailure::NotSent { .. }
+            | StatementFailure::StatementRefused { .. } => Self::NotCommitted,
+        }
+    }
+}
+
 /// A transaction-control command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TransactionCommand {
@@ -50,7 +85,7 @@ impl TransactionCommand {
     pub(crate) fn name(self) -> &'static str {
         match self {
             TransactionCommand::Begin(_) => "begin",
-            TransactionCommand::Commit => "commit",
+            TransactionCommand::Commit => COMMIT_STATEMENT_NAME,
             TransactionCommand::Rollback => "rollback",
         }
     }
@@ -274,7 +309,21 @@ impl Drop for Transaction<'_> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
+    use crate::db::{CancelRequestOutcome, UnknownOutcomeCause};
+
+    fn lost_reply(statement: &'static str) -> StatementFailure {
+        StatementFailure::OutcomeUnknown {
+            statement,
+            cause: UnknownOutcomeCause::NoReplyWithinBound {
+                bound: Duration::from_secs(30),
+                grace: Duration::from_secs(1),
+                cancel: CancelRequestOutcome::Sent,
+            },
+        }
+    }
 
     #[test]
     fn each_command_has_its_sql() {
@@ -289,5 +338,50 @@ mod tests {
         assert_eq!(TransactionCommand::Commit.sql(), "COMMIT");
         assert_eq!(TransactionCommand::Rollback.sql(), "ROLLBACK");
         assert_eq!(TransactionCommand::Commit.name(), "commit");
+    }
+
+    #[test]
+    fn the_commit_command_has_the_commit_statement_name() {
+        assert_eq!(TransactionCommand::Commit.name(), COMMIT_STATEMENT_NAME);
+    }
+
+    #[test]
+    fn a_lost_reply_to_commit_leaves_the_outcome_unknown() {
+        assert_eq!(
+            FailedTransactionOutcome::of(&lost_reply(TransactionCommand::Commit.name())),
+            FailedTransactionOutcome::Unknown
+        );
+    }
+
+    #[test]
+    fn a_lost_reply_before_commit_committed_nothing() {
+        for command in [
+            TransactionCommand::Begin(IsolationLevel::ServerDefault),
+            TransactionCommand::Rollback,
+        ] {
+            assert_eq!(
+                FailedTransactionOutcome::of(&lost_reply(command.name())),
+                FailedTransactionOutcome::NotCommitted,
+                "{command:?}"
+            );
+        }
+        assert_eq!(
+            FailedTransactionOutcome::of(&lost_reply("rerun_enqueue")),
+            FailedTransactionOutcome::NotCommitted
+        );
+    }
+
+    #[test]
+    fn a_commit_that_was_not_sent_committed_nothing() {
+        let failure = StatementFailure::NotSent {
+            statement: COMMIT_STATEMENT_NAME,
+            cause: NotSentCause::TransactionAborted {
+                failed_statement: "rerun_enqueue",
+            },
+        };
+        assert_eq!(
+            FailedTransactionOutcome::of(&failure),
+            FailedTransactionOutcome::NotCommitted
+        );
     }
 }
