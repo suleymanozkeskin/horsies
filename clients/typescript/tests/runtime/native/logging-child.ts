@@ -56,6 +56,7 @@ async function runCase(name: string | undefined): Promise<string> {
       return defectRecordToSink();
     case "first-payload-warning":
       return firstPayloadWarning();
+    case undefined:
     default:
       return `unknown case ${String(name)}`;
   }

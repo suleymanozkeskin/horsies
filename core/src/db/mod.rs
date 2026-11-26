@@ -86,7 +86,10 @@ pub use tls::{
     TlsPolicyError, TlsSettings, DEFAULT_CLIENT_CERTIFICATE_FILE, DEFAULT_CLIENT_KEY_FILE,
     DEFAULT_ROOT_CERTIFICATE_FILE, DEFAULT_ROOT_CRL_FILE,
 };
-pub use transaction::{DiscardReason, IsolationLevel, RollbackOutcome, Transaction};
+pub use transaction::{
+    DiscardReason, FailedTransactionOutcome, IsolationLevel, RollbackOutcome, Transaction,
+    COMMIT_STATEMENT_NAME,
+};
 pub use url::{
     parse_connection_url, ChannelBindingPolicy, ConnectionSettings, DatabaseName, DatabasePassword,
     Endpoint, HostAddress, HostOrder, MaskedUrl, TargetSession, UnsupportedReason, UrlComponent,

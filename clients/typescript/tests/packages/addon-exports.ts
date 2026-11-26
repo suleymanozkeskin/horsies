@@ -5,9 +5,10 @@ import type { CoreState } from "../../horsies/src/native/process-core/addon.ts";
 
 /**
  * The exports that only a build with the cargo feature `test-probes` registers (`bridge/Cargo.toml`,
- * `bridge/src/call/callback_probe.rs`). A published build has none of them.
+ * `bridge/src/call/callback_probe.rs`, `bridge/src/facades/child_spec_probe.rs`). A published build
+ * has none of them.
  */
-export const TEST_ONLY_EXPORTS: readonly string[] = ["probeCallback"];
+export const TEST_ONLY_EXPORTS: readonly string[] = ["probeCallback", "setProbeChildSpecSource"];
 
 /** The test-only exports that the export object of a loaded addon has. Pure. */
 export function testOnlyExportsIn(exports: object): readonly string[] {

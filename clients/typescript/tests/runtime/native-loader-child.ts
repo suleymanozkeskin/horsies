@@ -22,6 +22,7 @@ function runCase(name: string | undefined): CaseOutcome {
       return packageFirst();
     case "require-unset":
       return requireUnset();
+    case undefined:
     default:
       return { unknownCase: String(name) };
   }

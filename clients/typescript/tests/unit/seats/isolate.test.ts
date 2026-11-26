@@ -235,7 +235,7 @@ describe("cancel in a seat", () => {
     app.implement(crunch, (_input, runtime) => {
       try {
         // SAFETY: a JavaScript body can call a member that the type of its runtime does not hold.
-        (runtime as unknown as TaskRuntime).spawn("work", async () => 1);
+        void (runtime as unknown as TaskRuntime).spawn("work", async () => 1);
       } catch (cause) {
         thrown.push(cause);
       }
