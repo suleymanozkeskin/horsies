@@ -515,7 +515,7 @@ def _serialized(value: object, context: str) -> str:
             assert_never(unreachable)
 
 
-def _index_of(node: TaskNode[Any] | SubWorkflowNode[Any]) -> int:
+def _index_of(node: TaskNode[Any, Any] | SubWorkflowNode[Any]) -> int:
     assert node.index is not None, (
         f'node {node.name!r} has no index; a WorkflowSpec assigns one to every node'
     )
@@ -523,7 +523,7 @@ def _index_of(node: TaskNode[Any] | SubWorkflowNode[Any]) -> int:
 
 
 def _graph_columns(
-    node: TaskNode[Any] | SubWorkflowNode[Any],
+    node: TaskNode[Any, Any] | SubWorkflowNode[Any],
 ) -> tuple[tuple[int, ...], tuple[tuple[str, int], ...], tuple[str, ...] | None]:
     """Dependencies, args_from pairs and context node ids of a spec node. Pure."""
     dependencies = tuple(_index_of(dependency) for dependency in node.waits_for)
@@ -571,7 +571,7 @@ def subworkflow_node_row(node: SubWorkflowNode[Any], owner: NodeOwner) -> NodeRo
     )
 
 
-def task_options_with_good_until(node: TaskNode[Any], owner: NodeOwner) -> str | None:
+def task_options_with_good_until(node: TaskNode[Any, Any], owner: NodeOwner) -> str | None:
     """The task options JSON of a task node, with its ``good_until`` set.
 
     The options are the task decorator's own serialization of a validated
@@ -608,7 +608,7 @@ def task_options_with_good_until(node: TaskNode[Any], owner: NodeOwner) -> str |
 
 def task_node_row(
     broker: PostgresBroker,
-    node: TaskNode[Any],
+    node: TaskNode[Any, Any],
     owner: NodeOwner,
     queue_name: str,
     priority: int,

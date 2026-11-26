@@ -21,6 +21,7 @@ from horsies import (
     Err,
     Failed,
     Ok,
+    OperationalErrorCode,
     OutcomeCode,
     Result,
     Succeeded,
@@ -312,3 +313,124 @@ def test_args_from_source_with_the_same_codes_is_accepted() -> None:
     )
 
     assert refusal is None
+
+
+# ---------------------------------------------------------------------------
+# Workflow reads: result_for, results/tasks, the outputless map, the context
+# ---------------------------------------------------------------------------
+
+
+def _typed_app() -> Horsies:
+    """An app with a typed task and an untyped task."""
+    app = _app()
+
+    @app.task('send_welcome_email', error_codes=WelcomeCode)
+    def send_welcome_email(*, email: str) -> Result[str, TaskError[WelcomeCode]]:  # pyright: ignore[reportUnusedFunction]
+        return Ok(email)
+
+    @app.task('send_receipt')
+    def send_receipt(*, email: str) -> Result[str, TaskError]:  # pyright: ignore[reportUnusedFunction]
+        return Ok(email)
+
+    return app
+
+
+def _stored_error_text(code: str) -> str:
+    return json.dumps({
+        '__h_task_result__': True,
+        'ok': None,
+        'err': {'error_code': code, 'message': 'no', 'data': None, 'exception': None},
+    })
+
+
+def _node_decode(app: Horsies, task_name: str, code: str) -> Any:
+    from horsies.core.models.workflow.handle import _stored_node_decode
+
+    return _stored_node_decode(
+        _stored_error_text(code), app=app, task_name=task_name, node_id='n', sub_definition_key=None,
+    )
+
+
+def test_result_for_a_typed_node_gives_the_member() -> None:
+    from horsies.core.models.workflow.handle import _node_read
+
+    match _node_read(_node_decode(_typed_app(), 'send_welcome_email', 'MAILBOX_FULL')):
+        case Ok(Failed(TaskError(error_code=code))):
+            assert code is WelcomeCode.MAILBOX_FULL
+        case other:
+            pytest.fail(f'expected Ok(Failed(member)), got {other!r}')
+
+
+def test_result_for_an_unknown_code_is_unknown_custom_code() -> None:
+    from horsies.core.models.workflow.handle import _node_read
+
+    match _node_read(_node_decode(_typed_app(), 'send_welcome_email', 'RATE_LIMITED')):
+        case Err(err_value=UnknownCustomCode(custom_code='RATE_LIMITED')):
+            pass
+        case other:
+            pytest.fail(f'expected Err(UnknownCustomCode), got {other!r}')
+
+
+def test_result_for_an_untyped_node_gives_the_text() -> None:
+    from horsies.core.models.workflow.handle import _node_read
+
+    match _node_read(_node_decode(_typed_app(), 'send_receipt', 'MAILBOX_FULL')):
+        case Ok(Failed(TaskError(error_code=code))):
+            assert code == 'MAILBOX_FULL' and not isinstance(code, Enum)
+        case other:
+            pytest.fail(f'expected Ok(Failed(text)), got {other!r}')
+
+
+def test_results_map_folds_an_unknown_code_into_the_entry() -> None:
+    from horsies.core.models.workflow.handle import _folded
+
+    match _folded('n', _node_decode(_typed_app(), 'send_welcome_email', 'RATE_LIMITED')):
+        case Failed(TaskError(error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, data=data)):
+            assert isinstance(data, dict) and data['custom_code'] == 'RATE_LIMITED'
+        case other:
+            pytest.fail(f'expected Failed(RESULT_DESERIALIZATION_ERROR), got {other!r}')
+
+
+def test_outputless_map_entry_gives_the_member() -> None:
+    from horsies.core.models.workflow.handle import (
+        _OUTPUTLESS_TERMINALS,
+        _decode_workflow_envelope,
+    )
+
+    envelope = {
+        '__h_task_result__': True,
+        '__h_outputless_terminals__': True,
+        'ok': {
+            'results_by_id': {'n': json.loads(_stored_error_text('INVALID_EMAIL'))},
+            'task_name_by_id': {'n': 'send_welcome_email'},
+        },
+        'err': None,
+    }
+    read = _decode_workflow_envelope(
+        envelope, _OUTPUTLESS_TERMINALS, app=_typed_app(), workflow_id='w',
+    )
+    match read:
+        case Ok(Succeeded({'n': Failed(TaskError(error_code=code))})):
+            assert code is WelcomeCode.INVALID_EMAIL
+        case other:
+            pytest.fail(f'expected the member in the map, got {other!r}')
+
+
+def test_context_entry_gives_the_member() -> None:
+    match child_runner._context_entry(
+        'n', Failed(TaskError(error_code='MAILBOX_FULL')), EnumCodes(code_type=WelcomeCode),
+    ):
+        case Failed(TaskError(error_code=code)):
+            assert code is WelcomeCode.MAILBOX_FULL
+        case other:
+            pytest.fail(f'expected Failed(member), got {other!r}')
+
+
+def test_context_entry_with_an_unknown_code_is_result_deserialization_error() -> None:
+    match child_runner._context_entry(
+        'n', Failed(TaskError(error_code='RATE_LIMITED')), EnumCodes(code_type=WelcomeCode),
+    ):
+        case Failed(TaskError(error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, data=data)):
+            assert isinstance(data, dict) and data['custom_code'] == 'RATE_LIMITED'
+        case other:
+            pytest.fail(f'expected Failed(RESULT_DESERIALIZATION_ERROR), got {other!r}')

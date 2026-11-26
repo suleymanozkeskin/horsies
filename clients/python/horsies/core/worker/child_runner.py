@@ -80,6 +80,7 @@ from horsies.core.models.tasks import (
     Execution,
     OutcomeCode,
     RetrievalCode,
+    CustomCodeType,
     TaskError,
     OperationalErrorCode,
     custom_code_text,
@@ -1464,7 +1465,7 @@ def _prepare_task_call(
             definition_key_by_id = workflow_ctx_data.get(
                 'definition_key_by_id', {},
             )
-            results_by_id: dict[str, TaskOutcome[Any, TaskError]] = {}
+            results_by_id: dict[str, TaskOutcome[Any, TaskError[Any]]] = {}
             for node_id, envelope in results_by_id_raw.items():
                 if envelope is None:
                     # Engine couldn't encode this entry (no
@@ -1498,6 +1499,7 @@ def _prepare_task_call(
                     )
                     continue
                 from horsies.core.models.workflow.typing_utils import (
+                    resolve_source_code_type,
                     resolve_source_ok_type as _resolve_src_ok,
                 )
 
@@ -1528,8 +1530,17 @@ def _prepare_task_call(
                     )
                     continue
                 try:
-                    results_by_id[node_id] = decode_task_result(
-                        envelope, source_ok_type,
+                    results_by_id[node_id] = _context_entry(
+                        node_id,
+                        decode_task_result(envelope, source_ok_type),
+                        resolve_source_code_type(
+                            app, source_task_name,
+                            sub_definition_key=(
+                                _sub_def_key
+                                if isinstance(_sub_def_key, str)
+                                else None
+                            ),
+                        ),
                     )
                 except (StrictJsonError, ValueValidationError) as exc:
                     results_by_id[node_id] = Failed(
@@ -1612,6 +1623,27 @@ def _prepare_task_call(
         case _ as unreachable:
             assert_never(unreachable)
     return _PreparedCall(task=task, app=app, args=args, kwargs=kwargs)
+
+
+def _context_entry(
+    node_id: str,
+    outcome: TaskOutcome[Any, TaskError],
+    code_type: CustomCodeType,
+) -> TaskOutcome[Any, TaskError[Any]]:
+    """The entry of one node in a workflow context: its outcome with the
+    custom codes of its task (``typed_outcome``). A stored code that the
+    task's ``Enum`` does not name is a failed outcome with
+    ``RESULT_DESERIALIZATION_ERROR``, as a node whose stored value does not
+    read. Pure."""
+    match typed_outcome(outcome, code_type):
+        case Ok(ok_value=typed):
+            return typed
+        case Err(err_value=unknown):
+            return Failed(TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'workflow_ctx node {node_id!r}: {unknown.message}',
+                data={'node_id': node_id, 'custom_code': unknown.custom_code},
+            ))
 
 
 def _task_exception_response(task_name: str, e: BaseException) -> EncodedResult:

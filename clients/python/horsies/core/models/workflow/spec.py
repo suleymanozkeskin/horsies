@@ -86,7 +86,7 @@ The task row stores the priority under ``CHECK (priority BETWEEN 1 AND 100)``.
 """
 
 
-def _task_node_option_errors(node: TaskNode[Any]) -> list[WorkflowValidationError]:
+def _task_node_option_errors(node: TaskNode[Any, Any]) -> list[WorkflowValidationError]:
     """Return the errors for one task node's priority and good_until.
 
     ``None`` in either field is accepted: a ``None`` priority takes the queue
@@ -130,11 +130,11 @@ def _task_node_option_errors(node: TaskNode[Any]) -> list[WorkflowValidationErro
 
 
 def unique_node_refs(
-    refs: Sequence[TaskNode[Any] | SubWorkflowNode[Any]],
-) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
+    refs: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]],
+) -> list[TaskNode[Any, Any] | SubWorkflowNode[Any]]:
     """Return node refs de-duplicated by identity, preserving first-seen order."""
     seen: set[int] = set()
-    unique: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
+    unique: list[TaskNode[Any, Any] | SubWorkflowNode[Any]] = []
     for ref in refs:
         ref_id = id(ref)
         if ref_id in seen:
@@ -155,7 +155,7 @@ if TYPE_CHECKING:
 
 
 def _kwargs_target_hints(
-    node: TaskNode[Any] | SubWorkflowNode[Any],
+    node: TaskNode[Any, Any] | SubWorkflowNode[Any],
     task_fn: Callable[..., Any],
 ) -> tuple[dict[str, Any], inspect.Signature] | None:
     """The hints that `node.kwargs` bind against.
@@ -198,7 +198,7 @@ def _build_with_type_hints(node: SubWorkflowNode[Any]) -> dict[str, Any]:
 
 
 def _kwargs_target_callable(
-    node: TaskNode[Any] | SubWorkflowNode[Any],
+    node: TaskNode[Any, Any] | SubWorkflowNode[Any],
 ) -> Callable[..., Any]:
     """Return the callable whose signature ``node.kwargs`` bind against.
 
@@ -252,7 +252,7 @@ class WorkflowSpec(Generic[OutT]):
     node_ids, the name is passed through slugify() to ensure validity.
     """
 
-    tasks: Sequence[TaskNode[Any] | SubWorkflowNode[Any]]
+    tasks: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]]
     """
     - All nodes in the DAG (order determines index assignment)
     - Root nodes (empty waits_for) start immediately
@@ -264,7 +264,7 @@ class WorkflowSpec(Generic[OutT]):
     - PAUSE: on task failure, pause workflow for manual intervention (resume/cancel)
     """
 
-    output: TaskNode[OutT] | SubWorkflowNode[OutT] | None = None
+    output: TaskNode[OutT, Any] | SubWorkflowNode[OutT] | None = None
     """
     - Explicit output node: WorkflowHandle.get() returns this node's result
     - If None: get() returns dict of all terminal node results keyed by node_id
@@ -413,7 +413,7 @@ class WorkflowSpec(Generic[OutT]):
         # Phase B: freeze copies in-place (after back-propagation).
         self._freeze_graph()
 
-    def _isolate_inputs(self) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
+    def _isolate_inputs(self) -> list[TaskNode[Any, Any] | SubWorkflowNode[Any]]:
         """Copy input node graph so each spec has independent nodes.
 
         Uses copy.copy() for shallow copies — callables (fn) and class
@@ -429,8 +429,8 @@ class WorkflowSpec(Generic[OutT]):
         originals — needed for task-body WorkflowContext injection).
         """
         originals = list(self.tasks)
-        old_to_new: dict[int, TaskNode[Any] | SubWorkflowNode[Any]] = {}
-        copied_tasks: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
+        old_to_new: dict[int, TaskNode[Any, Any] | SubWorkflowNode[Any]] = {}
+        copied_tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]] = []
 
         for node in self.tasks:
             node_copy = copy_module.copy(node)
@@ -1623,7 +1623,7 @@ class WorkflowSpec(Generic[OutT]):
 
     def _collect_args_from_default_errors(
         self,
-        task: 'TaskNode[Any] | SubWorkflowNode[Any]',
+        task: 'TaskNode[Any, Any] | SubWorkflowNode[Any]',
     ) -> list[WorkflowValidationError]:
         """Require defaults on args_from targets of non-'all' join nodes."""
         errors: list[WorkflowValidationError] = []
@@ -1940,7 +1940,7 @@ class WorkflowSpec(Generic[OutT]):
 def _args_from_code_type_error(
     node_name: str,
     kwarg_name: str,
-    source_node: TaskNode[Any] | SubWorkflowNode[Any],
+    source_node: TaskNode[Any, Any] | SubWorkflowNode[Any],
     annotation: object,
 ) -> WorkflowValidationError | None:
     """The refusal of an ``args_from`` target that declares custom codes

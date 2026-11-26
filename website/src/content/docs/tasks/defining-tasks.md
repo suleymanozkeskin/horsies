@@ -462,8 +462,10 @@ def register(app: Horsies) -> None:
 
 - The body passes members of `E` (`ChargeCode.CARD_DECLINED`). A `str` code is a `RETURN_TYPE_MISMATCH`.
 - The stored text is the value of the member. It does not change.
-- `TaskHandle.get()` and an `args_from` parameter annotated `TaskOutcome[T, TaskError[E]]` give members of `E` back. `app.get_result()` gives members of the `Enum` of the registered task, typed `TaskError[Any]`. A stored code that `E` does not name (a row of another version of the task) is the read failure `UnknownCustomCode`.
-- `WorkflowHandle.get()`, `WorkflowHandle.result_for()` and `WorkflowContext.result_for()` give the code as its text, because they are not typed with the code type of one task.
+- These reads give members of `E` back: `TaskHandle.get()`; `WorkflowHandle.result_for(node)` and `WorkflowContext.result_for(node)` for a node of the task (`task.node()(...)` gives a `TaskNode[T, E]`); an `args_from` parameter annotated `TaskOutcome[T, TaskError[E]]`; the entries of `results()`, `tasks()` and the map of an outputless workflow's `get()`; and `app.get_result()`, typed `TaskError[Any]`.
+- A stored code that `E` does not name (a row of another version of the task) is the read failure `UnknownCustomCode`. In a map of node outcomes and in a workflow context, it is a failed entry with `RESULT_DESERIALIZATION_ERROR`; for an `args_from` input, the node fails with `WORKER_SERIALIZATION_ERROR`.
+- The error of a workflow that `WorkflowHandle.get()` gives keeps its custom code as text. That error is the error of the failed node, which can be any node of the workflow, with the codes of its own task, so no one `Enum` names it.
+- A `SubWorkflowNode` gives custom codes as text: a child workflow holds the codes of many tasks.
 - A `match` on `task_error.error_code` that leaves out a member of `E` fails pyright's exhaustiveness check.
 
 A task that returns `TaskError` keeps `str` codes with any declaration. Declaring is optional, and the default is `()`. A user code that the task does not declare still works everywhere; its metric label is `undeclared`.

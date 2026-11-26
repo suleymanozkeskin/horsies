@@ -12,11 +12,12 @@ from typing import (
     Self,
     TypeGuard,
     cast,
+    overload,
 )
 
 from pydantic import BaseModel
 
-from .enums import OkT, OkT_co, WorkflowStatus
+from .enums import CodeT, OkT, OkT_co, WorkflowStatus
 from .nodes import NodeKey
 
 if TYPE_CHECKING:
@@ -494,12 +495,30 @@ class WorkflowContext(BaseModel):
         )
         return ctx
 
+    @overload
+    def result_for(
+        self, node: TaskNode[OkT, CodeT] | NodeKey[OkT, CodeT],
+    ) -> TaskOutcome[OkT, TaskError[CodeT]]: ...
+
+    @overload
+    def result_for(
+        self, node: SubWorkflowNode[OkT],
+    ) -> TaskOutcome[OkT, TaskError]: ...
+
     def result_for(
         self,
-        node: TaskNode[OkT] | SubWorkflowNode[OkT] | NodeKey[OkT],
-    ) -> TaskOutcome[OkT, TaskError]:
+        node: TaskNode[OkT, Any] | SubWorkflowNode[OkT] | NodeKey[OkT, Any],
+    ) -> TaskOutcome[OkT, TaskError[Any]]:
         """
         Get the outcome of a specific node.
+
+        The custom codes of a failed outcome are members of the ``Enum`` of
+        the node's task when the task returns ``TaskError[E]``, and text for
+        a task that returns ``TaskError`` and for a ``SubWorkflowNode`` (a
+        child workflow holds the codes of many tasks). A stored code that
+        ``E`` does not name is a failed outcome with
+        ``RESULT_DESERIALIZATION_ERROR``, as a node whose stored value does
+        not read.
 
         Type-safe: returns TaskOutcome[T, TaskError] where T matches the node's type.
 
@@ -541,9 +560,9 @@ class WorkflowContext(BaseModel):
             )
 
         # Cast is safe because the generic parameter ensures type correctness
-        return cast('TaskOutcome[OkT, TaskError]', self._results_by_id[node_id])
+        return cast('TaskOutcome[OkT, TaskError[Any]]', self._results_by_id[node_id])
 
-    def has_result(self, node: TaskNode[Any] | SubWorkflowNode[Any]) -> bool:
+    def has_result(self, node: TaskNode[Any, Any] | SubWorkflowNode[Any]) -> bool:
         """Check if a result exists for the given node."""
         if node.node_id is None:
             return False

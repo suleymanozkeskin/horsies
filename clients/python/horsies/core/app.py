@@ -2580,9 +2580,9 @@ class Horsies:
     def workflow(
         self,
         name: str,
-        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
+        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
         on_error: OnError,
-        output: TaskNode[OutT] | SubWorkflowNode[OutT],
+        output: TaskNode[OutT, Any] | SubWorkflowNode[OutT],
         success_policy: SuccessPolicy | None = None,
         *,
         definition_key: str | None = None,
@@ -2593,10 +2593,10 @@ class Horsies:
     def workflow(
         self,
         name: str,
-        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
+        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
         on_error: OnError = OnError.FAIL,
         *,
-        output: TaskNode[OutT] | SubWorkflowNode[OutT],
+        output: TaskNode[OutT, Any] | SubWorkflowNode[OutT],
         success_policy: SuccessPolicy | None = None,
         definition_key: str | None = None,
         workflow_def_cls: type[Any] | None = None,
@@ -2606,7 +2606,7 @@ class Horsies:
     def workflow(
         self,
         name: str,
-        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
+        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
         on_error: OnError = OnError.FAIL,
         output: None = None,
         success_policy: SuccessPolicy | None = None,
@@ -2618,9 +2618,9 @@ class Horsies:
     def workflow(
         self,
         name: str,
-        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
+        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]],
         on_error: OnError = OnError.FAIL,
-        output: TaskNode[OutT] | SubWorkflowNode[OutT] | None = None,
+        output: TaskNode[OutT, Any] | SubWorkflowNode[OutT] | None = None,
         success_policy: SuccessPolicy | None = None,
         *,
         definition_key: str | None = None,
@@ -2659,7 +2659,7 @@ class Horsies:
         # TaskNode — reusing one node across configs must be order-independent.
         # Caveat: the save/restore is not thread-safe; do not build specs
         # sharing the same node objects from concurrent threads.
-        saved_node_config: list[tuple[TaskNode[Any], str | None, int | None]] = []
+        saved_node_config: list[tuple[TaskNode[Any, Any], str | None, int | None]] = []
         for node in tasks:
             # SubWorkflowNode doesn't have queue/priority - handled at execution time
             if isinstance(node, SubWorkflowNode):

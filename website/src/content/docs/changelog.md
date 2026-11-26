@@ -65,10 +65,15 @@ there is no migration contract between pre-1.0 versions.
     (`TaskError(error_code=E.MEMBER)`, no `.value`). A `str` code in such a
     task is `RETURN_TYPE_MISMATCH`. The stored text is the value of the
     member, as before.
-  - `TaskHandle.get` / `get_async` give members of `E` back, and so does an
-    `args_from` parameter annotated `TaskOutcome[T, TaskError[E]]`.
-    `Horsies.get_result` gives members of the `Enum` of the registered task
-    (typed `TaskError[Any]`). The
+  - `TaskHandle.get` / `get_async` give members of `E` back, and so do an
+    `args_from` parameter annotated `TaskOutcome[T, TaskError[E]]`,
+    `WorkflowHandle.result_for(node)` and `WorkflowContext.result_for(node)`
+    for a `TaskNode[T, E]`, and the entries of `results()`, `tasks()` and
+    an outputless `get()` map. `Horsies.get_result` gives members of the
+    `Enum` of the registered task (typed `TaskError[Any]`). `TaskNode`,
+    `NodeKey` and `NodeFactory` take the code type as a second type
+    argument (default `str`); `task.node()(...)` gives a `TaskNode[T, E]`,
+    and a node of any code type is `TaskNode[Any, Any]`. The
     handle type carries the code type: `TaskHandle[T, C]`, from the return
     annotation of the body.
   - A stored custom code that `E` does not name (a row of another version
@@ -83,8 +88,9 @@ there is no migration contract between pre-1.0 versions.
     `error_codes=E` is `HRS-105`. An `args_from` target with
     `TaskError[E]` whose source task does not return `TaskError[E]` is
     `WORKFLOW_ARGS_FROM_TYPE_MISMATCH`.
-  - `WorkflowHandle.get`, `WorkflowHandle.result_for` and
-    `WorkflowContext.result_for` give custom codes as text, typed `str`.
+  - The error of a workflow that `WorkflowHandle.get` gives, and the outcome
+    of a `SubWorkflowNode`, keep custom codes as text: the error of a failed
+    workflow is the error of its failed node, which can be any task.
 - **Breaking (Python): `Result` for task bodies, `ReadResult` for reads,
   `TaskOutcome` for node inputs.** `TaskResult` is removed, with no alias.
   - A task body returns `Result[T, TaskError]`: `Ok(value)` or

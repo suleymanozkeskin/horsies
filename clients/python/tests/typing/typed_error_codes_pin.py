@@ -27,6 +27,10 @@ from horsies import (
     Succeeded,
     TaskError,
     TaskHandle,
+    TaskNode,
+    TaskOutcome,
+    WorkflowContext,
+    WorkflowHandle,
 )
 
 
@@ -48,6 +52,32 @@ def register(app: Horsies) -> None:
             assert_type(handle.get(), ReadResult[str, TaskError[WelcomeCode]])
         case Err():
             pass
+
+    node = send_welcome_email.node()(email='a@b')
+    assert_type(node, TaskNode[str, WelcomeCode])
+
+
+def node_reads(
+    node: TaskNode[str, WelcomeCode],
+    ctx: WorkflowContext,
+    workflow: WorkflowHandle[str],
+) -> None:
+    assert_type(ctx.result_for(node), TaskOutcome[str, TaskError[WelcomeCode]])
+    assert_type(workflow.result_for(node), ReadResult[str, TaskError[WelcomeCode]])
+    assert_type(workflow.result_for(node.key()), ReadResult[str, TaskError[WelcomeCode]])
+
+
+def context_code_left_out(node: TaskNode[str, WelcomeCode], ctx: WorkflowContext) -> str:
+    match ctx.result_for(node):
+        case Succeeded(value):
+            return value
+        case Failed(task_error):
+            match task_error.error_code:  # pyright: ignore[reportMatchNotExhaustive]
+                case WelcomeCode.INVALID_EMAIL:
+                    return 'invalid'
+                case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+                    return 'library'
+    return ''
 
 
 def every_code(task_error: TaskError[WelcomeCode]) -> str:

@@ -286,11 +286,11 @@ class FromNodeMarker:
 
     __slots__ = ('_node',)
 
-    def __init__(self, node: 'TaskNode[Any] | SubWorkflowNode[Any]') -> None:
+    def __init__(self, node: 'TaskNode[Any, Any] | SubWorkflowNode[Any]') -> None:
         self._node = node
 
     @property
-    def node(self) -> 'TaskNode[Any] | SubWorkflowNode[Any]':
+    def node(self) -> 'TaskNode[Any, Any] | SubWorkflowNode[Any]':
         """The upstream node whose result will be injected."""
         return self._node
 
@@ -298,7 +298,7 @@ class FromNodeMarker:
         return f'FromNodeMarker(node={self._node!r})'
 
 
-def from_node(upstream: 'TaskNode[Any] | SubWorkflowNode[Any]') -> Any:
+def from_node(upstream: 'TaskNode[Any, Any] | SubWorkflowNode[Any]') -> Any:
     """Mark a `.node()()` kwarg as injected from an upstream node's result.
 
     When used as a kwarg value in the second call of the two-stage
@@ -357,7 +357,7 @@ def effective_priority(
     return config.priority
 
 
-def resolve_node_queue(node: 'TaskNode[Any]') -> str:
+def resolve_node_queue(node: 'TaskNode[Any, Any]') -> str:
     """Return the queue name of a workflow ``TaskNode``.
 
     Rule: ``node.queue``, else the task's declared ``task_queue_name``, else
@@ -370,7 +370,7 @@ def resolve_node_queue(node: 'TaskNode[Any]') -> str:
 
 def resolve_node_queue_and_priority(
     app: 'Horsies',
-    node: 'TaskNode[Any]',
+    node: 'TaskNode[Any, Any]',
 ) -> tuple[str, int]:
     """Bind a workflow ``TaskNode``'s queue and priority against app config.
 
@@ -429,14 +429,14 @@ class BoundTaskNode:
     guessed default. ``node`` carries the remaining authored fields unchanged.
     """
 
-    node: 'TaskNode[Any]'
+    node: 'TaskNode[Any, Any]'
     queue: str
     priority: int
 
 
 def bind_task_node(
     app: 'Horsies',
-    node: 'TaskNode[Any]',
+    node: 'TaskNode[Any, Any]',
 ) -> BoundTaskNode:
     """Resolve a ``TaskNode`` to a ``BoundTaskNode`` (queue/priority concrete).
 
@@ -697,7 +697,7 @@ class TaskHandle(Generic[T, C]):
                 self._cached_result = Ok(Failed(error))
 
 
-class NodeFactory(Generic[P, T]):
+class NodeFactory(Generic[P, T, C]):
     """
     Factory for creating TaskNode instances with typed arguments.
 
@@ -709,10 +709,10 @@ class NodeFactory(Generic[P, T]):
         # Type checker validates 'value' against my_task's signature
     """
 
-    _fn: 'TaskFunction[P, T, Any] | AsyncTaskFunction[P, T, Any] | RuntimeTaskFunction[P, T, Any] | AsyncRuntimeTaskFunction[P, T, Any]'
-    _waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
-    _workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
-    _args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None
+    _fn: 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[P, T, C] | AsyncRuntimeTaskFunction[P, T, C]'
+    _waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
+    _workflow_ctx_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
+    _args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
     _queue: str | None
     _priority: int | None
     _allow_failed_deps: bool
@@ -723,11 +723,11 @@ class NodeFactory(Generic[P, T]):
 
     def __init__(
         self,
-        fn: 'TaskFunction[P, T, Any] | AsyncTaskFunction[P, T, Any] | RuntimeTaskFunction[P, T, Any] | AsyncRuntimeTaskFunction[P, T, Any]',
+        fn: 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[P, T, C] | AsyncRuntimeTaskFunction[P, T, C]',
         *,
-        waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
-        workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
-        args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None,
+        waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None,
+        workflow_ctx_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None,
+        args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None,
         queue: str | None,
         priority: int | None,
         allow_failed_deps: bool,
@@ -748,7 +748,7 @@ class NodeFactory(Generic[P, T]):
         self._good_until = good_until
         self._node_id = node_id
 
-    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> 'TaskNode[T]':
+    def __call__(self, *args: P.args, **kwargs: P.kwargs) -> 'TaskNode[T, C]':
         from horsies.core.models.workflow import TaskNode
 
         # D.1: Reject positional args — workflow nodes are kwargs-only
@@ -764,7 +764,7 @@ class NodeFactory(Generic[P, T]):
             )
 
         # C.1: Scan kwargs for FromNodeMarker instances
-        marker_args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] = {}
+        marker_args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] = {}
         static_kwargs: dict[str, Any] = {}
 
         for key, value in kwargs.items():
@@ -908,9 +908,9 @@ class _TaskFunctionMembers(Protocol[P, T, C]):
     def node(
         self,
         *,
-        waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
-        workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
-        args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
+        waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
+        workflow_ctx_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
+        args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
         queue: str | None = None,
         priority: int | None = None,
         allow_failed_deps: bool = False,
@@ -918,7 +918,7 @@ class _TaskFunctionMembers(Protocol[P, T, C]):
         min_success: int | None = None,
         good_until: datetime | None = None,
         node_id: str | None = None,
-    ) -> 'NodeFactory[P, T]': ...
+    ) -> 'NodeFactory[P, T, C]': ...
 
 
 class TaskFunction(_TaskFunctionMembers[P, T, C], Protocol[P, T, C]):
@@ -3271,9 +3271,9 @@ def create_task_wrapper(
         def node(
             self,
             *,
-            waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
-            workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
-            args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None = None,
+            waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
+            workflow_ctx_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
+            args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
             queue: str | None = None,
             priority: int | None = None,
             allow_failed_deps: bool = False,
@@ -3281,7 +3281,7 @@ def create_task_wrapper(
             min_success: int | None = None,
             good_until: datetime | None = None,
             node_id: str | None = None,
-        ) -> NodeFactory[P, T]:
+        ) -> NodeFactory[P, T, C]:
             return NodeFactory(
                 fn=self,  # type: ignore[arg-type]
                 waits_for=waits_for,
