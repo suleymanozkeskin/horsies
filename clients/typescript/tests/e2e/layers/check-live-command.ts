@@ -22,6 +22,13 @@ const CHECK_LIMIT_MS = 60_000;
 /** A URL whose port has no server (port 1). It holds a password, so the connect reads no password source. */
 const UNREACHABLE_DATABASE_URL = "postgresql://postgres:unused@127.0.0.1:1/horsies";
 
+/**
+ * The head of the connectivity refusal: a refusal message starts with its config path (`broker`), so the text is
+ * `broker: broker connectivity check failed; <cause>` (`tests/unit/check/report.test.ts`). Python and Rust print
+ * `error[HRS-203]: broker connectivity check failed`.
+ */
+const CONNECTIVITY_FAILURE = "error[HRS-203]: broker: broker connectivity check failed; ";
+
 /** The end of one `check --live` process: its exit code and every output line. */
 type CheckEnd = { readonly code: number; readonly output: string };
 
@@ -74,7 +81,7 @@ describe("check --live", () => {
     const end = await runCheckLive(suite, withQueryParameter(pooledUrl(suite.db.connection), "keepalives=1"));
 
     assert.equal(end.code, 1, end.output);
-    assert.ok(end.output.includes("error[HRS-203]: broker connectivity check failed"), end.output);
+    assert.ok(end.output.includes(CONNECTIVITY_FAILURE), end.output);
     assert.ok(end.output.includes("the parameter keepalives is refused"), end.output);
     assert.ok(!end.output.includes("ok: all validations passed"), end.output);
   });
@@ -83,7 +90,7 @@ describe("check --live", () => {
     const end = await runCheckLive(suite, UNREACHABLE_DATABASE_URL);
 
     assert.equal(end.code, 1, end.output);
-    assert.ok(end.output.includes("error[HRS-203]: broker connectivity check failed"), end.output);
+    assert.ok(end.output.includes(CONNECTIVITY_FAILURE), end.output);
     assert.ok(!end.output.includes("ok: all validations passed"), end.output);
   });
 });
