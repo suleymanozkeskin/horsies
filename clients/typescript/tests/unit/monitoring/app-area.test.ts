@@ -9,7 +9,7 @@ import type { CancelAddon } from "../../../horsies/src/native/facades/cancel.ts"
 import type { HealthAddon } from "../../../horsies/src/native/facades/health.ts";
 import type { MonitoringReadsAddon } from "../../../horsies/src/native/facades/monitoring-reads.ts";
 import type { NativeCoreHandle } from "../../../horsies/src/native/handle/addon.ts";
-import { AddonOutsideMainThread } from "../../../horsies/src/thrown-errors.ts";
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import {
   coreText,
   fakeHandle,
@@ -140,11 +140,11 @@ describe("createMonitoringArea", () => {
     assert.ok(Object.isFrozen(area) && Object.isFrozen(area.monitoring));
   });
 
-  test("a thread with no addon throws AddonOutsideMainThread at the call, not at the build", async () => {
+  test("an app with no addon core on the main thread is a defect at the call, not at the build", async () => {
     const native = fakeHandle();
     const area = createMonitoringArea({ kind: "noCore" }, fakeAddons(native, []));
 
-    await assert.rejects(area.monitoring.listTasks(), AddonOutsideMainThread);
-    await assert.rejects(area.pingDatabase(), AddonOutsideMainThread);
+    await assert.rejects(area.monitoring.listTasks(), ClientDefect);
+    await assert.rejects(area.pingDatabase(), ClientDefect);
   });
 });

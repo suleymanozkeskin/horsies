@@ -1,7 +1,7 @@
 // How an area reaches the core in this thread: the addon on a main thread, the seat relay in a seat isolate, or no
 // core in any other worker thread (where a core operation is a defect).
 
-import { threadId } from "node:worker_threads";
+import { isMainThread, threadId } from "node:worker_threads";
 
 import type {
   EnqueueOutcome,
@@ -14,10 +14,11 @@ import type {
   TaskInfoRead,
   WaitBound,
 } from "../native/sends/addon.ts";
+import { raiseDefect } from "../native/call/defect.ts";
 import { unreachable } from "../native/call/never.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { TraceArgument } from "../native/values/records.ts";
-import { AddonOutsideMainThread } from "../thrown-errors.ts";
+import { AddonOutsideMainThread, ClientDefect } from "../thrown-errors.ts";
 
 /**
  * The core operations of sends and task reads. On a main thread the addon runs them; in a seat isolate the relay
@@ -79,17 +80,45 @@ export type CoreAccess =
   | { readonly kind: "seatRelay"; readonly relay: SeatRelay }
   | { readonly kind: "noCore" };
 
+/** The thread of a call: the main thread of the process, or a `worker_threads` isolate (with its id). */
+export type CallThread = { readonly kind: "main" } | { readonly kind: "worker"; readonly threadId: number };
+
 /**
- * The app's core handle of a main thread, for an area that calls the addon with it (the facades). A seat isolate and
- * any other worker thread have none: `AddonOutsideMainThread`.
+ * The core handle that `Horsies.create` built for the app, for each part that calls the addon with it: the facades,
+ * the worker run, the live check.
+ * - Off the main thread, `AddonOutsideMainThread`: the addon runs on the main thread of a process only.
+ * - On the main thread, a core access that is not the addon is a defect (`ClientDefect`): `Horsies.create` gives
+ *   every app of a main thread the addon core.
  */
 export function appCoreHandle(core: CoreAccess): CoreHandle {
+  return coreHandleOnThread(core, isMainThread ? { kind: "main" } : { kind: "worker", threadId });
+}
+
+/** The app's core handle of `core` for a call on `thread`; the refusals of `appCoreHandle`. */
+export function coreHandleOnThread(core: CoreAccess, thread: CallThread): CoreHandle {
+  switch (thread.kind) {
+    case "worker":
+      throw new AddonOutsideMainThread({ threadId: thread.threadId });
+    case "main":
+      return mainThreadCoreHandle(core);
+    default:
+      return unreachable(thread);
+  }
+}
+
+/** The handle of the addon core of a main thread; another core access there is a defect. */
+function mainThreadCoreHandle(core: CoreAccess): CoreHandle {
   switch (core.kind) {
     case "addon":
       return core.handle;
     case "seatRelay":
     case "noCore":
-      throw new AddonOutsideMainThread({ threadId });
+      return raiseDefect(
+        new ClientDefect({
+          subject: "appCoreHandle",
+          rule: `an app on the main thread holds the addon core, not the ${core.kind} access`,
+        }),
+      );
     default:
       return unreachable(core);
   }
