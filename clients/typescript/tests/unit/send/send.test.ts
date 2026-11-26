@@ -436,6 +436,14 @@ describe("the suppression of sends", () => {
     assert.equal(await sendInProcess({ ...PLAIN_START, argumentAfterScript: "check" }), "SEND_SUPPRESSED");
   });
 
+  test("the scheduler before it serves", async () => {
+    assert.equal(await sendInProcess({ ...PLAIN_START, argumentAfterScript: "scheduler" }), "SEND_SUPPRESSED");
+    assert.deepEqual(initialSuppression({ ...PLAIN_START, argumentAfterScript: "scheduler" }), {
+      kind: "suppressed",
+      reason: "schedulerBeforeServe",
+    });
+  });
+
   test("HORSIES_SUPPRESS_SENDS=1, with whitespace around it, suppresses; another value does not", async () => {
     assert.equal(await sendInProcess(PLAIN_START, { HORSIES_SUPPRESS_SENDS: "1" }), "SEND_SUPPRESSED");
     assert.equal(await sendInProcess(PLAIN_START, { HORSIES_SUPPRESS_SENDS: " 1\n" }), "SEND_SUPPRESSED");
@@ -464,7 +472,7 @@ describe("the suppression of sends", () => {
     assert.equal(await sendInProcess(PLAIN_START), "sent");
   });
 
-  test("the start of serving opens a task child and a seat, not the check command or the variable", () => {
+  test("the start of serving opens a task child, a seat and the scheduler, not the check command or the variable", () => {
     const opened = (start: ProcessStart): SendSuppression => {
       const state = new SuppressionState(initialSuppression(start), () => undefined);
 
@@ -475,6 +483,7 @@ describe("the suppression of sends", () => {
 
     assert.deepEqual(opened({ ...PLAIN_START, argumentAfterScript: "--horsies-child" }), { kind: "open" });
     assert.deepEqual(opened({ ...PLAIN_START, seatIsolate: true }), { kind: "open" });
+    assert.deepEqual(opened({ ...PLAIN_START, argumentAfterScript: "scheduler" }), { kind: "open" });
     assert.deepEqual(opened({ ...PLAIN_START, argumentAfterScript: "check" }), { kind: "suppressed", reason: "checkCommand" });
     assert.deepEqual(servingSuppression({ kind: "open" }), { kind: "open" });
   });

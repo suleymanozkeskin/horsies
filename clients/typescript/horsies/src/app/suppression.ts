@@ -1,8 +1,10 @@
-// Sends suppressed while a process prepares to serve. Every line before `cli.run` runs again in each child process
-// and each seat isolate, so a send at module level would run once per start. `Horsies.create` starts with sends
-// suppressed in a task child, in a seat isolate and in the `check` command; `cli.run` lifts the suppression when the
-// child or the seat starts to serve. `HORSIES_SUPPRESS_SENDS=1` suppresses too: read at each send, the value trimmed,
-// as the Python and Rust clients read it.
+// Sends suppressed while a process prepares to serve. Every line before `cli.run` runs again in each child process,
+// each seat isolate and each scheduler start, so a send at module level would run once per start. `Horsies.create`
+// starts with sends suppressed in a task child, in a seat isolate, in the scheduler and in the `check` command;
+// `cli.run` lifts the suppression when the child, the seat or the scheduler starts to serve. The Python scheduler
+// suppresses sends while it loads the task modules, and lifts the suppression before it serves.
+// `HORSIES_SUPPRESS_SENDS=1` suppresses too: read at each send, the value trimmed, as the Python and Rust clients read
+// it.
 
 import { isMainThread, workerData } from "node:worker_threads";
 
@@ -11,6 +13,9 @@ export const CHILD_MODE_FLAG = "--horsies-child";
 
 /** The command that checks the app and runs no task. */
 export const CHECK_COMMAND = "check";
+
+/** The command that runs the scheduler. */
+export const SCHEDULER_COMMAND = "scheduler";
 
 /** The `workerData` member that marks a seat isolate that horsies started. */
 export const SEAT_MARKER_KEY = "horsiesSeat";
@@ -24,8 +29,13 @@ const SUPPRESS_SENDS_ON = "1";
 /** A read of one environment variable. */
 export type VariableRead = (name: string) => string | undefined;
 
-/** Why sends are suppressed. A child and a seat lift it when they serve; the others stay. */
-export type SuppressionReason = "taskChildBeforeServe" | "seatBeforeServe" | "checkCommand" | "environment";
+/** Why sends are suppressed. A child, a seat and the scheduler lift it when they serve; the others stay. */
+export type SuppressionReason =
+  | "taskChildBeforeServe"
+  | "seatBeforeServe"
+  | "schedulerBeforeServe"
+  | "checkCommand"
+  | "environment";
 
 /** Whether this process may send. */
 export type SendSuppression =
@@ -60,6 +70,8 @@ export function initialSuppression(start: ProcessStart): SendSuppression {
   switch (start.argumentAfterScript) {
     case CHILD_MODE_FLAG:
       return { kind: "suppressed", reason: "taskChildBeforeServe" };
+    case SCHEDULER_COMMAND:
+      return { kind: "suppressed", reason: "schedulerBeforeServe" };
     case CHECK_COMMAND:
       return { kind: "suppressed", reason: "checkCommand" };
     default:
@@ -67,7 +79,7 @@ export function initialSuppression(start: ProcessStart): SendSuppression {
   }
 }
 
-/** The suppression after the process starts to serve: a child or a seat opens; the others stay. Pure. */
+/** The suppression after the process starts to serve: a child, a seat or the scheduler opens; the others stay. Pure. */
 export function servingSuppression(current: SendSuppression): SendSuppression {
   switch (current.kind) {
     case "open":
@@ -76,6 +88,7 @@ export function servingSuppression(current: SendSuppression): SendSuppression {
       switch (current.reason) {
         case "taskChildBeforeServe":
         case "seatBeforeServe":
+        case "schedulerBeforeServe":
           return { kind: "open" };
         case "checkCommand":
         case "environment":
@@ -117,7 +130,7 @@ export class SuppressionState {
       : this.#current;
   }
 
-  /** The process starts to serve (`cli.run`, a task child or a seat isolate). */
+  /** The process starts to serve (`cli.run`: a task child, a seat isolate or the scheduler). */
   startServing(): void {
     this.#current = servingSuppression(this.#current);
   }
