@@ -8,14 +8,41 @@
 use napi::bindgen_prelude::{BigInt, FnArgs, Function, Object};
 use napi::Env;
 use napi_derive::napi;
+use std::time::Duration;
 
-use crate::call::callback::{CallbackFailure, JsCallback, NotRunCause};
+use crate::call::callback::{CallbackFailure, CallbackWait, JsCallback, NotRunCause};
 use crate::call::guard::CallKind;
 use crate::call::operation::spawn_operation;
 use crate::values::boundary::bigint_of_u64;
 
 /// The queue bound of the registration of `probeCallback`: one call.
 const PROBE_QUEUE_BOUND: usize = 1;
+
+/// How long a call of `probeCallback` waits for the settle call.
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_to_js = false
+)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeWait {
+    /// The call ends with `noAnswer` after `millis` milliseconds.
+    Within { millis: u32 },
+    /// The call ends at the answer.
+    NoBound,
+}
+
+impl ProbeWait {
+    /// The wait of the callback primitive. Pure.
+    fn callback_wait(self) -> CallbackWait {
+        match self {
+            Self::Within { millis } => {
+                CallbackWait::Within(Duration::from_millis(u64::from(millis)))
+            }
+            Self::NoBound => CallbackWait::NoBound,
+        }
+    }
+}
 
 /// How one call of `probeCallback` ended.
 #[napi(
@@ -31,6 +58,8 @@ pub enum CallbackProbe {
     NotRun {
         cause: NotRunCause,
     },
+    /// No settle call came within the bound of `ProbeWait::Within`.
+    NoAnswer,
     Threw {
         call_id: BigInt,
         name: String,
@@ -54,6 +83,7 @@ impl CallbackProbe {
         match ended {
             Ok(answer) => Self::Answered { answer },
             Err(CallbackFailure::NotRun { cause }) => Self::NotRun { cause },
+            Err(CallbackFailure::NoAnswer { bound: _ }) => Self::NoAnswer,
             Err(CallbackFailure::Threw {
                 call_id,
                 name,
@@ -73,8 +103,8 @@ impl CallbackProbe {
     }
 }
 
-/// Register `callback` and call it once from a core thread with `argument`;
-/// resolve with how the call ended. Starts the core.
+/// Register `callback` and call it once from a core thread with `argument`,
+/// waiting as `wait` says; resolve with how the call ended. Starts the core.
 #[napi(ts_return_type = "Promise<NativeEnvelope<CallbackProbe>>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -84,19 +114,45 @@ pub fn probe_callback<'env>(
     env: &'env Env,
     callback: Function<FnArgs<(BigInt, String)>, ()>,
     argument: String,
+    wait: ProbeWait,
 ) -> napi::Result<Object<'env>> {
     let registered = JsCallback::<String, String, PROBE_QUEUE_BOUND>::register(&callback)?;
     spawn_operation(
         env,
         "probe_callback",
         CallKind::Read,
-        move |_core| async move { CallbackProbe::of(registered.call(argument).await) },
+        move |_core| async move {
+            CallbackProbe::of(registered.call(argument, wait.callback_wait()).await)
+        },
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_probe_wait_within_is_a_bound_in_milliseconds() {
+        assert_eq!(
+            ProbeWait::Within { millis: 250 }.callback_wait(),
+            CallbackWait::Within(Duration::from_millis(250))
+        );
+    }
+
+    #[test]
+    fn a_probe_wait_no_bound_is_no_bound() {
+        assert_eq!(ProbeWait::NoBound.callback_wait(), CallbackWait::NoBound);
+    }
+
+    #[test]
+    fn a_call_with_no_answer_has_its_probe_record() {
+        assert_eq!(
+            CallbackProbe::of(Err(CallbackFailure::NoAnswer {
+                bound: Duration::from_millis(50)
+            })),
+            CallbackProbe::NoAnswer
+        );
+    }
 
     #[test]
     fn each_end_of_a_call_has_its_probe_record() {
