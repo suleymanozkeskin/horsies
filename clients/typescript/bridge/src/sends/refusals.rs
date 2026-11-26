@@ -1,74 +1,75 @@
-//! The refusal record of a core check: the code, the message, the notes and
-//! the help lines.
+//! The refusal record of a core check: the catalog code, the message, the
+//! notes and the help lines.
 //!
-//! A check of `Horsies.create` gives every refusal as a value. The code is a
-//! catalog code (`HRS-nnn`), or none for a field bound that has no catalog
-//! code (the Python client refuses such a value through a field constraint).
+//! A check of `Horsies.create` gives every refusal as a value. Every refusal
+//! carries a code of the core's catalog (`HRS-nnn`).
 
-use horsies_core::{ErrorCode, HorsiesError};
+use horsies_core::{AppConfigError, ErrorCode};
 use napi_derive::napi;
 
-/// The code of a refusal of a core check.
+/// How to fix a refused value: no line, or one line, as the core's error
+/// holds it (`HorsiesError::help_text`).
 #[napi(
     discriminant = "kind",
     discriminant_case = "camelCase",
     object_from_js = false
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum CoreRefusalCode {
-    /// A code of the core's catalog, as its text (`HRS-102`).
-    Catalog { code: String },
-    /// A field bound with no catalog code.
-    NoCode,
+pub enum RefusalHelp {
+    NoHelp,
+    Help { line: String },
+}
+
+impl RefusalHelp {
+    /// The help of the core's optional help line. Pure.
+    pub fn of(help_text: Option<String>) -> Self {
+        match help_text {
+            None => Self::NoHelp,
+            Some(line) => Self::Help { line },
+        }
+    }
 }
 
 /// One refusal of a core check.
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CoreRefusal {
-    pub code: CoreRefusalCode,
+    /// A code of the core's catalog, as its text (`HRS-102`).
+    pub code: String,
     pub message: String,
     pub notes: Vec<String>,
-    /// Zero or one line: how to fix the value.
-    pub help: Vec<String>,
+    pub help: RefusalHelp,
 }
 
 impl CoreRefusal {
-    /// The refusal of a core error, with its code, notes and help. Pure.
-    pub fn of_error(error: &HorsiesError) -> Self {
-        Self {
-            code: match &error.code {
-                Some(code) => CoreRefusalCode::Catalog {
-                    code: code.as_code_str().to_owned(),
-                },
-                None => CoreRefusalCode::NoCode,
-            },
-            message: error.message.clone(),
-            notes: error.notes.clone(),
-            help: error.help_text.iter().cloned().collect(),
-        }
+    /// The refusal of an app config error: its catalog code
+    /// (`AppConfigError::error_code`), and the message, notes and help of
+    /// the core's error. Pure.
+    ///
+    /// Panics when the error has no catalog code: every `AppConfigError`
+    /// has one, so an error with none is a defect of the core. In a bridge
+    /// call, `sync_call` turns the panic into `CORE_PANIC`.
+    pub fn of_config_error(error: &AppConfigError) -> Self {
+        let code = error
+            .error_code()
+            .expect("every AppConfigError has a catalog code (AppConfigError::error_code)");
+        let converted = error.to_horsies_error();
+        Self::coded(
+            code,
+            converted.message,
+            converted.notes,
+            RefusalHelp::of(converted.help_text),
+        )
     }
 
-    /// A refusal with the catalog code `code`, its notes and its help
-    /// lines. Pure.
-    pub fn coded(code: ErrorCode, message: String, notes: Vec<String>, help: Vec<String>) -> Self {
+    /// A refusal with the catalog code `code`, its notes and its help.
+    /// Pure.
+    pub fn coded(code: ErrorCode, message: String, notes: Vec<String>, help: RefusalHelp) -> Self {
         Self {
-            code: CoreRefusalCode::Catalog {
-                code: code.as_code_str().to_owned(),
-            },
+            code: code.as_code_str().to_owned(),
             message,
             notes,
             help,
-        }
-    }
-
-    /// A refusal of a field bound that has no catalog code. Pure.
-    pub fn uncoded(message: String) -> Self {
-        Self {
-            code: CoreRefusalCode::NoCode,
-            message,
-            notes: Vec::new(),
-            help: Vec::new(),
         }
     }
 }
@@ -76,34 +77,42 @@ impl CoreRefusal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use horsies_core::HorsiesError;
 
     #[test]
-    fn a_core_error_keeps_its_code_notes_and_help() {
-        let error = HorsiesError::new("custom_queues must not be empty in CUSTOM mode")
-            .with_code(ErrorCode::ConfigInvalidQueueMode)
-            .with_note("the app is configured with QueueMode::Custom")
-            .with_help("name one queue");
+    fn a_config_error_keeps_its_code_notes_and_help() {
+        let error = AppConfigError::WorkerProfile(
+            HorsiesError::new("worker_profiles['empty']: the profile starts no children")
+                .with_code(ErrorCode::ConfigInvalidWorkerProfile)
+                .with_note("a worker of the profile runs no task")
+                .with_help("give the profile at least one child kind"),
+        );
         assert_eq!(
-            CoreRefusal::of_error(&error),
+            CoreRefusal::of_config_error(&error),
             CoreRefusal {
-                code: CoreRefusalCode::Catalog {
-                    code: "HRS-200".to_owned()
+                code: "HRS-218".to_owned(),
+                message: "worker_profiles['empty']: the profile starts no children".to_owned(),
+                notes: vec!["a worker of the profile runs no task".to_owned()],
+                help: RefusalHelp::Help {
+                    line: "give the profile at least one child kind".to_owned()
                 },
-                message: "custom_queues must not be empty in CUSTOM mode".to_owned(),
-                notes: vec!["the app is configured with QueueMode::Custom".to_owned()],
-                help: vec!["name one queue".to_owned()],
             }
         );
     }
 
     #[test]
-    fn a_core_error_with_no_code_has_no_code_and_no_help() {
-        let error = HorsiesError::new("payload.warn_bytes must be >= 1 (use None to disable)");
+    fn a_payload_error_has_hrs_227_and_no_help() {
+        let error = AppConfigError::Payload(
+            "payload.warn_bytes must be >= 1 (use None to disable)".to_owned(),
+        );
         assert_eq!(
-            CoreRefusal::of_error(&error),
-            CoreRefusal::uncoded(
-                "payload.warn_bytes must be >= 1 (use None to disable)".to_owned()
-            )
+            CoreRefusal::of_config_error(&error),
+            CoreRefusal {
+                code: "HRS-227".to_owned(),
+                message: "payload.warn_bytes must be >= 1 (use None to disable)".to_owned(),
+                notes: Vec::new(),
+                help: RefusalHelp::NoHelp,
+            }
         );
     }
 }

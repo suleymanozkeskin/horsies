@@ -1,29 +1,31 @@
 // The send path: `app.send` and `app.retrySend`.
 //
 // A send: the contract is listed; sends are not suppressed; the options and the input pass their checks (the input
-// with a read-back); the core prepares the facts (task id, options text, retention, payload bound); one enqueue with
+// with a read-back); the core prepares the facts (task id, options text, retention, payload bound, the priority of the
+// queue in the accepted config); one enqueue with
 // `FIRST`, wrapped by the send observer; with `resendOnTransientErr`, a retryable `ENQUEUE_FAILED` is sent again with
 // `REPEAT`, at most `RESEND_COUNT` times. Every refusal before the enqueue writes nothing.
 
 import type { CoreAccess } from "../app/core-access.ts";
 import type { SendObserver } from "../app/observers.ts";
 import type { SuppressionState } from "../app/suppression.ts";
-import type { TaskSendCoreError, TaskSendPayload } from "../_catalog/task_send_errors.ts";
+import type { TaskSendPayload } from "../_catalog/task_send_errors.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
 import { refusalText } from "../codec/refusal.ts";
 import type { CompiledContract } from "../contract/compile.ts";
 import { contractRecord } from "../contract/definition.ts";
 import { type TaskId, taskIdFromCore } from "../contract/ids.ts";
-import type { EnqueueRequest, OptionalText, RetentionRecord, SendKind } from "../native/sends/addon.ts";
+import type { EnqueueRequest, OptionalText, RetentionRecord, SendKind, SendPriority } from "../native/sends/addon.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 import { readFormOfCompiled, type TaskHandle, taskHandleOf } from "../read/handle.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import { RESEND_COUNT, RESEND_FIRST_WAIT_MS, RESEND_LONGEST_WAIT_MS } from "./bounds.ts";
+import { DEFAULT_QUEUE_PRIORITY, RESEND_COUNT, RESEND_FIRST_WAIT_MS, RESEND_LONGEST_WAIT_MS } from "./bounds.ts";
 import { enqueue, prepareSend } from "./core-calls.ts";
 import {
   preconditionFailed,
   type RetryableSendError,
   ruleRefused,
+  type SendFailure,
   sendErrorOfRaw,
   suppressedError,
   type TaskSendError,
@@ -31,8 +33,8 @@ import {
 } from "./errors.ts";
 import { checkSendOptions, epochMicrosTowardPast, type SendOptions } from "./options.ts";
 
-/** The queue and the priority that each send of a task carries. */
-export type QueueRoute = { readonly queueName: string; readonly priority: number };
+/** The queue that each send of a task carries. The priority of the queue comes from the core's accepted config. */
+export type QueueRoute = { readonly queueName: string };
 
 /** A contract of the app's list: its compiled form and its queue route. */
 export type ListedTask = { readonly compiled: CompiledContract; readonly route: QueueRoute };
@@ -93,6 +95,15 @@ export async function retrySend<O, E extends string>(
   context: SendContext,
   error: RetryableSendError<O, E>,
 ): Promise<SendOutcome<O, E>> {
+  // A JavaScript caller can pass another error than the type allows.
+  const code: string = error.code;
+
+  if (code !== "ENQUEUE_FAILED") {
+    const message = `retrySend takes ENQUEUE_FAILED only; ${code} is not retryable`;
+
+    return err(validationFailed(message, ruleRefused(message)));
+  }
+
   const listed = context.contracts.byName(error.payload.taskName);
 
   if (listed.kind === "notListed") {
@@ -108,7 +119,7 @@ export async function retrySend<O, E extends string>(
   return sentHandle<O, E>(context, listed.task, requestOfPayload(error.taskId, error.payload), "REPEAT");
 }
 
-function notListed(taskName: string): TaskSendCoreError {
+function notListed(taskName: string): SendFailure {
   const message = `the task ${taskName} is not in the tasks list of this app; add its contract to Horsies.create({ tasks })`;
 
   return validationFailed(message, preconditionFailed(message));
@@ -116,7 +127,7 @@ function notListed(taskName: string): TaskSendCoreError {
 
 function suppression(
   context: SendContext,
-): { readonly kind: "open" } | { readonly kind: "suppressed"; readonly error: TaskSendCoreError } {
+): { readonly kind: "open" } | { readonly kind: "suppressed"; readonly error: SendFailure } {
   const current = context.suppression.current();
 
   switch (current.kind) {
@@ -138,7 +149,7 @@ async function preparedRequest(
   task: ListedTask,
   input: object,
   options: SendOptions,
-): Promise<Result<EnqueueRequest, TaskSendCoreError>> {
+): Promise<Result<EnqueueRequest, SendFailure>> {
   const { compiled, route } = task;
   const taskName = compiled.record.name;
   const checked = checkSendOptions(options);
@@ -163,9 +174,7 @@ async function preparedRequest(
     return err(validationFailed(message, ruleRefused(message)));
   }
 
-  const prepared = await prepareSend(context.core, {
-    taskName,
-    queueName: route.queueName,
+  const prepared = await prepareSend(context.core, taskName, {
     retention: checked.value.retention,
     deadline: checked.value.deadline,
     inputBytes: Buffer.byteLength(text.value, "utf8"),
@@ -176,20 +185,35 @@ async function preparedRequest(
   }
 
   const request: EnqueueRequest = {
-      taskId: prepared.taskId,
-      taskName,
-      queueName: route.queueName,
-      priority: route.priority,
-      inputJson: text.value,
-      sentAtMicros: epochMicrosTowardPast(context.now()),
-      deadline: checked.value.deadline,
-      delay: checked.value.delay,
-      taskOptions: { kind: "text", text: prepared.taskOptions },
-      idempotencyKey: checked.value.idempotencyKey,
-      retention: prepared.retention,
+    taskId: prepared.taskId,
+    taskName,
+    queueName: route.queueName,
+    priority: sendPriority(prepared.priority),
+    inputJson: text.value,
+    sentAtMicros: epochMicrosTowardPast(context.now()),
+    deadline: checked.value.deadline,
+    delay: checked.value.delay,
+    taskOptions: { kind: "text", text: prepared.taskOptions },
+    idempotencyKey: checked.value.idempotencyKey,
+    retention: prepared.retention,
   };
 
   return ok(Object.freeze(request));
+}
+
+/** The priority of a prepared send: the client's priority of the default queue, or the configured one. Pure. */
+export function sendPriority(priority: SendPriority): number {
+  switch (priority.kind) {
+    case "defaultQueue":
+      return DEFAULT_QUEUE_PRIORITY;
+    case "configured":
+      return priority.priority;
+    default: {
+      const unexpected: never = priority;
+
+      throw new TypeError(`send: a priority outside its type: ${String(unexpected)}`);
+    }
+  }
 }
 
 /** The request of a resend of a payload. Pure. */
@@ -250,7 +274,7 @@ export async function enqueueWithResends(
   request: EnqueueRequest,
   firstKind: SendKind,
   trace: TraceArgument,
-): Promise<Result<TaskId, TaskSendCoreError>> {
+): Promise<Result<TaskId, SendFailure>> {
   let sent = await enqueueOnce(context, request, firstKind, trace);
 
   for (let resend = 0; resend < RESEND_COUNT && context.resendOnTransientErr && isTransient(sent); resend += 1) {
@@ -266,7 +290,7 @@ async function enqueueOnce(
   request: EnqueueRequest,
   sendKind: SendKind,
   trace: TraceArgument,
-): Promise<Result<TaskId, TaskSendCoreError>> {
+): Promise<Result<TaskId, SendFailure>> {
   const outcome = await enqueue(context.core, request, sendKind, trace);
 
   switch (outcome.kind) {
@@ -282,6 +306,6 @@ async function enqueueOnce(
   }
 }
 
-function isTransient(sent: Result<TaskId, TaskSendCoreError>): boolean {
+function isTransient(sent: Result<TaskId, SendFailure>): boolean {
   return !sent.ok && sent.error.code === "ENQUEUE_FAILED" && sent.error.retryable;
 }

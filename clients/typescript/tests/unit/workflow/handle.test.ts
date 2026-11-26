@@ -346,7 +346,7 @@ describe("the seat operations", () => {
 });
 
 describe("the child spec source", () => {
-  const facts = { taskOptionsText: () => "{}", queueClass: () => "standard_30d" };
+  const facts = { taskOptionsText: () => "{}", queueClass: () => "standard_30d", queuePriority: () => 100 };
 
   test("a listed child with params that decode: its spec data", () => {
     const answer = childSpecAnswer(registry(), facts, { definitionKey: "tests.child.v1", inputText: '{"n":1}' });

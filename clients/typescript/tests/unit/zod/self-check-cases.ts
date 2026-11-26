@@ -1,25 +1,30 @@
-// The self-check of the zod adapter: each rule runs once per process on a known schema, as Python's
-// `verify_shape_rules` does. zod gives no stability statement for its definition fields; a renamed field makes a
-// known schema compile to another kind or another refusal, and the self-check reports it. It never switches a rule
-// off: a failure refuses every zod schema until horsies reads the new field. A renamed field that the reader needs
-// makes the compile of a known schema throw; the self-check reports that throw as a failure of its case.
+// The self-check of the zod adapter: each rule runs on a known schema, as Python's `verify_shape_rules` does. zod
+// gives no stability statement for its definition fields; a renamed field makes a known schema compile to another kind
+// or another refusal, and the self-check reports it. A renamed field that the reader needs makes the compile of a
+// known schema throw; the self-check reports that throw as a failure of its case.
+//
+// The self-check builds its known schemas with zod's builders, so it runs where zod is: in the zod test lanes, once
+// per supported zod release (`SUPPORTED_ZOD`, `version.ts`), not in the main entry point, which imports no zod. A
+// release passes into the supported range only when the self-check passes on it. At run time the adapter refuses a
+// schema of a release outside the range (`version.ts`) and every definition part that it does not know
+// (`known-fields.ts`).
 //
 // The cases cover each accepted form and each refusal rule that the installed zod can build, also the forms of later
 // zod 4 releases (`z.xor()`, `z.looseRecord()`, `.exactOptional()`) when the installed zod has them.
 
 import { z } from "zod";
 
-import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
-import type { JsonValue } from "../codec/json-value.ts";
-import { encodeValue } from "../codec/writer.ts";
-import { h } from "../wire/builders.ts";
-import type { Kind, Member, MemberPresence } from "../wire/kinds.ts";
-import { err, ok, type Result } from "../wire/result.ts";
-import { unreachable } from "../wire/unreachable.ts";
-import { compileMember, type SelfCheckPassed, type ZodMemberKind } from "./adapter.ts";
-import { hz } from "./codecs.ts";
-import type { ZodSchema } from "./definition.ts";
-import type { ZodRule } from "./rules.ts";
+import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
+import type { JsonValue } from "../../../horsies/src/codec/json-value.ts";
+import { encodeValue } from "../../../horsies/src/codec/writer.ts";
+import { h } from "../../../horsies/src/wire/builders.ts";
+import type { Kind, Member, MemberPresence } from "../../../horsies/src/wire/kinds.ts";
+import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
+import { unreachable } from "../../../horsies/src/wire/unreachable.ts";
+import { compileMember, type ZodMemberKind } from "../../../horsies/src/zod/adapter.ts";
+import { hz } from "../../../horsies/src/zod/codecs.ts";
+import type { ZodSchema } from "../../../horsies/src/zod/internals.ts";
+import type { ZodRule } from "../../../horsies/src/zod/rules.ts";
 
 /** What a known schema compiles to: its kind text (`kindText`), or a refusal with one rule. */
 export type SelfCheckExpected =
@@ -40,37 +45,15 @@ export type SelfCheckCase = {
 /** A case whose schema compiled to something else: `expected` and `found` are kind texts or rules. */
 export type SelfCheckFailure = { readonly name: string; readonly expected: string; readonly found: string };
 
-/** The outcome of a self-check run: the proof that it passed, which the adapter takes, or every failure. */
-export type SelfCheckOutcome = Result<SelfCheckPassed, readonly SelfCheckFailure[]>;
-
-// SAFETY: the self-check is the one maker of the proof. It compiles its own known schemas with it, and hands it out
-// only in a passed outcome.
-const PASSED = Object.freeze({}) as SelfCheckPassed;
-
-/** The self-check of this process: not run yet, or its outcome. */
-type SelfCheckState = { readonly state: "notRun" } | { readonly state: "ran"; readonly outcome: SelfCheckOutcome };
-
-let processState: SelfCheckState = { state: "notRun" };
+/** The outcome of a self-check run: passed, or every failure. */
+export type SelfCheckOutcome = Result<"passed", readonly SelfCheckFailure[]>;
 
 /**
- * The self-check with the known schemas, once per process: the first call runs it, later calls give its outcome.
- * Fails with the cases whose schema compiled to another kind or refusal (`SelfCheckFailure`).
+ * The self-check with the known schemas on the installed zod. Fails with the cases whose schema compiled to another
+ * kind or refusal (`SelfCheckFailure`).
  */
-export function selfCheckOnce(): SelfCheckOutcome {
-  switch (processState.state) {
-    case "ran":
-      return processState.outcome;
-    case "notRun": {
-      const outcome = runSelfCheck(builtCases());
-
-      processState = { state: "ran", outcome };
-
-      return outcome;
-    }
-
-    default:
-      return unreachable(processState, "selfCheckOnce");
-  }
+export function selfCheck(): SelfCheckOutcome {
+  return runSelfCheck(builtCases());
 }
 
 /** The known cases, or one failure when building them throws (a zod that lacks a builder of the range). */
@@ -86,7 +69,7 @@ function builtCases(): readonly SelfCheckCase[] | SelfCheckFailure {
 export function runSelfCheck(cases: readonly SelfCheckCase[] | SelfCheckFailure): SelfCheckOutcome {
   const failures = "name" in cases ? [cases] : cases.flatMap(caseFailures);
 
-  return failures.length === 0 ? ok(PASSED) : err(Object.freeze(failures));
+  return failures.length === 0 ? ok("passed") : err(Object.freeze(failures));
 }
 
 /** The failures of one case. A throw of its compile is a failure: a renamed field that the reader needs. */
@@ -104,7 +87,7 @@ function thrownText(cause: unknown): string {
 }
 
 function compiledCaseFailures(known: SelfCheckCase): readonly SelfCheckFailure[] {
-  const compiled = compileMember(PASSED, known.schema);
+  const compiled = compileMember(known.schema);
   const expected = expectedText(known.expected);
   const found = compiled.ok ? memberText(compiled.value) : compiled.error.map((refused) => refused.rule).join(",");
 
@@ -328,7 +311,7 @@ function containerCases(): readonly SelfCheckCase[] {
 }
 
 function refusedCases(): readonly SelfCheckCase[] {
-  const recursive: ZodSchema = z.lazy(() => z.array(recursive));
+  const recursive: z.ZodType = z.lazy(() => z.array(recursive));
   const optionA = z.object({ kind: z.literal("a") });
   const convertedA = z.codec(optionA, optionA, { decode: (value) => value, encode: (value) => value });
   const optionB = z.object({ kind: z.literal("b") });

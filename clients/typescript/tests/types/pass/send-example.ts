@@ -1,5 +1,6 @@
-// Compile-pass cases of the sketch's send and read code (sections 4.1 to 4.3): the send error switch with a full
-// match, `retrySend` of the two accepted errors, the send options, and the read switch over the two-level code.
+// Compile-pass cases of a send and a read through the app: the send error switch with a full match (one case for
+// `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`, which `retryable` tells apart), `retrySend` of a retryable error,
+// the send options, and the read switch over the two-level code.
 
 import { defineTask, type Horsies, TaskId } from "../../../horsies/src/index.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
@@ -25,13 +26,11 @@ export async function sendAndRead(): Promise<void> {
   if (!sent.ok) {
     switch (sent.error.code) {
       case "ENQUEUE_FAILED":
+      case "IDEMPOTENCY_KEY_CONFLICT":
         if (sent.error.retryable) {
           void (await app.retrySend(sent.error));
         }
 
-        break;
-      case "IDEMPOTENCY_KEY_CONFLICT":
-        void (await app.retrySend(sent.error));
         break;
       case "VALIDATION_FAILED":
       case "PAYLOAD_TOO_LARGE":

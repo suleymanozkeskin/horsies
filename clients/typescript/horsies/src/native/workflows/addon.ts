@@ -12,7 +12,14 @@
 import { requireAddon } from "../call/addon.ts";
 import type { NativeEnvelope } from "../call/envelope.ts";
 import type { NativeCoreHandle } from "../handle/addon.ts";
-import type { NativeSendRules, NativeTaskOptions, RecordedInstant, RecordedText, WaitBound } from "../sends/addon.ts";
+import type {
+  NativeSendRules,
+  NativeTaskOptions,
+  RecordedInstant,
+  RecordedText,
+  SendPriority,
+  WaitBound,
+} from "../sends/addon.ts";
 import type { RawCatalogError, TraceArgument } from "../values/records.ts";
 
 /** A spec that the core read from spec data (the core's `ClientSpec`). Only the core reads it. */
@@ -171,6 +178,11 @@ export interface WorkflowsAddon {
    * `rules`, else the default class (the core's `resolve_queue_retention(queue).class_key()`). Pure.
    */
   queueRetentionClasses(rules: NativeSendRules, queueNames: string[]): NativeEnvelope<string[]>;
+  /**
+   * The priority of each queue, in the order of `queueNames`: the one queue of the default queue mode (the package
+   * holds its priority), or a custom queue with its priority in the accepted config. Pure.
+   */
+  queuePriorities(rules: NativeSendRules, queueNames: string[]): NativeEnvelope<SendPriority[]>;
   /**
    * The stored options text of a node of the task with the checked `options` and the deadline `epochMicros` (the
    * core's `stored_send_options_text`). An instant outside the core's range is a `CLIENT_DEFECT`. Pure.
