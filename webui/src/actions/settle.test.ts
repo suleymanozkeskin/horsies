@@ -46,7 +46,7 @@ const node = (taskIndex: number, nodeStatus: string): WorkflowNode => ({
   node_status: nodeStatus,
   is_subworkflow: false,
   sub_workflow_id: null,
-  allow_failed_deps: false,
+  allow_failed_dependencies: false,
   started_at: null,
   completed_at: null,
   exec_s: null,

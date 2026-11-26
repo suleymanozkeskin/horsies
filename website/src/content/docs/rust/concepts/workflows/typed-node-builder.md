@@ -99,7 +99,7 @@ Each method returns `Result<TaskNode<T, I>, HorsiesError>`. The text of `input_j
 
 What the parameter gets:
 
-| Dependency | Default | `allow_failed_deps(true)` |
+| Dependency | Default | `allow_failed_dependencies(true)` |
 |------------|---------|---------------------------|
 | COMPLETED | The node runs with `TaskOutcome::Succeeded(value)` | The same |
 | FAILED | The node is SKIPPED | The node runs with `TaskOutcome::Failed(error)` |
@@ -109,7 +109,7 @@ A `TaskOutcome<S, E>` parameter has no default. A node that joins on any or on a
 
 ## Read Results through the Workflow Context
 
-A task that takes the workflow context has the attribute `workflow_ctx` and a parameter named `workflow_ctx` of type `WorkflowContext`. The node names the dependencies whose results the context holds with `.workflow_ctx_from(nodes)`.
+A task that takes the workflow context has the attribute `workflow_ctx` and a parameter named `workflow_ctx` of type `WorkflowContext`. The node names the dependencies whose results the context holds with `.workflow_context_from(nodes)`.
 
 ```rust
 use std::convert::Infallible;
@@ -130,13 +130,13 @@ In the spec of [Build a Node](#build-a-node):
 let _audit = builder.task(
     audit_checkout::node()
         .waits_for(charged)
-        .workflow_ctx_from([charged]),
+        .workflow_context_from([charged]),
 )?;
 ```
 
-- Each node of `workflow_ctx_from` must be a dependency of the node: `HRS-009` otherwise. `waits_for` and `arg_from` make a dependency.
-- `workflow_ctx_from` on a task without the `workflow_ctx` attribute is `HRS-010`.
-- The worker writes the context into the parameter `workflow_ctx` only for a node with `workflow_ctx_from`. A node of such a task without `workflow_ctx_from` is `HRS-020`: its parameter has no value.
+- Each node of `workflow_context_from` must be a dependency of the node: `HRS-009` otherwise. `waits_for` and `arg_from` make a dependency.
+- `workflow_context_from` on a task without the `workflow_ctx` attribute is `HRS-010`.
+- The worker writes the context into the parameter `workflow_ctx` only for a node with `workflow_context_from`. A node of such a task without `workflow_context_from` is `HRS-020`: its parameter has no value.
 - Give each context source a node id, and read it with `NodeKey::new(id)`. `WorkflowSpec::key(node_ref)` and `TaskNode::key()` also give the key.
 
 | `WorkflowContext` method | Returns |
@@ -152,7 +152,7 @@ let _audit = builder.task(
 
 | `WorkflowContextError` | When |
 |------------------------|------|
-| `NotInContext { node_id }` | The context holds no entry for the node: it is not in `workflow_ctx_from`, or it did not end |
+| `NotInContext { node_id }` | The context holds no entry for the node: it is not in `workflow_context_from`, or it did not end |
 | `Unreadable { node_id, cause }` | The stored value does not read as the asked type; `cause` names no value |
 | `UnknownUserCode { node_id, cause }` | The stored error has a user code that `E` does not name |
 
@@ -164,7 +164,7 @@ let _audit = builder.task(
 | `.node_id(id)` | Sets the node id: unique in the spec (`HRS-004`), `[A-Za-z0-9_\-:.]`, at most 128 characters (`HRS-003`). Without one the node gets `<workflow name slug>:<index>` |
 | `.queue(name)` | Runs the task on this queue in place of the task's queue |
 | `.priority(p)` | Claims the task with priority 1 (first) to 100 (last), in place of the queue's priority. Another value is `HRS-034` |
-| `.allow_failed_deps(true)` | Runs the node when a dependency failed or was skipped |
+| `.allow_failed_dependencies(true)` | Runs the node when a dependency failed or was skipped |
 | `.join_all()` (default), `.join_any()`, `.join_quorum(min_success)` | When the node becomes ready. `min_success` is 1 to the node's dependencies (`HRS-013`) |
 | `.good_until(deadline)` | The task expires when it has not started by `deadline: DateTime<Utc>` |
 | `.key()` | `Option<NodeKey<T>>`: the key of the node's result when the node has a given node id |
@@ -177,7 +177,7 @@ let _audit = builder.task(
 | Type | Is |
 |------|----|
 | `TypedNodeRef<T>` | What `builder.task` and `builder.sub_workflow` return: a node of this builder with the output type `T`. `Copy`. `untyped()` returns its `NodeRef`; it converts with `Into<NodeRef>` |
-| `NodeRef` | A reference with no output type. `waits_for`, `workflow_ctx_from`, `output` and `SuccessCase::new` take `Into<NodeRef>` |
+| `NodeRef` | A reference with no output type. `waits_for`, `workflow_context_from`, `output` and `SuccessCase::new` take `Into<NodeRef>` |
 | `NodeKey<T>` | The key of a node's result: its node id, with the output type `T`. `NodeKey::new(node_id)`, `node_id()` |
 | `InputField<I, F>` | The token of the field `F` of the input type `I`. `name()` returns the member name |
 
@@ -185,15 +185,15 @@ let _audit = builder.task(
 
 **Do not take a dependency's result in a node that joins on any or on a quorum.** `arg_from` on such a node is `HRS-013`. Read the results through the workflow context.
 
-**Do not name a context source that the node does not wait for.** `workflow_ctx_from` without a dependency on the node is `HRS-009`.
+**Do not name a context source that the node does not wait for.** `workflow_context_from` without a dependency on the node is `HRS-009`.
 
 <!-- rust-check: skip elided -- a Wrong / Correct pair of expressions -->
 ```rust
 // Wrong
-audit_checkout::node().workflow_ctx_from([charged])
+audit_checkout::node().workflow_context_from([charged])
 
 // Correct
-audit_checkout::node().waits_for(charged).workflow_ctx_from([charged])
+audit_checkout::node().waits_for(charged).workflow_context_from([charged])
 ```
 
 **Do not add a node to a builder of an app that does not register its task.** `builder.task(node)` is then `HRS-302`. Register the task on the app that makes the builder.

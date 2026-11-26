@@ -982,7 +982,7 @@ class WorkflowNodeInfo(BaseModel):
     node_status: str
     is_subworkflow: bool
     sub_workflow_id: str | None
-    allow_failed_deps: bool
+    allow_failed_dependencies: bool
     started_at: datetime | None
     completed_at: datetime | None
     exec_s: float | None

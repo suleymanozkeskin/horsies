@@ -64,7 +64,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
             fn=process_data,
             waits_for=[fetch],           # wait for fetch to be terminal
             args_from={"raw": fetch},     # inject fetch's TaskOutcome as 'raw' kwarg
-            allow_failed_deps=True,       # run even if fetch failed
+            allow_failed_dependencies=True,  # run even if fetch failed
         )
         ```
     """
@@ -108,7 +108,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
     - Task receives: def my_task(validated: TaskOutcome[A, E], transformed: TaskOutcome[B, E])
     """
 
-    workflow_ctx_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
+    workflow_context_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
     """
     - Optional context: subset of dependencies to include in WorkflowContext
     - Only injected if task declares `workflow_ctx: WorkflowContext | None` parameter
@@ -124,7 +124,7 @@ class TaskNode(Generic[OkT_co, CodeT_co]):
     - Priority overrides (if None, use task decorator defaults)
     """
 
-    allow_failed_deps: bool = False
+    allow_failed_dependencies: bool = False
     """
     - If True, this task runs even if dependencies failed (receives Failed outcomes)
     - If False (default), task is SKIPPED when any dependency fails
@@ -288,7 +288,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     - Example: args_from={"input_data": fetch_node} → kwargs["input_data"] = TaskOutcome[T, E]
     """
 
-    workflow_ctx_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
+    workflow_context_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
     """
     - Optional context: subset of dependencies to include in WorkflowContext
     - For SubWorkflowNodes: access via ctx.summary_for(node) → SubWorkflowSummary
@@ -306,7 +306,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     - Required for join="quorum": minimum dependencies that must succeed
     """
 
-    allow_failed_deps: bool = False
+    allow_failed_dependencies: bool = False
     """
     - False (default): SKIPPED if any dependency failed
     - True: starts regardless, failed deps passed as Failed(task_error) via args_from

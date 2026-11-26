@@ -120,7 +120,7 @@ class TestAsyncTaskNodes:
 
         assert exc_info.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
-    def test_workflow_ctx_from_needs_the_parameter_on_an_async_task(self) -> None:
+    def test_workflow_context_from_needs_the_parameter_on_an_async_task(self) -> None:
         app = _app()
 
         @app.task('sync_first')
@@ -132,7 +132,7 @@ class TestAsyncTaskNodes:
             return Ok(1)
 
         first = first_task.node()()
-        second = without_ctx.node(waits_for=[first], workflow_ctx_from=[first])()
+        second = without_ctx.node(waits_for=[first], workflow_context_from=[first])()
 
         with pytest.raises(WorkflowValidationError) as exc_info:
             app.workflow(
@@ -143,7 +143,7 @@ class TestAsyncTaskNodes:
 
         assert exc_info.value.code == ErrorCode.WORKFLOW_CTX_PARAM_MISSING
 
-    def test_workflow_ctx_from_is_accepted_on_an_async_task_that_declares_it(
+    def test_workflow_context_from_is_accepted_on_an_async_task_that_declares_it(
         self,
     ) -> None:
         app = _app()
@@ -160,7 +160,7 @@ class TestAsyncTaskNodes:
             return Ok(1)
 
         first = first_task.node()()
-        second = with_ctx.node(waits_for=[first], workflow_ctx_from=[first])()
+        second = with_ctx.node(waits_for=[first], workflow_context_from=[first])()
         spec = app.workflow(
             name='ctx_present',
             tasks=[first, second],
@@ -170,5 +170,5 @@ class TestAsyncTaskNodes:
         node = spec.tasks[1]
         assert isinstance(node, TaskNode)
         assert node.fn is with_ctx
-        assert node.workflow_ctx_from is not None
-        assert len(node.workflow_ctx_from) == 1
+        assert node.workflow_context_from is not None
+        assert len(node.workflow_context_from) == 1

@@ -95,7 +95,7 @@ def recovery_wf_step(*, step: str, delay_ms: int) -> Result[str, TaskError]:
 #
 # A, B complete fast on "default" queue.
 # C, D are long-running (killed mid-flight) on "default" queue.
-# E depends on C AND D with allow_failed_deps=True — runs after recovery
+# E depends on C AND D with allow_failed_dependencies=True — runs after recovery
 #   on "recovery" queue (max_concurrency=1).
 # F depends on E, also on "recovery" queue — runs sequentially after E.
 # ---------------------------------------------------------------------------
@@ -108,7 +108,7 @@ _node_e = TaskNode(
     fn=recovery_wf_step,
     kwargs={'step': 'E', 'delay_ms': 50},
     waits_for=[_node_c, _node_d],
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
     queue='recovery',
 )
 _node_f = TaskNode(

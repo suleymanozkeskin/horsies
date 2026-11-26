@@ -21,7 +21,7 @@ pub const WORKFLOW_META_KWARG: &str = "__h_workflow_meta__";
 /// Context passed to workflow tasks that need access to upstream results.
 ///
 /// Constructed by the workflow engine and injected into task kwargs when
-/// a node declares `workflow_ctx_from`. The struct definition lives here
+/// a node declares `workflow_context_from`. The struct definition lives here
 /// in horsies-core; the injection logic lives in horsies-workflow.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowContext {

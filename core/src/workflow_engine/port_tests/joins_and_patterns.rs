@@ -222,7 +222,7 @@ async fn met_join_with_a_terminal_ctx_dependency(
 ) -> String {
     let pool = shared_pool().await;
     let mut aggregator = joined(2, &[0, 1], join, min_success);
-    aggregator.workflow_ctx_from = Some(vec!["node_1".to_owned()]);
+    aggregator.workflow_context_from = Some(vec!["node_1".to_owned()]);
     let workflow_id = run(
         &pool,
         &spec(name, vec![after(0, &[]), after(1, &[]), aggregator]),
@@ -259,7 +259,7 @@ async fn a_met_quorum_proceeds_when_its_context_dependency_failed() {
 async fn join_any_proceeds_when_its_context_dependency_was_skipped() {
     let pool = shared_pool().await;
     let mut aggregator = joined(3, &[1, 2], JoinType::Any, None);
-    aggregator.workflow_ctx_from = Some(vec!["node_1".to_owned()]);
+    aggregator.workflow_context_from = Some(vec!["node_1".to_owned()]);
     let workflow_id = run(
         &pool,
         &spec(
@@ -425,14 +425,14 @@ async fn a_join_any_sink_waits_after_a_failed_arm_and_runs_after_the_other() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
 }
 
-/// `TestComposedPatterns.test_diamond_allow_failed_deps_on_sink`
+/// `TestComposedPatterns.test_diamond_allow_failed_dependencies_on_sink`
 #[tokio::test]
-async fn an_allow_failed_deps_sink_gets_both_results_one_failed() {
+async fn an_allow_failed_dependencies_sink_gets_both_results_one_failed() {
     let pool = shared_pool().await;
     let mut sink = after(3, &[1, 2]);
     sink.args_from.insert("b_result".to_owned(), 1);
     sink.args_from.insert("c_result".to_owned(), 2);
-    sink.allow_failed_deps = true;
+    sink.allow_failed_dependencies = true;
     let workflow_id = run(&pool, &diamond("diamond_afd_args", sink)).await;
 
     succeed(&pool, workflow_id, 0).await;
@@ -514,11 +514,11 @@ async fn a_quorum_sink_is_enqueued_while_other_dependencies_still_run() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "COMPLETED");
 }
 
-/// A recovery node (`input_result` from `source`, `allow_failed_deps`).
+/// A recovery node (`input_result` from `source`, `allow_failed_dependencies`).
 fn recovery(index: usize, source: usize) -> AnyNode {
     let mut node = after(index, &[source]);
     node.args_from.insert("input_result".to_owned(), source);
-    node.allow_failed_deps = true;
+    node.allow_failed_dependencies = true;
     node
 }
 
@@ -1003,7 +1003,7 @@ async fn a_single_node_completes_its_workflow() {
 
 /// `TestDAGPatterns.test_diamond_one_arm_fails`: A -> [B, C] -> D; B fails.
 /// D waits until C is terminal too, then is SKIPPED (no
-/// `allow_failed_deps`), and the workflow fails.
+/// `allow_failed_dependencies`), and the workflow fails.
 #[tokio::test]
 async fn a_failed_diamond_arm_skips_the_sink_once_the_other_arm_ends() {
     let pool = shared_pool().await;
