@@ -29,8 +29,8 @@ export interface NativePreparedWorker {
  *   writes it, and the value is not kept;
  * - `profileRefused`: the core's report on the profile set or the requested profile;
  * - `connectionSettingsRefused`: the broker config check refuses the connection settings;
- * - `sharedThreadUnavailable`: the profile starts `SHARED_THREAD` children, and the runtime does not cap the memory of
- *   a worker thread (Bun).
+ * - `sharedThreadUnavailable`: the profile starts `SHARED_THREAD` children, and the runtime does not cap the
+ *   JavaScript heap of a worker thread (not Node).
  */
 export type WorkerPreparation =
   | { readonly kind: "prepared"; readonly worker: NativePreparedWorker }
@@ -40,8 +40,9 @@ export type WorkerPreparation =
   | { readonly kind: "sharedThreadUnavailable"; readonly profile: string };
 
 /**
- * Whether the runtime of this process caps the memory of a worker thread: `CAPPED` on Node (`resourceLimits`; a seat
- * isolate at its cap ends alone), `NOT_CAPPED` on Bun (it ignores `resourceLimits`).
+ * Whether the runtime of this process caps the JavaScript heap of a worker thread: `CAPPED` on Node (`resourceLimits`;
+ * a seat isolate at its cap ends alone), `NOT_CAPPED` on every other runtime (Bun ignores `resourceLimits`). The cap
+ * does not cover `ArrayBuffer` and `Buffer` memory on any runtime.
  */
 export type SeatIsolateMemory = "CAPPED" | "NOT_CAPPED";
 

@@ -3,9 +3,11 @@
 // at this extension point; this package never imports the telemetry code.
 //
 // Order of the calls for one body: `enter` with the facts of the run (from the `run` message); `run` with the body
-// call; `thrown` with a value that the body threw or rejected with, before the error mapping; `end` with how the body
-// ended and the time it ended (`endedAt`). The isolate calls `end` when the body ends in the isolate: a sync body
-// that runs past its deadline ends late, and `endedAt` is that time, not the time of the run's end in the core.
+// call; `thrown` with a value that the body threw or rejected with, before the error mapping; `end` with the verdict of
+// the run and its time (`endedAt`), from the `bodyEnded` message of the main thread. The main thread gives the verdict
+// from the run's cancel cause (a deadline is `timedOut`, an operator cancel `cancelled`) and from its outcome, at its
+// settle; `endedAt` is the main thread's time of that settle. A sync body that runs past its deadline ends late in the
+// isolate, and its observation ends at its settle.
 
 import type { AppContext } from "../app/context.ts";
 import type { BodyEnd, BodyObservation } from "../child/body-observer.ts";
@@ -17,7 +19,7 @@ export interface SeatBodyObservation {
   run<T>(call: () => T): T;
   /** The body threw, or its Promise rejected, with `cause`. */
   thrown(cause: unknown): void;
-  /** The body ended with `end` at `endedAt`. */
+  /** The run ended with the verdict `end` at `endedAt` (the main thread's time of its settle). */
   end(end: BodyEnd, endedAt: Temporal.Instant): void;
 }
 
@@ -50,15 +52,16 @@ export function seatBodyObserverOf(context: AppContext): SeatBodyObserver {
   return observers.get(context) ?? NO_SEAT_BODY_OBSERVER;
 }
 
-/** The observation of the body adapter for `observation`: `end` gets the time of `now` at the call. */
-export function bodyObservationOf(observation: SeatBodyObservation, now: () => Temporal.Instant): BodyObservation {
+/**
+ * The observation of the body adapter for `observation`: `run` and `thrown` pass on; the adapter's `end` passes
+ * nothing, because the observation ends at the main thread's verdict (`bodyEnded`).
+ */
+export function bodyObservationOf(observation: SeatBodyObservation): BodyObservation {
   return Object.freeze({
     run: <T>(call: () => T): T => observation.run(call),
     thrown: (cause: unknown): void => {
       observation.thrown(cause);
     },
-    end: (end: BodyEnd): void => {
-      observation.end(end, now());
-    },
+    end: (): void => undefined,
   });
 }

@@ -3,18 +3,29 @@
 // - A worker thread whose `workerData` holds the seat marker is a seat isolate. Its channel is made once, at the first
 //   read in the thread (`Horsies.create` reads it for the app's core access): it parses the marker, makes the relay,
 //   and listens on the port of the thread.
-// - The channel gives each message of the main thread to its owner: `opReply` to the relay, `run` and `cancel` to the
-//   runs of the seat once the isolate serves (`serve`). A `run` or a `cancel` before the serve, and a message outside
-//   the protocol, are defects of the package: the throw ends the isolate.
+// - The channel gives each message of the main thread to its owner: `opReply` to the relay, `run`, `cancel` and
+//   `bodyEnded` to the runs of the seat once the isolate serves (`serve`).
+// - A defect of the package in the isolate follows the defect rule of a worker process: the channel sends it to the
+//   main thread of the child (`defect`), which aborts the child; then the isolate throws. A `run` before the serve, a
+//   message outside the protocol, and any throw while the channel handles a message are such defects.
 // - Another worker thread has no channel and no core.
 
 import { isMainThread, parentPort, workerData } from "node:worker_threads";
 
 import type { CoreAccess } from "../app/core-access.ts";
 import { isObjectLike } from "../codec/values.ts";
-import { ClientDefect } from "../thrown-errors.ts";
+import { raiseDefect, reportDefectsToMainThread } from "../native/call/defect.ts";
+import { thrownFacts } from "../native/call/thrown-facts.ts";
+import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { type MainToSeat, parseMainToSeat, type SeatMarker, seatMarkerOf, type SeatToMain } from "./protocol.ts";
+import {
+  type MainToSeat,
+  parseMainToSeat,
+  SEAT_PROTOCOL_VERSION,
+  type SeatMarker,
+  seatMarkerOf,
+  type SeatToMain,
+} from "./protocol.ts";
 import { IsolateRelay } from "./relay.ts";
 
 /** The port of a seat isolate to the main thread of its child. */
@@ -24,10 +35,11 @@ export interface IsolatePort {
   onMessage(listener: (message: object) => void): void;
 }
 
-/** What serves the runs of a seat: the `run` and the `cancel` messages. */
+/** What serves the runs of a seat: the `run`, `cancel` and `bodyEnded` messages. */
 export interface SeatRunHandler {
   run(message: Extract<MainToSeat, { readonly kind: "run" }>): void;
   cancel(message: Extract<MainToSeat, { readonly kind: "cancel" }>): void;
+  bodyEnded(message: Extract<MainToSeat, { readonly kind: "bodyEnded" }>): void;
 }
 
 /** Whether the isolate serves runs yet. */
@@ -38,6 +50,8 @@ export class SeatChannel {
   readonly marker: SeatMarker;
   readonly relay: IsolateRelay;
   readonly #port: IsolatePort;
+  /** The defects sent to the main thread already: a defect that two paths report goes once. */
+  readonly #reported = new WeakSet<CoreDefect>();
   #runs: RunsSlot = { kind: "notServing" };
 
   constructor(marker: SeatMarker, port: IsolatePort) {
@@ -45,10 +59,25 @@ export class SeatChannel {
     this.#port = port;
     this.relay = new IsolateRelay((message) => {
       port.post(message);
-    });
+    }, marker.relayBounds);
     port.onMessage((message) => {
-      this.#dispatch(parseMainToSeat(message));
+      this.#guarded(message);
     });
+  }
+
+  /** Send the defect `defect` to the main thread of the child: its defect rule aborts the child. Never throws. */
+  reportDefect(defect: CoreDefect): void {
+    if (this.#reported.has(defect)) {
+      return;
+    }
+
+    this.#reported.add(defect);
+
+    try {
+      this.#port.post({ kind: "defect", protocol: SEAT_PROTOCOL_VERSION, code: defect.code, name: defect.name, message: defect.message });
+    } catch {
+      // The port of an ending isolate refuses posts; the throw that follows ends the isolate.
+    }
   }
 
   /** Send `message` to the main thread. */
@@ -64,7 +93,7 @@ export class SeatChannel {
 
         return;
       case "serving":
-        throw new ClientDefect({ subject: "seat isolate", rule: "a seat isolate serves its runs once" });
+        raiseDefect(new ClientDefect({ subject: "seat isolate", rule: "a seat isolate serves its runs once" }));
       default:
         unreachable(this.#runs, "SeatChannel.serve");
     }
@@ -84,8 +113,25 @@ export class SeatChannel {
         this.#handler(message.kind).cancel(message);
 
         return;
+      case "bodyEnded":
+        this.#handler(message.kind).bodyEnded(message);
+
+        return;
       default:
         unreachable(message, "SeatChannel.dispatch");
+    }
+  }
+
+  /** Handle one message; a throw there is a defect of the package: the defect rule, then the throw. */
+  #guarded(message: object): void {
+    try {
+      this.#dispatch(parseMainToSeat(message));
+    } catch (cause) {
+      const defect = cause instanceof CoreDefect ? cause : channelDefect(cause);
+
+      this.reportDefect(defect);
+
+      throw defect;
     }
   }
 
@@ -94,7 +140,7 @@ export class SeatChannel {
       case "serving":
         return this.#runs.handler;
       case "notServing":
-        throw new ClientDefect({ subject: "seat isolate", rule: `the main thread sent ${kind} before the isolate served its runs` });
+        return raiseDefect(new ClientDefect({ subject: "seat isolate", rule: `the main thread sent ${kind} before the isolate served its runs` }));
       default:
         return unreachable(this.#runs, "SeatChannel.handler");
     }
@@ -157,11 +203,26 @@ function channelOfThread(): ThreadChannel {
   switch (read.kind) {
     case "notSeat":
       return read;
-    case "seat":
-      return { kind: "seat", channel: new SeatChannel(read.marker, threadPort()) };
+    case "seat": {
+      const channel = new SeatChannel(read.marker, threadPort());
+
+      reportDefectsToMainThread((defect) => {
+        channel.reportDefect(defect);
+      });
+
+      return { kind: "seat", channel };
+    }
+
     default:
       return unreachable(read, "channelOfThread");
   }
+}
+
+/** A throw that is not a defect class, while the channel handled a message: a defect of the package. */
+function channelDefect(cause: unknown): ClientDefect {
+  const facts = thrownFacts(cause);
+
+  return new ClientDefect({ subject: "seat isolate", rule: `a message of the main thread threw ${facts.name}: ${facts.message}` });
 }
 
 /** The port of this worker thread. */
@@ -179,7 +240,7 @@ function threadPort(): IsolatePort {
     onMessage: (listener) => {
       port.on("message", (message) => {
         if (!isObjectLike(message)) {
-          throw new ClientDefect({ subject: "seat protocol", rule: "a message of the main thread is not an object" });
+          raiseDefect(new ClientDefect({ subject: "seat protocol", rule: "a message of the main thread is not an object" }));
         }
 
         listener(message);

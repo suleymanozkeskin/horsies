@@ -8,9 +8,10 @@
 //!   with the core's parser and picks the profile (`WorkerPlan::of_manifest`).
 //!   Answers `prepared`, `manifestBound`, `profileRefused`,
 //!   `connectionSettingsRefused` or `sharedThreadUnavailable` (a profile
-//!   with `SHARED_THREAD` children in a runtime that does not cap the memory
-//!   of a worker thread: Bun). A start member that the core's parser refuses
-//!   is `MANIFEST_REFUSED`, a defect of the package.
+//!   with `SHARED_THREAD` children in a runtime that does not cap the
+//!   JavaScript heap of a worker thread: any runtime but Node). A start
+//!   member that the core's parser refuses is `MANIFEST_REFUSED`, a defect of
+//!   the package.
 //! - `runWorker(worker, handle)`: a service run on the core's process
 //!   runtime. The worker builds its own broker for the client family
 //!   `TYPESCRIPT`. Its workflow steps build sub-workflow children with the
@@ -130,22 +131,23 @@ pub enum WorkerPreparation {
     /// PgBouncer transaction mode with no session URL). Nothing started.
     ConnectionSettingsRefused { cause: String },
     /// The profile `profile` starts `SHARED_THREAD` children, and the
-    /// runtime of this process does not cap the memory of a worker thread
-    /// (Bun ignores `resourceLimits`): a seat isolate out of memory would
-    /// not end alone. Nothing started.
+    /// runtime of this process does not cap the JavaScript heap of a worker
+    /// thread (it is not Node; Bun ignores `resourceLimits`): a seat isolate
+    /// at that heap's end would not end alone. Nothing started.
     SharedThreadUnavailable { profile: String },
 }
 
-/// Whether the runtime of this process caps the memory of a worker thread,
-/// so a `SHARED_THREAD` seat isolate out of memory ends alone.
+/// Whether the runtime of this process caps the JavaScript heap of a worker
+/// thread, so a `SHARED_THREAD` seat isolate at its cap ends alone. The cap
+/// does not cover `ArrayBuffer` and `Buffer` memory on any runtime.
 #[napi(string_enum = "UPPER_SNAKE")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SeatIsolateMemory {
     /// Node: a worker thread has its `resourceLimits`; at the cap the
     /// isolate ends with `ERR_WORKER_OUT_OF_MEMORY` and the child lives.
     Capped,
-    /// Bun: `resourceLimits` is ignored, and an isolate grows with no
-    /// bound.
+    /// Every other runtime: Bun ignores `resourceLimits`, and an isolate
+    /// heap grows with no bound.
     NotCapped,
 }
 

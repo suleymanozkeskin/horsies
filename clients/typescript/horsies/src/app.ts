@@ -20,13 +20,12 @@ import {
 } from "./app/create.ts";
 import { registerImplementation } from "./app/implement.ts";
 import { recordAppContext } from "./app/internals.ts";
-import { appCoreHandle } from "./app/core-access.ts";
 import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
 import type { StateKey } from "./child/state.ts";
 import { createMonitoringArea, type Monitoring, type MonitoringArea } from "./monitoring/app-area.ts";
 import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts";
 import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/health-types.ts";
-import { createRerunArea, type RerunArea } from "./rerun/app-area.ts";
+import { type RerunArea, rerunAreaOfCore } from "./rerun/app-area.ts";
 import type { CallerTransaction } from "./rerun/caller.ts";
 import type { CallerRerunError, RerunError } from "./rerun/errors.ts";
 import type { RerunCommand, RerunOutcome, RerunPolicy } from "./rerun/types.ts";
@@ -51,10 +50,7 @@ export class Horsies {
     this.#context = context;
     this.#monitoringArea = createMonitoringArea(context.core);
     this.monitoring = this.#monitoringArea.monitoring;
-    this.#rerunArea = createRerunArea({
-      coreHandle: () => appCoreHandle(context.core),
-      activeCarrier: () => context.observer.activeCarrier(),
-    });
+    this.#rerunArea = rerunAreaOfCore(context.core, () => context.observer.activeCarrier());
     recordAppContext(this, context);
   }
 

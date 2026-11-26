@@ -16,7 +16,7 @@ import {
 } from "../../../horsies/src/seats/protocol.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { PREPARED } from "../app/support.ts";
-import { cancelMessage, replyMessage, runMessage } from "./support.ts";
+import { bodyEndedMessage, cancelMessage, replyMessage, runMessage, TEST_RELAY_BOUNDS } from "./support.ts";
 
 const RECORDED_FACTS = {
   kind: "recorded",
@@ -60,6 +60,14 @@ describe("the messages of a seat isolate", () => {
       requestId: 12,
       request: { area: "sends", operation: { kind: "taskInfo", taskId: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b" } },
     },
+    {
+      kind: "op",
+      protocol: SEAT_PROTOCOL_VERSION,
+      requestId: 13,
+      request: { area: "facades", operation: { part: "database", call: { method: "pingDatabase", args: [] } } },
+    },
+    { kind: "defect", protocol: SEAT_PROTOCOL_VERSION, code: "CLIENT_DEFECT", name: "ClientDefect", message: "seat run: a rule" },
+    { kind: "log", protocol: SEAT_PROTOCOL_VERSION, line: "horsies child: a callback threw" },
   ];
 
   for (const message of messages) {
@@ -92,6 +100,13 @@ describe("the messages of the main thread", () => {
     runMessage(6n, "crunch", '{"n":1}', RECORDED_FACTS),
     cancelMessage(5n, "DEADLINE"),
     cancelMessage(5n, "OPERATOR"),
+    bodyEndedMessage(5n, { kind: "returned" }),
+    bodyEndedMessage(6n, { kind: "failed", code: "TOO_BIG" }),
+    bodyEndedMessage(7n, { kind: "timedOut" }),
+    replyMessage(3, {
+      kind: "reply",
+      reply: { area: "facades", reply: { envelope: { kind: "value", value: { kind: "json", text: "[]" } } } },
+    }),
     replyMessage(1, { kind: "reply", reply: { area: "sends", reply: { kind: "prepareSend", prepared: PREPARED } } }),
     replyMessage(2, { kind: "refused", refusal: { code: "CORE_START_FAILED", cause: "no addon file" } }),
   ];
@@ -108,6 +123,14 @@ describe("the messages of the main thread", () => {
 
   test("another protocol version is a defect", () => {
     assert.throws(() => parseMainToSeat({ ...cancelMessage(1n, "DEADLINE"), protocol: 0 }), /protocol version 0/);
+  });
+
+  test("a verdict of an unknown kind and a defect of another code are defects", () => {
+    assert.throws(() => parseMainToSeat({ ...bodyEndedMessage(1n, { kind: "returned" }), end: { kind: "maybe" } }), /verdict/);
+    assert.throws(
+      () => parseSeatToMain({ kind: "defect", protocol: SEAT_PROTOCOL_VERSION, code: "CORE_STOPPED", name: "x", message: "y" }),
+      /no defect code/,
+    );
   });
 
   test("a cancel cause outside the two causes and a defect code as a refusal are defects", () => {
@@ -127,21 +150,35 @@ describe("the messages of the main thread", () => {
 describe("the seat marker", () => {
   test("workerData with the marker gives the marker; workerData without it is no seat", () => {
     const cancelCells = newCancelCells(4);
-    const read = seatMarkerOf(structuredClone(seatWorkerData({ seatIndex: 2, protocol: SEAT_PROTOCOL_VERSION, cancelCells })));
+
+    const read = seatMarkerOf(
+      structuredClone(seatWorkerData({ seatIndex: 2, protocol: SEAT_PROTOCOL_VERSION, cancelCells, relayBounds: TEST_RELAY_BOUNDS })),
+    );
 
     assert.equal(read.kind, "seat");
     assert.equal(read.kind === "seat" ? read.marker.seatIndex : -1, 2);
+    assert.deepEqual(read.kind === "seat" ? read.marker.relayBounds : undefined, TEST_RELAY_BOUNDS);
     // The clone shares the memory of the cells: a write on one side reads on the other.
     Atomics.store(cancelCells, 2, 1);
     assert.equal(read.kind === "seat" ? Atomics.load(read.marker.cancelCells, 2) : 0, 1);
     assert.deepEqual(seatMarkerOf({ other: true }), { kind: "notSeat" });
   });
 
-  test("a marker with no shared cells, or with a seat past its cells, is a defect", () => {
+  test("a marker with no shared cells, a seat past its cells, or a relay bound of 0 is a defect", () => {
     assert.throws(
-      () => seatMarkerOf({ horsiesSeat: { seatIndex: 0, protocol: 1, cancelCells: new Int32Array(1) } }),
+      () => seatMarkerOf({ horsiesSeat: { seatIndex: 0, protocol: 1, cancelCells: new Int32Array(1), relayBounds: TEST_RELAY_BOUNDS } }),
       /SharedArrayBuffer/,
     );
-    assert.throws(() => seatMarkerOf({ horsiesSeat: { seatIndex: 4, protocol: 1, cancelCells: newCancelCells(4) } }), /no cancel cell/);
+    assert.throws(
+      () => seatMarkerOf({ horsiesSeat: { seatIndex: 4, protocol: 1, cancelCells: newCancelCells(4), relayBounds: TEST_RELAY_BOUNDS } }),
+      /no cancel cell/,
+    );
+    assert.throws(
+      () =>
+        seatMarkerOf({
+          horsiesSeat: { seatIndex: 0, protocol: 1, cancelCells: newCancelCells(1), relayBounds: { opsInFlight: 0, opsWaiting: 3 } },
+        }),
+      /relay bound opsInFlight/,
+    );
   });
 });

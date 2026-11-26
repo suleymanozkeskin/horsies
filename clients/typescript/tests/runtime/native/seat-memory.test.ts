@@ -1,6 +1,7 @@
-// The memory cap of a seat isolate, on Node: an isolate that reaches its cap ends alone with
-// `ERR_WORKER_OUT_OF_MEMORY`; its run ends `UNHANDLED_EXCEPTION` with that error; a new isolate takes the seat and runs
-// the next run; the child lives. The isolate's cap is small (32 MiB), and the task stops at 1 GiB on its own.
+// The heap cap of a seat isolate, on Node: an isolate whose JavaScript heap reaches its cap ends alone with
+// `ERR_WORKER_OUT_OF_MEMORY`; its run ends `WORKER_CRASHED` with that error in its message; a new isolate takes the
+// seat and runs the next run; the child lives. The isolate's cap is small (32 MiB), and the task stops at 1 GiB of the
+// heap on its own.
 //
 // Node only: Bun ignores `resourceLimits`, so the case never runs there (a Bun worker refuses `SHARED_THREAD`
 // children). Run it under the memory watchdog of the runtime checks (2 GiB, with a wall-time bound). It needs no addon
@@ -44,13 +45,15 @@ async function settledOutcome(outcomes: Map<bigint, SeatOutcome>, runKey: bigint
 }
 
 describe("the memory cap of a seat isolate", () => {
-  nodeOnly("an isolate at its cap ends alone; its run ends UNHANDLED_EXCEPTION; a new isolate runs the next run", async () => {
+  nodeOnly("an isolate at its heap cap ends alone; its run ends WORKER_CRASHED; a new isolate runs the next run", async () => {
     const outcomes = new Map<bigint, SeatOutcome>();
     const ends: number[] = [];
 
     const started = startSeatPool(1, {
       start: workerIsolates(ENTRY, { maxOldGenerationSizeMb: SMALL_CAP_MB }),
+      bounds: () => ({ opsInFlight: 2, opsWaiting: 10_000, replacementBootBoundMs: 10_000 }),
       clock: () => performance.now(),
+      now: () => Temporal.Now.instant(),
       timer: (milliseconds, callback) => {
         const timer = setTimeout(callback, milliseconds);
 
@@ -77,10 +80,10 @@ describe("the memory cap of a seat isolate", () => {
 
     const outcome = await settledOutcome(outcomes, 1n);
 
-    assert.equal(outcome.kind === "error" ? outcome.parts.code.code : "", "UNHANDLED_EXCEPTION");
+    assert.equal(outcome.kind === "error" ? outcome.parts.code.code : "", "WORKER_CRASHED");
     assert.match(
       outcome.kind === "error" && outcome.parts.message.kind === "text" ? outcome.parts.message.text : "",
-      /^Unhandled exception in task allocate: Error: .*memory limit/,
+      /^Seat isolate 0 exited with code \d+ before the task ended: Error: .*memory limit/,
     );
     started.pool.run({ kind: "runBody", runKey: 2n, taskName: "probe", inputJson: "{}", taskId: TASK_ID, attempt: 1, facts });
     assert.deepEqual(await settledOutcome(outcomes, 2n), { kind: "value", json: "1" });

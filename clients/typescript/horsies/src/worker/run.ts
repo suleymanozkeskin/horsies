@@ -4,8 +4,8 @@
 // 2. The static check without the schedules: a refusal prints the `worker-startup` report.
 // 3. The child command of this process.
 // 4. The start members and `prepareWorker`: the manifest bounds, the profile, the connection settings, and no
-//    `SHARED_THREAD` children on Bun (Bun does not cap the memory of a worker thread, so a seat isolate out of memory
-//    would not end alone; Node caps it with `resourceLimits`).
+//    `SHARED_THREAD` children on a runtime other than Node (Node caps the JavaScript heap of a worker thread with
+//    `resourceLimits`; Bun ignores them, so a seat isolate out of heap would not end alone).
 // 5. The run on the core's process runtime, with the core handle that `Horsies.create` built for the app (so the
 //    child spec source that the app registers there builds the sub-workflow children), and the stop on `SIGTERM`
 //    and `SIGINT`. The stop handlers stay until the process ends: `cli.run` ends it after the log wait.
@@ -69,8 +69,8 @@ export type WorkerRunError =
   /** The connection settings fail the broker config check. Nothing started. */
   | { readonly kind: "connectionSettingsRefused"; readonly cause: string }
   /**
-   * The profile starts `SHARED_THREAD` children, and the runtime of this process does not cap the memory of a worker
-   * thread (Bun). Nothing started.
+   * The profile starts `SHARED_THREAD` children, and the runtime of this process is not Node, so it does not cap the
+   * JavaScript heap of a worker thread (Bun ignores `resourceLimits`). Nothing started.
    */
   | { readonly kind: "sharedThreadUnavailable"; readonly profile: string }
   /** The core of this process refused the call: it could not start, it stopped, or this process is a fork. */
@@ -244,7 +244,7 @@ export function workerRunErrorText(error: WorkerRunError): string {
     case "connectionSettingsRefused":
       return `the connection settings are refused: ${error.cause}`;
     case "sharedThreadUnavailable":
-      return `workerProfiles[${JSON.stringify(error.profile)}].sharedThread: this runtime does not cap the memory of a worker thread (Bun ignores resourceLimits), so a seat isolate out of memory would not end alone, and the worker does not start SHARED_THREAD children here; run the worker on Node, or run the profile's tasks in isolated or shared async children`;
+      return `workerProfiles[${JSON.stringify(error.profile)}].sharedThread: SHARED_THREAD children run on Node only: Node caps the JavaScript heap of each seat isolate (resourceLimits), and this runtime does not (Bun ignores resourceLimits), so a seat isolate at that heap's end would not end alone; run the worker on Node, or run the profile's tasks in isolated or shared async children`;
     case "coreRefused":
       return `the core refused the worker: ${error.error.name}: ${error.error.message}`;
     case "bootFailed":
@@ -283,14 +283,46 @@ export function processWorkerRunDeps(
     writeLine: (line) => {
       process.stderr.write(`${line}\n`);
     },
-    prepare: (appConfigJson, startJson) => native.prepareWorker(appConfigJson, startJson, runtimeSeatIsolateMemory()),
+    prepare: (appConfigJson, startJson) =>
+      native.prepareWorker(appConfigJson, startJson, seatIsolateMemoryOf(runtimeNameOf(process.versions))),
     run: async (worker) => native.runWorker(worker, appCoreHandle(context.core)),
     requestStop: (worker) => native.requestWorkerStop(worker),
     stopOnSignals,
   };
 }
 
-/** Whether the runtime of this process caps the memory of a worker thread: Bun ignores `resourceLimits`. */
-export function runtimeSeatIsolateMemory(): SeatIsolateMemory {
-  return "bun" in process.versions ? "NOT_CAPPED" : "CAPPED";
+/** The runtime of a process, by the version facts that it reports (`process.versions`). */
+export type RuntimeName = "node" | "bun" | "deno" | "unknown";
+
+/** The version facts of a runtime that tell it apart: Bun and Deno also report a `node` version. */
+export type RuntimeVersions = { readonly node?: string | undefined; readonly bun?: string | undefined; readonly deno?: string | undefined };
+
+/** The runtime of `versions`: Bun or Deno by their own version fact; Node when only the Node version is there. Pure. */
+export function runtimeNameOf(versions: RuntimeVersions): RuntimeName {
+  if (versions.bun !== undefined) {
+    return "bun";
+  }
+
+  if (versions.deno !== undefined) {
+    return "deno";
+  }
+
+  return versions.node === undefined ? "unknown" : "node";
+}
+
+/**
+ * Whether the worker threads of `runtime` have a cap of their JavaScript heap: `CAPPED` on Node only (its
+ * `resourceLimits` are measured); Bun ignores `resourceLimits`, and no other runtime is in the support promise. Pure.
+ */
+export function seatIsolateMemoryOf(runtime: RuntimeName): SeatIsolateMemory {
+  switch (runtime) {
+    case "node":
+      return "CAPPED";
+    case "bun":
+    case "deno":
+    case "unknown":
+      return "NOT_CAPPED";
+    default:
+      return unreachable(runtime);
+  }
 }

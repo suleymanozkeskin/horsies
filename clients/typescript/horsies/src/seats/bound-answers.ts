@@ -1,22 +1,23 @@
-// How the relay of a seat isolate sends each operation, and the answer to an operation that comes past the bound of
-// the operations that wait in its isolate. A bound that is hit is an expected failure: the operation is not sent, so
-// nothing is written, and it gets the retryable failure that its own type already has, with a cause that names the
-// relay bound (`MAX_SEAT_OPS_WAITING`) and its value:
+// How the relay of a seat isolate sends each operation, and the answer to an operation that comes past a bound of the
+// relay. A bound that is hit is an expected failure: the operation is not sent, so nothing is read or written, and it
+// gets the retryable failure that its own type already has, with a cause that names the bound and its value:
 //
-// - `enqueue` waits for the I/O of the main thread: past the bound it gets `ENQUEUE_FAILED`, retryable, with the task
-//   id and the payload of the request. A resend of the same task id (`retrySend`, or the resend of
-//   `resendOnTransientErr`) is safe: no row exists.
-// - `taskInfo` waits for the I/O of the main thread: past the bound it gets the retryable failure of a task read,
-//   `TASK_INFO_QUERY_FAILED` (a read has no send failure).
-// - `prepareSend` does no I/O: the main thread computes the facts of a send at once and holds nothing. It goes at once,
-//   takes no place of the bounds, and is never refused at the bound. Its type has no failure that the relay could fill
-//   there (`ENQUEUE_FAILED` needs the task id and the payload that the prepare makes); the send meets the bound at its
-//   enqueue and gets `ENQUEUE_FAILED` with both. The prepares that wait are the sends that the body started, held in
-//   the isolate's heap under its memory cap.
+// - An operation that waits for I/O of the main thread (an enqueue, a task read, a facade call) takes a place of the
+//   in-flight bound and of the waiting bound (`opsWaiting`, the core's `MAX_RUN_WORK`):
+//   - `enqueue`: `ENQUEUE_FAILED`, retryable, with the task id and the payload of the request. A resend of the same task
+//     id (`retrySend`, or the resend of `resendOnTransientErr`) is safe: no row exists;
+//   - `taskInfo`: `TASK_INFO_QUERY_FAILED`, retryable (a read has no send failure);
+//   - a facade call: the retryable database failure of its own type (`monitoring/seat-calls.ts`).
+// - The prepare of a send does no I/O: the main thread computes the facts of a send at once. It goes at once and takes
+//   no place of the in-flight bound, but the prepares that wait for their answer have their own bound of the same value
+//   (`opsWaiting`). A prepare past it is refused with `VALIDATION_FAILED`, whose cause (`preconditionFailed`) is
+//   retryable: the send failure `ENQUEUE_FAILED` needs the task id and the payload that the prepare makes, and the task
+//   send catalog has no other retryable failure. Nothing is written.
 //
 // The records have the forms that the addon gives (`RawCatalogError`), so the area's own converters read them.
 
 import type { SendsSeatOperation, SendsSeatReply } from "../app/core-access.ts";
+import { facadeBoundAnswer } from "../monitoring/seat-calls.ts";
 import type { DeadlineFact, DelayFact, EnqueueRequest, OptionalText, RetentionRecord } from "../native/sends/addon.ts";
 import type { ExceptionRecord, RawCatalogError, RawRecordField, RawRecordValue } from "../native/values/records.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -30,10 +31,8 @@ const RELAY_SUBJECT = "seat relay";
  * operations that wait for the main thread, with the answer that it gets past them.
  */
 export type OperationLane =
-  | { readonly kind: "answeredAtOnce" }
+  | { readonly kind: "answeredAtOnce"; readonly boundAnswer: (bound: number) => SeatAnswer }
   | { readonly kind: "waitsForIo"; readonly boundAnswer: (bound: number) => SeatAnswer };
-
-const ANSWERED_AT_ONCE: OperationLane = Object.freeze({ kind: "answeredAtOnce" });
 
 /** The lane of `request`. Pure. */
 export function operationLane(request: SeatRequest): OperationLane {
@@ -42,34 +41,56 @@ export function operationLane(request: SeatRequest): OperationLane {
   switch (area) {
     case "sends":
       return sendsLane(request.operation);
+    case "facades": {
+      const operation = request.operation;
+
+      return {
+        kind: "waitsForIo",
+        boundAnswer: (bound) => ({
+          kind: "reply",
+          reply: { area: "facades", reply: facadeBoundAnswer(operation, boundMessage("operations", bound)) },
+        }),
+      };
+    }
+
     default:
       return unreachable(area, "operationLane");
   }
 }
 
-/** The text of a failure at the bound: the relay bound, its value, and that the operation did not run. Pure. */
-export function boundMessage(bound: number): string {
-  return `the relay of this seat isolate holds ${String(bound)} operations that wait for the main thread of its child, its bound (MAX_SEAT_OPS_WAITING = ${String(bound)}); the operation was not run`;
+/**
+ * The text of a failure at a bound of the relay: what waits (`operations` or `prepares`), the bound and its value (the
+ * core's `MAX_RUN_WORK`), and that the operation did not run. Pure.
+ */
+export function boundMessage(waiting: "operations" | "prepares", bound: number): string {
+  return `the relay of this seat isolate holds ${String(bound)} ${waiting} that wait for the main thread of its child, its bound (MAX_RUN_WORK = ${String(bound)}); the operation was not run`;
 }
 
 /** The lane of the `sends` operation `operation`. Pure. */
 function sendsLane(operation: SendsSeatOperation): OperationLane {
   switch (operation.kind) {
     case "prepareSend":
-      return ANSWERED_AT_ONCE;
+      return {
+        kind: "answeredAtOnce",
+        boundAnswer: (bound) =>
+          sendsReply({
+            kind: "prepareSend",
+            prepared: { kind: "refused", error: prepareRefused(`${boundMessage("prepares", bound)}; nothing was written`) },
+          }),
+      };
     case "enqueue":
       return {
         kind: "waitsForIo",
         boundAnswer: (bound) =>
           sendsReply({
             kind: "enqueue",
-            outcome: { kind: "failed", error: enqueueFailed(operation.request, `${boundMessage(bound)}; nothing was written`) },
+            outcome: { kind: "failed", error: enqueueFailed(operation.request, `${boundMessage("operations", bound)}; nothing was written`) },
           }),
       };
     case "taskInfo":
       return {
         kind: "waitsForIo",
-        boundAnswer: (bound) => sendsReply({ kind: "taskInfo", read: { kind: "failed", error: taskInfoFailed(boundMessage(bound)) } }),
+        boundAnswer: (bound) => sendsReply({ kind: "taskInfo", read: { kind: "failed", error: taskInfoFailed(boundMessage("operations", bound)) } }),
       };
     default:
       return unreachable(operation, "sendsLane");
@@ -94,6 +115,17 @@ export function enqueueFailed(request: EnqueueRequest, message: string): RawCata
       { name: "payload", value: { kind: "sendPayload", fields: payloadFields(request) } },
       { name: "message", value: { kind: "text", text: message } },
       { name: "retryable", value: { kind: "flag", value: true } },
+      { name: "exception", value: { kind: "exception", exception: boundCause(message) } },
+    ],
+  };
+}
+
+/** `VALIDATION_FAILED` with a retryable precondition cause, in the form of the task send catalog. Pure. */
+export function prepareRefused(message: string): RawCatalogError {
+  return {
+    class: "TaskSendValidationFailed",
+    slots: [
+      { name: "message", value: { kind: "text", text: message } },
       { name: "exception", value: { kind: "exception", exception: boundCause(message) } },
     ],
   };

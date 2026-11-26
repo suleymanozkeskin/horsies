@@ -1,24 +1,30 @@
 // The seat isolate side: the providers and `ready`, a provider failure, a run and its result, the reader's input, the
-// seat body observer, cancel in a seat (a sync body reads the cell, an async body sees the signal), a cancel of another
-// run, `spawn`, a run while a run runs, a run before the serve, and the answers of the relay.
+// seat body observer (enter at the run, end at the main thread's verdict), cancel in a seat (a sync body reads the
+// cell, an async body sees the signal), a cancel of another run, the process events of an isolate (a detached throw in
+// a run, a throw outside every run, an unhandled rejection), and each defect path (to the main thread, then the
+// throw).
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import type { BodyEnd } from "../../../horsies/src/child/body-observer.ts";
+import { runStore } from "../../../horsies/src/child/run-store.ts";
 import type { TaskRuntime } from "../../../horsies/src/child/runtime.ts";
 import type { BodyFactsRecord } from "../../../horsies/src/native/child/addon.ts";
 import { type SeatBodyObserver, setSeatBodyObserver } from "../../../horsies/src/seats/body-observer.ts";
 import { clearCancel, requestCancel } from "../../../horsies/src/seats/cancel-cells.ts";
-import { type SeatIsolateDeps, serveSeat } from "../../../horsies/src/seats/isolate.ts";
+import { serveSeat } from "../../../horsies/src/seats/isolate.ts";
 import type { SeatOutcome } from "../../../horsies/src/seats/protocol.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
-import { PREPARED } from "../app/support.ts";
+import { PREPARED, TASK_ID } from "../app/support.ts";
 import {
+  bodyEndedMessage,
   cancelMessage,
   contextOf,
   crunch,
+  ENDED_AT,
   fakeChannel,
+  FakeSeatEvents,
   type FakeIsolatePort,
   fetchPage,
   replyMessage,
@@ -27,13 +33,9 @@ import {
   settled,
 } from "./support.ts";
 
-const ENDED_AT: Temporal.Instant = Temporal.Instant.from("2026-11-26T10:00:00Z");
-
-const DEPS: SeatIsolateDeps = { now: () => ENDED_AT };
-
 const RECORDED: BodyFactsRecord = {
   kind: "recorded",
-  taskId: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b",
+  taskId: TASK_ID,
   taskName: "crunch",
   queueName: "default",
   attempt: 1,
@@ -45,6 +47,25 @@ const RECORDED: BodyFactsRecord = {
 
 function outcomes(port: FakeIsolatePort): SeatOutcome[] {
   return port.postsOf("result").map((post) => post.outcome);
+}
+
+/** The rule texts of the defects that the isolate sent to the main thread. */
+function defects(port: FakeIsolatePort): string[] {
+  return port.postsOf("defect").map((post) => `${post.name}: ${post.message}`);
+}
+
+/** A served isolate of `app` on a fake channel, after its boot. */
+async function served(
+  app: ReturnType<typeof seatApp>,
+  seatIndex = 0,
+): Promise<{ readonly port: FakeIsolatePort; readonly events: FakeSeatEvents; readonly channel: ReturnType<typeof fakeChannel>["channel"] }> {
+  const { channel, port } = fakeChannel(seatIndex);
+  const events = new FakeSeatEvents();
+
+  void serveSeat(contextOf(app), channel, events.deps());
+  await settled();
+
+  return { port, events, channel };
 }
 
 describe("the boot of a seat isolate", () => {
@@ -65,10 +86,8 @@ describe("the boot of a seat isolate", () => {
     });
     app.implement(crunch, ({ n }, runtime) => crunch.ok(n + runtime.state(pool).length));
 
-    const { channel, port } = fakeChannel(1);
+    const { port } = await served(app, 1);
 
-    void serveSeat(contextOf(app), channel, DEPS);
-    await settled();
     assert.deepEqual(order, ["pool", "cache"]);
     assert.deepEqual(port.posts, [{ kind: "ready", protocol: 1, seatIndex: 1 }]);
     port.deliver(runMessage(3n, "crunch", '{"n":1}'));
@@ -85,10 +104,8 @@ describe("the boot of a seat isolate", () => {
     });
     app.provide(() => order.push("later"));
 
-    const { channel, port } = fakeChannel(0);
+    const { port } = await served(app);
 
-    void serveSeat(contextOf(app), channel, DEPS);
-    await settled();
     assert.deepEqual(order, []);
     assert.deepEqual(port.posts, [
       { kind: "bootFailed", protocol: 1, seatIndex: 0, hookName: "provide #1 openPool", cause: "RangeError: the pool is full" },
@@ -109,10 +126,8 @@ describe("a run in a seat isolate", () => {
       return crunch.ok(1);
     });
 
-    const { channel, port } = fakeChannel();
+    const { port } = await served(app);
 
-    void serveSeat(contextOf(app), channel, DEPS);
-    await settled();
     port.deliver(runMessage(4n, "crunch", '{"n":9007199254740991}'));
     await settled();
     assert.deepEqual(seen, [{ n: 9_007_199_254_740_991 }]);
@@ -126,10 +141,8 @@ describe("a run in a seat isolate", () => {
       throw new TypeError("bad");
     });
 
-    const { channel, port } = fakeChannel();
+    const { port } = await served(app);
 
-    void serveSeat(contextOf(app), channel, DEPS);
-    await settled();
     port.deliver(runMessage(5n, "crunch", '{"n":1}'));
     await settled();
 
@@ -142,7 +155,7 @@ describe("a run in a seat isolate", () => {
     );
   });
 
-  test("the seat body observer: enter at the run with its facts, end at the body end with endedAt", async () => {
+  test("the seat body observer: enter at the run with its facts; end at the main thread's verdict with its time", async () => {
     const app = seatApp();
     const calls: string[] = [];
 
@@ -171,13 +184,16 @@ describe("a run in a seat isolate", () => {
       return crunch.ok(n);
     });
 
-    const { channel, port } = fakeChannel();
+    const { port } = await served(app);
 
-    void serveSeat(contextOf(app), channel, DEPS);
-    await settled();
     port.deliver(runMessage(6n, "crunch", '{"n":1}', RECORDED));
     await settled();
-    assert.deepEqual(calls, ["enter recorded", "run", "body", `end returned ${ENDED_AT.toString()}`]);
+    assert.deepEqual(calls, ["enter recorded", "run", "body"]);
+    port.deliver(bodyEndedMessage(6n, { kind: "timedOut" }));
+    assert.deepEqual(calls, ["enter recorded", "run", "body", `end timedOut ${ENDED_AT.toString()}`]);
+    port.deliver(runMessage(7n, "crunch", '{"n":2}', RECORDED));
+    await settled();
+    assert.equal(outcomes(port).length, 2);
   });
 });
 
@@ -191,10 +207,8 @@ describe("cancel in a seat", () => {
       return crunch.ok(state.kind === "requested" && state.cause === "DEADLINE" ? 1 : 0);
     });
 
-    const { channel, port } = fakeChannel(1);
+    const { port, channel } = await served(app, 1);
 
-    void serveSeat(contextOf(app), channel, DEPS);
-    await settled();
     clearCancel(channel.marker.cancelCells, 1);
     requestCancel(channel.marker.cancelCells, 1, "DEADLINE");
     port.deliver(runMessage(7n, "crunch", '{"n":1}'));
@@ -215,10 +229,8 @@ describe("cancel in a seat", () => {
       return fetchPage.ok(JSON.stringify(reason));
     });
 
-    const { channel, port } = fakeChannel();
+    const { port } = await served(app);
 
-    void serveSeat(contextOf(app), channel, DEPS);
-    await settled();
     port.deliver(runMessage(8n, "fetch_page", '{"url":"https://example.org"}'));
     port.deliver(cancelMessage(99n, "DEADLINE"));
     await settled();
@@ -227,8 +239,121 @@ describe("cancel in a seat", () => {
     await settled();
     assert.deepEqual(outcomes(port), [{ kind: "value", json: JSON.stringify(JSON.stringify({ cause: "OPERATOR" })) }]);
   });
+});
 
-  test("the runtime of a seat body has no spawn: a call is a defect", async () => {
+describe("the process events of a seat isolate", () => {
+  test("a detached throw in code of a run is logged with the run; the isolate lives", async () => {
+    const { port, events } = await served(seatApp());
+
+    runStore.run({ taskId: TASK_ID, taskName: "crunch", attempt: 2 }, () => {
+      events.uncaught[0]?.(new TypeError("late"));
+    });
+    assert.match(port.postsOf("log")[0]?.line ?? "", /a callback threw in the run of task crunch .*attempt 2.*TypeError: late.*; the child lives/s);
+    assert.deepEqual(events.ends, []);
+  });
+
+  test("a throw outside every run is logged and ends the isolate", async () => {
+    const { port, events } = await served(seatApp());
+
+    events.uncaught[0]?.(new RangeError("outside"));
+    assert.match(port.postsOf("log")[0]?.line ?? "", /code outside every run threw: RangeError: outside/);
+    assert.deepEqual(events.ends, [1]);
+  });
+
+  test("a rejection that no body awaits is logged; the isolate lives", async () => {
+    const { port, events } = await served(seatApp());
+
+    events.rejections[0]?.(new TypeError("not awaited"));
+    assert.match(port.postsOf("log")[0]?.line ?? "", /a Promise that no body awaits rejected: TypeError: not awaited/);
+    assert.deepEqual(events.ends, []);
+  });
+});
+
+describe("the defects of a seat isolate go to the main thread, then the isolate throws", () => {
+  test("a message outside the protocol", async () => {
+    const { port } = await served(seatApp());
+
+    assert.throws(() => {
+      port.deliverRaw({ ...cancelMessage(1n, "DEADLINE"), protocol: 9 });
+    }, ClientDefect);
+    assert.match(defects(port)[0] ?? "", /^ClientDefect: .*protocol version 9/);
+  });
+
+  test("a run before the isolate serves", () => {
+    const { port } = fakeChannel();
+
+    assert.throws(() => {
+      port.deliver(runMessage(12n, "crunch", '{"n":1}'));
+    }, /before the isolate served its runs/);
+    assert.match(defects(port)[0] ?? "", /before the isolate served its runs/);
+  });
+
+  test("a run while a run runs", async () => {
+    const app = seatApp();
+
+    app.implement(fetchPage, async () => new Promise(() => undefined));
+
+    const { port } = await served(app);
+
+    port.deliver(runMessage(10n, "fetch_page", '{"url":"a"}'));
+    assert.throws(() => {
+      port.deliver(runMessage(11n, "fetch_page", '{"url":"b"}'));
+    }, ClientDefect);
+    assert.match(defects(port)[0] ?? "", /whose run has not ended/);
+  });
+
+  test("a run of a task with no implementation", async () => {
+    const { port } = await served(seatApp());
+
+    assert.throws(() => {
+      port.deliver(runMessage(13n, "crunch", '{"n":1}'));
+    }, ClientDefect);
+    assert.match(defects(port)[0] ?? "", /which has no implementation/);
+  });
+
+  test("an answer to an operation that does not wait", async () => {
+    const { port } = await served(seatApp());
+
+    assert.throws(() => {
+      port.deliver(replyMessage(42, { kind: "reply", reply: { area: "sends", reply: { kind: "prepareSend", prepared: PREPARED } } }));
+    }, ClientDefect);
+    assert.match(defects(port)[0] ?? "", /answered the operation 42, which does not wait/);
+  });
+
+  test("a verdict of a run whose result did not go", async () => {
+    const { port } = await served(seatApp());
+
+    assert.throws(() => {
+      port.deliver(bodyEndedMessage(14n, { kind: "returned" }));
+    }, ClientDefect);
+    assert.match(defects(port)[0] ?? "", /whose result did not go/);
+  });
+
+  test("a rejection of the body adapter (a seat body observer that threw)", async () => {
+    const app = seatApp();
+
+    setSeatBodyObserver(contextOf(app), {
+      enter: () => ({
+        run: (call) => call(),
+        thrown: () => {
+          throw new TypeError("the observer broke");
+        },
+        end: () => undefined,
+      }),
+    });
+    app.implement(crunch, () => {
+      throw new RangeError("body");
+    });
+
+    const { port } = await served(app);
+
+    port.deliver(runMessage(15n, "crunch", '{"n":1}'));
+    await settled();
+    assert.match(defects(port)[0] ?? "", /the body adapter rejected with TypeError: the observer broke/);
+    assert.deepEqual(outcomes(port), []);
+  });
+
+  test("spawn in the runtime of a seat body", async () => {
     const app = seatApp();
     const thrown: unknown[] = [];
 
@@ -243,38 +368,16 @@ describe("cancel in a seat", () => {
       return crunch.ok(0);
     });
 
-    const { channel, port } = fakeChannel();
+    const { port } = await served(app);
 
-    void serveSeat(contextOf(app), channel, DEPS);
-    await settled();
     port.deliver(runMessage(9n, "crunch", '{"n":1}'));
     await settled();
     assert.ok(thrown[0] instanceof ClientDefect);
-  });
-});
-
-describe("the defects of a seat isolate", () => {
-  test("a run while a run runs is a defect", async () => {
-    const app = seatApp();
-
-    app.implement(fetchPage, async () => new Promise(() => undefined));
-
-    const { channel, port } = fakeChannel();
-
-    void serveSeat(contextOf(app), channel, DEPS);
-    await settled();
-    port.deliver(runMessage(10n, "fetch_page", '{"url":"a"}'));
-    assert.throws(() => {
-      port.deliver(runMessage(11n, "fetch_page", '{"url":"b"}'));
-    }, ClientDefect);
+    assert.match(defects(port)[0] ?? "", /has no spawn/);
   });
 
-  test("a run before the isolate serves is a defect; an answer goes to the relay", async () => {
+  test("an answer goes to the relay", async () => {
     const { channel, port } = fakeChannel();
-
-    assert.throws(() => {
-      port.deliver(runMessage(12n, "crunch", '{"n":1}'));
-    }, /before the isolate served its runs/);
 
     const replied = channel.relay.request("sends", {
       kind: "prepareSend",

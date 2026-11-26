@@ -1,21 +1,27 @@
 // The message protocol between a seat isolate of a `SHARED_THREAD` child and the main thread of the child.
 //
 // The main thread starts each isolate from the app entry with `workerData = { horsiesSeat: { seatIndex, protocol,
-// cancelCells } }`: the seat of the isolate, the protocol version, and the cancel cells of the child (one `Int32Array`
-// over a `SharedArrayBuffer`, one cell per seat). Each message is one member of a closed union, told apart by `kind`,
-// and carries the protocol version.
+// cancelCells, relayBounds } }`: the seat of the isolate, the protocol version, the cancel cells of the child (one
+// `Int32Array` over a `SharedArrayBuffer`, one cell per seat), and the bounds of the isolate's relay (from the core's
+// constants, which the main thread reads from the addon). Each message is one member of a closed union, told apart by
+// `kind`, and carries the protocol version.
 //
 // Main thread to seat:
 // - `run`: run the body of `taskName` for the run `runKey` with the stored input text, the task id, the attempt (the
 //   fencing token's value, from 1) and the facts for the seat body observer. The answer is `result`.
 // - `cancel`: the cancel signal of the run `runKey` fired with `cause`. No answer: the isolate aborts the run's signal.
+// - `bodyEnded`: the verdict of the run `runKey` (how its body ended, from the run's cancel cause and its outcome)
+//   and the main thread's time of its settle, for the seat body observer. No answer.
 // - `opReply`: the answer to the operation `requestId`.
 //
 // Seat to main thread:
 // - `ready`: the isolate ran every provider of the app; it takes runs.
 // - `bootFailed`: the provider `hookName` threw or rejected; the child ends with 173.
 // - `result`: the stored outcome of the run `runKey`.
-// - `op`: one core operation of an app area (a send, a task read) for the main thread to run. The answer is `opReply`.
+// - `op`: one core operation of an app area (a send, a task read, a facade call) for the main thread to run. The answer
+//   is `opReply`.
+// - `defect`: a defect of the package in the isolate; the main thread applies the defect rule (the child aborts).
+// - `log`: one line that the isolate's process events write (a detached throw, a rejection that no body awaits).
 //
 // A message of another kind or of another protocol version, or a field that is missing or of another type, is a defect
 // of the package: the parse throws `ClientDefect`. On the main thread the defect rule then ends the child; in an
@@ -25,11 +31,13 @@
 
 import type { SeatOperationMap } from "../app/core-access.ts";
 import { isBigint, isNumber, isObjectLike, isString } from "../codec/values.ts";
+import type { BodyEnd } from "../child/body-observer.ts";
 import type { BodyFactsRecord, CancelCauseName } from "../native/child/addon.ts";
 import type { NativeThrown } from "../native/call/envelope.ts";
 import type { TaskErrorParts } from "../native/sends/addon.ts";
 import { SEAT_MARKER_KEY } from "../app/suppression.ts";
-import { ClientDefect, type CoreErrorCode } from "../thrown-errors.ts";
+import { ClientDefect, type CoreDefectCode, type CoreErrorCode } from "../thrown-errors.ts";
+import { unreachable } from "../wire/unreachable.ts";
 
 /** The version of the protocol. An isolate runs the code of the same entry, so both sides hold the same version. */
 export const SEAT_PROTOCOL_VERSION = 1;
@@ -37,18 +45,25 @@ export const SEAT_PROTOCOL_VERSION = 1;
 /** The protocol version of this package. */
 export type SeatProtocolVersion = typeof SEAT_PROTOCOL_VERSION;
 
+/**
+ * The bounds of the relay of one isolate: the operations that wait for I/O of the main thread at once, and the
+ * operations of each lane that wait in the isolate. Whole numbers from 1.
+ */
+export type RelayBounds = { readonly opsInFlight: number; readonly opsWaiting: number };
+
 /** The facts that the main thread gives a seat isolate at its start. `seatIndex` is from 0. */
 export type SeatMarker = {
   readonly seatIndex: number;
   readonly protocol: SeatProtocolVersion;
   readonly cancelCells: Int32Array;
+  readonly relayBounds: RelayBounds;
 };
 
 /** An area of the app whose core operations a seat isolate sends to the main thread. */
 export type SeatArea = keyof SeatOperationMap;
 
 /** Each area by itself: the record names each member of `SeatArea` once, so a new area is a type change here. */
-const SEAT_AREA_SET: { readonly [Area in SeatArea]: Area } = { sends: "sends" };
+const SEAT_AREA_SET: { readonly [Area in SeatArea]: Area } = { sends: "sends", facades: "facades" };
 
 /** The areas of the seat operations. */
 export const SEAT_AREAS: readonly SeatArea[] = Object.values(SEAT_AREA_SET);
@@ -95,6 +110,14 @@ export type MainToSeat =
       readonly cause: CancelCauseName;
     }
   | {
+      readonly kind: "bodyEnded";
+      readonly protocol: SeatProtocolVersion;
+      readonly runKey: bigint;
+      readonly end: BodyEnd;
+      /** The main thread's time of the settle, in nanoseconds since the epoch (a `Temporal.Instant` does not clone). */
+      readonly endedAtEpochNanoseconds: bigint;
+    }
+  | {
       readonly kind: "opReply";
       readonly protocol: SeatProtocolVersion;
       readonly requestId: number;
@@ -122,7 +145,15 @@ export type SeatToMain =
       readonly protocol: SeatProtocolVersion;
       readonly requestId: number;
       readonly request: SeatRequest;
-    };
+    }
+  | {
+      readonly kind: "defect";
+      readonly protocol: SeatProtocolVersion;
+      readonly code: CoreDefectCode;
+      readonly name: string;
+      readonly message: string;
+    }
+  | { readonly kind: "log"; readonly protocol: SeatProtocolVersion; readonly line: string };
 
 /** The message of a seat isolate in `message`, as a port gave it. A message outside the protocol: `ClientDefect`. */
 export function parseSeatToMain(message: object): SeatToMain {
@@ -144,6 +175,16 @@ export function parseSeatToMain(message: object): SeatToMain {
       return { kind, protocol, runKey: runKeyField(message), outcome: outcomeOf(objectField(message, "outcome")) };
     case "op":
       return { kind, protocol, requestId: requestIdField(message), request: requestOf(objectField(message, "request")) };
+    case "defect":
+      return {
+        kind,
+        protocol,
+        code: defectCodeField(message),
+        name: textField(message, "name"),
+        message: textField(message, "message"),
+      };
+    case "log":
+      return { kind, protocol, line: textField(message, "line") };
     default:
       throw protocolDefect(`a message of a seat isolate has the unknown kind ${String(kind)}`);
   }
@@ -168,6 +209,14 @@ export function parseMainToSeat(message: object): MainToSeat {
       };
     case "cancel":
       return { kind, protocol, runKey: runKeyField(message), cause: causeField(message) };
+    case "bodyEnded":
+      return {
+        kind,
+        protocol,
+        runKey: runKeyField(message),
+        end: bodyEndOf(objectField(message, "end")),
+        endedAtEpochNanoseconds: bigintField(message, "endedAtEpochNanoseconds"),
+      };
     case "opReply":
       return { kind, protocol, requestId: requestIdField(message), answer: answerOf(objectField(message, "answer")) };
     default:
@@ -197,9 +246,12 @@ export function seatMarkerOf(data: object): SeatMarkerRead {
     throw protocolDefect(`the seat ${String(seatIndex)} of a seat marker has no cancel cell`);
   }
 
+  const bounds = objectField(marker, "relayBounds");
+  const relayBounds = Object.freeze({ opsInFlight: boundField(bounds, "opsInFlight"), opsWaiting: boundField(bounds, "opsWaiting") });
+
   return {
     kind: "seat",
-    marker: Object.freeze({ seatIndex, protocol: protocolOf(marker, "a seat marker"), cancelCells: cells }),
+    marker: Object.freeze({ seatIndex, protocol: protocolOf(marker, "a seat marker"), cancelCells: cells, relayBounds }),
   };
 }
 
@@ -253,13 +305,58 @@ function wholeNumberField(message: object, name: string): number {
 }
 
 function runKeyField(message: object): bigint {
-  const value: unknown = Reflect.get(message, "runKey");
+  return bigintField(message, "runKey");
+}
+
+function bigintField(message: object, name: string): bigint {
+  const value: unknown = Reflect.get(message, name);
 
   if (!isBigint(value)) {
-    throw protocolDefect("the field runKey of a seat message is not a bigint");
+    throw protocolDefect(`the field ${name} of a seat message is not a bigint`);
   }
 
   return value;
+}
+
+/** A bound of a relay: a whole number from 1. */
+function boundField(bounds: object, name: string): number {
+  const value = wholeNumberField(bounds, name);
+
+  if (value < 1) {
+    throw protocolDefect(`the relay bound ${name} of a seat marker is 0`);
+  }
+
+  return value;
+}
+
+function defectCodeField(message: object): CoreDefectCode {
+  const code: unknown = Reflect.get(message, "code");
+
+  switch (code) {
+    case "MANIFEST_REFUSED":
+    case "PANIC_RULE_FIXED":
+    case "CORE_PANIC":
+    case "ADDON_OUTSIDE_MAIN_THREAD":
+    case "CLIENT_DEFECT":
+      return code;
+    default:
+      throw protocolDefect(`the defect of a seat isolate has the code ${String(code)}, which is no defect code`);
+  }
+}
+
+function bodyEndOf(end: object): BodyEnd {
+  const kind: unknown = Reflect.get(end, "kind");
+
+  switch (kind) {
+    case "returned":
+    case "timedOut":
+    case "cancelled":
+      return { kind };
+    case "failed":
+      return { kind, code: textField(end, "code") };
+    default:
+      throw protocolDefect(`the verdict of a run has the unknown kind ${String(kind)}`);
+  }
 }
 
 function requestIdField(message: object): number {
@@ -324,21 +421,40 @@ function requestOf(request: object): SeatRequest {
   const area = areaOf(request);
   const operation = objectField(request, "operation");
 
-  // SAFETY: the relay of an isolate built the operation of the area with the area's own operation type.
-  return { area, operation: operation as SeatOperationMap[typeof area]["operation"] };
+  switch (area) {
+    case "sends":
+      // SAFETY: the relay of an isolate built the operation with the sends area's own operation type.
+      return { area, operation: operation as SeatOperationMap["sends"]["operation"] };
+    case "facades":
+      // SAFETY: the relay of an isolate built the operation with the facades area's own operation type.
+      return { area, operation: operation as SeatOperationMap["facades"]["operation"] };
+    default:
+      return unreachable(area, "requestOf");
+  }
+}
+
+function replyOf(reply: object): SeatReply {
+  const area = areaOf(reply);
+  const value = objectField(reply, "reply");
+
+  switch (area) {
+    case "sends":
+      // SAFETY: the main thread built the reply with the sends area's own reply type.
+      return { area, reply: value as SeatOperationMap["sends"]["reply"] };
+    case "facades":
+      // SAFETY: the main thread built the reply with the facades area's own reply type.
+      return { area, reply: value as SeatOperationMap["facades"]["reply"] };
+    default:
+      return unreachable(area, "replyOf");
+  }
 }
 
 function answerOf(answer: object): SeatAnswer {
   const kind: unknown = Reflect.get(answer, "kind");
 
   switch (kind) {
-    case "reply": {
-      const reply = objectField(answer, "reply");
-      const area = areaOf(reply);
-
-      // SAFETY: the main thread built the reply with the area's own reply type.
-      return { kind, reply: { area, reply: objectField(reply, "reply") as SeatOperationMap[typeof area]["reply"] } };
-    }
+    case "reply":
+      return { kind, reply: replyOf(objectField(answer, "reply")) };
 
     case "refused":
       return { kind, refusal: refusalOf(objectField(answer, "refusal")) };

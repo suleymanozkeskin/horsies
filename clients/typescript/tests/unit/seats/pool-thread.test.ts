@@ -1,6 +1,7 @@
-// The seat pool with real `worker_threads` isolates of the fixture entry: the isolates boot with the memory cap of the
-// main isolate; a run and its result; `process.exit` in an isolate and a late throw there end the run
-// UNHANDLED_EXCEPTION, and a new isolate boots and takes the next run. No case allocates without a bound.
+// The seat pool with real `worker_threads` isolates of the fixture entry: the isolates boot with the heap cap of the
+// main isolate; a run, its result and its verdict; `process.exit` in an isolate ends the run WORKER_CRASHED, and a new
+// isolate boots and takes the next run; a late throw in code of a run is logged and the run keeps its value (Node
+// only). No case allocates without a bound.
 
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
@@ -12,6 +13,10 @@ import { seatResourceLimits, workerIsolates } from "../../../horsies/src/seats/n
 import type { SeatOutcome } from "../../../horsies/src/seats/protocol.ts";
 import type { CoreDefect } from "../../../horsies/src/thrown-errors.ts";
 import { TASK_ID } from "../app/support.ts";
+import { TEST_SEAT_BOUNDS } from "./support.ts";
+
+/** `test` on Node; a skipped case on Bun, whose worker threads end at a throw that a listener of the thread handles. */
+const nodeOnly = "bun" in process.versions ? test.skip : test;
 
 /** The longest wait for one settle. */
 const SETTLE_BOUND_MS = 15_000;
@@ -60,7 +65,9 @@ describe("the seat pool with worker threads", () => {
   before(async () => {
     const started = startSeatPool(2, {
       start: workerIsolates(ENTRY, seatResourceLimits(getHeapStatistics().heap_size_limit)),
+      bounds: () => TEST_SEAT_BOUNDS,
       clock: () => performance.now(),
+      now: () => Temporal.Now.instant(),
       timer: (milliseconds, callback) => {
         const timer = setTimeout(callback, milliseconds);
 
@@ -99,12 +106,16 @@ describe("the seat pool with worker threads", () => {
     assert.deepEqual(await settles.of(1n), { kind: "value", json: "0" });
   });
 
-  test("process.exit in an isolate ends its run WorkerThreadExit, and a new isolate takes the next run", async () => {
+  test("process.exit in an isolate ends its run WORKER_CRASHED, and a new isolate takes the next run", async () => {
     pool.run(runPost(2n, "exit_now"));
 
     const outcome = await settles.of(2n);
 
-    assert.equal(outcome.kind === "error" && outcome.parts.exception.kind === "record" ? outcome.parts.exception.className : "", "WorkerThreadExit");
+    assert.equal(outcome.kind === "error" ? outcome.parts.code.code : "", "WORKER_CRASHED");
+    assert.match(
+      outcome.kind === "error" && outcome.parts.message.kind === "text" ? outcome.parts.message.text : "",
+      /exited with code 3 before the task ended: WorkerThreadExit/,
+    );
     pool.run(runPost(3n, "probe"));
     pool.run(runPost(4n, "probe"));
     assert.deepEqual(await settles.of(3n), { kind: "value", json: "0" });
@@ -112,15 +123,10 @@ describe("the seat pool with worker threads", () => {
     assert.deepEqual(settles.ends, []);
   });
 
-  test("a late throw in an isolate ends its run UNHANDLED_EXCEPTION with the record of the throw", async () => {
+  nodeOnly("a late throw in code of a run is logged, and the run keeps its value", async () => {
     pool.run(runPost(5n, "throw_later"));
-
-    const outcome = await settles.of(5n);
-
-    assert.equal(
-      outcome.kind === "error" && outcome.parts.message.kind === "text" ? outcome.parts.message.text : "",
-      "Unhandled exception in task throw_later: RangeError: a late throw",
-    );
+    assert.deepEqual(await settles.of(5n), { kind: "value", json: "5" });
+    assert.ok(settles.lines.some((line) => line.includes("a callback threw in the run of task throw_later")));
     assert.deepEqual(settles.defects, []);
   });
 });

@@ -1,17 +1,22 @@
-// A seat isolate entry: the spy on native module loads first, then an app with three `SHARED_THREAD` tasks and
-// `cli.run(app)`, as an app entry runs in each seat isolate. The test runs it in a `worker_threads` isolate with the
-// seat marker and plays the main thread of the child.
+// A seat isolate entry: the spy on native module loads first, then `configureLogging` at the top of the entry (as an
+// app entry calls it), an app with `SHARED_THREAD` tasks, and `cli.run(app)`, as an app entry runs in each seat
+// isolate. The test runs it in a `worker_threads` isolate with the seat marker and plays the main thread of the child.
 //
 // - `probe`: the number of native module loads in this isolate.
 // - `spin`: a sync body that holds the isolate until its cancel cell holds a cause, at most `SPIN_BOUND_MS`; 1 when the
 //   cause is DEADLINE, 0 at the bound.
 // - `send_and_wait`: sends `probe`, then waits for its result; the text names the send and the read error.
 // - `exit_now`: ends its isolate with `process.exit(3)`.
-// - `throw_later`: a callback that it scheduled throws, which ends its isolate with that error.
+// - `throw_later`: a callback that it scheduled throws; the body returns 5 after the throw.
+// - `reject_unawaited`: leaves a rejected Promise that it does not await; the body returns 7.
+// - `foreign_state`: reads the state of a key of another app (a defect of the package).
+// - `facades_probe`: pings the database and cancels a task through the facades; the text names both outcomes.
 
 import { dlopenFiles } from "./dlopen-spy.ts";
 
-import { cli, defineTask, h, Horsies } from "../../../../horsies/src/index.ts";
+import { cli, configureLogging, defineTask, h, Horsies, TaskId } from "../../../../horsies/src/index.ts";
+
+configureLogging({ levels: { default: "INFO" } });
 
 /** The longest hold of `spin`, in milliseconds. */
 const SPIN_BOUND_MS = 5000;
@@ -35,7 +40,25 @@ const exitNow = defineTask({ name: "exit_now", input: {}, output: h.int(), execu
 
 const throwLater = defineTask({ name: "throw_later", input: {}, output: h.int(), execution: "SHARED_THREAD", timeoutMs: 5000 });
 
-const created = Horsies.create({ broker: { databaseUrl }, tasks: [probe, spin, sendAndWait, exitNow, throwLater] });
+const rejectUnawaited = defineTask({ name: "reject_unawaited", input: {}, output: h.int(), execution: "SHARED_THREAD", timeoutMs: 5000 });
+
+const foreignState = defineTask({ name: "foreign_state", input: {}, output: h.int(), execution: "SHARED_THREAD", timeoutMs: 5000 });
+
+const facadesProbe = defineTask({ name: "facades_probe", input: {}, output: h.string(), execution: "SHARED_THREAD", timeoutMs: 5000 });
+
+const created = Horsies.create({
+  broker: { databaseUrl },
+  tasks: [probe, spin, sendAndWait, exitNow, throwLater, rejectUnawaited, foreignState, facadesProbe],
+});
+
+const otherApp = Horsies.create({ broker: { databaseUrl }, tasks: [] });
+
+if (!otherApp.ok) {
+  throw new Error("the second fixture app was refused");
+}
+
+/** A state key of another app: `runtime.state` of it is a defect. */
+const foreignKey = otherApp.value.provide(() => 1);
 
 if (!created.ok) {
   throw new Error(`the fixture app was refused: ${created.error.refusals.map((refused) => refused.message).join("; ")}`);
@@ -82,7 +105,32 @@ app.implement(throwLater, async () => {
     throw new RangeError("a late throw");
   }, 0);
 
-  return new Promise(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  return throwLater.ok(5);
+});
+
+app.implement(rejectUnawaited, async () => {
+  void Promise.reject(new TypeError("not awaited"));
+
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  return rejectUnawaited.ok(7);
+});
+
+app.implement(foreignState, (_input, runtime) => foreignState.ok(runtime.state(foreignKey)));
+
+app.implement(facadesProbe, async () => {
+  const ping = await app.pingDatabase();
+  const taskId = TaskId.parse("0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b");
+
+  if (!taskId.ok) {
+    return facadesProbe.ok("the task id does not parse");
+  }
+
+  const cancel = await app.monitoring.cancelTask(taskId.value, { policy: "includeRunning" });
+
+  return facadesProbe.ok(`ping ${ping.ok ? String(ping.value.latencyMs) : ping.error.code}; cancel ${cancel.ok ? "ok" : cancel.error.code}`);
 });
 
 await cli.run(app);

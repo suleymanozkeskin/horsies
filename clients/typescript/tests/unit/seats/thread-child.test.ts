@@ -19,7 +19,7 @@ import { ClientDefect, type CoreDefect, CoreStopped, ForkedAfterCoreStart, TooMa
 import type { CoreAccess, ProducerCore } from "../../../horsies/src/app/core-access.ts";
 import { ENQUEUED, fakeCoreHandle, fakeProducer, PREPARED, TASK_ID } from "../app/support.ts";
 import { FakeChildNative, settled } from "../child/child-native.ts";
-import { contextOf, crunch, seatApp } from "./support.ts";
+import { contextOf, crunch, ENDED_AT, seatApp, TEST_SEAT_BOUNDS } from "./support.ts";
 
 const CHILD_ARGUMENTS = ["--horsies-child", "3", "4242"] as const;
 
@@ -57,9 +57,11 @@ function threadDeps(native: FakeChildNative): ChildModeDeps & Recorded {
 
       isolates.push({ marker, events, posts });
 
-      return { post: (message) => posts.push(message) };
+      return { kind: "started", isolate: { post: (message) => posts.push(message) } };
     },
+    bounds: () => TEST_SEAT_BOUNDS,
     clock: () => 0,
+    now: () => ENDED_AT,
     timer: () => () => undefined,
   };
 
@@ -176,6 +178,13 @@ describe("a SHARED_THREAD child", () => {
     assert.deepEqual(deps.isolates[0]?.posts.map((post) => post.kind), ["run", "cancel"]);
     deps.isolates[0]?.events.message({ kind: "result", protocol: 1, runKey: 5n, outcome: { kind: "value", json: "1" } });
     assert.deepEqual(native.values, [[5n, "1"]]);
+    assert.deepEqual(deps.isolates[0]?.posts.at(-1), {
+      kind: "bodyEnded",
+      protocol: 1,
+      runKey: 5n,
+      end: { kind: "timedOut" },
+      endedAtEpochNanoseconds: ENDED_AT.epochNanoseconds,
+    });
   });
 
   test("a post before the start facts is a defect", async () => {

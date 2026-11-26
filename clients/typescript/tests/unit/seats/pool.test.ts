@@ -1,7 +1,9 @@
-// The seat pool on the main thread: N isolates boot; a provider failure fails the boot (173); a run goes to a free
-// isolate; the result relay; a cancel writes the cell and posts; a cancel of an ended run is left; the operation relay;
-// an isolate end during a run gives UNHANDLED_EXCEPTION and a new isolate; a run during the replacement waits and the
-// wait is logged; a replacement past 10 s, and a provider failure in a new isolate, end the child with 173.
+// The seat pool on the main thread: N isolates boot; a provider failure fails the boot (173); an isolate that does not
+// start; a run goes to a free isolate; the result relay and the verdict; a cancel writes the cell and posts; a cancel
+// of an ended run is left; the operation relay; the defects and log lines of an isolate; an isolate end during a run
+// gives WORKER_CRASHED and a new isolate; a run during the replacement waits and the wait is logged; a replacement past
+// the start-hook bound, and a provider failure in a new isolate, end the child with 173; a run that the core posts
+// while the child ends is left.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -10,7 +12,6 @@ import type { ChildPost } from "../../../horsies/src/native/child/addon.ts";
 import { cancelStateOf } from "../../../horsies/src/seats/cancel-cells.ts";
 import {
   type IsolateEvents,
-  REPLACEMENT_BOOT_BOUND_MS,
   type SeatPool,
   type SeatPoolDeps,
   type SeatRunPost,
@@ -26,7 +27,9 @@ import {
 } from "../../../horsies/src/seats/protocol.ts";
 import { ClientDefect, type CoreDefect } from "../../../horsies/src/thrown-errors.ts";
 import { PREPARED, TASK_ID } from "../app/support.ts";
-import { settled } from "./support.ts";
+import { ENDED_AT, settled, TEST_SEAT_BOUNDS } from "./support.ts";
+
+const REPLACEMENT_BOOT_BOUND_MS = TEST_SEAT_BOUNDS.replacementBootBoundMs;
 
 /** One isolate that the fake started. */
 type FakeIsolate = { readonly marker: SeatMarker; readonly events: IsolateEvents; readonly posts: MainToSeat[] };
@@ -41,17 +44,25 @@ class PoolFakes {
   readonly defects: CoreDefect[] = [];
   readonly timers: { readonly milliseconds: number; readonly fire: () => void; stopped: boolean }[] = [];
   now = 0;
+  /** The seat whose next start the runtime refuses, if any. */
+  refuseStart: number | undefined = undefined;
 
   deps(): SeatPoolDeps {
     return {
       start: (marker, events) => {
+        if (this.refuseStart === marker.seatIndex) {
+          return { kind: "notStarted", cause: "Error: the OS refused a thread" };
+        }
+
         const posts: MainToSeat[] = [];
 
         this.isolates.push({ marker, events, posts });
 
-        return { post: (message) => posts.push(message) };
+        return { kind: "started", isolate: { post: (message) => posts.push(message) } };
       },
+      bounds: () => TEST_SEAT_BOUNDS,
       clock: () => this.now,
+      now: () => ENDED_AT,
       timer: (milliseconds, fire) => {
         const timer = { milliseconds, fire, stopped: false };
 
@@ -65,7 +76,7 @@ class PoolFakes {
         this.settles.push([runKey, taskName, outcome]);
       },
       serve: async (request): Promise<SeatAnswer> => {
-        this.served.push(request.operation.kind);
+        this.served.push(request.area === "sends" ? request.operation.kind : request.operation.part);
 
         return { kind: "reply", reply: { area: "sends", reply: { kind: "prepareSend", prepared: PREPARED } } };
       },
@@ -180,8 +191,50 @@ describe("runs on the seat pool", () => {
     assert.deepEqual(fakes.isolate(1).posts.at(-1), { kind: "cancel", protocol: 1, runKey: 6n, cause: "OPERATOR" });
     fakes.send(0, result(5n, "1"));
     pool.cancel(5n, "DEADLINE");
-    assert.deepEqual(kinds(fakes.isolate(0).posts), ["run"]);
+    assert.deepEqual(kinds(fakes.isolate(0).posts), ["run", "bodyEnded"]);
     assert.deepEqual(cancelStateOf(cells, 0), { kind: "notRequested" });
+  });
+
+  test("after each result the isolate gets the verdict of the run, from its cancel cause and its outcome, and the time", async () => {
+    const { pool, fakes } = await bootedPool(1);
+
+    const failed: SeatToMain = {
+      kind: "result",
+      protocol: SEAT_PROTOCOL_VERSION,
+      runKey: 2n,
+      outcome: {
+        kind: "error",
+        parts: { code: { kind: "user", code: "TOO_BIG" }, message: { kind: "none" }, data: { kind: "noData" }, exception: { kind: "noException" } },
+      },
+    };
+
+    pool.run(runPost(1n));
+    fakes.send(0, result(1n, "1"));
+    pool.run(runPost(2n));
+    fakes.send(0, failed);
+    pool.run(runPost(3n));
+    pool.cancel(3n, "DEADLINE");
+    pool.cancel(3n, "OPERATOR");
+    fakes.send(0, result(3n, "1"));
+    pool.run(runPost(4n));
+    pool.cancel(4n, "OPERATOR");
+    fakes.send(0, result(4n, "1"));
+
+    const verdicts = fakes.isolate(0).posts.flatMap((post) => (post.kind === "bodyEnded" ? [post.end] : []));
+
+    assert.deepEqual(verdicts, [{ kind: "returned" }, { kind: "failed", code: "TOO_BIG" }, { kind: "timedOut" }, { kind: "cancelled" }]);
+    assert.equal(fakes.isolate(0).posts.find((post) => post.kind === "bodyEnded")?.endedAtEpochNanoseconds, ENDED_AT.epochNanoseconds);
+  });
+
+  test("a defect of an isolate goes to the defect rule; a log line of an isolate goes to stderr", async () => {
+    const { fakes } = await bootedPool(1);
+
+    fakes.send(0, { kind: "defect", protocol: 1, code: "CLIENT_DEFECT", name: "ClientDefect", message: "seat run: a rule" });
+    fakes.send(0, { kind: "log", protocol: 1, line: "horsies child: a callback threw" });
+    fakes.isolate(0).events.unreadable(new Error("DataCloneError"));
+    assert.match(fakes.defects[0]?.message ?? "", /the seat isolate 0: ClientDefect \(CLIENT_DEFECT\): seat run: a rule/);
+    assert.match(fakes.defects[1]?.message ?? "", /does not deserialize/);
+    assert.deepEqual(fakes.lines, ["horsies child: a callback threw"]);
   });
 
   test("an operation of an isolate runs on the main thread, and its answer goes back to that isolate", async () => {
@@ -214,7 +267,7 @@ describe("runs on the seat pool", () => {
 });
 
 describe("an isolate that ends", () => {
-  test("during a run: the run ends UNHANDLED_EXCEPTION with the record of the error, and a new isolate takes the seat", async () => {
+  test("during a run: the run ends WORKER_CRASHED with the error that ended the isolate, and a new isolate takes the seat", async () => {
     const { pool, fakes } = await bootedPool(2);
 
     pool.run(runPost(5n));
@@ -225,18 +278,22 @@ describe("an isolate that ends", () => {
     const outcome = settle?.[2];
 
     assert.equal(settle?.[0], 5n);
-    assert.equal(outcome?.kind === "error" ? outcome.parts.code.code : "", "UNHANDLED_EXCEPTION");
+    assert.deepEqual(outcome?.kind === "error" ? outcome.parts.code : undefined, { kind: "library", code: "WORKER_CRASHED" });
     assert.equal(
       outcome?.kind === "error" && outcome.parts.message.kind === "text" ? outcome.parts.message.text : "",
-      "Unhandled exception in task crunch: RangeError: Worker terminated due to reaching memory limit: JS heap out of memory",
+      "Seat isolate 0 exited with code 1 before the task ended: RangeError: Worker terminated due to reaching memory limit: JS heap out of memory",
     );
+    assert.deepEqual(outcome?.kind === "error" ? [outcome.parts.data, outcome.parts.exception] : [], [
+      { kind: "text", text: `{"task_id":"${TASK_ID}"}` },
+      { kind: "noException" },
+    ]);
     assert.equal(fakes.isolates.length, 3);
     assert.equal(fakes.isolate(2).marker.seatIndex, 0);
     assert.deepEqual(pool.stages(), ["booting", "free"]);
     assert.match(fakes.lines[0] ?? "", /seat isolate 0 ended with exit code 1: RangeError: .*during the run of task crunch/);
   });
 
-  test("with no error: the record type is WorkerThreadExit with the exit code", async () => {
+  test("with no error: WORKER_CRASHED names WorkerThreadExit and the exit code", async () => {
     const { pool, fakes } = await bootedPool(1);
 
     pool.run(runPost(5n));
@@ -245,13 +302,24 @@ describe("an isolate that ends", () => {
     const outcome = fakes.settles[0]?.[2];
 
     assert.equal(
-      outcome?.kind === "error" && outcome.parts.exception.kind === "record" ? outcome.parts.exception.className : "",
-      "WorkerThreadExit",
+      outcome?.kind === "error" && outcome.parts.message.kind === "text" ? outcome.parts.message.text : "",
+      "Seat isolate 0 exited with code 7 before the task ended: WorkerThreadExit: the seat isolate ended with exit code 7",
     );
-    assert.equal(
-      outcome?.kind === "error" && outcome.parts.exception.kind === "record" ? outcome.parts.exception.message : "",
-      "the seat isolate ended with exit code 7",
-    );
+  });
+
+  test("an isolate that the runtime does not start fails the first boot, and ends the child with 173 as a replacement", async () => {
+    const first = new PoolFakes();
+
+    first.refuseStart = 1;
+
+    await assert.rejects(startSeatPool(2, first.deps()).booted, /the seat isolate 1 did not start: Error: the OS refused a thread/);
+
+    const { fakes } = await bootedPool(1);
+
+    fakes.refuseStart = 0;
+    fakes.isolate(0).events.exit(1);
+    assert.deepEqual(fakes.ends, [173]);
+    assert.equal(fakes.timers[0]?.stopped, true);
   });
 
   test("a run during the replacement waits for the new isolate, then runs there; the wait is logged with its length", async () => {
@@ -292,6 +360,20 @@ describe("an isolate that ends", () => {
     assert.deepEqual(fakes.ends, [173]);
     assert.deepEqual(pool.stages(), ["ended"]);
     assert.match(fakes.lines.at(-1) ?? "", /not ready within 10000 ms; the child ends with 173/);
+  });
+
+  test("a run and a cancel that the core posts while the child ends are left; the child ends once", async () => {
+    const { pool, fakes } = await bootedPool(1);
+
+    fakes.isolate(0).events.exit(1);
+    fakes.timers[0]?.fire();
+    pool.run(runPost(6n));
+    pool.cancel(6n, "DEADLINE");
+    fakes.isolate(1).events.exit(1);
+    assert.equal(pool.stage(), "ending");
+    assert.deepEqual(fakes.ends, [173]);
+    assert.deepEqual(fakes.defects, []);
+    assert.equal(fakes.isolates.length, 2);
   });
 
   test("a provider failure in a new isolate ends the child with 173", async () => {

@@ -16,6 +16,7 @@ import type {
 } from "../native/sends/addon.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import { unreachable } from "../native/call/never.ts";
+import type { FacadesSeatOperation, FacadesSeatReply } from "../monitoring/seat-calls.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 import { AddonOutsideMainThread, ClientDefect } from "../thrown-errors.ts";
@@ -40,6 +41,8 @@ export interface ProducerCore {
  */
 export interface SeatOperationMap {
   readonly sends: { readonly operation: SendsSeatOperation; readonly reply: SendsSeatReply };
+  /** The monitoring and health reads, the database ping, the cancel and the rerun (`monitoring/seat-calls.ts`). */
+  readonly facades: { readonly operation: FacadesSeatOperation; readonly reply: FacadesSeatReply };
 }
 
 /** One send or task read that a seat isolate asks for. */

@@ -1,9 +1,10 @@
-// The outcome of a run whose seat isolate ended before the run's result: an uncaught throw in the isolate,
-// `process.exit` there, or an isolate out of memory (`ERR_WORKER_OUT_OF_MEMORY`, with the memory cap of the isolate).
+// The outcome of a run whose seat isolate ended before the run's result: an uncaught throw outside every run,
+// `process.exit` in the isolate, or the isolate at its memory cap (`ERR_WORKER_OUT_OF_MEMORY`).
 //
-// The run ends `UNHANDLED_EXCEPTION`, with the message form of a thrown value in a body
-// (`Unhandled exception in task <name>: <type>: <text>`), `data.exception_type`, and the exception record of the error
-// that ended the isolate. An isolate that ended with no error has the type `WorkerThreadExit` and its exit code.
+// The run ends with the core's crash outcome, `WORKER_CRASHED`, as a run whose child process ended does: the message
+// names the seat, the exit code and the error that ended the isolate (the core's form: `... exited with code <n>
+// before the task ended`), the data holds the task id, and no exception record is stored. A retry policy that names
+// `WORKER_CRASHED` retries it, as in the other classes.
 
 import { errorDataPart } from "../child/body.ts";
 import { type ThrownRecord, thrownRecord } from "../child/thrown-error.ts";
@@ -18,7 +19,7 @@ export type IsolateEnd =
   | { readonly kind: "error"; readonly cause: unknown; readonly exitCode: number }
   | { readonly kind: "exit"; readonly exitCode: number };
 
-/** The exception record of `end`. Pure. */
+/** The record of the error that ended an isolate. Pure. */
 export function isolateEndRecord(end: IsolateEnd): ThrownRecord {
   switch (end.kind) {
     case "error":
@@ -34,24 +35,23 @@ export function isolateEndRecord(end: IsolateEnd): ThrownRecord {
   }
 }
 
-/** The stored outcome of the run of `taskName` on an isolate that ended with `end`. Pure. */
-export function isolateEndOutcome(taskName: string, end: IsolateEnd): SeatOutcome {
-  const record = isolateEndRecord(end);
+/** The run of task `taskId` on seat `seat`, whose isolate ended with `end`. */
+export type EndedRun = { readonly seat: number; readonly taskId: string; readonly end: IsolateEnd };
+
+/** The stored outcome of a run whose isolate ended: `WORKER_CRASHED`. Pure. */
+export function isolateEndOutcome(run: EndedRun): SeatOutcome {
+  const record = isolateEndRecord(run.end);
 
   return {
     kind: "error",
     parts: {
-      code: { kind: "library", code: "UNHANDLED_EXCEPTION" },
-      message: { kind: "text", text: `Unhandled exception in task ${taskName}: ${record.type}: ${record.message}` },
-      data: errorDataPart({ exception_type: record.type }),
-      exception: {
-        kind: "record",
-        className: record.type,
-        module: "",
-        message: record.message,
-        repr: record.repr,
-        traceback: record.traceback,
+      code: { kind: "library", code: "WORKER_CRASHED" },
+      message: {
+        kind: "text",
+        text: `Seat isolate ${String(run.seat)} exited with code ${String(run.end.exitCode)} before the task ended: ${record.type}: ${record.message}`,
       },
+      data: errorDataPart({ task_id: run.taskId }),
+      exception: { kind: "noException" },
     },
   };
 }

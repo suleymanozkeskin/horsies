@@ -10,9 +10,13 @@ import { defineTask } from "../../../horsies/src/contract/public.ts";
 import type { BodyFactsRecord, CancelCauseName } from "../../../horsies/src/native/child/addon.ts";
 import { newCancelCells } from "../../../horsies/src/seats/cancel-cells.ts";
 import { type IsolatePort, SeatChannel } from "../../../horsies/src/seats/channel.ts";
+import type { BodyEnd } from "../../../horsies/src/child/body-observer.ts";
+import type { SeatBounds } from "../../../horsies/src/native/seats/addon.ts";
+import type { SeatIsolateDeps } from "../../../horsies/src/seats/isolate.ts";
 import type { SeatHost } from "../../../horsies/src/seats/pool.ts";
 import {
   type MainToSeat,
+  type RelayBounds,
   SEAT_PROTOCOL_VERSION,
   type SeatAnswer,
   type SeatToMain,
@@ -72,6 +76,11 @@ export class FakeIsolatePort implements IsolatePort {
     this.#listener(message);
   }
 
+  /** Deliver an object that may be outside the protocol. */
+  deliverRaw(message: object): void {
+    this.#listener(message);
+  }
+
   /** The posts of `kind`. */
   postsOf<K extends SeatToMain["kind"]>(kind: K): Extract<SeatToMain, { readonly kind: K }>[] {
     return this.posts.filter((post): post is Extract<SeatToMain, { readonly kind: K }> => post.kind === kind);
@@ -83,7 +92,7 @@ export function fakeChannel(seatIndex = 0, seats = 2): { readonly channel: SeatC
   const port = new FakeIsolatePort();
 
   const channel = new SeatChannel(
-    { seatIndex, protocol: SEAT_PROTOCOL_VERSION, cancelCells: newCancelCells(seats) },
+    { seatIndex, protocol: SEAT_PROTOCOL_VERSION, cancelCells: newCancelCells(seats), relayBounds: TEST_RELAY_BOUNDS },
     port,
   );
 
@@ -120,7 +129,41 @@ export async function settled(): Promise<void> {
 export function unusedSeatHost(): SeatHost {
   return {
     start: () => assert.fail("the child started a seat isolate"),
+    bounds: () => TEST_SEAT_BOUNDS,
     clock: () => 0,
+    now: () => ENDED_AT,
     timer: () => () => undefined,
   };
+}
+
+/** The relay bounds of the tests: small, so a test reaches them. */
+export const TEST_RELAY_BOUNDS: RelayBounds = Object.freeze({ opsInFlight: 2, opsWaiting: 3 });
+
+/** The seat bounds of the tests. */
+export const TEST_SEAT_BOUNDS: SeatBounds = Object.freeze({ ...TEST_RELAY_BOUNDS, replacementBootBoundMs: 10_000 });
+
+/** The main thread's time of each settle in the tests. */
+export const ENDED_AT: Temporal.Instant = Temporal.Instant.from("2026-11-26T10:00:00Z");
+
+/** A `bodyEnded` message of the run `runKey` with the verdict `end`, at `ENDED_AT`. */
+export function bodyEndedMessage(runKey: bigint, end: BodyEnd): MainToSeat {
+  return { kind: "bodyEnded", protocol: SEAT_PROTOCOL_VERSION, runKey, end, endedAtEpochNanoseconds: ENDED_AT.epochNanoseconds };
+}
+
+/** The process events of a seat isolate in a test: each listener that the isolate installs, and its ends. */
+export class FakeSeatEvents {
+  readonly uncaught: ((cause: unknown) => void)[] = [];
+  readonly rejections: ((cause: unknown) => void)[] = [];
+  readonly ends: number[] = [];
+
+  deps(): SeatIsolateDeps {
+    return {
+      events: {
+        onSignal: () => undefined,
+        onUncaught: (listener) => this.uncaught.push(listener),
+        onRejection: (listener) => this.rejections.push(listener),
+      },
+      endIsolate: (code) => this.ends.push(code),
+    };
+  }
 }

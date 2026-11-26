@@ -22,7 +22,8 @@ import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.
 import type { LaunchFacts } from "../../../horsies/src/worker/child-command.ts";
 import {
   processWorkerRunDeps,
-  runtimeSeatIsolateMemory,
+  runtimeNameOf,
+  seatIsolateMemoryOf,
   runWorkerOf,
   type WorkerRunDeps,
   type WorkerRunError,
@@ -260,7 +261,7 @@ describe("the worker run", () => {
     ];
 
     assert.equal(texts[3], "claim.prefetchBuffer: outside 0 to 2147483647, the bound of its worker manifest field");
-    assert.ok(texts[5]?.startsWith('workerProfiles["cpu"].sharedThread: this runtime does not cap the memory of a worker thread'));
+    assert.ok(texts[5]?.startsWith('workerProfiles["cpu"].sharedThread: SHARED_THREAD children run on Node only'));
     assert.equal(texts[7], "worker start failed (SCHEMA_REFUSED): schema");
     assert.equal(texts[8], "worker failed (CLAIM_FAILED): claim");
     assert.ok(texts[0]?.startsWith("error[HRS-300]: tasks[0] ping: no implementation"));
@@ -323,7 +324,7 @@ describe("the worker run of this process", () => {
     assert.equal(appCoreHandle(contextOf(created.value).core), handle);
   });
 
-  test("the preparation gets the memory cap of the worker threads of this runtime: capped on Node, not on Bun", () => {
+  test("the preparation gets the heap cap of the worker threads of the runtime of this process", () => {
     const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [] }, fakeEnvironment());
 
     if (!created.ok) {
@@ -343,8 +344,22 @@ describe("the worker run of this process", () => {
     });
 
     assert.deepEqual(deps.prepare("{}", "{}"), { kind: "prepared", worker: WORKER });
-    assert.deepEqual(given, ["bun" in process.versions ? "NOT_CAPPED" : "CAPPED"]);
-    assert.equal(runtimeSeatIsolateMemory(), given[0]);
+    assert.deepEqual(given, [seatIsolateMemoryOf(runtimeNameOf(process.versions))]);
+  });
+
+  test("each runtime by its version facts: Node by its own version only; Bun and Deno by theirs; else unknown", () => {
+    assert.equal(runtimeNameOf({ node: "26.13.1" }), "node");
+    assert.equal(runtimeNameOf({ node: "26.3.0", bun: "1.4.4" }), "bun");
+    assert.equal(runtimeNameOf({ node: "24.0.0", deno: "2.5.0" }), "deno");
+    assert.equal(runtimeNameOf({}), "unknown");
+  });
+
+  test("the worker threads of Node have a heap cap; those of every other runtime do not", () => {
+    assert.equal(seatIsolateMemoryOf("node"), "CAPPED");
+
+    for (const runtime of ["bun", "deno", "unknown"] as const) {
+      assert.equal(seatIsolateMemoryOf(runtime), "NOT_CAPPED");
+    }
   });
 
   test("the handle of an app without the addon is a defect", () => {

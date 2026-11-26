@@ -21,8 +21,9 @@ import { isMainThread } from "node:worker_threads";
 
 import type { Horsies } from "../app.ts";
 import { appInternals } from "../app/internals.ts";
-import { CHILD_MODE_FLAG, processStart } from "../app/suppression.ts";
+import { CHILD_MODE_FLAG } from "../app/suppression.ts";
 import { processChildModeDeps, runChildMode } from "../child/host.ts";
+import { type ThreadChannel, threadChannel } from "../seats/channel.ts";
 import { processSeatIsolateDeps, runSeatIsolate } from "../seats/isolate.ts";
 import { workerLogBacklog } from "../native/worker/worker.ts";
 import { raiseDefect, reportDefect } from "../native/call/defect.ts";
@@ -105,15 +106,19 @@ export type ProcessFacts = {
 
 /** The facts of this process. Effects: reads the thread, its `workerData` and `process.argv`. */
 export function processFacts(): ProcessFacts {
-  return { thread: threadOf(isMainThread, processStart().seatIsolate), argv: [...process.argv] };
+  return { thread: isMainThread ? "main" : workerThreadOf(threadChannel()), argv: [...process.argv] };
 }
 
-function threadOf(mainThread: boolean, seatIsolate: boolean): ProcessFacts["thread"] {
-  if (mainThread) {
-    return "main";
+/** The kind of a worker thread with the channel `channel`: a seat isolate, or another worker thread. Pure. */
+function workerThreadOf(channel: ThreadChannel): Exclude<ProcessFacts["thread"], "main"> {
+  switch (channel.kind) {
+    case "seat":
+      return "seatIsolate";
+    case "notSeat":
+      return "worker";
+    default:
+      return unreachable(channel);
   }
-
-  return seatIsolate ? "seatIsolate" : "worker";
 }
 
 /** The mode of a process with `facts`. Pure. */
