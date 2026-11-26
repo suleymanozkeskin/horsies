@@ -7,6 +7,9 @@
 /// <reference lib="esnext.temporal" />
 
 // @public
+export type ActionsSwitch = "enabled" | "disabled";
+
+// @public
 export class AddonOutsideMainThread extends CoreDefect {
     constructor(facts: {
         readonly threadId: number;
@@ -18,6 +21,9 @@ export class AddonOutsideMainThread extends CoreDefect {
     // (undocumented)
     readonly threadId: number;
 }
+
+// @public
+export function allowAll(): MonitoringAuthPolicy;
 
 // @public
 export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, string, ExecutionClass>;
@@ -725,6 +731,9 @@ export class CoreStopped extends CoreError {
     // (undocumented)
     readonly subject: string;
 }
+
+// @public
+export function createMonitoringHandler(app: Horsies, options: MonitoringHandlerOptions): MonitoringHandler;
 
 // @public
 export type CreateRefused = {
@@ -1738,6 +1747,27 @@ export interface Monitoring {
 // @public
 export const MONITORING_WINDOW_DEFAULT: Temporal.Duration;
 
+// @public
+export interface MonitoringAuthPolicy {
+    canAct(request: Request): boolean | Promise<boolean>;
+    canView(request: Request): boolean | Promise<boolean>;
+}
+
+// @public
+export interface MonitoringHandler {
+    (request: Request): Promise<Response>;
+    close(): Promise<void>;
+}
+
+// @public
+export interface MonitoringHandlerOptions {
+    readonly actions?: ActionsSwitch;
+    readonly auth: MonitoringAuthPolicy;
+    readonly basePath?: MountPathText;
+    // (undocumented)
+    readonly ui?: MonitoringUiOptions;
+}
+
 // @public (undocumented)
 export type MonitoringQueryCoreError = MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation;
 
@@ -1777,6 +1807,12 @@ export type MonitoringQueryRefusalCode = (typeof MonitoringQueryRefusalCode)[key
 export type MonitoringReadError = MonitoringQueryCoreError | QueryRefused;
 
 // @public
+export interface MonitoringUiOptions {
+    readonly customCssUrl?: string;
+    readonly traceLink?: TraceLinkTemplate;
+}
+
+// @public
 export interface MonitoringWindow {
     // (undocumented)
     readonly since?: Temporal.Instant;
@@ -1796,6 +1832,9 @@ export interface MonthlySchedule {
     // (undocumented)
     readonly kind: "monthly";
 }
+
+// @public
+export type MountPathText = `/${string}`;
 
 // @public
 export interface NoCause {
@@ -3935,6 +3974,77 @@ export class TooManyPendingCalls extends CoreError {
 }
 
 // @public
+export type TraceLinkRefusal =
+/** The template has 0 bytes or more than 2,048 bytes: `bytes`, its UTF-8 byte count. */
+    {
+    readonly kind: "length";
+    readonly bytes: number;
+    readonly template: string;
+    readonly rule: string;
+}
+/** The template holds a space, a control or a non-ASCII byte: `byte`, the first such byte. */
+| {
+    readonly kind: "character";
+    readonly byte: number;
+    readonly template: string;
+    readonly rule: string;
+}
+/** The template does not start with `https://` or `http://`. */
+| {
+    readonly kind: "scheme";
+    readonly template: string;
+    readonly rule: string;
+}
+/** The template has no host after its scheme. */
+| {
+    readonly kind: "noHost";
+    readonly template: string;
+    readonly rule: string;
+}
+/** The template does not hold `{trace_id}` once: `count`, the times that it holds it. */
+| {
+    readonly kind: "placeholderCount";
+    readonly count: number;
+    readonly template: string;
+    readonly rule: string;
+}
+/** The template holds a `{` or `}` outside `{trace_id}`. */
+| {
+    readonly kind: "strayBrace";
+    readonly template: string;
+    readonly rule: string;
+};
+
+// @public
+export interface TraceLinkTemplate {
+    // (undocumented)
+    readonly [traceLinkTemplateBrand]: "TraceLinkTemplate";
+    readonly text: string;
+}
+
+// @public
+export const TraceLinkTemplate: {
+    readonly parse: (text: string) => Result<TraceLinkTemplate, TraceLinkRefusal>;
+};
+
+// @public
+export function trustedHeader(headerName: string, options: TrustedHeaderOptions): Result<MonitoringAuthPolicy, TrustedHeaderRefused>;
+
+// @public
+export interface TrustedHeaderOptions {
+    readonly actions: ActionsSwitch;
+}
+
+// @public
+export type TrustedHeaderRefused = {
+    readonly kind: "blankHeaderName";
+} | {
+    readonly kind: "invalidHeaderName";
+    readonly headerName: string;
+    readonly rule: string;
+};
+
+// @public
 export type TupleSent<T extends readonly RequiredWire[]> = {
     -readonly [K in keyof T]: SentOf<T[K]>;
 };
@@ -3983,6 +4093,9 @@ export type ValueRefused = {
 
 // @public
 export type ValueWire = Wire<unknown, unknown, Presence, "value">;
+
+// @public
+export function viewOnly(): MonitoringAuthPolicy;
 
 // @public (undocumented)
 export type Weekday = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
