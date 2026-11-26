@@ -4,8 +4,8 @@
 import type { Refusal } from "../app/refusal.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 
-/** The name of the check in a report: `check`, or the check before a worker starts. */
-export type CheckPhaseName = "check" | "worker-startup";
+/** The name of the check in a report: `check`, or the check before a worker or a scheduler starts. */
+export type CheckPhaseName = "check" | "worker-startup" | "scheduler-startup";
 
 /** The refusals of the first phase of a check that refused, in the order the phase found them. */
 export type CheckReport = { readonly phase: CheckPhaseName; readonly refusals: NonEmpty<Refusal> };

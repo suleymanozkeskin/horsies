@@ -53,6 +53,11 @@ function recordingTable(code: CommandExitCode): CommandTable & { readonly calls:
 
       return code;
     },
+    scheduler: async (_app, args) => {
+      calls.push(["scheduler", ...args]);
+
+      return code;
+    },
   };
 }
 
@@ -108,6 +113,9 @@ function throwingTable(cause: Error): CommandTable {
     check: async () => {
       throw cause;
     },
+    scheduler: async () => {
+      throw cause;
+    },
   };
 }
 
@@ -158,7 +166,7 @@ describe("the mode of a process", () => {
   });
 
   test("the command names", () => {
-    assert.deepEqual(COMMAND_NAMES, ["worker", "check"]);
+    assert.deepEqual(COMMAND_NAMES, ["worker", "check", "scheduler"]);
   });
 });
 
@@ -190,7 +198,7 @@ describe("cli.run", () => {
     const deps = fakeDeps(main("serve"), recordingTable(0));
 
     assert.equal(await endedCode(runCli(testApp(), deps)), 2);
-    assert.ok(deps.errors[0]?.startsWith("usage: <entry> {worker,check}"));
+    assert.ok(deps.errors[0]?.startsWith("usage: <entry> {worker,check,scheduler}"));
     assert.ok(deps.errors[1]?.startsWith("horsies: error: unknown command"));
   });
 
