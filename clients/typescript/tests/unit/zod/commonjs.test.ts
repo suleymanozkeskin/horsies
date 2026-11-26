@@ -146,7 +146,7 @@ describe("a schema of zod's CommonJS build", () => {
 
     assert.deepEqual(checksRun(later._zod.def.checks ?? [])("x"), {
       ok: false,
-      error: { issues: [{ path: "$", code: ASYNC_ISSUE_CODE }] },
+      error: { issues: [{ kind: "horsiesIssue", path: "$", code: ASYNC_ISSUE_CODE }] },
     });
   });
 
@@ -158,7 +158,7 @@ describe("a schema of zod's CommonJS build", () => {
 
     assert.deepEqual(runsOfCodec(later).decode("x"), {
       ok: false,
-      error: { issues: [{ path: "$", code: ASYNC_ISSUE_CODE }] },
+      error: { issues: [{ kind: "horsiesIssue", path: "$", code: ASYNC_ISSUE_CODE }] },
     });
   });
 
@@ -170,7 +170,7 @@ describe("a schema of zod's CommonJS build", () => {
 
     assert.deepEqual(runsOfCodec(lossy).encode("x"), {
       ok: false,
-      error: { issues: [{ path: "$", code: ONE_WAY_ISSUE_CODE }] },
+      error: { issues: [{ kind: "horsiesIssue", path: "$", code: ONE_WAY_ISSUE_CODE }] },
     });
   });
 });

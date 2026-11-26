@@ -225,7 +225,7 @@ export const recordShipment = defineTask({
   `z.map()`, `z.set()`, `z.function()`, `z.promise()`; a union with an
   object member that is not a discriminated union; a union of an integer
   and a float; `z.intersection()`; `.optional()` or `.default()` outside an
-  object member or a parameter; a function default; `z.lazy()`; and a zod
+  object member or a parameter; a function default; `.default()` or `.prefault()` under `.nonoptional()`; `z.lazy()`; and a zod
   definition, field, format or check that the installed horsies does not
   know.
 - The supported zod range is the peer range of the package

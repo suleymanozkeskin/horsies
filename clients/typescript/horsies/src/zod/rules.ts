@@ -1,6 +1,7 @@
 // The refusals of the zod adapter: a zod form that has no stored form, or that the codec cannot read back exactly.
 // `Horsies.create` reports each one with the code of a task signature refusal (`HRS-105`).
 
+import type { KindRefused, KindRule } from "../wire/check.ts";
 import { unreachable } from "../wire/unreachable.ts";
 
 /** Why the adapter refuses a zod schema. */
@@ -24,12 +25,8 @@ export type ZodRule =
    * `z.instanceof()`, `z.custom()` outside a codec output, `z.nan()`, `z.never()`, `z.void()`, `z.undefined()`.
    */
   | "NOT_DATA"
-  /** `z.union()` with an object member, or `z.discriminatedUnion()` that tries each option for an unknown tag. */
-  | "UNDISCRIMINATED_UNION"
-  /** `z.union()` of a primitive and an array or a record. */
-  | "MIXED_UNION"
-  /** A union with an integer member and a float member: one JavaScript `number` cannot say which it is. */
-  | "INT_FLOAT_UNION"
+  /** `z.discriminatedUnion()` with `unionFallback`: it tries each option for an unknown tag. */
+  | "UNION_FALLBACK"
   /** A record key schema that is not a string, a string format, a string enum or a string literal. */
   | "RECORD_KEY"
   /** An object member whose name only the engine writes. */
@@ -53,6 +50,8 @@ export type ZodRule =
   | "OPTIONAL_NOT_A_MEMBER"
   /** A `.default()` or `.prefault()` whose value changes from one read to the next (a function default). */
   | "CHANGING_DEFAULT"
+  /** `.default()` or `.prefault()` under `.nonoptional()`: zod fills a missing key, the stored form has no such fill. */
+  | "DEFAULT_UNDER_NONOPTIONAL"
   /** A schema that contains itself (`z.lazy()`, a getter in an object): the kind tree has no recursive node yet. */
   | "RECURSIVE"
   /** `z.tuple([...], rest)`: the kind tree has no tuple with a rest item. */
@@ -115,9 +114,7 @@ function ruleText(refused: ZodSchemaRefused): string {
     case "DATE":
     case "LOOSE_OBJECT":
     case "NOT_DATA":
-    case "UNDISCRIMINATED_UNION":
-    case "MIXED_UNION":
-    case "INT_FLOAT_UNION":
+    case "UNION_FALLBACK":
     case "RECORD_KEY":
     case "ENGINE_KEY":
     case "UNKNOWN_DEFINITION":
@@ -125,6 +122,7 @@ function ruleText(refused: ZodSchemaRefused): string {
     case "INTERSECTION":
     case "OPTIONAL_NOT_A_MEMBER":
     case "CHANGING_DEFAULT":
+    case "DEFAULT_UNDER_NONOPTIONAL":
     case "RECURSIVE":
     case "TUPLE_REST":
     case "LITERAL_MEMBER":
@@ -151,12 +149,8 @@ function fixOf(rule: ZodRule): string {
       return "use z.object() or z.strictObject(): undeclared keys are refused";
     case "NOT_DATA":
       return "name a data type";
-    case "UNDISCRIMINATED_UNION":
-      return "use z.discriminatedUnion() for a union of objects";
-    case "MIXED_UNION":
-      return "use z.discriminatedUnion() of objects for a union of a primitive and a container";
-    case "INT_FLOAT_UNION":
-      return "use one number kind: z.int() or z.number()";
+    case "UNION_FALLBACK":
+      return "remove unionFallback: an unknown tag is refused";
     case "RECORD_KEY":
       return "use string keys: z.string(), a string format, or z.enum([...]) of strings";
     case "ENGINE_KEY":
@@ -174,6 +168,8 @@ function fixOf(rule: ZodRule): string {
       return "use .nullable(), or make the value an object member";
     case "CHANGING_DEFAULT":
       return "give a fixed default value; a sender sets a value that changes";
+    case "DEFAULT_UNDER_NONOPTIONAL":
+      return "remove .nonoptional(), or remove the default: a required member takes no default";
     case "RECURSIVE":
       return "use h.json() for a recursive value";
     case "TUPLE_REST":
@@ -186,5 +182,34 @@ function fixOf(rule: ZodRule): string {
       return "nest fewer schemas";
     default:
       return unreachable(rule, "fixOf");
+  }
+}
+
+/** A refusal of `checkKind` for a zod schema: the refusal, and the zod forms to use instead (empty: none to name). */
+export type ZodKindRefused = KindRefused & { readonly help: readonly string[] };
+
+/** `refused` with the zod forms to use instead. Pure. */
+export function zodKindRefused(refused: KindRefused): ZodKindRefused {
+  return Object.freeze({ ...refused, help: zodKindHelp(refused.rule) });
+}
+
+/** The zod forms to use instead of a form that breaks a rule of `checkKind`. Pure. */
+function zodKindHelp(rule: KindRule): readonly string[] {
+  switch (rule) {
+    case "AmbiguousUnion":
+      return ["use union members that store different JSON types: one number kind (z.int() or z.number()), not two"];
+    case "UnionMemberNotPrimitive":
+      return ["use z.discriminatedUnion() of objects for a union with an object, array or record member"];
+    case "DefaultNotStored":
+    case "EngineKeyMember":
+    case "IntegerLikeMember":
+    case "KindTooDeep":
+    case "LiteralNotSafeInteger":
+    case "UnionTagInvalid":
+    case "TaskOutcomePlacement":
+    case "UpstreamOutputRefused":
+      return [];
+    default:
+      return unreachable(rule, "zodKindHelp");
   }
 }

@@ -52,6 +52,8 @@ ruleTester.run("no-dropped-result", noDroppedResult, {
       name: "an array of Results that is used",
       code: `${header}const reads = await Promise.all([handle.get(), handle.get()]);\nconsole.log(reads.length);`,
     },
+    { name: "void discards a Promise.allSettled of sends", code: `${header}void (await Promise.allSettled([app.send(report, { n: 1 })]));` },
+    { name: "a settled array of values that are not Results", code: `await Promise.allSettled([Promise.resolve(1)]);` },
     { name: "an array of values that are not Results", code: `declare const numbers: number[];\nnumbers.map((n) => n + 1);` },
     { name: "a tuple of values that are not Results", code: `declare function pair(): [number, string];\npair();` },
     { name: "a value that is not a Result", code: `${header}console.log(parseCount("1"));` },
@@ -131,6 +133,16 @@ ruleTester.run("no-dropped-result", noDroppedResult, {
       name: "a dropped awaited array of reads",
       code: `${header}declare const handles: TaskHandle<number, string>[];\nawait Promise.all(handles.map((each) => each.get()));`,
       errors: [{ messageId: "droppedResult" }],
+    },
+    {
+      name: "a dropped awaited Promise.allSettled of sends",
+      code: `${header}await Promise.allSettled([app.send(report, { n: 1 }), app.send(report, { n: 2 })]);`,
+      errors: [{ messageId: "droppedResult" }],
+    },
+    {
+      name: "a dropped Promise.allSettled of reads that is not awaited",
+      code: `${header}Promise.allSettled([handle.get()]);`,
+      errors: [{ messageId: "droppedPromisedResult" }],
     },
     {
       name: "a dropped Promise.all of sends that is not awaited",
