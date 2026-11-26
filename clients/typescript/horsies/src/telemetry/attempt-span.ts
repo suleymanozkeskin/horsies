@@ -130,7 +130,7 @@ function openedObservation(deps: AttemptSpanDeps, facts: RecordedFacts): BodyObs
     deps.notMade.report({ kind: "attempt", taskId: facts.taskId }, cause);
   };
 
-  const opened = openedAttemptSpan(deps, facts, SDK_CLOCK, notMade);
+  const opened = openedAttemptSpan(deps, facts, SDK_CLOCK, {}, notMade);
 
   switch (opened.kind) {
     case "notOpen":
@@ -155,20 +155,21 @@ export type OpenedAttemptSpan = { readonly kind: "open"; readonly open: OpenSpan
 
 /**
  * Open the attempt span of `facts` from `start`: `run <task_name>`, CONSUMER, the parent and the links by the
- * parentage, the attributes of the run and of its workflow node. A throw of the user's SDK goes to `openFailed` and
+ * parentage, the attributes of the run and of its workflow node, and `extraAttributes`. A throw of the user's SDK goes to `openFailed` and
  * gives `notOpen`.
  */
 export function openedAttemptSpan(
   deps: AttemptSpanDeps,
   facts: RecordedFacts,
   start: SpanTime,
+  extraAttributes: OtelAttributes,
   openFailed: (cause: unknown) => void,
 ): OpenedAttemptSpan {
   const { api } = deps;
 
   try {
     const place = spanPlace(api, deps.parentage, facts.carrier);
-    const attributes = { ...runAttributes(facts), ...workflowAttributes(facts.workflow) };
+    const attributes = { ...runAttributes(facts), ...workflowAttributes(facts.workflow), ...extraAttributes };
     const options = { kind: api.SpanKind.CONSUMER, attributes, links: place.links };
 
     const span = api.trace
