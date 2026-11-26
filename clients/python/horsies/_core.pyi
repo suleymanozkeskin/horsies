@@ -2684,7 +2684,7 @@ class RerunCallerKeyRefused:
 
 @final
 class RerunRetryCodeNotDeclared:
-    """The stored retry list of the source names the custom code code, and the task task_name
+    """The stored retry list of the source names the custom code retry_code, and the task task_name
     of the calling app does not declare it (RETRY_CODE_NOT_DECLARED). Nothing written.
     message names both; exception is a CorePreconditionFailed with the subject rerun_task,
     not retryable.
@@ -2692,7 +2692,7 @@ class RerunRetryCodeNotDeclared:
     @property
     def task_name(self) -> str: ...
     @property
-    def code(self) -> str: ...
+    def retry_code(self) -> str: ...
     @property
     def message(self) -> str: ...
     @property

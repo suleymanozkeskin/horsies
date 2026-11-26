@@ -695,7 +695,11 @@ fn values_retrying_on(codes: &[&str]) -> Vec<StatementValue> {
     );
     let payload = format!("{{\"input\":{INPUT},\"options\":{options}}}").into_bytes();
     let digest = Sha256::digest(&payload).to_vec();
-    let values = with(history_values(), "rerun_input_digest", StatementValue::Bytea(digest));
+    let values = with(
+        history_values(),
+        "rerun_input_digest",
+        StatementValue::Bytea(digest),
+    );
     with(values, "rerun_input_inline", StatementValue::Bytea(payload))
 }
 
@@ -731,7 +735,10 @@ fn a_stored_custom_retry_code_that_the_task_declares_passes() {
         values_retrying_on(&["TRANSIENT"]),
         &app_codes(&["TRANSIENT"]),
     );
-    assert!(matches!(prepared, RerunPreparation::Write(_)), "{prepared:?}");
+    assert!(
+        matches!(prepared, RerunPreparation::Write(_)),
+        "{prepared:?}"
+    );
 }
 
 #[test]
@@ -744,7 +751,7 @@ fn a_stored_custom_retry_code_that_the_task_does_not_declare_is_refused() {
         prepared,
         RerunPreparation::RetryCodeNotDeclared {
             task_name: TASK_NAME.to_owned(),
-            code: "TRANSIENT".to_owned(),
+            retry_code: "TRANSIENT".to_owned(),
         }
     );
 }
@@ -773,6 +780,9 @@ fn stored_built_in_retry_codes_pass_for_every_task() {
             values_retrying_on(&["WORKER_CRASHED", "TASK_TIMEOUT"]),
             &codes,
         );
-        assert!(matches!(prepared, RerunPreparation::Write(_)), "{prepared:?}");
+        assert!(
+            matches!(prepared, RerunPreparation::Write(_)),
+            "{prepared:?}"
+        );
     }
 }

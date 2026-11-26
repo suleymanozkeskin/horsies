@@ -91,10 +91,13 @@ pub enum CallerRerunError<E> {
     /// written. Not retryable: the same call meets it again until the app
     /// declares the code.
     #[error(
-        "rerun refused: the stored retry list of task '{task_name}' names the code '{code}', \
+        "rerun refused: the stored retry list of task '{task_name}' names the code '{retry_code}', \
          which the task does not declare"
     )]
-    RetryCodeNotDeclared { task_name: String, code: String },
+    RetryCodeNotDeclared {
+        task_name: String,
+        retry_code: String,
+    },
     /// The stored retry list of the source names a custom code, and the app
     /// does not register the task `task_name`, so the code cannot be
     /// checked. Nothing is written. Not retryable: the same call meets it
@@ -201,8 +204,14 @@ where
         RerunPreparation::CallerKeyRefused(refused) => {
             return Err(CallerRerunError::CallerKeyRefused(refused))
         }
-        RerunPreparation::RetryCodeNotDeclared { task_name, code } => {
-            return Err(CallerRerunError::RetryCodeNotDeclared { task_name, code })
+        RerunPreparation::RetryCodeNotDeclared {
+            task_name,
+            retry_code,
+        } => {
+            return Err(CallerRerunError::RetryCodeNotDeclared {
+                task_name,
+                retry_code,
+            })
         }
         RerunPreparation::TaskNotRegistered { task_name } => {
             return Err(CallerRerunError::TaskNotRegistered { task_name })

@@ -383,7 +383,7 @@ pub struct RerunCallerKeyRefused {
 #[derive(Clone, Debug)]
 pub struct RerunRetryCodeNotDeclared {
     pub task_name: String,
-    pub code: String,
+    pub retry_code: String,
     pub message: String,
     pub exception: FailureException,
 }
@@ -576,15 +576,18 @@ fn preparation_record(preparation: RerunPreparation) -> PreparationRecord {
                 cause: refused.to_string(),
             })
         }
-        RerunPreparation::RetryCodeNotDeclared { task_name, code } => {
+        RerunPreparation::RetryCodeNotDeclared {
+            task_name,
+            retry_code,
+        } => {
             let message = RerunError::RetryCodeNotDeclared {
                 task_name: task_name.clone(),
-                code: code.clone(),
+                retry_code: retry_code.clone(),
             }
             .to_string();
             PreparationRecord::RetryCodeNotDeclared(RerunRetryCodeNotDeclared {
                 task_name,
-                code,
+                retry_code,
                 exception: precondition_failed(&message),
                 message,
             })
@@ -904,11 +907,11 @@ mod tests {
     fn the_retry_code_refusals_have_their_records() {
         match preparation_record(RerunPreparation::RetryCodeNotDeclared {
             task_name: "charge".to_owned(),
-            code: "TRANSIENT".to_owned(),
+            retry_code: "TRANSIENT".to_owned(),
         }) {
             PreparationRecord::RetryCodeNotDeclared(record) => {
                 assert_eq!(record.task_name, "charge");
-                assert_eq!(record.code, "TRANSIENT");
+                assert_eq!(record.retry_code, "TRANSIENT");
                 assert!(
                     record.message.contains("'charge'") && record.message.contains("'TRANSIENT'"),
                     "{}",

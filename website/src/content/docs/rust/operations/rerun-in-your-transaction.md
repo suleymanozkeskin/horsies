@@ -16,7 +16,7 @@ A rerun reads a terminal source task and, for an eligible source with a retained
 
 Both check the stored retry list of the source before the write. A built-in code passes. A custom code passes when the app registers the task and the task declares the code (its code type). The app's own rerun reads the codes of its registry; `rerun_task_in` takes them as `&app.registered_task_codes()`. Otherwise the rerun is refused and writes nothing:
 
-- `RetryCodeNotDeclared { task_name, code }` (`RETRY_CODE_NOT_DECLARED`): the stored list names the custom code `code`, and the task does not declare it. The new task would not retry on that code.
+- `RetryCodeNotDeclared { task_name, retry_code }` (`RETRY_CODE_NOT_DECLARED`): the stored list names the custom code `retry_code`, and the task does not declare it. The new task would not retry on that code.
 - `TaskNotRegistered { task_name }` (`TASK_NOT_REGISTERED`): the stored list names a custom code, and the app does not register the task, so the code cannot be checked.
 
 Both are not retryable: the same call meets them again until the app declares the code or registers the task. A stored list of built-in codes only, or no retry policy, needs no registered task.
@@ -109,7 +109,7 @@ async fn rerun_with_audit(
 | `ClientFamilyMismatch { stored }` | Another client installed the database, or it records none. Nothing is written. Not retryable |
 | `UnknownStoredFamily(UnknownStoredFamily)` | The family row of the database holds a value that is not a client family (`stored`): corrupt stored data. Nothing is written. Not retryable |
 | `CallerKeyRefused(IdempotencyKeyError)` | The caller key is not a valid idempotency key. Nothing is written |
-| `RetryCodeNotDeclared { task_name, code }` | The stored retry list of the source names a custom code that the task does not declare. Nothing is written. Not retryable |
+| `RetryCodeNotDeclared { task_name, retry_code }` | The stored retry list of the source names a custom code that the task does not declare. Nothing is written. Not retryable |
 | `TaskNotRegistered { task_name }` | The stored retry list of the source names a custom code, and the app does not register the task. Nothing is written. Not retryable |
 | `IdMintRefused(Uuid7Error)` | The id of the new task could not be minted. Nothing is written |
 | `Row(RerunRowError)` | A row did not fit its statement. Not retryable |

@@ -403,8 +403,8 @@ async fn a_stored_custom_retry_code_is_checked_against_the_app() {
     assert!(
         matches!(
             &undeclared,
-            CallerRerunError::RetryCodeNotDeclared { task_name, code }
-                if task_name == TASK_NAME && code == "TRANSIENT"
+            CallerRerunError::RetryCodeNotDeclared { task_name, retry_code }
+                if task_name == TASK_NAME && retry_code == "TRANSIENT"
         ),
         "{undeclared:?}"
     );

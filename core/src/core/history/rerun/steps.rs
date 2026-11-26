@@ -181,10 +181,13 @@ pub enum RerunPreparation {
     /// The caller key is not a valid idempotency key (Python raises
     /// `ValueError`). Nothing is written.
     CallerKeyRefused(IdempotencyKeyError),
-    /// The stored retry list of the source names the custom code `code`,
+    /// The stored retry list of the source names the custom code `retry_code`,
     /// and the task `task_name` of the calling app does not declare it.
     /// Nothing is written.
-    RetryCodeNotDeclared { task_name: String, code: String },
+    RetryCodeNotDeclared {
+        task_name: String,
+        retry_code: String,
+    },
     /// The stored retry list of the source names a custom code, and the
     /// calling app does not register the task `task_name`. Nothing is
     /// written.
@@ -556,7 +559,7 @@ fn prepare_write(
         Err(RetryCodeRefusal::NotDeclared { code }) => {
             return RerunPreparation::RetryCodeNotDeclared {
                 task_name: source.task_name,
-                code,
+                retry_code: code,
             };
         }
         Err(RetryCodeRefusal::TaskNotRegistered) => {

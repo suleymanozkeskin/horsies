@@ -133,7 +133,7 @@ there is no migration contract between pre-1.0 versions.
     { custom }` or `DeclaredCodes::TaskNotRegistered`. `prepare_rerun_write`
     takes `codes` after `policy`, and `PostgresBroker::rerun_task` takes
     `codes` last. `RerunPreparation` and `RerunError` have the variants
-    `RetryCodeNotDeclared { task_name, code }` and
+    `RetryCodeNotDeclared { task_name, retry_code }` and
     `TaskNotRegistered { task_name }`. `RetryRule::auto_retry_for` gives the
     stored codes.
   - Python: `rerun_task` takes the keyword `registered_task_codes`
@@ -146,7 +146,7 @@ there is no migration contract between pre-1.0 versions.
   - Rust: `rerun::rerun_task_in(transaction, &command, &policy, &codes,
     sent_at)` takes `&app.registered_task_codes()`; `Horsies::rerun_task`
     passes the app's codes. `CallerRerunError` has the variants
-    `RetryCodeNotDeclared { task_name, code }` and
+    `RetryCodeNotDeclared { task_name, retry_code }` and
     `TaskNotRegistered { task_name }`. `horsies::rerun` exports
     `RegisteredTaskCodes`.
 - **Breaking (Python): `auto_retry_for` takes code members.** An entry of

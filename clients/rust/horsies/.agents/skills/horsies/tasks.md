@@ -733,7 +733,7 @@ async fn rerun_with_audit(
 - `CallerRerunError<E>`: `Driver(E)`, `ClassNotRegistered { key }`,
   `ClientFamilyMismatch { stored }`, `UnknownStoredFamily` (a family row
   that holds no client family), `CallerKeyRefused`,
-  `RetryCodeNotDeclared { task_name, code }`, `TaskNotRegistered
+  `RetryCodeNotDeclared { task_name, retry_code }`, `TaskNotRegistered
   { task_name }`, `IdMintRefused`, `Row`.
 - The stored retry list of the source is checked before the write: a
   built-in code passes; a custom code passes when the app registers the

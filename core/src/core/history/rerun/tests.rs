@@ -1091,8 +1091,8 @@ async fn a_stored_custom_retry_code_is_checked_against_the_calling_app() {
     ));
     assert!(matches!(
         rerun(codes_declaring(&["RATE_LIMITED"])).await,
-        Err(RerunError::RetryCodeNotDeclared { ref task_name, ref code })
-            if task_name == "p8.rerun" && code == "TRANSIENT"
+        Err(RerunError::RetryCodeNotDeclared { ref task_name, ref retry_code })
+            if task_name == "p8.rerun" && retry_code == "TRANSIENT"
     ));
     assert_eq!(rerun_count(&pool, source).await, 0);
 
@@ -1143,7 +1143,11 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
     let (source, _) = seed_source(&pool, TerminalSource::Failed, false, None).await;
     let command = || RerunTask::new(source, None, Some("p8-replay".to_owned()));
     let first = broker
-        .rerun_task(command(), policy(SOURCE_CLASS, true), &RegisteredTaskCodes::NONE)
+        .rerun_task(
+            command(),
+            policy(SOURCE_CLASS, true),
+            &RegisteredTaskCodes::NONE,
+        )
         .await
         .unwrap();
     let RerunOutcome::Enqueued { new_task_id, .. } = first else {
@@ -1151,7 +1155,11 @@ async fn keyed_replay_and_source_owned_key_conflict_are_exact() {
     };
     assert_eq!(
         broker
-            .rerun_task(command(), policy(SOURCE_CLASS, true), &RegisteredTaskCodes::NONE)
+            .rerun_task(
+                command(),
+                policy(SOURCE_CLASS, true),
+                &RegisteredTaskCodes::NONE
+            )
             .await
             .unwrap(),
         RerunOutcome::KeyReplay {

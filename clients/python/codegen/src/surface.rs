@@ -3267,9 +3267,9 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunRetryCodeNotDeclared",
-        doc: "The stored retry list of the source names the custom code code, and the task task_name\nof the calling app does not declare it (RETRY_CODE_NOT_DECLARED). Nothing written.\nmessage names both; exception is a CorePreconditionFailed with the subject rerun_task,\nnot retryable.",
+        doc: "The stored retry list of the source names the custom code retry_code, and the task task_name\nof the calling app does not declare it (RETRY_CODE_NOT_DECLARED). Nothing written.\nmessage names both; exception is a CorePreconditionFailed with the subject rerun_task,\nnot retryable.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("task_name", "str"), property("code", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
+        properties: &[property("task_name", "str"), property("retry_code", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
