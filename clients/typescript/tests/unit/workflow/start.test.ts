@@ -200,8 +200,9 @@ describe("app.start", () => {
 
     const core = fakeCore();
 
-    await createWorkflowArea(contextOf(core, observer)).start(hello, { who: "a" });
+    const started = await createWorkflowArea(contextOf(core, observer)).start(hello, { who: "a" });
 
+    assert(started.ok);
     assert.deepEqual(seen, [`hello ${WORKFLOW_ID}`]);
     assert.deepEqual(core.starts[0]?.trace, carrier);
   });
