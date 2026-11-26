@@ -510,13 +510,13 @@ mod tests {
         assert_eq!(
             preparation_record(RerunPreparation::RetryCodeNotDeclared {
                 task_name: "charge".to_owned(),
-                code: "CARD_DECLINED".to_owned(),
+                retry_code: "CARD_DECLINED".to_owned(),
             }),
             RerunPreparationRecord::Refused {
                 error: CallerStepRefusal::RetryCodeNotDeclared {
                     message: RerunError::RetryCodeNotDeclared {
                         task_name: "charge".to_owned(),
-                        code: "CARD_DECLINED".to_owned(),
+                        retry_code: "CARD_DECLINED".to_owned(),
                     }
                     .to_string(),
                     task_name: "charge".to_owned(),
