@@ -13,7 +13,7 @@ import { type AppConfig, type AppConfigInput, parseAppConfig, resendOnTransientE
 import { queueSetupOf } from "../config/queues.ts";
 import type { EnvironmentRead } from "../config/secret.ts";
 import type { AnyTaskContract } from "../contract/define-task.ts";
-import { buildCoreHandle, type CoreHandle } from "../native/handle/core-handle.ts";
+import { buildCoreHandle } from "../native/handle/core-handle.ts";
 import type { NativeTaskOptions } from "../native/sends/addon.ts";
 import {
   checkAppConfig,
@@ -37,10 +37,11 @@ import {
   type ListRefusal,
 } from "./contract-list.ts";
 import { type AcceptedConfig, checkConfigWithCore, checkTaskWithCore, type CoreChecks } from "./core-checks.ts";
-import type { CoreAccess, ProducerCore } from "./core-access.ts";
+import type { AddonCore, CoreAccess, ProducerCore } from "./core-access.ts";
 import { NO_OP_OBSERVER } from "./observers.ts";
 import type { Refusal } from "./refusal.ts";
 import { RefusalSink } from "./refusals.ts";
+import { NO_TELEMETRY } from "./telemetry.ts";
 import { initialSuppression, type ProcessStart, processStart, SuppressionState } from "./suppression.ts";
 
 /** The config of `Horsies.create`: the app config and the contract list. */
@@ -59,15 +60,8 @@ export interface CreateEnvironment {
   readonly processStart: ProcessStart;
   /** The core's check functions. Called on a main thread only; the first call loads the addon. */
   readonly coreChecks: () => CoreChecks;
-  /** The core operations of the app's sends and reads, on a main thread. */
-  /** The core handle of the app's manifest, on a main thread. Starts nothing. */
-  readonly coreHandle: (accepted: AcceptedConfig) => CoreHandle;
-  /** The core operations of the app's sends and reads on `handle`, on a main thread. */
-  readonly producer: (
-    handle: CoreHandle,
-    accepted: AcceptedConfig,
-    options: ReadonlyMap<string, NativeTaskOptions>,
-  ) => ProducerCore;
+  /** The core of the app on a main thread: the operations of its sends and reads, and its core handle. */
+  readonly addonCore: (accepted: AcceptedConfig, options: ReadonlyMap<string, NativeTaskOptions>) => AddonCore;
 }
 
 /** The facts of this process. Effects: reads the thread, the environment and the arguments. */
@@ -77,8 +71,7 @@ export function processEnvironment(): CreateEnvironment {
     environment: (name) => process.env[name],
     processStart: processStart(),
     coreChecks: () => ({ checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions }),
-    coreHandle: addonCoreHandle,
-    producer: addonProducer,
+    addonCore: addonCoreOf,
   };
 }
 
@@ -111,13 +104,7 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
     return refused(refusals);
   }
 
-  const handle = environment.coreHandle(accepted.value);
-
-  const core: CoreAccess = {
-    kind: "addon",
-    handle,
-    producer: environment.producer(handle, accepted.value, options.options),
-  };
+  const core: CoreAccess = { kind: "addon", ...environment.addonCore(accepted.value, options.options) };
 
   return ok(contextOf(parsed.value, list.entries, core, environment));
 }
@@ -180,20 +167,17 @@ function contextOf(
       now: () => Temporal.Now.instant(),
     },
     implementations: new Map(),
+    telemetry: NO_TELEMETRY,
   };
 }
 
-/** The core handle of the app's manifest, with the coverage pass of its retention config. Starts nothing. */
-function addonCoreHandle(accepted: AcceptedConfig): CoreHandle {
-  return buildCoreHandle(accepted.manifestJson, "PRODUCER").withInstallCoverage(accepted.installCoverage);
-}
+/**
+ * The core of an app on a main thread: one core handle of the app's manifest, and the operations of its sends and
+ * reads on it, with its send rules. Builds the handle; starts nothing.
+ */
+function addonCoreOf(accepted: AcceptedConfig, options: ReadonlyMap<string, NativeTaskOptions>): AddonCore {
+  const handle = buildCoreHandle(accepted.manifestJson, "PRODUCER").withInstallCoverage(accepted.installCoverage);
 
-/** The core operations of an app on a main thread: its send rules on the app's core handle. */
-function addonProducer(
-  handle: CoreHandle,
-  accepted: AcceptedConfig,
-  options: ReadonlyMap<string, NativeTaskOptions>,
-): ProducerCore {
   const producer: ProducerCore = {
     prepareSend: async (taskName, facts) => prepareSendFacts(accepted.rules, facts, optionsOf(options, taskName)),
     enqueue: async (request, sendKind, trace) => enqueue(handle, request, sendKind, trace),
@@ -202,7 +186,7 @@ function addonProducer(
     processRole: async () => processRole(),
   };
 
-  return Object.freeze(producer);
+  return Object.freeze({ producer: Object.freeze(producer), handle });
 }
 
 function optionsOf(options: ReadonlyMap<string, NativeTaskOptions>, taskName: string): NativeTaskOptions {
