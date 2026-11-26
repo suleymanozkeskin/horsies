@@ -19,7 +19,7 @@ import { type ZodAdapterRefused, zodEntry, type ZodKindEntry, type ZodVersion } 
 export type ContractRule =
   /** A Standard Schema that is not a zod schema. */
   | "SchemaVendor"
-  /** A zod schema of a release that the adapter does not read (zod 3, a version outside the range, another copy). */
+  /** A zod schema of a release that the adapter does not read (zod 3, or a version outside the supported range). */
   | "ZodRelease"
   /** A parameter name that is not an identifier, that the engine fills, or that only the engine writes. */
   | "ParameterName"
@@ -199,14 +199,6 @@ function zodRefusals(path: string, refused: ZodAdapterRefused): readonly Contrac
           "ZodRelease",
           path,
           `zod ${versionText(refused.found)} is outside the supported range ${refused.supported}`,
-        ),
-      ];
-    case "OtherZodCopy":
-      return [
-        contractRefused(
-          "ZodRelease",
-          path,
-          `the schema is of zod ${versionText(refused.found)}, another copy than the zod ${versionText(refused.loaded)} that horsies loads`,
         ),
       ];
     case "KindRefused":

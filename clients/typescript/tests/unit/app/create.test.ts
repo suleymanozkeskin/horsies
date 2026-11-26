@@ -8,15 +8,10 @@ import { createHorsies } from "../../../horsies/src/app.ts";
 import type { HorsiesConfig } from "../../../horsies/src/app/create.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
+import type { AppConfigCheck } from "../../../horsies/src/native/sends/addon.ts";
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
-import {
-  catalogRefusal,
-  DATABASE_URL,
-  fakeChecks,
-  fakeEnvironment,
-  type FakeEnvironment,
-  uncodedRefusal,
-} from "./support.ts";
+import { catalogRefusal, DATABASE_URL, fakeChecks, fakeEnvironment, type FakeEnvironment } from "./support.ts";
 
 const ping = defineTask({ name: "ping", input: {}, output: h.string() });
 
@@ -31,6 +26,13 @@ function refusalsOf(input: HorsiesConfig, environment: FakeEnvironment): readonl
   assert.equal(created.ok, false, "the create is refused");
 
   return created.ok ? [] : created.error.refusals.map((refused) => [refused.code, refused.path] as const);
+}
+
+/** The first refusal message of a refused create. */
+function messagesOf(input: HorsiesConfig): string {
+  const created = createHorsies(input, fakeEnvironment());
+
+  return created.ok ? "" : created.error.refusals[0].message;
 }
 
 describe("Horsies.create: the config", () => {
@@ -58,10 +60,17 @@ describe("Horsies.create: the config", () => {
     assert.deepEqual(refusalsOf(config([ping]), environment), [["HRS-201", "config"]]);
   });
 
-  test("a core config refusal with no code is FIELD_BOUND", () => {
-    const environment = fakeEnvironment({ checks: fakeChecks({ config: [uncodedRefusal("payload.warn_bytes must be >= 1")] }) });
+  test("a config text that the core's reader refuses is a defect: the ClientDefect reaches the caller", () => {
+    const defect = new ClientDefect({ subject: "checkAppConfig", rule: "the config text reads as the core's AppConfig" });
 
-    assert.deepEqual(refusalsOf(config([ping]), environment), [["FIELD_BOUND", "config"]]);
+    const checks = {
+      ...fakeChecks(),
+      checkAppConfig: (_json: string): AppConfigCheck => {
+        throw defect;
+      },
+    };
+
+    assert.throws(() => createHorsies(config([ping]), fakeEnvironment({ checks })), (thrown) => thrown === defect);
   });
 
   test("a core refusal with a code that the catalog does not hold is a defect: TypeError", () => {
@@ -90,6 +99,26 @@ describe("Horsies.create: the contract list", () => {
     const queued = defineTask({ name: "queued", queue: "standard", input: {}, output: h.null() });
 
     assert.deepEqual(refusalsOf(config([queued]), fakeEnvironment()), [["HRS-200", "tasks[0] queued"]]);
+    assert.equal(
+      messagesOf(config([queued])),
+      'tasks[0] queued: the task names the queue "standard", and the default queue mode takes no queue',
+    );
+  });
+
+  test("a refused config adds no queue refusal: the queue check reads the queue fields of the input", () => {
+    const queued = defineTask({ name: "queued", queue: "urgent", input: {}, output: h.null() });
+
+    const input: HorsiesConfig = {
+      broker: { databaseUrl: { kind: "fromEnv", name: "UNSET_VARIABLE" } },
+      queueMode: "custom",
+      customQueues: [{ name: "urgent", priority: 1 }],
+      tasks: [queued],
+    };
+
+    assert.deepEqual(
+      refusalsOf(input, fakeEnvironment()).map(([code]) => code),
+      ["HRS-203"],
+    );
   });
 
   test("no queue in the custom queue mode is HRS-200", () => {
@@ -101,6 +130,7 @@ describe("Horsies.create: the contract list", () => {
     };
 
     assert.deepEqual(refusalsOf(input, fakeEnvironment()), [["HRS-200", "tasks[0] ping"]]);
+    assert.equal(messagesOf(input), "tasks[0] ping: the custom queue mode needs a queue on each task");
   });
 
   test("a queue that is not a custom queue is HRS-103", () => {

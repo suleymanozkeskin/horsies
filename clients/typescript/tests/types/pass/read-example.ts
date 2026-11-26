@@ -1,4 +1,4 @@
-// Compile-pass case: the read of the sketch (section 4.3) through `app.taskHandle`: a read error switch over every
+// Compile-pass case: a read through `app.taskHandle`: a read error switch over every
 // kind, the outcome switch, and the two-level code with a full match on the declared user codes.
 
 import { defineTask, h, type Horsies, type ReadError, TaskId } from "../../../horsies/src/index.ts";

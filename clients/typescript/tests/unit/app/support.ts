@@ -107,12 +107,7 @@ export function fakeChecks(script: CheckScript = {}): FakeChecks {
 
 /** A core refusal with a catalog code. */
 export function catalogRefusal(code: string, message: string): CoreRefusal {
-  return { code: { kind: "catalog", code }, message, notes: [], help: [] };
-}
-
-/** A core refusal with no code. */
-export function uncodedRefusal(message: string): CoreRefusal {
-  return { code: { kind: "noCode" }, message, notes: [], help: [] };
+  return { code, message, notes: [], help: [] };
 }
 
 /** One recorded enqueue of the fake producer. */
@@ -198,7 +193,7 @@ export function fakeProducer(script: ProducerScript = {}): FakeProducer {
 }
 
 /** The start facts of a plain producer process. */
-export const PLAIN_START: ProcessStart = { argumentAfterScript: undefined, seatIsolate: false, suppressVariable: undefined };
+export const PLAIN_START: ProcessStart = { argumentAfterScript: undefined, seatIsolate: false };
 
 /** The parts of a fake create environment. */
 export type EnvironmentParts = {

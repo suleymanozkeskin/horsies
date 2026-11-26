@@ -15,9 +15,9 @@ import { taskInfo } from "../send/core-calls.ts";
 import { AddonOutsideMainThread } from "../thrown-errors.ts";
 import type { Kind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import type { TaskOutcome } from "../wire/task-error.ts";
+import type { TaskError, TaskOutcome } from "../wire/task-error.ts";
 import { MAX_WAIT_LIMIT_MS } from "../send/bounds.ts";
-import { databaseError, type FinishedStatus, type ReadError, taskAbsence, type UnfinishedStatus } from "./errors.ts";
+import { brokerReadError, type FinishedStatus, type ReadError, taskAbsence, type UnfinishedStatus } from "./errors.ts";
 import { type TaskInfo, taskInfoOf } from "./info.ts";
 
 /** The options of a result read. */
@@ -105,11 +105,16 @@ class Handle<O, E extends string> implements TaskHandle<O, E> {
 
     const outcome = outcomeOfRead(read.read, this.#form);
 
-    if (isFinal(outcome)) {
+    if (!isFinal(outcome)) {
+      return outcome;
+    }
+
+    // The first final read is kept: a final read of a concurrent call that ended first stays.
+    if (this.#kept.kind === "none") {
       this.#kept = { kind: "kept", read: outcome };
     }
 
-    return outcome;
+    return this.#kept.read;
   }
 
   async info(): Promise<Result<TaskInfo, ReadError>> {
@@ -121,7 +126,7 @@ class Handle<O, E extends string> implements TaskHandle<O, E> {
       case "absent":
         return err(Object.freeze({ kind: "taskNotFound", absence: taskAbsence(read.reason) }));
       case "failed":
-        return err(databaseError(read.error));
+        return err(brokerReadError(read.error));
       default: {
         const unexpected: never = read;
 
@@ -173,7 +178,7 @@ export function outcomeOfRead(read: ResultRead, form: ReadForm): Outcome {
     case "absent":
       return err(Object.freeze({ kind: "taskNotFound", absence: taskAbsence(read.reason) }));
     case "failed":
-      return err(databaseError(read.error));
+      return err(brokerReadError(read.error));
     default: {
       const unexpected: never = read;
 
@@ -183,9 +188,15 @@ export function outcomeOfRead(read: ResultRead, form: ReadForm): Outcome {
 }
 
 function outcomeOfRecord(record: ResultRecord, form: ReadForm): Outcome {
+  const status = record.status;
+
+  if (status === "CANCELLED") {
+    return ok(cancelledOutcome(record.taskId));
+  }
+
   switch (record.envelope.kind) {
     case "notFinished":
-      return err(notFinished(record.status));
+      return err(notFinished(status));
     case "stored":
       return decodedOutcome(record.envelope.text, form);
     default: {
@@ -196,8 +207,24 @@ function outcomeOfRecord(record: ResultRecord, form: ReadForm): Outcome {
   }
 }
 
+/**
+ * The outcome of a cancelled task, whatever the row stores: the library code `TASK_CANCELLED`, as the Python and Rust
+ * clients read it (`Task <id> was cancelled before completion`, data `{ task_id }`). Pure.
+ */
+function cancelledOutcome(taskId: string): TaskOutcome<unknown, string> {
+  const error: TaskError<string> = {
+    code: Object.freeze({ kind: "library", code: "TASK_CANCELLED" }),
+    message: `Task ${taskId} was cancelled before completion`,
+    data: Object.freeze({ task_id: taskId }),
+    exception: null,
+    subWorkflow: null,
+  };
+
+  return Object.freeze({ kind: "failed", error: Object.freeze(error) });
+}
+
 /** The error of a read that found no stored result: the wait ended first, or a finished task stores none. */
-function notFinished(status: TaskStatusName): ReadError {
+function notFinished(status: Exclude<TaskStatusName, "CANCELLED">): ReadError {
   const finished = finishedStatus(status);
 
   return finished.kind === "finished"
@@ -206,7 +233,7 @@ function notFinished(status: TaskStatusName): ReadError {
 }
 
 function finishedStatus(
-  status: TaskStatusName,
+  status: Exclude<TaskStatusName, "CANCELLED">,
 ): { readonly kind: "finished"; readonly status: FinishedStatus } | { readonly kind: "unfinished"; readonly status: UnfinishedStatus } {
   switch (status) {
     case "PENDING":
@@ -215,7 +242,6 @@ function finishedStatus(
       return { kind: "unfinished", status };
     case "COMPLETED":
     case "FAILED":
-    case "CANCELLED":
     case "EXPIRED":
       return { kind: "finished", status };
     default: {
