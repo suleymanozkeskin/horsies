@@ -131,7 +131,7 @@ describe('round trip', () => {
   it('survives every task dimension, including the error category', () => {
     const search = {
       status: ['FAILED', 'EXPIRED'],
-      error_category: ['OPERATIONAL', 'DOMAIN'],
+      error_category: ['OPERATIONAL', 'CUSTOM'],
       error_code: ['TASK_EXCEPTION'],
       task_name: ['billing,report'],
       retried: true,
@@ -145,7 +145,7 @@ describe('round trip', () => {
 
     expect(url).toBe(
       '?status=FAILED,EXPIRED' +
-        '&error_category=OPERATIONAL,DOMAIN' +
+        '&error_category=OPERATIONAL,CUSTOM' +
         '&error_code=TASK_EXCEPTION' +
         '&task_name=billing%2Creport' +
         '&retried=true' +

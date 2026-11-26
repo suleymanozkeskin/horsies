@@ -21,7 +21,7 @@ Use a handler to send what a worker does to another system: your own metrics, an
 
 The core defines each event type once. The Python client generates its classes from the core, and the Rust client re-exports the core types, so both clients read the same events.
 
-- The contract has a version. This release has version 8: `core/tests/fixtures/event_contract/v8.txt` in the repository holds its text. Version 8 renames the variants of an error code that the task chose to `Custom` and `CustomOverBound`. A change of an event type, a field or a closed type of a field is a new version.
+- The contract has a version. This release has version 9: `core/tests/fixtures/event_contract/v9.txt` in the repository holds its text. Version 9 renames the field `child_execution` to `child_execution` in `AttemptPlaced`, `ChildStarted`, `ChildReplaced`, `SlotDown` and `SlotRecovered`, and adds the built-in code `UNKNOWN_CUSTOM_CODE`. Version 8 renamed the variants of an error code that the task chose to `Custom` and `CustomOverBound`. A change of an event type, a field or a closed type of a field is a new version.
 - An event holds ids, names, codes, numbers and times. It never holds task input, a task result, a failed reason or an exception text.
 - Each field has a closed type or a bound. A duration is a duration type, a time is a UTC time, and a state that can be missing or not known is a named variant.
 - A handler takes the events of one type, never the union of the types. A later version can add an event type, and that changes no handler of another type.
@@ -36,18 +36,18 @@ Each event also has `at`: the wall-clock time of the worker at the step.
 |-------|------|--------|
 | `TaskClaimed` | The worker claimed a task | `task_id`, `task_name`, `queue`, `execution`, `attempt`, `priority`, `queue_wait` |
 | `ClaimReleased` | A claimed task went back to the queue before it reached a child | `task_id`, `task_name`, `queue`, `reason` |
-| `AttemptPlaced` | A task reached a child | `task_id`, `task_name`, `queue`, `execution`, `attempt`, `child_kind`, `child_pid`, `slot_wait` |
+| `AttemptPlaced` | A task reached a child | `task_id`, `task_name`, `queue`, `execution`, `attempt`, `child_execution`, `child_pid`, `slot_wait` |
 | `AttemptNotStarted` | The child stopped before it set the task `RUNNING`: no task code ran | `task_id`, `task_name`, `queue`, `attempt`, `reason` |
 | `AttemptEnded` | An attempt ended | `task_id`, `task_name`, `queue`, `execution`, `attempt`, `end`, `run_duration` |
 | `AttemptRecorded` | The worker recorded the end of an attempt | `task_id`, `task_name`, `queue`, `attempt`, `record`, `record_duration` |
 | `TaskRecovered` | A recovery pass of the worker changed a task | `task_id`, `task_name`, `queue`, `action` |
-| `ChildStarted` | A child of a slot sent its ready frame | `child_kind`, `slot`, `child_pid`, `boot_duration` |
-| `ChildReplaced` | A slot replaced its child | `child_kind`, `slot`, `child_pid`, `reason` |
-| `SlotDown` | A slot is down after a boot failure that can clear | `child_kind`, `slot`, `cause` |
-| `SlotRecovered` | A slot that was down serves again | `child_kind`, `slot` |
+| `ChildStarted` | A child of a slot sent its ready frame | `child_execution`, `slot`, `child_pid`, `boot_duration` |
+| `ChildReplaced` | A slot replaced its child | `child_execution`, `slot`, `child_pid`, `reason` |
+| `SlotDown` | A slot is down after a boot failure that can clear | `child_execution`, `slot`, `cause` |
+| `SlotRecovered` | A slot that was down serves again | `child_execution`, `slot` |
 
 - `attempt` is the retry count of the row plus 1. `task_name` has at most 255 characters, `queue` at most 52. `priority` is 1 to 100.
-- `execution` is the execution class of the task. `child_kind` is the class of the child that took it: a shared task can run on an isolated child.
+- `execution` is the execution class of the task. `child_execution` is the execution class of the child that took it: a shared task can run on an isolated child.
 - `queue_wait` runs from the due time of the row to its claim. `slot_wait` runs from the claim result to the placement. `run_duration` runs from the placement to the end that the worker saw. `record_duration` runs from that end to the end of the outcome write.
 
 ### The End of an Attempt

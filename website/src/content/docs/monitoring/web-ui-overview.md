@@ -38,8 +38,8 @@ Server-paginated, server-sorted, server-filtered task list, plus:
 - Scoped facet filters for worker, task name, queue, and error code. Values OR
   within a dimension and AND across dimensions.
 - An error-code rollup by taxonomy family (`OPERATIONAL`, `CONTRACT`,
-  `RETRIEVAL`, `OUTCOME`, `DOMAIN`). It counts tasks carrying an error code,
-  which includes completed tasks that returned a domain error, so it is not a
+  `RETRIEVAL`, `OUTCOME`, `CUSTOM`). It counts tasks carrying an error code,
+  which includes completed tasks that returned a custom code, so it is not a
   failure count.
 - A grouping pivot by worker, task name, or queue, with a `TOTAL` rollup row.
 - The `Queued` and `Exec` columns write their durations with the rule in

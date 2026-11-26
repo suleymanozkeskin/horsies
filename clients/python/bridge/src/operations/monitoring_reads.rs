@@ -700,8 +700,8 @@ mod tests {
         let refused = task_statuses(&["pending".to_owned()]).expect_err("the wire value is upper");
         assert!(refused.contains("\"pending\""), "{refused}");
         assert_eq!(
-            error_categories_of(&["DOMAIN".to_owned(), "OUTCOME".to_owned()]),
-            Ok(vec![ErrorCategory::Domain, ErrorCategory::Outcome])
+            error_categories_of(&["CUSTOM".to_owned(), "OUTCOME".to_owned()]),
+            Ok(vec![ErrorCategory::Custom, ErrorCategory::Outcome])
         );
         assert!(error_categories_of(&["OTHER".to_owned()]).is_err());
     }

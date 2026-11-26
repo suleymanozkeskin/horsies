@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 
 use crate::core::task::{DeclaredErrorCodes, Execution};
-use crate::events::{Event, EventTypeName, UnionEvent, WorkerIdText};
+use crate::events::{AnyEvent, EventTypeName, UnionEvent, WorkerIdText};
 use crate::telemetry::catalog::MetricId;
 use crate::telemetry::declared::{self, DeclaredValue, ErrorCodeValue};
 use crate::telemetry::labels::{
@@ -344,7 +344,7 @@ pub enum Offer {
 
 /// The points' end of the event queue.
 pub struct EventLink {
-    sender: mpsc::Sender<Event>,
+    sender: mpsc::Sender<AnyEvent>,
     dropped: Counter<(EventDropCause,)>,
     /// The event types that the points build and offer.
     sent: SentEventTypes,
@@ -354,7 +354,7 @@ impl EventLink {
     /// Put `event` in the queue, or drop it and count the drop: `queue_full`
     /// when the queue holds its capacity, `child_down` when its reader is
     /// gone. Never waits.
-    pub fn offer(&self, event: Event) -> Offer {
+    pub fn offer(&self, event: AnyEvent) -> Offer {
         let cause = match self.sender.try_send(event) {
             Ok(()) => return Offer::Queued,
             Err(TrySendError::Full(_dropped)) => EventDropCause::QueueFull,
@@ -369,14 +369,14 @@ impl EventLink {
 #[derive(Debug)]
 pub enum EventBatch {
     /// One or more events, in the order of their offers.
-    Events(Vec<Event>),
+    Events(Vec<AnyEvent>),
     /// The link is gone and the queue is empty: no event comes again.
     LinkClosed,
 }
 
 /// The reader's end of the event queue: the writer of the handler child.
 pub struct EventQueue {
-    receiver: mpsc::Receiver<Event>,
+    receiver: mpsc::Receiver<AnyEvent>,
 }
 
 impl EventQueue {
@@ -401,7 +401,7 @@ impl EventQueue {
     /// Take the events that wait now, at most `limit`, in the order of
     /// their offers; none when the queue is empty or the link is gone.
     /// Never waits.
-    pub fn take_waiting(&mut self, limit: NonZeroUsize) -> Vec<Event> {
+    pub fn take_waiting(&mut self, limit: NonZeroUsize) -> Vec<AnyEvent> {
         let mut events = Vec::new();
         while events.len() < limit.get() {
             match self.receiver.try_recv() {

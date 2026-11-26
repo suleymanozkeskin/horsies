@@ -358,10 +358,10 @@ SELECT test_check(
     test_stats('{}', '{}', '{}', '{}', '{OPERATIONAL}', FALSE)::text
 );
 SELECT test_check(
-    'stats: DOMAIN selects the non-empty codes outside the taxonomy, and categories OR together',
-    test_stats('{}', '{}', '{}', '{}', '{DOMAIN}', FALSE) = ARRAY[0, 0, 0, 0, 2, 0, 0]::bigint[]
-    AND test_stats('{}', '{}', '{}', '{}', '{RETRIEVAL,DOMAIN}', FALSE) = ARRAY[0, 0, 0, 1, 2, 0, 0]::bigint[],
-    test_stats('{}', '{}', '{}', '{}', '{RETRIEVAL,DOMAIN}', FALSE)::text
+    'stats: CUSTOM selects the non-empty codes outside the taxonomy, and categories OR together',
+    test_stats('{}', '{}', '{}', '{}', '{CUSTOM}', FALSE) = ARRAY[0, 0, 0, 0, 2, 0, 0]::bigint[]
+    AND test_stats('{}', '{}', '{}', '{}', '{RETRIEVAL,CUSTOM}', FALSE) = ARRAY[0, 0, 0, 1, 2, 0, 0]::bigint[],
+    test_stats('{}', '{}', '{}', '{}', '{RETRIEVAL,CUSTOM}', FALSE)::text
 );
 SELECT test_check(
     'stats: retried_only keeps rows with retry_count > 0',
@@ -471,10 +471,10 @@ SELECT test_check(
     test_breakdown('queue', '{}', '{}', '{}', '{}', '{BOOM}', '{}', FALSE, 500)::text
 );
 SELECT test_check(
-    'breakdown: a DOMAIN category filter',
-    test_breakdown('task_name', '{}', '{}', '{}', '{}', '{}', '{DOMAIN}', FALSE, 500) = ARRAY[
+    'breakdown: a CUSTOM category filter',
+    test_breakdown('task_name', '{}', '{}', '{}', '{}', '{}', '{CUSTOM}', FALSE, 500) = ARRAY[
         'TOTAL:1=2/0/0/0/0/2/0/0/1', 'beta=2/0/0/0/0/2/0/0/1'],
-    test_breakdown('task_name', '{}', '{}', '{}', '{}', '{}', '{DOMAIN}', FALSE, 500)::text
+    test_breakdown('task_name', '{}', '{}', '{}', '{}', '{}', '{CUSTOM}', FALSE, 500)::text
 );
 SELECT test_check(
     'breakdown: filters combine across dimensions',

@@ -10,10 +10,11 @@
 //!   in the types: a duration is a [`std::time::Duration`], a time is a
 //!   `DateTime<Utc>`. A state that can be missing or unknown is a named
 //!   variant.
-//! - A handler subscribes to one event type, never to the union [`Event`]. A
-//!   later contract version can add an event type; that changes no handler
-//!   of another type. Delivery is best effort: at most once, and a drop is
-//!   counted, never retried. The history tables are the record for audit.
+//! - A handler subscribes to one event type, never to the union
+//!   [`AnyEvent`]. A later contract version can add an event type; that
+//!   changes no handler of another type. Delivery is best effort: at most
+//!   once, and a drop is counted, never retried. The history tables are the
+//!   record for audit.
 //! - The events of one task are in the order that the core emitted them. No
 //!   order holds across tasks.
 //!
@@ -65,13 +66,13 @@ pub use crate::worker::executor::protocol::StopReason;
 
 /// The version of the event contract: its event types, their fields and the
 /// closed types that the fields hold.
-pub const EVENT_CONTRACT_VERSION: u32 = 8;
+pub const EVENT_CONTRACT_VERSION: u32 = 9;
 
 /// The event contract, as `horsies-codegen` renders it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventContract {
     pub version: u32,
-    /// The event types, in the order of [`Event`].
+    /// The event types, in the order of [`AnyEvent`].
     pub events: &'static [EventType],
     /// The closed types that event fields hold, in render order: a type
     /// comes after the types that its variants' fields name.
@@ -131,20 +132,20 @@ pub struct EventEncodeError {
     pub refusal: EncodeRefusal,
 }
 
-/// An event type of the union [`Event`], with its name. A point of the
+/// An event type of the union [`AnyEvent`], with its name. A point of the
 /// worker builds one of these; the worker builds it only when its handler
 /// child takes events of its type. A handler of a Rust handler child takes
 /// the events of one of these types.
-pub trait UnionEvent: EventRecord + Into<Event> {
+pub trait UnionEvent: EventRecord + Into<AnyEvent> {
     /// The name of the type: its wire tag.
     const NAME: EventTypeName;
 
     /// The record of `event` when it is an event of this type; `None` for
     /// an event of any other type. Pure.
-    fn of_event(event: &Event) -> Option<&Self>;
+    fn of_event(event: &AnyEvent) -> Option<&Self>;
 }
 
-/// Defines the union [`Event`], the names [`EventTypeName`], the list
+/// Defines the union [`AnyEvent`], the names [`EventTypeName`], the list
 /// [`EVENT_TYPES`] and the dispatch of the codec from one list of event
 /// types, so that no event type is in one of them and not in the others.
 macro_rules! event_union {
@@ -153,7 +154,7 @@ macro_rules! event_union {
         /// type, never to this union: a later contract version can add a
         /// variant.
         #[derive(Debug, Clone, PartialEq, Eq)]
-        pub enum Event {
+        pub enum AnyEvent {
             $($event($event),)+
         }
 
@@ -200,7 +201,7 @@ macro_rules! event_union {
         }
 
         impl EventTypeName {
-            /// Every event type name, in the order of [`Event`].
+            /// Every event type name, in the order of [`AnyEvent`].
             pub const ALL: &'static [EventTypeName] = &[$(Self::$event,)+];
 
             /// The event type of this name.
@@ -215,9 +216,9 @@ macro_rules! event_union {
             impl UnionEvent for $event {
                 const NAME: EventTypeName = EventTypeName::$event;
 
-                fn of_event(event: &Event) -> Option<&Self> {
+                fn of_event(event: &AnyEvent) -> Option<&Self> {
                     match event {
-                        Event::$event(record) => Some(record),
+                        AnyEvent::$event(record) => Some(record),
                         // Every other event type of the union.
                         _ => None,
                     }
@@ -225,11 +226,11 @@ macro_rules! event_union {
             }
         )+
 
-        /// The event types, in the order of [`Event`]. A client checks a
+        /// The event types, in the order of [`AnyEvent`]. A client checks a
         /// handler's event type against this list.
         pub const EVENT_TYPES: &[EventType] = &[$(<$event as EventRecord>::TYPE,)+];
 
-        impl Event {
+        impl AnyEvent {
             /// The type of this event.
             pub fn event_type(&self) -> EventType {
                 match self {
@@ -246,23 +247,23 @@ macro_rules! event_union {
         }
 
         $(
-            impl From<$event> for Event {
+            impl From<$event> for AnyEvent {
                 fn from(event: $event) -> Self {
                     Self::$event(event)
                 }
             }
         )+
 
-        fn encode_union(event: &Event) -> Result<WireValue, EventEncodeError> {
+        fn encode_union(event: &AnyEvent) -> Result<WireValue, EventEncodeError> {
             match event {
-                $(Event::$event(record) => encode_record(record),)+
+                $(AnyEvent::$event(record) => encode_record(record),)+
             }
         }
 
-        fn decode_union(tag: &str, fields: &[WireValue]) -> Result<Event, EventDecodeError> {
+        fn decode_union(tag: &str, fields: &[WireValue]) -> Result<AnyEvent, EventDecodeError> {
             $(
                 if tag == <$event as EventRecord>::TYPE.name {
-                    return decode_record::<$event>(fields).map(Event::$event);
+                    return decode_record::<$event>(fields).map(AnyEvent::$event);
                 }
             )+
             Err(EventDecodeError::UnknownEventType {
@@ -290,7 +291,7 @@ event_union!(
 ///
 /// Errors: [`EventEncodeError`] names the event type and the field whose
 /// duration or time the wire cannot hold. Pure.
-pub fn encode_event(event: &Event) -> Result<WireValue, EventEncodeError> {
+pub fn encode_event(event: &AnyEvent) -> Result<WireValue, EventEncodeError> {
     encode_union(event)
 }
 
@@ -302,7 +303,7 @@ pub fn encode_event(event: &Event) -> Result<WireValue, EventEncodeError> {
 /// [`EventDecodeError::Malformed`] with the path to the first value that
 /// does not decode. A refusal of one event leaves the other events of a
 /// batch to their own decode. Pure.
-pub fn decode_event(wire: &WireValue) -> Result<Event, EventDecodeError> {
+pub fn decode_event(wire: &WireValue) -> Result<AnyEvent, EventDecodeError> {
     let (tag, fields) = match wire.as_array().and_then(|items| items.split_first()) {
         Some((WireValue::String(tag), fields)) => (tag.as_str(), fields),
         Some(_) | None => return Err(EventDecodeError::NotAnEvent),

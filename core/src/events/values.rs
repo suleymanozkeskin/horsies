@@ -298,10 +298,10 @@ pub enum AttemptEnd {
         /// worker): the start of the span.
         #[event_schema(internal)]
         placed_at: DateTime<Utc>,
-        /// Internal: the kind of the child that ran the attempt, the
-        /// `horsies.task.execution` of the span.
+        /// Internal: the execution class of the child that ran the
+        /// attempt, the `horsies.task.execution` of the span.
         #[event_schema(internal)]
-        child_kind: Execution,
+        child_execution: Execution,
         /// Internal: the worker that claimed the task and ended the attempt.
         #[event_schema(internal)]
         worker_id: WorkerIdText,

@@ -1057,19 +1057,19 @@ FROM test_list('{}', '{WORKER_CRASHED}', '{}', FALSE, 'enqueued_at', 'DESC', 0, 
          history_estimate_plan text, location text, task_id uuid, status text, error_code text);
 
 SELECT test_check(
-    'list: a built-in category selects its codes; DOMAIN selects non-empty codes outside the taxonomy',
+    'list: a built-in category selects its codes; CUSTOM selects non-empty codes outside the taxonomy',
     (SELECT array_agg(right(l.task_id::text, 2)) FILTER (WHERE l.row_kind = 'TASK')
      FROM test_list('{}', '{}', '{OPERATIONAL}', FALSE, 'enqueued_at', 'DESC', 0, 50)
          AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
               history_estimate_plan text, location text, task_id uuid, status text, error_code text))
         = ARRAY['e2']
     AND (SELECT array_agg(right(l.task_id::text, 2)) FILTER (WHERE l.row_kind = 'TASK')
-         FROM test_list('{}', '{}', '{DOMAIN}', FALSE, 'enqueued_at', 'DESC', 0, 50)
+         FROM test_list('{}', '{}', '{CUSTOM}', FALSE, 'enqueued_at', 'DESC', 0, 50)
              AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
                   history_estimate_plan text, location text, task_id uuid, status text, error_code text))
         = ARRAY['e3']
     AND (SELECT array_agg(right(l.task_id::text, 2) ORDER BY l.row_position) FILTER (WHERE l.row_kind = 'TASK')
-         FROM test_list('{}', '{}', '{DOMAIN,OPERATIONAL}', FALSE, 'enqueued_at', 'DESC', 0, 50)
+         FROM test_list('{}', '{}', '{CUSTOM,OPERATIONAL}', FALSE, 'enqueued_at', 'DESC', 0, 50)
              AS l(row_kind text, row_position integer, total_kind text, live_total bigint, history_total bigint,
                   history_estimate_plan text, location text, task_id uuid, status text, error_code text))
         = ARRAY['e3', 'e2']
@@ -1229,7 +1229,7 @@ SELECT test_check(
     AND (SELECT array_agg(f.facet_value || '=' || f.facet_count || '/' || f.category || '/' || f.category_total
                           ORDER BY f.facet_value)
          FROM test_facets('{}', FALSE) AS f WHERE f.facet = 'error_code')
-        = ARRAY['MY_DOMAIN_ERROR=1/DOMAIN/1', 'WORKER_CRASHED=1/OPERATIONAL/1']
+        = ARRAY['MY_DOMAIN_ERROR=1/CUSTOM/1', 'WORKER_CRASHED=1/OPERATIONAL/1']
     AND (SELECT bool_and(f.category IS NULL AND f.category_total IS NULL)
          FROM test_facets('{}', FALSE) AS f WHERE f.facet <> 'error_code'),
     (SELECT array_agg(f.facet || ':' || f.facet_value || '=' || f.facet_count) FROM test_facets('{}', FALSE) AS f)::text
@@ -1244,7 +1244,7 @@ SELECT test_check(
     'scoped facets differ'
 );
 
--- Caps: 55 task names (cap 50) and 35 DOMAIN codes (cap 30 per category); the category total counts all 35.
+-- Caps: 55 task names (cap 50) and 35 CUSTOM codes (cap 30 per category); the category total counts all 35.
 COMMIT;
 BEGIN;
 SELECT test_history_task(gen_random_uuid(), 'FAILED', 'app.many_' || g, 'q9', 'w9',
@@ -1259,9 +1259,9 @@ SELECT test_check(
     'facets: at most 50 values per facet and 30 codes per category; the category total counts every code',
     (SELECT count(*) FROM test_facets('{}', FALSE) AS f WHERE f.facet = 'task_name') = 50
     AND (SELECT count(*) FROM test_facets('{}', FALSE) AS f
-         WHERE f.facet = 'error_code' AND f.category = 'DOMAIN') = 30
+         WHERE f.facet = 'error_code' AND f.category = 'CUSTOM') = 30
     AND (SELECT bool_and(f.category_total = 36) FROM test_facets('{}', FALSE) AS f
-         WHERE f.facet = 'error_code' AND f.category = 'DOMAIN')
+         WHERE f.facet = 'error_code' AND f.category = 'CUSTOM')
     AND (SELECT array_agg(f.facet_value ORDER BY f.facet_value) FROM test_facets('{}', FALSE) AS f
          WHERE f.facet = 'error_code' AND f.category = 'OPERATIONAL') = ARRAY['WORKER_CRASHED'],
     (SELECT count(*) FROM test_facets('{}', FALSE) AS f WHERE f.facet = 'error_code')::text

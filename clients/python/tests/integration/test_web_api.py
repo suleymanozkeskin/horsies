@@ -383,7 +383,7 @@ class TestTaskReads:
         # The code list follows the selection; the strip's own totals do not,
         # so the categories it does not have selected stay offerable.
         assert [f['value'] for f in facets['error_codes']] == ['TASK_EXCEPTION']
-        assert facets['error_category_totals'] == {'OPERATIONAL': 1, 'DOMAIN': 1}
+        assert facets['error_category_totals'] == {'OPERATIONAL': 1, 'CUSTOM': 1}
 
     async def test_repeated_error_category_params_are_or_combined(
         self, api: AsyncClient, session: AsyncSession
@@ -396,7 +396,7 @@ class TestTaskReads:
         )
 
         body = (
-            await api.get('/api/tasks?error_category=OUTCOME&error_category=DOMAIN')
+            await api.get('/api/tasks?error_category=OUTCOME&error_category=CUSTOM')
         ).json()
 
         assert {row['error_code'] for row in body['rows']} == {

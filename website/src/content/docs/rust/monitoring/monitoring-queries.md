@@ -149,7 +149,7 @@ The bounded builders return `Result<_, PaginationRefused>`:
 | `TaskSortField` | `EnqueuedAt`, `StartedAt`, `CompletedAt`, `FailedAt`, `Status`, `TaskName`, `QueueName`, `Priority`, `RetryCount`, `QueueSeconds`, `ExecutionSeconds` |
 | `SortDirection` | `Ascending`, `Descending` |
 | `TaskGroupBy` | `Worker`, `TaskName`, `Queue` |
-| `ErrorCategory` | `Operational`, `Contract`, `Retrieval`, `Outcome`, `Domain` |
+| `ErrorCategory` | `Operational`, `Contract`, `Retrieval`, `Outcome`, `Custom` |
 
 ### The Window
 

@@ -75,7 +75,7 @@ class TestAcceptedHandlers:
         assert handler.name == f'{_MODULE}._on_end'
         assert handler.event_type.event_class is AttemptEnded
         assert handler.event_type.name == 'AttemptEnded'
-        assert handler.kind is HandlerKind.DEF
+        assert handler.handler_kind is HandlerKind.DEF
         assert handler.function is _on_end
 
     def test_an_async_def_handler_is_awaited(self) -> None:
@@ -84,7 +84,7 @@ class TestAcceptedHandlers:
         app.on_event(AttemptEnded)(_on_end_async)
 
         (handler,) = app.get_event_handlers()
-        assert handler.kind is HandlerKind.ASYNC_DEF
+        assert handler.handler_kind is HandlerKind.ASYNC_DEF
 
     def test_a_bound_method_is_named_by_its_class(self) -> None:
         class Sink:
@@ -98,7 +98,7 @@ class TestAcceptedHandlers:
 
         (handler,) = app.get_event_handlers()
         assert handler.name == f'{_MODULE}.{Sink.on_claim.__qualname__}'
-        assert handler.kind is HandlerKind.DEF
+        assert handler.handler_kind is HandlerKind.DEF
 
     @pytest.mark.parametrize('event_class', events.EVENT_TYPES)
     def test_every_event_type_is_known_by_its_manifest_name(
@@ -359,7 +359,7 @@ class TestLimit:
             EventHandler(
                 name=f'm.h{number}',
                 event_type=known,
-                kind=HandlerKind.DEF,
+                handler_kind=HandlerKind.DEF,
                 function=_on_end,
             )
             for number in range(MAX_EVENT_HANDLERS)

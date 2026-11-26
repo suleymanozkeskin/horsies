@@ -194,7 +194,7 @@ fn helpers_and_error_taxonomy_are_exact() {
     }
     assert_eq!(
         categorize_error_code(Some("MY_BUSINESS_ERROR")),
-        Some(ErrorCategory::Domain)
+        Some(ErrorCategory::Custom)
     );
 
     let start = Utc.with_ymd_and_hms(2026, 8, 8, 12, 0, 0).unwrap();
@@ -492,7 +492,7 @@ fn every_w2_model_serializes_the_contract_field_set() {
             keys(ErrorFacet {
                 value: "x".to_owned(),
                 count: 1,
-                category: "DOMAIN".to_owned(),
+                category: "CUSTOM".to_owned(),
             }),
             vec!["value", "count", "category"],
         ),
@@ -1219,7 +1219,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
         Some(3)
     );
     assert_eq!(facets.error_codes.len(), 30);
-    assert_eq!(facets.error_category_totals["DOMAIN"], 35);
+    assert_eq!(facets.error_category_totals["CUSTOM"], 35);
 
     let outcome_only = task_facets(
         &broker,
@@ -1238,7 +1238,7 @@ async fn live_and_history_aggregates_merge_before_caps() {
         BTreeSet::from(["TASK_CANCELLED", "TASK_EXPIRED"])
     );
     assert_eq!(outcome_only.error_category_totals["OUTCOME"], 2);
-    assert_eq!(outcome_only.error_category_totals["DOMAIN"], 35);
+    assert_eq!(outcome_only.error_category_totals["CUSTOM"], 35);
 
     let breakdown = task_breakdown(
         &broker,

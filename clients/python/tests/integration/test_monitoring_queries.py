@@ -7,7 +7,7 @@ applies migrations). Coverage:
 2. task_facets — scoping, NULL/empty exclusion, caps, uncapped category rollup
 3. task_breakdown — rollup row, 'unknown' key, limit vs group_count
 4. list_tasks — filters, sorting, NULLS LAST, pagination envelope
-5. error-category filter — family expansion, DOMAIN as the registry complement
+5. error-category filter — family expansion, CUSTOM as the registry complement
 6. get_task_detail — attempt ordering, empty-text normalization, absence
 7. duration semantics (spec 5.3) — which spans count up and which stay None
 8. workflow names / runs / run detail / node detail
@@ -641,7 +641,7 @@ class TestTaskFacets:
         assert is_ok(result)
         assert len(result.ok_value.error_codes) == 30
         assert result.ok_value.error_category_totals == {
-            ErrorCategory.DOMAIN.value: distinct_codes,
+            ErrorCategory.CUSTOM.value: distinct_codes,
         }
 
     async def test_a_live_and_a_history_row_sum_before_the_rank(
@@ -741,11 +741,11 @@ class TestTaskFacets:
         categories = {f.value: f.category for f in result.ok_value.error_codes}
         assert categories['TASK_EXCEPTION'] == ErrorCategory.OPERATIONAL.value
         assert categories['TASK_CANCELLED'] == ErrorCategory.OUTCOME.value
-        assert categories['MY_DOMAIN_ERROR'] == ErrorCategory.DOMAIN.value
+        assert categories['MY_DOMAIN_ERROR'] == ErrorCategory.CUSTOM.value
         assert result.ok_value.error_category_totals == {
             ErrorCategory.OPERATIONAL.value: 1,
             ErrorCategory.OUTCOME.value: 1,
-            ErrorCategory.DOMAIN.value: 1,
+            ErrorCategory.CUSTOM.value: 1,
         }
 
     async def test_scoped_by_status_and_retried_only(
@@ -879,7 +879,7 @@ class TestTaskFacets:
 
         assert is_ok(result)
         assert len(result.ok_value.error_codes) == 30
-        assert result.ok_value.error_category_totals == {ErrorCategory.DOMAIN.value: 35}
+        assert result.ok_value.error_category_totals == {ErrorCategory.CUSTOM.value: 35}
 
     async def test_history_category_totals_exceed_the_history_facet_cap(
         self, broker: PostgresBroker, session: AsyncSession
@@ -906,7 +906,7 @@ class TestTaskFacets:
         assert is_ok(result)
         assert len(result.ok_value.error_codes) == 30
         assert result.ok_value.error_category_totals == {
-            ErrorCategory.DOMAIN.value: 201
+            ErrorCategory.CUSTOM.value: 201
         }
 
 
@@ -1772,13 +1772,13 @@ async def rows_by_category(
     return result.ok_value.rows
 
 
-# One representative code per family, plus a user-defined one for DOMAIN.
+# One representative code per family, plus a user-defined one for CUSTOM.
 _FAMILY_SAMPLES: dict[ErrorCategory, str] = {
     ErrorCategory.OPERATIONAL: 'TASK_EXCEPTION',
     ErrorCategory.CONTRACT: 'RETURN_TYPE_MISMATCH',
     ErrorCategory.RETRIEVAL: 'WAIT_TIMEOUT',
     ErrorCategory.OUTCOME: 'TASK_CANCELLED',
-    ErrorCategory.DOMAIN: 'PAYMENT_DECLINED',
+    ErrorCategory.CUSTOM: 'PAYMENT_DECLINED',
 }
 
 _BUILT_IN_FAMILIES = [
@@ -1791,7 +1791,7 @@ _BUILT_IN_FAMILIES = [
 
 @pytest.mark.usefixtures('clean_monitoring_tables')
 class TestErrorCategoryFilter:
-    """Families expand to codes in SQL; DOMAIN is the complement of the registry."""
+    """Families expand to codes in SQL; CUSTOM is the complement of the registry."""
 
     async def seed_one_per_family(self, session: AsyncSession) -> None:
         """One failed task per family, each carrying that family's sample code."""
@@ -1816,7 +1816,7 @@ class TestErrorCategoryFilter:
 
         assert [row.error_code for row in rows] == [_FAMILY_SAMPLES[category]]
 
-    async def test_a_user_defined_code_is_domain_and_no_family_claims_it(
+    async def test_a_user_defined_code_is_custom_and_no_family_claims_it(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
         await insert_rows(
@@ -1824,17 +1824,17 @@ class TestErrorCategoryFilter:
             make_task(status=TaskStatus.FAILED, error_code='PAYMENT_DECLINED'),
         )
 
-        domain = await rows_by_category(broker, [ErrorCategory.DOMAIN])
+        custom = await rows_by_category(broker, [ErrorCategory.CUSTOM])
 
-        assert [row.error_code for row in domain] == ['PAYMENT_DECLINED']
-        assert domain[0].error_category == ErrorCategory.DOMAIN.value
+        assert [row.error_code for row in custom] == ['PAYMENT_DECLINED']
+        assert custom[0].error_category == ErrorCategory.CUSTOM.value
         for family in _BUILT_IN_FAMILIES:
             assert await rows_by_category(broker, [family]) == []
 
     async def test_absent_and_empty_codes_match_no_category(
         self, broker: PostgresBroker, session: AsyncSession
     ) -> None:
-        """DOMAIN means "carries a code the library does not define", not "no code"."""
+        """CUSTOM means "carries a code the library does not define", not "no code"."""
         await insert_rows(
             session,
             make_task(status=TaskStatus.COMPLETED, error_code=None),
@@ -1850,7 +1850,7 @@ class TestErrorCategoryFilter:
         await self.seed_one_per_family(session)
 
         rows = await rows_by_category(
-            broker, [ErrorCategory.CONTRACT, ErrorCategory.DOMAIN]
+            broker, [ErrorCategory.CONTRACT, ErrorCategory.CUSTOM]
         )
 
         assert {row.error_code for row in rows} == {
@@ -1902,7 +1902,7 @@ class TestErrorCategoryFilter:
         """The label and the filter must stay one mapping.
 
         A code core registers but the taxonomy map has not been taught would be
-        labelled DOMAIN while the DOMAIN filter — the complement of that same
+        labelled CUSTOM while the CUSTOM filter — the complement of that same
         registry — excludes it, leaving the row unreachable from the chip that
         describes it.
         """

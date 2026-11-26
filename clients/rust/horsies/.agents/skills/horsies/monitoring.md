@@ -516,7 +516,8 @@ use horsies::events::{
     // Event handlers
     TaskClaimed, ClaimReleased, AttemptPlaced, AttemptNotStarted, AttemptEnded,
     AttemptRecorded, TaskRecovered, ChildStarted, ChildReplaced, SlotDown, SlotRecovered,
-    AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS, HANDLER_STATS_INTERVAL,
+    AnyEvent, AttemptEnd, AttemptRecord, HandlerError, HANDLER_QUEUE_EVENTS,
+    HANDLER_STATS_INTERVAL,
 };
 use horsies::web::{  // feature `web`
     router, Actions, MonitoringConfig, MonitoringUiConfig, MonitoringAuthPolicy,

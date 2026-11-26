@@ -79,7 +79,7 @@ def _boot_cause(
 ) -> ClearableBootCause:
     match cause:
         case ResourceShortageRecord(errno=errno):
-            return ResourceShortage(errno_name=ShortageErrno(errno))
+            return ResourceShortage(errno=ShortageErrno(errno))
         case 'THREAD_START_REFUSED':
             return ThreadStartRefused()
         case _ as unreachable:

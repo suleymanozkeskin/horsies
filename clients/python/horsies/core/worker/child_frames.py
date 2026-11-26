@@ -603,8 +603,8 @@ def _cause(
             return 'TASK_LOOP_CREATE_FAILED'
         case ThreadStartRefused():
             return 'THREAD_START_REFUSED'
-        case ResourceShortage(errno_name=errno_name):
-            return core.ResourceShortage(errno=errno_name.value)
+        case ResourceShortage(errno=shortage_errno):
+            return core.ResourceShortage(errno=shortage_errno.value)
         case _ as unreachable:
             assert_never(unreachable)
 
