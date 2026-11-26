@@ -25,6 +25,11 @@ export function boundAnswer(request: SeatRequest, bound: number): SeatAnswer {
   switch (area) {
     case "sends":
       return sendsBoundAnswer(request.operation, bound);
+    case "workflows":
+      return {
+        kind: "refused",
+        refusal: { code: "TOO_MANY_PENDING_CALLS", subject: `${RELAY_SUBJECT}: ${request.operation.kind}`, bound },
+      };
     default:
       return unreachable(area, "boundAnswer");
   }

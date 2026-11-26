@@ -2,6 +2,7 @@
 // runs on the main thread's own core of the app, as the same call of that thread would run it.
 //
 // - `sends`: the prepared facts of a send, an enqueue, a task info read (`ProducerCore`).
+// - `workflows`: a workflow start, restart, read or handle change (`ProducerCore.workflows`).
 // - A core call that throws a `CoreError` (a process-state refusal) answers `refused` with the facts of the error; the
 //   relay of the isolate throws the same class. A defect of the package rejects: the pool gives it to the defect rule.
 
@@ -15,6 +16,7 @@ import {
   type TooManyPendingCalls,
 } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
+import { serveWorkflowsSeatOperation } from "../workflow/core.ts";
 import type { RelayedRefusal, SeatAnswer, SeatReply, SeatRequest } from "./protocol.ts";
 
 /** Run `request` on the core of the main thread, `core`, and give its answer. Rejects only with a defect. */
@@ -51,6 +53,8 @@ async function areaReply(producer: ProducerCore, request: SeatRequest): Promise<
   switch (area) {
     case "sends":
       return { area, reply: await sendsReply(producer, request.operation) };
+    case "workflows":
+      return { area, reply: await serveWorkflowsSeatOperation(producer.workflows, request.operation) };
     default:
       return unreachable(area, "areaReply");
   }

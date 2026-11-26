@@ -10,6 +10,7 @@ import {
   settlementVia,
   settlingCallback,
   takeThrown,
+  takingCallback,
 } from "../../../horsies/src/native/call/callback.ts";
 import type { CallbackSettlement, SettleAddon } from "../../../horsies/src/native/call/callback.ts";
 import type { NativeEnvelope } from "../../../horsies/src/native/call/envelope.ts";
@@ -74,6 +75,42 @@ describe("settlingCallback", () => {
     }, settlement)(4n, "ping");
     await afterMicrotasks();
     assert.deepEqual(settled, ["threw 4 no seat"]);
+  });
+});
+
+describe("takingCallback", () => {
+  test("a call that the core still waits for is taken first, then run", () => {
+    const order: string[] = [];
+
+    const wrapper = takingCallback(
+      (callId: bigint, argument: string) => order.push(`run ${callId} ${argument}`),
+      (callId) => {
+        order.push(`take ${callId}`);
+
+        return "settled";
+      },
+    );
+
+    wrapper(4n, "a");
+
+    assert.deepEqual(order, ["take 4", "run 4 a"]);
+  });
+
+  test("a call that the core no longer waits for, or a failed take call, does not run", () => {
+    for (const end of ["unknownCall", "notSettled"] as const) {
+      let runs = 0;
+
+      const wrapper = takingCallback(
+        () => {
+          runs += 1;
+        },
+        () => end,
+      );
+
+      wrapper(5n, "a");
+
+      assert.equal(runs, 0);
+    }
   });
 });
 

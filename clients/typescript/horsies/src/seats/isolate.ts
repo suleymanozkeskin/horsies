@@ -18,6 +18,7 @@ import type { AppContext } from "../app/context.ts";
 import { appInternals } from "../app/internals.ts";
 import { type ProviderMember, servedMembers } from "../child/app-members.ts";
 import { type AttemptNumber, attemptFromCore } from "../child/attempt.ts";
+import type { BodyObservation } from "../child/body-observer.ts";
 import { runBody, type StoredBodyOutcome } from "../child/body.ts";
 import type { LoopHolder, LoopMarks } from "../child/run-table.ts";
 import { type RunControls, taskRuntimeOf } from "../child/runtime.ts";
@@ -112,7 +113,14 @@ async function builtProviders(providers: readonly ProviderMember[], states: Stat
 }
 
 /** The run that a seat runs now, with the controller of its signal. */
-type CurrentRun = { readonly kind: "idle" } | { readonly kind: "running"; readonly runKey: bigint; readonly controller: AbortController };
+type CurrentRun =
+  | { readonly kind: "idle" }
+  | {
+      readonly kind: "running";
+      readonly runKey: bigint;
+      readonly controller: AbortController;
+      readonly observation: BodyObservation;
+    };
 
 const NO_RUN: LoopHolder = Object.freeze({ kind: "noRun" });
 
@@ -158,8 +166,9 @@ class SeatRuns implements SeatRunHandler {
     const taskId = taskIdFromCore(message.taskId, "seat run");
     const attempt = attemptFromCore(message.attempt, "seat run");
     const controller = new AbortController();
+    const observation = bodyObservationOf(seatBodyObserverOf(this.#context).enter(message.facts), this.#deps.now);
 
-    this.#current = { kind: "running", runKey: message.runKey, controller };
+    this.#current = { kind: "running", runKey: message.runKey, controller, observation };
 
     void runBody({
       // The core's child host reads each run input with its strict read rule (`build_task_input`) before it calls the
@@ -170,7 +179,7 @@ class SeatRuns implements SeatRunHandler {
       runtime: taskRuntimeOf(this.#controls(taskId, attempt, controller)),
       mark: { taskId, taskName: message.taskName, attempt },
       marks: NO_LOOP_MARKS,
-      observation: bodyObservationOf(seatBodyObserverOf(this.#context).enter(message.facts), this.#deps.now),
+      observation,
     }).then((outcome) => {
       this.#current = { kind: "idle" };
       this.#channel.post({ kind: "result", protocol: SEAT_PROTOCOL_VERSION, runKey: message.runKey, outcome: seatOutcomeOf(outcome) });
@@ -187,6 +196,7 @@ class SeatRuns implements SeatRunHandler {
       case "running":
         if (current.runKey === message.runKey && !current.controller.signal.aborted) {
           current.controller.abort(Object.freeze({ cause: message.cause }));
+          current.observation.cancelled(message.cause);
         }
 
         return;

@@ -30,6 +30,7 @@ import type { NativeThrown } from "../native/call/envelope.ts";
 import type { TaskErrorParts } from "../native/sends/addon.ts";
 import { SEAT_MARKER_KEY } from "../app/suppression.ts";
 import { ClientDefect, type CoreErrorCode } from "../thrown-errors.ts";
+import { unreachable } from "../wire/unreachable.ts";
 
 /** The version of the protocol. An isolate runs the code of the same entry, so both sides hold the same version. */
 export const SEAT_PROTOCOL_VERSION = 1;
@@ -48,7 +49,7 @@ export type SeatMarker = {
 export type SeatArea = keyof SeatOperationMap;
 
 /** Each area by itself: the record names each member of `SeatArea` once, so a new area is a type change here. */
-const SEAT_AREA_SET: { readonly [Area in SeatArea]: Area } = { sends: "sends" };
+const SEAT_AREA_SET: { readonly [Area in SeatArea]: Area } = { sends: "sends", workflows: "workflows" };
 
 /** The areas of the seat operations. */
 export const SEAT_AREAS: readonly SeatArea[] = Object.values(SEAT_AREA_SET);
@@ -324,21 +325,40 @@ function requestOf(request: object): SeatRequest {
   const area = areaOf(request);
   const operation = objectField(request, "operation");
 
-  // SAFETY: the relay of an isolate built the operation of the area with the area's own operation type.
-  return { area, operation: operation as SeatOperationMap[typeof area]["operation"] };
+  switch (area) {
+    case "sends":
+      // SAFETY: the relay of an isolate built the operation with the sends area's own operation type.
+      return { area, operation: operation as SeatOperationMap["sends"]["operation"] };
+    case "workflows":
+      // SAFETY: the relay of an isolate built the operation with the workflows area's own operation type.
+      return { area, operation: operation as SeatOperationMap["workflows"]["operation"] };
+    default:
+      return unreachable(area, "requestOf");
+  }
+}
+
+function replyOf(reply: object): SeatReply {
+  const area = areaOf(reply);
+  const value = objectField(reply, "reply");
+
+  switch (area) {
+    case "sends":
+      // SAFETY: the main thread built the reply with the sends area's own reply type.
+      return { area, reply: value as SeatOperationMap["sends"]["reply"] };
+    case "workflows":
+      // SAFETY: the main thread built the reply with the workflows area's own reply type.
+      return { area, reply: value as SeatOperationMap["workflows"]["reply"] };
+    default:
+      return unreachable(area, "replyOf");
+  }
 }
 
 function answerOf(answer: object): SeatAnswer {
   const kind: unknown = Reflect.get(answer, "kind");
 
   switch (kind) {
-    case "reply": {
-      const reply = objectField(answer, "reply");
-      const area = areaOf(reply);
-
-      // SAFETY: the main thread built the reply with the area's own reply type.
-      return { kind, reply: { area, reply: objectField(reply, "reply") as SeatOperationMap[typeof area]["reply"] } };
-    }
+    case "reply":
+      return { kind, reply: replyOf(objectField(answer, "reply")) };
 
     case "refused":
       return { kind, refusal: refusalOf(objectField(answer, "refusal")) };

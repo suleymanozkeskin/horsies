@@ -318,7 +318,7 @@ pub(super) async fn run_isolated(context: &HostContext, run: RunFrame, scope: &R
         } => unreachable!("{NO_DEADLINE_IN_ISOLATED}"),
     }
     let end = match work {
-        IsolatedWork::Refusal(refusal) => refusal_end(&refusal),
+        IsolatedWork::Refusal(refusal) => refusal_end(&facts.task_name, &refusal),
         IsolatedWork::Run => match prepare(&context.app, &facts.task_name, &input) {
             Prepared::Ended(end) => end,
             Prepared::Body { task, input } => {
@@ -783,9 +783,10 @@ async fn async_seat(seat: AsyncSeat, run: SharedRunFrame, work: AsyncSeatWork) {
                     },
                     _,
                 ) => unreachable!("{NO_DEADLINE_BEFORE_BODY}"),
-                (SignalState::NotFired, AsyncSeatWork::Refusal(refusal)) => {
-                    (SeatEnd::Finished(refusal_end(&refusal)), Marker::Write)
-                }
+                (SignalState::NotFired, AsyncSeatWork::Refusal(refusal)) => (
+                    SeatEnd::Finished(refusal_end(&facts.task_name, &refusal)),
+                    Marker::Write,
+                ),
                 (SignalState::NotFired, AsyncSeatWork::Task { timeout, grace }) => {
                     let body = SeatBody {
                         run_ref,
@@ -1348,7 +1349,8 @@ fn thread_seat(seat: &ThreadSeat, run: &SharedRunFrame, work: ThreadSeatWork) {
             };
             let (end, marker) = match work {
                 ThreadSeatWork::Refusal(refusal) => {
-                    end_without_body(context, run_ref, &seat.cancel.gate, refusal_end(&refusal))
+                    let end = refusal_end(&facts.task_name, &refusal);
+                    end_without_body(context, run_ref, &seat.cancel.gate, end)
                 }
                 ThreadSeatWork::Task { timeout } => {
                     let body = ThreadBody {

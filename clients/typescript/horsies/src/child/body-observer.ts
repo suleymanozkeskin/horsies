@@ -3,11 +3,13 @@
 // context where the body runs; this package never imports the telemetry code.
 //
 // Order of the calls for one body: `enter` with the facts of the run; `run` with the body call; `thrown` with a value
-// that the body threw or rejected with, before the error mapping; `end` with how the body ended. The child's exit
-// rule awaits `flush`, within its bound.
+// that the body threw or rejected with, before the error mapping; `end` with how the body ended. `cancelled` comes
+// when the run's cancel signal fires (the core's `cancelRun` post), before or after the other calls: the core then
+// decided the end of the run (`TASK_TIMEOUT` at the deadline, `TASK_CANCELLED` at an operator cancel), whatever the
+// body does later. The child's exit rule awaits `flush`, within its bound.
 
 import type { AppContext } from "../app/context.ts";
-import type { BodyFactsRecord } from "../native/child/addon.ts";
+import type { BodyFactsRecord, CancelCauseName } from "../native/child/addon.ts";
 
 /** How a body ended, as the adapter saw it. `code` is the text of the stored error code. */
 export type BodyEnd =
@@ -24,6 +26,8 @@ export interface BodyObservation {
   thrown(cause: unknown): void;
   /** The body ended. */
   end(end: BodyEnd): void;
+  /** The run's cancel signal fired with `cause`: the core decided the end of the run, whatever the body does later. */
+  cancelled(cause: CancelCauseName): void;
 }
 
 /** The observer of the task bodies of a child. */
@@ -38,6 +42,7 @@ const NO_OBSERVATION: BodyObservation = Object.freeze({
   run: <T>(call: () => T): T => call(),
   thrown: (): void => undefined,
   end: (): void => undefined,
+  cancelled: (): void => undefined,
 });
 
 /** The observer that does nothing: `run` calls the body, `flush` resolves at once. */

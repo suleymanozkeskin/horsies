@@ -249,14 +249,16 @@ made, and the core writer is the only writer.
 | `WORKFLOW_START_INCOMPLETE` (error object) | `workflow_id`, `recovery` | removed in 0.8.0 | `core/src/workflow_engine/recovery.rs:1748` |
 | `WORKFLOW_EXPIRED` (error object) | `policy`, `older_than_seconds` | `clients/python/horsies/core/workflows/lifecycle.py:845-857` | `core/src/workflow_engine/lifecycle.rs:300` |
 | `UNHANDLED_EXCEPTION`, with the exception record | `exception_type` | `clients/python/horsies/core/task_decorator.py:2031-2036` | `core/src/worker/executor/child_host/panic.rs:175` (a Rust panic) |
+| `WORKER_SERIALIZATION_ERROR`, stored options that the worker cannot use (3 vectors: `field` `task_options`, `timeout_ms` and `cancel_grace_ms`) | `task_name`, `field`; then `min_ms`, `max_ms` for `timeout_ms` and `cancel_grace_ms` | `clients/python/horsies/core/worker/child_runner.py:289-326` (`_stored_timeout_refusal_response`) | `core/src/worker/executor/child_host/run.rs` (`refusal_end`) |
 
 The SQL writer is `horsies_task_error_envelope`
 (`core/baseline/0005_workflow_functions.sql:99`); a DB test
 calls it with the code, the message and the data text of each engine vector.
 The core's tests call `timeout_write`, `killed_child_write`,
-`stale_attempt_command`, `upstream_skipped_error`, `missing_result_error` and
-`node_error`; the other core writers build their data with `json!` in the key
-order of the table, and the generic test pins the encoding of each vector.
+`stale_attempt_command`, `upstream_skipped_error`, `missing_result_error`,
+`node_error` and `refusal_end`; the other core writers build their data
+with `json!` in the key order of the table, and the generic test pins the
+encoding of each vector.
 The Rust client writes none of these errors; its test reads each envelope
 through `outcome_of_record`.
 

@@ -21,7 +21,8 @@ use crate::worker::executor::protocol::{
 };
 use crate::worker::executor::supervisor::exit::{ChildExit, ReapedExit};
 use crate::worker::executor::supervisor::spawner::{
-    wait_for_exit, ExitWatch, Intake, KillOutcome, Queue, Shared, Spawner, SpawnerStopReport, Waker,
+    wait_for_exit, ChildOutputs, ExitWatch, Intake, KillOutcome, Queue, Shared, Spawner,
+    SpawnerStopReport, Waker,
 };
 
 /// The child test to run, set in the environment of a child process.
@@ -746,7 +747,7 @@ fn spawner_loop() -> SpawnerLoop {
         }),
         waker,
     });
-    SpawnerLoop::new(shared, watch)
+    SpawnerLoop::new(shared, watch, ChildOutputs::hold().unwrap())
 }
 
 /// A plan whose program does not exist: every start of it fails.

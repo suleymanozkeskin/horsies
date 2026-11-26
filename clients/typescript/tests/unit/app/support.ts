@@ -3,6 +3,7 @@
 
 import type { CoreChecks } from "../../../horsies/src/app/core-checks.ts";
 import type { ProducerCore } from "../../../horsies/src/app/core-access.ts";
+import { noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
 import { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { CreateEnvironment } from "../../../horsies/src/app/create.ts";
 import type { ProcessStart } from "../../../horsies/src/app/suppression.ts";
@@ -31,6 +32,7 @@ import type {
   RawRecordField,
   TraceArgument,
 } from "../../../horsies/src/native/values/records.ts";
+import type { OtelApiLoader } from "../../../horsies/src/telemetry/otel-api.ts";
 
 /** A canonical task id of the fakes. */
 export const TASK_ID = "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b";
@@ -175,6 +177,7 @@ export function fakeProducer(script: ProducerScript = {}): FakeProducer {
     results,
     infos,
     roles,
+    workflows: noWorkflowCore(),
     prepareSend: async (taskName, facts) => {
       prepares.push({ taskName, facts });
 
@@ -230,6 +233,7 @@ export type EnvironmentParts = {
   readonly checks?: FakeChecks;
   readonly producer?: FakeProducer;
   readonly handle?: CoreHandle;
+  readonly otelApi?: OtelApiLoader;
 };
 
 /** The environment of a fake create, and the counter of the loads of the core checks. */
@@ -267,6 +271,7 @@ export function fakeEnvironment(parts: EnvironmentParts = {}): FakeEnvironment {
 
       return { producer, handle };
     },
+    otelApi: parts.otelApi ?? (() => ({ kind: "otelApiMissing", cause: "the fake environment loads no API" })),
   };
 }
 

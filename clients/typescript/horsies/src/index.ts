@@ -14,15 +14,25 @@ export * from "./send/public.ts";
 
 export * from "./read/public.ts";
 
+export * from "./workflow/public.ts";
+
 export * from "./monitoring/public.ts";
 
 export * from "./rerun/public.ts";
+
+export * from "./web/public.ts";
 
 export * from "./thrown-errors.ts";
 
 export * from "./cli/public.ts";
 
 export * from "./child/public.ts";
+
+export * from "./schedules/public.ts";
+
+export * from "./telemetry/public.ts";
+
+export * from "./events/public.ts";
 
 export {
   configureLogging,

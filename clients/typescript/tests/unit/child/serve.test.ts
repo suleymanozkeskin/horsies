@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { NO_BODY_OBSERVER } from "../../../horsies/src/child/body-observer.ts";
+import { type BodyObserver, NO_BODY_OBSERVER } from "../../../horsies/src/child/body-observer.ts";
 import { RunTable } from "../../../horsies/src/child/run-table.ts";
 import type { TaskRuntime } from "../../../horsies/src/child/runtime.ts";
 import { postDispatcher } from "../../../horsies/src/child/serve.ts";
@@ -15,7 +15,7 @@ import type { ChildPost } from "../../../horsies/src/native/child/addon.ts";
 import type { CoreDefect } from "../../../horsies/src/thrown-errors.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { FakeChildNative, settled } from "./child-native.ts";
-import { RecordingMarks, RUN_TASK_ID } from "./support.ts";
+import { RecordingMarks, RecordingObservation, RUN_TASK_ID } from "./support.ts";
 
 const double = defineTask({ name: "double", input: { n: h.int() }, output: h.int() });
 
@@ -30,6 +30,7 @@ const wait = defineTask({
 function served(
   implementations: readonly ImplementationParts[],
   native: FakeChildNative = new FakeChildNative(),
+  observer: BodyObserver = NO_BODY_OBSERVER,
 ): { readonly post: (post: ChildPost) => void; readonly native: FakeChildNative; readonly defects: CoreDefect[]; readonly table: RunTable } {
   const defects: CoreDefect[] = [];
   const marks = new RecordingMarks();
@@ -38,7 +39,7 @@ function served(
   const post = postDispatcher({
     implementations: new Map(implementations.map((parts) => [String(Reflect.get(parts.contract, "name")), parts])),
     table,
-    observer: NO_BODY_OBSERVER,
+    observer,
     native,
     marks,
     reportDefect: (defect) => defects.push(defect),
@@ -50,6 +51,47 @@ function served(
 function runBody(runKey: bigint, taskName: string, inputJson: string): ChildPost {
   return { kind: "runBody", runKey, taskName, inputJson, taskId: RUN_TASK_ID, attempt: 1, facts: { kind: "notRecorded" } };
 }
+
+describe("the cancel post and the body observation", () => {
+  test("a cancelRun reaches the observation of its run; after the body settled it reaches none", async () => {
+    const observation = new RecordingObservation();
+    const observer: BodyObserver = { enter: () => observation, flush: async () => undefined };
+    let release: () => void = () => undefined;
+
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const child = served(
+      [
+        implementationParts(
+          implementationOf(
+            wait,
+            async () => {
+              await held;
+
+              return wait.ok("done");
+            },
+            [],
+          ),
+        ),
+      ],
+      new FakeChildNative(),
+      observer,
+    );
+
+    child.post(runBody(7n, "wait", "{}"));
+    await settled();
+    child.post({ kind: "cancelRun", runKey: 7n, cause: "DEADLINE" });
+    release();
+    await settled();
+    child.post({ kind: "cancelRun", runKey: 7n, cause: "OPERATOR" });
+    assert.deepEqual(
+      observation.calls.filter((call) => call.startsWith("cancelled")),
+      ["cancelled DEADLINE"],
+    );
+  });
+});
 
 describe("the post dispatcher", () => {
   test("a body that returns settles with the stored text of its value, and the run leaves the table", async () => {

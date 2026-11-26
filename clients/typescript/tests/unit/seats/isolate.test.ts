@@ -160,6 +160,7 @@ describe("a run in a seat isolate", () => {
           end: (end: BodyEnd, endedAt) => {
             calls.push(`end ${end.kind} ${endedAt.toString()}`);
           },
+          cancelled: () => undefined,
         };
       },
     };
@@ -226,6 +227,44 @@ describe("cancel in a seat", () => {
     port.deliver(cancelMessage(8n, "OPERATOR"));
     await settled();
     assert.deepEqual(outcomes(port), [{ kind: "value", json: JSON.stringify(JSON.stringify({ cause: "OPERATOR" })) }]);
+  });
+
+  test("the seat body observer gets the cause of the run's cancel once; a cancel of another run is left", async () => {
+    const app = seatApp();
+    const causes: string[] = [];
+
+    const observer: SeatBodyObserver = {
+      enter: () => ({
+        run: (call) => call(),
+        thrown: () => undefined,
+        end: () => undefined,
+        cancelled: (cause) => {
+          causes.push(cause);
+        },
+      }),
+    };
+
+    setSeatBodyObserver(contextOf(app), observer);
+    app.implement(fetchPage, async (_input, runtime) => {
+      await new Promise<void>((resolve) => {
+        runtime.signal.addEventListener("abort", () => {
+          resolve();
+        });
+      });
+
+      return fetchPage.ok("cancelled");
+    });
+
+    const { channel, port } = fakeChannel();
+
+    void serveSeat(contextOf(app), channel, DEPS);
+    await settled();
+    port.deliver(runMessage(9n, "fetch_page", '{"url":"https://example.org"}'));
+    port.deliver(cancelMessage(98n, "OPERATOR"));
+    port.deliver(cancelMessage(9n, "DEADLINE"));
+    port.deliver(cancelMessage(9n, "OPERATOR"));
+    await settled();
+    assert.deepEqual(causes, ["DEADLINE"]);
   });
 
   test("the runtime of a seat body has no spawn: a call is a defect", async () => {

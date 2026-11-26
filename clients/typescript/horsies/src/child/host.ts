@@ -6,7 +6,8 @@
 // 2. The panic rule of a worker process: a defect goes to stderr, then to the log sink, then the process aborts.
 // 3. The process events: no-op `SIGINT` and `SIGTERM`; the detached throws and rejections (`process-events.ts`).
 // 4. The plan: each implementation by its task name and body form; the start hooks (the child's own, the providers,
-//    the `onChildStart` hooks); the producer manifest of the app; the host name; the body facts; the flush bound.
+//    the `onChildStart` hooks); the producer manifest of the app; the host name; the body facts; the flush bound. The
+//    handler slot: the event handlers, the start hooks of the handler child and the worker-ended span maker.
 // 5. The serve: sends from task code are no longer suppressed; the core posts each body, cancel and stop request to
 //    the post dispatcher, and runs each start hook through the hook runner. The turn timer starts at hook 0 (a host
 //    that started); the culprit method of Node starts there in a shared async child. In a `SHARED_THREAD` child hook 0
@@ -19,7 +20,6 @@ import { hostname } from "node:os";
 
 import type { Horsies } from "../app.ts";
 import type { AppContext } from "../app/context.ts";
-import type { TracingKind } from "../app/telemetry.ts";
 import { appInternals } from "../app/internals.ts";
 import { addonSettlement, settlingCallback, type CallbackSettlement } from "../native/call/callback.ts";
 import { reportDefect } from "../native/call/defect.ts";
@@ -36,6 +36,9 @@ import {
   settleBodyValue,
 } from "../native/child/child.ts";
 import { setPanicRule } from "../native/process-core/process-core.ts";
+import { fillHandlerChild } from "../native/handler-child/handler-child.ts";
+import { fillHandlerChildOf, type HandlerChildNative } from "../events/handler-child.ts";
+import type { TracingSetting } from "../telemetry/tracing-config.ts";
 import { buildTaskError, checkAppConfig } from "../native/sends/sends.ts";
 import type {
   BodyFactsMode,
@@ -82,7 +85,7 @@ import {
 import { StateValues } from "./state.ts";
 
 /** The calls of the addon in child mode. */
-export interface ChildNative extends ServeNative, LoopNative {
+export interface ChildNative extends ServeNative, LoopNative, HandlerChildNative {
   childArguments(processArguments: readonly string[]): ChildArgumentsCheck;
   serveChild(
     plan: ChildHostPlan,
@@ -250,6 +253,9 @@ async function servedChild(
 
   const plan = childPlan(context, members, processArguments, deps);
 
+  // The handler slot of the core, which a handler child reads at the serve.
+  fillHandlerChildOf(context, deps.native, deps.settlement);
+
   // Task code may send and start workflows from here on: the providers, the hooks and the bodies.
   context.suppression.startServing();
 
@@ -259,8 +265,8 @@ async function servedChild(
 }
 
 /** The body facts that a child of an app with `tracing` records: the facts of each run for its spans, or none. Pure. */
-export function bodyFactsMode(tracing: TracingKind): BodyFactsMode {
-  switch (tracing) {
+export function bodyFactsMode(tracing: TracingSetting): BodyFactsMode {
+  switch (tracing.kind) {
     case "otel":
       return "SPANS";
     case "none":
@@ -310,6 +316,7 @@ export function processChildNative(): ChildNative {
     buildTaskError,
     setPanicRule,
     checkAppConfig,
+    fillHandlerChild,
   };
 }
 

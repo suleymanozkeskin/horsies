@@ -7,6 +7,7 @@ import type { ListedEntry } from "./contract-list.ts";
 import type { CoreAccess } from "./core-access.ts";
 import type { SendObserver } from "./observers.ts";
 import type { RefusalSink } from "./refusals.ts";
+import type { WorkflowRegistry } from "../workflow/registry.ts";
 import type { SuppressionState } from "./suppression.ts";
 import type { AppTelemetry } from "./telemetry.ts";
 
@@ -23,6 +24,8 @@ export type AppContext = {
   readonly send: SendContext;
   /** The implementations, by task name. */
   readonly implementations: Map<string, ImplementationParts>;
+  /** The listed workflows. */
+  readonly workflows: WorkflowRegistry;
   /** The event handlers and the tracing of the app, which the worker manifest and the children read. */
   readonly telemetry: AppTelemetry;
 };
