@@ -50,6 +50,7 @@ fn the_marker_takes_the_socket_and_the_worker_pid() {
     match child_mode(arguments(&["app", CHILD_MODE_ARGUMENT, "7", "4242"])) {
         ChildMode::Child(args) => {
             assert_eq!(args.socket_fd, 7);
+            assert_eq!(args.socket_fd(), 7);
             assert_eq!(args.worker_pid.get(), 4242);
         }
         other => panic!("expected child mode, got {other:?}"),
