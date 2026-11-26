@@ -15,6 +15,7 @@
 
 import type { WorkerLogLevel } from "../_catalog/worker_manifest.ts";
 import type { AppContext } from "../app/context.ts";
+import { appCoreHandle } from "../app/core-access.ts";
 import type { CoreChecks } from "../app/core-checks.ts";
 import { type CheckReport, reportText } from "../check/report.ts";
 import { staticCheck } from "../check/static-check.ts";
@@ -28,7 +29,6 @@ import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../na
 import { type DeclaredScheduler, scheduleDeclaration } from "../schedules/app-member.ts";
 import { ClientDefect, CoreError } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import { appHandle } from "../worker/run.ts";
 
 /** How a scheduler starts: the log level of the process. */
 export type SchedulerStart = { readonly logLevel: WorkerLogLevel };
@@ -182,7 +182,7 @@ export const NATIVE_SCHEDULER_CALLS: NativeSchedulerCalls = Object.freeze({ runS
 
 /**
  * The scheduler run of this process: the addon and the log; `stopOnSignals` from the command. The run gets the core
- * handle that `Horsies.create` built for the app (`appHandle`).
+ * handle that `Horsies.create` built for the app (`appCoreHandle`).
  */
 export function processSchedulerRunDeps(
   context: AppContext,
@@ -192,7 +192,7 @@ export function processSchedulerRunDeps(
   return {
     setLogLevel: (level) => configureLogging({ levels: { default: level } }),
     coreChecks: { checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions },
-    run: async (scheduler) => native.runScheduler(scheduler, appHandle(context)),
+    run: async (scheduler) => native.runScheduler(scheduler, appCoreHandle(context.core)),
     requestStop: (scheduler) => native.requestSchedulerStop(scheduler),
     stopOnSignals,
   };
