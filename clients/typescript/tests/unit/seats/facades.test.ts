@@ -114,15 +114,15 @@ describe("each facade call kind of a seat body goes through the relay", () => {
     const { area, called } = seatArea();
 
     assert.deepEqual(await area.monitoring.taskStats(), { ok: true, value: [] });
-    assert.deepEqual(await area.monitoring.workflowNames(), { ok: true, value: [] });
+    assert.deepEqual(await area.monitoring.listWorkflowNames(), { ok: true, value: [] });
     assert.deepEqual(called, ["readTaskStats", "readWorkflowNames"]);
   });
 
   test("a health read", async () => {
     const { area, called } = seatArea();
 
-    assert.deepEqual(await area.monitoring.workers(), { ok: true, value: [] });
-    assert.equal((await area.monitoring.expiredTasks()).ok, true);
+    assert.deepEqual(await area.monitoring.listWorkerStates(), { ok: true, value: [] });
+    assert.equal((await area.monitoring.getExpiredTasks()).ok, true);
     assert.deepEqual(called, ["listWorkerStates", "getExpiredTasks"]);
   });
 
@@ -154,7 +154,7 @@ describe("each facade call kind of a seat body goes through the relay", () => {
     const relay = loopbackRelay(mainThreadAccess(handle), mainFacades(handle, called));
     const rerun = rerunAreaOfCore({ kind: "seatRelay", relay }, () => ({ kind: "noCarrier" }));
 
-    assert.deepEqual(await rerun.rerun(COMMAND, POLICY), { ok: true, value: { kind: "sourceLive", taskId: TASK_ID } });
+    assert.deepEqual(await rerun.rerunTask(COMMAND, POLICY), { ok: true, value: { kind: "sourceLive", taskId: TASK_ID } });
     assert.deepEqual(called, ["rerunTask"]);
   });
 });
@@ -196,11 +196,11 @@ describe("each facade call kind past the bound of the relay gives SEAT_RELAY_FUL
   });
 
   test("a monitoring read with no query", async () => {
-    assert.deepEqual(failure(await fullSeatArea().area.monitoring.schedules()), RELAY_FULL);
+    assert.deepEqual(failure(await fullSeatArea().area.monitoring.listSchedules()), RELAY_FULL);
   });
 
   test("a health read", async () => {
-    assert.deepEqual(failure(await fullSeatArea().area.monitoring.workers()), RELAY_FULL);
+    assert.deepEqual(failure(await fullSeatArea().area.monitoring.listWorkerStates()), RELAY_FULL);
   });
 
   test("a worker ping", async () => {
@@ -217,7 +217,7 @@ describe("each facade call kind past the bound of the relay gives SEAT_RELAY_FUL
 
   test("the rerun in the app's transaction", async () => {
     const { relay } = fullSeatArea();
-    const rerun = await rerunAreaOfCore({ kind: "seatRelay", relay }, () => ({ kind: "noCarrier" })).rerun(COMMAND, POLICY);
+    const rerun = await rerunAreaOfCore({ kind: "seatRelay", relay }, () => ({ kind: "noCarrier" })).rerunTask(COMMAND, POLICY);
 
     assert.deepEqual(failure(rerun), RELAY_FULL);
   });

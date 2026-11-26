@@ -1,11 +1,11 @@
 // The `web` command: serve the monitoring web API and page of the app until `SIGINT` or `SIGTERM`.
 //
-// `<entry> web [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header]
+// `<entry> web [--host 127.0.0.1] [--port 8600] [--authorization none|trusted-header]
 //              [--trusted-header X-Forwarded-User] [--enable-actions] [--trace-link TEMPLATE]
-//              [--loglevel INFO]`
+//              [--log-level INFO]`
 //
 // Exit codes: 0 after an operator stop; 1 when the check refuses the app or the address does not
-// bind; 2 for arguments that do not parse, `--auth none` on a host that is not a loopback host, a
+// bind; 2 for arguments that do not parse, `--authorization none` on a host that is not a loopback host, a
 // trusted header name that is not valid, and a trace link template that the core refuses.
 
 import { isIPv4, isIPv6 } from "node:net";
@@ -18,7 +18,7 @@ import { configureLogging } from "../logging.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
 import { unreachable } from "../native/call/never.ts";
 import { allowAll, trustedHeader, trustedHeaderRefusalText, viewOnly } from "../web/auth.ts";
-import type { ActionsSwitch, MonitoringAuthPolicy } from "../web/auth.ts";
+import type { ActionsSwitch, MonitoringAuthorizationPolicy } from "../web/auth.ts";
 import { monitoringAppOf } from "../web/app-facts.ts";
 import { monitoringHandlerOf } from "../web/handler.ts";
 import type { MonitoringHandler, MonitoringHandlerApp, MonitoringHandlerOptions } from "../web/handler.ts";
@@ -48,10 +48,10 @@ import {
 
 /** The usage line of `web`. */
 export const WEB_USAGE: string =
-  "<entry> web [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header NAME] " +
-  "[--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]";
+  "<entry> web [--host HOST] [--port PORT] [--authorization none|trusted-header] [--trusted-header NAME] " +
+  "[--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]";
 
-/** The default `--loglevel` of `web`, as in the Python and Rust clients. */
+/** The default `--log-level` of `web`, as in the Python and Rust clients. */
 export const WEB_DEFAULT_LOG_LEVEL: WorkerLogLevel = "INFO";
 
 /** The default `--host`: this machine only. */
@@ -70,15 +70,15 @@ const MAX_PORT = 65_535;
 const WEB_FLAG_OPTIONS = {
   host: { type: "string" },
   port: { type: "string" },
-  auth: { type: "string" },
+  authorization: { type: "string" },
   "trusted-header": { type: "string" },
   "enable-actions": { type: "boolean" },
   "trace-link": { type: "string" },
-  loglevel: { type: "string" },
+  "log-level": { type: "string" },
 } as const;
 
-/** The `--auth` modes. */
-export type WebAuthMode = "none" | "trustedHeader";
+/** The `--authorization` modes. */
+export type WebAuthorizationMode = "none" | "trustedHeader";
 
 /** The `--trace-link` flag: absent, or the template text. */
 export type TraceLinkFlag = { readonly kind: "noTraceLink" } | { readonly kind: "template"; readonly text: string };
@@ -86,7 +86,7 @@ export type TraceLinkFlag = { readonly kind: "noTraceLink" } | { readonly kind: 
 /** The parsed flags of `web`. */
 export interface WebFlags {
   readonly address: ServeAddress;
-  readonly auth: WebAuthMode;
+  readonly authorization: WebAuthorizationMode;
   readonly trustedHeaderName: string;
   readonly actions: ActionsSwitch;
   readonly traceLink: TraceLinkFlag;
@@ -95,8 +95,8 @@ export interface WebFlags {
 
 /** The access of the served handler. */
 export type WebAccess =
-  | { readonly kind: "noAuthentication"; readonly policy: MonitoringAuthPolicy }
-  | { readonly kind: "trustedHeader"; readonly policy: MonitoringAuthPolicy; readonly headerName: string };
+  | { readonly kind: "noAuthentication"; readonly policy: MonitoringAuthorizationPolicy }
+  | { readonly kind: "trustedHeader"; readonly policy: MonitoringAuthorizationPolicy; readonly headerName: string };
 
 /** The outcome of the check without the live step: passed, or the refusal report to print. */
 export type CheckStepOutcome = { readonly kind: "passed" } | { readonly kind: "refused"; readonly report: string };
@@ -187,7 +187,7 @@ export async function runWebCommand(args: readonly string[], deps: WebCommandDep
   }
 
   const handler = deps.createHandler({
-    auth: access.policy,
+    authorizationPolicy: access.policy,
     actions: flags.actions,
     ...(traceLink === undefined ? {} : { ui: { traceLink } }),
   });
@@ -286,13 +286,13 @@ export function parseWebFlags(args: readonly string[]): Result<WebFlags, UsageEr
     return port;
   }
 
-  const auth = parseAuthMode(textFlag(values, "auth") ?? "none");
+  const authorization = parseAuthorizationMode(textFlag(values, "authorization") ?? "none");
 
-  if (!auth.ok) {
-    return auth;
+  if (!authorization.ok) {
+    return authorization;
   }
 
-  const logLevel = parseLogLevel(textFlag(values, "loglevel") ?? WEB_DEFAULT_LOG_LEVEL);
+  const logLevel = parseLogLevel(textFlag(values, "log-level") ?? WEB_DEFAULT_LOG_LEVEL);
 
   if (!logLevel.ok) {
     return logLevel;
@@ -302,7 +302,7 @@ export function parseWebFlags(args: readonly string[]): Result<WebFlags, UsageEr
 
   return ok({
     address: { host: textFlag(values, "host") ?? WEB_DEFAULT_HOST, port: port.value },
-    auth: auth.value,
+    authorization: authorization.value,
     trustedHeaderName: textFlag(values, "trusted-header") ?? WEB_DEFAULT_TRUSTED_HEADER,
     actions: switchFlag(values, "enable-actions") ? "enabled" : "disabled",
     traceLink: traceLink === undefined ? { kind: "noTraceLink" } : { kind: "template", text: traceLink },
@@ -319,15 +319,15 @@ export function parsePort(text: string): Result<number, UsageError> {
     : err(usageError(`--port must be a whole number from 0 to ${MAX_PORT}, not ${JSON.stringify(text)}`));
 }
 
-/** A `--auth` value. Pure. */
-function parseAuthMode(text: string): Result<WebAuthMode, UsageError> {
+/** A `--authorization` value. Pure. */
+function parseAuthorizationMode(text: string): Result<WebAuthorizationMode, UsageError> {
   switch (text) {
     case "none":
       return ok("none");
     case "trusted-header":
       return ok("trustedHeader");
     default:
-      return err(usageError(`--auth must be none or trusted-header, not ${JSON.stringify(text)}`));
+      return err(usageError(`--authorization must be none or trusted-header, not ${JSON.stringify(text)}`));
   }
 }
 
@@ -351,12 +351,12 @@ function checkedTraceLink(
 }
 
 /**
- * The access of the flags. `--auth none` is allowed only on a loopback host: anyone who can reach
+ * The access of the flags. `--authorization none` is allowed only on a loopback host: anyone who can reach
  * the port could read the task data. It gives `allowAll()` with `--enable-actions`, else
  * `viewOnly()`. Pure.
  */
 export function webAccess(flags: WebFlags): Result<WebAccess, UsageError> {
-  switch (flags.auth) {
+  switch (flags.authorization) {
     case "trustedHeader": {
       const policy = trustedHeader(flags.trustedHeaderName, { actions: flags.actions });
 
@@ -370,13 +370,13 @@ export function webAccess(flags: WebFlags): Result<WebAccess, UsageError> {
         ? ok({ kind: "noAuthentication", policy: flags.actions === "enabled" ? allowAll() : viewOnly() })
         : err(usageError(exposedWithoutAuthenticationText(flags.address.host)));
     default:
-      return unreachable(flags.auth);
+      return unreachable(flags.authorization);
   }
 }
 
-/** The refusal of `--auth none` on `host`. Pure. */
+/** The refusal of `--authorization none` on `host`. Pure. */
 function exposedWithoutAuthenticationText(host: string): string {
-  return `--auth none is only allowed on a loopback host; ${JSON.stringify(host)} is reachable from the network. Use --auth trusted-header with a proxy-set header.`;
+  return `--authorization none is only allowed on a loopback host; ${JSON.stringify(host)} is reachable from the network. Use --authorization trusted-header with a proxy-set header.`;
 }
 
 /**
@@ -407,7 +407,7 @@ function isIpv6Loopback(host: string): boolean {
   return groups.length === 8 && groups.every((group, index) => Number.parseInt(group, 16) === (index === 7 ? 1 : 0));
 }
 
-/** The warning of `--auth trusted-header`, as the Python and Rust clients print it. Pure. */
+/** The warning of `--authorization trusted-header`, as the Python and Rust clients print it. Pure. */
 export function trustedHeaderWarning(headerName: string): string {
   return `SECURITY: the reverse proxy in front of this server MUST strip or overwrite the ${headerName} header on incoming requests. A proxy that forwards a client-supplied header makes this mode trivially spoofable, and horsies cannot detect that.`;
 }

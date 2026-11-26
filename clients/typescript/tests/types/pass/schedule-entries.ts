@@ -14,7 +14,7 @@ app.schedules(
       name: "daily-report",
       task: buildReport,
       input: { format: "pdf" },
-      pattern: { kind: "daily", at: Temporal.PlainTime.from("09:00") },
+      pattern: { kind: "daily", time: Temporal.PlainTime.from("09:00") },
       timezone: "Europe/Berlin",
       catchUpMissed: false,
     },

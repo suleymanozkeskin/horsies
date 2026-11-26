@@ -136,7 +136,7 @@ describe("found and not found", () => {
     const read = await taskDetail(fakeTarget(jsonOutcome(null)).target, TASK_ID);
 
     assert.ok(read.ok && read.value.kind === "found");
-    assert.ok(Array.isArray(read.value.detail.attempts));
+    assert.ok(Array.isArray(read.value.taskDetail.attempts));
   });
 
   test("taskDetail of a task that no table holds is notFound with its reason", async () => {
@@ -159,7 +159,7 @@ describe("found and not found", () => {
     const missing = await workflowNode(fakeTarget(jsonOutcome(null)).target, WORKFLOW_ID, 2);
 
     assert.ok(found.ok && found.value.kind === "found");
-    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: WORKFLOW_ID, taskIndex: 2 } });
+    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: WORKFLOW_ID, nodeIndex: 2 } });
   });
 });
 
@@ -221,7 +221,7 @@ describe("refusals before the call", () => {
       const { target, calls } = fakeTarget(jsonOutcome(null));
       const read = await workflowNode(target, WORKFLOW_ID, index);
 
-      assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "taskIndex", `${index}`);
+      assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === "nodeIndex", `${index}`);
       assert.equal(calls.size, 0);
     }
   });
@@ -265,7 +265,7 @@ describe("the timing variants of the core decode through the reads", () => {
       const read = await taskDetail(fakeTarget(jsonOutcome(null), { kind: "json", text }).target, TASK_ID);
 
       assert.ok(read.ok && read.value.kind === "found");
-      assert.equal(read.value.detail.attempts.length, 1);
+      assert.equal(read.value.taskDetail.attempts.length, 1);
     }
   });
 

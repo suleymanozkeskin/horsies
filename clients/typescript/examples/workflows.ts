@@ -58,7 +58,7 @@ const summarize = defineTask({
 
 /** The workflow: its nodes, and the node whose result is the workflow's. It has no params, so no check cases. */
 const orderSummary = defineWorkflow(
-  { name: "order_summary", definitionKey: "examples.order_summary.v1", params: {}, output: h.string() },
+  { name: "order_summary", definitionKey: "examples.order_summary.v1", parameters: {}, outputType: h.string() },
   (w) => {
     const load = w.task(loadPrices, { orderId: ORDER_ID }, { nodeId: "load_prices" });
     const total = w.task(sumPrices, { prices: load }, { nodeId: "sum_prices" });

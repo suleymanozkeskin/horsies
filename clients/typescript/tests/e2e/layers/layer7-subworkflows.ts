@@ -124,7 +124,7 @@ describe("layer 7: sub-workflows", () => {
     assert.equal(node.status, "COMPLETED");
 
     const childId = childIdOf(node);
-    const [info, ...otherInfos] = await handleCall("the node infos", handle.tasks());
+    const [info, ...otherInfos] = await handleCall("the node infos", handle.nodes());
 
     assert.ok(info !== undefined);
     assert.deepEqual(otherInfos, []);
@@ -162,7 +162,7 @@ describe("layer 7: sub-workflows", () => {
     assert.ok((await workflowRow(suite.rows, handle.workflowId)).error?.includes(childId), "the workflow error names the child");
     subWorkflowFailure(await workflowError(handle), childId);
 
-    const [info] = await handleCall("the node infos", handle.tasks());
+    const [info] = await handleCall("the node infos", handle.nodes());
 
     assert.ok(info !== undefined);
     assert.equal(info.status, "FAILED");
@@ -252,7 +252,7 @@ describe("layer 7: sub-workflows", () => {
     assert.equal(await nodeValue("the completed child", handle.resultFor("e2e_sub_parallel_ok_child")), SUB_OK_VALUE);
     failedChildOf(await nodeOutcome("the failed child", handle.resultFor("e2e_sub_parallel_fail_child")), failedChild);
     assert.deepEqual(
-      (await handleCall("the node infos", handle.tasks())).map((info) =>
+      (await handleCall("the node infos", handle.nodes())).map((info) =>
         info.subWorkflowSummary.kind === "recorded" ? info.subWorkflowSummary.value.status : "notRecorded",
       ),
       ["COMPLETED", "FAILED"],
@@ -720,7 +720,7 @@ describe("layer 7: sub-workflows", () => {
     assert.equal(await handleCall("status", handle.status()), "COMPLETED");
     assert.equal(await workflowValue(handle), SUB_OK_VALUE);
 
-    const [info, ...rest] = await handleCall("the node infos", handle.tasks());
+    const [info, ...rest] = await handleCall("the node infos", handle.nodes());
 
     assert.ok(info !== undefined);
     assert.deepEqual(rest, []);

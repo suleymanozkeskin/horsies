@@ -25,13 +25,13 @@ const TASKS = 3;
 
 /** The one attempt of task `taskId` in its monitoring detail. */
 async function onlyAttempt(suite: Suite, taskId: TaskId): Promise<TaskAttemptInfo> {
-  const read = await suite.app.monitoring.taskDetail(taskId);
+  const read = await suite.app.monitoring.getTaskDetail(taskId);
 
   assert.ok(read.ok && read.value.kind === "found", `read the detail of task ${taskId}: ${read.ok ? read.value.kind : read.error.code}`);
 
-  const [attempt, ...others] = read.value.detail.attempts;
+  const [attempt, ...others] = read.value.taskDetail.attempts;
 
-  assert.ok(attempt !== undefined && others.length === 0, `task ${taskId} has one attempt, not ${String(read.value.detail.attempts.length)}`);
+  assert.ok(attempt !== undefined && others.length === 0, `task ${taskId} has one attempt, not ${String(read.value.taskDetail.attempts.length)}`);
 
   return attempt;
 }

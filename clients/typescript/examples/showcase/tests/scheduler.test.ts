@@ -55,7 +55,7 @@ test("a scheduler process sends the due slots of a 1 s schedule", { timeout: 120
     assert.equal(await stopEntry(scheduler), "exited", logTail(scheduler, 30));
     assert.equal(scheduler.child.exitCode, 0, logTail(scheduler, 30));
 
-    const states = await showcase.app.monitoring.schedules();
+    const states = await showcase.app.monitoring.listSchedules();
 
     assert.ok(states.ok, JSON.stringify(states));
 

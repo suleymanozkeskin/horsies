@@ -11,7 +11,7 @@ const openOrder = defineTask({ name: "open_order", input: {}, output: h.int() })
 const charge = defineTask({ name: "charge", input: { order: h.taskOutcome(validateOrder) }, output: h.null() });
 
 export const fulfil = defineWorkflow(
-  { name: "fulfil", definitionKey: "tests.fulfil.v1", params: {}, output: h.null() },
+  { name: "fulfil", definitionKey: "tests.fulfil.v1", parameters: {}, outputType: h.null() },
   (w) => {
     const validated = w.task(validateOrder, {}, { nodeId: "validate" });
     const opened = w.task(openOrder, {}, { nodeId: "open" });

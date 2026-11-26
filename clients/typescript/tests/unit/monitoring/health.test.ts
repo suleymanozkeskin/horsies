@@ -291,8 +291,8 @@ describe("the pings", () => {
     const seen: Array<readonly [object, number, object]> = [];
 
     const target = fakeTarget({
-      pingWorkers: async (_handle, pingTarget, timeoutMs, minResponses) => {
-        seen.push([pingTarget, timeoutMs, minResponses]);
+      pingWorkers: async (_handle, pingTarget, waitMs, minResponses) => {
+        seen.push([pingTarget, waitMs, minResponses]);
 
         return done([{ workerId: "w1", hostname: "h", pid: 1, roundTripMs: 2 }]);
       },
@@ -306,13 +306,13 @@ describe("the pings", () => {
 
   test("pingWorkers gives INVALID_INPUT, LISTENER_DISABLED and WORKER_PING_FAILED", async () => {
     const answers: ReadonlyArray<readonly [RawCatalogError, string]> = [
-      [brokerInvalidInput("timeoutMs must be a whole number from 1"), "INVALID_INPUT"],
+      [brokerInvalidInput("waitMs must be a whole number from 1"), "INVALID_INPUT"],
       [brokerListenerDisabled(), "LISTENER_DISABLED"],
       [brokerOperationFailed("WORKER_PING_FAILED", "ping_workers"), "WORKER_PING_FAILED"],
     ];
 
     for (const [raw, code] of answers) {
-      const read = await pingWorkers(fakeTarget({ pingWorkers: async () => failed(raw) }), { timeoutMs: 0 });
+      const read = await pingWorkers(fakeTarget({ pingWorkers: async () => failed(raw) }), { waitMs: 0 });
 
       assert.ok(!read.ok && read.error.code === code, code);
     }

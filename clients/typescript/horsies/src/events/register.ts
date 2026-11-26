@@ -21,7 +21,7 @@ import { isObjectLike, isString } from "../codec/values.ts";
 import { type AnyEvent, EVENT_TYPES } from "../_catalog/events.ts";
 import type { EventTypeName } from "../_catalog/worker_manifest.ts";
 import type { AppContext } from "../app/context.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import type { HandlerRegistration } from "../app/telemetry.ts";
 import type { RaiseDefect } from "../child/state.ts";
 import { raiseDefect } from "../native/call/defect.ts";
@@ -129,7 +129,7 @@ function nameOfOptions(options: { readonly name: string }): OptionsName {
 /** A registration that passed every check, or its refusal. */
 type CheckedHandler =
   | { readonly kind: "accepted"; readonly registered: RegisteredHandler }
-  | { readonly kind: "refused"; readonly refusal: Refusal };
+  | { readonly kind: "refused"; readonly refusal: HorsiesError };
 
 /** The checks of one registration against the handlers before it, in the order of the module docs. Pure. */
 export function checkedHandler(
@@ -206,7 +206,7 @@ function nameRule(optionsName: OptionsName): NameRule {
   return { kind: "accepted", name };
 }
 
-function refused(code: Refusal["code"], path: string, message: string, help: readonly string[]): CheckedHandler {
+function refused(code: HorsiesError["code"], path: string, message: string, help: readonly string[]): CheckedHandler {
   return { kind: "refused", refusal: refusal(code, path, message, help) };
 }
 

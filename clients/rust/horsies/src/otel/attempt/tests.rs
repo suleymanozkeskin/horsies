@@ -133,7 +133,7 @@ fn the_attempt_span_is_a_child_of_the_send_span_with_the_task_attributes() {
     for key in ["horsies.workflow.id", "horsies.workflow.node"] {
         assert_eq!(attribute(attempt, key), None, "{key}");
     }
-    assert_eq!(attempt.status, Status::Ok);
+    assert_eq!(attempt.status, Status::Unset);
     assert_eq!(
         attribute(attempt, LabelName::ErrorCode.attribute_key()),
         None
@@ -320,7 +320,7 @@ fn the_end_of_the_body_sets_the_status_of_the_attempt_span() {
         );
         match expected {
             Some(_) => assert_eq!(attempt.status, Status::error(""), "{end:?}"),
-            None => assert_eq!(attempt.status, Status::Ok, "{end:?}"),
+            None => assert_eq!(attempt.status, Status::Unset, "{end:?}"),
         }
     }
 }

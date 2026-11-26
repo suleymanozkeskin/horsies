@@ -39,7 +39,7 @@ export type QueryRefusedField =
   | "workers"
   | "errorCodes"
   | "workflowName"
-  | "taskIndex"
+  | "nodeIndex"
   | "workerId";
 
 /** An argument that the call refuses before any connect: no statement ran. `reason` names the rule. */

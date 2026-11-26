@@ -10,7 +10,7 @@ import {
 } from "../../../horsies/src/index.ts";
 
 export const withChildren: WorkerProfileInput = {
-  isolated: { kind: "isolatedChildren", count: 2, recycle: { after: { kind: "tasks", tasks: 100 } } },
+  isolated: { kind: "isolatedChildren", count: 2, recycle: { after: { kind: "taskLimit", tasks: 100 } } },
   sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 50 },
   sharedThread: { kind: "sharedThreadChildren", count: 1, seats: 4 },
 };
