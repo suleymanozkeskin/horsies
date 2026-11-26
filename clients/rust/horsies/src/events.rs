@@ -216,7 +216,10 @@ mod tests {
             repeated.message.contains("'audit' is registered already"),
             "{repeated}"
         );
-        assert_eq!(repeated.code, Some(HorsiesErrorCode::EventHandlerDuplicateName));
+        assert_eq!(
+            repeated.code,
+            Some(HorsiesErrorCode::EventHandlerDuplicateName)
+        );
         assert!(
             repeated.to_string().starts_with("error[HRS-224]: "),
             "{repeated}"
@@ -225,7 +228,10 @@ mod tests {
         for name in ["", "(unknown)"] {
             let refused = app.on_event::<AttemptEnded>(name, record_end).unwrap_err();
             assert!(refused.message.contains("name is refused"), "{refused}");
-            assert_eq!(refused.code, Some(HorsiesErrorCode::EventHandlerInvalidName));
+            assert_eq!(
+                refused.code,
+                Some(HorsiesErrorCode::EventHandlerInvalidName)
+            );
             assert!(
                 refused.to_string().starts_with("error[HRS-225]: "),
                 "{refused}"

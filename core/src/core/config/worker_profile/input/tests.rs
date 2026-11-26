@@ -537,7 +537,10 @@ fn a_refusal_is_a_profile_refusal_with_its_bound() {
         "worker_profiles['p'].drain_timeout: a drain timeout of 0 is refused; a stopping \
          worker needs a deadline",
     );
-    assert_eq!(zero.code, Some(HorsiesErrorCode::ConfigInvalidWorkerProfile));
+    assert_eq!(
+        zero.code,
+        Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)
+    );
     assert_eq!(
         zero.help_text.as_deref(),
         Some("set a drain timeout above 0 and at most 86400s")

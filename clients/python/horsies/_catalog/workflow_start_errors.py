@@ -16,7 +16,7 @@ __all__ = ['WorkflowStartValidationFailed', 'WorkflowStartIdConflict', 'Workflow
 class WorkflowStartValidationFailed:
     """The spec, its args or the retry input was refused. Nothing was written.
 
-    The same start is refused again. ``exception`` is ``NoCause()`` when a
+    The same start is refused again. ``cause`` is ``NoCause()`` when a
     check refused the input without a Python exception. The retry methods
     refuse this error.
     """

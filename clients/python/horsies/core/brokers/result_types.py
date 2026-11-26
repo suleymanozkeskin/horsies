@@ -39,7 +39,7 @@ Where Result stops and exceptions take over (the "stop line"):
   process.  This is intentional, not a gap: the orchestration layer
   (CLI) already wraps these in retry loops
   (``_ensure_schema_with_retry``) *before* the service starts.
-  ``broker_error_cause()`` gives the exception to raise ``from``, or
+  ``error.failure_cause()`` gives the exception to raise ``from``, or
   ``NoCause()``.
 
 * **Workflow start** (``start_workflow_async``, ``start_workflow``) --
@@ -56,7 +56,7 @@ Where Result stops and exceptions take over (the "stop line"):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, assert_never
+from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
 
 from horsies._catalog.broker import DatabaseErrorCode as DatabaseErrorCode
@@ -92,6 +92,14 @@ class DatabaseNotAttached:
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
 
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
+
 
 @dataclass(slots=True, frozen=True)
 class DatabaseNoTypeAvailable:
@@ -104,6 +112,14 @@ class DatabaseNoTypeAvailable:
     code: ClassVar[DatabaseErrorCode] = DatabaseErrorCode.NO_TYPE_AVAILABLE
     retryable: ClassVar[bool] = False
     message: str = field(repr=False)
+
+    def failure_cause(self) -> BaseException | NoCause:
+        """The exception of the cause, or ``NoCause()`` when no exception caused it.
+
+        Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
+        call. It does not change the error.
+        """
+        return NoCause()
 
 
 type DatabaseOperationError = (
@@ -124,36 +140,6 @@ type DatabaseEnqueueError = DatabaseCoreEnqueueError
 type DatabaseSyncCallError = DatabaseAsyncContext
 """The failure that a sync facade adds to its async method: it was called
 inside a running event loop. Nothing ran."""
-
-
-def broker_error_cause(error: DatabaseOperationError) -> BaseException | NoCause:
-    """The exception that caused ``error``, or ``NoCause()`` when no exception did.
-
-    Use it before ``raise ... from``, an ``exc_info=`` or an error tracker
-    call. It does not change ``error``.
-    """
-    match error:
-        case DatabaseOperationFailed(exception=cause):
-            return cause
-        case (
-            DatabaseEnqueueFailed(exception=cause)
-            | DatabaseInvalidJsonPayload(exception=cause)
-            | DatabaseInvalidTaskOptions(exception=cause)
-            | DatabaseInvalidInput(exception=cause)
-        ):
-            return cause
-        case (
-            DatabasePayloadMismatch()
-            | DatabaseIdempotencyKeyConflict()
-            | DatabaseNotAttached()
-            | DatabaseNoTypeAvailable()
-            | DatabaseAsyncContext()
-            | DatabaseListenerDisabled()
-            | DatabaseWaitInsideTask()
-        ):
-            return NoCause()
-        case _ as unreachable:
-            assert_never(unreachable)
 
 
 @dataclass(slots=True, frozen=True)

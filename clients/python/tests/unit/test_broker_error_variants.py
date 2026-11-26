@@ -3,7 +3,7 @@
 ``DatabaseOperationError`` is a union with one frozen variant per state. The
 nine operation codes share ``DatabaseOperationFailed``; every other code has a
 variant of its own. A variant's repr hides the message and the cause.
-``broker_error_cause`` gives the exception, or ``NoCause()``. A send sees
+``failure_cause()`` gives the exception, or ``NoCause()``. A send sees
 only the variants of ``DatabaseEnqueueError | DatabaseSyncCallError``.
 """
 
@@ -34,7 +34,6 @@ from horsies.core.brokers.result_types import (
     DatabaseOperationFailedCode,
     DatabasePayloadMismatch,
     DatabaseSyncCallError,
-    broker_error_cause,
 )
 from horsies.core.cli import _raise_schema_error  # pyright: ignore[reportPrivateUsage]
 from horsies.core.models.payload import PayloadPolicy
@@ -74,16 +73,16 @@ def _every_variant(cause: BaseException) -> list[DatabaseOperationError]:
             code=DatabaseErrorCode.DATABASE_PING_FAILED,
             message=message,
             retryable=True,
-            exception=cause,
+            cause=cause,
         ),
-        DatabaseEnqueueFailed(message=message, retryable=True, exception=cause),
+        DatabaseEnqueueFailed(message=message, retryable=True, cause=cause),
         DatabasePayloadMismatch(message=message),
         DatabaseIdempotencyKeyConflict(message=message, owner_task_id=OWNER_TASK_ID),
         DatabaseNotAttached(message=message),
         DatabaseNoTypeAvailable(message=message),
-        DatabaseInvalidJsonPayload(message=message, exception=cause),
-        DatabaseInvalidTaskOptions(message=message, exception=cause),
-        DatabaseInvalidInput(message=message, exception=cause),
+        DatabaseInvalidJsonPayload(message=message, cause=cause),
+        DatabaseInvalidTaskOptions(message=message, cause=cause),
+        DatabaseInvalidInput(message=message, cause=cause),
         DatabaseAsyncContext(message=message),
         DatabaseListenerDisabled(message=message),
         DatabaseWaitInsideTask(message=message),
@@ -178,7 +177,7 @@ class TestBrokerErrorCause:
         self,
         error: DatabaseOperationError,
     ) -> None:
-        cause = broker_error_cause(error)
+        cause = error.failure_cause()
 
         match error:
             case (
@@ -187,7 +186,7 @@ class TestBrokerErrorCause:
                 | DatabaseInvalidJsonPayload()
                 | (DatabaseInvalidTaskOptions() | DatabaseInvalidInput())
             ):
-                assert cause is error.exception
+                assert cause is error.cause
                 assert isinstance(cause, RuntimeError)
             case _:
                 assert type(error) not in CAUSED_VARIANTS
@@ -195,10 +194,10 @@ class TestBrokerErrorCause:
 
     def test_a_data_check_cause_gives_no_cause(self) -> None:
         error = DatabaseInvalidJsonPayload(
-            message='not a JSON object', exception=NoCause()
+            message='not a JSON object', cause=NoCause()
         )
 
-        assert broker_error_cause(error) == NoCause()
+        assert error.failure_cause() == NoCause()
 
 
 def _make_app() -> MagicMock:
@@ -260,13 +259,13 @@ class TestSendMapping:
     ) -> None:
         send_error = _send_with_broker_error(
             DatabaseEnqueueFailed(
-                message='write failed', retryable=retryable, exception=cause,
+                message='write failed', retryable=retryable, cause=cause,
             ),
         )
 
         assert isinstance(send_error, TaskSendEnqueueFailed)
         assert send_error.retryable is retryable
-        assert send_error.exception is cause
+        assert send_error.cause is cause
 
     @pytest.mark.parametrize(
         'error', _every_other_variant(RuntimeError('cause')), ids=_variant_id
@@ -290,11 +289,11 @@ class TestSendMapping:
         cause: BaseException | NoCause,
     ) -> None:
         send_error = _send_with_broker_error(
-            variant(message='refused', exception=cause)
+            variant(message='refused', cause=cause)
         )
 
         assert isinstance(send_error, TaskSendValidationFailed)
-        assert send_error.exception is cause
+        assert send_error.cause is cause
 
     def test_the_key_conflict_keeps_the_owner(self) -> None:
         send_error = _send_with_broker_error(
@@ -347,11 +346,11 @@ class TestResultMapping:
                     f'({error.code.value}): {error.message}'
                 )
                 assert read_error.retryable is error.retryable
-                match broker_error_cause(error):
+                match error.failure_cause():
                     case NoCause():
-                        assert read_error.exception == NoCause()
+                        assert read_error.cause == NoCause()
                     case cause:
-                        assert read_error.exception is cause
+                        assert read_error.cause is cause
             case Err(err_value=read_error):
                 assert type(read_error) is expected_type
                 assert read_error.message == error.message
@@ -376,7 +375,7 @@ class TestProcessBoundaries:
             code=DatabaseErrorCode.SCHEMA_INIT_FAILED,
             message='schema init failed',
             retryable=False,
-            exception=cause,
+            cause=cause,
         )
 
         with pytest.raises(RuntimeError, match='schema init failed') as raised:

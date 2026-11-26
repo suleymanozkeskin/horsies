@@ -35,28 +35,28 @@ def causes_are_exceptions() -> None:
         message='read failed',
         retryable=True,
         workflow_id='id',
-        exception=ConnectionError('lost'),
+        cause=ConnectionError('lost'),
     )
     _ = WorkflowHandleDatabaseOperationFailed(
         message='read failed',
         retryable=True,
         workflow_id='id',
-        exception=NoCause(),  # pyright: ignore[reportArgumentType]
+        cause=NoCause(),  # pyright: ignore[reportArgumentType]
     )
     _ = WorkflowHandleStoredDataInvalid(
         message='stored data invalid',
         workflow_id='id',
-        exception=NoCause(),  # pyright: ignore[reportArgumentType]
+        cause=NoCause(),  # pyright: ignore[reportArgumentType]
     )
     _ = WorkflowHandleResumeRecoveryFailed(
         message='recovery failed',
         workflow_id='id',
-        exception=NoCause(),  # pyright: ignore[reportArgumentType]
+        cause=NoCause(),  # pyright: ignore[reportArgumentType]
     )
 
 
 def chain_the_database_cause(failed: WorkflowHandleDatabaseOperationFailed) -> None:
-    raise RuntimeError('read failed') from failed.exception
+    raise RuntimeError('read failed') from failed.cause
 
 
 def chain_a_cause_without_a_match(error: WorkflowHandleError) -> None:
@@ -65,11 +65,11 @@ def chain_a_cause_without_a_match(error: WorkflowHandleError) -> None:
 
 def chain_the_matched_cause(error: WorkflowHandleError) -> None:
     match error:
-        case WorkflowHandleDatabaseOperationFailed(exception=cause):
+        case WorkflowHandleDatabaseOperationFailed(cause=cause):
             raise RuntimeError(error.message) from cause
-        case WorkflowHandleStoredDataInvalid(exception=cause):
+        case WorkflowHandleStoredDataInvalid(cause=cause):
             raise RuntimeError(error.message) from cause
-        case WorkflowHandleResumeRecoveryFailed(exception=cause):
+        case WorkflowHandleResumeRecoveryFailed(cause=cause):
             raise RuntimeError(error.message) from cause
         case WorkflowHandleNotFound() | WorkflowHandleAsyncContext():
             raise RuntimeError(error.message)
@@ -99,7 +99,7 @@ def a_workflow_id_text_goes_through_for_id(broker: PostgresBroker) -> uuid.UUID:
     match WorkflowHandle.for_id('3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f', broker):
         case Ok(ok_value=handle):
             return handle.workflow_id
-        case Err(err_value=WorkflowHandleInvalidWorkflowId(exception=cause) as refused):
+        case Err(err_value=WorkflowHandleInvalidWorkflowId(cause=cause) as refused):
             raise RuntimeError(refused.message) from cause
 
 

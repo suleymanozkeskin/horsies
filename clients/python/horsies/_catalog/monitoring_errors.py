@@ -20,7 +20,7 @@ class MonitoringQueryDatabaseOperationFailed:
     process could not run it. Nothing changed.
 
     ``retryable`` is the core's classification of the cause: ``True`` when
-    the condition may clear, for example a lost connection. ``exception``
+    the condition may clear, for example a lost connection. ``cause``
     is the core's class of the cause (a ``CoreFailure`` leaf class, with
     the read as its subject), or the ``CoreCallRefusal`` of the core
     boundary.
@@ -44,7 +44,7 @@ class MonitoringQueryDatabaseOperationFailed:
 class MonitoringQueryHistoryContractViolation:
     """Stored history data does not decode. Nothing changed.
 
-    ``exception`` is the ``HistoryContractError``: for example a history
+    ``cause`` is the ``HistoryContractError``: for example a history
     status that is not a ``TaskStatus`` member, an attempt snapshot that
     does not decode, or an EXPLAIN payload that the row estimate cannot
     read. A repeat gives the same result until the stored row or the
@@ -140,7 +140,7 @@ class TaskActionDatabaseOperationFailed:
     core of this process could not run it.
 
     ``retryable`` is the core's classification of the cause: ``True`` when
-    the condition may clear, for example a lost connection. ``exception``
+    the condition may clear, for example a lost connection. ``cause``
     is the core's class of the cause (a ``CoreFailure`` leaf class, with the
     subject ``cancel_task``), or the ``CoreCallRefusal`` of the core boundary. The statement wrote nothing, or it
     committed and its reply was lost: a repeated cancel tells which,
@@ -167,7 +167,7 @@ class TaskActionDatabaseOperationFailed:
 class TaskActionStoredDataInvalid:
     """Stored task data does not parse. Nothing changed: the cancel refused the task.
 
-    ``exception`` is an ``OutcomeDecodeError`` with the core's message, for
+    ``cause`` is an ``OutcomeDecodeError`` with the core's message, for
     example a history status that is not a task status. A repeat gives the
     same result until the stored row changes.
     """

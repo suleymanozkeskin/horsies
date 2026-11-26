@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::core::error::{HorsiesErrorCode, HorsiesError};
+use crate::core::error::{HorsiesError, HorsiesErrorCode};
 use crate::core::task::fn_trait::RegisteredTask;
 
 /// Registry mapping task names to their registered implementations.

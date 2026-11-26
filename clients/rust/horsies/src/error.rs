@@ -6,4 +6,4 @@
 //! are the core's: both clients print the same codes.
 
 pub use horsies_core::core::error::diagnostic::{format_diagnostic, format_report_diagnostic};
-pub use horsies_core::{HorsiesErrorCategory, HorsiesErrorCode, HorsiesError, ValidationReport};
+pub use horsies_core::{HorsiesError, HorsiesErrorCategory, HorsiesErrorCode, ValidationReport};

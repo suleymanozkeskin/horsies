@@ -56,27 +56,27 @@ def enqueue_cause_is_an_exception() -> None:
         retryable=True,
         workflow_name='wf',
         workflow_id='id',
-        exception=ConnectionError('lost'),
+        cause=ConnectionError('lost'),
     )
     _ = WorkflowStartEnqueueFailed(
         message='start failed',
         retryable=True,
         workflow_name='wf',
         workflow_id='id',
-        exception=NoCause(),  # pyright: ignore[reportArgumentType]
+        cause=NoCause(),  # pyright: ignore[reportArgumentType]
     )
 
 
 def chain_the_enqueue_cause(enqueue_failed: WorkflowStartEnqueueFailed) -> None:
-    raise RuntimeError('start failed') from enqueue_failed.exception
+    raise RuntimeError('start failed') from enqueue_failed.cause
 
 
 def chain_the_validation_cause(validation_failed: WorkflowStartValidationFailed) -> None:
-    raise RuntimeError('refused') from validation_failed.exception  # pyright: ignore[reportGeneralTypeIssues]
+    raise RuntimeError('refused') from validation_failed.cause  # pyright: ignore[reportGeneralTypeIssues]
 
 
 def chain_the_matched_cause(validation_failed: WorkflowStartValidationFailed) -> None:
-    match validation_failed.exception:
+    match validation_failed.cause:
         case NoCause():
             raise RuntimeError(validation_failed.message)
         case cause:

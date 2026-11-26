@@ -222,7 +222,7 @@ def _core_call_failed(
         MonitoringQueryDatabaseOperationFailed(
             message=f'{operation} failed: {exc}',
             retryable=core_error_retryable(exc),
-            exception=exc,
+            cause=exc,
         )
     )
 

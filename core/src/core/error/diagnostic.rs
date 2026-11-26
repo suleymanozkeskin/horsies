@@ -89,8 +89,8 @@ mod tests {
 
     #[test]
     fn format_diagnostic_produces_output() {
-        let err =
-            HorsiesError::new("something went wrong").with_code(HorsiesErrorCode::ConfigInvalidQueueMode);
+        let err = HorsiesError::new("something went wrong")
+            .with_code(HorsiesErrorCode::ConfigInvalidQueueMode);
 
         let output = format_diagnostic(&err);
         assert!(!output.is_empty());

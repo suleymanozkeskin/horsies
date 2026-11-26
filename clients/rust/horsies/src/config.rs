@@ -14,7 +14,7 @@ use horsies_core::manifest::{
     WholeSeconds,
 };
 
-use crate::{HorsiesErrorCode, HorsiesError};
+use crate::{HorsiesError, HorsiesErrorCode};
 
 mod scheduler_manifest;
 mod worker_manifest;
@@ -349,7 +349,10 @@ mod tests {
 
         let refused = crate::Horsies::new(config).expect_err("two values are outside their bounds");
 
-        assert_eq!(refused.code, Some(HorsiesErrorCode::ConfigInvalidWorkerProfile));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)
+        );
         assert_eq!(refused.notes.len(), 2, "{refused}");
         assert!(
             refused.notes[0].contains(

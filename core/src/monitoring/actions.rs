@@ -178,9 +178,7 @@ fn task_action_failed(error: TaskActionError) -> ActionOutcome {
 
 fn handle_failed(error: WorkflowHandleError) -> ActionOutcome {
     match error {
-        WorkflowHandleError::NotFound { workflow_id, .. } => {
-            workflow_not_found(workflow_id)
-        }
+        WorkflowHandleError::NotFound { workflow_id, .. } => workflow_not_found(workflow_id),
         WorkflowHandleError::DatabaseOperationFailed {
             message, retryable, ..
         } => database_failed(Transience::of_retryable(retryable), message),
@@ -500,17 +498,21 @@ mod tests {
                     message,
                     workflow_id,
                 },
-                WorkflowHandleErrorCode::DatabaseOperationFailed => WorkflowHandleError::DatabaseOperationFailed {
-                    message,
-                    retryable: true,
-                    workflow_id,
-                    cause: cause(),
-                },
-                WorkflowHandleErrorCode::StoredDataInvalid => WorkflowHandleError::StoredDataInvalid {
-                    message,
-                    workflow_id,
-                    cause: cause(),
-                },
+                WorkflowHandleErrorCode::DatabaseOperationFailed => {
+                    WorkflowHandleError::DatabaseOperationFailed {
+                        message,
+                        retryable: true,
+                        workflow_id,
+                        cause: cause(),
+                    }
+                }
+                WorkflowHandleErrorCode::StoredDataInvalid => {
+                    WorkflowHandleError::StoredDataInvalid {
+                        message,
+                        workflow_id,
+                        cause: cause(),
+                    }
+                }
                 WorkflowHandleErrorCode::ResumeRecoveryFailed => {
                     WorkflowHandleError::ResumeRecoveryFailed {
                         message,

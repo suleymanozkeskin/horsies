@@ -709,13 +709,15 @@ mod tests {
     fn discover_stops_at_the_first_refusal() {
         let mut app = Horsies::new(config()).unwrap();
         let calls = std::cell::Cell::new(0);
-        let registrar = |app: &mut Horsies| {
-            calls.set(calls.get() + 1);
-            match calls.get() {
-                2 => Err(HorsiesError::new("refused").with_code(HorsiesErrorCode::TaskInvalidOptions)),
-                _ => app.provide(calls.get()),
-            }
-        };
+        let registrar =
+            |app: &mut Horsies| {
+                calls.set(calls.get() + 1);
+                match calls.get() {
+                    2 => Err(HorsiesError::new("refused")
+                        .with_code(HorsiesErrorCode::TaskInvalidOptions)),
+                    _ => app.provide(calls.get()),
+                }
+            };
         let refused = app
             .discover([&registrar, &registrar, &registrar])
             .unwrap_err();

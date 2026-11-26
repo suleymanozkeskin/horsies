@@ -2046,7 +2046,11 @@ mod tests {
             let refused = DatabaseOperationError::enqueue_error(SENT_TASK, error);
             assert_eq!(
                 enqueue_values(&refused),
-                ("DatabaseInvalidInput", text.as_str(), ExceptionValue::NoCause)
+                (
+                    "DatabaseInvalidInput",
+                    text.as_str(),
+                    ExceptionValue::NoCause
+                )
             );
             assert!(!refused.retryable(), "{text}");
         }

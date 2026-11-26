@@ -975,7 +975,8 @@ const PING_WORKERS_OUTCOME: &str =
     "WorkerPongsRecord | DatabaseOperationFailed | DatabaseInvalidInput | DatabaseListenerDisabled";
 const WORKER_STATES_OUTCOME: &str =
     "WorkerStatesRecord | DatabaseOperationFailed | DatabaseInvalidInput";
-const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | DatabaseOperationFailed";
+const WORKER_STATE_OUTCOME: &str =
+    "WorkerStateRecord | WorkerStateAbsent | DatabaseOperationFailed";
 const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | DatabaseOperationFailed";
 const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | DatabaseOperationFailed";
 const TASK_LIST_OUTCOME: &str =

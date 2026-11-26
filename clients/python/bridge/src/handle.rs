@@ -15,7 +15,7 @@ use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::worker_manifest::parse_worker_profiles;
 use horsies_core::{
-    BrokerError, DatabaseOperationError, ClientFamily, CoverageRequest, PoolProfile, PostgresBroker,
+    BrokerError, ClientFamily, CoverageRequest, DatabaseOperationError, PoolProfile, PostgresBroker,
 };
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;

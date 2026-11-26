@@ -163,12 +163,12 @@ The bounded builders return `Result<_, PaginationRefused>`:
 
 ## MonitoringQueryError
 
-Every read returns `MonitoringResult<T>`: `Result<T, MonitoringQueryError>`. `MonitoringQueryError` is an enum with one variant per state; each variant has `message` and `source`. The methods `code()`, `message()`, `retryable()`, `error_source()` and `failure_cause()` read them.
+Every read returns `MonitoringResult<T>`: `Result<T, MonitoringQueryError>`. `MonitoringQueryError` is an enum with one variant per state; each variant has `message` and `cause`. The methods `code()`, `message()`, `retryable()`, `error_source()` and `failure_cause()` read them.
 
 | Variant | `code()` | When |
 |---------|----------|------|
 | `DatabaseOperationFailed { retryable, .. }` | `DatabaseOperationFailed` | The connect or the statement failed. No statement ran after a failed connect. `retryable` is the classification of the cause |
-| `HistoryContractViolation` | `HistoryContractViolation` | A stored history row does not decode (`task_stats`, `task_facets`, `task_breakdown`, `list_tasks`, `get_task_detail`, `get_workflow_run`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable: a repeat gives the same result until the row changes |
+| `HistoryContractViolation` | `HistoryContractViolation` | A stored history row does not decode (`task_stats`, `task_facets`, `task_breakdown`, `list_tasks`, `get_task_detail`, `get_workflow_run`, `get_workflow_node`); `cause` is a `HistoryContractSource` that holds the error. Not retryable: a repeat gives the same result until the row changes |
 
 ## Cancel a Task
 

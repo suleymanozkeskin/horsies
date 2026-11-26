@@ -136,7 +136,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - ReadResult[T, E] = Ok[Succeeded[T]] | Ok[Failed[E]] | Err[ReadError]: TaskHandle.get/get_async, WorkflowHandle.get/get_async/result_for/result_for_async, app.get_result/get_result_async
 - Read with one match: case Ok(Succeeded(value)) / case Ok(Failed(task_error)) / case Err(read_error)
 - Ok(Failed(task_error)): the task returned the error, or the library recorded it (TASK_CANCELLED, TASK_TIMEOUT, WORKER_CRASHED, TASK_EXPIRED, WORKFLOW_FAILED, WORKFLOW_PAUSED, UPSTREAM_SKIPPED, RETURN_TYPE_MISMATCH, ...)
-- ReadError: a closed union of frozen classes, one per catalog code; each has code (ClassVar, the catalog member) and message: WaitTimeout, TaskNotFound, WorkflowNotFound, ResultNotAvailable, ResultNotReady, WaitInsideTask, AsyncContext, InvalidInput, ResultDeserializationError, UnknownCustomCode (RESULT_DESERIALIZATION_ERROR; a stored custom code that the declared Enum does not name; adds custom_code: str), ReadDatabaseError (adds retryable: bool and exception: BaseException | NoCause), NoTypeAvailable, WorkflowCtxMissingId
+- ReadError: a closed union of frozen classes, one per catalog code; each has code (ClassVar, the catalog member) and message: WaitTimeout, TaskNotFound, WorkflowNotFound, ResultNotAvailable, ResultNotReady, WaitInsideTask, AsyncContext, InvalidInput, ResultDeserializationError, UnknownCustomCode (UNKNOWN_CUSTOM_CODE; a stored custom code that the declared Enum does not name; adds custom_code: str), ReadDatabaseError (adds retryable: bool and cause: BaseException | NoCause), NoTypeAvailable, WorkflowCtxMissingId
 - TaskError[C]: generic in its custom code type, default str. error_codes=E with -> Result[T, TaskError[E]]: the body passes members of E; TaskHandle.get and args_from parameters annotated TaskOutcome[T, TaskError[E]] give members of E, and so do WorkflowHandle.result_for(node) and WorkflowContext.result_for(node) for a TaskNode[T, E] (task.node()(...)), the entries of results(), tasks() and an outputless get() map, and app.get_result (typed TaskError[Any]); the error of a workflow from WorkflowHandle.get and a SubWorkflowNode keep text, because the failed node can be any task. TaskError[E] without error_codes=E is HRS-105; a mapper or default code that E does not name is HRS-209
 - A later read can give an outcome after WaitTimeout, TaskNotFound or ReadDatabaseError; a TaskHandle keeps the final answers (an outcome, ResultNotAvailable, ResultDeserializationError, UnknownCustomCode, NoTypeAvailable) and not the others
 - read.unwrap() on a ReadResult gives the TaskOutcome, not the value
@@ -174,7 +174,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(value): operation succeeded
 - Err(DatabaseOperationError): operation failed
 - Use is_ok(result) / is_err(result) type guards, then access ok_value/err_value
-- DatabaseOperationError is a union of frozen variants; every variant has code (DatabaseErrorCode), message (str), retryable (bool). DatabaseOperationFailed (the nine operation codes SCHEMA_INIT_FAILED .. LISTENER_SUBSCRIBE_FAILED; exception: BaseException), DatabaseEnqueueFailed (ENQUEUE_FAILED; exception: BaseException | NoCause; the row may or may not exist), DatabasePayloadMismatch, DatabaseIdempotencyKeyConflict (owner_task_id), DatabaseNotAttached (NO_DATABASE), DatabaseNoTypeAvailable, DatabaseInvalidJsonPayload (exception), DatabaseInvalidTaskOptions (exception), DatabaseInvalidInput (INVALID_INPUT; exception; a refused argument, nothing written), DatabaseAsyncContext, DatabaseListenerDisabled (LISTENER_DISABLED; broker built with assume_initialized=True has no listener), DatabaseWaitInsideTask (WAIT_INSIDE_TASK; a raw result read in a worker child; nothing ran). Match on the variant; broker_error_cause(err) gives the cause or NoCause() before raise ... from
+- DatabaseOperationError is a union of frozen variants; every variant has code (DatabaseErrorCode), message (str), retryable (bool). DatabaseOperationFailed (the nine operation codes SCHEMA_INIT_FAILED .. LISTENER_SUBSCRIBE_FAILED; cause: BaseException), DatabaseEnqueueFailed (ENQUEUE_FAILED; cause: BaseException | NoCause; the row may or may not exist), DatabasePayloadMismatch, DatabaseIdempotencyKeyConflict (owner_task_id), DatabaseNotAttached (NO_DATABASE), DatabaseNoTypeAvailable, DatabaseInvalidJsonPayload (cause), DatabaseInvalidTaskOptions (cause), DatabaseInvalidInput (INVALID_INPUT; cause; a refused argument, nothing written), DatabaseAsyncContext, DatabaseListenerDisabled (LISTENER_DISABLED; broker built with assume_initialized=True has no listener), DatabaseWaitInsideTask (WAIT_INSIDE_TASK; a raw result read in a worker child; nothing ran). Match on the variant; err.failure_cause() gives the exception of the cause or NoCause() before raise ... from
 - DatabaseEnqueueError = DatabaseEnqueueFailed | DatabasePayloadMismatch | DatabaseIdempotencyKeyConflict | DatabaseInvalidTaskOptions | DatabaseInvalidInput (every failure of enqueue_async); DatabaseSyncCallError = DatabaseAsyncContext (the failure that the sync enqueue adds; nothing ran)
 - enqueue_async and enqueue require sent_at and send_kind (from horsies import SendKind): SendKind.FIRST for the first send of a task id, SendKind.REPEAT for a resend (reads history first, so a finished task does not run again)
 - DatabaseErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DATABASE_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_DATABASE, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, ASYNC_CONTEXT, INVALID_INPUT, LISTENER_DISABLED, WAIT_INSIDE_TASK
@@ -261,15 +261,15 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .retry_send(error) / .retry_send_async(error) / .retry_schedule(error): replay stored payload
 
 ### TaskSendError (union, one frozen variant per TaskSendErrorCode member)
-- Match on the variant; err.code (class variable) names its member; payload, message and exception are not in the repr
+- Match on the variant; err.code (class variable) names its member; payload, message and cause are not in the repr
 - TaskSendSuppressed: message
 - TaskSendAsyncContext: task_id, payload, message
-- TaskSendValidationFailed: message, exception
-- TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, the core's classification), exception
+- TaskSendValidationFailed: message, cause
+- TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, the core's classification), cause
 - TaskSendPayloadMismatch: task_id, payload, message
 - TaskSendPayloadTooLarge: message, size_bytes (int), limit_bytes (int)
 - TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str); retryable is True (a class variable: the conflict clears when the reservation ends)
-- exception (TaskSendValidationFailed, TaskSendEnqueueFailed): BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
+- cause (TaskSendValidationFailed, TaskSendEnqueueFailed): BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
 - Validation failure text: `<loc>: <msg> [<type>]`, at most 10 entries, no input values (`<input>` replaces an input part of a message; validator-written text is kept). A caught pydantic ValidationError is kept as ValueValidationError (horsies.core.codec). RETURN_TYPE_MISMATCH data: variant, expected_type, actual_type, validation_errors, validation_error_count; the returned value is not stored
 - TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the retry methods' parameter type; another variant is a type error and fails an assertion at run time
 
@@ -277,7 +277,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 <!-- members: TaskSendErrorCode -->
 - SEND_SUPPRESSED: send suppressed during worker import/discovery
 - VALIDATION_FAILED: argument serialization or validation failed
-- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (exception is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; CoreStartFailed is not); the row may or may not exist; retryable is the core's classification
+- ENQUEUE_FAILED: broker/database failure during enqueue, or the core of the process could not run the send (cause is the core error: TooManyPendingCalls and CoreCallTimedOut are retryable; CoreStartFailed is not); the row may or may not exist; retryable is the core's classification
 - PAYLOAD_MISMATCH: the task id exists, and the command or the idempotency key differs from the original send (payload altered)
 - IDEMPOTENCY_KEY_CONFLICT: the idempotency key is reserved by another task with a different command; owner_task_id names the owner task; the retry methods accept it
 - PAYLOAD_TOO_LARGE: the serialized input exceeds payload.reject_bytes bytes of UTF-8 text; nothing was enqueued
@@ -366,7 +366,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .cancel() / .cancel_async() -> HandleResult[None]
 - .pause() / .pause_async() -> HandleResult[bool]
 - .resume() / .resume_async() -> HandleResult[bool]
-- `HandleResult[T]` = Result[T, WorkflowHandleError]; WorkflowHandleError is a union of frozen variants, one per WorkflowHandleErrorCode member; every variant has code, message, retryable, workflow_id. WorkflowHandleNotFound, WorkflowHandleDatabaseOperationFailed (exception: BaseException; retryable is the core's classification; a write rolled back or its commit outcome is unknown), WorkflowHandleStoredDataInvalid (exception; a stored status or subworkflow summary does not parse; nothing changed), WorkflowHandleResumeRecoveryFailed (exception; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), WorkflowHandleAsyncContext. Match on the variant. A defect in pause or resume propagates
+- `HandleResult[T]` = Result[T, WorkflowHandleError]; WorkflowHandleError is a union of frozen variants, one per WorkflowHandleErrorCode member other than INVALID_WORKFLOW_ID; every variant has code, message, retryable, workflow_id. WorkflowHandleNotFound, WorkflowHandleDatabaseOperationFailed (cause: BaseException; retryable is the core's classification; a write rolled back or its commit outcome is unknown), WorkflowHandleStoredDataInvalid (cause; a stored status or subworkflow summary does not parse; nothing changed), WorkflowHandleResumeRecoveryFailed (cause; resume committed, the recovery pass after the commit failed, the workflow is RUNNING), WorkflowHandleAsyncContext. Match on the variant. A defect in pause or resume propagates
 - WorkflowHandleErrorCode: WORKFLOW_NOT_FOUND, DATABASE_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT
 
 ### WorkflowStatus (enum)
@@ -458,7 +458,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Ok(WorkflowHandle): workflow created and root tasks enqueued
 - Err(WorkflowStartError): start failed; match on the variant
 - WorkflowStartError is a union of frozen variants; every variant has code (WorkflowStartErrorCode), message (str), retryable (bool), workflow_name (str), workflow_id (str, the id this start used)
-- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (exception: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartCommandConflict; WorkflowStartEnqueueFailed (retryable = the core's classification, exception: BaseException); WorkflowStartAsyncContext
+- Variants: WorkflowStartBrokerNotConfigured; WorkflowStartValidationFailed (cause: BaseException | NoCause); WorkflowStartIdConflict (existing_workflow_name: str); WorkflowStartCommandConflict; WorkflowStartEnqueueFailed (retryable = the core's classification, cause: BaseException); WorkflowStartAsyncContext
 - WorkflowStartErrorCode: BROKER_NOT_CONFIGURED, VALIDATION_FAILED, WORKFLOW_ID_CONFLICT, WORKFLOW_COMMAND_CONFLICT, ENQUEUE_FAILED, ASYNC_CONTEXT
 - WORKFLOW_ID_CONFLICT: the workflow id exists for another workflow name; nothing was written; use another id
 - WORKFLOW_COMMAND_CONFLICT: the workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written; never retryable; retry_start refuses it; send the same start command or use another id
@@ -959,7 +959,7 @@ JsonValue, JsonInput, pydantic, datetime, SignatureValidationError, encode_value
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
 FAQ, questions, trade-offs, why PostgreSQL, production-ready, compatibility -> /horsies/questions-and-answers/
 HorsiesErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
-TaskError, DatabaseOperationError, TaskSendError, NoCause, broker_error_cause, ReadError, ReadDatabaseError, ResultDeserializationError -> /horsies/tasks/error-types/
+TaskError, DatabaseOperationError, TaskSendError, NoCause, ReadError, ReadDatabaseError, ResultDeserializationError -> /horsies/tasks/error-types/
 ValidationReport, MultipleValidationErrors, raise_collected, error collection -> /horsies/tasks/errors/
 SourceLocation, Rust-style errors, format_diagnostic, error display -> /horsies/tasks/error-types/
 HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/

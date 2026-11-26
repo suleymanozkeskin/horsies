@@ -90,7 +90,7 @@ class TestMissingRequiredKwargs:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert result.err_value.exception == NoCause()
+        assert result.err_value.cause == NoCause()
         assert 'amount' in result.err_value.message
         app.get_broker.assert_not_called()
 

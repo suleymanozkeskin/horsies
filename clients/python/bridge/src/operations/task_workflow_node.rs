@@ -8,7 +8,7 @@
 //! (`TASK_WORKFLOW_NODE_READ_END`).
 
 use horsies_core::{
-    DatabaseOperationError, DatabaseOperationFailedCode, BrokerOperationSource, TaskWorkflowNode,
+    BrokerOperationSource, DatabaseOperationError, DatabaseOperationFailedCode, TaskWorkflowNode,
 };
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;

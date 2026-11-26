@@ -24,10 +24,10 @@ use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
 use horsies_core::JsonText;
 use horsies_core::{
-    process_role, wait_inside_task_message, BuiltInTaskCode, WorkflowHandleErrorCode, HandleOperation,
-    WorkflowHandleError, HandleResult, NodeResultsRead, NodesRead, OperationalCode,
-    OutcomeCode, PostgresBroker, ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary,
-    TaskResult, TerminalErrorStatus, UserCode, WaitLimit, WorkflowEnd, WorkflowError,
+    process_role, wait_inside_task_message, BuiltInTaskCode, HandleOperation, HandleResult,
+    NodeResultsRead, NodesRead, OperationalCode, OutcomeCode, PostgresBroker, ProcessRole,
+    RetrievalCode, StoredNode, SubWorkflowSummary, TaskResult, TerminalErrorStatus, UserCode,
+    WaitLimit, WorkflowEnd, WorkflowError, WorkflowHandleError, WorkflowHandleErrorCode,
     WorkflowStatus, WorkflowTaskStatus, WorkflowWait,
 };
 use serde::de::DeserializeOwned;
@@ -63,8 +63,8 @@ pub enum WorkflowReadError {
     /// the handle's types. `cause` names no value.
     #[error("the stored value of workflow {workflow_id} does not read: {cause}")]
     StoredResultUnreadable { workflow_id: Uuid, cause: String },
-    /// The stored error has a user code that the asked code type does not
-    /// name.
+    /// `UNKNOWN_CUSTOM_CODE`: the stored error has a user code that the
+    /// asked code type does not name.
     #[error("the stored error of workflow {workflow_id}: {cause}")]
     UnknownUserCode {
         workflow_id: Uuid,
@@ -104,9 +104,10 @@ impl WorkflowReadError {
             Self::WaitTimedOut { .. } => RetrievalCode::WaitTimeout.into(),
             Self::WorkflowNotFound { .. } => RetrievalCode::WorkflowNotFound.into(),
             Self::ResultNotReady { .. } => RetrievalCode::ResultNotReady.into(),
-            Self::StoredResultUnreadable { .. } | Self::UnknownUserCode { .. } => {
+            Self::StoredResultUnreadable { .. } => {
                 OperationalCode::ResultDeserializationError.into()
             }
+            Self::UnknownUserCode { .. } => RetrievalCode::UnknownCustomCode.into(),
             Self::InvalidInput { .. } => RetrievalCode::InvalidInput.into(),
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
             Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),

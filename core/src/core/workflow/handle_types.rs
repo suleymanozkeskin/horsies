@@ -180,7 +180,7 @@ pub enum WorkflowHandleError {
     ///
     /// The value is a workflow status that is not a ``WorkflowStatus``
     /// (``status``), or a subworkflow summary that is not valid (``tasks``).
-    /// ``exception`` is a ``CoreContractViolation`` with the core's message.
+    /// ``cause`` is a ``CoreContractViolation`` with the core's message.
     /// The same call returns this error until the stored value changes.
     #[error_class(
         class = "WorkflowHandleStoredDataInvalid",
@@ -204,7 +204,7 @@ pub enum WorkflowHandleError {
     /// completes the propagation for a task that finished while the resume
     /// transaction ran, when the completion callback saw the workflow as
     /// ``PAUSED``. That pass rolled back, or its commit outcome is unknown.
-    /// ``exception`` is the core's class of the cause (a ``CoreFailure`` leaf
+    /// ``cause`` is the core's class of the cause (a ``CoreFailure`` leaf
     /// class). The worker reaper runs the same pass over all workflows. A
     /// repeated ``resume`` returns ``Ok(False)``.
     #[error_class(
@@ -226,7 +226,11 @@ pub enum WorkflowHandleError {
     ///
     /// Its wait would stall that loop. Call the ``*_async`` form; a sync call on
     /// that thread returns this error again.
-    #[error_class(class = "WorkflowHandleAsyncContext", code = "AsyncContext", never_retryable)]
+    #[error_class(
+        class = "WorkflowHandleAsyncContext",
+        code = "AsyncContext",
+        never_retryable
+    )]
     AsyncContext {
         #[error_slot(python = "Str", hidden)]
         message: String,
@@ -309,9 +313,7 @@ impl WorkflowHandleError {
             Self::DatabaseOperationFailed { cause, .. }
             | Self::StoredDataInvalid { cause, .. }
             | Self::ResumeRecoveryFailed { cause, .. } => cause.failure_cause(),
-            Self::NotFound { .. } | Self::AsyncContext { .. } => {
-                FailureCause::PreconditionFailed
-            }
+            Self::NotFound { .. } | Self::AsyncContext { .. } => FailureCause::PreconditionFailed,
         }
     }
 }
@@ -519,7 +521,10 @@ mod tests {
             workflow_id,
             BrokerError::ConnectionFailed("refused".to_owned()),
         );
-        assert_eq!(failed.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+        assert_eq!(
+            failed.code(),
+            WorkflowHandleErrorCode::DatabaseOperationFailed
+        );
         assert_eq!(
             failed.message(),
             format!("Status failed for workflow {workflow_id}: connection failed: refused")

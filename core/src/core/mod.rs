@@ -23,7 +23,7 @@ pub use config::{
     RetentionClassKeyRefused, RetentionConfig, RetentionConfigError, ScheduleConfig,
     SchedulePattern, TaskSchedule, Weekday, WeeklySchedule, WorkerResilienceConfig,
 };
-pub use error::{HorsiesErrorCategory, HorsiesErrorCode, HorsiesError, ValidationReport};
+pub use error::{HorsiesError, HorsiesErrorCategory, HorsiesErrorCode, ValidationReport};
 pub use registry::TaskRegistry;
 pub use task::{
     error_code_label, AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, CancelGraceMs,
@@ -37,9 +37,9 @@ pub use task::{
 };
 pub use types::{TaskAttemptOutcome, TaskStatus, TASK_TERMINAL_STATES, TASK_TERMINAL_VALUES};
 pub use workflow::{
-    AnyNode, WorkflowHandleErrorCode, HandleOperation, WorkflowHandleError, HandleResult, JoinType,
-    NodeKey, OnError, StartRefusalCause, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
-    SuccessPolicy, WorkflowContext, WorkflowMeta, WorkflowSpec, WorkflowStartError,
+    AnyNode, HandleOperation, HandleResult, JoinType, NodeKey, OnError, StartRefusalCause,
+    SubWorkflowParams, SubWorkflowSummary, SuccessCase, SuccessPolicy, WorkflowContext,
+    WorkflowHandleError, WorkflowHandleErrorCode, WorkflowMeta, WorkflowSpec, WorkflowStartError,
     WorkflowStartErrorCode, WorkflowStartResult, WorkflowStatus, WorkflowTaskStatus,
     WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };

@@ -61,9 +61,9 @@ def _every_variant(cause: BaseException) -> list[TaskActionError]:
             message=message, task_id=TASK_ID, current_status=TaskStatus.FAILED,
         ),
         TaskActionDatabaseOperationFailed(
-            message=message, retryable=True, task_id=TASK_ID, exception=cause,
+            message=message, retryable=True, task_id=TASK_ID, cause=cause,
         ),
-        TaskActionStoredDataInvalid(message=message, task_id=TASK_ID, exception=cause),
+        TaskActionStoredDataInvalid(message=message, task_id=TASK_ID, cause=cause),
     ]
 
 
@@ -180,7 +180,7 @@ def _core_errors() -> list[TaskActionError]:
             message=f'Task cancel failed: connection failed: {CAUSE_MARKER}',
             retryable=True,
             task_id=TASK_ID,
-            exception=CoreConnectionError(
+            cause=CoreConnectionError(
                 'cancel_task', f'connection failed: {CAUSE_MARKER}', True,
             ),
         ),
@@ -190,7 +190,7 @@ def _core_errors() -> list[TaskActionError]:
                 f'terminalization outcome decode failed: {CAUSE_MARKER}'
             ),
             task_id=TASK_ID,
-            exception=OutcomeDecodeError(
+            cause=OutcomeDecodeError(
                 f'terminalization outcome decode failed: {CAUSE_MARKER}',
             ),
         ),
@@ -248,7 +248,7 @@ class TestCancelFailures:
         assert is_err(result)
         failed = result.err_value
         assert isinstance(failed, TaskActionDatabaseOperationFailed)
-        assert failed.exception is error
+        assert failed.cause is error
         assert failed.retryable is retryable
 
 

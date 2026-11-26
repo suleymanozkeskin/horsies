@@ -22,9 +22,10 @@ use crate::monitoring::{
     MonitoringQueryErrorCode, MonitoringQueryRefusalCode, TaskActionErrorCode,
 };
 use crate::{
-    DatabaseErrorCode, ContractCode, HorsiesErrorCode, WorkflowHandleErrorCode, OperationalCode, OutcomeCode,
+    ContractCode, DatabaseErrorCode, HorsiesErrorCode, OperationalCode, OutcomeCode,
     RerunErrorCode, RetrievalCode, TaskAbsenceReason, TaskAttemptOutcome, TaskSendErrorCode,
-    TaskStatus, WorkflowStartErrorCode, WorkflowStatus, WorkflowTaskStatus,
+    TaskStatus, WorkflowHandleErrorCode, WorkflowStartErrorCode, WorkflowStatus,
+    WorkflowTaskStatus,
 };
 
 /// The Python base class of a generated enum.
@@ -360,6 +361,7 @@ mod tests {
             "ASYNC_CONTEXT",
             "INVALID_INPUT",
             "WAIT_INSIDE_TASK",
+            "UNKNOWN_CUSTOM_CODE",
         ]);
         assert_python_members::<OutcomeCode>(&[
             "TASK_CANCELLED",
@@ -386,9 +388,7 @@ mod tests {
                 .collect()
         };
         assert_eq!(
-            OperationalCode::ALL
-                .map(|code| code.to_string())
-                .to_vec(),
+            OperationalCode::ALL.map(|code| code.to_string()).to_vec(),
             catalog(<OperationalCode as CodeEnum>::CATALOG)
         );
         assert_eq!(

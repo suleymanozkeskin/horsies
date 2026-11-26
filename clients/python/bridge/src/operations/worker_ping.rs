@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use horsies_core::handle::HandleListener;
 use horsies_core::{
-    ping_listener_disabled, ping_min_responses_refused, ping_timeout_refused, DatabaseOperationError,
-    BrokerOperationSource, WorkerPingStep, WorkerPong,
+    ping_listener_disabled, ping_min_responses_refused, ping_timeout_refused,
+    BrokerOperationSource, DatabaseOperationError, WorkerPingStep, WorkerPong,
 };
 use pyo3::prelude::*;
 use pyo3::types::{PyInt, PyList, PyString};

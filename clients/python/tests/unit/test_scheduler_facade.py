@@ -571,7 +571,7 @@ class TestRunForeverAndStop:
                     code=DatabaseErrorCode.CLOSE_FAILED,
                     message='close failed',
                     retryable=False,
-                    exception=ConnectionError('close failed'),
+                    cause=ConnectionError('close failed'),
                 ),
             ),
         )

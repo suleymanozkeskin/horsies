@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::core::history::enqueue::{prepare_workflow_task_facts, WorkflowTaskFacts};
 use crate::core::{
-    AnyNode, HorsiesErrorCategory, HorsiesError, OperationalCode, TaskError, WorkflowSpec,
+    AnyNode, HorsiesError, HorsiesErrorCategory, OperationalCode, TaskError, WorkflowSpec,
 };
 
 use crate::workflow_engine::error::WorkflowError;

@@ -124,10 +124,14 @@ pub enum RetrievalCode {
     /// for nothing. Never cached: a task composes with other tasks through a workflow, not through a
     /// wait.
     WaitInsideTask,
+    /// The stored error has a custom code that the declared code type of the task does not name: a
+    /// row of another version of the task, or of a task with another code type. The same read gives
+    /// the same error until the stored value or the code type changes.
+    UnknownCustomCode,
 }
 
 impl RetrievalCode {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::WaitTimeout,
         Self::TaskNotFound,
         Self::WorkflowNotFound,
@@ -136,6 +140,7 @@ impl RetrievalCode {
         Self::AsyncContext,
         Self::InvalidInput,
         Self::WaitInsideTask,
+        Self::UnknownCustomCode,
     ];
 }
 
@@ -1408,6 +1413,7 @@ mod tests {
             "NO_TYPE_AVAILABLE",
             "ASYNC_CONTEXT",
             "WAIT_INSIDE_TASK",
+            "UNKNOWN_CUSTOM_CODE",
         ] {
             assert!(BuiltInTaskCode::parse(text).is_some(), "{text}");
             assert!(

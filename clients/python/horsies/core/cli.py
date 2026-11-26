@@ -31,7 +31,7 @@ from horsies._core import (
 from horsies.core.app import Horsies
 from horsies.core.banner import print_banner
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.brokers.result_types import DatabaseOperationError, broker_error_cause
+from horsies.core.brokers.result_types import DatabaseOperationError
 from horsies.core.types.error_detail import NoCause
 from horsies.core.errors import (
     ConfigurationError,
@@ -59,7 +59,7 @@ from horsies.core.utils.imports import (
 
 def _raise_schema_error(err: DatabaseOperationError) -> NoReturn:
     """Raise ``RuntimeError(err.message)``, chained from the cause when there is one."""
-    match broker_error_cause(err):
+    match err.failure_cause():
         case NoCause():
             raise RuntimeError(err.message)
         case cause:

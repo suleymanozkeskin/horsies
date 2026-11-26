@@ -1,7 +1,7 @@
 use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::PostgresBroker;
 use crate::core::config::retention::PausedWorkflowAge;
-use crate::core::workflow::handle_types::{HandleOperation, WorkflowHandleError, HandleResult};
+use crate::core::workflow::handle_types::{HandleOperation, HandleResult, WorkflowHandleError};
 #[cfg(test)]
 use crate::test_support::child_specs::TestChildSpecs;
 use uuid::Uuid;
@@ -1658,7 +1658,10 @@ mod cancel_tree_tests {
             .unwrap();
 
         let error = outcome.unwrap_err();
-        assert_eq!(error.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+        assert_eq!(
+            error.code(),
+            WorkflowHandleErrorCode::DatabaseOperationFailed
+        );
         // RAISE EXCEPTION is SQLSTATE P0001, which is not a retryable class.
         assert!(!error.retryable());
         assert_eq!(
@@ -1693,7 +1696,10 @@ mod cancel_tree_tests {
             )),
             workflow_id,
         );
-        assert_eq!(transient.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+        assert_eq!(
+            transient.code(),
+            WorkflowHandleErrorCode::DatabaseOperationFailed
+        );
         assert!(transient.retryable());
         let persistent = workflow_handle_error(
             &HandleOperation::Status,
@@ -1704,7 +1710,10 @@ mod cancel_tree_tests {
             )),
             workflow_id,
         );
-        assert_eq!(persistent.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+        assert_eq!(
+            persistent.code(),
+            WorkflowHandleErrorCode::DatabaseOperationFailed
+        );
         assert!(!persistent.retryable());
         let stored = workflow_handle_error(
             &HandleOperation::Status,
@@ -1849,7 +1858,10 @@ mod client_family_tests {
                 .expect_err("cancel of another family"),
         ];
         for refused in refusals {
-            assert_eq!(refused.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+            assert_eq!(
+                refused.code(),
+                WorkflowHandleErrorCode::DatabaseOperationFailed
+            );
             assert!(!refused.retryable());
             assert!(
                 refused.message().contains("its own family"),

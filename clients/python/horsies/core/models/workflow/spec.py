@@ -1880,7 +1880,7 @@ class WorkflowSpec(Generic[OutT]):
                 ),
                 workflow_name=self.name,
                 workflow_id=error.workflow_id,
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         return _Ok(error.workflow_id)
 

@@ -39,7 +39,6 @@ from horsies import (
     NoCause,
     Ok,
     TaskSendPayload,
-    broker_error_cause,
 )
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.postgres import (
@@ -60,36 +59,36 @@ def operation_codes() -> None:
         code=DatabaseErrorCode.DATABASE_PING_FAILED,
         message='ping failed',
         retryable=True,
-        exception=ConnectionError('lost'),
+        cause=ConnectionError('lost'),
     )
     _ = DatabaseOperationFailed(
         code=DatabaseErrorCode.ENQUEUE_FAILED,  # pyright: ignore[reportArgumentType]
         message='enqueue failed',
         retryable=True,
-        exception=ConnectionError('lost'),
+        cause=ConnectionError('lost'),
     )
     _ = DatabaseOperationFailed(
         code=DatabaseErrorCode.CLOSE_FAILED,
         message='close failed',
         retryable=False,
-        exception=NoCause(),  # pyright: ignore[reportArgumentType]
+        cause=NoCause(),  # pyright: ignore[reportArgumentType]
     )
 
 
 def chain_the_operation_cause(operation: DatabaseOperationFailed) -> None:
-    raise RuntimeError('operation failed') from operation.exception
+    raise RuntimeError('operation failed') from operation.cause
 
 
 def chain_the_enqueue_cause(enqueue: DatabaseEnqueueFailed) -> None:
-    raise RuntimeError('enqueue failed') from enqueue.exception  # pyright: ignore[reportGeneralTypeIssues]
+    raise RuntimeError('enqueue failed') from enqueue.cause  # pyright: ignore[reportGeneralTypeIssues]
 
 
 def chain_the_refusal_cause(refused: DatabaseInvalidInput) -> None:
-    raise RuntimeError('refused') from refused.exception  # pyright: ignore[reportGeneralTypeIssues]
+    raise RuntimeError('refused') from refused.cause  # pyright: ignore[reportGeneralTypeIssues]
 
 
 def chain_the_matched_cause(error: DatabaseOperationError) -> None:
-    match broker_error_cause(error):
+    match error.failure_cause():
         case NoCause():
             raise RuntimeError(error.message)
         case cause:

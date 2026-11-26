@@ -640,7 +640,7 @@ mod tests {
             status(MonitoringQueryError::DatabaseOperationFailed {
                 message: "read failed".to_owned(),
                 retryable: true,
-                source: read_source(),
+                cause: read_source(),
             }),
             StatusCode::SERVICE_UNAVAILABLE
         );
@@ -648,14 +648,14 @@ mod tests {
             status(MonitoringQueryError::DatabaseOperationFailed {
                 message: "read failed".to_owned(),
                 retryable: false,
-                source: read_source(),
+                cause: read_source(),
             }),
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(
             status(MonitoringQueryError::HistoryContractViolation {
                 message: "read failed".to_owned(),
-                source: crate::monitoring::HistoryContractSource(read_source()),
+                cause: crate::monitoring::HistoryContractSource(read_source()),
             }),
             StatusCode::INTERNAL_SERVER_ERROR
         );
@@ -666,13 +666,15 @@ mod tests {
     /// is 500. The detail names the read.
     #[test]
     fn a_broker_read_failure_answers_by_the_retry_rule_of_its_error() {
-        let answer =
-            |error: DatabaseOperationError| match broker_read_failed("Worker state query", &error) {
-                ApiError::Detail(status, detail) => (status, detail),
-                ApiError::InvalidInput(_) | ApiError::Validation(_) => {
-                    panic!("a broker read failure is always a detail body")
-                }
-            };
+        let answer = |error: DatabaseOperationError| match broker_read_failed(
+            "Worker state query",
+            &error,
+        ) {
+            ApiError::Detail(status, detail) => (status, detail),
+            ApiError::InvalidInput(_) | ApiError::Validation(_) => {
+                panic!("a broker read failure is always a detail body")
+            }
+        };
 
         let (status, detail) = answer(DatabaseOperationError::monitoring_query_failed(
             "list_worker_states",

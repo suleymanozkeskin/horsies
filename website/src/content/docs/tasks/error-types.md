@@ -31,7 +31,7 @@ When a value fails pydantic validation, the library writes each failure as `<loc
 - Text that your own validator writes is kept as written. This applies to `value_error`, `assertion_error` and custom `PydanticCustomError` types. Do not put input values into validator messages that must not be stored.
 - A key from the input can be part of `<loc>` in two cases: the validated type is a dict or a mapping, or contains one; or a model, `TypedDict` or dataclass with `extra='forbid'` refuses the key.
 
-The cause object follows the same rule. Where the library catches a pydantic `ValidationError`, it keeps a `ValueValidationError` with the same text instead (`horsies.core.codec.ValueValidationError`, a subclass of `SerializationError` and of `ValueError`). For example, `TaskSendValidationFailed.exception` is a `ValueValidationError` when a kwarg fails its declared type. When task code raises a `ValidationError`, the stored `TaskError` keeps the same text in `message` and in the `repr` and `traceback` of the flattened exception.
+The cause object follows the same rule. Where the library catches a pydantic `ValidationError`, it keeps a `ValueValidationError` with the same text instead (`horsies.core.codec.ValueValidationError`, a subclass of `SerializationError` and of `ValueError`). For example, `TaskSendValidationFailed.cause` is a `ValueValidationError` when a kwarg fails its declared type. When task code raises a `ValidationError`, the stored `TaskError` keeps the same text in `message` and in the `repr` and `traceback` of the flattened exception.
 
 ## Read Errors (ReadResult)
 
@@ -41,7 +41,7 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 - `Ok(Failed(task_error))`: the task returned `task_error`, or the library recorded it (`TASK_CANCELLED`, `TASK_TIMEOUT`, `WORKER_CRASHED`, ...).
 - `Err(read_error)`: the read gave no outcome.
 
-`ReadError` is a closed union of frozen classes, one class per catalog code. Every class has `code` (its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` adds `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`). Match on the class; a `match` that omits a class fails pyright's exhaustiveness check.
+`ReadError` is a closed union of frozen classes, one class per catalog code. Every class has `code` (its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` adds `retryable` (whether the cause may clear) and `cause` (the exception of the cause, or `NoCause()`). Match on the class; a `match` that omits a class fails pyright's exhaustiveness check.
 
 | Class | `code` | When | Kept by a `TaskHandle` |
 | ----- | ------ | ---- | ---------------------- |
@@ -54,7 +54,7 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 | `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form | No |
 | `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
 | `ResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types | Yes |
-| `UnknownCustomCode` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` of the task does not name. `custom_code` holds the stored text | Yes |
+| `UnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` of the task does not name. `custom_code` holds the stored text | Yes |
 | `ReadDatabaseError` | `OperationalCode.DATABASE_ERROR` | The database, the connection or the core call failed. A later read may succeed | No |
 | `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value: the handle was built by id, or the task is not registered here | Yes |
 | `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `result_for()` got a node with no `node_id`. Nothing was read | – |
@@ -120,7 +120,7 @@ These calls run on the core of the process: `enqueue()`, `enqueue_async()`, `ens
 
 - The sync forms `enqueue()`, `get_task_info()` and `get_raw_result_record()` call the core on the calling thread. They return `ASYNC_CONTEXT` on a thread that runs an event loop.
 
-When the core of the process cannot run the call, the call returns its failure code (for example `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DATABASE_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `exception`. Import the core errors from `horsies`:
+When the core of the process cannot run the call, the call returns its failure code (for example `ENQUEUE_FAILED`, `TASK_INFO_QUERY_FAILED`, `DATABASE_PING_FAILED`, `WORKER_PING_FAILED` or `SCHEMA_INIT_FAILED`) with the core error as `cause`. Import the core errors from `horsies`:
 
 | Core error | When | `retryable` | After the failure |
 | ---------- | ---- | ----------- | ----------------- |
@@ -149,7 +149,7 @@ Two more core errors are never a result: see [Process-State Refusals](#process-s
 | `ForkedAfterCoreStart` | The process was forked without exec after the core started in its parent, for example a `multiprocessing` pool with the `fork` start method inside a task. `args` are `(core_pid, this_pid, advice)` | Start child processes that call horsies with the `spawn` or `forkserver` start method. Or start the core after the fork: the core starts at the first call that runs on it, so fork before the parent's first call |
 | `CoreStopped` | A background task of the core panicked: a defect in horsies, not a failure of the database or of your code. The core then stops in this process. `args` are the `(subject, cause)` of the first panic | Restart the process: the core does not start again in it. Report the panic's subject and cause as a defect |
 
-When the core ran the call and the call failed, `exception` is the core's class of the cause. Import each class from `horsies`. The declared type of `exception` does not change:
+When the core ran the call and the call failed, `cause` is the core's class of the cause. Import each class from `horsies`. The declared type of `cause` does not change:
 
 | Class | When | Fields |
 | ----- | ---- | ------ |
@@ -190,15 +190,15 @@ When the core ran the call and the call failed, `exception` is the core's class 
 
 | Variant | `code` | Fields besides `message` | `retryable` | After the failure |
 | ------- | ------ | ------------------------ | ----------- | ----------------- |
-| `DatabaseOperationFailed` | one of the nine operation codes | `exception` | the core's classification | A read changed nothing. A cleanup may have finished part of its rows |
-| `DatabaseEnqueueFailed` | `ENQUEUE_FAILED` | `exception` | the core's classification | The row may or may not exist. An enqueue again with the same task id and payload returns the existing task |
+| `DatabaseOperationFailed` | one of the nine operation codes | `cause` | the core's classification | A read changed nothing. A cleanup may have finished part of its rows |
+| `DatabaseEnqueueFailed` | `ENQUEUE_FAILED` | `cause` | the core's classification | The row may or may not exist. An enqueue again with the same task id and payload returns the existing task |
 | `DatabasePayloadMismatch` | `PAYLOAD_MISMATCH` | – | `False` | Nothing was written |
 | `DatabaseIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `owner_task_id` | `False` | Nothing was written |
 | `DatabaseNotAttached` | `NO_DATABASE` | – | `False` | Nothing ran |
 | `DatabaseNoTypeAvailable` | `NO_TYPE_AVAILABLE` | – | `False` | The stored result is unchanged |
-| `DatabaseInvalidJsonPayload` | `INVALID_JSON_PAYLOAD` | `exception` | `False` | The stored data is unchanged |
-| `DatabaseInvalidTaskOptions` | `INVALID_TASK_OPTIONS` | `exception` | `False` | Nothing was written |
-| `DatabaseInvalidInput` | `INVALID_INPUT` | `exception` | `False` | Nothing was written |
+| `DatabaseInvalidJsonPayload` | `INVALID_JSON_PAYLOAD` | `cause` | `False` | The stored data is unchanged |
+| `DatabaseInvalidTaskOptions` | `INVALID_TASK_OPTIONS` | `cause` | `False` | Nothing was written |
+| `DatabaseInvalidInput` | `INVALID_INPUT` | `cause` | `False` | Nothing was written |
 | `DatabaseAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
 | `DatabaseListenerDisabled` | `LISTENER_DISABLED` | – | `False` | Nothing ran |
 | `DatabaseWaitInsideTask` | `WAIT_INSIDE_TASK` | – | `False` | Nothing ran |
@@ -207,12 +207,12 @@ When the core ran the call and the call failed, `exception` is the core's class 
 | ----- | ---- | ----------- |
 | `message` | `str` | Human-readable description |
 | `retryable` | `bool` | The classification of the cause where the variant has a cause from the database or the core: `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `False` on every other variant |
-| `exception` | `BaseException` on `DatabaseOperationFailed`; `BaseException \| NoCause` on the other variants that have it | The cause. `NoCause()` when a check found the failure without a Python exception |
+| `cause` | `BaseException` on `DatabaseOperationFailed`; `BaseException \| NoCause` on the other variants that have it | The exception of the cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 
-The repr of a variant shows its class name and its other fields. `message` and `exception` are not in the repr.
+The repr of a variant shows its class name and its other fields. `message` and `cause` are not in the repr.
 
-`broker_error_cause(err)` returns the cause of any variant, or `NoCause()` for a variant without one. Match on it before `raise ... from`, `exc_info=` or an error tracker call:
+`err.failure_cause()` returns the exception of the cause of any variant, or `NoCause()` for a variant without one. Every class of `DatabaseOperationError`, `TaskSendError`, `WorkflowStartError`, `WorkflowHandleError`, `MonitoringQueryError` and `TaskActionError` has the method. Match on it before `raise ... from`, `exc_info=` or an error tracker call:
 
 ```python
 from horsies import (
@@ -220,7 +220,6 @@ from horsies import (
     DatabaseOperationError,
     DatabaseOperationFailed,
     NoCause,
-    broker_error_cause,
 )
 
 
@@ -233,7 +232,7 @@ def should_retry(err: DatabaseOperationError) -> bool:
 
 
 def raise_broker_error(err: DatabaseOperationError) -> None:
-    match broker_error_cause(err):
+    match err.failure_cause():
         case NoCause():
             raise RuntimeError(err.message)
         case cause:
@@ -252,8 +251,8 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | ------- | ------ | ------ |
 | `TaskSendSuppressed` | `SEND_SUPPRESSED` | `message` |
 | `TaskSendAsyncContext` | `ASYNC_CONTEXT` | `task_id`, `payload`, `message` |
-| `TaskSendValidationFailed` | `VALIDATION_FAILED` | `message`, `exception` |
-| `TaskSendEnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `exception` |
+| `TaskSendValidationFailed` | `VALIDATION_FAILED` | `message`, `cause` |
+| `TaskSendEnqueueFailed` | `ENQUEUE_FAILED` | `task_id`, `payload`, `message`, `retryable`, `cause` |
 | `TaskSendPayloadMismatch` | `PAYLOAD_MISMATCH` | `task_id`, `payload`, `message` |
 | `TaskSendPayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` |
 | `TaskSendIdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id`; `retryable` is `True` |
@@ -264,14 +263,14 @@ Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.s
 | `task_id` | `uuid.UUID` | Task id of the prepared send |
 | `payload` | `TaskSendPayload` | Serialized envelope that the retry methods send again |
 | `retryable` | `bool` | `TaskSendEnqueueFailed`: the core's classification of the cause, `True` when the condition may clear, for example a lost connection or `TooManyPendingCalls`. `TaskSendIdempotencyKeyConflict`: a class variable that is always `True`, because the conflict clears when the reservation ends |
-| `exception` | `BaseException \| NoCause` | The cause. `NoCause()` when a check found the failure without a Python exception |
+| `cause` | `BaseException \| NoCause` | The exception of the cause. `NoCause()` when a check found the failure without a Python exception |
 | `owner_task_id` | `uuid.UUID` | The task that holds the idempotency key |
 | `size_bytes` | `int` | Bytes of the UTF-8 text of the serialized input |
 | `limit_bytes` | `int` | The configured `payload.reject_bytes` |
 
-The repr of a variant shows its class name and its other fields. `payload`, `message` and `exception` are not in the repr.
+The repr of a variant shows its class name and its other fields. `payload`, `message` and `cause` are not in the repr.
 
-`NoCause` is not an exception. Match on `exception` before `raise ... from`, `exc_info=` or an error tracker call:
+`NoCause` is not an exception. Match on `cause` before `raise ... from`, `exc_info=` or an error tracker call:
 
 ```python
 import logging
@@ -282,7 +281,7 @@ logger = logging.getLogger(__name__)
 
 
 def log_enqueue_failure(err: TaskSendEnqueueFailed) -> None:
-    match err.exception:
+    match err.cause:
         case NoCause():
             logger.error('enqueue failed: %s', err.message)
         case cause:
@@ -303,9 +302,9 @@ The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartRet
 
 `WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) and `pause_workflow()` / `resume_workflow()` and their sync forms return `HandleResult[T]` = `Result[T, WorkflowHandleError]`. `get()`, `result_for()` and their `*_async` forms return a `ReadResult` instead: see [Read Errors](#read-errors-readresult).
 
-`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Match on the variant. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
+`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member other than `INVALID_WORKFLOW_ID`. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Match on the variant. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
-`WorkflowHandle.for_id(text, broker)` returns `WorkflowHandleInvalidWorkflowId` for a workflow id text that is not a UUID: `message`, `workflow_id_text` and `exception` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `WorkflowHandleError` variant and has no `WorkflowHandleErrorCode`.
+`WorkflowHandle.for_id(text, broker)` returns `WorkflowHandleInvalidWorkflowId` for a workflow id text that is not a UUID: `code` (`INVALID_WORKFLOW_ID`), `message`, `workflow_id_text` and `cause` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `WorkflowHandleError` variant.
 
 ## User-Defined Error Codes
 

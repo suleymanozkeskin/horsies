@@ -267,10 +267,8 @@ mod tests {
 
     #[test]
     fn err_predicates() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         assert!(!result.is_ok());
         assert!(result.is_err());
     }
@@ -284,10 +282,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "called unwrap() on TaskResult::Err")]
     fn unwrap_err_panics() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         result.unwrap();
     }
 
@@ -310,10 +306,8 @@ mod tests {
 
     #[test]
     fn ok_returns_none_for_err() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         assert_eq!(result.ok(), None);
     }
 
@@ -326,10 +320,8 @@ mod tests {
 
     #[test]
     fn map_preserves_err() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         let mapped = result.map(|v| v * 2);
         assert!(mapped.is_err());
     }
@@ -343,10 +335,8 @@ mod tests {
 
     #[test]
     fn and_then_short_circuits_err() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         let chained = result.and_then(|v| TaskResult::Ok(v * 2));
         assert!(chained.is_err());
     }
@@ -361,10 +351,8 @@ mod tests {
 
     #[test]
     fn serde_round_trip_err() {
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalCode::TaskException,
-            "boom",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         let json = serde_json::to_string(&result).unwrap();
         let back: TaskResult<i32> = serde_json::from_str(&json).unwrap();
         let err = back.unwrap_err();
@@ -683,10 +671,8 @@ mod tests {
 
     #[test]
     fn task_exception_is_terminal() {
-        let r: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalCode::TaskException,
-            "boom",
-        ));
+        let r: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "boom"));
         assert!(r.is_terminal());
         assert!(!r.is_transient());
     }

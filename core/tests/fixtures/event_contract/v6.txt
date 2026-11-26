@@ -142,4 +142,4 @@ variants SlotDownCause
   ResourceShortage(errno: ShortageErrno)
   ThreadStartRefused
 
-codes BuiltInTaskCode: OperationalCode | ContractCode | RetrievalCode | OutcomeCode
+codes BuiltInTaskCode: OperationalErrorCode | ContractCode | RetrievalCode | OutcomeCode

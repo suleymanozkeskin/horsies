@@ -16,8 +16,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use horsies_core::{
-    BoundedTaskList, BrokerError, DatabaseOperationError, DatabaseOperationFailedCode,
-    BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing, ExpiredTaskRow,
+    BoundedTaskList, BrokerError, BrokerOperationSource, ClassCoverage, ClassReport,
+    DatabaseOperationError, DatabaseOperationFailedCode, DatabasePing, ExpiredTaskRow,
     PostgresBroker, StaleMinutes, StaleTaskRow, WorkerPong, WorkerStateSnapshot,
 };
 
@@ -47,10 +47,13 @@ impl Horsies {
     ///
     /// Errors: `DATABASE_PING_FAILED` with the retry classification of the cause.
     pub async fn ping_database(&self) -> Result<DatabasePing, DatabaseOperationError> {
-        self.health_broker(DatabaseOperationFailedCode::DatabasePingFailed, "ping_database")
-            .await?
-            .ping_database()
-            .await
+        self.health_broker(
+            DatabaseOperationFailedCode::DatabasePingFailed,
+            "ping_database",
+        )
+        .await?
+        .ping_database()
+        .await
     }
 
     /// Ping the workers and collect the distinct replies by worker id,
@@ -71,14 +74,17 @@ impl Horsies {
             PingTarget::EveryWorker => None,
             PingTarget::Worker(worker_id) => Some(worker_id.as_str()),
         };
-        self.health_broker(DatabaseOperationFailedCode::WorkerPingFailed, "ping_workers")
-            .await?
-            .ping_workers(
-                target_worker_id,
-                timeout,
-                min_responses.map(NonZeroUsize::get),
-            )
-            .await
+        self.health_broker(
+            DatabaseOperationFailedCode::WorkerPingFailed,
+            "ping_workers",
+        )
+        .await?
+        .ping_workers(
+            target_worker_id,
+            timeout,
+            min_responses.map(NonZeroUsize::get),
+        )
+        .await
     }
 
     /// The latest state snapshot of every worker that reported one, idle
@@ -233,7 +239,10 @@ mod tests {
             "ping_database",
             BrokerError::ListenerClosed,
         );
-        assert_eq!(failure.code(), horsies_core::DatabaseErrorCode::DatabasePingFailed);
+        assert_eq!(
+            failure.code(),
+            horsies_core::DatabaseErrorCode::DatabasePingFailed
+        );
         assert_eq!(
             failure.retryable(),
             BrokerError::ListenerClosed.is_retryable()

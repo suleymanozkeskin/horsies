@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::broker::class_budgets::{parse_class_capacity, ClassBudgets};
-use crate::broker::result_types::{DatabaseOperationError, BrokerOperationSource, DatabaseResult};
+use crate::broker::result_types::{BrokerOperationSource, DatabaseOperationError, DatabaseResult};
 use crate::broker::slot_health::{parse_slot_health, SlotHealth};
 
 /// Shared inbound channel every worker subscribes to. A ping NOTIFY carries a

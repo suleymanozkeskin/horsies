@@ -16,7 +16,7 @@
 use horsies_core::core::task::error::CodeTextRefusal;
 use horsies_core::{DeclaredCodeRefusal, DeclaredErrorCodes, RegisteredTask, TaskRegistry};
 
-use crate::{AppConfig, HorsiesErrorCode, HorsiesError, QueueMode, ValidationReport};
+use crate::{AppConfig, HorsiesError, HorsiesErrorCode, QueueMode, ValidationReport};
 
 /// The one queue of `Default` mode.
 pub(crate) const DEFAULT_QUEUE: &str = "default";

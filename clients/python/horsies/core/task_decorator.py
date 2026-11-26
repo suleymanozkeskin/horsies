@@ -1157,26 +1157,26 @@ def _map_broker_err(
                 message=message,
             )
         case (
-            DatabaseInvalidTaskOptions(message=message, exception=exception)
-            | DatabaseInvalidInput(message=message, exception=exception)
+            DatabaseInvalidTaskOptions(message=message, cause=exception)
+            | DatabaseInvalidInput(message=message, cause=exception)
         ):
             # Refused before the write: resending the same payload is
             # refused again, so the retry methods must not accept it.
             return TaskSendValidationFailed(
                 message=message,
-                exception=exception,
+                cause=exception,
             )
         case DatabaseEnqueueFailed(
             message=message,
             retryable=retryable,
-            exception=exception,
+            cause=exception,
         ):
             return TaskSendEnqueueFailed(
                 task_id=task_id,
                 payload=payload,
                 message=message,
                 retryable=retryable,
-                exception=exception,
+                cause=exception,
             )
         case _ as unreachable:
             assert_never(unreachable)
@@ -2139,7 +2139,7 @@ def create_task_wrapper(
             cause = without_validation_input(exc)
             return Err(TaskSendValidationFailed(
                 message=f'Invalid send options for {task_name}: {cause}',
-                exception=cause,
+                cause=cause,
             ))
 
         opts_result = serialize_task_options(send_options)
@@ -2147,7 +2147,7 @@ def create_task_wrapper(
             err = opts_result.err_value
             return Err(TaskSendValidationFailed(
                 message=f'Failed to serialize send options for {task_name}: {err}',
-                exception=err,
+                cause=err,
             ))
         return Ok((good_until, opts_result.ok_value))
 
@@ -2528,7 +2528,7 @@ def create_task_wrapper(
             # swallowed into Err(VALIDATION_FAILED).
             return Err(TaskSendValidationFailed(
                 message=f'Queue validation failed for {task_name}: {exc}',
-                exception=exc,
+                cause=exc,
             ))
 
         # Process-monotonic UUIDv7 from the core: the embedded birth time
@@ -2553,7 +2553,7 @@ def create_task_wrapper(
                     f"arg(s); strict-serde rejects positional args. "
                     f"Pass every argument by keyword."
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         missing = missing_required_kwargs(fn, kwargs_dict)
         if missing.workflow_only:
@@ -2563,7 +2563,7 @@ def create_task_wrapper(
                     f'which only a workflow can fill. Run it as a workflow node, '
                     f'or give these parameters a default.'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         if missing.producer:
             return Err(TaskSendValidationFailed(
@@ -2571,14 +2571,14 @@ def create_task_wrapper(
                     f'Task {task_name!r} is missing required kwargs '
                     f'{list(missing.producer)}; nothing was enqueued.'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         try:
             _ = fill_omitted_defaults(fn, kwargs_dict)
         except (StrictJsonError, ValueValidationError) as exc:
             return Err(TaskSendValidationFailed(
                 message=f'A default of {task_name!r} does not fit its type: {exc}',
-                exception=exc,
+                cause=exc,
             ))
 
         # Serialize kwargs against the receiver's declared parameter types.
@@ -2589,13 +2589,13 @@ def create_task_wrapper(
             except (StrictJsonError, ValueValidationError) as exc:
                 return Err(TaskSendValidationFailed(
                     message=f'Failed to encode kwargs for {task_name}: {exc}',
-                    exception=exc,
+                    cause=exc,
                 ))
             kwargs_r = dumps_json(encoded_kwargs)
             if is_err(kwargs_r):
                 return Err(TaskSendValidationFailed(
                     message=f'Failed to serialize encoded kwargs for {task_name}: {kwargs_r.err_value}',
-                    exception=kwargs_r.err_value,
+                    cause=kwargs_r.err_value,
                 ))
             input_json = kwargs_r.ok_value
 
@@ -2788,7 +2788,7 @@ def create_task_wrapper(
                         f'were removed: pass the period, for example '
                         f'timedelta(days=7).'
                     ),
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
 
     def _parse_explicit_period(
@@ -2799,7 +2799,7 @@ def create_task_wrapper(
             case Err(err_value=refused):
                 return Err(TaskSendValidationFailed(
                     message=f'Invalid retention for {task_name}: {refused.reason}.',
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
             case Ok(ok_value=days):
                 pass
@@ -2820,7 +2820,7 @@ def create_task_wrapper(
                         f'of: {listed}. Add the period to '
                         f'AppConfig.retention.retention_periods to send with it.'
                     ),
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
 
     def _sendable_periods() -> frozenset[RetentionDays]:
@@ -2848,7 +2848,7 @@ def create_task_wrapper(
                     f'schedule delay must be an int number of seconds, '
                     f'got {type(delay).__name__}'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         if delay < 0:
             return Err(TaskSendValidationFailed(
@@ -2856,7 +2856,7 @@ def create_task_wrapper(
                     f'schedule delay must not be negative, got {delay}; '
                     f'use delay=0 (or {task_name}.send(...)) for immediate execution'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         return Ok(delay)
 
@@ -3091,12 +3091,12 @@ def create_task_wrapper(
                     f'cross-task retry: error is for {error.payload.task_name!r} '
                     f'but this task is {task_name!r}'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         if require_delay and error.payload.enqueue_delay_seconds is None:
             return Err(TaskSendValidationFailed(
                 message='cannot retry schedule: missing enqueue_delay_seconds',
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         if reject_delay and error.payload.enqueue_delay_seconds is not None:
             return Err(TaskSendValidationFailed(
@@ -3104,7 +3104,7 @@ def create_task_wrapper(
                     'cannot retry scheduled task via retry_send — '
                     'use retry_schedule instead'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
         return Ok((error.task_id, error.payload))
 

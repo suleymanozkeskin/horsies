@@ -223,7 +223,6 @@ from .core.brokers.result_types import (
     DatabaseAsyncContext,
     DatabaseListenerDisabled,
     DatabaseWaitInsideTask,
-    broker_error_cause,
 )
 from .core.types.error_detail import NoCause
 from .core.models.health import (
@@ -497,7 +496,6 @@ __all__ = [
     'DatabaseAsyncContext',
     'DatabaseListenerDisabled',
     'DatabaseWaitInsideTask',
-    'broker_error_cause',
     'SendKind',
     # Core errors: the exception of a failed database call, and the errors of a
     # call that the core of the process cannot run

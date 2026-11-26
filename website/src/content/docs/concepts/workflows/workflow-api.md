@@ -68,13 +68,13 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 | Variant | `code` | Other fields | `retryable` | After the failure |
 |---|---|---|---|---|
 | `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` | Nothing ran |
-| `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` | Nothing written |
+| `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `cause: BaseException \| NoCause` | `False` | Nothing written |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` | Nothing written |
 | `WorkflowStartCommandConflict` | `WORKFLOW_COMMAND_CONFLICT` | – | `False` | Nothing written |
-| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | The core's classification of the cause | Rolled back, or the commit outcome is unknown |
+| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `cause: BaseException` | The core's classification of the cause | Rolled back, or the commit outcome is unknown |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing written |
 
-`NoCause()` means that a check refused the input without a Python exception. Match on `exception` before `raise ... from`.
+`NoCause()` means that a check refused the input without a Python exception. Match on `cause` before `raise ... from`.
 
 **WorkflowStartErrorCode values:**
 
@@ -155,14 +155,14 @@ Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, 
 
 **WorkflowHandleError variants:**
 
-`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Any other exception, for example a defect in pause or resume, propagates.
+`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member other than `INVALID_WORKFLOW_ID`. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Any other exception, for example a defect in pause or resume, propagates.
 
 | Variant | `code` | Other fields | `retryable` | After the failure |
 |---|---|---|---|---|
 | `WorkflowHandleNotFound` | `WORKFLOW_NOT_FOUND` | – | `False` | Nothing changed |
-| `WorkflowHandleDatabaseOperationFailed` | `DATABASE_OPERATION_FAILED` | `exception: BaseException` | The core's classification of the cause | A read changed nothing; a write rolled back, or the commit outcome is unknown |
-| `WorkflowHandleStoredDataInvalid` | `STORED_DATA_INVALID` | `exception: BaseException` | `False` | Nothing changed; a stored workflow status or subworkflow summary does not parse |
-| `WorkflowHandleResumeRecoveryFailed` | `RESUME_RECOVERY_FAILED` | `exception: BaseException` | `False` | The resume committed and the workflow is `RUNNING`; the recovery pass after the commit failed |
+| `WorkflowHandleDatabaseOperationFailed` | `DATABASE_OPERATION_FAILED` | `cause: BaseException` | The core's classification of the cause | A read changed nothing; a write rolled back, or the commit outcome is unknown |
+| `WorkflowHandleStoredDataInvalid` | `STORED_DATA_INVALID` | `cause: BaseException` | `False` | Nothing changed; a stored workflow status or subworkflow summary does not parse |
+| `WorkflowHandleResumeRecoveryFailed` | `RESUME_RECOVERY_FAILED` | `cause: BaseException` | `False` | The resume committed and the workflow is `RUNNING`; the recovery pass after the commit failed |
 | `WorkflowHandleAsyncContext` | `ASYNC_CONTEXT` | – | `False` | Nothing ran |
 
 See [Errors Reference](/horsies/tasks/errors/#workflow-handle-error-codes) for when each code occurs.

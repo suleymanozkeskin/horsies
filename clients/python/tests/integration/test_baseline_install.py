@@ -51,6 +51,7 @@ _MIGRATION_DESCRIPTIONS: Final[dict[int, str]] = {
     1004: 'worker profile name',
     1005: 'claim generation by status',
     1006: 'typescript client family',
+    1007: 'sub-workflow failed code',
 }
 """The description that the bookkeeping row of each migration of the chain
 stores (``MIGRATION_SOURCES``, ``core/src/broker/migrations.rs``)."""
@@ -498,7 +499,7 @@ async def test_a_family_row_that_holds_no_client_family_fails_closed(database_ur
                     DatabaseOperationFailed(
                         code=DatabaseErrorCode.SCHEMA_INIT_FAILED,
                         retryable=False,
-                        exception=CoreContractViolation() as exception,
+                        cause=CoreContractViolation() as exception,
                     )
                 ):
                     assert exception.subject == 'install_schema'

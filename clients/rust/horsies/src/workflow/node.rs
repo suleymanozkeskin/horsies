@@ -26,7 +26,7 @@ use crate::task::body::{
     decode_checked, decode_unit, encode_read_back, raw_value_of, unread_member,
     value_free_encode_text, value_parts, DecodeFailure, ValueParts,
 };
-use crate::{HorsiesErrorCode, HorsiesError, TaskFunction, TaskOutcome, UserErrorCode};
+use crate::{HorsiesError, HorsiesErrorCode, TaskFunction, TaskOutcome, UserErrorCode};
 
 // ---------------------------------------------------------------------------
 // Types and references
@@ -846,7 +846,10 @@ pub(crate) mod tests {
         let refused = task_node::<u32, ChargeInput>("charge")
             .set(amount(), f64::NAN)
             .unwrap_err();
-        assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowKwargsNotSerializable));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowKwargsNotSerializable)
+        );
         assert!(refused.message.contains("'charge'"), "{refused}");
     }
 
@@ -879,7 +882,10 @@ pub(crate) mod tests {
         let refused = task_node::<u32, ChargeInput>("charge")
             .input_json(r#"{"__h_workflow_meta__": {}}"#)
             .unwrap_err();
-        assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowInvalidKwargKey));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowInvalidKwargKey)
+        );
     }
 
     #[test]

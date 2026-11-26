@@ -65,7 +65,7 @@ def test_send_gives_the_broker_and_the_handle_one_minted_uuid() -> None:
 def test_a_failed_send_carries_the_minted_uuid() -> None:
     broker = MagicMock()
     broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
-        message='connection lost', retryable=True, exception=NoCause(),
+        message='connection lost', retryable=True, cause=NoCause(),
     ))
 
     result = _wrapper(_app_with_broker(broker)).send(x=1)

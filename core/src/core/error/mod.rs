@@ -645,23 +645,38 @@ mod tests {
 
     #[test]
     fn error_code_display() {
-        assert_eq!(HorsiesErrorCode::WorkflowCycleDetected.to_string(), "HRS-007");
+        assert_eq!(
+            HorsiesErrorCode::WorkflowCycleDetected.to_string(),
+            "HRS-007"
+        );
         assert_eq!(HorsiesErrorCode::TaskNotRegistered.to_string(), "HRS-300");
-        assert_eq!(HorsiesErrorCode::ConfigInvalidRetention.to_string(), "HRS-216");
+        assert_eq!(
+            HorsiesErrorCode::ConfigInvalidRetention.to_string(),
+            "HRS-216"
+        );
         assert_eq!(
             HorsiesErrorCode::ConfigInvalidRetention.category(),
             HorsiesErrorCategory::Config,
         );
         assert!(HorsiesErrorCode::ConfigInvalidRetention.is_config_error());
-        assert_eq!(HorsiesErrorCode::ConfigInvalidResilience.to_string(), "HRS-208");
+        assert_eq!(
+            HorsiesErrorCode::ConfigInvalidResilience.to_string(),
+            "HRS-208"
+        );
         assert!(HorsiesErrorCode::ConfigInvalidResilience.is_config_error());
-        assert_eq!(HorsiesErrorCode::CheckWorkerConnections.to_string(), "HRS-219");
+        assert_eq!(
+            HorsiesErrorCode::CheckWorkerConnections.to_string(),
+            "HRS-219"
+        );
         assert_eq!(
             HorsiesErrorCode::CheckWorkerConnections.category(),
             HorsiesErrorCategory::Config,
         );
         assert!(HorsiesErrorCode::CheckWorkerConnections.is_config_error());
-        assert_eq!(HorsiesErrorCode::CheckLiveAsyncContext.to_string(), "HRS-217");
+        assert_eq!(
+            HorsiesErrorCode::CheckLiveAsyncContext.to_string(),
+            "HRS-217"
+        );
         assert!(HorsiesErrorCode::CheckLiveAsyncContext.is_config_error());
     }
 
@@ -689,7 +704,9 @@ mod tests {
     #[test]
     fn validation_report_single_error() {
         let mut report = ValidationReport::new("test");
-        report.add(HorsiesError::new("bad config").with_code(HorsiesErrorCode::ConfigInvalidQueueMode));
+        report.add(
+            HorsiesError::new("bad config").with_code(HorsiesErrorCode::ConfigInvalidQueueMode),
+        );
         assert!(report.has_errors());
         let err = report.into_result().unwrap_err();
         assert_eq!(err.code, Some(HorsiesErrorCode::ConfigInvalidQueueMode));
@@ -817,8 +834,14 @@ mod tests {
 
     #[test]
     fn error_code_category_task() {
-        assert_eq!(HorsiesErrorCode::TaskNoReturnType.category(), HorsiesErrorCategory::Task);
-        assert_eq!(HorsiesErrorCode::TaskInvalidQueue.category(), HorsiesErrorCategory::Task);
+        assert_eq!(
+            HorsiesErrorCode::TaskNoReturnType.category(),
+            HorsiesErrorCategory::Task
+        );
+        assert_eq!(
+            HorsiesErrorCode::TaskInvalidQueue.category(),
+            HorsiesErrorCategory::Task
+        );
     }
 
     /// HRS-112 and HRS-113, the refusals of a declared code, are task
@@ -868,7 +891,10 @@ mod tests {
 
     #[test]
     fn error_category_display() {
-        assert_eq!(HorsiesErrorCategory::Workflow.to_string(), "workflow validation");
+        assert_eq!(
+            HorsiesErrorCategory::Workflow.to_string(),
+            "workflow validation"
+        );
         assert_eq!(HorsiesErrorCategory::Task.to_string(), "task definition");
         assert_eq!(HorsiesErrorCategory::Config.to_string(), "configuration");
         assert_eq!(HorsiesErrorCategory::Registry.to_string(), "registry");
@@ -878,7 +904,8 @@ mod tests {
 
     #[test]
     fn horsies_error_category_from_code() {
-        let err = HorsiesError::new("bad config").with_code(HorsiesErrorCode::ConfigInvalidQueueMode);
+        let err =
+            HorsiesError::new("bad config").with_code(HorsiesErrorCode::ConfigInvalidQueueMode);
         assert_eq!(err.category(), Some(HorsiesErrorCategory::Config));
         assert!(err.is_config_error());
         assert!(!err.is_workflow_error());
@@ -951,7 +978,8 @@ mod tests {
 
     #[test]
     fn horsies_error_display_with_code() {
-        let err = HorsiesError::new("cycle detected").with_code(HorsiesErrorCode::WorkflowCycleDetected);
+        let err =
+            HorsiesError::new("cycle detected").with_code(HorsiesErrorCode::WorkflowCycleDetected);
         let s = err.to_string();
         assert!(s.contains("cycle detected"));
     }

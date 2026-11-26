@@ -88,7 +88,7 @@ pub enum MonitoringQueryError {
     /// process could not run it. Nothing changed.
     ///
     /// ``retryable`` is the core's classification of the cause: ``True`` when
-    /// the condition may clear, for example a lost connection. ``exception``
+    /// the condition may clear, for example a lost connection. ``cause``
     /// is the core's class of the cause (a ``CoreFailure`` leaf class, with
     /// the read as its subject), or the ``CoreCallRefusal`` of the core
     /// boundary.
@@ -107,11 +107,11 @@ pub enum MonitoringQueryError {
         /// of its cause, with its text.
         #[error_slot(cause)]
         #[source]
-        source: MonitoringQueryErrorSource,
+        cause: MonitoringQueryErrorSource,
     },
     /// Stored history data does not decode. Nothing changed.
     ///
-    /// ``exception`` is the ``HistoryContractError``: for example a history
+    /// ``cause`` is the ``HistoryContractError``: for example a history
     /// status that is not a ``TaskStatus`` member, an attempt snapshot that
     /// does not decode, or an EXPLAIN payload that the row estimate cannot
     /// read. A repeat gives the same result until the stored row or the
@@ -130,7 +130,7 @@ pub enum MonitoringQueryError {
         /// `HistoryContractError` with its text.
         #[error_slot(cause)]
         #[source]
-        source: HistoryContractSource,
+        cause: HistoryContractSource,
     },
 }
 
@@ -161,8 +161,8 @@ impl MonitoringQueryError {
     /// The error that the read met. Pure.
     pub fn error_source(&self) -> &MonitoringQueryErrorSource {
         match self {
-            Self::DatabaseOperationFailed { source, .. } => source,
-            Self::HistoryContractViolation { source, .. } => &source.0,
+            Self::DatabaseOperationFailed { cause, .. } => cause,
+            Self::HistoryContractViolation { cause, .. } => &cause.0,
         }
     }
 
@@ -173,7 +173,7 @@ impl MonitoringQueryError {
         Self::DatabaseOperationFailed {
             message: format!("{operation} failed: {error}"),
             retryable: error.is_retryable(),
-            source: MonitoringQueryErrorSource::Broker(error),
+            cause: MonitoringQueryErrorSource::Broker(error),
         }
     }
 
@@ -221,21 +221,21 @@ enum ReadFailure {
 }
 
 impl ReadFailure {
-    /// The variant of this class with `message` and `source`. Pure.
+    /// The variant of this class with `message` and `cause`. Pure.
     fn into_error(
         self,
         message: String,
-        source: MonitoringQueryErrorSource,
+        cause: MonitoringQueryErrorSource,
     ) -> MonitoringQueryError {
         match self {
             Self::Database { retryable } => MonitoringQueryError::DatabaseOperationFailed {
                 message,
                 retryable,
-                source,
+                cause,
             },
             Self::Contract => MonitoringQueryError::HistoryContractViolation {
                 message,
-                source: HistoryContractSource(source),
+                cause: HistoryContractSource(cause),
             },
         }
     }
@@ -260,7 +260,10 @@ mod tests {
             }),
         );
 
-        assert_eq!(error.code(), MonitoringQueryErrorCode::DatabaseOperationFailed);
+        assert_eq!(
+            error.code(),
+            MonitoringQueryErrorCode::DatabaseOperationFailed
+        );
         assert!(error.retryable());
     }
 

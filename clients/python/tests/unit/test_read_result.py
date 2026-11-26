@@ -178,18 +178,18 @@ def test_broker_failure_is_broker_error_with_its_cause_and_class() -> None:
         code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
         message='read failed',
         retryable=True,
-        exception=cause,
+        cause=cause,
     ))
     error = _read_error(_read(answer))
     assert isinstance(error, ReadDatabaseError)
-    assert error.exception is cause
+    assert error.cause is cause
     assert error.retryable is True
     assert 'TASK_INFO_QUERY_FAILED' in error.message
 
 
 def test_broker_payload_refusal_is_result_deserialization_error() -> None:
     answer: DatabaseResult[RawResultRecord | None] = Err(DatabaseInvalidJsonPayload(
-        message='not JSON', exception=NoCause(),
+        message='not JSON', cause=NoCause(),
     ))
     assert isinstance(_read_error(_read(answer)), ResultDeserializationError)
 
@@ -220,7 +220,7 @@ def test_broker_async_context_is_a_defect() -> None:
         (Err(NoTypeAvailable(message='m')), True),
         (Err(WaitTimeout(message='m')), False),
         (Err(TaskNotFound(message='m')), False),
-        (Err(ReadDatabaseError(message='m', retryable=True, exception=NoCause())), False),
+        (Err(ReadDatabaseError(message='m', retryable=True, cause=NoCause())), False),
         (Err(WaitInsideTask(message='m')), False),
         (Err(InvalidInput(message='m')), False),
     ],

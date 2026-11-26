@@ -71,13 +71,13 @@ def _every_variant() -> list[TaskSendError]:
     return [
         TaskSendSuppressed(message=message),
         TaskSendAsyncContext(task_id=TASK_ID, payload=payload, message=message),
-        TaskSendValidationFailed(message=message, exception=cause),
+        TaskSendValidationFailed(message=message, cause=cause),
         TaskSendEnqueueFailed(
             task_id=TASK_ID,
             payload=payload,
             message=message,
             retryable=True,
-            exception=cause,
+            cause=cause,
         ),
         TaskSendPayloadMismatch(task_id=TASK_ID, payload=payload, message=message),
         TaskSendPayloadTooLarge(message=message, size_bytes=2048, limit_bytes=1024),
@@ -163,7 +163,7 @@ class TestValidationFailedCause:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert result.err_value.exception == NoCause()
+        assert result.err_value.cause == NoCause()
         assert 'positional' in result.err_value.message
         app.get_broker.assert_not_called()
 
@@ -176,12 +176,12 @@ class TestValidationFailedCause:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, TaskSendValidationFailed)
-        assert isinstance(err.exception, ValueValidationError)
-        assert err.exception.__context__ is None
-        assert err.exception.__cause__ is None
+        assert isinstance(err.cause, ValueValidationError)
+        assert err.cause.__context__ is None
+        assert err.cause.__cause__ is None
         assert '[int_type]' in err.message
         assert marker not in err.message
-        assert marker not in str(err.exception)
+        assert marker not in str(err.cause)
         app.get_broker.assert_not_called()
 
 
@@ -192,14 +192,14 @@ class TestEnqueueFailedCause:
         _broker_returning(app, DatabaseEnqueueFailed(
             message='task row is gone before the key was bound',
             retryable=False,
-            exception=NoCause(),
+            cause=NoCause(),
         ))
 
         result = _wrapper(app).send(x=1)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendEnqueueFailed)
-        assert result.err_value.exception == NoCause()
+        assert result.err_value.cause == NoCause()
         assert result.err_value.retryable is False
 
     def test_broker_exception_is_kept(self) -> None:
@@ -208,14 +208,14 @@ class TestEnqueueFailedCause:
         _broker_returning(app, DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=cause,
+            cause=cause,
         ))
 
         result = _wrapper(app).send(x=1)
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendEnqueueFailed)
-        assert result.err_value.exception is cause
+        assert result.err_value.cause is cause
         assert result.err_value.retryable is True
 
     @pytest.mark.parametrize('form', ['send', 'send_async', 'schedule', 'schedule_async'])

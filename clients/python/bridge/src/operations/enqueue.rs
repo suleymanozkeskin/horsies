@@ -18,7 +18,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
-    BrokerError, DatabaseOperationError, CheckedSend, EnqueueRefusal, EnqueueRetention, SendKind,
+    BrokerError, CheckedSend, DatabaseOperationError, EnqueueRefusal, EnqueueRetention, SendKind,
 };
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;

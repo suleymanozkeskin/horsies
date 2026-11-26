@@ -159,7 +159,7 @@ Query builders:
 | Variant | When |
 |---|---|
 | `DatabaseOperationFailed { retryable, .. }` | The database or the connect failed. `retryable` is the classification of the cause |
-| `HistoryContractViolation` | A history row does not decode (`task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_node`); `source` is a `HistoryContractSource` that holds the error. Not retryable |
+| `HistoryContractViolation` | A history row does not decode (`task_stats`, `list_tasks`, `get_task_detail`, `get_workflow_node`); `cause` is a `HistoryContractSource` that holds the error. Not retryable |
 
 ## Task Cancel
 

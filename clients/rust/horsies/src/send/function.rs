@@ -49,7 +49,7 @@ use crate::app::SendSuppression;
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::encode_send_input;
 use crate::telemetry::{CallEnd, TaskSendSpan, TaskSendSubject};
-use crate::{HorsiesErrorCode, Horsies, HorsiesError, TaskHandle, UserErrorCode};
+use crate::{Horsies, HorsiesError, HorsiesErrorCode, TaskHandle, UserErrorCode};
 
 /// Resends of a retryable `ENQUEUE_FAILED` after the first send (Python
 /// `_SEND_RETRY_COUNT`).
@@ -713,7 +713,10 @@ mod tests {
         let without = Horsies::new(config()).unwrap();
         let mut builder = without.workflow_builder("invoices");
         let refused = builder.task(node_of()).unwrap_err();
-        assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowUnregisteredTask));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnregisteredTask)
+        );
         assert!(refused.message.contains("task 'send_invoice'"), "{refused}");
         assert_eq!(
             builder.build().unwrap_err().code,
@@ -731,7 +734,10 @@ mod tests {
         let refused = builder
             .task(crate::__private::task_node::<u32, String>("send_invoice"))
             .unwrap_err();
-        assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowUnregisteredTask));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnregisteredTask)
+        );
         assert!(refused.message.contains("Invoice"), "{refused}");
         assert!(refused.message.contains("String"), "{refused}");
     }

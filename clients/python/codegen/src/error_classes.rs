@@ -592,7 +592,9 @@ mod tests {
         let modules = error_modules();
         let broker = &modules["broker_errors"];
         let text = render_error_module("broker_errors", broker);
-        assert!(text.contains("__all__ = ['DatabaseOperationFailedCode', 'DatabaseOperationFailed', "));
+        assert!(
+            text.contains("__all__ = ['DatabaseOperationFailedCode', 'DatabaseOperationFailed', ")
+        );
         assert!(text.contains("'DatabaseCoreError', 'DatabaseCoreEnqueueError']\n"));
         assert!(text.contains("from horsies._catalog.broker import DatabaseErrorCode\n"));
         assert!(text.contains("from horsies._catalog.error_detail import NoCause\n"));

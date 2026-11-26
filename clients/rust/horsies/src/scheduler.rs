@@ -26,7 +26,7 @@ use crate::config::{schedule_input_text, scheduler_manifest};
 use crate::process_state::{refuse_in_a_fork, runtime_for, RuntimeStartFailed};
 use crate::registry::resolve_task_queue;
 use crate::signals::stop_on_signals;
-use crate::{HorsiesErrorCode, Horsies, HorsiesError, ScheduleConfig, TaskSchedule};
+use crate::{Horsies, HorsiesError, HorsiesErrorCode, ScheduleConfig, TaskSchedule};
 
 /// The scheduler ran until a stop request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -447,7 +447,10 @@ mod tests {
         let schedule = app.config().schedule.clone().unwrap();
         let refusals = app.schedule_refusals(&schedule);
         assert_eq!(refusals.len(), 1);
-        assert_eq!(refusals[0].code, Some(HorsiesErrorCode::ConfigInvalidSchedule));
+        assert_eq!(
+            refusals[0].code,
+            Some(HorsiesErrorCode::ConfigInvalidSchedule)
+        );
         assert!(
             refusals[0].notes[0].contains("'options.stpe'"),
             "{}",
@@ -514,7 +517,10 @@ mod tests {
         let schedule = app.config().schedule.clone().unwrap();
         let refusals = app.schedule_refusals(&schedule);
         assert_eq!(refusals.len(), 1);
-        assert_eq!(refusals[0].code, Some(HorsiesErrorCode::ConfigInvalidSchedule));
+        assert_eq!(
+            refusals[0].code,
+            Some(HorsiesErrorCode::ConfigInvalidSchedule)
+        );
         let text = refusals[0].to_string();
         assert!(text.contains("bad_queue_job"), "{text}");
         assert!(text.contains("nonexistent_queue"), "{text}");

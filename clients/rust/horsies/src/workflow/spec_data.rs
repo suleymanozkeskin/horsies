@@ -21,7 +21,7 @@ use super::node::{JoinType, NodeDeadline, NodePriority};
 use super::spec::{SpecBody, SpecNode, SpecOutput, WorkflowSpec};
 use super::sub_workflow::NodeParams;
 use crate::registry::{check_queue, queue_priority};
-use crate::{AppConfig, HorsiesErrorCode, HorsiesError};
+use crate::{AppConfig, HorsiesError, HorsiesErrorCode};
 
 /// The member of a task node's options that holds its deadline.
 const GOOD_UNTIL_MEMBER: &str = "good_until";
@@ -305,7 +305,10 @@ mod tests {
         add(&mut builder, charge().queue("bulk"));
         let spec = builder.build().unwrap();
         let refused = client_spec(&spec, &config()).unwrap_err();
-        assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowUnresolvedQueue));
+        assert_eq!(
+            refused.code,
+            Some(HorsiesErrorCode::WorkflowUnresolvedQueue)
+        );
     }
 
     #[test]

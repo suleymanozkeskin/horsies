@@ -11,7 +11,7 @@
 
 use chrono::TimeDelta;
 use horsies_core::{
-    BoundedTaskList, BrokerError, DatabaseOperationError, BrokerOperationSource, ExpiredTaskRow,
+    BoundedTaskList, BrokerError, BrokerOperationSource, DatabaseOperationError, ExpiredTaskRow,
     StaleMinutes, StaleTaskRow, StaleThresholdRefusal,
 };
 use pyo3::prelude::*;

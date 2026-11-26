@@ -342,7 +342,7 @@ function contextFindings(
   if (use === "noContext") {
     return [
       finding(
-        ErrorCode.WORKFLOW_CTX_PARAM_MISSING,
+        ErrorCode.WORKFLOW_CONTEXT_PARAMETER_MISSING,
         `${context.place} workflowContextFrom`,
         "workflowContextFrom is given, but the task takes no workflow context",
         ["define the task with workflowContext: true, or remove workflowContextFrom"],
@@ -354,7 +354,7 @@ function contextFindings(
     .filter((source) => !dependencies.has(indexOf(context.session, source)))
     .map((source) =>
       finding(
-        ErrorCode.WORKFLOW_INVALID_CTX_FROM,
+        ErrorCode.WORKFLOW_INVALID_CONTEXT_FROM,
         `${context.place} workflowContextFrom`,
         `the context source "${source.nodeId}" is not a dependency`,
         ["add the node to waitsFor"],

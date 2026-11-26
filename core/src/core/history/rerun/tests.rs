@@ -1322,8 +1322,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .unwrap()
         .expect_found();
     assert_eq!(failed_raw.status, TaskStatus::Failed);
-    let expected_error =
-        TaskError::builtin(OperationalCode::TaskException, "p8 terminal source");
+    let expected_error = TaskError::builtin(OperationalCode::TaskException, "p8 terminal source");
     let expected_error_envelope =
         serde_json::to_value(TaskResult::<serde_json::Value>::Err(expected_error.clone())).unwrap();
     assert_eq!(
@@ -1374,7 +1373,10 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(completed, None)
         .await
         .unwrap_err();
-    assert_eq!(raw_error.code(), crate::DatabaseErrorCode::InvalidJsonPayload);
+    assert_eq!(
+        raw_error.code(),
+        crate::DatabaseErrorCode::InvalidJsonPayload
+    );
 
     let non_object = b"[]".to_vec();
     sql::query(
@@ -1445,7 +1447,10 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .get_raw_result_record(Uuid::new_v4(), None)
         .await
         .expect_err("a removed detail reader refuses the history read");
-    assert_eq!(refused.code(), crate::DatabaseErrorCode::TaskInfoQueryFailed);
+    assert_eq!(
+        refused.code(),
+        crate::DatabaseErrorCode::TaskInfoQueryFailed
+    );
     assert!(!refused.retryable());
     assert!(refused.message().contains("42883"), "{}", refused.message());
     let mut publication = pool.begin().await.unwrap();

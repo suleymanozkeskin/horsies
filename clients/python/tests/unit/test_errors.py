@@ -1,4 +1,4 @@
-"""Unit tests for Rust-style error formatting."""
+"""Unit tests for the diagnostic error format."""
 
 from __future__ import annotations
 
@@ -174,12 +174,12 @@ class TestHorsiesError:
         err = HorsiesError(message='msg')
         assert err.args == ('msg',)
 
-    def test_format_rust_style_basic(self) -> None:
+    def test_format_diagnostic_basic(self) -> None:
         err = HorsiesError(message='something went wrong')
         formatted = err.format_diagnostic(use_colors=False)
         assert 'error: something went wrong' in formatted
 
-    def test_format_rust_style_with_code(self) -> None:
+    def test_format_diagnostic_with_code(self) -> None:
         err = HorsiesError(
             message='cycle detected',
             code=HorsiesErrorCode.WORKFLOW_CYCLE_DETECTED,
@@ -188,7 +188,7 @@ class TestHorsiesError:
         assert 'error[HRS-007]:' in formatted
         assert 'cycle detected' in formatted
 
-    def test_format_rust_style_with_location(self) -> None:
+    def test_format_diagnostic_with_location(self) -> None:
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write('x = 1\n')
             f.write('raise SomeError()\n')
@@ -208,7 +208,7 @@ class TestHorsiesError:
         finally:
             os.unlink(temp_path)
 
-    def test_format_rust_style_column_underline(self) -> None:
+    def test_format_diagnostic_column_underline(self) -> None:
         """Column-specific underline uses start/end column range."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write('some_variable = bad_call()\n')
@@ -228,7 +228,7 @@ class TestHorsiesError:
         finally:
             os.unlink(temp_path)
 
-    def test_format_rust_style_column_without_end_column(self) -> None:
+    def test_format_diagnostic_column_without_end_column(self) -> None:
         """Column set but end_column is None produces a single caret."""
         with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
             f.write('x = 1\n')
@@ -245,7 +245,7 @@ class TestHorsiesError:
         finally:
             os.unlink(temp_path)
 
-    def test_format_rust_style_location_without_source_line(self) -> None:
+    def test_format_diagnostic_location_without_source_line(self) -> None:
         """Location exists but source file is missing — arrow shown, no snippet."""
         err = HorsiesError(
             message='gone',
@@ -257,7 +257,7 @@ class TestHorsiesError:
         # No source line or underline should appear
         assert '^^^' not in formatted
 
-    def test_format_rust_style_with_notes(self) -> None:
+    def test_format_diagnostic_with_notes(self) -> None:
         err = HorsiesError(
             message='error',
             notes=['first note', 'second note'],
@@ -266,7 +266,7 @@ class TestHorsiesError:
         assert '= note: first note' in formatted
         assert '= note: second note' in formatted
 
-    def test_format_rust_style_multiline_notes(self) -> None:
+    def test_format_diagnostic_multiline_notes(self) -> None:
         """Multi-line notes get continuation indentation."""
         err = HorsiesError(
             message='error',
@@ -277,7 +277,7 @@ class TestHorsiesError:
         assert 'line 2' in formatted
         assert 'line 3' in formatted
 
-    def test_format_rust_style_with_help(self) -> None:
+    def test_format_diagnostic_with_help(self) -> None:
         err = HorsiesError(
             message='error',
             help_text='try doing this instead',
@@ -286,7 +286,7 @@ class TestHorsiesError:
         assert '= help:' in formatted
         assert 'try doing this instead' in formatted
 
-    def test_format_rust_style_multiline_help(self) -> None:
+    def test_format_diagnostic_multiline_help(self) -> None:
         err = HorsiesError(
             message='error',
             help_text='line 1\nline 2\nline 3',
@@ -297,14 +297,14 @@ class TestHorsiesError:
         assert 'line 2' in formatted
         assert 'line 3' in formatted
 
-    def test_format_rust_style_with_colors(self) -> None:
+    def test_format_diagnostic_with_colors(self) -> None:
         """use_colors=True emits ANSI escape codes."""
         err = HorsiesError(message='colored error')
         formatted = err.format_diagnostic(use_colors=True)
         assert '\033[' in formatted
         assert 'colored error' in formatted
 
-    def test_format_rust_style_default_colors_auto_detects(self) -> None:
+    def test_format_diagnostic_default_colors_auto_detects(self) -> None:
         """use_colors=None delegates to _should_use_colors()."""
         err = HorsiesError(message='auto')
         with mock.patch('horsies.core.errors._should_use_colors', return_value=False):
@@ -374,7 +374,7 @@ class TestTaskDefinitionError:
         assert err.message == 'missing return type'
         assert err.code == HorsiesErrorCode.TASK_NO_RETURN_TYPE
 
-    def test_format_rust_style(self) -> None:
+    def test_format_diagnostic(self) -> None:
         err = TaskDefinitionError(
             message='invalid return type',
             code=HorsiesErrorCode.TASK_INVALID_RETURN_TYPE,
@@ -405,7 +405,7 @@ class TestRegistryError:
         assert err.message == 'task not found'
         assert err.code == HorsiesErrorCode.TASK_NOT_REGISTERED
 
-    def test_format_rust_style(self) -> None:
+    def test_format_diagnostic(self) -> None:
         err = RegistryError(
             message='duplicate name',
             code=HorsiesErrorCode.TASK_DUPLICATE_NAME,
@@ -623,7 +623,7 @@ class TestValidationReport:
         report.add(ConfigurationError(message='error 3'))
         assert len(report.errors) == 3
 
-    def test_format_rust_style_summary(self) -> None:
+    def test_format_diagnostic_summary(self) -> None:
         report = ValidationReport('test')
         report.add(ConfigurationError(message='first error'))
         report.add(ConfigurationError(message='second error'))
@@ -632,13 +632,13 @@ class TestValidationReport:
         assert 'second error' in formatted
         assert 'aborting due to 2 previous errors' in formatted
 
-    def test_format_rust_style_empty_report(self) -> None:
+    def test_format_diagnostic_empty_report(self) -> None:
         """Formatting an empty report still produces the summary line."""
         report = ValidationReport('empty')
         formatted = report.format_diagnostic(use_colors=False)
         assert 'aborting due to 0 previous errors' in formatted
 
-    def test_format_rust_style_with_colors(self) -> None:
+    def test_format_diagnostic_with_colors(self) -> None:
         """Colored output contains ANSI escape codes."""
         report = ValidationReport('test')
         report.add(ConfigurationError(message='err'))

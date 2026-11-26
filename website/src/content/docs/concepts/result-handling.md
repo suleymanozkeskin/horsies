@@ -99,7 +99,7 @@ match divide.send(a=10, b=2):
 
 ### ReadError
 
-`ReadError` is a closed union of frozen classes. Each class has the name of its code. A `match` on `ReadError` is exhaustive under a type checker. Each class has `code` (its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` also has `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`).
+`ReadError` is a closed union of frozen classes. Each class has the name of its code. A `match` on `ReadError` is exhaustive under a type checker. Each class has `code` (its catalog member) and `message` (the subject and the cause). `ReadDatabaseError` also has `retryable` (whether the cause may clear) and `cause` (the exception of the cause, or `NoCause()`).
 
 | Class | Code | When | Kept by `TaskHandle` |
 |-------|------|------|----------------------|
@@ -112,7 +112,7 @@ match divide.send(a=10, b=2):
 | `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form there | No |
 | `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
 | `ResultDeserializationError` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types. The same read gives the same error until the stored value changes | Yes |
-| `UnknownCustomCode` | `OperationalCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` of the task does not name: a row of another version of the task. `custom_code` holds the stored text. It shares its code with `ResultDeserializationError` and names the code | Yes |
+| `UnknownCustomCode` | `RetrievalCode.UNKNOWN_CUSTOM_CODE` | The stored error has a custom code that the declared `Enum` of the task does not name: a row of another version of the task. `custom_code` holds the stored text. It shares its code with `ResultDeserializationError` and names the code | Yes |
 | `ReadDatabaseError` | `OperationalCode.DATABASE_ERROR` | The database, the connection or the core call failed, or a workflow handle read found stored workflow data that is not valid. The condition can clear, so a later read can succeed | No |
 | `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value with: the handle was built by id, or the task or the workflow is not registered here | Yes |
 | `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CONTEXT_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read | No |

@@ -256,10 +256,10 @@ match spec.start():
 | Variant | `code` | Other fields | `retryable` |
 |---|---|---|---|
 | `WorkflowStartBrokerNotConfigured` | `BROKER_NOT_CONFIGURED` | – | `False` |
-| `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `exception: BaseException \| NoCause` | `False` |
+| `WorkflowStartValidationFailed` | `VALIDATION_FAILED` | `cause: BaseException \| NoCause` | `False` |
 | `WorkflowStartIdConflict` | `WORKFLOW_ID_CONFLICT` | `existing_workflow_name: str` | `False` |
 | `WorkflowStartCommandConflict` | `WORKFLOW_COMMAND_CONFLICT` | – | `False` |
-| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `exception: BaseException` | the core's classification |
+| `WorkflowStartEnqueueFailed` | `ENQUEUE_FAILED` | `cause: BaseException` | the core's classification |
 | `WorkflowStartAsyncContext` | `ASYNC_CONTEXT` | – | `False` |
 
 ### WorkflowStartErrorCode
@@ -308,7 +308,7 @@ handle.workflow_id  # uuid.UUID — the workflow's id; str(handle.workflow_id) i
 `WorkflowHandle` is a `@dataclass` with `workflow_id: uuid.UUID` and `broker: PostgresBroker`; pyright refuses a `str` id. To reconnect to a workflow whose id you have as text (from a database, an HTTP request, or a previous session), parse it once with `WorkflowHandle.for_id(text, broker)`:
 
 - `Ok(handle)`: the text is a UUID in any spelling that `uuid.UUID` accepts (upper case, braces, `urn:uuid:`, no hyphens); `handle.workflow_id` is the UUID. Nothing is read.
-- `Err(WorkflowHandleInvalidWorkflowId)`: the text is not a UUID. Fields: `message`, `workflow_id_text` (the text as given), `exception` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `WorkflowHandleError` variant.
+- `Err(WorkflowHandleInvalidWorkflowId)`: the text is not a UUID. Fields: `message`, `workflow_id_text` (the text as given), `cause` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `WorkflowHandleError` variant.
 
 ```python
 from horsies import Err, Ok, WorkflowHandle
@@ -410,15 +410,15 @@ Non-blocking single DB query. Returns `Err(ResultNotReady(...))` if the node has
 
 ### WorkflowHandleError / WorkflowHandleErrorCode
 
-`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `exception` needs the match first. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
+`WorkflowHandleError` is a union with one frozen variant per `WorkflowHandleErrorCode` member other than `INVALID_WORKFLOW_ID`. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `exception` needs the match first. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
 <!-- members: WorkflowHandleErrorCode -->
 | Code | Variant | Other fields | Retryable | After the failure |
 |---|---|---|---|---|
 | `WORKFLOW_NOT_FOUND` | `WorkflowHandleNotFound` | – | No | No workflow has this id; nothing changed |
-| `DATABASE_OPERATION_FAILED` | `WorkflowHandleDatabaseOperationFailed` | `exception: BaseException` | the core's classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
-| `STORED_DATA_INVALID` | `WorkflowHandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
-| `RESUME_RECOVERY_FAILED` | `WorkflowHandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
+| `DATABASE_OPERATION_FAILED` | `WorkflowHandleDatabaseOperationFailed` | `cause: BaseException` | the core's classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
+| `STORED_DATA_INVALID` | `WorkflowHandleStoredDataInvalid` | `cause: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
+| `RESUME_RECOVERY_FAILED` | `WorkflowHandleResumeRecoveryFailed` | `cause: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
 | `ASYNC_CONTEXT` | `WorkflowHandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `Err(AsyncContext(...))` instead) |
 
 ```python

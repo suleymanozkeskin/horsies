@@ -177,7 +177,7 @@ def _enqueue_failed(*, retryable: bool) -> Err[DatabaseEnqueueFailed]:
     return Err(DatabaseEnqueueFailed(
         message='db gone',
         retryable=retryable,
-        exception=ConnectionError('db gone'),
+        cause=ConnectionError('db gone'),
     ))
 
 

@@ -117,7 +117,7 @@ class TestPauseWorkflowResult:
             ),
             retryable=True,
             workflow_id=PAUSE_WORKFLOW_ID,
-            exception=core.CoreConnectionError(
+            cause=core.CoreConnectionError(
                 'pause_workflow', 'connection failed: connection refused', True,
             ),
         )
@@ -137,7 +137,7 @@ class TestPauseWorkflowResult:
                 f'Pause failed for workflow {PAUSE_WORKFLOW_ID}: invalid status: BOGUS'
             ),
             workflow_id=PAUSE_WORKFLOW_ID,
-            exception=core.CoreContractViolation(
+            cause=core.CoreContractViolation(
                 'pause_workflow', 'invalid status: BOGUS',
             ),
         )
@@ -160,7 +160,7 @@ class TestPauseWorkflowResult:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, WorkflowHandleDatabaseOperationFailed)
-        assert err.exception is refused
+        assert err.cause is refused
         assert err.retryable is True
 
 
@@ -230,7 +230,7 @@ class TestResumeThroughCore:
                 'tree failed: broker error: connection failed: connection refused'
             ),
             workflow_id=PAUSE_WORKFLOW_ID,
-            exception=core.CoreConnectionError(
+            cause=core.CoreConnectionError(
                 'resume_workflow', 'connection failed: connection refused', True,
             ),
         )
@@ -252,7 +252,7 @@ class TestResumeThroughCore:
             ),
             retryable=True,
             workflow_id=PAUSE_WORKFLOW_ID,
-            exception=core.CorePreconditionFailed(
+            cause=core.CorePreconditionFailed(
                 'resume_workflow',
                 'child spec source: build of the child did not run: queue full',
                 True,
@@ -335,7 +335,7 @@ class TestPauseSyncWrapper:
         assert isinstance(err, WorkflowHandleDatabaseOperationFailed)
         assert err.workflow_id == PAUSE_WORKFLOW_ID
         assert err.retryable is True
-        assert err.exception is refused
+        assert err.cause is refused
 
     def test_unexpected_exception_propagates(self) -> None:
         """An exception that is not a CoreError propagates unchanged."""
@@ -381,7 +381,7 @@ class TestResumeSyncWrapper:
         assert isinstance(err, WorkflowHandleDatabaseOperationFailed)
         assert err.workflow_id == PAUSE_WORKFLOW_ID
         assert err.retryable is True
-        assert err.exception is refused
+        assert err.cause is refused
 
     def test_unexpected_exception_propagates(self) -> None:
         """An exception that is not a CoreError propagates unchanged."""

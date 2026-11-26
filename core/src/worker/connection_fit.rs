@@ -50,7 +50,7 @@ use crate::core::config::worker_profile::{
     SharedAsyncSetting, SharedThreadSetting, WorkerProfile,
 };
 use crate::core::config::{AppConfig, PostgresConfig};
-use crate::core::error::{HorsiesErrorCode, HorsiesError};
+use crate::core::error::{HorsiesError, HorsiesErrorCode};
 use crate::db::{CheckoutClass, CorePool, StatementBound, TypedStatement};
 use crate::handle::CoreHandle;
 

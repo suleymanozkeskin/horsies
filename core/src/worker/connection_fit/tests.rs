@@ -396,7 +396,10 @@ async fn a_profile_value_outside_its_bound_is_refused_and_nothing_is_read() {
         messages,
         ["worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024"],
     );
-    assert_eq!(errors[0].code, Some(HorsiesErrorCode::ConfigInvalidWorkerProfile));
+    assert_eq!(
+        errors[0].code,
+        Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)
+    );
 }
 
 #[tokio::test]

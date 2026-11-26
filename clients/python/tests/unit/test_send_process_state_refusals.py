@@ -110,7 +110,7 @@ def _failed_send(delay_seconds: int | None) -> TaskSendEnqueueFailed:
         ),
         message='Failed to enqueue task test.refused_fn: connection lost',
         retryable=True,
-        exception=NoCause(),
+        cause=NoCause(),
     )
 
 
@@ -234,7 +234,7 @@ class TestBrokerEnqueue:
         assert is_err(result)
         failed = result.err_value
         assert isinstance(failed, DatabaseEnqueueFailed)
-        assert failed.exception is error
+        assert failed.cause is error
         assert failed.retryable is retryable
 
 

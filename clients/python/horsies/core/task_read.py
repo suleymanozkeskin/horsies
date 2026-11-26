@@ -27,7 +27,6 @@ from horsies.core.brokers.result_types import (
     DatabaseResult,
     DatabaseWaitInsideTask,
     RawResultRecord,
-    broker_error_cause,
 )
 from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.typed import (
@@ -162,7 +161,7 @@ def _read_error_of_broker(task_id: UUID, error: DatabaseOperationError) -> ReadE
                     f'({error.code.value}): {error.message}'
                 ),
                 retryable=error.retryable,
-                exception=broker_error_cause(error),
+                cause=error.failure_cause(),
             )
         case _ as unreachable:
             assert_never(unreachable)

@@ -666,7 +666,7 @@ class TestWorkflowHandleSubWorkflowFields:
         err = tasks_r.err_value
         assert isinstance(err, WorkflowHandleStoredDataInvalid)
         assert err.code == WorkflowHandleErrorCode.STORED_DATA_INVALID
-        assert isinstance(err.exception, SerializationError)
+        assert isinstance(err.cause, SerializationError)
         assert 'sub_workflow_summary JSON corrupt' in err.message
 
     async def test_subworkflow_node_with_bad_status_summary_returns_err(
@@ -726,7 +726,7 @@ class TestWorkflowHandleSubWorkflowFields:
         err = tasks_r.err_value
         assert isinstance(err, WorkflowHandleStoredDataInvalid)
         assert err.code == WorkflowHandleErrorCode.STORED_DATA_INVALID
-        assert isinstance(err.exception, ValueError)
+        assert isinstance(err.cause, ValueError)
         assert 'sub_workflow_summary invalid for node' in err.message
 
 
@@ -1431,12 +1431,12 @@ def _assert_failed_connect(
     prefix = f'{label} failed for workflow {workflow_id}: '
     assert error.message.startswith(prefix)
     cause_text = error.message.removeprefix(prefix)
-    assert type(error.exception) is CoreConnectionError
-    assert error.exception.subject == subject
-    assert error.exception.message != ''
-    assert cause_text == f'broker error: {error.exception.message}'
-    assert error.exception.retryable is True
-    assert str(error.exception) == f'{subject}: {error.exception.message}'
+    assert type(error.cause) is CoreConnectionError
+    assert error.cause.subject == subject
+    assert error.cause.message != ''
+    assert cause_text == f'broker error: {error.cause.message}'
+    assert error.cause.retryable is True
+    assert str(error.cause) == f'{subject}: {error.cause.message}'
 
 
 @pytest.mark.integration

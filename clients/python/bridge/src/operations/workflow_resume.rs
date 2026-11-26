@@ -20,7 +20,7 @@
 //! function's contract raises `PanicException`, as Python raises
 //! `OutcomeDecodeError`.
 
-use horsies_core::{HandleOperation, WorkflowHandleError, HandleResult};
+use horsies_core::{HandleOperation, HandleResult, WorkflowHandleError};
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
 use uuid::Uuid;
@@ -165,22 +165,26 @@ mod tests {
                 message,
                 workflow_id,
             },
-            WorkflowHandleErrorCode::DatabaseOperationFailed => WorkflowHandleError::DatabaseOperationFailed {
-                message,
-                retryable,
-                workflow_id,
-                cause: cause(),
-            },
+            WorkflowHandleErrorCode::DatabaseOperationFailed => {
+                WorkflowHandleError::DatabaseOperationFailed {
+                    message,
+                    retryable,
+                    workflow_id,
+                    cause: cause(),
+                }
+            }
             WorkflowHandleErrorCode::StoredDataInvalid => WorkflowHandleError::StoredDataInvalid {
                 message,
                 workflow_id,
                 cause: horsies_core::WorkflowError::InvalidStatus("BOGUS".to_owned()),
             },
-            WorkflowHandleErrorCode::ResumeRecoveryFailed => WorkflowHandleError::ResumeRecoveryFailed {
-                message,
-                workflow_id,
-                cause: cause(),
-            },
+            WorkflowHandleErrorCode::ResumeRecoveryFailed => {
+                WorkflowHandleError::ResumeRecoveryFailed {
+                    message,
+                    workflow_id,
+                    cause: cause(),
+                }
+            }
             WorkflowHandleErrorCode::AsyncContext => WorkflowHandleError::AsyncContext {
                 message,
                 workflow_id,
@@ -205,7 +209,10 @@ mod tests {
         assert!(matches!(
             resume_outcome(
                 id,
-                Err(handle_error(WorkflowHandleErrorCode::WorkflowNotFound, false)),
+                Err(handle_error(
+                    WorkflowHandleErrorCode::WorkflowNotFound,
+                    false
+                )),
                 None,
                 None
             ),
@@ -213,26 +220,38 @@ mod tests {
         ));
         match resume_outcome(
             id,
-            Err(handle_error(WorkflowHandleErrorCode::DatabaseOperationFailed, true)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::DatabaseOperationFailed,
+                true,
+            )),
             None,
             None,
         ) {
             WorkflowResumeOutcome::Failed(failed) => {
                 assert_eq!(failed.operation, HandleOperation::Resume);
-                assert_eq!(failed.error.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+                assert_eq!(
+                    failed.error.code(),
+                    WorkflowHandleErrorCode::DatabaseOperationFailed
+                );
                 assert!(failed.error.retryable());
             }
             _ => panic!("a database failure is a failure"),
         }
         match resume_outcome(
             id,
-            Err(handle_error(WorkflowHandleErrorCode::ResumeRecoveryFailed, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::ResumeRecoveryFailed,
+                false,
+            )),
             None,
             None,
         ) {
             WorkflowResumeOutcome::Failed(failed) => {
                 assert_eq!(failed.operation, HandleOperation::Resume);
-                assert_eq!(failed.error.code(), WorkflowHandleErrorCode::ResumeRecoveryFailed);
+                assert_eq!(
+                    failed.error.code(),
+                    WorkflowHandleErrorCode::ResumeRecoveryFailed
+                );
                 assert_eq!(failed.error.message(), "planned");
             }
             _ => panic!("a failed recovery pass is a failure"),
@@ -245,7 +264,10 @@ mod tests {
         let interrupt = Some(pyo3::exceptions::PyKeyboardInterrupt::new_err(()));
         let outcome = resume_outcome(
             Uuid::nil(),
-            Err(handle_error(WorkflowHandleErrorCode::DatabaseOperationFailed, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::DatabaseOperationFailed,
+                false,
+            )),
             interrupt,
             None,
         );
@@ -262,7 +284,10 @@ mod tests {
         ));
         let outcome = resume_outcome(
             Uuid::nil(),
-            Err(handle_error(WorkflowHandleErrorCode::DatabaseOperationFailed, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::DatabaseOperationFailed,
+                false,
+            )),
             None,
             exception,
         );

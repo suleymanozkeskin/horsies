@@ -78,7 +78,7 @@ class TestWrapStrategy:
         assert error.code == WorkflowHandleErrorCode.DATABASE_OPERATION_FAILED
         assert error.retryable is True
         assert error.workflow_id == WORKFLOW_ID
-        assert error.exception is refused
+        assert error.cause is refused
         getattr(broker._core_handle, f'{method}_async').assert_not_called()
 
     @pytest.mark.parametrize('name', list(WRAP_METHODS))
@@ -131,7 +131,7 @@ class TestReadStrategy:
         assert isinstance(error, ReadDatabaseError)
         assert 'TooManyPendingCalls' in error.message
         assert error.retryable is True
-        assert error.exception is refused
+        assert error.cause is refused
         getattr(broker._core_handle, f'{method}_async').assert_not_called()
 
     @pytest.mark.parametrize('name', list(READ_METHODS))

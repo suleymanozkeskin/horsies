@@ -29,8 +29,8 @@ def _every_variant(cause: BaseException) -> list[MonitoringQueryError]:
     """One value of each variant; each cause field holds ``cause``."""
     message = f'failed: {MESSAGE_MARKER}'
     return [
-        MonitoringQueryDatabaseOperationFailed(message=message, retryable=True, exception=cause),
-        MonitoringQueryHistoryContractViolation(message=message, exception=cause),
+        MonitoringQueryDatabaseOperationFailed(message=message, retryable=True, cause=cause),
+        MonitoringQueryHistoryContractViolation(message=message, cause=cause),
     ]
 
 

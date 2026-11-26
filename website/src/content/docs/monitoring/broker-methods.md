@@ -174,7 +174,7 @@ A page scans at most 500 PENDING and CLAIMED workflow tasks, from where the prev
 
 **Returns:** `Ok(int)`: the number of tasks cancelled.
 
-**Errors:** `CLEANUP_FAILED` when the page fails. Nothing is committed; after a lost `COMMIT` reply, the outcome is unknown. When another sweep holds the scan cursor, the page is refused at once: the `exception` is `CoreServerError` with `sqlstate` `'55P03'`, and the error is retryable.
+**Errors:** `CLEANUP_FAILED` when the page fails. Nothing is committed; after a lost `COMMIT` reply, the outcome is unknown. When another sweep holds the scan cursor, the page is refused at once: the `cause` is `CoreServerError` with `sqlstate` `'55P03'`, and the error is retryable.
 
 ```python
 result = await broker.terminate_orphaned_workflow_tasks()

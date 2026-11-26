@@ -173,10 +173,8 @@ mod tests {
     #[test]
     fn encode_decode_task_result_err() {
         use crate::core::task::error::{OperationalCode, TaskError};
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
-            OperationalCode::TaskException,
-            "fail",
-        ));
+        let result: TaskResult<i32> =
+            TaskResult::Err(TaskError::builtin(OperationalCode::TaskException, "fail"));
         let bytes = encode_task_result(&result).unwrap();
         let back: TaskResult<i32> = decode_task_result(&bytes).unwrap();
         assert!(back.is_err());

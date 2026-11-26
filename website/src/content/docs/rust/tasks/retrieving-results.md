@@ -49,7 +49,7 @@ The read checks the limit first. A `Within` limit above `MAX_WAIT_LIMIT_MS` (4,2
 | `TaskNotFound { task_id, reason }` | `TASK_NOT_FOUND` | Neither the live table nor the history holds the task. `reason` is a `TaskAbsenceReason`; see below. A handle built by id can race the commit of its send | May find it |
 | `ResultNotAvailable { task_id, status }` | `RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result | Kept: returns the same |
 | `StoredResultUnreadable { task_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of this task's types; `cause` names no value | Kept: returns the same |
-| `UnknownUserCode { task_id, code, code_type }` | `RESULT_DESERIALIZATION_ERROR` | The stored error has a user code that `E` does not name | Kept: returns the same |
+| `UnknownUserCode { task_id, code, code_type }` | `UNKNOWN_CUSTOM_CODE` | The stored error has a user code that `E` does not name | Kept: returns the same |
 | `InvalidInput { task_id, cause }` | `INVALID_INPUT` | The `Within` limit is above `MAX_WAIT_LIMIT_MS`. `cause` is `WaitLimitRefused`. Nothing was read | Refuses the same limit again. A limit within the bound reads |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read. Compose the tasks with a workflow | – |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread where a tokio runtime is current. Nothing was read. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread) | – |

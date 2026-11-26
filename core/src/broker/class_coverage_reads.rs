@@ -34,7 +34,7 @@ use crate::broker::class_coverage::{
 use crate::broker::core_rows::{column, one_row, RowDecodeError};
 use crate::broker::error::BrokerError;
 use crate::broker::postgres::PostgresBroker;
-use crate::broker::result_types::{DatabaseOperationError, BrokerOperationSource, DatabaseResult};
+use crate::broker::result_types::{BrokerOperationSource, DatabaseOperationError, DatabaseResult};
 use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
 use crate::core::task::Execution;
 use crate::db::{

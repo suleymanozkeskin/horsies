@@ -83,7 +83,7 @@ def _db_err(
             message=f'Task cancel failed: {message}',
             retryable=retryable,
             task_id=task_id,
-            exception=exc,
+            cause=exc,
         )
     )
 

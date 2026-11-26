@@ -322,7 +322,7 @@ def _start_request(
             message=str(exc),
             workflow_name=spec.name,
             workflow_id=wf_id,
-            exception=exc,
+            cause=exc,
         ))
 
     # ── Zone 2: the spec as data (no I/O) ────────────────────────────
@@ -334,7 +334,7 @@ def _start_request(
                 message=f'the spec data of workflow {spec.name!r} does not encode: {refused}',
                 workflow_name=spec.name,
                 workflow_id=wf_id,
-                exception=refused,
+                cause=refused,
             ))
         case _ as unreachable:
             assert_never(unreachable)
@@ -366,7 +366,7 @@ def _start_call_failed(
         retryable=core_error_retryable(exc),
         workflow_name=spec.name,
         workflow_id=wf_id,
-        exception=exc,
+        cause=exc,
     )
 
 

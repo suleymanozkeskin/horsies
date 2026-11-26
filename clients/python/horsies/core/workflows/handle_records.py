@@ -80,5 +80,5 @@ def core_call_error(
         ),
         retryable=core_error_retryable(exc),
         workflow_id=str(workflow_id),
-        exception=exc,
+        cause=exc,
     )

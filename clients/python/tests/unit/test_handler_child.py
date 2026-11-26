@@ -1291,7 +1291,7 @@ class TestTheNodeReaderOfTheApp:
             code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
             message='task_workflow_node failed: the pool is closed',
             retryable=True,
-            exception=RuntimeError('the pool is closed'),
+            cause=RuntimeError('the pool is closed'),
         )
         handle = _NodeHandle(failed)
 

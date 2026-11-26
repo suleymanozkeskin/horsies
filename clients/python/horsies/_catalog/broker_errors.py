@@ -57,7 +57,7 @@ class DatabaseEnqueueFailed:
 
     ``retryable`` is the core's classification of the cause. An enqueue
     again with the same task id and payload is safe: the broker returns the
-    existing task for a duplicate. ``exception`` is ``NoCause()`` when the
+    existing task for a duplicate. ``cause`` is ``NoCause()`` when the
     broker found the failure by a data check (the conflicting row was gone).
     """
 
@@ -124,7 +124,7 @@ class DatabaseIdempotencyKeyConflict:
 class DatabaseInvalidJsonPayload:
     """Stored JSON failed strict validation. The stored data is unchanged.
 
-    The same read fails again. ``exception`` is ``NoCause()`` when a shape
+    The same read fails again. ``cause`` is ``NoCause()`` when a shape
     check found the failure without a Python exception.
     """
 
@@ -146,7 +146,7 @@ class DatabaseInvalidJsonPayload:
 class DatabaseInvalidTaskOptions:
     """The task options are not valid JSON or carry a retry limit that cannot be stored.
 
-    Nothing was written. The same options are refused again. ``exception``
+    Nothing was written. The same options are refused again. ``cause``
     is ``NoCause()`` when a check refused the options without a Python
     exception.
     """
@@ -170,7 +170,7 @@ class DatabaseInvalidInput:
     """An argument of the call was refused before anything ran. Nothing was written.
 
     The message names the argument and the rule. The same arguments are
-    refused again. ``exception`` is ``NoCause()`` when a check refused the
+    refused again. ``cause`` is ``NoCause()`` when a check refused the
     argument without a Python exception.
     """
 

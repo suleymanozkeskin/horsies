@@ -62,13 +62,13 @@ def _every_variant(cause: BaseException) -> list[WorkflowHandleError]:
     return [
         WorkflowHandleNotFound(message=message, workflow_id=WORKFLOW_ID),
         WorkflowHandleDatabaseOperationFailed(
-            message=message, retryable=True, workflow_id=WORKFLOW_ID, exception=cause,
+            message=message, retryable=True, workflow_id=WORKFLOW_ID, cause=cause,
         ),
         WorkflowHandleStoredDataInvalid(
-            message=message, workflow_id=WORKFLOW_ID, exception=cause,
+            message=message, workflow_id=WORKFLOW_ID, cause=cause,
         ),
         WorkflowHandleResumeRecoveryFailed(
-            message=message, workflow_id=WORKFLOW_ID, exception=cause,
+            message=message, workflow_id=WORKFLOW_ID, cause=cause,
         ),
         WorkflowHandleAsyncContext(message=message, workflow_id=WORKFLOW_ID),
     ]
@@ -166,7 +166,7 @@ class TestStoredWorkflowStatus:
                 f'Status failed for workflow {WORKFLOW_ID}: invalid status: {UNKNOWN_STATUS}'
             ),
             workflow_id=WORKFLOW_ID,
-            exception=_UNKNOWN_STATUS_CAUSE,
+            cause=_UNKNOWN_STATUS_CAUSE,
         )
         handle = _handle_answering('workflow_status_async', invalid)
 
@@ -176,7 +176,7 @@ class TestStoredWorkflowStatus:
         err = result.err_value
         assert err is invalid
         assert isinstance(err, WorkflowHandleStoredDataInvalid)
-        assert err.exception is _UNKNOWN_STATUS_CAUSE
+        assert err.cause is _UNKNOWN_STATUS_CAUSE
         assert err.workflow_id == WORKFLOW_ID
         assert UNKNOWN_STATUS in err.message
 
@@ -248,7 +248,7 @@ class TestCancelOutcome:
             message=f'Cancel failed for workflow {WORKFLOW_ID}: {CAUSE_MARKER}',
             retryable=True,
             workflow_id=WORKFLOW_ID,
-            exception=cause,
+            cause=cause,
         )
         handle = _handle_with_core_answer(failed)
 
@@ -258,7 +258,7 @@ class TestCancelOutcome:
         err = result.err_value
         assert err is failed
         assert isinstance(err, WorkflowHandleDatabaseOperationFailed)
-        assert err.exception is cause
+        assert err.cause is cause
         assert err.retryable is True
         assert CAUSE_MARKER in err.message
 
@@ -271,7 +271,7 @@ class TestCancelOutcome:
 
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowHandleDatabaseOperationFailed)
-        assert result.err_value.exception is not_started
+        assert result.err_value.cause is not_started
         assert result.err_value.retryable is False
 
 
@@ -296,17 +296,17 @@ def _wait_failures() -> list[tuple[Any, ReadError]]:
                 message=failed_message,
                 retryable=True,
                 workflow_id=WORKFLOW_ID,
-                exception=connection_lost,
+                cause=connection_lost,
             ),
-            ReadDatabaseError(message=failed_message, retryable=True, exception=connection_lost),
+            ReadDatabaseError(message=failed_message, retryable=True, cause=connection_lost),
         ),
         (
             WorkflowHandleStoredDataInvalid(
                 message=failed_message,
                 workflow_id=WORKFLOW_ID,
-                exception=contract_violated,
+                cause=contract_violated,
             ),
-            ReadDatabaseError(message=failed_message, retryable=False, exception=contract_violated),
+            ReadDatabaseError(message=failed_message, retryable=False, cause=contract_violated),
         ),
     ]
 
@@ -395,7 +395,7 @@ class TestStoredSubworkflowSummary:
         assert isinstance(err, WorkflowHandleStoredDataInvalid)
         assert err.code is WorkflowHandleErrorCode.STORED_DATA_INVALID
         assert not err.retryable
-        assert isinstance(err.exception, EmptyJsonTextError)
+        assert isinstance(err.cause, EmptyJsonTextError)
         assert err.message == (
             'sub_workflow_summary JSON corrupt for node parent:0: '
             'JSON parse failed: the text is empty'
@@ -410,7 +410,7 @@ class TestStoredSubworkflowSummary:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, WorkflowHandleStoredDataInvalid)
-        assert isinstance(err.exception, SerializationError)
+        assert isinstance(err.cause, SerializationError)
         assert 'sub_workflow_summary JSON corrupt for node parent:0' in err.message
 
     @pytest.mark.asyncio
@@ -422,7 +422,7 @@ class TestStoredSubworkflowSummary:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, WorkflowHandleStoredDataInvalid)
-        assert isinstance(err.exception, SerializationError)
+        assert isinstance(err.cause, SerializationError)
         assert 'nested deeper than' in err.message
 
     @pytest.mark.asyncio
@@ -434,10 +434,10 @@ class TestStoredSubworkflowSummary:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, WorkflowHandleStoredDataInvalid)
-        assert isinstance(err.exception, ValueError)
-        assert not isinstance(err.exception, SerializationError)
+        assert isinstance(err.cause, ValueError)
+        assert not isinstance(err.cause, SerializationError)
         assert 'sub_workflow_summary invalid for node parent:0' in err.message
-        assert 'NOT_A_STATUS' in str(err.exception)
+        assert 'NOT_A_STATUS' in str(err.cause)
 
 
 class TestStoredNodeResult:

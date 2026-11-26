@@ -339,7 +339,10 @@ mod tests {
                 }],
                 "{code:?}"
             );
-            assert_eq!(found[0].error_code(), HorsiesErrorCode::TaskInvalidErrorCode);
+            assert_eq!(
+                found[0].error_code(),
+                HorsiesErrorCode::TaskInvalidErrorCode
+            );
             assert_eq!(found[0].error_code().as_code_str(), "HRS-112");
         }
     }
@@ -354,7 +357,10 @@ mod tests {
                 refusal: CodeTextRefusal::ReservedName,
             }]
         );
-        assert_eq!(found[0].error_code(), HorsiesErrorCode::CheckReservedCodeCollision);
+        assert_eq!(
+            found[0].error_code(),
+            HorsiesErrorCode::CheckReservedCodeCollision
+        );
     }
 
     #[test]
@@ -369,7 +375,10 @@ mod tests {
                 }],
                 "{value}"
             );
-            assert_eq!(found[0].error_code(), HorsiesErrorCode::CheckReservedCodeCollision);
+            assert_eq!(
+                found[0].error_code(),
+                HorsiesErrorCode::CheckReservedCodeCollision
+            );
             assert_eq!(found[0].error_code().as_code_str(), "HRS-212");
         }
     }
@@ -386,7 +395,10 @@ mod tests {
             code: "RATE_LIMITED".to_owned(),
         };
         assert_eq!(found, [repeat.clone(), repeat]);
-        assert_eq!(found[0].error_code(), HorsiesErrorCode::TaskDuplicateErrorCode);
+        assert_eq!(
+            found[0].error_code(),
+            HorsiesErrorCode::TaskDuplicateErrorCode
+        );
         assert_eq!(found[0].error_code().as_code_str(), "HRS-113");
     }
 

@@ -77,11 +77,11 @@ def _assert_failed_connect(
     assert error.message.startswith(prefix)
     cause_text = error.message.removeprefix(prefix)
     assert cause_text != ''
-    assert type(error.exception) is CoreConnectionError
-    assert error.exception.subject == subject
-    assert error.exception.message == cause_text
-    assert error.exception.retryable is True
-    assert str(error.exception) == f'{subject}: {cause_text}'
+    assert type(error.cause) is CoreConnectionError
+    assert error.cause.subject == subject
+    assert error.cause.message == cause_text
+    assert error.cause.retryable is True
+    assert str(error.cause) == f'{subject}: {cause_text}'
 
 
 async def test_a_failed_database_ping_is_db_ping_failed(
@@ -167,7 +167,7 @@ async def test_a_refused_argument_is_invalid_input_with_no_cause(
     assert error.code is DatabaseErrorCode.INVALID_INPUT
     assert error.retryable is False
     assert error.message == 'timeout_seconds must be positive, got 0'
-    assert type(error.exception) is NoCause
+    assert type(error.cause) is NoCause
 
 
 async def test_a_refused_history_limit_is_invalid_input_with_no_cause(
@@ -179,7 +179,7 @@ async def test_a_refused_history_limit_is_invalid_input_with_no_cause(
     error = result.err_value
     assert type(error) is DatabaseInvalidInput
     assert error.message == 'limit must be positive when set, got 0'
-    assert type(error.exception) is NoCause
+    assert type(error.cause) is NoCause
 
 
 async def test_a_ping_on_a_broker_with_no_listener_is_listener_disabled(

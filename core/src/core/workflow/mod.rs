@@ -9,7 +9,9 @@ pub mod status;
 pub mod summary;
 
 pub use context::{WorkflowContext, WORKFLOW_CTX_KWARG, WORKFLOW_META_KWARG};
-pub use handle_types::{WorkflowHandleErrorCode, HandleOperation, WorkflowHandleError, HandleResult};
+pub use handle_types::{
+    HandleOperation, HandleResult, WorkflowHandleError, WorkflowHandleErrorCode,
+};
 pub use meta::WorkflowMeta;
 pub use node::{AnyNode, JoinType, NodeKey, SubWorkflowParams};
 pub use policy::{SuccessCase, SuccessPolicy};

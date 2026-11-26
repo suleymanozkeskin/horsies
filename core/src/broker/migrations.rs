@@ -28,7 +28,10 @@
 //!   (`1005_claim_generation_by_status.sql`) adds the CHECK that a CLAIMED or
 //!   RUNNING task row holds its claim generation (`claimed_at`). Version 1006
 //!   (`1006_typescript_client_family.sql`) adds the client family
-//!   `TYPESCRIPT` to the CHECK of the family row.
+//!   `TYPESCRIPT` to the CHECK of the family row. Version 1007
+//!   (`1007_sub_workflow_failed_code.sql`) writes the code text
+//!   `SUB_WORKFLOW_FAILED` in the two SQL functions that write the error of a
+//!   failed sub-workflow node.
 //!
 //! The released text of a migration never changes: a database that applied
 //! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
@@ -165,12 +168,17 @@ pub(crate) const CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION: i64 = 1005;
 /// (`core/migrations/1006_typescript_client_family.sql`).
 pub(crate) const TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION: i64 = 1006;
 
+/// Version of the migration that writes the code text `SUB_WORKFLOW_FAILED`
+/// in the SQL functions that write the error of a failed sub-workflow node
+/// (`core/migrations/1007_sub_workflow_failed_code.sql`).
+pub(crate) const SUB_WORKFLOW_FAILED_CODE_MIGRATION_VERSION: i64 = 1007;
+
 /// The files of `core/migrations/`, one per migration after the baseline,
 /// in apply order: the version of the migration, the file name and the text.
 /// The core includes them by relative path and keeps no copy. A file added to
 /// the folder without a line here fails
 /// `later_migration_list_is_the_whole_folder`.
-pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 6] = [
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 7] = [
     (
         LIFECYCLE_RECORD_MIGRATION_VERSION,
         "1001_lifecycle_record.sql",
@@ -200,6 +208,11 @@ pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 6] = [
         TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION,
         "1006_typescript_client_family.sql",
         include_str!("../../migrations/1006_typescript_client_family.sql"),
+    ),
+    (
+        SUB_WORKFLOW_FAILED_CODE_MIGRATION_VERSION,
+        "1007_sub_workflow_failed_code.sql",
+        include_str!("../../migrations/1007_sub_workflow_failed_code.sql"),
     ),
 ];
 
@@ -404,6 +417,21 @@ const MIGRATION_SOURCES: [MigrationSource; 7] = [
             LATER_MIGRATION_FILES[5].2,
         ),
         admitted_families: &[ClientFamily::TypeScript],
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The migration adds no column and builds no index: it replaces
+    // horsies_task_error_envelope and horsies_workflow_child_node_result in
+    // place, with the code text SUB_WORKFLOW_FAILED. It writes no row.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[6].0,
+        description: "sub-workflow failed code",
+        script: SqlScript::new(
+            "migration_1007_sub_workflow_failed_code",
+            LATER_MIGRATION_FILES[6].2,
+        ),
+        admitted_families: &[],
         readers: ReaderPublication::NotPublished,
         exact_indexes: &[],
         retired_indexes: &[],

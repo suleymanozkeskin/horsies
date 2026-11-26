@@ -3,7 +3,7 @@
 //! leaves nothing registered: `main` returns the refusal with `?`, so a
 //! binary with a mismatched task never reaches `horsies::cli::run`.
 
-use horsies::{HorsiesErrorCode, Horsies, HorsiesError};
+use horsies::{Horsies, HorsiesError, HorsiesErrorCode};
 use horsies_queue_mismatch_tests::{
     analytics_compute, compute_body, custom_mode_config, default_mode_config, fast_compute, ping,
     slow_compute, ComputeInput, UNUSED_DATABASE_URL,

@@ -221,11 +221,11 @@ def _core_failures() -> list[MonitoringQueryDatabaseOperationFailed | Monitoring
         MonitoringQueryDatabaseOperationFailed(
             message=MESSAGE,
             retryable=True,
-            exception=CoreConnectionError('task list query', 'connection refused', True),
+            cause=CoreConnectionError('task list query', 'connection refused', True),
         ),
         MonitoringQueryHistoryContractViolation(
             message='task detail query failed: history row has status BOGUS',
-            exception=HistoryContractError('history row has status BOGUS'),
+            cause=HistoryContractError('history row has status BOGUS'),
         ),
     ]
 
@@ -323,7 +323,7 @@ class TestFailures:
 
         match result:
             case Err(MonitoringQueryDatabaseOperationFailed() as error):
-                assert error.exception is raised
+                assert error.cause is raised
                 assert error.retryable is retryable
                 assert error.message.startswith('task list query failed: ')
             case _:

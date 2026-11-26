@@ -18,7 +18,6 @@ from horsies.core.brokers.result_types import (
     DatabaseAsyncContext,
     DatabaseListenerDisabled,
     DatabaseWaitInsideTask,
-    broker_error_cause,
 )
 
 __all__ = [
@@ -41,5 +40,4 @@ __all__ = [
     'DatabaseAsyncContext',
     'DatabaseListenerDisabled',
     'DatabaseWaitInsideTask',
-    'broker_error_cause',
 ]

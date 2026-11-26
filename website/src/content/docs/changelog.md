@@ -78,6 +78,89 @@ there is no migration contract between pre-1.0 versions.
   - The database does not change: the columns `allow_failed_deps` and
     `workflow_ctx_from` of `horsies_workflow_tasks` and the SQL function
     parameters keep their names. There is no migration.
+- **Breaking: one name per concept for the errors and their codes.** The old
+  names, code texts and field names have no alias.
+  - The database error family says "database" in Python and Rust:
+    `BrokerOperationError` is `DatabaseOperationError`, `BrokerErrorCode` is
+    `DatabaseErrorCode`, `BrokerOperationFailedCode` is
+    `DatabaseOperationFailedCode`, `BrokerResult` is `DatabaseResult`, and
+    each `Broker*` class is `Database*` (`DatabaseOperationFailed`,
+    `DatabaseEnqueueFailed`, `DatabasePayloadMismatch`,
+    `DatabaseIdempotencyKeyConflict`, `DatabaseInvalidJsonPayload`,
+    `DatabaseInvalidTaskOptions`, `DatabaseInvalidInput`,
+    `DatabaseAsyncContext`, `DatabaseListenerDisabled`,
+    `DatabaseWaitInsideTask`, `DatabaseNotAttached`,
+    `DatabaseNoTypeAvailable`; the unions `DatabaseCoreError`,
+    `DatabaseCoreEnqueueError`, `DatabaseEnqueueError` and
+    `DatabaseSyncCallError`). The `retryable` of each class does not change.
+  - Python: the read failure `BrokerError` is `ReadDatabaseError`.
+  - The errors of a workflow handle say "workflow handle":
+    `HandleOperationError` is `WorkflowHandleError` and `HandleErrorCode` is
+    `WorkflowHandleErrorCode`. The Python classes are
+    `WorkflowHandleNotFound`, `WorkflowHandleAsyncContext`,
+    `WorkflowHandleDatabaseOperationFailed`,
+    `WorkflowHandleResumeRecoveryFailed`, `WorkflowHandleStoredDataInvalid`
+    and `WorkflowHandleInvalidWorkflowId`. Rust:
+    `WorkflowHandleError::WorkflowNotFound` is `NotFound`.
+  - Python: `WorkflowHandleInvalidWorkflowId` has the code
+    `INVALID_WORKFLOW_ID`, a new member of `WorkflowHandleErrorCode`. No
+    handle operation gives it, and `WorkflowHandleError` does not hold it.
+  - `ErrorCode` (the `HRS-nnn` codes) is `HorsiesErrorCode`. Rust: the
+    family of an `HRS-nnn` error, `ErrorCategory`, is
+    `HorsiesErrorCategory`; the monitoring `ErrorCategory` keeps its name.
+    The `HRS-nnn` numbers do not change.
+  - `OperationalErrorCode` is `OperationalCode`.
+  - Python: `SubWorkflowError` is `SubWorkflowFailure`,
+    `FlattenedException` is `ExceptionRecord`,
+    `WorkflowContextMissingIdError` is `WorkflowContextMissingId`, and
+    `format_rust_style()` of `HorsiesError`, `ValidationReport` and
+    `MultipleValidationErrors` is `format_diagnostic()`.
+  - Python: the cause field of a catalog error class is `cause` (it was
+    `exception`): on the classes of `DatabaseOperationError`,
+    `TaskSendError`, `WorkflowStartError`, `WorkflowHandleError`,
+    `MonitoringQueryError` and `TaskActionError`, on `ReadDatabaseError` and
+    on `WorkflowHandleInvalidWorkflowId`. `TaskError.exception` keeps its
+    name. Rust: the field `source` of
+    `MonitoringQueryError::DatabaseOperationFailed` and
+    `MonitoringQueryError::HistoryContractViolation` is `cause`.
+  - Python: `broker_error_cause(error)` is removed. Each class of
+    `DatabaseOperationError`, `TaskSendError`, `WorkflowStartError`,
+    `WorkflowHandleError`, `MonitoringQueryError` and `TaskActionError`, and
+    `WorkflowHandleInvalidWorkflowId`, has the method `failure_cause()`: the
+    exception of the cause, or `NoCause()`.
+  - Rust: `TaskSendError::SendSuppressed` is `Suppressed`. The code
+    `SEND_SUPPRESSED` does not change.
+  - Code texts: `DB_OPERATION_FAILED` is `DATABASE_OPERATION_FAILED`,
+    `DB_PING_FAILED` is `DATABASE_PING_FAILED`, `MODULE_EXEC_ERROR` is
+    `MODULE_IMPORT_ERROR`, `WORKFLOW_INVALID_CTX_FROM` is
+    `WORKFLOW_INVALID_CONTEXT_FROM`, `WORKFLOW_CTX_PARAM_MISSING` is
+    `WORKFLOW_CONTEXT_PARAMETER_MISSING`, `WORKFLOW_CTX_MISSING_ID` is
+    `WORKFLOW_CONTEXT_MISSING_ID`, `SUBWORKFLOW_FAILED` is
+    `SUB_WORKFLOW_FAILED`, `BROKER_ERROR` is `DATABASE_ERROR`,
+    `BROKER_INVALID_URL` is `DATABASE_INVALID_URL`, `BROKER_INIT_FAILED` is
+    `DATABASE_INIT_FAILED`, `CONFIG_INVALID_BROKER_POOL` is
+    `CONFIG_INVALID_DATABASE_POOL`, and `NO_BROKER` is `NO_DATABASE`. The
+    variants and the classes of these codes follow (for example Rust
+    `DatabasePingFailed`, `ModuleImportError`, `SubWorkflowFailed` and
+    `OperationalCode::DatabaseError`, Python
+    `TaskActionDatabaseOperationFailed` and
+    `MonitoringQueryDatabaseOperationFailed`). The web JSON of a failed
+    monitoring read or action gives the new code texts.
+  - Python `UnknownCustomCode` and Rust `ReadError::UnknownUserCode` and
+    `WorkflowReadError::UnknownUserCode` have the code
+    `UNKNOWN_CUSTOM_CODE`, a new member of `RetrievalCode`. Before, they
+    gave `RESULT_DESERIALIZATION_ERROR`.
+  - Stored text: three stored task codes change (`DATABASE_ERROR`,
+    `WORKFLOW_CONTEXT_MISSING_ID` and `SUB_WORKFLOW_FAILED`). Migration 1007
+    writes `SUB_WORKFLOW_FAILED` in `horsies_task_error_envelope` and
+    `horsies_workflow_child_node_result`, and writes no row. A row that was
+    stored before the upgrade keeps the old text and fails closed: a read of
+    its stored result, node result or workflow error gives
+    `RESULT_DESERIALIZATION_ERROR`, and the monitoring node detail gives
+    `HISTORY_CONTRACT_VIOLATION`. Lists, counts and facets show the old text
+    as a `DOMAIN` code. A stored `auto_retry_for` text with an old code
+    matches no code. Drain the tasks and the workflows before the upgrade.
+    The values of the metric label `error_code` change.
 - **Breaking (Python): typed custom error codes.** `TaskError[C]` is generic
   in the type of its custom code, with the default `str`; `TaskError` with
   no argument keeps its meaning. `error_code` is `C | BuiltInTaskCode`.
@@ -99,7 +182,7 @@ there is no migration contract between pre-1.0 versions.
     annotation of the body.
   - A stored custom code that `E` does not name (a row of another version
     of the task) is the new read failure `UnknownCustomCode`, with the code
-    `RESULT_DESERIALIZATION_ERROR` and the stored text in `custom_code`;
+    `UNKNOWN_CUSTOM_CODE` and the stored text in `custom_code`;
     for an `args_from` input it is `WORKER_SERIALIZATION_ERROR`.
   - `TaskError` now accepts a custom `Enum` member whose value is a code
     text; it refused one before.
@@ -128,12 +211,13 @@ there is no migration contract between pre-1.0 versions.
     union of one frozen class per code (`WaitTimeout`, `TaskNotFound`,
     `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`,
     `WaitInsideTask`, `AsyncContext`, `InvalidInput`,
-    `ResultDeserializationError`, `BrokerError`, `NoTypeAvailable`,
-    `WorkflowCtxMissingId`). Each class has `code` and `message`;
-    `BrokerError` also has `retryable` and `exception`. `RetrievalCode`
+    `ResultDeserializationError`, `UnknownCustomCode`, `ReadDatabaseError`,
+    `NoTypeAvailable`, `WorkflowCtxMissingId`). Each class has `code` and
+    `message`; `ReadDatabaseError` also has `retryable` and `cause`.
+    `RetrievalCode`
     values no longer arrive inside a `TaskError` from a read.
     `Horsies.get_result` gives these classes in place of the
-    `BrokerOperationError` variants.
+    `DatabaseOperationError` variants.
   - An `args_from` parameter is annotated `TaskOutcome[T, TaskError]` (or
     `| None`) and gets `Succeeded(value)` or `Failed(task_error)`.
     `WorkflowContext.result_for` returns a `TaskOutcome`.
@@ -142,7 +226,7 @@ there is no migration contract between pre-1.0 versions.
     `TaskOutcome` values.
   - Every read checks the wait limit first: a `timeout_ms` that is not
     `None` or an int from 0 to 4,294,967,295 gives `InvalidInput`
-    (`BrokerInvalidInput` for `get_raw_result` and
+    (`DatabaseInvalidInput` for `get_raw_result` and
     `PostgresBroker.get_raw_result_record`) before `WaitInsideTask` and
     `AsyncContext`, as in the Rust and TypeScript clients.
   - The stored result envelope and the stored codes do not change.
@@ -151,10 +235,10 @@ there is no migration contract between pre-1.0 versions.
   `forms: CallForms`, `AnyForm` or `BlockingFormOnly`. The `CodeCatalog`
   derive sets `BlockingFormOnly` for a variant with
   `#[code_catalog(blocking_form_only)]`, and refuses the key on the enum.
-  The `ASYNC_CONTEXT` members of `BrokerErrorCode`, `TaskSendErrorCode`,
-  `WorkflowStartErrorCode`, `HandleErrorCode` and `RetrievalCode` have it:
-  only a blocking call form (a Python sync call, a Rust blocking call)
-  gives these codes. An error class reads the mark through the member of
+  The `ASYNC_CONTEXT` members of `DatabaseErrorCode`, `TaskSendErrorCode`,
+  `WorkflowStartErrorCode`, `WorkflowHandleErrorCode` and `RetrievalCode`
+  have it: only a blocking call form (a Python sync call, a Rust blocking
+  call) gives these codes. An error class reads the mark through the member of
   its `code` slot; `CodeCatalog::member_named` finds that member. Code that
   builds a `CatalogMember` value sets the new field. The generated Python
   package does not change.

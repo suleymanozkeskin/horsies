@@ -594,10 +594,10 @@ def _core_error_failure(result: object) -> tuple[object, BaseException | NoCause
     """The code of a failed facade result and its exception."""
     match result:
         case Err(err_value=(
-            DatabaseOperationFailed(code=code, exception=exception)
-            | WorkflowHandleDatabaseOperationFailed(code=code, exception=exception)
-            | WorkflowStartEnqueueFailed(code=code, exception=exception)
-            | ReadDatabaseError(code=code, exception=exception)
+            DatabaseOperationFailed(code=code, cause=exception)
+            | WorkflowHandleDatabaseOperationFailed(code=code, cause=exception)
+            | WorkflowStartEnqueueFailed(code=code, cause=exception)
+            | ReadDatabaseError(code=code, cause=exception)
         )):
             return code, exception
         case _:
@@ -656,7 +656,7 @@ def _failed_start() -> WorkflowStartEnqueueFailed:
         retryable=True,
         workflow_name='async_context_wf',
         workflow_id=WORKFLOW_ID,
-        exception=ConnectionError('connection lost'),
+        cause=ConnectionError('connection lost'),
     )
 
 

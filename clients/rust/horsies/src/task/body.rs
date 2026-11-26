@@ -579,9 +579,7 @@ fn serialization_error<V>(message: String) -> StoredTaskError {
     );
     StoredTaskError {
         exception: None,
-        error_code: horsies_core::TaskErrorCode::from(
-            OperationalCode::WorkerSerializationError,
-        ),
+        error_code: horsies_core::TaskErrorCode::from(OperationalCode::WorkerSerializationError),
         data: Some(
             horsies_core::JsonText::of(&serde_json::Value::Object(data))
                 .expect("an object of two text members writes as strict JSON"),

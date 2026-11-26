@@ -499,7 +499,10 @@ mod tests {
 
     #[test]
     fn variant_names_follow_the_serde_rule() {
-        assert_eq!(screaming_snake_case("DatabasePingFailed"), "DATABASE_PING_FAILED");
+        assert_eq!(
+            screaming_snake_case("DatabasePingFailed"),
+            "DATABASE_PING_FAILED"
+        );
         assert_eq!(screaming_snake_case("Pending"), "PENDING");
         assert_eq!(
             screaming_snake_case("WorkflowSuccessCaseNotMet"),

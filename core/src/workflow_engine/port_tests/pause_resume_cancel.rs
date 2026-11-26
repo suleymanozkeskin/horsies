@@ -384,7 +384,10 @@ async fn a_database_error_before_the_resume_commit_keeps_the_workflow_paused() {
         .await
         .expect_err("the resume meets the refused node write");
 
-    assert_eq!(error.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable());
     assert_eq!(workflow_status(&db.pool, workflow_id).await, "PAUSED");
     assert_eq!(node_status(&db.pool, workflow_id, 1).await, "PENDING");

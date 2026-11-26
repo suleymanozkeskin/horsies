@@ -15,8 +15,8 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use horsies_core::catalog::CodeEnum;
 use horsies_core::{
-    BrokerError, HandleOperation, WorkflowHandleError, HandleResult, NodeResultsRead, NodesRead,
-    StoredNode, StoredNodeResult, WorkflowEnd, WorkflowStatus, WorkflowWait,
+    BrokerError, HandleOperation, HandleResult, NodeResultsRead, NodesRead, StoredNode,
+    StoredNodeResult, WorkflowEnd, WorkflowHandleError, WorkflowStatus, WorkflowWait,
 };
 use pyo3::prelude::*;
 use pyo3::IntoPyObjectExt;
@@ -401,7 +401,7 @@ pub async fn workflow_nodes_operation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use horsies_core::{WorkflowHandleErrorCode, TerminalErrorStatus};
+    use horsies_core::{TerminalErrorStatus, WorkflowHandleErrorCode};
 
     fn workflow() -> Uuid {
         Uuid::from_u128(11)
@@ -418,22 +418,26 @@ mod tests {
                 message,
                 workflow_id,
             },
-            WorkflowHandleErrorCode::DatabaseOperationFailed => WorkflowHandleError::DatabaseOperationFailed {
-                message,
-                retryable,
-                workflow_id,
-                cause: cause(),
-            },
+            WorkflowHandleErrorCode::DatabaseOperationFailed => {
+                WorkflowHandleError::DatabaseOperationFailed {
+                    message,
+                    retryable,
+                    workflow_id,
+                    cause: cause(),
+                }
+            }
             WorkflowHandleErrorCode::StoredDataInvalid => WorkflowHandleError::StoredDataInvalid {
                 message,
                 workflow_id,
                 cause: horsies_core::WorkflowError::InvalidStatus("BOGUS".to_owned()),
             },
-            WorkflowHandleErrorCode::ResumeRecoveryFailed => WorkflowHandleError::ResumeRecoveryFailed {
-                message,
-                workflow_id,
-                cause: cause(),
-            },
+            WorkflowHandleErrorCode::ResumeRecoveryFailed => {
+                WorkflowHandleError::ResumeRecoveryFailed {
+                    message,
+                    workflow_id,
+                    cause: cause(),
+                }
+            }
             WorkflowHandleErrorCode::AsyncContext => WorkflowHandleError::AsyncContext {
                 message,
                 workflow_id,
@@ -525,17 +529,26 @@ mod tests {
     fn a_failure_keeps_the_core_s_value_and_its_operation() {
         let WorkflowReadOutcome::Failed(failed) = status_outcome(
             workflow(),
-            Err(handle_error(WorkflowHandleErrorCode::StoredDataInvalid, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::StoredDataInvalid,
+                false,
+            )),
         ) else {
             panic!("a stored status outside the enum gives a failure");
         };
         assert_eq!(failed.operation, HandleOperation::Status);
-        assert_eq!(failed.error.code(), WorkflowHandleErrorCode::StoredDataInvalid);
+        assert_eq!(
+            failed.error.code(),
+            WorkflowHandleErrorCode::StoredDataInvalid
+        );
         assert!(!failed.error.retryable());
         let WorkflowReadOutcome::Failed(failed) = node_result_outcome(
             workflow(),
             "a".to_owned(),
-            Err(handle_error(WorkflowHandleErrorCode::DatabaseOperationFailed, true)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::DatabaseOperationFailed,
+                true,
+            )),
         ) else {
             panic!("a failed read gives a failure");
         };
@@ -564,7 +577,10 @@ mod tests {
         assert!(matches!(
             status_outcome(
                 workflow(),
-                Err(handle_error(WorkflowHandleErrorCode::WorkflowNotFound, false))
+                Err(handle_error(
+                    WorkflowHandleErrorCode::WorkflowNotFound,
+                    false
+                ))
             ),
             WorkflowReadOutcome::Absent(_)
         ));
@@ -600,7 +616,10 @@ mod tests {
     fn a_code_that_no_read_gives_is_a_defect() {
         let _ = nodes_outcome(
             workflow(),
-            Err(handle_error(WorkflowHandleErrorCode::ResumeRecoveryFailed, false)),
+            Err(handle_error(
+                WorkflowHandleErrorCode::ResumeRecoveryFailed,
+                false,
+            )),
         );
     }
 }

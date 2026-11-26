@@ -492,14 +492,14 @@ class TestTaskStats:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
         assert 'NOT_KNOWN' in error.message
         # Python's texts: the message names the read and holds the error's
         # text, and the exception is a HistoryContractError with that text.
-        assert type(error.exception) is HistoryContractError
-        cause_text = str(error.exception)
+        assert type(error.cause) is HistoryContractError
+        cause_text = str(error.cause)
         assert 'NOT_KNOWN' in cause_text
-        assert error.exception.args == (cause_text,)
+        assert error.cause.args == (cause_text,)
         assert error.message.endswith(f' failed: {cause_text}')
 
 
@@ -2072,7 +2072,7 @@ class TestGetTaskDetail:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
         assert "'NOT_KNOWN'" in error.message
 
     async def test_standalone_task_has_no_workflow_linkage(
@@ -2745,7 +2745,7 @@ class TestGetWorkflowNode:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
         assert "'NOT_KNOWN'" in error.message
 
     async def test_subworkflow_node_has_no_leaf_or_attempts(
@@ -2851,7 +2851,7 @@ class TestGetWorkflowNode:
         assert is_err(result)
         error = result.err_value
         assert isinstance(error, MonitoringQueryHistoryContractViolation)
-        assert isinstance(error.exception, HistoryContractError)
+        assert isinstance(error.cause, HistoryContractError)
 
 
 # --------------------------------------------------------------------------- #
@@ -3083,8 +3083,8 @@ class TestDatabaseFailure:
         assert 'task list query failed' in error.message
         # The driver error of Python's read, or the core's class of the cause
         # of the read on the core: no answer from the server.
-        assert isinstance(error.exception, SQLAlchemyError | CoreConnectionError)
-        match error.exception:
+        assert isinstance(error.cause, SQLAlchemyError | CoreConnectionError)
+        match error.cause:
             case CoreConnectionError():
                 # Python's texts: the message names the read and holds the
                 # cause's text; the exception is that text with the read as
@@ -3092,9 +3092,9 @@ class TestDatabaseFailure:
                 assert error.message.startswith('task list query failed: ')
                 cause_text = error.message.removeprefix('task list query failed: ')
                 assert cause_text != ''
-                assert error.exception.subject == 'task list query'
-                assert error.exception.message == cause_text
-                assert str(error.exception) == f'task list query: {cause_text}'
+                assert error.cause.subject == 'task list query'
+                assert error.cause.message == cause_text
+                assert str(error.cause) == f'task list query: {cause_text}'
             case _:
                 pass
 

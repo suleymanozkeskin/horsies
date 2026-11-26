@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::core::config::child_sizing::parent_pool_connections;
-use crate::core::error::{HorsiesErrorCode, HorsiesError};
+use crate::core::error::{HorsiesError, HorsiesErrorCode};
 
 /// A profile with every setting of every kind of child.
 pub(crate) fn full_profile() -> Value {

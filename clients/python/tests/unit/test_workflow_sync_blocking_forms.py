@@ -94,7 +94,7 @@ def _db_operation_failed() -> WorkflowHandleDatabaseOperationFailed:
         message=f'Status failed for workflow {WORKFLOW_ID}: connection lost',
         retryable=True,
         workflow_id=WORKFLOW_ID,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     )
 
 
@@ -103,7 +103,7 @@ def _stored_data_invalid() -> WorkflowHandleStoredDataInvalid:
     return WorkflowHandleStoredDataInvalid(
         message=f'Status failed for workflow {WORKFLOW_ID}: invalid status: BOGUS',
         workflow_id=WORKFLOW_ID,
-        exception=core.CoreContractViolation('workflow_status', 'invalid status: BOGUS'),
+        cause=core.CoreContractViolation('workflow_status', 'invalid status: BOGUS'),
     )
 
 
@@ -116,7 +116,7 @@ def _recovery_failed() -> WorkflowHandleResumeRecoveryFailed:
             'connection lost'
         ),
         workflow_id=WORKFLOW_ID,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     )
 
 
@@ -496,7 +496,7 @@ START_ANSWERS: Final[dict[str, object]] = {
         retryable=True,
         workflow_name='blocking_forms.flow',
         workflow_id=WORKFLOW_ID,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     ),
     'core_cannot_run_the_call': CORE_REFUSAL,
 }

@@ -621,10 +621,7 @@ pub(crate) async fn persist_undecodable_result(
     placement: AttemptPlacement,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let message = format!("failed to parse task result JSON: {diagnosis}");
-    let error = TaskError::builtin(
-        OperationalCode::WorkerSerializationError,
-        message.clone(),
-    );
+    let error = TaskError::builtin(OperationalCode::WorkerSerializationError, message.clone());
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))
         .map_err(|error| envelope_error(task_id, &error))?;
     let command = FinishFailedAttempt {

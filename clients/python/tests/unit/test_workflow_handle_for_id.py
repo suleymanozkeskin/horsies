@@ -77,8 +77,8 @@ def test_text_that_is_not_a_uuid_is_an_invalid_workflow_id(text: str) -> None:
     error = result.err_value
     assert type(error) is WorkflowHandleInvalidWorkflowId
     assert error.workflow_id_text == text
-    assert type(error.exception) is ValueError
-    assert str(error.exception) == str(parse_error.value)
+    assert type(error.cause) is ValueError
+    assert str(error.cause) == str(parse_error.value)
     assert error.message == f'workflow id {text!r} is not a UUID: {parse_error.value}'
     assert broker.mock_calls == []
 
@@ -100,7 +100,7 @@ def test_the_error_is_frozen_and_its_repr_hides_the_message_and_the_cause() -> N
     error = WorkflowHandleInvalidWorkflowId(
         message=f'message {marker}',
         workflow_id_text='not-a-uuid',
-        exception=ValueError(marker),
+        cause=ValueError(marker),
     )
 
     assert marker not in repr(error)

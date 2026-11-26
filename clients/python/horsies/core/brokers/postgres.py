@@ -143,7 +143,7 @@ def _operation_failed(
             code=code,
             message=message,
             retryable=core_exception_retryable(exc),
-            exception=exc,
+            cause=exc,
         )
     )
 
@@ -170,7 +170,7 @@ def _parse_enqueue_json(
     if is_err(loaded):
         return Err(DatabaseInvalidInput(
             message=f'{label} JSON corrupt for {task_name}: {loaded.err_value}',
-            exception=loaded.err_value,
+            cause=loaded.err_value,
         ))
     return loaded
 
@@ -206,7 +206,7 @@ def _parse_enqueue_input(
                     f'kwargs JSON for {task_name} must be an object or null, '
                     f'got {type(other).__name__}'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
 
 
@@ -221,7 +221,7 @@ def _monitoring_call_failed(
             code=DatabaseErrorCode.MONITORING_QUERY_FAILED,
             message=f'{operation} failed: {exc}',
             retryable=core_error_retryable(exc),
-            exception=exc,
+            cause=exc,
         ),
     )
 
@@ -234,7 +234,7 @@ def _database_ping_call_failed(exc: CoreCallRefusal) -> Err[DatabaseOperationFai
             code=DatabaseErrorCode.DATABASE_PING_FAILED,
             message=f'ping_database failed: {exc}',
             retryable=core_error_retryable(exc),
-            exception=exc,
+            cause=exc,
         ),
     )
 
@@ -271,7 +271,7 @@ def _worker_ping_call_failed(exc: CoreCallRefusal) -> Err[DatabaseOperationFaile
             code=DatabaseErrorCode.WORKER_PING_FAILED,
             message=f'ping_workers failed: {exc}',
             retryable=core_error_retryable(exc),
-            exception=exc,
+            cause=exc,
         ),
     )
 
@@ -489,7 +489,7 @@ def _task_info_core_error(
             code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
             message=f'get_task_info failed for {task_id}: {exc}',
             retryable=core_error_retryable(exc),
-            exception=exc,
+            cause=exc,
         ),
     )
 
@@ -510,7 +510,7 @@ def _strict_result_envelope(
     if is_err(loaded):
         return Err(DatabaseInvalidJsonPayload(
             message=f'Result JSON parse failed for task {task_id}: {loaded.err_value}',
-            exception=loaded.err_value,
+            cause=loaded.err_value,
         ))
     match loaded.ok_value:
         case dict() as envelope:
@@ -523,7 +523,7 @@ def _strict_result_envelope(
                     f'Result for task {task_id} is not a JSON object; '
                     f'got {type(other).__name__}'
                 ),
-                exception=NoCause(),
+                cause=NoCause(),
             ))
 
 
@@ -613,7 +613,7 @@ def _task_info_result(
       does not read, for example a history result whose digest differs; not
       retryable).
 
-    Each failure's ``exception`` is the core's exception of the cause, or
+    Each failure's ``cause`` is the core's exception of the cause, or
     ``NoCause()`` for a check of the core. Another operation code contradicts
     the read's catalog: ``AssertionError``.
     """
@@ -643,7 +643,7 @@ type RerunInputPolicy = Literal['APP_DEFAULT', 'KEEP', 'DROP']
 
 
 def _invalid_input(message: str) -> Err[DatabaseInvalidInput]:
-    return Err(DatabaseInvalidInput(message=message, exception=NoCause()))
+    return Err(DatabaseInvalidInput(message=message, cause=NoCause()))
 
 
 def _command_rule_refused(task_name: str, rule: str) -> Err[DatabaseInvalidInput]:
@@ -653,7 +653,7 @@ def _command_rule_refused(task_name: str, rule: str) -> Err[DatabaseInvalidInput
     that its request holds with the same message and cause. Pure."""
     return Err(DatabaseInvalidInput(
         message=f'enqueue input refused for {task_name}: {rule}',
-        exception=ValueError(rule),
+        cause=ValueError(rule),
     ))
 
 
@@ -718,7 +718,7 @@ def _check_key_encodes(
             except UnicodeEncodeError as exc:
                 return Err(DatabaseInvalidInput(
                     message=f'idempotency key refused for {task_name}: {exc}',
-                    exception=exc,
+                    cause=exc,
                 ))
             return Ok(None)
         case _ as unreachable:
@@ -819,7 +819,7 @@ def _enqueue_core_error(
     return Err(DatabaseEnqueueFailed(
         message=f'Failed to enqueue task {task_name}: {exc}',
         retryable=core_error_retryable(exc),
-        exception=exc,
+        cause=exc,
     ))
 
 
@@ -830,7 +830,7 @@ def _enqueue_result(outcome: CoreSendOutcome) -> Result[UUID, DatabaseEnqueueErr
       for a key replay.
     - The class that the core built, as it is: ``DatabaseInvalidInput`` or
       ``DatabaseInvalidTaskOptions`` (refused before any statement; the
-      ``exception`` is the ``ValueError`` of a rule, the
+      ``cause`` is the ``ValueError`` of a rule, the
       ``SerializationError`` of a JSON text that does not read, or
       ``NoCause()``), ``DatabaseEnqueueFailed`` (the core's exception of the
       cause, or ``NoCause()`` for a conflicting row that was gone),
@@ -1057,7 +1057,7 @@ class PostgresBroker:
             case SchemaInstalled() | SchemaInstallNotRun():
                 self._initialized = True
             case DatabaseOperationFailed(
-                code=DatabaseErrorCode.SCHEMA_INIT_FAILED, exception=exception,
+                code=DatabaseErrorCode.SCHEMA_INIT_FAILED, cause=exception,
             ):
                 raise exception
             case DatabaseOperationFailed(code=code):
@@ -1076,10 +1076,10 @@ class PostgresBroker:
 
         Returns ``Ok(None)`` on success. On failure ``DatabaseOperationFailed``
         with ``SCHEMA_INIT_FAILED`` and its cause: the core reported the
-        install failed (``exception`` is the core's ``CoreFailure``), for
+        install failed (``cause`` is the core's ``CoreFailure``), for
         example a database of the other client family or one this build
         cannot install into (not retryable), or the core of this process
-        cannot run the call (``exception`` is the ``CoreCallRefusal``). A
+        cannot run the call (``cause`` is the ``CoreCallRefusal``). A
         cancel of the caller does not stop the install. Raises ``ForkedAfterCoreStart`` and ``CoreStopped``
         (``call_refusal_or_raise``).
         """
@@ -1147,7 +1147,7 @@ class PostgresBroker:
         ``exec`` after the core started) and ``CoreStopped`` (a core
         background task panicked): states of the process, never a result.
         Nothing was written. Every other core error is ``ENQUEUE_FAILED``
-        with it as ``exception``.
+        with it as ``cause``.
 
         A cancel of the caller does not stop the write: the core runs it to
         its end.
@@ -1219,15 +1219,15 @@ class PostgresBroker:
           runs task bodies (a worker child). Nothing ran.
         - ``Err(DatabaseOperationFailed(TASK_INFO_QUERY_FAILED))``: the
           connect, the install or a read failed (``retryable`` is the core's
-          classification, ``exception`` the core's exception of the cause), or the
-          core of this process cannot run the call (``exception`` is the
+          classification, ``cause`` the core's exception of the cause), or the
+          core of this process cannot run the call (``cause`` is the
           ``CoreCallRefusal``).
         """
         match wait_timeout_seconds(timeout_ms):
             case Err(err_value=refused):
                 return Err(DatabaseInvalidInput(
                     message=f'raw result fetch of task {task_id}: {refused.message}',
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
             case Ok():
                 pass
@@ -1263,7 +1263,7 @@ class PostgresBroker:
             case Err(err_value=refused):
                 return Err(DatabaseInvalidInput(
                     message=f'raw result fetch of task {task_id}: {refused.message}',
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
             case Ok():
                 pass
@@ -1298,7 +1298,7 @@ class PostgresBroker:
                 code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
                 message=f'Broker error while retrieving task {task_id}: {exc}',
                 retryable=core_error_retryable(exc),
-                exception=exc,
+                cause=exc,
             ),
         )
 
@@ -1325,7 +1325,7 @@ class PostgresBroker:
           retrieving task {task_id}: {error}``), logged on
           ``horsies.broker``.
 
-        Each failure's ``exception`` is the core's exception of the cause, or
+        Each failure's ``cause`` is the core's exception of the cause, or
         ``NoCause()`` for a check of the core. ``DatabaseInvalidInput`` for a
         limit that the check above admitted contradicts that check:
         ``AssertionError``.
@@ -1460,12 +1460,12 @@ class PostgresBroker:
 
         Failures, each ``DATABASE_PING_FAILED``; nothing changed:
         - the connect or the statement failed; ``retryable`` is the core's
-          classification of the cause, and ``exception`` the core's
+          classification of the cause, and ``cause`` the core's
           exception of the cause;
         - the core of this process cannot run the call (``CoreCallRefusal``:
           it did not start, has too many calls in flight, or a sync call
           reached its bound); the
-          ``exception`` is that error, and ``retryable`` follows
+          ``cause`` is that error, and ``retryable`` follows
           ``core_error_retryable``.
         """
         try:
@@ -1811,7 +1811,7 @@ class PostgresBroker:
                         code=DatabaseErrorCode.CLEANUP_FAILED,
                         message=f'mark_stale_tasks_as_failed failed: {refusal}',
                         retryable=False,
-                        exception=OverflowError(refusal),
+                        cause=OverflowError(refusal),
                     ),
                 )
         try:
@@ -1825,7 +1825,7 @@ class PostgresBroker:
                     code=DatabaseErrorCode.CLEANUP_FAILED,
                     message=f'mark_stale_tasks_as_failed failed: {refusal}',
                     retryable=core_error_retryable(refusal),
-                    exception=refusal,
+                    cause=refusal,
                 ),
             )
         match outcome:
@@ -1846,7 +1846,7 @@ class PostgresBroker:
                         code=DatabaseErrorCode.CLEANUP_FAILED,
                         message=f'mark_stale_tasks_as_failed failed: {message}',
                         retryable=retryable,
-                        exception=exception,
+                        cause=exception,
                     ),
                 )
             case _ as unreachable:
@@ -1883,7 +1883,7 @@ class PostgresBroker:
                     code=DatabaseErrorCode.CLEANUP_FAILED,
                     message=f'expire_pending_tasks failed: {refusal}',
                     retryable=core_error_retryable(refusal),
-                    exception=refusal,
+                    cause=refusal,
                 ),
             )
         match outcome:
@@ -1904,7 +1904,7 @@ class PostgresBroker:
                         code=DatabaseErrorCode.CLEANUP_FAILED,
                         message=f'expire_pending_tasks failed: {message}',
                         retryable=retryable,
-                        exception=exception,
+                        cause=exception,
                     ),
                 )
             case _ as unreachable:
@@ -1934,7 +1934,7 @@ class PostgresBroker:
 
         - the core of this process cannot run the pass (``CoreCallRefusal``:
           it did not start, or has too many calls in flight); the
-          ``exception`` is that error, and ``retryable`` follows
+          ``cause`` is that error, and ``retryable`` follows
           ``core_error_retryable``.
 
         A cancel of the caller does not stop the pass: the core runs it to
@@ -1952,7 +1952,7 @@ class PostgresBroker:
                         f'{refusal}'
                     ),
                     retryable=False,
-                    exception=OverflowError(refusal),
+                    cause=OverflowError(refusal),
                 ),
             )
         try:
@@ -1966,7 +1966,7 @@ class PostgresBroker:
                     code=DatabaseErrorCode.CLEANUP_FAILED,
                     message=f'requeue_stale_claimed failed: {refusal}',
                     retryable=core_error_retryable(refusal),
-                    exception=refusal,
+                    cause=refusal,
                 ),
             )
         match outcome:
@@ -1993,7 +1993,7 @@ class PostgresBroker:
                             f'{requeued_before} task(s): {message}'
                         ),
                         retryable=retryable,
-                        exception=exception,
+                        cause=exception,
                     ),
                 )
             case _ as unreachable:
@@ -2014,7 +2014,7 @@ class PostgresBroker:
         Failures, each ``CLEANUP_FAILED``; nothing committed (after a lost
         ``COMMIT`` reply, the outcome is unknown):
         - another sweep holds the cursor: the page is refused at once; the
-          ``exception`` is ``CoreServerError``, whose ``sqlstate`` is
+          ``cause`` is ``CoreServerError``, whose ``sqlstate`` is
           ``'55P03'``;
         - a database failure, or a page outside the function's contract;
           ``retryable`` is the core's classification of the cause;
@@ -2034,7 +2034,7 @@ class PostgresBroker:
                     code=DatabaseErrorCode.CLEANUP_FAILED,
                     message=f'audit_orphaned_workflow_tasks failed: {refusal}',
                     retryable=core_error_retryable(refusal),
-                    exception=refusal,
+                    cause=refusal,
                 ),
             )
         match outcome:
@@ -2062,7 +2062,7 @@ class PostgresBroker:
                         code=DatabaseErrorCode.CLEANUP_FAILED,
                         message=f'audit_orphaned_workflow_tasks failed: {message}',
                         retryable=retryable,
-                        exception=exception,
+                        cause=exception,
                     ),
                 )
             case _ as unreachable:
@@ -2085,7 +2085,7 @@ class PostgresBroker:
         Failures, each ``CLEANUP_FAILED``; nothing committed (after a lost
         ``COMMIT`` reply, the outcome is unknown):
         - another sweep holds the cursor: the page is refused at once; the
-          ``exception`` is ``CoreServerError``, whose ``sqlstate`` is
+          ``cause`` is ``CoreServerError``, whose ``sqlstate`` is
           ``'55P03'``;
         - a database failure, or a page outside the function's contract;
           ``retryable`` is the core's classification of the cause;
@@ -2104,7 +2104,7 @@ class PostgresBroker:
                     code=DatabaseErrorCode.CLEANUP_FAILED,
                     message=f'terminate_orphaned_workflow_tasks failed: {refusal}',
                     retryable=core_error_retryable(refusal),
-                    exception=refusal,
+                    cause=refusal,
                 ),
             )
         match outcome:
@@ -2123,7 +2123,7 @@ class PostgresBroker:
                         code=DatabaseErrorCode.CLEANUP_FAILED,
                         message=f'terminate_orphaned_workflow_tasks failed: {message}',
                         retryable=retryable,
-                        exception=exception,
+                        cause=exception,
                     ),
                 )
             case _ as unreachable:

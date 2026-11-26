@@ -2,7 +2,7 @@ use std::num::NonZeroU32;
 
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-use crate::core::error::{HorsiesErrorCode, HorsiesError, ValidationReport};
+use crate::core::error::{HorsiesError, HorsiesErrorCode, ValidationReport};
 
 use crate::core::config::socket::{socket_settings, TcpKeepalivesConfig, TcpUserTimeoutConfig};
 use crate::db::SocketSettings;
@@ -748,11 +748,17 @@ mod tests {
                  pool.max_size connections",
             ),
         ];
-        assert_eq!(HorsiesErrorCode::ConfigInvalidDatabasePool.to_string(), "HRS-213");
+        assert_eq!(
+            HorsiesErrorCode::ConfigInvalidDatabasePool.to_string(),
+            "HRS-213"
+        );
         assert!(HorsiesErrorCode::ConfigInvalidDatabasePool.is_config_error());
         for (field, note) in cases {
             let refusal = field.refusal();
-            assert_eq!(refusal.code, Some(HorsiesErrorCode::ConfigInvalidDatabasePool));
+            assert_eq!(
+                refusal.code,
+                Some(HorsiesErrorCode::ConfigInvalidDatabasePool)
+            );
             assert_eq!(
                 refusal.message,
                 format!("{} was removed in 0.7.0", field.key())
@@ -810,7 +816,10 @@ mod tests {
         ];
         for (field, value, pool_argument) in cases {
             let refusal = field.refusal();
-            assert_eq!(refusal.code, Some(HorsiesErrorCode::ConfigInvalidDatabasePool));
+            assert_eq!(
+                refusal.code,
+                Some(HorsiesErrorCode::ConfigInvalidDatabasePool)
+            );
             assert_eq!(
                 refusal.message,
                 format!("{} was removed in 0.7.0", field.key())
@@ -858,7 +867,10 @@ mod tests {
         let refusal =
             removed_pool_field_refusal(fields).expect_err("three removed fields are refused");
 
-        assert_eq!(refusal.code, Some(HorsiesErrorCode::ConfigInvalidDatabasePool));
+        assert_eq!(
+            refusal.code,
+            Some(HorsiesErrorCode::ConfigInvalidDatabasePool)
+        );
         assert_eq!(
             first_lines(&refusal),
             [

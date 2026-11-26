@@ -125,7 +125,9 @@ impl DeclaredOptionRefusal {
             | Self::RetryCodeNotUserCode { .. }
             | Self::RetryCodeNotDeclared { .. }
             | Self::TimeoutBelowMinimum => HorsiesErrorCode::TaskInvalidOptions,
-            Self::SharedClassWithoutTimeout { .. } => HorsiesErrorCode::TaskSharedExecutionRequiresTimeout,
+            Self::SharedClassWithoutTimeout { .. } => {
+                HorsiesErrorCode::TaskSharedExecutionRequiresTimeout
+            }
             Self::GraceNotTaken { .. } => HorsiesErrorCode::TaskCancelGraceRequiresSharedAsync,
             Self::GraceOutOfRange { .. } => HorsiesErrorCode::TaskCancelGraceOutOfRange,
         }
@@ -452,7 +454,10 @@ mod tests {
                 RetryPolicyError::MaxRetriesOutOfRange(21)
             )]
         ));
-        assert_eq!(refusals[0].error_code(), HorsiesErrorCode::TaskInvalidOptions);
+        assert_eq!(
+            refusals[0].error_code(),
+            HorsiesErrorCode::TaskInvalidOptions
+        );
     }
 
     #[test]

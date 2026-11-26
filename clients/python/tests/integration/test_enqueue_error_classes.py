@@ -159,8 +159,8 @@ async def test_a_rule_of_the_command_or_the_key_is_invalid_input_with_its_value_
     assert error.code is DatabaseErrorCode.INVALID_INPUT
     assert error.retryable is False
     assert error.message == message
-    assert type(error.exception) is ValueError
-    assert str(error.exception) == rule
+    assert type(error.cause) is ValueError
+    assert str(error.cause) == rule
 
 
 async def test_a_rule_that_refused_a_value_that_reads_is_invalid_input_with_no_cause(
@@ -179,7 +179,7 @@ async def test_a_rule_that_refused_a_value_that_reads_is_invalid_input_with_no_c
         'enqueue contract violation: sent_at is in the future without enqueued_at or '
         'enqueue_delay_seconds; sent_at is a call-site timestamp'
     )
-    assert type(error.exception) is NoCause
+    assert type(error.cause) is NoCause
 
 
 async def test_a_send_refused_by_a_rule_keeps_the_value_error(
@@ -195,8 +195,8 @@ async def test_a_send_refused_by_a_rule_keeps_the_value_error(
     error = result.err_value
     assert type(error) is TaskSendValidationFailed
     assert error.code is TaskSendErrorCode.VALIDATION_FAILED
-    assert type(error.exception) is ValueError
-    assert str(error.exception) == 'idempotency key must be at most 255 UTF-8 bytes'
+    assert type(error.cause) is ValueError
+    assert str(error.cause) == 'idempotency key must be at most 255 UTF-8 bytes'
 
 
 async def test_refused_task_options_are_invalid_task_options_with_python_s_cause(
@@ -207,8 +207,8 @@ async def test_refused_task_options_are_invalid_task_options_with_python_s_cause
     assert type(unreadable) is DatabaseInvalidTaskOptions
     assert unreadable.code is DatabaseErrorCode.INVALID_TASK_OPTIONS
     assert unreadable.retryable is False
-    assert type(unreadable.exception) is SerializationError
-    reader_error = str(unreadable.exception)
+    assert type(unreadable.cause) is SerializationError
+    reader_error = str(unreadable.cause)
     assert reader_error != ''
     assert unreadable.message.startswith('enqueue contract violation: task_options JSON ')
     assert unreadable.message.endswith(f': {reader_error}')
@@ -220,7 +220,7 @@ async def test_refused_task_options_are_invalid_task_options_with_python_s_cause
     assert type(by_rule) is DatabaseInvalidTaskOptions
     assert by_rule.retryable is False
     assert 'retry_policy is not an object: str' in by_rule.message
-    assert type(by_rule.exception) is NoCause
+    assert type(by_rule.cause) is NoCause
 
 
 async def test_a_failed_connect_is_enqueue_failed_with_the_core_class_of_its_cause(
@@ -231,12 +231,12 @@ async def test_a_failed_connect_is_enqueue_failed_with_the_core_class_of_its_cau
     assert type(error) is DatabaseEnqueueFailed
     assert error.code is DatabaseErrorCode.ENQUEUE_FAILED
     assert error.retryable is True
-    assert type(error.exception) is CoreConnectionError
-    assert error.exception.subject == 'enqueue'
-    assert error.exception.retryable is True
-    assert error.exception.message != ''
-    assert str(error.exception) == f'enqueue: {error.exception.message}'
-    assert error.message == f'Failed to enqueue task {TASK_NAME}: {error.exception.message}'
+    assert type(error.cause) is CoreConnectionError
+    assert error.cause.subject == 'enqueue'
+    assert error.cause.retryable is True
+    assert error.cause.message != ''
+    assert str(error.cause) == f'enqueue: {error.cause.message}'
+    assert error.message == f'Failed to enqueue task {TASK_NAME}: {error.cause.message}'
 
 
 async def test_a_retention_key_that_no_class_derives_is_enqueue_failed_not_retried(
@@ -254,11 +254,11 @@ async def test_a_retention_key_that_no_class_derives_is_enqueue_failed_not_retri
 
     assert type(error) is DatabaseEnqueueFailed
     assert error.retryable is False
-    assert type(error.exception) is CorePreconditionFailed
-    assert error.exception.retryable is False
-    assert error.exception.message.startswith('retention class key "standard_0d"')
-    assert str(error.exception) == f'enqueue: {error.exception.message}'
-    assert error.message == f'Failed to enqueue task {TASK_NAME}: {error.exception.message}'
+    assert type(error.cause) is CorePreconditionFailed
+    assert error.cause.retryable is False
+    assert error.cause.message.startswith('retention class key "standard_0d"')
+    assert str(error.cause) == f'enqueue: {error.cause.message}'
+    assert error.message == f'Failed to enqueue task {TASK_NAME}: {error.cause.message}'
 
 
 @pytest.mark.parametrize(
@@ -284,8 +284,8 @@ async def test_a_failed_send_keeps_the_payload_that_the_send_made(
     assert type(error) is TaskSendEnqueueFailed
     assert error.code is TaskSendErrorCode.ENQUEUE_FAILED
     assert error.retryable is True
-    assert type(error.exception) is CoreConnectionError
-    assert str(error.exception) == f'enqueue: {error.exception.message}'
+    assert type(error.cause) is CoreConnectionError
+    assert str(error.cause) == f'enqueue: {error.cause.message}'
     assert error.payload.input_json == input_json
     assert error.payload.task_name == task.task_name
 
@@ -305,7 +305,7 @@ async def test_a_task_id_with_another_command_is_payload_mismatch(
     assert type(error) is DatabasePayloadMismatch
     assert error.code is DatabaseErrorCode.PAYLOAD_MISMATCH
     assert error.retryable is False
-    assert not hasattr(error, 'exception')
+    assert not hasattr(error, 'cause')
     assert error.message == (
         f'payload mismatch for task_id {task_id}: the existing task has a different '
         'command or idempotency key'
@@ -356,7 +356,7 @@ async def test_a_key_that_another_task_holds_is_idempotency_key_conflict(
     assert type(conflict) is DatabaseIdempotencyKeyConflict
     assert conflict.code is DatabaseErrorCode.IDEMPOTENCY_KEY_CONFLICT
     assert conflict.retryable is False
-    assert not hasattr(conflict, 'exception')
+    assert not hasattr(conflict, 'cause')
     assert conflict.owner_task_id == owner
     assert conflict.message == (
         f'idempotency key for {name} is reserved by task {owner} with a different command'

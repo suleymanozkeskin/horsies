@@ -40,7 +40,7 @@ use super::spec_data::client_spec;
 use super::sub_workflow::NodeParams;
 use crate::send::TaskFunctions;
 use crate::task::body::{decode_checked, raw_value_of, value_parts, DecodeFailure, ValueParts};
-use crate::{AppConfig, HorsiesErrorCode, HorsiesError, ValidationReport};
+use crate::{AppConfig, HorsiesError, HorsiesErrorCode, ValidationReport};
 
 /// The hook that builds a child from params, as the error texts of a child
 /// start name it: the definition's `build_with`.
@@ -725,7 +725,8 @@ fn child_for_check(
             }
             Err(ParamsBuildRefused::Undecodable { text }) => {
                 findings.push(
-                    HorsiesError::new(text).with_code(HorsiesErrorCode::WorkflowKwargsNotSerializable),
+                    HorsiesError::new(text)
+                        .with_code(HorsiesErrorCode::WorkflowKwargsNotSerializable),
                 );
                 None
             }

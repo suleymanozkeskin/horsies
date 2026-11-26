@@ -301,7 +301,10 @@ mod tests {
     #[test]
     fn a_failed_connect_is_db_operation_failed_with_the_read_and_the_retry_rule() {
         let error = connect_failed("task list query", BrokerError::ListenerClosed);
-        assert_eq!(error.code(), MonitoringQueryErrorCode::DatabaseOperationFailed);
+        assert_eq!(
+            error.code(),
+            MonitoringQueryErrorCode::DatabaseOperationFailed
+        );
         assert!(error.message().starts_with("task list query failed: "));
         assert_eq!(
             error.retryable(),
@@ -310,7 +313,7 @@ mod tests {
         assert!(matches!(
             error,
             MonitoringQueryError::DatabaseOperationFailed {
-                source: MonitoringQueryErrorSource::Broker(BrokerError::ListenerClosed),
+                cause: MonitoringQueryErrorSource::Broker(BrokerError::ListenerClosed),
                 ..
             }
         ));

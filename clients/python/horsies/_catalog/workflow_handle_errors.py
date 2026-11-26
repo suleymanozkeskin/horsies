@@ -64,7 +64,7 @@ class WorkflowHandleStoredDataInvalid:
 
     The value is a workflow status that is not a ``WorkflowStatus``
     (``status``), or a subworkflow summary that is not valid (``tasks``).
-    ``exception`` is a ``CoreContractViolation`` with the core's message.
+    ``cause`` is a ``CoreContractViolation`` with the core's message.
     The same call returns this error until the stored value changes.
     """
 
@@ -92,7 +92,7 @@ class WorkflowHandleResumeRecoveryFailed:
     completes the propagation for a task that finished while the resume
     transaction ran, when the completion callback saw the workflow as
     ``PAUSED``. That pass rolled back, or its commit outcome is unknown.
-    ``exception`` is the core's class of the cause (a ``CoreFailure`` leaf
+    ``cause`` is the core's class of the cause (a ``CoreFailure`` leaf
     class). The worker reaper runs the same pass over all workflows. A
     repeated ``resume`` returns ``Ok(False)``.
     """

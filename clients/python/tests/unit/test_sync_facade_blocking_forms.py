@@ -159,7 +159,7 @@ def _read_failed() -> DatabaseResult[Any]:
             code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
             message='connection lost',
             retryable=True,
-            exception=CONNECTION_LOST,
+            cause=CONNECTION_LOST,
         ),
     )
 
@@ -308,7 +308,7 @@ def _failure(code: DatabaseOperationFailedCode) -> DatabaseOperationFailed:
         code=code,
         message=f'{code}: connection refused',
         retryable=True,
-        exception=CONNECTION_LOST,
+        cause=CONNECTION_LOST,
     )
 
 
@@ -421,7 +421,7 @@ def test_close_with_nothing_open_runs_no_event_loop(monkeypatch: pytest.MonkeyPa
 
 def _refused_input() -> DatabaseInvalidInput:
     """The core's class of an argument that a check refused."""
-    return DatabaseInvalidInput(message='INVALID_INPUT: refused', exception=NoCause())
+    return DatabaseInvalidInput(message='INVALID_INPUT: refused', cause=NoCause())
 
 
 def _listener_disabled() -> DatabaseListenerDisabled:

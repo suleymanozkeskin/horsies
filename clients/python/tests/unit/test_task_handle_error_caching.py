@@ -100,7 +100,7 @@ class TestTransientErrorsNotCached:
                     code=DatabaseErrorCode.TASK_INFO_QUERY_FAILED,
                     message='transient',
                     retryable=True,
-                    exception=ConnectionError('db gone'),
+                    cause=ConnectionError('db gone'),
                 )),
                 _ok_record(7),
             ],

@@ -79,9 +79,7 @@ fn schedule_plan(schedule_name: &str, task_name: &str) -> ActivePlan {
         task_name: task_name.to_owned(),
         queue_name: None,
         good_until: None,
-        auto_retry_for: Some(vec![TaskErrorCode::from(
-            OperationalCode::TaskException,
-        )]),
+        auto_retry_for: Some(vec![TaskErrorCode::from(OperationalCode::TaskException)]),
         retry_policy: Some(
             RetryPolicy::fixed(RETRY_INTERVALS_SECONDS.to_vec(), true)
                 .expect("two intervals inside the bounds"),

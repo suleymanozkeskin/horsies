@@ -2112,7 +2112,7 @@ class Horsies:
                 message=(
                     f'TaskResult envelope invalid for {task_id}: {exc}'
                 ),
-                exception=exc,
+                cause=exc,
             ))
         err_slot = envelope.get('err')
         # Err-fast-path: TaskError is fixed-schema; decodable without
@@ -2127,7 +2127,7 @@ class Horsies:
                     message=(
                         f'TaskError decode failed for {task_id}: {exc}'
                     ),
-                    exception=exc,
+                    cause=exc,
                 ))
             from horsies.core.models.outcome import Failed
             info.decoded_result = Failed(err_value)
@@ -2148,7 +2148,7 @@ class Horsies:
                 message=(
                     f'get_task_info decode failed for {task_id}: {exc}'
                 ),
-                exception=exc,
+                cause=exc,
             ))
         info.decoded_result = decoded
         info.result_decoded = True
@@ -2210,7 +2210,7 @@ class Horsies:
             case Err(err_value=refused):
                 return Err(DatabaseInvalidInput(
                     message=f'app.{label}() for task {task_id}: {refused.message}',
-                    exception=NoCause(),
+                    cause=NoCause(),
                 ))
             case Ok():
                 return None

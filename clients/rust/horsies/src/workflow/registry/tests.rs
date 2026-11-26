@@ -235,7 +235,10 @@ fn a_definition_registers_once_by_key_and_by_name() {
     let again = registry
         .register(Definition::without_params::<Plain>(&tasks()).unwrap())
         .unwrap_err();
-    assert_eq!(again.code, Some(HorsiesErrorCode::WorkflowDuplicateDefinitionKey));
+    assert_eq!(
+        again.code,
+        Some(HorsiesErrorCode::WorkflowDuplicateDefinitionKey)
+    );
     let same_name = Definition {
         definition_key: "tests.plain.v2".to_owned(),
         ..Definition::without_params::<Plain>(&tasks()).unwrap()
@@ -273,7 +276,10 @@ fn a_spec_with_an_unregistered_child_is_refused() {
     let registry = registry();
     let spec = Root::<Countdown>::build(test_builder(Root::<Countdown>::name())).unwrap();
     let refused = registry.prepare(&spec).unwrap_err();
-    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowMissingRequiredParams));
+    assert_eq!(
+        refused.code,
+        Some(HorsiesErrorCode::WorkflowMissingRequiredParams)
+    );
     registry
         .register(Definition::with_params::<Countdown>(&tasks()))
         .unwrap();

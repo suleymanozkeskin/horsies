@@ -39,7 +39,7 @@ use crate::broker::health::{
 };
 use crate::broker::history_reads::{read_history_detail, read_task_result, ResultReaderSeen};
 use crate::broker::result_types::{
-    BrokerCheckCause, DatabaseOperationError, BrokerOperationSource, DatabaseResult, RawResultRead,
+    BrokerCheckCause, BrokerOperationSource, DatabaseOperationError, DatabaseResult, RawResultRead,
     RawResultRecord, StoredEnvelopeText, TaskInfoRead, WorkerPingStep,
 };
 use crate::broker::row::task::{ExpiredTaskRow, StaleTaskRow, TaskAttemptRow};
@@ -2858,7 +2858,9 @@ fn raw_result_operation_error(task_id: Uuid, error: BrokerError) -> DatabaseOper
 /// Errors: `INVALID_JSON_PAYLOAD`, not retryable, for an absent digest, an
 /// envelope that fails its version, digest or strict JSON check, and a value
 /// other than an object or `null`.
-fn history_result_envelope(detail: &HistoryTaskDetail) -> DatabaseResult<Option<StoredEnvelopeText>> {
+fn history_result_envelope(
+    detail: &HistoryTaskDetail,
+) -> DatabaseResult<Option<StoredEnvelopeText>> {
     let checked = match history_result_text(detail) {
         Ok(None) => Ok(None),
         Ok(Some(text)) => StoredEnvelopeText::parse(text).map_err(|refused| refused.to_string()),

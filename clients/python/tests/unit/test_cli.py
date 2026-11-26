@@ -532,7 +532,7 @@ def _make_schema_err(
         code=DatabaseErrorCode.SCHEMA_INIT_FAILED,
         message=message,
         retryable=retryable,
-        exception=exception or ConnectionError(message),
+        cause=exception or ConnectionError(message),
     )
 
 

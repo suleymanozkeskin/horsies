@@ -48,7 +48,7 @@ use super::child_sizing::{
     DEFAULT_TASK_SEND_POOL_CONNECTIONS, FINALIZE_BATCH_FLUSHERS, PARENT_POOL_CLAIM_CONNECTIONS,
     PARENT_POOL_MIN_CONNECTIONS, PARENT_POOL_RESERVE,
 };
-use crate::core::error::{HorsiesErrorCode, HorsiesError};
+use crate::core::error::{HorsiesError, HorsiesErrorCode};
 
 pub mod input;
 
@@ -1097,7 +1097,8 @@ pub fn quoted_profile_name(name: &str) -> String {
 }
 
 fn profile_error(message: String, notes: &[String], help: String) -> HorsiesError {
-    let refusal = HorsiesError::new(message).with_code(HorsiesErrorCode::ConfigInvalidWorkerProfile);
+    let refusal =
+        HorsiesError::new(message).with_code(HorsiesErrorCode::ConfigInvalidWorkerProfile);
     notes
         .iter()
         .fold(refusal, |refusal, note| refusal.with_note(note.as_str()))
@@ -1633,7 +1634,10 @@ mod tests {
     fn only_refusal(errors: Vec<HorsiesError>) -> HorsiesError {
         assert_eq!(errors.len(), 1, "{:?}", messages(&errors));
         let refusal = errors.into_iter().next().expect("one refusal");
-        assert_eq!(refusal.code, Some(HorsiesErrorCode::ConfigInvalidWorkerProfile));
+        assert_eq!(
+            refusal.code,
+            Some(HorsiesErrorCode::ConfigInvalidWorkerProfile)
+        );
         refusal
     }
 

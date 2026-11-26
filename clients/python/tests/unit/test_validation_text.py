@@ -465,9 +465,9 @@ class TestSendOptions:
         assert is_err(result)
         err = result.err_value
         assert isinstance(err, TaskSendValidationFailed)
-        assert isinstance(err.exception, ValueValidationError)
+        assert isinstance(err.cause, ValueValidationError)
         assert '2031' not in err.message
-        assert '2031' not in str(err.exception)
+        assert '2031' not in str(err.cause)
         assert 'good_until must be timezone-aware' in err.message
 
 

@@ -24,7 +24,7 @@ use super::registry::{CaseBuild, CheckCase, Definition, DefinitionKind};
 use super::spec::{WorkflowSpec, WorkflowSpecBuilder};
 use super::start::{new_workflow_id, WorkflowStarter};
 use super::sub_workflow::{SubWorkflowNode, SubWorkflowParams};
-use crate::{HorsiesErrorCode, Horsies, HorsiesError};
+use crate::{Horsies, HorsiesError, HorsiesErrorCode};
 
 /// A registered workflow definition without params, with the result type
 /// `T`. Clones share one app.

@@ -769,7 +769,10 @@ async fn a_detail_read_on_an_unreachable_database_is_an_error_not_absence() {
         .await
         .expect_err("an unreachable database fails the read");
 
-    assert_eq!(error.code(), MonitoringQueryErrorCode::DatabaseOperationFailed);
+    assert_eq!(
+        error.code(),
+        MonitoringQueryErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable(), "{error:?}");
 }
 
@@ -780,6 +783,9 @@ async fn a_stats_read_on_an_unreachable_database_is_a_retryable_error() {
         .await
         .expect_err("an unreachable database fails the read");
 
-    assert_eq!(error.code(), MonitoringQueryErrorCode::DatabaseOperationFailed);
+    assert_eq!(
+        error.code(),
+        MonitoringQueryErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable(), "{error:?}");
 }

@@ -253,7 +253,11 @@ async fn a_blocking_handle_method_on_a_runtime_thread_is_async_context() {
         view.resume().map(|_resumed| ()).unwrap_err(),
     ];
     for refused in &refusals {
-        assert_eq!(refused.code(), WorkflowHandleErrorCode::AsyncContext, "{refused}");
+        assert_eq!(
+            refused.code(),
+            WorkflowHandleErrorCode::AsyncContext,
+            "{refused}"
+        );
         assert!(!refused.retryable(), "{refused}");
         assert_eq!(refused.workflow_id(), workflow_id);
     }

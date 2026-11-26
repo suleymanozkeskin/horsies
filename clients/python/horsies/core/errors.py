@@ -1,4 +1,4 @@
-"""Rust-style error display for horsies startup/validation errors.
+"""Diagnostic display for horsies startup/validation errors.
 
 `HorsiesErrorCode`, the `HRS-nnn` codes, is the catalog that `horsies-codegen`
 renders from horsies-core into `horsies._catalog.error_codes`.
@@ -102,7 +102,7 @@ class SourceLocation:
 class HorsiesError(Exception):
     """Base exception for horsies startup/validation errors.
 
-    Provides Rust-style error formatting with:
+    ``format_diagnostic()`` formats it with:
     - Error code and category
     - Source location with code snippet
     - Notes and help text
@@ -146,7 +146,7 @@ class HorsiesError(Exception):
         return self
 
     def format_diagnostic(self, use_colors: bool | None = None) -> str:
-        """Format the error in Rust style."""
+        """Format the error as a report: code, message, location, notes and help."""
         if use_colors is None:
             use_colors = _should_use_colors()
 

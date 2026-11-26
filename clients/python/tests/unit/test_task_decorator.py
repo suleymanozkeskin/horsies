@@ -1759,7 +1759,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, ConfigurationError)
+        assert isinstance(result.err_value.cause, ConfigurationError)
 
     @pytest.mark.parametrize(
         ('value', 'subject'),
@@ -1785,7 +1785,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert isinstance(result.err_value.cause, StrictJsonError)
         assert result.err_value.message == (
             f'Failed to encode kwargs for test.good_fn: x: {subject} holds a '
             'lone surrogate, which UTF-8 cannot encode'
@@ -1812,7 +1812,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert isinstance(result.err_value.cause, StrictJsonError)
         assert 'nested deeper than 300 levels' in result.err_value.message
         app.get_broker.assert_not_called()
 
@@ -1833,7 +1833,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, StrictJsonError)
+        assert isinstance(result.err_value.cause, StrictJsonError)
         assert result.err_value.message == (
             'Failed to encode kwargs for test.good_fn: x: a validation error '
             'holds a lone surrogate, which UTF-8 cannot encode'
@@ -1855,7 +1855,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, ValueValidationError)
+        assert isinstance(result.err_value.cause, ValueValidationError)
         assert result.err_value.message == (
             'Failed to encode kwargs for test.good_fn: x: serialization failed: '
             'Circular reference detected (id repeated)'
@@ -1878,7 +1878,7 @@ class TestCreateTaskWrapperSend:
 
         assert is_err(result)
         assert isinstance(result.err_value, TaskSendValidationFailed)
-        assert isinstance(result.err_value.exception, ValueValidationError)
+        assert isinstance(result.err_value.cause, ValueValidationError)
         assert result.err_value.message == (
             'Failed to encode kwargs for test.good_fn: x: serialization failed: '
             'Circular reference detected (depth exceeded)'
@@ -1979,7 +1979,7 @@ class TestCreateTaskWrapperSend:
         broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=ConnectionError('db gone'),
+            cause=ConnectionError('db gone'),
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2259,7 +2259,7 @@ class TestCreateTaskWrapperSendAsync:
         broker.enqueue_async = AsyncMock(return_value=Err(DatabaseEnqueueFailed(
             message='fail',
             retryable=False,
-            exception=RuntimeError('fail'),
+            cause=RuntimeError('fail'),
         )))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2407,7 +2407,7 @@ class TestCreateTaskWrapperSchedule:
         broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
             message='gone',
             retryable=True,
-            exception=ConnectionError('gone'),
+            cause=ConnectionError('gone'),
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2581,7 +2581,7 @@ def _make_enqueue_failed_error(
         payload=payload,
         message='db gone',
         retryable=True,
-        exception=ConnectionError('db gone'),
+        cause=ConnectionError('db gone'),
     )
 
 
@@ -2731,7 +2731,7 @@ class TestAutoRetry:
         transient_err = Err(DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=ConnectionError('db gone'),
+            cause=ConnectionError('db gone'),
         ))
         broker.enqueue.side_effect = [transient_err, transient_err, Ok('task-ok')]
         app.get_broker.return_value = broker
@@ -2759,7 +2759,7 @@ class TestAutoRetry:
         transient_err = Err(DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=ConnectionError('db gone'),
+            cause=ConnectionError('db gone'),
         ))
         broker.enqueue.return_value = transient_err
         app.get_broker.return_value = broker
@@ -2781,7 +2781,7 @@ class TestAutoRetry:
         broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
             message='db gone',
             retryable=True,
-            exception=ConnectionError('db gone'),
+            cause=ConnectionError('db gone'),
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -2889,7 +2889,7 @@ class TestPayloadMismatchClassification:
         broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
             message='unexpected sha mismatch in log',
             retryable=True,
-            exception=NoCause(),
+            cause=NoCause(),
         ))
         app.get_broker.return_value = broker
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
@@ -3409,7 +3409,7 @@ def _failed_send_error(
     broker.enqueue.return_value = Err(DatabaseEnqueueFailed(
         message='boom',
         retryable=False,
-        exception=NoCause(),
+        cause=NoCause(),
     ))
     if schedule_delay is None:
         res = task.send(value=1)

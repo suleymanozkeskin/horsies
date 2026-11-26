@@ -54,8 +54,8 @@ use std::time::Duration;
 
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, thread_role, BrokerError, DatabaseErrorCode, DatabaseOperationError,
-    DatabaseOperationFailedCode, BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing,
+    process_role, thread_role, BrokerError, BrokerOperationSource, ClassCoverage, ClassReport,
+    DatabaseErrorCode, DatabaseOperationError, DatabaseOperationFailedCode, DatabasePing,
     FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
     WorkerStateSnapshot,
 };
@@ -68,7 +68,7 @@ use crate::check::{connectivity_report, CHECK};
 use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::{
-    CheckPassed, CheckReport, HorsiesErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
+    CheckPassed, CheckReport, Horsies, HorsiesError, HorsiesErrorCode, PingTarget, ReadError,
     StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
     UserErrorCode, WaitLimit, WorkerHistoryLimit,
 };

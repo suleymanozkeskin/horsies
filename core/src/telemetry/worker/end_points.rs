@@ -17,9 +17,7 @@ use chrono::Utc;
 use tokio::time::Instant;
 
 use super::{TelemetryOn, WorkerTelemetry};
-use crate::core::task::error::{
-    error_code_label, OperationalCode, OutcomeCode, TaskErrorCode,
-};
+use crate::core::task::error::{error_code_label, OperationalCode, OutcomeCode, TaskErrorCode};
 use crate::events::{
     self, AttemptEnded, AttemptErrorCode, AttemptNotStarted, AttemptRecord, AttemptRecorded,
     AttemptStart, ChildResult, OperatorCancelEnd, RetryCount, WorkerDecision, WorkerIdText,

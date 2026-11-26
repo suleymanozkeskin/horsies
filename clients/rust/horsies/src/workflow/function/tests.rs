@@ -177,7 +177,10 @@ fn a_definition_registers_and_gives_its_function() {
         .definition("tests.function.daily.v1")
         .is_some());
     let again = app.register_workflow_definition::<Daily>().unwrap_err();
-    assert_eq!(again.code, Some(HorsiesErrorCode::WorkflowDuplicateDefinitionKey));
+    assert_eq!(
+        again.code,
+        Some(HorsiesErrorCode::WorkflowDuplicateDefinitionKey)
+    );
 }
 
 #[test]
@@ -203,7 +206,10 @@ fn a_builder_without_a_case_is_refused() {
         .check_workflow_builder("empty", |builder, _case: &u32| Daily::build(builder))
         .register()
         .unwrap_err();
-    assert_eq!(refused.code, Some(HorsiesErrorCode::WorkflowCheckCasesRequired));
+    assert_eq!(
+        refused.code,
+        Some(HorsiesErrorCode::WorkflowCheckCasesRequired)
+    );
 }
 
 #[test]
@@ -218,7 +224,10 @@ fn the_check_builds_each_case() {
     .unwrap();
     let findings = app.workflow_check_findings();
     assert_eq!(findings.len(), 1, "{findings:?}");
-    assert_eq!(findings[0].code, Some(HorsiesErrorCode::WorkflowCheckCaseInvalid));
+    assert_eq!(
+        findings[0].code,
+        Some(HorsiesErrorCode::WorkflowCheckCaseInvalid)
+    );
 }
 
 /// Python `_check_workflow_builders`: the check runs each case with the

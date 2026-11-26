@@ -140,7 +140,7 @@ def _broker_read_error(
     message: str, retryable: bool, exception: BaseException | NoCause,
 ) -> Err[ReadError]:
     """``ReadDatabaseError`` of a read whose core call or database read failed."""
-    return Err(ReadDatabaseError(message=message, retryable=retryable, exception=exception))
+    return Err(ReadDatabaseError(message=message, retryable=retryable, cause=exception))
 
 
 def _unreadable(message: str) -> Err[ReadError]:
@@ -746,7 +746,7 @@ class WorkflowHandle(Generic[OutT]):
             return Err(WorkflowHandleInvalidWorkflowId(
                 message=f'workflow id {text!r} is not a UUID: {exc}',
                 workflow_id_text=text,
-                exception=exc,
+                cause=exc,
             ))
         handle: WorkflowHandle[Any] = WorkflowHandle(workflow_id=workflow_key, broker=broker)
         return Ok(handle)
@@ -1008,8 +1008,8 @@ class WorkflowHandle(Generic[OutT]):
                     message=f'Workflow {self.workflow_id} not found',
                 ))
             case (
-                WorkflowHandleDatabaseOperationFailed(message=message, exception=cause)
-                | WorkflowHandleStoredDataInvalid(message=message, exception=cause)
+                WorkflowHandleDatabaseOperationFailed(message=message, cause=cause)
+                | WorkflowHandleStoredDataInvalid(message=message, cause=cause)
             ):
                 return _broker_read_error(message, record.retryable, cause)
             case _ as unreachable:
@@ -1175,8 +1175,8 @@ class WorkflowHandle(Generic[OutT]):
                     f"in workflow '{self.workflow_id}'"
                 )))
             case (
-                WorkflowHandleDatabaseOperationFailed(message=message, exception=cause)
-                | WorkflowHandleStoredDataInvalid(message=message, exception=cause)
+                WorkflowHandleDatabaseOperationFailed(message=message, cause=cause)
+                | WorkflowHandleStoredDataInvalid(message=message, cause=cause)
             ):
                 return _broker_read_error(message, record.retryable, cause)
             case StoredNodeResultRecord():
@@ -1410,7 +1410,7 @@ class WorkflowHandle(Generic[OutT]):
                                 f'{row.node_id}: {summary_loads_r.err_value}'
                             ),
                             workflow_id=str(self.workflow_id),
-                            exception=summary_loads_r.err_value,
+                            cause=summary_loads_r.err_value,
                         ))
                     try:
                         summary = SubWorkflowSummary.from_json(summary_loads_r.ok_value)
@@ -1421,7 +1421,7 @@ class WorkflowHandle(Generic[OutT]):
                                 f'{row.node_id}: {summary_exc}'
                             ),
                             workflow_id=str(self.workflow_id),
-                            exception=summary_exc,
+                            cause=summary_exc,
                         ))
 
             out.append(WorkflowTaskInfo(

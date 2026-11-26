@@ -702,7 +702,10 @@ async fn a_lost_database_makes_status_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("status() with no database");
 
-    assert_eq!(error.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable());
     assert_eq!(error.workflow_id(), workflow_id);
 }
@@ -729,7 +732,10 @@ async fn a_lost_database_makes_cancel_give_a_retryable_db_operation_failed() {
         .await
         .expect_err("cancel() with no database");
 
-    assert_eq!(error.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert!(error.retryable());
 }
 
@@ -743,7 +749,10 @@ async fn a_lost_database_makes_results_give_db_operation_failed() {
         .await
         .expect_err("results() with no database");
 
-    assert_eq!(error.code(), WorkflowHandleErrorCode::DatabaseOperationFailed);
+    assert_eq!(
+        error.code(),
+        WorkflowHandleErrorCode::DatabaseOperationFailed
+    );
     assert_eq!(error.workflow_id(), workflow_id);
 }
 

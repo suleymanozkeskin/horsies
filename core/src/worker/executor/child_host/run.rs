@@ -456,10 +456,7 @@ pub(super) fn refusal_end(task_name: &str, refusal: &StoredOptionsRefusal) -> Ru
             }),
         ),
     };
-    let mut error = TaskError::builtin(
-        OperationalCode::WorkerSerializationError,
-        reason.as_str(),
-    );
+    let mut error = TaskError::builtin(OperationalCode::WorkerSerializationError, reason.as_str());
     error.data = Some(JsonText::of_engine_value(&data));
     error_envelope(error)
 }

@@ -35,7 +35,7 @@ use horsies_core::{
 };
 
 use crate::process_state::refuse_in_a_fork;
-use crate::{AppRole, HorsiesErrorCode, Horsies, HorsiesError, ValidationReport};
+use crate::{AppRole, Horsies, HorsiesError, HorsiesErrorCode, ValidationReport};
 
 /// The check passed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,7 +113,7 @@ impl CheckReport {
 }
 
 impl std::fmt::Display for CheckReport {
-    /// Each refusal, then the count (Python `format_rust_style`).
+    /// Each refusal, then the count (Python `format_diagnostic`).
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}", self.report)
     }
@@ -690,7 +690,10 @@ mod tests {
     #[test]
     fn a_failed_connect_is_python_s_connectivity_refusal() {
         let report = connectivity_report("connection refused");
-        assert_eq!(report.errors()[0].code, Some(HorsiesErrorCode::DatabaseInvalidUrl));
+        assert_eq!(
+            report.errors()[0].code,
+            Some(HorsiesErrorCode::DatabaseInvalidUrl)
+        );
         assert_eq!(report.errors()[0].notes, vec!["connection refused"]);
     }
 }

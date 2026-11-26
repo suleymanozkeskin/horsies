@@ -37,7 +37,7 @@ use super::node::{
 use super::sub_workflow::{NodeParams, SubWorkflowNode};
 use crate::send::TaskFunctions;
 use crate::task::body::DecodeFailure;
-use crate::{HorsiesErrorCode, HorsiesError, TaskFunctionNotFound, ValidationReport};
+use crate::{HorsiesError, HorsiesErrorCode, TaskFunctionNotFound, ValidationReport};
 
 /// The longest node id (Python `NODE_ID_MAX_LENGTH`).
 const MAX_NODE_ID_LENGTH: usize = 128;

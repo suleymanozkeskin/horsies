@@ -75,10 +75,7 @@ pub async fn no_retry() -> Result<String, TaskError<BasicCode>> {
 /// Python `e2e_error_code`: a task body that returns a library code.
 #[task("e2e_error_code")]
 pub async fn error_code() -> Result<String, TaskError<Infallible>> {
-    Err(TaskError::library(
-        OperationalCode::TaskException,
-        "boom",
-    ))
+    Err(TaskError::library(OperationalCode::TaskException, "boom"))
 }
 
 /// The output of `e2e_complex_result` (Python `OutputModel`).
