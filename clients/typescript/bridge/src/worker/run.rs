@@ -49,7 +49,7 @@ use crate::logging::bridge::{running_log, DrainOutcome};
 use crate::logging::levels::RecordLevel;
 use crate::process_core::runtime::{core_for_call, pure_call_refusal, Core};
 use crate::sends::checks::{check_app_config, AppConfigCheck};
-use crate::sends::refusals::CoreRefusal;
+use crate::sends::refusals::{CoreRefusal, RefusalHelp};
 use crate::values::boundary::bigint_of_u64;
 use crate::worker::manifest::{config_sections, ConfigSections, ManifestBoundRefused};
 use crate::worker::start::StartPart;
@@ -218,7 +218,7 @@ pub fn coded_refusal(error: &HorsiesError) -> CoreRefusal {
         code,
         error.message.clone(),
         error.notes.clone(),
-        error.help_text.iter().cloned().collect(),
+        RefusalHelp::of(error.help_text.clone()),
     )
 }
 
@@ -606,7 +606,9 @@ mod tests {
                     .to_owned(),
                 message: "unknown worker profile 'absent'".to_owned(),
                 notes: vec!["the app defines the profiles: io".to_owned()],
-                help: vec!["pass one of them to --profile".to_owned()],
+                help: RefusalHelp::Help {
+                    line: "pass one of them to --profile".to_owned()
+                },
             }
         );
     }
