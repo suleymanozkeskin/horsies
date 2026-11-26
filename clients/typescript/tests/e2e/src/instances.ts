@@ -66,6 +66,18 @@ export const INSTANCES = [
   "hook_past_bound",
   // The default tasks with the profiles that start `SHARED_THREAD` children.
   "thread_profiles",
+  // The default tasks with the schedules of the scheduler tests (Python `instance_scheduler.py`).
+  "scheduler",
+  // The default tasks with an interval of no time unit and two schedules of one name.
+  "scheduler_invalid_rules",
+  // The default tasks with a schedule of a task that the app does not list (Python `instance_scheduler_invalid.py`).
+  "scheduler_invalid_task",
+  // The default tasks with an `AttemptEnded` handler and a handler child start hook (Python
+  // `instance_event_handlers.py`).
+  "handlers",
+  // The default tasks with OpenTelemetry tracing and a span SDK in each child (Python
+  // `instance_worker_ended_spans.py`).
+  "worker_ended_spans",
 ] as const;
 
 /** One app instance. */
@@ -144,7 +156,13 @@ export function instanceConfig(instance: Instance, connection: Connection): AppC
     case "provider_throws":
     case "hook_past_bound":
     case "thread_profiles":
+    case "scheduler":
+    case "scheduler_invalid_rules":
+    case "scheduler_invalid_task":
+    case "handlers":
       return base;
+    case "worker_ended_spans":
+      return { ...base, tracing: { kind: "otel" } };
     case "custom_queues":
       return { ...base, queueMode: "custom", customQueues: customQueues() };
     case "cluster_cap":

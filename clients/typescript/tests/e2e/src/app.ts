@@ -11,16 +11,20 @@ import { defineTask, h, Horsies } from "../../../horsies/src/index.ts";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import type { Connection } from "./connection.ts";
 import { entryThread, type StartMember, startMarkerName } from "./entry-thread.ts";
+import { addInstanceMembers, instanceWorkflows } from "./instance-members.ts";
 import { type Instance, instanceConfig } from "./instances.ts";
 import { createOnce, markerErrorText } from "./markers.ts";
 import { BASIC_CONTRACTS, implementBasic } from "./tasks/basic.ts";
+import { CANCEL_CONTRACTS, implementCancel } from "./tasks/cancel.ts";
 import { CORE_PANIC_CONTRACTS, implementCorePanic } from "./tasks/core-panic.ts";
 import { CUSTOM_CONTRACTS, implementCustom } from "./tasks/custom.ts";
+import { ENDED_SPANS_CONTRACTS, implementEndedSpans } from "./tasks/ended-spans.ts";
 import { FENCING_CONTRACTS, implementFencing } from "./tasks/fencing.ts";
 import { implementRetry, RETRY_CONTRACTS } from "./tasks/retry.ts";
+import { implementScheduled, SCHEDULED_CONTRACTS } from "./tasks/scheduled.ts";
 import { implementShared, SHARED_CONTRACTS } from "./tasks/shared.ts";
 import { implementSpawned, SPAWNED_CONTRACTS } from "./tasks/spawned.ts";
-import { blockMainThreadOnAsk, implementThreads, THREAD_CONTRACTS } from "./tasks/threads.ts";
+import { implementThreads, THREAD_CONTRACTS } from "./tasks/threads.ts";
 import { holdThread } from "./tasks/waits.ts";
 
 /** How long the hook of `hook_past_bound` holds its child: past the 10 s bound of a start hook. */
@@ -53,6 +57,9 @@ const DEFAULT_CONTRACTS = [
   ...THREAD_CONTRACTS,
   ...FENCING_CONTRACTS,
   ...SPAWNED_CONTRACTS,
+  ...SCHEDULED_CONTRACTS,
+  ...CANCEL_CONTRACTS,
+  ...ENDED_SPANS_CONTRACTS,
   ...CORE_PANIC_CONTRACTS,
   providedState,
   threadProvidedState,
@@ -61,7 +68,7 @@ const DEFAULT_CONTRACTS = [
 /** The app of `instance` on `connection`, with its tasks and start members. No I/O: the app connects at its first use. */
 export function buildApp(instance: Instance, connection: Connection): Result<Horsies, string> {
   const tasks = instance === "custom_queues" ? CUSTOM_CONTRACTS : DEFAULT_CONTRACTS;
-  const created = Horsies.create({ ...instanceConfig(instance, connection), tasks });
+  const created = Horsies.create({ ...instanceConfig(instance, connection), tasks, workflows: instanceWorkflows(instance) });
 
   if (!created.ok) {
     return err(created.error.refusals.map((refused) => `${refused.code} ${refused.path}: ${refused.message}`).join("; "));
@@ -85,6 +92,9 @@ function implementDefault(app: Horsies, instance: Exclude<Instance, "custom_queu
   implementThreads(app);
   implementFencing(app);
   implementSpawned(app);
+  implementScheduled(app);
+  implementCancel(app);
+  implementEndedSpans(app);
   implementCorePanic(app);
 
   const key = app.provide(() => markedStart("provider"));
@@ -102,14 +112,12 @@ function implementDefault(app: Horsies, instance: Exclude<Instance, "custom_queu
 
     return threadProvidedState.ok({ bodyPid: process.pid, bodyThreadId: threadId, providerPid: provided.pid, providerThreadId: provided.threadId });
   });
-  addInstanceStartMember(app, instance);
+  addFailingStartMember(app, instance);
+  addInstanceMembers(app, instance);
 }
 
-/**
- * The start member of an instance: the failing member of a hook instance, and the main-thread block of
- * `thread_profiles` (a thread body asks for it, `tasks/threads.ts`); none for the others.
- */
-function addInstanceStartMember(app: Horsies, instance: Exclude<Instance, "custom_queues">): void {
+/** The failing start member of a hook instance; none for the others. */
+function addFailingStartMember(app: Horsies, instance: Exclude<Instance, "custom_queues">): void {
   switch (instance) {
     case "hook_throws":
       app.onChildStart(() => {
@@ -130,18 +138,18 @@ function addInstanceStartMember(app: Horsies, instance: Exclude<Instance, "custo
       });
 
       return;
-    case "thread_profiles":
-      app.onChildStart(() => {
-        blockMainThreadOnAsk();
-      });
-
-      return;
     case "default":
     case "cluster_cap":
     case "recovery":
     case "soft_cap":
     case "queue_retention":
     case "declared_retention":
+    case "thread_profiles":
+    case "scheduler":
+    case "scheduler_invalid_rules":
+    case "scheduler_invalid_task":
+    case "handlers":
+    case "worker_ended_spans":
       return;
   }
 }
