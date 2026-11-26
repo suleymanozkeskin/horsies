@@ -108,6 +108,13 @@ describe("checkCaseParams", () => {
     assert.equal(built.ok ? undefined : built.error.side, "encode");
   });
 
+  test("a case that is not a plain object: the writer's refusal", () => {
+    const params = paramsOf({ price: h.taskOutcome(priced) });
+    const built = checkCaseParams(params, new Map([["region", "eu"]]));
+
+    assert.equal(built.ok ? undefined : built.error.side, "encode");
+  });
+
   test("a plain param that does not encode: the writer's refusal, before the outcome params", () => {
     const params = paramsOf({ price: h.taskOutcome(priced) });
     const built = checkCaseParams(params, { region: 7 });

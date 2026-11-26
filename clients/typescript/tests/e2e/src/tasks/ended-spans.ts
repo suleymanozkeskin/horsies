@@ -85,7 +85,7 @@ export function implementEndedSpans(app: Horsies): void {
 
     return ok("woke");
   });
-  app.implement(endedSpansThreadHold, ({ token, holdMs }) => {
+  app.implement(endedSpansThreadHold, ({ token, holdMs }, { ok }) => {
     const created = createOnce(`${token}-started`, "started");
 
     if (!created.ok) {
@@ -94,11 +94,11 @@ export function implementEndedSpans(app: Horsies): void {
 
     holdThread(holdMs);
 
-    return endedSpansThreadHold.ok("held");
+    return ok("held");
   });
-  app.implement(endedSpansThreadOverrun, () => {
+  app.implement(endedSpansThreadOverrun, (_input, { ok }) => {
     holdThread(THREAD_OVERRUN_HOLD_MS);
 
-    return endedSpansThreadOverrun.ok("late");
+    return ok("late");
   });
 }

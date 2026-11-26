@@ -3,19 +3,21 @@
 // `E2ESub*` definitions, and `dynamic_fanout.py`). Every process of an instance lists them, so the worker builds each
 // child from its own app when the child's node is ready.
 //
-// A child param that takes an upstream result is `h.resultOf(T).optional()`: `check` builds each check case with the
-// params that a sender gives, and a sender gives no upstream result (#2549). The build of such a child names what it
-// does when the param is absent; only `check` builds it so.
+// A check case may give an outcome for an `h.taskOutcome` param (#2549). The children here keep such a param
+// `.optional()` and leave it out of their check case: the build of such a child names what it does when the param is
+// absent, and only `check` builds it so.
 
 import { defineTask, defineWorkflow, h, type Horsies, type TaskOutcome, type ValueOf } from "../../../../horsies/src/index.ts";
 import { err, ok, type Result } from "../../../../horsies/src/wire/result.ts";
 import { errorCode } from "../../support/outcome.ts";
 import {
   contextInt,
+  failWith,
   mark,
   type NodeError,
   NODE_RUN_MS,
   outcomeValue,
+  produceInt,
   retryThenOk,
   slowMark,
   WF_CODES,
@@ -94,15 +96,6 @@ export const subReportInput = defineTask({
 /** Python `e2e_sub_pet_report`: returns what the build saw of its pet. */
 export const subPetReport = defineTask({ name: "e2e_sub_pet_report", input: { seen: PetSeen }, output: PetSeen, errors: WF_CODES });
 
-/** Python `e2e_sub_probe_failed_child`: what the node read of the failed child of the node `childNode`. */
-export const subProbeFailedChild = defineTask({
-  name: "e2e_sub_probe_failed_child",
-  input: { childResult: h.resultOf(h.int()), childNode: h.string() },
-  output: FailedChildProbe,
-  errors: WF_CODES,
-  workflowContext: true,
-});
-
 /** Python `e2e_sub_probe_success_ctx`: what the node read of the completed child of the node `childNode`. */
 export const subProbeCompletedChild = defineTask({
   name: "e2e_sub_probe_success_ctx",
@@ -144,6 +137,15 @@ export const subFail = defineWorkflow(
   (w) => ({ output: w.task(subIntFail, { errorCode: SUB_CHILD_FAIL }, node(CHILD_NODE)) }),
 );
 
+/** Python `e2e_sub_probe_failed_child`: what the node read of the failed child of the node `childNode`. */
+export const subProbeFailedChild = defineTask({
+  name: "e2e_sub_probe_failed_child",
+  input: { childResult: h.taskOutcome(subFail), childNode: h.string() },
+  output: FailedChildProbe,
+  errors: WF_CODES,
+  workflowContext: true,
+});
+
 /** Python `E2ESubNestedOkMiddleWorkflow`: one sub-workflow node of `e2e_sub_ok_workflow`. */
 export const subNestedOkMiddle = defineWorkflow(
   { name: "e2e_sub_nested_ok_middle_workflow", definitionKey: "tests.e2e.sub.nested.ok.middle.v1", params: {}, output: h.int() },
@@ -169,7 +171,7 @@ export const subParam = defineWorkflow(
   {
     name: "e2e_sub_param_workflow",
     definitionKey: "tests.e2e.sub.param.v1",
-    params: { value: h.resultOf(h.int()).optional() },
+    params: { value: h.taskOutcome(produceInt).optional() },
     output: h.int(),
     checkCases: [{}],
   },
@@ -190,7 +192,7 @@ export const subFailedInput = defineWorkflow(
   {
     name: "e2e_sub_failed_input_workflow",
     definitionKey: "tests.e2e.sub.failed.input.v1",
-    params: { value: h.resultOf(h.int()).optional() },
+    params: { value: h.taskOutcome(failWith).optional() },
     output: UpstreamSeen,
     checkCases: [{}],
   },
@@ -202,7 +204,7 @@ export const subLabel = defineWorkflow(
   {
     name: "e2e_sub_label_workflow",
     definitionKey: "tests.e2e.sub.label.v1",
-    params: { label: h.string(), value: h.resultOf(h.int()).optional() },
+    params: { label: h.string(), value: h.taskOutcome(produceInt).optional() },
     output: h.string(),
     checkCases: [{ label: "check" }],
   },
@@ -280,7 +282,7 @@ export const shardReport = defineWorkflow(
   {
     name: "e2e_fanout_shard_report",
     definitionKey: "tests.e2e.dynamic_fanout.shard_report.v1",
-    params: { shards: h.resultOf(h.array(h.string())).optional() },
+    params: { shards: h.taskOutcome(listShards).optional() },
     output: h.int(),
     checkCases: [{}],
   },
@@ -391,66 +393,66 @@ function failedChildId(
 
 /** The implementations of this module on `app`. */
 export function implementChildNodes(app: Horsies): void {
-  app.implement(subIntOk, ({ value }) => {
+  app.implement(subIntOk, ({ value }, { ok }) => {
     holdThread(NODE_RUN_MS);
 
-    return subIntOk.ok(value);
+    return ok(value);
   });
-  app.implement(subIntFail, ({ errorCode: code }) => {
+  app.implement(subIntFail, ({ errorCode: code }, { err }) => {
     holdThread(NODE_RUN_MS);
 
-    return subIntFail.err({ code, message: `Subworkflow failed: ${code}` });
+    return err({ code, message: `Subworkflow failed: ${code}` });
   });
-  app.implement(subReportInput, ({ seen }) => subReportInput.ok(seen));
-  app.implement(subPetReport, ({ seen }) => subPetReport.ok(seen));
-  app.implement(listShards, ({ tenantId }) => listShards.ok(FANOUT_SHARD_SUFFIXES.map((suffix) => `${tenantId}-${suffix}`)));
-  app.implement(countShardRows, ({ shard }) => countShardRows.ok(shard.length));
-  app.implement(sumShardRows, ({ shardCount }, runtime) => {
+  app.implement(subReportInput, ({ seen }, { ok }) => ok(seen));
+  app.implement(subPetReport, ({ seen }, { ok }) => ok(seen));
+  app.implement(listShards, ({ tenantId }, { ok }) => ok(FANOUT_SHARD_SUFFIXES.map((suffix) => `${tenantId}-${suffix}`)));
+  app.implement(countShardRows, ({ shard }, { ok }) => ok(shard.length));
+  app.implement(sumShardRows, ({ shardCount }, { ok, err, workflowContext }) => {
     let total = 0;
 
     for (let position = 0; position < shardCount; position += 1) {
-      const shard = contextInt(runtime.workflowContext, `shard_${String(position)}`);
+      const shard = contextInt(workflowContext, `shard_${String(position)}`);
 
       if (!shard.ok) {
-        return sumShardRows.err(shard.error);
+        return err(shard.error);
       }
 
       total += shard.value;
     }
 
-    return sumShardRows.ok(total);
+    return ok(total);
   });
   implementProbes(app);
 }
 
 function implementProbes(app: Horsies): void {
-  app.implement(subProbeFailedChild, ({ childResult, childNode }, runtime) => {
-    const seen = runtime.workflowContext;
+  app.implement(subProbeFailedChild, ({ childResult, childNode }, { ok, err, workflowContext }) => {
+    const seen = workflowContext;
 
     if (seen.kind === "noContext") {
-      return subProbeFailedChild.err({ code: "NO_CONTEXT", message: "the run has no workflow context" });
+      return err({ code: "NO_CONTEXT", message: "the run has no workflow context" });
     }
 
     const read = seen.context.resultFor(childNode, subIntOk);
     const summary = seen.context.summaryFor(childNode);
 
     if (!read.ok || !summary.ok) {
-      return subProbeFailedChild.err({ code: "NOT_IN_CONTEXT", message: JSON.stringify([read, summary]) });
+      return err({ code: "NOT_IN_CONTEXT", message: JSON.stringify([read, summary]) });
     }
 
     const argsChild = failedChildId(childResult, "the parameter");
 
     if (!argsChild.ok) {
-      return subProbeFailedChild.err(argsChild.error);
+      return err(argsChild.error);
     }
 
     const ctxChild = failedChildId(read.value, "the context");
 
     if (!ctxChild.ok) {
-      return subProbeFailedChild.err(ctxChild.error);
+      return err(ctxChild.error);
     }
 
-    return subProbeFailedChild.ok({
+    return ok({
       argsCode: argsChild.value.code,
       argsChildId: argsChild.value.childId,
       ctxChildId: ctxChild.value.childId,
@@ -458,11 +460,11 @@ function implementProbes(app: Horsies): void {
       summaryFailedTasks: summary.value.failedTasks,
     });
   });
-  app.implement(subProbeCompletedChild, ({ childNode }, runtime) => {
-    const seen = runtime.workflowContext;
+  app.implement(subProbeCompletedChild, ({ childNode }, { ok, err, workflowContext }) => {
+    const seen = workflowContext;
 
     if (seen.kind === "noContext") {
-      return subProbeCompletedChild.err({ code: "NO_CONTEXT", message: "the run has no workflow context" });
+      return err({ code: "NO_CONTEXT", message: "the run has no workflow context" });
     }
 
     const read = seen.context.resultFor(childNode, subIntOk);
@@ -470,16 +472,16 @@ function implementProbes(app: Horsies): void {
     const output = seen.context.outputFor(childNode, subOk);
 
     if (!read.ok || !summary.ok || !output.ok) {
-      return subProbeCompletedChild.err({ code: "NOT_IN_CONTEXT", message: JSON.stringify([read, summary, output]) });
+      return err({ code: "NOT_IN_CONTEXT", message: JSON.stringify([read, summary, output]) });
     }
 
     const value = outcomeValue(read.value);
 
     if (!value.ok || output.value.kind === "notRecorded") {
-      return subProbeCompletedChild.err({ code: "UNEXPECTED_OUTCOME", message: JSON.stringify([read.value, output.value]) });
+      return err({ code: "UNEXPECTED_OUTCOME", message: JSON.stringify([read.value, output.value]) });
     }
 
-    return subProbeCompletedChild.ok({
+    return ok({
       resultValue: value.value,
       summaryStatus: summary.value.status,
       summaryOutput: output.value.value,

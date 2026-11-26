@@ -11,7 +11,7 @@
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
 import { decodeParameters } from "../codec/reader.ts";
 import { type CodecRefused, decodeRefused, memberPath, ROOT_PATH } from "../codec/refusal.ts";
-import { isObjectLike, setOwn } from "../codec/values.ts";
+import { isObjectLike, isPlainObject, setOwn } from "../codec/values.ts";
 import { type Member, objectKind, type ObjectKind, REQUIRED } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { isTaskOutcomeKind, upstreamValueKind } from "../wire/task-outcome.ts";
@@ -64,21 +64,16 @@ function plainValue(decoded: object, member: Member): CaseValue {
     : LEFT_OUT;
 }
 
-/** The plain params of `given` (its members but those of `outcomeNames`), encoded, read back and decoded. Pure. */
+/**
+ * The plain params of `given` (its members but those of `outcomeNames`), encoded, read back and decoded. A case that
+ * is not a plain object goes to the writer as it is, so the writer's refusal of it stays. Pure.
+ */
 function plainParams(
   plain: ObjectKind,
   given: object,
   outcomeNames: ReadonlySet<string>,
 ): Result<object, CodecRefused> {
-  const plainGiven: Record<string, unknown> = {};
-
-  for (const [name, value] of Object.entries(given)) {
-    if (!outcomeNames.has(name)) {
-      setOwn(plainGiven, name, value);
-    }
-  }
-
-  const text = encodeParametersWithReadBack(plain, plainGiven);
+  const text = encodeParametersWithReadBack(plain, isPlainObject(given) ? withoutMembers(given, outcomeNames) : given);
 
   if (!text.ok) {
     return text;
@@ -87,6 +82,19 @@ function plainParams(
   const decoded = decodeParameters(plain, text.value, "worker");
 
   return decoded.ok ? ok(Object(decoded.value)) : decoded;
+}
+
+/** The members of `given` but those of `names`, in their order. Pure. */
+function withoutMembers(given: Readonly<Record<string, unknown>>, names: ReadonlySet<string>): Record<string, unknown> {
+  const kept: Record<string, unknown> = {};
+
+  for (const [name, value] of Object.entries(given)) {
+    if (!names.has(name)) {
+      setOwn(kept, name, value);
+    }
+  }
+
+  return kept;
 }
 
 /** The outcome param `member` of the case `given`. Pure. */
