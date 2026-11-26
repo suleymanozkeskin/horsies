@@ -8,9 +8,11 @@ import { createHorsies, Horsies } from "../../../horsies/src/app.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { NO_OP_OBSERVER } from "../../../horsies/src/app/observers.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
+import { taskIdFromCore } from "../../../horsies/src/contract/ids.ts";
 import * as entry from "../../../horsies/src/index.ts";
 import type { TraceArgument } from "../../../horsies/src/native/values/records.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
+import { ok } from "../../../horsies/src/wire/result.ts";
 import { DATABASE_URL, fakeEnvironment } from "./support.ts";
 
 const listed = defineTask({ name: "listed", input: { n: h.int() }, output: h.int() });
@@ -69,14 +71,15 @@ describe("app.implement and the refusal sink", () => {
 describe("the send observer", () => {
   test("the no-op observer runs the send with no carrier", async () => {
     const seen: TraceArgument[] = [];
+    const sent = ok(taskIdFromCore("0192f6a1-7b3c-7d4e-8f00-0123456789ab", "the hub test"));
 
     const value = await NO_OP_OBSERVER.observeSend({ taskName: "t", queueName: "default", taskId: "id" }, async (trace) => {
       seen.push(trace);
 
-      return 7;
+      return sent;
     });
 
-    assert.equal(value, 7);
+    assert.equal(value, sent);
     assert.deepEqual(seen, [{ kind: "noCarrier" }]);
   });
 

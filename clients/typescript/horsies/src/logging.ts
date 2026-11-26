@@ -8,6 +8,7 @@
 // Thresholds follow the dotted names, as Python's `logging` does: a threshold set for
 // `horsies.workflow` applies to `horsies.workflow.engine` unless that logger has its own.
 
+import { processStart } from "./app/suppression.ts";
 import { nativeValue } from "./native/call/envelope.ts";
 import { thrownFacts } from "./native/call/thrown-facts.ts";
 import { loggingAddon } from "./native/logging/addon.ts";
@@ -109,9 +110,35 @@ export interface LoggingOptions {
 /**
  * Set the thresholds and the sink of the core log records of this process. It can run before the
  * first core call and at any later time; it starts no core. The thresholds apply first: if the sink
- * step then throws, the thresholds stay as set.
+ * step then throws, the thresholds stay as set. In a seat isolate of a `SHARED_THREAD` child it does
+ * nothing: no core runs there, and the child's main thread holds the core log of the process (the
+ * entry runs there too).
  */
 export function configureLogging(options: LoggingOptions): void {
+  const thread = loggingThread();
+
+  switch (thread) {
+    case "seatIsolate":
+      return;
+    case "processCore":
+      configureCoreLogging(options);
+
+      return;
+    default: {
+      const unexpected: never = thread;
+
+      throw new TypeError(`configureLogging: a thread outside its type: ${String(unexpected)}`);
+    }
+  }
+}
+
+/** Where `configureLogging` applies: the core log of the process, or nothing in a seat isolate. */
+function loggingThread(): "processCore" | "seatIsolate" {
+  return processStart().seatIsolate ? "seatIsolate" : "processCore";
+}
+
+/** The thresholds and the sink of the core log of this process. Loads the addon. */
+function configureCoreLogging(options: LoggingOptions): void {
   const addon = loggingAddon();
   const levels = options.levels;
 

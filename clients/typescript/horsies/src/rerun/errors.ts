@@ -3,6 +3,7 @@
 
 import type { CoreFailure } from "../_catalog/error_detail.ts";
 import { RerunErrorCode } from "../_catalog/history.ts";
+import type { SeatRelayFull } from "../seats/relay-full.ts";
 import type { CallerConnectionState } from "./caller.ts";
 
 /** The app's handle could not connect, install the schema, or open its closed pools again. Nothing ran. */
@@ -159,13 +160,17 @@ export type RerunStepRefused =
   | RerunUnknownStoredFamily
   | RerunContractViolation;
 
-/** Why a rerun in the app's transaction failed. */
+/**
+ * Why a rerun in the app's transaction failed. `SEAT_RELAY_FULL` comes in a `SHARED_THREAD` body only: the seat relay
+ * held its bound and sent nothing.
+ */
 export type RerunError =
   | RerunConnectFailed
   | RerunStatementFailed
   | RerunFamilyCheckFailed
   | RerunRequestRefused
-  | RerunStepRefused;
+  | RerunStepRefused
+  | SeatRelayFull;
 
 /** Why a rerun in the caller's transaction failed. After it, the caller does not commit. */
 export type CallerRerunError =

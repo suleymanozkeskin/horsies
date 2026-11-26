@@ -1,0 +1,21 @@
+{
+  // The examples. Each file is the app of a user of the package: it imports `horsies`, `horsies/zod` and
+  // `horsies/rerun/pg` by the package's own names, and runs on Node 26 and on Bun 1.4.
+  //
+  // The workspace does not build the package, so `paths` gives each name the source entry that the package build
+  // compiles for the same name of the `exports` map. Bun applies `paths` when it runs a file; on Node,
+  // `dev/source-package.ts` gives the same mapping (see that file).
+  "extends": "../horsies/tsconfig.json",
+  "compilerOptions": {
+    // An app publishes no declarations.
+    "isolatedDeclarations": false,
+    "declaration": false,
+    "paths": {
+      "horsies": ["../horsies/src/index.ts"],
+      "horsies/zod": ["../horsies/src/zod.ts"],
+      "horsies/rerun/pg": ["../horsies/src/rerun/pg.ts"],
+      "horsies/rerun/postgres": ["../horsies/src/rerun/postgres.ts"]
+    }
+  },
+  "include": ["*.ts", "dev"]
+}

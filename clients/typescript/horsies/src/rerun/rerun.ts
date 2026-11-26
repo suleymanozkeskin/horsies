@@ -57,6 +57,8 @@ export async function rerunInApp(
       return ok(rerunOutcome(answer.outcome));
     case "failed":
       return err(appRerunError(answer.error));
+    case "seatRelayFull":
+      return err(answer.error);
     default:
       return unreachable(answer);
   }

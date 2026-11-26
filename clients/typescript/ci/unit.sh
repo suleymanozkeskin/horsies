@@ -23,8 +23,14 @@ cd "$workspace_folder"
 print_step_title "Runtime versions"
 printf 'bun %s\nnode %s\n' "$(bun --revision)" "$(node --version)"
 
-print_step_title "Install the workspace from bun.lock"
+# Every pin that a later step uses is installed here, before the first step
+# that runs a tool: the workspace (bun.lock; it holds the tests package and
+# its TypeScript 7 compiler) and the TypeScript 6.0 compiler of the floor lane
+# (ci/typescript-floor/bun.lock). `bun test` runs both compilers: the docs
+# check test compiles its fixture page with each of them.
+print_step_title "Install the workspace and the floor compiler from their lockfiles"
 bun install --frozen-lockfile
+(cd "$floor_compiler_folder" && bun install --frozen-lockfile)
 
 print_step_title "Type check with bun check"
 bun check
@@ -41,11 +47,13 @@ bun test
 # corpus of Python's texts) run on Node too (`node:test`). The task child code
 # (the body adapter, the runtime, the run store) runs on Node too, and so do
 # the workflow builder, its checks and the child spec answer, which a child
-# build runs in a task child. The schedule checks read time zones through the
-# engine's Temporal (V8 on Node, JavaScriptCore on Bun), so the schedule tests
-# run on Node too.
-print_step_title "Run the codec, wire type, zod adapter, child, workflow, schedule and stored-form tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
+# build runs in a task child, and the telemetry (the spans and the context
+# across `await` with the OpenTelemetry SDK). The schedule checks read time
+# zones through the engine's Temporal (V8 on Node, JavaScriptCore on Bun), so
+# the schedule tests run on Node too. The seat isolates of SHARED_THREAD
+# children run on Node, so their tests run there too.
+print_step_title "Run the codec, wire type, zod adapter, child, seat, workflow, telemetry, schedule and stored-form tests on Node"
+node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/seats/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/telemetry/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
 
 # The lint rule package (eslint-plugin/) runs in ESLint, on Node: its
 # RuleTester cases, and ESLint and tsc of TypeScript 7 on its fixture project.
@@ -64,7 +72,6 @@ node eslint-plugin/lint-client.ts
 # project list of tsconfig.json, as `bun check` does; `--clean` then removes
 # the build info files that build mode writes.
 print_step_title "Type check with tsc of TypeScript 6.0"
-(cd "$floor_compiler_folder" && bun install --frozen-lockfile)
 "$floor_compiler" --version
 "$floor_compiler" --build
 "$floor_compiler" --build --clean
@@ -82,7 +89,7 @@ bun tests/public-api/run.ts check
 
 # The type tests (tests/types/pass/, tests/types/fail/) and the consumer
 # project (tests/types/consumer/), with tsc of TypeScript 7, bun check, and
-# tsc of TypeScript 6.0 (the floor compiler installed above).
+# tsc of TypeScript 6.0 (the floor compiler of the install step).
 print_step_title "Type tests and the consumer project in both compiler lanes"
 bun tests/types/run.ts
 

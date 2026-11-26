@@ -19,6 +19,7 @@ import { DATABASE_URL, fakeEnvironment } from "../app/support.ts";
 import { ping } from "../worker/support.ts";
 import { FakeChildNative, settled } from "./child-native.ts";
 import { FakeRunNative, RecordingMarks, RUN_TASK_ID, tableRun } from "./support.ts";
+import { unusedSeatHost } from "../seats/support.ts";
 
 const CHILD_ARGUMENTS = ["--horsies-child", "3", "4242"] as const;
 
@@ -50,6 +51,7 @@ function deps(native: FakeChildNative, lines: string[], defects: CoreDefect[]): 
     culprit: { kind: "none" },
     settlement: { returned: () => undefined, threw: () => undefined },
     hostname: "host-1",
+    seats: unusedSeatHost(),
     writeLine: (line) => lines.push(line),
     wait: async () => undefined,
     exit: (code) => {
@@ -89,6 +91,9 @@ describe("a served child", () => {
     const native = new FakeChildNative();
     const running = runChildMode(app, CHILD_ARGUMENTS, deps(native, [], []));
 
+    await settled();
+    // The core runs the start hooks before it posts a run: hook 0 gives the start facts.
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "isolated" } });
     await settled();
     native.serves[0]?.post(runBodyPost(1n));
     await settled();

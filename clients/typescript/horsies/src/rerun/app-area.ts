@@ -1,9 +1,16 @@
 // The rerun area of the app: the members `app.rerun` and `app.rerunIn`. The app hub builds it once
 // with `createRerunArea(host)` and gives one line per member.
 
-import type { CoreHandle } from "../native/handle/core-handle.ts";
+import { appCoreHandle, type CoreAccess } from "../app/core-access.ts";
+import { type RelayedAddon, relayedFacades } from "../monitoring/seat-calls.ts";
+import { CoreHandle } from "../native/handle/core-handle.ts";
+import { unreachable } from "../wire/unreachable.ts";
 import type { TraceArgument } from "../native/values/records.ts";
+import { nativeValueAsync } from "../native/call/envelope.ts";
+import type { AppRerunAnswer, RerunAddon } from "../native/facades/rerun.ts";
+import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
 import { addonRerunBridge } from "./bridge.ts";
+import type { RerunRequest } from "./parse.ts";
 import type { RerunBridge } from "./bridge.ts";
 import type { CallerTransaction } from "./caller.ts";
 import { rerunInApp, rerunInCaller } from "./rerun.ts";
@@ -38,6 +45,42 @@ export interface RerunArea {
 
 /** The trace argument of a call with no active context. */
 export const NO_ACTIVE_CARRIER: TraceArgument = { kind: "noCarrier" };
+
+/**
+ * The rerun area of an app whose thread reaches the core through `core`. In a seat isolate `rerun` goes through the
+ * seat relay to the main thread of its child; `rerunIn` does not cross a thread (the caller's transaction object stays
+ * in the isolate), so there it throws `AddonOutsideMainThread`. Starts nothing.
+ */
+export function rerunAreaOfCore(core: CoreAccess, activeCarrier: () => TraceArgument): RerunArea {
+  switch (core.kind) {
+    case "seatRelay": {
+      const relayed = relayedFacades(core.relay);
+      const handle = new CoreHandle(relayed.handle);
+
+      return rerunAreaOn({ coreHandle: () => handle, activeCarrier }, relayedRerunBridge(relayed.rerun));
+    }
+
+    case "addon":
+    case "noCore":
+      return createRerunArea({ coreHandle: () => appCoreHandle(core), activeCarrier });
+    default:
+      return unreachable(core, "rerunAreaOfCore");
+  }
+}
+
+/** The rerun bridge of a seat isolate: `rerunTask` on the relayed addon; the caller steps on the loaded addon. */
+function relayedRerunBridge(rerun: RelayedAddon<Pick<RerunAddon, "rerunTask">>): RerunBridge {
+  return {
+    rerunTask: async (
+      handle: CoreHandle,
+      request: RerunRequest,
+      trace: TraceArgument,
+    ): Promise<AppRerunAnswer | SeatRelayFullOutcome> =>
+      nativeValueAsync("rerunTask", () => rerun.rerunTask(handle.native, request.command, request.policy, trace)),
+    readStatement: addonRerunBridge.readStatement,
+    prepareWrite: addonRerunBridge.prepareWrite,
+  };
+}
 
 /** The rerun area of the app that `host` describes, on the loaded addon. Starts nothing. */
 export function createRerunArea(host: RerunHost): RerunArea {

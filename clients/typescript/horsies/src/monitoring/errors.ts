@@ -2,6 +2,7 @@
 //
 // - The core catalog errors come from the generated converters (`monitoring_errors.ts`, `broker_errors.ts`).
 // - `QUERY_REFUSED` is the one client code: an argument that the call refuses before any connect. Nothing ran.
+// - `SEAT_RELAY_FULL` comes in a `SHARED_THREAD` body only: the seat relay held its bound and sent nothing.
 // - Each health read lists only the broker codes that the read can give. A code outside the list is a defect of the
 //   core: it crashes loud.
 
@@ -25,6 +26,7 @@ import { raiseDefect } from "../native/call/defect.ts";
 import { unreachable } from "../native/call/never.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
+import type { SeatRelayFull } from "../seats/relay-full.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 
 /** The argument that a call refuses before any connect. */
@@ -48,11 +50,14 @@ export interface QueryRefused {
   readonly reason: string;
 }
 
+/** The error of a monitoring read with no query to refuse. */
+export type MonitoringCoreReadError = MonitoringQueryCoreError | SeatRelayFull;
+
 /** The error of a monitoring read with a query that the read can refuse. */
-export type MonitoringReadError = MonitoringQueryCoreError | QueryRefused;
+export type MonitoringReadError = MonitoringCoreReadError | QueryRefused;
 
 /** The error of a cancel. */
-export type CancelTaskError = TaskActionCoreError;
+export type CancelTaskError = TaskActionCoreError | SeatRelayFull;
 
 /** `BrokerOperationFailed` with one code of its subset. */
 export type BrokerOperationFailedWith<Code extends BrokerOperationFailed["code"]> = BrokerOperationFailed & {
@@ -60,23 +65,24 @@ export type BrokerOperationFailedWith<Code extends BrokerOperationFailed["code"]
 };
 
 /** The error of a database ping. */
-export type PingDatabaseError = BrokerOperationFailedWith<"DB_PING_FAILED">;
+export type PingDatabaseError = BrokerOperationFailedWith<"DB_PING_FAILED"> | SeatRelayFull;
 
 /** The error of a worker ping. */
 export type PingWorkersError =
   | BrokerInvalidInput
   | BrokerListenerDisabled
   | BrokerOperationFailedWith<"WORKER_PING_FAILED">
-  | QueryRefused;
+  | QueryRefused
+  | SeatRelayFull;
 
 /** The error of a health read with no argument to refuse. */
-export type HealthReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED">;
+export type HealthReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
 
 /** The error of a health read of one worker. */
-export type WorkerReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | QueryRefused;
+export type WorkerReadError = HealthReadError | QueryRefused;
 
 /** The error of a health read with a count or a threshold that the core checks: `staleTasks`. */
-export type HealthInputError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED">;
+export type HealthInputError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | SeatRelayFull;
 
 /** The error of the history read of one worker: its limit, and its worker id. */
 export type WorkerHistoryError = HealthInputError | QueryRefused;

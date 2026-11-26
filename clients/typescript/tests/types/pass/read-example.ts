@@ -32,6 +32,8 @@ function describeReadError(error: ReadError): string {
       return `${error.code} ${String(error.retryable)}`;
     case "invalidWait":
       return String(error.maxMs);
+    case "seatRelayFull":
+      return error.error.code;
     default:
       return assertNever(error);
   }

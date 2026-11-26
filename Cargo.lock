@@ -1208,6 +1208,7 @@ dependencies = [
  "chrono-tz",
  "futures-util",
  "horsies-core",
+ "libc",
  "mimalloc",
  "napi",
  "napi-build",

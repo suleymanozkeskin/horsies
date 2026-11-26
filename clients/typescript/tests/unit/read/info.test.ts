@@ -183,8 +183,11 @@ describe("TaskHandle.info", () => {
         kind: "seatRelay",
         relay: {
           request: async () => ({
-            kind: "prepareSend",
-            prepared: { kind: "refused", error: operationFailedRaw("TASK_INFO_QUERY_FAILED", false) },
+            kind: "reply",
+            reply: {
+              kind: "prepareSend",
+              prepared: { kind: "refused", error: operationFailedRaw("TASK_INFO_QUERY_FAILED", false) },
+            },
           }),
         },
       },

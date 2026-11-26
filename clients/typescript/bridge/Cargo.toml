@@ -38,6 +38,9 @@ chrono = "0.4"
 # same version), so the zone check of `app.schedules` and the scheduler start
 # read one zone table.
 chrono-tz = "0.10"
+# `fcntl` of the child's socket: the duplicate that the host thread keeps
+# until the process ends (`child::exit`).
+libc = "0.2"
 
 [build-dependencies]
 napi-build = "=2.7.0"

@@ -14,6 +14,7 @@ import {
   type WorkflowStartValidationFailed,
 } from "../_catalog/workflow_start_errors.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
+import type { SeatRelayFull } from "../seats/relay-full.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
 import type { NodeTarget } from "./node-checks.ts";
 import type { BuildReturn } from "./node.ts";
@@ -24,12 +25,16 @@ export declare const startTypes: unique symbol;
 /** `ENQUEUE_FAILED` of a start: the tree may or may not exist; `retryStart` sends the same spec again. */
 export type StartEnqueueFailed<R extends BuildReturn> = WorkflowStartEnqueueFailed & { readonly [startTypes]?: R };
 
-/** The error of a workflow start, told apart by `code`. */
+/**
+ * The error of a workflow start, told apart by `code`. `SEAT_RELAY_FULL` comes in a `SHARED_THREAD` body only: the seat
+ * relay held its bound and sent nothing, so no tree was written; start again (`retryStart` does not take it).
+ */
 export type WorkflowStartError<R extends BuildReturn> =
   | WorkflowStartValidationFailed
   | WorkflowStartIdConflict
   | WorkflowStartCommandConflict
-  | StartEnqueueFailed<R>;
+  | StartEnqueueFailed<R>
+  | SeatRelayFull;
 
 /** What a retry of a failed start sends again: the same text, id, sent instant, and the nodes for typed reads. */
 export type StartRetry = {

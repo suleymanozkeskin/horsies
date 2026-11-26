@@ -17,6 +17,16 @@ pub struct ChildArgs {
     pub(super) worker_pid: ProcessId,
 }
 
+impl ChildArgs {
+    /// The descriptor number of the child's socket, as the supervisor
+    /// passed it. `run_child_host` closes the socket when it returns. A host
+    /// whose process ends later keeps a duplicate open until its end, so the
+    /// parent reads the exit and not an end of the socket before it. Pure.
+    pub fn socket_fd(&self) -> RawFd {
+        self.socket_fd
+    }
+}
+
 /// Why child-mode arguments cannot be used. The child exits with the
 /// bad-arguments code.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

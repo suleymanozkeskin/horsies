@@ -11,6 +11,7 @@ import { nativeValueAsync } from "../native/call/envelope.ts";
 import { unreachable } from "../native/call/never.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import type { CancelAddon, CancelPolicy } from "../native/facades/cancel.ts";
+import type { RelayedAddon } from "./seat-calls.ts";
 import type { NativeCoreHandle } from "../native/handle/addon.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
@@ -25,7 +26,7 @@ export interface CancelTaskOptions {
 
 /** The addon and the handle that the cancel calls. */
 export interface CancelTarget {
-  readonly addon: CancelAddon;
+  readonly addon: RelayedAddon<CancelAddon>;
   readonly handle: NativeCoreHandle;
 }
 
@@ -44,6 +45,8 @@ export async function cancelTask(
       return ok(Object.freeze({ taskId, wasStatus: leftStatus(outcome.record.wasStatus) }));
     case "failed":
       return err(taskActionError(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default:
       return unreachable(outcome);
   }
