@@ -543,7 +543,7 @@ wrote answers with its id, also after it finished, and does not run again.
 It refuses with `ValidationFailed` an error with no payload and the error of
 another task.
 
-With `AppConfig.resend_on_transient_err`, a retryable `EnqueueFailed` is
+With `AppConfig.resend_on_transient_error`, a retryable `EnqueueFailed` is
 sent again up to 3 times, after 200, 400 and 800 ms, as a repeat.
 
 ## `TaskHandle<T, E>` — Reads

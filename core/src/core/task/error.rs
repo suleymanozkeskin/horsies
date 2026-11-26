@@ -249,17 +249,17 @@ impl BuiltInTaskCode {
 
     /// Try to parse a string into a BuiltInTaskCode.
     /// Returns None if the string does not match any known code.
-    pub fn parse(s: &str) -> Option<Self> {
-        if let Ok(c) = serde_plain::from_str::<OperationalErrorCode>(s) {
+    pub fn parse(text: &str) -> Option<Self> {
+        if let Ok(c) = serde_plain::from_str::<OperationalErrorCode>(text) {
             return Some(Self::Operational(c));
         }
-        if let Ok(c) = serde_plain::from_str::<ContractCode>(s) {
+        if let Ok(c) = serde_plain::from_str::<ContractCode>(text) {
             return Some(Self::Contract(c));
         }
-        if let Ok(c) = serde_plain::from_str::<RetrievalCode>(s) {
+        if let Ok(c) = serde_plain::from_str::<RetrievalCode>(text) {
             return Some(Self::Retrieval(c));
         }
-        if let Ok(c) = serde_plain::from_str::<OutcomeCode>(s) {
+        if let Ok(c) = serde_plain::from_str::<OutcomeCode>(text) {
             return Some(Self::Outcome(c));
         }
         None

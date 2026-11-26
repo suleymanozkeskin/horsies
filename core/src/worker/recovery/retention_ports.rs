@@ -64,9 +64,9 @@ async fn run_maintenance_pass(
     retention: &RetentionConfig,
 ) -> ReaperHealthSnapshot {
     let recovery = RecoveryConfig {
-        auto_requeue_stale_claimed: false,
-        auto_fail_stale_running: false,
-        auto_terminate_orphaned_workflow_tasks: false,
+        requeue_stale_claimed: false,
+        fail_stale_running: false,
+        terminate_orphaned_workflow_tasks: false,
         ..RecoveryConfig::default()
     };
     let health = new_reaper_health();

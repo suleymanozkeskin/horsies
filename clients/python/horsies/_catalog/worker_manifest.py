@@ -410,8 +410,8 @@ class TcpKeepalivesConfigOn:
 
 
 type TcpKeepalivesConfig = TcpKeepalivesConfigOff | TcpKeepalivesConfigOn
-"""TCP keepalives of every core connection. Python's
-`tcp_keepalives=False` is `Off`; `True` is `On` with the three values.
+"""TCP keepalives of every core connection, checked form (Python
+`TcpKeepalivesOff`, `TcpKeepalivesOn`).
 """
 
 
@@ -434,8 +434,8 @@ class TcpUserTimeoutConfigAfter:
 
 
 type TcpUserTimeoutConfig = TcpUserTimeoutConfigSystemDefault | TcpUserTimeoutConfigAfter
-"""The TCP user timeout of every core connection. Python's
-`tcp_user_timeout_ms=0` is `SystemDefault`; another value is `After`.
+"""The TCP user timeout of every core connection, checked form (Python
+`TcpUserTimeoutSystemDefault`, `TcpUserTimeoutAfter`).
 """
 
 
@@ -465,7 +465,7 @@ class WorkerDatabaseManifest:
     (`PostgresConfig.worker_pool_pre_ping`).
     """
 
-    pool_timeout: int
+    pool_timeout_seconds: int
     """The longest a checkout waits for a free connection; 0 does not wait."""
 
     pool_recycle: PoolRecycle
@@ -474,14 +474,10 @@ class WorkerDatabaseManifest:
     """Log every statement through the log bridge."""
 
     tcp_keepalives: TcpKeepalivesConfig
-    """TCP keepalives of every core connection (Python `tcp_keepalives` and
-    its three values).
-    """
+    """TCP keepalives of every core connection (Python `tcp_keepalives`)."""
 
     tcp_user_timeout: TcpUserTimeoutConfig
-    """TCP user timeout of every core connection (Python
-    `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
-    """
+    """TCP user timeout of every core connection (Python `tcp_user_timeout`)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -941,13 +937,13 @@ class WorkerClaimManifest:
 class RecoveryManifest:
     """Stale task detection and crash recovery (Python `RecoveryConfig`)."""
 
-    auto_requeue_stale_claimed: bool
+    requeue_stale_claimed: bool
 
     claimed_stale_threshold_ms: int
 
-    auto_terminate_orphaned_workflow_tasks: bool
+    terminate_orphaned_workflow_tasks: bool
 
-    auto_fail_stale_running: bool
+    fail_stale_running: bool
 
     running_stale_threshold_ms: int
 
@@ -955,7 +951,7 @@ class RecoveryManifest:
 
     crashed_worker_recovery_grace_ms: int
 
-    phase2_quarantine_after_attempts: int
+    finalization_quarantine_after_attempts: int
 
     workflow_recovery_failure_limit: int
 
@@ -1060,7 +1056,7 @@ class RetentionManifest:
 
     terminal_record_retention: TerminalRecordRetention
 
-    paused_workflow_auto_cancel_after: PausedWorkflowExpiry
+    paused_workflow_cancel_after: PausedWorkflowExpiry
 
     history_leaf_horizon_days: int
 
@@ -1074,9 +1070,9 @@ class RetentionManifest:
     queue_retention: dict[str, QueueRetention]
     """The retention of each mapped queue, by queue name."""
 
-    partition_maintenance_interval_s: int
+    partition_maintenance_interval_seconds: int
 
-    retention_sweep_interval_s: int
+    retention_sweep_interval_seconds: int
 
     retention_delete_batch_size: int
 
@@ -1092,7 +1088,7 @@ class RetryAttemptLimitAttempts:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RetryAttemptLimitNoLimit:
-    """No limit on the attempts (Python `db_retry_max_attempts=0`)."""
+    """No limit on the attempts (Python `database_retry_max_attempts=0`)."""
 
     kind: Literal['NO_LIMIT'] = 'NO_LIMIT'
 
@@ -1107,11 +1103,11 @@ class ResilienceManifest:
     `WorkerResilienceConfig`).
     """
 
-    db_retry_initial_ms: int
+    database_retry_initial_ms: int
 
-    db_retry_max_ms: int
+    database_retry_max_ms: int
 
-    db_retry_max_attempts: RetryAttemptLimit
+    database_retry_max_attempts: RetryAttemptLimit
 
     notify_poll_interval_ms: int
 

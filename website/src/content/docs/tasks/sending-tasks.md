@@ -343,7 +343,7 @@ The retry methods take a `TaskSendRetryable`: `TaskSendEnqueueFailed`, `TaskSend
 
 ### Automatic Retry via Config
 
-Set `resend_on_transient_err=True` in `AppConfig` to resend a transient enqueue failure before the send returns the error. The default is `False`. The resend rules are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#resend-transient-failures).
+Set `resend_on_transient_error=True` in `AppConfig` to resend a transient enqueue failure before the send returns the error. The default is `False`. The resend rules are on [Atomic Enqueue and Topology](/horsies/operations/atomic-enqueue-and-topology/#resend-transient-failures).
 
 ```python
 from horsies import AppConfig, Horsies, QueueMode
@@ -354,7 +354,7 @@ app = Horsies(
     AppConfig(
         queue_mode=QueueMode.DEFAULT,
         broker=broker_config,
-        resend_on_transient_err=True,
+        resend_on_transient_error=True,
     )
 )
 ```

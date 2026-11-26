@@ -162,7 +162,7 @@ class TestEveryRefusalCarriesTheCode:
             ),
             pytest.param(
                 lambda: RetentionConfig(
-                    paused_workflow_auto_cancel_after=timedelta(days=365_001)
+                    paused_workflow_cancel_after=timedelta(days=365_001)
                 ),
                 id='paused-age-above-maximum',
             ),

@@ -94,7 +94,7 @@ const LOG_TARGET: &str = "horsies.db";
 pub enum PoolRole {
     /// The main URL (`database_url`) of a producer or a handle.
     Main,
-    /// The session URL (`session_database_url`): partition maintenance and
+    /// The session URL (`PostgresConfig.session_database`): partition maintenance and
     /// the schema install (its state reads, its advisory lock and its
     /// migrations).
     Session,

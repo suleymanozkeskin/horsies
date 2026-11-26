@@ -507,15 +507,13 @@ pub struct WorkerDatabaseManifest {
     /// (`PostgresConfig.worker_pool_pre_ping`).
     pub worker_pool_pre_ping: bool,
     /// The longest a checkout waits for a free connection; 0 does not wait.
-    pub pool_timeout: WholeSeconds,
+    pub pool_timeout_seconds: WholeSeconds,
     pub pool_recycle: PoolRecycle,
     /// Log every statement through the log bridge.
     pub echo: bool,
-    /// TCP keepalives of every core connection (Python `tcp_keepalives` and
-    /// its three values).
+    /// TCP keepalives of every core connection (Python `tcp_keepalives`).
     pub tcp_keepalives: TcpKeepalivesConfig,
-    /// TCP user timeout of every core connection (Python
-    /// `tcp_user_timeout_ms`; its 0 is `SYSTEM_DEFAULT`).
+    /// TCP user timeout of every core connection (Python `tcp_user_timeout`).
     pub tcp_user_timeout: TcpUserTimeoutConfig,
 }
 
@@ -958,13 +956,15 @@ impl WorkerManifest {
     /// Pure.
     pub fn app_broker_config(&self, selected: &SelectedProfile) -> PostgresConfig {
         let database = &self.database;
-        let session_database_url = match &database.session_database {
-            SessionDatabase::SameAsDatabaseUrl => None,
-            SessionDatabase::Separate { url } => Some(url.expose().to_owned()),
+        let session_database = match &database.session_database {
+            SessionDatabase::SameAsDatabaseUrl => crate::core::SessionDatabase::SameAsDatabaseUrl,
+            SessionDatabase::Separate { url } => crate::core::SessionDatabase::Separate {
+                url: url.expose().to_owned(),
+            },
         };
         PostgresConfig {
             database_url: database.database_url.expose().to_owned(),
-            session_database_url,
+            session_database,
             pgbouncer_transaction_mode: database.pgbouncer_transaction_mode,
             pool_pre_ping: database.pool_pre_ping,
             worker_pool_pre_ping: database.worker_pool_pre_ping,
@@ -972,11 +972,11 @@ impl WorkerManifest {
             pool_size: selected.profile.resolved_parent_pool().get(),
             max_overflow: 0,
             retain_rerun_input_default: self.send.retain_rerun_input_default,
-            pool_timeout: database.pool_timeout.get(),
+            pool_timeout_seconds: database.pool_timeout_seconds.get(),
             pool_recycle: database.pool_recycle,
             echo: database.echo,
-            tcp_keepalives: database.tcp_keepalives,
-            tcp_user_timeout: database.tcp_user_timeout,
+            tcp_keepalives: database.tcp_keepalives.into(),
+            tcp_user_timeout: database.tcp_user_timeout.into(),
         }
     }
 }

@@ -59,6 +59,7 @@ from horsies.core.models.class_coverage import (
     StreamWithoutCapacity,
     WorkerExecutionClassLoad,
 )
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.health import (
     AllSlotsServing,
     DownSlot,
@@ -152,6 +153,16 @@ def _recovery_config(text: str) -> dict[str, Any]:
             raise AssertionError(f'the core gave recovery settings that do not decode: {refused}')
 
 
+def _cluster_cap(tasks: int | None) -> ClusterCap | NoClusterCap:
+    """The cap of a record: the core gives the stored cap as an int, or
+    None for no cap."""
+    match tasks:
+        case None:
+            return NoClusterCap()
+        case int():
+            return ClusterCap(tasks=tasks)
+
+
 def worker_state_snapshot(record: WorkerStateRecord) -> WorkerStateSnapshot:
     """The snapshot of one worker state record."""
     return WorkerStateSnapshot(
@@ -164,7 +175,7 @@ def worker_state_snapshot(record: WorkerStateRecord) -> WorkerStateSnapshot:
             per_queue_per_pass=_task_limit(record.per_queue_per_pass),
             claimed_per_worker=_task_limit(record.claimed_per_worker),
         ),
-        cluster_wide_cap=record.cluster_wide_cap,
+        cluster_wide_cap=_cluster_cap(record.cluster_wide_cap),
         queues=list(record.queues),
         queue_priorities=dict(record.queue_priorities),
         queue_max_concurrency=dict(record.queue_max_concurrency),

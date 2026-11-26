@@ -87,7 +87,7 @@ pub(crate) fn test_producer_manifest() -> ProducerManifest {
                 "pool_pre_ping": true,
                 "pool_size": 5,
                 "max_overflow": 10,
-                "pool_timeout": 30,
+                "pool_timeout_seconds": 30,
                 "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
                 "echo": false,
                 "tcp_keepalives": {

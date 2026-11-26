@@ -43,6 +43,7 @@ from horsies.core.errors import (
     WorkflowValidationError,
 )
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.cluster_cap import NoClusterCap
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.resilience import WorkerResilienceConfig
 from horsies.core.models.tracing import NoTracing, OtelTracing
@@ -637,7 +638,7 @@ def _make_mock_app() -> MagicMock:
     app.config.custom_queues = None
     app.config.schedule = schedule_config
     app.config.resilience = resilience
-    app.config.cluster_wide_cap = 0
+    app.config.cluster_wide_cap = NoClusterCap()
     app.config.prefetch_buffer = 2
     app.config.claim_lease_ms = 30000
     app.config.max_claim_renew_age_ms = 120000
@@ -722,7 +723,7 @@ class TestEnsureSchemaWithRetry:
         err_obj = _make_schema_err(retryable=True, message='transient')
         broker = MagicMock()
         broker.ensure_schema_initialized = AsyncMock(return_value=Err(err_obj))
-        resilience = WorkerResilienceConfig(db_retry_max_attempts=2)
+        resilience = WorkerResilienceConfig(database_retry_max_attempts=2)
         logger = logging.getLogger('test')
 
         # Act / Assert
@@ -750,7 +751,7 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[Err(err_obj), Ok(None)],
         )
-        resilience = WorkerResilienceConfig(db_retry_max_attempts=3)
+        resilience = WorkerResilienceConfig(database_retry_max_attempts=3)
         logger = logging.getLogger('test')
 
         # Act
@@ -773,7 +774,7 @@ class TestEnsureSchemaWithRetry:
         broker.ensure_schema_initialized = AsyncMock(
             side_effect=[Err(err_obj), Err(err_obj), Ok(None)],
         )
-        resilience = WorkerResilienceConfig(db_retry_max_attempts=0)
+        resilience = WorkerResilienceConfig(database_retry_max_attempts=0)
         logger = logging.getLogger('test')
 
         # Act
@@ -800,9 +801,9 @@ class TestEnsureSchemaWithRetry:
             side_effect=[Err(err_obj), Err(err_obj), Err(err_obj), Ok(None)],
         )
         resilience = WorkerResilienceConfig(
-            db_retry_initial_ms=500,
-            db_retry_max_ms=1000,
-            db_retry_max_attempts=0,
+            database_retry_initial_ms=500,
+            database_retry_max_ms=1000,
+            database_retry_max_attempts=0,
         )
         logger = logging.getLogger('test')
 

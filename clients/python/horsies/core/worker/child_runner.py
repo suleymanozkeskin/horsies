@@ -1789,7 +1789,7 @@ def run_isolated_task(
     the span and the log records of the body.
 
     ``orphan_self_heal`` comes with the run from the worker (the app's
-    ``RecoveryConfig.auto_terminate_orphaned_workflow_tasks``): with it, the
+    ``RecoveryConfig.terminate_orphaned_workflow_tasks``): with it, the
     stop of a workflow task whose node is not linked cancels the task
     (ORPHAN_CANCELLED).
 

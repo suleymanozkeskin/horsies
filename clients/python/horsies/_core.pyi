@@ -2259,7 +2259,7 @@ class WorkflowStartRequest:
     TypeError. trace is NoTraceCarrier or the TraceCarrier of the start's span; every row of
     the tree stores it.
     """
-    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_err: bool, trace: NoTraceCarrier | TraceCarrier) -> None: ...
+    def __init__(self, *, spec_json: str, workflow_id: uuid.UUID, sent_at: datetime.datetime, resend_on_transient_error: bool, trace: NoTraceCarrier | TraceCarrier) -> None: ...
 
 
 @final

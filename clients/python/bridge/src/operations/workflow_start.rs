@@ -49,7 +49,7 @@ pub struct StartParts {
     pub spec: ClientSpec,
     pub workflow_id: Uuid,
     pub sent_at: DateTime<Utc>,
-    pub resend_on_transient_err: bool,
+    pub resend_on_transient_error: bool,
     pub trace: SendTrace,
 }
 
@@ -62,12 +62,12 @@ impl WorkflowStartRequest {
 #[pymethods]
 impl WorkflowStartRequest {
     #[new]
-    #[pyo3(signature = (*, spec_json, workflow_id, sent_at, resend_on_transient_err, trace))]
+    #[pyo3(signature = (*, spec_json, workflow_id, sent_at, resend_on_transient_error, trace))]
     fn new(
         spec_json: &str,
         workflow_id: Uuid,
         sent_at: &Bound<'_, PyAny>,
-        resend_on_transient_err: bool,
+        resend_on_transient_error: bool,
         trace: TraceArgument<'_>,
     ) -> PyResult<Self> {
         let spec = parse_workflow_spec_data(spec_json)
@@ -77,7 +77,7 @@ impl WorkflowStartRequest {
                 spec,
                 workflow_id,
                 sent_at: utc_instant(sent_at)?,
-                resend_on_transient_err,
+                resend_on_transient_error,
                 trace: trace.send_trace(),
             }),
         })
@@ -222,7 +222,7 @@ pub async fn start_workflow_operation(
             parts.workflow_id,
             parts.sent_at,
             parts.trace.clone(),
-            parts.resend_on_transient_err,
+            parts.resend_on_transient_error,
             &source,
         )
         .await;

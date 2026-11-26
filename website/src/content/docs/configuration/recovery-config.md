@@ -22,9 +22,9 @@ The settings are the `recovery` section of the app config. The API is on the cli
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auto_requeue_stale_claimed` | `bool` | `True` | Requeue tasks stuck in CLAIMED |
+| `requeue_stale_claimed` | `bool` | `True` | Requeue tasks stuck in CLAIMED |
 | `claimed_stale_threshold_ms` | `int` | 120,000 | Ms before CLAIMED task is stale |
-| `auto_fail_stale_running` | `bool` | `True` | Fail tasks stuck in RUNNING |
+| `fail_stale_running` | `bool` | `True` | Fail tasks stuck in RUNNING |
 | `running_stale_threshold_ms` | `int` | 300,000 | Ms before RUNNING task is stale |
 | `finalizing_stale_threshold_ms` | `int` | 300,000 | Ms a completed child may remain in finalization handoff before recovery |
 | `crashed_worker_recovery_grace_ms` | `int` | 10,000 | Grace before recovering a workflow task whose underlying task is terminal but whose workflow progression was not applied; `0` disables |
@@ -32,8 +32,8 @@ The settings are the `recovery` section of the app config. The API is on the cli
 | `runner_heartbeat_interval_ms` | `int` | 30,000 | How often the worker process writes the heartbeats of its RUNNING tasks |
 | `claimer_heartbeat_interval_ms` | `int` | 30,000 | CLAIMED task heartbeat frequency |
 | `worker_state_snapshot_interval_ms` | `int` | 30,000 | How often each worker persists a monitoring snapshot row to `horsies_worker_states` (1s–1min). The cap is half the 120 s [live window](/horsies/monitoring/worker-health/), so a running worker stays live when a snapshot write is late by up to half the window. A larger value fails with `HRS-204` |
-| `auto_terminate_orphaned_workflow_tasks` | `bool` | `True` | Terminate claimed tasks whose workflow node linkage no longer exists |
-| `phase2_quarantine_after_attempts` | `int` | 25 | Recovery passes an unresolvable crashed-worker progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it (3–1,000) |
+| `terminate_orphaned_workflow_tasks` | `bool` | `True` | Terminate claimed tasks whose workflow node linkage no longer exists |
+| `finalization_quarantine_after_attempts` | `int` | 25 | Recovery passes an unresolvable crashed-worker progression row may retain before its evidence moves to the quarantine table and discovery stops retrying it (3–1,000) |
 | `workflow_recovery_failure_limit` | `int` | 25 | Reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails closed (3–1,000) |
 
 All time values for thresholds and intervals are in milliseconds. Retention windows are in hours; the sweep interval is in seconds.
@@ -62,7 +62,7 @@ For **workflow** tasks, terminalization records the owed workflow progression in
 ### Unresolvable progression evidence quarantines
 
 A progression record whose disposition keeps refusing to resolve is retried for
-`phase2_quarantine_after_attempts` recovery passes (default 25, bounds 3–1,000),
+`finalization_quarantine_after_attempts` recovery passes (default 25, bounds 3–1,000),
 then moved to a quarantine table with its evidence preserved; discovery stops
 retrying it. Retaining dispositions are either transient races, which resolve
 within a pass or two, or structural conflicts, which never do — the bound gives
@@ -129,8 +129,8 @@ and the ones with live nodes.
 
 | Threshold | Constraint |
 |-----------|------------|
-| Running stale, `auto_fail_stale_running` on | Must be >= 2 × (runner heartbeat interval + 2 s) |
-| Running stale, `auto_fail_stale_running` off | Must be >= 2x runner heartbeat interval |
+| Running stale, `fail_stale_running` on | Must be >= 2 × (runner heartbeat interval + 2 s) |
+| Running stale, `fail_stale_running` off | Must be >= 2x runner heartbeat interval |
 | Finalizing stale | Must be >= 2x runner heartbeat interval |
 | Claimed stale | Must be >= 2x claimer heartbeat interval |
 | Claimed stale | 1 second to 1 hour |
@@ -163,16 +163,16 @@ The reaper of each worker runs the recovery passes below. Each pass has a method
 
 | Pass | Setting (default `True`) | Automatic interval | Method of `PostgresBroker` (Python) |
 |------|--------------------------|--------------------|-------------------------------------|
-| Stale CLAIMED tasks go back to PENDING | `auto_requeue_stale_claimed` | `check_interval_ms` | `requeue_stale_claimed()` |
-| Stale RUNNING tasks are retried or failed | `auto_fail_stale_running` | `check_interval_ms` | `mark_stale_tasks_as_failed()` |
-| One page of orphan workflow tasks is cancelled | `auto_terminate_orphaned_workflow_tasks` | `orphan_task_audit_interval_ms` (default 60,000) | `terminate_orphaned_workflow_tasks()` |
+| Stale CLAIMED tasks go back to PENDING | `requeue_stale_claimed` | `check_interval_ms` | `requeue_stale_claimed()` |
+| Stale RUNNING tasks are retried or failed | `fail_stale_running` | `check_interval_ms` | `mark_stale_tasks_as_failed()` |
+| One page of orphan workflow tasks is cancelled | `terminate_orphaned_workflow_tasks` | `orphan_task_audit_interval_ms` (default 60,000) | `terminate_orphaned_workflow_tasks()` |
 | PENDING tasks past their `good_until` expire | None; the reaper always runs this pass | `check_interval_ms` | `expire_pending_tasks()` |
 
 [Broker Methods](/horsies/monitoring/broker-methods/#methods) documents `requeue_stale_claimed`, `mark_stale_tasks_as_failed` and `terminate_orphaned_workflow_tasks`. The Rust client has no method for these passes.
 
 ## Disabling Recovery
 
-To disable automatic recovery (not recommended), set `auto_requeue_stale_claimed` and `auto_fail_stale_running` to false. See [Disable Recovery](/horsies/configuration/app-config/#disable-recovery) (Python).
+To disable automatic recovery (not recommended), set `requeue_stale_claimed` and `fail_stale_running` to false. See [Disable Recovery](/horsies/configuration/app-config/#disable-recovery) (Python).
 
 Tasks will remain stuck until manually resolved, for example with the methods of [Automatic and Manual Passes](#automatic-and-manual-passes).
 

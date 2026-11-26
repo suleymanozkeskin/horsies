@@ -92,7 +92,7 @@ def _start_request(name: str, workflow_id: uuid.UUID) -> core.WorkflowStartReque
         spec_json=spec_json,
         workflow_id=workflow_id,
         sent_at=datetime.now(UTC),
-        resend_on_transient_err=False,
+        resend_on_transient_error=False,
         trace=core.NoTraceCarrier(),
     )
 

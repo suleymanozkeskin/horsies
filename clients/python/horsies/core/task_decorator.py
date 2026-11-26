@@ -228,7 +228,7 @@ class _ExplicitClass:
 
 type _RetentionStamp = _FromQueueMapping | _ExplicitClass
 
-# Internal retry constants for resend_on_transient_err.
+# Internal retry constants for resend_on_transient_error.
 # 1 initial attempt + _SEND_RETRY_COUNT retries = 4 total broker calls.
 _SEND_RETRY_COUNT: Final[int] = 3
 _SEND_RETRY_INITIAL_MS: Final[int] = 200
@@ -2160,7 +2160,7 @@ def create_task_wrapper(
         trace: TraceArgument,
     ) -> TaskSendResult[TaskHandle[T, C]]:
         """The broker calls of one sync send: the first, and the resends of a
-        transient failure when ``resend_on_transient_err`` is on. Each call
+        transient failure when ``resend_on_transient_error`` is on. Each call
         passes ``trace``.
 
         ``first_kind`` is the send kind of the first broker call
@@ -2180,7 +2180,7 @@ def create_task_wrapper(
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
-        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_error else 0)
 
         for attempt in range(max_attempts):
             if attempt > 0 and last_err is not None:
@@ -2240,7 +2240,7 @@ def create_task_wrapper(
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
-        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_error else 0)
 
         for attempt in range(max_attempts):
             if attempt > 0 and last_err is not None:
@@ -2311,7 +2311,7 @@ def create_task_wrapper(
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
-        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_error else 0)
 
         for attempt in range(max_attempts):
             if attempt > 0 and last_err is not None:
@@ -2372,7 +2372,7 @@ def create_task_wrapper(
         broker = app.get_broker()
 
         last_err: TaskSendEnqueueFailed | None = None
-        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_err else 0)
+        max_attempts = 1 + (_SEND_RETRY_COUNT if app.config.resend_on_transient_error else 0)
 
         for attempt in range(max_attempts):
             if attempt > 0 and last_err is not None:

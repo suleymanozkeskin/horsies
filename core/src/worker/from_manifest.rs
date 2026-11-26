@@ -487,9 +487,13 @@ fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig
         queue_mode,
         custom_queues,
         broker,
+        // The manifest keeps its own tags (`TASKS`, `NO_LIMIT`) for the two
+        // config states.
         cluster_wide_cap: match claim.cluster_wide_cap {
-            ClusterWideCap::Tasks { tasks } => Some(tasks.0.get()),
-            ClusterWideCap::NoLimit => None,
+            ClusterWideCap::Tasks { tasks } => crate::core::config::ClusterCapSetting::ClusterCap {
+                tasks: tasks.0.get(),
+            },
+            ClusterWideCap::NoLimit => crate::core::config::ClusterCapSetting::NoClusterCap,
         },
         prefetch_buffer: claim.prefetch_buffer.0.get(),
         claim_lease_ms: match claim.claim_lease {
@@ -503,7 +507,7 @@ fn app_config_of(manifest: &WorkerManifest, broker: PostgresConfig) -> AppConfig
         resilience: manifest.resilience.to_config(),
         worker_profiles: manifest.config_profiles(),
         schedule: None,
-        resend_on_transient_err: false,
+        resend_on_transient_error: false,
     }
 }
 

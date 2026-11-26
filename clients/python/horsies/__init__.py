@@ -8,7 +8,22 @@ from .core.app import Horsies, ChildStartHook, SharedAsyncChildStartHook
 from .core.event_handlers import HandlerChildStartHook
 from .core.models.app import AppConfig
 from .core.models.schema_mode import AppRole, SchemaMode
-from .core.models.broker import PostgresConfig
+from .core.models.broker import (
+    PoolRecycle,
+    PoolRecycleAfterSeconds,
+    PoolRecycleNever,
+    PostgresConfig,
+    SessionDatabase,
+    SessionDatabaseSameAsDatabaseUrl,
+    SessionDatabaseSeparate,
+    TcpKeepalives,
+    TcpKeepalivesOff,
+    TcpKeepalivesOn,
+    TcpUserTimeout,
+    TcpUserTimeoutAfter,
+    TcpUserTimeoutSystemDefault,
+)
+from .core.models.cluster_cap import ClusterCap, ClusterCapSetting, NoClusterCap
 from .core.models.tasks import (
     TaskError,
     OperationalErrorCode,
@@ -315,6 +330,23 @@ __all__ = [
     'HandlerChildStartHook',
     'AppConfig',
     'PostgresConfig',
+    # Database connection settings
+    'SessionDatabase',
+    'SessionDatabaseSameAsDatabaseUrl',
+    'SessionDatabaseSeparate',
+    'TcpKeepalives',
+    'TcpKeepalivesOff',
+    'TcpKeepalivesOn',
+    'TcpUserTimeout',
+    'TcpUserTimeoutSystemDefault',
+    'TcpUserTimeoutAfter',
+    'PoolRecycle',
+    'PoolRecycleNever',
+    'PoolRecycleAfterSeconds',
+    # Cluster-wide cap
+    'ClusterCapSetting',
+    'ClusterCap',
+    'NoClusterCap',
     'TaskError',
     # Outcomes and reads
     'TaskOutcome',

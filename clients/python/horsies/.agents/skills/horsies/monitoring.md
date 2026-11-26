@@ -431,7 +431,7 @@ schedules table always polls (its table has no trigger). A task's start
   queries; put a ~1 s shared cache in front (`Cache-Control: max-age=1` via a
   proxy) to make audience size irrelevant to database load.
 - Under PgBouncer transaction pooling, provide the session-capable URL for
-  LISTEN (`session_database_url` / `--session-database-url`).
+  LISTEN (`session_database` / `--session-database-url`).
 
 ## All Public Imports
 

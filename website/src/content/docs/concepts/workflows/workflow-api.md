@@ -21,7 +21,7 @@ Use this page for the exact method signatures and return types used by workflows
 | `.on_error` | `OnError` | Error policy (`FAIL` or `PAUSE`) |
 | `.output` | `TaskNode[Any] \| SubWorkflowNode[Any] \| None` | Output node for `handle.get()` |
 | `.success_policy` | `SuccessPolicy \| None` | Custom success criteria |
-| `.resend_on_transient_err` | `bool` | Auto-retry transient start errors (default `False`) |
+| `.resend_on_transient_error` | `bool` | Auto-retry transient start errors (default `False`) |
 | `.start(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (sync) |
 | `.start_async(workflow_id=None)` | `(str \| None) -> WorkflowStartResult[WorkflowHandle[T]]` | Start workflow (async) |
 | `.retry_start(error)` | `(WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]]` | Retry a failed start (sync) |
@@ -45,8 +45,8 @@ result = await start_workflow_async(spec, broker)
 
 | Function | Signature |
 |---|---|
-| `start_workflow(spec, broker, workflow_id=None, sent_at=None, *, resend_on_transient_err=False)` | `-> WorkflowStartResult[WorkflowHandle[T]]` |
-| `start_workflow_async(spec, broker, workflow_id=None, sent_at=None, *, resend_on_transient_err=False)` | `-> WorkflowStartResult[WorkflowHandle[T]]` |
+| `start_workflow(spec, broker, workflow_id=None, sent_at=None, *, resend_on_transient_error=False)` | `-> WorkflowStartResult[WorkflowHandle[T]]` |
+| `start_workflow_async(spec, broker, workflow_id=None, sent_at=None, *, resend_on_transient_error=False)` | `-> WorkflowStartResult[WorkflowHandle[T]]` |
 
 These are equivalent to `spec.start()` / `spec.start_async()` but allow passing a broker explicitly instead of relying on the one attached to the spec.
 

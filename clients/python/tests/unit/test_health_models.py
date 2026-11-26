@@ -16,6 +16,7 @@ from horsies.core.models.class_coverage import (
     StreamServed,
     StreamWithoutCapacity,
 )
+from horsies.core.models.cluster_cap import NoClusterCap
 from horsies.core.models.health import (
     AllSlotsServing,
     DatabasePing,
@@ -63,7 +64,7 @@ class TestResultModels:
                 per_queue_per_pass=TaskLimit(tasks=10),
                 claimed_per_worker=NoTaskLimit(),
             ),
-            cluster_wide_cap=None,
+            cluster_wide_cap=NoClusterCap(),
             queues=['default'],
             queue_priorities={},
             queue_max_concurrency={},
@@ -79,7 +80,7 @@ class TestResultModels:
             execution_class_budgets=ExecutionClassBudgets(()),
             profile=ProfileNamed(name='default'),
         )
-        assert snap.cluster_wide_cap is None
+        assert snap.cluster_wide_cap == NoClusterCap()
         assert snap.queues == ['default']
         assert snap.tasks_running == 0
 

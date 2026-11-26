@@ -5,7 +5,7 @@
 //! checked against the app's registered definitions and converted to the
 //! core's spec data, the connect of the handle, then the core's start of
 //! the tree, whose sub-workflow roots build from the app's registry. With
-//! `AppConfig.resend_on_transient_err` the core runs a retryable failure of
+//! `AppConfig.resend_on_transient_error` the core runs a retryable failure of
 //! the start again, with the same workflow id and start time, up to 3
 //! times. In a worker child the start goes through the child's producer
 //! handle, as a send does. With the feature `otel`, the start runs inside
@@ -162,7 +162,7 @@ impl WorkflowStarter {
                 workflow_id,
                 Utc::now(),
                 trace,
-                self.workflows.config().resend_on_transient_err,
+                self.workflows.config().resend_on_transient_error,
                 &*self.workflows,
             )
             .await;

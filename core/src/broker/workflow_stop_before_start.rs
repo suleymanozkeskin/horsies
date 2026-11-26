@@ -58,7 +58,7 @@ static STOP_BEFORE_START: TypedStatement = TypedStatement::new(
 );
 
 /// Whether the stop of a claimed workflow task that no node links live
-/// cancels the task (the app's `auto_terminate_orphaned_workflow_tasks`).
+/// cancels the task (the app's `terminate_orphaned_workflow_tasks`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OrphanSelfHeal {
     /// Cancel the task with `horsies_cancel_owned_orphan`.
@@ -68,9 +68,9 @@ pub enum OrphanSelfHeal {
 }
 
 impl OrphanSelfHeal {
-    /// The setting of `auto_terminate_orphaned_workflow_tasks`. Pure.
-    pub fn of_recovery_flag(auto_terminate_orphaned_workflow_tasks: bool) -> Self {
-        match auto_terminate_orphaned_workflow_tasks {
+    /// The setting of `terminate_orphaned_workflow_tasks`. Pure.
+    pub fn of_recovery_flag(terminate_orphaned_workflow_tasks: bool) -> Self {
+        match terminate_orphaned_workflow_tasks {
             true => Self::On,
             false => Self::Off,
         }

@@ -132,7 +132,7 @@ mod tests {
                 "pool_pre_ping": true,
                 "pool_size": 1,
                 "max_overflow": 0,
-                "pool_timeout": 1,
+                "pool_timeout_seconds": 1,
                 "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
                 "echo": false,
                 "tcp_keepalives": {"kind": "OFF"},

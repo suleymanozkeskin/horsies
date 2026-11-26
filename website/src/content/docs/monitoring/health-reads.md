@@ -296,7 +296,7 @@ The meaning of each field is on [Snapshot Fields](/horsies/monitoring/worker-hea
 | `pid` | `int` |
 | `child_count` | `int` |
 | `claim_limits` | `ClaimLimits(per_queue_per_pass, claimed_per_worker)`: each `TaskLimit(tasks)` or `NoTaskLimit()` |
-| `cluster_wide_cap` | `int \| None` |
+| `cluster_wide_cap` | `ClusterCap \| NoClusterCap` |
 | `queues` | `list[str]` |
 | `queue_priorities` | `dict[str, int]` |
 | `queue_max_concurrency` | `dict[str, int]` |

@@ -293,11 +293,11 @@ fn the_pending_limit_covers_the_claim_budget() {
 #[test]
 fn the_exit_rule_follows_stale_running_recovery() {
     let mut recovery = RecoveryConfig {
-        auto_fail_stale_running: true,
+        fail_stale_running: true,
         ..RecoveryConfig::default()
     };
     assert_eq!(exit_not_seen(&recovery), ExitNotSeen::LeaveToRecovery);
-    recovery.auto_fail_stale_running = false;
+    recovery.fail_stale_running = false;
     assert_eq!(exit_not_seen(&recovery), ExitNotSeen::WaitForExit);
 }
 

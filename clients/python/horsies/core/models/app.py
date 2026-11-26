@@ -9,6 +9,7 @@ from horsies._catalog.worker_manifest import (
 )
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.cluster_cap import ClusterCap, ClusterCapSetting, NoClusterCap
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.retention import RetentionConfig
@@ -73,8 +74,8 @@ def worker_bound_errors(
 ) -> list[ConfigurationError]:
     """The refusals of the claim values above their worker manifest bounds,
     in field order: `prefetch_buffer`, `claim_lease_ms` and
-    `max_claim_renew_age_ms` (`CONFIG_INVALID_PREFETCH`), `cluster_wide_cap`
-    (`CONFIG_INVALID_CLUSTER_CAP`), then each queue's `max_concurrency`
+    `max_claim_renew_age_ms` (`CONFIG_INVALID_PREFETCH`), the tasks of a
+    `ClusterCap` (`CONFIG_INVALID_CLUSTER_CAP`), then each queue's `max_concurrency`
     (`CONFIG_INVALID_QUEUE_MODE`). The core's claim takes each count as a
     PostgreSQL `integer` and each time as an unsigned 32-bit number of
     milliseconds, so a larger value never reaches a worker. A `None` value
@@ -85,7 +86,7 @@ def worker_bound_errors(
         ('claim_lease_ms', claim_lease_ms, MILLISECONDS_MAX, prefetch),
         ('max_claim_renew_age_ms', max_claim_renew_age_ms, MILLISECONDS_MAX, prefetch),
         (
-            'cluster_wide_cap',
+            'cluster_wide_cap.tasks',
             cluster_wide_cap,
             TASK_LIMIT_MAX,
             ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
@@ -107,6 +108,16 @@ def worker_bound_errors(
     ]
 
 
+def cluster_cap_tasks(setting: ClusterCap | NoClusterCap) -> int | None:
+    """The task count of a cluster cap, for a bound check that takes no
+    value for no cap: `None` for `NoClusterCap`. Pure."""
+    match setting:
+        case ClusterCap(tasks=tasks):
+            return tasks
+        case NoClusterCap():
+            return None
+
+
 class AppConfig(BaseModel):
     model_config: ClassVar[ConfigDict] = ConfigDict(
         arbitrary_types_allowed=True,
@@ -117,8 +128,9 @@ class AppConfig(BaseModel):
     queue_mode: QueueMode = QueueMode.DEFAULT
     custom_queues: Optional[List[CustomQueueConfig]] = None
     broker: PostgresConfig
-    # Cluster-wide cap on concurrently RUNNING tasks across all queues. None = unlimited.
-    cluster_wide_cap: Optional[int] = None
+    # Cluster-wide cap on concurrently RUNNING tasks across all queues:
+    # ClusterCap(tasks=N), or NoClusterCap() (the default).
+    cluster_wide_cap: ClusterCapSetting = Field(default_factory=NoClusterCap)
     # Prefetch buffer: 0 = hard cap mode (count RUNNING + CLAIMED), >0 = soft cap with lease
     prefetch_buffer: int = 0
     # Claim lease duration in ms. Required when prefetch_buffer > 0.
@@ -144,7 +156,7 @@ class AppConfig(BaseModel):
         default_factory=lambda: ExceptionMapper(),
     )
     default_unhandled_error_code: str = 'UNHANDLED_EXCEPTION'
-    resend_on_transient_err: bool = False
+    resend_on_transient_error: bool = False
     # Spans and producer metrics through the OpenTelemetry API
     # (`OtelTracing`, needs `horsies[otel]`), or none (`NoTracing`).
     tracing: TracingSetting = Field(default_factory=NoTracing)
@@ -195,16 +207,22 @@ class AppConfig(BaseModel):
 
 
 
-        # Validate cluster_wide_cap if provided
-        if self.cluster_wide_cap is not None and self.cluster_wide_cap <= 0:
-            report.add(
-                ConfigurationError(
-                    message='cluster_wide_cap must be positive',
-                    code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
-                    notes=[f'got cluster_wide_cap={self.cluster_wide_cap}'],
-                    help_text='use a positive integer or None for unlimited',
+        # Validate the tasks of a cluster cap
+        match self.cluster_wide_cap:
+            case ClusterCap(tasks=tasks) if tasks <= 0:
+                report.add(
+                    ConfigurationError(
+                        message='cluster_wide_cap.tasks must be positive',
+                        code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+                        notes=[f'got cluster_wide_cap=ClusterCap(tasks={tasks})'],
+                        help_text=(
+                            'use ClusterCap(tasks=N) with N >= 1, or '
+                            'NoClusterCap() for no cap'
+                        ),
+                    )
                 )
-            )
+            case ClusterCap() | NoClusterCap():
+                pass
 
         # Validate prefetch_buffer
         if self.prefetch_buffer < 0:
@@ -304,25 +322,28 @@ class AppConfig(BaseModel):
             prefetch_buffer=self.prefetch_buffer,
             claim_lease_ms=self.claim_lease_ms,
             max_claim_renew_age_ms=self.max_claim_renew_age_ms,
-            cluster_wide_cap=self.cluster_wide_cap,
+            cluster_wide_cap=cluster_cap_tasks(self.cluster_wide_cap),
             custom_queues=self.custom_queues or [],
         ):
             report.add(bound_error)
 
         # Validate prefetch_buffer vs cluster_wide_cap conflict
-        if self.cluster_wide_cap is not None and self.prefetch_buffer > 0:
-            report.add(
-                ConfigurationError(
-                    message='cluster_wide_cap incompatible with prefetch mode',
-                    code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
-                    notes=[
-                        f'cluster_wide_cap={self.cluster_wide_cap}',
-                        f'prefetch_buffer={self.prefetch_buffer}',
-                        'cluster_wide_cap requires hard cap mode (prefetch_buffer=0)',
-                    ],
-                    help_text='set prefetch_buffer=0 when using cluster_wide_cap',
+        match self.cluster_wide_cap:
+            case ClusterCap(tasks=tasks) if self.prefetch_buffer > 0:
+                report.add(
+                    ConfigurationError(
+                        message='cluster_wide_cap incompatible with prefetch mode',
+                        code=ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
+                        notes=[
+                            f'cluster_wide_cap=ClusterCap(tasks={tasks})',
+                            f'prefetch_buffer={self.prefetch_buffer}',
+                            'cluster_wide_cap requires hard cap mode (prefetch_buffer=0)',
+                        ],
+                        help_text='set prefetch_buffer=0 when using ClusterCap',
+                    )
                 )
-            )
+            case ClusterCap() | NoClusterCap():
+                pass
 
         # Validate exception_mapper entries
         mapper_errors = validate_exception_mapper(
@@ -445,8 +466,11 @@ class AppConfig(BaseModel):
                 )
 
         # Cluster-wide cap and prefetch settings
-        if self.cluster_wide_cap is not None:
-            lines.append(f'  cluster_wide_cap: {self.cluster_wide_cap}')
+        match self.cluster_wide_cap:
+            case ClusterCap(tasks=tasks):
+                lines.append(f'  cluster_wide_cap: {tasks}')
+            case NoClusterCap():
+                pass
         lines.append(f'  prefetch_buffer: {self.prefetch_buffer}')
         if self.claim_lease_ms is not None:
             lines.append(f'  claim_lease_ms: {self.claim_lease_ms}ms')
@@ -455,12 +479,9 @@ class AppConfig(BaseModel):
         masked_url = mask_database_url(self.broker.database_url.get_secret_value())
         lines.append(f'  broker:')
         lines.append(f'    database_url: {masked_url}')
-        if (
-            self.broker.session_database_url is not None
-            and self.broker.session_database_url != self.broker.database_url
-        ) or self.broker.pgbouncer_transaction_mode:
+        if self.broker.session_url_differs() or self.broker.pgbouncer_transaction_mode:
             lines.append(
-                f'    session_database_url: {mask_database_url(self.broker.effective_session_database_url)}'
+                f'    session_database: {mask_database_url(self.broker.effective_session_database_url)}'
             )
         lines.append(
             f'    pgbouncer_transaction_mode: {self.broker.pgbouncer_transaction_mode}'
@@ -471,13 +492,13 @@ class AppConfig(BaseModel):
         # Recovery config
         lines.append('  recovery:')
         lines.append(
-            f'    auto_requeue_stale_claimed: {self.recovery.auto_requeue_stale_claimed}'
+            f'    requeue_stale_claimed: {self.recovery.requeue_stale_claimed}'
         )
         lines.append(
             f'    claimed_stale_threshold: {self.recovery.claimed_stale_threshold_ms}ms'
         )
         lines.append(
-            f'    auto_fail_stale_running: {self.recovery.auto_fail_stale_running}'
+            f'    fail_stale_running: {self.recovery.fail_stale_running}'
         )
         lines.append(
             f'    running_stale_threshold: {self.recovery.running_stale_threshold_ms}ms'
@@ -502,17 +523,17 @@ class AppConfig(BaseModel):
         )
         lines.append(
             f'    period_classes: '
-            f'{[key for key, _ in self.retention.registrable_classes()]}'
+            f'{[key for key, _ in self.retention.registrable_periods()]}'
         )
 
         # Resilience config
         lines.append('  resilience:')
         lines.append(
-            f'    db_retry_initial_ms: {self.resilience.db_retry_initial_ms}ms'
+            f'    database_retry_initial_ms: {self.resilience.database_retry_initial_ms}ms'
         )
-        lines.append(f'    db_retry_max_ms: {self.resilience.db_retry_max_ms}ms')
+        lines.append(f'    database_retry_max_ms: {self.resilience.database_retry_max_ms}ms')
         lines.append(
-            f'    db_retry_max_attempts: {self.resilience.db_retry_max_attempts}'
+            f'    database_retry_max_attempts: {self.resilience.database_retry_max_attempts}'
         )
         lines.append(
             f'    notify_poll_interval_ms: {self.resilience.notify_poll_interval_ms}ms'
@@ -526,7 +547,7 @@ class AppConfig(BaseModel):
                 lines.append(f'    {name}: {description}')
 
         # Send retry
-        lines.append(f'  resend_on_transient_err: {self.resend_on_transient_err}')
+        lines.append(f'  resend_on_transient_error: {self.resend_on_transient_error}')
 
         # Tracing
         lines.append(f'  tracing: {tracing_label(self.tracing)}')

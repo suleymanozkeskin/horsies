@@ -45,12 +45,14 @@ traffic on that pooled URL and give Horsies a second direct/session-capable URL
 for schema setup and `LISTEN`/`NOTIFY`.
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig
+from horsies import Horsies, AppConfig, PostgresConfig, SessionDatabaseSeparate
 
 config = AppConfig(
     broker=PostgresConfig(
         database_url=SecretStr(os.environ["DATABASE_URL_POOLED"]),
-        session_database_url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
+        session_database=SessionDatabaseSeparate(
+            url=SecretStr(os.environ["DATABASE_URL_DIRECT"]),
+        ),
         pgbouncer_transaction_mode=True,
     ),
 )

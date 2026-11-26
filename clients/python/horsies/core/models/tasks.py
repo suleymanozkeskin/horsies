@@ -689,14 +689,16 @@ class TaskOptions(BaseModel):
 
     @field_validator('good_until')
     @classmethod
-    def reject_naive_good_until(cls, v: datetime.datetime | None) -> datetime.datetime | None:
+    def reject_naive_good_until(
+        cls, value: datetime.datetime | None,
+    ) -> datetime.datetime | None:
         """Reject naive datetimes — they are ambiguous and break fingerprinting."""
-        if v is not None and v.tzinfo is None:
+        if value is not None and value.tzinfo is None:
             raise ValueError(
                 'good_until must be timezone-aware (got naive datetime). '
                 'Use e.g. datetime.now(timezone.utc) or a tz-aware value.',
             )
-        return v
+        return value
 
 
 # Rebuild SubWorkflowError to resolve forward reference to SubWorkflowSummary

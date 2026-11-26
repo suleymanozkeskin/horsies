@@ -19,7 +19,7 @@ use std::process::ExitCode;
 use clap::{Args, ValueEnum};
 
 use crate::cli::LogLevel;
-use crate::{AppConfig, ValidationReport};
+use crate::{AppConfig, SessionDatabase, ValidationReport};
 
 /// The largest TOML config file that `web` reads.
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
@@ -377,7 +377,12 @@ fn resolve_config(source: &ConfigSource<'_>) -> Result<AppConfig, WebError> {
             pgbouncer_transaction_mode,
         } => {
             let mut config = AppConfig::for_database_url(*url);
-            config.broker.session_database_url = session_url.map(str::to_owned);
+            config.broker.session_database = match session_url {
+                None => SessionDatabase::SameAsDatabaseUrl,
+                Some(url) => SessionDatabase::Separate {
+                    url: (*url).to_owned(),
+                },
+            };
             config.broker.pgbouncer_transaction_mode = *pgbouncer_transaction_mode;
             Ok(config)
         }
@@ -475,14 +480,15 @@ mod tests {
     fn a_toml_config_keeps_its_broker_section() {
         let config = parse_config(
             Path::new("horsies.toml"),
-            "[broker]\ndatabase_url = \"postgresql://pool/horsies\"\nsession_database_url = \
-             \"postgresql://direct/horsies\"\npgbouncer_transaction_mode = true\n",
+            "[broker]\ndatabase_url = \"postgresql://pool/horsies\"\npgbouncer_transaction_mode = \
+             true\n[broker.session_database]\nkind = \"SEPARATE\"\nurl = \
+             \"postgresql://direct/horsies\"\n",
         )
         .unwrap();
         assert_eq!(config.broker.database_url, "postgresql://pool/horsies");
         assert_eq!(
-            config.broker.session_database_url.as_deref(),
-            Some("postgresql://direct/horsies")
+            config.broker.effective_session_database_url(),
+            "postgresql://direct/horsies"
         );
         assert!(config.broker.pgbouncer_transaction_mode);
     }
@@ -517,8 +523,8 @@ mod tests {
         .unwrap();
         assert_eq!(config.broker.database_url, "postgresql://pool/horsies");
         assert_eq!(
-            config.broker.session_database_url.as_deref(),
-            Some("postgresql://direct/horsies")
+            config.broker.effective_session_database_url(),
+            "postgresql://direct/horsies"
         );
         assert!(config.broker.pgbouncer_transaction_mode);
     }

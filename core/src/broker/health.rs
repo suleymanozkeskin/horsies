@@ -17,6 +17,7 @@ use crate::broker::class_budgets::{parse_class_capacity, ExecutionClassBudgets};
 use crate::broker::result_types::{BrokerOperationError, BrokerOperationSource, BrokerResult};
 use crate::broker::slot_health::{parse_slot_health, SlotHealth};
 use crate::core::config::worker_profile::input::{ClaimLimits, TaskLimitSetting};
+use crate::core::config::ClusterCapSetting;
 
 /// Shared inbound channel every worker subscribes to. A ping NOTIFY carries a
 /// [`WorkerPingRequest`]; each worker replies on the request's `reply_channel`.
@@ -102,7 +103,8 @@ pub struct WorkerStateSnapshot {
     /// the limit that the worker resolved: the seat count of the worker when
     /// its profile sets none.
     pub claim_limits: ClaimLimits,
-    pub cluster_wide_cap: Option<i32>,
+    /// The cluster-wide cap that the worker ran with.
+    pub cluster_wide_cap: ClusterCapSetting,
     pub queues: Vec<String>,
     /// Queue name to priority. Empty when the worker had none set.
     pub queue_priorities: BTreeMap<String, i64>,
@@ -242,6 +244,15 @@ impl StoredWorkerState {
             Some(name) => SnapshotProfile::Named { name },
             None => SnapshotProfile::NotRecorded,
         };
+        // The column `cluster_wide_cap` holds the cap as a nullable integer:
+        // NULL is no cap, and the table CHECK keeps a cap above 0.
+        let cluster_wide_cap = match self.cluster_wide_cap {
+            None => ClusterCapSetting::NoClusterCap,
+            Some(tasks) => ClusterCapSetting::ClusterCap {
+                tasks: u32::try_from(tasks)
+                    .expect("the table CHECK keeps cluster_wide_cap above 0"),
+            },
+        };
         Ok(WorkerStateSnapshot {
             worker_id: self.worker_id,
             snapshot_at: self.snapshot_at,
@@ -250,7 +261,7 @@ impl StoredWorkerState {
             // Row boundary: the columns keep their stored names.
             child_count: self.processes,
             claim_limits: stored_claim_limits(self.max_claim_batch, self.max_claim_per_worker),
-            cluster_wide_cap: self.cluster_wide_cap,
+            cluster_wide_cap,
             queues: self.queues,
             queue_priorities,
             queue_max_concurrency,

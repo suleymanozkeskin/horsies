@@ -42,7 +42,7 @@ See [Broker Config](/horsies/configuration/broker-config/#schema-initialization)
 | `queue_mode` | `QueueMode` (`Default`, `Custom`) | [Queue Modes](/horsies/concepts/queue-modes/) |
 | `custom_queues` | `Option<Vec<CustomQueueConfig>>` (`name`, `priority`, `max_concurrency`) | [Queue Modes](/horsies/concepts/queue-modes/) |
 | `broker` | `PostgresConfig` | [Broker Config](/horsies/configuration/broker-config/) |
-| `cluster_wide_cap` | `Option<u32>` | [Concurrency](/horsies/workers/concurrency/) |
+| `cluster_wide_cap` | `ClusterCapSetting::ClusterCap { tasks }` or `ClusterCapSetting::NoClusterCap` (default) | [Concurrency](/horsies/workers/concurrency/) |
 | `prefetch_buffer` | `u32` | [Concurrency](/horsies/workers/concurrency/) |
 | `claim_lease_ms` | `Option<u32>` | [Concurrency](/horsies/workers/concurrency/) |
 | `max_claim_renew_age_ms` | `u32` | [Heartbeats & Recovery](/horsies/workers/heartbeats-recovery/) |
@@ -52,7 +52,7 @@ See [Broker Config](/horsies/configuration/broker-config/#schema-initialization)
 | `resilience` | `WorkerResilienceConfig` | [Worker Architecture](/horsies/workers/worker-architecture/) |
 | `worker_profiles` | `BTreeMap<String, WorkerProfile>` | [Concurrency](/horsies/workers/concurrency/) |
 | `schedule` | `Option<ScheduleConfig>` | [Scheduler Overview](/horsies/scheduling/scheduler-overview/) |
-| `resend_on_transient_err` | `bool` | [Sending Tasks](/horsies/rust/tasks/sending-tasks/#resend-on-transient-errors) |
+| `resend_on_transient_error` | `bool` | [Sending Tasks](/horsies/rust/tasks/sending-tasks/#resend-on-transient-errors) |
 
 ```rust
 use horsies::{AppConfig, CustomQueueConfig, Horsies, QueueMode, ValidationReport};
@@ -72,13 +72,16 @@ fn build_app(database_url: &str) -> Result<Horsies, ValidationReport> {
 
 ### PostgresConfig
 
-`PostgresConfig::from_url(url)` builds the broker config with every default. Three fields have Rust types where the Python client has numbers:
+`PostgresConfig::from_url(url)` builds the broker config with every default. Four fields are enums, as the Python classes:
 
-| Field | Type | Python field |
-|-------|------|--------------|
-| `pool_recycle` | `PoolRecycle::Never` or `PoolRecycle::AfterSeconds { seconds: WholeSeconds }` | `pool_recycle` (`-1` or seconds) |
-| `tcp_keepalives` | `TcpKeepalivesConfig::Off` or `TcpKeepalivesConfig::On { idle_seconds, interval_seconds, probes }` | `tcp_keepalives`, `tcp_keepalives_idle`, `tcp_keepalives_interval`, `tcp_keepalives_count` |
-| `tcp_user_timeout` | `TcpUserTimeoutConfig::SystemDefault` or `TcpUserTimeoutConfig::After { milliseconds }` | `tcp_user_timeout_ms` (`0` or milliseconds) |
+| Field | Type | Python classes |
+|-------|------|----------------|
+| `session_database` | `SessionDatabase::SameAsDatabaseUrl` (default) or `SessionDatabase::Separate { url }` | `SessionDatabaseSameAsDatabaseUrl`, `SessionDatabaseSeparate` |
+| `pool_recycle` | `PoolRecycle::Never` or `PoolRecycle::AfterSeconds { seconds: WholeSeconds }` | `PoolRecycleNever`, `PoolRecycleAfterSeconds` |
+| `tcp_keepalives` | `TcpKeepalivesConfig::Off` or `TcpKeepalivesConfig::On { idle_seconds, interval_seconds, probes }` | `TcpKeepalivesOff`, `TcpKeepalivesOn` |
+| `tcp_user_timeout` | `TcpUserTimeoutConfig::SystemDefault` or `TcpUserTimeoutConfig::After { milliseconds }` | `TcpUserTimeoutSystemDefault`, `TcpUserTimeoutAfter` |
+
+The keepalive and user timeout values are plain `u32` numbers. `Horsies::new` refuses a value outside its bound with `HRS-215` (`CONFIG_INVALID_KEEPALIVE`), and the message names the field, for example `tcp_keepalives.probes`. In a TOML file, a separate session database is `session_database = { kind = "SEPARATE", url = "postgresql://..." }`.
 
 The other fields have the names and the meanings of the [Broker Config](/horsies/configuration/broker-config/) table.
 

@@ -6,7 +6,7 @@ import os
 
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 from horsies.core.models.queues import QueueMode
 
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
@@ -19,7 +19,7 @@ config = AppConfig(
     queue_mode=QueueMode.DEFAULT,
     broker=PostgresConfig(
         database_url=DB_URL,
-        session_database_url=SESSION_DB_URL,
+        session_database=SessionDatabaseSeparate(url=SESSION_DB_URL),
         pgbouncer_transaction_mode=True,
         pool_size=5,
         max_overflow=5,

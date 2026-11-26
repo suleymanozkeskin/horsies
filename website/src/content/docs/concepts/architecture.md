@@ -87,11 +87,11 @@ split:
 
 ```text
 Producer/Worker SQL  --> database_url          --> PgBouncer transaction pool
-Worker LISTEN        --> session_database_url  --> direct/session Postgres
-Result wait LISTEN   --> session_database_url  --> direct/session Postgres
-Web UI LISTEN        --> session_database_url  --> direct/session Postgres
-Schema setup         --> session_database_url  --> direct/session Postgres
-Partition maintenance --> session_database_url --> direct/session Postgres
+Worker LISTEN        --> session_database      --> direct/session Postgres
+Result wait LISTEN   --> session_database      --> direct/session Postgres
+Web UI LISTEN        --> session_database      --> direct/session Postgres
+Schema setup         --> session_database      --> direct/session Postgres
+Partition maintenance --> session_database     --> direct/session Postgres
 ```
 
 Workers check session behavior before partition maintenance starts. Startup

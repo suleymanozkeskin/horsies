@@ -147,7 +147,7 @@ elif result.ok_value is not None:
 
 ### `mark_stale_tasks_as_failed(stale_threshold_ms: int = 300_000, finalizing_stale_threshold_ms: int = 300_000) -> BrokerResult[int]`
 
-Run the stale RUNNING recovery pass once. The reaper of each worker runs the same pass every `check_interval_ms` when `RecoveryConfig.auto_fail_stale_running` is on. Use this method to run the pass when that setting is off, or between two reaper passes.
+Run the stale RUNNING recovery pass once. The reaper of each worker runs the same pass every `check_interval_ms` when `RecoveryConfig.fail_stale_running` is on. Use this method to run the pass when that setting is off, or between two reaper passes.
 
 The pass recovers each RUNNING task with no runner heartbeat within the threshold, as [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#stale-running-recovery) states. A task with a retry policy that lists `WORKER_CRASHED` in `auto_retry_for`, and with retries left, is scheduled for retry. Each other task goes to FAILED with the `WORKER_CRASHED` error code.
 
@@ -168,7 +168,7 @@ if is_ok(result):
 
 ### `terminate_orphaned_workflow_tasks() -> BrokerResult[int]`
 
-Run one page of the orphan workflow-task pass. The reaper of each worker runs one page every `orphan_task_audit_interval_ms` when `RecoveryConfig.auto_terminate_orphaned_workflow_tasks` is on. Use this method to run a page when that setting is off.
+Run one page of the orphan workflow-task pass. The reaper of each worker runs one page every `orphan_task_audit_interval_ms` when `RecoveryConfig.terminate_orphaned_workflow_tasks` is on. Use this method to run a page when that setting is off.
 
 A page scans at most 500 PENDING and CLAIMED workflow tasks, from where the previous page stopped. Each scanned task that no runnable workflow node links moves to history as CANCELLED. The page is one transaction. `audit_orphaned_workflow_tasks()` runs the same page and returns its scan counts.
 

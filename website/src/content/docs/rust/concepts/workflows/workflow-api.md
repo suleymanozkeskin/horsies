@@ -172,7 +172,7 @@ Steps 1 to 3 refuse with `ValidationFailed` before any I/O.
   - Another workflow name: `WORKFLOW_ID_CONFLICT`.
   - A run started before this release has no stored start command: the handle of that workflow, with no compare.
 - A start names its app, as a send does. `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)` on an app that does not register `D` in that form are `VALIDATION_FAILED` with the cause `PreconditionFailed`. Nothing is written, and the build does not run. A registration on another app of the process does not count.
-- With `AppConfig.resend_on_transient_err`, the core runs a retryable start failure again with the same workflow id and start time, up to 3 times.
+- With `AppConfig.resend_on_transient_error`, the core runs a retryable start failure again with the same workflow id and start time, up to 3 times.
 - In a worker child a start goes through the child's producer handle, as a send does.
 
 ### Start from a Task

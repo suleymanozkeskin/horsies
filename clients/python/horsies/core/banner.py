@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, TextIO
 
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.utils.url import mask_database_url
 
 if TYPE_CHECKING:
@@ -178,9 +179,9 @@ def print_banner(
         mask_database_url(app.config.broker.database_url.get_secret_value()),
     )
     if (
-        app.config.broker.session_database_url is not None
-        and app.config.broker.session_database_url != app.config.broker.database_url
-    ) or app.config.broker.pgbouncer_transaction_mode:
+        app.config.broker.session_url_differs()
+        or app.config.broker.pgbouncer_transaction_mode
+    ):
         _write_kv(
             lines,
             'broker_session',
@@ -193,8 +194,11 @@ def print_banner(
     )
 
     # Cluster-wide cap
-    if app.config.cluster_wide_cap is not None:
-        _write_kv(lines, 'cluster_cap', f'{app.config.cluster_wide_cap} (cluster-wide)')
+    match app.config.cluster_wide_cap:
+        case ClusterCap(tasks=tasks):
+            _write_kv(lines, 'cluster_cap', f'{tasks} (cluster-wide)')
+        case NoClusterCap():
+            pass
 
     # Prefetch buffer
     if app.config.prefetch_buffer > 0:
@@ -208,12 +212,12 @@ def print_banner(
     _write_kv(
         lines,
         'requeue_stale_claimed',
-        _format_bool(recovery.auto_requeue_stale_claimed),
+        _format_bool(recovery.requeue_stale_claimed),
     )
     _write_kv(
         lines,
         'fail_stale_running',
-        _format_bool(recovery.auto_fail_stale_running),
+        _format_bool(recovery.fail_stale_running),
     )
     _write_kv(
         lines,

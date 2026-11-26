@@ -611,7 +611,13 @@ pub(crate) async fn write_snapshot(
     let processes = source.claim_columns.processes as i32;
     let max_claim_batch = source.claim_columns.max_claim_batch as i32;
     let max_claim_per_worker = source.claim_columns.max_claim_per_worker as i32;
-    let cluster_wide_cap = source.app_config.cluster_wide_cap.map(|cap| cap as i32);
+    // The column `cluster_wide_cap` stores the cap as a nullable integer:
+    // NULL for no cap.
+    let cluster_wide_cap = source
+        .app_config
+        .cluster_wide_cap
+        .claim_parameter()
+        .map(|cap| cap as i32);
     // The queue maps are stored as they are: an empty map is `{}`, never
     // NULL (both columns are NOT NULL on the baseline).
     let queue_priorities = Json(&source.worker_config.queue_priorities);

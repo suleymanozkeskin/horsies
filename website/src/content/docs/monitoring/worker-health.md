@@ -122,7 +122,7 @@ Both reads use the claim index. The coverage read takes one index probe per pend
 | `pid` | Worker process id |
 | `child_count` | The number of children of the worker profile (the stored column `processes`) |
 | `claim_limits` | The claim limits of the worker: `per_queue_per_pass` (the stored column `max_claim_batch`) and `claimed_per_worker` (the stored column `max_claim_per_worker`: the limit of the profile, or the seat count of the worker when the profile sets none) |
-| `cluster_wide_cap` | Cluster-wide concurrency cap, if set |
+| `cluster_wide_cap` | Cluster-wide concurrency cap: `ClusterCap(tasks)` or `NoClusterCap()` |
 | `queues` | Queues this worker serves |
 | `queue_priorities` | Per-queue priorities (CUSTOM mode); empty when none is set |
 | `queue_max_concurrency` | Per-queue concurrency (CUSTOM mode); empty when none is set |

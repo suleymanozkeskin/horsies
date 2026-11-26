@@ -587,7 +587,11 @@ pub(super) fn worker_state(listed: ListedWorkerState) -> WorkerStateInfo {
         queue_max_concurrency: snapshot.queue_max_concurrency,
         tasks_running: snapshot.tasks_running,
         tasks_claimed: snapshot.tasks_claimed,
-        cluster_wide_cap: snapshot.cluster_wide_cap,
+        // The web JSON holds the cap as a number, or null for no cap.
+        cluster_wide_cap: snapshot
+            .cluster_wide_cap
+            .claim_parameter()
+            .map(|tasks| i32::try_from(tasks).expect("a stored cap came from an integer column")),
         memory_usage_mb: snapshot.memory_usage_mb,
         memory_percent: snapshot.memory_percent,
         cpu_percent: snapshot.cpu_percent,

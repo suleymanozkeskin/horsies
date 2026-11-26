@@ -1729,7 +1729,7 @@ class Horsies:
         rule of both clients (``CoreHandle.check_connectivity``).
 
         In order, stopping at the first failure: ``SELECT 1`` on
-        ``database_url``; ``SELECT 1`` on ``session_database_url`` when it
+        ``database_url``; ``SELECT 1`` on the session database URL when it
         differs; in PgBouncer transaction mode, a LISTEN probe on the session
         URL that must receive a NOTIFY within 2 s. Runs on ``handle``, the
         live check's own handle.
@@ -1754,13 +1754,13 @@ class Horsies:
                             message='broker listener capability check failed',
                             code=ErrorCode.BROKER_INVALID_URL,
                             notes=[
-                                'session_database_url appears to be transaction-pooled; '
+                                'the session_database URL appears to be transaction-pooled; '
                                 'LISTEN notification was not delivered',
                                 message,
                             ],
                             help_text=(
-                                'use a direct/session-capable Postgres URL for '
-                                'session_database_url'
+                                'set session_database to a separate '
+                                'direct/session-capable Postgres URL'
                             ),
                         )
                     )
@@ -2801,7 +2801,7 @@ class Horsies:
                 broker=self.get_broker(),
                 definition_key=definition_key,
                 workflow_def_cls=workflow_def_cls,
-                resend_on_transient_err=self.config.resend_on_transient_err,
+                resend_on_transient_error=self.config.resend_on_transient_error,
             )
             spec._require_definition_key()
         finally:

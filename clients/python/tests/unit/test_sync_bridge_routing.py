@@ -80,7 +80,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
 
         with patch('horsies._core.WorkflowStartRequest') as request_class:
             result = start_workflow(
-                spec, broker, WORKFLOW_ID, sent_at, resend_on_transient_err=True,
+                spec, broker, WORKFLOW_ID, sent_at, resend_on_transient_error=True,
             )
 
         assert is_ok(result)

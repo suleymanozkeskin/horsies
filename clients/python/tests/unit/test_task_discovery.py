@@ -18,7 +18,7 @@ from horsies.core.app import Horsies
 from horsies.core.cli import discover_app
 from horsies.core.errors import ConfigurationError, ErrorCode
 from horsies.core.models.app import AppConfig
-from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.broker import PostgresConfig, SessionDatabaseSeparate
 
 
 def _make_app() -> Horsies:
@@ -526,7 +526,7 @@ def _pgbouncer_app() -> Horsies:
         config=AppConfig(
             broker=PostgresConfig(
                 database_url="postgresql://test:test@pooler/test",
-                session_database_url="postgresql://test:test@direct/test",
+                session_database=SessionDatabaseSeparate(url="postgresql://test:test@direct/test"),
                 pgbouncer_transaction_mode=True,
             ),
         )
@@ -614,7 +614,7 @@ class TestLiveBrokerConnectivityCheck:
         assert errors[0].message == 'broker listener capability check failed'
         assert errors[0].notes is not None
         assert (
-            "session_database_url appears to be transaction-pooled" in errors[0].notes[0]
+            "the session_database URL appears to be transaction-pooled" in errors[0].notes[0]
         )
         assert errors[0].notes[1] == 'no NOTIFY within 2000 ms'
 

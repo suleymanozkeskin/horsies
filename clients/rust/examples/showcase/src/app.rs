@@ -122,7 +122,7 @@ pub fn config_for_url(url: &str) -> AppConfig {
     config.retention.terminal_record_retention_hours =
         Some(crate::tuning::TERMINAL_RECORD_RETENTION_HOURS);
     config.schedule = Some(schedules());
-    config.resend_on_transient_err = true;
+    config.resend_on_transient_error = true;
     config
 }
 

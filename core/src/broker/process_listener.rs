@@ -155,7 +155,7 @@ pub enum SessionCheckFailure {
     #[error(
         "LISTEN on {session_url} received no NOTIFY within {} ms: the session URL does not \
          keep session state (for example PgBouncer transaction pooling); set \
-         session_database_url to a direct or session-pooled URL",
+         session_database to a separate direct or session-pooled URL",
         .waited.as_millis()
     )]
     NotCapable {
@@ -650,10 +650,11 @@ mod tests {
         let mut config = crate::core::config::PostgresConfig::from_url(
             "postgresql://horsies@127.0.0.1:1/horsies",
         );
-        config.session_database_url = Some(session_url.to_owned());
+        config.session_database = crate::core::config::SessionDatabase::Separate {
+            url: session_url.to_owned(),
+        };
         config.tcp_user_timeout = crate::core::config::TcpUserTimeoutConfig::After {
-            milliseconds: crate::core::config::TcpUserTimeoutMs::try_from(12_345_u32)
-                .expect("12345 ms is in bounds"),
+            milliseconds: 12_345,
         };
 
         let broker =
@@ -765,7 +766,7 @@ mod tests {
         assert!(!not_capable.is_retryable());
         let message = not_capable.to_string();
         assert!(!message.contains("secret"), "{message}");
-        assert!(message.contains("session_database_url"), "{message}");
+        assert!(message.contains("session_database"), "{message}");
         for interruption in [CheckInterruption::Reconnected, CheckInterruption::Stopped] {
             assert!(SessionCheckFailure::Interrupted(interruption).is_retryable());
         }

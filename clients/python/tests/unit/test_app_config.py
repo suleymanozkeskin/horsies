@@ -32,8 +32,17 @@ from datetime import timedelta
 from horsies.core.models.broker import (
     MOVED_TO_PARENT_POOL,
     MOVED_TO_WORKER_PROFILE,
+    PoolRecycleAfterSeconds,
+    PoolRecycleNever,
     PostgresConfig,
+    SessionDatabaseSameAsDatabaseUrl,
+    SessionDatabaseSeparate,
+    TcpKeepalivesOff,
+    TcpKeepalivesOn,
+    TcpUserTimeoutAfter,
+    TcpUserTimeoutSystemDefault,
 )
+from horsies.core.models.cluster_cap import ClusterCap, NoClusterCap
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_SECONDS
 from horsies.core.models.recovery import (
@@ -292,6 +301,7 @@ class TestPostgresConfigPgBouncer:
         )
 
         # database_url is SecretStr (0.1.7); the effective property unwraps.
+        assert config.session_database == SessionDatabaseSameAsDatabaseUrl()
         assert (
             config.effective_session_database_url
             == config.database_url.get_secret_value()
@@ -300,13 +310,16 @@ class TestPostgresConfigPgBouncer:
     def test_split_database_urls_are_valid(self) -> None:
         config = PostgresConfig(
             database_url='postgresql://user:pass@pooler:6432/db',
-            session_database_url='postgresql://user:pass@direct:5432/db',
+            session_database=SessionDatabaseSeparate(
+                url=SecretStr('postgresql://user:pass@direct:5432/db'),
+            ),
             pgbouncer_transaction_mode=True,
         )
 
         assert config.effective_session_database_url == (
             'postgresql://user:pass@direct:5432/db'
         )
+        assert config.session_url_differs()
         # Keepalives default on; PgBouncer mode also disables prepared statements.
         assert config.pooled_connect_args == {
             'keepalives': 1,
@@ -327,8 +340,8 @@ class TestPostgresConfigPgBouncer:
         password = 'sup3r-secret-pw'
         config = PostgresConfig(
             database_url=f'postgresql://user:{password}@pooler/db',
-            session_database_url=(
-                f'postgresql://user:{password}@direct/db'
+            session_database=SessionDatabaseSeparate(
+                url=SecretStr(f'postgresql://user:{password}@direct/db'),
             ),
         )
 
@@ -339,9 +352,20 @@ class TestPostgresConfigPgBouncer:
         assert password in config.database_url.get_secret_value()
         assert password in config.effective_session_database_url
 
+    def test_the_flat_session_url_field_is_refused(self) -> None:
+        """The flat field of 0.8.1 is no field: the config names its key."""
+        with pytest.raises(ValidationError, match='session_database_url'):
+            PostgresConfig.model_validate(
+                {
+                    'database_url': 'postgresql://user:pass@localhost/db',
+                    'session_database_url': 'postgresql://user:pass@direct/db',
+                },
+            )
 
     def test_pgbouncer_mode_requires_session_database_url(self) -> None:
-        with pytest.raises(ConfigurationError, match='session_database_url required'):
+        with pytest.raises(
+            ConfigurationError, match='a separate session_database is required',
+        ):
             PostgresConfig(
                 database_url='postgresql://user:pass@pooler:6432/db',
                 pgbouncer_transaction_mode=True,
@@ -351,11 +375,11 @@ class TestPostgresConfigPgBouncer:
         url = 'postgresql://user:pass@pooler:6432/db'
         with pytest.raises(
             ConfigurationError,
-            match='session_database_url must not use the transaction-pool URL',
+            match='session_database must not use the transaction-pool URL',
         ):
             PostgresConfig(
                 database_url=url,
-                session_database_url=url,
+                session_database=SessionDatabaseSeparate(url=SecretStr(url)),
                 pgbouncer_transaction_mode=True,
             )
 
@@ -370,10 +394,12 @@ class TestPostgresConfigPgBouncer:
         self, url: str,
     ) -> None:
         config = PostgresConfig(
-            database_url=SecretStr(url), session_database_url=SecretStr(url),
+            database_url=SecretStr(url),
+            session_database=SessionDatabaseSeparate(url=SecretStr(url)),
         )
         assert config.database_url.get_secret_value() == url
         assert config.effective_session_database_url == url
+        assert not config.session_url_differs()
 
     @pytest.mark.parametrize(
         'scheme',
@@ -410,15 +436,12 @@ class TestPostgresConfigPgBouncer:
 
     def test_session_database_url_that_names_a_driver_is_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
-            PostgresConfig(
-                database_url=SecretStr('postgresql://user:pass@localhost/db'),
-                session_database_url=SecretStr(
-                    'postgresql+psycopg://user:pass@localhost/db',
-                ),
+            SessionDatabaseSeparate(
+                url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
             )
         assert refused.value.code == ErrorCode.BROKER_INVALID_URL
         assert refused.value.message == (
-            "invalid session_database_url scheme 'postgresql+psycopg'"
+            "invalid session_database.url scheme 'postgresql+psycopg'"
         )
 
 
@@ -436,30 +459,32 @@ class TestPostgresConfigTcpUserTimeout:
     def test_default_is_30_seconds_in_every_connect_args(self) -> None:
         config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
 
-        assert config.tcp_user_timeout_ms == 30_000
+        assert config.tcp_user_timeout == TcpUserTimeoutAfter(milliseconds=30_000)
         assert config.tcp_connect_args()['tcp_user_timeout'] == 30_000
         assert config.pooled_connect_args['tcp_user_timeout'] == 30_000
 
-    def test_zero_passes_through_as_the_system_default(self) -> None:
+    def test_the_system_default_is_libpq_zero(self) -> None:
         config = PostgresConfig(
-            database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=0,
+            database_url=SecretStr(self._LOCAL_URL),
+            tcp_user_timeout=TcpUserTimeoutSystemDefault(),
         )
 
         assert config.pooled_connect_args['tcp_user_timeout'] == 0
 
-    def test_negative_value_is_refused(self) -> None:
+    def test_zero_milliseconds_are_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(
-                database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=-1,
+                database_url=SecretStr(self._LOCAL_URL),
+                tcp_user_timeout=TcpUserTimeoutAfter(milliseconds=0),
             )
 
         assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
-        assert refused.value.message == 'invalid tcp_user_timeout_ms'
+        assert refused.value.message == 'invalid tcp_user_timeout.milliseconds'
 
     def test_the_core_bound_is_accepted(self) -> None:
         config = PostgresConfig(
             database_url=SecretStr(self._LOCAL_URL),
-            tcp_user_timeout_ms=TCP_USER_TIMEOUT_MS_MAX,
+            tcp_user_timeout=TcpUserTimeoutAfter(milliseconds=TCP_USER_TIMEOUT_MS_MAX),
         )
 
         assert config.pooled_connect_args['tcp_user_timeout'] == TCP_USER_TIMEOUT_MS_MAX
@@ -468,24 +493,32 @@ class TestPostgresConfigTcpUserTimeout:
         above = TCP_USER_TIMEOUT_MS_MAX + 1
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(
-                database_url=SecretStr(self._LOCAL_URL), tcp_user_timeout_ms=above,
+                database_url=SecretStr(self._LOCAL_URL),
+                tcp_user_timeout=TcpUserTimeoutAfter(milliseconds=above),
             )
 
         assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
-        assert refused.value.message == 'invalid tcp_user_timeout_ms'
+        assert refused.value.message == 'invalid tcp_user_timeout.milliseconds'
         assert refused.value.notes == [
-            f'got: tcp_user_timeout_ms={above}',
-            'tcp_user_timeout_ms is 0 (the operating system default) or '
-            f'1 to {TCP_USER_TIMEOUT_MS_MAX} milliseconds',
+            f'got: tcp_user_timeout.milliseconds={above}',
+            f'tcp_user_timeout.milliseconds is from 1 to {TCP_USER_TIMEOUT_MS_MAX}',
         ]
         assert refused.value.help_text == (
-            f'give 0 or a number of milliseconds from 1 to {TCP_USER_TIMEOUT_MS_MAX}'
+            f'give a number of milliseconds from 1 to {TCP_USER_TIMEOUT_MS_MAX}, '
+            'or TcpUserTimeoutSystemDefault() for the operating system default'
         )
+
+    def test_the_flat_milliseconds_field_is_refused(self) -> None:
+        """The flat field of 0.8.1 is no field: the config names its key."""
+        with pytest.raises(ValidationError, match='tcp_user_timeout_ms'):
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, 'tcp_user_timeout_ms': 0},
+            )
 
     def test_not_passed_to_the_sqlalchemy_engine(self) -> None:
         config = PostgresConfig(database_url=SecretStr(self._LOCAL_URL))
 
-        assert 'tcp_user_timeout_ms' not in config.sqlalchemy_engine_kwargs()
+        assert 'tcp_user_timeout' not in config.sqlalchemy_engine_kwargs()
 
 
 @pytest.mark.unit
@@ -502,7 +535,9 @@ class TestPostgresConfigKeepalives:
     def test_keepalives_default_on(self) -> None:
         config = PostgresConfig(database_url=self._LOCAL_URL)
 
-        assert config.tcp_keepalives is True
+        assert config.tcp_keepalives == TcpKeepalivesOn(
+            idle_seconds=30, interval_seconds=10, probes=3,
+        )
         assert config.keepalive_connect_args() == {
             'keepalives': 1,
             'keepalives_idle': 30,
@@ -525,10 +560,10 @@ class TestPostgresConfigKeepalives:
             'tcp_user_timeout': 30_000,
         }
 
-    def test_keepalives_disabled_yields_empty_connect_args(self) -> None:
+    def test_keepalives_off_yields_empty_connect_args(self) -> None:
         config = PostgresConfig(
             database_url=self._LOCAL_URL,
-            tcp_keepalives=False,
+            tcp_keepalives=TcpKeepalivesOff(),
         )
 
         assert config.keepalive_connect_args() == {}
@@ -537,9 +572,9 @@ class TestPostgresConfigKeepalives:
     def test_custom_keepalive_values_flow_through(self) -> None:
         config = PostgresConfig(
             database_url=self._LOCAL_URL,
-            tcp_keepalives_idle=15,
-            tcp_keepalives_interval=5,
-            tcp_keepalives_count=2,
+            tcp_keepalives=TcpKeepalivesOn(
+                idle_seconds=15, interval_seconds=5, probes=2,
+            ),
         )
 
         assert config.pooled_connect_args == {
@@ -552,104 +587,138 @@ class TestPostgresConfigKeepalives:
 
     @pytest.mark.parametrize(
         'field_name',
-        [
-            'tcp_keepalives_idle',
-            'tcp_keepalives_interval',
-            'tcp_keepalives_count',
-        ],
+        ['idle_seconds', 'interval_seconds', 'probes'],
     )
-    def test_non_positive_keepalive_values_rejected_when_enabled(
-        self, field_name: str
-    ) -> None:
+    def test_non_positive_keepalive_values_rejected(self, field_name: str) -> None:
         with pytest.raises(ConfigurationError) as exc_info:
             PostgresConfig(
                 database_url=self._LOCAL_URL,
-                **{field_name: 0},
+                tcp_keepalives=TcpKeepalivesOn.model_validate({field_name: 0}),
             )
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
-
-    def test_non_positive_values_allowed_when_keepalives_disabled(self) -> None:
-        # Disabled keepalives ignore the interval/idle/count values entirely.
-        config = PostgresConfig(
-            database_url=self._LOCAL_URL,
-            tcp_keepalives=False,
-            tcp_keepalives_idle=0,
-        )
-
-        # tcp_user_timeout does not depend on keepalives.
-        assert config.pooled_connect_args == {'tcp_user_timeout': 30_000}
+        assert exc_info.value.message == f'invalid tcp_keepalives.{field_name}'
 
     @pytest.mark.parametrize(
-        ('field_name', 'bound'),
+        ('field_name', 'connect_arg', 'bound'),
         [
-            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
-            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
-            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+            ('idle_seconds', 'keepalives_idle', KEEPALIVE_SECONDS_MAX),
+            ('interval_seconds', 'keepalives_interval', KEEPALIVE_SECONDS_MAX),
+            ('probes', 'keepalives_count', KEEPALIVE_PROBES_MAX),
         ],
     )
     def test_keepalive_value_at_the_core_bound_is_accepted(
-        self, field_name: str, bound: int,
+        self, field_name: str, connect_arg: str, bound: int,
     ) -> None:
-        config = PostgresConfig.model_validate(
-            {'database_url': self._LOCAL_URL, field_name: bound},
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL,
+            tcp_keepalives=TcpKeepalivesOn.model_validate({field_name: bound}),
         )
 
-        connect_arg = field_name.removeprefix('tcp_')
         assert config.keepalive_connect_args()[connect_arg] == bound
 
     @pytest.mark.parametrize(
         ('field_name', 'bound'),
         [
-            ('tcp_keepalives_idle', KEEPALIVE_SECONDS_MAX),
-            ('tcp_keepalives_interval', KEEPALIVE_SECONDS_MAX),
-            ('tcp_keepalives_count', KEEPALIVE_PROBES_MAX),
+            ('idle_seconds', KEEPALIVE_SECONDS_MAX),
+            ('interval_seconds', KEEPALIVE_SECONDS_MAX),
+            ('probes', KEEPALIVE_PROBES_MAX),
         ],
     )
     def test_keepalive_value_above_the_core_bound_is_refused_with_the_bound(
         self, field_name: str, bound: int,
     ) -> None:
         with pytest.raises(ConfigurationError) as refused:
-            PostgresConfig.model_validate(
-                {'database_url': self._LOCAL_URL, field_name: bound + 1},
+            PostgresConfig(
+                database_url=self._LOCAL_URL,
+                tcp_keepalives=TcpKeepalivesOn.model_validate({field_name: bound + 1}),
             )
 
+        path = f'tcp_keepalives.{field_name}'
         assert refused.value.code == ErrorCode.CONFIG_INVALID_KEEPALIVE
-        assert refused.value.message == f'invalid {field_name}'
+        assert refused.value.message == f'invalid {path}'
         assert refused.value.notes == [
-            f'got: {field_name}={bound + 1}',
-            f'{field_name} is from 1 to {bound} when tcp_keepalives is True',
+            f'got: {path}={bound + 1}',
+            f'{path} is from 1 to {bound}',
         ]
         assert refused.value.help_text == (
-            f'give a number from 1 to {bound}, or set tcp_keepalives=False '
-            'to turn keepalives off'
+            f'give a number from 1 to {bound}, or set '
+            'tcp_keepalives=TcpKeepalivesOff() to turn keepalives off'
         )
 
-    def test_values_above_the_core_bounds_allowed_when_keepalives_disabled(
-        self,
-    ) -> None:
-        # Disabled keepalives ignore the interval/idle/count values entirely.
-        config = PostgresConfig(
-            database_url=SecretStr(self._LOCAL_URL),
-            tcp_keepalives=False,
-            tcp_keepalives_idle=KEEPALIVE_SECONDS_MAX + 1,
-            tcp_keepalives_interval=KEEPALIVE_SECONDS_MAX + 1,
-            tcp_keepalives_count=KEEPALIVE_PROBES_MAX + 1,
-        )
+    @pytest.mark.parametrize(
+        'field_name',
+        ['tcp_keepalives_idle', 'tcp_keepalives_interval', 'tcp_keepalives_count'],
+    )
+    def test_the_flat_keepalive_fields_are_refused(self, field_name: str) -> None:
+        """The flat fields of 0.8.1 are no fields: the config names the key."""
+        with pytest.raises(ValidationError, match=field_name):
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, field_name: 30},
+            )
 
-        assert config.keepalive_connect_args() == {}
+    def test_a_keepalive_switch_is_refused(self) -> None:
+        """The bool of 0.8.1 is not a keepalive setting."""
+        with pytest.raises(ValidationError):
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, 'tcp_keepalives': True},
+            )
 
     def test_keepalive_fields_excluded_from_engine_kwargs(self) -> None:
         config = PostgresConfig(database_url=self._LOCAL_URL)
         engine_kwargs = config.sqlalchemy_engine_kwargs()
 
-        for field_name in (
-            'tcp_keepalives',
-            'tcp_keepalives_idle',
-            'tcp_keepalives_interval',
-            'tcp_keepalives_count',
-        ):
-            assert field_name not in engine_kwargs
+        assert 'tcp_keepalives' not in engine_kwargs
+        assert set(engine_kwargs) == {
+            'pool_size',
+            'max_overflow',
+            'pool_timeout',
+            'pool_recycle',
+            'echo',
+            'hide_parameters',
+        }
+
+
+@pytest.mark.unit
+class TestPostgresConfigPoolRecycle:
+    """When the pool replaces a connection by its age."""
+
+    _LOCAL_URL = 'postgresql://user:pass@localhost/db'
+
+    def test_the_default_is_1800_seconds(self) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL)
+
+        assert config.pool_recycle == PoolRecycleAfterSeconds(seconds=1800)
+        assert config.sqlalchemy_engine_kwargs()['pool_recycle'] == 1800
+
+    def test_never_is_sqlalchemy_minus_one(self) -> None:
+        config = PostgresConfig(
+            database_url=self._LOCAL_URL, pool_recycle=PoolRecycleNever(),
+        )
+
+        assert config.sqlalchemy_engine_kwargs()['pool_recycle'] == -1
+
+    def test_the_timeout_is_sqlalchemy_pool_timeout(self) -> None:
+        config = PostgresConfig(database_url=self._LOCAL_URL, pool_timeout_seconds=12)
+
+        assert config.sqlalchemy_engine_kwargs()['pool_timeout'] == 12
+
+    def test_negative_seconds_are_refused(self) -> None:
+        with pytest.raises(ConfigurationError) as refused:
+            PostgresConfig(
+                database_url=self._LOCAL_URL,
+                pool_recycle=PoolRecycleAfterSeconds(seconds=-1),
+            )
+
+        assert refused.value.code == ErrorCode.CONFIG_INVALID_BROKER_POOL
+        assert refused.value.message == 'invalid pool_recycle.seconds'
+
+    def test_a_number_is_not_a_recycle_setting(self) -> None:
+        """The int of 0.8.1 (-1 for never) is not a recycle setting."""
+        with pytest.raises(ValidationError):
+            PostgresConfig.model_validate(
+                {'database_url': self._LOCAL_URL, 'pool_recycle': -1},
+            )
 
 
 @pytest.mark.unit
@@ -867,10 +936,10 @@ class TestClusterWideCapPrefetchConflict:
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
             broker=BROKER,
-            cluster_wide_cap=50,
+            cluster_wide_cap=ClusterCap(tasks=50),
             prefetch_buffer=0,
         )
-        assert config.cluster_wide_cap == 50
+        assert config.cluster_wide_cap == ClusterCap(tasks=50)
         assert config.prefetch_buffer == 0
 
     def test_cluster_wide_cap_with_prefetch_raises(self) -> None:
@@ -881,7 +950,7 @@ class TestClusterWideCapPrefetchConflict:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
                 broker=BROKER,
-                cluster_wide_cap=50,
+                cluster_wide_cap=ClusterCap(tasks=50),
                 prefetch_buffer=4,
                 claim_lease_ms=5000,
                 recovery=SHORT_HB_RECOVERY,
@@ -893,12 +962,12 @@ class TestClusterWideCapPrefetchConflict:
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
             broker=BROKER,
-            cluster_wide_cap=None,
+            cluster_wide_cap=NoClusterCap(),
             prefetch_buffer=4,
             claim_lease_ms=5000,
             recovery=SHORT_HB_RECOVERY,
         )
-        assert config.cluster_wide_cap is None
+        assert config.cluster_wide_cap == NoClusterCap()
         assert config.prefetch_buffer == 4
 
 
@@ -909,24 +978,24 @@ class TestClusterWideCapBoundaries:
     def test_cluster_wide_cap_zero_raises(self) -> None:
         """cluster_wide_cap=0 should raise ConfigurationError."""
         with pytest.raises(
-            ConfigurationError, match='cluster_wide_cap must be positive'
+            ConfigurationError, match='cluster_wide_cap.tasks must be positive'
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
                 broker=BROKER,
-                cluster_wide_cap=0,
+                cluster_wide_cap=ClusterCap(tasks=0),
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
     def test_cluster_wide_cap_negative_raises(self) -> None:
         """cluster_wide_cap=-1 should raise ConfigurationError."""
         with pytest.raises(
-            ConfigurationError, match='cluster_wide_cap must be positive'
+            ConfigurationError, match='cluster_wide_cap.tasks must be positive'
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
                 broker=BROKER,
-                cluster_wide_cap=-1,
+                cluster_wide_cap=ClusterCap(tasks=-1),
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
@@ -935,9 +1004,9 @@ class TestClusterWideCapBoundaries:
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
             broker=BROKER,
-            cluster_wide_cap=1,
+            cluster_wide_cap=ClusterCap(tasks=1),
         )
-        assert config.cluster_wide_cap == 1
+        assert config.cluster_wide_cap == ClusterCap(tasks=1)
 
 
 def _config_errors(**fields: object) -> list[HorsiesError]:
@@ -979,8 +1048,8 @@ class TestWorkerManifestBounds:
                 ErrorCode.CONFIG_INVALID_PREFETCH,
             ),
             (
-                {'cluster_wide_cap': TASK_LIMIT_MAX + 1},
-                'cluster_wide_cap',
+                {'cluster_wide_cap': ClusterCap(tasks=TASK_LIMIT_MAX + 1)},
+                'cluster_wide_cap.tasks',
                 TASK_LIMIT_MAX,
                 ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
             ),
@@ -1032,7 +1101,7 @@ class TestWorkerManifestBounds:
         )
         hard_cap = AppConfig(
             broker=BROKER,
-            cluster_wide_cap=TASK_LIMIT_MAX,
+            cluster_wide_cap=ClusterCap(tasks=TASK_LIMIT_MAX),
             queue_mode=QueueMode.CUSTOM,
             custom_queues=[
                 CustomQueueConfig(name='a', max_concurrency=QUEUE_CONCURRENCY_MAX),
@@ -1042,7 +1111,7 @@ class TestWorkerManifestBounds:
         assert soft_cap.prefetch_buffer == CLAIM_COUNT_MAX
         assert soft_cap.claim_lease_ms == MILLISECONDS_MAX
         assert soft_cap.max_claim_renew_age_ms == MILLISECONDS_MAX
-        assert hard_cap.cluster_wide_cap == TASK_LIMIT_MAX
+        assert hard_cap.cluster_wide_cap == ClusterCap(tasks=TASK_LIMIT_MAX)
 
 
 @pytest.mark.unit
@@ -1180,12 +1249,12 @@ class TestDefaultBehavior:
         assert config.claim_lease_ms is None
 
     def test_cluster_wide_cap_defaults_to_none(self) -> None:
-        """cluster_wide_cap should default to None (unlimited)."""
+        """cluster_wide_cap should default to NoClusterCap() (no cap)."""
         config = AppConfig(
             queue_mode=QueueMode.DEFAULT,
             broker=BROKER,
         )
-        assert config.cluster_wide_cap is None
+        assert config.cluster_wide_cap == NoClusterCap()
 
     def test_queue_mode_defaults_to_default(self) -> None:
         """queue_mode should default to DEFAULT."""
@@ -1213,24 +1282,24 @@ class TestMultiErrorCollection:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
                 broker=BROKER,
-                cluster_wide_cap=-1,
+                cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
             )
         errors = exc_info.value.report.refusals
         assert len(errors) == 2
         messages = [e.message for e in errors]
-        assert 'cluster_wide_cap must be positive' in messages
+        assert 'cluster_wide_cap.tasks must be positive' in messages
         assert 'prefetch_buffer must be non-negative' in messages
 
     def test_single_error_still_raises_original_type(self) -> None:
         """Single config error still raises ConfigurationError (backward compat)."""
         with pytest.raises(
-            ConfigurationError, match='cluster_wide_cap must be positive'
+            ConfigurationError, match='cluster_wide_cap.tasks must be positive'
         ) as exc_info:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
                 broker=BROKER,
-                cluster_wide_cap=-1,
+                cluster_wide_cap=ClusterCap(tasks=-1),
             )
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CLUSTER_CAP
 
@@ -1240,7 +1309,7 @@ class TestMultiErrorCollection:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
                 broker=BROKER,
-                cluster_wide_cap=-1,
+                cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
             )
 
@@ -1250,7 +1319,7 @@ class TestMultiErrorCollection:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
                 broker=BROKER,
-                cluster_wide_cap=-1,
+                cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
                 default_unhandled_error_code='TimeoutError',
             )
@@ -1263,7 +1332,7 @@ class TestMultiErrorCollection:
             AppConfig(
                 queue_mode=QueueMode.DEFAULT,
                 broker=BROKER,
-                cluster_wide_cap=-1,
+                cluster_wide_cap=ClusterCap(tasks=-1),
                 prefetch_buffer=-5,
                 default_unhandled_error_code='TimeoutError',
             )
@@ -1465,12 +1534,12 @@ class TestFormatForLoggingExtended:
 
     def test_cluster_wide_cap_displayed(self) -> None:
         """cluster_wide_cap should appear in formatted output when set."""
-        config = AppConfig(broker=BROKER, cluster_wide_cap=50)
+        config = AppConfig(broker=BROKER, cluster_wide_cap=ClusterCap(tasks=50))
         formatted = config._format_for_logging()
         assert 'cluster_wide_cap: 50' in formatted
 
     def test_cluster_wide_cap_omitted_when_none(self) -> None:
-        """cluster_wide_cap should not appear when None."""
+        """cluster_wide_cap should not appear for NoClusterCap()."""
         config = AppConfig(broker=BROKER)
         formatted = config._format_for_logging()
         assert 'cluster_wide_cap' not in formatted
@@ -1622,14 +1691,14 @@ class TestExactPool:
         database_url=SecretStr('postgresql://user:pass@localhost/db'),
         pool_size=30,
         max_overflow=30,
-        pool_timeout=12,
+        pool_timeout_seconds=12,
     )
 
     def test_the_copy_has_the_pool_and_no_overflow(self) -> None:
         exact = self._CONFIG.with_exact_pool(7)
         assert (exact.pool_size, exact.max_overflow) == (7, 0)
         assert exact.database_url == self._CONFIG.database_url
-        assert exact.pool_timeout == 12
+        assert exact.pool_timeout_seconds == 12
         assert (self._CONFIG.pool_size, self._CONFIG.max_overflow) == (30, 30)
 
     @pytest.mark.parametrize('connections', [0, -1])
@@ -1861,24 +1930,24 @@ class TestOrphanTaskAuditInterval:
 
 @pytest.mark.unit
 class TestRetentionSweepInterval:
-    """RetentionConfig.retention_sweep_interval_s bounds and default."""
+    """RetentionConfig.retention_sweep_interval_seconds bounds and default."""
 
     def test_default_is_5_minutes(self) -> None:
-        assert RetentionConfig().retention_sweep_interval_s == 300
+        assert RetentionConfig().retention_sweep_interval_seconds == 300
 
     def test_bounds_accept_valid_edges(self) -> None:
-        assert RetentionConfig(retention_sweep_interval_s=30,
-        ).retention_sweep_interval_s == 30
-        assert RetentionConfig(retention_sweep_interval_s=86_400,
-        ).retention_sweep_interval_s == 86_400
+        assert RetentionConfig(retention_sweep_interval_seconds=30,
+        ).retention_sweep_interval_seconds == 30
+        assert RetentionConfig(retention_sweep_interval_seconds=86_400,
+        ).retention_sweep_interval_seconds == 86_400
 
     def test_below_minimum_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            RetentionConfig(retention_sweep_interval_s=29)
+            RetentionConfig(retention_sweep_interval_seconds=29)
 
     def test_above_maximum_rejected(self) -> None:
         with pytest.raises(ValidationError):
-            RetentionConfig(retention_sweep_interval_s=86_401)
+            RetentionConfig(retention_sweep_interval_seconds=86_401)
 
 
 @pytest.mark.unit

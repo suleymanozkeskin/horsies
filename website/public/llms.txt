@@ -44,7 +44,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - queue_mode: QueueMode (DEFAULT or CUSTOM)
 - custom_queues: list[CustomQueueConfig] | None (required for CUSTOM)
 - broker: PostgresConfig
-- cluster_wide_cap: int | None (max RUNNING tasks across cluster)
+- cluster_wide_cap: ClusterCap(tasks) | NoClusterCap (default NoClusterCap(); max RUNNING tasks across cluster)
 - prefetch_buffer: int (0 = hard cap, >0 = soft cap with lease)
 - claim_lease_ms: int | None (required when prefetch_buffer > 0)
 - max_claim_renew_age_ms: int
@@ -55,7 +55,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - schedule: ScheduleConfig | None
 - exception_mapper: ExceptionMapper (global {ExceptionClass: "ERROR_CODE"})
 - default_unhandled_error_code: str (default "UNHANDLED_EXCEPTION")
-- resend_on_transient_err: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
+- resend_on_transient_error: bool (default False, auto-retry transient ENQUEUE_FAILED for both task send and workflow start)
 - tracing: OtelTracing(parentage: ChildOfSend() | LinkedToSend()) | NoTracing() (default NoTracing(); OtelTracing() traces the sends and each attempt that a worker runs with the OpenTelemetry API and records the producer metrics with its meter; the attempt span is a child of the send span with ChildOfSend() (default), or a new trace with a link to it with LinkedToSend(); needs the extra horsies[otel], else HRS-220; with NoTracing() horsies does not import opentelemetry)
 - log_format: LogFormat = TextLogs() | JsonLogs() (default TextLogs(); JsonLogs() writes one JSON object per line with the keys ts, level, logger, message, process, task_id, task_name, attempt, trace_id, span_id, exc)
 - worker_profiles: dict[str, WorkerProfile] (default {}; `horsies worker <app> --profile <name>` runs one; every profile is validated at construction, HRS-218)
@@ -100,25 +100,22 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### PostgresConfig
 - database_url: SecretStr (must start with "postgresql://")
-- session_database_url: str | None (direct/session-capable URL for schema setup and LISTEN/NOTIFY)
+- session_database: SessionDatabaseSameAsDatabaseUrl | SessionDatabaseSeparate(url: SecretStr) (default same as database_url; a separate direct/session-capable URL for schema setup and LISTEN/NOTIFY)
 - pgbouncer_transaction_mode: bool (default False; disables prepared statements for transaction-pooled PgBouncer)
 - pool_size: int (default 5; 1 to 10,000, else HRS-213)
 - max_overflow: int (default 10; 0 to 10,000, else HRS-213)
 - worker_pool_size, worker_max_overflow: removed in 0.7.0; setting one fails with HRS-213 and names WorkerProfile(pool=ParentPool(max_size=PoolSize(connections=N))); task code in a child opens the task_send_pool of its kind
 - worker_child_pool_min_size, worker_child_pool_max_size, worker_child_pool_check: removed in 0.7.0; setting one fails with HRS-213 and names the pool field of each child kind (IsolatedPool, SharedPool)
-- tcp_keepalives: bool (default True)
-- tcp_keepalives_idle: int (default 30; 1 to 32,767 s while tcp_keepalives is True, else HRS-215)
-- tcp_keepalives_interval: int (default 10; 1 to 32,767 s while tcp_keepalives is True, else HRS-215)
-- tcp_keepalives_count: int (default 3; 1 to 127 while tcp_keepalives is True, else HRS-215)
-- tcp_user_timeout_ms: int (default 30000; 0 uses the operating system default, or 1 to 2,147,483,647 ms; else HRS-215)
+- tcp_keepalives: TcpKeepalivesOn(idle_seconds, interval_seconds, probes) | TcpKeepalivesOff (default TcpKeepalivesOn(): 30 s, 10 s, 3 probes; idle_seconds and interval_seconds 1 to 32,767 s, probes 1 to 127, else HRS-215)
+- tcp_user_timeout: TcpUserTimeoutAfter(milliseconds) | TcpUserTimeoutSystemDefault (default 30000 ms; milliseconds 1 to 2,147,483,647, else HRS-215)
 - psycopg >= 3.3.7 is required: after an interrupted query it sends a cancel request (at most 5 s) and waits for the query (at most 5 s), then closes the connection; the 5 s limit on the cancel request needs libpq 17+ (older libpq: no limit; horsies[pg-binary] bundles its own libpq; psycopg.pq.version() reads it, 170000 = 17.0)
 - retain_rerun_input_default: bool (default False)
-- pool_timeout: int (default 30; 0 to 4,294,967,295 s, 0 does not wait; else HRS-213)
-- pool_recycle: int (default 1800; -1 never, or 0 to 4,294,967,295 s; else HRS-213)
+- pool_timeout_seconds: int (default 30; 0 to 4,294,967,295 s, 0 does not wait; else HRS-213)
+- pool_recycle: PoolRecycleAfterSeconds(seconds) | PoolRecycleNever (default 1800 s; seconds 0 to 4,294,967,295, else HRS-213)
 - pool_pre_ping: bool (default True)
 - echo: bool (default False)
-- PgBouncer pattern: database_url -> pooled transaction URL, session_database_url -> direct/session-capable URL, pgbouncer_transaction_mode=True
-- PgBouncer pool size: each worker opens the resolved WorkerProfile.pool max_size + 1 runner heartbeat + children x resolved pool max_size per mode, plus task_send_pool per sending event loop in each child, as pooler clients (the 2 listener connections go to session_database_url); max_client_conn >= the sum over workers and other clients; default_pool_size equal to that sum never makes a transaction wait -> /horsies/troubleshooting/pgbouncer/#pool-size
+- PgBouncer pattern: database_url -> pooled transaction URL, session_database=SessionDatabaseSeparate(url=...) -> direct/session-capable URL, pgbouncer_transaction_mode=True
+- PgBouncer pool size: each worker opens the resolved WorkerProfile.pool max_size + 1 runner heartbeat + children x resolved pool max_size per mode, plus task_send_pool per sending event loop in each child, as pooler clients (the 2 listener connections go to the session database URL); max_client_conn >= the sum over workers and other clients; default_pool_size equal to that sum never makes a transaction wait -> /horsies/troubleshooting/pgbouncer/#pool-size
 - PgBouncer-only workers are unsupported because PostgreSQL LISTEN requires a persistent session
 
 ### QueueMode
@@ -350,7 +347,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .on_error -> OnError (FAIL or PAUSE)
 - .output -> TaskNode | SubWorkflowNode | None
 - .success_policy -> SuccessPolicy | None
-- .resend_on_transient_err -> bool (auto-retry transient start errors, default False)
+- .resend_on_transient_error -> bool (auto-retry transient start errors, default False)
 - .start(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - .start_async(workflow_id=None) -> WorkflowStartResult[WorkflowHandle[T]]
 - .retry_start(error: WorkflowStartRetryable) -> WorkflowStartResult[WorkflowHandle[T]] (retry failed start, sync)
@@ -373,7 +370,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - HandleErrorCode: WORKFLOW_NOT_FOUND, DB_OPERATION_FAILED, STORED_DATA_INVALID, RESUME_RECOVERY_FAILED, ASYNC_CONTEXT
 
 ### WorkflowStatus (enum)
-- PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED; PAUSED -> EXPIRED when paused_workflow_auto_cancel_after elapses
+- PENDING -> RUNNING -> COMPLETED | FAILED | PAUSED | CANCELLED; PAUSED -> EXPIRED when paused_workflow_cancel_after elapses
 - .is_terminal -> bool
 - WORKFLOW_TERMINAL_STATES: frozenset = {COMPLETED, FAILED, CANCELLED, EXPIRED}
 
@@ -449,11 +446,11 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - HRS-030: function returns WorkflowSpec but lacks @app.workflow_builder
 
 ### start_workflow / start_workflow_async
-- start_workflow(spec, broker, workflow_id=None, *, resend_on_transient_err=False) -> WorkflowStartResult[WorkflowHandle[T]]
-- start_workflow_async(spec, broker, workflow_id=None, *, resend_on_transient_err=False) -> WorkflowStartResult[WorkflowHandle[T]]
+- start_workflow(spec, broker, workflow_id=None, *, resend_on_transient_error=False) -> WorkflowStartResult[WorkflowHandle[T]]
+- start_workflow_async(spec, broker, workflow_id=None, *, resend_on_transient_error=False) -> WorkflowStartResult[WorkflowHandle[T]]
 - Standalone functions (alternative to spec.start())
 - Returns Ok(WorkflowHandle) on success, Err(WorkflowStartError) on failure
-- resend_on_transient_err: auto-retry up to 3 times on transient infra errors with exponential backoff
+- resend_on_transient_error: auto-retry up to 3 times on transient infra errors with exponential backoff
 
 ### WorkflowStartResult[T] (workflow start Result type)
 - spec.start() / start_async() / start_workflow() / start_workflow_async() return WorkflowStartResult[WorkflowHandle[T]]
@@ -486,43 +483,43 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Exponential: exactly one base interval, delay = base * 2^(attempt-1)
 
 ### RecoveryConfig
-- auto_requeue_stale_claimed: bool (default True)
+- requeue_stale_claimed: bool (default True)
 - claimed_stale_threshold_ms: int (default 120_000, range 1s-1hr)
-- auto_fail_stale_running: bool (default True)
+- fail_stale_running: bool (default True)
 - running_stale_threshold_ms: int (default 300_000, range 1s-2hr)
 - check_interval_ms: int (default 30_000, range 1s-10min)
 - runner_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
 - claimer_heartbeat_interval_ms: int (default 30_000, range 1s-2min)
-- auto_terminate_orphaned_workflow_tasks: bool (default True)
+- terminate_orphaned_workflow_tasks: bool (default True)
 - finalizing_stale_threshold_ms: int (default 300_000, range 1s-2hr)
 - crashed_worker_recovery_grace_ms: int (default 10_000, range 0-1hr; 0 disables)
 - orphan_task_audit_interval_ms: int (default 60_000, range 1s-24hr)
 - worker_state_snapshot_interval_ms: int (default 30_000, range 1s-1min; the cap is half the 120 s live window WORKER_STATE_LIVE_WINDOW_SECONDS, so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with HRS-204)
-- phase2_quarantine_after_attempts: int (default 25, range 3-1000)
+- finalization_quarantine_after_attempts: int (default 25, range 3-1000)
 - workflow_recovery_failure_limit: int (default 25, range 3-1000; reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with WORKFLOW_RECOVERY_LIMIT_REACHED)
-- Constraint: stale thresholds must be >= 2x heartbeat intervals; with auto_fail_stale_running=True, running_stale_threshold_ms >= 2 x (runner_heartbeat_interval_ms + 2000) (the worker stops when no runner heartbeat lands for half of it; HRS-204 below)
+- Constraint: stale thresholds must be >= 2x heartbeat intervals; with fail_stale_running=True, running_stale_threshold_ms >= 2 x (runner_heartbeat_interval_ms + 2000) (the worker stops when no runner heartbeat lands for half of it; HRS-204 below)
 - Retention fields are not on RecoveryConfig; setting heartbeat_retention_hours (removed in 0.5.0) or a retention field here fails at construction
 
 ### RetentionConfig
 - Reached as AppConfig.retention
-- paused_workflow_auto_cancel_after: timedelta | None (default None; a positive duration of at most 365,000 days, else HRS-216)
+- paused_workflow_cancel_after: timedelta | None (default None; a positive duration of at most 365,000 days, else HRS-216)
 - worker_state_retention_hours: int | None (default 168 / 7 days, range 1-8760, None disables pruning)
 - terminal_record_retention_hours: int | None (default 720 / 30 days, range 1-43800, None disables pruning; applies to terminal workflow rows)
 - history_leaf_horizon_days: int (default 3, range 2-14)
 - heartbeat_leaf_horizon_hours: int (default 6, range 2-48)
-- partition_maintenance_interval_s: int (default 900, range 60-3600)
-- retention_sweep_interval_s: int (default 300, range 30s-24h)
+- partition_maintenance_interval_seconds: int (default 900, range 60-3600)
+- retention_sweep_interval_seconds: int (default 300, range 30s-24h)
 - retention_delete_batch_size: int (default 500, range 50-10000)
 - retention_periods: tuple[timedelta, ...] (default (); whole days 1-1825; periods a send may choose explicitly)
 - queue_retention: dict[str, timedelta | None] (default {}; whole days 1-1825, or None for forever; the class key is standard_<days>d)
 - Terminal task records are removed by partition drop, not by row delete
 
 ### WorkerResilienceConfig
-- db_retry_initial_ms: int (default 500, range 100ms-60s)
-- db_retry_max_ms: int (default 30_000, range 500ms-5min)
-- db_retry_max_attempts: int (default 0 = infinite, range 0-10_000)
+- database_retry_initial_ms: int (default 500, range 100ms-60s)
+- database_retry_max_ms: int (default 30_000, range 500ms-5min)
+- database_retry_max_attempts: int (default 0 = infinite, range 0-10_000)
 - notify_poll_interval_ms: int (default 5_000, range 1s-5min)
-- Constraint: db_retry_max_ms >= db_retry_initial_ms
+- Constraint: database_retry_max_ms >= database_retry_initial_ms
 
 ### discover_tasks
 - app.discover_tasks(["myapp.tasks", "myapp.workflows"])
@@ -867,7 +864,7 @@ Each entry: Title -- summary -> URL
 
 ### Operations
 - Deployment Topology -- a dedicated PostgreSQL instance and why, the transaction boundary with the application, the connections of each URL and the pooler mode, what a failover under asynchronous replication can lose (a send, a workflow start, a claim, the end of a task, workflow progress, the liveness lock), the settings that lose no commit -> /horsies/operations/deployment-topology/
-- Atomic Enqueue and Topology -- send after commit, resend_on_transient_err, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
+- Atomic Enqueue and Topology -- send after commit, resend_on_transient_error, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
 - Deploying Code Changes -- renamed or removed tasks and parameters, in-flight rows, old and new workers, error codes per change -> /horsies/operations/deploying-code-changes/
 - Code Change Examples -- the Python code of the deploy steps: a parameter with a default, two names for one task, a model field with a default, a renamed field with AliasChoices -> /horsies/operations/code-change-examples/
 - Rerun in Your Transaction -- the Python rerun_task: re-execute a terminal task as a new task in the caller's transaction, RerunTask, RerunEnqueuePolicy, RerunOutcome -> /horsies/operations/rerun-in-your-transaction/
@@ -911,7 +908,7 @@ keyword(s) -> page URL
 
 install, pip, setup, first task -> /horsies/quick-start/getting-started/
 Horsies, AppConfig, PostgresConfig, database_url, broker -> /horsies/configuration/app-config/
-pool_size, max_overflow, session_database_url, pgbouncer_transaction_mode, keepalives -> /horsies/configuration/broker-config/
+pool_size, max_overflow, session_database, pgbouncer_transaction_mode, keepalives -> /horsies/configuration/broker-config/
 PostgresConfig, psycopg, libpq, event loop, ASYNC_CONTEXT, connection ceiling -> /horsies/configuration/broker-connections/
 stale, requeue, crash recovery, recovery fields -> /horsies/configuration/recovery-config/
 RecoveryConfig, HRS-204 example, disable recovery -> /horsies/configuration/app-config/#recovery-configuration
@@ -945,7 +942,7 @@ TaskRuntime.for_test, AttemptNumber, direct call with a runtime -> /horsies/oper
 WorkflowDefinition, class-based workflow, build, build_with -> /horsies/concepts/workflows/subworkflows/
 ExceptionMapper, exception_mapper, error code mapping -> /horsies/tasks/error-handling/
 good_until, task expiry, deadline, with_options, TaskSendOptions -> /horsies/tasks/sending-tasks/
-schedule, delay, TaskFunction.schedule, resend_on_transient_err, idempotency_reservation_window -> /horsies/tasks/sending-tasks/
+schedule, delay, TaskFunction.schedule, resend_on_transient_error, idempotency_reservation_window -> /horsies/tasks/sending-tasks/
 worker, child process, claim, execute -> /horsies/workers/worker-architecture/
 concurrency, max_concurrency, cluster_wide_cap, prefetch -> /horsies/workers/concurrency/
 heartbeat, crash, stale, worker recovery -> /horsies/workers/heartbeats-recovery/
@@ -990,7 +987,7 @@ rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome, RerunEnqueued -> /horsi
 AliasChoices, renamed model field, task alias, deploy -> /horsies/operations/code-change-examples/
 autovacuum, vacuum, high-churn tables -> /horsies/operations/autovacuum-tuning/
 deployment topology, dedicated instance, failover, asynchronous replication, synchronous replication, synchronous_commit, synchronous_standby_names, standby, lost commit -> /horsies/operations/deployment-topology/
-atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_err -> /horsies/operations/atomic-enqueue-and-topology/
+atomic enqueue, send after commit, transaction, topology, separate database, idempotency_key, idempotency window, IDEMPOTENCY_KEY_CONFLICT, resend_on_transient_error -> /horsies/operations/atomic-enqueue-and-topology/
 deploy, rolling deploy, rename task, remove task, rename parameter, in-flight rows, WORKER_SERIALIZATION_ERROR, WORKER_RESOLUTION_ERROR, SUBWORKFLOW_LOAD_FAILED, RESULT_DESERIALIZATION_ERROR, definition_key -> /horsies/operations/deploying-code-changes/
 testing, pytest, unit test, direct call, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS, TaskSendSuppressed, SEND_SUPPRESSED -> /horsies/operations/testing/
 PgBouncer, transaction pooling, pgbouncer_transaction_mode -> /horsies/troubleshooting/pgbouncer/

@@ -43,9 +43,9 @@ const WAIT: Duration = Duration::from_secs(30);
 
 fn resilience(initial_ms: u64, max_attempts: u64) -> WorkerResilienceConfig {
     WorkerResilienceConfig {
-        db_retry_initial_ms: initial_ms,
-        db_retry_max_ms: initial_ms,
-        db_retry_max_attempts: max_attempts,
+        database_retry_initial_ms: initial_ms,
+        database_retry_max_ms: initial_ms,
+        database_retry_max_attempts: max_attempts,
         ..WorkerResilienceConfig::default()
     }
 }

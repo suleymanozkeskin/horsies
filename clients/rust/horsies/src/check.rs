@@ -220,11 +220,11 @@ fn listener_report(cause: &str) -> ValidationReport {
         vec![HorsiesError::new("broker listener capability check failed")
             .with_code(ErrorCode::BrokerInvalidUrl)
             .with_note(
-                "session_database_url appears to be transaction-pooled; LISTEN notification \
-                 was not delivered",
+                "the session_database URL appears to be transaction-pooled; LISTEN \
+                 notification was not delivered",
             )
             .with_note(cause.to_owned())
-            .with_help("use a direct/session-capable Postgres URL for session_database_url")],
+            .with_help("set session_database to a separate direct/session-capable Postgres URL")],
     )
 }
 

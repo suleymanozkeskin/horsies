@@ -236,14 +236,14 @@ impl ManifestValue for PayloadBytes {
 )]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryManifest {
-    pub auto_requeue_stale_claimed: bool,
+    pub requeue_stale_claimed: bool,
     pub claimed_stale_threshold_ms: ClaimedStaleThresholdMs,
-    pub auto_terminate_orphaned_workflow_tasks: bool,
-    pub auto_fail_stale_running: bool,
+    pub terminate_orphaned_workflow_tasks: bool,
+    pub fail_stale_running: bool,
     pub running_stale_threshold_ms: StaleThresholdMs,
     pub finalizing_stale_threshold_ms: StaleThresholdMs,
     pub crashed_worker_recovery_grace_ms: RecoveryGraceMs,
-    pub phase2_quarantine_after_attempts: RecoveryPassLimit,
+    pub finalization_quarantine_after_attempts: RecoveryPassLimit,
     pub workflow_recovery_failure_limit: RecoveryPassLimit,
     pub check_interval_ms: CheckIntervalMs,
     pub orphan_task_audit_interval_ms: AuditIntervalMs,
@@ -309,7 +309,7 @@ pub enum QueueRetention {
 pub struct RetentionManifest {
     pub worker_state_retention: WorkerStateRetention,
     pub terminal_record_retention: TerminalRecordRetention,
-    pub paused_workflow_auto_cancel_after: PausedWorkflowExpiry,
+    pub paused_workflow_cancel_after: PausedWorkflowExpiry,
     pub history_leaf_horizon_days: HistoryLeafHorizonDays,
     pub heartbeat_leaf_horizon_hours: HeartbeatLeafHorizonHours,
     /// Finite periods a send may choose besides the default and the mapped
@@ -317,8 +317,8 @@ pub struct RetentionManifest {
     pub retention_periods: Vec<RetentionPeriodDays>,
     /// The retention of each mapped queue, by queue name.
     pub queue_retention: BTreeMap<String, QueueRetention>,
-    pub partition_maintenance_interval_s: MaintenanceIntervalSeconds,
-    pub retention_sweep_interval_s: SweepIntervalSeconds,
+    pub partition_maintenance_interval_seconds: MaintenanceIntervalSeconds,
+    pub retention_sweep_interval_seconds: SweepIntervalSeconds,
     pub retention_delete_batch_size: DeleteBatchSize,
 }
 
@@ -330,7 +330,7 @@ pub struct RetentionManifest {
 pub enum RetryAttemptLimit {
     /// At most `attempts` attempts.
     Attempts { attempts: RetryAttemptCount },
-    /// No limit on the attempts (Python `db_retry_max_attempts=0`).
+    /// No limit on the attempts (Python `database_retry_max_attempts=0`).
     NoLimit,
 }
 
@@ -341,9 +341,9 @@ pub enum RetryAttemptLimit {
 )]
 #[serde(deny_unknown_fields)]
 pub struct ResilienceManifest {
-    pub db_retry_initial_ms: RetryInitialMs,
-    pub db_retry_max_ms: RetryMaxMs,
-    pub db_retry_max_attempts: RetryAttemptLimit,
+    pub database_retry_initial_ms: RetryInitialMs,
+    pub database_retry_max_ms: RetryMaxMs,
+    pub database_retry_max_attempts: RetryAttemptLimit,
     pub notify_poll_interval_ms: PollIntervalMs,
 }
 
@@ -376,17 +376,20 @@ impl RecoveryManifest {
     /// Pure.
     pub fn to_config(&self) -> RecoveryConfig {
         RecoveryConfig {
-            auto_requeue_stale_claimed: self.auto_requeue_stale_claimed,
+            requeue_stale_claimed: self.requeue_stale_claimed,
             claimed_stale_threshold_ms: u64::from(self.claimed_stale_threshold_ms.0.get()),
-            auto_fail_stale_running: self.auto_fail_stale_running,
-            auto_terminate_orphaned_workflow_tasks: self.auto_terminate_orphaned_workflow_tasks,
+            fail_stale_running: self.fail_stale_running,
+            terminate_orphaned_workflow_tasks: self.terminate_orphaned_workflow_tasks,
             orphan_task_audit_interval_ms: u64::from(self.orphan_task_audit_interval_ms.0.get()),
             running_stale_threshold_ms: u64::from(self.running_stale_threshold_ms.0.get()),
             finalizing_stale_threshold_ms: u64::from(self.finalizing_stale_threshold_ms.0.get()),
             crashed_worker_recovery_grace_ms: u64::from(
                 self.crashed_worker_recovery_grace_ms.0.get(),
             ),
-            phase2_quarantine_after_attempts: self.phase2_quarantine_after_attempts.0.get(),
+            finalization_quarantine_after_attempts: self
+                .finalization_quarantine_after_attempts
+                .0
+                .get(),
             workflow_recovery_failure_limit: self.workflow_recovery_failure_limit.0.get(),
             check_interval_ms: u64::from(self.check_interval_ms.0.get()),
             runner_heartbeat_interval_ms: u64::from(self.runner_heartbeat_interval_ms.0.get()),
@@ -418,7 +421,7 @@ impl RetentionManifest {
                 TerminalRecordRetention::Hours { hours } => Some(hours.0.get()),
                 TerminalRecordRetention::NoPruning => None,
             },
-            paused_workflow_auto_cancel_after: match self.paused_workflow_auto_cancel_after {
+            paused_workflow_cancel_after: match self.paused_workflow_cancel_after {
                 PausedWorkflowExpiry::After { micros } => Some(micros.as_paused_age()),
                 PausedWorkflowExpiry::NoExpiry => None,
             },
@@ -440,10 +443,12 @@ impl RetentionManifest {
                     (queue.clone(), period)
                 })
                 .collect::<HashMap<String, Option<chrono::Duration>>>(),
-            partition_maintenance_interval_s: u64::from(
-                self.partition_maintenance_interval_s.0.get(),
+            partition_maintenance_interval_seconds: u64::from(
+                self.partition_maintenance_interval_seconds.0.get(),
             ),
-            retention_sweep_interval_s: u64::from(self.retention_sweep_interval_s.0.get()),
+            retention_sweep_interval_seconds: u64::from(
+                self.retention_sweep_interval_seconds.0.get(),
+            ),
             retention_delete_batch_size: self.retention_delete_batch_size.0.get(),
         }
     }
@@ -454,9 +459,9 @@ impl ResilienceManifest {
     /// Total. Pure.
     pub fn to_config(&self) -> WorkerResilienceConfig {
         WorkerResilienceConfig {
-            db_retry_initial_ms: u64::from(self.db_retry_initial_ms.0.get()),
-            db_retry_max_ms: u64::from(self.db_retry_max_ms.0.get()),
-            db_retry_max_attempts: match self.db_retry_max_attempts {
+            database_retry_initial_ms: u64::from(self.database_retry_initial_ms.0.get()),
+            database_retry_max_ms: u64::from(self.database_retry_max_ms.0.get()),
+            database_retry_max_attempts: match self.database_retry_max_attempts {
                 RetryAttemptLimit::Attempts { attempts } => u64::from(attempts.0.get()),
                 RetryAttemptLimit::NoLimit => 0,
             },
