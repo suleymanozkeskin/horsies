@@ -628,7 +628,11 @@ mod tests {
     }
 
     #[test]
-    fn a_dependency_result_that_repeats_a_key_fails_the_node_with_the_strict_read() {
+    fn a_dependency_result_that_repeats_a_key_reaches_the_build_as_a_deserialization_error() {
+        // The core's merge reads a stored dependency result with the strict
+        // read of a result envelope: a repeated key gives the member an error
+        // envelope, `RESULT_DESERIALIZATION_ERROR`, which the strict read of
+        // the merged input passes.
         let mut merged = request(Some("tests.report.v1"), "{}");
         merged.args_from = Some(r#"{"rows": 0}"#.to_owned());
         merged.sources = vec![ChildStartSource {
@@ -639,15 +643,20 @@ mod tests {
             definition_key: None,
             result: Some(r#"{"__h_task_result__":true,"ok":{"a":1,"a":2},"err":null}"#.to_owned()),
         }];
-        let BuildStep::Answered(answer) = build_step(&merged, &listed()) else {
-            panic!("a merged input that the strict read refuses calls no JavaScript");
+        let BuildStep::Call { call, .. } = build_step(&merged, &listed()) else {
+            panic!("a merged input that the strict read passes is a call");
         };
-        let (message, _envelope) = failed_node(answer);
+        let text = call.input_text;
         assert!(
-            message.starts_with("[WORKFLOW_ENQUEUE_FAILED] Subworkflow build failed: "),
-            "{message}"
+            text.starts_with(r#"{"rows":{"__h_task_result__":true,"ok":null,"err":{"#),
+            "{text}"
         );
-        assert!(message.contains("repeats the key"), "{message}");
+        assert!(text.contains("RESULT_DESERIALIZATION_ERROR"), "{text}");
+        assert!(text.contains("repeats the key"), "{text}");
+        assert_eq!(
+            strict_input(&merged, &text).map_err(|error| error.to_string()),
+            Ok(())
+        );
     }
 
     #[tokio::test(start_paused = true)]
