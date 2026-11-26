@@ -33,6 +33,13 @@ function refusalsOf(input: HorsiesConfig, environment: FakeEnvironment): readonl
   return created.ok ? [] : created.error.refusals.map((refused) => [refused.code, refused.path] as const);
 }
 
+/** The first refusal message of a refused create. */
+function messagesOf(input: HorsiesConfig): string {
+  const created = createHorsies(input, fakeEnvironment());
+
+  return created.ok ? "" : created.error.refusals[0].message;
+}
+
 describe("Horsies.create: the config", () => {
   test("an unset environment variable of a secret is HRS-203, and the core checks do not run", () => {
     const environment = fakeEnvironment();
@@ -90,6 +97,26 @@ describe("Horsies.create: the contract list", () => {
     const queued = defineTask({ name: "queued", queue: "standard", input: {}, output: h.null() });
 
     assert.deepEqual(refusalsOf(config([queued]), fakeEnvironment()), [["HRS-200", "tasks[0] queued"]]);
+    assert.equal(
+      messagesOf(config([queued])),
+      'tasks[0] queued: the task names the queue "standard", and the default queue mode takes no queue',
+    );
+  });
+
+  test("a refused config adds no queue refusal: the queue check reads the queue fields of the input", () => {
+    const queued = defineTask({ name: "queued", queue: "urgent", input: {}, output: h.null() });
+
+    const input: HorsiesConfig = {
+      broker: { databaseUrl: { kind: "fromEnv", name: "UNSET_VARIABLE" } },
+      queueMode: "custom",
+      customQueues: [{ name: "urgent", priority: 1 }],
+      tasks: [queued],
+    };
+
+    assert.deepEqual(
+      refusalsOf(input, fakeEnvironment()).map(([code]) => code),
+      ["HRS-203"],
+    );
   });
 
   test("no queue in the custom queue mode is HRS-200", () => {
@@ -101,6 +128,7 @@ describe("Horsies.create: the contract list", () => {
     };
 
     assert.deepEqual(refusalsOf(input, fakeEnvironment()), [["HRS-200", "tasks[0] ping"]]);
+    assert.equal(messagesOf(input), "tasks[0] ping: the custom queue mode needs a queue on each task");
   });
 
   test("a queue that is not a custom queue is HRS-103", () => {

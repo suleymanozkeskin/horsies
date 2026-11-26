@@ -198,7 +198,7 @@ export function fakeProducer(script: ProducerScript = {}): FakeProducer {
 }
 
 /** The start facts of a plain producer process. */
-export const PLAIN_START: ProcessStart = { argumentAfterScript: undefined, seatIsolate: false, suppressVariable: undefined };
+export const PLAIN_START: ProcessStart = { argumentAfterScript: undefined, seatIsolate: false };
 
 /** The parts of a fake create environment. */
 export type EnvironmentParts = {

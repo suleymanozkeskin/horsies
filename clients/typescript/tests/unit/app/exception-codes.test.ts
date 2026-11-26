@@ -44,7 +44,7 @@ function checks(): CoreChecks & { readonly codeLists: string[][] } {
 const environment: CreateEnvironment = {
   mainThread: false,
   environment: () => undefined,
-  processStart: { argumentAfterScript: undefined, seatIsolate: false, suppressVariable: undefined },
+  processStart: { argumentAfterScript: undefined, seatIsolate: false },
   coreChecks: () => {
     throw new TypeError("not called on a worker thread");
   },
