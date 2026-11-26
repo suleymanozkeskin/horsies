@@ -19,7 +19,7 @@ export {
   type AnyNode,
   type BuildReturn,
   type DefaultJoin,
-  type Join,
+  type JoinType,
   type JoinNeedsOptional,
   type NodeById,
   type NodeCode,

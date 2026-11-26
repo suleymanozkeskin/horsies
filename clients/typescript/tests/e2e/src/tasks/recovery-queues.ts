@@ -51,7 +51,7 @@ export const serialDirectTask = defineTask({ name: "e2e_serial_direct_task", que
  * Python `spec_recovery_crash`: a and b, then c and d that run long; e after c and d, which allows failed
  * dependencies; f after e. e and f run on the serial queue.
  */
-export const recoveryCrash = defineWorkflow({ ...named("recovery_crash"), params: {}, output: h.string() }, (w) => {
+export const recoveryCrash = defineWorkflow({ ...named("recovery_crash"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(recoveryStep, { step: "a", delayMs: SHORT_NODE_MS }, node("a"));
   const b = w.task(recoveryStep, { step: "b", delayMs: SHORT_NODE_MS }, node("b", { after: [a] }));
   const c = w.task(recoveryStep, { step: "c", delayMs: CRASHED_NODE_MS }, node("c", { after: [b] }));
@@ -67,12 +67,12 @@ export const recoveryCrash = defineWorkflow({ ...named("recovery_crash"), params
 });
 
 /** Python `PriorityChildWorkflow`: one node of the serial queue task; the node names no priority. */
-export const serialChild = defineWorkflow({ ...named("serial_child"), params: {}, output: h.int() }, (w) => ({
+export const serialChild = defineWorkflow({ ...named("serial_child"), parameters: {}, outputType: h.int() }, (w) => ({
   output: w.task(serialChildTask, {}, node("scrape")),
 }));
 
 /** Python `spec_priority_parent`: one sub-workflow node of `serial_child`. */
-export const serialParent = defineWorkflow({ ...named("serial_parent"), params: {}, output: h.int() }, (w) => ({
+export const serialParent = defineWorkflow({ ...named("serial_parent"), parameters: {}, outputType: h.int() }, (w) => ({
   output: w.subWorkflow(serialChild, {}, node("child")),
 }));
 

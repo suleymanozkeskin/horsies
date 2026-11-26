@@ -3,7 +3,7 @@
 // data of the runtime (`Temporal`) words the refusal only: an offset, another case, a name of neither table. In a
 // worker thread no zone check runs: no scheduler and no `check` runs there.
 
-import type { Refusal } from "../app/refusal.ts";
+import type { HorsiesError } from "../app/refusal.ts";
 import type { TimezoneCheck } from "../native/scheduler/addon.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -61,7 +61,7 @@ type ZoneRule = { readonly message: string; readonly help: string };
 const ZONE_HELP = 'use an IANA zone name, for example "UTC" or "Europe/Berlin"';
 
 /** `name` when the core's zone data holds it (always in a worker thread), else the refusal of `refuse`. */
-export function checkedZone(name: string, zones: ZoneCheck, refuse: (rule: ZoneRule) => Refusal): Result<string, Refusal> {
+export function checkedZone(name: string, zones: ZoneCheck, refuse: (rule: ZoneRule) => HorsiesError): Result<string, HorsiesError> {
   switch (zones.kind) {
     case "noCore":
       return ok(name);
@@ -73,7 +73,7 @@ export function checkedZone(name: string, zones: ZoneCheck, refuse: (rule: ZoneR
 }
 
 /** `name` when the core's zone data holds it, else the refusal, worded from the runtime's reading of `name`. */
-function coreZone(name: string, check: (name: string) => TimezoneCheck, refuse: (rule: ZoneRule) => Refusal): Result<string, Refusal> {
+function coreZone(name: string, check: (name: string) => TimezoneCheck, refuse: (rule: ZoneRule) => HorsiesError): Result<string, HorsiesError> {
   const answer = check(name);
 
   switch (answer) {

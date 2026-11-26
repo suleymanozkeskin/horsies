@@ -1,4 +1,4 @@
-// Automatic retries: a `retryPolicy` with `autoRetryFor`. A retry starts when the task ends with one of the listed
+// Automatic retries: a `retryPolicy` with `retryFor`. A retry starts when the task ends with one of the listed
 // codes: a custom code that the task declares, or a built-in code such as `TASK_TIMEOUT`.
 //
 //   node examples/retries.ts worker --profile default
@@ -26,7 +26,7 @@ const REQUESTS: readonly string[] = ["sync-orders", ""];
 
 /**
  * Fails with `RATE_LIMITED` every time, so the demo sees each retry: one run and two retries, 1 s and 2 s apart, then
- * the final failure. `REJECTED` is not in `autoRetryFor`, so an empty request fails at its first run.
+ * the final failure. `REJECTED` is not in `retryFor`, so an empty request fails at its first run.
  */
 const callPartner = defineTask({
   name: "call_partner",
@@ -38,7 +38,7 @@ const callPartner = defineTask({
     kind: "fixed",
     intervalsSeconds: [1, 2],
     jitter: false,
-    autoRetryFor: ["RATE_LIMITED", "TASK_TIMEOUT"],
+    retryFor: ["RATE_LIMITED", "TASK_TIMEOUT"],
   },
 });
 

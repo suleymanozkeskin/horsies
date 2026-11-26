@@ -23,7 +23,7 @@ export const validateOrder = defineTask({
     kind: "exponential",
     baseSeconds: 30,
     maxRetries: 5,
-    autoRetryFor: ["STOCK_SERVICE_DOWN", "WORKER_CRASHED"],
+    retryFor: ["STOCK_SERVICE_DOWN", "WORKER_CRASHED"],
   },
 });
 ```
@@ -561,17 +561,17 @@ export const fetchPrices = defineTask({
   retryPolicy: {
     kind: "fixed",
     intervalsSeconds: [30, 60, 120],
-    autoRetryFor: ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
+    retryFor: ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
   },
 });
 ```
 
 | `kind` | Fields | Delay of retry n |
 |---|---|---|
-| `"fixed"` | `intervalsSeconds` (one delay per retry), `jitter?`, `autoRetryFor` | `intervalsSeconds[n - 1]` |
-| `"exponential"` | `baseSeconds`, `maxRetries`, `jitter?`, `maxDelaySeconds?`, `autoRetryFor` | `baseSeconds * 2^(n - 1)` |
+| `"fixed"` | `intervalsSeconds` (one delay per retry), `jitter?`, `retryFor` | `intervalsSeconds[n - 1]` |
+| `"exponential"` | `baseSeconds`, `maxRetries`, `jitter?`, `maxDelaySeconds?`, `retryFor` | `baseSeconds * 2^(n - 1)` |
 
-- `autoRetryFor` has at least one code: a declared code of the task or a
+- `retryFor` has at least one code: a declared code of the task or a
   built-in code. Another code fails typecheck.
 - `jitter` is `true` when left out, as in the Python client.
   `maxDelaySeconds` caps the delay after the backoff and the jitter.
@@ -590,7 +590,7 @@ export async function sendValidation(orderId: string): Promise<void> {
       idempotencyKey: `validate:${orderId}`,
       goodUntil: Temporal.Now.instant().add({ minutes: 10 }),
       delaySeconds: 5,
-      retention: { kind: "days", days: 30 },
+      retention: { kind: "period", days: 30 },
     },
   );
 
@@ -603,7 +603,7 @@ export async function sendValidation(orderId: string): Promise<void> {
   switch (sent.error.code) {
     case "ENQUEUE_FAILED":
       if (sent.error.retryable) {
-        const again = await app.retrySend(sent.error);
+        const again = await app.resend(sent.error);
 
         console.log(again.ok ? `sent ${again.value.taskId}` : again.error.message);
       }
@@ -611,7 +611,7 @@ export async function sendValidation(orderId: string): Promise<void> {
       break;
     case "IDEMPOTENCY_KEY_CONFLICT": {
       // Retryable: a retry after the key's reservation ends is accepted.
-      const again = await app.retrySend(sent.error);
+      const again = await app.resend(sent.error);
 
       console.warn(again.ok ? `sent ${again.value.taskId}` : `task ${sent.error.ownerTaskId} holds the key`);
       break;
@@ -642,12 +642,12 @@ the first refusal. Every refusal before the enqueue writes nothing.
 A task body may send. The sends that the entry makes at module level in a
 task child are suppressed: the child lifts the suppression when it serves.
 
-| `SendOptions` | Does |
+| `TaskSendOptions` | Does |
 |---|---|
 | `idempotencyKey` | 1 to 255 UTF-8 bytes. Stores the task once per key within the reservation window (24 hours). A second send of the same command gives the task that holds the key |
 | `goodUntil` | A `Temporal.Instant`: the task expires (`TASK_EXPIRED`) when no worker started it by then. Cut to the microsecond, toward the past |
 | `delaySeconds` | Whole seconds, 0 to 4,294,967,295, before a worker may start the task |
-| `retention` | `{ kind: "days", days }`: a period that the app registers; `{ kind: "forever" }`. Left out: the queue's retention, else 30 days |
+| `retention` | `{ kind: "period", days }`: a period that the app registers; `{ kind: "forever" }`. Left out: the queue's retention, else 30 days |
 
 `TaskSendError<O, E>`, told apart by `code`:
 
@@ -666,7 +666,7 @@ task child are suppressed: the child lifts the suppression when it serves.
 - `payload` is not enumerable, so `JSON.stringify` of an error never holds
   the input.
 
-`app.retrySend(error)` takes `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`
+`app.resend(error)` takes `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`
 (typecheck; another code from untyped code is `VALIDATION_FAILED`). It sends
 the same task id and payload again, as a repeat: a task that an earlier call
 wrote answers with its id, also after it finished, and does not run again. A
@@ -675,7 +675,7 @@ It takes an error of another app instance too, when this app lists its task.
 
 With `resendOnTransientError: true` in the config, a retryable
 `ENQUEUE_FAILED` is sent again up to 3 times, after 200, 400 and 800 ms, as
-a repeat. A key conflict is not sent again: only `retrySend` sends it again.
+a repeat. A key conflict is not sent again: only `resend` sends it again.
 
 ## Reads
 
@@ -690,9 +690,9 @@ function readErrorText(error: ReadError): string {
       return `no record holds the task (${error.reason})`;
     case "resultNotAvailable":
       return `the task is ${error.status} and stores no result`;
-    case "storedResultUnreadable":
+    case "resultDeserializationError":
       return error.cause;
-    case "unknownUserCode":
+    case "unknownCustomCode":
       return `the stored code ${error.code} is not declared`;
     case "waitInsideTask":
       return "a result wait inside a task body";
@@ -781,8 +781,8 @@ or `"builtIn"` with `code: BuiltInTaskCode` (a code of horsies).
 | `waitTimeout` | `WAIT_TIMEOUT` | `status` | The task had not ended when the wait ended; it may still run | No |
 | `taskNotFound` | `TASK_NOT_FOUND` | `reason` | Neither the live table nor the history holds the task | No |
 | `resultNotAvailable` | `RESULT_NOT_AVAILABLE` | `status` | The task ended and stores no result | Yes |
-| `storedResultUnreadable` | - | `cause` | The stored result does not read with the contract's types | Yes |
-| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the contract's `errorCodes` | Yes |
+| `resultDeserializationError` | - | `cause` | The stored result does not read with the contract's types | Yes |
+| `unknownCustomCode` | - | `code` (the stored code) | The stored custom code is not in the contract's `errorCodes` | Yes |
 | `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A result wait in a worker child. Nothing was read | No |
 | `database` | the broker code | `retryable`, `message` | The database or the connection failed | No |
 | `invalidInput` | `INVALID_INPUT` | `maxMs` | `waitMs` outside its range. Nothing was read | No |
@@ -901,7 +901,7 @@ import {
   TaskRuntime, AttemptNumber, type CancelState, type CancelCause, type FencingToken,
   type SpawnRefused, type StateKey, type WorkflowTaskRuntime, type StoredWorkflowContext,
   // Sends
-  type SendOptions, type Retention, type TaskSendError, type RetryableSendError,
+  type TaskSendOptions, type SendRetention, type TaskSendError, type RetryableSendError,
   // Reads
   TaskId, type TaskHandle, type ReadError, type TaskInfo, type TaskAttempt, type Recorded,
 } from "horsies";

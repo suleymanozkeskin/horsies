@@ -400,6 +400,12 @@ and there is no migration contract between pre-1.0 versions.
   request before or during them now returns `Ok(SchedulerStopped)`, drops
   the connect and writes no schedule state, as the TypeScript and Python
   schedulers do. A stop request after the connect is unchanged.
+- **The Python and Rust web handlers refuse a trusted identity header with a
+  blank comma-separated member.** A request with two copies of the header,
+  one blank, reaches the handler as `alice, `. `TrustedHeader` now refuses
+  it for reads and for actions, as the TypeScript client does. Every value
+  of a repeated header is checked. A value with all members present, such as
+  `alice, bob`, is still allowed.
 
 ## [0.8.1] - 2026-11-25
 

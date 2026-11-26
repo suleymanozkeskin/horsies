@@ -311,7 +311,7 @@ describe("the worker run", () => {
     const { deps, steps } = fakeDeps();
 
     const created = createHorsies(
-      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otel" }, tasks: [] },
+      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [] },
       fakeEnvironment({ otelApi: () => ({ kind: "loaded", api: API }) }),
     );
 

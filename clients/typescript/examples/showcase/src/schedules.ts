@@ -2,7 +2,7 @@
 // its task with its input; the `scheduler` command runs the table, and `check` checks it (the input against the task's
 // input types, each pattern, each zone). The patterns are typed: interval, hourly, daily, weekly, monthly and cron.
 
-import type { AnyTaskContract, CronNumericTerm, Horsies, SchedulePattern, ScheduleEntry } from "horsies";
+import type { AnyTaskContract, CronNumericTerm, Horsies, SchedulePattern, TaskSchedule } from "horsies";
 
 import { abandonedCartSweep, flakyExport, regionalRollup, retentionAudit, salesRollup } from "./contracts/analytics.ts";
 import { replenishCatalog, syncSupplierFeed } from "./contracts/inventory.ts";
@@ -32,7 +32,7 @@ import {
 export type DeclareSchedules = (app: Horsies) => void;
 
 /** A schedule of the table: an entry whose input typechecks against its task. Pure. */
-function schedule<C extends AnyTaskContract>(entry: ScheduleEntry<C>): ScheduleEntry<C> {
+function schedule<C extends AnyTaskContract>(entry: TaskSchedule<C>): TaskSchedule<C> {
   return entry;
 }
 
@@ -54,7 +54,7 @@ function values(...numbers: [number, ...number[]]): CronNumericTerm {
 }
 
 /** The schedules of each supplier: its feed, at its own interval. */
-function supplierSchedules(): readonly ScheduleEntry<typeof syncSupplierFeed>[] {
+function supplierSchedules(): readonly TaskSchedule<typeof syncSupplierFeed>[] {
   return SUPPLIERS.map((supplier, offset) =>
     schedule({
       name: `supplier-feed-${supplier}`,
@@ -66,7 +66,7 @@ function supplierSchedules(): readonly ScheduleEntry<typeof syncSupplierFeed>[] 
 }
 
 /** The schedules of each region: the hourly rollup and the cache warm-up. */
-function regionSchedules(): readonly (ScheduleEntry<typeof regionalRollup> | ScheduleEntry<typeof warmCacheEdge>)[] {
+function regionSchedules(): readonly (TaskSchedule<typeof regionalRollup> | TaskSchedule<typeof warmCacheEdge>)[] {
   return REGIONS.flatMap((region, offset) => [
     schedule({
       name: `rollup-${region}`,
@@ -84,7 +84,7 @@ function regionSchedules(): readonly (ScheduleEntry<typeof regionalRollup> | Sch
 }
 
 /** The schedules of the daily, weekly and monthly work. */
-function calendarSchedules(): readonly ScheduleEntry<AnyTaskContract>[] {
+function calendarSchedules(): readonly TaskSchedule<AnyTaskContract>[] {
   return [
     schedule({ name: "search-prewarm", task: prewarmSearch, input: { campaignId: "steady-state" }, pattern: everyMinutes(SEARCH_PREWARM_INTERVAL_MINUTES) }),
     schedule({
@@ -94,40 +94,40 @@ function calendarSchedules(): readonly ScheduleEntry<AnyTaskContract>[] {
       pattern: { kind: "hourly", minute: ABANDONED_CART_MINUTE },
     }),
     schedule({ name: "retention-audit-hourly", task: retentionAudit, input: { olderThanDays: RETENTION_AUDIT_DAYS }, pattern: { kind: "hourly", minute: 50 } }),
-    schedule({ name: "sales-rollup-daily", task: salesRollup, input: { window: "daily" }, pattern: { kind: "daily", at: at(SALES_ROLLUP_HOUR, 0) } }),
-    schedule({ name: "retention-audit-daily", task: retentionAudit, input: { olderThanDays: 90 }, pattern: { kind: "daily", at: at(3, 30) } }),
-    schedule({ name: "nightly-stocktake", task: replenishCatalog, input: { targetUnits: CATALOG_STOCK_PER_SKU }, pattern: { kind: "daily", at: at(4, 15) } }),
-    schedule({ name: "reconcile-daily", task: reconcilePayments, input: { window: "daily" }, pattern: { kind: "daily", at: at(4, 0) } }),
-    schedule({ name: "winback-blast", task: marketingBlast, input: { segment: "winback" }, pattern: { kind: "daily", at: at(9, 0) } }),
-    schedule({ name: "newsletter-blast", task: marketingBlast, input: { segment: "newsletter" }, pattern: { kind: "daily", at: at(10, 0) }, enabled: false }),
-    schedule({ name: "weekly-sales-review", task: salesRollup, input: { window: "weekly" }, pattern: { kind: "weekly", days: ["monday"], at: at(6, 0) } }),
+    schedule({ name: "sales-rollup-daily", task: salesRollup, input: { window: "daily" }, pattern: { kind: "daily", time: at(SALES_ROLLUP_HOUR, 0) } }),
+    schedule({ name: "retention-audit-daily", task: retentionAudit, input: { olderThanDays: 90 }, pattern: { kind: "daily", time: at(3, 30) } }),
+    schedule({ name: "nightly-stocktake", task: replenishCatalog, input: { targetUnits: CATALOG_STOCK_PER_SKU }, pattern: { kind: "daily", time: at(4, 15) } }),
+    schedule({ name: "reconcile-daily", task: reconcilePayments, input: { window: "daily" }, pattern: { kind: "daily", time: at(4, 0) } }),
+    schedule({ name: "winback-blast", task: marketingBlast, input: { segment: "winback" }, pattern: { kind: "daily", time: at(9, 0) } }),
+    schedule({ name: "newsletter-blast", task: marketingBlast, input: { segment: "newsletter" }, pattern: { kind: "daily", time: at(10, 0) }, enabled: false }),
+    schedule({ name: "weekly-sales-review", task: salesRollup, input: { window: "weekly" }, pattern: { kind: "weekly", weekdays: ["monday"], time: at(6, 0) } }),
     schedule({
       name: "weekly-supplier-audit",
       task: syncSupplierFeed,
       input: { supplier: SUPPLIERS[0] },
-      pattern: { kind: "weekly", days: ["wednesday"], at: at(7, 0) },
+      pattern: { kind: "weekly", weekdays: ["wednesday"], time: at(7, 0) },
     }),
     schedule({
       name: "weekend-flash-prep",
       task: prewarmSearch,
       input: { campaignId: "weekend" },
-      pattern: { kind: "weekly", days: ["friday", "saturday"], at: at(12, 0) },
+      pattern: { kind: "weekly", weekdays: ["friday", "saturday"], time: at(12, 0) },
     }),
     schedule({
       name: "weekly-retention-audit",
       task: retentionAudit,
       input: { olderThanDays: 180 },
-      pattern: { kind: "weekly", days: ["sunday"], at: at(2, 0) },
+      pattern: { kind: "weekly", weekdays: ["sunday"], time: at(2, 0) },
       enabled: false,
     }),
-    schedule({ name: "monthly-close", task: reconcilePayments, input: { window: "monthly" }, pattern: { kind: "monthly", day: 1, at: at(5, 0) } }),
-    schedule({ name: "monthly-catalog-audit", task: retentionAudit, input: { olderThanDays: 365 }, pattern: { kind: "monthly", day: 15, at: at(8, 0) } }),
-    schedule({ name: "monthly-markdown-review", task: salesRollup, input: { window: "monthly" }, pattern: { kind: "monthly", day: 28, at: at(11, 0) } }),
+    schedule({ name: "monthly-close", task: reconcilePayments, input: { window: "monthly" }, pattern: { kind: "monthly", dayOfMonth: 1, time: at(5, 0) } }),
+    schedule({ name: "monthly-catalog-audit", task: retentionAudit, input: { olderThanDays: 365 }, pattern: { kind: "monthly", dayOfMonth: 15, time: at(8, 0) } }),
+    schedule({ name: "monthly-markdown-review", task: salesRollup, input: { window: "monthly" }, pattern: { kind: "monthly", dayOfMonth: 28, time: at(11, 0) } }),
   ];
 }
 
 /** The schedules with a typed cron pattern. */
-function cronSchedules(): readonly ScheduleEntry<AnyTaskContract>[] {
+function cronSchedules(): readonly TaskSchedule<AnyTaskContract>[] {
   const every = { kind: "every" } as const;
 
   return [
@@ -178,7 +178,7 @@ function cronSchedules(): readonly ScheduleEntry<AnyTaskContract>[] {
 }
 
 /** The schedule table of the app, in the order of the Rust showcase. */
-export const ACME_SCHEDULES: readonly ScheduleEntry<AnyTaskContract>[] = [
+export const ACME_SCHEDULES: readonly TaskSchedule<AnyTaskContract>[] = [
   ...supplierSchedules(),
   ...regionSchedules(),
   ...calendarSchedules(),

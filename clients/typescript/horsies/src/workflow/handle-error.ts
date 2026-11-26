@@ -1,7 +1,7 @@
 // The errors of a workflow handle: the handle catalog of the core, generated (`src/_catalog/workflow_handle_errors.ts`),
 // told apart by `code`; and the errors of a read of an outcome (`get`, `resultFor`), told apart by `kind`.
 
-import { RetrievalCode } from "../_catalog/task_codes.ts";
+import { OperationalErrorCode, RetrievalCode } from "../_catalog/task_codes.ts";
 import type { HandleErrorCode } from "../_catalog/workflow_handle.ts";
 import {
   type HandleCoreError,
@@ -19,16 +19,15 @@ import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 
 /**
- * The error of a handle call (`status`, `results`, `tasks`, `pause`, `resume`, `cancel`): the handle catalog of the
+ * The error of a handle call (`status`, `results`, `nodes`, `pause`, `resume`, `cancel`): the handle catalog of the
  * core, or, in a `SHARED_THREAD` body, the seat relay at its bound (nothing was sent).
  */
 export type WorkflowHandleError = HandleCoreError | SeatRelayFull;
 
 /**
  * Why a read of a workflow outcome failed, told apart by `kind`, which is named after the catalog code in `code`. A
- * read error is not the workflow's outcome. Two variants have no `code` member, `storedResultUnreadable` and
- * `unknownUserCode` (both `RESULT_DESERIALIZATION_ERROR`), and `database` holds the handle code in `code`
- * (`BROKER_ERROR`).
+ * read error is not the workflow's outcome. One variant has no `code` member, `unknownCustomCode`
+ * (`RESULT_DESERIALIZATION_ERROR`), and `database` holds the handle code in `code` (`BROKER_ERROR`).
  */
 export type WorkflowReadError =
   /** The workflow had not ended when the wait ended; it may still run. */
@@ -37,9 +36,13 @@ export type WorkflowReadError =
   /** The node stores no result yet, or the workflow has no node of this id. */
   | { readonly kind: "resultNotReady"; readonly code: "RESULT_NOT_READY" }
   /** The stored value does not read with the handle's types. `cause` holds no value. */
-  | { readonly kind: "storedResultUnreadable"; readonly cause: string }
+  | {
+      readonly kind: "resultDeserializationError";
+      readonly code: "RESULT_DESERIALIZATION_ERROR";
+      readonly cause: string;
+    }
   /** The stored error has a custom code that the node's contract does not list. */
-  | { readonly kind: "unknownUserCode"; readonly code: string }
+  | { readonly kind: "unknownCustomCode"; readonly code: string }
   /** A wait in a process that runs task bodies; nothing was read. */
   | { readonly kind: "waitInsideTask"; readonly code: "WAIT_INSIDE_TASK" }
   /** The app does not list the workflow, so its output has no type to read with; nothing was read. */
@@ -98,7 +101,11 @@ export function readErrorOfHandle(error: HandleCoreError): WorkflowReadError {
     case "WORKFLOW_NOT_FOUND":
       return Object.freeze({ kind: "workflowNotFound", code: RetrievalCode.WORKFLOW_NOT_FOUND });
     case "STORED_DATA_INVALID":
-      return Object.freeze({ kind: "storedResultUnreadable", cause: error.message });
+      return Object.freeze({
+        kind: "resultDeserializationError",
+        code: OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+        cause: error.message,
+      });
     case "DB_OPERATION_FAILED":
     case "RESUME_RECOVERY_FAILED":
       return Object.freeze({ kind: "database", code: error.code, retryable: error.retryable, message: error.message });

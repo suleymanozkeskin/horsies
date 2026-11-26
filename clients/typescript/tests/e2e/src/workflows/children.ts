@@ -143,13 +143,13 @@ export const sumShardRows = defineTask({
 
 /** Python `E2ESubOkWorkflow`: one node that returns `SUB_OK_VALUE`. */
 export const subOk = defineWorkflow(
-  { name: "e2e_sub_ok_workflow", definitionKey: "tests.e2e.sub.ok.v1", params: {}, output: h.int() },
+  { name: "e2e_sub_ok_workflow", definitionKey: "tests.e2e.sub.ok.v1", parameters: {}, outputType: h.int() },
   (w) => ({ output: w.task(subIntOk, { value: SUB_OK_VALUE }, node(CHILD_NODE)) }),
 );
 
 /** Python `E2ESubFailWorkflow`: one node that fails with `SUB_CHILD_FAIL`. */
 export const subFail = defineWorkflow(
-  { name: "e2e_sub_fail_workflow", definitionKey: "tests.e2e.sub.fail.v1", params: {}, output: h.int() },
+  { name: "e2e_sub_fail_workflow", definitionKey: "tests.e2e.sub.fail.v1", parameters: {}, outputType: h.int() },
   (w) => ({ output: w.task(subIntFail, { errorCode: SUB_CHILD_FAIL }, node(CHILD_NODE)) }),
 );
 
@@ -164,7 +164,7 @@ export const subProbeFailedChild = defineTask({
 
 /** Python `E2ESubNestedOkMiddleWorkflow`: one sub-workflow node of `e2e_sub_ok_workflow`. */
 export const subNestedOkMiddle = defineWorkflow(
-  { name: "e2e_sub_nested_ok_middle_workflow", definitionKey: "tests.e2e.sub.nested.ok.middle.v1", params: {}, output: h.int() },
+  { name: "e2e_sub_nested_ok_middle_workflow", definitionKey: "tests.e2e.sub.nested.ok.middle.v1", parameters: {}, outputType: h.int() },
   (w) => ({ output: w.subWorkflow(subOk, {}, node(CHILD_NODE)) }),
 );
 
@@ -173,8 +173,8 @@ export const subNestedFailMiddle = defineWorkflow(
   {
     name: "e2e_sub_nested_fail_middle_workflow",
     definitionKey: "tests.e2e.sub.nested.fail.middle.v1",
-    params: {},
-    output: h.int(),
+    parameters: {},
+    outputType: h.int(),
   },
   (w) => ({ output: w.subWorkflow(subFail, {}, node(CHILD_NODE)) }),
 );
@@ -187,8 +187,8 @@ export const subParam = defineWorkflow(
   {
     name: "e2e_sub_param_workflow",
     definitionKey: "tests.e2e.sub.param.v1",
-    params: { value: h.taskOutcome(produceInt) },
-    output: h.int(),
+    parameters: { value: h.taskOutcome(produceInt) },
+    outputType: h.int(),
     checkCases: [
       { value: { kind: "succeeded", value: 1 } },
       { value: { kind: "failed", error: CHECK_UPSTREAM_FAILURE } },
@@ -211,8 +211,8 @@ export const subFailedInput = defineWorkflow(
   {
     name: "e2e_sub_failed_input_workflow",
     definitionKey: "tests.e2e.sub.failed.input.v1",
-    params: { value: h.taskOutcome(failWith) },
-    output: UpstreamSeen,
+    parameters: { value: h.taskOutcome(failWith) },
+    outputType: UpstreamSeen,
     checkCases: [{ value: { kind: "failed", error: CHECK_UPSTREAM_FAILURE } }],
   },
   (w, { value }) => ({ output: w.task(subReportInput, { seen: upstreamSeen(value) }, node(CHILD_NODE)) }),
@@ -223,8 +223,8 @@ export const subLabel = defineWorkflow(
   {
     name: "e2e_sub_label_workflow",
     definitionKey: "tests.e2e.sub.label.v1",
-    params: { label: h.string(), value: h.taskOutcome(produceInt) },
-    output: h.string(),
+    parameters: { label: h.string(), value: h.taskOutcome(produceInt) },
+    outputType: h.string(),
     checkCases: [{ label: "check", value: { kind: "succeeded", value: 1 } }],
   },
   (w, { label, value }) => ({ output: w.task(mark, { value: `${label}=${seenText(upstreamSeen(value))}` }, node(CHILD_NODE)) }),
@@ -235,8 +235,8 @@ export const subTypedKwarg = defineWorkflow(
   {
     name: "e2e_sub_typed_kwarg_workflow",
     definitionKey: "tests.e2e.sub.typed.kwarg.v1",
-    params: { pet: Pet },
-    output: PetSeen,
+    parameters: { pet: Pet },
+    outputType: PetSeen,
     checkCases: [{ pet: { kind: "cat", name: "Tom" } }],
   },
   (w, { pet }) => ({ output: w.task(subPetReport, { seen: petSeen(pet) }, node(CHILD_NODE)) }),
@@ -247,8 +247,8 @@ export const subSlow = defineWorkflow(
   {
     name: "e2e_sub_slow_workflow",
     definitionKey: "tests.e2e.sub.slow.v1",
-    params: { value: h.string(), delayMs: h.int() },
-    output: h.string(),
+    parameters: { value: h.string(), delayMs: h.int() },
+    outputType: h.string(),
     checkCases: [{ value: "check", delayMs: 1 }],
   },
   (w, { value, delayMs }) => ({ output: w.task(slowMark, { value, delayMs }, node(CHILD_NODE)) }),
@@ -262,8 +262,8 @@ export const subNestedSlowMiddle = defineWorkflow(
   {
     name: "e2e_sub_nested_slow_middle_workflow",
     definitionKey: "tests.e2e.sub.nested.slow.middle.v1",
-    params: {},
-    output: h.string(),
+    parameters: {},
+    outputType: h.string(),
   },
   (w) => ({ output: w.subWorkflow(subSlow, NESTED_SLOW_LEAF, node(CHILD_NODE)) }),
 );
@@ -273,8 +273,8 @@ export const subRetry = defineWorkflow(
   {
     name: "e2e_sub_retry_workflow",
     definitionKey: "tests.e2e.sub.retry.v1",
-    params: { token: h.string(), succeedOnAttempt: h.int() },
-    output: h.string(),
+    parameters: { token: h.string(), succeedOnAttempt: h.int() },
+    outputType: h.string(),
     checkCases: [{ token: "check", succeedOnAttempt: 1 }],
   },
   (w, params) => ({ output: w.task(retryThenOk, params, node(CHILD_NODE)) }),
@@ -285,8 +285,8 @@ export const subExpiring = defineWorkflow(
   {
     name: "e2e_sub_expired_workflow",
     definitionKey: "tests.e2e.sub.expired.v1",
-    params: { goodUntil: h.instant() },
-    output: h.string(),
+    parameters: { goodUntil: h.instant() },
+    outputType: h.string(),
     checkCases: [{ goodUntil: Temporal.Instant.from("2030-01-01T00:00:00Z") }],
   },
   (w, { goodUntil }) => ({ output: w.task(mark, { value: "expired_child" }, node(CHILD_NODE, { deadline: goodUntil })) }),
@@ -300,8 +300,8 @@ export const shardReport = defineWorkflow(
   {
     name: "e2e_fanout_shard_report",
     definitionKey: "tests.e2e.dynamic_fanout.shard_report.v1",
-    params: { shards: h.taskOutcome(listShards) },
-    output: h.int(),
+    parameters: { shards: h.taskOutcome(listShards) },
+    outputType: h.int(),
     checkCases: [
       { shards: { kind: "succeeded", value: ["shard-a", "shard-b"] } },
       { shards: { kind: "failed", error: CHECK_UPSTREAM_FAILURE } },
@@ -322,7 +322,7 @@ export const shardReport = defineWorkflow(
 
 /** Python `TenantReport`: list the shards, then build the child from the list. */
 export const tenantReport = defineWorkflow(
-  { name: "e2e_fanout_tenant_report", definitionKey: "tests.e2e.dynamic_fanout.tenant_report.v1", params: {}, output: h.int() },
+  { name: "e2e_fanout_tenant_report", definitionKey: "tests.e2e.dynamic_fanout.tenant_report.v1", parameters: {}, outputType: h.int() },
   (w) => {
     const shards = w.task(listShards, { tenantId: FANOUT_TENANT_ID }, node("shards"));
 

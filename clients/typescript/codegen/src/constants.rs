@@ -200,12 +200,12 @@ const EVENT_BOUNDS: ConstantModule = ConstantModule {
 };
 
 const BROKER_CONSTANTS: [PublishedConstant; 1] = [PublishedConstant::Integer {
-    name: "TASK_LIST_ROW_BOUND",
+    name: "TASK_LIST_BOUND",
     value: TASK_LIST_BOUND as i128,
 }];
 
 /// The bound of the stale and expired task reads of the broker. The name is
-/// the name of the Python client's constant.
+/// the name of the core's constant.
 const BROKER_BOUNDS: ConstantModule = ConstantModule {
     stem: "broker_bounds",
     constants: &BROKER_CONSTANTS,
@@ -493,7 +493,7 @@ mod tests {
             module_of("broker_bounds"),
             format!(
                 "{GENERATED_HEADER}\n{}",
-                integer_statement("TASK_LIST_ROW_BOUND", TASK_LIST_BOUND as i128)
+                integer_statement("TASK_LIST_BOUND", TASK_LIST_BOUND as i128)
             )
         );
     }

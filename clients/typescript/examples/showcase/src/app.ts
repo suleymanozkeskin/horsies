@@ -4,7 +4,7 @@
 // Every process of the showcase builds the same app: the producer scenarios, the worker, each worker child, the
 // monitoring server and the check. Building it connects nothing: the app connects at its first operation.
 
-import { Horsies, type HorsiesConfig, type NonEmpty, type Refusal, type Result, type WorkerProfileInput } from "horsies";
+import { Horsies, type HorsiesConfig, type NonEmpty, type HorsiesError, type Result, type WorkerProfileInput } from "horsies";
 
 import { ALL_TASKS } from "./contracts/index.ts";
 import { QUEUES } from "./contracts/policies.ts";
@@ -49,7 +49,7 @@ export const ACME_PROFILE: WorkerProfileInput = {
 export type ShowcaseApp = { readonly app: Horsies; readonly store: StoreKey };
 
 /** Why the app was not built: every refusal of `Horsies.create`. */
-export type AppRefused = { readonly refusals: NonEmpty<Refusal> };
+export type AppRefused = { readonly refusals: NonEmpty<HorsiesError> };
 
 /** The config of the app on the database `url`. Pure. */
 export function appConfig(url: string): HorsiesConfig {

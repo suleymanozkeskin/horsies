@@ -1,7 +1,7 @@
 // The OpenTelemetry API as the package uses it, and its load.
 //
 // - The API is `@opentelemetry/api` 1.x, an optional peer dependency. The package loads it only for an app with
-//   `tracing: { kind: "otel" }`, with a synchronous `require` from this module, because `Horsies.create` is sync.
+//   `tracing: { kind: "otelTracing" }`, with a synchronous `require` from this module, because `Horsies.create` is sync.
 // - The package never names a type of the API module: the interfaces below hold the members that it calls, so the
 //   published types do not need the API. A test checks that the API module fits them.
 // - The tracer, the meter and the propagator are the global ones, taken at each use, so a provider that the user sets

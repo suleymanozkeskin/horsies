@@ -60,7 +60,7 @@ describe("defineTask", () => {
         execution: "SHARED_ASYNC",
         timeoutMs: 30_000,
         cancelGraceMs: 2_000,
-        retryPolicy: { kind: "exponential", baseSeconds: 30, maxRetries: 5, autoRetryFor: ["PROVIDER_DOWN"] },
+        retryPolicy: { kind: "exponential", baseSeconds: 30, maxRetries: 5, retryFor: ["PROVIDER_DOWN"] },
       }),
     );
 
@@ -74,7 +74,7 @@ describe("defineTask", () => {
       maxRetries: 5,
       jitter: true,
       maxDelay: { kind: "noCap" },
-      autoRetryFor: ["PROVIDER_DOWN"],
+      retryFor: ["PROVIDER_DOWN"],
     });
     assert.equal(record.parameters[0]?.schema.kind, "zod");
   });

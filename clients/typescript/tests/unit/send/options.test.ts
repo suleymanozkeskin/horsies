@@ -3,9 +3,9 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { checkSendOptions, epochMicrosTowardPast, type SendOptions } from "../../../horsies/src/send/options.ts";
+import { checkSendOptions, epochMicrosTowardPast, type TaskSendOptions } from "../../../horsies/src/send/options.ts";
 
-function refusalOf(options: SendOptions): readonly [string, string] | "accepted" {
+function refusalOf(options: TaskSendOptions): readonly [string, string] | "accepted" {
   const checked = checkSendOptions(options);
 
   return checked.ok ? "accepted" : [checked.error.option, checked.error.detail];
@@ -51,8 +51,8 @@ describe("checkSendOptions: refusals", () => {
   });
 
   test("a retention of 0 days and of 1.5 days", () => {
-    assert.equal(refusalOf({ retention: { kind: "days", days: 0 } })[0], "retention");
-    assert.equal(refusalOf({ retention: { kind: "days", days: 1.5 } })[0], "retention");
+    assert.equal(refusalOf({ retention: { kind: "period", days: 0 } })[0], "retention");
+    assert.equal(refusalOf({ retention: { kind: "period", days: 1.5 } })[0], "retention");
   });
 
   test("the first refusal in field order is given", () => {
@@ -88,7 +88,7 @@ describe("checkSendOptions: accepted forms", () => {
         idempotencyKey: "k".repeat(255),
         goodUntil,
         delaySeconds: 4_294_967_295,
-        retention: { kind: "days", days: 1 },
+        retention: { kind: "period", days: 1 },
       }),
       {
         ok: true,

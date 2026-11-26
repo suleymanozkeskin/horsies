@@ -4,5 +4,5 @@
 import type { SchedulePattern } from "../../../horsies/src/index.ts";
 
 export const pattern: SchedulePattern = {
-  kind: "weekly", days: [], at: Temporal.PlainTime.from("08:30"),
+  kind: "weekly", weekdays: [], time: Temporal.PlainTime.from("08:30"),
 };
