@@ -51,6 +51,7 @@ _MIGRATION_DESCRIPTIONS: Final[dict[int, str]] = {
     1004: 'worker profile name',
     1005: 'claim generation by status',
     1006: 'typescript client family',
+    1007: 'retry policy keys and custom category',
 }
 """The description that the bookkeeping row of each migration of the chain
 stores (``MIGRATION_SOURCES``, ``core/src/broker/migrations.rs``)."""

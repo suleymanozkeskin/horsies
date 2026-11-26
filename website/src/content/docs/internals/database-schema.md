@@ -1,7 +1,7 @@
 ---
 title: Database Schema
 section: shared
-summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000 to 1006).
+summary: PostgreSQL tables for live tasks, the task-history archive, workflows, heartbeats, worker states, and schedules (migration chain 1000 to 1007).
 related: [../../configuration/broker-config]
 tags: [internals, database, schema, PostgreSQL, task-history]
 ---
@@ -19,6 +19,7 @@ The schema is a chain of migrations. Each migration runs in its own transaction,
 | 1004 | `core/migrations/1004_worker_profile_name.sql` | The name of the worker profile in each worker snapshot: the column `profile_name` and one `CHECK` on `horsies_worker_states` |
 | 1005 | `core/migrations/1005_claim_generation_by_status.sql` | The claim generation of a held task row: one `CHECK` on `horsies_tasks` (`horsies_tasks_claim_generation_by_status`) |
 | 1006 | `core/migrations/1006_typescript_client_family.sql` | The client family `TYPESCRIPT`: the `CHECK` `horsies_client_family_family_known` admits `PYTHON`, `RUST` and `TYPESCRIPT` |
+| 1007 | `core/migrations/1007_retry_policy_keys_and_custom_category.sql` | The retry policy keys `intervals_seconds` and `retry_for`: the four validation functions of the retry policy of a workflow node (`horsies_workflow_retry_interval_entries`, `horsies_workflow_retry_code_entries`, `horsies_workflow_retry_policy_entries`, `horsies_workflow_retry_policy_value_error`). The code category `CUSTOM`: the five monitoring functions that hold the category text (`horsies_monitoring_check_scope`, `horsies_monitoring_task_list`, `horsies_monitoring_task_facets`, `horsies_monitoring_task_stats`, `horsies_monitoring_task_breakdown`) |
 
 The files of migration 1000:
 
@@ -148,6 +149,21 @@ Upgrade from version 1005 to version 1006 (also from an earlier version, after t
 - The text of the migration does not change the family row. In the install of a `TYPESCRIPT` client, its
   transaction writes the row `TYPESCRIPT` when the database has none. `TYPESCRIPT` is reserved for a TypeScript
   client; the Python and Rust clients never write it, and refuse a database that records it.
+
+Upgrade from version 1006 to version 1007 (also from an earlier version, after the migrations before it):
+
+- Drain the tasks and the workflows, stop every process of an earlier build before the first start of this build,
+  and upgrade every process together. The first start applies migration 1007. A process of an earlier build that
+  starts after it is refused, because the database holds a newer version.
+- A database at version 1007 does not go back to an earlier build.
+- The migration replaces nine functions in place. It adds no column, builds no index, changes no `CHECK` and writes
+  no row.
+- A stored retry policy keeps the keys that its writer wrote. A live task or a workflow node whose stored
+  `task_options` hold the keys `intervals` or `auto_retry_for` does not validate after the upgrade: the worker
+  refuses the task before its body runs (`WORKER_SERIALIZATION_ERROR`), and a node with such options fails at its
+  promotion.
+- A monitoring call with the code category `DOMAIN` is refused (`22023` from `horsies_monitoring_check_scope`); the
+  category of a custom code is `CUSTOM`.
 
 `horsies_migrations` has the sqlx form: `version`, `description`, `installed_on`, `success`, `checksum`
 (SHA-384 of the migration text) and `execution_time` (nanoseconds). The text of a released migration never

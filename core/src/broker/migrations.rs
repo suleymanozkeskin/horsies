@@ -28,7 +28,11 @@
 //!   (`1005_claim_generation_by_status.sql`) adds the CHECK that a CLAIMED or
 //!   RUNNING task row holds its claim generation (`claimed_at`). Version 1006
 //!   (`1006_typescript_client_family.sql`) adds the client family
-//!   `TYPESCRIPT` to the CHECK of the family row.
+//!   `TYPESCRIPT` to the CHECK of the family row. Version 1007
+//!   (`1007_retry_policy_keys_and_custom_category.sql`) replaces the
+//!   validation functions of the retry policy of a workflow node (the keys
+//!   `intervals_seconds` and `retry_for`) and the monitoring functions that
+//!   hold the code category of a custom code (`CUSTOM`).
 //!
 //! The released text of a migration never changes: a database that applied
 //! another text of it is refused ([`SchemaRefusal::MigrationEdited`]), so a
@@ -165,12 +169,18 @@ pub(crate) const CLAIM_GENERATION_BY_STATUS_MIGRATION_VERSION: i64 = 1005;
 /// (`core/migrations/1006_typescript_client_family.sql`).
 pub(crate) const TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION: i64 = 1006;
 
+/// Version of the migration that replaces the retry policy validation of a
+/// workflow node (keys `intervals_seconds`, `retry_for`) and the monitoring
+/// functions of the code category `CUSTOM`
+/// (`core/migrations/1007_retry_policy_keys_and_custom_category.sql`).
+pub(crate) const RETRY_POLICY_KEYS_AND_CUSTOM_CATEGORY_MIGRATION_VERSION: i64 = 1007;
+
 /// The files of `core/migrations/`, one per migration after the baseline,
 /// in apply order: the version of the migration, the file name and the text.
 /// The core includes them by relative path and keeps no copy. A file added to
 /// the folder without a line here fails
 /// `later_migration_list_is_the_whole_folder`.
-pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 6] = [
+pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 7] = [
     (
         LIFECYCLE_RECORD_MIGRATION_VERSION,
         "1001_lifecycle_record.sql",
@@ -200,6 +210,11 @@ pub(crate) const LATER_MIGRATION_FILES: [(i64, &str, &str); 6] = [
         TYPESCRIPT_CLIENT_FAMILY_MIGRATION_VERSION,
         "1006_typescript_client_family.sql",
         include_str!("../../migrations/1006_typescript_client_family.sql"),
+    ),
+    (
+        RETRY_POLICY_KEYS_AND_CUSTOM_CATEGORY_MIGRATION_VERSION,
+        "1007_retry_policy_keys_and_custom_category.sql",
+        include_str!("../../migrations/1007_retry_policy_keys_and_custom_category.sql"),
     ),
 ];
 
@@ -304,7 +319,7 @@ struct MigrationSource {
 /// The embedded chain, in apply order: the baseline, then the migrations of
 /// [`LATER_MIGRATION_FILES`]. The Python client installs through the core,
 /// so both clients apply the same chain.
-const MIGRATION_SOURCES: [MigrationSource; 7] = [
+const MIGRATION_SOURCES: [MigrationSource; 8] = [
     // The baseline creates horsies_client_family with the CHECK
     // horsies_client_family_family_known: family IN ('PYTHON', 'RUST')
     // (baseline `0001_tables.sql`).
@@ -404,6 +419,21 @@ const MIGRATION_SOURCES: [MigrationSource; 7] = [
             LATER_MIGRATION_FILES[5].2,
         ),
         admitted_families: &[ClientFamily::TypeScript],
+        readers: ReaderPublication::NotPublished,
+        exact_indexes: &[],
+        retired_indexes: &[],
+    },
+    // The migration adds no column, builds no index and changes no CHECK: it
+    // replaces nine functions in place (each keeps its argument list and its
+    // result), and it writes no row.
+    MigrationSource {
+        version: LATER_MIGRATION_FILES[6].0,
+        description: "retry policy keys and custom category",
+        script: SqlScript::new(
+            "migration_1007_retry_policy_keys_and_custom_category",
+            LATER_MIGRATION_FILES[6].2,
+        ),
+        admitted_families: &[],
         readers: ReaderPublication::NotPublished,
         exact_indexes: &[],
         retired_indexes: &[],
