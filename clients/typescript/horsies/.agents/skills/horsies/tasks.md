@@ -610,10 +610,8 @@ export async function sendValidation(orderId: string): Promise<void> {
 
       break;
     case "IDEMPOTENCY_KEY_CONFLICT": {
-      // Retryable: a retry after the key's reservation ends is accepted.
-      const again = await app.retrySend(sent.error);
-
-      console.warn(again.ok ? `sent ${again.value.taskId}` : `task ${sent.error.ownerTaskId} holds the key`);
+      // Not retryable, and `retrySend` does not take it: send the owner's command, or use another key.
+      console.warn(`task ${sent.error.ownerTaskId} holds the key`);
       break;
     }
     case "VALIDATION_FAILED":
@@ -657,7 +655,7 @@ task child are suppressed: the child lifts the suppression when it serves.
 | `VALIDATION_FAILED` | `message`, `exception` | A rule refused the send. Nothing was written |
 | `PAYLOAD_TOO_LARGE` | `message`, `sizeBytes`, `limitBytes` (`bigint`) | The input is over the reject bound. Nothing was written |
 | `PAYLOAD_MISMATCH` | `taskId`, `payload`, `message` | The task id exists with another command or key. Nothing was written |
-| `IDEMPOTENCY_KEY_CONFLICT` | `taskId`, `payload`, `message`, `ownerTaskId`, `retryable: true` | Another task holds the key with another command. Nothing was written. The conflict clears when the key's reservation ends |
+| `IDEMPOTENCY_KEY_CONFLICT` | `taskId`, `payload`, `message`, `ownerTaskId`, `retryable: false` | Another task holds the key with another command. Nothing was written. Not retryable, and `retrySend` refuses it: send the owner's command, or use another key |
 | `ENQUEUE_FAILED` | `taskId`, `payload`, `message`, `retryable`, `exception` | The enqueue failed. The row may or may not exist. `retryable` is the classification of the cause |
 | `SEAT_RELAY_FULL` | `message`, `retryable: true`, `exception` | A `SHARED_THREAD` body only: the seat relay holds its bound of waiting calls. Nothing was sent; send again |
 
@@ -666,16 +664,15 @@ task child are suppressed: the child lifts the suppression when it serves.
 - `payload` is not enumerable, so `JSON.stringify` of an error never holds
   the input.
 
-`app.retrySend(error)` takes `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`
+`app.retrySend(error)` takes `ENQUEUE_FAILED` only
 (typecheck; another code from untyped code is `VALIDATION_FAILED`). It sends
 the same task id and payload again, as a repeat: a task that an earlier call
-wrote answers with its id, also after it finished, and does not run again. A
-key conflict before the key's reservation ends gives the same conflict again.
+wrote answers with its id, also after it finished, and does not run again.
 It takes an error of another app instance too, when this app lists its task.
 
 With `resendOnTransientError: true` in the config, a retryable
 `ENQUEUE_FAILED` is sent again up to 3 times, after 200, 400 and 800 ms, as
-a repeat. A key conflict is not sent again: only `retrySend` sends it again.
+a repeat. A key conflict is never sent again.
 
 ## Reads
 

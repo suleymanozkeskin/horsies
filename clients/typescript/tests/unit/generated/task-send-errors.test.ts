@@ -191,7 +191,7 @@ describe("taskSendCoreErrorFromNative", () => {
     });
 
     expectConverted(value, {
-      shown: { code: "IDEMPOTENCY_KEY_CONFLICT", retryable: true, taskId: TASK_ID, ownerTaskId: OTHER_TASK_ID },
+      shown: { code: "IDEMPOTENCY_KEY_CONFLICT", retryable: false, taskId: TASK_ID, ownerTaskId: OTHER_TASK_ID },
       hidden: ["payload", "message"],
       message: MESSAGE,
       cause: null,

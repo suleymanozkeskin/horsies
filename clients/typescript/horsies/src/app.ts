@@ -172,7 +172,7 @@ export class Horsies {
   }
 
   /**
-   * Send again the payload of `ENQUEUE_FAILED` or `IDEMPOTENCY_KEY_CONFLICT`, under the same task id. Takes an error
+   * Send again the payload of `ENQUEUE_FAILED`, under the same task id. Takes an error
    * of another app instance too, when this app lists its task.
    */
   async retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {

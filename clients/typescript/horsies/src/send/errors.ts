@@ -28,15 +28,10 @@ export type SentTypes<O, E extends string> = { readonly output: O; readonly code
 export type WithSentTypes<V, O, E extends string> = V & { readonly [sentTypes]?: SentTypes<O, E> };
 
 /**
- * The send errors that `retrySend` takes: the row may or may not exist (`ENQUEUE_FAILED`), or another task holds the
- * idempotency key (`IDEMPOTENCY_KEY_CONFLICT`; a retry after the key's reservation ends is accepted, a retry before
- * that gives the same error).
+ * The send error that `retrySend` takes: the row may or may not exist (`ENQUEUE_FAILED`). It leaves out
+ * `IDEMPOTENCY_KEY_CONFLICT` (`retryable: false`): a repeat of the same send does not complete it.
  */
-export type RetryableSendError<O, E extends string> = WithSentTypes<
-  TaskSendEnqueueFailed | TaskSendIdempotencyKeyConflict,
-  O,
-  E
->;
+export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed, O, E>;
 
 /** A send error of the task send catalog, or the seat relay at its bound. */
 export type SendFailure =
@@ -54,6 +49,7 @@ export type TaskSendError<O, E extends string> =
   | TaskSendValidationFailed
   | TaskSendPayloadMismatch
   | TaskSendPayloadTooLarge
+  | TaskSendIdempotencyKeyConflict
   | SeatRelayFull
   | RetryableSendError<O, E>;
 
