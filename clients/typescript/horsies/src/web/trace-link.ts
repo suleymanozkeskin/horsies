@@ -18,8 +18,16 @@ export interface TraceLinkTemplate {
   readonly [traceLinkTemplateBrand]: "TraceLinkTemplate";
 }
 
+/**
+ * The parser of trace link templates, as the Rust client's `TraceLinkTemplate::parse`: the core checks the text.
+ * Starts no core.
+ */
+export const TraceLinkTemplate: {
+  readonly parse: (text: string) => Result<TraceLinkTemplate, TraceLinkRefusal>;
+} = Object.freeze({ parse: (text: string) => parseTraceLink(text) });
+
 /** A template that the core refused. `rule` names the rule that it breaks. */
-export interface TraceLinkRefused {
+export interface TraceLinkRefusal {
   readonly kind: "traceLinkRefused";
   readonly template: string;
   readonly rule: string;
@@ -30,7 +38,7 @@ export interface TraceLinkRefused {
  * no space, an `http://` or `https://` scheme, a host, one `{trace_id}`, and no other brace.
  * Starts no core.
  */
-export function parseTraceLink(text: string): Result<TraceLinkTemplate, TraceLinkRefused> {
+export function parseTraceLink(text: string): Result<TraceLinkTemplate, TraceLinkRefusal> {
   return traceLinkOf(
     text,
     nativeValue("checkTraceLinkTemplate", () => webHandlerAddon().checkTraceLinkTemplate(text)),
@@ -38,7 +46,7 @@ export function parseTraceLink(text: string): Result<TraceLinkTemplate, TraceLin
 }
 
 /** The template of `text` by the answer `check` of the core. Pure. */
-export function traceLinkOf(text: string, check: TraceLinkCheck): Result<TraceLinkTemplate, TraceLinkRefused> {
+export function traceLinkOf(text: string, check: TraceLinkCheck): Result<TraceLinkTemplate, TraceLinkRefusal> {
   switch (check.kind) {
     case "accepted":
       // SAFETY: the brand is a type-only marker; the core accepted the text just above.

@@ -21,7 +21,7 @@ import { serveHandler, serverRuntime } from "../web/serve.ts";
 import { addressText } from "../web/server.ts";
 import type { FetchHandler, ServeAddress, ServeOutcome } from "../web/server.ts";
 import { parseTraceLink } from "../web/trace-link.ts";
-import type { TraceLinkRefused, TraceLinkTemplate } from "../web/trace-link.ts";
+import type { TraceLinkRefusal, TraceLinkTemplate } from "../web/trace-link.ts";
 import { err, ok } from "../wire/result.ts";
 import type { Result } from "../wire/result.ts";
 import {
@@ -90,7 +90,7 @@ export interface WebCommandDeps {
   readonly output: CommandOutput;
   readonly setLogLevel: (level: CliLogLevel) => undefined;
   readonly checkStatic: () => Promise<CheckStepOutcome>;
-  readonly parseTraceLink: (text: string) => Result<TraceLinkTemplate, TraceLinkRefused>;
+  readonly parseTraceLink: (text: string) => Result<TraceLinkTemplate, TraceLinkRefusal>;
   readonly createHandler: (options: MonitoringHandlerOptions) => MonitoringHandler;
   readonly serve: (handler: FetchHandler, address: ServeAddress) => Promise<ServeOutcome>;
   readonly stopSignals: () => StopSignals;
@@ -168,7 +168,7 @@ interface PreparedWeb {
 /** Every argument check of `web`, in order: the flags, the trace link, the access rule. */
 function prepareWeb(
   args: readonly string[],
-  check: (text: string) => Result<TraceLinkTemplate, TraceLinkRefused>,
+  check: (text: string) => Result<TraceLinkTemplate, TraceLinkRefusal>,
 ): Result<PreparedWeb, UsageError> {
   const flags = parseWebFlags(args);
 
@@ -295,7 +295,7 @@ function parseAuthMode(text: string): Result<WebAuthMode, UsageError> {
 /** The template of `--trace-link`, checked by the core; a refusal is a usage error with the rule. */
 function checkedTraceLink(
   flag: TraceLinkFlag,
-  check: (text: string) => Result<TraceLinkTemplate, TraceLinkRefused>,
+  check: (text: string) => Result<TraceLinkTemplate, TraceLinkRefusal>,
 ): Result<TraceLinkTemplate | undefined, UsageError> {
   switch (flag.kind) {
     case "noTraceLink":
