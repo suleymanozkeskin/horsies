@@ -143,6 +143,7 @@ describe("the attempt span", () => {
 
     const entries: { key: string; value: string }[] = [];
     const span = otel.trace.getTracer("sender").startSpan("send resize");
+
     const sending = otel.propagation.setBaggage(
       otel.trace.setSpan(otel.ROOT_CONTEXT, span),
       otel.propagation.createBaggage({ tenant: { value: "acme" } }),

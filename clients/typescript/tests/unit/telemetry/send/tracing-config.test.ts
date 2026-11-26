@@ -165,6 +165,7 @@ describe("Horsies.create and the tracing step", () => {
 
   test("a config that the parse accepts and a tracing step that refuses: the core's config and option refusals follow it", () => {
     const { loader } = countingLoader(MISSING);
+
     const checks = fakeChecks({
       config: [catalogRefusal("HRS-101", "the core refuses the config")],
       options: [catalogRefusal("HRS-102", "the core refuses the options")],
