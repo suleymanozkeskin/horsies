@@ -117,6 +117,19 @@ describe("zod adapter: refusal rules", () => {
     }
   });
 
+  test("DEFAULT_UNDER_NONOPTIONAL: .default() or .prefault() under .nonoptional(), at the member's path", () => {
+    assert.deepEqual(refusals(z.string().default("ab").nonoptional()), [["DEFAULT_UNDER_NONOPTIONAL", "$", "nonoptional"]]);
+    assert.deepEqual(refusals(z.string().prefault("ab").nonoptional()), [["DEFAULT_UNDER_NONOPTIONAL", "$", "nonoptional"]]);
+    assert.deepEqual(refusals(z.object({ code: z.string().default("ab").nonoptional() })), [
+      ["DEFAULT_UNDER_NONOPTIONAL", "$.code", "nonoptional"],
+    ]);
+  });
+
+  test("DEFAULT_UNDER_NONOPTIONAL: .nonoptional() over .optional() or a required schema still compiles", () => {
+    assert.ok(compileValue(z.string().optional().nonoptional()).ok);
+    assert.ok(compileValue(z.string().nonoptional()).ok);
+  });
+
   test("RECORD_KEY: a key schema that is not a string, a string format, a string enum or a string literal", () => {
     assert.deepEqual(refusals(z.record(z.int(), z.string())), [["RECORD_KEY", "$", "record"]]);
     assert.deepEqual(refusals(z.record(z.enum({ One: 1 }), z.string())), [["RECORD_KEY", "$", "record"]]);

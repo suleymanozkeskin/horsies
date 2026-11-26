@@ -351,6 +351,7 @@ function refusedCases(): readonly SelfCheckCase[] {
     refusedCase("intersection", z.intersection(z.object({}), z.object({})), "INTERSECTION"),
     refusedCase("optional item", z.array(z.string().optional()), "OPTIONAL_NOT_A_MEMBER"),
     refusedCase("changing default", z.number().default(changingDefault()), "CHANGING_DEFAULT"),
+    refusedCase("default under nonoptional", z.string().default("ab").nonoptional(), "DEFAULT_UNDER_NONOPTIONAL"),
     refusedCase("recursive", recursive, "RECURSIVE"),
     refusedCase("tuple rest", z.tuple([z.string()], z.string()), "TUPLE_REST"),
     refusedCase("literal member", z.literal(1n), "LITERAL_MEMBER"),

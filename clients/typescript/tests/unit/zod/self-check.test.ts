@@ -42,7 +42,7 @@ describe("self-check", () => {
       assert.ok(rules.has(rule), rule);
     }
 
-    assert.ok(rules.has("LITERAL_MEMBER") && rules.has("UNION_OPTION"));
+    assert.ok(rules.has("LITERAL_MEMBER") && rules.has("UNION_OPTION") && rules.has("DEFAULT_UNDER_NONOPTIONAL"));
   });
 
   test("finds a renamed optional field: a loose object whose catchall field has another name", () => {

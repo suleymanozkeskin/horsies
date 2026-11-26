@@ -50,6 +50,8 @@ export type ZodRule =
   | "OPTIONAL_NOT_A_MEMBER"
   /** A `.default()` or `.prefault()` whose value changes from one read to the next (a function default). */
   | "CHANGING_DEFAULT"
+  /** `.default()` or `.prefault()` under `.nonoptional()`: zod fills a missing key, the stored form has no such fill. */
+  | "DEFAULT_UNDER_NONOPTIONAL"
   /** A schema that contains itself (`z.lazy()`, a getter in an object): the kind tree has no recursive node yet. */
   | "RECURSIVE"
   /** `z.tuple([...], rest)`: the kind tree has no tuple with a rest item. */
@@ -120,6 +122,7 @@ function ruleText(refused: ZodSchemaRefused): string {
     case "INTERSECTION":
     case "OPTIONAL_NOT_A_MEMBER":
     case "CHANGING_DEFAULT":
+    case "DEFAULT_UNDER_NONOPTIONAL":
     case "RECURSIVE":
     case "TUPLE_REST":
     case "LITERAL_MEMBER":
@@ -165,6 +168,8 @@ function fixOf(rule: ZodRule): string {
       return "use .nullable(), or make the value an object member";
     case "CHANGING_DEFAULT":
       return "give a fixed default value; a sender sets a value that changes";
+    case "DEFAULT_UNDER_NONOPTIONAL":
+      return "remove .nonoptional(), or remove the default: a required member takes no default";
     case "RECURSIVE":
       return "use h.json() for a recursive value";
     case "TUPLE_REST":

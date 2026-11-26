@@ -251,7 +251,7 @@ function compileWrapper(definition: FormOf<WrapperForm>, schema: ZodSchema, walk
         presence: inner.presence.mode === "defaulted" ? inner.presence : OPTIONAL,
       }));
     case "nonoptional":
-      return mapped(compileNode(definition.inner, walk), (inner) => ({ kind: inner.kind, presence: REQUIRED }));
+      return compileNonOptional(definition, walk);
     case "default":
     case "prefault":
       return compileDefault(definition, walk);
@@ -274,6 +274,28 @@ function compileWrapper(definition: FormOf<WrapperForm>, schema: ZodSchema, walk
       return refusedForm(definition, walk.path);
     default:
       return unreachable(definition, "compileWrapper");
+  }
+}
+
+/**
+ * `.nonoptional()`: the member is required. Over a `.default()` or `.prefault()` it is refused: zod fills the missing
+ * key from the default, and a default of the stored form would then be a second source of the value.
+ */
+function compileNonOptional(definition: FormOf<"nonoptional">, walk: Walk): Compiled<ZodMemberKind> {
+  const inner = compileNode(definition.inner, walk);
+
+  if (!inner.ok) {
+    return inner;
+  }
+
+  switch (inner.value.presence.mode) {
+    case "defaulted":
+      return refused("DEFAULT_UNDER_NONOPTIONAL", walk.path, definition.zodType);
+    case "required":
+    case "optional":
+      return ok({ kind: inner.value.kind, presence: REQUIRED });
+    default:
+      return unreachable(inner.value.presence, "compileNonOptional");
   }
 }
 
