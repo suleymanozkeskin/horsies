@@ -5,9 +5,11 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import type { TaskId } from "../contract/ids.ts";
+
 /** The run whose code runs now. `attempt` is the fencing token's value, from 1. */
 export type RunMark = {
-  readonly taskId: string;
+  readonly taskId: TaskId;
   readonly taskName: string;
   readonly attempt: number;
 };
