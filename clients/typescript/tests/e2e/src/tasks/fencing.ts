@@ -28,6 +28,15 @@ export const fenceSharedAsync = defineTask({
   timeoutMs: 30_000,
 });
 
+/** The token of a shared thread run, read in its seat isolate. */
+export const fenceSharedThread = defineTask({
+  name: "e2e_fence_shared_thread",
+  input: {},
+  output: fence,
+  execution: "SHARED_THREAD",
+  timeoutMs: 30_000,
+});
+
 /** Two reads of the token in the body, then a read in work that the body started with `runtime.spawn`. */
 export const fenceReadsTwice = defineTask({ name: "e2e_fence_reads_twice", input: {}, output: h.array(fence), errors: FENCE_CODES });
 
@@ -41,7 +50,7 @@ export const fenceRetry = defineTask({
 });
 
 /** Every contract of this module. */
-export const FENCING_CONTRACTS = [fenceIsolatedAsync, fenceIsolatedSync, fenceSharedAsync, fenceReadsTwice, fenceRetry] as const;
+export const FENCING_CONTRACTS = [fenceIsolatedAsync, fenceIsolatedSync, fenceSharedAsync, fenceSharedThread, fenceReadsTwice, fenceRetry] as const;
 
 function fenceOf(runtime: Pick<TaskRuntime, "fencingToken">): Fence {
   return { taskId: runtime.fencingToken.taskId, value: runtime.fencingToken.value };
@@ -52,6 +61,7 @@ export function implementFencing(app: Horsies): void {
   app.implement(fenceIsolatedAsync, async (_input, runtime) => fenceIsolatedAsync.ok(fenceOf(runtime)));
   app.implement(fenceIsolatedSync, (_input, runtime) => fenceIsolatedSync.ok(fenceOf(runtime)));
   app.implement(fenceSharedAsync, async (_input, runtime) => fenceSharedAsync.ok(fenceOf(runtime)));
+  app.implement(fenceSharedThread, (_input, runtime) => fenceSharedThread.ok(fenceOf(runtime)));
   app.implement(fenceReadsTwice, async (_input, runtime) => {
     const first = fenceOf(runtime);
     const second = fenceOf(runtime);

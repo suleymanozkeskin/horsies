@@ -17,12 +17,13 @@ import { type AnyTaskContract, type AnyWorkflowContract, Horsies, type TaskHandl
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { buildApp } from "../src/app.ts";
 import { connectionEnv } from "../src/connection.ts";
-import { type Instance, INSTANCE_ENV, instanceConfig, type Profile, readyClass, type ThreadProfile } from "../src/instances.ts";
+import { type Instance, INSTANCE_ENV, instanceConfig, type Profile, readyClass, type ReadyClass, type ThreadProfile } from "../src/instances.ts";
 import { MARKER_DIR_ENV, MarkerDir } from "../src/markers.ts";
 import { customHealthcheck } from "../src/tasks/custom.ts";
 import { recoveryHealthcheck } from "../src/tasks/recovery-queues.ts";
 import { healthcheck } from "../src/tasks/basic.ts";
 import { sharedHealthcheck } from "../src/tasks/shared.ts";
+import { threadHealthcheck } from "../src/tasks/threads.ts";
 import {
   createDatabase,
   dropDatabase,
@@ -166,7 +167,7 @@ export class Suite {
    * second before the second is ready. A worker of another instance than the suite's must run the suite's readiness
    * task.
    */
-  async worker(profile: Profile, instance: Instance = this.instance): Promise<TestProcess> {
+  async worker(profile: Profile | ThreadProfile, instance: Instance = this.instance): Promise<TestProcess> {
     const worker = this.spawnWorker(profile, instance);
 
     await worker.waitForLog(WORKER_READY_LINE, READY_LIMIT_MS);
@@ -176,7 +177,7 @@ export class Suite {
   }
 
   /** Wait until `worker`, of `profile`, ran a readiness task. Fails the test when it exits first or the limit passes. */
-  async waitReady(worker: TestProcess, profile: Profile): Promise<void> {
+  async waitReady(worker: TestProcess, profile: Profile | ThreadProfile): Promise<void> {
     const handle = await this.#sendReadiness(profile);
 
     await worker.waitUntil(READY_LIMIT_MS, "the worker runs its readiness task", async () => {
@@ -186,8 +187,8 @@ export class Suite {
     });
   }
 
-  async #sendReadiness(profile: Profile): Promise<TaskHandle<string, string>> {
-    const sent = await this.app.send(readinessTask(this.instance, profile), {});
+  async #sendReadiness(profile: Profile | ThreadProfile): Promise<TaskHandle<string, string>> {
+    const sent = await this.app.send(instanceReadinessTask(this.instance, profile), {});
 
     if (!sent.ok) {
       assert.fail(`send the readiness task: ${sent.error.code}: ${sent.error.message}`);
@@ -249,7 +250,10 @@ type SuiteParts = {
 };
 
 /** The readiness task of a worker of `profile` of `instance`: a task of the instance that a child of the profile runs. Pure. */
-function readinessTask(instance: Instance, profile: Profile): typeof healthcheck | typeof customHealthcheck | typeof sharedHealthcheck | typeof recoveryHealthcheck {
+function instanceReadinessTask(
+  instance: Instance,
+  profile: Profile | ThreadProfile,
+): typeof customHealthcheck | typeof recoveryHealthcheck | ReturnType<typeof readinessTask> {
   switch (instance) {
     case "custom_queues":
       return customHealthcheck;
@@ -265,7 +269,24 @@ function readinessTask(instance: Instance, profile: Profile): typeof healthcheck
     case "provider_throws":
     case "hook_past_bound":
     case "thread_profiles":
-      return readyClass(profile) === "SHARED_ASYNC" ? sharedHealthcheck : healthcheck;
+    case "scheduler":
+    case "scheduler_invalid_rules":
+    case "scheduler_invalid_task":
+    case "handlers":
+    case "worker_ended_spans":
+      return readinessTask(readyClass(profile));
+  }
+}
+
+/** The readiness task of a class in an instance of the default tasks. Pure. */
+function readinessTask(readiness: ReadyClass): typeof healthcheck | typeof sharedHealthcheck | typeof threadHealthcheck {
+  switch (readiness) {
+    case "ISOLATED":
+      return healthcheck;
+    case "SHARED_ASYNC":
+      return sharedHealthcheck;
+    case "SHARED_THREAD":
+      return threadHealthcheck;
   }
 }
 

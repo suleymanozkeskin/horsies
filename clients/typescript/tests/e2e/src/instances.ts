@@ -75,6 +75,18 @@ export const INSTANCES = [
   "hook_past_bound",
   // The default tasks with the profiles that start `SHARED_THREAD` children.
   "thread_profiles",
+  // The default tasks with the schedules of the scheduler tests (Python `instance_scheduler.py`).
+  "scheduler",
+  // The default tasks with an interval of no time unit and two schedules of one name.
+  "scheduler_invalid_rules",
+  // The default tasks with a schedule of a task that the app does not list (Python `instance_scheduler_invalid.py`).
+  "scheduler_invalid_task",
+  // The default tasks with an `AttemptEnded` handler and a handler child start hook (Python
+  // `instance_event_handlers.py`).
+  "handlers",
+  // The default tasks with OpenTelemetry tracing and a span SDK in each child (Python
+  // `instance_worker_ended_spans.py`).
+  "worker_ended_spans",
   // The custom queues `default` and `recovery` with short heartbeats and stale thresholds (Rust
   // `Instance::RecoveryQueues`, Python `instance_recovery.py` and `instance_priority_binding.py`).
   "recovery_queues",
@@ -82,6 +94,9 @@ export const INSTANCES = [
 
 /** One app instance. */
 export type Instance = (typeof INSTANCES)[number];
+
+/** An instance whose app has the default tasks: every instance but the two of custom queues. */
+export type DefaultTaskInstance = Exclude<Instance, "custom_queues" | "recovery_queues">;
 
 /** The worker profiles that every instance defines (Python `profiles.py`). */
 export const PROFILES = [
@@ -112,8 +127,8 @@ export const THREAD_PROFILES = ["thread-only-1x4", "split-isolated-1-thread-1x4"
 /** A profile with `SHARED_THREAD` children. */
 export type ThreadProfile = (typeof THREAD_PROFILES)[number];
 
-/** Which task proves that a worker of a profile is ready. */
-export type ReadyClass = "ISOLATED" | "SHARED_ASYNC";
+/** Which task proves that a worker of a profile is ready: one of the class of a child that the profile starts. */
+export type ReadyClass = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
 
 /** The instance of `name`, or the rule it breaks. Pure. */
 export function parseInstance(name: string): Result<Instance, string> {
@@ -123,10 +138,12 @@ export function parseInstance(name: string): Result<Instance, string> {
 }
 
 /** The class of the readiness task of a worker of `profile`. Pure. */
-export function readyClass(profile: Profile): ReadyClass {
+export function readyClass(profile: Profile | ThreadProfile): ReadyClass {
   switch (profile) {
     case "shared-only-1x4":
       return "SHARED_ASYNC";
+    case "thread-only-1x4":
+      return "SHARED_THREAD";
     case "isolated-1":
     case "isolated-2":
     case "isolated-4":
@@ -134,6 +151,7 @@ export function readyClass(profile: Profile): ReadyClass {
     case "claim-batch-1":
     case "recycle-after-2-tasks":
     case "split-isolated-1-shared-1x4":
+    case "split-isolated-1-thread-1x4":
       return "ISOLATED";
   }
 }
@@ -153,7 +171,13 @@ export function instanceConfig(instance: Instance, connection: Connection): AppC
     case "provider_throws":
     case "hook_past_bound":
     case "thread_profiles":
+    case "scheduler":
+    case "scheduler_invalid_rules":
+    case "scheduler_invalid_task":
+    case "handlers":
       return base;
+    case "worker_ended_spans":
+      return { ...base, tracing: { kind: "otel" } };
     case "custom_queues":
       return { ...base, queueMode: "custom", customQueues: customQueues(CUSTOM_QUEUES) };
     case "recovery_queues":

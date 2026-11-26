@@ -9,15 +9,23 @@ export type LayerFile = { readonly name: string; readonly boundSeconds: number }
 export const LAYER_FILES: readonly LayerFile[] = [
   { name: "layer1-tasks", boundSeconds: 1_800 },
   { name: "layer2-cluster", boundSeconds: 1_500 },
+  { name: "layer3-scheduler", boundSeconds: 1_200 },
   { name: "layer4-workflow-structure", boundSeconds: 600 },
   { name: "layer5-workflow-dataflow", boundSeconds: 600 },
   { name: "layer6-workflow-advanced", boundSeconds: 900 },
   { name: "layer7-subworkflows", boundSeconds: 1_200 },
   { name: "child-model", boundSeconds: 1_200 },
   { name: "typescript-child", boundSeconds: 1_200 },
+  { name: "shared-thread", boundSeconds: 1_200 },
+  { name: "child-core-panic", boundSeconds: 600 },
   { name: "stored-timeout-refusal", boundSeconds: 600 },
   { name: "retention", boundSeconds: 600 },
   { name: "check-live-command", boundSeconds: 600 },
+  { name: "layer8-health", boundSeconds: 900 },
+  { name: "cancel-running", boundSeconds: 900 },
+  { name: "event-handlers", boundSeconds: 300 },
+  { name: "lifecycle-record", boundSeconds: 300 },
+  { name: "worker-ended-spans", boundSeconds: 600 },
 ];
 
 /** Mirrored scenarios that need a package that has not merged, by the issue that adds the package. */
@@ -26,11 +34,6 @@ export type PendingScenarios = { readonly issue: number; readonly needs: string;
 /** The scenarios of the suite's design that no file runs yet. */
 export const PENDING_SCENARIOS: readonly PendingScenarios[] = [
   {
-    issue: 2336,
-    needs: "schedules and the scheduler command",
-    mirrors: ["layer 3: Rust layer3_scheduler.rs (10), Python test_layer3_scheduler.py (12)"],
-  },
-  {
     issue: 2459,
     needs: "workflows with no output node",
     mirrors: [
@@ -38,35 +41,8 @@ export const PENDING_SCENARIOS: readonly PendingScenarios[] = [
     ],
   },
   {
-    issue: 2337,
-    needs: "monitoring, cancel and health reads",
-    mirrors: [
-      "layer 8: Rust layer8_health.rs (6), Python test_worker_health.py (5)",
-      "Rust cancel_running.rs (6), Python test_cancel_running.py (3): runtime.signal with OPERATOR, the cancel grace of an isolated run",
-      "Rust layer1_tasks.rs::test_task_cancelled, ::test_task_cancelled_get_result",
-      "Rust lifecycle_record.rs (2), read through the monitoring task detail",
-      "Rust event_handlers.rs (1), Python test_event_handlers.py (1): the event registration",
-    ],
-  },
-  {
-    issue: 2335,
-    needs: "SHARED_THREAD seats on worker threads (Node only; SHARED_THREAD stays off on Bun)",
-    mirrors: [
-      "Rust child_model.rs::thread_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished",
-      "Rust child_model.rs::a_timed_out_thread_does_not_overlap_its_retry",
-      "Rust child_model.rs::shared_thread_runs_read_their_own_fencing_tokens",
-      "Python test_shared_thread_tasks.py (3)",
-      "sync and async thread bodies; a provider runs once in each seat isolate; a seat isolate loads no addon; two CPU-heavy bodies at once; a blocked main thread gives loop_blocked",
-    ],
-  },
-  {
-    issue: 2338,
-    needs: "observability client parts",
-    mirrors: ["the attempt spans and the worker-ended spans (Python test_worker_ended_spans.py)"],
-  },
-  {
-    issue: 2492,
-    needs: "a way to stop the core of a task child for a test",
-    mirrors: ["Python test_child_core_stopped.py (3)"],
+    issue: 2500,
+    needs: "the start span of a workflow start, whose carrier the workflow rows store",
+    mirrors: ["Python test_worker_ended_spans.py::test_a_workflow_task_killed_at_its_timeout_gets_a_span_with_its_node: the span is in the trace of the start"],
   },
 ];
