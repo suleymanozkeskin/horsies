@@ -1,5 +1,5 @@
 // The pure parts of the TypeScript parity program: the entry's commands, the scenario table, the send options, the
-// read of a stored code, the step lines, the configs, the doubled value, and the waits of the bodies. No addon, no
+// read of a stored code, the step lines, the configs and the schedule, the doubled value, and the waits of the bodies. No addon, no
 // database and no process: a test that builds the app or sends runs in the parity runs (`crossclient/parity`).
 
 import assert from "node:assert/strict";
@@ -10,12 +10,15 @@ import {
   doubledValue,
   holdThread,
   ISOLATED,
+  PARITY_SCHEDULE,
   parityConfig,
   PROFILES,
   REFUSED_BROKER_CHECKOUT_WAIT_S,
   REFUSED_BROKER_URL,
   refusedBrokerConfig,
   refusedMessage,
+  SCHEDULE_NAME,
+  SCHEDULE_SECTION,
   SHARED_ASYNC,
   SHARED_THREAD,
   TASKS,
@@ -166,6 +169,21 @@ describe("the configs", () => {
     assert.deepEqual(PROFILES[ISOLATED], { isolated: { count: 1 }, drainTimeoutMs: 5_000 });
     assert.deepEqual(PROFILES[SHARED_ASYNC], { sharedAsync: { count: 1, seats: 4 }, drainTimeoutMs: 5_000 });
     assert.deepEqual(PROFILES[SHARED_THREAD], { sharedThread: { count: 1, seats: 4 }, drainTimeoutMs: 5_000 });
+  });
+
+  test("the schedule sends parity.add with 2 and 3 every hour in UTC, two catch-up slots per check of 1 s", () => {
+    assert.equal(PARITY_SCHEDULE.name, SCHEDULE_NAME);
+    assert.equal(PARITY_SCHEDULE.task.name, "parity.add");
+    assert.deepEqual(PARITY_SCHEDULE.input, { a: 2, b: 3 });
+    assert.equal(PARITY_SCHEDULE.pattern.kind, "interval");
+    assert.equal(
+      PARITY_SCHEDULE.pattern.kind === "interval" ? PARITY_SCHEDULE.pattern.every.total("hours") : 0,
+      1,
+    );
+    assert.equal(PARITY_SCHEDULE.timezone, "UTC");
+    assert.equal(PARITY_SCHEDULE.catchUpMissed, true);
+    assert.equal(PARITY_SCHEDULE.maxCatchUpRuns, 2);
+    assert.deepEqual(SCHEDULE_SECTION, { checkIntervalSeconds: 1 });
   });
 
   test("the refused broker app has the parity contracts on port 1 with the short checkout wait", () => {
