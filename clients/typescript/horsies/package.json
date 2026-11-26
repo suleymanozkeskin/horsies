@@ -44,8 +44,8 @@
   },
   "peerDependencies": {
     "zod": ">=4.1.13 <4.7.0",
-    "pg": ">=8 <9",
-    "postgres": ">=3.4 <4"
+    "pg": ">=8.23.1 <8.24.0",
+    "postgres": ">=3.4.9 <3.5.0"
   },
   "peerDependenciesMeta": {
     "zod": {
