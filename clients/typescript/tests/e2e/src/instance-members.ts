@@ -20,7 +20,7 @@ import { SUBWORKFLOW_PARENTS } from "./workflows/subworkflows.ts";
  * The workflows of the workflow layers (4 to 7) and of `stored-timeout-refusal`. The instances that those files run,
  * `default` and `recovery`, list them; `check --live` checks them on `default`.
  */
-const LAYER_WORKFLOWS: readonly AnyWorkflowContract[] = [
+export const LAYER_WORKFLOWS: readonly AnyWorkflowContract[] = [
   ...STRUCTURE_WORKFLOWS,
   ...DATAFLOW_WORKFLOWS,
   ...ADVANCED_WORKFLOWS,
