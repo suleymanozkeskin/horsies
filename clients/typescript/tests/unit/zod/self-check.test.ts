@@ -9,7 +9,8 @@ import * as z3 from "zod/v3";
 
 import { hz } from "../../../horsies/src/zod/codecs.ts";
 import { compileMember } from "../../../horsies/src/zod/adapter.ts";
-import { kindAfterChecks, zodMemberKind, zodValueKind } from "../../../horsies/src/zod/kind.ts";
+import { kindOf, presenceOf } from "../../../horsies/src/wire/wire-type.ts";
+import { kindAfterChecks, zodMemberWire, zodValueWire } from "../../../horsies/src/zod/kind.ts";
 import {
   knownCases,
   runSelfCheck,
@@ -131,19 +132,19 @@ describe("self-check", () => {
   });
 });
 
-describe("zodMemberKind and zodValueKind", () => {
+describe("zodMemberWire and zodValueWire", () => {
   const failure: SelfCheckFailure = { name: "loose object", expected: "LOOSE_OBJECT", found: "object()" };
 
-  test("give the kind of an accepted schema", () => {
-    const member = zodMemberKind(z.string().optional());
-    const value = zodValueKind(z.string());
+  test("give the wire type of an accepted schema: its kind and its presence", () => {
+    const member = zodMemberWire(z.string().optional());
+    const value = zodValueWire(z.string());
 
-    assert.equal(member.ok && member.value.presence.mode, "optional");
-    assert.equal(value.ok && value.value.node, "string");
+    assert.equal(member.ok && presenceOf(member.value).mode, "optional");
+    assert.equal(value.ok && kindOf(value.value).node, "string");
   });
 
   test("give SchemaRefused with every refusal of a refused schema", () => {
-    const refused = zodValueKind(z.object({ at: z.date(), any: z.any() }));
+    const refused = zodValueWire(z.object({ at: z.date(), any: z.any() }));
 
     assert.equal(refused.ok ? "" : refused.error.kind, "SchemaRefused");
     assert.equal(refused.ok || refused.error.kind !== "SchemaRefused" ? 0 : refused.error.refusals.length, 2);
@@ -160,7 +161,7 @@ describe("zodMemberKind and zodValueKind", () => {
     ];
 
     const rules = forms.map((schema) => {
-      const outcome = zodValueKind(schema);
+      const outcome = zodValueWire(schema);
 
       return outcome.ok || outcome.error.kind !== "KindRefused" ? "" : outcome.error.refusals[0]?.rule;
     });
@@ -175,8 +176,8 @@ describe("zodMemberKind and zodValueKind", () => {
     ]);
   });
 
-  test("zodMemberKind checks the member's own default", () => {
-    const outcome = zodMemberKind(z.number().default(Number.NaN));
+  test("zodMemberWire checks the member's own default", () => {
+    const outcome = zodMemberWire(z.number().default(Number.NaN));
 
     const rule = outcome.ok || outcome.error.kind !== "KindRefused" ? "" : outcome.error.refusals[0]?.rule;
 
@@ -187,7 +188,7 @@ describe("zodMemberKind and zodValueKind", () => {
     const schema = z3.z.object({ a: z3.z.string() });
 
     assert.equal(schema["~standard"].vendor, "zod");
-    assert.deepEqual(zodMemberKind(schema), {
+    assert.deepEqual(zodMemberWire(schema), {
       ok: false,
       error: {
         kind: "Zod3Schema",

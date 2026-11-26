@@ -1,6 +1,11 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
-import { compareReport, extractorConfig, reportFileName } from "./report.ts";
+import type { BuiltPackage } from "./package.ts";
+
+import { apiReport, compareReport, extractorConfig, reportFileName } from "./report.ts";
 
 const entryPoint = { specifier: "horsies/zod", typesFile: "dist/zod.d.ts", reportName: "horsies-zod" };
 
@@ -38,15 +43,73 @@ describe("the API Extractor config of an entry point", () => {
     expect(reportFileName(entryPoint)).toBe("horsies-zod.api.md");
   });
 
-  test("a message other than a missing release tag, a forgotten export or a doc comment is an error", () => {
+  test("a forgotten export is a warning that the gate reads; any other message is an error", () => {
     expect(extractorConfig({ folder: "/p", entryPoints: [] }, entryPoint, "/r")).toMatchObject({
       messages: {
         compilerMessageReporting: { default: { logLevel: "error" } },
         extractorMessageReporting: {
           default: { logLevel: "error" },
-          "ae-forgotten-export": { logLevel: "none", addToApiReportFile: true },
+          "ae-forgotten-export": { logLevel: "warning", addToApiReportFile: false },
         },
       },
     });
+  });
+});
+
+const work = realpathSync(mkdtempSync(join(tmpdir(), "horsies-report-test-")));
+
+afterAll(() => {
+  rmSync(work, { recursive: true, force: true });
+});
+
+/** A package in `work/<name>` with `dist/index.d.ts` and `dist/hidden.d.ts`. */
+function declarationPackage(name: string, index: string): BuiltPackage {
+  const folder = join(work, name);
+
+  mkdirSync(join(folder, "dist"), { recursive: true });
+  writeFileSync(join(folder, "package.json"), JSON.stringify({ name: "probe", version: "0.0.0" }));
+  writeFileSync(join(folder, "dist", "hidden.d.ts"), "export type Hidden = { readonly id: string };\n");
+  writeFileSync(join(folder, "dist", "index.d.ts"), index);
+
+  return { folder, entryPoints: [{ specifier: "probe", typesFile: "dist/index.d.ts", reportName: "probe" }] };
+}
+
+describe("apiReport", () => {
+  test("the report of an entry point whose surface names only exported types", () => {
+    const built = declarationPackage("exported", 'export type { Hidden } from "./hidden.ts";\n');
+    const entry = built.entryPoints[0];
+    const report = entry === undefined ? undefined : apiReport(built, entry, built.folder);
+
+    expect(report?.ok && report.value.forgotten).toEqual([]);
+    expect(report?.ok && report.value.text).toContain("export type Hidden = {");
+  });
+
+  test("each type that a public declaration names and the entry point does not export", () => {
+    const index = 'import type { Hidden } from "./hidden.ts";\nexport declare function find(id: string): Hidden;\n';
+    const built = declarationPackage("forgotten", index);
+    const entry = built.entryPoints[0];
+    const report = entry === undefined ? undefined : apiReport(built, entry, built.folder);
+
+    expect(report?.ok && report.value.forgotten.map(({ file, line }) => `${file}:${line}`)).toEqual(["dist/index.d.ts:2"]);
+    expect(report?.ok && report.value.forgotten[0]?.text).toContain('"Hidden"');
+  });
+
+  test("ExtractorErrors: an error-level message of API Extractor (an internal name without an underscore)", () => {
+    const built = declarationPackage("refused", "/** @internal */\nexport declare const count: number;\n");
+    const entry = built.entryPoints[0];
+    const report = entry === undefined ? undefined : apiReport(built, entry, built.folder);
+
+    expect(report?.ok === false && report.error.kind).toBe("ExtractorErrors");
+  });
+
+  test("ExtractorThrew: a package folder without package.json", () => {
+    const built = declarationPackage("no-manifest", "export declare const count: number;\n");
+    const entry = built.entryPoints[0];
+
+    rmSync(join(built.folder, "package.json"));
+
+    const report = entry === undefined ? undefined : apiReport(built, entry, built.folder);
+
+    expect(report?.ok === false && report.error.kind).toBe("ExtractorThrew");
   });
 });

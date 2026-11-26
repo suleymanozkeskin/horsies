@@ -1,6 +1,17 @@
 // A user of the entry point `horsies`: wire types, their value and sent types, Decimal, Result and TaskOutcome.
 
-import { Decimal, h, type JsonValue, type Result, type TaskOutcome, type Wire } from "horsies";
+import {
+  Decimal,
+  h,
+  type JsonValue,
+  LIBRARY_TASK_CODES,
+  type LibraryTaskCode,
+  type Result,
+  type SentOf,
+  type TaskOutcome,
+  type ValueOf,
+  type Wire,
+} from "horsies";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
 
@@ -60,3 +71,10 @@ export function outcomeText(outcome: TaskOutcome<Order, "OUT_OF_STOCK">): string
 }
 
 export const nullableCount: Wire<number | null> = describeWire(h.int());
+
+// The helper types that the public declarations name are importable.
+expectType<Equal<ValueOf<typeof order>, Order>>();
+
+expectType<Equal<SentOf<typeof order>["retries"], number | undefined>>();
+
+export const firstLibraryCode: LibraryTaskCode | undefined = LIBRARY_TASK_CODES[0];

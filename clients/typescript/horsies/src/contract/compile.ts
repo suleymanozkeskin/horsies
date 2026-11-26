@@ -128,9 +128,11 @@ function compileParameter(parameter: ParameterSource): Result<Member, readonly C
 
     case "zod": {
       const schema = parameter.schema.schema;
-      const member = withEntry(path, (entry) => entry.zodMemberKind(schema));
+      const member = withEntry(path, (entry) => entry.zodMemberWire(schema));
 
-      return member.ok ? ok({ name: parameter.name, kind: member.value.kind, presence: member.value.presence }) : member;
+      return member.ok
+        ? ok({ name: parameter.name, kind: kindOf(member.value), presence: presenceOf(member.value) })
+        : member;
     }
 
     default: {
@@ -150,7 +152,9 @@ function compileOutput(source: SchemaSource): Result<Kind, readonly ContractRefu
     case "zod": {
       const schema = source.schema;
 
-      return withEntry("output", (entry) => entry.zodValueKind(schema));
+      const output = withEntry("output", (entry) => entry.zodValueWire(schema));
+
+      return output.ok ? ok(kindOf(output.value)) : output;
     }
 
     default: {

@@ -12,7 +12,7 @@ import { extname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { KindRefused } from "../wire/check.ts";
-import type { Kind, MemberPresence } from "../wire/kinds.ts";
+import type { RequiredWire, ValueWire } from "../wire/infer.ts";
 import type { Result } from "../wire/result.ts";
 import type { StandardSchemaMarker } from "./schema.ts";
 
@@ -39,12 +39,13 @@ export type ZodAdapterRefused =
   | { readonly kind: "SchemaRefused"; readonly refusals: readonly ZodNodeRefused[] }
   | { readonly kind: "KindRefused"; readonly refusals: readonly KindRefused[] };
 
-/** The functions of `horsies/zod` that the contracts call. */
+/**
+ * The functions of `horsies/zod` that the contracts call. Each gives a wire type: the contracts read its kind with
+ * `kindOf` and its presence with `presenceOf`.
+ */
 export interface ZodKindEntry {
-  zodMemberKind(
-    schema: StandardSchemaMarker,
-  ): Result<{ readonly kind: Kind; readonly presence: MemberPresence }, ZodAdapterRefused>;
-  zodValueKind(schema: StandardSchemaMarker): Result<Kind, ZodAdapterRefused>;
+  zodMemberWire(schema: StandardSchemaMarker): Result<ValueWire, ZodAdapterRefused>;
+  zodValueWire(schema: StandardSchemaMarker): Result<RequiredWire, ZodAdapterRefused>;
 }
 
 /** The adapter, or why it did not load (zod is not installed, or the package files are incomplete). */
