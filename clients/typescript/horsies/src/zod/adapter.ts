@@ -14,10 +14,10 @@
 //   stored value.
 
 import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
-import type { ValueCheck } from "../codec/conversion.ts";
-import { issuesText } from "../codec/conversion.ts";
+import { issuesText, type ValueCheck } from "../codec/conversion.ts";
 import { isEngineKey } from "../codec/engine-keys.ts";
-import { encodeRefused, itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";
+import type { JsonText } from "../codec/json-text.ts";
+import { encodeRefused, type EncodeRefused, itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";
 import { isBoolean, isNumber, isPlainObject, isString } from "../codec/values.ts";
 import { encodeValue } from "../codec/writer.ts";
 import {
@@ -57,8 +57,6 @@ import {
   zodTypeOf,
 } from "./definition.ts";
 import { type ZodRule, type ZodSchemaRefused, zodRefused } from "./rules.ts";
-import type { JsonText } from "../codec/json-text.ts";
-import type { EncodeRefused } from "../codec/refusal.ts";
 import { checksRun, codecRuns, decodeRun, parseRun, recordKeysRun } from "./runs.ts";
 
 /** The nodes of one level of a stored value that the walk allows for: the array or object, and four wrappers. */
