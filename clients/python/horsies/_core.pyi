@@ -2544,18 +2544,20 @@ class PruneFailed:
 
 @final
 class RerunCommandRecord:
-    """One rerun request: the source task id, the deadline of the new task (aware, or None
-    for no deadline), the caller key, and the trace that the new task stores (NoTraceCarrier,
-    or the TraceCarrier of the caller's current context). A naive deadline raises TypeError.
+    """One rerun command: the source task id, the latest start time of the new task (aware,
+    or None for no limit), the idempotency key, and the trace that the new task stores
+    (NoTraceCarrier, or the TraceCarrier of the caller's current context). A naive good_until
+    raises TypeError.
     """
-    def __init__(self, *, source_task_id: uuid.UUID, deadline: datetime.datetime | None, caller_key: str | None, trace: NoTraceCarrier | TraceCarrier) -> None: ...
+    def __init__(self, *, source_task_id: uuid.UUID, good_until: datetime.datetime | None, idempotency_key: str | None, trace: NoTraceCarrier | TraceCarrier) -> None: ...
 
 
 @final
 class RerunPolicyRecord:
     """The enqueue policy of the new task: its retention class key, whether it keeps its input
-    for a rerun, and the reservation window of a caller key in microseconds. A window not
-    above 0 or above 30 days, or an empty class key, raises ValueError.
+    for a rerun, and the reservation window of an idempotency key in microseconds. A window
+    not above 0 or above 30 days, or a text that is not the key of a retention class, raises
+    ValueError.
     """
     def __init__(self, *, retention_class_key: str, retain_rerun_input: bool, reservation_window_us: int) -> None: ...
 
@@ -2665,7 +2667,7 @@ class RerunClientFamilyMismatch:
 class RerunUnknownStoredFamily:
     """The family row of the database holds a value that is not a client family (stored):
     corrupt stored data. Nothing written. message names the table, the column and the
-    value; exception is a CoreContractViolation with the subject rerun_task.
+    value; exception is a CoreContractViolation with the subject rerun_task_in.
     """
     @property
     def stored(self) -> str: ...
@@ -2676,8 +2678,8 @@ class RerunUnknownStoredFamily:
 
 
 @final
-class RerunCallerKeyRefused:
-    """The caller key is not a valid idempotency key; cause names why. Nothing written."""
+class RerunIdempotencyKeyRefused:
+    """The idempotency key is not valid; cause names why. Nothing written."""
     @property
     def cause(self) -> str: ...
 
@@ -2695,18 +2697,18 @@ class RerunEnqueuedRecord:
 
 @final
 class RerunKeyReplayRecord:
-    """The caller key already holds this rerun command, as existing_task_id."""
+    """The idempotency key already holds this rerun command, as existing_task_id."""
     @property
     def existing_task_id(self) -> uuid.UUID: ...
 
 
 @final
 class RerunKeyConflictRecord:
-    """The caller key holds another command (the source's own included)."""
+    """The idempotency key holds another command (the source's own included), as owner_task_id."""
     @property
     def task_id(self) -> uuid.UUID: ...
     @property
-    def reserved_by_task_id(self) -> uuid.UUID: ...
+    def owner_task_id(self) -> uuid.UUID: ...
 
 
 @final
@@ -3379,7 +3381,7 @@ def prepare_fleet_metrics(handle: CoreHandle, *, listen: ListenAddress, queue_na
     """
 
 
-def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], command: RerunCommandRecord, policy: RerunPolicyRecord, *, sent_at: datetime.datetime) -> RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused:
+def prepare_rerun_write(read: PreparedStatement, row: tuple[object, ...], command: RerunCommandRecord, policy: RerunPolicyRecord, *, sent_at: datetime.datetime) -> RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunIdempotencyKeyRefused | IdMintRefused:
     """Decide the rerun from the row of its read (a tuple in column order): the write, or the
     answer that ends it with nothing written. Pure apart from the id mint. A row that does not
     fit the columns raises CoreDefect.

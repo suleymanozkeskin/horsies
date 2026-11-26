@@ -17,8 +17,8 @@ use crate::core::history::reads::result::{
     HistoryResultPayload, HistoryTaskResult, TaskResultRead,
 };
 use crate::core::history::rerun::operations::{
-    rerun_first_statement, rerun_task_in_transaction, RerunEnqueuePolicy, RerunError, RerunOutcome,
-    RerunTask,
+    rerun_first_statement, rerun_task_in_transaction, RerunCommand, RerunEnqueuePolicy, RerunError,
+    RerunOutcome,
 };
 use crate::core::{EnqueueRetention, PostgresConfig, TaskInfo};
 
@@ -1481,7 +1481,7 @@ impl PostgresBroker {
     /// `OutcomeUnknown` at `COMMIT`.
     pub async fn rerun_task(
         &self,
-        command: RerunTask,
+        command: RerunCommand,
         policy: RerunEnqueuePolicy,
     ) -> Result<RerunOutcome, RerunError> {
         self.check_client_family_for_write()

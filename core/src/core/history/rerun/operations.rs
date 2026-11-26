@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::broker::client_family::ClientFamily;
 use crate::broker::core_rows::{RowDecodeError, StatementLog};
 use crate::broker::pools::PoolSettingsError;
-use crate::core::history::ddl::classes::DEFAULT_RETENTION_CLASS_KEY;
+use crate::core::config::EnqueueRetention;
 use crate::core::history::enqueue::EnqueuePreparationError;
 use crate::core::history::identity::fingerprint::FingerprintError;
 use crate::core::history::identity::keys::{validate_reservation_window, IdempotencyKeyError};
@@ -20,27 +20,27 @@ use super::steps::{
     decode_rerun_write, prepare_rerun_write, rerun_read, RerunPreparation, RerunRowError,
 };
 
-/// One rerun request: the source task, the deadline and the caller key of
-/// the new task, and its trace carrier ([`RerunTask::new`] has none;
-/// [`RerunTask::with_trace`] sets one).
+/// One rerun command: the source task, the latest start time (`good_until`)
+/// and the idempotency key of the new task, and its trace carrier
+/// ([`RerunCommand::new`] has none; [`RerunCommand::with_trace`] sets one).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RerunTask {
+pub struct RerunCommand {
     source_task_id: Uuid,
-    deadline: Option<DateTime<Utc>>,
-    caller_key: Option<String>,
+    good_until: Option<DateTime<Utc>>,
+    idempotency_key: Option<String>,
     trace: StoredTrace,
 }
 
-impl RerunTask {
+impl RerunCommand {
     pub fn new(
         source_task_id: Uuid,
-        deadline: Option<DateTime<Utc>>,
-        caller_key: Option<String>,
+        good_until: Option<DateTime<Utc>>,
+        idempotency_key: Option<String>,
     ) -> Self {
         Self {
             source_task_id,
-            deadline,
-            caller_key,
+            good_until,
+            idempotency_key,
             trace: StoredTrace::NoCarrier,
         }
     }
@@ -65,37 +65,33 @@ impl RerunTask {
         self.source_task_id
     }
 
-    pub fn deadline(&self) -> Option<DateTime<Utc>> {
-        self.deadline
+    pub fn good_until(&self) -> Option<DateTime<Utc>> {
+        self.good_until
     }
 
-    pub fn caller_key(&self) -> Option<&str> {
-        self.caller_key.as_deref()
+    pub fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_deref()
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerunEnqueuePolicy {
-    retention_class_key: String,
+    retention: EnqueueRetention,
     retain_rerun_input: bool,
     reservation_window: Duration,
 }
 
 impl RerunEnqueuePolicy {
+    /// Errors: [`RerunError::Idempotency`] for a reservation window that is
+    /// not above zero, is above 30 days, or is finer than a microsecond.
     pub fn new(
-        retention_class_key: impl Into<String>,
+        retention: EnqueueRetention,
         retain_rerun_input: bool,
         reservation_window: Duration,
     ) -> Result<Self, RerunError> {
-        let retention_class_key = retention_class_key.into();
-        if retention_class_key.is_empty() {
-            return Err(RerunError::InvalidPolicy(
-                "retention class key must be non-empty".to_owned(),
-            ));
-        }
         validate_reservation_window(reservation_window)?;
         Ok(Self {
-            retention_class_key,
+            retention,
             retain_rerun_input,
             reservation_window,
         })
@@ -103,14 +99,19 @@ impl RerunEnqueuePolicy {
 
     pub fn standard(retain_rerun_input: bool) -> Self {
         Self {
-            retention_class_key: DEFAULT_RETENTION_CLASS_KEY.to_owned(),
+            retention: EnqueueRetention::Default,
             retain_rerun_input,
             reservation_window: Duration::hours(24),
         }
     }
 
-    pub fn retention_class_key(&self) -> &str {
-        &self.retention_class_key
+    pub fn retention(&self) -> EnqueueRetention {
+        self.retention
+    }
+
+    /// The class key of the retention ([`EnqueueRetention::class_key`]).
+    pub fn retention_class_key(&self) -> String {
+        self.retention.class_key()
     }
 
     pub fn retain_rerun_input(&self) -> bool {
@@ -164,7 +165,7 @@ pub enum RerunOutcome {
     },
     KeyConflict {
         task_id: Uuid,
-        reserved_by_task_id: Uuid,
+        owner_task_id: Uuid,
     },
     KeyReplay {
         existing_task_id: Uuid,
@@ -256,7 +257,7 @@ pub(crate) fn rerun_first_statement() -> &'static TypedStatement {
 }
 
 /// `horsies_enqueue_task` for a rerun, in the caller's transaction (Python
-/// `rerun_task`): start `NOW`, lineage `RERUN`, send kind `FIRST`; a keyed
+/// `rerun_task_in_async`): start `NOW`, lineage `RERUN`, send kind `FIRST`; a keyed
 /// rerun claims its key inside the call. Parameters in order: task id, task
 /// name, queue name, priority, input, task options, execution, retention
 /// class key, retain rerun input, max retries, good until, sent at,
@@ -299,14 +300,14 @@ pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
     ],
 );
 
-/// Run one rerun inside the caller's transaction (Python `rerun_task`,
+/// Run one rerun inside the caller's transaction (Python `rerun_task_in_async`,
 /// `clients/python/horsies/core/history/rerun/operations.py`): the three steps of
 /// `steps` on `transaction`, so the core's own path and a client's
 /// transaction run one rerun.
 ///
 /// Statements: the source read (`horsies_rerun_source_read`); for a source
 /// with an inline input, one `horsies_enqueue_task` with the lineage `RERUN`,
-/// which claims a caller key first. Each outcome but `Enqueued` writes
+/// which claims an idempotency key first. Each outcome but `Enqueued` writes
 /// nothing. The caller's commit or rollback decides whether the claim and
 /// the row stay. `own` is the family of the calling handle: a database of
 /// another family is refused before the write.
@@ -314,7 +315,7 @@ pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
 /// Errors: [`RerunError::UnknownRetentionClass`],
 /// [`RerunError::ClientFamilyMismatch`], [`RerunError::UnknownStoredFamily`],
 /// [`RerunError::Idempotency`] (the
-/// caller key) and [`RerunError::Identity`] before any write;
+/// idempotency key) and [`RerunError::Identity`] before any write;
 /// [`RerunError::Statement`] (a missing history reader is refused with
 /// `42883`); [`RerunError::RowDecode`] and [`RerunError::CallerRow`]. After
 /// an error the caller's transaction may hold the claim; the caller does not
@@ -322,7 +323,7 @@ pub(super) static RERUN_ENQUEUE: TypedStatement = TypedStatement::new(
 pub(crate) async fn rerun_task_in_transaction(
     transaction: &mut Transaction<'_>,
     log: StatementLog,
-    command: &RerunTask,
+    command: &RerunCommand,
     policy: &RerunEnqueuePolicy,
     own: ClientFamily,
 ) -> Result<RerunOutcome, RerunError> {
@@ -344,7 +345,7 @@ pub(crate) async fn rerun_task_in_transaction(
         RerunPreparation::UnknownStoredFamily(unknown) => {
             return Err(RerunError::UnknownStoredFamily(unknown));
         }
-        RerunPreparation::CallerKeyRefused(refused) => {
+        RerunPreparation::IdempotencyKeyRefused(refused) => {
             return Err(RerunError::Idempotency(refused));
         }
         RerunPreparation::IdMintRefused(refused) => return Err(RerunError::Identity(refused)),

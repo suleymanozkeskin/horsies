@@ -663,12 +663,12 @@ but `Enqueued` writes nothing.
 In a transaction of the app:
 
 ```rust
-use horsies::rerun::{AppRerunError, RerunEnqueuePolicy, RerunOutcome, RerunTask};
+use horsies::rerun::{AppRerunError, RerunCommand, RerunEnqueuePolicy, RerunOutcome};
 use horsies::Horsies;
 use uuid::Uuid;
 
 async fn rerun_failed(app: &Horsies, source_task_id: Uuid) -> Result<Option<Uuid>, AppRerunError> {
-    let command = RerunTask::new(source_task_id, None, None);
+    let command = RerunCommand::new(source_task_id, None, None);
     let policy = RerunEnqueuePolicy::standard(true);
     match app.rerun_task(command, policy).await? {
         RerunOutcome::Enqueued { new_task_id, .. } => Ok(Some(new_task_id)),
@@ -690,7 +690,7 @@ In a transaction that the caller owns (feature `sqlx`; feature
 
 ```rust
 use chrono::Utc;
-use horsies::rerun::{rerun_task_in, RerunEnqueuePolicy, RerunOutcome, RerunTask, SqlxCaller};
+use horsies::rerun::{rerun_task_in, RerunCommand, RerunEnqueuePolicy, RerunOutcome, SqlxCaller};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -705,7 +705,7 @@ async fn rerun_with_audit(
         .await?;
     let outcome = rerun_task_in(
         &mut SqlxCaller::new(&mut transaction),
-        &RerunTask::new(source_task_id, None, None),
+        &RerunCommand::new(source_task_id, None, None),
         &RerunEnqueuePolicy::standard(true),
         Utc::now(),
     )
@@ -715,21 +715,25 @@ async fn rerun_with_audit(
 }
 ```
 
-- `RerunTask::new(source_task_id, deadline, caller_key)`: `deadline` is an
-  `Option<DateTime<Utc>>` for the new task; `caller_key` is an
-  `Option<String>` idempotency key of the rerun.
-- `RerunEnqueuePolicy::new(retention_class_key, retain_rerun_input,
-  reservation_window)` returns `Result<_, RerunError>`.
+- `RerunCommand::new(source_task_id, good_until, idempotency_key)`:
+  `good_until` is an `Option<DateTime<Utc>>`, the latest start time of the
+  new task; `idempotency_key` is an `Option<String>` idempotency key of the
+  rerun.
+- `RerunEnqueuePolicy::new(retention, retain_rerun_input,
+  reservation_window)` returns `Result<_, RerunError>`. `retention` is an
+  `EnqueueRetention`: `Default` (the class `standard_30d`), `Forever`, or
+  `Period(RetentionDays)`. The policy derives the class key of the new task
+  from it.
   `RerunEnqueuePolicy::standard(retain_rerun_input)` uses the class
   `standard_30d` and a 24-hour window.
 - `rerun_task_in` commits nothing. The caller's commit keeps the new task
   and the key claim; its rollback drops them. After an error the
   transaction may hold the key claim or the new row: do not commit it.
-- `AppRerunError`: `Connect(BrokerError)` (nothing ran) or
+- `AppRerunError`: `ConnectFailed(BrokerError)` (nothing ran) or
   `Rerun(RerunError)`.
-- `CallerRerunError<E>`: `Driver(E)`, `ClassNotRegistered { key }`,
+- `CallerRerunError<E>`: `DriverFailed(E)`, `ClassNotRegistered { key }`,
   `ClientFamilyMismatch { stored }`, `UnknownStoredFamily` (a family row
-  that holds no client family), `CallerKeyRefused`, `IdMintRefused`,
+  that holds no client family), `IdempotencyKeyRefused`, `IdMintRefused`,
   `Row`.
 
 | `RerunOutcome` | Meaning |
@@ -741,8 +745,8 @@ async fn rerun_with_audit(
 | `NotEligible { task_id, reason }` | `NotEligibleReason::CompletedSource` or `WorkflowTask` |
 | `InputUnavailable { task_id, disposition }` | The source stores no input; `disposition` is the stored reason (`DECLINED_BY_POLICY`, `OVER_BOUND`) |
 | `InputCorrupt { task_id, detail }` | The stored input fails its integrity or shape check |
-| `KeyConflict { task_id, reserved_by_task_id }` | The caller key is held by another command |
-| `KeyReplay { existing_task_id }` | The caller key already holds this rerun command; the existing task answers |
+| `KeyConflict { task_id, owner_task_id }` | Another command holds the idempotency key; `owner_task_id` is its task |
+| `KeyReplay { existing_task_id }` | The idempotency key already holds this rerun command; the existing task answers |
 
 The rules are on the shared docs page `monitoring/action-semantics`
 ("Task rerun").
@@ -822,7 +826,7 @@ use horsies::{
 };
 use horsies::blocking::{HorsiesView, TaskFunctionView, TaskHandleView};
 use horsies::rerun::{
-    rerun_task_in, AppRerunError, CallerRerunError, CallerTransaction, NotEligibleReason,
-    RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+    rerun_task_in, AppRerunError, CallerRerunError, CallerTransaction, EnqueueRetention,
+    NotEligibleReason, RerunCommand, RerunEnqueuePolicy, RerunError, RerunOutcome,
 };
 ```

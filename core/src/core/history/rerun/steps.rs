@@ -1,5 +1,5 @@
 //! The rerun as three pure steps for a transaction that the caller owns
-//! (Python `rerun_task(connection, command, policy)`). The core builds each
+//! (Python `rerun_task_in_async(connection, command, policy)`). The core builds each
 //! statement and decides the outcome; the caller's connection runs the
 //! statements, so the rerun commits or rolls back with the caller's own
 //! writes. No step does I/O or starts a runtime.
@@ -36,7 +36,7 @@ use super::caller::{
 };
 use super::input_envelope::{decode_framed_rerun_input, InputEnvelopeDecodeError};
 use super::operations::{
-    NotEligibleReason, RerunEnqueuePolicy, RerunOutcome, RerunTask, RERUN_ENQUEUE,
+    NotEligibleReason, RerunCommand, RerunEnqueuePolicy, RerunOutcome, RERUN_ENQUEUE,
     RERUN_SOURCE_READ,
 };
 
@@ -176,9 +176,9 @@ pub enum RerunPreparation {
     /// The family row holds a value that is not a client family: corrupt
     /// stored data, not retryable. Nothing is written.
     UnknownStoredFamily(UnknownStoredFamily),
-    /// The caller key is not a valid idempotency key (Python raises
-    /// `ValueError`). Nothing is written.
-    CallerKeyRefused(IdempotencyKeyError),
+    /// The idempotency key is not valid (Python raises `ValueError`).
+    /// Nothing is written.
+    IdempotencyKeyRefused(IdempotencyKeyError),
     /// The task id source refused to mint (the millisecond clock is outside
     /// the 48-bit range; Python raises `ValueError`). Nothing is written.
     IdMintRefused(Uuid7Error),
@@ -194,13 +194,11 @@ pub enum RerunWriteOutcome {
         source_task_id: Uuid,
         rerun_root_task_id: Uuid,
     },
-    /// The caller key holds this rerun command already, as `existing_task_id`.
+    /// The idempotency key holds this rerun command already, as `existing_task_id`.
     KeyReplay { existing_task_id: Uuid },
-    /// The caller key holds another command (the source's own included).
-    KeyConflict {
-        task_id: Uuid,
-        reserved_by_task_id: Uuid,
-    },
+    /// The idempotency key holds another command (the source's own included),
+    /// as `owner_task_id`.
+    KeyConflict { task_id: Uuid, owner_task_id: Uuid },
 }
 
 impl From<RerunWriteOutcome> for RerunOutcome {
@@ -220,10 +218,10 @@ impl From<RerunWriteOutcome> for RerunOutcome {
             }
             RerunWriteOutcome::KeyConflict {
                 task_id,
-                reserved_by_task_id,
+                owner_task_id,
             } => RerunOutcome::KeyConflict {
                 task_id,
-                reserved_by_task_id,
+                owner_task_id,
             },
         }
     }
@@ -247,12 +245,12 @@ pub enum RerunRowError {
 /// id, `$2` the retention class key of the new task (Python
 /// `_RERUN_SOURCE_SQL`). Reads only; the detail reader keeps ACCESS SHARE
 /// on the source leaf until the caller's transaction ends. Pure.
-pub fn rerun_read(command: &RerunTask, policy: &RerunEnqueuePolicy) -> CallerStatement {
+pub fn rerun_read(command: &RerunCommand, policy: &RerunEnqueuePolicy) -> CallerStatement {
     CallerStatement::new(
         &RERUN_SOURCE_READ,
         vec![
             StatementValue::Uuid(command.source_task_id()),
-            StatementValue::Text(policy.retention_class_key().to_owned()),
+            StatementValue::Text(policy.retention_class_key()),
         ],
         &RERUN_READ_COLUMNS,
     )
@@ -282,7 +280,7 @@ enum SourceRead {
     History(RerunSource),
 }
 
-/// Decide the rerun from the row of `read` (Python `rerun_task` after its
+/// Decide the rerun from the row of `read` (Python `rerun_task_in_async` after its
 /// read): the client family (refused unless it is `own`, and refused as
 /// corrupt when it is not a client family), the class check,
 /// the location, the eligibility (workflow task, completed source), the
@@ -294,7 +292,7 @@ enum SourceRead {
 pub fn prepare_rerun_write(
     read: &CallerStatement,
     row: &CallerRow,
-    command: &RerunTask,
+    command: &RerunCommand,
     policy: &RerunEnqueuePolicy,
     own: ClientFamily,
     sent_at: DateTime<Utc>,
@@ -317,7 +315,7 @@ pub fn prepare_rerun_write(
         true => {}
         false => {
             return Ok(RerunPreparation::ClassNotRegistered {
-                class_key: policy.retention_class_key().to_owned(),
+                class_key: policy.retention_class_key(),
             });
         }
     }
@@ -452,10 +450,10 @@ fn history_source(
 }
 
 /// The eligibility ladder and the write of a history source (Python
-/// `rerun_task` after `read_rerun_source`).
+/// `rerun_task_in_async` after `read_rerun_source`).
 fn prepare_write(
     source: RerunSource,
-    command: &RerunTask,
+    command: &RerunCommand,
     policy: &RerunEnqueuePolicy,
     sent_at: DateTime<Utc>,
 ) -> RerunPreparation {
@@ -508,18 +506,18 @@ fn prepare_write(
         &source.queue_name,
         source.priority,
         &framed.input,
-        command.deadline(),
+        command.good_until(),
         None,
         framed.options.as_deref(),
-        Some(policy.retention_class_key()),
+        Some(policy.retention_class_key().as_str()),
         policy.retain_rerun_input(),
-        command.caller_key(),
+        command.idempotency_key(),
         Some(source.task_id),
         Some(root_task_id),
     ) {
         Ok(facts) => facts,
         Err(EnqueuePreparationError::Idempotency(refused)) => {
-            return RerunPreparation::CallerKeyRefused(refused);
+            return RerunPreparation::IdempotencyKeyRefused(refused);
         }
         Err(EnqueuePreparationError::InvalidExecution(invalid)) => {
             return input_corrupt(
@@ -561,7 +559,7 @@ fn prepare_write(
         StatementValue::Text(facts.retention_class_key),
         StatementValue::Bool(facts.retain_rerun_input),
         StatementValue::Int4(source.max_retries),
-        optional_instant(command.deadline()),
+        optional_instant(command.good_until()),
         StatementValue::Timestamptz(sent_at),
         StatementValue::Int2(facts.command_fingerprint_version),
         StatementValue::Bytea(facts.command_fingerprint.to_vec()),
@@ -670,7 +668,7 @@ fn rerun_write_outcome(
         },
         EnqueueTaskOutcome::KeyConflict { owner } => RerunWriteOutcome::KeyConflict {
             task_id: source_task_id,
-            reserved_by_task_id: owner,
+            owner_task_id: owner,
         },
         EnqueueTaskOutcome::PayloadMismatch | EnqueueTaskOutcome::ConflictUnverifiable => panic!(
             "the rerun write of the minted task id {new_task_id} answered {written:?}: \

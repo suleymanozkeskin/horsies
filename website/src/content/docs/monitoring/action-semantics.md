@@ -127,7 +127,7 @@ source (`rerun_of_task_id`, and `rerun_root_task_id` for a chain).
 | History row does not decode (for example a stored status that is not a task status) | Refused, source corrupt; nothing is written |
 | Not found in live or history | Refused, source absent, with a `TaskAbsenceReason` that says whether retention can explain the absence |
 | Row is a workflow node | Refused, not eligible (workflow task) |
-| Caller key already used | Key replay (same request: the id of the task it enqueued) or key conflict (a different request under that key) |
+| Idempotency key already used | Key replay (same request: the id of the task it enqueued) or key conflict (a different request under that key) |
 
 Whether a task can be rerun is decided **at enqueue**, not at rerun time: the
 `retain_rerun_input_default` broker setting (with a per-task override)

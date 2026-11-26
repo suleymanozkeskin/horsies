@@ -51,9 +51,9 @@ from horsies.core.telemetry.send_telemetry import (
     send_telemetry_of,
 )
 from horsies.core.history.rerun.operations import (
+    RerunCommand,
     RerunEnqueuePolicy,
     RerunOutcome,
-    RerunTask,
     rerun_with_trace,
     rerun_with_trace_async,
 )
@@ -1798,15 +1798,15 @@ class Horsies:
         (`horsies.core.telemetry.send_telemetry`). Pure."""
         return self._send_telemetry
 
-    async def rerun_task_async(
+    async def rerun_task_in_async(
         self,
         connection: AsyncConnection,
-        command: RerunTask,
+        command: RerunCommand,
         policy: RerunEnqueuePolicy,
     ) -> RerunOutcome:
-        """``horsies.rerun_task`` with the tracing setting of this app: the
-        same statements on ``connection``, in its transaction, with the same
-        outcomes and errors. It does not commit.
+        """``horsies.rerun_task_in_async`` with the tracing setting of this
+        app: the same statements on ``connection``, in its transaction, with
+        the same outcomes and errors. It does not commit.
 
         With ``OtelTracing`` the new task stores the carrier that the
         configured propagator injects for the caller's current context, with
@@ -1824,13 +1824,13 @@ class Horsies:
             current_context_trace(self._send_telemetry),
         )
 
-    def rerun_task(
+    def rerun_task_in(
         self,
         connection: Connection,
-        command: RerunTask,
+        command: RerunCommand,
         policy: RerunEnqueuePolicy,
     ) -> RerunOutcome:
-        """``rerun_task_async`` on a blocking SQLAlchemy ``Connection`` of the
+        """``rerun_task_in_async`` on a blocking SQLAlchemy ``Connection`` of the
         caller: the same statements in its transaction, the same trace
         carrier, outcomes and errors. It does not commit."""
         return rerun_with_trace(

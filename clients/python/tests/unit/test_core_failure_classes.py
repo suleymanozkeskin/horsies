@@ -68,10 +68,10 @@ class TestCoreContractViolation:
 
 class TestCorePreconditionFailed:
     def test_keeps_its_fields_and_is_not_a_database_failure(self) -> None:
-        error = CorePreconditionFailed('rerun_task', 'database of another family', False)
+        error = CorePreconditionFailed('rerun_task_in', 'database of another family', False)
 
         assert (error.subject, error.message, error.retryable) == (
-            'rerun_task',
+            'rerun_task_in',
             'database of another family',
             False,
         )

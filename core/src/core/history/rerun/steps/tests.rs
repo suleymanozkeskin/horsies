@@ -1,7 +1,7 @@
 //! The three rerun steps without a database: the read statement, each
 //! answer of the read's row, the write statement and each write outcome.
 //!
-//! Python specification: the outcome catalog of `rerun_task`
+//! Python specification: the outcome catalog of `rerun_task_in_async`
 //! (`clients/python/horsies/core/history/rerun/operations.py`) and
 //! `_rerun_write_outcome`.
 
@@ -9,6 +9,7 @@ use chrono::Duration;
 use sha2::{Digest, Sha256};
 
 use super::*;
+use crate::core::config::EnqueueRetention;
 use crate::core::history::archive::attempts::{
     encode_attempt_archive, encode_attempt_snapshot, Finalizing, OpenAttempt, OpenAttemptFacts,
     OpenClaims,
@@ -21,12 +22,13 @@ const HOLDER: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00f0);
 const CLASS: &str = "standard_14d";
 const INPUT: &str = "{\"k\":\"v\"}";
 
-fn command(caller_key: Option<&str>) -> RerunTask {
-    RerunTask::new(SOURCE, None, caller_key.map(str::to_owned))
+fn command(idempotency_key: Option<&str>) -> RerunCommand {
+    RerunCommand::new(SOURCE, None, idempotency_key.map(str::to_owned))
 }
 
 fn policy() -> RerunEnqueuePolicy {
-    RerunEnqueuePolicy::new(CLASS, true, Duration::hours(24)).expect("a valid policy")
+    let retention = EnqueueRetention::from_class_key(CLASS).expect("a class key");
+    RerunEnqueuePolicy::new(retention, true, Duration::hours(24)).expect("a valid policy")
 }
 
 fn sent_at() -> DateTime<Utc> {
@@ -83,8 +85,8 @@ fn with(
     values
 }
 
-fn prepare_values(values: Vec<StatementValue>, caller_key: Option<&str>) -> RerunPreparation {
-    let command = command(caller_key);
+fn prepare_values(values: Vec<StatementValue>, idempotency_key: Option<&str>) -> RerunPreparation {
+    let command = command(idempotency_key);
     let read = rerun_read(&command, &policy());
     prepare_rerun_write(
         &read,
@@ -104,8 +106,8 @@ fn refusal(values: Vec<StatementValue>) -> RerunRefusal {
     }
 }
 
-fn write(caller_key: Option<&str>) -> RerunWrite {
-    match prepare_values(history_values(), caller_key) {
+fn write(idempotency_key: Option<&str>) -> RerunWrite {
+    match prepare_values(history_values(), idempotency_key) {
         RerunPreparation::Write(write) => write,
         other => panic!("expected a write, got {other:?}"),
     }
@@ -453,10 +455,10 @@ fn the_eligibility_ladder_refuses_in_python_order() {
 }
 
 #[test]
-fn an_invalid_caller_key_is_refused_before_the_write() {
+fn an_invalid_idempotency_key_is_refused_before_the_write() {
     assert!(matches!(
         prepare_values(history_values(), Some("")),
-        RerunPreparation::CallerKeyRefused(IdempotencyKeyError::Empty { .. })
+        RerunPreparation::IdempotencyKeyRefused(IdempotencyKeyError::Empty { .. })
     ));
 }
 
@@ -633,7 +635,7 @@ fn each_write_answer_maps_onto_its_rerun_outcome() {
         decode_rerun_write(&write, &written("KEY_CONFLICT", HOLDER)),
         Ok(RerunWriteOutcome::KeyConflict {
             task_id: SOURCE,
-            reserved_by_task_id: HOLDER,
+            owner_task_id: HOLDER,
         })
     );
     assert_eq!(

@@ -298,15 +298,15 @@ is a **new request** with a new id and recorded lineage:
 from datetime import timedelta
 
 from horsies import (
-    rerun_task, RerunTask, RerunEnqueuePolicy,
+    rerun_task_in_async, RerunCommand, RerunEnqueuePolicy,
     RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunSourceCorrupt,
     RerunNotEligible, RerunInputUnavailable, RerunInputCorrupt,
     RerunKeyConflict, RerunKeyReplay,
 )
 
-outcome = await rerun_task(
+outcome = await rerun_task_in_async(
     connection,
-    RerunTask(source_task_id=task_id, deadline=None),
+    RerunCommand(source_task_id=task_id, good_until=None),
     RerunEnqueuePolicy(
         # A period in whole days, or None for forever. A rerun states its
         # period outright -- there is no queue mapping to fall back on here.
@@ -324,7 +324,7 @@ match outcome:
         ...
     case RerunInputUnavailable() | RerunInputCorrupt():
         ...
-    case RerunSourceCorrupt(exception=cause):
+    case RerunSourceCorrupt(detail=detail):
         ...  # the source history row does not decode; nothing was written
     case RerunKeyConflict() | RerunKeyReplay():
         ...
@@ -337,11 +337,11 @@ was not retained cannot be rerun. A `COMPLETED` source is not eligible.
 `RerunSourceAbsent.reason` is a `TaskAbsenceReason`: it says whether
 retention can explain that no record has the id (see `monitoring.md`).
 
-`app.rerun_task_async(connection, command, policy)` is the same rerun with
-the tracing setting of the app (blocking: `app.rerun_task` on a SQLAlchemy
+`app.rerun_task_in_async(connection, command, policy)` is the same rerun with
+the tracing setting of the app (blocking: `app.rerun_task_in` on a SQLAlchemy
 `Connection`). With `OtelTracing()` the new task stores the trace carrier of
 the caller's current context, so its attempts continue the caller's trace.
-The free `rerun_task` stores no carrier.
+The free `rerun_task_in_async` stores no carrier.
 
 ## Result Types
 

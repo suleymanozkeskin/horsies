@@ -85,7 +85,7 @@ At its stop, a worker child calls `force_flush` of the global tracer provider, f
 
 ### Set the Propagator
 
-The client injects the carrier at a send and at a rerun of the app (`app.rerun_task`, `app.rerun_task_async`), and extracts it in the worker child, with the global propagator of `opentelemetry.propagate`. Set the same propagator in each process: with `opentelemetry.propagate.set_global_textmap`, or with the environment variable `OTEL_PROPAGATORS` that the OpenTelemetry API reads. The core stores the carrier of any propagator that fits the [carrier bounds](/horsies/observability/tracing/#the-trace-carrier).
+The client injects the carrier at a send and at a rerun of the app (`app.rerun_task_in`, `app.rerun_task_in_async`), and extracts it in the worker child, with the global propagator of `opentelemetry.propagate`. Set the same propagator in each process: with `opentelemetry.propagate.set_global_textmap`, or with the environment variable `OTEL_PROPAGATORS` that the OpenTelemetry API reads. The core stores the carrier of any propagator that fits the [carrier bounds](/horsies/observability/tracing/#the-trace-carrier).
 
 ### Link the Attempt to the Send
 

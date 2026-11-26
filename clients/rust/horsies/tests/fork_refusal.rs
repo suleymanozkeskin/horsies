@@ -24,7 +24,7 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use horsies::monitoring::{cancel_task, list_workflow_names, pause_workflow_action};
-use horsies::rerun::{RerunEnqueuePolicy, RerunTask};
+use horsies::rerun::{RerunCommand, RerunEnqueuePolicy};
 use horsies::{
     task, AppConfig, Horsies, TaskError, TaskInfoParts, WaitLimit, WorkflowHandle, WorkflowSpec,
 };
@@ -160,7 +160,7 @@ fn child_report(app: &mut Horsies) -> Vec<String> {
         }),
         refusal_of("Horsies::rerun_task", || {
             let _never = first_poll(app.rerun_task(
-                RerunTask::new(TASK_ID, None, None),
+                RerunCommand::new(TASK_ID, None, None),
                 RerunEnqueuePolicy::standard(false),
             ));
         }),

@@ -3169,14 +3169,14 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunCommandRecord",
-        doc: "One rerun request: the source task id, the deadline of the new task (aware, or None\nfor no deadline), the caller key, and the trace that the new task stores (NoTraceCarrier,\nor the TraceCarrier of the caller's current context). A naive deadline raises TypeError.",
-        constructor: Constructor::Parameters(&[keyword("source_task_id", "uuid.UUID"), keyword("deadline", "datetime.datetime | None"), keyword("caller_key", "str | None"), keyword("trace", "NoTraceCarrier | TraceCarrier")]),
+        doc: "One rerun command: the source task id, the latest start time of the new task (aware,\nor None for no limit), the idempotency key, and the trace that the new task stores\n(NoTraceCarrier, or the TraceCarrier of the caller's current context). A naive good_until\nraises TypeError.",
+        constructor: Constructor::Parameters(&[keyword("source_task_id", "uuid.UUID"), keyword("good_until", "datetime.datetime | None"), keyword("idempotency_key", "str | None"), keyword("trace", "NoTraceCarrier | TraceCarrier")]),
         properties: &[],
         methods: &[],
     },
     StubClass {
         name: "RerunPolicyRecord",
-        doc: "The enqueue policy of the new task: its retention class key, whether it keeps its input\nfor a rerun, and the reservation window of a caller key in microseconds. A window not\nabove 0 or above 30 days, or an empty class key, raises ValueError.",
+        doc: "The enqueue policy of the new task: its retention class key, whether it keeps its input\nfor a rerun, and the reservation window of an idempotency key in microseconds. A window\nnot above 0 or above 30 days, or a text that is not the key of a retention class, raises\nValueError.",
         constructor: Constructor::Parameters(&[keyword("retention_class_key", "str"), keyword("retain_rerun_input", "bool"), keyword("reservation_window_us", "int")]),
         properties: &[],
         methods: &[],
@@ -3253,14 +3253,14 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunUnknownStoredFamily",
-        doc: "The family row of the database holds a value that is not a client family (stored):\ncorrupt stored data. Nothing written. message names the table, the column and the\nvalue; exception is a CoreContractViolation with the subject rerun_task.",
+        doc: "The family row of the database holds a value that is not a client family (stored):\ncorrupt stored data. Nothing written. message names the table, the column and the\nvalue; exception is a CoreContractViolation with the subject rerun_task_in.",
         constructor: Constructor::NoConstructor,
         properties: &[property("stored", "str"), property("message", "str"), property("exception", CORE_FAILURE_EXCEPTION)],
         methods: &[],
     },
     StubClass {
-        name: "RerunCallerKeyRefused",
-        doc: "The caller key is not a valid idempotency key; cause names why. Nothing written.",
+        name: "RerunIdempotencyKeyRefused",
+        doc: "The idempotency key is not valid; cause names why. Nothing written.",
         constructor: Constructor::NoConstructor,
         properties: &[property("cause", "str")],
         methods: &[],
@@ -3274,16 +3274,16 @@ const HISTORY_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "RerunKeyReplayRecord",
-        doc: "The caller key already holds this rerun command, as existing_task_id.",
+        doc: "The idempotency key already holds this rerun command, as existing_task_id.",
         constructor: Constructor::NoConstructor,
         properties: &[property("existing_task_id", "uuid.UUID")],
         methods: &[],
     },
     StubClass {
         name: "RerunKeyConflictRecord",
-        doc: "The caller key holds another command (the source's own included).",
+        doc: "The idempotency key holds another command (the source's own included), as owner_task_id.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("task_id", "uuid.UUID"), property("reserved_by_task_id", "uuid.UUID")],
+        properties: &[property("task_id", "uuid.UUID"), property("owner_task_id", "uuid.UUID")],
         methods: &[],
     },
 ];
@@ -3933,7 +3933,7 @@ const FUNCTIONS: &[StubFunction] = &[
     StubFunction {
         name: "prepare_rerun_write",
         parameters: &[positional("read", "PreparedStatement"), positional("row", "tuple[object, ...]"), positional("command", "RerunCommandRecord"), positional("policy", "RerunPolicyRecord"), keyword("sent_at", "datetime.datetime")],
-        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunCallerKeyRefused | IdMintRefused"),
+        returns: TypeText::Plain("RerunWriteRecord | RerunSourceLiveRecord | RerunSourceAbsentRecord | RerunSourceCorruptRecord | RerunNotEligibleRecord | RerunInputUnavailableRecord | RerunInputCorruptRecord | RerunClassNotRegistered | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunIdempotencyKeyRefused | IdMintRefused"),
         doc: "Decide the rerun from the row of its read (a tuple in column order): the write, or the\nanswer that ends it with nothing written. Pure apart from the id mint. A row that does not\nfit the columns raises CoreDefect.",
     },
     StubFunction {

@@ -360,9 +360,9 @@ def set_up_child_tracing() -> None:
   characters, a value at most 1,024 bytes of printable ASCII, the JSON text
   at most 2,048 bytes. Over a bound: no carrier, the send goes on, one
   WARNING per process. A schedule run and a rerun through the free
-  `rerun_task` store no carrier: each attempt is a new trace.
-- `app.rerun_task_async(connection, command, policy)` (blocking:
-  `app.rerun_task` on a SQLAlchemy `Connection`) opens no span: the new task
+  `rerun_task_in_async` store no carrier: each attempt is a new trace.
+- `app.rerun_task_in_async(connection, command, policy)` (blocking:
+  `app.rerun_task_in` on a SQLAlchemy `Connection`) opens no span: the new task
   stores the carrier of the caller's current context, so its attempt spans
   are children of the caller's span. No valid span, or `NoTracing()`: no
   carrier, and no `opentelemetry` import.

@@ -11,7 +11,7 @@ use std::convert::Infallible;
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use horsies::rerun::{RerunEnqueuePolicy, RerunOutcome, RerunTask};
+use horsies::rerun::{RerunCommand, RerunEnqueuePolicy, RerunOutcome};
 use horsies::{
     blocking_task, task, AppConfig, ChildPreload, Horsies, HorsiesError, IntervalSchedule,
     IsolatedChildren, IsolatedSetting, PingTarget, RetryPolicy, ScheduleConfig, SchedulePattern,
@@ -910,7 +910,7 @@ async fn rerun_one(app: &Horsies, rerun: &Rerun, sent: &[Uuid]) -> Result<Uuid, 
             )))
         }
     }
-    let command = RerunTask::new(source, None, None);
+    let command = RerunCommand::new(source, None, None);
     match app
         .rerun_task(command, RerunEnqueuePolicy::standard(true))
         .await
