@@ -32,13 +32,13 @@ export type SchemaValue<S> = S extends AnyWire ? ValueOf<S> : ZodValueOf<S>;
 export type SchemaSent<S> = S extends AnyWire ? SentOf<S> : ZodSentOf<S>;
 
 /** Whether a parameter is an upstream outcome that only a workflow node gives (`h.resultOf`). */
-type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "resultOf" ? true : false) : false;
+export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "resultOf" ? true : false) : false;
 
 /** Whether a sender may leave out an upstream outcome parameter (an `h.*` wire type): `.optional()`. */
-type LeftOutBySender<S> = S extends AnyWire ? (PresenceOf<S> extends "required" ? false : true) : false;
+export type LeftOutBySender<S> = S extends AnyWire ? (PresenceOf<S> extends "required" ? false : true) : false;
 
 /** The parameters that a sender gives: every parameter that is not an upstream outcome. */
-type PlainParameters<P extends ParameterSchemas> = {
+export type PlainParameters<P extends ParameterSchemas> = {
   readonly [K in keyof P as IsUpstreamOutcome<P[K]> extends true ? never : K]: P[K];
 };
 
@@ -51,7 +51,7 @@ export type SendInput<P extends ParameterSchemas> = keyof PlainParameters<P> ext
   : ParametersSent<PlainParameters<P>>;
 
 /** Whether a task takes an upstream outcome that a sender cannot leave out. */
-type HasRequiredUpstreamOutcome<P extends ParameterSchemas> = true extends {
+export type HasRequiredUpstreamOutcome<P extends ParameterSchemas> = true extends {
   [K in keyof P]: IsUpstreamOutcome<P[K]> extends true ? (LeftOutBySender<P[K]> extends true ? false : true) : false;
 }[keyof P]
   ? true

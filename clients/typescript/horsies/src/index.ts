@@ -18,6 +18,9 @@ export * from "./thrown-errors.ts";
 
 export {
   configureLogging,
+  LOGGER_NAMES,
+  LOGGER_PARENTS,
+  type LoggerKey,
   type LogField,
   type LogFieldValue,
   type LoggerName,

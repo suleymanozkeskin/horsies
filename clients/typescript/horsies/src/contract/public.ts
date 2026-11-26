@@ -7,6 +7,8 @@ export {
   defineTask,
   type ExecutionClass,
   type ExecutionRules,
+  type ReservedCode,
+  type RetryCodes,
   type RetryPolicy,
   type TaskContract,
   type TaskDefinition,
@@ -16,6 +18,30 @@ export {
 
 export { type IdRefused, TaskId, WorkflowId } from "./ids.ts";
 
+export { RESERVED_NON_TASK_CODES } from "../codec/bounds.ts";
+
+export type { RoleOf } from "../wire/infer.ts";
+
+export type {
+  IsZodJson,
+  ParametersSent,
+  ParametersValue,
+  ParameterSent,
+  ParameterValue,
+  ReaderMayLeaveOut,
+  SenderMayLeaveOut,
+  ZodContainerSent,
+  ZodContainerValue,
+  ZodDefOf,
+  ZodObjectSent,
+  ZodObjectValue,
+  ZodOptionalIn,
+  ZodOptionalOut,
+  ZodOutputOf,
+  ZodSentOf,
+  ZodValueOf,
+} from "../zod/infer.ts";
+
 export type {
   AnyImplementation,
   BodyFor,
@@ -24,13 +50,18 @@ export type {
   ExceptionMapping,
   Implementation,
   ImplementOptions,
+  RuntimeOf,
 } from "./implementation.ts";
 
 export type {
   BodyInput,
-  ParameterSchemas,
+  HasRequiredUpstreamOutcome,
+  IsUpstreamOutcome,
+  LeftOutBySender,
   OutputSchema,
   ParameterSchema,
+  ParameterSchemas,
+  PlainParameters,
   SchemaSent,
   SchemaValue,
   SendableInput,

@@ -11,7 +11,7 @@
 // input type is not the sent type: it holds a codec's stored side (a string for `hz.instant()`).
 
 import type { JsonValue } from "../codec/json-value.ts";
-import type { AnyWire, EmptyObject, PresenceOf, SentOf, ValueOf } from "../wire/infer.ts";
+import type { AnyWire, EmptyObject, Flat, PresenceOf, SentOf, ValueOf } from "../wire/infer.ts";
 
 /** Type-only key of the sent type of `hz.wire()`. It does not exist at run time. */
 export declare const zodWireSent: unique symbol;
@@ -21,75 +21,73 @@ export type ZodSchemaLike = {
   readonly _zod: { readonly def: { readonly type: string }; readonly output: unknown };
 };
 
-type DefOf<S> = S extends { readonly _zod: { readonly def: infer D } } ? D : never;
+export type ZodDefOf<S> = S extends { readonly _zod: { readonly def: infer D } } ? D : never;
 
-type OutputOf<S> = S extends { readonly _zod: { readonly output: infer O } } ? O : never;
+export type ZodOutputOf<S> = S extends { readonly _zod: { readonly output: infer O } } ? O : never;
 
 /**
  * Whether an output type is zod's `JSONType`, the output of `z.json()`: it takes every JSON primitive and arrays of
  * itself, and it is not `unknown`. (`z.json()` is a lazy schema at run time and a union in its static type.)
  */
-type IsZodJson<O> = unknown extends O ? false : [string | number | boolean | null | O[]] extends [O] ? true : false;
+export type IsZodJson<O> = unknown extends O ? false : [string | number | boolean | null | O[]] extends [O] ? true : false;
 
 /** A member that a reader may give without the key: zod marks `.optional()` with `optout`. */
-type OptionalOut = { readonly _zod: { readonly optout: "optional" } };
+export type ZodOptionalOut = { readonly _zod: { readonly optout: "optional" } };
 
 /**
  * A member that a sender may leave out: zod marks `.optional()`, `.default()` and `.prefault()` with `optin`. zod 4.1
  * marks each one `"optional"`; later zod 4 releases mark a default `"defaulted"`.
  */
-type OptionalIn = { readonly _zod: { readonly optin: "optional" | "defaulted" } };
+export type ZodOptionalIn = { readonly _zod: { readonly optin: "optional" | "defaulted" } };
 
-type Flat<T> = { [K in keyof T]: T[K] } & {};
-
-type ObjectValue<M> = keyof M extends never
+export type ZodObjectValue<M> = keyof M extends never
   ? EmptyObject
   : Flat<
       {
-        -readonly [K in keyof M as M[K] extends OptionalOut ? never : K]: ZodValueOf<M[K]>;
+        -readonly [K in keyof M as M[K] extends ZodOptionalOut ? never : K]: ZodValueOf<M[K]>;
       } & {
-        -readonly [K in keyof M as M[K] extends OptionalOut ? K : never]?: ZodValueOf<M[K]>;
+        -readonly [K in keyof M as M[K] extends ZodOptionalOut ? K : never]?: ZodValueOf<M[K]>;
       }
     >;
 
-type ObjectSent<M> = keyof M extends never
+export type ZodObjectSent<M> = keyof M extends never
   ? EmptyObject
   : Flat<
       {
-        -readonly [K in keyof M as M[K] extends OptionalIn ? never : K]: ZodSentOf<M[K]>;
+        -readonly [K in keyof M as M[K] extends ZodOptionalIn ? never : K]: ZodSentOf<M[K]>;
       } & {
-        -readonly [K in keyof M as M[K] extends OptionalIn ? K : never]?: ZodSentOf<M[K]>;
+        -readonly [K in keyof M as M[K] extends ZodOptionalIn ? K : never]?: ZodSentOf<M[K]>;
       }
     >;
 
 /** The value that a reader gives for a zod schema: zod's output type, with `JsonValue` for `z.json()`. */
 export type ZodValueOf<S> =
-  IsZodJson<OutputOf<S>> extends true
+  IsZodJson<ZodOutputOf<S>> extends true
     ? JsonValue
     : ZodContainerValue<S>;
 
-type ZodContainerValue<S> =
-  DefOf<S> extends { readonly type: "object"; readonly "shape": infer M }
-    ? ObjectValue<M>
-    : DefOf<S> extends { readonly type: "array"; readonly element: infer I }
+export type ZodContainerValue<S> =
+  ZodDefOf<S> extends { readonly type: "object"; readonly "shape": infer M }
+    ? ZodObjectValue<M>
+    : ZodDefOf<S> extends { readonly type: "array"; readonly element: infer I }
       ? ZodValueOf<I>[]
-      : DefOf<S> extends { readonly type: "tuple"; readonly items: infer T }
+      : ZodDefOf<S> extends { readonly type: "tuple"; readonly items: infer T }
         ? { -readonly [K in keyof T]: ZodValueOf<T[K]> }
-        : DefOf<S> extends { readonly type: "record"; readonly valueType: infer V }
-          ? { [K in keyof OutputOf<S>]: ZodValueOf<V> }
-          : DefOf<S> extends { readonly type: "nullable"; readonly innerType: infer I }
+        : ZodDefOf<S> extends { readonly type: "record"; readonly valueType: infer V }
+          ? { [K in keyof ZodOutputOf<S>]: ZodValueOf<V> }
+          : ZodDefOf<S> extends { readonly type: "nullable"; readonly innerType: infer I }
             ? ZodValueOf<I> | null
-            : DefOf<S> extends { readonly type: "optional"; readonly innerType: infer I }
+            : ZodDefOf<S> extends { readonly type: "optional"; readonly innerType: infer I }
               ? ZodValueOf<I> | undefined
-              : DefOf<S> extends { readonly type: "default" | "prefault" | "nonoptional"; readonly innerType: infer I }
+              : ZodDefOf<S> extends { readonly type: "default" | "prefault" | "nonoptional"; readonly innerType: infer I }
                 ? Exclude<ZodValueOf<I>, undefined>
-                : DefOf<S> extends { readonly type: "readonly"; readonly innerType: infer I }
+                : ZodDefOf<S> extends { readonly type: "readonly"; readonly innerType: infer I }
                   ? Readonly<ZodValueOf<I>>
-                  : DefOf<S> extends { readonly type: "lazy"; readonly getter: () => infer I }
+                  : ZodDefOf<S> extends { readonly type: "lazy"; readonly getter: () => infer I }
                     ? ZodValueOf<I>
-                    : DefOf<S> extends { readonly type: "union"; readonly options: readonly (infer O)[] }
+                    : ZodDefOf<S> extends { readonly type: "union"; readonly options: readonly (infer O)[] }
                       ? ZodValueOf<O>
-                      : OutputOf<S>;
+                      : ZodOutputOf<S>;
 
 /**
  * The value that a sender gives for a zod schema. It follows the containers (object, array, tuple, record, union,
@@ -97,33 +95,33 @@ type ZodContainerValue<S> =
  */
 export type ZodSentOf<S> = S extends { readonly [zodWireSent]: infer Sent }
   ? Sent
-  : IsZodJson<OutputOf<S>> extends true
+  : IsZodJson<ZodOutputOf<S>> extends true
     ? JsonValue
     : ZodContainerSent<S>;
 
-type ZodContainerSent<S> =
-  DefOf<S> extends { readonly type: "object"; readonly "shape": infer M }
-    ? ObjectSent<M>
-    : DefOf<S> extends { readonly type: "array"; readonly element: infer I }
+export type ZodContainerSent<S> =
+  ZodDefOf<S> extends { readonly type: "object"; readonly "shape": infer M }
+    ? ZodObjectSent<M>
+    : ZodDefOf<S> extends { readonly type: "array"; readonly element: infer I }
       ? ZodSentOf<I>[]
-      : DefOf<S> extends { readonly type: "tuple"; readonly items: infer T }
+      : ZodDefOf<S> extends { readonly type: "tuple"; readonly items: infer T }
         ? { -readonly [K in keyof T]: ZodSentOf<T[K]> }
-        : DefOf<S> extends { readonly type: "record"; readonly valueType: infer V }
-          ? { [K in keyof OutputOf<S>]: ZodSentOf<V> }
-          : DefOf<S> extends { readonly type: "nullable"; readonly innerType: infer I }
+        : ZodDefOf<S> extends { readonly type: "record"; readonly valueType: infer V }
+          ? { [K in keyof ZodOutputOf<S>]: ZodSentOf<V> }
+          : ZodDefOf<S> extends { readonly type: "nullable"; readonly innerType: infer I }
             ? ZodSentOf<I> | null
-            : DefOf<S> extends {
+            : ZodDefOf<S> extends {
                   readonly type: "optional" | "default" | "prefault" | "nonoptional";
                   readonly innerType: infer I;
                 }
               ? ZodSentOf<I>
-              : DefOf<S> extends { readonly type: "readonly"; readonly innerType: infer I }
+              : ZodDefOf<S> extends { readonly type: "readonly"; readonly innerType: infer I }
                 ? Readonly<ZodSentOf<I>>
-                : DefOf<S> extends { readonly type: "lazy"; readonly getter: () => infer I }
+                : ZodDefOf<S> extends { readonly type: "lazy"; readonly getter: () => infer I }
                   ? ZodSentOf<I>
-                  : DefOf<S> extends { readonly type: "union"; readonly options: readonly (infer O)[] }
+                  : ZodDefOf<S> extends { readonly type: "union"; readonly options: readonly (infer O)[] }
                     ? ZodSentOf<O>
-                    : OutputOf<S>;
+                    : ZodOutputOf<S>;
 
 /** A task input parameter: an `h.*` wire type or a zod schema. */
 export type ParameterSchema = AnyWire | ZodSchemaLike;
@@ -132,26 +130,26 @@ export type ParameterSchema = AnyWire | ZodSchemaLike;
 export type ParameterSchemas = { readonly [name: string]: ParameterSchema };
 
 /** The value of one parameter that a reader gives. */
-type ParameterValue<P> = P extends AnyWire ? ValueOf<P> : ZodValueOf<P>;
+export type ParameterValue<P> = P extends AnyWire ? ValueOf<P> : ZodValueOf<P>;
 
 /** The value of one parameter that a sender gives. */
-type ParameterSent<P> = P extends AnyWire ? SentOf<P> : ZodSentOf<P>;
+export type ParameterSent<P> = P extends AnyWire ? SentOf<P> : ZodSentOf<P>;
 
 /** A parameter that a reader may give without the key: `h.*` `.optional()`, zod `.optional()`. */
-type ReaderMayLeaveOut<P> = P extends AnyWire
+export type ReaderMayLeaveOut<P> = P extends AnyWire
   ? PresenceOf<P> extends "optional"
     ? true
     : false
-  : P extends OptionalOut
+  : P extends ZodOptionalOut
     ? true
     : false;
 
 /** A parameter that a sender may leave out: `h.*` `.optional()` and `.default()`, zod `optin`. */
-type SenderMayLeaveOut<P> = P extends AnyWire
+export type SenderMayLeaveOut<P> = P extends AnyWire
   ? PresenceOf<P> extends "required"
     ? false
     : true
-  : P extends OptionalIn
+  : P extends ZodOptionalIn
     ? true
     : false;
 

@@ -1,14 +1,13 @@
 // The info of a task: its status, times, failed reason and every attempt, newest first. The result is read by `get`.
 
+import type { TaskAttemptOutcome, TaskStatus } from "../_catalog/status.ts";
 import type {
-  AttemptOutcomeName,
   ExecutionRecord,
   RecordedCount,
   RecordedInstant,
   RecordedText,
   TaskAttemptRecord,
   TaskInfoRecord,
-  TaskStatusName,
 } from "../native/sends/addon.ts";
 import type { ExecutionClass } from "../contract/define-task.ts";
 import { type TaskId, taskIdFromCore } from "../contract/ids.ts";
@@ -22,7 +21,7 @@ export type ExecutionFact = { readonly kind: "class"; readonly execution: Execut
 /** One attempt of a task. */
 export interface TaskAttempt {
   readonly attempt: number;
-  readonly outcome: AttemptOutcomeName;
+  readonly outcome: TaskAttemptOutcome;
   readonly willRetry: boolean;
   readonly startedAt: Temporal.Instant;
   readonly finishedAt: Temporal.Instant;
@@ -39,7 +38,7 @@ export interface TaskAttempt {
 export interface TaskInfo {
   readonly taskId: TaskId;
   readonly taskName: string;
-  readonly status: TaskStatusName;
+  readonly status: TaskStatus;
   readonly queueName: string;
   readonly priority: number;
   readonly retryCount: number;

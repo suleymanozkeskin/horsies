@@ -1,6 +1,20 @@
 // The public names of sends. `src/index.ts` exports this module.
 
-export type { CoreCause, NoCause } from "../_catalog/error_detail.ts";
+export type {
+  CoreCause,
+  CoreConnectionError,
+  CoreContractViolation,
+  CoreFailure,
+  CorePreconditionFailed,
+  CoreServerError,
+  HistoryContractError,
+  JsonUnreadable,
+  NoCause,
+  OutcomeDecodeError,
+  RuleRefused,
+} from "../_catalog/error_detail.ts";
+
+export { DEFAULT_RETENTION_CLASS_KEY, type RetentionClassKey } from "../_catalog/retention_class.ts";
 
 export type {
   TaskSendEnqueueFailed,
@@ -12,6 +26,6 @@ export type {
   TaskSendValidationFailed,
 } from "../_catalog/task_send_errors.ts";
 
-export type { RetryableSendError, TaskSendError } from "./errors.ts";
+export type { RetryableSendError, SentTypes, TaskSendError, WithSentTypes } from "./errors.ts";
 
 export type { Retention, SendOptions } from "./options.ts";

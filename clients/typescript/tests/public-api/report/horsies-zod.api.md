@@ -36,6 +36,7 @@ export type DecimalRefused =
 export type Err<E> = {
     readonly ok: false;
     readonly error: E;
+    readonly [resultBrand]?: "horsies.Result";
 };
 
 // @public (undocumented)
@@ -83,6 +84,7 @@ export type NamedZodRule = "UNKNOWN_DEFINITION_FIELD" | "UNKNOWN_FORMAT" | "UNKN
 export type Ok<T> = {
     readonly ok: true;
     readonly value: T;
+    readonly [resultBrand]?: "horsies.Result";
 };
 
 // @public

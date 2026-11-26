@@ -1,10 +1,7 @@
 // Why a read of a task failed. A read error is not the task's outcome: the task may have failed, or may still run.
 
-import {
-  type BrokerCoreError,
-  brokerCoreErrorFromNative,
-  type NativeBrokerCoreError,
-} from "../_catalog/broker_errors.ts";
+import type { BrokerErrorCode } from "../_catalog/broker.ts";
+import { brokerCoreErrorFromNative, type NativeBrokerCoreError } from "../_catalog/broker_errors.ts";
 import type { AbsenceReason } from "../native/sends/addon.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
 import { nativeCatalogValue } from "../send/catalog-value.ts";
@@ -41,7 +38,7 @@ export type ReadError =
   /** The database or the connection failed. */
   | {
       readonly kind: "database";
-      readonly code: BrokerCoreError["code"];
+      readonly code: BrokerErrorCode;
       readonly retryable: boolean;
       readonly message: string;
     }
