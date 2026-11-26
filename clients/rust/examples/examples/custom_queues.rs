@@ -54,7 +54,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 }
 
 async fn demo(app: Horsies) -> DemoResult {
-    let limit = WaitLimit::parse(Some(Duration::from_secs(60)))?;
+    let limit = WaitLimit::Within(Duration::from_secs(60));
     let mut shards = Vec::new();
     for shard in 0..4 {
         shards.push(rebuild_index::send(&app, shard).await?);

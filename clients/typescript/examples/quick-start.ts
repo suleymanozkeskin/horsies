@@ -36,7 +36,7 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(greet, ({ name }) => greet.ok(`hello, ${name}`));
+app.implement(greet, ({ name }, { ok }) => ok(`hello, ${name}`));
 
 async function demo(): Promise<Result<void, string>> {
   const sent = await app.send(greet, { name: "world" });

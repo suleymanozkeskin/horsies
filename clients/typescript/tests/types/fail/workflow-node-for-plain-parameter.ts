@@ -1,5 +1,5 @@
 // expect: TS2322 at 13
-// A node for a plain parameter: the parameter is not declared h.resultOf(T).
+// A node for a plain parameter: the parameter is not declared h.taskOutcome(contract).
 
 import { defineTask, h } from "../../../horsies/src/index.ts";
 import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";

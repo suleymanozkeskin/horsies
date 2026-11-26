@@ -10,7 +10,7 @@ import { type ReadForm, readFormOf } from "../read/handle.ts";
 import type { ContractLookup } from "../send/send.ts";
 import type { DeclaredCodes } from "../contract/definition.ts";
 import { type Kind, objectKind, type ObjectKind } from "../wire/kinds.ts";
-import { isResultOfKind } from "../wire/result-of.ts";
+import { isTaskOutcomeKind } from "../wire/task-outcome.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { SpecAppView, WorkflowLookup } from "./checks.ts";
@@ -90,7 +90,7 @@ function lookupOf(listed: ListedWorkflow): WorkflowLookup {
  * Pure.
  */
 export function buildParams(params: ObjectKind, given: object): Result<object, CodecRefused> {
-  const plain = objectKind(params.members.filter((member) => !isResultOfKind(member.kind)));
+  const plain = objectKind(params.members.filter((member) => !isTaskOutcomeKind(member.kind)));
   const text = encodeParametersWithReadBack(plain, given);
 
   if (!text.ok) {

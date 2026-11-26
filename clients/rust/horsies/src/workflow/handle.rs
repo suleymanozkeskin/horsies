@@ -37,10 +37,10 @@ use uuid::Uuid;
 use super::dependency::OutputlessResults;
 use super::node::NodeKey;
 use super::registry::WorkflowRegistry;
-use crate::handle::{limit_duration, read_stored_result};
+use crate::handle::{checked_wait, read_stored_result};
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::value_free_decode_text;
-use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode};
+use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode, WaitLimitRefused};
 
 /// The marker key of the result of a workflow with no output node.
 const OUTPUTLESS_TERMINALS_KEY: &str = "__h_outputless_terminals__";
@@ -69,6 +69,14 @@ pub enum WorkflowReadError {
     UnknownUserCode {
         workflow_id: Uuid,
         cause: UnknownUserCode,
+    },
+    /// `INVALID_INPUT`: the `WaitLimit::Within` limit is above
+    /// `MAX_WAIT_LIMIT_MS`. It is the first check of `get`: nothing was
+    /// read. The same limit is refused again.
+    #[error("invalid input for the read of workflow {workflow_id}: {cause}")]
+    InvalidInput {
+        workflow_id: Uuid,
+        cause: WaitLimitRefused,
     },
     /// `WAIT_INSIDE_TASK`: a result wait in a process that runs task bodies.
     /// Nothing was read.
@@ -99,6 +107,7 @@ impl WorkflowReadError {
             Self::StoredResultUnreadable { .. } | Self::UnknownUserCode { .. } => {
                 OperationalErrorCode::ResultDeserializationError.into()
             }
+            Self::InvalidInput { .. } => RetrievalCode::InvalidInput.into(),
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
             Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
             Self::Database { .. } => OperationalErrorCode::BrokerError.into(),
@@ -442,14 +451,17 @@ where
     /// the code of its status when it stored none, and `WORKFLOW_PAUSED` for
     /// a PAUSED workflow, which a resume can continue.
     ///
-    /// In a process that runs task bodies the wait is refused with
-    /// `WaitInsideTask` before any statement.
+    /// The limit is the first check: a `Within` limit above
+    /// `MAX_WAIT_LIMIT_MS` is `InvalidInput`. In a process that runs task
+    /// bodies the wait is refused with `WaitInsideTask`. Both come before
+    /// any statement.
     ///
     /// Errors: [`WorkflowReadError`].
     pub async fn get(
         &self,
         limit: WaitLimit,
     ) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError> {
+        let checked = self.checked_wait(limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(WorkflowReadError::WaitInsideTask {
                 message: wait_inside_task_message(&format!(
@@ -463,7 +475,7 @@ where
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
         let wait = broker
-            .wait_workflow_end(self.workflow_id, limit_duration(limit))
+            .wait_workflow_end(self.workflow_id, checked)
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
         match wait {
@@ -475,6 +487,20 @@ where
             }),
             WorkflowWait::Ended(end) => end_outcome(self.workflow_id, end),
         }
+    }
+
+    /// The wait of a read of this workflow, as the core's wait takes it
+    /// ([`checked_wait`]). Pure.
+    ///
+    /// Errors: `InvalidInput` with the workflow id and the refusal.
+    pub(crate) fn checked_wait(
+        &self,
+        limit: WaitLimit,
+    ) -> Result<Option<std::time::Duration>, WorkflowReadError> {
+        checked_wait(limit).map_err(|cause| WorkflowReadError::InvalidInput {
+            workflow_id: self.workflow_id,
+            cause,
+        })
     }
 }
 

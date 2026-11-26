@@ -80,7 +80,7 @@ describe("app.start, app.retryStart and app.workflowHandle", () => {
 
     assert(started.ok);
     assert.equal(core.starts.length, 1);
-    assert.equal(core.starts[0]?.spec.name, "hello");
+    assert.equal(core.prepares[0]?.name, "hello");
   });
 
   test("retryStart sends the kept spec again", async () => {
@@ -93,7 +93,7 @@ describe("app.start, app.retryStart and app.workflowHandle", () => {
 
     assert(!started.ok && started.error.code === "ENQUEUE_FAILED");
     assert((await app.retryStart(started.error)).ok);
-    assert.equal(core.restarts.length, 1);
+    assert.equal(core.starts.length, 2);
   });
 
   test("a handle by id reads through the same core, with no I/O before a call", async () => {

@@ -13,8 +13,9 @@
 //    that started); the culprit method of Node starts there in a shared async child. In a `SHARED_THREAD` child hook 0
 //    boots the seat isolates, and each post goes to the seat pool (`src/seats/router.ts`): the main thread runs no
 //    body and sets no run mark, and its turns keep the core's main-thread watch fed.
-// 6. The exit rule: the flush of the body observer, at most its bound, then the end of the process with the host's
-//    code. The child never waits for its event loop to empty.
+// 6. The exit rule: the flush of the body observer and, in a `SHARED_THREAD` child, of each seat isolate (the router
+//    asks the pool), at most its bound, then the end of the process with the host's code. The child never waits for
+//    its event loop to empty.
 
 import { hostname } from "node:os";
 
@@ -38,6 +39,7 @@ import {
 import { setPanicRule } from "../native/process-core/process-core.ts";
 import { fillHandlerChild } from "../native/handler-child/handler-child.ts";
 import { fillHandlerChildOf, type HandlerChildNative } from "../events/handler-child.ts";
+import { processSpansNotMade } from "../telemetry/not-made.ts";
 import type { TracingSetting } from "../telemetry/tracing-config.ts";
 import { buildTaskError, checkAppConfig } from "../native/sends/sends.ts";
 import type {
@@ -123,13 +125,13 @@ export interface ChildModeDeps {
  * through the exit rule. So an entry that does not await `cli.run` (a CommonJS entry) does not exit 0 or hang.
  */
 export async function runChildMode(app: Horsies, processArguments: readonly string[], deps: ChildModeDeps): Promise<never> {
-  const observer = observerOfApp(app);
-  const childEnd = new ChildEnd({ flush: async () => observer.flush(), wait: deps.wait, exit: deps.exit });
+  const flushes = new ExitFlushes(observerOfApp(app));
+  const childEnd = new ChildEnd({ flush: async () => flushes.flush(), wait: deps.wait, exit: deps.exit });
 
   let ended: ChildModeEnd;
 
   try {
-    ended = await childMode(app, processArguments, deps, childEnd);
+    ended = await childMode(app, processArguments, deps, { childEnd, flushes });
   } catch (cause) {
     return failedChildMode(cause, deps, childEnd);
   }
@@ -149,6 +151,43 @@ type ChildModeEnd = { readonly kind: "badArguments"; readonly code: number } | {
 
 /** The exit code of a child whose child mode failed outside every run: the code of an uncaught throw there. */
 export const CHILD_MODE_FAILED_EXIT_CODE: number = UNCAUGHT_EXIT_CODE;
+
+/** The end of a child: its exit rule, and the flushes that the rule awaits. */
+type ChildEnding = { readonly childEnd: ChildEnd; readonly flushes: ExitFlushes };
+
+/** Where the exit rule finds the seat isolates of the child: none until the serve made the router. */
+type RouterSlot = { readonly kind: "noRouter" } | { readonly kind: "router"; readonly router: SeatRouter };
+
+/** The flushes that the exit rule awaits: the body observer's, and the seat isolates' once the serve made the router. */
+class ExitFlushes {
+  readonly #observer: BodyObserver;
+  #router: RouterSlot = { kind: "noRouter" };
+
+  constructor(observer: BodyObserver) {
+    this.#observer = observer;
+  }
+
+  /** The router of the serve: from here on the flush asks it for the seat isolates too. */
+  route(router: SeatRouter): void {
+    this.#router = { kind: "router", router };
+  }
+
+  /** The flush of the body observer and of the seat isolates, at once. */
+  async flush(): Promise<void> {
+    const router = this.#router;
+
+    switch (router.kind) {
+      case "noRouter":
+        return this.#observer.flush();
+      case "router":
+        await Promise.all([this.#observer.flush(), router.router.flush()]);
+
+        return;
+      default:
+        unreachable(router, "ExitFlushes.flush");
+    }
+  }
+}
 
 /** The body observer of `app`, or the one that does nothing when `app` is not an app (child mode then fails). */
 function observerOfApp(app: Horsies): BodyObserver {
@@ -178,7 +217,7 @@ async function childMode(
   app: Horsies,
   processArguments: readonly string[],
   deps: ChildModeDeps,
-  childEnd: ChildEnd,
+  ending: ChildEnding,
 ): Promise<ChildModeEnd> {
   const checked = deps.native.childArguments(processArguments);
 
@@ -188,7 +227,7 @@ async function childMode(
 
       return { kind: "badArguments", code: checked.code };
     case "child":
-      return servedChild(appInternals(app), processArguments, deps, childEnd);
+      return servedChild(appInternals(app), processArguments, deps, ending);
     default:
       return unreachable(checked, "runChildMode");
   }
@@ -199,14 +238,14 @@ async function servedChild(
   context: AppContext,
   processArguments: readonly string[],
   deps: ChildModeDeps,
-  childEnd: ChildEnd,
+  ending: ChildEnding,
 ): Promise<ChildModeEnd> {
   deps.native.setPanicRule("ABORT_PROCESS");
   installProcessEvents({
     hooks: deps.events,
     writeLine: deps.writeLine,
     end: (code) => {
-      void childEnd.end(code);
+      void ending.childEnd.end(code);
     },
     currentRun,
   });
@@ -225,18 +264,7 @@ async function servedChild(
     reportDefect: deps.reportDefect,
   };
 
-  const router = new SeatRouter({
-    ...deps.seats,
-    settle: (runKey, taskName, outcome) => {
-      settleRun(serve, runKey, taskName, outcome);
-    },
-    serve: async (request) => serveSeatOperation(context.core, request),
-    endChild: (code) => {
-      void childEnd.end(code);
-    },
-    writeLine: deps.writeLine,
-    reportDefect: deps.reportDefect,
-  });
+  const router = seatRouterOf(context, serve, deps, ending);
 
   const post = router.posts(postDispatcher(serve));
 
@@ -263,6 +291,33 @@ async function servedChild(
   const end = await deps.native.serveChild(plan, post, settlingCallback(hooks, deps.settlement));
 
   return { kind: "served", code: end.code };
+}
+
+/**
+ * The router of the posts of the child: the seat pool of a thread child settles its runs through `serve`, ends the
+ * child through the exit rule, and writes the span reports of its isolates once per process. The exit rule flushes the
+ * seat isolates through it from here on.
+ */
+function seatRouterOf(context: AppContext, serve: ChildServe, deps: ChildModeDeps, ending: ChildEnding): SeatRouter {
+  const router = new SeatRouter({
+    ...deps.seats,
+    settle: (runKey, taskName, outcome) => {
+      settleRun(serve, runKey, taskName, outcome);
+    },
+    serve: async (request) => serveSeatOperation(context.core, request),
+    endChild: (code) => {
+      void ending.childEnd.end(code);
+    },
+    writeLine: deps.writeLine,
+    spanNotMade: (span, cause) => {
+      processSpansNotMade.reportText(span, cause);
+    },
+    reportDefect: deps.reportDefect,
+  });
+
+  ending.flushes.route(router);
+
+  return router;
 }
 
 /** The body facts that a child of an app with `tracing` records: the facts of each run for its spans, or none. Pure. */

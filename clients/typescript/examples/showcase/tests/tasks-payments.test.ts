@@ -3,6 +3,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { reserveStock } from "../src/contracts/inventory.ts";
+import { authorizePayment, capturePayment, reconcilePayments, refundPayment } from "../src/contracts/payments.ts";
 import { draw } from "../src/simulate.ts";
 import type { Store } from "../src/store/connection.ts";
 import { authorizationAttempts, getOrder } from "../src/store/orders.ts";
@@ -13,6 +15,7 @@ import { uniqueId } from "./support.ts";
 import {
   failed,
   idWhere,
+  resultsOf,
   seedOrder,
   seedProduct,
   stockOf,
@@ -21,6 +24,12 @@ import {
   withStore,
   withUnreachableStore,
 } from "./fixtures.ts";
+
+const authorizePaymentResults = resultsOf(authorizePayment);
+const capturePaymentResults = resultsOf(capturePayment);
+const reconcilePaymentsResults = resultsOf(reconcilePayments);
+const refundPaymentResults = resultsOf(refundPayment);
+const reserveStockResults = resultsOf(reserveStock);
 
 /** The amount of every test hold, in cents. */
 const AMOUNT_CENTS = 2_000;
@@ -54,7 +63,7 @@ describe("authorize", () => {
 
       await seedPaymentOrder(store, orderId);
 
-      const hold = succeeded(await authorize(store, orderId, AMOUNT_CENTS));
+      const hold = succeeded(await authorize(store, orderId, AMOUNT_CENTS, authorizePaymentResults));
 
       assert.equal(hold.orderId, orderId);
       assert.equal(hold.amountCents, AMOUNT_CENTS);
@@ -70,8 +79,8 @@ describe("authorize", () => {
 
       await seedPaymentOrder(store, orderId);
 
-      const first = succeeded(await authorize(store, orderId, AMOUNT_CENTS));
-      const replay = succeeded(await authorize(store, orderId, AMOUNT_CENTS));
+      const first = succeeded(await authorize(store, orderId, AMOUNT_CENTS, authorizePaymentResults));
+      const replay = succeeded(await authorize(store, orderId, AMOUNT_CENTS, authorizePaymentResults));
 
       assert.equal(replay.replayed, true);
       assert.equal(replay.attempt, 2);
@@ -81,7 +90,7 @@ describe("authorize", () => {
 
   test("an unknown order: ORDER_NOT_FOUND", async () => {
     await withStore(async (store) => {
-      assert.equal(failed(await authorize(store, uniqueId("t1-missing"), AMOUNT_CENTS)).code, "ORDER_NOT_FOUND");
+      assert.equal(failed(await authorize(store, uniqueId("t1-missing"), AMOUNT_CENTS, authorizePaymentResults)).code, "ORDER_NOT_FOUND");
     });
   });
 
@@ -90,9 +99,9 @@ describe("authorize", () => {
       const orderId = idWhere(uniqueId("t1-declined"), (id) => draw(CARD_DECLINE_RATE, [id, "card"]));
       const sku = await seedPaymentOrder(store, orderId);
 
-      succeeded(await reserve(store, { orderId, lineNo: 1, sku, quantity: 2 }));
+      succeeded(await reserve(store, { orderId, lineNo: 1, sku, quantity: 2 }, reserveStockResults));
 
-      assert.equal(failed(await authorize(store, orderId, AMOUNT_CENTS)).code, "CARD_DECLINED");
+      assert.equal(failed(await authorize(store, orderId, AMOUNT_CENTS, authorizePaymentResults)).code, "CARD_DECLINED");
       assert.equal(await statusOf(store, orderId), "failed");
       assert.deepEqual(await stockOf(store, sku), { onHand: 8, reserved: 0 });
     });
@@ -108,10 +117,10 @@ describe("authorize", () => {
       await seedPaymentOrder(store, orderId);
 
       for (let attempt = 1; attempt <= PSP_FAILING_ATTEMPTS; attempt += 1) {
-        assert.equal(failed(await authorize(store, orderId, AMOUNT_CENTS)).code, "PSP_UNAVAILABLE");
+        assert.equal(failed(await authorize(store, orderId, AMOUNT_CENTS, authorizePaymentResults)).code, "PSP_UNAVAILABLE");
       }
 
-      const hold = succeeded(await authorize(store, orderId, AMOUNT_CENTS));
+      const hold = succeeded(await authorize(store, orderId, AMOUNT_CENTS, authorizePaymentResults));
 
       assert.equal(hold.attempt, PSP_FAILING_ATTEMPTS + 1);
 
@@ -130,8 +139,8 @@ describe("capture", () => {
 
       await seedPaymentOrder(store, orderId);
 
-      const hold = succeeded(await authorize(store, orderId, AMOUNT_CENTS));
-      const settled = succeeded(await capture(store, orderId, hold));
+      const hold = succeeded(await authorize(store, orderId, AMOUNT_CENTS, authorizePaymentResults));
+      const settled = succeeded(await capture(store, orderId, hold, capturePaymentResults));
 
       assert.equal(settled.authorizationId, hold.authorizationId);
       assert.equal(settled.amountCents, AMOUNT_CENTS);
@@ -146,16 +155,21 @@ describe("capture", () => {
 
       await seedPaymentOrder(store, orderId);
 
-      const hold = succeeded(await authorize(store, orderId, AMOUNT_CENTS));
+      const hold = succeeded(await authorize(store, orderId, AMOUNT_CENTS, authorizePaymentResults));
 
-      succeeded(await capture(store, orderId, hold));
-      assert.equal(failed(await capture(store, orderId, hold)).code, "PAYMENT_ALREADY_CAPTURED");
+      succeeded(await capture(store, orderId, hold, capturePaymentResults));
+      assert.equal(failed(await capture(store, orderId, hold, capturePaymentResults)).code, "PAYMENT_ALREADY_CAPTURED");
     });
   });
 
   test("a failed authorization node: UPSTREAM_FAILED with the upstream code, and no capture", async () => {
     await withUnreachableStore(async (store) => {
-      const error = failed(await captureAfter(store, "t1-any", { kind: "failed", error: upstreamError("CARD_DECLINED") }));
+      const error = failed(await captureAfter(
+        store,
+        "t1-any",
+        { kind: "failed", error: upstreamError("CARD_DECLINED") },
+        capturePaymentResults,
+      ));
 
       assert.equal(error.code, "UPSTREAM_FAILED");
       assert.deepEqual(error.data, { upstreamCode: "CARD_DECLINED" });
@@ -167,7 +181,7 @@ describe("refund and reconcile", () => {
   test("a refund: the refund of the order, with the instant of its dispute", () => {
     const disputedAt = Temporal.Instant.from("2026-01-15T09:00:00Z");
 
-    assert.deepEqual(succeeded(refund("ACME-00001", 4_500, disputedAt)), {
+    assert.deepEqual(succeeded(refund("ACME-00001", 4_500, disputedAt, refundPaymentResults)), {
       orderId: "ACME-00001",
       refundId: "rfd_ACME-00001",
       amountCents: 4_500,
@@ -176,9 +190,9 @@ describe("refund and reconcile", () => {
   });
 
   test("a reconciliation window: the same draws for the same window; captures are the matched authorizations", () => {
-    const report = succeeded(reconcile("daily"));
+    const report = succeeded(reconcile("daily", reconcilePaymentsResults));
 
-    assert.deepEqual(succeeded(reconcile("daily")), report);
+    assert.deepEqual(succeeded(reconcile("daily", reconcilePaymentsResults)), report);
     assert.equal(report.captures, report.authorizations - report.unmatched);
     assert.ok(report.unmatched >= 0 && report.unmatched <= 3);
   });
@@ -196,8 +210,8 @@ describe("a store that does not connect", () => {
         replayed: false,
       };
 
-      assert.equal(failed(await authorize(store, "t1-any", AMOUNT_CENTS)).code, "STORE_UNAVAILABLE");
-      assert.equal(failed(await capture(store, "t1-any", hold)).code, "STORE_UNAVAILABLE");
+      assert.equal(failed(await authorize(store, "t1-any", AMOUNT_CENTS, authorizePaymentResults)).code, "STORE_UNAVAILABLE");
+      assert.equal(failed(await capture(store, "t1-any", hold, capturePaymentResults)).code, "STORE_UNAVAILABLE");
     });
   });
 });

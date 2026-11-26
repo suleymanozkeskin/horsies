@@ -13,6 +13,7 @@ import {
   type MemberPresence,
   type ObjectKind,
   tagValues,
+  type UpstreamOutput,
 } from "./kinds.ts";
 import { unreachable } from "./unreachable.ts";
 
@@ -47,8 +48,10 @@ export type KindRule =
   | "UnionMemberNotPrimitive"
   /** A member of `h.union(tag, [...])` has no required string-literal tag member, or repeats a tag value. */
   | "UnionTagInvalid"
-  /** `h.resultOf` anywhere but as a whole task input parameter (optional or nullable too). */
-  | "ResultOfPlacement";
+  /** `h.taskOutcome` anywhere but as a whole task input parameter (optional or nullable too). */
+  | "TaskOutcomePlacement"
+  /** An `h.taskOutcome` parameter whose upstream contract has an output with no stored form. */
+  | "UpstreamOutputRefused";
 
 /** A refusal of a kind tree. `path` names the place in the type: `[*]` an array item, `.*` a record value. */
 export type KindRefused = { readonly rule: KindRule; readonly path: string; readonly detail: string };
@@ -75,7 +78,7 @@ export function checkMemberKind(kind: Kind, presence: MemberPresence): readonly 
 }
 
 /**
- * Every refusal of the kind of a task input, in walk order: a parameter may be an upstream outcome (`h.resultOf`),
+ * Every refusal of the kind of a task input, in walk order: a parameter may be an upstream outcome (`h.taskOutcome`),
  * nothing below a parameter may. Pure.
  */
 export function checkParameters(parameters: ObjectKind): readonly KindRefused[] {
@@ -85,19 +88,51 @@ export function checkParameters(parameters: ObjectKind): readonly KindRefused[] 
     const at = memberPath(ROOT_PATH, member.name);
 
     refusals.push(...memberRefusals(member, at));
-    walk(parameterValueKind(member.kind), at, 0, refusals);
+    walkParameter(parameterValue(member.kind), at, refusals);
   }
 
   return refusals;
 }
 
-/** The kind of the value of a parameter: the `ok` kind of an upstream outcome, or the parameter's own kind. */
-function parameterValueKind(kind: Kind): Kind {
+/** The value of a parameter: its own kind, or the upstream output of an upstream outcome. */
+type ParameterValue =
+  | { readonly kind: "value"; readonly value: Kind }
+  | { readonly kind: "upstream"; readonly output: UpstreamOutput };
+
+function walkParameter(value: ParameterValue, at: string, refusals: KindRefused[]): void {
+  switch (value.kind) {
+    case "value":
+      return walk(value.value, at, 0, refusals);
+    case "upstream":
+      return walkUpstream(value.output, at, refusals);
+    default:
+      return unreachable(value, "walkParameter");
+  }
+}
+
+/** The refusals of the upstream output of a parameter: its kind tree, or the refusal of an output with no kind. */
+function walkUpstream(output: UpstreamOutput, at: string, refusals: KindRefused[]): void {
+  switch (output.state) {
+    case "compiled":
+      return walk(output.kind, at, 0, refusals);
+    case "refused":
+      refusals.push({ rule: "UpstreamOutputRefused", path: at, detail: output.detail });
+
+      return;
+    default:
+      return unreachable(output, "walkUpstream");
+  }
+}
+
+/** The value of a parameter of `kind`: the upstream output of an upstream outcome, or the parameter's own kind. */
+function parameterValue(kind: Kind): ParameterValue {
   switch (kind.node) {
-    case "resultOf":
-      return kind.inner;
+    case "taskOutcome":
+      return { kind: "upstream", output: kind.output };
     case "nullable":
-      return kind.inner.node === "resultOf" ? kind.inner.inner : kind;
+      return kind.inner.node === "taskOutcome"
+        ? { kind: "upstream", output: kind.inner.output }
+        : { kind: "value", value: kind };
     case "null":
     case "boolean":
     case "int":
@@ -121,9 +156,9 @@ function parameterValueKind(kind: Kind): Kind {
     case "json":
     case "conversion":
     case "checked":
-      return kind;
+      return { kind: "value", value: kind };
     default:
-      return unreachable(kind, "parameterValueKind");
+      return unreachable(kind, "parameterValue");
   }
 }
 
@@ -150,10 +185,14 @@ function walk(kind: Kind, path: string, level: number, refusals: KindRefused[]):
       return walkUnion(kind.members, path, level, refusals);
     case "taggedUnion":
       return walkTagged(kind.tag, kind.variants, path, level, refusals);
-    case "resultOf":
-      refusals.push({ rule: "ResultOfPlacement", path, detail: "h.resultOf is valid only as a whole task parameter" });
+    case "taskOutcome":
+      refusals.push({
+        rule: "TaskOutcomePlacement",
+        path,
+        detail: "h.taskOutcome is valid only as a whole task parameter",
+      });
 
-      return walk(kind.inner, path, 0, refusals);
+      return walkUpstream(kind.output, path, refusals);
     case "conversion":
       return walk(kind.stored, path, level, refusals);
     case "checked":
@@ -300,7 +339,7 @@ function storedClasses(kind: Kind): readonly StoredClass[] {
     case "object":
     case "taggedUnion":
     case "json":
-    case "resultOf":
+    case "taskOutcome":
       return ["container"];
     default:
       return unreachable(kind, "storedClasses");

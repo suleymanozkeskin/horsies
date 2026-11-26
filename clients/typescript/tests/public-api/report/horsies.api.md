@@ -327,7 +327,7 @@ export interface AttemptStartReported {
 }
 
 // @public
-export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = "noContext"> = [X] extends ["SHARED_ASYNC"] ? (input: BodyInput<P>, runtime: RuntimeOf<X, C>) => Promise<BodyResult<O, E>> : (input: BodyInput<P>, runtime: RuntimeOf<X, C>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
+export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = "noContext"> = [X] extends ["SHARED_ASYNC"] ? (input: BodyInput<P>, runtime: RuntimeOf<X, C> & ResultConstructors<O, E>) => Promise<BodyResult<O, E>> : (input: BodyInput<P>, runtime: RuntimeOf<X, C> & ResultConstructors<O, E>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
 
 // @public
 export type BodyInput<P extends ParameterSchemas> = ParametersValue<P>;
@@ -620,10 +620,17 @@ export interface CancelTaskOptions {
 }
 
 // @public
+export type CheckCase<P extends ParameterSchemas> = keyof P extends never ? EmptyObject : Flat<{
+    -readonly [K in keyof P as SenderMayLeaveOut<P[K]> extends true ? never : K]: IsUpstreamOutcome<P[K]> extends true ? ParameterValue<P[K]> : ParameterSent<P[K]>;
+} & {
+    -readonly [K in keyof P as SenderMayLeaveOut<P[K]> extends true ? K : never]?: IsUpstreamOutcome<P[K]> extends true ? ParameterValue<P[K]> : ParameterSent<P[K]>;
+}>;
+
+// @public
 export type CheckCases<P extends ParameterSchemas> = keyof P extends never ? {
     readonly checkCases?: readonly [];
 } : {
-    readonly checkCases: NonEmpty<SendInput<P>>;
+    readonly checkCases: NonEmpty<CheckCase<P>>;
 };
 
 // @public (undocumented)
@@ -1836,7 +1843,7 @@ export interface IsolatedRecycleInput {
 }
 
 // @public
-export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "resultOf" ? true : false) : false;
+export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "taskOutcome" ? true : false) : false;
 
 // @public
 export type IsZodJson<O> = [undefined] extends [O] ? false : [string | number | boolean | null | O[]] extends [O] ? true : false;
@@ -1947,7 +1954,7 @@ export type LogFieldValue = {
 };
 
 // @public
-export const LOGGER_NAMES: readonly ["horsies.app", "horsies.bridge", "horsies.broker", "horsies.cli", "horsies.codec", "horsies.core", "horsies.db", "horsies.lifecycle", "horsies.listener", "horsies.monitoring", "horsies.scheduler", "horsies.scheduler.state", "horsies.sql", "horsies.web", "horsies.worker", "horsies.workflow.engine", "horsies.workflow.handle", "horsies.workflow.recovery"];
+export const LOGGER_NAMES: readonly ["horsies.app", "horsies.bridge", "horsies.broker", "horsies.cli", "horsies.codec", "horsies.core", "horsies.db", "horsies.lifecycle", "horsies.listener", "horsies.monitoring", "horsies.scheduler", "horsies.scheduler.state", "horsies.sql", "horsies.telemetry", "horsies.web", "horsies.worker", "horsies.workflow.engine", "horsies.workflow.handle", "horsies.workflow.recovery"];
 
 // @public
 export const LOGGER_PARENTS: readonly ["horsies", "horsies.workflow"];
@@ -2236,7 +2243,7 @@ export type NodeParameter<S, J extends Join, K> = IsUpstreamOutcome<S> extends t
     readonly kind: "any";
 } | {
     readonly kind: "quorum";
-} ? SenderMayLeaveOut<S> extends true ? NodeRef<UpstreamValue<S>, string, string> : JoinNeedsOptional<K> : NodeRef<UpstreamValue<S>, string, string> : ParameterSent<S>;
+} ? SenderMayLeaveOut<S> extends true ? NodeRef<UpstreamValue<S>, UpstreamCode<S>, string> : JoinNeedsOptional<K> : NodeRef<UpstreamValue<S>, UpstreamCode<S>, string> : ParameterSent<S>;
 
 // @public
 export interface NodeRef<O, E extends string, Id extends string> {
@@ -3213,7 +3220,10 @@ export interface ResilienceConfigInput {
 export type Result<T, E> = Ok<T> | Err<E>;
 
 // @public
-export type ResultOfWire<W extends RequiredWire> = Wire<TaskOutcome<ValueOf<W>>, never, "required", "resultOf">;
+export type ResultConstructors<O extends OutputSchema, E extends string> = {
+    readonly ok: (value: SchemaSent<O>) => Ok<SchemaSent<O>>;
+    readonly err: <const K extends E>(failure: UserFailure<UserCode<K>>) => Err<UserFailure<E>>;
+};
 
 // @public
 export type Retention = {
@@ -3306,7 +3316,7 @@ export type ReturnedNodes<R extends BuildReturn> = R["output"] | (R extends {
 } ? PolicyNodes<S> : never);
 
 // @public
-export type Role = "value" | "resultOf";
+export type Role = "value" | "taskOutcome";
 
 // @public
 export type RoleOf<W extends AnyWire> = W[typeof wireRole];
@@ -4088,12 +4098,10 @@ export interface TaskClaimed {
 export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = ContextUse> {
     // (undocumented)
     readonly [contractTypes]: ContractTypes<P, O, E, X, C>;
-    err<const K extends E>(failure: UserFailure<UserCode<K>>): Err<UserFailure<E>>;
     // (undocumented)
     readonly kind: "task";
     // (undocumented)
     readonly name: string;
-    ok(value: SchemaSent<O>): Ok<SchemaSent<O>>;
 }
 
 // @public
@@ -4296,6 +4304,9 @@ export type TaskOutcome<O, E extends string = string> = {
     readonly error: TaskError<E>;
 };
 
+// @public
+export type TaskOutcomeWire<C extends AnyTaskContract | AnyWorkflowContract> = Wire<C extends AnyTaskContract ? TaskOutcome<SchemaValue<C[typeof contractTypes]["output"]>, C[typeof contractTypes]["code"]> : C extends AnyWorkflowContract ? TaskOutcome<WorkflowOutput<C[typeof workflowTypes]["build"]>, string> : never, never, "required", "taskOutcome">;
+
 // @public (undocumented)
 export interface TaskRecovered {
     // (undocumented)
@@ -4314,12 +4325,12 @@ export interface TaskRecovered {
 
 // @public
 export class TaskRuntime {
-    cancelState(): CancelState;
+    readonly cancelState: () => CancelState;
     readonly fencingToken: FencingToken;
     static forTest<const Keys extends readonly AnyStateKey[]>(options: TestRuntimeOptions<Keys>): WorkflowTaskRuntime;
     readonly signal: AbortSignal;
-    spawn<T>(name: string, work: SpawnedWork<T>): Result<Promise<T>, SpawnRefused>;
-    state<T>(key: StateKey<T>): T;
+    readonly spawn: <T>(name: string, work: SpawnedWork<T>) => Result<Promise<T>, SpawnRefused>;
+    readonly state: <T>(key: StateKey<T>) => T;
     readonly taskId: TaskId;
 }
 
@@ -4674,6 +4685,13 @@ export type UnfinishedStatus = "PENDING" | "CLAIMED" | "RUNNING";
 export type UnknownReason = "ATTEMPT_NOT_CAPTURED" | "CLAIMS_NOT_COUNTED" | "HISTORY_PRUNED" | "WORKER_LOST";
 
 // @public
+export type UpstreamCode<S> = S extends AnyWire ? Extract<ValueOf<S>, {
+    readonly kind: "failed";
+}> extends {
+    readonly error: TaskError<infer E>;
+} ? E : never : never;
+
+// @public
 export type UpstreamValue<S> = S extends AnyWire ? Extract<ValueOf<S>, {
     readonly kind: "succeeded";
 }> extends {
@@ -4757,8 +4775,8 @@ export interface WireBuilders {
     plainDateTime(): Wire<Temporal.PlainDateTime>;
     plainTime(): Wire<Temporal.PlainTime>;
     record<W extends RequiredWire>(value: W): Wire<Readonly<Record<string, ValueOf<W>>>, Readonly<Record<string, SentOf<W>>>>;
-    resultOf<W extends RequiredWire>(inner: W): ResultOfWire<W>;
     string(): Wire<string>;
+    taskOutcome<C extends AnyTaskContract | AnyWorkflowContract>(contract: C): TaskOutcomeWire<C>;
     tuple<const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>>;
     union<const T extends NonEmpty<RequiredWire>>(members: T): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
     union<const K extends string, const T extends NonEmpty<ObjectWire>>(tag: K, members: T): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
@@ -5016,7 +5034,7 @@ export interface WorkflowNodeInfo {
 }
 
 // @public
-export type WorkflowNodeOnly = "horsies: this task takes an upstream result (h.resultOf); only a workflow node can run it";
+export type WorkflowNodeOnly = "horsies: this task takes an upstream result (h.taskOutcome); only a workflow node can run it";
 
 // @public
 export type WorkflowNodeRead = {

@@ -10,7 +10,7 @@ import {
   type WorkflowTaskRuntime,
 } from "../../../horsies/src/child/public.ts";
 import type { TaskId } from "../../../horsies/src/contract/ids.ts";
-import type { RuntimeOf } from "../../../horsies/src/contract/public.ts";
+import type { ResultConstructors, RuntimeOf } from "../../../horsies/src/contract/public.ts";
 import { defineTask, h, type Horsies, type RuntimeWorkflowContext } from "../../../horsies/src/index.ts";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -49,15 +49,18 @@ export const audited = app.implement(audit, (_input, runtime) => {
     case "context": {
       const produced = context.context.resultFor("produce", produce);
 
-      return audit.ok(produced.ok && produced.value.kind === "succeeded" ? produced.value.value : 0);
+      return runtime.ok(produced.ok && produced.value.kind === "succeeded" ? produced.value.value : 0);
     }
 
     case "noContext":
-      return audit.ok(0);
+      return runtime.ok(0);
   }
 });
 
-export const plainImplementation = app.implement(plain, (_input, runtime: TaskRuntime) => plain.ok(runtime.fencingToken.value));
+export const plainImplementation = app.implement(
+  plain,
+  (_input, runtime: TaskRuntime & ResultConstructors<ReturnType<typeof h.int>, string>) => runtime.ok(runtime.fencingToken.value),
+);
 
 const forTest: WorkflowTaskRuntime = TaskRuntime.forTest({
   taskId,

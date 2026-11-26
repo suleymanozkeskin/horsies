@@ -10,6 +10,7 @@ export {
   type ExecutionClass,
   type ExecutionRules,
   type ReservedCode,
+  type ResultConstructors,
   type RetryCodes,
   type RetryPolicy,
   type TaskContract,

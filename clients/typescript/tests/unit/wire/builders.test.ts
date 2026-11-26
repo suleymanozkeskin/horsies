@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { defineTask } from "../../../horsies/src/contract/define-task.ts";
 import { h, type ObjectWire, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import type { AnyWire, RequiredWire } from "../../../horsies/src/wire/infer.ts";
 import { kindOf, presenceOf } from "../../../horsies/src/wire/wire-type.ts";
@@ -110,14 +111,15 @@ describe("h.* builders", () => {
     assert.throws(() => h.record(item), TypeError);
   });
 
-  test("h.resultOf holds the upstream output kind; it is a parameter only", () => {
-    const upstream = h.resultOf(h.object({ id: h.int() }));
+  test("h.taskOutcome holds the output kind of its upstream contract; it is a parameter only", () => {
+    const order = defineTask({ name: "order", input: {}, output: h.object({ id: h.int() }) });
+    const upstream = h.taskOutcome(order);
 
     assert.deepEqual(kindOf(upstream), {
-      node: "resultOf",
-      inner: kindOf(h.object({ id: h.int() })),
+      node: "taskOutcome",
+      output: { state: "compiled", kind: kindOf(h.object({ id: h.int() })) },
     });
-    assert.equal(parametersKind({ order: upstream }).members[0]?.kind.node, "resultOf");
+    assert.equal(parametersKind({ order: upstream }).members[0]?.kind.node, "taskOutcome");
 
     // SAFETY: the static types refuse these calls; the test checks the run-time guard behind them.
     const asValue = upstream as AnyWire as RequiredWire;
@@ -125,7 +127,7 @@ describe("h.* builders", () => {
     assert.throws(() => h.array(asValue), TypeError);
     assert.throws(() => h.object({ order: asValue }), TypeError);
     // SAFETY: the static types refuse this call; the test checks the run-time guard behind them.
-    const nullableAsValue = h.resultOf(h.int()).nullable() as AnyWire as RequiredWire;
+    const nullableAsValue = h.taskOutcome(order).nullable() as AnyWire as RequiredWire;
 
     assert.throws(() => h.object({ order: nullableAsValue }), TypeError);
   });

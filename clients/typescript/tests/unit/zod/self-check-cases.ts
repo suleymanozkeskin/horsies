@@ -18,7 +18,7 @@ import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
 import type { JsonValue } from "../../../horsies/src/codec/json-value.ts";
 import { encodeValue } from "../../../horsies/src/codec/writer.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";
-import type { Kind, Member, MemberPresence } from "../../../horsies/src/wire/kinds.ts";
+import type { Kind, Member, MemberPresence, UpstreamOutput } from "../../../horsies/src/wire/kinds.ts";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import { unreachable } from "../../../horsies/src/wire/unreachable.ts";
 import { compileMember, type ZodMemberKind } from "../../../horsies/src/zod/adapter.ts";
@@ -163,8 +163,9 @@ export function kindText(kind: Kind, depth: number): string {
       return `record(${inner(kind.value)})`;
     case "nullable":
     case "checked":
-    case "resultOf":
       return `${kind.node}(${inner(kind.inner)})`;
+    case "taskOutcome":
+      return `taskOutcome(${upstreamOutputText(kind.output, inner)})`;
     case "conversion":
       return `conversion(${inner(kind.stored)})`;
     case "null":
@@ -184,6 +185,18 @@ export function kindText(kind: Kind, depth: number): string {
       return kind.node;
     default:
       return unreachable(kind, "kindText");
+  }
+}
+
+/** The text of the upstream output of an outcome kind: its kind, or `refused`. */
+function upstreamOutputText(output: UpstreamOutput, inner: (kind: Kind) => string): string {
+  switch (output.state) {
+    case "compiled":
+      return inner(output.kind);
+    case "refused":
+      return "refused";
+    default:
+      return unreachable(output, "upstreamOutputText");
   }
 }
 

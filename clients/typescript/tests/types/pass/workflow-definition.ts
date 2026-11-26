@@ -1,6 +1,6 @@
 // Compile-pass cases of the sketch's workflow definitions (sections 5.1 and 5.2): a parameter takes a value or, when
-// declared h.resultOf(T), an upstream node; joins; a success policy; sub-workflows with and without params; a task that
-// takes the workflow context names ctxFrom.
+// declared h.taskOutcome(contract), an upstream node; joins; a success policy; sub-workflows with and without params; a
+// task that takes the workflow context names ctxFrom.
 
 import { defineTask, h, type ParameterSchemas } from "../../../horsies/src/index.ts";
 import {
@@ -25,18 +25,18 @@ const validateOrder = defineTask({ name: "validate_order", input: { order: Order
 
 const reserveStock = defineTask({
   name: "reserve_stock",
-  input: { order: h.resultOf(ValidatedOrder), warehouse: h.string() },
+  input: { order: h.taskOutcome(validateOrder), warehouse: h.string() },
   output: h.null(),
 });
 
 const chargePayment = defineTask({
   name: "charge_payment",
-  input: { order: h.resultOf(ValidatedOrder) },
+  input: { order: h.taskOutcome(validateOrder) },
   output: Receipt,
   errors: ["PAYMENT_DECLINED"],
 });
 
-const sendReceipt = defineTask({ name: "send_receipt", input: { receipt: h.resultOf(Receipt) }, output: h.null() });
+const sendReceipt = defineTask({ name: "send_receipt", input: { receipt: h.taskOutcome(chargePayment) }, output: h.null() });
 
 const quoteShipping = defineTask({
   name: "quote_shipping",
@@ -123,7 +123,7 @@ export const nightly = defineWorkflow(
 );
 
 /** A node-fed parameter declared optional runs under an any join. */
-const tally = defineTask({ name: "tally", input: { first: h.resultOf(h.int()).optional() }, output: h.int() });
+const tally = defineTask({ name: "tally", input: { first: h.taskOutcome(quoteShipping).optional() }, output: h.int() });
 
 export const anyJoin = defineWorkflow(
   { name: "any_join", definitionKey: "shop.any_join.v1", output: h.int(), params: {} },

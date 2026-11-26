@@ -39,7 +39,7 @@ import {
   PROMOTION_CODES,
   PROMOTION_SIZE_CODE_BUG_RATE,
 } from "../tuning.ts";
-import { storeFailure, type StoreKey } from "./support.ts";
+import { type ResultsOf, storeFailure, type StoreKey } from "./support.ts";
 
 /** The result of the promotion body. */
 export type PromotionResult = BodyResult<typeof PromotionOutcome, "ORDER_NOT_FOUND" | "DATA_CORRUPTION" | "STORE_UNAVAILABLE">;
@@ -170,21 +170,25 @@ async function promotionMultiplier(store: Store, orderId: string): Promise<numbe
  * The promotions of `orderId`: the bundle discount of its lines times the size multiplier, and the code that applied.
  * Throws `RangeError` for an order that the bundle fault draws and `SizeCodeError` for one that the size fault draws.
  */
-export async function applyPromotionsWith(store: Store, orderId: string): Promise<PromotionResult> {
+export async function applyPromotionsWith(
+  store: Store,
+  orderId: string,
+  { ok, err }: ResultsOf<typeof applyPromotions>,
+): Promise<PromotionResult> {
   priceDrawnClearanceBundle(orderId);
 
   const percent = await promotionMultiplier(store, orderId);
   const order = await getOrder(store, orderId);
 
   if (!order.ok) {
-    return applyPromotions.err({ code: "STORE_UNAVAILABLE", ...storeFailure(order.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(order.error) });
   }
 
   switch (order.value.kind) {
     case "notFound":
-      return applyPromotions.err({ code: "ORDER_NOT_FOUND", message: `no order ${orderId}` });
+      return err({ code: "ORDER_NOT_FOUND", message: `no order ${orderId}` });
     case "found":
-      return applyPromotions.ok({
+      return ok({
         orderId,
         discountCents: Math.floor((bundleDiscountCents(order.value.value.lines) * percent) / WHOLE_PERCENT),
         appliedCodes: [PROMOTION_CODES[0]],
@@ -207,20 +211,20 @@ export function loyaltyLifetimeEuros(customerId: string): number {
 }
 
 /** The loyalty points that `orderId` earns `customerId`. A fault of the engine is `LOYALTY_ENGINE_BUG`. Pure. */
-export function loyaltyPoints(customerId: string, orderId: string): LoyaltyResult {
+export function loyaltyPoints(customerId: string, orderId: string, { ok, err }: ResultsOf<typeof computeLoyaltyPoints>): LoyaltyResult {
   let lifetimeEuros: number;
 
   try {
     lifetimeEuros = loyaltyLifetimeEuros(customerId);
   } catch (cause) {
     if (cause instanceof LoyaltyEngineFault) {
-      return computeLoyaltyPoints.err({ code: "LOYALTY_ENGINE_BUG", message: cause.message });
+      return err({ code: "LOYALTY_ENGINE_BUG", message: cause.message });
     }
 
     throw cause;
   }
 
-  return computeLoyaltyPoints.ok({ customerId, orderId, points: lifetimeEuros * LOYALTY_POINTS_PER_EURO, tier: LOYALTY_TIER });
+  return ok({ customerId, orderId, points: lifetimeEuros * LOYALTY_POINTS_PER_EURO, tier: LOYALTY_TIER });
 }
 
 /** The list price of `sku` in the range of the demo catalog. Pure. */
@@ -257,13 +261,13 @@ export function priceUpdate(sku: string, campaignId: string): PriceUpdate {
 
 /** Implement the promotion, loyalty and price tasks on `app`; `apply_promotions` uses the store of `store`. */
 export function implementPromotionTasks(app: Horsies, store: StoreKey): void {
-  app.implement(applyPromotions, async ({ orderId }, runtime) => applyPromotionsWith(runtime.state(store), orderId), {
+  app.implement(applyPromotions, async ({ orderId }, runtime) => applyPromotionsWith(runtime.state(store), orderId, runtime), {
     exceptions: [[SizeCodeError, "DATA_CORRUPTION"]],
   });
-  app.implement(computeLoyaltyPoints, async ({ customerId, orderId }) => loyaltyPoints(customerId, orderId));
-  app.implement(publishCdn, async ({ campaignId, sku }) => publishCdn.ok(pricePush(sku, `cdn:${campaignId}`)));
-  app.implement(publishOrigin, async ({ campaignId, sku }) => publishOrigin.ok(pricePush(sku, `origin:${campaignId}`)));
-  app.implement(prewarmSearch, async ({ campaignId }) => prewarmSearch.ok(searchPrewarm(campaignId)));
-  app.implement(warmCacheEdge, async ({ campaignId }) => warmCacheEdge.ok(cacheWarm(campaignId)));
-  app.implement(updatePrice, async ({ sku, campaignId }) => updatePrice.ok(priceUpdate(sku, campaignId)));
+  app.implement(computeLoyaltyPoints, async ({ customerId, orderId }, results) => loyaltyPoints(customerId, orderId, results));
+  app.implement(publishCdn, async ({ campaignId, sku }, { ok }) => ok(pricePush(sku, `cdn:${campaignId}`)));
+  app.implement(publishOrigin, async ({ campaignId, sku }, { ok }) => ok(pricePush(sku, `origin:${campaignId}`)));
+  app.implement(prewarmSearch, async ({ campaignId }, { ok }) => ok(searchPrewarm(campaignId)));
+  app.implement(warmCacheEdge, async ({ campaignId }, { ok }) => ok(cacheWarm(campaignId)));
+  app.implement(updatePrice, async ({ sku, campaignId }, { ok }) => ok(priceUpdate(sku, campaignId)));
 }

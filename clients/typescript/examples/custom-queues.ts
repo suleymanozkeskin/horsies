@@ -55,9 +55,9 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(sendAlert, async ({ message }) => sendAlert.ok(`alert sent: ${message}`));
+app.implement(sendAlert, async ({ message }, { ok }) => ok(`alert sent: ${message}`));
 
-app.implement(rebuildIndex, async ({ shard }) => rebuildIndex.ok(shard));
+app.implement(rebuildIndex, async ({ shard }, { ok }) => ok(shard));
 
 async function demo(): Promise<Result<void, string>> {
   const shards: TaskHandle<number, string>[] = [];

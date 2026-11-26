@@ -12,7 +12,7 @@ import type { Store } from "../store/connection.ts";
 import { setOrderStatus } from "../store/orders.ts";
 import { countCourierAttempt, getShipment, setBookingReference, setLabelUrl, setTrackingCode } from "../store/shipments.ts";
 import { COURIER_FAILING_ATTEMPTS, COURIER_FLAKE_RATE } from "../tuning.ts";
-import { storeFailure, type StoreKey } from "./support.ts";
+import { type ResultsOf, storeFailure, type StoreKey } from "./support.ts";
 
 /** The letters of the courier name that start a booking reference. */
 const BOOKING_PREFIX_LETTERS = 3;
@@ -32,6 +32,10 @@ type LabelResult = BodyResult<typeof ShippingLabel, "UPSTREAM_FAILED" | Shipping
 
 type TrackResult = BodyResult<typeof TrackingSeed, "UPSTREAM_FAILED" | ShippingCode>;
 
+type LabelResults = ResultsOf<typeof printLabel>;
+
+type TrackResults = ResultsOf<typeof trackingSeed>;
+
 /** One booking request: `courier` takes the shipment of `orderId`. */
 export type BookingRequest = { readonly orderId: string; readonly courier: string; readonly express: boolean };
 
@@ -47,76 +51,76 @@ function bookingReference(courier: string): string {
  * `COURIER_UNAVAILABLE` on the first attempts of a drawn flake, which the retry policy retries; `SHIPMENT_NOT_FOUND`;
  * `STORE_UNAVAILABLE`.
  */
-export async function book(store: Store, request: BookingRequest): Promise<BookResult> {
+export async function book(store: Store, request: BookingRequest, { ok, err }: ResultsOf<typeof bookCourier>): Promise<BookResult> {
   const { orderId, courier, express } = request;
   const counted = await countCourierAttempt(store, orderId, courier, express);
 
   if (!counted.ok) {
-    return bookCourier.err({ code: "STORE_UNAVAILABLE", ...storeFailure(counted.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(counted.error) });
   }
 
   const { attempt, bookingReference: existing } = counted.value;
 
   if (existing.kind === "set") {
-    return bookCourier.ok({ orderId, courier, express, bookingReference: existing.value, attempt, replayed: true });
+    return ok({ orderId, courier, express, bookingReference: existing.value, attempt, replayed: true });
   }
 
   if (draw(COURIER_FLAKE_RATE, [orderId, "courier"]) && attempt <= COURIER_FAILING_ATTEMPTS) {
-    return bookCourier.err({ code: "COURIER_UNAVAILABLE", message: `${courier} refused attempt ${String(attempt)}` });
+    return err({ code: "COURIER_UNAVAILABLE", message: `${courier} refused attempt ${String(attempt)}` });
   }
 
   const reference = bookingReference(courier);
   const stored = await setBookingReference(store, orderId, reference);
 
   if (!stored.ok) {
-    return bookCourier.err({ code: "STORE_UNAVAILABLE", ...storeFailure(stored.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(stored.error) });
   }
 
   if (!stored.value) {
-    return bookCourier.err({ code: "SHIPMENT_NOT_FOUND", message: `order ${orderId} has no shipment row` });
+    return err({ code: "SHIPMENT_NOT_FOUND", message: `order ${orderId} has no shipment row` });
   }
 
-  return bookCourier.ok({ orderId, courier, express, bookingReference: reference, attempt, replayed: false });
+  return ok({ orderId, courier, express, bookingReference: reference, attempt, replayed: false });
 }
 
 /** Print the label of the booked shipment of `orderId`. `SHIPMENT_NOT_FOUND` for no shipment or no booking. */
-export async function label(store: Store, orderId: string): Promise<LabelResult> {
+export async function label(store: Store, orderId: string, { ok, err }: LabelResults): Promise<LabelResult> {
   const read = await getShipment(store, orderId);
 
   if (!read.ok) {
-    return printLabel.err({ code: "STORE_UNAVAILABLE", ...storeFailure(read.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(read.error) });
   }
 
   if (read.value.kind === "notFound") {
-    return printLabel.err({ code: "SHIPMENT_NOT_FOUND", message: `order ${orderId} has no shipment row` });
+    return err({ code: "SHIPMENT_NOT_FOUND", message: `order ${orderId} has no shipment row` });
   }
 
   const shipment = read.value.value;
 
   if (shipment.bookingReference.kind === "notSet") {
-    return printLabel.err({ code: "SHIPMENT_NOT_FOUND", message: `the shipment of order ${orderId} has no booking` });
+    return err({ code: "SHIPMENT_NOT_FOUND", message: `the shipment of order ${orderId} has no booking` });
   }
 
   const labelUrl = `https://labels.acme.invalid/${shipment.bookingReference.value}.pdf`;
   const stored = await setLabelUrl(store, orderId, labelUrl);
 
   if (!stored.ok) {
-    return printLabel.err({ code: "STORE_UNAVAILABLE", ...storeFailure(stored.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(stored.error) });
   }
 
-  return printLabel.ok({ orderId, labelUrl, labelFormat: shipment.express ? "A6" : "A5" });
+  return ok({ orderId, labelUrl, labelFormat: shipment.express ? "A6" : "A5" });
 }
 
 /** Seed the tracking code of the shipment of `orderId` and mark the order shipped. `SHIPMENT_NOT_FOUND`. */
-export async function track(store: Store, orderId: string): Promise<TrackResult> {
+export async function track(store: Store, orderId: string, { ok, err }: TrackResults): Promise<TrackResult> {
   const read = await getShipment(store, orderId);
 
   if (!read.ok) {
-    return trackingSeed.err({ code: "STORE_UNAVAILABLE", ...storeFailure(read.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(read.error) });
   }
 
   if (read.value.kind === "notFound") {
-    return trackingSeed.err({ code: "SHIPMENT_NOT_FOUND", message: `order ${orderId} has no shipment row` });
+    return err({ code: "SHIPMENT_NOT_FOUND", message: `order ${orderId} has no shipment row` });
   }
 
   const courier = read.value.value.courier;
@@ -124,25 +128,30 @@ export async function track(store: Store, orderId: string): Promise<TrackResult>
   const stored = await setTrackingCode(store, orderId, trackingCode);
 
   if (!stored.ok) {
-    return trackingSeed.err({ code: "STORE_UNAVAILABLE", ...storeFailure(stored.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(stored.error) });
   }
 
   const marked = await setOrderStatus(store, orderId, "shipped");
 
   if (!marked.ok) {
-    return trackingSeed.err({ code: "STORE_UNAVAILABLE", ...storeFailure(marked.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(marked.error) });
   }
 
-  return trackingSeed.ok({ orderId, courier, trackingCode, trackingUrl: `https://track.${courier}.invalid/${trackingCode}` });
+  return ok({ orderId, courier, trackingCode, trackingUrl: `https://track.${courier}.invalid/${trackingCode}` });
 }
 
 /** The label after the booking node: `UPSTREAM_FAILED` when the booking failed. */
-export async function labelAfter(store: Store, orderId: string, booking: TaskOutcome<CourierBooking>): Promise<LabelResult> {
+export async function labelAfter(
+  store: Store,
+  orderId: string,
+  booking: TaskOutcome<CourierBooking>,
+  { ok, err }: LabelResults,
+): Promise<LabelResult> {
   switch (booking.kind) {
     case "succeeded":
-      return label(store, orderId);
+      return label(store, orderId, { ok, err });
     case "failed":
-      return printLabel.err({ code: "UPSTREAM_FAILED", ...upstreamFailure(booking.error) });
+      return err({ code: "UPSTREAM_FAILED", ...upstreamFailure(booking.error) });
     default: {
       const unexpected: never = booking;
 
@@ -152,12 +161,17 @@ export async function labelAfter(store: Store, orderId: string, booking: TaskOut
 }
 
 /** The tracking code after the label node: `UPSTREAM_FAILED` when the label failed. */
-export async function trackAfter(store: Store, orderId: string, shippingLabel: TaskOutcome<ShippingLabel>): Promise<TrackResult> {
+export async function trackAfter(
+  store: Store,
+  orderId: string,
+  shippingLabel: TaskOutcome<ShippingLabel>,
+  { ok, err }: TrackResults,
+): Promise<TrackResult> {
   switch (shippingLabel.kind) {
     case "succeeded":
-      return track(store, orderId);
+      return track(store, orderId, { ok, err });
     case "failed":
-      return trackingSeed.err({ code: "UPSTREAM_FAILED", ...upstreamFailure(shippingLabel.error) });
+      return err({ code: "UPSTREAM_FAILED", ...upstreamFailure(shippingLabel.error) });
     default: {
       const unexpected: never = shippingLabel;
 
@@ -168,9 +182,11 @@ export async function trackAfter(store: Store, orderId: string, shippingLabel: T
 
 /** Implement the shipping tasks on `app`; each one uses the store of `store`. */
 export function implementShippingTasks(app: Horsies, store: StoreKey): void {
-  app.implement(bookCourier, async (input, runtime) => book(runtime.state(store), input));
-  app.implement(printLabel, async ({ orderId, booking }, runtime) => labelAfter(runtime.state(store), orderId, booking));
+  app.implement(bookCourier, async (input, runtime) => book(runtime.state(store), input, runtime));
+  app.implement(printLabel, async ({ orderId, booking }, runtime) =>
+    labelAfter(runtime.state(store), orderId, booking, runtime),
+  );
   app.implement(trackingSeed, async ({ orderId, label: shippingLabel }, runtime) =>
-    trackAfter(runtime.state(store), orderId, shippingLabel),
+    trackAfter(runtime.state(store), orderId, shippingLabel, runtime),
   );
 }

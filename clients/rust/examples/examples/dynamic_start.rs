@@ -81,7 +81,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 }
 
 async fn demo(app: Horsies) -> DemoResult {
-    let limit = WaitLimit::parse(Some(Duration::from_secs(60)))?;
+    let limit = WaitLimit::Within(Duration::from_secs(60));
     let started = start_report::send(&app, "emea".to_owned()).await?;
     let workflow_id = match started.get(limit).await? {
         TaskOutcome::Succeeded(workflow_id) => workflow_id,

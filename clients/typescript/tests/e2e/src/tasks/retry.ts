@@ -69,20 +69,20 @@ export const RETRY_CONTRACTS = [retryExhausted, retrySuccess, exponential, retry
 
 /** The implementations of this module on `app`. */
 export function implementRetry(app: Horsies): void {
-  app.implement(retryExhausted, () => retryExhausted.err({ code: "TRANSIENT", message: "always fails" }));
-  app.implement(retrySuccess, ({ token }) => {
+  app.implement(retryExhausted, (_input, { err }) => err({ code: "TRANSIENT", message: "always fails" }));
+  app.implement(retrySuccess, ({ token }, { ok, err }) => {
     const attempt = nextAttempt(token);
 
     if (!attempt.ok) {
-      return retrySuccess.err({ code: "MARKER_FAILED", message: markerErrorText(attempt.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(attempt.error) });
     }
 
     return attempt.value < SUCCESS_ATTEMPT
-      ? retrySuccess.err({ code: "TRANSIENT", message: `attempt ${String(attempt.value)}` })
-      : retrySuccess.ok(`succeeded_on_attempt_${String(attempt.value)}`);
+      ? err({ code: "TRANSIENT", message: `attempt ${String(attempt.value)}` })
+      : ok(`succeeded_on_attempt_${String(attempt.value)}`);
   });
-  app.implement(exponential, () => exponential.err({ code: "TRANSIENT", message: "fail" }));
-  app.implement(retryErrorCode, () => retryErrorCode.err({ code: "RETRYABLE_ERROR", message: "Retryable error" }));
-  app.implement(retryOtherCode, () => retryOtherCode.err({ code: "RETRYABLE_ERROR", message: "not in autoRetryFor" }));
-  app.implement(retryLongInterval, () => retryLongInterval.err({ code: "TRANSIENT", message: "always fails" }));
+  app.implement(exponential, (_input, { err }) => err({ code: "TRANSIENT", message: "fail" }));
+  app.implement(retryErrorCode, (_input, { err }) => err({ code: "RETRYABLE_ERROR", message: "Retryable error" }));
+  app.implement(retryOtherCode, (_input, { err }) => err({ code: "RETRYABLE_ERROR", message: "not in autoRetryFor" }));
+  app.implement(retryLongInterval, (_input, { err }) => err({ code: "TRANSIENT", message: "always fails" }));
 }

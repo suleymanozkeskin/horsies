@@ -69,6 +69,7 @@ describe("the memory cap of a seat isolate", () => {
       serve: async () => assert.fail("the case runs no operation"),
       endChild: (code) => ends.push(code),
       writeLine: () => undefined,
+      spanNotMade: () => assert.fail("the case makes no span"),
       reportDefect: (defect) => assert.fail(defect.message),
     });
 

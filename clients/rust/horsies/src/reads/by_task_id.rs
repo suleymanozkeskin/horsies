@@ -1,8 +1,10 @@
 //! Reads by task id on the app, as the Python app offers them:
 //! `get_result`, `get_raw_result` and `get_task_info`.
 //!
-//! A result wait in a process that runs task bodies is refused with
-//! `WaitInsideTask` before any statement; the task info is not a wait.
+//! A result wait checks its limit first (`InvalidInput` above
+//! `MAX_WAIT_LIMIT_MS`). In a process that runs task bodies it is refused
+//! with `WaitInsideTask`. Both come before any statement. The task info is
+//! not a wait.
 
 use std::sync::Arc;
 
@@ -14,7 +16,7 @@ use horsies_core::{
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
-use crate::handle::{limit_duration, read_task_info};
+use crate::handle::{checked_task_wait, read_task_info};
 use crate::process_state::refuse_in_a_fork;
 use crate::{Horsies, ReadError, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, UserErrorCode};
 
@@ -60,14 +62,17 @@ impl Horsies {
     /// The stored result of task `task_id`, waiting up to `limit` while it
     /// has not finished (Python `get_raw_result`).
     ///
-    /// Errors: `WaitInsideTask` in a process that runs task bodies, before
-    /// any statement; `TaskNotFound`; `WaitTimedOut`; `ResultNotAvailable`
-    /// for a terminal task that stored no result; `Database`.
+    /// Errors: `InvalidInput` for a `Within` limit above
+    /// `MAX_WAIT_LIMIT_MS`, as the first check; `WaitInsideTask` in a
+    /// process that runs task bodies; both before any statement.
+    /// `TaskNotFound`; `WaitTimedOut`; `ResultNotAvailable` for a terminal
+    /// task that stored no result; `Database`.
     pub async fn get_raw_result(
         &self,
         task_id: Uuid,
         limit: WaitLimit,
     ) -> Result<StoredResult, ReadError> {
+        let wait = checked_task_wait(task_id, limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "Horsies.get_raw_result() for task {task_id}"
@@ -80,7 +85,7 @@ impl Horsies {
             .await
             .map_err(|error| ReadError::of_broker(&error))?;
         let record = broker
-            .get_raw_result_record(task_id, limit_duration(limit))
+            .get_raw_result_record(task_id, wait)
             .await
             .map_err(|error| ReadError::of_operation(task_id, error))?;
         match record {

@@ -89,10 +89,10 @@ function decimalOfCents(cents: bigint): Decimal {
   return parsed.value;
 }
 
-app.implement(priceOrder, async ({ order }) => {
+app.implement(priceOrder, async ({ order }, { ok }) => {
   const totalCents = order.items.reduce((sum, item) => sum + BigInt(item.quantity) * item.unitCents, 0n);
 
-  return priceOrder.ok({
+  return ok({
     orderId: order.orderId,
     itemCount: order.items.length,
     total: decimalOfCents(totalCents),

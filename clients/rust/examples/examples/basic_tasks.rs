@@ -82,7 +82,7 @@ fn report<T: Debug, E: UserErrorCode>(label: &str, read: Result<TaskOutcome<T, E
 }
 
 async fn demo(app: Horsies) -> DemoResult {
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
+    let limit = WaitLimit::Within(Duration::from_secs(30));
     let sum = add::send(&app, 2, 3).await?;
     let words = word_count::send(&app, "the quick brown fox".to_owned()).await?;
     let small = charge::send(&app, 500).await?;

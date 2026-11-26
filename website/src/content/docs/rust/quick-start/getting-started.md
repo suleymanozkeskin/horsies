@@ -62,8 +62,7 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
 
 async fn send_greeting(app: &Horsies) -> Result<(), Box<dyn std::error::Error>> {
     let handle = greet::send(app, "world".to_owned()).await?;
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
-    match handle.get(limit).await? {
+    match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(greeting) => println!("{greeting}"),
         TaskOutcome::Failed(error) => println!("greet failed: {}", error.code().text()),
     }

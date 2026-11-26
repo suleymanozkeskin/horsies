@@ -913,7 +913,7 @@ async fn rerun_one(app: &Horsies, rerun: &Rerun, sent: &[Uuid]) -> Result<Uuid, 
     let source = *sent
         .get(rerun.source)
         .ok_or_else(|| SendRefused(format!("{rerun:?} names no earlier task line")))?;
-    let limit = WaitLimit::parse(Some(RESULT_WAIT)).expect("30 s is below the wait bound");
+    let limit = WaitLimit::Within(RESULT_WAIT);
     match app.get_result::<i64, ParityCode>(source, limit).await {
         Ok(TaskOutcome::Failed(error))
             if *error.code() == TaskErrorCode::User(ParityCode::Refused) => {}

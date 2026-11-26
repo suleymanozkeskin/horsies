@@ -75,7 +75,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 
 async fn demo(app: Horsies) -> DemoResult {
     let handle = welcome::send(&app, "ada".to_owned()).await?;
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
+    let limit = WaitLimit::Within(Duration::from_secs(30));
     match handle.get(limit).await? {
         TaskOutcome::Succeeded(message) => println!("{message}"),
         TaskOutcome::Failed(error) => println!("welcome failed: {error}"),

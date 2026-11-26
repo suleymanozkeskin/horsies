@@ -8,6 +8,7 @@
 import type { ContextUse } from "../contract/define-task.ts";
 import type { IsUpstreamOutcome, ParameterSchemas } from "../contract/schema.ts";
 import type { AnyWire, EmptyObject, Flat, ValueOf } from "../wire/infer.ts";
+import type { TaskError } from "../wire/task-error.ts";
 import type { ParameterSent, SenderMayLeaveOut } from "../zod/infer.ts";
 
 /** Type-only key of the types of a node. It does not exist at run time. */
@@ -40,7 +41,7 @@ export type DefaultJoin = { readonly kind: "all" };
 export type JoinNeedsOptional<K> =
   `horsies: under an "any" or "quorum" join, parameter '${K & string}' must be declared .optional()`;
 
-/** The success value of an upstream outcome parameter: `h.resultOf(T)` gives `T`. */
+/** The success value of an upstream outcome parameter: `h.taskOutcome(contract)` gives the contract's output. */
 export type UpstreamValue<S> = S extends AnyWire
   ? Extract<ValueOf<S>, { readonly kind: "succeeded" }> extends { readonly value: infer T }
     ? T
@@ -48,17 +49,27 @@ export type UpstreamValue<S> = S extends AnyWire
   : never;
 
 /**
+ * The custom codes of an upstream outcome parameter: `h.taskOutcome(contract)` gives the codes of a task contract, or
+ * any code (`string`) for a workflow contract or a task with no `errorCodes`.
+ */
+export type UpstreamCode<S> = S extends AnyWire
+  ? Extract<ValueOf<S>, { readonly kind: "failed" }> extends { readonly error: TaskError<infer E> }
+    ? E
+    : never
+  : never;
+
+/**
  * The value of one parameter of a node: a value of the parameter's type, or, for a parameter declared
- * `h.resultOf(T)`, a node whose output is a `T`. Under an `any` or `quorum` join, such a parameter must be optional:
- * its source may not have ended.
+ * `h.taskOutcome(contract)`, a node whose output and codes fit those of the contract. Under an `any` or `quorum` join,
+ * such a parameter must be optional: its source may not have ended.
  */
 export type NodeParameter<S, J extends Join, K> =
   IsUpstreamOutcome<S> extends true
     ? J extends { readonly kind: "any" } | { readonly kind: "quorum" }
       ? SenderMayLeaveOut<S> extends true
-        ? NodeRef<UpstreamValue<S>, string, string>
+        ? NodeRef<UpstreamValue<S>, UpstreamCode<S>, string>
         : JoinNeedsOptional<K>
-      : NodeRef<UpstreamValue<S>, string, string>
+      : NodeRef<UpstreamValue<S>, UpstreamCode<S>, string>
     : ParameterSent<S>;
 
 /** The input of a node: one member per parameter; an optional or defaulted one may be left out. */

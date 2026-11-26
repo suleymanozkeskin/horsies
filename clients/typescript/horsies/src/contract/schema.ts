@@ -31,8 +31,8 @@ export type SchemaValue<S> = S extends AnyWire ? ValueOf<S> : ZodValueOf<S>;
 /** The value that a sender gives for a schema. */
 export type SchemaSent<S> = S extends AnyWire ? SentOf<S> : ZodSentOf<S>;
 
-/** Whether a parameter is an upstream outcome that only a workflow node gives (`h.resultOf`). */
-export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "resultOf" ? true : false) : false;
+/** Whether a parameter is an upstream outcome that only a workflow node gives (`h.taskOutcome`). */
+export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "taskOutcome" ? true : false) : false;
 
 /** Whether a sender may leave out an upstream outcome parameter (an `h.*` wire type): `.optional()`. */
 export type LeftOutBySender<S> = S extends AnyWire ? (PresenceOf<S> extends "required" ? false : true) : false;
@@ -59,7 +59,7 @@ export type HasRequiredUpstreamOutcome<P extends ParameterSchemas> = true extend
 
 /** The type of the input of a task that only a workflow node can run: no value has it. */
 export type WorkflowNodeOnly =
-  "horsies: this task takes an upstream result (h.resultOf); only a workflow node can run it";
+  "horsies: this task takes an upstream result (h.taskOutcome); only a workflow node can run it";
 
 /** The input that `app.send` takes: `SendInput`, or a refusal text for a task that only a workflow node can run. */
 export type SendableInput<P extends ParameterSchemas> =

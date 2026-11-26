@@ -7,7 +7,8 @@
 //    first and given as the runtime's `workflowContext` (`workflow-input.ts`); a member that does not read is
 //    `WORKER_SERIALIZATION_ERROR` too, as the Rust client's input decode gives it.
 // 2. The body runs inside the run store, with the run held in the loop marks for its synchronous part, through the
-//    body observer. A returned Promise is awaited.
+//    body observer. Its second argument is one frozen object: the own members of the run's runtime and the
+//    contract's `ok` and `err`. A returned Promise is awaited.
 // 3. The outcome:
 //    - `ok(value)`: the value encodes with the output kind and reads back; a refusal is `WORKER_SERIALIZATION_ERROR`;
 //    - `err({ code, message, data })`: the stored error with the user code;
@@ -26,7 +27,9 @@ import type { JsonText } from "../codec/json-text.ts";
 import { refusalText, type CodecRefused } from "../codec/refusal.ts";
 import { isObjectLike, isString } from "../codec/values.ts";
 import type { CompiledContract } from "../contract/compile.ts";
+import type { ResultConstructors } from "../contract/define-task.ts";
 import type { ImplementationParts } from "../contract/implementation.ts";
+import type { OutputSchema } from "../contract/schema.ts";
 import type { ErrorDataPart, OptionalText, TaskErrorParts } from "../native/sends/addon.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -75,8 +78,14 @@ type DecodedParameters = Readonly<Record<string, unknown>>;
 /** What a body returned (or its Promise resolved with), before its read. */
 type BodyReturn = { readonly returned: unknown };
 
+/**
+ * The second argument of a body: the members of its runtime and the result constructors of its contract. The type of
+ * the run's runtime is erased to the members of every class.
+ */
+type BodyArgument = ThreadTaskRuntime & ResultConstructors<OutputSchema, string>;
+
 /** The body of an implementation, with its types erased: the adapter decodes its input with the contract's kinds. */
-type ErasedBody = (input: DecodedParameters, runtime: ThreadTaskRuntime) => unknown;
+type ErasedBody = (input: DecodedParameters, runtime: BodyArgument) => unknown;
 
 /** Run the body of `run` and give its stored outcome. Never rejects. */
 export async function runBody(run: BodyRun): Promise<StoredBodyOutcome> {
@@ -139,12 +148,13 @@ async function calledBody(run: BodyRun, prepared: PreparedBody): Promise<StoredB
   // SAFETY: the parts keep the body with its types erased; the input decoded with the contract's parameters and
   // the runtime is the one of the run, so the body gets the values its static types name.
   const body = run.implementation.body as ErasedBody;
+  const argument = bodyArgumentOf(prepared.runtime, run.implementation.resultConstructors);
   let returned: unknown;
 
   const before = run.marks.hold(run.mark.taskId);
 
   try {
-    returned = runStore.run(run.mark, () => run.observation.run(() => body(prepared.input, prepared.runtime)));
+    returned = runStore.run(run.mark, () => run.observation.run(() => body(prepared.input, argument)));
   } catch (cause) {
     return thrownOutcome(run, cause);
   } finally {
@@ -156,6 +166,17 @@ async function calledBody(run: BodyRun, prepared: PreparedBody): Promise<StoredB
   } catch (cause) {
     return thrownOutcome(run, cause);
   }
+}
+
+/**
+ * The second argument of a body: the own members of `runtime` (a child's runtime, or the runtime of a test) and the
+ * result constructors of the contract, in one frozen object. Pure.
+ */
+function bodyArgumentOf(
+  runtime: ThreadTaskRuntime,
+  constructors: ResultConstructors<OutputSchema, string>,
+): BodyArgument {
+  return Object.freeze({ ...runtime, ok: constructors.ok, err: constructors.err });
 }
 
 /** Give the observer how the body ended, then give the outcome. */

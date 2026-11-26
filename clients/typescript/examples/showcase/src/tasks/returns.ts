@@ -10,7 +10,7 @@ import { restockUnits } from "../store/catalog.ts";
 import type { Store } from "../store/connection.ts";
 import { closeReturn, getReturn, openReturn, recordInspection } from "../store/returns.ts";
 import { RETURN_DAMAGE_RATE } from "../tuning.ts";
-import { storeFailure, type StoreKey } from "./support.ts";
+import { type ResultsOf, storeFailure, type StoreKey } from "./support.ts";
 
 /** The notes of an inspection that finds no damage. */
 const RESELLABLE_NOTES = "no visible wear, tags intact";
@@ -21,6 +21,8 @@ type InspectResult = BodyResult<typeof Inspection, "RETURN_NOT_FOUND" | "DAMAGED
 
 type SettleResult = BodyResult<typeof RestockDecision, "RETURN_NOT_FOUND" | "UNKNOWN_SKU" | "STORE_UNAVAILABLE">;
 
+type SettleResults = ResultsOf<typeof restockOrWriteoff>;
+
 /** One returned item: `quantity` units of `sku` of the order `orderId`, under the case `returnId`. */
 export type ReturnRequest = {
   readonly returnId: string;
@@ -30,7 +32,11 @@ export type ReturnRequest = {
 };
 
 /** Book the returned item in. A case of the id that exists stays as it is. `STORE_UNAVAILABLE`. */
-export async function receive(store: Store, request: ReturnRequest): Promise<ReceiveResult> {
+export async function receive(
+  store: Store,
+  request: ReturnRequest,
+  { ok, err }: ResultsOf<typeof receiveReturn>,
+): Promise<ReceiveResult> {
   const opened = await openReturn(store, {
     ...request,
     status: "received",
@@ -39,25 +45,25 @@ export async function receive(store: Store, request: ReturnRequest): Promise<Rec
   });
 
   if (!opened.ok) {
-    return receiveReturn.err({ code: "STORE_UNAVAILABLE", ...storeFailure(opened.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(opened.error) });
   }
 
-  return receiveReturn.ok(request);
+  return ok(request);
 }
 
 /**
  * Inspect the item of `returnId` and record its condition. A drawn damage is `DAMAGED_ITEM`, which no policy
  * retries. `RETURN_NOT_FOUND`; `STORE_UNAVAILABLE`.
  */
-export async function inspect(store: Store, returnId: string): Promise<InspectResult> {
+export async function inspect(store: Store, returnId: string, { ok, err }: ResultsOf<typeof inspectItem>): Promise<InspectResult> {
   const read = await getReturn(store, returnId);
 
   if (!read.ok) {
-    return inspectItem.err({ code: "STORE_UNAVAILABLE", ...storeFailure(read.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(read.error) });
   }
 
   if (read.value.kind === "notFound") {
-    return inspectItem.err({ code: "RETURN_NOT_FOUND", message: `no return ${returnId}` });
+    return err({ code: "RETURN_NOT_FOUND", message: `no return ${returnId}` });
   }
 
   const returnCase = read.value.value;
@@ -65,18 +71,18 @@ export async function inspect(store: Store, returnId: string): Promise<InspectRe
   const recorded = await recordInspection(store, returnId, condition);
 
   if (!recorded.ok) {
-    return inspectItem.err({ code: "STORE_UNAVAILABLE", ...storeFailure(recorded.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(recorded.error) });
   }
 
   switch (condition) {
     case "damaged":
-      return inspectItem.err({
+      return err({
         code: "DAMAGED_ITEM",
         message: `${returnCase.sku} came back damaged and cannot be resold`,
         data: { returnId, sku: returnCase.sku, quantity: returnCase.quantity },
       });
     case "resellable":
-      return inspectItem.ok({ returnId, sku: returnCase.sku, condition, notes: RESELLABLE_NOTES });
+      return ok({ returnId, sku: returnCase.sku, condition, notes: RESELLABLE_NOTES });
     default: {
       const unexpected: never = condition;
 
@@ -89,24 +95,29 @@ export async function inspect(store: Store, returnId: string): Promise<InspectRe
  * Settle the case `returnId` by the outcome of its inspection: a resellable item goes back on the shelf, a failed
  * inspection writes the item off. `RETURN_NOT_FOUND`; `UNKNOWN_SKU`; `STORE_UNAVAILABLE`.
  */
-export async function settle(store: Store, returnId: string, inspection: TaskOutcome<Inspection>): Promise<SettleResult> {
+export async function settle(
+  store: Store,
+  returnId: string,
+  inspection: TaskOutcome<Inspection>,
+  { ok, err }: SettleResults,
+): Promise<SettleResult> {
   const read = await getReturn(store, returnId);
 
   if (!read.ok) {
-    return restockOrWriteoff.err({ code: "STORE_UNAVAILABLE", ...storeFailure(read.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(read.error) });
   }
 
   if (read.value.kind === "notFound") {
-    return restockOrWriteoff.err({ code: "RETURN_NOT_FOUND", message: `no return ${returnId}` });
+    return err({ code: "RETURN_NOT_FOUND", message: `no return ${returnId}` });
   }
 
   const returnCase = read.value.value;
 
   switch (inspection.kind) {
     case "succeeded":
-      return restock(store, returnCase);
+      return restock(store, returnCase, { ok, err });
     case "failed":
-      return writeOff(store, returnCase);
+      return writeOff(store, returnCase, { ok, err });
     default: {
       const unexpected: never = inspection;
 
@@ -115,24 +126,24 @@ export async function settle(store: Store, returnId: string, inspection: TaskOut
   }
 }
 
-async function restock(store: Store, returnCase: ReturnCase): Promise<SettleResult> {
+async function restock(store: Store, returnCase: ReturnCase, { ok, err }: SettleResults): Promise<SettleResult> {
   const restocked = await restockUnits(store, returnCase.sku, returnCase.quantity);
 
   if (!restocked.ok) {
-    return restockOrWriteoff.err({ code: "STORE_UNAVAILABLE", ...storeFailure(restocked.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(restocked.error) });
   }
 
   if (restocked.value.kind === "notFound") {
-    return restockOrWriteoff.err({ code: "UNKNOWN_SKU", message: `${returnCase.sku} is not in the catalog` });
+    return err({ code: "UNKNOWN_SKU", message: `${returnCase.sku} is not in the catalog` });
   }
 
   const closed = await closeReturn(store, returnCase.returnId, "restocked");
 
   if (!closed.ok) {
-    return restockOrWriteoff.err({ code: "STORE_UNAVAILABLE", ...storeFailure(closed.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(closed.error) });
   }
 
-  return restockOrWriteoff.ok({
+  return ok({
     returnId: returnCase.returnId,
     sku: returnCase.sku,
     quantity: returnCase.quantity,
@@ -140,14 +151,14 @@ async function restock(store: Store, returnCase: ReturnCase): Promise<SettleResu
   });
 }
 
-async function writeOff(store: Store, returnCase: ReturnCase): Promise<SettleResult> {
+async function writeOff(store: Store, returnCase: ReturnCase, { ok, err }: SettleResults): Promise<SettleResult> {
   const closed = await closeReturn(store, returnCase.returnId, "written_off");
 
   if (!closed.ok) {
-    return restockOrWriteoff.err({ code: "STORE_UNAVAILABLE", ...storeFailure(closed.error) });
+    return err({ code: "STORE_UNAVAILABLE", ...storeFailure(closed.error) });
   }
 
-  return restockOrWriteoff.ok({
+  return ok({
     returnId: returnCase.returnId,
     sku: returnCase.sku,
     quantity: returnCase.quantity,
@@ -157,9 +168,9 @@ async function writeOff(store: Store, returnCase: ReturnCase): Promise<SettleRes
 
 /** Implement the return tasks on `app`; each one uses the store of `store`. */
 export function implementReturnTasks(app: Horsies, store: StoreKey): void {
-  app.implement(receiveReturn, async (input, runtime) => receive(runtime.state(store), input));
-  app.implement(inspectItem, async ({ returnId }, runtime) => inspect(runtime.state(store), returnId));
+  app.implement(receiveReturn, async (input, runtime) => receive(runtime.state(store), input, runtime));
+  app.implement(inspectItem, async ({ returnId }, runtime) => inspect(runtime.state(store), returnId, runtime));
   app.implement(restockOrWriteoff, async ({ returnId, inspection }, runtime) =>
-    settle(runtime.state(store), returnId, inspection),
+    settle(runtime.state(store), returnId, inspection, runtime),
   );
 }

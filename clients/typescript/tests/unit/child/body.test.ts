@@ -6,8 +6,16 @@ import { describe, test } from "node:test";
 
 import { errorDataPart, refusedCodeParts } from "../../../horsies/src/child/body.ts";
 import type { TaskErrorParts } from "../../../horsies/src/native/sends/addon.ts";
+import {
+  type ContextUse,
+  type ExecutionClass,
+  type ResultConstructors,
+  resultConstructorsOf,
+  type TaskContract,
+} from "../../../horsies/src/contract/define-task.ts";
 import { implementationOf, implementationParts, type ImplementationParts } from "../../../horsies/src/contract/implementation.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
+import type { OutputSchema, ParameterSchemas } from "../../../horsies/src/contract/schema.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { adapterRun, errorParts, RUN_TASK_ID } from "./support.ts";
 
@@ -26,23 +34,24 @@ class CardDeclined extends Error {
 
 class SoftDecline extends CardDeclined {}
 
-function parts(
-  contract: object,
-  body: (input: never, runtime: never) => unknown,
+/** The parts of an implementation of `contract` with `body`: the body gets the contract's `ok` and `err`. */
+function parts<O extends OutputSchema, E extends string>(
+  contract: TaskContract<ParameterSchemas, O, E, ExecutionClass, ContextUse>,
+  body: (input: never, runtime: ResultConstructors<O, E>) => unknown,
   exceptions: ImplementationParts["exceptions"] = [],
 ): ImplementationParts {
-  return { contract, body, exceptions };
+  return { contract, body, exceptions, resultConstructors: resultConstructorsOf<OutputSchema, string>(contract.name) };
 }
 
 describe("the input of a body", () => {
   test("the input decodes with the contract's parameters", async () => {
-    const run = await adapterRun(implementationParts(implementationOf(add, ({ a, b }) => add.ok(a + b), [])), '{"a":2,"b":3}');
+    const run = await adapterRun(implementationParts(implementationOf(add, ({ a, b }, { ok }) => ok(a + b), [])), '{"a":2,"b":3}');
 
     assert.deepEqual(run.outcome, { kind: "value", json: "5" });
   });
 
   test("an input that does not decode is WORKER_SERIALIZATION_ERROR with the path and the kind, never the value", async () => {
-    const run = await adapterRun(parts(add, () => add.ok(0)), '{"a":"secret-text","b":3}');
+    const run = await adapterRun(parts(add, (_input, { ok }) => ok(0)), '{"a":"secret-text","b":3}');
     const error = errorParts(run.outcome);
 
     assert.deepEqual(error.code, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
@@ -55,14 +64,14 @@ describe("the input of a body", () => {
 
 describe("the value of a body", () => {
   test("a value that reads back is stored as its text", async () => {
-    const run = await adapterRun(parts(greet, () => greet.ok({ text: "hi ✓" })), '{"name":"x"}');
+    const run = await adapterRun(parts(greet, (_input, { ok }) => ok({ text: "hi ✓" })), '{"name":"x"}');
 
     assert.deepEqual(run.outcome, { kind: "value", json: '{"text":"hi ✓"}' });
   });
 
   test("a value that does not read back is WORKER_SERIALIZATION_ERROR", async () => {
     // SAFETY: the test returns a value outside the output type on purpose: the read-back refuses it.
-    const run = await adapterRun(parts(greet, () => greet.ok({ text: 7 } as never)), '{"name":"x"}');
+    const run = await adapterRun(parts(greet, (_input, { ok }) => ok({ text: 7 } as never)), '{"name":"x"}');
     const error = errorParts(run.outcome);
 
     assert.deepEqual(error.code, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
@@ -81,7 +90,7 @@ describe("the value of a body", () => {
 describe("the errors of a body", () => {
   test("a declared task error keeps its code, message and data", async () => {
     const run = await adapterRun(
-      parts(add, () => add.err({ code: "TOO_BIG", message: "over the cap", data: { cap: 10 } })),
+      parts(add, (_input, { err }) => err({ code: "TOO_BIG", message: "over the cap", data: { cap: 10 } })),
       '{"a":1,"b":1}',
     );
 
@@ -160,7 +169,7 @@ describe("the errors of a body", () => {
       deep = [deep];
     }
 
-    const noData = await adapterRun(parts(add, () => add.err({ code: "TOO_BIG" })), '{"a":1,"b":1}');
+    const noData = await adapterRun(parts(add, (_input, { err }) => err({ code: "TOO_BIG" })), '{"a":1,"b":1}');
 
     assert.deepEqual(errorParts(noData.outcome).data, { kind: "noData" });
     assert.deepEqual(errorDataPart({ cap: 10 }), { kind: "text", text: '{"cap":10}' });
@@ -179,13 +188,13 @@ describe("the errors of a body", () => {
 
 describe("sync and async bodies, the loop marks, the observer", () => {
   test("a sync body and an async body give the same outcome; the run is held for the synchronous part only", async () => {
-    const sync = await adapterRun(parts(add, () => add.ok(3)), '{"a":1,"b":2}');
+    const sync = await adapterRun(parts(add, (_input, { ok }) => ok(3)), '{"a":1,"b":2}');
 
     const async_ = await adapterRun(
-      parts(add, async () => {
+      parts(add, async (_input, { ok }) => {
         await Promise.resolve();
 
-        return add.ok(3);
+        return ok(3);
       }),
       '{"a":1,"b":2}',
     );
@@ -211,9 +220,9 @@ describe("sync and async bodies, the loop marks, the observer", () => {
   });
 
   test("the end is the run's cancel cause when its signal fired", async () => {
-    const timedOut = await adapterRun(parts(add, () => add.ok(2)), '{"a":1,"b":1}', "DEADLINE");
-    const cancelled = await adapterRun(parts(add, () => add.ok(2)), '{"a":1,"b":1}', "OPERATOR");
-    const returned = await adapterRun(parts(add, () => add.ok(2)), '{"a":1,"b":1}');
+    const timedOut = await adapterRun(parts(add, (_input, { ok }) => ok(2)), '{"a":1,"b":1}', "DEADLINE");
+    const cancelled = await adapterRun(parts(add, (_input, { ok }) => ok(2)), '{"a":1,"b":1}', "OPERATOR");
+    const returned = await adapterRun(parts(add, (_input, { ok }) => ok(2)), '{"a":1,"b":1}');
 
     assert.deepEqual(timedOut.observation.ends, [{ kind: "timedOut" }]);
     assert.deepEqual(cancelled.observation.ends, [{ kind: "cancelled" }]);

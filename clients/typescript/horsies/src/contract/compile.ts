@@ -10,7 +10,7 @@ import { ROOT_PATH } from "../codec/refusal.ts";
 import { checkKind, checkParameters, type KindRefused, type KindRule } from "../wire/check.ts";
 import type { Kind, Member, ObjectKind } from "../wire/kinds.ts";
 import { objectKind } from "../wire/kinds.ts";
-import { isResultOfKind } from "../wire/result-of.ts";
+import { isTaskOutcomeKind } from "../wire/task-outcome.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { kindOf, presenceOf } from "../wire/wire-type.ts";
@@ -190,7 +190,11 @@ function compileParameter(parameter: ParameterSource): Result<Member, readonly C
   }
 }
 
-function compileOutput(source: SchemaSource): Result<Kind, readonly ContractRefused[]> {
+/**
+ * The kind of an output schema, or the refusals at `output`: an output that may be left out, a zod schema that the
+ * adapter refuses, a schema of another vendor. `checkKind` of the kind is the caller's. Pure.
+ */
+export function compileOutput(source: SchemaSource): Result<Kind, readonly ContractRefused[]> {
   switch (source.kind) {
     case "wire":
       return presenceOf(source.wire).mode === "required"
@@ -260,7 +264,7 @@ function wireKindRefused(root: string, refused: KindRefused): ContractRefused {
 
 /** The send form of the parameters. Pure. */
 function sendForm(parameters: ObjectKind): SendForm {
-  const upstream = parameters.members.filter((member) => isResultOfKind(member.kind));
+  const upstream = parameters.members.filter((member) => isTaskOutcomeKind(member.kind));
   const required = upstream.filter((member) => member.presence.mode === "required").map((member) => member.name);
 
   if (required.length > 0) {
@@ -269,7 +273,7 @@ function sendForm(parameters: ObjectKind): SendForm {
 
   return Object.freeze({
     kind: "sendable",
-    parameters: objectKind(parameters.members.filter((member) => !isResultOfKind(member.kind))),
+    parameters: objectKind(parameters.members.filter((member) => !isTaskOutcomeKind(member.kind))),
   });
 }
 

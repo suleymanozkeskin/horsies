@@ -5,7 +5,7 @@ use std::convert::Infallible;
 use serde_json::json;
 
 use super::*;
-use crate::TaskErrorCode;
+use crate::{AppConfig, Horsies, TaskErrorCode, WaitLimitRefused, MAX_WAIT_LIMIT_MS};
 
 fn workflow() -> Uuid {
     Uuid::from_u128(9)
@@ -275,6 +275,13 @@ fn each_read_failure_has_python_s_code() {
             RetrievalCode::ResultNotReady.into(),
         ),
         (
+            WorkflowReadError::InvalidInput {
+                workflow_id: workflow(),
+                cause: WaitLimitRefused,
+            },
+            RetrievalCode::InvalidInput.into(),
+        ),
+        (
             WorkflowReadError::WaitInsideTask {
                 message: "m".to_owned(),
             },
@@ -298,6 +305,41 @@ fn each_read_failure_has_python_s_code() {
     for (error, code) in cases {
         assert_eq!(error.code(), code, "{error}");
     }
+}
+
+/// The limit is the first check of `get`, before any statement: the app's
+/// address has no database, so a wait that ran would fail as `Database`.
+/// The limit at the bound passes the check.
+#[tokio::test]
+async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
+    let app = Horsies::new(AppConfig::for_database_url(
+        "postgresql://127.0.0.1:1/nothing",
+    ))
+    .unwrap();
+    let handle = app.workflow_handle::<u32>(workflow());
+    let above = WaitLimit::Within(std::time::Duration::from_millis(MAX_WAIT_LIMIT_MS + 1));
+    let refused = handle.get(above).await.unwrap_err();
+    assert_eq!(
+        refused,
+        WorkflowReadError::InvalidInput {
+            workflow_id: workflow(),
+            cause: WaitLimitRefused,
+        },
+    );
+    assert_eq!(refused.code().value(), "INVALID_INPUT");
+    assert_eq!(
+        refused.to_string(),
+        format!(
+            "invalid input for the read of workflow {}: the wait limit is above 4294967295 ms \
+             (about 49.7 days)",
+            workflow()
+        ),
+    );
+    let at_the_bound = WaitLimit::Within(std::time::Duration::from_millis(MAX_WAIT_LIMIT_MS));
+    assert_eq!(
+        handle.checked_wait(at_the_bound),
+        Ok(Some(std::time::Duration::from_millis(MAX_WAIT_LIMIT_MS)))
+    );
 }
 
 #[test]

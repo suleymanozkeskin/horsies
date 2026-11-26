@@ -154,21 +154,21 @@ export const BASIC_CONTRACTS = [
 
 /** The implementations of this module on `app`. */
 export function implementBasic(app: Horsies): void {
-  app.implement(healthcheck, () => healthcheck.ok("ready"));
-  app.implement(simple, ({ x }) => simple.ok(x * 2));
-  app.implement(kwargs, ({ required, optional, multiplier }) =>
-    kwargs.ok(`${String(required * (multiplier ?? 1))}_${optional ?? "default"}`),
+  app.implement(healthcheck, (_input, { ok }) => ok("ready"));
+  app.implement(simple, ({ x }, { ok }) => ok(x * 2));
+  app.implement(kwargs, ({ required, optional, multiplier }, { ok }) =>
+    ok(`${String(required * (multiplier ?? 1))}_${optional ?? "default"}`),
   );
-  app.implement(deliberateError, () =>
-    deliberateError.err({ code: "DELIBERATE_ERROR", message: "This is intentional", data: { key: "value" } }),
+  app.implement(deliberateError, (_input, { err }) =>
+    err({ code: "DELIBERATE_ERROR", message: "This is intentional", data: { key: "value" } }),
   );
-  app.implement(noRetry, () => noRetry.err({ code: "PERMANENT", message: "not retryable" }));
-  app.implement(builtInCode, () => {
+  app.implement(noRetry, (_input, { err }) => err({ code: "PERMANENT", message: "not retryable" }));
+  app.implement(builtInCode, (_input, { err }) => {
     const code: string = "TASK_EXCEPTION";
 
-    return builtInCode.err({ code, message: "boom" });
+    return err({ code, message: "boom" });
   });
-  app.implement(complexResult, () => complexResult.ok({ value: 42, nested: { a: [1, 2, 3], b: [4, 5] } }));
+  app.implement(complexResult, (_input, { ok }) => ok({ value: 42, nested: { a: [1, 2, 3], b: [4, 5] } }));
   implementSleepers(app);
   implementProcessEnds(app);
   implementMarkers(app);
@@ -176,44 +176,44 @@ export function implementBasic(app: Horsies): void {
 }
 
 function implementSleepers(app: Horsies): void {
-  app.implement(slow, ({ durationMs }) => {
+  app.implement(slow, ({ durationMs }, { ok }) => {
     holdThread(durationMs);
 
-    return slow.ok(`slept_${String(durationMs)}`);
+    return ok(`slept_${String(durationMs)}`);
   });
-  app.implement(timeoutSleeper, ({ durationMs }) => {
+  app.implement(timeoutSleeper, ({ durationMs }, { ok }) => {
     holdThread(durationMs);
 
-    return timeoutSleeper.ok(`slept_${String(durationMs)}`);
+    return ok(`slept_${String(durationMs)}`);
   });
-  app.implement(asyncTimeoutSleeper, async ({ durationMs }) => {
+  app.implement(asyncTimeoutSleeper, async ({ durationMs }, { ok }) => {
     await sleepFor(durationMs, "noSignal");
 
-    return asyncTimeoutSleeper.ok(`slept_${String(durationMs)}`);
+    return ok(`slept_${String(durationMs)}`);
   });
-  app.implement(timeoutRetrySleeper, async ({ durationMs }) => {
+  app.implement(timeoutRetrySleeper, async ({ durationMs }, { ok }) => {
     await sleepFor(durationMs, "noSignal");
 
-    return timeoutRetrySleeper.ok(`slept_${String(durationMs)}`);
+    return ok(`slept_${String(durationMs)}`);
   });
-  app.implement(pid, async ({ sleepMs }) => {
+  app.implement(pid, async ({ sleepMs }, { ok }) => {
     await sleepFor(sleepMs, "noSignal");
 
-    return pid.ok(process.pid);
+    return ok(process.pid);
   });
-  app.implement(stamp, ({ durationMs }) => {
+  app.implement(stamp, ({ durationMs }, { ok }) => {
     const start = unixMillis();
 
     holdThread(durationMs);
 
-    return stamp.ok(`${String(process.pid)}:${String(start)}:${String(unixMillis())}`);
+    return ok(`${String(process.pid)}:${String(start)}:${String(unixMillis())}`);
   });
-  app.implement(outlivesDrain, ({ seconds }) => {
+  app.implement(outlivesDrain, ({ seconds }, { ok }) => {
     holdThread(seconds * 1_000);
 
-    return outlivesDrain.ok("ended");
+    return ok("ended");
   });
-  app.implement(runtimeOfChild, () => runtimeOfChild.ok({ runtime: runtimeName(), pid: process.pid }));
+  app.implement(runtimeOfChild, (_input, { ok }) => ok({ runtime: runtimeName(), pid: process.pid }));
 }
 
 function implementProcessEnds(app: Horsies): void {
@@ -229,62 +229,62 @@ function implementProcessEnds(app: Horsies): void {
 }
 
 function implementMarkers(app: Horsies): void {
-  app.implement(idempotent, ({ token }) => {
+  app.implement(idempotent, ({ token }, { ok, err }) => {
     const created = createOnce(`idempotent-${token}`, "executed");
 
     if (!created.ok) {
-      return idempotent.err({ code: "MARKER_FAILED", message: markerErrorText(created.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(created.error) });
     }
 
     return created.value === "created"
-      ? idempotent.ok(`executed:${token}`)
-      : idempotent.err({ code: "DOUBLE_EXECUTION", message: `Token ${token} already executed` });
+      ? ok(`executed:${token}`)
+      : err({ code: "DOUBLE_EXECUTION", message: `Token ${token} already executed` });
   });
-  app.implement(slowIdempotent, async ({ token, durationMs }) => {
+  app.implement(slowIdempotent, async ({ token, durationMs }, { ok, err }) => {
     const created = createOnce(`idempotent-${token}`, "executed");
 
     if (!created.ok) {
-      return slowIdempotent.err({ code: "MARKER_FAILED", message: markerErrorText(created.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(created.error) });
     }
 
     if (created.value === "existed") {
-      return slowIdempotent.err({ code: "DOUBLE_EXECUTION", message: `Token ${token} already executed` });
+      return err({ code: "DOUBLE_EXECUTION", message: `Token ${token} already executed` });
     }
 
     await sleepFor(durationMs, "noSignal");
 
-    return slowIdempotent.ok(`executed:${token}`);
+    return ok(`executed:${token}`);
   });
-  app.implement(pidThenHold, ({ token, durationMs }) => {
+  app.implement(pidThenHold, ({ token, durationMs }, { ok, err }) => {
     const created = createOnce(`${token}-pid`, String(process.pid));
 
     if (!created.ok) {
-      return pidThenHold.err({ code: "MARKER_FAILED", message: markerErrorText(created.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(created.error) });
     }
 
     holdThread(durationMs);
 
-    return pidThenHold.ok("ended");
+    return ok("ended");
   });
 }
 
 function implementSends(app: Horsies): void {
-  app.implement(waitInsideTask, async () => {
+  app.implement(waitInsideTask, async (_input, { ok, err }) => {
     const sent = await app.send(simple, { x: 1 });
 
     if (!sent.ok) {
-      return waitInsideTask.err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
+      return err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
     }
 
     const read = await sent.value.get({ timeoutMs: INSIDE_WAIT_MS });
 
-    return waitInsideTask.ok(!read.ok && read.error.kind === "waitInsideTask");
+    return ok(!read.ok && read.error.kind === "waitInsideTask");
   });
-  app.implement(asyncSends, async ({ x }) => {
+  app.implement(asyncSends, async ({ x }, { ok, err }) => {
     const sent = await app.send(simple, { x });
 
     return sent.ok
-      ? asyncSends.ok(sent.value.taskId)
-      : asyncSends.err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
+      ? ok(sent.value.taskId)
+      : err({ code: "SEND_FAILED", message: `${sent.error.code}: ${sent.error.message}` });
   });
 }

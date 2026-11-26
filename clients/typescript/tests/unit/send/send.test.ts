@@ -45,7 +45,8 @@ import {
 
 const report = defineTask({ name: "report", input: { n: h.int() }, output: h.int() });
 const unlisted = defineTask({ name: "unlisted", input: {}, output: h.null() });
-const upstreamOnly = defineTask({ name: "upstream_only", input: { upstream: h.resultOf(h.int()) }, output: h.null() });
+const intSource = defineTask({ name: "int_source", input: {}, output: h.int() });
+const upstreamOnly = defineTask({ name: "upstream_only", input: { upstream: h.taskOutcome(intSource) }, output: h.null() });
 const billed = defineTask({ name: "billed", queue: "billing", input: {}, output: h.null() });
 
 /** The sent instant of the tests: `SENT_AT_MICROS` and 999 nanoseconds, which the request cuts. */
@@ -241,7 +242,7 @@ describe("the send error codes", () => {
     assert.equal(producer.prepares.length, 0);
   });
 
-  test("VALIDATION_FAILED for a task with a required h.resultOf parameter", async () => {
+  test("VALIDATION_FAILED for a task with a required h.taskOutcome parameter", async () => {
     const { context, producer } = harness();
     const sent = await sendTask(context, upstreamOnly, {}, {});
 
