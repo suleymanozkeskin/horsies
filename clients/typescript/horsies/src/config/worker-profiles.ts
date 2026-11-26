@@ -9,8 +9,6 @@ import {
   CHILD_POOL_CONNECTIONS_MIN,
   CHILD_POOL_MIN_SIZE_MAX,
   CHILD_POOL_MIN_SIZE_MIN,
-  DEFAULT_EXECUTOR_THREADS_MAX,
-  DEFAULT_EXECUTOR_THREADS_MIN,
   DRAIN_TIMEOUT_MS_MAX,
   DRAIN_TIMEOUT_MS_MIN,
   ISOLATED_CHILDREN_MAX,
@@ -56,9 +54,6 @@ export type PoolSize = { readonly kind: "connections"; readonly connections: num
 /** A pool size: a number of connections, or a size that follows the seats. */
 export type SharedPoolSize = PoolSize | { readonly kind: "fromSeats" };
 
-/** The threads of the default executor of a shared async child: a number, or a count that follows the seats. */
-export type ExecutorThreads = { readonly kind: "threads"; readonly threads: number } | { readonly kind: "fromSeats" };
-
 /** When the worker replaces an isolated child: after a number of tasks, or above a memory limit. */
 export interface IsolatedRecycleInput {
   readonly after?: TaskLimit;
@@ -94,13 +89,15 @@ export interface IsolatedChildrenInput {
   readonly taskSendPool?: PoolSize;
 }
 
-/** `count` shared async children of `seats` seats each, on one event loop per child. */
+/**
+ * `count` shared async children of `seats` seats each, on one event loop per child. The type has no `executor` field:
+ * the task code of a child runs on its event loop, and the core sizes the other threads of the child from the seats.
+ */
 export interface SharedAsyncChildrenInput {
   readonly count: number;
   readonly seats: number;
   readonly recycle?: SharedRecycleInput;
   readonly pool?: SharedPoolInput;
-  readonly executor?: ExecutorThreads;
   readonly taskSendPool?: PoolSize;
 }
 
@@ -150,7 +147,6 @@ const TASK_COUNT = profileBound(TASK_LIMIT_MIN, TASK_LIMIT_MAX);
 const MEMORY_MB = profileBound(MEMORY_LIMIT_MB_MIN, MEMORY_LIMIT_MB_MAX);
 const POOL_CONNECTIONS = profileBound(CHILD_POOL_CONNECTIONS_MIN, CHILD_POOL_CONNECTIONS_MAX);
 const POOL_MIN_SIZE = profileBound(CHILD_POOL_MIN_SIZE_MIN, CHILD_POOL_MIN_SIZE_MAX);
-const EXECUTOR_THREADS = profileBound(DEFAULT_EXECUTOR_THREADS_MIN, DEFAULT_EXECUTOR_THREADS_MAX);
 const ISOLATED_CHILDREN = profileBound(ISOLATED_CHILDREN_MIN, ISOLATED_CHILDREN_MAX);
 const SHARED_ASYNC_CHILDREN = profileBound(SHARED_ASYNC_CHILDREN_MIN, SHARED_ASYNC_CHILDREN_MAX);
 const SHARED_ASYNC_SEATS = profileBound(SHARED_ASYNC_SEATS_MIN, SHARED_ASYNC_SEATS_MAX);
@@ -232,7 +228,6 @@ function sharedAsyncJson(children: SharedAsyncChildrenInput, path: string): Chec
     entry("seats", checkedInteger(children.seats, SHARED_ASYNC_SEATS, memberPath(path, "seats"))),
     optionalEntry("recycle", children.recycle, (recycle) => sharedRecycleJson(recycle, memberPath(path, "recycle"))),
     optionalEntry("pool", children.pool, (pool) => sharedPoolJson(pool, memberPath(path, "pool"))),
-    optionalEntry("executor", children.executor, (executor) => executorJson(executor, memberPath(path, "executor"))),
     optionalEntry("task_send_pool", children.taskSendPool, (size) =>
       poolSizeJson(size, memberPath(path, "taskSendPool")),
     ),
@@ -323,20 +318,6 @@ function sharedPoolSizeJson(size: SharedPoolSize, path: string): Checked<ConfigJ
       return accepted({ kind: "pool_size_from_seats" });
     default:
       return unreachable(size, "sharedPoolSizeJson");
-  }
-}
-
-function executorJson(executor: ExecutorThreads, path: string): Checked<ConfigJson> {
-  switch (executor.kind) {
-    case "threads":
-      return checkedObject([
-        accepted([["kind", "executor_threads"]]),
-        entry("threads", checkedInteger(executor.threads, EXECUTOR_THREADS, memberPath(path, "threads"))),
-      ]);
-    case "fromSeats":
-      return accepted({ kind: "executor_threads_from_seats" });
-    default:
-      return unreachable(executor, "executorJson");
   }
 }
 

@@ -589,14 +589,6 @@ export type ExecutionRules<X extends ExecutionClass> = [X] extends ["SHARED_ASYN
 };
 
 // @public
-export type ExecutorThreads = {
-    readonly kind: "threads";
-    readonly threads: number;
-} | {
-    readonly kind: "fromSeats";
-};
-
-// @public
 export type FinishedStatus = "COMPLETED" | "FAILED" | "EXPIRED";
 
 // @public
@@ -1300,8 +1292,6 @@ export type SessionDatabase = {
 export interface SharedAsyncChildrenInput {
     // (undocumented)
     readonly count: number;
-    // (undocumented)
-    readonly executor?: ExecutorThreads;
     // (undocumented)
     readonly pool?: SharedPoolInput;
     // (undocumented)
