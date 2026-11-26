@@ -27,6 +27,8 @@ import type { WorkflowHandle, WorkflowHandleById } from "./workflow/handle.ts";
 import type { BuildReturn } from "./workflow/node.ts";
 import { NO_OP_START_OBSERVER, type StartOptions } from "./workflow/start.ts";
 import type { StartEnqueueFailed, WorkflowStartError } from "./workflow/start-error.ts";
+import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
+import type { StateKey } from "./child/state.ts";
 
 /** The constructor of an app, for `createHorsies` in this module. */
 let constructApp: (context: AppContext) => Horsies;
@@ -75,6 +77,25 @@ export class Horsies {
     registerImplementation(this.#context, implementation);
 
     return implementation;
+  }
+
+  /**
+   * Add a provider of app state and give its key; `runtime.state(key)` gives the value. Calls nothing: the factory
+   * runs in each task child, before the child reports ready, in registration order and before the `onChildStart`
+   * hooks, for at most 10 s. A factory that throws, rejects or runs past its bound stops the worker with
+   * `CHILD_HOOK_FAILED` (exit 173). A call after `cli.run` serves a child is a defect: `ClientDefect`.
+   */
+  provide<T>(factory: ProviderFactory<T>): StateKey<Awaited<T>> {
+    return provideFor(this.#context, factory);
+  }
+
+  /**
+   * Run `hook` once in each task child, a replacement child included, after the providers and before the child
+   * reports ready, for at most 10 s. A hook that throws, rejects or runs past its bound stops the worker with
+   * `CHILD_HOOK_FAILED` (exit 173). A call after `cli.run` serves a child is a defect: `ClientDefect`.
+   */
+  onChildStart(hook: ChildStartHook): void {
+    onChildStartFor(this.#context, hook);
   }
 
   /** Send a task: its handle, or the send error. A delay is the only start option. */

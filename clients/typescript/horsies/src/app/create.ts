@@ -42,10 +42,11 @@ import {
   type ListRefusal,
 } from "./contract-list.ts";
 import { type AcceptedConfig, checkConfigWithCore, checkTaskWithCore, type CoreChecks } from "./core-checks.ts";
-import type { CoreAccess, ProducerCore } from "./core-access.ts";
+import type { AddonCore, CoreAccess, ProducerCore } from "./core-access.ts";
 import { NO_OP_OBSERVER } from "./observers.ts";
 import type { Refusal } from "./refusal.ts";
 import { RefusalSink } from "./refusals.ts";
+import { NO_TELEMETRY } from "./telemetry.ts";
 import { initialSuppression, type ProcessStart, processStart, SuppressionState } from "./suppression.ts";
 
 /** The config of `Horsies.create`: the app config and the contract lists. */
@@ -66,12 +67,15 @@ export interface CreateEnvironment {
   readonly processStart: ProcessStart;
   /** The core's check functions. Called on a main thread only; the first call loads the addon. */
   readonly coreChecks: () => CoreChecks;
-  /** The core operations of the app's sends, reads and workflows, on a main thread. */
-  readonly producer: (
+  /**
+   * The core of the app on a main thread: the operations of its sends, reads and workflows, and its one core handle,
+   * on which the app's child spec source is registered.
+   */
+  readonly addonCore: (
     accepted: AcceptedConfig,
     options: ReadonlyMap<string, NativeTaskOptions>,
     workflows: WorkflowsOnMainThread,
-  ) => ProducerCore;
+  ) => AddonCore;
 }
 
 /** The facts of this process. Effects: reads the thread, the environment and the arguments. */
@@ -81,7 +85,7 @@ export function processEnvironment(): CreateEnvironment {
     environment: (name) => process.env[name],
     processStart: processStart(),
     coreChecks: () => ({ checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions }),
-    producer: addonProducer,
+    addonCore: addonCoreOf,
   };
 }
 
@@ -128,8 +132,7 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
     resendOnTransientErr: resendOnTransientErr(parsed.value),
   };
 
-  const producer = environment.producer(accepted.value, options.options, onMainThread);
-  const core: CoreAccess = { kind: "addon", producer };
+  const core: CoreAccess = { kind: "addon", ...environment.addonCore(accepted.value, options.options, onMainThread) };
 
   return ok(contextOf(parsed.value, list.entries, core, environment, workflows.registry));
 }
@@ -194,6 +197,7 @@ function contextOf(
     },
     implementations: new Map(),
     workflows,
+    telemetry: NO_TELEMETRY,
   };
 }
 
@@ -204,12 +208,16 @@ export type WorkflowsOnMainThread = {
   readonly resendOnTransientErr: boolean;
 };
 
-/** The core operations of an app on a main thread: a core handle of the app's manifest, and its send rules. */
-function addonProducer(
+/**
+ * The core of an app on a main thread: one core handle of the app's manifest, and the operations of its sends, reads
+ * and workflows on it, with its send rules. The app's child spec source is registered on that handle. Builds the
+ * handle and registers the source; starts nothing.
+ */
+function addonCoreOf(
   accepted: AcceptedConfig,
   options: ReadonlyMap<string, NativeTaskOptions>,
   workflows: WorkflowsOnMainThread,
-): ProducerCore {
+): AddonCore {
   const handle = buildCoreHandle(accepted.manifestJson, "PRODUCER").withInstallCoverage(accepted.installCoverage);
 
   const producer: ProducerCore = {
@@ -230,7 +238,7 @@ function addonProducer(
     ),
   };
 
-  return Object.freeze(producer);
+  return Object.freeze({ producer: Object.freeze(producer), handle });
 }
 
 function optionsOf(options: ReadonlyMap<string, NativeTaskOptions>, taskName: string): NativeTaskOptions {
