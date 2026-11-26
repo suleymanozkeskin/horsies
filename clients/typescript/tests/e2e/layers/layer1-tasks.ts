@@ -35,6 +35,9 @@ void requireDevAddon();
 /** The longest wait for the outcome of a task that a running worker runs. */
 const RESULT_WAIT_MS = 15_000;
 
+/** The result wait of a task that a cancel moved to history. */
+const CANCELLED_READ_MS = 1_000;
+
 /** A task that only this test process lists: no worker knows its name. */
 const nonexistent = defineTask({ name: "nonexistent_task_xyz", input: {}, output: h.string() });
 
@@ -269,6 +272,27 @@ describe("layer 1: tasks", () => {
     const handle = await sentHandle("e2e_simple as text", other.send(simpleAsText, { x: "not_a_number" }));
 
     assert.equal(await failedCode(handle, RESULT_WAIT_MS), "WORKER_SERIALIZATION_ERROR");
+  });
+
+  e2eTest("a cancelled PENDING task reads as TASK_CANCELLED, with its task id in the data", "default", async (suite) => {
+    const handle = await sentHandle("e2e_simple", suite.app.send(basic.simple, { x: 5 }));
+
+    await cancelPending(suite, handle.taskId);
+
+    const error = await failed(handle, CANCELLED_READ_MS);
+
+    assert.deepEqual(errorCode(error), { source: "library", code: "TASK_CANCELLED" });
+    assert.equal(dataMembers(error)["task_id"], handle.taskId);
+  });
+
+  e2eTest("a cancelled PENDING task read by its id gives TASK_CANCELLED", "default", async (suite) => {
+    const handle = await sentHandle("e2e_simple", suite.app.send(basic.simple, { x: 5 }));
+
+    await cancelPending(suite, handle.taskId);
+
+    const byId = suite.app.taskHandle(basic.simple, handle.taskId);
+
+    assert.equal(await failedCode(byId, CANCELLED_READ_MS), "TASK_CANCELLED");
   });
 
   e2eTest("the info of a completed task names it and holds one attempt", "default", async (suite) => {
@@ -608,6 +632,13 @@ function stampParts(stamp: string): { readonly pid: string; readonly start: numb
   assert.ok(pid !== undefined && start !== undefined && end !== undefined && rest.length === 0, `a stamp is pid:start:end, not ${stamp}`);
 
   return { pid, start: Number(start), end: Number(end) };
+}
+
+/** Cancel the PENDING task `taskId` with no worker: the cancel moves it from PENDING. */
+async function cancelPending(suite: Suite, taskId: TaskId): Promise<void> {
+  const cancelled = await suite.app.monitoring.cancelTask(taskId, { policy: "pendingOrClaimedOnly" });
+
+  assert.deepEqual(cancelled, { ok: true, value: { taskId, wasStatus: "PENDING" } });
 }
 
 /** Fail the test when task `taskId` leaves PENDING for any status but EXPIRED within 2 s. */

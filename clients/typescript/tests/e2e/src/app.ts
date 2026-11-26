@@ -8,12 +8,16 @@ import { defineTask, h, Horsies } from "../../../horsies/src/index.ts";
 import { err, ok, type Result } from "../../../horsies/src/wire/result.ts";
 import type { Connection } from "./connection.ts";
 import { entryThread, type StartMember, startMarkerName } from "./entry-thread.ts";
+import { addInstanceMembers, instanceWorkflows } from "./instance-members.ts";
 import { type Instance, instanceConfig } from "./instances.ts";
 import { createOnce, markerErrorText } from "./markers.ts";
 import { BASIC_CONTRACTS, implementBasic } from "./tasks/basic.ts";
+import { CANCEL_CONTRACTS, implementCancel } from "./tasks/cancel.ts";
 import { CUSTOM_CONTRACTS, implementCustom } from "./tasks/custom.ts";
+import { ENDED_SPANS_CONTRACTS, implementEndedSpans } from "./tasks/ended-spans.ts";
 import { FENCING_CONTRACTS, implementFencing } from "./tasks/fencing.ts";
 import { implementRetry, RETRY_CONTRACTS } from "./tasks/retry.ts";
+import { implementScheduled, SCHEDULED_CONTRACTS } from "./tasks/scheduled.ts";
 import { implementShared, SHARED_CONTRACTS } from "./tasks/shared.ts";
 import { implementSpawned, SPAWNED_CONTRACTS } from "./tasks/spawned.ts";
 import { holdThread } from "./tasks/waits.ts";
@@ -32,12 +36,22 @@ export const providedState = defineTask({
 });
 
 /** The contracts of the default tasks: every instance but `custom_queues`. */
-const DEFAULT_CONTRACTS = [...BASIC_CONTRACTS, ...RETRY_CONTRACTS, ...SHARED_CONTRACTS, ...FENCING_CONTRACTS, ...SPAWNED_CONTRACTS, providedState];
+const DEFAULT_CONTRACTS = [
+  ...BASIC_CONTRACTS,
+  ...RETRY_CONTRACTS,
+  ...SHARED_CONTRACTS,
+  ...FENCING_CONTRACTS,
+  ...SPAWNED_CONTRACTS,
+  ...SCHEDULED_CONTRACTS,
+  ...CANCEL_CONTRACTS,
+  ...ENDED_SPANS_CONTRACTS,
+  providedState,
+];
 
 /** The app of `instance` on `connection`, with its tasks and start members. No I/O: the app connects at its first use. */
 export function buildApp(instance: Instance, connection: Connection): Result<Horsies, string> {
   const tasks = instance === "custom_queues" ? CUSTOM_CONTRACTS : DEFAULT_CONTRACTS;
-  const created = Horsies.create({ ...instanceConfig(instance, connection), tasks });
+  const created = Horsies.create({ ...instanceConfig(instance, connection), tasks, workflows: instanceWorkflows(instance) });
 
   if (!created.ok) {
     return err(created.error.refusals.map((refused) => `${refused.code} ${refused.path}: ${refused.message}`).join("; "));
@@ -60,6 +74,9 @@ function implementDefault(app: Horsies, instance: Exclude<Instance, "custom_queu
   implementShared(app);
   implementFencing(app);
   implementSpawned(app);
+  implementScheduled(app);
+  implementCancel(app);
+  implementEndedSpans(app);
 
   const key = app.provide(() => markedStart("provider"));
 
@@ -70,6 +87,7 @@ function implementDefault(app: Horsies, instance: Exclude<Instance, "custom_queu
     providedState.ok({ bodyPid: process.pid, providerPid: runtime.state(key).pid }),
   );
   addFailingStartMember(app, instance);
+  addInstanceMembers(app, instance);
 }
 
 /** The failing start member of a hook instance; none for the others. */
@@ -101,6 +119,11 @@ function addFailingStartMember(app: Horsies, instance: Exclude<Instance, "custom
     case "queue_retention":
     case "declared_retention":
     case "thread_profiles":
+    case "scheduler":
+    case "scheduler_invalid_rules":
+    case "scheduler_invalid_task":
+    case "handlers":
+    case "worker_ended_spans":
       return;
   }
 }
