@@ -5,10 +5,16 @@ import { requireAddon } from "../../../horsies/src/native/call/addon.ts";
 import type { NotRunCause } from "../../../horsies/src/native/call/callback.ts";
 import type { NativeEnvelope } from "../../../horsies/src/native/call/envelope.ts";
 
+/** How long a call of `probeCallback` waits for the settle call. */
+export type ProbeWait =
+  | { readonly kind: "within"; readonly millis: number }
+  | { readonly kind: "noBound" };
+
 /** How one call of `probeCallback` ended. */
 export type CallbackProbe =
   | { readonly kind: "answered"; readonly answer: string }
   | { readonly kind: "notRun"; readonly cause: NotRunCause }
+  | { readonly kind: "noAnswer" }
   | { readonly kind: "threw"; readonly callId: bigint; readonly name: string; readonly message: string }
   | { readonly kind: "panicked"; readonly cause: string }
   | { readonly kind: "answerRefused"; readonly cause: string }
@@ -20,6 +26,7 @@ export interface ProbeAddon {
   probeCallback(
     callback: (callId: bigint, argument: string) => void,
     argument: string,
+    wait: ProbeWait,
   ): Promise<NativeEnvelope<CallbackProbe>>;
 }
 

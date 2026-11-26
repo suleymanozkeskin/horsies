@@ -4,7 +4,7 @@
 import type * as Generated from "../../bridge/index.js";
 import type { CallAddon, NotRunCause, SettleOutcome } from "../../horsies/src/native/call/callback.ts";
 import type { NativeEnvelope, NativeThrown } from "../../horsies/src/native/call/envelope.ts";
-import type { CallbackProbe, ProbeAddon } from "../runtime/native/callback-probe.ts";
+import type { CallbackProbe, ProbeAddon, ProbeWait } from "../runtime/native/callback-probe.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const settleReturnedMatches: SameFunction<
@@ -25,3 +25,4 @@ export const notRunCauseMatches: Mutual<Generated.NotRunCause, NotRunCause> = tr
 // The test export of a build with the cargo feature `test-probes` (`build:dev`).
 export const probeCallbackMatches: SameFunction<typeof Generated.probeCallback, ProbeAddon["probeCallback"]> = true;
 export const probeMatches: Mutual<Generated.CallbackProbe, CallbackProbe> = true;
+export const probeWaitMatches: Mutual<Generated.ProbeWait, ProbeWait> = true;
