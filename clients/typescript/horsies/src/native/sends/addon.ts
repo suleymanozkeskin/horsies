@@ -3,7 +3,8 @@
 // - The check functions (`checkAppConfig`, `parseDeclaredErrorCodes`, `checkTaskOptions`) and the classes that they
 //   give are pure: they start no core, open no connection and read no clock, so `Horsies.create` can call them before
 //   a child host shapes the process runtime.
-// - `prepareSendFacts` mints a task id; it starts no core.
+// - `prepareSendFacts` mints a task id and starts the log forwarder of the process, so the payload warning reaches the
+//   log sink; it starts no core.
 // - `enqueue`, `getResult` and `taskInfo` are operations on a core handle: they start the core of the process at the
 //   first call and run on its runtime.
 

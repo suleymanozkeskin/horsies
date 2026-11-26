@@ -47,6 +47,11 @@ import type {
   TaskStatusName,
   WaitBound,
 } from "../../horsies/src/native/sends/addon.ts";
+import type {
+  ChildProducerProbeAddon,
+  NativeProbeChildProducer,
+  ProbeClose,
+} from "../runtime/native/child-producer-probe.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const checkAppConfigMatches: SameFunction<typeof Generated.checkAppConfig, SendsAddon["checkAppConfig"]> =
@@ -130,3 +135,32 @@ export const errorCodeMatches: Mutual<Generated.ErrorCodePart, ErrorCodePart> = 
 export const exceptionMatches: Mutual<Generated.ExceptionPart, ExceptionPart> = true;
 export const errorPartsMatches: Mutual<Generated.TaskErrorParts, TaskErrorParts> = true;
 export const errorBuildMatches: Mutual<Generated.TaskErrorBuild, TaskErrorBuild> = true;
+
+// The test exports of a build with the cargo feature `test-probes` (`build:dev`).
+export const probeChildProducerMatches: SameFunction<
+  typeof Generated.probeChildProducer,
+  ChildProducerProbeAddon["probeChildProducer"]
+> = true;
+
+export const probeEnqueueInChildMatches: SameFunction<
+  typeof Generated.probeEnqueueInChild,
+  ChildProducerProbeAddon["probeEnqueueInChild"]
+> = true;
+
+export const probeGetResultInChildMatches: SameFunction<
+  typeof Generated.probeGetResultInChild,
+  ChildProducerProbeAddon["probeGetResultInChild"]
+> = true;
+
+export const probeTaskInfoInChildMatches: SameFunction<
+  typeof Generated.probeTaskInfoInChild,
+  ChildProducerProbeAddon["probeTaskInfoInChild"]
+> = true;
+
+export const probeCloseMethodMatches: SameFunction<
+  Generated.ProbeChildProducer["close"],
+  NativeProbeChildProducer["close"]
+> = true;
+
+export const probeChildMatches: Mutual<Generated.ProbeChildProducer, NativeProbeChildProducer> = true;
+export const probeCloseMatches: Mutual<Generated.ProbeClose, ProbeClose> = true;
