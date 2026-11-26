@@ -17,7 +17,7 @@
 pub mod checks;
 #[cfg(feature = "test-probes")]
 pub mod child_producer_probe;
-mod early_end;
+pub mod early_end;
 pub mod producer_handle;
 pub mod refusals;
 pub mod send;

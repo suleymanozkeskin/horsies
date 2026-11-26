@@ -62,9 +62,9 @@ describe("the worker area of the addon", () => {
   test("each preparation outcome; the core does not start", () => {
     const config = configText("postgresql://127.0.0.1:55432/horsies");
 
-    assert.equal(prepareWorker(config, startText({ kind: "NAMED", name: "io" })).kind, "prepared");
-    assert.equal(prepareWorker(config, startText({ kind: "NAMED", name: "absent" })).kind, "profileRefused");
-    assert.equal(prepareWorker(config, startText({ kind: "NOT_GIVEN" })).kind, "profileRefused");
+    assert.equal(prepareWorker(config, startText({ kind: "NAMED", name: "io" }), "CAPPED").kind, "prepared");
+    assert.equal(prepareWorker(config, startText({ kind: "NAMED", name: "absent" }), "CAPPED").kind, "profileRefused");
+    assert.equal(prepareWorker(config, startText({ kind: "NOT_GIVEN" }), "CAPPED").kind, "profileRefused");
 
     const pooled = JSON.stringify({
       broker: { database_url: "postgresql://127.0.0.1:6432/horsies", pgbouncer_transaction_mode: true },
@@ -72,7 +72,7 @@ describe("the worker area of the addon", () => {
     });
 
     // The config check runs the broker check of the plan's connection step, so it refuses this text first.
-    assert.throws(() => prepareWorker(pooled, startText({ kind: "NAMED", name: "io" })), ClientDefect);
+    assert.throws(() => prepareWorker(pooled, startText({ kind: "NAMED", name: "io" }), "CAPPED"), ClientDefect);
 
     // The config check compares the URL texts as written; the manifest writes `postgres://` as `postgresql://`, so
     // the plan's connection step sees one URL twice.
@@ -85,7 +85,10 @@ describe("the worker area of the addon", () => {
       worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
     });
 
-    assert.equal(prepareWorker(sameSession, startText({ kind: "NAMED", name: "io" })).kind, "connectionSettingsRefused");
+    assert.equal(
+      prepareWorker(sameSession, startText({ kind: "NAMED", name: "io" }), "CAPPED").kind,
+      "connectionSettingsRefused",
+    );
 
     const capped = JSON.stringify({
       broker: { database_url: "postgresql://127.0.0.1:55432/horsies" },
@@ -93,7 +96,7 @@ describe("the worker area of the addon", () => {
       worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
     });
 
-    const bound = prepareWorker(capped, startText({ kind: "NAMED", name: "io" }));
+    const bound = prepareWorker(capped, startText({ kind: "NAMED", name: "io" }), "CAPPED");
 
     assert.equal(bound.kind === "manifestBound" ? bound.path : bound.kind, "clusterWideCap.tasks");
 
@@ -107,7 +110,10 @@ describe("the worker area of the addon", () => {
       },
     });
 
-    assert.deepEqual(prepareWorker(threads, startText({ kind: "NAMED", name: "cpu" })), {
+    // A SHARED_THREAD profile starts where a worker thread has a memory cap (Node), and is refused where it has none
+    // (Bun).
+    assert.equal(prepareWorker(threads, startText({ kind: "NAMED", name: "cpu" }), "CAPPED").kind, "prepared");
+    assert.deepEqual(prepareWorker(threads, startText({ kind: "NAMED", name: "cpu" }), "NOT_CAPPED"), {
       kind: "sharedThreadUnavailable",
       profile: "cpu",
     });
@@ -118,13 +124,14 @@ describe("the worker area of the addon", () => {
     const config = configText("postgresql://127.0.0.1:55432/horsies");
     const start = startText({ kind: "NAMED", name: "io" }).replace('"ISOLATED"', '"FORKED"');
 
-    assert.throws(() => prepareWorker(config, start), { name: "ManifestRefused" });
+    assert.throws(() => prepareWorker(config, start, "CAPPED"), { name: "ManifestRefused" });
   });
 
   test("a stop request before the run returns at once", () => {
     const prepared = prepareWorker(
       configText("postgresql://127.0.0.1:55432/horsies"),
       startText({ kind: "NAMED", name: "io" }),
+      "CAPPED",
     );
 
     assert.equal(prepared.kind, "prepared");

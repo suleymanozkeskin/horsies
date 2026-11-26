@@ -4,7 +4,7 @@
 import { isEngineKey } from "../codec/engine-keys.ts";
 import { memberPath } from "../codec/refusal.ts";
 import type { AnyWire } from "../wire/infer.ts";
-import type { ExecutionClass } from "./define-task.ts";
+import type { ContextUse, ExecutionClass } from "./define-task.ts";
 import type { ParameterSchema, StandardSchemaMarker, ZodSchemaLike } from "./schema.ts";
 
 /** The Standard Schema vendor name of zod. */
@@ -79,6 +79,8 @@ export type ContractRecord = {
   readonly timeout: MillisecondsSetting;
   readonly cancelGrace: MillisecondsSetting;
   readonly retry: RetrySetting;
+  /** Whether the task takes the workflow context (`workflowContext: true`). */
+  readonly context: ContextUse;
   readonly refusals: readonly DefinitionRefused[];
 };
 
@@ -93,6 +95,7 @@ export type DefinitionFields = {
   readonly retry?: RetryFields;
   readonly timeoutMs?: number;
   readonly cancelGraceMs?: number;
+  readonly workflowContext?: boolean;
 };
 
 /** The retry policy fields as `defineTask` reads them. */
@@ -157,6 +160,7 @@ function recordOf(fields: DefinitionFields): ContractRecord {
     timeout: millisecondsSetting(fields.timeoutMs),
     cancelGrace: millisecondsSetting(fields.cancelGraceMs),
     retry: retrySetting(fields.retry),
+    context: fields.workflowContext === true ? "takesContext" : "noContext",
     refusals: Object.freeze(refusals),
   };
 

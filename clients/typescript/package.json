@@ -4,11 +4,14 @@
   "type": "module",
   "workspaces": [
     "bridge",
+    "eslint-plugin",
+    "examples",
+    "examples/showcase",
     "horsies",
     "tests"
   ],
   "scripts": {
-    "lint": "oxlint --deny-warnings horsies tests",
+    "lint": "oxlint --deny-warnings eslint-plugin examples horsies tests",
     "typecheck-speed": "bun tests/typecheck-speed/cli.ts check",
     "typecheck-speed:record": "bun tests/typecheck-speed/cli.ts record"
   },

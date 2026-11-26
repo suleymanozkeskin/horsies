@@ -14,6 +14,7 @@ import type {
   WaitBound,
 } from "../../../horsies/src/native/sends/addon.ts";
 import type { RawCatalogError } from "../../../horsies/src/native/values/records.ts";
+import { noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
 import { fakeCoreHandle } from "../app/support.ts";
 
 /** A task id of the tests (a UUIDv7 text). */
@@ -55,6 +56,7 @@ export function fakeProducer(script: ProducerScript): FakeProducer {
   const calls: ProducerCalls = { getResult: 0, taskInfo: 0, processRole: 0, prepareSend: 0, enqueue: 0, waits: [] };
 
   const producer: ProducerCore = {
+    workflows: noWorkflowCore(),
     prepareSend: async () => {
       calls.prepareSend += 1;
       throw new TypeError("the read tests make no send");
@@ -108,11 +110,11 @@ export function countingRelay(read: TaskInfoRead): { readonly access: CoreAccess
       requests += 1;
 
       const reply: SendsSeatReply =
-        operation.kind === "taskInfo"
+        "kind" in operation && operation.kind === "taskInfo"
           ? { kind: "taskInfo", read }
           : { kind: "taskInfo", read: { kind: "absent", reason: "NOT_CLASSIFIED" } };
 
-      return reply;
+      return { kind: "reply", reply };
     },
   };
 

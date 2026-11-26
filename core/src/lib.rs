@@ -181,6 +181,14 @@ pub use crate::core::task::{FencingToken, FencingTokenRefused};
 // preload process: they speak it through `horsies._core`.
 pub use crate::worker::executor::protocol as frame_protocol;
 
+// The waits of the parent for a child: the ready frame of a booting child,
+// the exit after the end of its socket, the exit after a stop frame. A host
+// whose child process ends after `run_child_host` returns puts its own exit
+// bounds inside them.
+pub use crate::worker::executor::supervisor::{
+    CHANNEL_LOST_GRACE, CHILD_READY_TIMEOUT, CHILD_STOP_TIMEOUT,
+};
+
 // How the core ends the process from its own threads (a child at the end of
 // its parent, a worker that fails closed): `ChildApp::exit` and
 // `Worker::from_plan` take it.
@@ -243,7 +251,7 @@ pub use crate::broker::migrations::SchemaRefusal;
 pub use crate::core::history::identity::uuid7::{mint_task_id, Uuid7Error};
 pub use crate::core::history::reads::detail::TaskAbsenceReason;
 pub use crate::core::history::rerun::{
-    NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunTask,
+    NotEligibleReason, RerunEnqueuePolicy, RerunError, RerunErrorCode, RerunOutcome, RerunTask,
 };
 // One core statement in a transaction that the caller owns: the Rust
 // client's adapters implement `CallerTransaction`; the core's own

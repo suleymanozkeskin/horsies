@@ -7,6 +7,7 @@ import { processEventHooks } from "../../../../horsies/src/child/process-events.
 import { DATABASE_URL, fakeEnvironment } from "../../app/support.ts";
 import { ping } from "../../worker/support.ts";
 import { FakeChildNative } from "../child-native.ts";
+import { unusedSeatHost } from "../../seats/support.ts";
 
 const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [ping] }, fakeEnvironment());
 
@@ -28,6 +29,7 @@ void runChildMode(created.value, ["--horsies-child", "3", "4242"], {
   culprit: { kind: "none" },
   settlement: { returned: () => undefined, threw: () => undefined },
   hostname: "fixture",
+  seats: unusedSeatHost(),
   writeLine: (line) => {
     process.stderr.write(`${line}\n`);
   },

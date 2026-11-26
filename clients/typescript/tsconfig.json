@@ -2,6 +2,9 @@
   // `bun check` in this folder checks each referenced project with its own options.
   "files": [],
   "references": [
+    { "path": "./eslint-plugin" },
+    { "path": "./examples" },
+    { "path": "./examples/showcase" },
     { "path": "./horsies" },
     { "path": "./lint" },
     { "path": "./tests" }

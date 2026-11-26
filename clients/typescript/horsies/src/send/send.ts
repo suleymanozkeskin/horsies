@@ -180,8 +180,18 @@ async function preparedRequest(
     inputBytes: Buffer.byteLength(text.value, "utf8"),
   });
 
-  if (prepared.kind === "refused") {
-    return err(sendErrorOfRaw(prepared.error));
+  switch (prepared.kind) {
+    case "refused":
+      return err(sendErrorOfRaw(prepared.error));
+    case "seatRelayFull":
+      return err(prepared.error);
+    case "prepared":
+      break;
+    default: {
+      const unexpected: never = prepared;
+
+      throw new TypeError(`send: a prepare outside its type: ${String(unexpected)}`);
+    }
   }
 
   const request: EnqueueRequest = {
@@ -202,7 +212,7 @@ async function preparedRequest(
 }
 
 /** The priority of a prepared send: the client's priority of the default queue, or the configured one. Pure. */
-function sendPriority(priority: SendPriority): number {
+export function sendPriority(priority: SendPriority): number {
   switch (priority.kind) {
     case "defaultQueue":
       return DEFAULT_QUEUE_PRIORITY;
@@ -298,6 +308,8 @@ async function enqueueOnce(
       return ok(taskIdFromCore(outcome.taskId, "enqueue"));
     case "failed":
       return err(sendErrorOfRaw(outcome.error));
+    case "seatRelayFull":
+      return err(outcome.error);
     default: {
       const unexpected: never = outcome;
 

@@ -53,6 +53,21 @@ function recordingTable(code: CommandExitCode): CommandTable & { readonly calls:
 
       return code;
     },
+    scheduler: async (_app, args) => {
+      calls.push(["scheduler", ...args]);
+
+      return code;
+    },
+    web: async (_app, args) => {
+      calls.push(["web", ...args]);
+
+      return code;
+    },
+    metrics: async (_app, args) => {
+      calls.push(["metrics", ...args]);
+
+      return code;
+    },
   };
 }
 
@@ -60,11 +75,13 @@ function fakeDeps(facts: ProcessFacts, table: CommandTable, backlog: readonly Lo
   readonly errors: string[];
   readonly pauses: number[];
   readonly children: (readonly string[])[];
+  readonly seats: number[];
   readonly defects: CoreDefect[];
 } {
   const errors: string[] = [];
   const pauses: number[] = [];
   const children: (readonly string[])[] = [];
+  const seats: number[] = [];
   const defects: CoreDefect[] = [];
   let reads = 0;
 
@@ -72,12 +89,19 @@ function fakeDeps(facts: ProcessFacts, table: CommandTable, backlog: readonly Lo
     errors,
     pauses,
     children,
+    seats,
     defects,
     facts,
     table,
     child: async (_app, args) => {
       children.push(args);
 
+      throw new Ended(0);
+    },
+    seat: async () => {
+      seats.push(1);
+
+      // A seat isolate serves until its process ends: the fake ends at once.
       throw new Ended(0);
     },
     output: { writeOut: () => undefined, writeError: (line) => errors.push(line) },
@@ -108,6 +132,15 @@ function throwingTable(cause: Error): CommandTable {
     check: async () => {
       throw cause;
     },
+    scheduler: async () => {
+      throw cause;
+    },
+    web: async () => {
+      throw cause;
+    },
+    metrics: async () => {
+      throw cause;
+    },
   };
 }
 
@@ -126,6 +159,12 @@ async function endedCode(run: Promise<number>): Promise<number> {
 }
 
 describe("the mode of a process", () => {
+  test("a worker thread with the seat marker is a seat isolate, whatever its arguments", () => {
+    assert.deepEqual(processMode({ thread: "seatIsolate", argv: [...ENTRY, "--horsies-child", "3", "4242"] }), {
+      kind: "seatIsolate",
+    });
+  });
+
   test("a worker thread", () => {
     assert.deepEqual(processMode({ thread: "worker", argv: [...ENTRY, "worker"] }), { kind: "workerThread" });
   });
@@ -158,16 +197,28 @@ describe("the mode of a process", () => {
   });
 
   test("the command names", () => {
-    assert.deepEqual(COMMAND_NAMES, ["worker", "check"]);
+    assert.deepEqual(COMMAND_NAMES, ["worker", "check", "scheduler", "web", "metrics"]);
   });
 });
 
 describe("cli.run", () => {
+  test("a seat isolate serves as a seat; no child and no command runs", async () => {
+    const table = recordingTable(0);
+    const deps = fakeDeps({ thread: "seatIsolate", argv: [...ENTRY, "--horsies-child", "3", "4242"] }, table);
+
+    assert.equal(await endedCode(runCli(testApp(), deps)), 0);
+    assert.deepEqual(deps.seats, [1]);
+    assert.deepEqual(deps.children, []);
+    assert.equal(table.calls.length, 0);
+  });
+
   test("a worker thread is a defect", async () => {
     const table = recordingTable(0);
+    const deps = fakeDeps({ thread: "worker", argv: [...ENTRY] }, table);
 
-    await assert.rejects(runCli(testApp(), fakeDeps({ thread: "worker", argv: [...ENTRY] }, table)), ClientDefect);
+    await assert.rejects(runCli(testApp(), deps), ClientDefect);
     assert.equal(table.calls.length, 0);
+    assert.deepEqual(deps.seats, []);
   });
 
   test("child mode runs the child with its arguments, and no command runs", async () => {
@@ -190,7 +241,7 @@ describe("cli.run", () => {
     const deps = fakeDeps(main("serve"), recordingTable(0));
 
     assert.equal(await endedCode(runCli(testApp(), deps)), 2);
-    assert.ok(deps.errors[0]?.startsWith("usage: <entry> {worker,check}"));
+    assert.ok(deps.errors[0]?.startsWith("usage: <entry> {worker,check,scheduler,web,metrics}"));
     assert.ok(deps.errors[1]?.startsWith("horsies: error: unknown command"));
   });
 

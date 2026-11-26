@@ -1,0 +1,6 @@
+{
+  // The showcase app, its tests and its run script. The options and the `paths` of the package names are the ones of
+  // the examples (`../tsconfig.json`).
+  "extends": "../tsconfig.json",
+  "include": ["src", "tests", "scripts"]
+}

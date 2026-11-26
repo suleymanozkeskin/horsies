@@ -17,11 +17,14 @@
 //! An error class reads the mark through the member of its `code` slot
 //! ([`CodeCatalog::member_named`]); the class holds no copy of it.
 
-use crate::monitoring::{MonitoringQueryErrorCode, TaskActionErrorCode};
+use crate::core::task::SeatRelayCode;
+use crate::monitoring::{
+    MonitoringQueryErrorCode, MonitoringQueryRefusalCode, TaskActionErrorCode,
+};
 use crate::{
     BrokerErrorCode, ContractCode, ErrorCode, HandleErrorCode, OperationalErrorCode, OutcomeCode,
-    RetrievalCode, TaskAbsenceReason, TaskAttemptOutcome, TaskSendErrorCode, TaskStatus,
-    WorkflowStartErrorCode, WorkflowStatus, WorkflowTaskStatus,
+    RerunErrorCode, RetrievalCode, TaskAbsenceReason, TaskAttemptOutcome, TaskSendErrorCode,
+    TaskStatus, WorkflowStartErrorCode, WorkflowStatus, WorkflowTaskStatus,
 };
 
 /// The Python base class of a generated enum.
@@ -114,6 +117,7 @@ pub trait CodeEnum: Sized + 'static {
 pub const CODE_CATALOGS: &[CodeCatalog] = &[
     <BrokerErrorCode as CodeEnum>::CATALOG,
     <TaskSendErrorCode as CodeEnum>::CATALOG,
+    <SeatRelayCode as CodeEnum>::CATALOG,
     <WorkflowStartErrorCode as CodeEnum>::CATALOG,
     <HandleErrorCode as CodeEnum>::CATALOG,
     <OperationalErrorCode as CodeEnum>::CATALOG,
@@ -126,7 +130,9 @@ pub const CODE_CATALOGS: &[CodeCatalog] = &[
     <WorkflowTaskStatus as CodeEnum>::CATALOG,
     <MonitoringQueryErrorCode as CodeEnum>::CATALOG,
     <TaskActionErrorCode as CodeEnum>::CATALOG,
+    <MonitoringQueryRefusalCode as CodeEnum>::CATALOG,
     <TaskAbsenceReason as CodeEnum>::CATALOG,
+    <RerunErrorCode as CodeEnum>::CATALOG,
     <ErrorCode as CodeEnum>::CATALOG,
 ];
 
@@ -189,11 +195,65 @@ mod tests {
         assert_wire_values::<TaskActionErrorCode>(|code| {
             serde_plain::to_string(code).expect("a unit variant serializes")
         });
+        assert_wire_values::<MonitoringQueryRefusalCode>(|code| {
+            serde_plain::to_string(code).expect("a unit variant serializes")
+        });
+        assert_eq!(
+            MonitoringQueryRefusalCode::QueryRefused.wire_value(),
+            "QUERY_REFUSED"
+        );
+    }
+
+    #[test]
+    fn seat_relay_codes_match_their_serde_form() {
+        assert_wire_values::<SeatRelayCode>(|code| {
+            serde_plain::to_string(code).expect("a unit variant serializes")
+        });
+        // clients/typescript/horsies/src/send/errors.ts. The Python and Rust
+        // clients have no seat relay.
+        assert_eq!(SeatRelayCode::SeatRelayFull.wire_value(), "SEAT_RELAY_FULL");
+        assert_eq!(
+            <SeatRelayCode as CodeEnum>::CATALOG.python_module,
+            "task_send"
+        );
     }
 
     #[test]
     fn absence_reasons_match_their_text() {
         assert_wire_values::<TaskAbsenceReason>(|reason| reason.as_str().to_owned());
+    }
+
+    #[test]
+    fn rerun_codes_match_their_serde_form() {
+        assert_wire_values::<RerunErrorCode>(|code| {
+            serde_plain::to_string(code).expect("a unit variant serializes")
+        });
+        // clients/typescript/horsies/src/rerun/errors.ts. The Python client
+        // raises exception classes for these cases, with no code.
+        let values: Vec<&str> = <RerunErrorCode as CodeEnum>::CATALOG
+            .members
+            .iter()
+            .map(|member| member.value)
+            .collect();
+        assert_eq!(
+            values,
+            [
+                "CONNECT_FAILED",
+                "STATEMENT_FAILED",
+                "FAMILY_CHECK_FAILED",
+                "INVALID_COMMAND",
+                "INVALID_POLICY",
+                "CLASS_NOT_REGISTERED",
+                "CALLER_KEY_REFUSED",
+                "ID_MINT_REFUSED",
+                "CLIENT_FAMILY_MISMATCH",
+                "UNKNOWN_STORED_FAMILY",
+                "CONTRACT_VIOLATION",
+                "DRIVER_FAILED",
+                "NO_OPEN_TRANSACTION",
+                "RESULT_NOT_TEXT",
+            ]
+        );
     }
 
     /// The core catalog holds exactly `python`, the members of the Python

@@ -3,6 +3,8 @@
 export {
   type AnyTaskContract,
   type BodyResult,
+  type ContextUse,
+  type ContextUseOf,
   type ContractTypes,
   defineTask,
   type ExecutionClass,
@@ -47,6 +49,7 @@ export type {
   AnyImplementation,
   BodyFor,
   BodyRuntimes,
+  ContextBodyRuntimes,
   ErrorClass,
   ExceptionMapping,
   Implementation,

@@ -23,8 +23,14 @@ cd "$workspace_folder"
 print_step_title "Runtime versions"
 printf 'bun %s\nnode %s\n' "$(bun --revision)" "$(node --version)"
 
-print_step_title "Install the workspace from bun.lock"
+# Every pin that a later step uses is installed here, before the first step
+# that runs a tool: the workspace (bun.lock; it holds the tests package and
+# its TypeScript 7 compiler) and the TypeScript 6.0 compiler of the floor lane
+# (ci/typescript-floor/bun.lock). `bun test` runs both compilers: the docs
+# check test compiles its fixture page with each of them.
+print_step_title "Install the workspace and the floor compiler from their lockfiles"
 bun install --frozen-lockfile
+(cd "$floor_compiler_folder" && bun install --frozen-lockfile)
 
 print_step_title "Type check with bun check"
 bun check
@@ -39,22 +45,40 @@ bun test
 # Bun, and the zod adapter runs where a contract is checked, so the codec, wire
 # type and zod adapter tests and the stored-form tests (the vectors and the
 # corpus of Python's texts) run on Node too (`node:test`). The task child code
-# (the body adapter, the runtime, the run store) runs on Node too.
-print_step_title "Run the codec, wire type, zod adapter, child and stored-form tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
+# (the body adapter, the runtime, the run store) runs on Node too, and so do
+# the workflow builder, its checks and the child spec answer, which a child
+# build runs in a task child, and the telemetry (the spans and the context
+# across `await` with the OpenTelemetry SDK). The schedule checks read time
+# zones through the engine's Temporal (V8 on Node, JavaScriptCore on Bun), so
+# the schedule tests run on Node too. The seat isolates of SHARED_THREAD
+# children run on Node, so their tests run there too.
+print_step_title "Run the codec, wire type, zod adapter, child, seat, workflow, telemetry, schedule and stored-form tests on Node"
+node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/seats/**/*.test.ts' 'tests/unit/workflow/**/*.test.ts' 'tests/unit/telemetry/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
+
+# The lint rule package (eslint-plugin/) runs in ESLint, on Node: its
+# RuleTester cases, and ESLint and tsc of TypeScript 7 on its fixture project.
+print_step_title "Run the lint rule package tests on Node"
+bun run --cwd eslint-plugin test
+
+# The ESLint config of the lint rule package (horsies/no-dropped-result and
+# @typescript-eslint/switch-exhaustiveness-check) on the client's own code:
+# the files of horsies/tsconfig.json and tests/tsconfig.json. A dropped Result
+# or a switch that misses a member of a union fails the step.
+print_step_title "Lint the client's own code with ESLint: dropped results and switch cases"
+node eslint-plugin/lint-client.ts
 
 # TypeScript 6.0 is the oldest compiler that the published types support.
 # This step type checks the workspace projects with it. Build mode reads the
 # project list of tsconfig.json, as `bun check` does; `--clean` then removes
 # the build info files that build mode writes.
 print_step_title "Type check with tsc of TypeScript 6.0"
-(cd "$floor_compiler_folder" && bun install --frozen-lockfile)
 "$floor_compiler" --version
 "$floor_compiler" --build
 "$floor_compiler" --build --clean
 
 # The public API gate of the published entry points (`horsies`,
-# `horsies/zod`): the API report of each one against
+# `horsies/zod`, `horsies/rerun/pg`, `horsies/rerun/postgres`): the API
+# report of each one against
 # tests/public-api/report/, each type that a public declaration names is
 # exported by its entry point, and the no-`any` check with the `unknown`
 # allow list (tests/public-api/unknown-allowed.json). A difference prints the
@@ -65,6 +89,15 @@ bun tests/public-api/run.ts check
 
 # The type tests (tests/types/pass/, tests/types/fail/) and the consumer
 # project (tests/types/consumer/), with tsc of TypeScript 7, bun check, and
-# tsc of TypeScript 6.0 (the floor compiler installed above).
+# tsc of TypeScript 6.0 (the floor compiler of the install step).
 print_step_title "Type tests and the consumer project in both compiler lanes"
 bun tests/types/run.ts
+
+# The docs check (tests/docs-check/): each TypeScript code block of the docs
+# pages (website/src/content/docs/typescript/) and of the skill files
+# (horsies/.agents/skills/horsies/) compiles against the built package in the
+# consumer project, with the same three compilers. A failing block is printed
+# with its page and line. The docs pages are held on the docs branch until
+# the release; on other branches the step reads the skill files only.
+print_step_title "Docs check of the TypeScript code blocks in both compiler lanes"
+bun tests/docs-check/run.ts

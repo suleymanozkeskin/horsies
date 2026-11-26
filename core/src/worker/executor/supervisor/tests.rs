@@ -4,6 +4,7 @@
 use std::io::Read;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
 use super::*;
@@ -497,6 +498,236 @@ async fn the_child_gets_its_socket_end_and_the_buffer_sizes() {
         ChildExit::Reaped(ReapedExit::ExitedWith(0))
     );
     stop(spawner);
+}
+
+/// Set only in the process that the standard stream tests start: the name
+/// of its [`ProbeForm`].
+const STANDARD_STREAMS_PROBE_ENV: &str = "HORSIES_TEST_SPAWNER_STANDARD_STREAMS_PROBE";
+const STANDARD_STREAMS_PROBE_TEST: &str =
+    "worker::executor::supervisor::tests::standard_streams_probe";
+/// The lines that the child of the probe writes to its standard output and
+/// to its standard error.
+const CHILD_STDOUT_LINE: &str = "the child wrote this line to its standard output";
+const CHILD_STDERR_LINE: &str = "the child wrote this line to its standard error";
+
+/// What the probe process does to its standard streams before it starts
+/// the spawner, and the child that it spawns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeForm {
+    /// The streams as a Python or a Rust worker has them: close-on-exec
+    /// clear.
+    FlagsClear,
+    /// fds 0, 1 and 2 close-on-exec, as Node sets them at its start.
+    CloseOnExec,
+    /// The probe started with fd 1 closed; a pipe takes number 1 before the
+    /// spawner starts.
+    StdoutClosedAtStart,
+    /// The probe started with fd 1 open; another pipe takes number 1 before
+    /// the spawner starts.
+    StdoutReplacedAfterLoad,
+}
+
+impl ProbeForm {
+    fn name(self) -> &'static str {
+        match self {
+            Self::FlagsClear => "flags-clear",
+            Self::CloseOnExec => "close-on-exec",
+            Self::StdoutClosedAtStart => "stdout-closed-at-start",
+            Self::StdoutReplacedAfterLoad => "stdout-replaced-after-load",
+        }
+    }
+
+    fn of_name(name: &str) -> Self {
+        match name {
+            "flags-clear" => Self::FlagsClear,
+            "close-on-exec" => Self::CloseOnExec,
+            "stdout-closed-at-start" => Self::StdoutClosedAtStart,
+            "stdout-replaced-after-load" => Self::StdoutReplacedAfterLoad,
+            other => panic!("unknown probe form {other}"),
+        }
+    }
+
+    /// The child of the probe. It exits 10 when its standard input is
+    /// closed, 11 when it reads a line there (the input is not
+    /// `/dev/null`), 20 when its standard output is not `/dev/null` and the
+    /// form requires it, 12 or 13 when a write to its standard output or
+    /// standard error fails, else 0.
+    fn child(self) -> ChildCommand {
+        let stdout_check = match self {
+            Self::FlagsClear | Self::CloseOnExec => "",
+            Self::StdoutClosedAtStart | Self::StdoutReplacedAfterLoad => {
+                "[ /dev/fd/1 -ef /dev/null ] || exit 20\n"
+            }
+        };
+        shell(&format!(
+            r#"( exec 3<&0 ) 2>/dev/null || exit 10
+if IFS= read -r _; then exit 11; fi
+{stdout_check}printf '%s\n' '{CHILD_STDOUT_LINE}' || exit 12
+printf '%s\n' '{CHILD_STDERR_LINE}' >&2 || exit 13
+exit 0"#
+        ))
+    }
+}
+
+/// Set close-on-exec on the open descriptor `fd` of this process.
+fn mark_close_on_exec(fd: libc::c_int) {
+    // SAFETY: fcntl with integer arguments.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    assert_ne!(
+        flags,
+        -1,
+        "F_GETFD of {fd}: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: as above.
+    let set = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    assert_ne!(
+        set,
+        -1,
+        "F_SETFD of {fd}: {}",
+        std::io::Error::last_os_error()
+    );
+}
+
+/// Put the write end of a new pipe at number 1: the descriptor at number 1
+/// when the child starts, which is not the stream of the probe at load.
+///
+/// The read end stays open to the end of the probe process, and nothing
+/// reads it: the test harness writes its result lines to number 1 after the
+/// probe body, and a write to a pipe with no open read end fails with
+/// `EPIPE`, which fails the probe. With number 1 closed at the start
+/// ([`ProbeForm::StdoutClosedAtStart`]), `pipe` gives the read end number 1,
+/// so a duplicate of the read end above number 2 is made before the `dup2`
+/// replaces number 1.
+fn pipe_on_stdout() {
+    let mut ends: [libc::c_int; 2] = [-1; 2];
+    // SAFETY: pipe writes two descriptors into the array of two.
+    let made = unsafe { libc::pipe(ends.as_mut_ptr()) };
+    assert_eq!(made, 0, "pipe: {}", std::io::Error::last_os_error());
+    // SAFETY: fcntl with integer arguments.
+    let kept_read_end =
+        unsafe { libc::fcntl(ends[0], libc::F_DUPFD_CLOEXEC, libc::STDERR_FILENO + 1) };
+    assert_ne!(
+        kept_read_end,
+        -1,
+        "F_DUPFD_CLOEXEC: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: dup2 with integer arguments.
+    let placed = unsafe { libc::dup2(ends[1], libc::STDOUT_FILENO) };
+    assert_ne!(placed, -1, "dup2: {}", std::io::Error::last_os_error());
+}
+
+/// What the probe of `form` does to its streams before the spawner starts.
+fn prepare_streams(form: ProbeForm) {
+    match form {
+        ProbeForm::FlagsClear => {}
+        ProbeForm::CloseOnExec => {
+            for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+                mark_close_on_exec(fd);
+            }
+        }
+        ProbeForm::StdoutClosedAtStart | ProbeForm::StdoutReplacedAfterLoad => pipe_on_stdout(),
+    }
+}
+
+/// The body of the probe process: it prepares its streams for its form,
+/// starts the spawner, spawns the child of the form and checks that it
+/// exits 0. The streams are of the whole process, so only this process
+/// changes them. Without [`STANDARD_STREAMS_PROBE_ENV`] it returns at once.
+#[tokio::test]
+async fn standard_streams_probe() {
+    let Some(name) = std::env::var_os(STANDARD_STREAMS_PROBE_ENV) else {
+        return;
+    };
+    let form = ProbeForm::of_name(name.to_str().expect("a form name"));
+    prepare_streams(form);
+    let spawner = Spawner::start().unwrap();
+    let mut child = spawner.handle().spawn(form.child()).await.unwrap();
+    assert_eq!(wait_for_exit(&mut child.exit, TEST_WAIT).await, exited(0));
+    stop(spawner);
+}
+
+/// In the forked probe before `exec`: close fd 1, so that the probe starts
+/// with no standard output.
+fn close_stdout() -> std::io::Result<()> {
+    // SAFETY: close with an integer argument.
+    match unsafe { libc::close(libc::STDOUT_FILENO) } {
+        0 => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+/// Run the probe of `form` with pipes as its standard output and standard
+/// error (fd 1 closed for [`ProbeForm::StdoutClosedAtStart`]), and require
+/// its success. Gives the text of the two pipes.
+fn run_streams_probe(form: ProbeForm) -> (String, String) {
+    let mut command = std::process::Command::new(std::env::current_exe().expect("the test binary"));
+    command
+        .args([
+            "--exact",
+            STANDARD_STREAMS_PROBE_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(STANDARD_STREAMS_PROBE_ENV, form.name())
+        .stdin(std::process::Stdio::null());
+    match form {
+        ProbeForm::StdoutClosedAtStart => {
+            // SAFETY: the hook runs in the forked probe before `exec` and
+            // calls only close.
+            unsafe {
+                command.pre_exec(close_stdout);
+            }
+        }
+        ProbeForm::FlagsClear | ProbeForm::CloseOnExec | ProbeForm::StdoutReplacedAfterLoad => {}
+    }
+    let output = command.output().expect("the probe process runs");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        output.status.success(),
+        "the probe {form:?} failed ({}).\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status,
+    );
+    (stdout, stderr)
+}
+
+/// A worker whose fds 1 and 2 are open with close-on-exec clear, as a
+/// Python or a Rust worker has them: a child writes to both, as before.
+#[test]
+fn a_child_writes_to_the_standard_streams_of_the_worker() {
+    let (stdout, stderr) = run_streams_probe(ProbeForm::FlagsClear);
+    assert!(stdout.contains(CHILD_STDOUT_LINE), "stdout:\n{stdout}");
+    assert!(stderr.contains(CHILD_STDERR_LINE), "stderr:\n{stderr}");
+}
+
+/// A worker whose runtime marked fds 0, 1 and 2 close-on-exec (Node): a
+/// child still writes to its stdout and stderr, and reads `/dev/null`.
+#[test]
+fn a_child_gets_the_standard_streams_that_the_worker_marked_close_on_exec() {
+    let (stdout, stderr) = run_streams_probe(ProbeForm::CloseOnExec);
+    assert!(stdout.contains(CHILD_STDOUT_LINE), "stdout:\n{stdout}");
+    assert!(stderr.contains(CHILD_STDERR_LINE), "stderr:\n{stderr}");
+}
+
+/// A worker that started with fd 1 closed, and holds a pipe at number 1
+/// when the child starts: the child's fd 1 is `/dev/null`, not the pipe;
+/// its fd 2 is the worker's stderr.
+#[test]
+fn a_worker_that_started_with_fd_1_closed_gives_its_children_dev_null() {
+    let (_stdout, stderr) = run_streams_probe(ProbeForm::StdoutClosedAtStart);
+    assert!(stderr.contains(CHILD_STDERR_LINE), "stderr:\n{stderr}");
+}
+
+/// A worker whose fd 1 holds another file when the spawner starts than when
+/// the process loaded the core: the child's fd 1 is `/dev/null`, not the new
+/// file, and the line reaches neither the old stream nor the new one.
+#[test]
+fn a_worker_whose_fd_1_is_another_file_than_at_load_gives_its_children_dev_null() {
+    let (stdout, stderr) = run_streams_probe(ProbeForm::StdoutReplacedAfterLoad);
+    assert!(!stdout.contains(CHILD_STDOUT_LINE), "stdout:\n{stdout}");
+    assert!(stderr.contains(CHILD_STDERR_LINE), "stderr:\n{stderr}");
 }
 
 /// One descriptor of a process: its number and the target of its

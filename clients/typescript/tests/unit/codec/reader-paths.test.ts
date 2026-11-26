@@ -39,6 +39,24 @@ const TESTS_DIR: string = fileURLToPath(new URL("../../", import.meta.url));
 
 const READER_PATHS: readonly ReaderPath[] = [
   {
+    module: "workflow/handle.ts",
+    maker: "jsonTextCheckedByCore",
+    checkedBy: "nodeResult",
+    proof: {
+      file: "unit/workflow/handle.test.ts",
+      test: "a stored text that the core's strict check refuses ends as storedResultUnreadable and never reaches the reader",
+    },
+  },
+  {
+    module: "workflow/child-spec.ts",
+    maker: "jsonTextCheckedByCore",
+    checkedBy: "inputText",
+    proof: {
+      file: "runtime/native/workflows-addon.test.ts",
+      test: "a stored input that the core's strict read refuses fails the node and never calls the build",
+    },
+  },
+  {
     module: "read/handle.ts",
     maker: "jsonTextCheckedByCore",
     checkedBy: "getResult",
@@ -57,12 +75,30 @@ const READER_PATHS: readonly ReaderPath[] = [
     },
   },
   {
+    module: "seats/isolate.ts",
+    maker: "jsonTextCheckedByCore",
+    checkedBy: "build_task_input",
+    proof: {
+      file: "unit/seats/isolate.test.ts",
+      test: "the reader of a seat isolate gets only the input text that the core posts after its strict check",
+    },
+  },
+  {
     module: "codec/error-data.ts",
     maker: "writtenJsonText",
     checkedBy: "errorDataText",
     proof: {
       file: "unit/codec/error-data.test.ts",
       test: "the error data writer makes a JsonText of strict JSON only",
+    },
+  },
+  {
+    module: "testing/task-runtime.ts",
+    maker: "writtenJsonText",
+    checkedBy: "engineKeysKeptText",
+    proof: {
+      file: "unit/testing/run.test.ts",
+      test: "the stored workflow context of a test runtime is written by the codec writer, which makes strict JSON only",
     },
   },
   {

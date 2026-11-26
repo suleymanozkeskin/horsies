@@ -101,7 +101,12 @@ export interface SharedAsyncChildrenInput {
   readonly taskSendPool?: PoolSize;
 }
 
-/** `count` shared thread children of `seats` seats each, one worker thread per seat. */
+/**
+ * `count` shared thread children of `seats` seats each, one worker thread per seat. Node only: a worker on another
+ * runtime refuses the profile at its start. The JavaScript heap of each seat has the heap limit of its child's main
+ * isolate (`--max-old-space-size` on the worker command sets it), and a seat at that limit ends alone with its run.
+ * The limit does not cover `ArrayBuffer` and `Buffer` memory: that memory of every seat counts toward the whole child.
+ */
 export interface SharedThreadChildrenInput {
   readonly count: number;
   readonly seats: number;

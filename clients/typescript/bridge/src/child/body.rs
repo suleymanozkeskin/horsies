@@ -3,7 +3,10 @@
 //!
 //! The core calls a body through `AsyncTaskFn::execute` (an `ISOLATED` or a
 //! `SHARED_ASYNC` task) or `BlockingTaskFn::execute` (a `SHARED_THREAD`
-//! task that the child's main thread runs). Each call:
+//! task). The JavaScript main thread runs the body of a post, or, in a
+//! `SHARED_THREAD` child, gives it to a free seat isolate and settles the run
+//! with the isolate's result; a seat isolate never loads this addon. Each
+//! call:
 //! 1. reads the run's fencing token and cancel signal; an async run also
 //!    takes its run handle and registers the body as host-held work, named
 //!    by the task name;
@@ -83,8 +86,9 @@ const WORK_STOP_POST_TRIES: u32 = 100;
 const WORK_STOP_POST_PAUSE: Duration = Duration::from_millis(10);
 
 /// How often the wait of a blocking body reads its cancel signal: the turn
-/// tick of the host loop. A blocking body runs on the JavaScript main thread
-/// until the thread seats fill their slot.
+/// tick of the host loop. The cancel then reaches the body through the
+/// `cancelRun` post: on the JavaScript main thread, or in the cancel cell of
+/// the body's seat isolate.
 const BLOCKING_CANCEL_READ: Duration = HOST_LOOP_TURN_TICK;
 
 /// The most seats of a shared async child, as a `usize`.
@@ -535,8 +539,10 @@ fn settled_value(
     }
 }
 
-/// The blocking body of one task: a `SHARED_THREAD` task that the child's
-/// main thread runs.
+/// The blocking body of one task: a `SHARED_THREAD` task, on a seat thread
+/// of the core. Its body runs in a seat isolate of a `SHARED_THREAD` child,
+/// or on the JavaScript main thread of an isolated child of a worker that
+/// runs no thread child.
 pub struct JsBlockingBody {
     pub task_name: String,
     pub bodies: Arc<ChildBodies>,

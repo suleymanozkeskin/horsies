@@ -148,7 +148,7 @@ describe("TaskHandle.info", () => {
     const first = await handle.info();
 
     assert.equal(first.ok && first.value.status, "FAILED");
-    await handle.info();
+    void (await handle.info());
     assert.equal(fake.calls.taskInfo, 2);
   });
 
@@ -183,8 +183,11 @@ describe("TaskHandle.info", () => {
         kind: "seatRelay",
         relay: {
           request: async () => ({
-            kind: "prepareSend",
-            prepared: { kind: "refused", error: operationFailedRaw("TASK_INFO_QUERY_FAILED", false) },
+            kind: "reply",
+            reply: {
+              kind: "prepareSend",
+              prepared: { kind: "refused", error: operationFailedRaw("TASK_INFO_QUERY_FAILED", false) },
+            },
           }),
         },
       },

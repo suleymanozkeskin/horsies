@@ -127,6 +127,8 @@ class Handle<O, E extends string> implements TaskHandle<O, E> {
         return err(Object.freeze({ kind: "taskNotFound", absence: taskAbsence(read.reason) }));
       case "failed":
         return err(brokerReadError(read.error));
+      case "seatRelayFull":
+        return err(Object.freeze({ kind: "seatRelayFull", error: read.error }));
       default: {
         const unexpected: never = read;
 
@@ -278,6 +280,7 @@ function isFinal(read: Outcome): boolean {
     case "waitInsideTask":
     case "database":
     case "invalidWait":
+    case "seatRelayFull":
       return false;
     default: {
       const unexpected: never = read.error;

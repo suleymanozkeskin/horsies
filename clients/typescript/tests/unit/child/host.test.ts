@@ -13,6 +13,7 @@ import { CHILD_KIND_HOOK_NAME } from "../../../horsies/src/child/serve.ts";
 import type { CallbackSettlement } from "../../../horsies/src/native/call/callback.ts";
 import { contextOf, implementedApp } from "../worker/support.ts";
 import { FakeChildNative, settled } from "./child-native.ts";
+import { unusedSeatHost } from "../seats/support.ts";
 
 const CHILD_ARGUMENTS = ["--horsies-child", "3", "4242"] as const;
 
@@ -76,6 +77,7 @@ function fakeDeps(native: FakeChildNative): ChildModeDeps & Recorded {
     culprit,
     settlement,
     hostname: "host-1",
+    seats: unusedSeatHost(),
     writeLine: (line) => lines.push(line),
     wait: async (milliseconds) => {
       flushes.push(`wait ${String(milliseconds)}`);
@@ -133,8 +135,8 @@ describe("child mode", () => {
     assert.deepEqual(native.calls.slice(0, 3), ["childArguments", "setPanicRule ABORT_PROCESS", "serveChild"]);
     assert.deepEqual(native.serves[0]?.plan, {
       tasks: [
-        { name: "ping", form: "ASYNC" },
-        { name: "charge", form: "ASYNC" },
+        { name: "ping", form: "ASYNC", context: "NO_CONTEXT" },
+        { name: "charge", form: "ASYNC", context: "NO_CONTEXT" },
       ],
       startHooks: [CHILD_KIND_HOOK_NAME, "provide #1 openPool", "onChildStart #1 warmCache"],
       producerManifestJson: '{"manifest":"of the app"}',
@@ -217,7 +219,7 @@ describe("child mode", () => {
 
 describe("the body facts of a child", () => {
   test("OpenTelemetry tracing records the facts of each run; no tracing records none", () => {
-    assert.equal(bodyFactsMode("otel"), "SPANS");
-    assert.equal(bodyFactsMode("none"), "NO_SCOPE");
+    assert.equal(bodyFactsMode({ kind: "otel", parentage: "linkedToSend", workerEndedSpans: "noSpans" }), "SPANS");
+    assert.equal(bodyFactsMode({ kind: "none" }), "NO_SCOPE");
   });
 });
