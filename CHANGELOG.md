@@ -393,6 +393,13 @@ and there is no migration contract between pre-1.0 versions.
   10000). Before, its stored error had no `data`. A reader that reads
   `data.field` now reads it for the rows of each client. The Python child
   writes the same `data` as before.
+- **The Rust scheduler run ends at a stop request during its connect.**
+  `PreparedScheduler::run` waited for the connect and the schema install
+  before it read the stop request, so `SIGTERM` during them ended the run
+  only after the connect, the start and its first state write. A stop
+  request before or during them now returns `Ok(SchedulerStopped)`, drops
+  the connect and writes no schedule state, as the TypeScript and Python
+  schedulers do. A stop request after the connect is unchanged.
 
 ## [0.8.1] - 2026-11-25
 
