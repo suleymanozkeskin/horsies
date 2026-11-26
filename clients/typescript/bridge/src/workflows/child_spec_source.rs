@@ -14,12 +14,15 @@
 //! 3. The merged text passes the core's strict JSON check
 //!    (`check_json_text`), because the package's reader trusts only checked
 //!    text. A refused text fails the node with `WORKFLOW_ENQUEUE_FAILED`.
-//! 4. The call into JavaScript, with a wait of at most
-//!    [`CHILD_SPEC_WAIT_BOUND`]. Past the bound the answer is `NotRun`
-//!    (retryable): the step rolls back and runs again through its retry or
-//!    the workflow recovery. The drop of the call at the bound removes its
-//!    pending entry, so a late answer finds no call and is dropped; the build
-//!    has no I/O, so nothing is lost.
+//! 4. The call into JavaScript in the take form: the wait for the
+//!    JavaScript thread to take the call is at most [`CHILD_SPEC_WAIT_BOUND`].
+//!    Past the bound the answer is `NotRun` (retryable): the step rolls back
+//!    and runs again through its retry or the workflow recovery. The drop of
+//!    the call at the bound removes its entries, so a late take finds no call
+//!    and the wrapper does not run the build. Once JavaScript takes the call,
+//!    the wait for the answer has no bound of its own, as in the Rust and
+//!    Python clients: a build that blocks the JavaScript thread is the
+//!    child's loop watch's case (`LOOP_BLOCK_LIMIT`, `loop_blocked`).
 //! 5. The answer: a spec that the core parses is the child; every other
 //!    answer fails the node with the core's error of its case.
 //!
@@ -56,10 +59,11 @@ use crate::handle::core_handle::{ChildSpecSourceSet, CoreHandle};
 /// Python bridge's callback thread.
 pub const CHILD_SPEC_QUEUE_BOUND: usize = 1_024;
 
-/// The longest wait for the answer of one build, from the call to the
-/// answer: it covers the wait for the JavaScript thread to take the call and
-/// the run of the build itself. A JavaScript loop that does not take the call
-/// within it is blocked by the core's rule.
+/// The longest wait for the JavaScript thread to take the call of one build.
+/// A JavaScript loop that does not take the call within it is blocked by the
+/// core's rule. The run of the build after the take has no bound here: the
+/// child's loop watch bounds a blocked loop (`LOOP_BLOCK_LIMIT`,
+/// `loop_blocked`).
 pub const CHILD_SPEC_WAIT_BOUND: Duration = LOOP_BLOCK_LIMIT;
 
 /// The name of the build function of a TypeScript workflow, as the node
@@ -194,7 +198,7 @@ impl ChildSpecSource for JavaScriptChildSpecSource {
 
 impl JavaScriptChildSpecSource {
     /// The answer to `request`: steps 1 to 3 here, then the call into
-    /// JavaScript within [`CHILD_SPEC_WAIT_BOUND`], then its answer.
+    /// JavaScript, taken within [`CHILD_SPEC_WAIT_BOUND`], then its answer.
     async fn answer(
         &self,
         request: ChildSpecRequest,
@@ -203,22 +207,31 @@ impl JavaScriptChildSpecSource {
             BuildStep::Answered(answer) => return answer,
             BuildStep::Call { call, input } => (call, input),
         };
-        let end = call_end(self.callback.call(call), CHILD_SPEC_WAIT_BOUND).await;
+        let end = match self.callback.start_call(call) {
+            Ok((taken, answer)) => {
+                call_end(taken.wait(), answer.wait(), CHILD_SPEC_WAIT_BOUND).await
+            }
+            Err(failure) => CallEnd::Failed(failure),
+        };
         spec_of_call(&request, &input, end)
     }
 }
 
-/// How the wait for the answer of `call` ended: its answer or its failure,
-/// or `PastBound` when no answer came within `bound`. The drop of `call` at
-/// the bound ends the wait for it.
+/// How a call of the take form ended: `NotTaken` when the JavaScript thread
+/// did not take it within `take_bound`; else its answer or its failure, with
+/// no bound on the wait for the answer. The drop of `answer` at the bound
+/// ends the call.
 async fn call_end(
-    call: impl Future<Output = Result<ChildSpecAnswer, CallbackFailure>>,
-    bound: Duration,
+    taken: impl Future<Output = ()>,
+    answer: impl Future<Output = Result<ChildSpecAnswer, CallbackFailure>>,
+    take_bound: Duration,
 ) -> CallEnd {
-    match tokio::time::timeout(bound, call).await {
-        Ok(Ok(answer)) => CallEnd::Answered(answer),
-        Ok(Err(failure)) => CallEnd::Failed(failure),
-        Err(_past_the_bound) => CallEnd::PastBound,
+    match tokio::time::timeout(take_bound, taken).await {
+        Err(_not_taken) => CallEnd::NotTaken,
+        Ok(()) => match answer.await {
+            Ok(answer) => CallEnd::Answered(answer),
+            Err(failure) => CallEnd::Failed(failure),
+        },
     }
 }
 
@@ -237,8 +250,9 @@ enum BuildStep {
 enum CallEnd {
     Answered(ChildSpecAnswer),
     Failed(CallbackFailure),
-    /// No answer came within [`CHILD_SPEC_WAIT_BOUND`].
-    PastBound,
+    /// The JavaScript thread did not take the call within
+    /// [`CHILD_SPEC_WAIT_BOUND`].
+    NotTaken,
 }
 
 /// Steps 1 to 3 of a build: the definition key and its listing in
@@ -302,10 +316,10 @@ fn spec_of_call(
     match end {
         CallEnd::Answered(answer) => spec_of_answer(request, input, answer),
         CallEnd::Failed(failure) => Err(unavailable_of(request, failure)),
-        CallEnd::PastBound => Err(ChildSpecUnavailable::NotRun {
+        CallEnd::NotTaken => Err(ChildSpecUnavailable::NotRun {
             subject: subject_of(request),
             cause: format!(
-                "the JavaScript build gave no answer within {} ms",
+                "the JavaScript thread did not take the build call within {} ms",
                 CHILD_SPEC_WAIT_BOUND.as_millis()
             ),
         }),
@@ -636,10 +650,15 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_call_with_no_answer_ends_past_the_wait_bound() {
+    async fn a_call_that_javascript_does_not_take_ends_at_the_wait_bound() {
         let started = tokio::time::Instant::now();
-        let end = call_end(std::future::pending(), CHILD_SPEC_WAIT_BOUND).await;
-        assert!(matches!(end, CallEnd::PastBound));
+        let end = call_end(
+            std::future::pending(),
+            std::future::pending::<Result<ChildSpecAnswer, CallbackFailure>>(),
+            CHILD_SPEC_WAIT_BOUND,
+        )
+        .await;
+        assert!(matches!(end, CallEnd::NotTaken));
         // The paused clock jumps to the timer, which rounds up to the next
         // millisecond.
         let waited = started.elapsed();
@@ -651,13 +670,21 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn an_answer_within_the_wait_bound_is_the_answer() {
+    async fn a_taken_call_waits_for_its_answer_past_the_wait_bound() {
+        // The build runs three bounds long after the take: the bound covers
+        // only the wait for the take.
+        let started = tokio::time::Instant::now();
         let end = call_end(
-            async { Ok(ChildSpecAnswer::NotListed) },
+            async {},
+            async {
+                tokio::time::sleep(CHILD_SPEC_WAIT_BOUND * 3).await;
+                Ok(ChildSpecAnswer::NotListed)
+            },
             CHILD_SPEC_WAIT_BOUND,
         )
         .await;
         assert!(matches!(end, CallEnd::Answered(ChildSpecAnswer::NotListed)));
+        assert!(started.elapsed() >= CHILD_SPEC_WAIT_BOUND * 3);
     }
 
     #[test]
@@ -787,7 +814,7 @@ mod tests {
     }
 
     #[test]
-    fn a_call_that_did_not_run_or_passed_the_bound_is_not_run_and_retryable() {
+    fn a_call_that_did_not_run_or_was_not_taken_is_not_run_and_retryable() {
         let (request, input) = called();
         for end in [
             CallEnd::Failed(CallbackFailure::NotRun {
@@ -796,7 +823,7 @@ mod tests {
             CallEnd::Failed(CallbackFailure::NotRun {
                 cause: NotRunCause::EnvClosing,
             }),
-            CallEnd::PastBound,
+            CallEnd::NotTaken,
         ] {
             match spec_of_call(&request, &input, end) {
                 Err(unavailable @ ChildSpecUnavailable::NotRun { .. }) => {

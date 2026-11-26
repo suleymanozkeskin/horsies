@@ -27,6 +27,12 @@
 //! - The answer is read with its `FromNapiValue` on the JavaScript thread,
 //!   in the settle call. An answer that does not read is `AnswerRefused`, a
 //!   defect of the package.
+//! - The take form ([`JsCallback::start_call`]): the package's wrapper calls
+//!   `takeCallback(callId)` when the JavaScript thread takes the call, before
+//!   it runs the function. A caller can bound the wait for the JavaScript
+//!   thread with [`TakenSignal`] and wait for the answer with no bound. A
+//!   settle call, a drop of the call and the end of the environment end the
+//!   taken signal too, so it never waits past the end of the call.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -133,6 +139,39 @@ where
         })
     }
 
+    /// Queue the call of the function with `argument`, in the take form: the
+    /// signal that the JavaScript thread took the call, and the wait for its
+    /// settle call. On a core thread. The drop of the answer wait ends the
+    /// call: a late take or settle call finds no call.
+    ///
+    /// Failure exits: the `CallbackFailure` of a call that is not admitted
+    /// or not queued (`NotRun`, `OnJavaScriptThread`, `NodeApiRefused`).
+    pub fn start_call(
+        &self,
+        argument: Argument,
+    ) -> Result<(TakenSignal, AnswerWait<Answer>), CallbackFailure> {
+        admit(self.javascript_thread, std::thread::current().id())?;
+        let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, receiver) = oneshot::channel();
+        let pending = PendingCall::insert(call_id, settler::<Answer>(call_id, sender))?;
+        let (taken_sender, taken_receiver) = oneshot::channel();
+        let watch = TakeWatch::insert(call_id, taken_sender);
+        queued(self.function.call(
+            FnArgs::from((bigint_of_u64(call_id), argument)),
+            ThreadsafeFunctionCallMode::NonBlocking,
+        ))?;
+        Ok((
+            TakenSignal {
+                receiver: taken_receiver,
+            },
+            AnswerWait {
+                receiver,
+                pending,
+                watch,
+            },
+        ))
+    }
+
     /// Call the function with `argument` and wait for its settle call. On a
     /// core thread. The wait has no bound of its own: a caller that needs one
     /// drops the future at its bound, and a late settle call then finds no
@@ -147,6 +186,39 @@ where
             ThreadsafeFunctionCallMode::NonBlocking,
         ))?;
         answer_of(receiver.await)
+    }
+}
+
+/// The signal that the JavaScript thread took a call of the take form.
+pub struct TakenSignal {
+    receiver: oneshot::Receiver<()>,
+}
+
+impl TakenSignal {
+    /// Wait until the JavaScript thread takes the call, or the call ends
+    /// with no take call (a settle call, the end of the environment): the
+    /// answer wait then has the answer or the failure.
+    pub async fn wait(self) {
+        let _taken_or_ended = self.receiver.await;
+    }
+}
+
+/// The wait for the settle call of a call of the take form. Its drop ends
+/// the call.
+pub struct AnswerWait<Answer> {
+    receiver: oneshot::Receiver<Result<Answer, CallbackFailure>>,
+    /// The entries of the call; dropped after the answer, or with the wait.
+    pending: PendingCall,
+    watch: TakeWatch,
+}
+
+impl<Answer> AnswerWait<Answer> {
+    /// The answer of the call, or its failure. No bound of its own.
+    pub async fn wait(self) -> Result<Answer, CallbackFailure> {
+        let answer = answer_of(self.receiver.await);
+        drop(self.pending);
+        drop(self.watch);
+        answer
     }
 }
 
@@ -202,6 +274,13 @@ pub fn end_pending_calls() {
         .map(|(_call_id, settler)| settler)
         .collect();
     drop(ended);
+    let watches: Vec<oneshot::Sender<()>> = TAKE_WATCHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .drain()
+        .map(|(_call_id, sender)| sender)
+        .collect();
+    drop(watches);
 }
 
 /// What the settle call of the package brings.
@@ -225,6 +304,47 @@ static PENDING: LazyLock<Mutex<HashMap<u64, Settler>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static NEXT_CALL_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The taken senders of the calls of the take form, by call id. An entry
+/// exists only next to an entry of [`PENDING`], so the bound of that table
+/// bounds this one.
+static TAKE_WATCHES: LazyLock<Mutex<HashMap<u64, oneshot::Sender<()>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// The entry of one call of the take form in [`TAKE_WATCHES`]; the drop
+/// removes it.
+struct TakeWatch {
+    call_id: u64,
+}
+
+impl TakeWatch {
+    /// Add the entry. Its call holds an entry of [`PENDING`].
+    fn insert(call_id: u64, sender: oneshot::Sender<()>) -> Self {
+        let _no_earlier_entry = TAKE_WATCHES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(call_id, sender);
+        Self { call_id }
+    }
+}
+
+impl Drop for TakeWatch {
+    fn drop(&mut self) {
+        let _taken_or_left = TAKE_WATCHES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&self.call_id);
+    }
+}
+
+/// The taken sender of the call `call_id`, out of the table. Pure apart
+/// from the table.
+fn take_watch(call_id: u64) -> Option<oneshot::Sender<()>> {
+    TAKE_WATCHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&call_id)
+}
 
 /// The entry of one call in the table of pending calls; the drop removes it.
 struct PendingCall {
@@ -318,6 +438,8 @@ fn settle(call_id: &BigInt, settlement: Settlement) -> Envelope<SettleOutcome> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .remove(&call_id);
+    // A settle call ends the taken signal of a call of the take form too.
+    drop(take_watch(call_id));
     match settler {
         Some(settler) => {
             settler(settlement);
@@ -348,6 +470,36 @@ pub fn settle_callback_returned(call_id: BigInt, value: Unknown) -> Envelope<Set
             },
         )
     })
+}
+
+/// The JavaScript thread took the call `callId` of the take form, before it
+/// runs the function: `settled` when the core still waits for the call,
+/// `unknownCall` when it ended (its caller passed its bound), so the
+/// function need not run.
+#[napi(ts_return_type = "NativeEnvelope<SettleOutcome>")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
+pub fn take_callback(call_id: BigInt) -> Envelope<SettleOutcome> {
+    sync_call("take_callback", || {
+        match u64_of_bigint("callId", &call_id) {
+            Ok(call_id) => Envelope::Value(take(call_id)),
+            Err(refusal) => Envelope::Thrown(refusal.into()),
+        }
+    })
+}
+
+/// Signal the take of the call `call_id`, if a call of the take form waits
+/// under the id.
+fn take(call_id: u64) -> SettleOutcome {
+    match take_watch(call_id) {
+        Some(sender) => {
+            let _no_reader = sender.send(());
+            SettleOutcome::Settled
+        }
+        None => SettleOutcome::UnknownCall,
+    }
 }
 
 /// The function of the call `callId` threw, or its Promise rejected. The
@@ -405,6 +557,50 @@ mod tests {
         let pending = PendingCall::insert(call_id, settler::<String>(call_id, sender))
             .expect("the table has room");
         (pending, receiver)
+    }
+
+    #[test]
+    fn a_take_call_ends_the_taken_signal_and_a_second_take_finds_no_call() {
+        let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, mut receiver) = oneshot::channel();
+        let _watch = TakeWatch::insert(call_id, sender);
+        assert_eq!(take(call_id), SettleOutcome::Settled);
+        assert_eq!(receiver.try_recv(), Ok(()));
+        assert_eq!(take(call_id), SettleOutcome::UnknownCall);
+    }
+
+    #[test]
+    fn a_settle_call_ends_the_taken_signal_of_a_call_with_no_take() {
+        let (pending, _answer) = pending_call();
+        let call_id = pending.call_id;
+        let (sender, mut receiver) = oneshot::channel();
+        let _watch = TakeWatch::insert(call_id, sender);
+        assert!(matches!(
+            settle(
+                &bigint_of_u64(call_id),
+                Settlement::Threw {
+                    name: "Error".to_owned(),
+                    message: "boom".to_owned(),
+                }
+            ),
+            Envelope::Value(SettleOutcome::Settled)
+        ));
+        assert_eq!(
+            receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        );
+    }
+
+    #[test]
+    fn the_drop_of_a_watch_ends_its_taken_signal() {
+        let call_id = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed);
+        let (sender, mut receiver) = oneshot::channel();
+        drop(TakeWatch::insert(call_id, sender));
+        assert_eq!(
+            receiver.try_recv(),
+            Err(oneshot::error::TryRecvError::Closed)
+        );
+        assert_eq!(take(call_id), SettleOutcome::UnknownCall);
     }
 
     #[test]

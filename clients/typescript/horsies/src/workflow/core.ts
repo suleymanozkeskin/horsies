@@ -9,7 +9,7 @@ import { threadId } from "node:worker_threads";
 import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
 import type { CoreAccess, SeatRelay } from "../app/core-access.ts";
 import type { QueueSetup } from "../config/queues.ts";
-import { addonSettlement, settlingCallback } from "../native/call/callback.ts";
+import { addonSettlement, addonTake, settlingCallback, takingCallback } from "../native/call/callback.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { NativeSendRules, NativeTaskOptions, ProcessRoleName, WaitBound } from "../native/sends/addon.ts";
 import { processRole, storedOptionsText } from "../native/sends/sends.ts";
@@ -305,9 +305,9 @@ export function noWorkflowCore(): WorkflowCore {
 export function mainThreadWorkflowCore(facts: MainThreadFacts, registry: WorkflowRegistry): WorkflowCore {
   const conversion = addonConversionFacts(facts);
 
-  const source = settlingCallback(
-    (call: ChildSpecCall) => childSpecAnswer(registry, conversion, call),
-    addonSettlement,
+  const source = takingCallback(
+    settlingCallback((call: ChildSpecCall) => childSpecAnswer(registry, conversion, call), addonSettlement),
+    addonTake,
   );
 
   const definitionKeys = registry.workflows.map((listed) => listed.record.definitionKey);
