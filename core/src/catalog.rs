@@ -20,8 +20,8 @@
 use crate::monitoring::{MonitoringQueryErrorCode, TaskActionErrorCode};
 use crate::{
     BrokerErrorCode, ContractCode, ErrorCode, HandleErrorCode, OperationalErrorCode, OutcomeCode,
-    RetrievalCode, TaskAbsenceReason, TaskAttemptOutcome, TaskSendErrorCode, TaskStatus,
-    WorkflowStartErrorCode, WorkflowStatus, WorkflowTaskStatus,
+    RerunErrorCode, RetrievalCode, TaskAbsenceReason, TaskAttemptOutcome, TaskSendErrorCode,
+    TaskStatus, WorkflowStartErrorCode, WorkflowStatus, WorkflowTaskStatus,
 };
 
 /// The Python base class of a generated enum.
@@ -127,6 +127,7 @@ pub const CODE_CATALOGS: &[CodeCatalog] = &[
     <MonitoringQueryErrorCode as CodeEnum>::CATALOG,
     <TaskActionErrorCode as CodeEnum>::CATALOG,
     <TaskAbsenceReason as CodeEnum>::CATALOG,
+    <RerunErrorCode as CodeEnum>::CATALOG,
     <ErrorCode as CodeEnum>::CATALOG,
 ];
 
@@ -194,6 +195,39 @@ mod tests {
     #[test]
     fn absence_reasons_match_their_text() {
         assert_wire_values::<TaskAbsenceReason>(|reason| reason.as_str().to_owned());
+    }
+
+    #[test]
+    fn rerun_codes_match_their_serde_form() {
+        assert_wire_values::<RerunErrorCode>(|code| {
+            serde_plain::to_string(code).expect("a unit variant serializes")
+        });
+        // clients/typescript/horsies/src/rerun/errors.ts. The Python client
+        // raises exception classes for these cases, with no code.
+        let values: Vec<&str> = <RerunErrorCode as CodeEnum>::CATALOG
+            .members
+            .iter()
+            .map(|member| member.value)
+            .collect();
+        assert_eq!(
+            values,
+            [
+                "CONNECT_FAILED",
+                "STATEMENT_FAILED",
+                "FAMILY_CHECK_FAILED",
+                "INVALID_COMMAND",
+                "INVALID_POLICY",
+                "CLASS_NOT_REGISTERED",
+                "CALLER_KEY_REFUSED",
+                "ID_MINT_REFUSED",
+                "CLIENT_FAMILY_MISMATCH",
+                "UNKNOWN_STORED_FAMILY",
+                "CONTRACT_VIOLATION",
+                "DRIVER_FAILED",
+                "NO_OPEN_TRANSACTION",
+                "RESULT_NOT_TEXT",
+            ]
+        );
     }
 
     /// The core catalog holds exactly `python`, the members of the Python
