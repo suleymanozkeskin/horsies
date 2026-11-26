@@ -36,7 +36,13 @@ from horsies.core.models.tasks import (
     SubWorkflowError,
     TaskError,
     TaskInfo,
-    TaskResult,
+)
+from horsies.core.models.outcome import (
+    Failed,
+    ReadResult,
+    ResultDeserializationError,
+    Succeeded,
+    TaskOutcome,
 )
 from horsies.core.models.workflow.context import SubWorkflowSummary
 from horsies.core.models.workflow.enums import WorkflowStatus
@@ -46,7 +52,7 @@ from horsies.core.models.workflow.handle import (
     _decode_workflow_envelope,  # pyright: ignore[reportPrivateUsage]
 )
 from horsies.core.task_decorator import TaskHandle
-from horsies.core.types.result import Ok, is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
 
 pytestmark = [pytest.mark.unit]
@@ -118,17 +124,24 @@ def _make_app() -> Horsies:
     )
 
 
-def _assert_stored_data_error(result: TaskResult[Any, TaskError], cause: str) -> None:
-    assert result.is_err()
-    error = result.unwrap_err()
-    assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-    assert error.message is not None
-    assert cause in error.message
+def _assert_stored_data_error(read: ReadResult[Any, TaskError], cause: str) -> None:
+    match read:
+        case Err(err_value=ResultDeserializationError(message=message)):
+            assert cause in message
+        case _:
+            pytest.fail(f'expected ResultDeserializationError, got {read!r}')
 
 
-def _assert_code_without_message(result: TaskResult[Any, TaskError]) -> None:
-    assert result.is_err()
-    error = result.unwrap_err()
+def _failed_task_error(read: Result[TaskOutcome[Any, TaskError], object]) -> TaskError:
+    """The task error of a failed outcome; a test failure for any other read."""
+    match read:
+        case Ok(ok_value=Failed(error=error)):
+            return error
+        case _:
+            pytest.fail(f'expected a failed outcome, got {read!r}')
+
+
+def _assert_code_without_message(error: TaskError) -> None:
     assert error.error_code == 'RATE_LIMITED'
     assert error.message is None
 
@@ -182,9 +195,9 @@ class TestRequiredFields:
         app = _make_app()
 
         @app.task('builds_no_code')
-        def builds_no_code() -> TaskResult[int, TaskError]:
-            return TaskResult(
-                err=TaskError(message='m'),  # pyright: ignore[reportCallIssue]
+        def builds_no_code() -> Result[int, TaskError]:
+            return Err(
+                TaskError(message='m'),  # pyright: ignore[reportCallIssue]
             )
 
         error = builds_no_code().unwrap_err()
@@ -197,10 +210,10 @@ class TestRequiredFields:
         app = _make_app()
 
         @app.task('builds_no_message')
-        def builds_no_message() -> TaskResult[int, TaskError]:
-            return TaskResult(err=TaskError(error_code='RATE_LIMITED'))
+        def builds_no_message() -> Result[int, TaskError]:
+            return Err(TaskError(error_code='RATE_LIMITED'))
 
-        _assert_code_without_message(builds_no_message())
+        _assert_code_without_message(builds_no_message().unwrap_err())
 
 
 class TestErrorWithNoMessage:
@@ -238,7 +251,7 @@ class TestErrorWithNoMessage:
             task_id='task-1', app=app, broker_mode=True, ok_type=int,
         )
 
-        _assert_code_without_message(await handle.get_async())
+        _assert_code_without_message(_failed_task_error(await handle.get_async()))
 
     @_NO_MESSAGE
     @pytest.mark.asyncio
@@ -261,27 +274,27 @@ class TestErrorWithNoMessage:
 
         result = await app.get_result_async('task-1')
 
-        _assert_code_without_message(result.unwrap())
+        _assert_code_without_message(_failed_task_error(result))
 
     @_NO_MESSAGE
     def test_a_stored_workflow_error_returns_the_error(
         self, err_slot: dict[str, Json],
     ) -> None:
-        _assert_code_without_message(
+        _assert_code_without_message(_failed_task_error(
             _decode_stored_workflow_error(
                 'wf-1', WorkflowStatus.FAILED, dumps_json(err_slot).unwrap(),
             ),
-        )
+        ))
 
     @_NO_MESSAGE
     def test_a_stored_workflow_envelope_returns_the_error(
         self, err_slot: dict[str, Json],
     ) -> None:
-        _assert_code_without_message(
+        _assert_code_without_message(_failed_task_error(
             _decode_workflow_envelope(
                 _envelope(err_slot), int, app=None, workflow_id='wf-1',
             ),
-        )
+        ))
 
     @_NO_MESSAGE
     def test_a_per_node_envelope_returns_the_error(
@@ -289,11 +302,11 @@ class TestErrorWithNoMessage:
     ) -> None:
         app = MagicMock()
         app.tasks = {'t': SimpleNamespace(task_ok_type=int)}
-        _assert_code_without_message(
+        _assert_code_without_message(_failed_task_error(
             _decode_per_task_envelope(
                 _envelope(err_slot), app=app, task_name='t', node_id='n1',
             ),
-        )
+        ))
 
 
 class TestDecodeTaskError:
@@ -416,10 +429,12 @@ class TestDecodeTaskError:
         decoded = decode_task_result(
             loads_json(FALLBACK_ERROR_JSON).unwrap(), type(None),
         )
-        assert decoded.is_err()
-        error = decoded.unwrap_err()
-        assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
-        assert error.message == 'secondary serialization failure'
+        match decoded:
+            case Failed(error=error):
+                assert error.error_code is OperationalErrorCode.WORKER_SERIALIZATION_ERROR
+                assert error.message == 'secondary serialization failure'
+            case Succeeded():
+                pytest.fail(f'expected a failed outcome, got {decoded!r}')
 
 
 class TestClientReaders:
@@ -470,9 +485,7 @@ class TestClientReaders:
 
         result = await app.get_result_async('task-1')
 
-        assert is_err(result)
-        assert isinstance(result.err_value, BrokerInvalidJsonPayload)
-        assert cause in result.err_value.message
+        _assert_stored_data_error(result, cause)
 
     @_REFUSED
     @pytest.mark.asyncio
@@ -520,7 +533,15 @@ class TestClientReaders:
         result = _decode_per_task_envelope(
             _envelope(err_slot), app=app, task_name='t', node_id='n1',
         )
-        _assert_stored_data_error(result, cause)
+        match result:
+            case Err(err_value=unreadable):
+                assert cause in unreadable.message
+                assert (
+                    unreadable.as_outcome().error.error_code
+                    is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+                )
+            case Ok():
+                pytest.fail(f'expected an unreadable node, got {result!r}')
 
 
 class TestStoredWorkflowStoppedCode:

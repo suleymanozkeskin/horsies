@@ -1212,21 +1212,17 @@ class PostgresBroker:
         - ``Err(BrokerInvalidJsonPayload)``: the stored result does not read
           (malformed, non-finite number, not an object, a history digest
           that differs). The same read fails again.
-        - ``Err(BrokerWaitInsideTask)``: the call runs in a process that
-          runs task bodies (a worker child). This is the first check: it
-          comes before the argument checks. Nothing ran.
         - ``Err(BrokerInvalidInput)``: ``timeout_ms`` is not None or an int
-          from 0 to ``MAX_TASK_TIMEOUT_MS``. Nothing ran.
+          from 0 to ``MAX_TASK_TIMEOUT_MS``. This is the first check, as in
+          every client. Nothing ran.
+        - ``Err(BrokerWaitInsideTask)``: the call runs in a process that
+          runs task bodies (a worker child). Nothing ran.
         - ``Err(BrokerOperationFailed(TASK_INFO_QUERY_FAILED))``: the
           connect, the install or a read failed (``retryable`` is the core's
           classification, ``exception`` the core's exception of the cause), or the
           core of this process cannot run the call (``exception`` is the
           ``CoreCallRefusal``).
         """
-        if process_role() is ProcessRole.RUNS_TASK_BODIES:
-            return _wait_inside_task_err(
-                'PostgresBroker.get_raw_result_record_async()', task_id,
-            )
         match wait_timeout_seconds(timeout_ms):
             case Err(err_value=refused):
                 return Err(BrokerInvalidInput(
@@ -1235,6 +1231,10 @@ class PostgresBroker:
                 ))
             case Ok():
                 pass
+        if process_role() is ProcessRole.RUNS_TASK_BODIES:
+            return _wait_inside_task_err(
+                'PostgresBroker.get_raw_result_record_async()', task_id,
+            )
         try:
             outcome = await self._core_handle.raw_result_record_async(
                 task_id, timeout_ms=timeout_ms,
@@ -1252,12 +1252,21 @@ class PostgresBroker:
         ``CoreHandle.raw_result_record`` on the calling thread, with the GIL
         released and signals checked every 100 ms.
 
-        In a process that runs task bodies it returns
-        ``Err(BrokerWaitInsideTask)`` first. On a thread that runs an event
-        loop it returns ``Err(ASYNC_CONTEXT)``. Neither does I/O. A wait
-        with a limit is bounded by the limit plus the core's bound of a
-        blocking call; a wait with no limit has no call bound, as before.
+        The checks before any I/O come in this order: the wait limit
+        (``Err(BrokerInvalidInput)``), a process that runs task bodies
+        (``Err(BrokerWaitInsideTask)``), and a thread that runs an event
+        loop (``Err(ASYNC_CONTEXT)``). A wait with a limit is bounded by the
+        limit plus the core's bound of a blocking call; a wait with no limit
+        has no call bound, as before.
         """
+        match wait_timeout_seconds(timeout_ms):
+            case Err(err_value=refused):
+                return Err(BrokerInvalidInput(
+                    message=f'raw result fetch of task {task_id}: {refused.message}',
+                    exception=NoCause(),
+                ))
+            case Ok():
+                pass
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return _wait_inside_task_err(
                 'PostgresBroker.get_raw_result_record()', task_id,
@@ -1267,14 +1276,6 @@ class PostgresBroker:
                 'PostgresBroker.get_raw_result_record()',
                 'broker.get_raw_result_record_async(...)',
             )
-        match wait_timeout_seconds(timeout_ms):
-            case Err(err_value=refused):
-                return Err(BrokerInvalidInput(
-                    message=f'raw result fetch of task {task_id}: {refused.message}',
-                    exception=NoCause(),
-                ))
-            case Ok():
-                pass
         try:
             outcome = self._core_handle.raw_result_record(task_id, timeout_ms=timeout_ms)
         except CoreError as exc:

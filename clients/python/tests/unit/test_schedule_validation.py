@@ -29,13 +29,13 @@ from horsies.core.models.schedule import (
     ScheduleConfig,
     TaskSchedule,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.scheduler.validation import (
     PreparedSchedule,
     collect_schedule_errors,
     prepare_schedules,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 
 
 class _EchoingModel(BaseModel):
@@ -470,8 +470,8 @@ class TestCheckValidatesSchedules:
         app = _make_real_app(config)
 
         @app.task('my_task')
-        def my_task(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
+        def my_task(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
 
         return app
 
@@ -484,8 +484,8 @@ class TestCheckValidatesSchedules:
         app = _make_real_app(config)
 
         @app.task('my_task')
-        def my_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def my_task() -> Result[int, TaskError]:
+            return Ok(1)
 
         return app
 
@@ -516,8 +516,8 @@ class TestCheckValidatesSchedules:
         )
 
         @app.task('my_task')
-        def my_task(*, blob: str) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=len(blob))
+        def my_task(*, blob: str) -> Result[int, TaskError]:
+            return Ok(len(blob))
 
         errors = app.check()
 

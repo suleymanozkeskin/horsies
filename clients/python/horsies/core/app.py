@@ -122,7 +122,7 @@ from horsies.core.models.workflow.nesting_check import (
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.codec.validation_errors import ValueValidationError, exception_text
 from horsies.core.types.core_failure import call_refusal_or_raise
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.models.broker import PostgresConfig
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
@@ -159,7 +159,8 @@ if TYPE_CHECKING:
         TaskFunction,
     )
     from horsies.core.task_runtime import TaskRuntime
-    from horsies.core.models.tasks import TaskInfo, TaskResult, TaskError
+    from horsies.core.models.tasks import TaskInfo, TaskError
+    from horsies.core.models.outcome import ReadResult
     from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
     from horsies.core.models.class_coverage import ClassCoverage, ClassReport
     from horsies.core.models.health import (
@@ -767,7 +768,7 @@ class Horsies:
         task_name: str,
         func: Callable[
             Concatenate['TaskRuntime', P],
-            Coroutine[Any, Any, 'TaskResult[T, TaskError]'],
+            Coroutine[Any, Any, 'Result[T, TaskError]'],
         ],
     ) -> 'AsyncRuntimeTaskFunction[P, T]': ...
 
@@ -775,19 +776,19 @@ class Horsies:
     def task(  # pyright: ignore[reportOverlappingOverload]
         self,
         task_name: str,
-        func: Callable[Concatenate['TaskRuntime', P], 'TaskResult[T, TaskError]'],
+        func: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError]'],
     ) -> 'RuntimeTaskFunction[P, T]': ...
 
     @overload
     def task(
         self,
         task_name: str,
-        func: Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
+        func: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError]']],
     ) -> 'AsyncTaskFunction[P, T]': ...
 
     @overload
     def task(
-        self, task_name: str, func: Callable[P, 'TaskResult[T, TaskError]']
+        self, task_name: str, func: Callable[P, 'Result[T, TaskError]']
     ) -> 'TaskFunction[P, T]': ...
 
     # The last overload also accepts a literal SHARED_ASYNC with
@@ -886,8 +887,8 @@ class Horsies:
         self,
         task_name: str,
         func: Optional[
-            Callable[..., 'TaskResult[Any, TaskError]']
-            | Callable[..., Coroutine[Any, Any, 'TaskResult[Any, TaskError]']]
+            Callable[..., 'Result[Any, TaskError]']
+            | Callable[..., Coroutine[Any, Any, 'Result[Any, TaskError]']]
         ] = None,
         **task_options_kwargs: Any,
     ) -> Union[
@@ -946,28 +947,28 @@ class Horsies:
         def decorator(  # pyright: ignore[reportOverlappingOverload]
             fn: Callable[
                 Concatenate['TaskRuntime', P],
-                Coroutine[Any, Any, 'TaskResult[T, TaskError]'],
+                Coroutine[Any, Any, 'Result[T, TaskError]'],
             ],
         ) -> 'AsyncRuntimeTaskFunction[P, T]': ...
 
         @overload
         def decorator(  # pyright: ignore[reportOverlappingOverload]
-            fn: Callable[Concatenate['TaskRuntime', P], 'TaskResult[T, TaskError]'],
+            fn: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError]'],
         ) -> 'RuntimeTaskFunction[P, T]': ...
 
         @overload
         def decorator(
-            fn: Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
+            fn: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError]']],
         ) -> 'AsyncTaskFunction[P, T]': ...
 
         @overload
         def decorator(
-            fn: Callable[P, 'TaskResult[T, TaskError]'],
+            fn: Callable[P, 'Result[T, TaskError]'],
         ) -> 'TaskFunction[P, T]': ...
 
         def decorator(
-            fn: Callable[P, 'TaskResult[T, TaskError]']
-            | Callable[P, Coroutine[Any, Any, 'TaskResult[T, TaskError]']],
+            fn: Callable[P, 'Result[T, TaskError]']
+            | Callable[P, Coroutine[Any, Any, 'Result[T, TaskError]']],
         ) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[Any, T] | AsyncRuntimeTaskFunction[Any, T]':
             fn_location = SourceLocation.from_function(fn)
 
@@ -1897,12 +1898,16 @@ class Horsies:
         use this to inspect payloads without importing user task
         modules.
 
-        In a process that runs task bodies it returns
-        ``Err(BrokerWaitInsideTask)`` at once, before the argument checks,
-        and does no I/O.
+        The first check is the wait limit: a timeout_ms that is not None or
+        an int from 0 to MAX_TASK_TIMEOUT_MS returns
+        ``Err(BrokerInvalidInput)``. Then, in a process that runs task
+        bodies, it returns ``Err(BrokerWaitInsideTask)``. Neither does I/O.
         """
         from horsies.core.types.result import Err, Ok, is_err
 
+        refused_wait = self._raw_wait_refused('get_raw_result_async', task_id, timeout_ms)
+        if refused_wait is not None:
+            return refused_wait
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return self._wait_inside_task_err('get_raw_result_async', task_id)
         broker = self.get_broker()
@@ -1923,12 +1928,16 @@ class Horsies:
     ) -> 'BrokerResult[dict[str, Any] | None]':
         """Synchronous version of ``get_raw_result_async``.
 
-        In a process that runs task bodies it returns
-        ``Err(BrokerWaitInsideTask)`` first. On a thread that runs an event
-        loop it returns ``Err(ASYNC_CONTEXT)``. Neither does I/O.
+        The checks before any I/O come in this order: the wait limit
+        (``Err(BrokerInvalidInput)``), a process that runs task bodies
+        (``Err(BrokerWaitInsideTask)``), and a thread that runs an event loop
+        (``Err(ASYNC_CONTEXT)``).
         """
         from horsies.core.types.result import Err, Ok, is_err
 
+        refused_wait = self._raw_wait_refused('get_raw_result', task_id, timeout_ms)
+        if refused_wait is not None:
+            return refused_wait
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return self._wait_inside_task_err('get_raw_result', task_id)
         if in_running_event_loop():
@@ -1946,25 +1955,31 @@ class Horsies:
         self,
         task_id: UUID,
         timeout_ms: int | None = None,
-    ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
+    ) -> 'ReadResult[Any, TaskError]':
         """Fetch and typed-decode a task's stored result.
 
-        Returns ``Ok(TaskResult[Any, TaskError])``: success path
-        materializes the typed result using the local task catalog's
-        ``task_ok_type``; failed-task results decode without ``ok_type``
-        (TaskError has a fixed schema).
+        Returns ``Ok(Succeeded(value))`` or ``Ok(Failed(task_error))`` for a
+        task that ended: a success materializes the typed value using the
+        local task catalog's ``task_ok_type``; a failed task decodes without
+        ``ok_type`` (TaskError has a fixed schema), so a cross-process caller
+        inspecting failed tasks can decode without importing user code.
 
-        Returns ``Err(BrokerOperationError(NO_TYPE_AVAILABLE))`` only
-        when the ok slot is populated and ``task_name`` isn't in the
-        local registry. Cross-process callers inspecting failed tasks
-        can therefore decode without importing user code.
+        Returns ``Err(read_error)`` when the read gives no outcome:
+        ``NoTypeAvailable`` when the ok slot is populated and ``task_name``
+        isn't in the local registry; ``TaskNotFound``, ``WaitTimeout``,
+        ``ResultNotAvailable``, ``ResultDeserializationError`` and
+        ``BrokerError`` as ``TaskHandle.get``.
 
-        In a process that runs task bodies it returns
-        ``Ok(TaskResult(err=RetrievalCode.WAIT_INSIDE_TASK))`` at once and
-        does no I/O.
+        The first check is the wait limit: a timeout_ms that is not None or
+        an int from 0 to MAX_TASK_TIMEOUT_MS returns ``Err(InvalidInput)``.
+        Then, in a process that runs task bodies, it returns
+        ``Err(WaitInsideTask)``. Neither does I/O.
         """
+        refused_wait = self._read_wait_refused('get_result_async', task_id, timeout_ms)
+        if refused_wait is not None:
+            return refused_wait
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
-            return self._wait_inside_task_ok('get_result_async', task_id)
+            return self._wait_inside_task_read('get_result_async', task_id)
         record_result = await self.get_broker().get_raw_result_record_async(
             task_id, timeout_ms,
         )
@@ -1975,152 +1990,48 @@ class Horsies:
         task_id: UUID,
         timeout_ms: int | None,
         record_result: 'BrokerResult[RawResultRecord | None]',
-    ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
+    ) -> 'ReadResult[Any, TaskError]':
         """The answer of ``get_result`` and ``get_result_async`` for the
-        broker's result read. Pure apart from the lookup of the task's
-        ``task_ok_type`` in the registry.
+        broker's result read (``read_of_record``). Pure apart from the lookup
+        of the task's ``task_ok_type`` in the registry.
         """
-        from horsies.core.brokers.result_types import (
-            BrokerInvalidJsonPayload,
-            BrokerNoTypeAvailable,
-        )
-        from horsies.core.codec.json_value import StrictJsonError
-        from horsies.core.codec.typed import (
-            decode_task_error,
-            decode_task_result,
-            validate_task_result_envelope,
-        )
-        from horsies.core.models.tasks import (
-            OutcomeCode,
-            RetrievalCode,
-            TaskError,
-            TaskResult,
-        )
-        from horsies.core.types.result import Err, Ok, is_err
-        from horsies.core.types.status import TaskStatus
+        from horsies.core.task_read import read_of_record
 
-        if is_err(record_result):
-            return Err(record_result.err_value)
-        record = record_result.ok_value
-        if record is None:
-            return Ok(TaskResult(
-                err=TaskError(
-                    error_code=RetrievalCode.TASK_NOT_FOUND,
-                    message=f'Task {task_id} not found',
-                    data={'task_id': str(task_id)},
-                ),
-            ))
-        if record.status == TaskStatus.CANCELLED:
-            return Ok(TaskResult(
-                err=TaskError(
-                    error_code=OutcomeCode.TASK_CANCELLED,
-                    message=f'Task {task_id} was cancelled before completion',
-                    data={'task_id': str(task_id)},
-                ),
-            ))
-        if record.raw_result is None:
-            # Disambiguate: terminal status without a payload is
-            # RESULT_NOT_AVAILABLE (engine didn't write); non-terminal
-            # is WAIT_TIMEOUT (timeout before the row terminalized).
-            terminal_statuses = (
-                TaskStatus.COMPLETED,
-                TaskStatus.FAILED,
-                TaskStatus.EXPIRED,
-            )
-            if record.status in terminal_statuses:
-                return Ok(TaskResult(
-                    err=TaskError(
-                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
-                        message=(
-                            f'Task {task_id} reached terminal status '
-                            f'{record.status.value} but stored no '
-                            f'result payload'
-                        ),
-                        data={
-                            'task_id': str(task_id),
-                            'status': record.status.value,
-                        },
-                    ),
-                ))
-            return Ok(TaskResult(
-                err=TaskError(
-                    error_code=RetrievalCode.WAIT_TIMEOUT,
-                    message=(
-                        f'Timed out waiting for task {task_id}; status '
-                        f'is {record.status.value}'
-                    ),
-                    data={
-                        'task_id': str(task_id),
-                        'timeout_ms': timeout_ms,
-                        'status': record.status.value,
-                    },
-                ),
-            ))
-        # Validate envelope shape before either fast-path or full
-        # decode — a malformed envelope (missing marker, both ok and
-        # err populated, extras) must fail closed before we read the
-        # err slot.
-        raw = record.raw_result
-        try:
-            envelope = validate_task_result_envelope(raw)
-        except StrictJsonError as exc:
-            return Err(BrokerInvalidJsonPayload(
-                message=(
-                    f'TaskResult envelope invalid for {task_id}: {exc}'
-                ),
-                exception=exc,
-            ))
-        err_slot = envelope.get('err')
-        # Err-fast-path: TaskError is fixed-schema; decodable without
-        # ok_type. ``validate_task_result_envelope`` already guarantees
-        # err and ok are not both populated.
-        if err_slot is not None:
-            try:
-                err_value = decode_task_error(err_slot)
-            except (StrictJsonError, ValueValidationError) as exc:
-                return Err(BrokerInvalidJsonPayload(
-                    message=f'TaskError decode failed for {task_id}: {exc}',
-                    exception=exc,
-                ))
-            return Ok(TaskResult(err=err_value))
-        # Ok slot — needs ok_type from local registry.
-        task = self.tasks.get(record.task_name)
-        ok_type = getattr(task, 'task_ok_type', None) if task is not None else None
-        if ok_type is None:
-            return Err(BrokerNoTypeAvailable(
-                message=(
-                    f'Task {record.task_name!r} is not locally registered; '
-                    f'cannot decode successful result. Use '
-                    f'get_raw_result(...) or import the task module.'
-                ),
-            ))
-        try:
-            return Ok(decode_task_result(raw, ok_type))
-        except (StrictJsonError, ValueValidationError) as exc:
-            return Err(BrokerInvalidJsonPayload(
-                message=f'decode_task_result failed for {task_id}: {exc}',
-                exception=exc,
-            ))
+        ok_type: object | None = None
+        match record_result:
+            case Ok(ok_value=record) if record is not None:
+                task = self.tasks.get(record.task_name)
+                ok_type = getattr(task, 'task_ok_type', None) if task is not None else None
+            case _:
+                pass
+        return read_of_record(task_id, record_result, ok_type, timeout_ms)
 
     def get_result(
         self,
         task_id: UUID,
         timeout_ms: int | None = None,
-    ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
+    ) -> 'ReadResult[Any, TaskError]':
         """Synchronous version of ``get_result_async``: the broker's blocking
         result read (``PostgresBroker.get_raw_result_record``) on the calling
         thread, with the GIL released and signals checked every 100 ms.
 
-        In a process that runs task bodies it returns
-        ``Ok(TaskResult(err=RetrievalCode.WAIT_INSIDE_TASK))`` at once. On a
-        thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``.
-        Neither does I/O. A raised signal handler (Ctrl+C) ends the wait with
-        its exception; nothing changed.
+        The checks before any I/O come in this order: the wait limit
+        (``Err(InvalidInput)``), a process that runs task bodies
+        (``Err(WaitInsideTask)``), and a thread that runs an event loop
+        (``Err(AsyncContext)``). A raised signal handler (Ctrl+C) ends the
+        wait with its exception; nothing changed.
         """
+        from horsies.core.models.outcome import AsyncContext
+
+        refused_wait = self._read_wait_refused('get_result', task_id, timeout_ms)
+        if refused_wait is not None:
+            return refused_wait
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
-            return self._wait_inside_task_ok('get_result', task_id)
+            return self._wait_inside_task_read('get_result', task_id)
         if in_running_event_loop():
-            return self._async_context_err('get_result')
+            return Err(AsyncContext(message=async_context_message(
+                'app.get_result()', 'app.get_result_async(...)',
+            )))
         record_result = self.get_broker().get_raw_result_record(task_id, timeout_ms)
         return self._task_result_of_record(task_id, timeout_ms, record_result)
 
@@ -2205,8 +2116,8 @@ class Horsies:
                     ),
                     exception=exc,
                 ))
-            from horsies.core.models.tasks import TaskResult
-            info.decoded_result = TaskResult(err=err_value)
+            from horsies.core.models.outcome import Failed
+            info.decoded_result = Failed(err_value)
             info.result_decoded = True
             return Ok(info)
 
@@ -2257,19 +2168,48 @@ class Horsies:
 
     # ------------- Health / liveness API -------------
 
-    def _wait_inside_task_ok(
-        self, label: str, task_id: UUID,
-    ) -> 'BrokerResult[TaskResult[Any, TaskError]]':
-        """Refuse a result wait in a process that runs task bodies. Nothing ran."""
-        from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
-        from horsies.core.types.result import Ok
+    def _read_wait_refused(
+        self, label: str, task_id: UUID, timeout_ms: object,
+    ) -> 'ReadResult[Any, TaskError] | None':
+        """``Err(InvalidInput)`` for a wait limit that no wait can use, or
+        None to go on. The first check of a typed result read. Pure."""
+        from horsies.core.models.outcome import InvalidInput
+        from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
-        return Ok(TaskResult(
-            err=TaskError(
-                error_code=RetrievalCode.WAIT_INSIDE_TASK,
-                message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
-                data={'task_id': str(task_id)},
-            ),
+        match wait_timeout_seconds(timeout_ms):
+            case Err(err_value=refused):
+                return Err(InvalidInput(
+                    message=f'app.{label}() for task {task_id}: {refused.message}',
+                ))
+            case Ok():
+                return None
+
+    def _raw_wait_refused(
+        self, label: str, task_id: UUID, timeout_ms: object,
+    ) -> 'BrokerResult[Any] | None':
+        """``Err(BrokerInvalidInput)`` for a wait limit that no wait can use,
+        or None to go on. The first check of a raw result read. Pure."""
+        from horsies.core.brokers.result_types import BrokerInvalidInput
+        from horsies.core.types.error_detail import NoCause
+        from horsies.core.utils.wait_timeout import wait_timeout_seconds
+
+        match wait_timeout_seconds(timeout_ms):
+            case Err(err_value=refused):
+                return Err(BrokerInvalidInput(
+                    message=f'app.{label}() for task {task_id}: {refused.message}',
+                    exception=NoCause(),
+                ))
+            case Ok():
+                return None
+
+    def _wait_inside_task_read(
+        self, label: str, task_id: UUID,
+    ) -> 'ReadResult[Any, TaskError]':
+        """Refuse a result wait in a process that runs task bodies. Nothing ran."""
+        from horsies.core.models.outcome import WaitInsideTask
+
+        return Err(WaitInsideTask(
+            message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
         ))
 
     def _wait_inside_task_err(self, label: str, task_id: UUID) -> 'BrokerResult[Any]':

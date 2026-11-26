@@ -49,9 +49,9 @@ from horsies.core.models.tasks import (
     MIN_TASK_TIMEOUT_MS,
     OperationalErrorCode,
     TaskError,
-    TaskResult,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
     OptionsUnreadable,
@@ -186,12 +186,12 @@ class _FakeChildHandle:
 
 
 # ---------------------------------------------------------------------------
-# Helper to parse a TaskResult from serialized JSON produced by child_runner
+# Helper to parse a stored result envelope produced by child_runner
 # ---------------------------------------------------------------------------
 
 
 def _parse_task_result(json_str: str) -> dict[str, Any]:
-    """Parse a serialized TaskResult JSON into a dict for assertions."""
+    """Parse a serialized result envelope JSON into a dict for assertions."""
     return json.loads(json_str)  # type: ignore[no-any-return]
 
 
@@ -857,7 +857,7 @@ def _make_run_task_patches(
     else:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task.__call__ = MagicMock(return_value=TaskResult(ok='hello'))
+        mock_task.__call__ = MagicMock(return_value=Ok('hello'))
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
     patches['horsies.core.worker.child_runner.get_current_app'] = MagicMock(
@@ -884,8 +884,12 @@ def _run_entry_defaults() -> dict[str, Any]:
     }
 
 
-def _takes_upstream(*, upstream: TaskResult[str, TaskError]) -> TaskResult[str, TaskError]:
-    return TaskResult(ok=upstream.unwrap())
+def _takes_upstream(*, upstream: TaskOutcome[str, TaskError]) -> Result[str, TaskError]:
+    match upstream:
+        case Succeeded(value=value):
+            return Ok(value)
+        case Failed(error=error):
+            return Err(error)
 
 
 class _EchoingModel(BaseModel):
@@ -946,47 +950,47 @@ def _registered_tasks() -> dict[str, Any]:
     ))
 
     @app.task('surrogate.echoing')
-    def returns_echoing() -> TaskResult[_EchoingModel, TaskError]:
-        return TaskResult(ok=_LONE_SURROGATE_NAME)
+    def returns_echoing() -> Result[_EchoingModel, TaskError]:
+        return Ok(_LONE_SURROGATE_NAME)
 
     @app.task('surrogate.custom_error')
-    def returns_custom_error() -> TaskResult[_CustomErrorModel, TaskError]:
-        return TaskResult(ok=_LONE_SURROGATE_NAME)
+    def returns_custom_error() -> Result[_CustomErrorModel, TaskError]:
+        return Ok(_LONE_SURROGATE_NAME)
 
     @app.task('circular.returned')
-    def returns_itself() -> TaskResult[_Linked, TaskError]:
+    def returns_itself() -> Result[_Linked, TaskError]:
         node = _Linked()
         node.next = node
-        return TaskResult(ok=node)
+        return Ok(node)
 
     @app.task('circular.error_data')
-    def error_data_holds_itself() -> TaskResult[int, TaskError]:
+    def error_data_holds_itself() -> Result[int, TaskError]:
         value: list[Any] = []
         value.append(value)
-        return TaskResult(
-            err=TaskError(error_code='MY_ERROR', message='m', data=value),
+        return Err(
+            TaskError(error_code='MY_ERROR', message='m', data=value),
         )
 
     @app.task('deep.returned')
-    def returns_a_long_chain() -> TaskResult[_Linked, TaskError]:
+    def returns_a_long_chain() -> Result[_Linked, TaskError]:
         node = _Linked()
         for _ in range(299):
             node = _Linked(next=node)
-        return TaskResult(ok=node)
+        return Ok(node)
 
     @app.task('deep.error_data')
-    def error_data_is_too_deep() -> TaskResult[int, TaskError]:
+    def error_data_is_too_deep() -> Result[int, TaskError]:
         value: list[Any] = []
         for _ in range(299):
             value = [value]
-        return TaskResult(
-            err=TaskError(error_code='MY_ERROR', message='m', data=value),
+        return Err(
+            TaskError(error_code='MY_ERROR', message='m', data=value),
         )
 
     @app.task('bytes.error_data')
-    def error_data_is_not_utf8() -> TaskResult[int, TaskError]:
-        return TaskResult(
-            err=TaskError(error_code='MY_ERROR', message='m', data=b'\xff'),
+    def error_data_is_not_utf8() -> Result[int, TaskError]:
+        return Err(
+            TaskError(error_code='MY_ERROR', message='m', data=b'\xff'),
         )
 
     return {
@@ -1001,8 +1005,8 @@ def _registered_tasks() -> dict[str, Any]:
 
 
 _LONE_SURROGATE_RETURNS: list[tuple[Any, Any]] = [
-    (str, TaskResult(ok=f'text{chr(0xd800)}')),
-    (dict[str, int], TaskResult(ok={f'key{chr(0xd800)}': 1})),
+    (str, Ok(f'text{chr(0xd800)}')),
+    (dict[str, int], Ok({f'key{chr(0xd800)}': 1})),
 ]
 
 
@@ -1135,7 +1139,7 @@ class TestRunTaskEntryErrorPaths:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
-        mock_task.return_value = TaskResult(ok=42)
+        mock_task.return_value = Ok(42)
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         _run_entry_defaults['input_json'] = '{}'
 
@@ -1152,7 +1156,7 @@ class TestRunTaskEntryErrorPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """The wrapper turns each return into a `TaskResult`, so another
+        """The wrapper turns each return into an `Ok` or an `Err`, so another
         value here is a defect in the library. It ends as TASK_EXCEPTION."""
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
@@ -1241,7 +1245,7 @@ class TestRunTaskEntryErrorPaths:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = _EchoingModel
-        mock_task.return_value = TaskResult(ok={'name': f'text{chr(0xd800)}'})
+        mock_task.return_value = Ok({'name': f'text{chr(0xd800)}'})
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
@@ -1413,8 +1417,8 @@ class TestRunTaskEntryErrorPaths:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
-        mock_task.return_value = TaskResult(
-            err=TaskError(
+        mock_task.return_value = Err(
+            TaskError(
                 error_code='MY_ERROR', message='m', data={frozenset({1}): 1},
             ),
         )
@@ -1476,9 +1480,9 @@ class TestRunTaskEntryErrorPaths:
         def _identity(x: Any) -> Any:
             return x
 
-        # Task wraps the callable as ok inside a TaskResult — same
+        # Task wraps the callable as ok inside an Ok — same
         # shape as ``unserializable_result_task`` in tests/e2e/tasks/basic.py.
-        mock_task.return_value = TaskResult(ok=_identity)
+        mock_task.return_value = Ok(_identity)
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches):
@@ -1496,12 +1500,12 @@ class TestRunTaskEntryErrorPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """Task returning TaskResult(ok=...) → serialized correctly."""
+        """Task returning Ok(...) → serialized correctly."""
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task.return_value = TaskResult(ok='success')
+        mock_task.return_value = Ok('success')
         mock_task.task_ok_type = str
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1514,13 +1518,13 @@ class TestRunTaskEntryErrorPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """Task returning TaskResult(err=...) → serialized correctly, ok=True."""
+        """Task returning Err(...) → serialized correctly, ok=True."""
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task.return_value = TaskResult(
-            err=TaskError(error_code='CUSTOM_ERR', message='failed'),
+        mock_task.return_value = Err(
+            TaskError(error_code='CUSTOM_ERR', message='failed'),
         )
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1534,13 +1538,13 @@ class TestRunTaskEntryErrorPaths:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """When dumps_json fails on TaskResult output → WORKER_SERIALIZATION_ERROR."""
+        """When dumps_json fails on the result output → WORKER_SERIALIZATION_ERROR."""
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
-        mock_task.return_value = TaskResult(ok='data')
+        mock_task.return_value = Ok('data')
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with _apply_patches(patches), patch(
@@ -1583,7 +1587,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        """__h_taskresult_envelope__ with valid JSON but not TaskResult shape → serde error."""
+        """__h_taskresult_envelope__ with valid JSON but not the result envelope shape → serde error."""
         patches = _make_run_task_patches()
         _run_entry_defaults['input_json'] = json.dumps({
             'upstream': {
@@ -1600,7 +1604,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
     # (test_workflow_ctx_results_by_id_bad_json removed: the strict-serde
     # phase 5/6 rewrite of workflow_ctx kwarg decode no longer raises
     # SerializationError on per-node decode failure. Per-node failures
-    # now fold into a sentinel TaskResult(err=RESULT_DESERIALIZATION_ERROR)
+    # now fold into a sentinel Failed(TaskError(RESULT_DESERIALIZATION_ERROR))
     # so the workflow_ctx stays typed. New contract is covered by
     # test_workflow_handle_decode.py and the integration tests.)
 
@@ -1610,14 +1614,14 @@ class TestRunTaskEntryWorkflowInjectionErrors:
     ) -> None:
         """workflow_ctx with invalid summaries_by_id JSON → serde error."""
 
-        def _task_with_ctx(workflow_ctx: Any = None) -> TaskResult[str, TaskError]:
-            return TaskResult(ok='done')
+        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+            return Ok('done')
 
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task.return_value = TaskResult(ok='done')
+        mock_task.return_value = Ok('done')
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1649,14 +1653,14 @@ class TestRunTaskEntryWorkflowInjectionErrors:
         serialization error instead.
         """
 
-        def _task_with_ctx(workflow_ctx: Any = None) -> TaskResult[str, TaskError]:
-            return TaskResult(ok='done')
+        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+            return Ok('done')
 
         patches = _make_run_task_patches(task_fn=_task_with_ctx)
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task.return_value = TaskResult(ok='done')
+        mock_task.return_value = Ok('done')
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
@@ -1685,14 +1689,14 @@ class TestRunTaskEntryWorkflowInjectionErrors:
 
         def _task_with_meta(
             workflow_meta: Any = None,
-        ) -> TaskResult[str, TaskError]:
-            return TaskResult(ok=f'meta:{workflow_meta}')
+        ) -> Result[str, TaskError]:
+            return Ok(f'meta:{workflow_meta}')
 
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task.return_value = TaskResult(ok='meta_ok')
+        mock_task.return_value = Ok('meta_ok')
         mock_task.task_ok_type = str
         mock_task._original_fn = _task_with_meta
         mock_task._fn = _task_with_meta
@@ -2077,7 +2081,7 @@ class TestRunTaskEntryWorkflowHappyPaths:
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task._original_fn = _takes_upstream
         mock_task.task_ok_type = str
-        mock_task.return_value = TaskResult(ok='processed')
+        mock_task.return_value = Ok('processed')
 
         def _task_lookup(name: str) -> Any:
             if name == 'upstream_task':
@@ -2111,14 +2115,14 @@ class TestRunTaskEntryWorkflowHappyPaths:
     ) -> None:
         """workflow_ctx with valid results_by_id + summaries_by_id → injected."""
 
-        def _task_with_ctx(workflow_ctx: Any = None) -> TaskResult[str, TaskError]:
-            return TaskResult(ok='done')
+        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+            return Ok('done')
 
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
-        mock_task.return_value = TaskResult(ok='ctx_ok')
+        mock_task.return_value = Ok('ctx_ok')
         mock_task.task_ok_type = str
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
@@ -2179,13 +2183,13 @@ class TestChildWritesNoRunnerHeartbeat:
     ) -> None:
         names_during_run: list[str] = []
 
-        def body() -> TaskResult[str, TaskError]:
+        def body() -> Result[str, TaskError]:
             # Longer than two of the beat intervals the child used to have.
             time.sleep(0.3)
             names_during_run.extend(thread.name for thread in threading.enumerate())
-            return TaskResult(ok='done')
+            return Ok('done')
 
-        def call(*args: Any, **kwargs: Any) -> TaskResult[str, TaskError]:
+        def call(*args: Any, **kwargs: Any) -> Result[str, TaskError]:
             return body()
 
         task = MagicMock(side_effect=call)
@@ -2227,8 +2231,8 @@ class TestChildWritesNoRunnerHeartbeat:
 _INPUT_MARKER = 'child-marker-8b2f'
 
 
-def _typed_count_task(*, count: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=count)
+def _typed_count_task(*, count: int) -> Result[int, TaskError]:
+    return Ok(count)
 
 
 @pytest.mark.unit
@@ -2327,7 +2331,7 @@ class TestRunTaskEntryRefusalTextHoldsNoInput:
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = int
-        mock_task.return_value = TaskResult(ok=_INPUT_MARKER)
+        mock_task.return_value = Ok(_INPUT_MARKER)
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
 
         with caplog.at_level(logging.DEBUG), _apply_patches(patches):
@@ -2384,15 +2388,15 @@ class TestRunTaskEntryStoredErrorRefusal:
         self,
         _run_entry_defaults: dict[str, Any],
     ) -> None:
-        def _task_with_ctx(workflow_ctx: Any = None) -> TaskResult[str, TaskError]:
-            return TaskResult(ok='done')
+        def _task_with_ctx(workflow_ctx: Any = None) -> Result[str, TaskError]:
+            return Ok('done')
 
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
         mock_task = MagicMock()
         mock_task.task_body_kind = TaskBodyKind.DEF
         mock_task.task_ok_type = str
-        mock_task.return_value = TaskResult(ok='done')
+        mock_task.return_value = Ok('done')
         mock_task._original_fn = _task_with_ctx
         mock_app.tasks.__getitem__ = MagicMock(return_value=mock_task)
         mock_app.tasks.get = MagicMock(return_value=mock_task)
@@ -2417,9 +2421,10 @@ class TestRunTaskEntryStoredErrorRefusal:
             _ = envelope_of(_run_task_entry(**_run_entry_defaults))
 
         injected = mock_task.call_args.kwargs['workflow_ctx']
-        entry = injected._results_by_id['node_a'].unwrap_err()
-        assert entry.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert 'nope' in entry.message
+        entry = injected._results_by_id['node_a']
+        assert isinstance(entry, Failed)
+        assert entry.error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+        assert 'nope' in entry.error.message
 
 
 # ===================================================================
@@ -2534,8 +2539,8 @@ class TestRunTaskEntryStoredTimeout:
 # ===================================================================
 
 
-def _ok_value(payload: str, ok_type: Any) -> Any:
-    return decode_task_result(loads_json(payload).unwrap(), ok_type).unwrap()
+def _outcome(payload: str, ok_type: Any) -> TaskOutcome[Any, TaskError]:
+    return decode_task_result(loads_json(payload).unwrap(), ok_type)
 
 
 @pytest.mark.unit
@@ -2551,9 +2556,9 @@ class TestRunTaskEntryCoroutineCall:
         _run_entry_defaults['task_loop'] = task_loop
         seen: list[asyncio.AbstractEventLoop] = []
 
-        async def body() -> TaskResult[int, TaskError]:
+        async def body() -> Result[int, TaskError]:
             seen.append(asyncio.get_running_loop())
-            return TaskResult(ok=5)
+            return Ok(5)
 
         patches = _make_run_task_patches()
         mock_app = patches['horsies.core.worker.child_runner.get_current_app'].return_value
@@ -2569,6 +2574,6 @@ class TestRunTaskEntryCoroutineCall:
         finally:
             task_loop.close()
 
-        assert _ok_value(payload, int) == 5
+        assert _outcome(payload, int) == Succeeded(5)
         assert isinstance(loop_state, LoopOpen)
         assert seen == [loop_state.loop]

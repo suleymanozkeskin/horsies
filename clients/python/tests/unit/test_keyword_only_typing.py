@@ -24,7 +24,8 @@ _FIXTURE = """\
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 app = Horsies(
     config=AppConfig(
@@ -34,8 +35,8 @@ app = Horsies(
 
 
 @app.task('charge')
-def charge(*, user_id: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=user_id)
+def charge(*, user_id: int) -> Result[int, TaskError]:
+    return Ok(user_id)
 
 
 ok_call = charge.send(user_id=1)

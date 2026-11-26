@@ -17,7 +17,6 @@ from unittest.mock import Mock
 
 from pydantic import BaseModel
 
-from horsies.core.models.tasks import TaskResult
 from horsies.core.types.result import Err, Ok
 
 SHAPE_DEPTH_BOUND: Final = 32
@@ -29,9 +28,9 @@ def outcome_shape(value: object) -> object:
     """A form of ``value`` that ``==`` compares field by field.
 
     - ``Ok`` and ``Err``: the tag and the shape of the value.
-    - ``TaskResult``: the side (``ok`` or ``err``) and the shape of its value.
     - an exception: its type and the shapes of its ``args``.
-    - a dataclass or a Pydantic model: its type and the shape of each field.
+    - a dataclass or a Pydantic model: its type and the shape of each field
+      (``Succeeded``, ``Failed`` and each read failure are dataclasses).
     - a list, tuple or dict: the shapes of its items, in order.
     - a mock: its identity; the same mock in both runs compares equal.
     - any other value (``str``, ``int``, ``UUID``, ``datetime``, an enum
@@ -52,13 +51,6 @@ def _shape(value: object, depth: int) -> object:
             return ('Ok', _shape(cast('Ok[object]', value).ok_value, deeper))
         case Err():
             return ('Err', _shape(cast('Err[object]', value).err_value, deeper))
-        case TaskResult():
-            result = cast('TaskResult[object, object]', value)
-            match result.is_ok():
-                case True:
-                    return ('TaskResult', 'ok', _shape(result.ok_value, deeper))
-                case False:
-                    return ('TaskResult', 'err', _shape(result.err_value, deeper))
         case BaseException():
             return (
                 type(value).__qualname__,

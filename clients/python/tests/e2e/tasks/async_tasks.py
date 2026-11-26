@@ -14,9 +14,16 @@ from typing import Any
 from pydantic import BaseModel
 
 from horsies.core.brokers.result_types import BrokerWaitInsideTask
-from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
+from horsies.core.models.outcome import (
+    Failed,
+    ReadResult,
+    Succeeded,
+    TaskOutcome,
+    WaitInsideTask,
+)
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.utils.loop_runner import in_running_event_loop
 
 from tests.e2e.tasks.basic import simple_task
@@ -28,44 +35,46 @@ _SEEN_LOOPS: list[asyncio.AbstractEventLoop] = []
 
 
 @app.task(task_name='e2e_async_loop_report')
-async def async_loop_report() -> TaskResult[str, TaskError]:
+async def async_loop_report() -> Result[str, TaskError]:
     """Report the child pid and the count of distinct loops that ran here."""
     loop = asyncio.get_running_loop()
     if not any(seen is loop for seen in _SEEN_LOOPS):
         _SEEN_LOOPS.append(loop)
     await asyncio.sleep(0)
-    return TaskResult(ok=f'{os.getpid()}:{len(_SEEN_LOOPS)}')
+    return Ok(f'{os.getpid()}:{len(_SEEN_LOOPS)}')
 
 
 @app.task(task_name='e2e_sync_loop_report')
-def sync_loop_report() -> TaskResult[str, TaskError]:
+def sync_loop_report() -> Result[str, TaskError]:
     """Report the child pid and a running loop, then run a loop of its own."""
     ran = asyncio.run(asyncio.sleep(0, 'ran'))
-    return TaskResult(ok=f'{os.getpid()}:{in_running_event_loop()}:{ran}')
+    return Ok(f'{os.getpid()}:{in_running_event_loop()}:{ran}')
 
 
 @app.task(task_name='e2e_async_sends')
-async def async_sends(*, x: int) -> TaskResult[str, TaskError]:
+async def async_sends(*, x: int) -> Result[str, TaskError]:
     """Send a task with `send_async` from an async task. Return its id."""
     match await simple_task.send_async(x=x):
         case Ok(handle):
-            return TaskResult(ok=str(handle.task_id))
+            return Ok(str(handle.task_id))
         case Err(send_err):
-            return TaskResult(
-                err=TaskError(error_code='SEND_FAILED', message=send_err.message),
+            return Err(
+                TaskError(error_code='SEND_FAILED', message=send_err.message),
             )
 
 
 @app.task(task_name='e2e_async_add_one')
 async def async_add_one(
     *,
-    upstream: TaskResult[int, TaskError],
-) -> TaskResult[int, TaskError]:
+    upstream: TaskOutcome[int, TaskError],
+) -> Result[int, TaskError]:
     """Add one to the upstream value, after an await."""
     await asyncio.sleep(0)
-    if upstream.is_err():
-        return TaskResult(err=upstream.err_value)
-    return TaskResult(ok=upstream.unwrap() + 1)
+    match upstream:
+        case Succeeded(value):
+            return Ok(value + 1)
+        case Failed(error):
+            return Err(error)
 
 
 WAIT_PROBE_TIMEOUT_MS = 1_000
@@ -83,15 +92,16 @@ class AsyncWaitProbe(BaseModel):
     workflow_get_async_refused: bool
 
 
-def _refused(result: TaskResult[Any, TaskError]) -> bool:
-    return (
-        result.is_err()
-        and result.unwrap_err().error_code is RetrievalCode.WAIT_INSIDE_TASK
-    )
+def _refused(read: ReadResult[Any, TaskError]) -> bool:
+    match read:
+        case Err(err_value=WaitInsideTask()):
+            return True
+        case _:
+            return False
 
 
 @app.task(task_name='e2e_async_wait_inside_task')
-async def async_wait_inside_task() -> TaskResult[AsyncWaitProbe, TaskError]:
+async def async_wait_inside_task() -> Result[AsyncWaitProbe, TaskError]:
     """Send a task and start a workflow, then try the async result waits.
 
     The test waits for the sent task from outside the worker, so a send that
@@ -101,19 +111,19 @@ async def async_wait_inside_task() -> TaskResult[AsyncWaitProbe, TaskError]:
         case Ok(handle):
             pass
         case Err(send_err):
-            return TaskResult(
-                err=TaskError(error_code='E2E_SEND_FAILED', message=send_err.message),
+            return Err(
+                TaskError(error_code='E2E_SEND_FAILED', message=send_err.message),
             )
     read = await app.get_result_async(handle.task_id, WAIT_PROBE_TIMEOUT_MS)
     raw = await app.get_raw_result_async(handle.task_id, WAIT_PROBE_TIMEOUT_MS)
     started = await spec_single_node.start_async()
-    return TaskResult(
-        ok=AsyncWaitProbe(
+    return Ok(
+        AsyncWaitProbe(
             sent_task_id=str(handle.task_id),
             get_async_refused=_refused(
                 await handle.get_async(timeout_ms=WAIT_PROBE_TIMEOUT_MS),
             ),
-            app_get_result_async_refused=is_ok(read) and _refused(read.ok_value),
+            app_get_result_async_refused=_refused(read),
             raw_async_refused=is_err(raw)
             and isinstance(raw.err_value, BrokerWaitInsideTask),
             workflow_started=is_ok(started),
@@ -126,10 +136,10 @@ async def async_wait_inside_task() -> TaskResult[AsyncWaitProbe, TaskError]:
 
 
 @app.task(task_name='e2e_async_timeout_sleeper', timeout_ms=2_000)
-async def async_timeout_sleeper(*, duration_ms: int) -> TaskResult[str, TaskError]:
+async def async_timeout_sleeper(*, duration_ms: int) -> Result[str, TaskError]:
     """Await past the 2 s timeout_ms, so the parent kills the child."""
     await asyncio.sleep(duration_ms / 1000)
-    return TaskResult(ok=f'slept_{duration_ms}')
+    return Ok(f'slept_{duration_ms}')
 
 
 # =============================================================================
@@ -181,29 +191,32 @@ async def _write_marker_later(path: str) -> None:
 
 
 @app.task(task_name='e2e_async_leaves_work')
-async def async_leaves_work(*, marker_path: str) -> TaskResult[str, TaskError]:
+async def async_leaves_work(*, marker_path: str) -> Result[str, TaskError]:
     """Start work that writes the marker later, and return the pid without
     awaiting it."""
     _LEFT_WORK.append(
         asyncio.get_running_loop().create_task(_write_marker_later(marker_path)),
     )
-    return TaskResult(ok=str(os.getpid()))
+    return Ok(str(os.getpid()))
 
 
 @app.task(task_name='e2e_read_marker')
 def read_marker(
     *,
     marker_path: str,
-    upstream: TaskResult[str, TaskError],
-) -> TaskResult[str, TaskError]:
+    upstream: TaskOutcome[str, TaskError],
+) -> Result[str, TaskError]:
     """Return what the marker holds when this task runs, or ``absent``."""
-    if upstream.is_err():
-        return TaskResult(err=upstream.err_value)
+    match upstream:
+        case Failed(error):
+            return Err(error)
+        case Succeeded():
+            pass
     try:
         with open(marker_path, encoding='ascii') as marker:
-            return TaskResult(ok=marker.read())
+            return Ok(marker.read())
     except FileNotFoundError:
-        return TaskResult(ok='absent')
+        return Ok('absent')
 
 
 node_left_work = TaskNode(

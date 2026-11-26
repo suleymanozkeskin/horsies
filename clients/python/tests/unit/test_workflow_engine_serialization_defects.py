@@ -30,7 +30,6 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import (
     TaskError,
-    TaskResult,
 )
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -38,6 +37,7 @@ from horsies.core.models.workflow import (
     WorkflowDefinition,
 )
 from horsies.core.task_decorator import TaskFunction
+from horsies.core.types.result import Ok, Result
 
 
 pytestmark = [pytest.mark.unit]
@@ -54,8 +54,8 @@ def _real_app() -> Horsies:
 
 def _register_note_task(app: Horsies) -> TaskFunction[..., int]:
     @app.task('surrogate.note')
-    def note(*, text: str, labels: dict[str, int]) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=len(text) + len(labels))
+    def note(*, text: str, labels: dict[str, int]) -> Result[int, TaskError]:
+        return Ok(len(text) + len(labels))
     return note
 
 
@@ -187,8 +187,8 @@ class TestValueThatHoldsItself:
         app = _real_app()
 
         @app.task('circular.linked')
-        def linked(*, x: _Linked) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def linked(*, x: _Linked) -> Result[int, TaskError]:
+            return Ok(1)
 
         node = _Linked()
         node.next = node
@@ -242,8 +242,8 @@ class TestValueThatIsTooDeep:
         app = _real_app()
 
         @app.task('deep.linked')
-        def linked(*, x: _Linked) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def linked(*, x: _Linked) -> Result[int, TaskError]:
+            return Ok(1)
 
         node = _Linked()
         for _ in range(299):
@@ -268,8 +268,8 @@ class TestValuePastTheDepthBound:
         app = _real_app()
 
         @app.task('cycle.json_value')
-        def holds_json(*, x: JsonValue) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def holds_json(*, x: JsonValue) -> Result[int, TaskError]:
+            return Ok(1)
 
         value: list[object] = []
         value.append(value)

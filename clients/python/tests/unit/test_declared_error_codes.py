@@ -34,8 +34,8 @@ from horsies.core.errors import (
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.result import Err, Ok
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Err, Ok, Result
 
 pytestmark = [pytest.mark.unit]
 
@@ -69,8 +69,8 @@ def _app(
 
 def _declare(app: Horsies, error_codes: Any) -> None:
     @app.task('charge', error_codes=error_codes)
-    def charge(*, amount: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=amount)
+    def charge(*, amount: int) -> Result[int, TaskError]:
+        return Ok(amount)
 
     del charge
 
@@ -214,8 +214,8 @@ class TestDecorator:
         app = _app()
 
         @app.task('resize')
-        def resize(*, width: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=width)
+        def resize(*, width: int) -> Result[int, TaskError]:
+            return Ok(width)
 
         assert resize.task_error_codes == ()
 
@@ -223,8 +223,8 @@ class TestDecorator:
         app = _app()
 
         @app.task('charge', error_codes=('RATE_LIMITED', 'CARD_DECLINED'))
-        def charge(*, amount: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=amount)
+        def charge(*, amount: int) -> Result[int, TaskError]:
+            return Ok(amount)
 
         assert charge.task_error_codes == ('RATE_LIMITED', 'CARD_DECLINED')
         assert app.tasks['charge'].task_error_codes == ('RATE_LIMITED', 'CARD_DECLINED')
@@ -233,8 +233,8 @@ class TestDecorator:
         app = _app()
 
         @app.task('charge', error_codes=ChargeCode)
-        async def charge(*, amount: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=amount)
+        async def charge(*, amount: int) -> Result[int, TaskError]:
+            return Ok(amount)
 
         assert charge.task_error_codes == ('CARD_DECLINED', 'RATE_LIMITED')
 
@@ -285,16 +285,16 @@ class TestDecorator:
         app = _app()
 
         @app.task('send_mail', error_codes=('BOUNCED',))
-        def send_mail(*, to: str) -> TaskResult[str, TaskError]:
-            return TaskResult(ok=to)
+        def send_mail(*, to: str) -> Result[str, TaskError]:
+            return Ok(to)
 
         @app.task('charge', error_codes=ChargeCode)
-        def charge(*, amount: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=amount)
+        def charge(*, amount: int) -> Result[int, TaskError]:
+            return Ok(amount)
 
         @app.task('resize')
-        def resize(*, width: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=width)
+        def resize(*, width: int) -> Result[int, TaskError]:
+            return Ok(width)
 
         del send_mail, charge, resize
         assert list(app.declared_error_codes().items()) == [
@@ -310,8 +310,8 @@ class TestDecorator:
             error_codes=('CARD_DECLINED',),
             exception_mapper={TimeoutError: 'GATEWAY_SLOW'},
         )
-        def charge(*, amount: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=amount)
+        def charge(*, amount: int) -> Result[int, TaskError]:
+            return Ok(amount)
 
         assert charge.task_error_codes == (
             'CARD_DECLINED',
@@ -329,8 +329,8 @@ class TestDecorator:
             error_codes=('CARD_DECLINED',),
             exception_mapper={TimeoutError: 'CARD_DECLINED'},
         )
-        def charge(*, amount: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=amount)
+        def charge(*, amount: int) -> Result[int, TaskError]:
+            return Ok(amount)
 
         assert charge.task_error_codes == ('CARD_DECLINED',)
 
@@ -340,8 +340,8 @@ class TestDecorator:
         app = _app({ValueError: 'BAD_AMOUNT'})
 
         @app.task('resize')
-        def resize(*, width: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=width)
+        def resize(*, width: int) -> Result[int, TaskError]:
+            return Ok(width)
 
         del resize
         assert app.declared_error_codes() == {'resize': ('BAD_AMOUNT',)}

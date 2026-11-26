@@ -16,15 +16,15 @@ pull in ``traceback`` formatting.
 from __future__ import annotations
 
 import traceback as tb
-from typing import Any, Final
+from typing import Final
 
 from pydantic import ValidationError
 
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.validation_errors import exception_text, validation_summary
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import FlattenedException, TaskError, TaskResult
-from horsies.core.types.result import is_err
+from horsies.core.models.tasks import FlattenedException, TaskError
+from horsies.core.types.result import Err, is_err
 
 
 __all__ = [
@@ -49,8 +49,8 @@ FALLBACK_ERROR_JSON = (
 )
 
 
-def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
-    """Serialize a library-constructed TaskResult for error responses.
+def serialize_error_payload(error: TaskError) -> str:
+    """Serialize a library-constructed task error as a stored result envelope.
 
     Routes through ``encode_task_result`` (strict-serde) so the emitted
     envelope matches the worker's success path. The ok slot is always ``None``
@@ -68,7 +68,7 @@ def serialize_error_payload(tr: TaskResult[Any, TaskError]) -> str:
     from horsies.core.codec.typed import encode_task_result
 
     try:
-        envelope = encode_task_result(tr, type(None))
+        envelope = encode_task_result(Err(error), type(None))
     except Exception as exc:
         logger.error(f'encode_task_result failed for library error payload: {exc}')
         return FALLBACK_ERROR_JSON

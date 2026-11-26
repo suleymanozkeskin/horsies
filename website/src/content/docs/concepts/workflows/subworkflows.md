@@ -28,30 +28,32 @@ Workflows provide:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, WorkflowDefinitionConfig, TaskNode, TaskResult, TaskError, JsonValue
+from horsies import Horsies, AppConfig, PostgresConfig, WorkflowDefinition, WorkflowDefinitionConfig, TaskNode, Err, Failed, Ok, Result, Succeeded, TaskError, TaskOutcome, JsonValue
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(database_url=SecretStr("postgresql://user:pass@localhost:5432/mydb")),
 ))
 
 @app.task(task_name="fetch_data")
-def fetch_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def fetch_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
     # fetch logic...
-    return TaskResult(ok={"data": "..."})
+    return Ok({"data": "..."})
 
 @app.task(task_name="transform")
-def transform(*, raw: TaskResult[dict[str, JsonValue], TaskError]) -> TaskResult[str, TaskError]:
-    # With the defaults, a failed `fetch` makes this node SKIPPED, so this branch
-    # runs only on a decode failure. An upstream err also arrives with
+def transform(*, raw: TaskOutcome[dict[str, JsonValue], TaskError]) -> Result[str, TaskError]:
+    # With the defaults, a failed `fetch` makes this node SKIPPED, so the Failed
+    # arm runs only on a decode failure. A failed upstream also arrives with
     # allow_failed_deps=True, join="any", or join="quorum".
-    if raw.is_err():
-        return TaskResult(err=raw.err_value)
-    return TaskResult(ok=str(raw.ok_value))
+    match raw:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(value):
+            return Ok(str(value))
 
 @app.task(task_name="store")
-def store(*, transformed: str) -> TaskResult[bool, TaskError]:
+def store(*, transformed: str) -> Result[bool, TaskError]:
     # store logic...
-    return TaskResult(ok=True)
+    return Ok(True)
 
 
 class DataPipeline(WorkflowDefinition[bool]):
@@ -93,7 +95,7 @@ For type-safe node construction with static arguments, see [Typed Node Builder](
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Ok
+from horsies import Err, Failed, Ok, Succeeded
 
 # Build and start
 spec = DataPipeline.build(app)
@@ -104,12 +106,13 @@ match await spec.start_async():
         print(f"Start failed: {start_error.code} - {start_error.message}")
     case Ok(handle):
         # Wait for completion
-        result = await handle.get_async()  # TaskResult[bool, TaskError]
-
-        if result.is_ok():
-            print(f"Pipeline succeeded: {result.ok_value}")
-        else:
-            print(f"Pipeline failed: {result.err_value}")
+        match await handle.get_async():  # ReadResult[bool, TaskError]
+            case Ok(Succeeded(value)):
+                print(f"Pipeline succeeded: {value}")
+            case Ok(Failed(task_error)):
+                print(f"Pipeline failed: {task_error}")
+            case Err(read_error):
+                print(f"Read failed: {read_error.code} - {read_error.message}")
 ```
 
 ### 2.3 Inline Definition (Simple Cases Only)
@@ -176,18 +179,20 @@ Use `allow_failed_deps=True` to run anyway (see Section 6).
 <!-- check: skip partial -- uses a name before the page defines it -->
 ```python
 @app.task(task_name="add")
-def add(*, a: int, b: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=a + b)
+def add(*, a: int, b: int) -> Result[int, TaskError]:
+    return Ok(a + b)
 
 @app.task(task_name="multiply")
 def multiply(
     *,
-    sum_result: TaskResult[int, TaskError],
+    sum_result: TaskOutcome[int, TaskError],
     factor: int,
-) -> TaskResult[int, TaskError]:
-    if sum_result.is_err():
-        return TaskResult(err=sum_result.err_value)
-    return TaskResult(ok=sum_result.ok_value * factor)
+) -> Result[int, TaskError]:
+    match sum_result:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(total):
+            return Ok(total * factor)
 
 
 class MathWorkflow(WorkflowDefinition[int]):
@@ -198,14 +203,14 @@ class MathWorkflow(WorkflowDefinition[int]):
     multiply_node = TaskNode(
         fn=multiply,
         waits_for=[add_node],
-        args_from={"sum_result": add_node},  # Receives TaskResult[int, TaskError]
+        args_from={"sum_result": add_node},  # Receives TaskOutcome[int, TaskError]
         kwargs={"factor": 10},
     )
 
     config = WorkflowDefinitionConfig(output=multiply_node)
 ```
 
-**The injected value is always `TaskResult[T, TaskError]`**, not the raw value.
+**The injected value is always `TaskOutcome[T, TaskError]`** (`Succeeded(value)` or `Failed(task_error)`), not the raw value.
 This lets you handle upstream failures explicitly.
 
 ---
@@ -223,18 +228,18 @@ from horsies import WorkflowContext
 def aggregate(
     *,
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[Summary, TaskError]:
+) -> Result[Summary, TaskError]:
     if workflow_ctx is None:
-        return TaskResult(err=TaskError(error_code="NO_CTX", message="Missing context"))
+        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
 
-    # Access individual results
-    result_a = workflow_ctx.result_for(node_a)  # TaskResult[int, TaskError]
-    result_b = workflow_ctx.result_for(node_b)  # TaskResult[str, TaskError]
+    # Access individual outcomes
+    result_a = workflow_ctx.result_for(node_a)  # TaskOutcome[int, TaskError]
+    result_b = workflow_ctx.result_for(node_b)  # TaskOutcome[str, TaskError]
 
     # Build summary from both
-    return TaskResult(ok=Summary(
-        value_a=result_a.ok_value if result_a.is_ok() else None,
-        value_b=result_b.ok_value if result_b.is_ok() else None,
+    return Ok(Summary(
+        value_a=result_a.value if isinstance(result_a, Succeeded) else None,
+        value_b=result_b.value if isinstance(result_b, Succeeded) else None,
     ))
 
 
@@ -415,7 +420,7 @@ class MultiSourceAggregation(WorkflowDefinition[Report]):
 A node becomes ready when its `waits_for` dependencies are terminal (see [Join Semantics](#8-join-semantics)).
 The child graph can therefore depend on the result of an upstream node, for example one child node per element of a list.
 
-Each `args_from` entry arrives in `build_with()` as the upstream `TaskResult[T, TaskError]`, not as the plain value.
+Each `args_from` entry arrives in `build_with()` as the upstream `TaskOutcome[T, TaskError]`, not as the plain value.
 The key of an `args_from` entry must be a parameter of `build_with()`.
 A key that is also a static `kwargs` key fails the node.
 
@@ -426,12 +431,17 @@ A fan-in task reads the shard results by `NodeKey`, because the child nodes do n
 from typing import Any
 
 from horsies import (
+    Err,
+    Failed,
     Horsies,
     NodeKey,
+    Ok,
+    Result,
     SubWorkflowNode,
+    Succeeded,
     TaskError,
     TaskNode,
-    TaskResult,
+    TaskOutcome,
     WorkflowContext,
     WorkflowDefinition,
     WorkflowDefinitionConfig,
@@ -441,13 +451,13 @@ from instance import app
 
 
 @app.task("list_shards")
-def list_shards(*, tenant_id: str) -> TaskResult[list[str], TaskError]:
-    return TaskResult(ok=[f"{tenant_id}-a", f"{tenant_id}-b", f"{tenant_id}-c"])
+def list_shards(*, tenant_id: str) -> Result[list[str], TaskError]:
+    return Ok([f"{tenant_id}-a", f"{tenant_id}-b", f"{tenant_id}-c"])
 
 
 @app.task("count_shard_rows")
-def count_shard_rows(*, shard: str) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=len(shard))
+def count_shard_rows(*, shard: str) -> Result[int, TaskError]:
+    return Ok(len(shard))
 
 
 @app.task("sum_shard_rows")
@@ -455,18 +465,19 @@ def sum_shard_rows(
     *,
     shard_count: int,
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[int, TaskError]:
+) -> Result[int, TaskError]:
     if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code="NO_CONTEXT", message="workflow_ctx is missing"),
+        return Err(
+            TaskError(error_code="NO_CONTEXT", message="workflow_ctx is missing"),
         )
     total = 0
     for position in range(shard_count):
-        shard_result = workflow_ctx.result_for(NodeKey[int](f"shard_{position}"))
-        if shard_result.is_err():
-            return TaskResult(err=shard_result.err_value)
-        total += shard_result.ok_value
-    return TaskResult(ok=total)
+        match workflow_ctx.result_for(NodeKey[int](f"shard_{position}")):
+            case Failed(error):
+                return Err(error)
+            case Succeeded(rows):
+                total += rows
+    return Ok(total)
 
 
 class ShardReport(WorkflowDefinition[int]):
@@ -479,13 +490,15 @@ class ShardReport(WorkflowDefinition[int]):
     def build_with(
         cls,
         app: Horsies,
-        shards: TaskResult[list[str], TaskError],
+        shards: TaskOutcome[list[str], TaskError],
         *_args: Any,
         **_kwargs: Any,
     ) -> WorkflowSpec[int]:
-        if shards.is_err():
-            raise ValueError("shard_report needs the shard list")
-        shard_names = shards.ok_value
+        match shards:
+            case Failed():
+                raise ValueError("shard_report needs the shard list")
+            case Succeeded(shard_names):
+                pass
 
         count_nodes: list[TaskNode[int]] = [
             count_shard_rows.node(node_id=f"shard_{position}")(shard=shard_name)
@@ -523,7 +536,7 @@ Rules for this pattern:
 - Define the tasks at module level. A worker resolves a task by name from the modules it imported.
 - Import the child module in the worker (`app.discover_tasks`). See [Subworkflow Not Found in Worker](#subworkflow-not-found-in-worker).
 - With the default `allow_failed_deps=False`, a failed upstream node SKIPS the `SubWorkflowNode` and `build_with()` does not run.
-  With `allow_failed_deps=True`, `build_with()` receives `TaskResult(err=...)` and must handle it.
+  With `allow_failed_deps=True`, `build_with()` receives `Failed(task_error)` and must handle it.
 - An exception in `build_with()` fails the `SubWorkflowNode` with `WORKFLOW_ENQUEUE_FAILED`. The message starts with `Subworkflow build failed`.
 - The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse are a defect, not a node failure. They occur only when the `task_options_json` of a task function changed after registration. The child start raises `SerializationError`, and its transaction rolls back, as in the workflow start transaction.
 - The child start also encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them, and refuses a value that does not fit with `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (the node fails with `WORKFLOW_ENQUEUE_FAILED`). So a refusal at the child start is a defect: the child start raises `SerializationError` and its transaction rolls back.
@@ -543,14 +556,14 @@ from horsies import WorkflowContext, SubWorkflowSummary
 def report_health(
     *,
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[HealthReport, TaskError]:
+) -> Result[HealthReport, TaskError]:
     if workflow_ctx is None:
-        return TaskResult(err=TaskError(error_code="NO_CTX", message="Missing context"))
+        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
 
     # Get summary for the child subworkflow node
     summary: SubWorkflowSummary = workflow_ctx.summary_for(child_node)
 
-    return TaskResult(ok=HealthReport(
+    return Ok(HealthReport(
         status=summary.status,           # WorkflowStatus (COMPLETED, FAILED, etc.)
         output=summary.output,           # Child workflow output (if completed)
         total_tasks=summary.total_tasks,       # Total tasks in child
@@ -597,15 +610,15 @@ SubWorkflowNode results flow like TaskNode results:
 @app.task(task_name="process_child_result")
 def process_child_result(
     *,
-    child_result: TaskResult[ChildOutput, TaskError],
-) -> TaskResult[ParentOutput, TaskError]:
-    if child_result.is_err():
-        # Child workflow failed - error is SubWorkflowError
-        return TaskResult(err=child_result.err_value)
-
-    # Child succeeded - access the output value
-    child_output: ChildOutput = child_result.ok_value
-    return TaskResult(ok=ParentOutput(derived_from=child_output))
+    child_result: TaskOutcome[ChildOutput, TaskError],
+) -> Result[ParentOutput, TaskError]:
+    match child_result:
+        case Failed(error):
+            # Child workflow failed - error is SubWorkflowError
+            return Err(error)
+        case Succeeded(child_output):
+            # Child succeeded - access the output value
+            return Ok(ParentOutput(derived_from=child_output))
 
 
 class ParentWithDataFlow(WorkflowDefinition[ParentOutput]):
@@ -616,7 +629,7 @@ class ParentWithDataFlow(WorkflowDefinition[ParentOutput]):
     processor = TaskNode(
         fn=process_child_result,
         waits_for=[child],
-        args_from={"child_result": child},  # Receives TaskResult[ChildOutput, TaskError]
+        args_from={"child_result": child},  # Receives TaskOutcome[ChildOutput, TaskError]
     )
 
     config = WorkflowDefinitionConfig(output=processor)
@@ -624,8 +637,8 @@ class ParentWithDataFlow(WorkflowDefinition[ParentOutput]):
 
 Outputless child workflows are orchestration-only when used through
 `SubWorkflowNode`. If a `WorkflowDefinition` has no `config.output`, declare it
-as `WorkflowDefinition[None]`; the parent node receives `TaskResult[None,
-TaskError]` with `ok=None` when the child completes. The terminal-results map
+as `WorkflowDefinition[None]`; the parent node receives `Succeeded(None)`, a
+`TaskOutcome[None, TaskError]`, when the child completes. The terminal-results map
 returned by a top-level outputless `app.workflow(...).get()` is not exposed as
 a nested subworkflow output.
 
@@ -660,14 +673,14 @@ Use this for recovery tasks or aggregators that handle failures:
 @app.task(task_name="recovery_handler")
 def recovery_handler(
     *,
-    primary_result: TaskResult[Data, TaskError],
-) -> TaskResult[Data, TaskError]:
-    if primary_result.is_ok():
-        return primary_result  # Pass through success
-
-    # Handle the failure - use fallback, log, alert, etc.
-    error = primary_result.err_value
-    return TaskResult(ok=Data(fallback=True, original_error=str(error)))
+    primary_result: TaskOutcome[Data, TaskError],
+) -> Result[Data, TaskError]:
+    match primary_result:
+        case Succeeded(data):
+            return Ok(data)  # Pass through success
+        case Failed(error):
+            # Handle the failure - use fallback, log, alert, etc.
+            return Ok(Data(fallback=True, original_error=str(error)))
 
 
 class RecoveryWorkflow(WorkflowDefinition[Data]):
@@ -719,25 +732,24 @@ With `OnError.PAUSE`:
 ### 7.4 Handling SKIPPED Dependencies
 
 When a task runs with `allow_failed_deps=True` and its dependency was SKIPPED
-(not just FAILED), the injected result has error code `UPSTREAM_SKIPPED`:
+(not just FAILED), the injected outcome is `Failed(task_error)` with error code `UPSTREAM_SKIPPED`:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task(task_name="handle_any_failure")
 def handle_any_failure(
     *,
-    upstream: TaskResult[Data, TaskError],
-) -> TaskResult[Report, TaskError]:
-    if upstream.is_ok():
-        return TaskResult(ok=Report(data=upstream.ok_value))
-
-    error = upstream.err_value
-    if error.error_code == "UPSTREAM_SKIPPED":
-        # Upstream was skipped (its own dependency failed)
-        return TaskResult(ok=Report(skipped=True))
-    else:
-        # Upstream actually failed
-        return TaskResult(ok=Report(failed=True, error=str(error)))
+    upstream: TaskOutcome[Data, TaskError],
+) -> Result[Report, TaskError]:
+    match upstream:
+        case Succeeded(data):
+            return Ok(Report(data=data))
+        case Failed(error) if error.error_code == "UPSTREAM_SKIPPED":
+            # Upstream was skipped (its own dependency failed)
+            return Ok(Report(skipped=True))
+        case Failed(error):
+            # Upstream actually failed
+            return Ok(Report(failed=True, error=str(error)))
 ```
 
 ---
@@ -977,7 +989,7 @@ workflow can continue deterministic failure propagation without leaving the node
 def my_task(
     *,
     workflow_ctx: WorkflowContext | None = None,  # Add this
-) -> TaskResult[Output, TaskError]:
+) -> Result[Output, TaskError]:
     ...
 ```
 
@@ -1045,8 +1057,11 @@ from horsies import (
     WorkflowDefinitionConfig,
     TaskNode,
     SubWorkflowNode,
-    TaskResult,
+    Result,
     TaskError,
+    TaskOutcome,
+    Succeeded,
+    Failed,
     WorkflowContext,
     WorkflowSpec,
     SuccessPolicy,
@@ -1079,28 +1094,29 @@ class AggregatedReport(BaseModel):
 # --- Task Functions ---
 
 @app.task(task_name="fetch_from_api")
-def fetch_from_api(*, url: str) -> TaskResult[RawData, TaskError]:
+def fetch_from_api(*, url: str) -> Result[RawData, TaskError]:
     # Simulate fetch
-    return TaskResult(ok=RawData(source=url, content="..."))
+    return Ok(RawData(source=url, content="..."))
 
 @app.task(task_name="parse_and_validate")
 def parse_and_validate(
     *,
-    raw: TaskResult[RawData, TaskError],
-) -> TaskResult[ProcessedData, TaskError]:
-    if raw.is_err():
-        return TaskResult(err=raw.err_value)
-    data = raw.ok_value
-    # Simulate parsing
-    return TaskResult(ok=ProcessedData(source=data.source, records=[{"id": 1}]))
+    raw: TaskOutcome[RawData, TaskError],
+) -> Result[ProcessedData, TaskError]:
+    match raw:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(data):
+            # Simulate parsing
+            return Ok(ProcessedData(source=data.source, records=[{"id": 1}]))
 
 @app.task(task_name="aggregate_sources")
 def aggregate_sources(
     *,
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[AggregatedReport, TaskError]:
+) -> Result[AggregatedReport, TaskError]:
     if workflow_ctx is None:
-        return TaskResult(err=TaskError(error_code="NO_CTX", message="Missing context"))
+        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
 
     total = 0
     sources = []
@@ -1116,7 +1132,7 @@ def aggregate_sources(
         else:
             errors.append(f"{node.name}: {summary.error_summary or 'unknown error'}")
 
-    return TaskResult(ok=AggregatedReport(
+    return Ok(AggregatedReport(
         total_records=total,
         sources=sources,
         errors=errors,
@@ -1208,15 +1224,15 @@ async def run_pipeline():
         case Ok(handle):
             pass
 
-    result = await handle.get_async()
-
-    if result.is_ok():
-        report = result.ok_value
-        print(f"Processed {report.total_records} records from {len(report.sources)} sources")
-        if report.errors:
-            print(f"Errors: {report.errors}")
-    else:
-        print(f"Pipeline failed: {result.err_value}")
+    match await handle.get_async():
+        case Ok(Succeeded(report)):
+            print(f"Processed {report.total_records} records from {len(report.sources)} sources")
+            if report.errors:
+                print(f"Errors: {report.errors}")
+        case Ok(Failed(task_error)):
+            print(f"Pipeline failed: {task_error}")
+        case Err(read_error):
+            print(f"Read failed: {read_error.code} - {read_error.message}")
 ```
 
 This example demonstrates:

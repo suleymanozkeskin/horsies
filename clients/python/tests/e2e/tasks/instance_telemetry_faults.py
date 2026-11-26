@@ -42,7 +42,8 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 from horsies.core.models.tracing import NoTracing, OtelTracing
 from horsies.telemetry import AttemptEnded
 
@@ -206,13 +207,13 @@ match FAULT:
 
 
 @app.task(task_name='e2e_telemetry_faults_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
 @app.task(task_name='e2e_telemetry_faults_add')
-def add(*, left: int, right: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=left + right)
+def add(*, left: int, right: int) -> Result[int, TaskError]:
+    return Ok(left + right)
 
 
 app.discover_tasks(['tests.e2e.tasks.instance_telemetry_faults'])

@@ -39,10 +39,10 @@ from horsies.core.models.task_send_types import (
     TaskSendSuppressed,
     TaskSendValidationFailed,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.result import Err, is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 
 PAYLOAD_MARKER = 'kwargs-marker-41c2'
 TASK_ID = UUID('0198c0de-0000-7000-8000-000000000001')
@@ -107,8 +107,8 @@ def _make_app() -> MagicMock:
 
 
 def _wrapper(app: MagicMock) -> Any:
-    def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=x)
+    def good_fn(*, x: int) -> Result[int, TaskError]:
+        return Ok(x)
 
     return create_task_wrapper(good_fn, app, 'test.good_fn')
 

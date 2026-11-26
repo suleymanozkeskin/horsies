@@ -55,8 +55,9 @@ operation. The patch makes these changes:
 - **Selection.** `--scenario candidates` selects no scenario now. A selection
   of no scenario is refused.
 - **Public call scenarios.** The patch adds `tests/perf/public_calls.py`, the
-  same file as `crossclient/perf/public_calls.py` of the current harness with
-  the package name `tests`, and the scenarios `send` and
+  file `crossclient/perf/public_calls.py` of the current harness as it was
+  before the result model of 0.8.x (`TaskResult`), with the package name
+  `tests`, and the scenarios `send` and
   `workflow-start` (see "Scenario map"). The runner, the entry point and the
   report change as in the current harness to run them; the report names the
   payload "payload per operation".

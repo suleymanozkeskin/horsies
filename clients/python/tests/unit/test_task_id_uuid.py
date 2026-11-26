@@ -12,10 +12,10 @@ from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.brokers.result_types import BrokerEnqueueFailed
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 
 pytestmark = [pytest.mark.unit]
 
@@ -33,8 +33,8 @@ def _app_with_broker(broker: MagicMock) -> MagicMock:
 
 
 def _wrapper(app: MagicMock) -> Any:
-    def add_one(*, x: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=x + 1)
+    def add_one(*, x: int) -> Result[int, TaskError]:
+        return Ok(x + 1)
 
     return create_task_wrapper(add_one, app, 'test.add_one')
 

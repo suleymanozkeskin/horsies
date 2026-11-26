@@ -17,7 +17,7 @@ from horsies.core.models.task_send_types import TaskSendResult
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 
-from tests.e2e.helpers.assertions import start_ok_in_thread
+from tests.e2e.helpers.assertions import read_succeeded, start_ok_in_thread
 from tests.e2e.helpers.db import wait_for_all_terminal
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import wait_for_workflow_completion
@@ -45,7 +45,7 @@ def _make_ready_check(task_func: _HealthcheckTask):
             if is_err(result):
                 return False
             handle = result.ok_value
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 

@@ -184,7 +184,7 @@ When a worker crashes during a **workflow** task, the reaper marks `tasks.status
 The recovery loop detects this mismatch automatically:
 
 1. Finds `workflow_tasks` rows in non-terminal status where the linked `tasks` row is terminal (`COMPLETED`, `FAILED`, or `CANCELLED`)
-2. Deserializes the `TaskResult` from the task's stored result
+2. Deserializes the task's stored result
 3. If no result is stored, synthesizes an error result:
    - `WORKER_CRASHED` for failed tasks
    - `TASK_CANCELLED` for cancelled tasks

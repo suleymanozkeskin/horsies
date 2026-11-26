@@ -2,7 +2,7 @@
 """Acme Clothing's domain vocabulary: error codes, entities, and task payloads.
 
 Entities mirror rows in the `acme_*` tables. Payload models are what tasks
-return inside `TaskResult(ok=...)`; they are the typed contract the dashboard
+return inside `Ok(...)`; they are the typed contract the dashboard
 renders and downstream nodes consume through `args_from`.
 """
 
@@ -39,7 +39,7 @@ LOYALTY_ENGINE_BUG: Final[str] = 'LOYALTY_ENGINE_BUG'
 STORE_UNAVAILABLE: Final[str] = 'STORE_UNAVAILABLE'
 
 # Plain assignments, not PEP 695 `type` aliases: strict-serde inspects the
-# annotations of every model that appears in a task's TaskResult ok slot, and a
+# annotations of every model that appears in the `Ok` value of a task, and a
 # `TypeAliasType` is not on its allow list (HRS-105). An implicit alias *is*
 # the Literal at runtime, so it resolves.
 OrderStatus = Literal[

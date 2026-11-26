@@ -26,7 +26,7 @@ from horsies.core.models.boot_failure import (
     ChildPoolSetupFailed,
     ThreadStartRefusedError,
 )
-from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError
 from horsies.core.task_decorator import await_task_call_in_worker
 from horsies.core.telemetry.attempt_span import BodyEndOrder, run_in_attempt_span_async
 from horsies.core.types.result import Err, Ok, Result
@@ -149,7 +149,7 @@ async def run_shared_async_start_hooks() -> None:
 
 
 type _TaskCall = (
-    TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]]
+    Result[Any, TaskError] | Coroutine[Any, Any, Result[Any, TaskError]]
 )
 """What a call of a task wrapper returns: a result, or a coroutine of one."""
 
@@ -157,8 +157,8 @@ type _TaskCall = (
 async def _seat_call_result(
     task_name: str,
     called: _TaskCall,
-    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
-) -> TaskResult[Any, TaskError]:
+    map_exception: Callable[[BaseException], Result[Any, TaskError]],
+) -> Result[Any, TaskError]:
     """Await the coroutine of an ``async def`` task call on the running loop.
 
     ``await_task_call_in_worker`` maps each exception that it takes from
@@ -173,7 +173,7 @@ async def _seat_call_result(
         case Coroutine():
             mapped: list[BaseException] = []
 
-            def map_and_note(exc: BaseException) -> TaskResult[Any, TaskError]:
+            def map_and_note(exc: BaseException) -> Result[Any, TaskError]:
                 mapped.append(exc)
                 return map_exception(exc)
 
@@ -191,9 +191,9 @@ async def _seat_call_result(
 
 
 def _without_left_cancel(
-    out: TaskResult[Any, TaskError],
-    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
-) -> TaskResult[Any, TaskError]:
+    out: Result[Any, TaskError],
+    map_exception: Callable[[BaseException], Result[Any, TaskError]],
+) -> Result[Any, TaskError]:
     """Clear a cancel request that a returned call left on the seat task.
 
     A body can cancel its own task (``asyncio.current_task().cancel()``, or

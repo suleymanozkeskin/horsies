@@ -28,9 +28,9 @@ from horsies import (
     Horsies,
     Ok,
     PostgresConfig,
+    Result,
     TaskError,
     TaskNode,
-    TaskResult,
 )
 from crossclient.perf.telemetry_levels import AppTelemetry
 
@@ -93,8 +93,8 @@ class SendCall:
         app = public_call_app(dsn, app_telemetry)
 
         @app.task(SEND_TASK_NAME)
-        def perf_public_send(*, text: str) -> TaskResult[str, TaskError]:
-            return TaskResult(ok=text)
+        def perf_public_send(*, text: str) -> Result[str, TaskError]:
+            return Ok(text)
 
         self._broker = app.get_broker()
         self._task = perf_public_send
@@ -130,8 +130,8 @@ class WorkflowStartCall:
         app = public_call_app(dsn, app_telemetry)
 
         @app.task(WORKFLOW_TASK_NAME)
-        def perf_public_workflow_node(*, text: str) -> TaskResult[str, TaskError]:
-            return TaskResult(ok=text)
+        def perf_public_workflow_node(*, text: str) -> Result[str, TaskError]:
+            return Ok(text)
 
         node = TaskNode(
             fn=perf_public_workflow_node,

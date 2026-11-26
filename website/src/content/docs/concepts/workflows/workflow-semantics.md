@@ -155,7 +155,7 @@ A → D
 
 **To run recovery logic downstream:**
 
-Set `allow_failed_deps=True` on the downstream task. It will run and receive the failed `TaskResult`.
+Set `allow_failed_deps=True` on the downstream task. It will run and receive the failed outcome of the dependency.
 
 **Join rules change the short-circuit behavior:**
 
@@ -169,17 +169,17 @@ Set `allow_failed_deps=True` on the downstream task. It will run and receive the
 
 **Result access is separate:**
 
-- `WorkflowHandle.get()` returns the workflow-level `TaskResult` (output value or error, not a status enum).
+- `WorkflowHandle.get()` returns the workflow-level outcome (output value or error, not a status enum). A read that gives no outcome, for example a wait timeout, returns a read error.
 - A FAILED workflow stores no output. This is also true when its output node ran with `allow_failed_deps=True` and succeeded. Read that node's result with `WorkflowHandle.result_for()`.
 - A COMPLETED workflow can have a SKIPPED or FAILED output node. See [Output Node Under a Success Policy](#output-node-under-a-success-policy).
-- `WorkflowHandle.result_for()` is non-blocking and may return `RESULT_NOT_READY` if the task has not completed.
+- `WorkflowHandle.result_for()` is non-blocking and may return the read error `RESULT_NOT_READY` if the task has not completed.
 
 ### Upstream Failure and args_from
 
 When an upstream task fails and the downstream task uses `join="all"` (the default):
 
 - **`allow_failed_deps=False` (default):** The downstream task is **SKIPPED**. It does not execute and does not receive the failed result.
-- **`allow_failed_deps=True`:** The downstream task **runs** and receives the upstream `TaskResult` with `is_err() == True`.
+- **`allow_failed_deps=True`:** The downstream task **runs** and receives the upstream outcome as `Failed`, with the upstream error.
 
 `on_error=OnError.FAIL` does **not** short-circuit the DAG. The workflow stores the error and continues resolving dependents — downstream tasks are SKIPPED (or run if `allow_failed_deps=True`) before the workflow is marked FAILED.
 
@@ -187,7 +187,7 @@ With `join="any"`, a downstream task runs when **any** dependency succeeds, so a
 
 The Python example is in [Upstream Failure and args_from](/horsies/concepts/workflows/workflow-examples/#upstream-failure-and-args_from).
 
-The manual `is_err()` check is the intended pattern when `allow_failed_deps=True`. With the defaults (`join="all"`, no `allow_failed_deps`), the task does not run on an upstream failure. An err still arrives with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
+A match on `Succeeded` and `Failed` is the intended pattern when `allow_failed_deps=True`. With the defaults (`join="all"`, no `allow_failed_deps`), the task does not run on an upstream failure. A `Failed` input still arrives with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
 
 ### PAUSE Semantics (Cooperative Stop)
 
@@ -272,7 +272,7 @@ TaskNode supports three join modes via the `join` parameter:
 
 The Python examples are in [Join Modes](/horsies/concepts/workflows/workflow-examples/#join-modes).
 
-**Note:** `COMPLETED` means the dependency returned `TaskResult.ok`. A dependency that finished execution but returned `TaskResult.err` is `FAILED`, not `COMPLETED`. The same rule applies to a `SubWorkflowNode`: see [Output Node Under a Success Policy](#output-node-under-a-success-policy).
+**Note:** `COMPLETED` means the dependency returned `Ok`. A dependency that finished execution but returned `Err` is `FAILED`, not `COMPLETED`. The same rule applies to a `SubWorkflowNode`: see [Output Node Under a Success Policy](#output-node-under-a-success-policy).
 
 ### AND-join (join="all")
 
@@ -285,7 +285,7 @@ Task runs when: ALL dependencies are in terminal state (COMPLETED/FAILED/SKIPPED
 | Dependency State | allow_failed_deps=False | allow_failed_deps=True |
 |------------------|-------------------------|------------------------|
 | All COMPLETED | Task runs normally | Task runs normally |
-| Any FAILED | Task is SKIPPED | Task runs with failed TaskResult |
+| Any FAILED | Task is SKIPPED | Task runs with the `Failed` outcome |
 | Any SKIPPED | Task is SKIPPED | Task runs with UPSTREAM_SKIPPED sentinel |
 
 ### OR-join (join="any")
@@ -313,10 +313,10 @@ A (FAILED) → B (SKIPPED) → C (SKIPPED) → D (SKIPPED)
 
 ### allow_failed_deps=True
 
-Tasks with `allow_failed_deps=True` receive the `TaskResult` from dependencies:
+Tasks with `allow_failed_deps=True` receive the outcome of each dependency:
 
-- **FAILED deps**: Receive the actual `TaskResult` with the original error
-- **SKIPPED deps**: Receive a sentinel `TaskResult` with `error_code=UPSTREAM_SKIPPED`
+- **FAILED deps**: Receive `Failed` with the original error
+- **SKIPPED deps**: Receive a sentinel `Failed` with `error_code=UPSTREAM_SKIPPED`
 
 The Python example is in [Recovery Handlers](/horsies/concepts/workflows/workflow-examples/#recovery-handlers).
 
@@ -475,34 +475,34 @@ When no success case is satisfied:
 A success case does not have to require the output node. The workflow is then COMPLETED, and its output node can be SKIPPED or FAILED. The workflow result follows the status of the output node:
 
 <!-- members: WorkflowTaskStatus subset -->
-| Output node | Workflow result | `WorkflowHandle.get()` returns |
-|-------------|-----------------|--------------------------------|
-| COMPLETED | The node's result | The node's `TaskResult` |
-| FAILED | The node's error | `TaskResult(err=...)` with the node's error |
-| SKIPPED | An error with `WORKFLOW_OUTPUT_SKIPPED` | `TaskResult(err=...)` with `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED` |
+| Output node | Workflow result | Outcome of `WorkflowHandle.get()` |
+|-------------|-----------------|-----------------------------------|
+| COMPLETED | The node's result | `Succeeded` with the node's value |
+| FAILED | The node's error | `Failed` with the node's error |
+| SKIPPED | An error with `WORKFLOW_OUTPUT_SKIPPED` | `Failed` with `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED` |
 
 `WORKFLOW_OUTPUT_SKIPPED` means that the workflow succeeded and has no output. It does not mean that stored data is corrupt. `data` holds `workflow_id`, `output_node_id`, `output_task_index` and `output_task_name`.
 
 The Python example is in [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-examples/#output-node-under-a-success-policy).
 
-A node is COMPLETED only when its result is ok, so the status of a `SubWorkflowNode` follows the output of its child, not the status of its child. A `SubWorkflowNode` of such a child workflow is FAILED and holds the child's err:
+A node is COMPLETED only when its result is ok, so the status of a `SubWorkflowNode` follows the output of its child, not the status of its child. A `SubWorkflowNode` of such a child workflow is FAILED and holds the child's error:
 
 - `on_error` runs, as for a failed task.
-- A dependent with `allow_failed_deps=False` is SKIPPED. A dependent with `allow_failed_deps=True` receives the err through `args_from` or `workflow_ctx_from`.
+- A dependent with `allow_failed_deps=False` is SKIPPED. A dependent with `allow_failed_deps=True` receives the error through `args_from` or `workflow_ctx_from`.
 - `join="any"` and `join="quorum"` do not count the node.
 - A `SuccessCase` that requires the node is not met.
-- `result_for()`, `results()` and `tasks()` return the err.
-- Without a success policy, the parent is FAILED, and its `get()` returns the err.
+- `result_for()`, `results()` and `tasks()` give the error as a `Failed` outcome.
+- Without a success policy, the parent is FAILED, and its `get()` gives the error as a `Failed` outcome.
 - `SubWorkflowSummary.status` is COMPLETED on this FAILED node, because the child is COMPLETED. `SubWorkflowSummary.output` is `None`.
 
-A child workflow with no output node is not affected: its `SubWorkflowNode` is COMPLETED with `ok=None`.
+A child workflow with no output node is not affected: its `SubWorkflowNode` is COMPLETED with the value `None`.
 
 **A parent that completes with this node.** The parent's success case can leave the node out: the node is in `optional`, or in no case. The node is still FAILED, and `on_error` still runs:
 
 - With `OnError.FAIL`, the node's error is stored on the workflow, and the workflow stays RUNNING. The success case then decides COMPLETED. A COMPLETED parent keeps the node's error in its error column, as for a failed `TaskNode`.
 - With `OnError.PAUSE`, the parent pauses.
 
-If the node is also the parent's output node, the parent stores the same err, and its `get()` returns it. A `SubWorkflowNode` of that parent is FAILED in the same way, and `data` still names the workflow that holds the SKIPPED output node.
+If the node is also the parent's output node, the parent stores the same error, and its `get()` gives it as a `Failed` outcome. A `SubWorkflowNode` of that parent is FAILED in the same way, and `data` still names the workflow that holds the SKIPPED output node.
 
 **Nesting without a success policy.** The parent is FAILED, so the next level sees a failed child: its node holds a `SubWorkflowError` with `SUBWORKFLOW_FAILED`. The message of the first error is in `SubWorkflowSummary.error_summary`.
 
@@ -540,7 +540,7 @@ Tasks can access upstream results via `WorkflowContext` using the type-safe `res
 
 **Scope:** Inside a task function, only results from nodes listed in `workflow_ctx_from` are accessible via `workflow_ctx.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
 
-This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns `RESULT_NOT_READY` if the task hasn't completed.
+This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns the read error `RESULT_NOT_READY` if the task hasn't completed.
 
 ### Node IDs
 
@@ -578,7 +578,7 @@ For type-safe node construction with static arguments, see [Typed Node Builder](
 
 ### args_from: What the Receiving Function Gets
 
-`args_from` delivers the upstream task's full `TaskResult[T, TaskError]` — not just the raw `T`.
+`args_from` delivers the upstream task's outcome, a `TaskOutcome`: `Succeeded` with the value, or `Failed` with the error. It does not deliver the raw value.
 
 The Python example is in [What the Receiving Function Gets](/horsies/concepts/workflows/workflow-examples/#what-the-receiving-function-gets).
 
@@ -586,4 +586,4 @@ The Python example is in [What the Receiving Function Gets](/horsies/concepts/wo
 
 ### Reading a Node Result Before the Workflow Ends
 
-A node result read does not block: it is one database query. When the task of the node has not completed, the read returns `RESULT_NOT_READY`. Workflows can run for minutes to hours, so wait for the workflow first, for example with the workflow result read and a timeout, and then read node results. The Python example is in [Things to Avoid](/horsies/concepts/workflows/workflow-examples/#things-to-avoid).
+A node result read does not block: it is one database query. When the task of the node has not completed, the read returns the read error `RESULT_NOT_READY`. Workflows can run for minutes to hours, so wait for the workflow first, for example with the workflow result read and a timeout, and then read node results. The Python example is in [Things to Avoid](/horsies/concepts/workflows/workflow-examples/#things-to-avoid).

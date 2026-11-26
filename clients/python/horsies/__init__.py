@@ -9,7 +9,6 @@ from .core.event_handlers import HandlerChildStartHook
 from .core.models.app import AppConfig
 from .core.models.broker import PostgresConfig
 from .core.models.tasks import (
-    TaskResult,
     TaskError,
     OperationalErrorCode,
     ContractCode,
@@ -21,6 +20,25 @@ from .core.models.tasks import (
     Execution,
     TaskInfo,
     TaskAttemptInfo,
+)
+from .core.models.outcome import (
+    AsyncContext,
+    BrokerError,
+    Failed,
+    InvalidInput,
+    NoTypeAvailable,
+    ReadError,
+    ReadResult,
+    ResultDeserializationError,
+    ResultNotAvailable,
+    ResultNotReady,
+    Succeeded,
+    TaskNotFound,
+    TaskOutcome,
+    WaitInsideTask,
+    WaitTimeout,
+    WorkflowCtxMissingId,
+    WorkflowNotFound,
 )
 from .core.models.queues import QueueMode, CustomQueueConfig
 from .core.models.workflow import (
@@ -277,8 +295,25 @@ __all__ = [
     'HandlerChildStartHook',
     'AppConfig',
     'PostgresConfig',
-    'TaskResult',
     'TaskError',
+    # Outcomes and reads
+    'TaskOutcome',
+    'Succeeded',
+    'Failed',
+    'ReadResult',
+    'ReadError',
+    'WaitTimeout',
+    'TaskNotFound',
+    'WorkflowNotFound',
+    'ResultNotAvailable',
+    'ResultNotReady',
+    'WaitInsideTask',
+    'AsyncContext',
+    'InvalidInput',
+    'ResultDeserializationError',
+    'BrokerError',
+    'NoTypeAvailable',
+    'WorkflowCtxMissingId',
     'OperationalErrorCode',
     'ContractCode',
     'RetrievalCode',

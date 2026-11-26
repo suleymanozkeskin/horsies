@@ -30,7 +30,9 @@ from horsies import (
     CancelCause,
     CancelNotRequested,
     CancelRequested,
+    Failed,
     FencingToken,
+    Succeeded,
     TaskRuntime,
 )
 from horsies.core.app import Horsies
@@ -51,7 +53,7 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.schedule import IntervalSchedule, TaskSchedule
-from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowSpec
 from horsies.core.scheduler.validation import _signature_error
 from horsies.core.task_runtime import (
@@ -62,7 +64,7 @@ from horsies.core.task_runtime import (
     RunCancelCell,
     run_task_runtime,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker import child_runner, shared_runner, thread_runner
 from horsies.core.worker.child_frames import NoTraceCarrier
 from horsies.core.worker.child_runner import RunTheTask
@@ -101,35 +103,35 @@ APP = _app()
 
 
 @APP.task('runtime.token')
-def token_task(runtime: TaskRuntime, *, order_id: str) -> TaskResult[FencingToken, TaskError]:
+def token_task(runtime: TaskRuntime, *, order_id: str) -> Result[FencingToken, TaskError]:
     _ = order_id
-    return TaskResult(ok=runtime.fencing_token)
+    return Ok(runtime.fencing_token)
 
 
 @APP.task('runtime.token_async')
-async def token_async_task(runtime: TaskRuntime) -> TaskResult[FencingToken, TaskError]:
+async def token_async_task(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
     await asyncio.sleep(0)
-    return TaskResult(ok=runtime.fencing_token)
+    return Ok(runtime.fencing_token)
 
 
 @APP.task('runtime.reads_twice')
-def reads_twice_task(runtime: TaskRuntime) -> TaskResult[list[FencingToken], TaskError]:
-    return TaskResult(ok=[runtime.fencing_token, runtime.fencing_token])
+def reads_twice_task(runtime: TaskRuntime) -> Result[list[FencingToken], TaskError]:
+    return Ok([runtime.fencing_token, runtime.fencing_token])
 
 
 @APP.task('runtime.plain')
-def plain_task(*, order_id: str) -> TaskResult[str, TaskError]:
-    return TaskResult(ok=order_id)
+def plain_task(*, order_id: str) -> Result[str, TaskError]:
+    return Ok(order_id)
 
 
 @APP.task('runtime.shared_async', execution=Execution.SHARED_ASYNC, timeout_ms=5_000)
-async def shared_async_task(runtime: TaskRuntime) -> TaskResult[FencingToken, TaskError]:
-    return TaskResult(ok=runtime.fencing_token)
+async def shared_async_task(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
+    return Ok(runtime.fencing_token)
 
 
 @APP.task('runtime.shared_thread', execution=Execution.SHARED_THREAD, timeout_ms=5_000)
-def shared_thread_task(runtime: TaskRuntime) -> TaskResult[FencingToken, TaskError]:
-    return TaskResult(ok=runtime.fencing_token)
+def shared_thread_task(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
+    return Ok(runtime.fencing_token)
 
 
 @pytest.fixture
@@ -200,7 +202,7 @@ class TestForTest:
 
         result = token_task(runtime, order_id='o-1')
 
-        assert result.unwrap() == FencingToken(task_id=TASK_ID, value=2)
+        assert result == Ok(FencingToken(task_id=TASK_ID, value=2))
 
     def test_the_default_cancel_state_is_not_requested(self) -> None:
         runtime = TaskRuntime.for_test(task_id=TASK_ID)
@@ -282,43 +284,43 @@ class _HoldsRuntime(BaseModel):
     runtime: TaskRuntime
 
 
-def _keyword_only(*, runtime: TaskRuntime) -> TaskResult[int, TaskError]:
+def _keyword_only(*, runtime: TaskRuntime) -> Result[int, TaskError]:
     _ = runtime
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-def _optional_first(runtime: TaskRuntime | None, *, x: int) -> TaskResult[int, TaskError]:
+def _optional_first(runtime: TaskRuntime | None, *, x: int) -> Result[int, TaskError]:
     _ = runtime
-    return TaskResult(ok=x)
+    return Ok(x)
 
 
 def _with_default(
     runtime: TaskRuntime = TaskRuntime.for_test(task_id=TASK_ID),
-) -> TaskResult[int, TaskError]:
+) -> Result[int, TaskError]:
     _ = runtime
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 def _second_positional(
     runtime: TaskRuntime,
     other: TaskRuntime,
-) -> TaskResult[int, TaskError]:
+) -> Result[int, TaskError]:
     _ = (runtime, other)
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-def _in_a_container(*, runtimes: list[TaskRuntime]) -> TaskResult[int, TaskError]:
+def _in_a_container(*, runtimes: list[TaskRuntime]) -> Result[int, TaskError]:
     _ = runtimes
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-def _in_a_model(*, holder: _HoldsRuntime) -> TaskResult[int, TaskError]:
+def _in_a_model(*, holder: _HoldsRuntime) -> Result[int, TaskError]:
     _ = holder
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
-def _as_the_ok_type(runtime: TaskRuntime) -> TaskResult[TaskRuntime, TaskError]:
-    return TaskResult(ok=runtime)
+def _as_the_ok_type(runtime: TaskRuntime) -> Result[TaskRuntime, TaskError]:
+    return Ok(runtime)
 
 
 class TestRegistration:
@@ -331,9 +333,9 @@ class TestRegistration:
     def test_a_positional_only_runtime_parameter_registers(self) -> None:
         app = _app()
 
-        def positional_only(runtime: TaskRuntime, /, *, x: int) -> TaskResult[int, TaskError]:
+        def positional_only(runtime: TaskRuntime, /, *, x: int) -> Result[int, TaskError]:
             _ = runtime
-            return TaskResult(ok=x)
+            return Ok(x)
 
         registered = app.task('runtime.positional_only')(positional_only)
 
@@ -348,7 +350,7 @@ class TestRegistration:
             (_second_positional, "parameter 'other'"),
             (_in_a_container, "parameter 'runtimes'"),
             (_in_a_model, "parameter 'holder'"),
-            (_as_the_ok_type, 'return TaskResult ok slot'),
+            (_as_the_ok_type, 'return Result ok slot'),
         ],
         ids=[
             'keyword-only',
@@ -444,7 +446,11 @@ class TestProducerPaths:
 
 
 def _ok_of(envelope: str, ok_type: Any) -> Any:
-    return decode_task_result(loads_json(envelope).unwrap(), ok_type).unwrap()
+    match decode_task_result(loads_json(envelope).unwrap(), ok_type):
+        case Succeeded(value=value):
+            return value
+        case Failed(error=error):
+            raise AssertionError(f'the stored result is an error: {error!r}')
 
 
 def _run_isolated(

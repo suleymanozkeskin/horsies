@@ -27,7 +27,8 @@ from tests.session_database import suite_database_url
 # Rebuild AppConfig to resolve forward references
 AppConfig.model_rebuild()
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowHandle,
@@ -44,7 +45,7 @@ from tests.fixtures.child_core import (
     install_child_core_handle,
 )
 from horsies.core.workflows.engine import start_workflow_async
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 from tests.sqlalchemy_url import sqlalchemy_url
 
 
@@ -145,8 +146,8 @@ def make_simple_task(app: Horsies, name: str = 'simple_task') -> Any:
     """Create a simple task that doubles its input."""
 
     @app.task(task_name=name)
-    def simple_task(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value * 2)
+    def simple_task(*, value: int) -> Result[int, TaskError]:
+        return Ok(value * 2)
 
     return simple_task
 
@@ -158,8 +159,8 @@ def make_simple_ctx_task(app: Horsies, name: str = 'simple_ctx_task') -> Any:
     def simple_ctx_task(
         *, value: int,
         workflow_ctx: WorkflowContext | None = None,
-    ) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value * 2)
+    ) -> Result[int, TaskError]:
+        return Ok(value * 2)
 
     return simple_ctx_task
 
@@ -168,10 +169,8 @@ def make_failing_task(app: Horsies, name: str = 'failing_task') -> Any:
     """Create a task that always fails."""
 
     @app.task(task_name=name)
-    def failing_task() -> TaskResult[int, TaskError]:
-        return TaskResult(
-            err=TaskError(error_code='DELIBERATE_FAIL', message='Test failure')
-        )
+    def failing_task() -> Result[int, TaskError]:
+        return Err(TaskError(error_code='DELIBERATE_FAIL', message='Test failure'))
 
     return failing_task
 
@@ -180,8 +179,8 @@ def make_identity_task(app: Horsies, name: str = 'identity_task') -> Any:
     """Create a task that returns its input unchanged."""
 
     @app.task(task_name=name)
-    def identity_task(*, value: JsonValue = None) -> TaskResult[JsonValue, TaskError]:
-        return TaskResult(ok=value)
+    def identity_task(*, value: JsonValue = None) -> Result[JsonValue, TaskError]:
+        return Ok(value)
 
     return identity_task
 
@@ -191,17 +190,19 @@ def make_args_receiver_task(app: Horsies, name: str = 'args_receiver') -> Any:
 
     @app.task(task_name=name)
     def args_receiver(
-        *, input_result: TaskResult[int, TaskError],
-    ) -> TaskResult[int, TaskError]:
-        if input_result.is_err():
-            return TaskResult(
-                err=TaskError(
-                    error_code='UPSTREAM_FAILED',
-                    message='Upstream task failed',
-                    data={'upstream_error': input_result.err},
+        *, input_result: TaskOutcome[int, TaskError],
+    ) -> Result[int, TaskError]:
+        match input_result:
+            case Succeeded(value=value):
+                return Ok(value + 10)
+            case Failed(error=error):
+                return Err(
+                    TaskError(
+                        error_code='UPSTREAM_FAILED',
+                        message='Upstream task failed',
+                        data={'upstream_error': error},
+                    )
                 )
-            )
-        return TaskResult(ok=input_result.unwrap() + 10)
 
     return args_receiver
 
@@ -211,12 +212,14 @@ def make_recovery_task(app: Horsies, name: str = 'recovery_task') -> Any:
 
     @app.task(task_name=name)
     def recovery_task(
-        *, input_result: TaskResult[int, TaskError],
-    ) -> TaskResult[int, TaskError]:
-        if input_result.is_err():
-            # Recover by returning a default value
-            return TaskResult(ok=999)
-        return TaskResult(ok=input_result.unwrap())
+        *, input_result: TaskOutcome[int, TaskError],
+    ) -> Result[int, TaskError]:
+        match input_result:
+            case Succeeded(value=value):
+                return Ok(value)
+            case Failed():
+                # Recover by returning a default value
+                return Ok(999)
 
     return recovery_task
 
@@ -227,11 +230,11 @@ def make_ctx_receiver_task(app: Horsies, name: str = 'ctx_receiver') -> Any:
     @app.task(task_name=name)
     def ctx_receiver(
         *, workflow_ctx: WorkflowContext | None = None,
-    ) -> TaskResult[dict[str, JsonValue], TaskError]:
+    ) -> Result[dict[str, JsonValue], TaskError]:
         if workflow_ctx is None:
-            return TaskResult(ok={'ctx': None})
-        return TaskResult(
-            ok={
+            return Ok({'ctx': None})
+        return Ok(
+            {
                 'workflow_id': workflow_ctx.workflow_id,
                 'task_index': workflow_ctx.task_index,
                 'task_name': workflow_ctx.task_name,
@@ -246,8 +249,8 @@ def make_no_ctx_task(app: Horsies, name: str = 'no_ctx_task') -> Any:
     """Create a task that does NOT declare workflow_ctx param."""
 
     @app.task(task_name=name)
-    def no_ctx_task(*, value: int = 0) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value + 1)
+    def no_ctx_task(*, value: int = 0) -> Result[int, TaskError]:
+        return Ok(value + 1)
 
     return no_ctx_task
 
@@ -259,16 +262,18 @@ def make_multi_args_receiver_task(
 
     @app.task(task_name=name)
     def multi_args_receiver(
-        *, first: TaskResult[int, TaskError],
-        second: TaskResult[int, TaskError],
-    ) -> TaskResult[int, TaskError]:
-        if first.is_err() or second.is_err():
-            return TaskResult(
-                err=TaskError(
-                    error_code='UPSTREAM_FAILED', message='One or more upstreams failed'
+        *, first: TaskOutcome[int, TaskError],
+        second: TaskOutcome[int, TaskError],
+    ) -> Result[int, TaskError]:
+        match (first, second):
+            case (Succeeded(value=first_value), Succeeded(value=second_value)):
+                return Ok(first_value + second_value)
+            case _:
+                return Err(
+                    TaskError(
+                        error_code='UPSTREAM_FAILED', message='One or more upstreams failed'
+                    )
                 )
-            )
-        return TaskResult(ok=first.unwrap() + second.unwrap())
 
     return multi_args_receiver
 
@@ -288,8 +293,8 @@ def make_retryable_task(
         task_name=name,
         retry_policy=RetryPolicy.fixed(intervals, auto_retry_for=['TASK_EXCEPTION']),
     )
-    def retryable_task(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value * 2)
+    def retryable_task(*, value: int) -> Result[int, TaskError]:
+        return Ok(value * 2)
 
     return retryable_task
 
@@ -347,7 +352,7 @@ async def _phase_one(
     task_id: str,
     task_name: str,
     claimed_at: datetime,
-    result: TaskResult[Any, TaskError],
+    result: Result[Any, TaskError],
 ) -> NodeFacts:
     """Phase 1 of the RUNNING task through the core handle of ``broker``: the
     success (``finish_workflow_success_async``), or the failure with no retry
@@ -361,8 +366,8 @@ async def _phase_one(
     encoded = dumps_json(encode_task_result(result, Any if ok_type is None else ok_type))
     if is_err(encoded):
         pytest.fail(f'the result of task {task_id} does not encode: {encoded.err_value}')
-    match result.err:
-        case None:
+    match result:
+        case Ok():
             succeeded = await handle.finish_workflow_success_async(
                 uuid.UUID(task_id),
                 worker_id=FINISH_WORKER_ID,
@@ -374,7 +379,7 @@ async def _phase_one(
                     return owed.step
                 case _:
                     pytest.fail(f'phase 1 of the success of task {task_id}: {succeeded!r}')
-        case error:
+        case Err(err_value=error):
             failed = await handle.finish_failed_attempt_async(
                 core.FinishFailedAttemptRequest(
                     task_id=uuid.UUID(task_id),
@@ -410,7 +415,7 @@ async def finish_phase_one(
     broker: PostgresBroker,
     workflow_id: str,
     task_index: int,
-    result: TaskResult[Any, TaskError],
+    result: Result[Any, TaskError],
 ) -> PhaseOneDone:
     """Phase 1 of the task of node ``task_index``, as a worker writes it.
 
@@ -481,7 +486,7 @@ async def finish_task(
     broker: PostgresBroker,
     workflow_id: str,
     task_index: int,
-    result: TaskResult[Any, TaskError],
+    result: Result[Any, TaskError],
 ) -> None:
     """End the task of node ``task_index`` as a worker does: phase 1
     (``finish_phase_one``), then phase 2 (``finish_phase_two``)."""

@@ -20,7 +20,8 @@ from horsies.core.errors import (
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
     TaskNode,
@@ -1046,7 +1047,7 @@ class TestRecursiveSubworkflowBindingInCheck:
 
             @classmethod
             def build_with(
-                cls, app: Horsies, v: TaskResult[int, TaskError],
+                cls, app: Horsies, v: TaskOutcome[int, TaskError],
             ) -> WorkflowSpec[Any]:
                 bad = TaskNode(fn=_mock_fn('ghost'), node_id='bad')
                 return WorkflowSpec(name=cls.name, tasks=[bad], output=bad)

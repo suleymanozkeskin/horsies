@@ -15,10 +15,11 @@ import pytest
 
 from horsies.core.codec.json_value import JsonValue
 from horsies.core.errors import ErrorCode, WorkflowValidationError
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
 from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
@@ -44,8 +45,8 @@ class MockFn(TaskFunction[Any, Any]):
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
-    def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    def __call__(self, *args: Any, **kwargs: Any) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -92,8 +93,8 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
         *args: Any,
         workflow_ctx: WorkflowContext | None = None,
         **kwargs: Any,
-    ) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    ) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -131,23 +132,23 @@ def _target_a(
     url: str = '',
     data: JsonValue = None,
     payload: SnapshotPayload | None = None,
-) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=None)
+) -> Result[Any, TaskError]:
+    return Ok(None)
 
 
 def _target_b(
     *,
-    data: TaskResult[Any, TaskError] | None = None,
-) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=None)
+    data: TaskOutcome[Any, TaskError] | None = None,
+) -> Result[Any, TaskError]:
+    return Ok(None)
 
 
 def _target_c(
     *,
-    data: TaskResult[Any, TaskError] | None = None,
+    data: TaskOutcome[Any, TaskError] | None = None,
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=None)
+) -> Result[Any, TaskError]:
+    return Ok(None)
 
 
 fn_a = MockFn(task_name='task_a')
@@ -158,7 +159,7 @@ fn_c = MockFnWithCtx(task_name='task_c')
 fn_c._original_fn = _target_c  # type: ignore[attr-defined]
 
 
-def _jsonvalue_payload_task(payload: JsonValue) -> TaskResult[None, TaskError]:
+def _jsonvalue_payload_task(payload: JsonValue) -> Result[None, TaskError]:
     """Typed task target used by strict-snapshot regressions.
 
     The annotated parameter routes through the JsonValue producer fence
@@ -167,7 +168,7 @@ def _jsonvalue_payload_task(payload: JsonValue) -> TaskResult[None, TaskError]:
     ``WORKFLOW_KWARGS_NOT_SERIALIZABLE`` at workflow-spec construction.
     """
     _ = payload
-    return TaskResult(ok=None)
+    return Ok(None)
 
 
 def _typed_jsonvalue_fn(task_name: str) -> MockFn:

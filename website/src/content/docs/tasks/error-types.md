@@ -1,14 +1,14 @@
 ---
 title: Error Types
 section: python
-summary: The Python types of task errors, broker errors, send errors, workflow start and handle errors, and startup errors.
+summary: The Python types of task errors, read errors, broker errors, send errors, workflow start and handle errors, and startup errors.
 related: [errors, error-handling, retrieving-results, sending-tasks]
-tags: [errors, TaskError, TaskResult, BrokerOperationError, TaskSendError, HorsiesError]
+tags: [errors, TaskError, ReadError, ReadResult, TaskOutcome, BrokerOperationError, TaskSendError, HorsiesError]
 ---
 
 # Error Types
 
-The Python types that carry the error codes of the [Errors Reference](/horsies/tasks/errors/). A task returns `TaskResult[T, TaskError]`; a broker call returns `BrokerResult[T]`; a send returns `TaskSendResult`; a workflow start returns `WorkflowStartResult`; a workflow handle call returns `HandleResult`. Startup errors raise `HorsiesError`.
+The Python types that carry the error codes of the [Errors Reference](/horsies/tasks/errors/). A task returns `Result[T, TaskError]`; a result read returns `ReadResult[T, TaskError]`; a broker call returns `BrokerResult[T]`; a send returns `TaskSendResult`; a workflow start returns `WorkflowStartResult`; a workflow handle call returns `HandleResult`. Startup errors raise `HorsiesError`.
 
 ## TaskError
 
@@ -33,9 +33,71 @@ When a value fails pydantic validation, the library writes each failure as `<loc
 
 The cause object follows the same rule. Where the library catches a pydantic `ValidationError`, it keeps a `ValueValidationError` with the same text instead (`horsies.core.codec.ValueValidationError`, a subclass of `SerializationError` and of `ValueError`). For example, `TaskSendValidationFailed.exception` is a `ValueValidationError` when a kwarg fails its declared type. When task code raises a `ValidationError`, the stored `TaskError` keeps the same text in `message` and in the `repr` and `traceback` of the flattened exception.
 
+## Read Errors (ReadResult)
+
+`TaskHandle.get()`, `WorkflowHandle.get()`, `WorkflowHandle.result_for()`, `app.get_result()` and their `*_async` forms return `ReadResult[T, TaskError]` = `Ok[Succeeded[T]] | Ok[Failed[TaskError]] | Err[ReadError]`:
+
+- `Ok(Succeeded(value))`: the task returned `value`.
+- `Ok(Failed(task_error))`: the task returned `task_error`, or the library recorded it (`TASK_CANCELLED`, `TASK_TIMEOUT`, `WORKER_CRASHED`, ...).
+- `Err(read_error)`: the read gave no outcome.
+
+`ReadError` is a closed union of frozen classes, one class per catalog code. Every class has `code` (its catalog member) and `message` (the subject and the cause). `BrokerError` adds `retryable` (whether the cause may clear) and `exception` (the cause, or `NoCause()`). Match on the class; a `match` that omits a class fails pyright's exhaustiveness check.
+
+| Class | `code` | When | Kept by a `TaskHandle` |
+| ----- | ------ | ---- | ---------------------- |
+| `WaitTimeout` | `RetrievalCode.WAIT_TIMEOUT` | The task or the workflow did not end before the wait limit. It may still run | No |
+| `TaskNotFound` | `RetrievalCode.TASK_NOT_FOUND` | Neither the live table nor the task history holds the task. A handle built by id can race the commit of its send | No |
+| `WorkflowNotFound` | `RetrievalCode.WORKFLOW_NOT_FOUND` | No workflow has the id of the handle | – |
+| `ResultNotAvailable` | `RetrievalCode.RESULT_NOT_AVAILABLE` | The task reached a terminal status and stored no result, or the handle has no broker | Yes |
+| `ResultNotReady` | `RetrievalCode.RESULT_NOT_READY` | `result_for()`: the node stores no result yet | – |
+| `WaitInsideTask` | `RetrievalCode.WAIT_INSIDE_TASK` | A result wait in a process that runs task bodies. Nothing was read | No |
+| `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form | No |
+| `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
+| `ResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types | Yes |
+| `BrokerError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed. A later read may succeed | No |
+| `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value: the handle was built by id, or the task is not registered here | Yes |
+| `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `result_for()` got a node with no `node_id`. Nothing was read | – |
+
+A failed task decodes without a declared type, so `NoTypeAvailable` comes only for a task that succeeded. A process that does not import the task code still reads failed tasks.
+
+A read does its checks before it reads, in this order. Only the first check that fails gives its class:
+
+1. `InvalidInput`: the wait limit (`timeout_ms`) is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`.
+2. `WaitInsideTask`: the read runs in a process that runs task bodies.
+3. A `TaskHandle` returns the read that it keeps.
+4. `AsyncContext`: a sync read runs on a thread that runs an event loop.
+
+The Rust and the TypeScript clients use the same order. So a read inside a task with a wait above the limit gives `InvalidInput` in each client.
+
+```python
+from horsies import (
+    BrokerError,
+    Err,
+    Failed,
+    Ok,
+    ReadResult,
+    Succeeded,
+    TaskError,
+    TaskNotFound,
+    WaitTimeout,
+)
+
+
+def describe_read(read: ReadResult[int, TaskError]) -> str:
+    match read:
+        case Ok(Succeeded(value)):
+            return f'value: {value}'
+        case Ok(Failed(task_error)):
+            return f'task failed: {task_error.error_code}'
+        case Err(WaitTimeout() | TaskNotFound() | BrokerError()):
+            return 'no outcome yet: read again later'
+        case Err(read_error):
+            return f'no outcome: {read_error.code}: {read_error.message}'
+```
+
 ## Broker Errors (BrokerResult)
 
-`app.get_result_async()` and broker methods return `BrokerResult[T]` = `Result[T, BrokerOperationError]`. The outer `Err` is an infrastructure-level failure, distinct from the inner `TaskResult.err`.
+Broker methods return `BrokerResult[T]` = `Result[T, BrokerOperationError]`. The `Err` is an infrastructure-level failure, distinct from a `TaskError` in `Failed`.
 
 Three broker methods return a subset of `BrokerOperationError`, their only failures:
 
@@ -113,7 +175,7 @@ When the core ran the call and the call failed, `exception` is the core's class 
 | `LISTENER_START_FAILED` | LISTEN/NOTIFY listener failed to start | Varies |
 | `LISTENER_SUBSCRIBE_FAILED` | LISTEN/NOTIFY subscribe failed | Varies |
 | `NO_BROKER` | Operation needs a broker, but none is configured | No |
-| `ASYNC_CONTEXT` | A sync method (`app.get_result()`, `app.ping_database()`, `broker.close()`, ...) was called on a thread that runs an event loop; nothing ran. Call the `*_async` form | No |
+| `ASYNC_CONTEXT` | A sync method (`app.get_raw_result()`, `app.ping_database()`, `broker.close()`, ...) was called on a thread that runs an event loop; nothing ran. Call the `*_async` form | No |
 | `NO_TYPE_AVAILABLE` | Typed decode at the `app` layer needs an `ok_type`, but `task_name` is not in the local task registry | No |
 | `INVALID_JSON_PAYLOAD` | Stored result JSON is malformed, not a JSON object, has an invalid strict-serde envelope, or fails app-level typed slot decode | No |
 | `INVALID_TASK_OPTIONS` | `enqueue_async` received task options that are not valid JSON or not a JSON object, a `retry_policy` that does not validate as `RetryPolicy` (strict types, no unknown fields), an `execution` that is not an `Execution` value, or a `cancel_grace_ms` that does not fit the class (100 to 10,000 ms for `SHARED_ASYNC`; absent, null, or 100 to 10,000 ms for `ISOLATED`; absent or null for `SHARED_THREAD`), or a `SHARED_ASYNC` or `SHARED_THREAD` class with no `timeout_ms` (absent or null). The message names each failing field. Nothing was written | No |
@@ -177,11 +239,9 @@ def raise_broker_error(err: BrokerOperationError) -> None:
             raise RuntimeError(err.message) from cause
 ```
 
-Failed-task results decode without an `ok_type`, so `BrokerErrorCode.NO_TYPE_AVAILABLE` only fires for the success path. Reading failed tasks across processes that don't import the user code still works.
-
 ## Send Errors (TaskSendResult)
 
-Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.send_async()`, `.schedule()` and `.schedule_async()`. These are separate from `TaskResult` -- they indicate that enqueuing the task itself failed, not that task execution failed.
+Send errors are returned via `TaskSendResult[TaskHandle[T]]` from `.send()`, `.send_async()`, `.schedule()` and `.schedule_async()`. These are separate from the result of the task: they indicate that enqueuing the task itself failed, not that task execution failed.
 
 ### TaskSendError
 
@@ -240,7 +300,7 @@ The retry methods accept `ENQUEUE_FAILED` and `ASYNC_CONTEXT` (`WorkflowStartRet
 
 ## Workflow Handle Errors (HandleResult)
 
-`WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) and `pause_workflow()` / `resume_workflow()` and their sync forms return `HandleResult[T]` = `Result[T, HandleOperationError]`. `get()` and `result_for()` return a `TaskResult` and use `RetrievalCode` instead.
+`WorkflowHandle` methods that read or change the workflow row (`status()`, `results()`, `tasks()`, `cancel()`, `pause()`, `resume()` and their `*_async` forms) and `pause_workflow()` / `resume_workflow()` and their sync forms return `HandleResult[T]` = `Result[T, HandleOperationError]`. `get()`, `result_for()` and their `*_async` forms return a `ReadResult` instead: see [Read Errors](#read-errors-readresult).
 
 `HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. `message` and the cause do not show in `repr()`. Match on the variant. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
 
@@ -252,20 +312,20 @@ Domain-specific errors use string codes:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import TaskResult, TaskError, JsonValue
+from horsies import Err, JsonValue, Ok, Result, TaskError
 
 @app.task("validate_order")
-def validate_order(*, order_id: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def validate_order(*, order_id: str) -> Result[dict[str, JsonValue], TaskError]:
     order = get_order(order_id)
 
     if order.total > 10000:
-        return TaskResult(err=TaskError(
+        return Err(TaskError(
             error_code="ORDER_LIMIT_EXCEEDED",
             message=f"Order {order_id} exceeds limit",
             data={"order_id": order_id, "total": order.total},
         ))
 
-    return TaskResult(ok={"status": "valid"})
+    return Ok({"status": "valid"})
 ```
 
 Declare a task's codes with `error_codes=` to give each one its own value of the `error_code` metric label; another user code counts as `undeclared` there. See [Declare Error Codes](/horsies/tasks/defining-tasks/#declare-error-codes).
@@ -277,7 +337,7 @@ User-defined codes are auto-retried when listed in `auto_retry_for`:
     "call_api",
     retry_policy=RetryPolicy.fixed([30, 60, 120], auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"]),
 )
-def call_api(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def call_api(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
     ...
 ```
 
@@ -385,13 +445,24 @@ except HorsiesError as e:
 
 ## API Reference
 
-### TaskResult[T, TaskError]
+### `Result[T, TaskError]`
 
-| Property/Method | Type | Description |
-| --------------- | ---- | ----------- |
-| `is_ok()` | `bool` | True if success |
-| `is_err()` | `bool` | True if error |
-| `ok` | `T \| None` | Success value or `None` |
-| `err` | `TaskError \| None` | Error value or `None` |
-| `ok_value` | `T` | Success value; raises `ValueError` if error |
-| `err_value` | `TaskError` | Error value; raises `ValueError` if success |
+The return type of a task body: `Ok[T] | Err[TaskError]`.
+
+| Member | Field | Description |
+| ------ | ----- | ----------- |
+| `Ok(value)` | `ok_value: T` | The task succeeded with `value` |
+| `Err(error)` | `err_value: TaskError` | The task failed with `error` |
+
+### `TaskOutcome[T, TaskError]`
+
+How a task ended: `Succeeded[T] | Failed[TaskError]`. A workflow node input from `args_from` and `WorkflowContext.result_for()` have this type.
+
+| Class | Field | Description |
+| ----- | ----- | ----------- |
+| `Succeeded` | `value: T` | The task returned this value |
+| `Failed` | `error: TaskError` | The task returned this error, or the library recorded it |
+
+### `ReadResult[T, TaskError]`
+
+The result of a read: `Ok[Succeeded[T]] | Ok[Failed[TaskError]] | Err[ReadError]`. The classes of `ReadError` are in [Read Errors](#read-errors-readresult).

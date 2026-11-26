@@ -61,9 +61,9 @@ order_log.addHandler(order_handler)
 
 
 @app.task('charge_card')
-def charge_card(*, amount_cents: int) -> TaskResult[str, TaskError]:
+def charge_card(*, amount_cents: int) -> Result[str, TaskError]:
     order_log.info('charging card')
-    return TaskResult(ok='charged')
+    return Ok('charged')
 ```
 
 Inside the body of a task in a worker child, each record of `order_log` gets:

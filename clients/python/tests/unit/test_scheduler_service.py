@@ -21,7 +21,8 @@ from horsies.core.models.schedule import (
     TaskSchedule,
 )
 from horsies.core.models.payload import PayloadPolicy
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import WorkflowContext
 from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.validation import (
@@ -243,12 +244,12 @@ class TestEncodeScheduleKwargs:
         assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'not encodable' in result.err_value.message
 
-    def test_taskresult_typed_kwarg_rejected(self) -> None:
-        def f(dep: TaskResult[int, TaskError]) -> str:
+    def test_outcome_typed_kwarg_rejected(self) -> None:
+        def f(dep: TaskOutcome[int, TaskError]) -> str:
             return 'ok'
 
         app = self._make_app_with_task(_make_task_mock(f))
-        result = _encode_schedule_kwargs(app, self._schedule({'dep': TaskResult(ok=1)}))
+        result = _encode_schedule_kwargs(app, self._schedule({'dep': Succeeded(1)}))
         assert is_err(result)
         assert result.err_value.code == ErrorCode.CONFIG_INVALID_SCHEDULE
         assert 'not encodable' in result.err_value.message

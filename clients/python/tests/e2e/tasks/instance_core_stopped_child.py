@@ -43,7 +43,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import RetryPolicy, TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
@@ -140,22 +141,22 @@ def _stop_the_core(delay_s: float, marker_path: str) -> None:
 
 
 @app.task(task_name='e2e_core_stopped_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
 @app.task(task_name='e2e_core_stops_after_return')
-def stops_after_return(*, marker_path: str) -> TaskResult[int, TaskError]:
+def stops_after_return(*, marker_path: str) -> Result[int, TaskError]:
     """Arm the panic, which comes ``STOP_DELAY_S`` later, and return the
     process id of the child."""
     _stop_the_core(STOP_DELAY_S, marker_path)
-    return TaskResult(ok=os.getpid())
+    return Ok(os.getpid())
 
 
 @app.task(task_name='e2e_core_stopped_child_pid')
-def child_pid() -> TaskResult[int, TaskError]:
+def child_pid() -> Result[int, TaskError]:
     """The process id of the child that runs this task."""
-    return TaskResult(ok=os.getpid())
+    return Ok(os.getpid())
 
 
 def _wait_for_the_stop() -> None:
@@ -169,7 +170,7 @@ def _wait_for_the_stop() -> None:
     task_name='e2e_core_stops_during_body',
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['WORKER_CRASHED']),
 )
-def stops_during_body(*, runs_path: str, marker_path: str) -> TaskResult[int, TaskError]:
+def stops_during_body(*, runs_path: str, marker_path: str) -> Result[int, TaskError]:
     """Append the process id of the child to ``runs_path``, stop the core of
     the child, wait for the stop, and return the process id. The retry
     policy runs the task again if the run takes the crashed-child path, so
@@ -178,23 +179,23 @@ def stops_during_body(*, runs_path: str, marker_path: str) -> TaskResult[int, Ta
         runs.write(f'{os.getpid()}\n')
     _stop_the_core(0.0, marker_path)
     _wait_for_the_stop()
-    return TaskResult(ok=os.getpid())
+    return Ok(os.getpid())
 
 
 @app.task(
     task_name='e2e_core_stops_and_interrupts_body',
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['WORKER_CRASHED']),
 )
-def interrupted_in_body(*, first_run_path: str, marker_path: str) -> TaskResult[int, TaskError]:
+def interrupted_in_body(*, first_run_path: str, marker_path: str) -> Result[int, TaskError]:
     """The first run (no file at ``first_run_path``) writes that file, stops
     the core of its child, waits for the stop, then sends ``child_pid``: the
     send raises ``CoreStopped``, which ends the body. Every later run
     returns the process id of its child."""
     if os.path.exists(first_run_path):
-        return TaskResult(ok=os.getpid())
+        return Ok(os.getpid())
     with open(first_run_path, 'w', encoding='ascii') as first_run:
         first_run.write(str(os.getpid()))
     _stop_the_core(0.0, marker_path)
     _wait_for_the_stop()
     _ = child_pid.send()
-    return TaskResult(ok=os.getpid())
+    return Ok(os.getpid())

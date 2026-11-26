@@ -68,9 +68,9 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies._core import CoreConnectionError
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.types.status import TaskStatus
 from horsies.core.history.errors import HistoryContractError
 from horsies._catalog.monitoring_bounds import LIST_ROW_BOUND
@@ -1122,8 +1122,8 @@ class TestTaskBreakdown:
 
 def _stored_error(message: str) -> str:
     """The stored result text of a failed node whose error has ``message``."""
-    failed: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(error_code='ORDER_REJECTED', message=message),
+    failed: Result[None, TaskError] = Err(
+        TaskError(error_code='ORDER_REJECTED', message=message),
     )
     match dumps_json(encode_task_result(failed, type(None))):
         case Ok(text_value):
@@ -1134,7 +1134,7 @@ def _stored_error(message: str) -> str:
 
 def _stored_value(value: int) -> str:
     """The stored result text of a node that completed with ``value``."""
-    completed: TaskResult[int, TaskError] = TaskResult(ok=value)
+    completed: Result[int, TaskError] = Ok(value)
     match dumps_json(encode_task_result(completed, int)):
         case Ok(text_value):
             return text_value

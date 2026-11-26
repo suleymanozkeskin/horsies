@@ -25,14 +25,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
     WorkflowDefinition,
     OnError,
 )
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.workflows.engine import resume_workflow
 
 from .conftest import finish_task, make_simple_task, start_ok
@@ -67,12 +67,12 @@ class PausingChildWorkflow(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
         @app.task(task_name='pausing_child_c')
-        def child_task_c() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def child_task_c() -> Result[int, TaskError]:
+            return Ok(1)
 
         @app.task(task_name='pausing_child_d')
-        def child_task_d(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value * 2)
+        def child_task_d(*, value: int) -> Result[int, TaskError]:
+            return Ok(value * 2)
 
         node_c: TaskNode[int] = TaskNode(fn=child_task_c)
         node_d: TaskNode[int] = TaskNode(fn=child_task_d, kwargs={'value': 1}, waits_for=[node_c])
@@ -158,7 +158,7 @@ class TestCascadeResumeMissingCompletionCheck:
             broker,
             child_wf_id,
             0,
-            TaskResult(err=TaskError(error_code='CHILD_FAIL', message='C failed')),
+            Err(TaskError(error_code='CHILD_FAIL', message='C failed')),
         )
         await session.commit()
         session.expire_all()
@@ -176,7 +176,7 @@ class TestCascadeResumeMissingCompletionCheck:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='PARENT_FAIL', message='A failed')),
+            Err(TaskError(error_code='PARENT_FAIL', message='A failed')),
         )
         await session.commit()
         session.expire_all()

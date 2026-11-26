@@ -21,10 +21,11 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import WaitTimeout
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
 from horsies.core.models.workflow.handle import WorkflowHandle
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Err, Ok, Result, is_ok
 from horsies.core.workflows.lifecycle import (
     pause_workflow_sync,
     resume_workflow_sync,
@@ -65,8 +66,8 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         ))
 
         @app.task('routing.value')
-        def value_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def value_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         node: TaskNode[int] = TaskNode(fn=value_task, kwargs={'value': 1})
         spec = app.workflow('routing.flow', [node], output=node, definition_key='routing.flow.v1')
@@ -132,7 +133,7 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
         broker._core_handle.workflow_status_async.assert_not_called()
         assert threads == [threading.current_thread()]
 
-    def test_handle_fold_strategy(self) -> None:
+    def test_handle_read_strategy(self) -> None:
         threads: list[threading.Thread] = []
         broker = MagicMock()
         broker._core_handle.wait_workflow_result = _on_this_thread(
@@ -144,7 +145,8 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
 
         result = handle.get(timeout_ms=5)
 
-        assert result.is_err()
+        assert isinstance(result, Err)
+        assert isinstance(result.err_value, WaitTimeout)
         broker._core_handle.wait_workflow_result.assert_called_once_with(
             WORKFLOW_KEY, timeout_ms=5,
         )

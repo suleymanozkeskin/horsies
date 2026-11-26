@@ -16,12 +16,14 @@ import time
 
 from horsies import (
     Err,
+    Failed,
     Ok,
     OperationalErrorCode,
+    Result,
     RetryPolicy,
+    Succeeded,
     TaskError,
     TaskNode,
-    TaskResult,
     WorkflowContext,
 )
 
@@ -56,25 +58,25 @@ def reserve_stock(
     line_no: int,
     sku: str,
     quantity: int,
-) -> TaskResult[StockReservation, TaskError]:
+) -> Result[StockReservation, TaskError]:
     """Hold stock for one order line. One node per line runs in parallel."""
     simulate.perform(tuning.RESERVE_STOCK_WORK, order_id, sku, 'reserve')
 
     match store.reserve_line(order_id, line_no, sku, quantity):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(outcome):
             if not outcome.known_sku:
-                return TaskResult(
-                    err=TaskError(
+                return Err(
+                    TaskError(
                         error_code=UNKNOWN_SKU,
                         message=f'{sku} is not in the catalog',
                         data={'order_id': order_id, 'sku': sku},
                     ),
                 )
             if not outcome.reserved:
-                return TaskResult(
-                    err=TaskError(
+                return Err(
+                    TaskError(
                         error_code=INSUFFICIENT_STOCK,
                         message=(
                             f'{sku} has {outcome.available} available, '
@@ -88,8 +90,8 @@ def reserve_stock(
                         },
                     ),
                 )
-            return TaskResult(
-                ok=StockReservation(
+            return Ok(
+                StockReservation(
                     order_id=order_id,
                     sku=sku,
                     quantity=quantity,
@@ -111,24 +113,24 @@ def release_stock(
     *,
     sku: str,
     quantity: int,
-) -> TaskResult[StockRelease, TaskError]:
+) -> Result[StockRelease, TaskError]:
     """Hand reserved units back to available stock."""
     simulate.perform(tuning.RELEASE_STOCK_WORK, sku, 'release')
 
     match store.release_line(sku, quantity):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(available):
             if available is None:
-                return TaskResult(
-                    err=TaskError(
+                return Err(
+                    TaskError(
                         error_code=UNKNOWN_SKU,
                         message=f'{sku} is not in the catalog',
                         data={'sku': sku},
                     ),
                 )
-            return TaskResult(
-                ok=StockRelease(sku=sku, quantity=quantity, available_after=available),
+            return Ok(
+                StockRelease(sku=sku, quantity=quantity, available_after=available),
             )
 
 
@@ -140,7 +142,7 @@ def release_stock(
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def replenish_catalog(*, target_units: int) -> TaskResult[StocktakeSummary, TaskError]:
+def replenish_catalog(*, target_units: int) -> Result[StocktakeSummary, TaskError]:
     """Nightly stocktake: clear stale reservations, top every SKU back up.
 
     An always-on shop drains its finite catalog: orders that fail after
@@ -157,10 +159,10 @@ def replenish_catalog(*, target_units: int) -> TaskResult[StocktakeSummary, Task
 
     match store.nightly_stocktake(target_units, tuning.STOCKTAKE_CEILING_UNITS):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok((topped_up, cleared)):
-            return TaskResult(
-                ok=StocktakeSummary(
+            return Ok(
+                StocktakeSummary(
                     skus_topped_up=topped_up,
                     reservations_cleared=cleared,
                     target_units=target_units,
@@ -187,7 +189,7 @@ def _feed_window() -> str:
     ),
     exception_mapper={TimeoutError: SUPPLIER_TIMEOUT},
 )
-def sync_supplier_feed(*, supplier: str) -> TaskResult[SupplierFeed, TaskError]:
+def sync_supplier_feed(*, supplier: str) -> Result[SupplierFeed, TaskError]:
     """Pull a supplier's catalog feed.
 
     Raises `TimeoutError` when the supplier stalls. The task never converts it:
@@ -202,10 +204,10 @@ def sync_supplier_feed(*, supplier: str) -> TaskResult[SupplierFeed, TaskError]:
 
     match store.count_products():
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(sku_count):
-            return TaskResult(
-                ok=SupplierFeed(
+            return Ok(
+                SupplierFeed(
                     supplier=supplier,
                     sku_count=sku_count,
                     changed_count=simulate.integer(0, 12, supplier, window, 'changed'),
@@ -235,7 +237,7 @@ def update_stock_levels(
     *,
     feed_node_ids: list[str],
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[RestockPlan, TaskError]:
+) -> Result[RestockPlan, TaskError]:
     """Apply whatever supplier feeds reported — the quorum aggregate.
 
     Its node declares `join='quorum'` with `min_success=2`, so it fires as soon
@@ -244,8 +246,8 @@ def update_stock_levels(
     every lookup is guarded rather than assumed.
     """
     if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(
+        return Err(
+            TaskError(
                 error_code=NO_WORKFLOW_CONTEXT,
                 message='update_stock_levels runs only as a workflow node',
                 data={'feed_node_ids': feed_node_ids},
@@ -254,7 +256,7 @@ def update_stock_levels(
 
     match store.list_catalog():
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(catalog):
             skus = [entry.product.sku for entry in catalog]
 
@@ -267,32 +269,33 @@ def update_stock_levels(
         if not workflow_ctx.has_result(node):
             missing.append(node_id)
             continue
-        feed = workflow_ctx.result_for(node)
-        if feed.is_err():
-            missing.append(node_id)
-            continue
-        supplier = feed.ok_value.supplier
+        match workflow_ctx.result_for(node):
+            case Failed(_):
+                missing.append(node_id)
+                continue
+            case Succeeded(feed):
+                supplier = feed.supplier
         reporting.append(supplier)
         for sku in simulate.sample(
             skus, min(tuning.RESTOCK_SKUS_PER_SUPPLIER, len(skus)), supplier, 'restock',
         ):
             match store.adjust_stock(sku, tuning.RESTOCK_UNITS_PER_SUPPLIER):
                 case Err(error):
-                    return TaskResult(err=store_failure(error))
+                    return Err(store_failure(error))
                 case Ok(applied):
                     adjusted += 1 if applied else 0
 
     if not reporting:
-        return TaskResult(
-            err=TaskError(
+        return Err(
+            TaskError(
                 error_code=QUORUM_NOT_MET,
                 message='no supplier feed reached the aggregate',
                 data={'missing': missing},
             ),
         )
 
-    return TaskResult(
-        ok=RestockPlan(
+    return Ok(
+        RestockPlan(
             suppliers_reporting=reporting,
             suppliers_missing=missing,
             skus_adjusted=adjusted,

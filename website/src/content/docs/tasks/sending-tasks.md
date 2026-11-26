@@ -151,21 +151,29 @@ match await my_task.schedule_async(60, name="alice", count=3):
 ### Wait for Result
 
 ```python
-from horsies import Ok, Err
+from horsies import Err, Failed, Ok, Succeeded
 
 match my_task.send(name="alice", count=3):
     case Ok(handle):
-        # Blocking wait
-        result = handle.get()
+        # Blocking wait, with a timeout in milliseconds
+        match handle.get(timeout_ms=5000):
+            case Ok(Succeeded(value)):
+                print(f"Result: {value}")
+            case Ok(Failed(task_error)):
+                print(f"Task failed: {task_error.error_code}")
+            case Err(read_error):
+                print(f"No result: {read_error.code}")
 
-        # With timeout (milliseconds)
-        result = handle.get(timeout_ms=5000)
+        # Blocking wait with no timeout
+        result = handle.get()
 
         # Async wait
         result = await handle.get_async(timeout_ms=5000)
     case Err(err):
         print(f"Send failed: {err.code}")
 ```
+`get()` and `get_async()` return `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error of the task. `Err(read_error)` means the read gave no outcome, for example `WaitTimeout`. See [Retrieving Results](/horsies/tasks/retrieving-results/).
+
 `get_async()` waits via broker notifications (LISTEN/NOTIFY) with a polling fallback.
 
 ### Fire and Forget
@@ -203,7 +211,8 @@ Pydantic models and dataclasses must be defined in importable modules (not `__ma
 ### Execute Directly (Skip Queue)
 
 ```python
-# Runs immediately in current process (plain Python call; bypasses the queue)
+# Runs immediately in current process (plain Python call; bypasses the queue).
+# Returns the Result[T, TaskError] of the body: Ok(value) or Err(TaskError).
 result = my_task(name="alice", count=3)
 ```
 
@@ -223,14 +232,14 @@ Commit the application transaction, then send, and handle the `Err` result of th
 ```python
 from sqlalchemy import Engine, text
 
-from horsies import Err, Ok, TaskError, TaskResult, TaskSendEnqueueFailed
+from horsies import Err, Ok, Result, TaskError, TaskSendEnqueueFailed
 
 from myapp.instance import app
 
 
 @app.task('send_receipt')
-def send_receipt(*, order_id: str) -> TaskResult[None, TaskError]:
-    return TaskResult(ok=None)
+def send_receipt(*, order_id: str) -> Result[None, TaskError]:
+    return Ok(None)
 
 
 def place_order(engine: Engine, order_id: str) -> None:
@@ -485,7 +494,7 @@ The codes, and which of them the retry methods accept, are in the [Errors Refere
 | Property/Method | Type | Description |
 | --------------- | ---- | ----------- |
 | `.task_id` | `uuid.UUID` | Unique task identifier |
-| `.get(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (blocking) |
-| `.get_async(timeout_ms=None)` | `TaskResult[T, TaskError]` | Wait for result (async) |
+| `.get(timeout_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (blocking) |
+| `.get_async(timeout_ms=None)` | `ReadResult[T, TaskError]` | Wait for result (async) |
 | `.info(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Fetch task metadata from broker |
 | `.info_async(include_result=False, include_failed_reason=False, include_attempts=False)` | `BrokerResult[TaskInfo \| None]` | Async variant of `.info()` |

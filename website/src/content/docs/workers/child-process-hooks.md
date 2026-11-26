@@ -83,13 +83,13 @@ from app.databases.postgres import get_engine
 engine = get_engine()  # module-import time, parent's engine
 
 @app.task("report")
-def report() -> TaskResult[int, TaskError]:
+def report() -> Result[int, TaskError]:
     with engine.connect() as conn:  # rebind never took effect here
         ...
 
 # Correct — resolve at call time
 @app.task("report")
-def report() -> TaskResult[int, TaskError]:
+def report() -> Result[int, TaskError]:
     with get_engine().connect() as conn:
         ...
 ```
@@ -124,7 +124,7 @@ def build_client() -> None:
 ```python
 import asyncio
 
-from horsies import Execution, TaskError, TaskResult
+from horsies import Execution, Ok, Result, TaskError
 
 shared_state: dict[str, asyncio.AbstractEventLoop] = {}
 
@@ -135,8 +135,8 @@ async def remember_loop() -> None:
 
 
 @app.task('loop_check', execution=Execution.SHARED_ASYNC, timeout_ms=5_000)
-async def loop_check() -> TaskResult[bool, TaskError]:
-    return TaskResult(ok=shared_state['loop'] is asyncio.get_running_loop())
+async def loop_check() -> Result[bool, TaskError]:
+    return Ok(shared_state['loop'] is asyncio.get_running_loop())
 ```
 
 - The hooks run after the `on_child_process_start` hooks and after the child opens its async connection pool, in registration order.
@@ -160,9 +160,9 @@ async def open_http_client() -> None:
 
 
 @app.task('get_status', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def get_status(*, url: str) -> TaskResult[int, TaskError]:
+async def get_status(*, url: str) -> Result[int, TaskError]:
     response = await clients['http'].get(url)
-    return TaskResult(ok=response.status_code)
+    return Ok(response.status_code)
 ```
 
 ## API Reference

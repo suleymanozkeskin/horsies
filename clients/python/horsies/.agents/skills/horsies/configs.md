@@ -401,10 +401,11 @@ See website docs `observability/tracing`, `observability/tracing-setup`,
 broker = app.get_broker()
 
 # Typed result by ID — app-level API (broker.get_result(_async) was removed in 0.1.2).
-# Returns BrokerResult[TaskResult[Any, TaskError]]: outer surfaces infrastructure
-# failures (INVALID_JSON_PAYLOAD / NO_TYPE_AVAILABLE), inner is the typed result.
-outer = await app.get_result_async("task-uuid", timeout_ms=5000)
-outer = app.get_result("task-uuid", timeout_ms=5000)  # sync
+# Returns ReadResult[Any, TaskError]: Ok(Succeeded(value)), Ok(Failed(task_error)),
+# or Err(read_error) for a read that gave no outcome (BrokerError,
+# ResultDeserializationError, NoTypeAvailable, WaitTimeout, ...).
+read = await app.get_result_async("task-uuid", timeout_ms=5000)
+read = app.get_result("task-uuid", timeout_ms=5000)  # sync
 
 # Raw stored envelope, no typed decode — returns BrokerResult[RawResultRecord | None]
 raw = await broker.get_raw_result_record_async("task-uuid", timeout_ms=5000)

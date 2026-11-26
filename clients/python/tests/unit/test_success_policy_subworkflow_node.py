@@ -17,7 +17,7 @@ from horsies.core.app import Horsies
 from horsies.core.errors import ErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
     SuccessCase,
@@ -28,6 +28,7 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
 )
 from horsies.core.task_decorator import TaskFunction
+from horsies.core.types.result import Ok, Result
 
 
 pytestmark = [pytest.mark.unit]
@@ -48,8 +49,8 @@ def _app_with_tasks() -> tuple[Horsies, TaskFunction[..., int]]:
     ))
 
     @app.task('success_policy_sub.work')
-    def work() -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def work() -> Result[int, TaskError]:
+        return Ok(1)
 
     return app, work
 

@@ -83,9 +83,8 @@ from horsies.core.models.tasks import (
     Execution,
     TaskError,
     TaskInfo,
-    TaskResult,
 )
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.types.status import TaskAttemptOutcome, TaskStatus
 
 
@@ -2142,8 +2141,8 @@ class TestEnqueueInputRefusal:
         app.validate_queue_name.return_value = 'default'
         app.get_broker.return_value = broker
 
-        def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
+        def good_fn(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
 
         wrapper = create_task_wrapper(good_fn, app, 'test.good_fn')
 

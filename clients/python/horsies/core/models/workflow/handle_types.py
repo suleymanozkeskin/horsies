@@ -9,10 +9,10 @@ Two error strategies by return type:
    per ``HandleErrorCode`` member. Every variant has ``code``, ``message``,
    ``retryable`` and ``workflow_id``. Callers match on the variant.
 
-2. **Fold strategy**: ``get``, ``result_for`` and their ``*_async`` forms
-   return ``TaskResult``. A failure folds into
-   ``TaskResult(err=TaskError(...))`` with a ``RetrievalCode`` or
-   ``BROKER_ERROR``.
+2. **Read strategy**: ``get``, ``result_for`` and their ``*_async`` forms
+   return ``ReadResult``. A read failure is ``Err(ReadError)``, one class
+   per code (``WaitTimeout``, ``WorkflowNotFound``, ``BrokerError``, ...),
+   apart from the outcome of the workflow or the node.
 
 ``WorkflowHandle.for_id`` returns ``HandleInvalidWorkflowId`` for a workflow
 id text that is not a UUID.

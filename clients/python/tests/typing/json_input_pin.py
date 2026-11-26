@@ -20,9 +20,10 @@ from horsies import (
     JsonInput,
     JsonList,
     JsonValue,
+    Ok,
+    Result,
     SubWorkflowError,
     TaskError,
-    TaskResult,
 )
 from horsies.core.models.workflow import SubWorkflowSummary
 
@@ -190,14 +191,14 @@ def a_pyright_limit(err: TaskError) -> JsonValue:
 
 def task_parameters(app: Horsies) -> None:
     @app.task('pin.pass_on')
-    def pass_on(*, payload: JsonInput) -> TaskResult[int, TaskError]:
+    def pass_on(*, payload: JsonInput) -> Result[int, TaskError]:
         _ = payload
-        return TaskResult(ok=1)
+        return Ok(1)
 
     @app.task('pin.reads')
-    def reads(*, payload: JsonValue) -> TaskResult[int, TaskError]:
+    def reads(*, payload: JsonValue) -> Result[int, TaskError]:
         _ = payload
-        return TaskResult(ok=1)
+        return Ok(1)
 
     _ = pass_on.send(payload=_ids)
     _ = reads.send(payload=_exact)

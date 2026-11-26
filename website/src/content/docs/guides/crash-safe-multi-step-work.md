@@ -26,7 +26,7 @@ A checkout in one task body:
         auto_retry_for=["PAYMENTS_UNAVAILABLE", "MAIL_UNAVAILABLE", "WORKER_CRASHED"],
     ),
 )
-def checkout(*, order: Order) -> TaskResult[str, TaskError]:
+def checkout(*, order: Order) -> Result[str, TaskError]:
     charge = charge_the_card(order)             # 1. money moves
     invoice = write_the_invoice(order, charge)  # 2. a record is written
     return send_the_receipt(order, invoice)     # 3. a message is sent
@@ -44,7 +44,7 @@ The rules are on [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#
 
 ### Define One Task per Step
 
-Each step is a task with its own retry policy. A step takes the result of the step before it as a parameter of type `TaskResult[T, TaskError]`.
+Each step is a task with its own retry policy. A step takes the outcome of the step before it as a parameter of type `TaskOutcome[T, TaskError]`.
 
 ```python
 import httpx
@@ -52,12 +52,14 @@ from pydantic import BaseModel
 
 from horsies import (
     Err,
+    Failed,
     JsonValue,
     Ok,
     Result,
     RetryPolicy,
+    Succeeded,
     TaskError,
-    TaskResult,
+    TaskOutcome,
 )
 from instance import app
 
@@ -127,7 +129,7 @@ def charge_card(
     order_id: str,
     customer_id: str,
     amount_cents: int,
-) -> TaskResult[Charge, TaskError]:
+) -> Result[Charge, TaskError]:
     match post_with_key(
         PAYMENTS_URL,
         {"customer_id": customer_id, "amount_cents": amount_cents},
@@ -136,9 +138,9 @@ def charge_card(
         refused_code="CHARGE_REFUSED",
     ):
         case Ok(answer):
-            return TaskResult(ok=Charge(charge_id=str(answer["id"]), amount_cents=amount_cents))
+            return Ok(Charge(charge_id=str(answer["id"]), amount_cents=amount_cents))
         case Err(error):
-            return TaskResult(err=error)
+            return Err(error)
 
 
 @app.task(
@@ -152,11 +154,13 @@ def charge_card(
 def write_invoice(
     *,
     order_id: str,
-    charge: TaskResult[Charge, TaskError],
-) -> TaskResult[Invoice, TaskError]:
-    if charge.is_err():
-        return TaskResult(err=charge.err_value)
-    paid = charge.ok_value
+    charge: TaskOutcome[Charge, TaskError],
+) -> Result[Invoice, TaskError]:
+    match charge:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(paid):
+            pass
     match post_with_key(
         INVOICES_URL,
         {"order_id": order_id, "charge_id": paid.charge_id, "amount_cents": paid.amount_cents},
@@ -165,12 +169,12 @@ def write_invoice(
         refused_code="INVOICE_REFUSED",
     ):
         case Ok(answer):
-            return TaskResult(ok=Invoice(
+            return Ok(Invoice(
                 invoice_number=str(answer["number"]),
                 charge_id=paid.charge_id,
             ))
         case Err(error):
-            return TaskResult(err=error)
+            return Err(error)
 
 
 @app.task(
@@ -184,30 +188,33 @@ def send_receipt(
     *,
     order_id: str,
     to_address: str,
-    invoice: TaskResult[Invoice, TaskError],
-) -> TaskResult[str, TaskError]:
-    if invoice.is_err():
-        return TaskResult(err=invoice.err_value)
+    invoice: TaskOutcome[Invoice, TaskError],
+) -> Result[str, TaskError]:
+    match invoice:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(issued):
+            pass
     match post_with_key(
         MESSAGES_URL,
         {
             "to": to_address,
             "template": "receipt",
-            "invoice_number": invoice.ok_value.invoice_number,
+            "invoice_number": issued.invoice_number,
         },
         idempotency_key=f"checkout-{order_id}-receipt",
         unavailable_code="MAIL_UNAVAILABLE",
         refused_code="MAIL_REFUSED",
     ):
         case Ok(answer):
-            return TaskResult(ok=str(answer["message_id"]))
+            return Ok(str(answer["message_id"]))
         case Err(error):
-            return TaskResult(err=error)
+            return Err(error)
 ```
 
 - The `auto_retry_for` of each step names `WORKER_CRASHED` and the code that the step returns when its provider is not available. Another code, for example `CHARGE_REFUSED`, ends the step as `FAILED` at once.
 - Each call sends an idempotency key made from the order id and the step name. The key makes a repeated run of the step safe. See [External Effects Need Idempotency](#external-effects-need-idempotency).
-- With the default dependency rules, a step runs only when the step before it is `COMPLETED`. The `is_err()` branch receives a stored result that does not decode (`RESULT_DESERIALIZATION_ERROR`). See [Upstream Failure and args_from](/horsies/concepts/workflows/workflow-semantics/#upstream-failure-and-args_from).
+- With the default dependency rules, a step runs only when the step before it is `COMPLETED`. The `Failed` arm receives a stored result that does not decode (`RESULT_DESERIALIZATION_ERROR`). See [Upstream Failure and args_from](/horsies/concepts/workflows/workflow-semantics/#upstream-failure-and-args_from).
 
 ### Connect the Steps in a Workflow
 

@@ -29,12 +29,18 @@ from typing import Any, Awaitable, Callable, cast
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.workflow import TaskNode
-
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Succeeded, WaitTimeout
+from horsies.core.models.workflow import TaskNode, WorkflowTerminalResults
 
 from horsies.core.types.result import is_ok
-from tests.e2e.helpers.assertions import assert_err, assert_ok, start_ok_in_thread, unwrap_send
+from tests.e2e.helpers.assertions import (
+    assert_failed,
+    read_error,
+    read_succeeded,
+    start_ok_in_thread,
+    succeeded_value,
+    unwrap_send,
+)
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
     get_workflow_tasks,
@@ -60,8 +66,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(healthcheck.send())
-        result = handle.get(timeout_ms=2000)
-        return result.is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -500,10 +505,9 @@ async def test_explicit_output_task(broker: PostgresBroker) -> None:
 
         # Get result via sync handle.get() - should work after workflow completes
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
         # Should return node_output_final's result directly (not dict of terminals)
-        output = result.unwrap()
+        output = succeeded_value(result)
         assert output == {'final': 'result', 'count': 42}
 
 
@@ -527,29 +531,29 @@ async def test_default_terminal_results(broker: PostgresBroker) -> None:
 
         # Get result via sync handle.get() - should work after workflow completes
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
         # Returns dict keyed by node_id
-        output = cast(dict[str, Any], result.unwrap())
-        assert isinstance(output, dict)
+        value_of_get = succeeded_value(result)
+        assert isinstance(value_of_get, dict)
+        output = cast(WorkflowTerminalResults, value_of_get)
 
         # Terminal tasks are B, C, D (indices 1, 2, 3)
         # Keys should be like "e2e_fanout:1", "e2e_fanout:2", etc.
         assert len(output) == 3, f'Expected 3 terminal results, got {len(output)}'
 
         # Each key should be in 'workflow_name:task_index' format
-        # Each value should be a TaskResult(ok='completed_...')
+        # Each value should be a Succeeded('completed_...')
         for key, value in output.items():
             assert (
                 ':' in key
             ), f"Key should be in 'workflow_name:task_index' format: {key}"
-            assert isinstance(value, TaskResult), f'Value for {key} should be TaskResult'
-            task_result: TaskResult[Any, TaskError] = cast(TaskResult[Any, TaskError], value)
-            assert task_result.is_ok(), f'Terminal task {key} should have ok result'
-            unwrapped = task_result.unwrap()
-            assert isinstance(unwrapped, str) and unwrapped.startswith('completed_'), (
-                f'Terminal task {key} value should start with "completed_", got {unwrapped!r}'
-            )
+            match value:
+                case Succeeded(unwrapped):
+                    assert isinstance(unwrapped, str) and unwrapped.startswith('completed_'), (
+                        f'Terminal task {key} value should start with "completed_", got {unwrapped!r}'
+                    )
+                case _:
+                    pytest.fail(f'Terminal task {key} should have succeeded, got {value!r}')
 
 
 # =============================================================================
@@ -717,16 +721,12 @@ async def test_single_node_workflow(broker: PostgresBroker) -> None:
         assert task['completed_at'] is not None
 
         result = await asyncio.to_thread(handle.get, timeout_ms=2000)
-        assert_ok(result)
-        output = result.unwrap()
+        output = succeeded_value(result)
         # Default terminal results: dict keyed by node_id
         assert isinstance(output, dict)
-        terminal_results: list[Any] = list(output.values())
+        terminal_results = list(cast(WorkflowTerminalResults, output).values())
         assert len(terminal_results) == 1
-        inner: Any = terminal_results[0]
-        assert isinstance(inner, TaskResult)
-        assert inner.is_ok()
-        assert inner.unwrap() == 'completed_ONLY'
+        assert terminal_results[0] == Succeeded('completed_ONLY')
 
 
 # =============================================================================
@@ -786,7 +786,7 @@ async def test_handle_get_returns_error_on_failed_workflow(
         assert status == 'FAILED'
 
         result = await asyncio.to_thread(handle.get, timeout_ms=2000)
-        assert_err(result, 'MID_FAIL')
+        assert_failed(result, 'MID_FAIL')
 
 
 # =============================================================================
@@ -911,7 +911,7 @@ async def test_workflow_cancellation(broker: PostgresBroker) -> None:
             ), f"Task {task['task_index']} has unexpected status: {task['status']}"
 
         result = await asyncio.to_thread(handle.get, timeout_ms=2000)
-        assert_err(result, 'WORKFLOW_CANCELLED')
+        assert_failed(result, 'WORKFLOW_CANCELLED')
 
 
 # =============================================================================
@@ -922,10 +922,10 @@ async def test_workflow_cancellation(broker: PostgresBroker) -> None:
 @pytest.mark.e2e
 @pytest.mark.asyncio(loop_scope='function')
 async def test_handle_get_timeout(broker: PostgresBroker) -> None:
-    """handle.get() returns WAIT_TIMEOUT when workflow does not complete."""
+    """handle.get() returns WaitTimeout when workflow does not complete."""
     _ = broker  # Fixture ensures DB schema is initialized
     # Start workflow WITHOUT a worker — tasks stay non-terminal
     handle = await start_ok_in_thread(wf_tasks.spec_slow_linear)
 
     result = await asyncio.to_thread(handle.get, timeout_ms=200)
-    assert_err(result, 'WAIT_TIMEOUT')
+    assert isinstance(read_error(result), WaitTimeout), result

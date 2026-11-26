@@ -1,9 +1,9 @@
 ---
 title: Error Handling
 section: python
-summary: Patterns for handling TaskResult errors with explicit control flow.
+summary: Patterns for handling task errors and read errors with explicit control flow.
 related: [errors, retrieving-results, retry-policy]
-tags: [tasks, errors, TaskResult, patterns]
+tags: [tasks, errors, Result, TaskOutcome, ReadError, patterns]
 ---
 
 # Error Handling
@@ -21,15 +21,17 @@ Adjust to your needs.
 
 | Category | Source | Examples | Auto-Retry? |
 | -------- | ------ | -------- | ----------- |
-| Retrieval errors | `handle.get()` | `WAIT_TIMEOUT`, `BROKER_ERROR` | No |
+| Read errors | `handle.get()` gave no outcome | `WaitTimeout`, `BrokerError` | No |
 | Execution errors | Task raised an exception, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `auto_retry_for` |
 | Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `auto_retry_for` |
+
+A read gives an execution error or a domain error as `Ok(Failed(task_error))`. It gives a read error as `Err(read_error)`. The read errors are on [ReadError](/horsies/concepts/result-handling/#readerror).
 
 ### When to Handle Errors
 
 Handle errors when:
 
-- The error is a **retrieval error** (task may still complete)
+- The error is a **read error** (task may still complete)
 - The error is **not in `auto_retry_for`** (won't be retried)
 - The task has **exhausted retries** (final failure)
 
@@ -40,7 +42,7 @@ Handle errors when:
 The library handles retries automatically when `auto_retry_for` matches the error:
 
 ```python
-from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
+from horsies import RetryPolicy, Result, TaskError, JsonValue
 
 @app.task(
     "fetch_api_data",
@@ -50,7 +52,7 @@ from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
         auto_retry_for=["UNHANDLED_EXCEPTION", "RATE_LIMITED"],
     ),
 )
-def fetch_api_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def fetch_api_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
     # If this returns a RATE_LIMITED error or raises an unhandled exception,
     # the worker automatically retries up to 3 times
     ...
@@ -78,7 +80,7 @@ To avoid try/except boilerplate for mapping exceptions to error codes, use `exce
         TimeoutError: "TIMEOUT",
     },
 )
-def fetch_api_data(*, url: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def fetch_api_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
     # Unhandled RateLimitError/TimeoutError automatically mapped and retried
     ...
 ```
@@ -87,7 +89,7 @@ The `RetryPolicy` API is in [Configure Retries](/horsies/tasks/defining-tasks/#c
 
 ### Handling Upstream Failures in Chained Tasks
 
-Tasks wired with `args_from` receive the upstream `TaskResult`, not just the raw success value. Use this workflow example as the canonical guard pattern:
+Tasks wired with `args_from` receive the upstream `TaskOutcome`: `Succeeded(value)` or `Failed(task_error)`, not just the raw success value. Use this workflow example as the canonical guard pattern:
 
 ```python
 from pydantic import SecretStr
@@ -97,9 +99,12 @@ from horsies import (
     Horsies,
     AppConfig,
     PostgresConfig,
-    TaskResult,
+    Result,
     TaskError,
     TaskNode,
+    TaskOutcome,
+    Succeeded,
+    Failed,
     OnError,
     Ok,
     Err,
@@ -121,45 +126,48 @@ class ProductRecord:
 
 
 @app.task("fetch_product_page")
-def fetch_product_page(*, url: str) -> TaskResult[str, TaskError]:
+def fetch_product_page(*, url: str) -> Result[str, TaskError]:
     if "missing" in url:
-        return TaskResult(err=TaskError(
+        return Err(TaskError(
             error_code="FETCH_FAILED",
             message=f"Could not fetch {url}",
         ))
-    return TaskResult(ok="<html>...</html>")
+    return Ok("<html>...</html>")
 
 
 @app.task("parse_product_page")
 def parse_product_page(
     *,
-    page_result: TaskResult[str, TaskError],
-) -> TaskResult[ProductRecord, TaskError]:
-    if page_result.is_err():
-        return TaskResult(err=TaskError(
-            error_code="UPSTREAM_FAILED",
-            message="Cannot parse product page: fetch failed",
-        ))
-    return TaskResult(ok=ProductRecord(
-        product_id="product-123",
-        name="Widget Pro",
-        price_cents=1999,
-    ))
+    page_result: TaskOutcome[str, TaskError],
+) -> Result[ProductRecord, TaskError]:
+    match page_result:
+        case Failed():
+            return Err(TaskError(
+                error_code="UPSTREAM_FAILED",
+                message="Cannot parse product page: fetch failed",
+            ))
+        case Succeeded():
+            return Ok(ProductRecord(
+                product_id="product-123",
+                name="Widget Pro",
+                price_cents=1999,
+            ))
 
 
 @app.task("save_product_record")
 def save_product_record(
     *,
-    product_result: TaskResult[ProductRecord, TaskError],
-) -> TaskResult[None, TaskError]:
-    if product_result.is_err():
-        return TaskResult(err=TaskError(
-            error_code="UPSTREAM_FAILED",
-            message="Cannot save product: parse failed",
-        ))
-    product = product_result.ok_value
-    _ = product  # persist to storage
-    return TaskResult(ok=None)
+    product_result: TaskOutcome[ProductRecord, TaskError],
+) -> Result[None, TaskError]:
+    match product_result:
+        case Failed():
+            return Err(TaskError(
+                error_code="UPSTREAM_FAILED",
+                message="Cannot save product: parse failed",
+            ))
+        case Succeeded(product):
+            _ = product  # persist to storage
+            return Ok(None)
 
 
 fetch: TaskNode[str] = TaskNode(
@@ -204,7 +212,7 @@ Prefer explicit returns over raising exceptions:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import RetrievalCode, Ok, Err
+from horsies import Err, Failed, Ok, Succeeded, TaskNotFound, WaitTimeout
 from instance import my_task
 
 def process_task() -> str | None:
@@ -215,23 +223,23 @@ def process_task() -> str | None:
         case Ok(handle):
             pass
 
-    result = handle.get(timeout_ms=5000)
-
-    if result.is_err():
-        error = result.err_value
-        match error.error_code:
-            case RetrievalCode.WAIT_TIMEOUT:
-                # Task may still be running
-                # check status again using task id if you need absolute decisions
-                return None
-            case RetrievalCode.TASK_NOT_FOUND:
-                return None
-            case _:
-                # Pass to centralized handler
-                handle_error(error)
-                return None
-
-    return result.ok_value
+    match handle.get(timeout_ms=5000):
+        case Ok(Succeeded(value)):
+            return value
+        case Ok(Failed(task_error)):
+            # Pass to centralized handler
+            handle_error(task_error)
+            return None
+        case Err(WaitTimeout()):
+            # Task may still be running
+            # check status again using task id if you need absolute decisions
+            return None
+        case Err(TaskNotFound()):
+            return None
+        case Err(read_error):
+            # Pass to centralized handler
+            handle_read_error(read_error)
+            return None
 ```
 
 ### Centralized Error Handler
@@ -245,13 +253,19 @@ Create a handler that **returns actions**, not just logs.
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong - exceptions break control flow
-if result.is_err():
-    raise RuntimeError(f"Task failed: {result.err_value.error_code}")
+match handle.get():
+    case Ok(Failed(task_error)):
+        raise RuntimeError(f"Task failed: {task_error.error_code}")
+    case _:
+        ...  # the other arms
 
 # Correct - explicit return and handling
-if result.is_err():
-    handle_error(result.err_value)
-    return None
+match handle.get():
+    case Ok(Failed(task_error)):
+        handle_error(task_error)
+        return None
+    case _:
+        ...  # the other arms
 ```
 
 **Don't ignore errors after logging.**
@@ -259,14 +273,20 @@ if result.is_err():
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong - logs but continues as if nothing happened
-if result.is_err():
-    print(result.err_value.message)
+match handle.get():
+    case Ok(Failed(task_error)):
+        print(task_error.message)
+    case _:
+        pass
 # Code continues...
 
 # Correct - handle and return explicitly
-if result.is_err():
-    handle_error(result.err_value)
-    return result.err_value.error_code
+match handle.get():
+    case Ok(Failed(task_error)):
+        handle_error(task_error)
+        return task_error.error_code
+    case _:
+        ...  # the other arms
 ```
 
 **Don't manually retry errors that should be auto-retried.**
@@ -282,6 +302,6 @@ if error.error_code == "RATE_LIMITED":
     "my_task",
     retry_policy=RetryPolicy.fixed([60, 120, 300], auto_retry_for=["RATE_LIMITED"]),
 )
-def my_task() -> TaskResult[str, TaskError]:
+def my_task() -> Result[str, TaskError]:
     ...
 ```

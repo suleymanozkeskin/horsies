@@ -68,7 +68,7 @@ from .typing_utils import (
     _signature_accepts_kwargs,
     _valid_kwarg_names,
     _resolved_type_hints,
-    _extract_taskresult_ok_type,
+    _extract_outcome_ok_type,
     _resolve_source_node_ok_type,
     _is_ok_type_compatible,
     _without_annotated,
@@ -527,7 +527,7 @@ class WorkflowSpec(Generic[OutT]):
 
         Producer-side rules apply (see
         ``codec.kwargs.resolve_producer_kwarg_binding``): engine-injected
-        names (``workflow_ctx`` / ``workflow_meta``) and TaskResult-typed
+        names (``workflow_ctx`` / ``workflow_meta``) and TaskOutcome-typed
         kwargs (engine-populated via ``args_from``) fail closed here as
         workflow validation errors, with per-key context preserved.
 
@@ -576,7 +576,7 @@ class WorkflowSpec(Generic[OutT]):
                         help_text=(
                             'every kwarg must bind to a declared, typed '
                             'parameter on the node\'s callable; '
-                            'workflow_ctx / workflow_meta / TaskResult-'
+                            'workflow_ctx / workflow_meta / TaskOutcome-'
                             'typed kwargs are engine-populated'
                         ),
                     ))
@@ -1253,8 +1253,8 @@ class WorkflowSpec(Generic[OutT]):
         """
         Validate args_from source result types against callable parameter annotations.
 
-        args_from always injects TaskResult objects, so target params should be
-        annotated as TaskResult[OkT, TaskError] (or Optional/Union containing it).
+        args_from always injects TaskOutcome values, so target params should be
+        annotated as TaskOutcome[OkT, TaskError] (or Optional/Union containing it).
         """
         errors: list[WorkflowValidationError] = []
         for node in self.tasks:
@@ -1308,19 +1308,19 @@ class WorkflowSpec(Generic[OutT]):
                 annotation = hints.get(kwarg_name)
                 if annotation is None and param.annotation is not inspect.Parameter.empty:
                     annotation = param.annotation
-                expected_ok = _extract_taskresult_ok_type(annotation)
+                expected_ok = _extract_outcome_ok_type(annotation)
                 if expected_ok is None:
                     errors.append(
                         WorkflowValidationError(
-                            message='args_from target parameter must be annotated as TaskResult[OkT, TaskError]',
+                            message='args_from target parameter must be annotated as TaskOutcome[OkT, TaskError]',
                             code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
                             notes=[
                                 f"node '{node.name}' args_from['{kwarg_name}'] targets parameter '{kwarg_name}'",
                                 f"parameter annotation is {_format_type_name(annotation)}",
-                                'args_from injects TaskResult values, not raw payloads',
+                                'args_from injects TaskOutcome values, not raw payloads',
                             ],
                             help_text=(
-                                f"annotate '{kwarg_name}' as TaskResult[ExpectedType, TaskError]"
+                                f"annotate '{kwarg_name}' as TaskOutcome[ExpectedType, TaskError]"
                             ),
                         )
                     )
@@ -1337,7 +1337,7 @@ class WorkflowSpec(Generic[OutT]):
                                 "source output type could not be inferred from task return annotation or workflow generic",
                             ],
                             help_text=(
-                                "ensure source task returns TaskResult[ConcreteType, TaskError] "
+                                "ensure source task returns Result[ConcreteType, TaskError] "
                                 'or source subworkflow subclasses WorkflowDefinition[ConcreteType]'
                             ),
                         )
@@ -1370,8 +1370,8 @@ class WorkflowSpec(Generic[OutT]):
                         code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
                         notes=[
                             f"node '{node.name}' args_from['{kwarg_name}'] receives from '{source_node.name}'",
-                            f'source TaskResult ok-type: {_format_type_name(source_ok)}',
-                            f"target expects TaskResult[{_format_type_name(expected_ok)}, TaskError]",
+                            f'source ok type: {_format_type_name(source_ok)}',
+                            f"target expects TaskOutcome[{_format_type_name(expected_ok)}, TaskError]",
                         ],
                         help_text='fix args_from wiring or update the target parameter type annotation',
                     )
@@ -1649,7 +1649,7 @@ class WorkflowSpec(Generic[OutT]):
                         code=ErrorCode.WORKFLOW_INVALID_JOIN,
                         help_text=(
                             f"give '{kwarg_name}' a default (e.g. "
-                            f"TaskResult[..., TaskError] | None = None) or "
+                            f"TaskOutcome[..., TaskError] | None = None) or "
                             f"use join='all'"
                         ),
                     )

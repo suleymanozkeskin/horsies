@@ -42,10 +42,10 @@ from horsies.core.codec.typed import conform_to_target
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import ConfigurationError, ErrorCode, WorkflowValidationError
 from horsies.core.logging import get_logger
+from horsies.core.models.outcome import TaskOutcome
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     TaskError,
-    TaskResult,
 )
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -204,7 +204,7 @@ def node_error(
 
 def node_failure_result(error: TaskError) -> str:
     """The stored result of a node that fails with ``error``. Pure."""
-    return serialize_error_payload(TaskResult(err=error))
+    return serialize_error_payload(error)
 
 
 def _failed(
@@ -299,7 +299,7 @@ def _args_from_map(
 def _input_kwargs(
     node: ChildOfNode,
     workflow_def: type[WorkflowDefinition[Any]],
-    dependency_results: Mapping[int, TaskResult[Any, TaskError]],
+    dependency_results: Mapping[int, TaskOutcome[Any, TaskError]],
 ) -> dict[str, Any] | ChildBuildFailed:
     """The kwargs of ``build_with``: the decoded node input and the args_from members.
 
@@ -428,7 +428,7 @@ def _built_spec(
 def build_child_within_depth(
     broker: PostgresBroker,
     node: ChildOfNode,
-    dependency_results: Mapping[int, TaskResult[Any, TaskError]],
+    dependency_results: Mapping[int, TaskOutcome[Any, TaskError]],
     child_depth: int,
 ) -> ChildBuild:
     """The child of ``node`` at ``child_depth``, which the core checked against

@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from horsies import AppConfig, Horsies, JsonValue, PostgresConfig, TaskError, TaskResult
+from horsies import AppConfig, Horsies, JsonValue, Ok, PostgresConfig, Result, TaskError
 from horsies.core.errors import ErrorCode, WorkflowValidationError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
@@ -49,12 +49,12 @@ def _app() -> Horsies:
 
 
 def _task(app: Horsies, name: str, annotation: Any) -> Any:
-    def take(*, value: Any) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def take(*, value: Any) -> Result[int, TaskError]:
+        return Ok(1)
 
     take.__annotations__ = {
         'value': annotation,
-        'return': TaskResult[int, TaskError],
+        'return': Result[int, TaskError],
     }
     return app.task(task_name=name)(take)
 

@@ -35,9 +35,10 @@ from pydantic import SecretStr
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.outcome import Succeeded, TaskOutcome
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.schedule import IntervalSchedule, ScheduleConfig, TaskSchedule
-from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, RetryPolicy, TaskError
 from horsies.core.models.workflow import (
     OnError,
     SubWorkflowNode,
@@ -52,6 +53,7 @@ from horsies.core.models.worker_profile import (
     SharedThreadChildren,
     WorkerProfile,
 )
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.config import ChildPreload
 
 DATABASE_URL_ENV: Final = 'HORSIES_PARITY_DATABASE_URL'
@@ -148,39 +150,39 @@ app = Horsies(config)
 
 
 @app.task(task_name='parity.add')
-def add(*, a: int, b: int) -> TaskResult[int, TaskError]:
+def add(*, a: int, b: int) -> Result[int, TaskError]:
     """A plain success."""
-    return TaskResult(ok=a + b)
+    return Ok(a + b)
 
 
 @app.task(task_name='parity.refuse')
-def refuse(*, value: int) -> TaskResult[int, TaskError]:
+def refuse(*, value: int) -> Result[int, TaskError]:
     """A task error with no retry."""
-    return TaskResult(err=TaskError(error_code='REFUSED', message=f'refused {value}'))
+    return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
 
 
 @app.task(task_name='parity.transient', retry_policy=RETRY_POLICY)
-def transient(*, value: int) -> TaskResult[int, TaskError]:
+def transient(*, value: int) -> Result[int, TaskError]:
     """A task error that the policy retries until the retries run out."""
-    return TaskResult(err=TaskError(error_code='TRANSIENT', message=f'transient {value}'))
+    return Err(TaskError(error_code='TRANSIENT', message=f'transient {value}'))
 
 
 @app.task(task_name='parity.sleep_past_deadline', timeout_ms=SHORT_TIMEOUT_MS)
-def sleep_past_deadline() -> TaskResult[str, TaskError]:
+def sleep_past_deadline() -> Result[str, TaskError]:
     """An isolated task that the parent kills at its deadline."""
     time.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 @app.task(task_name='parity.double')
-def double(*, upstream: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+def double(*, upstream: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
     """Twice the value of its upstream node."""
     match upstream:
-        case TaskResult(ok=int() as value):
-            return TaskResult(ok=value * 2)
+        case Succeeded(value):
+            return Ok(value * 2)
         case _:
-            return TaskResult(
-                err=TaskError(error_code='UPSTREAM_FAILED', message='the upstream failed'),
+            return Err(
+                TaskError(error_code='UPSTREAM_FAILED', message='the upstream failed'),
             )
 
 
@@ -192,10 +194,10 @@ def double(*, upstream: TaskResult[int, TaskError]) -> TaskResult[int, TaskError
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-async def add_async(*, a: int, b: int) -> TaskResult[int, TaskError]:
+async def add_async(*, a: int, b: int) -> Result[int, TaskError]:
     """A plain success on an async seat."""
     await asyncio.sleep(0)
-    return TaskResult(ok=a + b)
+    return Ok(a + b)
 
 
 @app.task(
@@ -203,9 +205,9 @@ async def add_async(*, a: int, b: int) -> TaskResult[int, TaskError]:
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-async def refuse_async(*, value: int) -> TaskResult[int, TaskError]:
+async def refuse_async(*, value: int) -> Result[int, TaskError]:
     await asyncio.sleep(0)
-    return TaskResult(err=TaskError(error_code='REFUSED', message=f'refused {value}'))
+    return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
 
 
 @app.task(
@@ -214,9 +216,9 @@ async def refuse_async(*, value: int) -> TaskResult[int, TaskError]:
     timeout_ms=SHARED_TIMEOUT_MS,
     retry_policy=RETRY_POLICY,
 )
-async def transient_async(*, value: int) -> TaskResult[int, TaskError]:
+async def transient_async(*, value: int) -> Result[int, TaskError]:
     await asyncio.sleep(0)
-    return TaskResult(err=TaskError(error_code='TRANSIENT', message=f'transient {value}'))
+    return Err(TaskError(error_code='TRANSIENT', message=f'transient {value}'))
 
 
 @app.task(
@@ -224,11 +226,11 @@ async def transient_async(*, value: int) -> TaskResult[int, TaskError]:
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
-async def async_past_deadline() -> TaskResult[str, TaskError]:
+async def async_past_deadline() -> Result[str, TaskError]:
     """The cancel at the deadline ends the sleep within the grace:
     `cancel_end` is `RETURNED_AFTER_SIGNAL`."""
     await asyncio.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 # ---- Shared thread ----
@@ -239,8 +241,8 @@ async def async_past_deadline() -> TaskResult[str, TaskError]:
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-def add_thread(*, a: int, b: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=a + b)
+def add_thread(*, a: int, b: int) -> Result[int, TaskError]:
+    return Ok(a + b)
 
 
 @app.task(
@@ -248,8 +250,8 @@ def add_thread(*, a: int, b: int) -> TaskResult[int, TaskError]:
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-def refuse_thread(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(err=TaskError(error_code='REFUSED', message=f'refused {value}'))
+def refuse_thread(*, value: int) -> Result[int, TaskError]:
+    return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
 
 
 @app.task(
@@ -258,8 +260,8 @@ def refuse_thread(*, value: int) -> TaskResult[int, TaskError]:
     timeout_ms=SHARED_TIMEOUT_MS,
     retry_policy=RETRY_POLICY,
 )
-def transient_thread(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(err=TaskError(error_code='TRANSIENT', message=f'transient {value}'))
+def transient_thread(*, value: int) -> Result[int, TaskError]:
+    return Err(TaskError(error_code='TRANSIENT', message=f'transient {value}'))
 
 
 @app.task(
@@ -267,11 +269,11 @@ def transient_thread(*, value: int) -> TaskResult[int, TaskError]:
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
-def thread_past_deadline() -> TaskResult[str, TaskError]:
+def thread_past_deadline() -> Result[str, TaskError]:
     """A thread seat that cannot stop at its deadline: the child is killed
     when no run of it has time left."""
     time.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 # ---- Workflow ----

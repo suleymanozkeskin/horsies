@@ -34,9 +34,10 @@ from pydantic import SecretStr
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.outcome import Succeeded, TaskOutcome
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.tasks import Execution, RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, RetryPolicy, TaskError
 from horsies.core.models.workflow import (
     OnError,
     SubWorkflowNode,
@@ -53,6 +54,7 @@ from horsies.core.models.worker_profile import (
     TaskLimit,
     WorkerProfile,
 )
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.worker.config import ChildPreload
 
 DATABASE_URL_ENV: Final = 'DUALRUN_WORKER_DATABASE_URL'
@@ -200,34 +202,34 @@ app = Horsies(config)
 
 
 @app.task(task_name='whole_run.double')
-def double(*, value: int) -> TaskResult[int, TaskError]:
+def double(*, value: int) -> Result[int, TaskError]:
     """A plain success."""
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(task_name='whole_run.refuse')
-def refuse(*, value: int) -> TaskResult[int, TaskError]:
+def refuse(*, value: int) -> Result[int, TaskError]:
     """A task error with no retry."""
-    return TaskResult(err=TaskError(error_code='REFUSED', message=f'refused {value}'))
+    return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
 
 
 @app.task(task_name='whole_run.transient', retry_policy=RETRY_POLICY)
-def transient(*, value: int) -> TaskResult[int, TaskError]:
+def transient(*, value: int) -> Result[int, TaskError]:
     """A task error that the policy retries until the retries run out."""
-    return TaskResult(
-        err=TaskError(error_code='TRANSIENT', message=f'transient {value}')
+    return Err(
+        TaskError(error_code='TRANSIENT', message=f'transient {value}')
     )
 
 
 @app.task(task_name='whole_run.sleep_past_deadline', timeout_ms=SHORT_TIMEOUT_MS)
-def sleep_past_deadline() -> TaskResult[str, TaskError]:
+def sleep_past_deadline() -> Result[str, TaskError]:
     """An isolated task that the parent kills at its deadline."""
     time.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 @app.task(task_name='whole_run.crash')
-def crash() -> TaskResult[str, TaskError]:
+def crash() -> Result[str, TaskError]:
     """A child that exits in the middle of its task."""
     os._exit(9)
 
@@ -237,10 +239,10 @@ def crash() -> TaskResult[str, TaskError]:
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-async def double_async(*, value: int) -> TaskResult[int, TaskError]:
+async def double_async(*, value: int) -> Result[int, TaskError]:
     """A plain success on an async seat."""
     await asyncio.sleep(0)
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(
@@ -248,10 +250,10 @@ async def double_async(*, value: int) -> TaskResult[int, TaskError]:
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
-async def async_past_deadline() -> TaskResult[str, TaskError]:
+async def async_past_deadline() -> Result[str, TaskError]:
     """An async seat whose task the child cancels at its deadline."""
     await asyncio.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 @app.task(
@@ -259,9 +261,9 @@ async def async_past_deadline() -> TaskResult[str, TaskError]:
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-def double_thread(*, value: int) -> TaskResult[int, TaskError]:
+def double_thread(*, value: int) -> Result[int, TaskError]:
     """A plain success on a thread seat."""
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(
@@ -269,12 +271,12 @@ def double_thread(*, value: int) -> TaskResult[int, TaskError]:
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-async def async_neighbour() -> TaskResult[str, TaskError]:
+async def async_neighbour() -> Result[str, TaskError]:
     """A seat that runs while its neighbour blocks the loop. Its policy does
     not retry `NEIGHBOUR_BLOCKED_LOOP`."""
     _write_marker(NEIGHBOUR_RUNNING)
     await asyncio.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 @app.task(
@@ -283,17 +285,17 @@ async def async_neighbour() -> TaskResult[str, TaskError]:
     timeout_ms=SHARED_TIMEOUT_MS,
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_BLOCKED_LOOP']),
 )
-async def blocks_loop_once() -> TaskResult[str, TaskError]:
+async def blocks_loop_once() -> Result[str, TaskError]:
     """The first attempt waits until its neighbour runs, then blocks the
     loop past the block limit. The retry, in the isolated child, returns."""
     if not _first_call(LOOP_BLOCKED):
-        return TaskResult(ok='unblocked')
+        return Ok('unblocked')
     if not await _wait_for_marker(NEIGHBOUR_RUNNING):
-        return TaskResult(
-            err=TaskError(error_code='NO_NEIGHBOUR', message='the neighbour never ran'),
+        return Err(
+            TaskError(error_code='NO_NEIGHBOUR', message='the neighbour never ran'),
         )
     time.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 # The loop holds only weak references to its tasks.
@@ -306,11 +308,11 @@ async def _left_work() -> None:
 
 
 @app.task(task_name='whole_run.leaves_work')
-async def leaves_work(*, value: int) -> TaskResult[int, TaskError]:
+async def leaves_work(*, value: int) -> Result[int, TaskError]:
     """An isolated async task that starts work and returns without awaiting
     it: `body_returned`, then `left_work_ended`."""
     _LEFT_WORK.append(asyncio.get_running_loop().create_task(_left_work()))
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(
@@ -318,11 +320,11 @@ async def leaves_work(*, value: int) -> TaskResult[int, TaskError]:
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SHARED_TIMEOUT_MS,
 )
-async def sleep_then_double(*, value: int) -> TaskResult[int, TaskError]:
+async def sleep_then_double(*, value: int) -> Result[int, TaskError]:
     """A seat that is still running when the stop arrives; the drain lets it
     end."""
     await asyncio.sleep(DRAIN_TASK_S)
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(
@@ -330,26 +332,26 @@ async def sleep_then_double(*, value: int) -> TaskResult[int, TaskError]:
     execution=Execution.SHARED_THREAD,
     timeout_ms=SHORT_TIMEOUT_MS,
 )
-def thread_past_deadline() -> TaskResult[str, TaskError]:
+def thread_past_deadline() -> Result[str, TaskError]:
     """A thread seat that cannot stop at its deadline: the child is killed
     when no run of it has time left."""
     time.sleep(PAST_THE_DEADLINE_S)
-    return TaskResult(ok='late')
+    return Ok('late')
 
 
 @app.task(task_name='whole_run.waits_for_release')
-def waits_for_release() -> TaskResult[str, TaskError]:
+def waits_for_release() -> Result[str, TaskError]:
     """The first node of the pause chain: it runs until the runner paused
     the workflow and wrote the release marker."""
     _write_marker(FIRST_NODE_RUNNING)
     deadline = time.monotonic() + MARKER_WAIT_S
     while not os.path.exists(_marker(FIRST_NODE_RELEASED)):
         if time.monotonic() > deadline:
-            return TaskResult(
-                err=TaskError(error_code='NOT_RELEASED', message='no release marker'),
+            return Err(
+                TaskError(error_code='NOT_RELEASED', message='no release marker'),
             )
         time.sleep(MARKER_POLL_S)
-    return TaskResult(ok='released')
+    return Ok('released')
 
 
 class ChildChain(WorkflowDefinition[int]):
@@ -408,10 +410,10 @@ class ChildFromResult(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
-        cls, app: Horsies, doubled: TaskResult[int, TaskError],
+        cls, app: Horsies, doubled: TaskOutcome[int, TaskError],
     ) -> WorkflowSpec[int]:
         match doubled:
-            case TaskResult(ok=int() as value):
+            case Succeeded(value):
                 pass
             case _:
                 raise ValueError(f'{cls.name} takes a completed result, not {doubled!r}')

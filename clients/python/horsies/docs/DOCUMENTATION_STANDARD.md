@@ -145,14 +145,14 @@ Omit if the page is purely conceptual (e.g., architecture overview).
 # 3. Use realistic names
 # 4. Show the minimal code needed
 
-from horsies import Horsies, TaskResult, TaskError
+from horsies import Horsies, Ok, Result, TaskError
 
 app = Horsies(config)
 
 @app.task("send_email")
-def send_email(*, to: str, subject: str) -> TaskResult[None, TaskError]:
+def send_email(*, to: str, subject: str) -> Result[None, TaskError]:
     # Implementation
-    return TaskResult(ok=None)
+    return Ok(None)
 ```
 
 ### Tone by Section

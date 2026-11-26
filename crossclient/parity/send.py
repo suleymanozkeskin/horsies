@@ -38,7 +38,8 @@ from horsies import (
     WorkerPong,
     rerun_task,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Failed
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import WorkflowHandle
 from horsies.core.types.result import Err, Ok
 from crossclient.parity import app as parity
@@ -182,7 +183,7 @@ async def _rerun_one(rerun: Rerun, sent: list[str]) -> str:
         raise SendRefused(f'{rerun} names no earlier task line')
     source = UUID(sent[rerun.source])
     match await parity.app.get_result_async(source, timeout_ms=RESULT_WAIT_MS):
-        case Ok(TaskResult(err=TaskError(error_code='REFUSED'))):
+        case Ok(Failed(TaskError(error_code='REFUSED'))):
             pass
         case other:
             raise SendRefused(f'the rerun source {source} did not end with REFUSED: {other}')

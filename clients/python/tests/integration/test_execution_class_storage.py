@@ -28,10 +28,9 @@ from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     Execution,
     TaskError,
-    TaskResult,
 )
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.integration.conftest import finish_task
 
@@ -80,24 +79,24 @@ class TestSendPaths:
         session: AsyncSession,
     ) -> None:
         @app.task('exec_store_isolated')
-        def isolated(*, n: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def isolated(*, n: int) -> Result[int, TaskError]:
+            return Ok(n)
 
         @app.task(
             'exec_store_async',
             execution=Execution.SHARED_ASYNC,
             timeout_ms=5_000,
         )
-        async def shared_async(*, n: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        async def shared_async(*, n: int) -> Result[int, TaskError]:
+            return Ok(n)
 
         @app.task(
             'exec_store_thread',
             execution=Execution.SHARED_THREAD,
             timeout_ms=5_000,
         )
-        def shared_thread(*, n: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def shared_thread(*, n: int) -> Result[int, TaskError]:
+            return Ok(n)
 
         isolated_id = _sent_id(await isolated.send_async(n=1))
         async_id = _sent_id(await shared_async.send_async(n=1))
@@ -128,8 +127,8 @@ class TestSendPaths:
             execution=Execution.SHARED_THREAD,
             timeout_ms=5_000,
         )
-        def delayed(*, n: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def delayed(*, n: int) -> Result[int, TaskError]:
+            return Ok(n)
 
         task_id = _sent_id(await delayed.schedule_async(600, n=1))
 
@@ -146,8 +145,8 @@ class TestSendPaths:
             execution=Execution.SHARED_ASYNC,
             timeout_ms=5_000,
         )
-        async def with_deadline(*, n: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        async def with_deadline(*, n: int) -> Result[int, TaskError]:
+            return Ok(n)
 
         deadline = datetime.now(timezone.utc) + timedelta(hours=1)
         sent = await with_deadline.with_options(good_until=deadline).send_async(n=1)
@@ -190,8 +189,8 @@ class TestSendPaths:
         session: AsyncSession,
     ) -> None:
         @app.task('exec_store_check')
-        def plain(*, n: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def plain(*, n: int) -> Result[int, TaskError]:
+            return Ok(n)
 
         task_id = _sent_id(await plain.send_async(n=1))
 
@@ -220,16 +219,16 @@ class TestWorkflowPaths:
             execution=Execution.SHARED_THREAD,
             timeout_ms=5_000,
         )
-        def root(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def root(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         @app.task(
             'exec_wf_next',
             execution=Execution.SHARED_ASYNC,
             timeout_ms=5_000,
         )
-        async def after(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        async def after(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         node_root = root.node()(value=1)
         node_next = after.node(waits_for=[node_root])(value=2)
@@ -245,7 +244,7 @@ class TestWorkflowPaths:
         root_id = await _node_task_id(session, workflow_id, 0)
         assert await _stored_class(session, root_id) == 'SHARED_THREAD'
 
-        await finish_task(session, broker, workflow_id, 0, TaskResult(ok=1))
+        await finish_task(session, broker, workflow_id, 0, Ok(1))
 
         next_id = await _node_task_id(session, workflow_id, 1)
         assert await _stored_class(session, next_id) == 'SHARED_ASYNC'
@@ -264,8 +263,8 @@ class TestWorkflowPaths:
             execution=Execution.SHARED_THREAD,
             timeout_ms=5_000,
         )
-        def child_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def child_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         class Child(WorkflowDefinition[int]):
             name = f'exec_child_wf_{suffix}'

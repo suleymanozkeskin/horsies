@@ -7,9 +7,7 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
-    Generic,
     TypedDict,
-    TypeVar,
     Optional,
     Literal,
     Self,
@@ -32,6 +30,7 @@ from pydantic.types import PositiveInt
 from enum import Enum
 
 if TYPE_CHECKING:
+    from horsies.core.models.outcome import TaskOutcome
     from horsies.core.models.workflow import SubWorkflowSummary
 
 from horsies._catalog.task_codes import ContractCode as ContractCode
@@ -45,16 +44,6 @@ from horsies.core.exception_mapper import (
     reserved_code_message,
     validate_error_code_string,
 )
-
-T = TypeVar('T')  # success payload
-E = TypeVar('E')  # error payload (TaskError )
-
-
-class _Unset:
-    """Sentinel type for distinguishing 'not provided' from None."""
-
-    __slots__ = ()
-
 
 type BuiltInTaskCode = (
     OperationalErrorCode
@@ -129,7 +118,8 @@ if TYPE_CHECKING:
 
 
 class TaskError(BaseModel):
-    """The error payload for a TaskResult.
+    """The error of a task: the ``Err`` of what a body returns, and the
+    ``Failed`` of what a reader gets.
 
     ``error_code`` carries one of four built-in families
     (``OperationalErrorCode``, ``ContractCode``, ``RetrievalCode``,
@@ -278,119 +268,17 @@ class SubWorkflowError(TaskError):
     Allows parent tasks to distinguish subworkflow failures from regular
     task failures via pattern matching:
 
-        match result.err:
-            case SubWorkflowError() as e:
+        match outcome:
+            case Failed(SubWorkflowError() as e):
                 print(f"Subworkflow {e.sub_workflow_id} failed")
-            case TaskError() as e:
+            case Failed(e):
                 print(f"Task error: {e.message}")
+            case Succeeded(value):
+                print(value)
     """
 
     sub_workflow_id: str
     sub_workflow_summary: 'SubWorkflowSummary[Any]'
-
-
-_UNSET: _Unset = _Unset()
-
-
-class TaskResult(Generic[T, E]):
-    """
-    Discriminated union style result: exactly one of ok / err is set.
-    Supports None as a valid success value (e.g., TaskResult[None, TaskError]).
-
-    Internally uses tuple-based discriminated union for type narrowing:
-    - (True, value) for success
-    - (False, error) for failure
-    """
-
-    __slots__ = ('_data',)
-    _data: tuple[Literal[True], T] | tuple[Literal[False], E]
-
-    @overload
-    def __init__(self, *, ok: T) -> None: ...
-
-    @overload
-    def __init__(self, *, err: E) -> None: ...
-
-    def __init__(
-        self,
-        *,
-        ok: T | _Unset = _UNSET,
-        err: E | _Unset = _UNSET,
-    ) -> None:
-        ok_provided = not isinstance(ok, _Unset)
-        err_provided = not isinstance(err, _Unset)
-
-        if ok_provided and err_provided:
-            raise ValueError('TaskResult cannot have both ok and err')
-        if not ok_provided and not err_provided:
-            raise ValueError('TaskResult must have exactly one of ok / err')
-
-        # isinstance narrowing for assignment
-        if not isinstance(ok, _Unset):
-            self._data = (True, ok)
-        elif not isinstance(err, _Unset):
-            self._data = (False, err)
-        else:
-            raise ValueError('TaskResult must have exactly one of ok / err')
-
-    # helpers
-    def is_ok(self) -> bool:
-        return self._data[0]
-
-    def is_err(self) -> bool:
-        return not self._data[0]
-
-    @property
-    def ok(self) -> T | None:
-        """Access the success value, or None if this is an error result."""
-        match self._data:
-            case (True, value):
-                return value
-            case (False, _):
-                return None
-
-    @property
-    def err(self) -> E | None:
-        """Access the error value, or None if this is a success result."""
-        match self._data:
-            case (False, error):
-                return error
-            case (True, _):
-                return None
-
-    def unwrap(self) -> T:
-        """Get the success value. Raises if result is error."""
-        match self._data:
-            case (True, value):
-                return value
-            case (False, _):
-                raise ValueError('Result is not ok - check is_ok() first')
-
-    def unwrap_err(self) -> E:
-        """Get the error value. Raises if result is success."""
-        match self._data:
-            case (False, error):
-                return error
-            case (True, _):
-                raise ValueError('Result is not error - check is_err() first')
-
-    @property
-    def ok_value(self) -> T:
-        """Get the success value. Raises if result is error."""
-        match self._data:
-            case (True, value):
-                return value
-            case (False, _):
-                raise ValueError('Result is not ok - check is_ok() first')
-
-    @property
-    def err_value(self) -> E:
-        """Get the error value. Raises if result is success."""
-        match self._data:
-            case (False, error):
-                return error
-            case (True, _):
-                raise ValueError('Result is not error - check is_err() first')
 
 
 @dataclass
@@ -423,13 +311,11 @@ class TaskInfo:
     - ``raw_result``: the JSON envelope as stored, always populated when
       the task has a terminal payload. Available without any local task
       registration — safe for cross-process monitoring / dashboards.
-    - ``decoded_result``: the typed ``TaskResult`` produced by
+    - ``decoded_result``: the typed ``TaskOutcome`` produced by
       ``decode_task_result(raw_result, ok_type)``. Populated only when
       the calling process has the task definition imported AND decode
       succeeds.
     - ``result_decoded``: ``True`` iff ``decoded_result`` was populated.
-      Lets callers branch without comparing for ``None`` (which is also
-      a valid ok-value for ``TaskResult[None, TaskError]``).
 
     ``execution`` is the stored ``Execution`` of a live task. It is ``None``
     for a task read from the history archive, which does not keep the class.
@@ -457,7 +343,7 @@ class TaskInfo:
     worker_process_name: str | None
     error_code: str | None = None
     raw_result: 'dict[str, Any] | None' = None
-    decoded_result: TaskResult[Any, TaskError] | None = None
+    decoded_result: 'TaskOutcome[Any, TaskError] | None' = None
     result_decoded: bool = False
     failed_reason: str | None = None
     attempts: list[TaskAttemptInfo] | None = None

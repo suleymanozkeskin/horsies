@@ -7,7 +7,7 @@ returns a `DAMAGED_ITEM` error, and because `returns_review` is declared with
 nodes start, and the run sits PAUSED with the reason readable in the node.
 
 `restock_or_writeoff` sets `allow_failed_deps=True`, so once the run is resumed
-it executes on either branch: it reads the inspection's `TaskResult` and writes
+it executes on either branch: it reads the inspection's `TaskOutcome` and writes
 the item off when it is damaged, or returns it to stock when it is not.
 """
 
@@ -17,11 +17,14 @@ from datetime import datetime, timezone
 
 from horsies import (
     Err,
+    Failed,
     Ok,
     OperationalErrorCode,
+    Result,
     RetryPolicy,
+    Succeeded,
     TaskError,
-    TaskResult,
+    TaskOutcome,
 )
 
 from .. import simulate, store, tuning
@@ -51,7 +54,7 @@ def receive_return(
     order_id: str,
     sku: str,
     quantity: int,
-) -> TaskResult[ReturnReceipt, TaskError]:
+) -> Result[ReturnReceipt, TaskError]:
     """Book a returned item in. Idempotent — a replay finds its own row."""
     simulate.perform(tuning.RECEIVE_RETURN_WORK, return_id, 'receive')
 
@@ -66,10 +69,10 @@ def receive_return(
     )
     match store.open_return(case):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(_):
-            return TaskResult(
-                ok=ReturnReceipt(
+            return Ok(
+                ReturnReceipt(
                     return_id=return_id,
                     order_id=order_id,
                     sku=sku,
@@ -86,7 +89,7 @@ def receive_return(
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def inspect_item(*, return_id: str) -> TaskResult[Inspection, TaskError]:
+def inspect_item(*, return_id: str) -> Result[Inspection, TaskError]:
     """Inspect the returned item.
 
     Damage is recorded either way — the inspector saw what they saw — but a
@@ -98,11 +101,11 @@ def inspect_item(*, return_id: str) -> TaskResult[Inspection, TaskError]:
 
     match store.get_return(return_id):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(case):
             if case is None:
-                return TaskResult(
-                    err=TaskError(
+                return Err(
+                    TaskError(
                         error_code=RETURN_NOT_FOUND,
                         message=f'no return {return_id} to inspect',
                         data={'return_id': return_id},
@@ -113,13 +116,13 @@ def inspect_item(*, return_id: str) -> TaskResult[Inspection, TaskError]:
     damaged = simulate.draw(tuning.RETURN_DAMAGE_RATE, return_id, 'damage')
     match store.record_inspection(return_id, 'damaged' if damaged else 'resellable'):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(_):
             pass
 
     if damaged:
-        return TaskResult(
-            err=TaskError(
+        return Err(
+            TaskError(
                 error_code=DAMAGED_ITEM,
                 message=f'{inspected.sku} came back damaged and cannot be resold',
                 data={
@@ -129,8 +132,8 @@ def inspect_item(*, return_id: str) -> TaskResult[Inspection, TaskError]:
                 },
             ),
         )
-    return TaskResult(
-        ok=Inspection(
+    return Ok(
+        Inspection(
             return_id=return_id,
             sku=inspected.sku,
             condition='resellable',
@@ -150,8 +153,8 @@ def inspect_item(*, return_id: str) -> TaskResult[Inspection, TaskError]:
 def restock_or_writeoff(
     *,
     return_id: str,
-    inspection: TaskResult[Inspection, TaskError],
-) -> TaskResult[RestockDecision, TaskError]:
+    inspection: TaskOutcome[Inspection, TaskError],
+) -> Result[RestockDecision, TaskError]:
     """Handle both inspection outcomes.
 
     Reached on the damaged branch only because its node sets
@@ -160,11 +163,11 @@ def restock_or_writeoff(
     """
     match store.get_return(return_id):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(case):
             if case is None:
-                return TaskResult(
-                    err=TaskError(
+                return Err(
+                    TaskError(
                         error_code=RETURN_NOT_FOUND,
                         message=f'no return {return_id} to settle',
                         data={'return_id': return_id},
@@ -174,19 +177,21 @@ def restock_or_writeoff(
 
     simulate.perform(tuning.RESTOCK_OR_WRITEOFF_WORK, return_id, 'settle')
 
-    if inspection.is_err():
-        return _write_off(settling)
-    return _restock(settling)
+    match inspection:
+        case Failed(_):
+            return _write_off(settling)
+        case Succeeded(_):
+            return _restock(settling)
 
 
-def _write_off(case: ReturnCase) -> TaskResult[RestockDecision, TaskError]:
+def _write_off(case: ReturnCase) -> Result[RestockDecision, TaskError]:
     """Take a damaged item out of circulation."""
     match store.close_return(case.return_id, 'written_off'):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(_):
-            return TaskResult(
-                ok=RestockDecision(
+            return Ok(
+                RestockDecision(
                     return_id=case.return_id,
                     sku=case.sku,
                     quantity=case.quantity,
@@ -196,20 +201,20 @@ def _write_off(case: ReturnCase) -> TaskResult[RestockDecision, TaskError]:
             )
 
 
-def _restock(case: ReturnCase) -> TaskResult[RestockDecision, TaskError]:
+def _restock(case: ReturnCase) -> Result[RestockDecision, TaskError]:
     """Put a resellable item back on the shelf."""
     match store.adjust_stock(case.sku, case.quantity):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(_):
             pass
 
     match store.close_return(case.return_id, 'restocked'):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(_):
-            return TaskResult(
-                ok=RestockDecision(
+            return Ok(
+                RestockDecision(
                     return_id=case.return_id,
                     sku=case.sku,
                     quantity=case.quantity,

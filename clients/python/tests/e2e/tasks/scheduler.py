@@ -2,30 +2,31 @@
 
 from __future__ import annotations
 
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.tasks.instance_scheduler import app
 
 
 @app.task(task_name='e2e_scheduled_simple')
-def scheduled_simple_task() -> TaskResult[str, TaskError]:
+def scheduled_simple_task() -> Result[str, TaskError]:
     """Simple task used for scheduler tests."""
-    return TaskResult(ok='scheduled_executed')
+    return Ok('scheduled_executed')
 
 
 @app.task(task_name='e2e_scheduled_with_args')
-def scheduled_with_args_task(*, value: int) -> TaskResult[int, TaskError]:
+def scheduled_with_args_task(*, value: int) -> Result[int, TaskError]:
     """Scheduled task that accepts arguments."""
-    return TaskResult(ok=value * 2)
+    return Ok(value * 2)
 
 
 @app.task(task_name='e2e_catch_up_task')
-def catch_up_task() -> TaskResult[str, TaskError]:
+def catch_up_task() -> Result[str, TaskError]:
     """Task used to verify catch-up missed runs logic."""
-    return TaskResult(ok='catch_up_executed')
+    return Ok('catch_up_executed')
 
 
 @app.task(task_name='e2e_cron_task')
-def cron_task() -> TaskResult[str, TaskError]:
+def cron_task() -> Result[str, TaskError]:
     """Task used to verify CronSchedule enqueue/firing."""
-    return TaskResult(ok='cron_executed')
+    return Ok('cron_executed')

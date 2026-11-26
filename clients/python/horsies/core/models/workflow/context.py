@@ -20,7 +20,8 @@ from .enums import OkT, OkT_co, WorkflowStatus
 from .nodes import NodeKey
 
 if TYPE_CHECKING:
-    from horsies.core.models.tasks import TaskResult, TaskError
+    from horsies.core.models.outcome import TaskOutcome
+    from horsies.core.models.tasks import TaskError
     from .nodes import TaskNode, SubWorkflowNode
 
 
@@ -38,16 +39,16 @@ class SubWorkflowSummary(Generic[OkT_co]):
     Useful for conditional logic based on partial success/failure.
 
     Example:
-        def make_report(workflow_ctx: WorkflowContext | None) -> TaskResult[str, TaskError]:
+        def make_report(workflow_ctx: WorkflowContext | None) -> Result[str, TaskError]:
             if workflow_ctx is None:
-                return TaskResult(err=TaskError(
+                return Err(TaskError(
                     error_code="NO_CTX",
                     message="make_report ran without a workflow context",
                 ))
             summary = workflow_ctx.summary_for(data_pipeline_node)
             if summary.failed_tasks > 0:
-                return TaskResult(ok=f"Partial: {summary.completed_tasks}/{summary.total_tasks}")
-            return TaskResult(ok=f"Full: {summary.output}")
+                return Ok(f"Partial: {summary.completed_tasks}/{summary.total_tasks}")
+            return Ok(f"Full: {summary.output}")
     """
 
     status: WorkflowStatus
@@ -219,7 +220,7 @@ class WorkflowContext(BaseModel):
     task_name: str
 
     # Internal storage: results keyed by node_id
-    _results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
+    _results_by_id: dict[str, TaskOutcome[Any, TaskError]] = {}
     # Internal storage: subworkflow summaries keyed by node_id
     _summaries_by_id: dict[str, SubWorkflowSummary[Any]] = {}
 
@@ -228,7 +229,7 @@ class WorkflowContext(BaseModel):
         workflow_id: str,
         task_index: int,
         task_name: str,
-        results_by_id: dict[str, TaskResult[Any, TaskError]] | None = None,
+        results_by_id: dict[str, TaskOutcome[Any, TaskError]] | None = None,
         summaries_by_id: dict[str, SubWorkflowSummary[Any]] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -252,7 +253,7 @@ class WorkflowContext(BaseModel):
         ``WorkflowContext`` (see ``model_dump`` / ``model_dump_json``
         overrides). The legacy ``to_jsonable`` branch is gone — the only
         sanctioned reconstruction path is ``from_serialized`` with
-        pre-typed ``TaskResult`` instances.
+        pre-typed ``TaskOutcome`` values.
         """
         return dict(payload)
 
@@ -287,33 +288,33 @@ class WorkflowContext(BaseModel):
     def _coerce_results_by_id(
         cls,
         raw_results: Any,
-    ) -> dict[str, TaskResult[Any, TaskError]]:
+    ) -> dict[str, TaskOutcome[Any, TaskError]]:
         """Strict-serde phase 6 (design §6 / plan §H).
 
         ``WorkflowContext`` no longer decodes raw envelopes inside this
         validator — decode happens at the engine/child-runner boundary
         where ``node_id → ok_type`` is known via the workflow spec
         and local task registry. Here we accept only pre-typed
-        ``TaskResult`` instances (the shape produced upstream) and
+        ``TaskOutcome`` values (the shape produced upstream) and
         reject raw dicts so a cross-version producer can't slip a
         wrong-shape value past the type system.
         """
-        from horsies.core.models.tasks import TaskResult
+        from horsies.core.models.outcome import Failed, Succeeded
 
         if raw_results is None:
             return {}
         if not isinstance(raw_results, dict):
             raise ValueError('WorkflowContext results_by_id must be a dict')
 
-        results: dict[str, TaskResult[Any, TaskError]] = {}
+        results: dict[str, TaskOutcome[Any, TaskError]] = {}
         raw_result_map = cast(dict[Any, Any], raw_results)
         for key, value in raw_result_map.items():
             if not isinstance(key, str):
                 raise ValueError('WorkflowContext results_by_id keys must be strings')
-            if not isinstance(value, TaskResult):
+            if not isinstance(value, Succeeded | Failed):
                 raise ValueError(
                     f'WorkflowContext results_by_id[{key!r}] must be a '
-                    f'TaskResult instance; got {type(value).__name__}. '
+                    f'TaskOutcome (Succeeded or Failed); got {type(value).__name__}. '
                     f'Strict-serde decodes raw envelopes at the engine/'
                     f'worker boundary, not inside the model validator.'
                 )
@@ -368,9 +369,7 @@ class WorkflowContext(BaseModel):
                 "because its per-result ok_type information lives at the "
                 "engine/worker boundary, not on the model. Use "
                 "WorkflowContext.from_serialized(...) with pre-typed "
-                "TaskResult instances for in-process reconstruction; "
-                "encode individual TaskResults via encode_task_result if "
-                "you need a wire form."
+                "TaskOutcome values for in-process reconstruction."
             )
         data = super().model_dump(
             mode=mode,
@@ -426,7 +425,7 @@ class WorkflowContext(BaseModel):
         """Refuse wire serialization of WorkflowContext.
 
         Strict-serde phase 7: WorkflowContext can only be reconstructed
-        via ``from_serialized`` with pre-typed ``TaskResult`` instances;
+        via ``from_serialized`` with pre-typed ``TaskOutcome`` values;
         per-result ``ok_type`` information lives at the engine/worker
         boundary, not on the model, so a JSON form has no sanctioned
         decode path.
@@ -498,14 +497,14 @@ class WorkflowContext(BaseModel):
     def result_for(
         self,
         node: TaskNode[OkT] | SubWorkflowNode[OkT] | NodeKey[OkT],
-    ) -> TaskResult[OkT, TaskError]:
+    ) -> TaskOutcome[OkT, TaskError]:
         """
-        Get the result for a specific node.
+        Get the outcome of a specific node.
 
-        Type-safe: returns TaskResult[T, TaskError] where T matches the node's type.
+        Type-safe: returns TaskOutcome[T, TaskError] where T matches the node's type.
 
         Accepts SubWorkflowNode as well as TaskNode: a SubWorkflowNode's
-        terminal TaskResult is stored alongside task results (see
+        terminal outcome is stored alongside task outcomes (see
         ``has_result``, which also accepts both). Use ``summary_for`` when you
         need the richer SubWorkflowSummary instead.
 
@@ -515,7 +514,8 @@ class WorkflowContext(BaseModel):
                   have a node_id assigned.
 
         Returns:
-            The TaskResult from the completed task.
+            The outcome of the completed task: ``Succeeded(value)`` or
+            ``Failed(task_error)``.
 
         Raises:
             KeyError: If the node's result is not in this context.
@@ -541,7 +541,7 @@ class WorkflowContext(BaseModel):
             )
 
         # Cast is safe because the generic parameter ensures type correctness
-        return cast('TaskResult[OkT, TaskError]', self._results_by_id[node_id])
+        return cast('TaskOutcome[OkT, TaskError]', self._results_by_id[node_id])
 
     def has_result(self, node: TaskNode[Any] | SubWorkflowNode[Any]) -> bool:
         """Check if a result exists for the given node."""
@@ -635,7 +635,7 @@ class WorkflowContext(BaseModel):
         workflow_id: str,
         task_index: int,
         task_name: str,
-        results_by_id: dict[str, TaskResult[Any, TaskError]],
+        results_by_id: dict[str, TaskOutcome[Any, TaskError]],
         summaries_by_id: dict[str, SubWorkflowSummary[Any]] | None = None,
     ) -> WorkflowContext:
         """Reconstruct WorkflowContext from serialized data."""

@@ -16,10 +16,11 @@ import pytest
 from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
 from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Ok, Result
 from horsies.core.errors import MultipleValidationErrors
 from horsies.core.models.workflow import (
     TaskNode,
@@ -41,8 +42,8 @@ class MockFn(TaskFunction[Any, Any]):
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
-    def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    def __call__(self, *args: Any, **kwargs: Any) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -89,8 +90,8 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
         *args: Any,
         workflow_ctx: WorkflowContext | None = None,
         **kwargs: Any,
-    ) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    ) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -126,9 +127,9 @@ class MockFnWithCtx(TaskFunction[Any, Any]):
 def _target(
     *,
     url: str = '',
-    data: TaskResult[Any, TaskError] | None = None,
-) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=None)
+    data: TaskOutcome[Any, TaskError] | None = None,
+) -> Result[Any, TaskError]:
+    return Ok(None)
 
 
 fn_a = MockFn(task_name='task_a')
@@ -306,7 +307,7 @@ class TestSpecIsolation:
 
         # Build a WorkflowContext the way the engine would: keyed by
         # the spec copy's node_id.
-        expected_result = TaskResult[int, TaskError](ok=42)
+        expected_result = Succeeded(42)
         ctx = WorkflowContext(
             workflow_id='test-wf-id',
             task_index=1,
@@ -317,8 +318,7 @@ class TestSpecIsolation:
         # The closure captures `a` (original), not spec.tasks[0] (copy).
         # This must resolve successfully — proves the runtime coupling works.
         resolved = ctx.result_for(a)
-        assert resolved.is_ok()
-        assert resolved.unwrap() == 42
+        assert resolved == Succeeded(42)
 
     # ------------------------------------------------------------------
     # Invalid refs preserved for validators
@@ -409,7 +409,7 @@ class _MetaStampWorkflow(WorkflowDefinition[int]):
 # Closure captures the module-level node — the fresh-worker scenario
 def _meta_closure_condition(ctx: WorkflowContext) -> bool:
     result = ctx.result_for(_meta_node_a)
-    return result.is_ok()
+    return isinstance(result, Succeeded)
 
 
 @pytest.mark.unit
@@ -441,13 +441,11 @@ class TestMetaclassStamping:
         the metaclass stamps node_id at import time, so closures captured
         at module level always have a valid node_id for lookup.
         """
-        from horsies.core.models.tasks import TaskResult, TaskError
-
         # Build a WorkflowContext keyed by the metaclass-stamped node_id
         node_id = _meta_node_a.node_id
         assert node_id is not None
 
-        expected_result = TaskResult[int, TaskError](ok=42)
+        expected_result = Succeeded(42)
         ctx = WorkflowContext(
             workflow_id='test-wf-id',
             task_index=1,

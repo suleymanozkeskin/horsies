@@ -13,7 +13,9 @@ from typing import Annotated, Any, Literal, TypeAlias
 from pydantic import BaseModel, Field
 
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.models.tasks import SubWorkflowError, TaskResult, TaskError
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import SubWorkflowError, TaskError
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.models.workflow import TaskNode, SuccessPolicy, SuccessCase
 
 from tests.e2e.tasks.instance import app
@@ -34,33 +36,33 @@ def _workflow(*, name: str, tasks: list[Any], **kwargs: Any) -> Any:
 
 
 @app.task(task_name='e2e_wf_step')
-def step_task(*, step: str) -> TaskResult[str, TaskError]:
+def step_task(*, step: str) -> Result[str, TaskError]:
     """Simple workflow step that returns the step name."""
     # Minimum 50ms execution to ensure distinguishable timestamps
     time.sleep(0.05)
-    return TaskResult(ok=f'completed_{step}')
+    return Ok(f'completed_{step}')
 
 
 @app.task(task_name='e2e_wf_slow_step')
-def slow_step_task(*, step: str, delay_ms: int = 500) -> TaskResult[str, TaskError]:
+def slow_step_task(*, step: str, delay_ms: int = 500) -> Result[str, TaskError]:
     """Workflow step with configurable delay for timing tests."""
     time.sleep(delay_ms / 1000)
-    return TaskResult(ok=f'completed_{step}')
+    return Ok(f'completed_{step}')
 
 
 @app.task(task_name='e2e_wf_final_result')
-def final_result_task() -> TaskResult[dict[str, JsonValue], TaskError]:
+def final_result_task() -> Result[dict[str, JsonValue], TaskError]:
     """Task returning a dict result for output task tests."""
     time.sleep(0.05)
-    return TaskResult(ok={'final': 'result', 'count': 42})
+    return Ok({'final': 'result', 'count': 42})
 
 
 @app.task(task_name='e2e_wf_fail')
-def fail_task(*, error_code: str) -> TaskResult[int, TaskError]:
+def fail_task(*, error_code: str) -> Result[int, TaskError]:
     """Always fails with the specified error code."""
     time.sleep(0.05)
-    return TaskResult(
-        err=TaskError(error_code=error_code, message=f'Failed: {error_code}')
+    return Err(
+        TaskError(error_code=error_code, message=f'Failed: {error_code}')
     )
 
 
@@ -125,10 +127,10 @@ spec_fanin = _workflow(
 
 
 @app.task(task_name='e2e_wf_join_barrier')
-def join_barrier_task() -> TaskResult[None, TaskError]:
+def join_barrier_task() -> Result[None, TaskError]:
     """Small barrier task used to detect duplicate/orphan join enqueues."""
     time.sleep(0.05)
-    return TaskResult(ok=None)
+    return Ok(None)
 
 
 node_wide_fanin_sources = [
@@ -335,188 +337,210 @@ from horsies.core.models.workflow import WorkflowContext
 
 
 @app.task(task_name='e2e_wf_produce_int')
-def produce_int_task(*, value: int) -> TaskResult[int, TaskError]:
+def produce_int_task(*, value: int) -> Result[int, TaskError]:
     """Produces an integer value."""
     time.sleep(0.05)
-    return TaskResult(ok=value)
+    return Ok(value)
 
 
 @app.task(task_name='e2e_wf_double')
-def double_task(*, input_result: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
+def double_task(*, input_result: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
     """Doubles the input value from args_from injection."""
     time.sleep(0.05)
-    if input_result.is_err():
-        return TaskResult(err=input_result.err_value)
-    return TaskResult(ok=input_result.unwrap() * 2)
+    match input_result:
+        case Succeeded(value):
+            return Ok(value * 2)
+        case Failed(error):
+            return Err(error)
 
 
 @app.task(task_name='e2e_wf_sum_two')
 def sum_two_task(
-    *, first: TaskResult[int, TaskError],
-    second: TaskResult[int, TaskError],
-) -> TaskResult[int, TaskError]:
+    *, first: TaskOutcome[int, TaskError],
+    second: TaskOutcome[int, TaskError],
+) -> Result[int, TaskError]:
     """Sums two values from args_from injection."""
     time.sleep(0.05)
-    if first.is_err():
-        return TaskResult(err=first.err_value)
-    if second.is_err():
-        return TaskResult(err=second.err_value)
-    return TaskResult(ok=first.unwrap() + second.unwrap())
+    match first:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(first_value):
+            pass
+    match second:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(second_value):
+            return Ok(first_value + second_value)
 
 
 @app.task(task_name='e2e_wf_fail_with')
-def fail_with_task(*, error_code: str) -> TaskResult[int, TaskError]:
+def fail_with_task(*, error_code: str) -> Result[int, TaskError]:
     """Returns an error with the specified code."""
     time.sleep(0.05)
-    return TaskResult(
-        err=TaskError(error_code=error_code, message=f'Failed with {error_code}')
+    return Err(
+        TaskError(error_code=error_code, message=f'Failed with {error_code}')
     )
 
 
 @app.task(task_name='e2e_wf_ctx_reader')
 def ctx_reader_task(
     *, workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[int, TaskError]:
+) -> Result[int, TaskError]:
     """Reads integer value from workflow context."""
     time.sleep(0.05)
     if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+        return Err(
+            TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
         )
-    result = workflow_ctx.result_for(node_ctx_a.key())
-    if result.is_ok():
-        return TaskResult(ok=result.unwrap())
-    return TaskResult(err=result.err_value)
+    match workflow_ctx.result_for(node_ctx_a.key()):
+        case Succeeded(value):
+            return Ok(value)
+        case Failed(error):
+            return Err(error)
 
 
 @app.task(task_name='e2e_wf_ctx_reader_str')
 def ctx_reader_str_task(
     *, workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[str, TaskError]:
+) -> Result[str, TaskError]:
     """Reads string value from workflow context."""
     time.sleep(0.05)
     if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+        return Err(
+            TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
         )
     for node_id in workflow_ctx._results_by_id:
-        result = workflow_ctx._results_by_id[node_id]
-        if hasattr(result, 'is_ok') and result.is_ok():
-            return TaskResult(ok=str(result.unwrap()))
-        elif hasattr(result, 'is_err') and result.is_err():
-            return TaskResult(err=result.err_value)
-    return TaskResult(
-        err=TaskError(error_code='NO_RESULT', message='No results in context')
+        match workflow_ctx._results_by_id[node_id]:
+            case Succeeded(value):
+                return Ok(str(value))
+            case Failed(error):
+                return Err(error)
+    return Err(
+        TaskError(error_code='NO_RESULT', message='No results in context')
     )
 
 
 @app.task(task_name='e2e_wf_ctx_sum')
 def ctx_sum_task(
     *, workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[int, TaskError]:
+) -> Result[int, TaskError]:
     """Sums all integer results from workflow context."""
     time.sleep(0.05)
     if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+        return Err(
+            TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
         )
     first = workflow_ctx.result_for(node_ctx_multi_a.key())
     second = workflow_ctx.result_for(node_ctx_multi_b.key())
-    if first.is_err():
-        return TaskResult(err=first.err_value)
-    if second.is_err():
-        return TaskResult(err=second.err_value)
-    return TaskResult(ok=first.unwrap() + second.unwrap())
+    match first:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(first_value):
+            pass
+    match second:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(second_value):
+            return Ok(first_value + second_value)
 
 
 @app.task(task_name='e2e_wf_check_upstream_skipped')
 def check_upstream_skipped_task(
-    *, input_result: TaskResult[int, TaskError],
-) -> TaskResult[str, TaskError]:
+    *, input_result: TaskOutcome[int, TaskError],
+) -> Result[str, TaskError]:
     """Checks if input is UPSTREAM_SKIPPED error."""
     time.sleep(0.05)
-    if input_result.is_err():
-        err = input_result.err
-        if err is not None and err.error_code == 'UPSTREAM_SKIPPED':
-            return TaskResult(ok='received_upstream_skipped')
-        return TaskResult(ok=f"received_error_{err.error_code if err else 'unknown'}")
-    return TaskResult(ok=f'received_value_{input_result.unwrap()}')
+    match input_result:
+        case Failed(error) if error.error_code == 'UPSTREAM_SKIPPED':
+            return Ok('received_upstream_skipped')
+        case Failed(error):
+            return Ok(f'received_error_{error.error_code}')
+        case Succeeded(value):
+            return Ok(f'received_value_{value}')
 
 
 @app.task(task_name='e2e_wf_passthrough')
-def passthrough_task(*, value: int) -> TaskResult[int, TaskError]:
+def passthrough_task(*, value: int) -> Result[int, TaskError]:
     """Simple passthrough that returns the input value."""
     time.sleep(0.05)
-    return TaskResult(ok=value)
+    return Ok(value)
 
 
 @app.task(task_name='e2e_wf_mixed_reader')
 def mixed_reader_task(
-    *, from_args: TaskResult[int, TaskError],
+    *, from_args: TaskOutcome[int, TaskError],
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[dict[str, int], TaskError]:
+) -> Result[dict[str, int], TaskError]:
     """Reads from both args_from and workflow_ctx."""
     time.sleep(0.05)
     result: dict[str, int] = {}
 
     # Get value from args_from
-    if from_args.is_err():
-        return TaskResult(err=from_args.err_value)
-    result['from_args'] = from_args.unwrap()
+    match from_args:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(value):
+            result['from_args'] = value
 
     # Get value from workflow_ctx
     if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+        return Err(
+            TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
         )
 
     for node_id in workflow_ctx._results_by_id:
-        ctx_result = workflow_ctx._results_by_id[node_id]
-        if hasattr(ctx_result, 'is_ok') and ctx_result.is_ok():
-            result['from_ctx'] = ctx_result.unwrap()
-            break
+        match workflow_ctx._results_by_id[node_id]:
+            case Succeeded(value):
+                result['from_ctx'] = value
+                break
+            case Failed():
+                pass
 
-    return TaskResult(ok=result)
+    return Ok(result)
 
 
 @app.task(task_name='e2e_wf_produce_dict')
-def produce_dict_task(*, value: str) -> TaskResult[dict[str, JsonValue], TaskError]:
+def produce_dict_task(*, value: str) -> Result[dict[str, JsonValue], TaskError]:
     """Produces a dict with nested structure."""
     time.sleep(0.05)
-    return TaskResult(ok={'key': value, 'count': 42, 'nested': {'inner': True}})
+    return Ok({'key': value, 'count': 42, 'nested': {'inner': True}})
 
 
 @app.task(task_name='e2e_wf_receive_dict')
 def receive_dict_task(
-    *, input_result: TaskResult[dict[str, JsonValue], TaskError],
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+    *, input_result: TaskOutcome[dict[str, JsonValue], TaskError],
+) -> Result[dict[str, JsonValue], TaskError]:
     """Receives dict via args_from and returns it unchanged."""
     time.sleep(0.05)
-    if input_result.is_err():
-        return TaskResult(err=input_result.err_value)
-    return TaskResult(ok=input_result.unwrap())
+    match input_result:
+        case Succeeded(value):
+            return Ok(value)
+        case Failed(error):
+            return Err(error)
 
 
 @app.task(task_name='e2e_wf_dual_reader')
 def dual_reader_task(
-    *, from_args: TaskResult[int, TaskError],
+    *, from_args: TaskOutcome[int, TaskError],
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[dict[str, int], TaskError]:
+) -> Result[dict[str, int], TaskError]:
     """Reads same node's result via both args_from and workflow_ctx."""
     time.sleep(0.05)
-    if from_args.is_err():
-        return TaskResult(err=from_args.err_value)
-    args_value = from_args.unwrap()
+    match from_args:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(args_value):
+            pass
 
     if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided'),
+        return Err(
+            TaskError(error_code='NO_CTX', message='WorkflowContext not provided'),
         )
-    ctx_result = workflow_ctx.result_for(node_dual_a.key())
-    if ctx_result.is_err():
-        return TaskResult(err=ctx_result.err_value)
-
-    return TaskResult(ok={'from_args': args_value, 'from_ctx': ctx_result.unwrap()})
+    match workflow_ctx.result_for(node_dual_a.key()):
+        case Failed(error):
+            return Err(error)
+        case Succeeded(ctx_value):
+            return Ok({'from_args': args_value, 'from_ctx': ctx_value})
 
 
 # =============================================================================
@@ -786,18 +810,18 @@ from horsies.core.models.tasks import RetryPolicy
 def mark_task(
     *, value: str,
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[str, TaskError]:
+) -> Result[str, TaskError]:
     """Returns the provided value."""
     time.sleep(0.05)
     _ = workflow_ctx
-    return TaskResult(ok=value)
+    return Ok(value)
 
 
 @app.task(task_name='e2e_wf_slow_mark')
-def slow_mark_task(*, value: str, delay_ms: int = 200) -> TaskResult[str, TaskError]:
+def slow_mark_task(*, value: str, delay_ms: int = 200) -> Result[str, TaskError]:
     """Returns value after sleeping for delay_ms."""
     time.sleep(delay_ms / 1000)
-    return TaskResult(ok=value)
+    return Ok(value)
 
 
 @app.task(
@@ -806,7 +830,7 @@ def slow_mark_task(*, value: str, delay_ms: int = 200) -> TaskResult[str, TaskEr
 )
 def retry_then_ok_task(
     *, counter_file: str, succeed_on_attempt: int = 2
-) -> TaskResult[str, TaskError]:
+) -> Result[str, TaskError]:
     """
     Fails until attempt number reaches succeed_on_attempt.
     Uses a file to track attempts across retries.
@@ -824,14 +848,14 @@ def retry_then_ok_task(
         f.write(str(attempt))
 
     if attempt < succeed_on_attempt:
-        return TaskResult(
-            err=TaskError(
+        return Err(
+            TaskError(
                 error_code='RETRY_NEEDED',
                 message=f'Attempt {attempt}, need {succeed_on_attempt}',
             )
         )
 
-    return TaskResult(ok=f'succeeded_on_attempt_{attempt}')
+    return Ok(f'succeeded_on_attempt_{attempt}')
 
 
 # =============================================================================
@@ -1038,16 +1062,16 @@ E2ESubPet: TypeAlias = Annotated[
 
 
 @app.task(task_name='e2e_sub_int_ok')
-def e2e_sub_int_ok_task(*, value: int = 11) -> TaskResult[int, TaskError]:
+def e2e_sub_int_ok_task(*, value: int = 11) -> Result[int, TaskError]:
     time.sleep(0.05)
-    return TaskResult(ok=value)
+    return Ok(value)
 
 
 @app.task(task_name='e2e_sub_int_fail')
-def e2e_sub_int_fail_task(*, error_code: str) -> TaskResult[int, TaskError]:
+def e2e_sub_int_fail_task(*, error_code: str) -> Result[int, TaskError]:
     time.sleep(0.05)
-    return TaskResult(
-        err=TaskError(error_code=error_code, message=f'Subworkflow failed: {error_code}'),
+    return Err(
+        TaskError(error_code=error_code, message=f'Subworkflow failed: {error_code}'),
     )
 
 
@@ -1056,9 +1080,9 @@ def e2e_sub_report_input_task(
     *, input_is_err: bool,
     input_error_code: str | None,
     input_value: int | None,
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
-    return TaskResult(ok={
+    return Ok({
         'input_is_err': input_is_err,
         'input_error_code': input_error_code,
         'input_value': input_value,
@@ -1067,12 +1091,17 @@ def e2e_sub_report_input_task(
 
 @app.task(task_name='e2e_sub_probe_failed_child')
 def e2e_sub_probe_failed_child_task(
-    *, child_result: TaskResult[int, TaskError],
+    *, child_result: TaskOutcome[int, TaskError],
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
 
-    args_err = child_result.err if child_result.is_err() else None
+    args_err: TaskError | None
+    match child_result:
+        case Failed(error):
+            args_err = error
+        case Succeeded():
+            args_err = None
     ctx_err: TaskError | None = None
     summary_status: str | None = None
     summary_failed_tasks: int | None = None
@@ -1084,7 +1113,11 @@ def e2e_sub_probe_failed_child_task(
         try:
             ctx_result = workflow_ctx.result_for(node_e2e_sub_failure_probe_child.key())
             ctx_lookup_ok = True
-            ctx_err = ctx_result.err if ctx_result.is_err() else None
+            match ctx_result:
+                case Failed(error):
+                    ctx_err = error
+                case Succeeded():
+                    ctx_err = None
         except Exception as exc:
             ctx_err = TaskError(
                 error_code='CTX_LOOKUP_FAILED',
@@ -1100,7 +1133,7 @@ def e2e_sub_probe_failed_child_task(
         except Exception as exc:
             summary_error_summary = f'{type(exc).__name__}: {exc}'
 
-    return TaskResult(ok={
+    return Ok({
         'args_lookup_ok': True,
         'args_is_subworkflow_error': isinstance(args_err, SubWorkflowError),
         'args_sub_workflow_id': (
@@ -1126,7 +1159,7 @@ def e2e_sub_probe_failed_child_task(
 @app.task(task_name='e2e_sub_probe_success_ctx')
 def e2e_sub_probe_success_ctx_task(
     *, workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
 
     result_ok = False
@@ -1138,18 +1171,18 @@ def e2e_sub_probe_success_ctx_task(
     summary_lookup_ok = False
 
     if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CTX', message='WorkflowContext not provided'),
+        return Err(
+            TaskError(error_code='NO_CTX', message='WorkflowContext not provided'),
         )
 
     try:
-        result = workflow_ctx.result_for(node_e2e_sub_success_ctx_child.key())
-        result_ok = result.is_ok()
-        if result.is_ok():
-            result_value = result.unwrap()
-        else:
-            err = result.err
-            result_error_code = str(err.error_code) if err is not None else None
+        match workflow_ctx.result_for(node_e2e_sub_success_ctx_child.key()):
+            case Succeeded(value):
+                result_ok = True
+                result_value = value
+            case Failed(error):
+                result_ok = False
+                result_error_code = str(error.error_code)
     except Exception as exc:
         result_error_code = f'{type(exc).__name__}: {exc}'
 
@@ -1162,7 +1195,7 @@ def e2e_sub_probe_success_ctx_task(
     except Exception as exc:
         summary_status = f'{type(exc).__name__}: {exc}'
 
-    return TaskResult(ok={
+    return Ok({
         'result_ok': result_ok,
         'result_value': result_value,
         'result_error_code': result_error_code,
@@ -1179,9 +1212,9 @@ def e2e_sub_pet_report_task(
     type_name_at_build: str,
     kind_at_build: str | None,
     bark_volume_at_build: int | None,
-) -> TaskResult[dict[str, JsonValue], TaskError]:
+) -> Result[dict[str, JsonValue], TaskError]:
     time.sleep(0.05)
-    return TaskResult(ok={
+    return Ok({
         'saw_dog_at_build': saw_dog_at_build,
         'type_name_at_build': type_name_at_build,
         'kind_at_build': kind_at_build,
@@ -1236,9 +1269,13 @@ class E2ESubParamWorkflow(WorkflowDefinition[int]):
     def build_with(
         cls,
         horsies_app: Any,
-        value: TaskResult[int, TaskError],
+        value: TaskOutcome[int, TaskError],
     ) -> Any:
-        raw_value = value.unwrap() if value.is_ok() else -1
+        match value:
+            case Succeeded(succeeded_value):
+                raw_value = succeeded_value
+            case Failed():
+                raw_value = -1
         child = TaskNode(fn=e2e_sub_int_ok_task, kwargs={'value': raw_value})
         return horsies_app.workflow(
             name=cls.name,
@@ -1258,16 +1295,25 @@ class E2ESubFailedInputWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
     def build_with(
         cls,
         horsies_app: Any,
-        value: TaskResult[int, TaskError],
+        value: TaskOutcome[int, TaskError],
     ) -> Any:
-        err = value.err if value.is_err() else None
+        input_kwargs: dict[str, JsonValue]
+        match value:
+            case Failed(error):
+                input_kwargs = {
+                    'input_is_err': True,
+                    'input_error_code': str(error.error_code),
+                    'input_value': None,
+                }
+            case Succeeded(succeeded_value):
+                input_kwargs = {
+                    'input_is_err': False,
+                    'input_error_code': None,
+                    'input_value': succeeded_value,
+                }
         child = TaskNode(
             fn=e2e_sub_report_input_task,
-            kwargs={
-                'input_is_err': value.is_err(),
-                'input_error_code': str(err.error_code) if err is not None else None,
-                'input_value': value.unwrap() if value.is_ok() else None,
-            },
+            kwargs=input_kwargs,
         )
         return horsies_app.workflow(
             name=cls.name,

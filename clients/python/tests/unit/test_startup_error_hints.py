@@ -24,11 +24,12 @@ import horsies
 from horsies import (
     AppConfig,
     Horsies,
+    Ok,
     PostgresConfig,
+    Result,
     SubWorkflowNode,
     TaskError,
     TaskNode,
-    TaskResult,
     WorkflowDefinition,
     WorkflowSpec,
 )
@@ -216,13 +217,13 @@ class _SubNote(_Note):
 
 
 @_app.task('hints_one')
-def _one() -> TaskResult[int, TaskError]:
-    return TaskResult(ok=1)
+def _one() -> Result[int, TaskError]:
+    return Ok(1)
 
 
 @_app.task('hints_takes_note')
-def _takes_note(*, note: _Note) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=note.n)
+def _takes_note(*, note: _Note) -> Result[int, TaskError]:
+    return Ok(note.n)
 
 
 def _key(label: str) -> str:
@@ -486,8 +487,8 @@ class TestARefusedSignatureSplitsItsReport:
         with pytest.raises(TaskDefinitionError) as refused:
 
             @_app.task('hints_banned')
-            def banned(*, value: Any) -> TaskResult[int, TaskError]:
-                return TaskResult(ok=1)
+            def banned(*, value: Any) -> Result[int, TaskError]:
+                return Ok(1)
 
         assert refused.value.code is ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION
         assert 'Fix:' not in refused.value.message

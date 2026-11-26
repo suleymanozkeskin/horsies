@@ -30,12 +30,13 @@ from pydantic import (
 
 from horsies import (
     AppConfig,
+    Failed,
     Horsies,
     JsonInput,
     JsonValue,
     PostgresConfig,
+    Succeeded,
     TaskError,
-    TaskResult,
 )
 from horsies.core.codec.json_io import SerializationError, dumps_json, loads_json
 from horsies.core.codec.json_value import (
@@ -72,7 +73,7 @@ from horsies.core.models.workflow import WorkflowStatus
 from horsies.core.models.workflow.context import SubWorkflowSummary
 from horsies.core.scheduler.validation import _encode_schedule_kwargs
 from horsies.core.task_decorator import create_task_wrapper
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 
 
 class Color(enum.Enum):
@@ -498,8 +499,8 @@ def _mock_app() -> MagicMock:
 @pytest.mark.unit
 class TestEntryPoints:
     def test_send_refuses_a_value_the_worker_cannot_read(self) -> None:
-        def task(*, order: Note) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=order.n)
+        def task(*, order: Note) -> Result[int, TaskError]:
+            return Ok(order.n)
 
         app = _mock_app()
         value = Note(n=1)
@@ -512,8 +513,8 @@ class TestEntryPoints:
         app.get_broker.assert_not_called()
 
     def test_send_refuses_a_typo_in_a_nested_key(self) -> None:
-        def task(*, order: Note) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=order.n)
+        def task(*, order: Note) -> Result[int, TaskError]:
+            return Ok(order.n)
 
         app = _mock_app()
 
@@ -525,8 +526,8 @@ class TestEntryPoints:
         app.get_broker.assert_not_called()
 
     def test_send_refuses_a_subclass_that_loses_fields(self) -> None:
-        def task(*, order: Note) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=order.n)
+        def task(*, order: Note) -> Result[int, TaskError]:
+            return Ok(order.n)
 
         app = _mock_app()
 
@@ -537,12 +538,12 @@ class TestEntryPoints:
         app.get_broker.assert_not_called()
 
     def test_a_return_with_an_unknown_key_is_refused(self) -> None:
-        def task() -> TaskResult[Note, TaskError]:
-            return TaskResult(ok={'n': 1, 'bogus': 2})  # type: ignore[arg-type]
+        def task() -> Result[Note, TaskError]:
+            return Ok({'n': 1, 'bogus': 2})  # type: ignore[arg-type]
 
         result = create_task_wrapper(task, _mock_app(), 'test.task')()
 
-        assert result.is_err()
+        assert is_err(result)
         assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_a_schedule_refuses_a_value_the_worker_cannot_read(self) -> None:
@@ -555,8 +556,8 @@ class TestEntryPoints:
         )
 
         @app.task('schedule_read_back')
-        def task(*, order: Note) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=order.n)
+        def task(*, order: Note) -> Result[int, TaskError]:
+            return Ok(order.n)
 
         value = Note(n=1)
         value.n = 'x'  # type: ignore[assignment]
@@ -573,8 +574,8 @@ class TestEntryPoints:
         assert result.err_value.code is ErrorCode.CONFIG_INVALID_SCHEDULE
 
     def test_the_checked_entry_keeps_the_wire_form(self) -> None:
-        def task(*, order: Note) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=order.n)
+        def task(*, order: Note) -> Result[int, TaskError]:
+            return Ok(order.n)
 
         assert encode_kwargs_read_back(task, {'order': Note(n=1)}) == {
             'order': {'n': 1, 'note': 'default'},
@@ -582,11 +583,11 @@ class TestEntryPoints:
 
     def test_a_returned_result_is_proved_at_the_wire(self) -> None:
         with pytest.raises(ValueValidationError, match='secret'):
-            encode_returned_result(TaskResult(ok=Sub(n=1)), Note)
+            encode_returned_result(Ok(Sub(n=1)), Note)
 
     def test_a_good_returned_result_keeps_its_envelope(self) -> None:
-        assert encode_returned_result(TaskResult(ok=1), int) == encode_task_result(
-            TaskResult(ok=1),
+        assert encode_returned_result(Ok(1), int) == encode_task_result(
+            Ok(1),
             int,
         )
 
@@ -635,12 +636,16 @@ class _Evil(ValueError):
 
 def _stored(err: TaskError) -> TaskError:
     """The full path of a stored error."""
-    wire = encode_task_result(TaskResult(err=err), type(None), 'task')
+    wire = encode_task_result(Err(err), type(None), 'task')
     text = dumps_json(wire)
     assert is_ok(text)
     parsed = loads_json(text.ok_value)
     assert is_ok(parsed)
-    return decode_task_result(parsed.ok_value, type(None)).err_value
+    match decode_task_result(parsed.ok_value, type(None)):
+        case Failed(error=error):
+            return error
+        case Succeeded() as outcome:
+            pytest.fail(f'expected a failed outcome, got {outcome!r}')
 
 
 @pytest.mark.unit
@@ -858,7 +863,7 @@ class TestReportableError:
     ) -> None:
         with caplog.at_level('ERROR', logger='horsies.codec'):
             encode_task_result(
-                TaskResult(err=TaskError(error_code='X', data=_Opaque())),
+                Err(TaskError(error_code='X', data=_Opaque())),
                 type(None),
             )
 
@@ -1000,8 +1005,8 @@ class TestJsonInput:
         assert 'data' not in vars(TaskError)
 
     def test_a_task_parameter_takes_the_checks_of_json_value(self) -> None:
-        def pass_on(*, payload: JsonInput) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def pass_on(*, payload: JsonInput) -> Result[int, TaskError]:
+            return Ok(1)
 
         app = Horsies(
             AppConfig(
@@ -1018,7 +1023,7 @@ class TestJsonInput:
 @pytest.mark.unit
 def test_json_text_of_a_refused_error_is_valid() -> None:
     wire = encode_task_result(
-        TaskResult(err=TaskError(error_code='X', data=_Opaque())),
+        Err(TaskError(error_code='X', data=_Opaque())),
         type(None),
         'task',
     )

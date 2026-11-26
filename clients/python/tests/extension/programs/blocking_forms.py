@@ -23,7 +23,7 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
 from horsies.core.brokers.result_types import (
     BrokerInvalidInput,
@@ -36,7 +36,7 @@ from horsies.core.models.workflow.handle_types import (
     HandleResumeRecoveryFailed,
     HandleStoredDataInvalid,
 )
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.workflows.start_types import (
     WorkflowStartEnqueueFailed,
     WorkflowStartIdConflict,
@@ -65,8 +65,8 @@ APP: Final = Horsies(
 
 
 @APP.task(task_name='tests.extension.blocking_forms.value')
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 def _start_request(name: str, workflow_id: uuid.UUID) -> core.WorkflowStartRequest:

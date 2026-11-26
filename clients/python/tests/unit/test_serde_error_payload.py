@@ -31,7 +31,6 @@ from horsies.core.models.tasks import (
     OperationalErrorCode,
     SubWorkflowError,
     TaskError,
-    TaskResult,
 )
 from horsies.core.models.workflow.context import SubWorkflowSummary
 from horsies.core.models.workflow.enums import WorkflowStatus
@@ -45,13 +44,11 @@ def _decode_envelope(wire: str) -> dict[str, Any]:
 @pytest.mark.unit
 class TestSerializeErrorPayloadFlattensException:
     def test_exception_none_round_trips_unchanged(self) -> None:
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.BROKER_ERROR,
-                message='nothing to flatten',
-            ),
+        error: TaskError = TaskError(
+            error_code=OperationalErrorCode.BROKER_ERROR,
+            message='nothing to flatten',
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
         assert envelope['__h_task_result__'] is True
         assert envelope['ok'] is None
@@ -79,14 +76,12 @@ class TestSerializeErrorPayloadFlattensException:
         except ValueError as caught:
             original = caught
 
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
-                message=f'{type(original).__name__}: {original}',
-                exception=original,
-            ),
+        error: TaskError = TaskError(
+            error_code=OperationalErrorCode.TASK_EXCEPTION,
+            message=f'{type(original).__name__}: {original}',
+            exception=original,
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
 
         # Critical: error_code stays TASK_EXCEPTION — no silent
@@ -116,14 +111,12 @@ class TestSerializeErrorPayloadFlattensException:
             pass
 
         original = MyDomainError('domain problem')
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
-                message='custom failure',
-                exception=original,
-            ),
+        error: TaskError = TaskError(
+            error_code=OperationalErrorCode.TASK_EXCEPTION,
+            message='custom failure',
+            exception=original,
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
         flattened = envelope['err']['exception']
         assert flattened['type'] == 'MyDomainError'
@@ -150,14 +143,12 @@ class TestSerializeErrorPayloadFlattensException:
             'repr': "ConnectionError('db down')",
             'traceback': 'Traceback (most recent call last):\n  ConnectionError: db down\n',
         }
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=OperationalErrorCode.BROKER_ERROR,
-                message='db down',
-                exception=pre_flattened,
-            ),
+        error: TaskError = TaskError(
+            error_code=OperationalErrorCode.BROKER_ERROR,
+            message='db down',
+            exception=pre_flattened,
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
         # The pre-flattened dict round-trips unchanged.
         assert envelope['err']['exception'] == pre_flattened
@@ -187,15 +178,13 @@ class TestSerializeErrorPayloadFlattensException:
             skipped_tasks=0,
             error_summary='downstream',
         )
-        tr: TaskResult[Any, TaskError] = TaskResult(
-            err=SubWorkflowError(
-                error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
-                message='subworkflow failed',
-                sub_workflow_id='wf-child',
-                sub_workflow_summary=summary,
-            ),
+        error: TaskError = SubWorkflowError(
+            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+            message='subworkflow failed',
+            sub_workflow_id='wf-child',
+            sub_workflow_summary=summary,
         )
-        wire = serialize_error_payload(tr)
+        wire = serialize_error_payload(error)
         envelope = _decode_envelope(wire)
         err = envelope['err']
         # Base-class fields survive.

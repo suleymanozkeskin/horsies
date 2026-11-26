@@ -13,12 +13,17 @@ from __future__ import annotations
 from typing import Any
 
 from horsies import (
+    Err,
+    Failed,
     Horsies,
     NodeKey,
+    Ok,
+    Result,
     SubWorkflowNode,
+    Succeeded,
     TaskError,
     TaskNode,
-    TaskResult,
+    TaskOutcome,
     WorkflowContext,
     WorkflowDefinition,
     WorkflowDefinitionConfig,
@@ -32,19 +37,19 @@ FANOUT_SHARD_SUFFIXES = ('a', 'b', 'c')
 
 
 @app.task(task_name='e2e_fanout_ready')
-def ready_task() -> TaskResult[str, TaskError]:
+def ready_task() -> Result[str, TaskError]:
     """Readiness probe for the fan-out worker."""
-    return TaskResult(ok='ready')
+    return Ok('ready')
 
 
 @app.task(task_name='e2e_fanout_list_shards')
-def list_shards(*, tenant_id: str) -> TaskResult[list[str], TaskError]:
-    return TaskResult(ok=[f'{tenant_id}-{suffix}' for suffix in FANOUT_SHARD_SUFFIXES])
+def list_shards(*, tenant_id: str) -> Result[list[str], TaskError]:
+    return Ok([f'{tenant_id}-{suffix}' for suffix in FANOUT_SHARD_SUFFIXES])
 
 
 @app.task(task_name='e2e_fanout_count_shard_rows')
-def count_shard_rows(*, shard: str) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=len(shard))
+def count_shard_rows(*, shard: str) -> Result[int, TaskError]:
+    return Ok(len(shard))
 
 
 @app.task(task_name='e2e_fanout_sum_shard_rows')
@@ -52,18 +57,19 @@ def sum_shard_rows(
     *,
     shard_count: int,
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[int, TaskError]:
+) -> Result[int, TaskError]:
     if workflow_ctx is None:
-        return TaskResult(
-            err=TaskError(error_code='NO_CONTEXT', message='workflow_ctx is missing'),
+        return Err(
+            TaskError(error_code='NO_CONTEXT', message='workflow_ctx is missing'),
         )
     total = 0
     for position in range(shard_count):
-        shard_result = workflow_ctx.result_for(NodeKey[int](f'shard_{position}'))
-        if shard_result.is_err():
-            return TaskResult(err=shard_result.err_value)
-        total += shard_result.ok_value
-    return TaskResult(ok=total)
+        match workflow_ctx.result_for(NodeKey[int](f'shard_{position}')):
+            case Failed(error):
+                return Err(error)
+            case Succeeded(rows):
+                total += rows
+    return Ok(total)
 
 
 class ShardReport(WorkflowDefinition[int]):
@@ -76,13 +82,15 @@ class ShardReport(WorkflowDefinition[int]):
     def build_with(
         cls,
         app: Horsies,
-        shards: TaskResult[list[str], TaskError],
+        shards: TaskOutcome[list[str], TaskError],
         *_args: Any,
         **_kwargs: Any,
     ) -> WorkflowSpec[int]:
-        if shards.is_err():
-            raise ValueError('shard_report needs the shard list')
-        shard_names = shards.ok_value
+        match shards:
+            case Failed():
+                raise ValueError('shard_report needs the shard list')
+            case Succeeded(shard_names):
+                pass
 
         count_nodes: list[TaskNode[int]] = [
             count_shard_rows.node(node_id=f'shard_{position}')(shard=shard_name)

@@ -63,7 +63,7 @@ from horsies.core.models.task_send_types import (
     TaskSendPayloadMismatch,
     TaskSendValidationFailed,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.types.result import Ok, Result, is_err, is_ok
 from tests.task_ids import mint_task_id
 
@@ -106,8 +106,8 @@ def _optional_value_task(app: Horsies, name: str) -> Any:
     or pass nothing."""
 
     @app.task(task_name=name)
-    def optional_value(*, value: int = 0) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def optional_value(*, value: int = 0) -> Result[int, TaskError]:
+        return Ok(value)
 
     return optional_value
 

@@ -27,7 +27,7 @@ Values flowing through a task signature must classify as **one** of:
 - A concrete `BaseModel` subclass (not bare `BaseModel`).
 - A `@dataclass`.
 - `list[T]`, `tuple[T, ...]`, `dict[str, T]`, `Literal[...]`, `Annotated[T, ...]`, `T | None`, or a discriminated union — recursively classified.
-- `TaskResult[T, TaskError]` or `TaskResult[T, TaskError] | None`, as a whole parameter only. The engine fills it through `args_from`. `err_t` must be `TaskError`, and a default must be `None`.
+- `TaskOutcome[T, TaskError]` or `TaskOutcome[T, TaskError] | None`, as a whole parameter only. The engine fills it through `args_from` with `Succeeded(value)` or `Failed(task_error)`. The second type argument must be `TaskError`, and a default must be `None`.
 
 Anything outside this surface raises `SignatureValidationError` at `@app.task` time. The error names the banned type and prints the documented fix.
 
@@ -35,7 +35,7 @@ The same rules apply to each parameter of a `build_with` that a `SubWorkflowNode
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Horsies, TaskResult, TaskError, JsonValue
+from horsies import Horsies, Ok, Result, TaskError, JsonValue
 from pydantic import BaseModel
 
 app = Horsies(config)
@@ -45,8 +45,8 @@ class Order(BaseModel):
     items: list[str]
 
 @app.task("process_order")
-def process_order(*, order: Order) -> TaskResult[Order, TaskError]:
-    return TaskResult(ok=order)
+def process_order(*, order: Order) -> Result[Order, TaskError]:
+    return Ok(order)
 ```
 
 The wire stores the Pydantic JSON form (`{"id": 1, "items": ["widget"]}`), with no per-value class tag. The worker decodes it back to `Order` because the registered task declared `Order` as the parameter type.
@@ -58,8 +58,8 @@ For raw JSON payloads where the inner shape is genuinely dynamic:
 def validate_input(
     *,
     data: dict[str, JsonValue],
-) -> TaskResult[dict[str, JsonValue], TaskError]:
-    return TaskResult(ok=data)
+) -> Result[dict[str, JsonValue], TaskError]:
+    return Ok(data)
 ```
 
 ## Strict Values
@@ -135,7 +135,7 @@ The rules of an error that crosses the wire are on [The Error Path](/horsies/int
 
 ## Pydantic Models in Workflows
 
-Models flowing through `args_from` ride through the same envelope. The downstream task declares `TaskResult[Model, TaskError]` (or an `Optional` / `Union` containing it) as the parameter type; the engine decodes the upstream envelope and binds a typed `TaskResult` into the consumer's kwargs.
+Models flowing through `args_from` ride through the same envelope. The downstream task declares `TaskOutcome[Model, TaskError]` (or `TaskOutcome[Model, TaskError] | None`) as the parameter type. The engine decodes the upstream envelope and passes a typed `Succeeded(model)` or `Failed(task_error)` to the parameter.
 
 ```python
 from pydantic import SecretStr
@@ -145,9 +145,14 @@ from horsies import (
     Horsies,
     AppConfig,
     PostgresConfig,
-    TaskResult,
+    Err,
+    Failed,
+    Ok,
+    Result,
+    Succeeded,
     TaskError,
     TaskNode,
+    TaskOutcome,
 )
 
 config = AppConfig(
@@ -163,8 +168,8 @@ class Order(BaseModel):
     created_at: datetime
 
 @app.task("create_order")
-def create_order() -> TaskResult[Order, TaskError]:
-    return TaskResult(ok=Order(
+def create_order() -> Result[Order, TaskError]:
+    return Ok(Order(
         item="widget",
         total=9.99,
         created_at=datetime.now(timezone.utc),
@@ -173,12 +178,13 @@ def create_order() -> TaskResult[Order, TaskError]:
 @app.task("process_order")
 def process_order(
     *,
-    order_result: TaskResult[Order, TaskError],
-) -> TaskResult[str, TaskError]:
-    if order_result.is_err():
-        return TaskResult(err=order_result.err_value)
-    order: Order = order_result.ok_value  # typed Order, not a dict
-    return TaskResult(ok=f"Processed {order.item}")
+    order_result: TaskOutcome[Order, TaskError],
+) -> Result[str, TaskError]:
+    match order_result:
+        case Failed(error):
+            return Err(error)
+        case Succeeded(order):  # typed Order, not a dict
+            return Ok(f"Processed {order.item}")
 
 node_create: TaskNode[Order] = TaskNode(fn=create_order)
 node_process: TaskNode[str] = TaskNode(
@@ -209,10 +215,10 @@ The worker calls `encode_task_result(result, ok_type)` after the task function r
 
 ```python
 from horsies.core.codec.typed import encode_task_result
-from horsies import TaskResult, TaskError
+from horsies import Ok
 
 envelope = encode_task_result(
-    TaskResult[int, TaskError](ok=42),
+    Ok(42),
     ok_type=int,
 )
 # {"__h_task_result__": True, "ok": 42, "err": None}
@@ -224,27 +230,27 @@ The consumer holds the declared `ok_type` (from the task registry) and calls `de
 
 | Code | Source | When |
 |------|--------|------|
-| `BrokerErrorCode.INVALID_JSON_PAYLOAD` | broker/app result read | the stored result does not parse as JSON, is not a JSON object, has a malformed envelope, or fails typed slot decode through an app-level API |
-| `BrokerErrorCode.NO_TYPE_AVAILABLE` | `app.get_result_async` | `task_name` is not in the local task registry, so no `ok_type` available to decode the ok slot |
-| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | handle / workflow / engine wrappers around typed decode | a wrapper catches a strict decode failure and folds it into a `TaskResult(err=...)` |
-| `ContractCode.NO_TYPE_AVAILABLE` | outputless workflow handle decode | per-node lookup failed inside `WorkflowHandle.get()` for a terminal task name not in the local registry |
+| `BrokerErrorCode.INVALID_JSON_PAYLOAD` | raw result read (`app.get_raw_result`, `broker.get_raw_result_record`), task info read (`handle.info(include_result=True)`) | the stored result does not parse as JSON, or is not a JSON object. For the task info read, also a malformed envelope or a failed typed slot decode |
+| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | typed read (`TaskHandle.get`, `app.get_result`, `WorkflowHandle.get`, `WorkflowHandle.result_for`) | the stored result does not parse, has a malformed envelope, or fails the typed slot decode. The read returns `Err(ResultDeserializationError(...))` |
+| `ContractCode.NO_TYPE_AVAILABLE` | typed read | the task succeeded, and its `task_name` is not in the local task registry, so no `ok_type` is available to decode the ok slot. The read returns `Err(NoTypeAvailable(...))` |
+| `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` or `ContractCode.NO_TYPE_AVAILABLE` | node map (`WorkflowHandle.results()`, the terminal results of an outputless workflow's `get()`) | a node whose stored result does not decode stays in the map as `Failed(TaskError(error_code=...))` with one of these codes |
 
 ## API Reference
 
 ### `encode_task_result(result, ok_type) -> dict[str, Json]`
 
-Encode a `TaskResult[T, TaskError]` to the wire envelope.
+Encode a `Result[T, TaskError]` to the wire envelope.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `result` | `TaskResult[T, TaskError]` | Domain result returned by the task |
+| `result` | `Result[T, TaskError]` | Domain result returned by the task: `Ok(value)` or `Err(task_error)` |
 | `ok_type` | `TypeAnnotation` | Declared `T` from the task signature |
 
-**Raises:** `ValueValidationError` if `result.ok` does not match `ok_type` or pydantic cannot serialize it; `StrictJsonError` for non-JSON-serializable structures. `ValueValidationError` (`horsies.core.codec`) is a `SerializationError` and a `ValueError`; its text names each failing field, the message and the error type, not the value.
+**Raises:** `ValueValidationError` if the value of `Ok(value)` does not match `ok_type` or pydantic cannot serialize it; `StrictJsonError` for non-JSON-serializable structures. `ValueValidationError` (`horsies.core.codec`) is a `SerializationError` and a `ValueError`; its text names each failing field, the message and the error type, not the value.
 
-### `decode_task_result(envelope, ok_type) -> TaskResult[T, TaskError]`
+### `decode_task_result(envelope, ok_type) -> TaskOutcome[T, TaskError]`
 
-Decode a wire envelope into a typed `TaskResult`.
+Decode a wire envelope into a typed `TaskOutcome`: `Succeeded(value)` or `Failed(task_error)`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -261,7 +267,7 @@ Cheap shape check before per-slot decode. Returns the envelope as `dict[str, Jso
 
 ### `encode_value(value, type) / decode_value(payload, type)`
 
-Primitive entry points for non-`TaskResult` values (workflow kwargs, success policies, args_from blocks). Same `TypeAdapter`-driven semantics.
+Primitive entry points for values that are not a task result (workflow kwargs, success policies, args_from blocks). Same `TypeAdapter`-driven semantics.
 
 **Raises:** `encode_value` raises `ValueValidationError` for a dict key without a JSON form (a `frozenset`, or an Enum member whose value is a list, a dict or a set), for a value that holds itself, for a value that is nested too deep, and for `bytes` that are not UTF-8. Any other `TypeError` or `ValueError` from the dump propagates, for example from a computed field.
 
@@ -320,13 +326,13 @@ Raised by strict codec primitives and the JSON parse guards for strict JSON viol
 ```python
 # Wrong — raises SignatureValidationError
 @app.task("bad")
-def bad(*, data: dict) -> TaskResult[dict, TaskError]:
-    return TaskResult(ok=data)
+def bad(*, data: dict) -> Result[dict, TaskError]:
+    return Ok(data)
 
 # Correct — declare the contents
 @app.task("good")
-def good(*, data: dict[str, JsonValue]) -> TaskResult[dict[str, JsonValue], TaskError]:
-    return TaskResult(ok=data)
+def good(*, data: dict[str, JsonValue]) -> Result[dict[str, JsonValue], TaskError]:
+    return Ok(data)
 ```
 
 **Don't define result types in `__main__` or inside functions.** Workers import types by module path; classes without an importable qualname cannot participate in typed decode.

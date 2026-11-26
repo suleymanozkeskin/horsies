@@ -19,7 +19,8 @@ from horsies.core.errors import ConfigurationError, ErrorCode, HorsiesError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import TaskNode, WorkflowSpec
 from horsies.core.errors import MultipleValidationErrors
 
@@ -53,8 +54,8 @@ class TestDefaultModeRejectsQueueName:
         app = _default_app()
         with pytest.raises(ConfigurationError) as exc_info:
             @app.task('my_task', queue_name='fast')
-            def my_task() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='done')  # pragma: no cover
+            def my_task() -> Result[str, TaskError]:
+                return Ok('done')  # pragma: no cover
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
         assert 'DEFAULT' in str(exc_info.value)
@@ -64,8 +65,8 @@ class TestDefaultModeRejectsQueueName:
         app = _default_app()
         with pytest.raises(ConfigurationError) as exc_info:
             @app.task('my_task', queue_name='default')
-            def my_task() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='done')  # pragma: no cover
+            def my_task() -> Result[str, TaskError]:
+                return Ok('done')  # pragma: no cover
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
 
@@ -81,8 +82,8 @@ class TestCustomModeRequiresQueueName:
         app = _custom_app('fast', 'slow')
         with pytest.raises(ConfigurationError) as exc_info:
             @app.task('my_task')
-            def my_task() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='done')  # pragma: no cover
+            def my_task() -> Result[str, TaskError]:
+                return Ok('done')  # pragma: no cover
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_QUEUE_MODE
         assert 'CUSTOM' in str(exc_info.value)
@@ -99,8 +100,8 @@ class TestCustomModeRejectsUnknownQueue:
         app = _custom_app('fast', 'slow')
         with pytest.raises(ConfigurationError) as exc_info:
             @app.task('my_task', queue_name='analytics')
-            def my_task() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='done')  # pragma: no cover
+            def my_task() -> Result[str, TaskError]:
+                return Ok('done')  # pragma: no cover
 
         assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
         assert 'analytics' in str(exc_info.value)
@@ -112,8 +113,8 @@ class TestCustomModeRejectsUnknownQueue:
         app = _custom_app('fast', 'slow')
         with pytest.raises(ConfigurationError) as exc_info:
             @app.task('my_task', queue_name='fats')
-            def my_task() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='done')  # pragma: no cover
+            def my_task() -> Result[str, TaskError]:
+                return Ok('done')  # pragma: no cover
 
         assert exc_info.value.code == ErrorCode.TASK_INVALID_QUEUE
 
@@ -129,8 +130,8 @@ class TestCustomModeAcceptsValidQueue:
         app = _custom_app('fast', 'slow')
 
         @app.task('my_task', queue_name='fast')
-        def my_task() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='done')  # pragma: no cover
+        def my_task() -> Result[str, TaskError]:
+            return Ok('done')  # pragma: no cover
 
         assert 'my_task' in app.tasks
 
@@ -139,12 +140,12 @@ class TestCustomModeAcceptsValidQueue:
         app = _custom_app('fast', 'slow')
 
         @app.task('task_a', queue_name='fast')
-        def task_a() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='a')  # pragma: no cover
+        def task_a() -> Result[str, TaskError]:
+            return Ok('a')  # pragma: no cover
 
         @app.task('task_b', queue_name='slow')
-        def task_b() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='b')  # pragma: no cover
+        def task_b() -> Result[str, TaskError]:
+            return Ok('b')  # pragma: no cover
 
         assert 'task_a' in app.tasks
         assert 'task_b' in app.tasks
@@ -161,8 +162,8 @@ class TestDefaultModeAcceptsNoQueue:
         app = _default_app()
 
         @app.task('my_task')
-        def my_task() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='done')  # pragma: no cover
+        def my_task() -> Result[str, TaskError]:
+            return Ok('done')  # pragma: no cover
 
         assert 'my_task' in app.tasks
 
@@ -290,8 +291,8 @@ class TestWorkflowValidatesFrozenNodes:
         app = _custom_app('scraping')
 
         @app.task('scrape', queue_name='scraping')
-        def scrape() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)  # pragma: no cover
+        def scrape() -> Result[int, TaskError]:
+            return Ok(1)  # pragma: no cover
 
         # Freeze a node carrying a concrete invalid queue by building a spec.
         node: TaskNode[int] = TaskNode(
@@ -320,8 +321,8 @@ class TestWorkflowValidatesFrozenNodes:
         app = _custom_app('scraping')
 
         @app.task('scrape_ok', queue_name='scraping')
-        def scrape_ok() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)  # pragma: no cover
+        def scrape_ok() -> Result[int, TaskError]:
+            return Ok(1)  # pragma: no cover
 
         node: TaskNode[int] = TaskNode(
             fn=scrape_ok, node_id='n', queue='scraping', priority=30,

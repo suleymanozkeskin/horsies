@@ -37,7 +37,7 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     NoRuntimeParameter,
     TakesRuntime,
-    declared_taskresult_ok_type,
+    declared_outcome_ok_type,
     decode_kwargs,
     fill_omitted_defaults,
     task_runtime_parameter,
@@ -80,7 +80,6 @@ from horsies.core.models.tasks import (
     Execution,
     OutcomeCode,
     RetrievalCode,
-    TaskResult,
     TaskError,
     OperationalErrorCode,
 )
@@ -151,7 +150,8 @@ from horsies.core.lifecycle.outcomes import (
     TerminalizationOutcome,
 )
 from horsies.core.task_decorator import TaskBodyKind, await_task_call_in_worker
-from horsies.core.types.result import Err, Ok, is_err
+from horsies.core.models.outcome import Failed, TaskOutcome
+from horsies.core.types.result import Err, Ok, Result, is_err
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,23 +250,25 @@ def error_code_text(code: BuiltInTaskCode | str) -> str:
             return code
 
 
-def result_outcome_of(out: TaskResult[Any, TaskError]) -> ResultOutcome:
+def result_outcome_of(out: Result[Any, TaskError]) -> ResultOutcome:
     """What the envelope of ``out`` holds: its value, or its task error with
     the code text and the live exception that the error keeps. Pure."""
-    match out.err:
-        case None:
+    match out:
+        case Ok():
             return ResultSucceeded()
-        case TaskError(error_code=code, exception=BaseException() as exception):
-            return ResultFailed(error_code_text(code), RaisedInRun(exception))
-        case TaskError(error_code=code):
-            return ResultFailed(error_code_text(code), NothingRaised())
+        case Err(err_value=error):
+            match error.exception:
+                case BaseException() as exception:
+                    return ResultFailed(error_code_text(error.error_code), RaisedInRun(exception))
+                case _:
+                    return ResultFailed(error_code_text(error.error_code), NothingRaised())
 
 
-def _encoded_error(tr: TaskResult[None, TaskError]) -> EncodedResult:
+def _encoded_error(error: TaskError) -> EncodedResult:
     """The envelope of an error that the run built itself, and its outcome."""
     return EncodedResult(
-        ResultEnvelope(serialize_error_payload(tr)),
-        result_outcome_of(tr),
+        ResultEnvelope(serialize_error_payload(error)),
+        result_outcome_of(Err(error)),
     )
 
 
@@ -276,14 +278,12 @@ def _serialization_error_response(
 ) -> EncodedResult:
     """Build a WORKER_SERIALIZATION_ERROR response for a serde failure."""
     logger.error(f'Serialization error for task {task_name}: {error}')
-    tr: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-            message=str(error),
-            data={'task_name': task_name},
-        ),
+    task_error = TaskError(
+        error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        message=str(error),
+        data={'task_name': task_name},
     )
-    return _encoded_error(tr)
+    return _encoded_error(task_error)
 
 
 def _stored_timeout_refusal_response(
@@ -316,14 +316,12 @@ def _stored_timeout_refusal_response(
         case _ as unreachable:
             assert_never(unreachable)
     logger.error(f'Stored timeout refused for task {task_name}: {reason}')
-    tr: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-            message=reason,
-            data=data,
-        ),
+    task_error = TaskError(
+        error_code=OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+        message=reason,
+        data=data,
     )
-    return _encoded_error(tr)
+    return _encoded_error(task_error)
 
 
 from horsies.core.errors import ConfigurationError, ErrorCode
@@ -1099,7 +1097,7 @@ def marker_refused(task_id: uuid.UUID, refused: CoreError) -> MarkerEnd:
 def encoded_body_end(
     task_name: str,
     task: Any,
-    out: TaskResult[Any, TaskError],
+    out: Result[Any, TaskError],
 ) -> EncodedResult | BodyInterrupted:
     """The end of a body whose task call returned ``out``.
 
@@ -1108,8 +1106,8 @@ def encoded_body_end(
     as its exception. Any other outcome is encoded for the frame
     (``_encode_task_outcome``), and an exception of the encode propagates.
     """
-    match out.err:
-        case TaskError(exception=CoreStopped() | ForkedAfterCoreStart() as refusal):
+    match out:
+        case Err(err_value=TaskError(exception=CoreStopped() | ForkedAfterCoreStart() as refusal)):
             return BodyInterrupted(refusal)
         case _:
             return _encode_task_outcome(task_name, task, out)
@@ -1155,14 +1153,12 @@ def async_task_presence(app: Horsies) -> AsyncTaskPresence:
 
 def _resolution_failure(task_name: str, message: str) -> EncodedResult:
     """The result of a task the worker cannot resolve: WORKER_RESOLUTION_ERROR."""
-    tr: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
-            message=message,
-            data={'task_name': task_name},
-        )
+    task_error = TaskError(
+        error_code=OperationalErrorCode.WORKER_RESOLUTION_ERROR,
+        message=message,
+        data={'task_name': task_name},
     )
-    return _encoded_error(tr)
+    return _encoded_error(task_error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,11 +1242,11 @@ def _why_not_runnable(body_kind: object, place: RunPlace) -> str | None:
 
 def _task_call_result(
     task_name: str,
-    called: TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]],
+    called: Result[Any, TaskError] | Coroutine[Any, Any, Result[Any, TaskError]],
     task_loop: TaskLoop,
-    map_exception: Callable[[BaseException], TaskResult[Any, TaskError]],
+    map_exception: Callable[[BaseException], Result[Any, TaskError]],
     cancel: RunCancel,
-) -> TaskResult[Any, TaskError]:
+) -> Result[Any, TaskError]:
     """The result of one call of a task wrapper.
 
     The call of a ``def`` task returns its result. The call of an
@@ -1265,7 +1261,7 @@ def _task_call_result(
     defect in the library: ``AssertionError``.
     """
     match called:
-        case TaskResult():
+        case Ok() | Err():
             return called
         case Coroutine():
             return task_loop.run_watched(
@@ -1360,7 +1356,7 @@ def _prepare_task_call(
             ),
         )
 
-    # Deserialize injected TaskResults from workflow args_from.
+    # Deserialize injected outcomes from workflow args_from.
     # Strict-serde envelope shape (engine.py emit sites):
     #   {
     #     '__h_taskresult_envelope__': True,
@@ -1417,7 +1413,7 @@ def _prepare_task_call(
                     f'(source task {source_task_name!r}): {exc}'
                 ),
             )
-        target_ok_type = declared_taskresult_ok_type(underlying_fn, key)
+        target_ok_type = declared_outcome_ok_type(underlying_fn, key)
         if target_ok_type is None or target_ok_type == source_ok_type:
             kwargs[key] = decoded_result
             continue
@@ -1454,15 +1450,15 @@ def _prepare_task_call(
             definition_key_by_id = workflow_ctx_data.get(
                 'definition_key_by_id', {},
             )
-            results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
+            results_by_id: dict[str, TaskOutcome[Any, TaskError]] = {}
             for node_id, envelope in results_by_id_raw.items():
                 if envelope is None:
                     # Engine couldn't encode this entry (no
                     # registered task or no ok_type); surface as a
                     # sentinel TaskError so the context still has a
                     # typed value.
-                    results_by_id[node_id] = TaskResult(
-                        err=TaskError(
+                    results_by_id[node_id] = Failed(
+                        TaskError(
                             error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx result for node '
@@ -1476,8 +1472,8 @@ def _prepare_task_call(
                     continue
                 source_task_name = task_name_by_id.get(node_id)
                 if not isinstance(source_task_name, str):
-                    results_by_id[node_id] = TaskResult(
-                        err=TaskError(
+                    results_by_id[node_id] = Failed(
+                        TaskError(
                             error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx missing task_name for '
@@ -1501,8 +1497,8 @@ def _prepare_task_call(
                     ),
                 )
                 if source_ok_type is None:
-                    results_by_id[node_id] = TaskResult(
-                        err=TaskError(
+                    results_by_id[node_id] = Failed(
+                        TaskError(
                             error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx source '
@@ -1522,8 +1518,8 @@ def _prepare_task_call(
                         envelope, source_ok_type,
                     )
                 except (StrictJsonError, ValueValidationError) as exc:
-                    results_by_id[node_id] = TaskResult(
-                        err=TaskError(
+                    results_by_id[node_id] = Failed(
+                        TaskError(
                             error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'decode_task_result failed for '
@@ -1608,21 +1604,19 @@ def _task_exception_response(task_name: str, e: BaseException) -> EncodedResult:
     """The result of a task that raised: ``TASK_EXCEPTION``. Logs it."""
     logger.error(f'Task exception: {task_name}: {exception_text(e)}')
     # If the task raised an exception, we wrap it in a TaskError
-    tr: TaskResult[None, TaskError] = TaskResult(
-        err=TaskError(
-            error_code=OperationalErrorCode.TASK_EXCEPTION,
-            message=f'{type(e).__name__}: {exception_text(e)}',
-            data={'task_name': task_name},
-            exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
-        )
+    task_error = TaskError(
+        error_code=OperationalErrorCode.TASK_EXCEPTION,
+        message=f'{type(e).__name__}: {exception_text(e)}',
+        data={'task_name': task_name},
+        exception=e,  # pydantic will accept and we flatten on serialization if needed elsewhere
     )
-    return _encoded_error(tr)
+    return _encoded_error(task_error)
 
 
 def _encode_task_outcome(
     task_name: str,
     task: Any,
-    out: TaskResult[Any, TaskError],
+    out: Result[Any, TaskError],
 ) -> EncodedResult:
     """Encode the result of a task call for the frame, against the declared
     ok type of the task, and read the ok value back with that type

@@ -208,7 +208,7 @@ pub enum ErrorCode {
     TaskPredecoratedNotSupported,
     /// The task signature fails the strict check: a parameter that is not
     /// keyword-only, a type that is not allowed, or a return type that is not
-    /// `TaskResult[OkT, TaskError]`.
+    /// `Result[OkT, TaskError]`.
     #[code_catalog(value = "HRS-105")]
     TaskStrictSignatureViolation,
     /// `execution=SHARED_ASYNC` on a function defined with `def`.

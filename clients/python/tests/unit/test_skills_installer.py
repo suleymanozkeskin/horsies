@@ -523,7 +523,9 @@ class TestSkillFolderShape:
 
         assert text.startswith('---\nname: horsies\ndescription: ')
         header = text.split('\n---\n', 1)[0]
-        for signal in ('import horsies', '@app.task', 'TaskResult', 'WorkflowDefinition'):
+        for signal in (
+            'import horsies', '@app.task', 'TaskOutcome', 'ReadResult', 'WorkflowDefinition',
+        ):
             assert signal in header
 
     @pytest.mark.parametrize('name', _REFERENCE_FILES)

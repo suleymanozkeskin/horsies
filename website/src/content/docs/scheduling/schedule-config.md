@@ -83,7 +83,7 @@ Must match a registered `@app.task()`:
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 @app.task("send_notification")
-def send_notification(*, user_id: int) -> TaskResult[None, TaskError]:
+def send_notification(*, user_id: int) -> Result[None, TaskError]:
     ...
 
 TaskSchedule(
@@ -99,7 +99,7 @@ Pass arguments to the scheduled task via `kwargs`. Schedules are keyword-only: `
 
 ```python
 @app.task("process_region")
-def process_region(*, region: str, full_sync: bool) -> TaskResult[None, TaskError]:
+def process_region(*, region: str, full_sync: bool) -> Result[None, TaskError]:
     ...
 
 TaskSchedule(
@@ -125,7 +125,7 @@ In CUSTOM mode, override the task's default queue:
 <!-- check: skip elided -- ... stands for a config shown on other pages -->
 ```python
 @app.task("background_job", queue_name="normal")
-def background_job() -> TaskResult[None, TaskError]:
+def background_job() -> Result[None, TaskError]:
     ...
 
 TaskSchedule(

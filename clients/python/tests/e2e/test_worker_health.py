@@ -33,7 +33,7 @@ from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.types.status import TaskStatus
 
 from tests.broker_resources_support import current_resources
-from tests.e2e.helpers.assertions import unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, unwrap_send
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
@@ -160,7 +160,7 @@ def _make_shared_ready_check():
         nonlocal handle
         if handle is None:
             handle = unwrap_send(shared_async_tasks.shared_sleep.send(seconds=0))
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 

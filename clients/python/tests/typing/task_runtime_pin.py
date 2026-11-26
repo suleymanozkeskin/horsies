@@ -35,7 +35,6 @@ from horsies import (
     RunCancelState,
     TaskError,
     TaskNode,
-    TaskResult,
     TaskRuntime,
 )
 from horsies.core.models.task_send_types import TaskSendResult
@@ -44,24 +43,24 @@ from horsies.core.task_decorator import (
     RuntimeTaskFunction,
     TaskHandle,
 )
-from horsies.core.types.result import Result
+from horsies.core.types.result import Ok, Result
 
 
 def sync_forms(app: Horsies, runtime: TaskRuntime) -> None:
     @app.task('pin_runtime_sync')
-    def with_parameters(runtime: TaskRuntime, *, order_id: str) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=runtime.fencing_token.value + len(order_id))
+    def with_parameters(runtime: TaskRuntime, *, order_id: str) -> Result[int, TaskError]:
+        return Ok(runtime.fencing_token.value + len(order_id))
 
     @app.task('pin_runtime_sync_only')
-    def runtime_only(runtime: TaskRuntime) -> TaskResult[FencingToken, TaskError]:
-        return TaskResult(ok=runtime.fencing_token)
+    def runtime_only(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
+        return Ok(runtime.fencing_token)
 
     as_runtime: RuntimeTaskFunction[..., int] = with_parameters
     as_runtime_only: RuntimeTaskFunction[[], FencingToken] = runtime_only
     del as_runtime, as_runtime_only
 
-    assert_type(with_parameters(runtime, order_id='o-1'), TaskResult[int, TaskError])
-    assert_type(runtime_only(runtime), TaskResult[FencingToken, TaskError])
+    assert_type(with_parameters(runtime, order_id='o-1'), Result[int, TaskError])
+    assert_type(runtime_only(runtime), Result[FencingToken, TaskError])
     with_parameters(order_id='o-1')  # pyright: ignore[reportCallIssue]
     runtime_only()  # pyright: ignore[reportCallIssue]
     with_parameters('not a runtime', order_id='o-1')  # pyright: ignore[reportArgumentType]
@@ -81,12 +80,12 @@ def sync_forms(app: Horsies, runtime: TaskRuntime) -> None:
 
 async def async_forms(app: Horsies, runtime: TaskRuntime) -> None:
     @app.task('pin_runtime_async')
-    async def with_parameters(runtime: TaskRuntime, *, order_id: str) -> TaskResult[str, TaskError]:
-        return TaskResult(ok=f'{order_id}:{runtime.fencing_token.value}')
+    async def with_parameters(runtime: TaskRuntime, *, order_id: str) -> Result[str, TaskError]:
+        return Ok(f'{order_id}:{runtime.fencing_token.value}')
 
     @app.task('pin_runtime_async_only')
-    async def runtime_only(runtime: TaskRuntime) -> TaskResult[FencingToken, TaskError]:
-        return TaskResult(ok=runtime.fencing_token)
+    async def runtime_only(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
+        return Ok(runtime.fencing_token)
 
     as_runtime: AsyncRuntimeTaskFunction[..., str] = with_parameters
     as_sync: RuntimeTaskFunction[..., str] = with_parameters  # pyright: ignore[reportAssignmentType]
@@ -94,11 +93,11 @@ async def async_forms(app: Horsies, runtime: TaskRuntime) -> None:
 
     pending = assert_type(
         with_parameters(runtime, order_id='o-1'),
-        Coroutine[Any, Any, TaskResult[str, TaskError]],
+        Coroutine[Any, Any, Result[str, TaskError]],
     )
     pending_only = assert_type(
         runtime_only(runtime),
-        Coroutine[Any, Any, TaskResult[FencingToken, TaskError]],
+        Coroutine[Any, Any, Result[FencingToken, TaskError]],
     )
     del pending, pending_only
     with_parameters(order_id='o-1')  # pyright: ignore[reportCallIssue]
@@ -117,18 +116,18 @@ async def async_forms(app: Horsies, runtime: TaskRuntime) -> None:
 
 def shared_forms(app: Horsies, runtime: TaskRuntime) -> None:
     @app.task('pin_runtime_shared_async', execution=Execution.SHARED_ASYNC, timeout_ms=5_000)
-    async def shared_async(runtime: TaskRuntime, *, count: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=runtime.fencing_token.value + count)
+    async def shared_async(runtime: TaskRuntime, *, count: int) -> Result[int, TaskError]:
+        return Ok(runtime.fencing_token.value + count)
 
     @app.task('pin_runtime_shared_thread', execution=Execution.SHARED_THREAD, timeout_ms=5_000)
-    def shared_thread(runtime: TaskRuntime, *, count: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=runtime.fencing_token.value + count)
+    def shared_thread(runtime: TaskRuntime, *, count: int) -> Result[int, TaskError]:
+        return Ok(runtime.fencing_token.value + count)
 
     as_async: AsyncRuntimeTaskFunction[..., int] = shared_async
     as_sync: RuntimeTaskFunction[..., int] = shared_thread
     del as_async, as_sync
 
-    assert_type(shared_thread(runtime, count=1), TaskResult[int, TaskError])
+    assert_type(shared_thread(runtime, count=1), Result[int, TaskError])
     assert_type(shared_async.send(count=1), TaskSendResult[TaskHandle[int]])
     assert_type(shared_thread.send(count=1), TaskSendResult[TaskHandle[int]])
     shared_async.send(runtime, count=1)  # pyright: ignore[reportCallIssue]
@@ -137,14 +136,14 @@ def shared_forms(app: Horsies, runtime: TaskRuntime) -> None:
     @app.task(
         'pin_runtime_bad_async_on_def', execution=Execution.SHARED_ASYNC, timeout_ms=5_000
     )  # pyright: ignore[reportArgumentType, reportCallIssue, reportUntypedFunctionDecorator]
-    def async_class_on_def(runtime: TaskRuntime, *, count: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=runtime.fencing_token.value + count)
+    def async_class_on_def(runtime: TaskRuntime, *, count: int) -> Result[int, TaskError]:
+        return Ok(runtime.fencing_token.value + count)
 
     @app.task(
         'pin_runtime_bad_thread_on_async', execution=Execution.SHARED_THREAD, timeout_ms=5_000
     )  # pyright: ignore[reportArgumentType, reportCallIssue, reportUntypedFunctionDecorator]
-    async def thread_class_on_async(runtime: TaskRuntime, *, count: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=runtime.fencing_token.value + count)
+    async def thread_class_on_async(runtime: TaskRuntime, *, count: int) -> Result[int, TaskError]:
+        return Ok(runtime.fencing_token.value + count)
 
     del async_class_on_def, thread_class_on_async
 

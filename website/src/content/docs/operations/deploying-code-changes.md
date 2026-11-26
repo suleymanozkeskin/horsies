@@ -44,7 +44,7 @@ The Python code of the steps below is on [Code Change Examples](/horsies/operati
 | The task name is not registered in the worker | `WORKER_RESOLUTION_ERROR` | The result of the task. The message names the task |
 | A subworkflow `definition_key` is not registered | `SUBWORKFLOW_LOAD_FAILED` | The subworkflow node ends `FAILED`, and failure handling of the parent runs |
 | The kwargs of a subworkflow node do not fit the current `build_with` signature | `WORKER_SERIALIZATION_ERROR` | The subworkflow node ends `FAILED` |
-| The return type of an upstream task changed, and a stored result does not fit | `RESULT_DESERIALIZATION_ERROR` | A `TaskResult` with this error replaces the stored result where it is read: downstream nodes, `WorkflowContext` and handles |
+| The return type of an upstream task changed, and a stored result does not fit | `RESULT_DESERIALIZATION_ERROR` | A failed outcome with this error replaces the stored result in downstream nodes, in `WorkflowContext` and in the result maps of a handle. `get()` and `result_for()` of a handle return this error as a read error (Python: `Err(ResultDeserializationError(...))`) |
 | An upstream task name was removed or renamed | `RESULT_DESERIALIZATION_ERROR` | Same place. The error data has `stage: 'source_not_registered'` |
 
 | Change to a model field after the data was stored | Result on read |

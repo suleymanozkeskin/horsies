@@ -39,7 +39,8 @@ from horsies.core.codec.validation_errors import (
     validation_summary,
 )
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import SubWorkflowError, TaskError, TaskResult
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import SubWorkflowError, TaskError
 from horsies.core.types.result import Err, Ok, Result
 
 logger = get_logger('codec')
@@ -73,7 +74,7 @@ __all__ = [
 ]
 
 
-# Wire envelope key for the typed `TaskResult` payload (§5 / §8). The
+# Wire envelope key for the stored task result payload (§5 / §8). The
 # only reserved-namespace key the codec layer emits directly; user-
 # originated dumps that try to inject this key are rejected by
 # `_scan_reserved_keys`.
@@ -105,7 +106,7 @@ TypeAnnotation = object
 """Any value `pydantic.TypeAdapter` accepts.
 
 Not narrowed to `type` because `list[X]`, `Annotated[...]`, `Union[...]`,
-`TaskResult[X, Y]`, etc. are not plain `type` instances at runtime. See
+`Result[X, Y]`, etc. are not plain `type` instances at runtime. See
 design-doc §0.
 """
 
@@ -529,35 +530,37 @@ def validate_omitted_default(
 
 
 def conform_to_target(
-    result: TaskResult[Any, TaskError],
+    outcome: TaskOutcome[Any, TaskError],
     target_ok_type: TypeAnnotation,
-) -> Result[TaskResult[Any, TaskError], ValueValidationError | StrictJsonError]:
-    """Validate a dependency result against the type that the receiver declares.
+) -> Result[TaskOutcome[Any, TaskError], ValueValidationError | StrictJsonError]:
+    """Validate a dependency outcome against the type that the receiver declares.
 
-    An `args_from` result is decoded with the source's type, so a constraint or
-    a validator on the receiver's `TaskResult[T, TaskError]` has not run. This
+    An `args_from` outcome is decoded with the source's type, so a constraint or
+    a validator on the receiver's `TaskOutcome[T, TaskError]` has not run. This
     runs them on the decoded value, and the receiver gets the value they
     return. It validates the value, not the wire form: a subclass stays a
     subclass, and a source that the wiring check accepts does not fail on a
     key that the target forbids.
 
-    An error result passes unchanged, because it has no ok value.
+    A failed outcome passes unchanged, because it has no value.
 
     Args:
-        result: The decoded result of the dependency.
+        outcome: The decoded outcome of the dependency.
         target_ok_type: The `T` of the receiver's parameter.
 
     Returns:
-        Ok with the result to give to the receiver, or Err with the refusal.
+        Ok with the outcome to give to the receiver, or Err with the refusal.
         The text of a refusal holds no input value.
     """
-    if result.is_err():
-        return Ok(result)
-    adapter = _get_adapter(target_ok_type)
-    try:
-        return Ok(TaskResult(ok=_validate_strict(adapter, result.ok_value)))
-    except (StrictJsonError, ValueValidationError) as refusal:
-        return Err(refusal)
+    match outcome:
+        case Failed():
+            return Ok(outcome)
+        case Succeeded(value=value):
+            adapter = _get_adapter(target_ok_type)
+            try:
+                return Ok(Succeeded(_validate_strict(adapter, value)))
+            except (StrictJsonError, ValueValidationError) as refusal:
+                return Err(refusal)
 
 
 def decode_value(
@@ -769,19 +772,19 @@ def _dump(
 
 
 def encode_task_result(
-    result: TaskResult[Any, TaskError],
+    result: Result[Any, TaskError],
     ok_type: TypeAnnotation,
     origin: Literal['task', 'library'] = 'library',
 ) -> dict[str, Json]:
-    """Encode a `TaskResult[OkT, TaskError]` into the wire envelope.
+    """Encode a `Result[OkT, TaskError]` into the wire envelope.
 
     Envelope shape:
         ``{"__h_task_result__": True, "ok": <encoded ok> | None,
            "err": <encoded TaskError dict> | None}``
 
-    Exactly one slot carries data (matching `TaskResult`'s constructor
-    invariant). The ok slot may legitimately be `None` when
-    `ok_type` permits it (e.g. `TaskResult[None, TaskError]`); decode
+    Exactly one slot carries data (``Ok`` or ``Err``). The ok slot may
+    legitimately be `None` when `ok_type` permits it (e.g.
+    `Result[None, TaskError]`); decode
     discriminates on the err slot — `err is None` → ok path,
     `err is not None` → err path.
 
@@ -817,23 +820,23 @@ def encode_task_result(
         ValueValidationError: when the carried value doesn't satisfy
             its declared shape.
     """
-    if result.is_err():
-        encoded_err = encode_task_error(reportable_error(result.err_value, origin))
-        return {
-            _TASK_RESULT_ENVELOPE_KEY: True,
-            'ok': None,
-            'err': encoded_err,
-        }
-    encoded_ok = encode_value(result.ok_value, ok_type)
-    return {
-        _TASK_RESULT_ENVELOPE_KEY: True,
-        'ok': encoded_ok,
-        'err': None,
-    }
+    match result:
+        case Err(err_value=error):
+            return {
+                _TASK_RESULT_ENVELOPE_KEY: True,
+                'ok': None,
+                'err': encode_task_error(reportable_error(error, origin)),
+            }
+        case Ok(ok_value=value):
+            return {
+                _TASK_RESULT_ENVELOPE_KEY: True,
+                'ok': encode_value(value, ok_type),
+                'err': None,
+            }
 
 
 def encode_returned_result(
-    result: TaskResult[Any, TaskError],
+    result: Result[Any, TaskError],
     ok_type: TypeAnnotation,
 ) -> dict[str, Json]:
     """Encode the return of a task body, and prove the ok value reads back.
@@ -846,13 +849,15 @@ def encode_returned_result(
         ValueValidationError: as `encode_value`, or when a reader cannot get the
             value back.
     """
-    if result.is_err():
-        return encode_task_result(result, ok_type, origin='task')
-    return {
-        _TASK_RESULT_ENVELOPE_KEY: True,
-        'ok': encode_or_raise_on_refusal(result.ok_value, ok_type),
-        'err': None,
-    }
+    match result:
+        case Err():
+            return encode_task_result(result, ok_type, origin='task')
+        case Ok(ok_value=value):
+            return {
+                _TASK_RESULT_ENVELOPE_KEY: True,
+                'ok': encode_or_raise_on_refusal(value, ok_type),
+                'err': None,
+            }
 
 
 def reportable_error(
@@ -1062,7 +1067,7 @@ def decode_task_error(err_slot: Json) -> TaskError:
     subworkflow failures via ``SubWorkflowError.model_dump(...)`` at
     ``engine.py::on_subworkflow_complete``; without polymorphic decode
     those subclass fields would be silently lost when downstream
-    consumers read the parent node's TaskResult.
+    consumers read the parent node's outcome.
 
     Discriminator: inspect the payload's keys. SubWorkflowError-specific
     fields (``sub_workflow_id``) identify the subclass; everything else
@@ -1071,7 +1076,7 @@ def decode_task_error(err_slot: Json) -> TaskError:
     via ``decode_value``.
 
     Args:
-        err_slot: The raw err-slot value from a TaskResult envelope.
+        err_slot: The raw err-slot value from a stored task result envelope.
 
     Returns:
         A ``TaskError`` (or ``SubWorkflowError``) instance.
@@ -1156,8 +1161,8 @@ def validate_task_result_envelope(raw: Json) -> dict[str, Json]:
 def decode_task_result(
     raw: Json,
     ok_type: TypeAnnotation,
-) -> TaskResult[Any, TaskError]:
-    """Decode a wire envelope back to `TaskResult[OkT, TaskError]`.
+) -> TaskOutcome[Any, TaskError]:
+    """Decode a wire envelope back to `TaskOutcome[OkT, TaskError]`.
 
     Validates the envelope shape strictly (must be a dict carrying
     `__h_task_result__: True`, with exactly the keys
@@ -1177,7 +1182,7 @@ def decode_task_result(
         ok_type: Declared `OkT` for the ok-slot decoding.
 
     Returns:
-        The reconstructed `TaskResult`.
+        The reconstructed outcome: `Succeeded(value)` or `Failed(error)`.
 
     Raises:
         StrictJsonError: on envelope shape failure or reserved-key
@@ -1193,9 +1198,9 @@ def decode_task_result(
         # (``sub_workflow_id`` / ``sub_workflow_summary``). The engine
         # emits these at ``on_subworkflow_complete``; without subclass
         # routing TypeAdapter(TaskError) would drop them.
-        return TaskResult(err=decode_task_error(err_slot))
+        return Failed(decode_task_error(err_slot))
     decoded_ok = decode_value(ok_slot, ok_type)
-    return TaskResult(ok=decoded_ok)
+    return Succeeded(decoded_ok)
 
 
 def _is_task_error_type(expected_type: TypeAnnotation) -> bool:

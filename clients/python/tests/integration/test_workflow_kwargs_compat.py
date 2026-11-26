@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import loads_json
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     TaskNode,
     SubWorkflowNode,
@@ -27,6 +27,7 @@ from horsies.core.models.workflow import (
     WorkflowValidationError,
 )
 from horsies.core.errors import ErrorCode
+from horsies.core.types.result import Ok, Result
 
 from .conftest import make_simple_task, start_ok
 
@@ -58,7 +59,7 @@ class StaticKwargsChildWorkflow(WorkflowDefinition[int]):
 
     The sibling ``KwargsChildWorkflow`` is the args_from variant — those
     two contracts are deliberately separated under strict-serde so
-    ``TaskResult[...]`` only ever means engine-injected.
+    ``TaskOutcome[...]`` only ever means engine-injected.
     """
 
     name = 'static_kwargs_child_workflow'
@@ -67,8 +68,8 @@ class StaticKwargsChildWorkflow(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, value: int) -> Any:
         @app.task(task_name='static_kwargs_child_task')
-        def child_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def child_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         node = TaskNode(fn=child_task, kwargs={'value': value})
         return app.workflow(

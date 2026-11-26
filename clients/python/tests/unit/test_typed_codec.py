@@ -44,8 +44,8 @@ from horsies.core.codec.json_value import (
     StrictJsonError,
 )
 from horsies.core.codec.validation_errors import ValueValidationError
-from horsies.core.models.tasks import TaskResult
-from horsies.core.types.result import is_ok
+from horsies.core.models.outcome import Failed, Succeeded
+from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.codec.typed import (
     Json,
     _get_adapter,  # pyright: ignore[reportPrivateUsage]
@@ -1198,13 +1198,13 @@ class TestDepthBoundAndTheLimitOfTheDump:
 
     def test_the_deepest_result_passes_the_boundary_in_its_envelope(self) -> None:
         value = _nested_list(MAX_TYPED_JSON_DEPTH)
-        envelope = encode_task_result(TaskResult(ok=value), Any)
+        envelope = encode_task_result(Ok(value), Any)
 
         text = dumps_json(envelope)
         assert is_ok(text)
         parsed = loads_json(text.ok_value)
         assert is_ok(parsed)
-        assert decode_task_result(parsed.ok_value, Any).ok_value == value
+        assert decode_task_result(parsed.ok_value, Any) == Succeeded(value)
 
     def test_the_bound_leaves_room_for_the_envelopes(self) -> None:
         wrapped = encode_value(_nested_list(self.deepest_accepted_value), Any)
@@ -1624,18 +1624,14 @@ class TestTaskResultEnvelopeRoundTrip:
     worker persistence, engine emit, handle decode."""
 
     def test_ok_envelope_round_trips(self) -> None:
-        from horsies.core.models.tasks import TaskError, TaskResult
-
-        tr: TaskResult[int, TaskError] = TaskResult(ok=42)
-        encoded = encode_task_result(tr, int)
+        encoded = encode_task_result(Ok(42), int)
         assert encoded == {
             '__h_task_result__': True,
             'ok': 42,
             'err': None,
         }
         decoded = decode_task_result(encoded, int)
-        assert decoded.ok == 42
-        assert decoded.err is None
+        assert decoded == Succeeded(42)
 
     def test_decode_rejects_missing_marker(self) -> None:
         # User-visible regression of the strict shape check — a payload
@@ -1657,25 +1653,24 @@ class TestTaskResultEnvelopeRoundTrip:
         """Live ``BaseException`` on ``TaskError.exception`` is flattened.
 
         Regression: ``task_decorator`` builds
-        ``TaskResult(err=TaskError(exception=<live exc>, ...))`` for
+        ``Err(TaskError(exception=<live exc>, ...))`` for
         unhandled exceptions (and specifically for
         ``WorkflowContextMissingIdError``). The worker hands that
-        TaskResult to ``encode_task_result`` directly; without the
+        result to ``encode_task_result`` directly; without the
         in-encoder flatten the pydantic serializer rejects the live
         exception with ``PydanticSerializationError`` and the wrapper
         folds the failure to ``OperationalErrorCode.TASK_EXCEPTION``,
         clobbering the producer's declared ``error_code``.
         """
-        from horsies.core.models.tasks import TaskError, TaskResult
+        from horsies.core.models.tasks import TaskError
 
         err = TaskError(
             exception=ValueError('boom'),
             error_code='X',
             message='m',
         )
-        tr: TaskResult[None, TaskError] = TaskResult(err=err)
 
-        encoded = encode_task_result(tr, type(None))
+        encoded = encode_task_result(Err(err), type(None))
         assert encoded['ok'] is None
         err_slot = cast('dict[str, Json]', encoded['err'])
         flat = err_slot['exception']
@@ -1687,11 +1682,14 @@ class TestTaskResultEnvelopeRoundTrip:
         assert err_slot['message'] == 'm'
 
         decoded = decode_task_result(encoded, type(None))
-        assert decoded.err is not None
-        assert decoded.err.error_code == 'X'
-        # Round-trip preserves the flattened dict shape (not a live exc).
-        assert isinstance(decoded.err.exception, dict)
-        assert decoded.err.exception['type'] == 'ValueError'
+        match decoded:
+            case Failed(error=decoded_err):
+                assert decoded_err.error_code == 'X'
+                # Round-trip preserves the flattened dict shape (not a live exc).
+                assert isinstance(decoded_err.exception, dict)
+                assert decoded_err.exception['type'] == 'ValueError'
+            case Succeeded():
+                pytest.fail(f'expected a failed outcome, got {decoded!r}')
 
 
 class TestDecodeTaskErrorPolymorphic:
@@ -1817,7 +1815,7 @@ class TestDecodeTaskErrorPolymorphic:
 
     def test_encode_task_result_preserves_sub_workflow_error_subclass(self) -> None:
         """``encode_task_result`` routes through ``encode_task_error``
-        so a ``TaskResult(err=SubWorkflowError(...))`` round-trips with
+        so an ``Err(SubWorkflowError(...))`` round-trips with
         ``sub_workflow_id`` / ``sub_workflow_summary`` intact.
 
         Regression: pre-fix the encode side called
@@ -1834,7 +1832,6 @@ class TestDecodeTaskErrorPolymorphic:
         from horsies.core.models.tasks import (
             OperationalErrorCode,
             SubWorkflowError,
-            TaskResult,
         )
         from horsies.core.models.workflow.context import SubWorkflowSummary
         from horsies.core.models.workflow.enums import WorkflowStatus
@@ -1855,14 +1852,20 @@ class TestDecodeTaskErrorPolymorphic:
             sub_workflow_summary=summary,
         )
         envelope = encode_task_result(
-            TaskResult(err=original_err),
+            Err(original_err),
             ok_type=int,
         )
         decoded = decode_task_result(cast(Json, envelope), ok_type=int)
 
-        assert decoded.is_err()
-        assert isinstance(decoded.err, SubWorkflowError)
-        assert decoded.err.sub_workflow_id == 'wf-pq'
-        assert decoded.err.sub_workflow_summary.status == WorkflowStatus.FAILED
-        assert decoded.err.sub_workflow_summary.failed_tasks == 2
-        assert decoded.err.sub_workflow_summary.error_summary == 'both children boom'
+        match decoded:
+            case Failed(error=decoded_err):
+                assert isinstance(decoded_err, SubWorkflowError)
+                assert decoded_err.sub_workflow_id == 'wf-pq'
+                assert decoded_err.sub_workflow_summary.status == WorkflowStatus.FAILED
+                assert decoded_err.sub_workflow_summary.failed_tasks == 2
+                assert (
+                    decoded_err.sub_workflow_summary.error_summary
+                    == 'both children boom'
+                )
+            case Succeeded():
+                pytest.fail(f'expected a failed outcome, got {decoded!r}')

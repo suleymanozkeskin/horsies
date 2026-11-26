@@ -15,7 +15,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import BrokerInvalidInput
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS, RetrievalCode
+from horsies.core.models.outcome import InvalidInput
+from horsies.core.models.tasks import MAX_TASK_TIMEOUT_MS
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import Err, Ok
@@ -74,8 +75,8 @@ class TestTaskHandle:
 
         result = handle.get(timeout_ms=timeout_ms)
 
-        assert result.unwrap_err().error_code is RetrievalCode.INVALID_INPUT
-        assert message in (result.unwrap_err().message or '')
+        assert isinstance(result, Err) and isinstance(result.err_value, InvalidInput), result
+        assert message in result.err_value.message
         broker.get_raw_result_record.assert_not_called()
 
     @pytest.mark.parametrize(('timeout_ms', 'message'), _REFUSED)
@@ -86,8 +87,8 @@ class TestTaskHandle:
 
         result = asyncio.run(handle.get_async(timeout_ms=timeout_ms))
 
-        assert result.unwrap_err().error_code is RetrievalCode.INVALID_INPUT
-        assert message in (result.unwrap_err().message or '')
+        assert isinstance(result, Err) and isinstance(result.err_value, InvalidInput), result
+        assert message in result.err_value.message
         broker.get_raw_result_record_async.assert_not_called()
 
     def test_a_refusal_is_not_cached(self) -> None:
@@ -95,7 +96,7 @@ class TestTaskHandle:
 
         _ = handle.get(timeout_ms=-1)
 
-        assert handle._result_fetched is False  # pyright: ignore[reportPrivateUsage]
+        assert handle._cached_result is None  # pyright: ignore[reportPrivateUsage]
 
 
 class TestWorkflowHandle:
@@ -110,8 +111,8 @@ class TestWorkflowHandle:
 
         result = asyncio.run(handle.get_async(timeout_ms=timeout_ms))
 
-        assert result.unwrap_err().error_code is RetrievalCode.INVALID_INPUT
-        assert message in (result.unwrap_err().message or '')
+        assert isinstance(result, Err) and isinstance(result.err_value, InvalidInput), result
+        assert message in result.err_value.message
         assert broker._core_handle.mock_calls == []
 
 
@@ -131,10 +132,16 @@ class TestBrokerAndApp:
         assert message in refused.message
         assert core_handle.mock_calls == []
 
-    @pytest.mark.parametrize('method', ['get_result_async', 'get_raw_result_async'])
-    def test_app_returns_the_broker_refusal(self, method: str) -> None:
+    def test_app_get_raw_result_returns_the_broker_refusal(self) -> None:
         app = Horsies(AppConfig(broker=PostgresConfig(database_url=_UNREACHABLE_URL)))
 
-        result = asyncio.run(getattr(app, method)('task-1', timeout_ms=-1))
+        result = asyncio.run(app.get_raw_result_async(uuid.uuid4(), timeout_ms=-1))
 
         assert isinstance(result.unwrap_err(), BrokerInvalidInput)
+
+    def test_app_get_result_refuses_before_any_read(self) -> None:
+        app = Horsies(AppConfig(broker=PostgresConfig(database_url=_UNREACHABLE_URL)))
+
+        result = asyncio.run(app.get_result_async(uuid.uuid4(), timeout_ms=-1))
+
+        assert isinstance(result, Err) and isinstance(result.err_value, InvalidInput), result

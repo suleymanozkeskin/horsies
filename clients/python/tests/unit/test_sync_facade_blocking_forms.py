@@ -56,8 +56,8 @@ from horsies.core.brokers.result_types import (
 from horsies.core.codec.json_io import Json
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskInfo, TaskResult
-from horsies.core.types.result import Err, Ok
+from horsies.core.models.tasks import TaskError, TaskInfo
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 from tests.sync_facade_support import outcome_shape
 from tests.unit.test_broker_postgres import _make_broker
@@ -96,8 +96,8 @@ def _app() -> Horsies:
     app = Horsies(AppConfig(broker=PostgresConfig(database_url=SecretStr(UNREACHABLE_URL))))
 
     @app.task(REGISTERED_TASK)
-    def number(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def number(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     _ = number
     return app

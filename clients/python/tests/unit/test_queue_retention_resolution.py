@@ -22,10 +22,10 @@ import pytest
 
 from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.models.payload import PayloadPolicy
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.task_decorator import create_task_wrapper
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Ok, Result
 
 pytestmark = [pytest.mark.unit]
 
@@ -33,8 +33,8 @@ MAPPED_QUEUE = 'emails'
 PERIOD_KEY = 'standard_7d'
 
 
-def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=x)
+def good_fn(*, x: int) -> Result[int, TaskError]:
+    return Ok(x)
 
 
 def _make_app(retention: RetentionConfig) -> MagicMock:

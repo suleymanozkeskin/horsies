@@ -18,7 +18,7 @@ threshold are parameters of the report being built.
 
 `abandoned_cart_sweep` is the same task the HourlySchedule runs. Its `rollup`
 parameter defaults to `None`, so it works standalone; inside this workflow
-`from_node` injects the rollup's `TaskResult` and the sweep reports against it.
+`from_node` injects the rollup's `TaskOutcome` and the sweep reports against it.
 """
 
 from __future__ import annotations

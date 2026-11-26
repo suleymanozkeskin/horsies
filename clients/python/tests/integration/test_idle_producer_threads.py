@@ -20,8 +20,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.result import is_ok
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result, is_ok
 from tests.integration.conftest import DB_URL
 
 pytestmark = [pytest.mark.integration]
@@ -54,8 +54,8 @@ def test_an_idle_producer_has_no_loop_thread(schema_ready: None) -> None:
     )
 
     @app.task(TASK_NAME)
-    def idle_producer_echo(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def idle_producer_echo(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     try:
         sent = idle_producer_echo.send(value=1)

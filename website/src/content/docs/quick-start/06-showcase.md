@@ -25,7 +25,7 @@ continue, a task crashing and arriving in the dashboard as a data structure
 rather than a stack trace.
 
 It is also the reference for how the patterns fit together in one codebase:
-keyword-only task parameters, `TaskResult` on both branches, `build_with`
+keyword-only task parameters, `Ok` and `Err` on both branches, `build_with`
 returning a fresh spec per call, and idempotent writes in tasks that can be
 replayed.
 

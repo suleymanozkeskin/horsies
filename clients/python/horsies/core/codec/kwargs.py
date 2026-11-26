@@ -8,13 +8,13 @@ the worker's `_run_task_entry`.
 Strict binding: every kwarg key must correspond to a named parameter
 the receiver actually declares. Unknown keys, user-supplied
 engine-injected names (`workflow_ctx` / `workflow_meta`), and
-user-supplied TaskResult-typed kwargs (the engine populates those via
+user-supplied TaskOutcome-typed kwargs (the engine populates those via
 `args_from`) all fail closed producer-side. So does a kwarg that names the
 first parameter of a task that takes its `TaskRuntime`: the worker passes the
 runtime by position on each run (`runtime_parameter_of`).
 
 Decode-side mirrors the producer: unknown kwarg names on the wire fail
-closed. Engine transport keys (`__h_*` prefix) and TaskResult-typed
+closed. Engine transport keys (`__h_*` prefix) and TaskOutcome-typed
 envelopes (args_from) pass through unchanged so the worker entry
 point's downstream logic can unpack them.
 
@@ -52,7 +52,7 @@ from horsies.core.codec.typed import (
     encode_or_raise_on_refusal,
     validate_omitted_default,
 )
-from horsies.core.models.tasks import TaskResult
+from horsies.core.models.outcome import TaskOutcome
 from horsies.core.task_runtime import TaskRuntime
 from horsies.core.types.result import Err, Ok, Result
 
@@ -65,7 +65,7 @@ __all__ = [
     'TakesRuntime',
     'build_with_engine_parameters',
     'decode_kwargs',
-    'declared_taskresult_ok_type',
+    'declared_outcome_ok_type',
     'decode_subworkflow_kwargs',
     'encode_kwargs_read_back',
     'fill_build_with_defaults',
@@ -323,7 +323,7 @@ class KwargBinding:
     source of truth so the two paths cannot drift.
 
     Producer-side semantics: engine-injected names
-    (``workflow_ctx`` / ``workflow_meta``) and TaskResult-typed kwargs
+    (``workflow_ctx`` / ``workflow_meta``) and TaskOutcome-typed kwargs
     (engine populates via ``args_from``) are errors here. Decode-side
     treats them differently and uses its own per-key logic.
     """
@@ -353,7 +353,7 @@ def resolve_producer_kwarg_binding(
       ``*args`` or ``**params``: a catch-all has no declared type, so it takes
       nothing from a producer.
     - kwarg name declared but missing a type annotation.
-    - kwarg name annotated as ``TaskResult`` — engine populates via
+    - kwarg name annotated as ``TaskOutcome`` — engine populates via
       ``args_from``, producer must not supply.
 
     Caller decides whether ``kind='error'`` raises or accumulates.
@@ -390,11 +390,11 @@ def resolve_producer_kwarg_binding(
                 f'{_fn_name(task_fn)!r}'
             ),
         )
-    if _annotates_taskresult(annot):
+    if _annotates_outcome(annot):
         return KwargBinding(
             kind='error',
             error_message=(
-                f'kwarg {key!r} is TaskResult-typed; the workflow engine '
+                f'kwarg {key!r} is TaskOutcome-typed; the workflow engine '
                 f'populates it via args_from. Producer must not supply a '
                 f'value directly'
             ),
@@ -412,7 +412,7 @@ def encode_kwargs_read_back(
 
     Binds strictly: every key must match a declared parameter name on
     `task_fn`. Engine-injected names (`workflow_ctx` / `workflow_meta`)
-    and TaskResult-typed parameters fail closed when supplied by the
+    and TaskOutcome-typed parameters fail closed when supplied by the
     producer — the engine populates those on the wire itself.
 
     Args:
@@ -425,7 +425,7 @@ def encode_kwargs_read_back(
 
     Raises:
         StrictJsonError: on unknown kwarg name, user-supplied
-            engine-injected name, user-supplied TaskResult-typed kwarg,
+            engine-injected name, user-supplied TaskOutcome-typed kwarg,
             or kwarg without a type annotation.
         ValueValidationError: when a value doesn't satisfy its
             declared type, or when the worker could not read it back.
@@ -505,7 +505,7 @@ def missing_required_kwargs(
 
 def is_engine_filled(name: str, annot: object) -> bool:
     """Whether the engine fills this parameter: an injected name or an `args_from` slot."""
-    return name in _INJECTED_PARAM_NAMES or _annotates_taskresult(annot)
+    return name in _INJECTED_PARAM_NAMES or _annotates_outcome(annot)
 
 
 def fill_omitted_defaults(
@@ -579,25 +579,25 @@ def _with_validated_defaults(
     return filled
 
 
-def _annotates_taskresult(annot: Any) -> bool:
+def _annotates_outcome(annot: Any) -> bool:
     """Whether a parameter annotation marks an ``args_from`` slot.
 
-    ``TaskResult[T, TaskError]`` is the plain form. Under ``join='any'`` /
+    ``TaskOutcome[T, TaskError]`` is the plain form. Under ``join='any'`` /
     ``'quorum'`` a source may be absent, so the documented target annotation is
-    ``TaskResult[T, TaskError] | None`` — a union, whose origin is the union
-    itself and never ``TaskResult``. Unwrapping it mirrors
-    ``models.workflow.typing_utils._extract_taskresult_ok_type``.
+    ``TaskOutcome[T, TaskError] | None`` — a union, whose origin is the union
+    itself and never ``TaskOutcome``. Unwrapping it mirrors
+    ``models.workflow.typing_utils._extract_outcome_ok_type``.
 
     One member is enough, where that function requires exactly one: it must
     name a single Ok type and an ambiguous union has none, while this only
     decides that the slot carries an engine envelope rather than user data.
     """
     if get_origin(annot) is Annotated:
-        return _annotates_taskresult(get_args(annot)[0])
-    if get_origin(annot) is TaskResult:
+        return _annotates_outcome(get_args(annot)[0])
+    if get_origin(annot) is TaskOutcome:
         return True
     if get_origin(annot) in (Union, UnionType):
-        return any(get_origin(member) is TaskResult for member in get_args(annot))
+        return any(get_origin(member) is TaskOutcome for member in get_args(annot))
     return False
 
 
@@ -609,10 +609,10 @@ def decode_kwargs(
 
     Strict binding mirrors encode: unknown kwarg names on the wire fail
     closed. Engine transport keys (`__h_*` prefix) pass through
-    verbatim; TaskResult-typed kwargs pass through raw because the wire
+    verbatim; TaskOutcome-typed kwargs pass through raw because the wire
     form is an `__h_taskresult_envelope__` envelope that the worker
     entry point unpacks downstream. A parameter typed
-    `TaskResult[T, TaskError] | None` is such a slot too — that is the
+    `TaskOutcome[T, TaskError] | None` is such a slot too — that is the
     documented shape for an `args_from` target whose source may be
     absent under `join='any'` / `'quorum'`.
 
@@ -653,7 +653,7 @@ def decode_kwargs(
                 f"kwarg {key!r} has no type annotation on "
                 f"{_fn_name(task_fn)!r}",
             )
-        if _annotates_taskresult(annot):
+        if _annotates_outcome(annot):
             # args_from envelope — handled by the worker entry point
             # after decode_kwargs returns.
             decoded[key] = raw_value
@@ -662,11 +662,11 @@ def decode_kwargs(
     return decoded
 
 
-def declared_taskresult_ok_type(
+def declared_outcome_ok_type(
     target_fn: Callable[..., Any],
     key: str,
 ) -> Any | None:
-    """Return the `T` of a parameter declared `TaskResult[T, TaskError]`.
+    """Return the `T` of a parameter declared `TaskOutcome[T, TaskError]`.
 
     Reads the hints with `Annotated` kept, so a constraint on `T` stays.
 
@@ -676,7 +676,7 @@ def declared_taskresult_ok_type(
 
     Returns:
         The declared ok type, or None when the hints do not resolve, the
-        parameter is not a `TaskResult` slot, or `T` is a TypeVar: then
+        parameter is not a `TaskOutcome` slot, or `T` is a TypeVar: then
         nothing further can be checked on the value.
     """
     resolved = resolve_hints_and_sig(target_fn)
@@ -687,19 +687,19 @@ def declared_taskresult_ok_type(
 
 
 def _slot_ok_type(annot: object) -> Any | None:
-    """The `T` of a `TaskResult[T, TaskError]` slot, through `Annotated`."""
+    """The `T` of a `TaskOutcome[T, TaskError]` slot, through `Annotated`."""
     from horsies.core.models.workflow.typing_utils import (
-        _extract_taskresult_ok_type,
+        _extract_outcome_ok_type,
         _normalize_resolved_ok_type,
     )
 
     if get_origin(annot) is Annotated:
         annot = get_args(annot)[0]
-    return _normalize_resolved_ok_type(_extract_taskresult_ok_type(annot))
+    return _normalize_resolved_ok_type(_extract_outcome_ok_type(annot))
 
 
 def subworkflow_target_ok_type(workflow_def: Any, key: str) -> Any | None:
-    """`declared_taskresult_ok_type` for a parameter of a child `build_with`."""
+    """`declared_outcome_ok_type` for a parameter of a child `build_with`."""
     match resolve_build_with_hints(workflow_def):
         case Ok(ok_value=(hints, _)):
             return _slot_ok_type(hints.get(key))
@@ -836,12 +836,12 @@ def decode_subworkflow_kwargs(
     A workflow spec encodes these kwargs, with the same binding rule. A key that
     no named parameter takes is refused, also in a row from an earlier version.
 
-    ``TaskResult``-typed parameters are merged in-process by the engine
-    after this function returns (the engine attaches live ``TaskResult``
-    instances at the call site); decode must not see them on the wire.
+    ``TaskOutcome``-typed parameters are merged in-process by the engine
+    after this function returns (the engine attaches live ``TaskOutcome``
+    values at the call site); decode must not see them on the wire.
 
     Raises:
-        StrictJsonError: on unknown / TaskResult-typed / unannotated
+        StrictJsonError: on unknown / TaskOutcome-typed / unannotated
             wire kwargs.
         ValueValidationError: when a wire value doesn't satisfy its
             declared annotation.
@@ -862,9 +862,9 @@ def decode_subworkflow_kwargs(
                     f'kwarg {key!r} has no type annotation on build_with '
                     f'for workflow {_workflow_def_name(workflow_def)!r}',
                 )
-            if get_origin(annot) is TaskResult:
+            if get_origin(annot) is TaskOutcome:
                 raise StrictJsonError(
-                    f'kwarg {key!r} is TaskResult-typed; static '
+                    f'kwarg {key!r} is TaskOutcome-typed; static '
                     f'SubWorkflowNode kwargs must not carry args_from '
                     f'values',
                 )

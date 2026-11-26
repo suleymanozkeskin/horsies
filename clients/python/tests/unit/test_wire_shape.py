@@ -50,11 +50,16 @@ from pydantic_core import core_schema
 
 from horsies import (
     AppConfig,
+    Err,
+    Failed,
     Horsies,
     JsonValue,
+    Ok,
     PostgresConfig,
+    Result,
+    Succeeded,
     TaskError,
-    TaskResult,
+    TaskOutcome,
 )
 from horsies.core.codec import wire_shape
 from horsies.core.codec.kwargs import (
@@ -118,10 +123,10 @@ def _rules(annotation: object) -> set[ShapeRule]:
 
 
 def _signature_refuses(annotation: object) -> bool:
-    def task(*, x: Any) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def task(*, x: Any) -> Result[int, TaskError]:
+        return Ok(1)
 
-    task.__annotations__ = {'x': annotation, 'return': TaskResult[int, TaskError]}
+    task.__annotations__ = {'x': annotation, 'return': Result[int, TaskError]}
     try:
         check_task_signature(task, task_name='task')
     except SignatureValidationError:
@@ -866,8 +871,8 @@ class TestParameterDefaults:
         assert calls == []
 
     def test_at_task_definition(self) -> None:
-        def task(*, n: int = 'x') -> TaskResult[int, TaskError]:  # type: ignore[assignment]
-            return TaskResult(ok=n)
+        def task(*, n: int = 'x') -> Result[int, TaskError]:  # type: ignore[assignment]
+            return Ok(n)
 
         with pytest.raises(SignatureValidationError, match='default'):
             check_task_signature(task, task_name='task')
@@ -876,9 +881,9 @@ class TestParameterDefaults:
         def task(
             *,
             workflow_ctx: WorkflowContext | None = None,
-            value: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+            value: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
         check_task_signature(task, task_name='task')
 
@@ -1027,21 +1032,21 @@ class TestDataclassFields:
 
 
 @pytest.mark.unit
-class TestNestedTaskResult:
+class TestNestedTaskOutcome:
     @pytest.mark.parametrize(
         'annotation',
         [
-            list[TaskResult[int, TaskError]],
-            dict[str, TaskResult[int, TaskError]],
-            tuple[TaskResult[int, TaskError], ...],
-            int | TaskResult[int, TaskError],
+            list[TaskOutcome[int, TaskError]],
+            dict[str, TaskOutcome[int, TaskError]],
+            tuple[TaskOutcome[int, TaskError], ...],
+            int | TaskOutcome[int, TaskError],
         ],
     )
     def test_below_the_top_is_refused(self, annotation: object) -> None:
-        def task(*, x: Any) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, x: Any) -> Result[int, TaskError]:
+            return Ok(1)
 
-        task.__annotations__ = {'x': annotation, 'return': TaskResult[int, TaskError]}
+        task.__annotations__ = {'x': annotation, 'return': Result[int, TaskError]}
 
         with pytest.raises(SignatureValidationError, match='fits only|mixed union'):
             check_task_signature(task, task_name='task')
@@ -1049,27 +1054,27 @@ class TestNestedTaskResult:
     @pytest.mark.parametrize(
         'annotation',
         [
-            TaskResult[int, TaskError],
-            TaskResult[int, TaskError] | None,
-            Annotated[TaskResult[int, TaskError], 'a note'],
-            Annotated[TaskResult[int, TaskError] | None, 'a note'],
+            TaskOutcome[int, TaskError],
+            TaskOutcome[int, TaskError] | None,
+            Annotated[TaskOutcome[int, TaskError], 'a note'],
+            Annotated[TaskOutcome[int, TaskError] | None, 'a note'],
         ],
     )
     def test_a_slot_passes(self, annotation: object) -> None:
         assert _signature_refuses(annotation) is False
 
     def test_a_slot_ok_type_is_checked(self) -> None:
-        assert _signature_refuses(TaskResult[Open, TaskError]) is True
+        assert _signature_refuses(TaskOutcome[Open, TaskError]) is True
 
     def test_a_wrong_error_type_is_refused(self) -> None:
-        assert _signature_refuses(TaskResult[int, str]) is True
+        assert _signature_refuses(TaskOutcome[int, str]) is True
 
     def test_a_slot_default_other_than_none_is_refused(self) -> None:
         def task(
             *,
-            x: TaskResult[int, TaskError] | None = 'not none',  # type: ignore[assignment]
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+            x: TaskOutcome[int, TaskError] | None = 'not none',  # type: ignore[assignment]
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
         with pytest.raises(SignatureValidationError, match='must be None'):
             check_task_signature(task, task_name='task')
@@ -1077,13 +1082,13 @@ class TestNestedTaskResult:
     @pytest.mark.parametrize(
         'annotation',
         [
-            TaskResult[int, TaskError] | None,
-            Annotated[TaskResult[int, TaskError], 'a note'],
+            TaskOutcome[int, TaskError] | None,
+            Annotated[TaskOutcome[int, TaskError], 'a note'],
         ],
     )
     def test_a_producer_cannot_supply_a_slot(self, annotation: object) -> None:
-        def task(*, x: Any = None) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, x: Any = None) -> Result[int, TaskError]:
+            return Ok(1)
 
         task.__annotations__['x'] = annotation
         hints, sig = resolve_hints_and_sig(task) or ({}, None)
@@ -1109,20 +1114,20 @@ def _mock_app() -> MagicMock:
 @pytest.mark.unit
 class TestFillOmittedDefaults:
     def test_the_function_gets_the_validated_default(self) -> None:
-        def task(*, s: Upper = 'abc') -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, s: Upper = 'abc') -> Result[int, TaskError]:
+            return Ok(1)
 
         assert fill_omitted_defaults(task, {}) == {'s': 'ABC'}
 
     def test_a_given_value_stays(self) -> None:
-        def task(*, s: Upper = 'abc') -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, s: Upper = 'abc') -> Result[int, TaskError]:
+            return Ok(1)
 
         assert fill_omitted_defaults(task, {'s': 'x'}) == {'s': 'x'}
 
     def test_a_list_default_is_a_fresh_copy(self) -> None:
-        def task(*, items: list[int] = []) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def task(*, items: list[int] = []) -> Result[int, TaskError]:
+            return Ok(1)
 
         filled = fill_omitted_defaults(task, {})
 
@@ -1130,8 +1135,8 @@ class TestFillOmittedDefaults:
         assert filled['items'] is not task.__kwdefaults__['items']
 
     def test_a_validator_that_refuses_its_default_raises(self) -> None:
-        def task(*, n: _Refused = 1) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def task(*, n: _Refused = 1) -> Result[int, TaskError]:
+            return Ok(n)
 
         with pytest.raises(ValueValidationError):
             fill_omitted_defaults(task, {})
@@ -1140,15 +1145,15 @@ class TestFillOmittedDefaults:
         def task(
             *,
             workflow_ctx: WorkflowContext | None = None,
-            value: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+            value: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
         assert fill_omitted_defaults(task, {}) == {}
 
     def test_a_refused_default_stops_the_send(self) -> None:
-        def task(*, n: _Refused = 1) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def task(*, n: _Refused = 1) -> Result[int, TaskError]:
+            return Ok(n)
 
         app = _mock_app()
         result = create_task_wrapper(task, app, 'test.task').send()
@@ -1196,9 +1201,9 @@ class TestOmittedDefaultInTheWorker:
         app = _real_app()
 
         @app.task('child_default')
-        def task(*, s: Upper = 'abc') -> TaskResult[int, TaskError]:
+        def task(*, s: Upper = 'abc') -> Result[int, TaskError]:
             seen.append(s)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         _run_child(app, 'child_default')
 
@@ -1211,10 +1216,10 @@ class TestOmittedDefaultInTheWorker:
         @app.task('child_slot')
         def task(
             *,
-            value: TaskResult[int, TaskError] | None = None,
-        ) -> TaskResult[int, TaskError]:
+            value: TaskOutcome[int, TaskError] | None = None,
+        ) -> Result[int, TaskError]:
             seen.append(value)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         ok, payload, _ = _run_child(app, 'child_slot')
 
@@ -1230,9 +1235,9 @@ class TestOmittedDefaultInTheWorker:
         def task(
             *,
             data: dict[str, JsonValue] = {'__h_taskresult_envelope__': True},
-        ) -> TaskResult[int, TaskError]:
+        ) -> Result[int, TaskError]:
             seen.append(data)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         _run_child(app, 'child_envelope')
 
@@ -1243,9 +1248,9 @@ class TestOmittedDefaultInTheWorker:
         app = _real_app()
 
         @app.task('child_refused')
-        def task(*, n: _Refused = 1) -> TaskResult[int, TaskError]:
+        def task(*, n: _Refused = 1) -> Result[int, TaskError]:
             seen.append(n)
-            return TaskResult(ok=1)
+            return Ok(1)
 
         _, payload, reason = _run_child(app, 'child_refused')
 
@@ -1269,8 +1274,8 @@ class TestDefaultOnASchedule:
         app = _real_app()
 
         @app.task('schedule_refused')
-        def task(*, n: _Refused = 1) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def task(*, n: _Refused = 1) -> Result[int, TaskError]:
+            return Ok(n)
 
         result = _encode_schedule_kwargs(app, self._schedule('schedule_refused'))
 
@@ -1281,8 +1286,8 @@ class TestDefaultOnASchedule:
         app = _real_app()
 
         @app.task('schedule_valid')
-        def task(*, n: int = 1) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=n)
+        def task(*, n: int = 1) -> Result[int, TaskError]:
+            return Ok(n)
 
         result = _encode_schedule_kwargs(app, self._schedule('schedule_valid'))
 
@@ -1533,8 +1538,12 @@ class TestDefinitionOfAny:
         app = _real_app()
 
         @app.task('any_target')
-        def target(*, value: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
-            return value
+        def target(*, value: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
+            match value:
+                case Succeeded(value=number):
+                    return Ok(number)
+                case Failed(error=error):
+                    return Err(error)
 
         source = SubWorkflowNode(workflow_def=self._child('any_source'))
         node = TaskNode(fn=target, waits_for=[source], args_from={'value': source})
@@ -1564,8 +1573,12 @@ class TestDefinitionOfAny:
         app = _real_app()
 
         @app.task('annotated_any_target')
-        def target(*, value: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
-            return value
+        def target(*, value: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
+            match value:
+                case Succeeded(value=number):
+                    return Ok(number)
+                case Failed(error=error):
+                    return Err(error)
 
         source = SubWorkflowNode(workflow_def=Child)
         node = TaskNode(fn=target, waits_for=[source], args_from={'value': source})

@@ -38,9 +38,9 @@ from horsies import (
     NoTaskLimit,
     Ok,
     PostgresConfig,
+    Result,
     TaskError,
     TaskHandle,
-    TaskResult,
     TaskSendResult,
     WorkerProfile,
 )
@@ -144,8 +144,8 @@ def with_drain_task(app: Horsies) -> DrainApp:
     """Define the no-op task of the drain on ``app``. No I/O."""
 
     @app.task(DRAIN_TASK_NAME)
-    def perf_drain_noop() -> TaskResult[None, TaskError]:
-        return TaskResult(ok=None)
+    def perf_drain_noop() -> Result[None, TaskError]:
+        return Ok(None)
 
     return DrainApp(app=app, send=perf_drain_noop.send)
 

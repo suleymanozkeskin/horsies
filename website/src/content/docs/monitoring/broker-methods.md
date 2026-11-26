@@ -34,7 +34,7 @@ Every task id parameter and field of these methods is a `uuid.UUID`.
 
 ### `get_raw_result_record_async(task_id: UUID, timeout_ms: int | None = None) -> BrokerResult[RawResultRecord | None]`
 
-Fetch the raw stored result envelope for a task by ID, waiting if necessary. This is the broker's infrastructure-level result-fetch surface: it does no typed decoding and imports no user code. Callers that want a typed `TaskResult[T, TaskError]` should use [`app.get_result_async`](#app-level-typed-result-apis) instead — it composes a typed decode on top of this call.
+Fetch the raw stored result envelope for a task by ID, waiting if necessary. This is the broker's infrastructure-level result-fetch surface: it does no typed decoding and imports no user code. Callers that want a typed `ReadResult[T, TaskError]` should use [`app.get_result_async`](#app-level-typed-result-apis) instead — it composes a typed decode on top of this call.
 
 Waits on PostgreSQL `LISTEN/NOTIFY`, and reads the row again at least every 5 seconds. With no listener, it reads the row every 0.2 seconds.
 
@@ -67,22 +67,22 @@ elif is_err(result):
 
 ### App-level typed result APIs
 
-For most callers, prefer `app.get_result_async(task_id, timeout_ms)` over the raw record. It returns `BrokerResult[TaskResult[Any, TaskError]]` — the outer `BrokerResult` surfaces infrastructure failures (`INVALID_JSON_PAYLOAD`, `NO_TYPE_AVAILABLE`), while the inner `TaskResult` carries the typed domain result decoded via the local task catalog's `task_ok_type`.
+For most callers, prefer `app.get_result_async(task_id, timeout_ms)` over the raw record. It returns `ReadResult[Any, TaskError]`. The outcome is decoded with the `task_ok_type` of the local task catalog. A read failure is `Err(read_error)`: for example `ResultDeserializationError` for a stored value that does not decode, `NoTypeAvailable` for a task that is not registered in this process, or `BrokerError` for a database failure. See [Read Errors](/horsies/tasks/error-types/#read-errors-readresult).
 
 ```python
+from horsies import Err, Failed, Ok, Succeeded
+
 # Async — typed decode at the app layer
-outer = await app.get_result_async(task_id, timeout_ms=5000)
-if is_err(outer):
-    print(f"Infrastructure error: {outer.err_value.code}")
-else:
-    task_result = outer.ok_value  # TaskResult[Any, TaskError]
-    if task_result.is_ok():
-        print(f"Result: {task_result.ok_value}")
-    else:
-        print(f"Task error: {task_result.err_value.error_code}")
+match await app.get_result_async(task_id, timeout_ms=5000):
+    case Ok(Succeeded(value)):
+        print(f"Result: {value}")
+    case Ok(Failed(task_error)):
+        print(f"Task error: {task_error.error_code}")
+    case Err(read_error):
+        print(f"Read error: {read_error.code} - {read_error.message}")
 
 # Sync
-outer = app.get_result(task_id, timeout_ms=5000)
+read = app.get_result(task_id, timeout_ms=5000)
 ```
 
 ### `get_stale_tasks(stale_threshold_minutes: int = 2) -> BrokerResult[list[dict[str, Any]]]`

@@ -34,9 +34,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies.core import cli
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.types.status import TaskStatus
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode as WorkflowTaskNode
 from horsies.core.models.workflow import WorkflowDefinition, WorkflowSpec
 from horsies.core.workflows.registry import register_workflow_definition
@@ -893,8 +893,8 @@ def _register_child_with_a_corrupt_root(app: Horsies) -> str:
     suffix = uuid.uuid4().hex[:8]
 
     @app.task(task_name=f'web_corrupt_root_{suffix}')
-    def corrupt_root(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def corrupt_root(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     corrupt_root.task_options_json = '{not-json'  # type: ignore[attr-defined]
 

@@ -29,9 +29,9 @@ from horsies.core.history.periods import period_class_key
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Ok, Result, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.broker_resources_support import current_resources
 
@@ -64,12 +64,12 @@ def _mapped_app(broker: PostgresBroker) -> tuple[Horsies, Any, Any]:
     suffix = uuid.uuid4().hex[:8]
 
     @app.task(task_name=f'period_email_{suffix}', queue_name='emails')
-    def email_task(*, x: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=x)  # pragma: no cover - never executed here
+    def email_task(*, x: int) -> Result[int, TaskError]:
+        return Ok(x)  # pragma: no cover - never executed here
 
     @app.task(task_name=f'period_alert_{suffix}', queue_name='alerts')
-    def alert_task(*, x: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=x)  # pragma: no cover - never executed here
+    def alert_task(*, x: int) -> Result[int, TaskError]:
+        return Ok(x)  # pragma: no cover - never executed here
 
     return app, email_task, alert_task
 

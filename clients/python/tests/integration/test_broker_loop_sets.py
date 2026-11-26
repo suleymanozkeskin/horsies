@@ -21,9 +21,9 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import TaskFunction
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Ok, Result, is_ok
 from tests.integration.conftest import DB_URL
 
 pytestmark = [pytest.mark.integration]
@@ -69,8 +69,8 @@ def one_connection_app(schema_ready: None) -> Generator[OneConnectionApp, None, 
     app = Horsies(AppConfig(queue_mode=QueueMode.DEFAULT, broker=_one_connection_config()))
 
     @app.task('loop_sets_echo')
-    def loop_sets_echo(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def loop_sets_echo(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     yield OneConnectionApp(app=app, broker=app.get_broker(), echo=loop_sets_echo)
     closed = app.get_broker().close()

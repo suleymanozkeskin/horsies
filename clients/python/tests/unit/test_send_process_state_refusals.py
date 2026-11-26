@@ -40,10 +40,10 @@ from horsies.core.brokers.result_types import (
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed, TaskSendPayload
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.result import Result, is_err
+from horsies.core.types.result import Ok, Result, is_err
 
 pytestmark = [pytest.mark.unit]
 
@@ -88,8 +88,8 @@ def _app_with(broker: PostgresBroker) -> MagicMock:
 
 
 def _wrapper(app: MagicMock) -> Any:
-    def refused_fn(*, x: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=x)
+    def refused_fn(*, x: int) -> Result[int, TaskError]:
+        return Ok(x)
 
     return create_task_wrapper(refused_fn, app, _TASK_NAME)
 

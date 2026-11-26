@@ -54,7 +54,7 @@ The rules of each mode are on [Queue Modes](/horsies/concepts/queue-modes/).
 
 ```python
 from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 from horsies import QueueMode
 
 config = AppConfig(
@@ -64,8 +64,8 @@ config = AppConfig(
 app = Horsies(config)
 
 @app.task("cleanup_sessions")  # Goes to "default" queue
-def cleanup_sessions() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="done")
+def cleanup_sessions() -> Result[str, TaskError]:
+    return Ok("done")
 ```
 
 ### CUSTOM Mode
@@ -73,7 +73,7 @@ def cleanup_sessions() -> TaskResult[str, TaskError]:
 Each task names its queue with `queue_name`.
 
 ```python
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, QueueMode, CustomQueueConfig
+from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError, QueueMode, CustomQueueConfig
 
 config = AppConfig(
     queue_mode=QueueMode.CUSTOM,
@@ -87,16 +87,16 @@ config = AppConfig(
 app = Horsies(config)
 
 @app.task("urgent_alert", queue_name="critical")
-def urgent_alert() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="alerted")
+def urgent_alert() -> Result[str, TaskError]:
+    return Ok("alerted")
 
 @app.task("process_order", queue_name="normal")
-def process_order() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="processed")
+def process_order() -> Result[str, TaskError]:
+    return Ok("processed")
 
 @app.task("ship_item", queue_name="low")
-def ship_to_address() -> TaskResult[str, TaskError]:
-    return TaskResult(ok="shipped")
+def ship_to_address() -> Result[str, TaskError]:
+    return Ok("shipped")
 ```
 
 ### Unknown Queue Names
@@ -106,7 +106,7 @@ A `queue_name` that the config does not list raises `ConfigurationError` with co
 ```python
 # This raises ConfigurationError (HRS-103) at definition time:
 @app.task("bad_task", queue_name="nonexistent")
-def bad_task() -> TaskResult[str, TaskError]:
+def bad_task() -> Result[str, TaskError]:
     ...
 ```
 

@@ -9,7 +9,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import RetryPolicy, TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
@@ -36,8 +37,8 @@ broker.app = app
 
 
 @app.task(task_name='e2e_retry_precedence_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
 @app.task(
@@ -45,7 +46,7 @@ def healthcheck() -> TaskResult[str, TaskError]:
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['GLOBAL_VALUE_ERROR']),
     exception_mapper={ValueError: 'TASK_VALUE_ERROR'},
 )
-def task_mapper_wins_no_retry_task() -> TaskResult[str, TaskError]:
+def task_mapper_wins_no_retry_task() -> Result[str, TaskError]:
     raise ValueError('task mapper should win over global mapper')
 
 
@@ -54,7 +55,7 @@ def task_mapper_wins_no_retry_task() -> TaskResult[str, TaskError]:
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['TASK_VALUE_ERROR']),
     exception_mapper={ValueError: 'TASK_VALUE_ERROR'},
 )
-def task_mapper_wins_retry_task() -> TaskResult[str, TaskError]:
+def task_mapper_wins_retry_task() -> Result[str, TaskError]:
     raise ValueError('task mapper should win and retry should trigger')
 
 
@@ -62,7 +63,7 @@ def task_mapper_wins_retry_task() -> TaskResult[str, TaskError]:
     task_name='e2e_retry_precedence_global_mapper_retry',
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['GLOBAL_VALUE_ERROR']),
 )
-def global_mapper_retry_task() -> TaskResult[str, TaskError]:
+def global_mapper_retry_task() -> Result[str, TaskError]:
     raise ValueError('global mapper should trigger retry')
 
 
@@ -74,7 +75,7 @@ ValueErrorClone = type('ValueError', (Exception,), {})
     task_name='e2e_retry_precedence_exception_name_collision',
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['GLOBAL_VALUE_ERROR']),
 )
-def exception_name_collision_task() -> TaskResult[str, TaskError]:
+def exception_name_collision_task() -> Result[str, TaskError]:
     raise ValueErrorClone('same name as ValueError, different class object')
 
 

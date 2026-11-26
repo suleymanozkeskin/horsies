@@ -28,14 +28,14 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
     WorkflowSpec,
 )
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Ok, Result, is_ok
 from horsies.core.workflows.registry import (
     register_workflow_definition,
     unregister_workflow_definition,
@@ -71,8 +71,8 @@ APP: Final = Horsies(
 
 
 @APP.task(task_name='sync_start_subworkflow.value')
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 class SyncStartChild(WorkflowDefinition[int]):

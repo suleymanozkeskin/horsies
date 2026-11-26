@@ -20,7 +20,7 @@ import pytest
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.task_decorator import TaskHandle
 
-from tests.e2e.helpers.assertions import assert_ok, unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import shared_async_tasks, shared_thread_tasks
@@ -43,15 +43,14 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(basic_tasks.healthcheck.send())
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
 
 async def _value[Value](handle: TaskHandle[Value]) -> Value:
     result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
-    assert_ok(result)
-    return result.unwrap()
+    return succeeded_value(result)
 
 
 @pytest.mark.e2e

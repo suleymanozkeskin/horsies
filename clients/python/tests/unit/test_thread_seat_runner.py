@@ -33,9 +33,10 @@ from horsies.core.models.tasks import (
     Execution,
     OperationalErrorCode,
     TaskError,
-    TaskResult,
 )
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
 from horsies.core.telemetry.attempt_span import BodyEndOrder, BodyFirst
+from horsies.core.types.result import Ok, Result
 from horsies.core.worker import child_main, child_runner, thread_runner
 from horsies.core.worker.child_frames import (
     ChildFrame,
@@ -87,34 +88,34 @@ RAN: list[str] = []
 @APP.task(
     task_name='thread_double', execution=Execution.SHARED_THREAD, timeout_ms=10_000
 )
-def thread_double(*, x: int) -> TaskResult[int, TaskError]:
+def thread_double(*, x: int) -> Result[int, TaskError]:
     RAN.append(threading.current_thread().name)
-    return TaskResult(ok=x * 2)
+    return Ok(x * 2)
 
 
 @APP.task(task_name='thread_async', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def thread_async() -> TaskResult[int, TaskError]:
+async def thread_async() -> Result[int, TaskError]:
     RAN.append('thread_async')
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 @APP.task(task_name='thread_raises', execution=Execution.SHARED_THREAD, timeout_ms=1000)
-def thread_raises() -> TaskResult[int, TaskError]:
+def thread_raises() -> Result[int, TaskError]:
     raise ValueError('bad input')
 
 
 @APP.task(
     task_name='thread_core_stopped', execution=Execution.SHARED_THREAD, timeout_ms=1000
 )
-def thread_core_stopped() -> TaskResult[int, TaskError]:
+def thread_core_stopped() -> Result[int, TaskError]:
     """A core call of the body met the stopped core of the child."""
     raise core.CoreStopped('log forwarder', 'planned panic')
 
 
 @APP.task(task_name='thread_never', execution=Execution.SHARED_THREAD, timeout_ms=1000)
-def thread_never() -> TaskResult[int, TaskError]:
+def thread_never() -> Result[int, TaskError]:
     RAN.append('thread_never')
-    return TaskResult(ok=1)
+    return Ok(1)
 
 
 def _frame(
@@ -208,8 +209,17 @@ def _set_running(seat_return: SeatReturn) -> ResultEnvelope:
     return seat_return.result
 
 
-def _result(envelope: ResultEnvelope, ok_type: Any) -> TaskResult[Any, TaskError]:
+def _result(envelope: ResultEnvelope, ok_type: Any) -> TaskOutcome[Any, TaskError]:
     return decode_task_result(loads_json(envelope.text).unwrap(), ok_type)
+
+
+def _failed(outcome: TaskOutcome[Any, TaskError]) -> TaskError:
+    """The task error of a failed outcome; any other outcome fails the test."""
+    match outcome:
+        case Failed(error=error):
+            return error
+        case Succeeded():
+            pytest.fail(f'expected a failed outcome, got {outcome!r}')
 
 
 def test_a_def_task_runs_on_the_seat_thread(steps: _Steps) -> None:
@@ -217,7 +227,7 @@ def test_a_def_task_runs_on_the_seat_thread(steps: _Steps) -> None:
     table fixed the end, not the run itself."""
     envelope = _set_running(_run(_frame('thread_double', {'x': 21})))
 
-    assert _result(envelope, int).unwrap() == 42
+    assert _result(envelope, int) == Succeeded(42)
     assert RAN == ['horsies-seat-0']
     steps.confirm.assert_called_once_with(
         str(TASK_ID),
@@ -232,7 +242,7 @@ def test_a_def_task_runs_on_the_seat_thread(steps: _Steps) -> None:
 def test_an_async_def_task_is_refused_before_it_runs(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('thread_async')))
 
-    error = _result(envelope, int).unwrap_err()
+    error = _failed(_result(envelope, int))
     assert error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
     assert error.message == (
         'Failed to resolve thread_async: the task is async def, and a shared '
@@ -257,7 +267,7 @@ def test_a_refusal_fails_the_task_after_running_and_before_resolve(
         'thread_double',
         TimeoutValueInvalid(reason=reason),
     ).envelope
-    error = _result(envelope, int).unwrap_err()
+    error = _failed(_result(envelope, int))
     assert error.error_code == OperationalErrorCode.WORKER_SERIALIZATION_ERROR
     assert error.data == {
         'task_name': 'thread_double',
@@ -282,7 +292,7 @@ def test_a_stop_before_start_runs_no_body_and_reports_no_running_row(
 def test_a_task_that_raises_is_mapped(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('thread_raises')))
 
-    error = _result(envelope, int).unwrap_err()
+    error = _failed(_result(envelope, int))
     assert error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
 
 
@@ -325,7 +335,7 @@ def test_a_body_that_the_stopped_core_ended_ends_the_child_with_no_report(
 def test_an_unknown_task_is_a_resolution_error(steps: _Steps) -> None:
     envelope = _set_running(_run(_frame('not_registered')))
 
-    error = _result(envelope, int).unwrap_err()
+    error = _failed(_result(envelope, int))
     assert error.error_code == OperationalErrorCode.WORKER_RESOLUTION_ERROR
 
 

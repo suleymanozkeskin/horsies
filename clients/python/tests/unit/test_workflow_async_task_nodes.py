@@ -13,10 +13,12 @@ from horsies.core.app import Horsies
 from horsies.core.errors import ErrorCode, WorkflowValidationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode, WorkflowContext
 from horsies.core.models.workflow.nodes import stored_kwargs
 from horsies.core.task_decorator import from_node
+from horsies.core.types.result import Err, Ok, Result
 
 pytestmark = [pytest.mark.unit]
 
@@ -38,8 +40,8 @@ class TestAsyncTaskNodes:
         app = _app()
 
         @app.task('async_double')
-        async def double(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value * 2)
+        async def double(*, value: int) -> Result[int, TaskError]:
+            return Ok(value * 2)
 
         spec = app.workflow(
             name='async_node',
@@ -56,18 +58,26 @@ class TestAsyncTaskNodes:
         app = _app()
 
         @app.task('sync_source')
-        def source() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def source() -> Result[int, TaskError]:
+            return Ok(1)
 
         @app.task('async_middle')
         async def middle(
-            *, upstream: TaskResult[int, TaskError]
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=upstream.ok_value + 1)
+            *, upstream: TaskOutcome[int, TaskError]
+        ) -> Result[int, TaskError]:
+            match upstream:
+                case Succeeded(value):
+                    return Ok(value + 1)
+                case Failed(error):
+                    return Err(error)
 
         @app.task('sync_sink')
-        def sink(*, upstream: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=upstream.ok_value + 1)
+        def sink(*, upstream: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
+            match upstream:
+                case Succeeded(value):
+                    return Ok(value + 1)
+                case Failed(error):
+                    return Err(error)
 
         first = source.node()()
         second = middle.node()(upstream=from_node(first))
@@ -85,14 +95,18 @@ class TestAsyncTaskNodes:
         app = _app()
 
         @app.task('sync_text_source')
-        def text_source() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='text')
+        def text_source() -> Result[str, TaskError]:
+            return Ok('text')
 
         @app.task('async_needs_int')
         async def needs_int(
-            *, upstream: TaskResult[int, TaskError]
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=upstream.ok_value)
+            *, upstream: TaskOutcome[int, TaskError]
+        ) -> Result[int, TaskError]:
+            match upstream:
+                case Succeeded(value):
+                    return Ok(value)
+                case Failed(error):
+                    return Err(error)
 
         first = text_source.node()()
         second = needs_int.node()(upstream=from_node(first))
@@ -110,12 +124,12 @@ class TestAsyncTaskNodes:
         app = _app()
 
         @app.task('sync_first')
-        def first_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def first_task() -> Result[int, TaskError]:
+            return Ok(1)
 
         @app.task('async_without_ctx')
-        async def without_ctx() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        async def without_ctx() -> Result[int, TaskError]:
+            return Ok(1)
 
         first = first_task.node()()
         second = without_ctx.node(waits_for=[first], workflow_ctx_from=[first])()
@@ -135,15 +149,15 @@ class TestAsyncTaskNodes:
         app = _app()
 
         @app.task('sync_first')
-        def first_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def first_task() -> Result[int, TaskError]:
+            return Ok(1)
 
         @app.task('async_with_ctx')
         async def with_ctx(
             *,
             workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        ) -> Result[int, TaskError]:
+            return Ok(1)
 
         first = first_task.node()()
         second = with_ctx.node(waits_for=[first], workflow_ctx_from=[first])()

@@ -230,7 +230,7 @@ def _encode_schedule_kwargs(
 
     ``sig.bind`` only checks parameter names/arity, not the strict-serde wire
     contract. This refuses a kwarg that targets an engine-injected parameter
-    (``workflow_ctx``/``workflow_meta``), a TaskResult-typed parameter, a value
+    (``workflow_ctx``/``workflow_meta``), a TaskOutcome-typed parameter, a value
     that cannot be JSON-serialized, and kwargs over ``payload.reject_bytes``.
     Each repeats on every fire, so the schedule is refused once at boot.
 
@@ -248,7 +248,7 @@ def _encode_schedule_kwargs(
             message=f"schedule '{schedule.name}' kwargs are not encodable for task '{schedule.task_name}'",
             code=ErrorCode.CONFIG_INVALID_SCHEDULE,
             notes=[f'encode error: {exc}'],
-            help_text='schedules are kwargs-only and must satisfy the task\'s typed signature; do not supply engine-injected (workflow_ctx/workflow_meta) or TaskResult-typed kwargs',
+            help_text='schedules are kwargs-only and must satisfy the task\'s typed signature; do not supply engine-injected (workflow_ctx/workflow_meta) or TaskOutcome-typed kwargs',
         ))
     ser = dumps_json(encoded)
     if is_err(ser):

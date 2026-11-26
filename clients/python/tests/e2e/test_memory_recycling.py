@@ -18,7 +18,7 @@ import pytest
 
 from horsies.core.types.result import is_err
 
-from tests.e2e.helpers.assertions import assert_err, assert_ok, unwrap_send
+from tests.e2e.helpers.assertions import assert_failed, read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks.profiles import RECYCLE_ABOVE_MEMORY
@@ -41,7 +41,7 @@ def _ready_check():
             if is_err(r):
                 return False
             handle = r.ok_value
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -61,8 +61,7 @@ def test_max_memory_per_child_rotates_pids() -> None:
         pids: set[int] = set()
         for handle in handles:
             result = handle.get(timeout_ms=30_000)
-            assert_ok(result)
-            pids.add(result.unwrap())
+            pids.add(succeeded_value(result))
         assert len(pids) > PROCESSES, (
             f'expected > {PROCESSES} distinct child PIDs with memory recycling, '
             f'got {len(pids)}: {pids}'
@@ -91,12 +90,11 @@ def test_memory_recycle_survives_task_exceptions() -> None:
             for _ in range(BURST)
         ]
         for handle in raise_handles:
-            assert_err(handle.get(timeout_ms=30_000))
+            assert_failed(handle.get(timeout_ms=30_000))
         pids: set[int] = set()
         for handle in ok_handles:
             result = handle.get(timeout_ms=30_000)
-            assert_ok(result)
-            pids.add(result.unwrap())
+            pids.add(succeeded_value(result))
         assert len(pids) > PROCESSES, (
             f'worker stalled or pool broke: only {len(pids)} distinct PIDs '
             f'across {BURST} tasks: {pids}'

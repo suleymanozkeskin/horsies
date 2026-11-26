@@ -24,7 +24,7 @@ from ..tasks.shipping import book_courier, print_label, tracking_seed
 
 
 class ShippingWorkflow(WorkflowDefinition[TrackingSeed]):
-    """Three sequential nodes, each consuming the previous node's TaskResult."""
+    """Three sequential nodes, each consuming the previous node's TaskOutcome."""
 
     name = 'shipping'
     definition_key = 'acme.shipping.v1'

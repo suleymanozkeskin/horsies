@@ -21,7 +21,7 @@ from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
 from horsies.core.task_decorator import TaskHandle
 from horsies.core.types.result import is_err
 
-from tests.e2e.helpers.assertions import unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
@@ -46,8 +46,7 @@ def _make_ready_check(task_func: _HealthcheckTask):
             if is_err(r):
                 return False
             handle = r.ok_value
-        result = handle.get(timeout_ms=2000)
-        return result.is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -105,8 +104,7 @@ async def test_timeout_fails_task_and_worker_survives(
         # must still execute new work.
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
         result = await asyncio.to_thread(follow_up.get, timeout_ms=30_000)
-        assert result.is_ok()
-        assert result.ok_value == 42
+        assert succeeded_value(result) == 42
 
 
 @pytest.mark.e2e
@@ -178,8 +176,7 @@ async def test_timeout_backlog_drains_without_killing_worker(
         # The load-bearing assertion: the worker survived the drain.
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
         result = await asyncio.to_thread(follow_up.get, timeout_ms=30_000)
-        assert result.is_ok()
-        assert result.ok_value == 42
+        assert succeeded_value(result) == 42
 
 
 @pytest.mark.e2e
@@ -237,5 +234,4 @@ async def test_pool_breaker_storm_does_not_kill_worker(
 
         follow_up = unwrap_send(await basic_tasks.simple_task.send_async(x=21))
         result = await asyncio.to_thread(follow_up.get, timeout_ms=30_000)
-        assert result.is_ok()
-        assert result.ok_value == 42
+        assert succeeded_value(result) == 42

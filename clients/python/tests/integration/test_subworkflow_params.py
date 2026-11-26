@@ -19,8 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
+from horsies.core.types.result import Ok, Result
 
 from tests.integration.conftest import start_ok
 
@@ -29,8 +31,8 @@ pytestmark = [pytest.mark.integration]
 
 def _task(app: Horsies, prefix: str) -> Any:
     @app.task(task_name=f'{prefix}_{uuid.uuid4().hex[:8]}')
-    def fn(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def fn(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     return fn
 
@@ -63,10 +65,14 @@ def _child_with_result(app: Horsies) -> type[WorkflowDefinition[int]]:
 
         @classmethod
         def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
-            cls, app: Horsies, value: TaskResult[int, TaskError],
+            cls, app: Horsies, value: TaskOutcome[int, TaskError],
         ) -> Any:
-            node = TaskNode(fn=child_fn, kwargs={'value': value.unwrap()})
-            return app.workflow(cls.name, [node], output=node)
+            match value:
+                case Succeeded(value=succeeded_value):
+                    node = TaskNode(fn=child_fn, kwargs={'value': succeeded_value})
+                    return app.workflow(cls.name, [node], output=node)
+                case Failed(error=error):
+                    raise AssertionError(f'build_with got a failed upstream: {error!r}')
 
     return ChildWithResult
 

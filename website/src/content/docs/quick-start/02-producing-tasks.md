@@ -12,22 +12,22 @@ Decorate a function with `@app.task()` to register it. Provide a task name and t
 
 <!-- check: skip partial -- imports a placeholder module -->
 ```python
-from horsies import TaskResult, TaskError
+from horsies import Err, Ok, Result, TaskError
 from .config import app
 
 @app.task("validate_order", queue_name="standard")
 def validate_order(
     *,
     order: Order,
-) -> TaskResult[ValidatedOrder, TaskError]:
+) -> Result[ValidatedOrder, TaskError]:
     if not order.order_id:
-        return TaskResult(err=TaskError(
+        return Err(TaskError(
             error_code="INVALID_ORDER_ID",
             message="Order ID is required",
         ))
 
     if not order.items:
-        return TaskResult(err=TaskError(
+        return Err(TaskError(
             error_code="EMPTY_ORDER",
             message="Order must contain at least one item",
         ))
@@ -40,10 +40,10 @@ def validate_order(
         shipping_method=order.shipping_method,
         validated_at=datetime.now(),
     )
-    return TaskResult(ok=validated)
+    return Ok(validated)
 ```
 
-Every task returns `TaskResult[T, TaskError]`. Use `TaskResult(ok=value)` for success and `TaskResult(err=TaskError(...))` for failure.
+Every task returns `Result[T, TaskError]`. Use `Ok(value)` for success and `Err(TaskError(...))` for failure.
 
 ## Sending a Task
 
@@ -51,16 +51,26 @@ Every task returns `TaskResult[T, TaskError]`. Use `TaskResult(ok=value)` for su
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Ok, Err
+from horsies import Err, Failed, Ok, Succeeded, WaitTimeout
 
 match validate_order.send(order=order):
     case Ok(handle):
-        result = handle.get(timeout_ms=5000)  # blocks up to 5 seconds
+        match handle.get(timeout_ms=5000):  # blocks up to 5 seconds
+            case Ok(Succeeded(validated)):
+                print(f"Validated: {validated.order_id}")
+            case Ok(Failed(task_error)):
+                print(f"Validation failed: {task_error.error_code}")
+            case Err(WaitTimeout()):
+                print("Not done after 5 seconds; the task may still run")
+            case Err(read_error):
+                print(f"Read failed: {read_error.code} - {read_error.message}")
     case Err(send_err):
         print(f"Send failed: {send_err.code} - {send_err.message}")
 ```
 
-`timeout_ms` controls the maximum wait time. If the task does not complete within the timeout, `get()` returns `TaskResult(err=TaskError(error_code=RetrievalCode.WAIT_TIMEOUT, ...))`. The task may still be running. `timeout_ms` is None (no limit) or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295). 0 checks once with no wait. Any other value returns `RetrievalCode.INVALID_INPUT` before any read.
+`get()` returns `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error of the task. `Err(read_error)` means the read gave no outcome.
+
+`timeout_ms` controls the maximum wait time. If the task does not complete within the timeout, `get()` returns `Err(WaitTimeout(...))`. The task may still be running. `timeout_ms` is None (no limit) or an int from 0 to `MAX_TASK_TIMEOUT_MS` (4,294,967,295). 0 checks once with no wait. Any other value returns `Err(InvalidInput(...))` before any read.
 
 ## Async Usage
 

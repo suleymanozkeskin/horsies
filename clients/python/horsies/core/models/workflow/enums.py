@@ -18,7 +18,7 @@ from horsies._catalog.status import (
 from horsies._catalog.status import WorkflowStatus as WorkflowStatus
 from horsies._catalog.status import WorkflowTaskStatus as WorkflowTaskStatus
 
-# TypeVar for TaskNode generic parameter (the "ok" type of TaskResult)
+# TypeVar for TaskNode generic parameter (the "ok" type of its Result)
 OkT = TypeVar('OkT')
 OkT_co = TypeVar('OkT_co', covariant=True)
 OutT = TypeVar('OutT')

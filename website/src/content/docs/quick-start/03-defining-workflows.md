@@ -59,7 +59,7 @@ Each `TaskNode` requires a `node_id` for identification within the workflow.
 
 **We strongly recommend explicit `node_id` values:**
 
-- **Typed results:** `handle.result_for(node)` returns `TaskResult[T, TaskError]` only when `node_id` is set
+- **Typed results:** `handle.result_for(node)` returns `ReadResult[T, TaskError]` only when `node_id` is set
 - **Stable observability:** Index-based IDs shift when you reorder tasks
 - **Meaningful tracing:** `validate_order` is clearer than `order_processing:0` in logs
 
@@ -166,7 +166,7 @@ class OrderProcessingWorkflow(WorkflowDefinition[NotificationResult]):
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Ok
+from horsies import Err, Failed, Ok, Succeeded
 
 spec = OrderProcessingWorkflow.build(app)
 reveal_type(spec)  # WorkflowSpec[NotificationResult]
@@ -180,18 +180,19 @@ match spec.start():
 
         handle.get(timeout_ms=30000)  # Wait for completion
 
-        # Type-safe result: TaskResult[NotificationResult, TaskError]
+        # Type-safe result: ReadResult[NotificationResult, TaskError]
         result = handle.result_for(OrderProcessingWorkflow.notify)
-        reveal_type(result)  # TaskResult[NotificationResult, TaskError]
+        reveal_type(result)  # ReadResult[NotificationResult, TaskError]
 
-        if result.is_err():
-            error = result.err_value
-            reveal_type(error)  # TaskError
-            print(f"Failed: {error.error_code} - {error.message}")
-        else:
-            notification = result.ok_value
-            reveal_type(notification)  # NotificationResult
-            print(f"Order {notification.order_id} processed")
+        match result:
+            case Ok(Succeeded(notification)):
+                reveal_type(notification)  # NotificationResult
+                print(f"Order {notification.order_id} processed")
+            case Ok(Failed(error)):
+                reveal_type(error)  # TaskError
+                print(f"Failed: {error.error_code} - {error.message}")
+            case Err(read_error):
+                print(f"Read failed: {read_error.code} - {read_error.message}")
 ```
 
 ## Imperative Workflow
@@ -200,7 +201,7 @@ Define nodes within a function scope, then pass to `app.workflow()`:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Ok
+from horsies import Err, Failed, Ok, Succeeded
 
 def start_order_processing(order: Order) -> None:
     """Start the order processing workflow."""
@@ -286,22 +287,22 @@ def start_order_processing(order: Order) -> None:
 
     # Type-safe result access
     result = handle.result_for(notify_node)
-    reveal_type(result)  # TaskResult[NotificationResult, TaskError]
+    reveal_type(result)  # ReadResult[NotificationResult, TaskError]
 
-    if result.is_err():
-        error = result.err_value
-        reveal_type(error)  # TaskError
-        print(f"Order processing failed: {error.error_code} - {error.message}")
-        return
-
-    notification = result.ok_value
-    reveal_type(notification)  # NotificationResult
-    print(f"Order {notification.order_id} processed successfully")
+    match result:
+        case Ok(Succeeded(notification)):
+            reveal_type(notification)  # NotificationResult
+            print(f"Order {notification.order_id} processed successfully")
+        case Ok(Failed(error)):
+            reveal_type(error)  # TaskError
+            print(f"Order processing failed: {error.error_code} - {error.message}")
+        case Err(read_error):
+            print(f"Read failed: {read_error.code} - {read_error.message}")
 ```
 
 ## Handling Upstream Results
 
-`args_from` injects upstream `TaskResult` values as keyword arguments into the receiving task function. Use `is_err()` to check for errors before accessing `.ok_value`:
+`args_from` injects upstream `TaskOutcome` values as keyword arguments into the receiving task function: `Succeeded(value)` or `Failed(task_error)`. Use `match` to get the value or the error:
 
 **Note:** When using `args_from` or `workflow_ctx_from`, positional `args` are not allowed. Put static inputs in `kwargs` instead.
 
@@ -310,22 +311,21 @@ def start_order_processing(order: Order) -> None:
 @app.task("check_inventory", queue_name="standard")
 def check_inventory(
     *,
-    order_result: TaskResult[ValidatedOrder, TaskError],
-) -> TaskResult[InventoryStatus, TaskError]:
-    if order_result.is_err():
-        return TaskResult(err=TaskError(
-            error_code="UPSTREAM_FAILED",
-            message="Cannot check inventory: order validation failed",
-        ))
-
-    order = order_result.ok_value  # ValidatedOrder (safe after is_err check)
-
-    status = InventoryStatus(
-        order_id=order.order_id,
-        all_available=True,
-        item_availability={item.sku: True for item in order.items},
-    )
-    return TaskResult(ok=status)
+    order_result: TaskOutcome[ValidatedOrder, TaskError],
+) -> Result[InventoryStatus, TaskError]:
+    match order_result:
+        case Failed():
+            return Err(TaskError(
+                error_code="UPSTREAM_FAILED",
+                message="Cannot check inventory: order validation failed",
+            ))
+        case Succeeded(order):  # ValidatedOrder
+            status = InventoryStatus(
+                order_id=order.order_id,
+                all_available=True,
+                item_availability={item.sku: True for item in order.items},
+            )
+            return Ok(status)
 ```
 
 When multiple nodes converge into a single task (fan-in), each upstream result arrives as a separate keyword argument:
@@ -335,40 +335,35 @@ When multiple nodes converge into a single task (fan-in), each upstream result a
 @app.task("reserve_inventory", queue_name="urgent")
 def reserve_inventory(
     *,
-    inventory_result: TaskResult[InventoryStatus, TaskError],
-    cost_result: TaskResult[ShippingCost, TaskError],
-    address_result: TaskResult[AddressValidation, TaskError],
-) -> TaskResult[Reservation, TaskError]:
-    if inventory_result.is_err():
-        return TaskResult(err=TaskError(
-            error_code="INVENTORY_CHECK_FAILED",
-            message="Cannot reserve: inventory check failed",
-        ))
-
-    if cost_result.is_err():
-        return TaskResult(err=TaskError(
-            error_code="COST_CALCULATION_FAILED",
-            message="Cannot reserve: shipping cost calculation failed",
-        ))
-
-    if address_result.is_err():
-        return TaskResult(err=TaskError(
-            error_code="ADDRESS_VALIDATION_FAILED",
-            message="Cannot reserve: address validation failed",
-        ))
-
-    inventory = inventory_result.ok_value
-    cost = cost_result.ok_value
-    address = address_result.ok_value
-
-    reservation = Reservation(
-        order_id=inventory.order_id,
-        reservation_id=str(uuid.uuid4()),
-        reserved_items=[],
-        reserved_at=datetime.now(),
-        shipping_cost_cents=cost.total_cost_cents,
-    )
-    return TaskResult(ok=reservation)
+    inventory_result: TaskOutcome[InventoryStatus, TaskError],
+    cost_result: TaskOutcome[ShippingCost, TaskError],
+    address_result: TaskOutcome[AddressValidation, TaskError],
+) -> Result[Reservation, TaskError]:
+    match (inventory_result, cost_result, address_result):
+        case (Failed(), _, _):
+            return Err(TaskError(
+                error_code="INVENTORY_CHECK_FAILED",
+                message="Cannot reserve: inventory check failed",
+            ))
+        case (_, Failed(), _):
+            return Err(TaskError(
+                error_code="COST_CALCULATION_FAILED",
+                message="Cannot reserve: shipping cost calculation failed",
+            ))
+        case (_, _, Failed()):
+            return Err(TaskError(
+                error_code="ADDRESS_VALIDATION_FAILED",
+                message="Cannot reserve: address validation failed",
+            ))
+        case (Succeeded(inventory), Succeeded(cost), Succeeded(_address)):
+            reservation = Reservation(
+                order_id=inventory.order_id,
+                reservation_id=str(uuid.uuid4()),
+                reserved_items=[],
+                reserved_at=datetime.now(),
+                shipping_cost_cents=cost.total_cost_cents,
+            )
+            return Ok(reservation)
 ```
 
 The kwarg names must match the keys defined in `args_from`. For example, the `reserve_inventory` wiring above uses `"inventory_result"`, `"cost_result"`, and `"address_result"` as keys — these correspond directly to the function parameter names.
@@ -379,7 +374,7 @@ The kwarg names must match the keys defined in `args_from`. For example, the `re
 |---------|-------------|
 | `node_id` | Unique identifier for observability and `result_for()` |
 | `waits_for` | List of nodes that must complete before this task runs |
-| `args_from` | Inject upstream `TaskResult` as kwargs |
+| `args_from` | Inject the upstream `TaskOutcome` as kwargs |
 | `output` | Node whose result becomes the workflow result |
 | `on_error` | `FAIL` continues DAG, `PAUSE` stops immediately |
-| `result_for(node)` | Non-blocking type-safe result access. Returns `RESULT_NOT_READY` error if task hasn't completed |
+| `result_for(node)` | Non-blocking type-safe result access. Returns `Err(ResultNotReady(...))` if task hasn't completed |

@@ -17,9 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Ok, Result, is_ok
 from horsies.core.workflows.engine import resume_workflow
 
 from .conftest import finish_task, start_ok
@@ -69,12 +70,12 @@ async def test_resume_injects_real_dependency_results(
     """
 
     @app.task(task_name='resume_dep_producer')
-    def producer() -> TaskResult[int, TaskError]:
-        return TaskResult(ok=42)
+    def producer() -> Result[int, TaskError]:
+        return Ok(42)
 
     @app.task(task_name='resume_dep_consumer')
-    def consumer(*, value: TaskResult[int, TaskError]) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def consumer(*, value: TaskOutcome[int, TaskError]) -> Result[int, TaskError]:
+        return Ok(1)
 
     node_a: TaskNode[int] = TaskNode(fn=producer)
     node_b: TaskNode[int] = TaskNode(
@@ -92,7 +93,7 @@ async def test_resume_injects_real_dependency_results(
     handle = await start_ok(spec, broker)
 
     # 1. Producer completes -> consumer enqueued with real dep results.
-    await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=42))
+    await finish_task(session, broker, str(handle.workflow_id), 0, Ok(42))
     await session.commit()
 
     # Simulate a worker claiming (but not starting) the consumer's task so

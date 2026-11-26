@@ -16,7 +16,7 @@ The `.node()` method on `TaskFunction` creates `TaskNode` instances with static 
 
 ```python
 from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
@@ -28,8 +28,8 @@ def compute_score(
     user_id: str,
     base_score: int,
     multiplier: float = 1.0,
-) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=int(base_score * multiplier))
+) -> Result[int, TaskError]:
+    return Ok(int(base_score * multiplier))
 
 # Type-safe node construction
 node = compute_score.node(node_id='score')(
@@ -92,22 +92,22 @@ _score_c = compute_score.node(
 
 ### Dependency Injection with `from_node()`
 
-Use `from_node()` to wire upstream results into downstream task arguments. It auto-adds the upstream node to `waits_for` and `args_from`:
+Use `from_node()` to wire upstream results into downstream task arguments. It auto-adds the upstream node to `waits_for` and `args_from`. The parameter receives a `TaskOutcome[T, TaskError]`: `Succeeded(value)`, or `Failed(task_error)` with `allow_failed_deps=True`:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import from_node
+from horsies import TaskOutcome, from_node
 
 @app.task(task_name='fetch_user')
-def fetch_user(*, user_id: str) -> TaskResult[UserData, TaskError]:
+def fetch_user(*, user_id: str) -> Result[UserData, TaskError]:
     ...
 
 @app.task(task_name='process_user')
 def process_user(
     *,
-    user_data: TaskResult[UserData, TaskError],
+    user_data: TaskOutcome[UserData, TaskError],
     threshold: int = 50,
-) -> TaskResult[ProcessedUser, TaskError]:
+) -> Result[ProcessedUser, TaskError]:
     ...
 
 fetch_node = fetch_user.node(node_id='fetch')(user_id='user-123')
