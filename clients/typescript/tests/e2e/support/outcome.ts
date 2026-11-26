@@ -47,6 +47,8 @@ export function readErrorText(error: ReadError): string {
       return `the database read failed: ${error.code}: ${error.message}`;
     case "invalidWait":
       return `the wait is not 0 to ${String(error.maxMs)} ms`;
+    case "seatRelayFull":
+      return `the seat relay did not send the read: ${error.error.message}`;
   }
 }
 
