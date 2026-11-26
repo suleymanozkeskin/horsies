@@ -73,6 +73,174 @@ and there is no migration contract between pre-1.0 versions.
   - The database does not change: the columns `allow_failed_deps` and
     `workflow_ctx_from` of `horsies_workflow_tasks` and the SQL function
     parameters keep their names. There is no migration.
+- **Breaking: the names of a workflow node say "node".** A node can be a
+  sub-workflow node, so the names do not say "task". The old names have no
+  alias.
+  - Python: `app.workflow(name=..., nodes=[...])` and `WorkflowSpec.nodes`
+    (were `tasks`); `WorkflowHandle.nodes()` and `nodes_async()` (were
+    `tasks()` and `tasks_async()`); `WorkflowNodeInfo` (was
+    `WorkflowTaskInfo`); `WorkflowNodeStatus` and
+    `WORKFLOW_NODE_TERMINAL_STATES` (were `WorkflowTaskStatus` and
+    `WORKFLOW_TASK_TERMINAL_STATES`); `node_index` on `WorkflowContext` and
+    `WorkflowMetadata` (was `task_index`); the parameters `node_index`,
+    `results_by_node_id` and `summaries_by_node_id` of
+    `WorkflowContext.from_serialized`.
+  - Rust: `WorkflowHandle::nodes` and `blocking::WorkflowHandleView::nodes`
+    (were `tasks`); `WorkflowNodeStatus`; `WorkflowContext::node_index()` and
+    `WorkflowMetadata.node_index` (were `task_index`).
+  - `horsies-core`: `WorkflowNodeStatus` and `WORKFLOW_NODE_TERMINAL_STATES`.
+  - The counts of `SubWorkflowSummary` are `total_nodes`, `completed_nodes`,
+    `failed_nodes` and `skipped_nodes` (were `*_tasks`), in Python, in Rust
+    and in the stored summary text. A stored summary with the old keys does
+    not read: the core refuses it with `SummaryRefused::BadCount` that names
+    `total_nodes`, and Python raises `ValueError` that names the key. Drain
+    the workflows that have sub-workflow nodes before the upgrade.
+  - The table `horsies_workflow_tasks`, its columns, and the private keys of
+    the workflow context in a task input (`task_index`, `results_by_id`,
+    `summaries_by_id`) keep their names. There is no migration for them.
+- **Breaking (Python): `Horsies.workflow_handle(workflow_id)` replaces
+  `WorkflowHandle.for_id(text, broker)`.** It returns
+  `Result[WorkflowHandle[Any], HandleInvalidWorkflowId]` and builds the handle
+  on the broker of the app (`get_broker()`). Text that is not a UUID is
+  `Err(HandleInvalidWorkflowId)`, and no broker is built.
+- **Breaking (Python): `pause_workflow()` and `resume_workflow()` block.**
+  The async forms are `pause_workflow_async()` and `resume_workflow_async()`.
+  `pause_workflow_sync()` and `resume_workflow_sync()` are removed. Pyright
+  reports each old `await pause_workflow(...)`: the value is not awaitable.
+- **Breaking: `resend_start` replaces `retry_start`.** "Retry" names only a
+  new attempt of a task. Python: `WorkflowSpec.resend_start(error)` and
+  `resend_start_async(error)`. Rust: `WorkflowFunction::resend_start` and its
+  blocking view.
+- **Breaking: full words in the workflow names.** The old names have no
+  alias.
+  - Python: `WorkflowMetadata` (was `WorkflowMeta`);
+    `SubWorkflowNode.workflow_definition`, `WorkflowSpec.workflow_definition`
+    and `app.workflow(workflow_definition=...)` (were `workflow_def` and
+    `workflow_def_cls`); `WorkflowHandle.output_type` (was `out_type`);
+    `node_id_from_text` (was `slugify`); `build_with(app, **parameters)`;
+    `@app.check_workflow_builder(cases=...)` and
+    `app.get_check_workflow_builders()` (were `workflow_builder` and
+    `get_workflow_builders`); `TaskNode.task_name` and
+    `SubWorkflowNode.workflow_name` (were `name`).
+  - Rust: `WorkflowMetadata`; `RegisteredTask::Async.metadata` and
+    `RegisteredTask::Blocking.metadata` of type `TaskMetadata` (were `meta`
+    and `TaskMeta`); `WorkflowDefinitionConfig` (was `WorkflowDefConfig`);
+    `Horsies::register_workflow_definition_with` (was `workflow_template`);
+    `SubWorkflowParameters` (was `SubWorkflowParams`);
+    `WorkflowDefinition::Parameters` (was `Params`);
+    `SubWorkflowNode::set_parameters` (was `set_params`).
+    `app.workflow_builder(name)` keeps its name.
+  - `horsies-core`: `WorkflowMetadata`, `TaskMetadata`,
+    `SubWorkflowParameters`.
+- **Breaking: the monitoring reads take the app, and each row field has one
+  name per concept.** The old names have no alias.
+  - Python: each `horsies.monitoring` function takes `app: Horsies` first
+    (was `broker: PostgresBroker`). `list_tasks(sort_field=...,
+    sort_direction=SortDirection.ASCENDING | SortDirection.DESCENDING)`
+    (were `sort_by` and `sort_dir: 'asc' | 'desc'`).
+    `list_workflow_runs(workflow_name=...)` (was `name`).
+    `get_workflow_node(app, workflow_id, node_index)` (was `task_index`).
+    `task_status_counts()` (was `task_stats()`). `elapsed_seconds()`,
+    `duration_seconds()` and `none_if_blank()` (were `elapsed_s()`, `span_s()`
+    and `nz()`). The alias `TaskDetailRead = TaskDetail | TaskDetailNotFound`
+    names the answer of `get_task_detail`.
+  - Types in both clients: `TaskAttemptDetail` (was the monitoring
+    `TaskAttemptInfo`); `TaskRowInfo` and its field `task_row` (were
+    `LeafTaskInfo` and `leaf`); `WorkflowNodeSummary` (was the monitoring
+    `WorkflowNodeInfo`); `WorkflowNodeDetail` (was `WorkflowTaskDetail`);
+    `TaskActionIsWorkflowTask` and `TaskActionError::IsWorkflowTask` (were
+    `TaskActionWorkflowTask` and `TaskActionError::WorkflowTask`; the code
+    `TASK_IS_WORKFLOW_TASK` does not change).
+  - Rust: `monitoring::task_status_counts` and `TaskStatusCountsQuery` (were
+    `task_stats` and `TaskStatsQuery`); `PageRefused` (was
+    `PaginationRefused`); `MonitoringWindow` (was `HistoryWindow`);
+    `WorkflowRunsQuery::with_workflow_name` (was `with_name`);
+    `TaskSortField::Queue` (was `QueueName`); `monitoring::duration` (was
+    `span`).
+  - Fields and JSON keys of the web routes: `task_id` and `workflow_id` (were
+    `id`), `workflow_name` (was `name`), `queue` (was `queue_name`),
+    `workflow_node_index` (was `workflow_task_index`), `node_index` (was
+    `task_index`), `is_sub_workflow` (was `is_subworkflow`), `task_row` (was
+    `leaf`), `execution_seconds`, `queue_seconds`, `wall_seconds`,
+    `snapshot_age_seconds` and `uptime_seconds` (were `exec_s`, `queue_s`,
+    `wall_s`, `snapshot_age_s` and `uptime_s`). The web UI of the same build
+    reads the new keys. A reader outside the build does not find the old
+    keys.
+  - The sort values of `GET /api/tasks` are `queue`, `queue_seconds` and
+    `execution_seconds` (were `queue_name`, `queue_s` and `exec_s`). An old
+    value gets 400. The query parameter names (`sort_by`, `sort_dir`, `name`)
+    do not change.
+  - The SQL functions and their output columns keep their names. There is no
+    migration.
+- **Breaking: the operator cancel takes a `CancelPolicy`.** The old
+  `include_running: bool` has no alias.
+  - Python: `cancel_task(app, task_id, policy=CancelPolicy.INCLUDE_RUNNING)`.
+    The default is `CancelPolicy.PENDING_OR_CLAIMED_ONLY`.
+  - Rust: `monitoring::cancel_task(&app, task_id, policy)` and
+    `cancel_task_action(&app, task_id, policy)` with
+    `CancelPolicy::PendingOrClaimedOnly` or `CancelPolicy::IncludeRunning`.
+  - Web API: the body of `POST /api/tasks/{id}/cancel` is
+    `{"policy": "PENDING_OR_CLAIMED_ONLY" | "INCLUDE_RUNNING"}`. No body, and
+    a body with no `policy` key, cancel with `PENDING_OR_CLAIMED_ONLY`. The
+    old key `include_running` is an unknown key: 422 `extra_forbidden`. The
+    web UI of the same build sends `policy`.
+- **Breaking (Python): each variant class of the monitoring and health unions
+  is named `<Union><Variant>`.** The old names have no alias.
+  - Attempt timing: `AttemptClaimsCountedInfo`, `AttemptClaimsNotCountedInfo`,
+    `AttemptPlacementPlacedInfo`, `AttemptPlacementNotObservedInfo`,
+    `AttemptFinalizingMarkedInfo`, `AttemptFinalizingNotMarkedInfo`,
+    `AttemptRecordedByWorkerInfo`, `AttemptRecordedByRecoveryInfo`,
+    `AttemptRecordedByCancelInfo`, `AttemptPhasesCapturedInfo`,
+    `AttemptPhasesNotCapturedInfo` (were `ClaimsCountedInfo`, ...,
+    `PhasesNotCapturedInfo`).
+  - Segment timing: `SegmentClaimEarlierInfo`, `SegmentClaimRecordedInfo`,
+    `SegmentClaimNotRecordedInfo`, `SegmentPhasePendingInfo` to
+    `SegmentPhaseUnknownInfo` (9 classes), `SegmentEndClosedInfo`,
+    `SegmentEndOpenInfo`, `SegmentSourceNodeInfo`, `SegmentSourceTaskInfo`,
+    `SegmentSourceAttemptInfo`.
+  - Node and run timing: `NodeEndpointTerminalInfo`,
+    `NodeEndpointNotTerminalInfo`, `TimingConflictClockOrderInfo`,
+    `TimingConflictMissingRecordInfo`, `TimingConflictUnexpectedEventInfo`,
+    `PauseEndResumedInfo`, `PauseEndRunEndedInfo`, `PauseEndOpenInfo`.
+  - Breakdown: `BreakdownGroupValue`, `BreakdownGroupUnclaimed`.
+  - Health: `SnapshotProfileNamed`, `SnapshotProfileNotRecorded`,
+    `SlotHealthAllServing`, `SlotHealthSlotsDown`,
+    `StreamCoverageStateServed`, `StreamCoverageStateNoCapacity`,
+    `StreamCoverageStateUnserved`, `StreamWaitDue`, `StreamWaitNoneDue` (were
+    `ProfileNamed`, `ProfileNotRecorded`, `AllSlotsServing`, `SlotsDown`,
+    `StreamServed`, `StreamWithoutCapacity`, `StreamUnserved`,
+    `OldestWaiting`, `NoneDue`).
+  - The monitoring model contract (`core/src/monitoring/model_contract.json`)
+    names the new classes.
+- **Breaking: a timing segment that has an end is `closed`.** Rust
+  `SegmentEndInfo::Ended` is `SegmentEndInfo::Closed`, and its JSON tag in
+  `GET /api/workflows/{workflow_id}` is `"closed"` in place of `"ended"`.
+  Python reads it as `SegmentEndClosedInfo`. The web UI of the same build
+  reads the new tag. A reader outside the build that matches `"ended"` stops
+  matching.
+- **Breaking: the monitoring mount names its policy "authorization", and the
+  actions switch is a closed type.** The old names have no alias.
+  - Python: `create_monitoring_app(app, *, authorization_policy, ui=None,
+    actions=Actions.ENABLED)` (were `auth_policy`, `config`,
+    `actions_enabled: bool`). `MonitoringAuthorizationPolicy` (was
+    `MonitoringAuthPolicy`). `TrustedHeader(header_name, *, actions)` takes
+    `Actions.ENABLED` or `Actions.DISABLED` (was `allow_actions: bool`).
+    `horsies.web` exports `Actions` and the union alias `TraceLink =
+    TraceLinkTemplate | TraceLinkText`; `TraceLinkText` (tag
+    `trace_link_text`) was `NoTraceLink`.
+  - Rust: `web::MonitoringAuthorizationPolicy` (was `MonitoringAuthPolicy`).
+    `TrustedHeader::new(header_name, actions: Actions)` and
+    `TrustedHeader::actions()` (were `allow_actions: bool` and
+    `allows_actions()`). `TraceLink::Text` (was `TraceLink::NoTraceLink`).
+    `web::Actions` is `horsies_core::web::Actions`.
+  - `horsies-core`: `web::Actions`; `MonitoringHandlerConfig.actions` and
+    `route_access(actions, ...)` take it (were `actions_enabled: bool`).
+  - `horsies web` in both clients: the flag `--authorization none |
+    trusted-header` (was `--auth`). An old `--auth` is an argument error.
+  - Web API: `GET /api/meta` sends `"actions": "ENABLED" | "DISABLED"` in
+    place of `"actions_enabled": true | false`. `ENABLED` means that the
+    mount enables the actions and the schema is compatible. The web UI of the
+    same build reads the new field.
 - **Breaking (Python): typed custom error codes.** `TaskError[C]` is generic
   in the type of its custom code, with the default `str`; `TaskError` with
   no argument keeps its meaning. `error_code` is `C | BuiltInTaskCode`.
@@ -340,8 +508,8 @@ and there is no migration contract between pre-1.0 versions.
   `ErrorSlot` takes the new variant.
 
 - **Breaking: the web API refuses an unknown key in an action body.**
-  `POST /api/tasks/{id}/cancel` takes the key `include_running` (no body,
-  or a JSON object), and `POST /api/workflows/{id}/pause`, `/resume` and
+  `POST /api/tasks/{id}/cancel` takes the key `policy` (no body, or a JSON
+  object), and `POST /api/workflows/{id}/pause`, `/resume` and
   `/cancel` take no key (no body, or `{}`). A key that the route does not
   know is refused with 422 before any statement of the action. The response
   has one issue, for the first unknown key in body order: `type`
