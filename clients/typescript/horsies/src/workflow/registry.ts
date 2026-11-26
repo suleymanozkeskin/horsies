@@ -1,7 +1,6 @@
 // The workflows of an app: each listed workflow with the kind tree of its params, the lookups by contract and by
 // definition key, the app view of the spec checks, and the output form of a workflow for its reads.
 
-import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
 import { decodeParameters } from "../codec/reader.ts";
 import { type CodecRefused, refusalText } from "../codec/refusal.ts";
@@ -91,7 +90,7 @@ export function buildParams(params: ObjectKind, given: object): Result<object, C
     return text;
   }
 
-  const decoded = decodeParameters(params, jsonTextCheckedByCore(text.value), "worker");
+  const decoded = decodeParameters(params, text.value, "worker");
 
   return decoded.ok ? ok(Object(decoded.value)) : decoded;
 }

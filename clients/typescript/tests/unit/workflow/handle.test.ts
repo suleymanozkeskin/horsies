@@ -176,17 +176,21 @@ describe("WorkflowHandle.resultFor", () => {
     assert.deepEqual(read, { ok: false, error: { kind: "unknownUserCode", code: "OTHER" } });
   });
 
-  test("no stored result: resultNotReady; a refused text: storedResultUnreadable; a failed read: database", async () => {
+  test("no stored result: resultNotReady; a failed read: database", async () => {
     assert.deepEqual(await handle().handle.resultFor("count"), { ok: false, error: { kind: "resultNotReady" } });
-
-    const refused = await handle({
-      nodeResult: { kind: "stored", result: { kind: "refused", cause: "dup key" } },
-    }).handle.resultFor("count");
 
     const failed = await handle({ nodeResult: { kind: "failed", error: rawDbFailed() } }).handle.resultFor("count");
 
-    assert.deepEqual(refused, { ok: false, error: { kind: "storedResultUnreadable", cause: "dup key" } });
     assert(!failed.ok && failed.error.kind === "database");
+  });
+
+  test("a stored text that the core's strict check refuses ends as storedResultUnreadable and never reaches the reader", async () => {
+    // The addon ran the strict check (`nodeResult`); a refused text crosses as its cause only, so no text is decoded.
+    const refused = await handle({
+      nodeResult: { kind: "stored", result: { kind: "refused", cause: "a repeated key" } },
+    }).handle.resultFor("count");
+
+    assert.deepEqual(refused, { ok: false, error: { kind: "storedResultUnreadable", cause: "a repeated key" } });
   });
 
   test("a handle by id reads with the contract that the caller gives", async () => {

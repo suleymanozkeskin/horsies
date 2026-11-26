@@ -132,3 +132,73 @@ describe("the workflow reads of a workflow that does not exist, with a database"
     await handle.close();
   });
 });
+
+/** The spec data text of one sub-workflow root of the child `tests.strict_child.v1` with the stored input `input`. */
+function subWorkflowRootText(input: string): string {
+  const node = {
+    index: 0,
+    node_id: "child",
+    task_name: "strict_child",
+    input_json: input,
+    dependencies: [],
+    args_from: {},
+    workflow_ctx_from: [],
+    allow_failed_deps: false,
+    join: { kind: "ALL" },
+    body: { kind: "SUB_WORKFLOW", definition_key: "tests.strict_child.v1", params: "GIVEN" },
+  };
+
+  return JSON.stringify({
+    data_version: 1,
+    name: "strict_parent",
+    definition_key: { kind: "KEYED", key: "tests.strict_parent.v1" },
+    on_error: "FAIL",
+    output: { kind: "NODE", index: 0 },
+    success_policy: { kind: "NO_POLICY" },
+    queue_classes: {},
+    nodes: [node],
+  });
+}
+
+describe("the child spec source and the core's strict check, with a database", () => {
+  test("a merged input that the core's strict check refuses fails the node and never calls the build", async () => {
+    const handle = testHandle();
+    let calls = 0;
+
+    const counting: ChildSpecSourceFunction = () => {
+      calls += 1;
+    };
+
+    assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, counting)), "registered");
+
+    // A repeated key: the strict JSON rule of the core refuses it.
+    const prepared = envelopeValue(workflowsAddon().prepareClientSpec(subWorkflowRootText('{"n":1,"n":1}')));
+
+    if (prepared.kind === "prepared") {
+      const workflowId = randomUUID();
+
+      const started = envelopeValue(
+        await workflowsAddon().startWorkflow(
+          handle.native,
+          prepared.spec,
+          workflowId,
+          1_795_687_200_000_000n,
+          { kind: "noCarrier" },
+          false,
+        ),
+      );
+
+      assert.equal(started.kind, "started");
+
+      const read = envelopeValue(await workflowsAddon().nodeResult(handle.native, workflowId, "child"));
+
+      assert(read.kind === "stored" && read.result.kind === "checked");
+      assert.match(read.result.text, /"error_code":"WORKFLOW_ENQUEUE_FAILED"/u);
+    } else {
+      assert.match(prepared.fieldPath, /input_json/u);
+    }
+
+    assert.equal(calls, 0);
+    await handle.close();
+  });
+});
