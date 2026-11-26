@@ -36,7 +36,7 @@ The Python client, the Rust client and the TypeScript client run on one core, wr
 - Rerun -- app.rerun(command, policy) in a transaction of the app, app.rerunIn(transaction, command, policy) in the caller's transaction through horsies/rerun/pg or horsies/rerun/postgres, RerunCommand, RerunPolicy, RerunOutcome -> /horsies/typescript/operations/rerun/
 - Frameworks -- an HTTP server on Bun or Node imports the contracts and the app, never the implementations; send from a handler; read a result by its id -> /horsies/typescript/guides/frameworks/
 - Testing -- implementation.run(input, runtime), TaskRuntime.forTest, app state in a test, Horsies.create and the check command with no database, HORSIES_SUPPRESS_SENDS -> /horsies/typescript/operations/testing/
-- CLI Reference -- cli.run(app) at the end of the app's entry: `<entry> worker --profile NAME [--metrics-listen HOST:PORT]`, `check [--live]`, `web`, `metrics --listen HOST:PORT`, `--loglevel`; child mode; exit codes; the package's bin: `horsies skills install --target DIR [--force]`, `horsies get-docs [--output DIR] [--ref main]` -> /horsies/typescript/cli/
+- CLI Reference -- cli.run(app) at the end of the app's entry: `<entry> worker --profile NAME [--metrics-listen HOST:PORT]`, `check [--live]`, `web`, `metrics --listen HOST:PORT`, `--loglevel`; child mode; exit codes; the package's bin: `horsies skills install --target DIR [--force]`, `horsies get-docs [--output DIR] [--ref main]`, `horsies --version` -> /horsies/typescript/cli/
 
 ## Shared pages (behaviour, every client)
 - Architecture -> /horsies/concepts/architecture/
