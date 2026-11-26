@@ -293,7 +293,7 @@ async fn a_failed_attempt_that_retries_counts_its_retry_under_its_code_once() {
                     start,
                 } if *start == scripted_start() => assert_eq!(
                     error_code,
-                    &crate::events::AttemptErrorCode::User {
+                    &crate::events::AttemptErrorCode::Custom {
                         code: crate::events::UserCodeText::new("RATE_LIMITED".to_owned()).unwrap(),
                     }
                 ),

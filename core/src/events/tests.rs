@@ -635,7 +635,7 @@ fn a_task_error_code_converts_and_a_long_user_code_is_named() {
     let user = TaskErrorCode::User(UserCode::parse(at_bound.clone()).unwrap());
     assert_eq!(
         AttemptErrorCode::from(&user),
-        AttemptErrorCode::User {
+        AttemptErrorCode::Custom {
             code: UserCodeText::new(at_bound).unwrap()
         }
     );
@@ -643,7 +643,7 @@ fn a_task_error_code_converts_and_a_long_user_code_is_named() {
         TaskErrorCode::User(UserCode::parse("C".repeat(MAX_EVENT_USER_CODE_CHARS + 1)).unwrap());
     assert_eq!(
         AttemptErrorCode::from(&over),
-        AttemptErrorCode::UserOverBound
+        AttemptErrorCode::CustomOverBound
     );
 }
 
@@ -836,7 +836,7 @@ fn vector_events() -> Vec<(&'static str, Event)> {
                 2,
                 AttemptEnd::ReportedByChild {
                     result: ChildResult::Failed {
-                        error_code: AttemptErrorCode::User {
+                        error_code: AttemptErrorCode::Custom {
                             code: text("RATE_LIMITED"),
                         },
                     },

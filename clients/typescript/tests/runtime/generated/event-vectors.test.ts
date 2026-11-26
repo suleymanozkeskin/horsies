@@ -154,7 +154,7 @@ const EXPECTED: ReadonlyMap<string, AnyEvent> = new Map<string, AnyEvent>([
       2,
       {
         kind: "reportedByChild",
-        result: { kind: "failed", errorCode: { kind: "user", code: "RATE_LIMITED" } },
+        result: { kind: "failed", errorCode: { kind: "custom", code: "RATE_LIMITED" } },
         start: { kind: "reported", startedAt: STARTED_AT },
       },
       Temporal.Duration.from({ seconds: 2 }),

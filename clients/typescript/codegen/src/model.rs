@@ -67,6 +67,8 @@ pub enum ClassSlot {
     CodeSubset { subset: &'static str },
     /// The state of the class never clears: `retryable` is always false.
     NeverRetryable,
+    /// The state of the class may clear: `retryable` is always true.
+    AlwaysRetryable,
     /// A field of the value.
     Field {
         name: &'static str,
@@ -83,6 +85,7 @@ pub fn class_slot(slot: &ErrorSlot) -> ClassSlot {
         ErrorSlot::CodeMember { member } => ClassSlot::CodeMember { member },
         ErrorSlot::CodeSubset { subset } => ClassSlot::CodeSubset { subset },
         ErrorSlot::NeverRetryable => ClassSlot::NeverRetryable,
+        ErrorSlot::AlwaysRetryable => ClassSlot::AlwaysRetryable,
         ErrorSlot::Field {
             name,
             python_type,
@@ -304,6 +307,7 @@ mod tests {
                     subset: "BrokerOperationFailedCode",
                 },
                 ErrorSlot::NeverRetryable,
+                ErrorSlot::AlwaysRetryable,
                 ErrorSlot::Field {
                     name: "message",
                     python_type: SlotType::Str,
@@ -327,6 +331,7 @@ mod tests {
                     subset: "BrokerOperationFailedCode"
                 },
                 ClassSlot::NeverRetryable,
+                ClassSlot::AlwaysRetryable,
                 ClassSlot::Field {
                     name: "message",
                     slot_type: SlotType::Str,

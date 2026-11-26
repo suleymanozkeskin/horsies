@@ -1145,7 +1145,7 @@ When `True` on `AppConfig`, enables automatic retry of transient `ENQUEUE_FAILED
 - Max backoff: 2000ms
 - Exponential backoff (no jitter)
 
-Only retries errors with `retryable=True`. Permanent errors (validation, serialization) return immediately.
+Only retries `ENQUEUE_FAILED` errors with `retryable=True`. Permanent errors (validation, serialization) and an `IDEMPOTENCY_KEY_CONFLICT` return immediately.
 
 `app.workflow()` copies this setting onto each `WorkflowSpec` automatically.
 

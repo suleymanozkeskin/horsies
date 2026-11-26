@@ -160,7 +160,12 @@ fn class_call_forms(class: &ErrorClass, codes: &CodeCatalog, subsets: &[CodeSubs
         Some(ClassSlot::CodeSubset { subset }) => {
             subset_call_forms(class_name, subset, codes, subsets)
         }
-        Some(ClassSlot::NeverRetryable | ClassSlot::Field { .. } | ClassSlot::Cause { .. })
+        Some(
+            ClassSlot::NeverRetryable
+            | ClassSlot::AlwaysRetryable
+            | ClassSlot::Field { .. }
+            | ClassSlot::Cause { .. },
+        )
         | None => panic!("the class {class_name} does not start with its code slot"),
     }
 }
@@ -274,6 +279,7 @@ fn assert_payload_records_in_module(classes: &[&ErrorClass], records: &[RecordCl
                 ClassSlot::CodeMember { .. }
                 | ClassSlot::CodeSubset { .. }
                 | ClassSlot::NeverRetryable
+                | ClassSlot::AlwaysRetryable
                 | ClassSlot::Cause { .. } => false,
             };
             assert!(
@@ -350,9 +356,10 @@ fn slot_imports(slot: ClassSlot) -> Vec<(&'static str, &'static str)> {
             | SlotType::UuidText
             | SlotType::TaskSendPayload => Vec::new(),
         },
-        ClassSlot::CodeMember { .. } | ClassSlot::CodeSubset { .. } | ClassSlot::NeverRetryable => {
-            Vec::new()
-        }
+        ClassSlot::CodeMember { .. }
+        | ClassSlot::CodeSubset { .. }
+        | ClassSlot::NeverRetryable
+        | ClassSlot::AlwaysRetryable => Vec::new(),
     }
 }
 
@@ -450,6 +457,7 @@ fn public_member(class: &ErrorClass, slot: ClassSlot, codes: &CodeCatalog) -> In
         ),
         ClassSlot::CodeSubset { subset } => InterfaceMember::new(CODE_SLOT, subset),
         ClassSlot::NeverRetryable => InterfaceMember::new(RETRYABLE_SLOT, "false"),
+        ClassSlot::AlwaysRetryable => InterfaceMember::new(RETRYABLE_SLOT, "true"),
         ClassSlot::Field {
             name, slot_type, ..
         } => InterfaceMember::new(public_name(name), public_field_type(slot_type)),
@@ -622,7 +630,9 @@ fn native_class_interface(class: &ErrorClass) -> String {
 /// class value (the code of one member, a fixed `retryable`). Pure.
 fn native_slot(slot: ClassSlot) -> Option<InterfaceMember> {
     match slot {
-        ClassSlot::CodeMember { .. } | ClassSlot::NeverRetryable => None,
+        ClassSlot::CodeMember { .. } | ClassSlot::NeverRetryable | ClassSlot::AlwaysRetryable => {
+            None
+        }
         ClassSlot::CodeSubset { subset } => Some(InterfaceMember::new(CODE_SLOT, subset)),
         ClassSlot::Field {
             name, slot_type, ..
@@ -803,6 +813,7 @@ fn slot_value(class: &ErrorClass, slot: ClassSlot, codes: &CodeCatalog) -> (Stri
         ),
         ClassSlot::CodeSubset { .. } => (CODE_SLOT.to_owned(), property_access(&slots, CODE_SLOT)),
         ClassSlot::NeverRetryable => (RETRYABLE_SLOT.to_owned(), "false".to_owned()),
+        ClassSlot::AlwaysRetryable => (RETRYABLE_SLOT.to_owned(), "true".to_owned()),
         ClassSlot::Field {
             name, slot_type, ..
         } => (public_name(name), field_value(&slots, name, slot_type)),
@@ -838,9 +849,10 @@ fn field_value(slots: &str, name: &str, slot_type: SlotType) -> String {
 /// cause. Pure.
 fn hidden_member(slot: ClassSlot) -> Option<String> {
     match slot {
-        ClassSlot::CodeMember { .. } | ClassSlot::CodeSubset { .. } | ClassSlot::NeverRetryable => {
-            None
-        }
+        ClassSlot::CodeMember { .. }
+        | ClassSlot::CodeSubset { .. }
+        | ClassSlot::NeverRetryable
+        | ClassSlot::AlwaysRetryable => None,
         ClassSlot::Field { name, display, .. } => match display {
             SlotRepr::Shown => None,
             SlotRepr::Hidden => Some(public_name(name)),
