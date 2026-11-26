@@ -313,6 +313,7 @@ deployment pattern.
 | HRS-224 | `EVENT_HANDLER_DUPLICATE_NAME` | An earlier event handler of the app has the same name. In Python the name is `module.qualname` of the function: the same function registered twice, or two lambdas of one scope |
 | HRS-225 | `EVENT_HANDLER_INVALID_NAME` | The name of an event handler is empty, longer than 255 characters, or `(unknown)`; in Python, also a function with no module name |
 | HRS-226 | `EVENT_HANDLER_LIMIT` | The app has 32 event handlers already, the most that a handler child runs |
+| HRS-227 | `CONFIG_INVALID_PAYLOAD` | A payload size bound (`warn_bytes` or `reject_bytes`) is not valid. Only the Rust and TypeScript clients raise it; in Python, `PayloadPolicy` refuses the value through its field bounds (a pydantic `ValidationError`) |
 
 ### Registry (HRS-300-HRS-399)
 

@@ -5,7 +5,7 @@
 // - The same form (`matchAt`): the two kinds write and read the same stored text: the same node at every place, the same
 //   members in the same order with the same presence, the same literal values and the same tags.
 // - `storedFormFits`, the relation of both checks: the target's reader reads every text that the source's writer gives. It is the rule of the
-//   Python client's `_is_ok_type_compatible` (`horsies/core/models/workflow/typing_utils.py`) on kinds: the same form
+//   Python client's `_is_ok_type_compatible` (`clients/python/horsies/core/models/workflow/typing_utils.py`) on kinds: the same form
 //   fits; a JSON target takes any source; a nullable or union target takes a source that fits one member; a union
 //   source fits when each member fits. Two widenings that the TypeScript type allows and the reader reads are added:
 //   a literal fits its base scalar, and an integer fits a float.
