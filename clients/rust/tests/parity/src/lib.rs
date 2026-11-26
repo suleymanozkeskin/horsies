@@ -13,14 +13,12 @@ use std::time::Duration;
 
 use horsies::rerun::{RerunEnqueuePolicy, RerunOutcome, RerunTask};
 use horsies::{
-    blocking_task, task, AppConfig, ChildPreload, DrainTimeout, Horsies, HorsiesError,
-    IntervalSchedule, IsolatedChildCount, IsolatedChildren, IsolatedSetting, PingTarget,
-    RetryPolicy, ScheduleConfig, SchedulePattern, SharedAsyncChildCount, SharedAsyncChildren,
-    SharedAsyncSeats, SharedAsyncSetting, SharedThreadChildCount, SharedThreadChildren,
-    SharedThreadSeats, SharedThreadSetting, SubWorkflowParams, TaskError, TaskErrorCode,
-    TaskOutcome, TaskRuntime, TaskSchedule, TaskSendError, TaskSendOptions, UserErrorCode,
-    WaitLimit, WorkerPong, WorkerProfile, WorkflowDefConfig, WorkflowDefinition, WorkflowFunction,
-    WorkflowHandle, WorkflowSpecBuilder,
+    blocking_task, task, AppConfig, ChildPreload, Horsies, HorsiesError, IntervalSchedule,
+    IsolatedChildren, IsolatedSetting, PingTarget, RetryPolicy, ScheduleConfig, SchedulePattern,
+    SharedAsyncChildren, SharedAsyncSetting, SharedThreadChildren, SharedThreadSetting,
+    SubWorkflowParams, TaskError, TaskErrorCode, TaskOutcome, TaskRuntime, TaskSchedule,
+    TaskSendError, TaskSendOptions, UserErrorCode, WaitLimit, WorkerPong, WorkerProfile,
+    WorkflowDefConfig, WorkflowDefinition, WorkflowFunction, WorkflowHandle, WorkflowSpecBuilder,
 };
 use uuid::Uuid;
 
@@ -359,39 +357,28 @@ fn profiles() -> BTreeMap<String, WorkerProfile> {
         shared_async: SharedAsyncSetting::NoSharedAsyncChildren {},
         shared_thread: SharedThreadSetting::NoSharedThreadChildren {},
         preload: ChildPreload::NoPreload,
-        drain_timeout: DrainTimeout::try_from(DRAIN_TIMEOUT)
-            .expect("5 s is above 0 and below 24 hours"),
+        drain_timeout: DRAIN_TIMEOUT,
         ..WorkerProfile::default()
     };
     BTreeMap::from([
         (
             ISOLATED.to_owned(),
             WorkerProfile {
-                isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-                    IsolatedChildCount::from_constant(1),
-                )),
+                isolated: IsolatedChildren::new(1).into(),
                 ..base
             },
         ),
         (
             SHARED_ASYNC.to_owned(),
             WorkerProfile {
-                shared_async: SharedAsyncSetting::SharedAsyncChildren(SharedAsyncChildren::new(
-                    SharedAsyncChildCount::from_constant(1),
-                    SharedAsyncSeats::from_constant(4),
-                )),
+                shared_async: SharedAsyncChildren::new(1, 4).into(),
                 ..base
             },
         ),
         (
             SHARED_THREAD.to_owned(),
             WorkerProfile {
-                shared_thread: SharedThreadSetting::SharedThreadChildren(
-                    SharedThreadChildren::new(
-                        SharedThreadChildCount::from_constant(1),
-                        SharedThreadSeats::from_constant(4),
-                    ),
-                ),
+                shared_thread: SharedThreadChildren::new(1, 4).into(),
                 ..base
             },
         ),

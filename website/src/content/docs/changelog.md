@@ -170,6 +170,41 @@ there is no migration contract between pre-1.0 versions.
     `horsies::blocking::start_workflow` and
     `horsies::blocking::start_workflow_with`, which started through the
     first registration in the process.
+- **Rust client: worker profile counts are plain numbers.** Each count,
+  size and task limit of a worker profile is a `u32`, and `drain_timeout`
+  is a `Duration`: `IsolatedChildren::new(2)`,
+  `SharedAsyncChildren::new(4, 25)`, `SharedThreadChildren::new(1, 4)`,
+  `TaskLimitSetting::TaskLimit { tasks: 500 }`. `From` builds each setting
+  from its children, so a profile reads
+  `WorkerProfile { isolated: IsolatedChildren::new(2).into(), ..WorkerProfile::default() }`.
+  `Horsies::new` checks each value against its bounds and refuses the
+  config with every refusal in one error, `HRS-218`. Each refusal names the
+  field path and the bounds, for example
+  `worker_profiles['default'].isolated.count: 0 is outside the bounds 1 to 1024`.
+  The crate does not export the bounded count types (`IsolatedChildCount`,
+  `SharedAsyncChildCount`, `SharedAsyncSeats`, `SharedThreadChildCount`,
+  `SharedThreadSeats`, `TaskCount`, `MemoryMb`, `PoolConnectionCount`,
+  `PoolMinSize`, `ExecutorThreadCount`), `DrainTimeout`,
+  `DrainTimeoutRefused`, `BoundedU32` and `OutOfBounds` now. It exports
+  `ProfileValueRefused`. The JSON form of a profile and the worker manifest
+  do not change.
+- **Core: the config form of a worker profile.**
+  `horsies_core::core::config::worker_profile::input` holds the profile
+  types of `AppConfig.worker_profiles`: plain numbers, with the JSON form of
+  the checked types. `input::WorkerProfile::checked(name)` gives the
+  checked profile, or one `ProfileValueRefused` (`OutOfBounds` or
+  `DrainTimeout`, each with the field path) for each value outside its
+  bounds. `worker_profiles_shape_errors` and `worker_profiles_claim_errors`
+  take the config form. A value outside its bounds is a refusal of
+  `AppConfig::validate` with its path, not a parse error, so the TypeScript
+  client gets it together with every other refusal of the config.
+  `checked_worker_profiles` checks a profile set of the config.
+  `config_sections` checks the profiles into the checked form; it panics on
+  a value outside its bounds, because `AppConfig::validate` refuses that
+  config first. `check_worker_connections` returns the bound refusals and
+  reads nothing. `WorkerManifest::config_profiles` gives the profiles of a
+  manifest in the config form. The checked types, `parse_worker_profiles`
+  and `select_worker_profile` do not change.
 
 - **Rust client: a wait limit is built directly, and a limit above the
   bound is the read error `InvalidInput`.** `WaitLimit::Within` holds a

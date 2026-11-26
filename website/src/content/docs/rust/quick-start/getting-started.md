@@ -32,8 +32,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    task, AppConfig, Horsies, IsolatedChildCount, IsolatedChildren,
-    IsolatedSetting, TaskError, TaskOutcome, WaitLimit, WorkerProfile,
+    task, AppConfig, Horsies, IsolatedChildren, TaskError, TaskOutcome, WaitLimit,
+    WorkerProfile,
 };
 
 const DATABASE_URL: &str = "postgresql://postgres:postgres@localhost:5432/horsies";
@@ -46,9 +46,7 @@ async fn greet(name: String) -> Result<String, TaskError<Infallible>> {
 /// Every process builds the same app: the producer, the worker and each child.
 fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     let profile = WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-            IsolatedChildCount::try_from(2)?,
-        )),
+        isolated: IsolatedChildren::new(2).into(),
         ..WorkerProfile::default()
     };
     let config = AppConfig {
