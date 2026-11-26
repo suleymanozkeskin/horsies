@@ -172,7 +172,9 @@ describe("a send that the core takes", () => {
       script: { prepared: [preparedWith({ kind: "configured", priority: 7 })] },
     });
 
-    await sendTask(context, billed, {}, {});
+    const sent = await sendTask(context, billed, {}, {});
+
+    assert.equal(sent.ok, true);
     assert.deepEqual(
       [producer.enqueues[0]?.request.queueName, producer.enqueues[0]?.request.priority],
       ["billing", 7],

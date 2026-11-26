@@ -4,6 +4,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { appCoreHandle } from "../../../horsies/src/app/core-access.ts";
+
 import type { WorkerLogLevel } from "../../../horsies/src/_catalog/worker_manifest.ts";
 import type { AppContext } from "../../../horsies/src/app/context.ts";
 import { checkReport } from "../../../horsies/src/check/report.ts";
@@ -19,7 +21,6 @@ import { createHorsies } from "../../../horsies/src/app.ts";
 import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { LaunchFacts } from "../../../horsies/src/worker/child-command.ts";
 import {
-  appHandle,
   processWorkerRunDeps,
   runtimeSeatIsolateMemory,
   runWorkerOf,
@@ -138,7 +139,7 @@ describe("the worker run", () => {
   test("the start members name the profile, each task and the child command", async () => {
     const { deps, steps } = fakeDeps();
 
-    await runWorkerOf(contextOf(implementedApp()), START, deps);
+    void (await runWorkerOf(contextOf(implementedApp()), START, deps));
 
     const prepared = steps.find((step) => step.kind === "prepare");
     const members: unknown = JSON.parse(prepared?.kind === "prepare" ? prepared.startJson : "null");
@@ -283,7 +284,7 @@ describe("the worker run", () => {
       telemetry: { handlers: () => [{ name: "alerts", eventType: "AttemptEnded" }], tracing: "otel" },
     };
 
-    await runWorkerOf(context, START, deps);
+    void (await runWorkerOf(context, START, deps));
 
     const prepared = steps.find((step) => step.kind === "prepare");
     const members: unknown = JSON.parse(prepared?.kind === "prepare" ? prepared.startJson : "null");
@@ -319,7 +320,7 @@ describe("the worker run of this process", () => {
     assert.deepEqual(await deps.run(WORKER), { kind: "stopped" });
     assert.equal(handles.length, 1);
     assert.equal(handles[0], handle);
-    assert.equal(appHandle(contextOf(created.value)), handle);
+    assert.equal(appCoreHandle(contextOf(created.value).core), handle);
   });
 
   test("the preparation gets the memory cap of the worker threads of this runtime: capped on Node, not on Bun", () => {
@@ -356,6 +357,6 @@ describe("the worker run of this process", () => {
       assert.fail("the app is created");
     }
 
-    assert.throws(() => appHandle(contextOf(created.value)), ClientDefect);
+    assert.throws(() => appCoreHandle(contextOf(created.value).core), ClientDefect);
   });
 });
