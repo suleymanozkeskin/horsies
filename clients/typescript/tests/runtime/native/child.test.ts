@@ -51,17 +51,17 @@ describe("the child area of the addon", () => {
   });
 
   test("a socket descriptor that is not open ends the serve with 73", () => {
-    assert.equal(runChildCase(SCRIPT, "socket-not-open", CHILD_CASE_BOUND_MS).stdout, "BAD_ARGUMENTS 73 1000");
+    assert.equal(runChildCase(SCRIPT, "socket-not-open", CHILD_CASE_BOUND_MS).stdout, "BAD_ARGUMENTS 73");
   });
 
   test("a worker pid that is not the parent ends the serve with 71", () => {
-    assert.equal(runChildCase(SCRIPT, "parent-gone", CHILD_CASE_BOUND_MS).stdout, "PARENT_GONE 71 1000");
+    assert.equal(runChildCase(SCRIPT, "parent-gone", CHILD_CASE_BOUND_MS).stdout, "PARENT_GONE 71");
   });
 
   test("the host thread ends a process whose JavaScript thread does not exit, with the host's code", () => {
     const ended = runChildCase(SCRIPT, "backstop", CHILD_CASE_BOUND_MS);
 
-    assert.equal(ended.stdout, "BAD_ARGUMENTS 73 1000");
+    assert.equal(ended.stdout, "BAD_ARGUMENTS 73");
     assert.equal(ended.status, 73);
   });
 

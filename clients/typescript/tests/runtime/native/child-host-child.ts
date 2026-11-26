@@ -12,7 +12,7 @@ const CLOSED_DESCRIPTOR = "987";
 /** A pid that is never the parent of a test process. */
 const NOT_THE_PARENT = "1";
 
-/** How long the `backstop` case blocks its JavaScript thread: past the backstop of the host thread. */
+/** How long the `backstop` case blocks its JavaScript thread: past the backstop of the host thread (2 s). */
 const BLOCK_PAST_BACKSTOP_MS = 6_000;
 
 /** A plan with no task and no hook, for the arguments `processArguments`. */
@@ -23,6 +23,7 @@ function plan(processArguments: readonly string[]): ChildHostPlan {
     producerManifestJson: manifestJson("postgresql://horsies@127.0.0.1:55432/horsies", false),
     hostname: "test-host",
     bodyFacts: "NO_SCOPE",
+    exitFlushBoundMs: 1000,
     processArguments: [...processArguments],
   };
 }
@@ -34,7 +35,7 @@ const noHook = (): void => undefined;
 async function served(processArguments: readonly string[]): Promise<string> {
   const end = await serveChild(plan(processArguments), noPost, noHook);
 
-  return `${end.exit} ${String(end.code)} ${String(end.flushBoundMs)}`;
+  return `${end.exit} ${String(end.code)}`;
 }
 
 /** Block the JavaScript thread for `milliseconds`. */

@@ -112,6 +112,8 @@ export interface ChildHostPlan {
   readonly producerManifestJson: string;
   readonly hostname: string;
   readonly bodyFacts: BodyFactsMode;
+  /** The package's longest wait for its telemetry flush before the exit, in milliseconds (at most 8,000). */
+  readonly exitFlushBoundMs: number;
   /** The process arguments after the entry script: the child flag, the socket descriptor, the worker pid. */
   readonly processArguments: string[];
 }
@@ -131,11 +133,10 @@ export type ChildExitName =
   | "PROTOCOL_MISMATCH"
   | "CHILD_HOOK_FAILED";
 
-/** The end of the serve: the exit code of the process, its name, and the longest wait for the telemetry flush. */
+/** The end of the serve: the exit code of the process and its name. */
 export interface ChildServeEnd {
   readonly code: number;
   readonly exit: ChildExitName;
-  readonly flushBoundMs: number;
 }
 
 /** The facts of the child that a start hook runs in. */

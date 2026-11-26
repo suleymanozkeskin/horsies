@@ -10,7 +10,7 @@
 //!   and the hook dispatcher, builds the task registry (one body form per
 //!   task), the start hooks, the producer manifest and the loop, and starts
 //!   the host thread (`exit`). It resolves with the exit code when the host
-//!   returns.
+//!   returns; the host thread's backstop waits for the plan's flush bound.
 //! - The child app: family `TYPESCRIPT`; the bridge's log setup at the
 //!   level of the init frame; the body scope of the plan's body facts; the
 //!   handler child of the handler slot; the loop of the JavaScript main
@@ -41,7 +41,7 @@ use crate::call::operation::{guarded_start, resolve, EnvelopeResolver};
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::child::body::{ChildBodies, ChildPost, ChildPoster, JsAsyncBody};
 use crate::child::body_facts::{BodyFacts, BodyFactsMode};
-use crate::child::exit::{child_process_exit, flush_bound_ms, spawn_host_thread};
+use crate::child::exit::{child_process_exit, spawn_host_thread, FlushBound};
 use crate::child::handler_slot::take_handler_child;
 use crate::child::loop_watch::make_host_loop;
 use crate::child::seat_slot::seat_body;
@@ -92,6 +92,10 @@ pub struct ChildHostPlan {
     /// The host name written with each start.
     pub hostname: String,
     pub body_facts: BodyFactsMode,
+    /// The package's longest wait for its telemetry flush before it ends
+    /// the process, in milliseconds: at most 8,000. The backstop of the host
+    /// thread comes 1 s after it.
+    pub exit_flush_bound_ms: u32,
     /// The process arguments after the entry script (`process.argv`
     /// from index 2): the child flag, the socket descriptor, the worker pid.
     pub process_arguments: Vec<String>,
@@ -140,14 +144,12 @@ impl ChildExitName {
     }
 }
 
-/// The end of the serve: the exit code of the process, its name, and the
-/// longest wait for the telemetry flush before the exit.
+/// The end of the serve: the exit code of the process and its name.
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChildServeEnd {
     pub code: i32,
     pub exit: ChildExitName,
-    pub flush_bound_ms: u32,
 }
 
 /// The core's read of child-mode arguments.
@@ -221,7 +223,7 @@ pub fn serve_child<'env>(
         env.create_deferred::<Envelope<ChildServeEnd>, EnvelopeResolver<ChildServeEnd>>()?;
     match guarded_start(SERVE_SUBJECT, || served_app(plan, &post, &hook)) {
         Err(thrown) => resolve(deferred, Envelope::Thrown(thrown)),
-        Ok((app, args)) => start_host(deferred, app, args),
+        Ok(served) => start_host(deferred, served),
     }
     Ok(promise)
 }
@@ -240,12 +242,18 @@ fn resolve_once(slot: &Mutex<Option<ServeDeferred>>, envelope: Envelope<ChildSer
 
 /// Start the host thread; a thread that the OS refuses resolves with
 /// `CORE_START_FAILED`, and nothing runs.
-fn start_host(deferred: ServeDeferred, app: ChildApp, args: ChildArgs) {
+fn start_host(deferred: ServeDeferred, served: ServedApp) {
+    let ServedApp {
+        app,
+        args,
+        flush_bound,
+    } = served;
     let slot = Arc::new(Mutex::new(Some(deferred)));
     let thread_slot = Arc::clone(&slot);
     let started = spawn_host_thread(
         move || run_child_host(app, args),
         move |exit| resolve_once(&thread_slot, Envelope::Value(serve_end(exit))),
+        flush_bound,
     );
     if let Err(error) = started {
         resolve_once(
@@ -262,16 +270,27 @@ fn serve_end(exit: ChildHostExit) -> ChildServeEnd {
     ChildServeEnd {
         code: exit.code(),
         exit: ChildExitName::of(exit),
-        flush_bound_ms: flush_bound_ms(),
     }
 }
 
-/// The child app of `plan` and its arguments, on the JavaScript thread.
+/// What the serve starts: the child app, its arguments, and the flush bound
+/// of the package.
+struct ServedApp {
+    app: ChildApp,
+    args: ChildArgs,
+    flush_bound: FlushBound,
+}
+
+/// The child app of `plan`, its arguments and its flush bound, on the
+/// JavaScript thread.
 fn served_app(
     plan: ChildHostPlan,
     post: &Function<ChildPost, ()>,
     hook: &Function<FnArgs<(BigInt, StartHookCall)>, ()>,
-) -> Result<(ChildApp, ChildArgs), NativeThrown> {
+) -> Result<ServedApp, NativeThrown> {
+    let flush_bound = FlushBound::of_millis(plan.exit_flush_bound_ms).map_err(|_too_long| {
+        client_defect("the exit flush bound of a plan is at most 8,000 milliseconds")
+    })?;
     let args = match read_arguments(&plan.process_arguments)? {
         ArgumentsRead::Child(args) => args,
         ArgumentsRead::Bad { cause } => {
@@ -315,7 +334,11 @@ fn served_app(
         event_loop: host_loop_watch(host_loop),
         exit: child_process_exit(),
     };
-    Ok((app, args))
+    Ok(ServedApp {
+        app,
+        args,
+        flush_bound,
+    })
 }
 
 /// The loop watch of a JavaScript child: the JavaScript main thread's loop.
@@ -408,7 +431,6 @@ mod tests {
             ChildServeEnd {
                 code: 0,
                 exit: ChildExitName::Stopped,
-                flush_bound_ms: 1000,
             }
         );
         assert_eq!(serve_end(ChildHostExit::ParentGone).code, 71);
