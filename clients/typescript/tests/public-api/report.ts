@@ -41,7 +41,9 @@ export function extractorConfig(built: BuiltPackage, entryPoint: EntryPoint, rep
           strict: true,
           module: "nodenext",
           moduleResolution: "nodenext",
-          lib: ["es2025", "esnext.temporal"],
+          // The published declarations name global web types (`AbortSignal`), which a consumer has from the Node
+          // types or the DOM lib; with neither, API Extractor cannot follow them.
+          lib: ["es2025", "esnext.temporal", "dom"],
           types: [],
         },
         files: [entryPoint.typesFile],

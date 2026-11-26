@@ -87,6 +87,7 @@ describe("the errors of a body", () => {
         dataJson: '{"cap":10}',
         exception: { kind: "noException" },
       },
+      data: '{"cap":10}',
     });
   });
 

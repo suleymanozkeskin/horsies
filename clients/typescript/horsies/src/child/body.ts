@@ -18,7 +18,7 @@
 
 import { encodeWithReadBack } from "../codec/read-back.ts";
 import { decodeParameters } from "../codec/reader.ts";
-import { errorDataText } from "../codec/error-data.ts";
+import { errorDataText, type StoredErrorData } from "../codec/error-data.ts";
 import type { JsonText } from "../codec/json-text.ts";
 import { refusalText, type CodecRefused } from "../codec/refusal.ts";
 import { isObjectLike, isString } from "../codec/values.ts";
@@ -29,20 +29,20 @@ import { unreachable } from "../wire/unreachable.ts";
 import type { BodyEnd, BodyObservation } from "./body-observer.ts";
 import type { LoopMarks } from "./run-table.ts";
 import { type RunMark, runStore } from "./run-store.ts";
-import type { TaskRuntime } from "./runtime.ts";
+import type { ThreadTaskRuntime } from "./runtime.ts";
 import { thrownRecord } from "./thrown-error.ts";
 
-/** The stored outcome of a body: the text of its value, or the parts of its task error. */
+/** The stored outcome of a body: the text of its value, or the parts of its task error and the text of its data. */
 export type StoredBodyOutcome =
   | { readonly kind: "value"; readonly json: JsonText }
-  | { readonly kind: "error"; readonly parts: TaskErrorParts };
+  | { readonly kind: "error"; readonly parts: TaskErrorParts; readonly data: JsonText };
 
 /** One run of a body. */
 export interface BodyRun {
   readonly inputJson: JsonText;
   readonly implementation: ImplementationParts;
   readonly compiled: CompiledContract;
-  readonly runtime: TaskRuntime;
+  readonly runtime: ThreadTaskRuntime;
   readonly mark: RunMark;
   readonly marks: LoopMarks;
   readonly observation: BodyObservation;
@@ -55,7 +55,7 @@ type DecodedParameters = Readonly<Record<string, unknown>>;
 type BodyReturn = { readonly returned: unknown };
 
 /** The body of an implementation, with its types erased: the adapter decodes its input with the contract's kinds. */
-type ErasedBody = (input: DecodedParameters, runtime: TaskRuntime) => unknown;
+type ErasedBody = (input: DecodedParameters, runtime: ThreadTaskRuntime) => unknown;
 
 /** Run the body of `run` and give its stored outcome. Never rejects. */
 export async function runBody(run: BodyRun): Promise<StoredBodyOutcome> {
@@ -132,7 +132,7 @@ function returnedOutcome(run: BodyRun, body: BodyReturn): StoredBodyOutcome {
     }
 
     case "err":
-      return { kind: "error", parts: userFailureParts(result.failure) };
+      return userFailureOutcome(result.failure);
     case "notAResult":
       return notAResult(taskName, result.actualType);
     default:
@@ -199,14 +199,17 @@ function actualTypeOf(cause: unknown): string {
 
 const NO_TEXT: OptionalText = Object.freeze({ kind: "none" });
 
-/** The parts of the stored error of a user failure. Pure. */
-function userFailureParts(failure: UserFailureRead): TaskErrorParts {
-  return {
-    code: { kind: "user", code: failure.code },
-    message: failure.message,
-    dataJson: errorDataText(failure.data).text,
-    exception: { kind: "noException" },
-  };
+/** The parts of a stored error with its data, and the text of the data. Pure. */
+function errorOutcome(parts: Omit<TaskErrorParts, "dataJson">, data: StoredErrorData): StoredBodyOutcome {
+  return { kind: "error", parts: { ...parts, dataJson: data.text }, data: data.text };
+}
+
+/** The outcome of a user failure. Pure. */
+function userFailureOutcome(failure: UserFailureRead): StoredBodyOutcome {
+  return errorOutcome(
+    { code: { kind: "user", code: failure.code }, message: failure.message, exception: { kind: "noException" } },
+    errorDataText(failure.data),
+  );
 }
 
 /** The outcome of a thrown value: the observer's `thrown`, then the exception map. */
@@ -216,12 +219,10 @@ function thrownOutcome(run: BodyRun, cause: unknown): StoredBodyOutcome {
   const record = thrownRecord(cause);
   const mapped = mappedCode(run.implementation, cause);
 
-  return {
-    kind: "error",
-    parts: {
+  return errorOutcome(
+    {
       code: mapped === undefined ? { kind: "library", code: "UNHANDLED_EXCEPTION" } : { kind: "user", code: mapped },
       message: { kind: "text", text: `Unhandled exception in task ${run.mark.taskName}: ${record.type}: ${record.message}` },
-      dataJson: errorDataText({ exception_type: record.type }).text,
       exception: {
         kind: "record",
         className: record.type,
@@ -231,7 +232,8 @@ function thrownOutcome(run: BodyRun, cause: unknown): StoredBodyOutcome {
         traceback: record.traceback,
       },
     },
-  };
+    errorDataText({ exception_type: record.type }),
+  );
 }
 
 /** The user code of the first entry of the exception map whose class `cause` is an instance of. */
@@ -263,36 +265,29 @@ function serializationError(
 ): StoredBodyOutcome {
   const message = `${subject}: ${refusalText(refused)}`;
 
-  return {
-    kind: "error",
-    parts: {
+  return errorOutcome(
+    {
       code: { kind: "library", code: "WORKER_SERIALIZATION_ERROR" },
       message: { kind: "text", text: message },
-      dataJson: errorDataText({ expected_type: `${taskName}.${side}`, validation_error: message }).text,
       exception: { kind: "noException" },
     },
-  };
+    errorDataText({ expected_type: `${taskName}.${side}`, validation_error: message }),
+  );
 }
 
 /** `RETURN_TYPE_MISMATCH` of a return that is neither `ok(value)` nor `err(failure)` (the Python client's form). */
 function notAResult(taskName: string, actualType: string): StoredBodyOutcome {
-  return {
-    kind: "error",
-    parts: {
+  return errorOutcome(
+    {
       code: { kind: "library", code: "RETURN_TYPE_MISMATCH" },
       message: {
         kind: "text",
         text: `Task ${taskName} returned ${actualType} but must return ok(value) or err({ code })`,
       },
-      dataJson: errorDataText({
-        variant: "not_a_task_result",
-        expected_type: "Result",
-        actual_type: actualType,
-        validation_errors: [],
-      }).text,
       exception: { kind: "noException" },
     },
-  };
+    errorDataText({ variant: "not_a_task_result", expected_type: "Result", actual_type: actualType, validation_errors: [] }),
+  );
 }
 
 /**

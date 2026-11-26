@@ -7,19 +7,32 @@ import { ClientDefect } from "../thrown-errors.ts";
 /** Type-only key of the value type of a state key. It does not exist at run time. */
 export declare const stateValueType: unique symbol;
 
-/** The key of one provider of app state. `name` names the provider in logs and in defects. */
-export interface StateKey<T> {
+/** Type-only key of the mark that only `app.provide` gives a key. It does not exist at run time. */
+export declare const stateKeyMark: unique symbol;
+
+/** A key of app state of any value type: a key that `app.provide` returned. */
+export interface AnyStateKey {
   readonly kind: "stateKey";
   readonly name: string;
+  readonly [stateKeyMark]: "StateKey";
+}
+
+/** The key of one provider of app state, whose value has the type `T`. `name` names the provider in logs. */
+export interface StateKey<T> extends AnyStateKey {
   readonly [stateValueType]?: (value: T) => T;
 }
+
+/** The value type of the key `K`. */
+export type StateValueOf<K extends AnyStateKey> = K extends StateKey<infer T> ? T : never;
 
 /** A key as the store holds it: its identity and its name, with no value type. Every `StateKey<T>` is one. */
 export type StateKeyIdentity = { readonly kind: "stateKey"; readonly name: string };
 
-/** A new key named `name`. Frozen. */
+/** A new key named `name`. Frozen. Only `app.provide` calls it. */
 export function stateKeyNamed<T>(name: string): StateKey<T> {
-  return Object.freeze({ kind: "stateKey", name });
+  // SAFETY: the mark and the value type are type-only facts: this function is the one maker of a key, and the
+  // provider that the key belongs to builds a value of `T`.
+  return Object.freeze({ kind: "stateKey", name }) as StateKey<T>;
 }
 
 /** The state of one value: its provider has not run in this process yet, or it ran and built the value. */

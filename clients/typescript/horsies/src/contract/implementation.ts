@@ -1,18 +1,20 @@
 // The implementation of a contract: the body and the map of thrown error classes to codes. `app.implement` builds
 // it; only the worker imports the module that calls it.
 
+import type { TaskRuntime, ThreadTaskRuntime } from "../child/runtime.ts";
+import { runImplementation } from "../testing/run.ts";
+import type { TaskOutcome } from "../wire/task-error.ts";
 import type { BodyResult, ExecutionClass, TaskContract } from "./define-task.ts";
-import type { BodyInput, ParameterSchemas, OutputSchema } from "./schema.ts";
+import type { BodyInput, ParameterSchemas, OutputSchema, SchemaValue } from "./schema.ts";
 
 /**
- * The run context that a body gets as its second argument, by execution class. The worker's child process gives
- * it; its member types join this map with the child process code. A key whose type is `never` has no run context
- * yet: a body of that class takes one argument.
+ * The run context that a body gets as its second argument, by execution class: the worker's child process gives it,
+ * and `TaskRuntime.forTest` gives one to a test. A `SHARED_THREAD` body has no `spawn`.
  */
 export interface BodyRuntimes {
-  readonly ISOLATED: never;
-  readonly SHARED_ASYNC: never;
-  readonly SHARED_THREAD: never;
+  readonly ISOLATED: TaskRuntime;
+  readonly SHARED_ASYNC: TaskRuntime;
+  readonly SHARED_THREAD: ThreadTaskRuntime;
 }
 
 /** The run context of a body of the execution class `X`. */
@@ -47,6 +49,12 @@ export interface ImplementOptions<E extends string> {
 export interface Implementation<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
   readonly kind: "implementation";
   readonly contract: TaskContract<P, O, E, X>;
+  /**
+   * Run the body with `input` and `runtime` (`TaskRuntime.forTest`), with no worker and no database: the input and
+   * the output are checked with the contract's types, as a worker checks them, and a thrown error goes through the
+   * exception map. Gives the outcome as a task read gives it.
+   */
+  run(input: BodyInput<P>, runtime: RuntimeOf<X>): Promise<TaskOutcome<SchemaValue<O>, E>>;
 }
 
 /** Any implementation: the constraint of a generic parameter. */
@@ -70,9 +78,18 @@ export function implementationOf<P extends ParameterSchemas, O extends OutputSch
   body: BodyFor<P, O, E, X>,
   exceptions: readonly ExceptionMapping<E>[],
 ): Implementation<P, O, E, X> {
-  const implementation: Implementation<P, O, E, X> = Object.freeze({ kind: "implementation", contract });
+  const kept: ImplementationParts = Object.freeze({ contract, body, exceptions: Object.freeze([...exceptions]) });
 
-  parts.set(implementation, Object.freeze({ contract, body, exceptions: Object.freeze([...exceptions]) }));
+  const implementation: Implementation<P, O, E, X> = Object.freeze({
+    kind: "implementation",
+    contract,
+    run: async (input: BodyInput<P>, runtime: RuntimeOf<X>): Promise<TaskOutcome<SchemaValue<O>, E>> =>
+      // SAFETY: the runner decodes the value with the contract's output kind, and a user code of the error is a code
+      // of the contract (a declared code, by typecheck of `err` and of the exception map).
+      runImplementation(kept, input, runtime) as Promise<TaskOutcome<SchemaValue<O>, E>>,
+  });
+
+  parts.set(implementation, kept);
 
   return implementation;
 }

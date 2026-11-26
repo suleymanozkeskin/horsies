@@ -15,9 +15,10 @@
 // `TaskRuntime.forTest`.
 
 import type { TaskId } from "../contract/ids.ts";
+import { testRunControls, type TestRuntimeOptions } from "../testing/task-runtime.ts";
 import type { Result } from "../wire/result.ts";
 import type { AttemptNumber } from "./attempt.ts";
-import type { StateKey } from "./state.ts";
+import type { AnyStateKey, StateKey } from "./state.ts";
 
 /** Why the cancel signal of a run fired. */
 export type CancelCause = "DEADLINE" | "OPERATOR";
@@ -73,6 +74,15 @@ export class TaskRuntime {
     this.signal = controls.signal;
     this.#controls = controls;
     Object.freeze(this);
+  }
+
+  /**
+   * A runtime for a test of a task body, with no worker, no database and no addon: the task id and the attempt of
+   * `options`; a signal that never fires; `spawn` that runs its work at once; `state` from the entries of `options`,
+   * each a key that `app.provide` returned and a value of the key's type.
+   */
+  static forTest<const Keys extends readonly AnyStateKey[]>(options: TestRuntimeOptions<Keys>): TaskRuntime {
+    return new TaskRuntime(testRunControls(options));
   }
 
   /** Whether a cancel was requested, and its first cause. Reads with no turn of the event loop. */
