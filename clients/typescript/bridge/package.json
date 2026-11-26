@@ -1,0 +1,27 @@
+{
+  "name": "horsies-native-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:dev": "napi build --platform --esm --features test-probes",
+    "test:native": "cd .. && failed=0; for file in tests/runtime/native/*.test.ts; do bun test --path-ignore-patterns='node_modules/**' \"./$file\" || failed=1; done; exit $failed",
+    "test:native:node": "cd .. && node --test 'tests/runtime/native/**/*.test.ts'",
+    "check:declarations": "cd ../tests/native-declarations && bun check"
+  },
+  "napi": {
+    "binaryName": "horsies",
+    "packageName": "@horsies/native",
+    "constEnum": false,
+    "dtsHeaderFile": "dts-header.d.ts",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl",
+      "aarch64-apple-darwin"
+    ]
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.10.12"
+  }
+}

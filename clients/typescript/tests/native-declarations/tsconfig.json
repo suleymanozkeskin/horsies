@@ -1,0 +1,7 @@
+{
+  // The declaration tests import the `index.d.ts` that a native build writes in
+  // clients/typescript/bridge/. Run `bun check` in this folder after the build.
+  "extends": "../tsconfig.json",
+  "include": ["*.ts"],
+  "exclude": []
+}

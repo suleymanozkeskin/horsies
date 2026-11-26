@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "workspaces": [
+    "bridge",
     "horsies",
     "tests"
   ],
