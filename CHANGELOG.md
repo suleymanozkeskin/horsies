@@ -113,6 +113,30 @@ and there is no migration contract between pre-1.0 versions.
   The Rust client and the Python bridge pass `Standard`; their exits do
   not change.
 
+- **Rust client: a wait limit is built directly, and a limit above the
+  bound is the read error `InvalidInput`.** `WaitLimit::Within` holds a
+  `Duration`: a read writes
+  `handle.get(WaitLimit::Within(Duration::from_secs(30)))`.
+  `WaitLimit::NoLimit` waits until the task ends, as before. A `Within`
+  limit above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms, about 49.7 days) is
+  `ReadError::InvalidInput { task_id, cause }` or
+  `WorkflowReadError::InvalidInput { workflow_id, cause }`, with the code
+  `INVALID_INPUT`, as in the Python client. It is the first check of
+  `TaskHandle::get`, `Horsies::get_result`, `Horsies::get_raw_result`,
+  `WorkflowHandle::get` and their blocking views: it comes before a kept
+  read, `WaitInsideTask` and `AsyncContext`. No statement runs, and the
+  handle keeps nothing. `cause` is `WaitLimitRefused`, with the text
+  `the wait limit is above 4294967295 ms (about 49.7 days)`. Before,
+  `WaitLimit::parse(Some(duration))` refused a long limit with
+  `WaitLimitRefused`, before the call. `WaitLimit::parse` and the client
+  export `BoundedWait` are removed. Code that called
+  `WaitLimit::parse(Some(duration))?` writes `WaitLimit::Within(duration)`.
+  A `match` on every variant of `ReadError` or `WorkflowReadError` takes
+  the new variant. In `horsies_core`, `BoundedWait::try_from(duration)`
+  builds a `BoundedWait`, and `WaitLimit::parse` and
+  `WaitLimit::deadline_from` are no longer public. The `INVALID_INPUT`
+  message of the core result wait has the new text.
+
 ### Fixed
 
 - **A schema install of the `TYPESCRIPT` client family into an empty

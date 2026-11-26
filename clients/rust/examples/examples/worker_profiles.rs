@@ -91,7 +91,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 }
 
 async fn demo(_app: Horsies) -> DemoResult {
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
+    let limit = WaitLimit::Within(Duration::from_secs(30));
     let sum = checksum::send(vec![1, 2, 3]).await?;
     let mut pages = Vec::new();
     for path in ["/", "/docs", "/docs/rust"] {

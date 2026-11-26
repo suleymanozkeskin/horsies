@@ -177,10 +177,8 @@ pub async fn wait_inside_task() -> Result<bool, TaskError<BasicCode>> {
     let handle = simple::send(1)
         .await
         .map_err(|error| TaskError::user(BasicCode::SendFailed, error.to_string()))?;
-    let limit = WaitLimit::parse(Some(INSIDE_WAIT))
-        .map_err(|error| TaskError::user(BasicCode::SendFailed, error.to_string()))?;
     Ok(matches!(
-        handle.get(limit).await,
+        handle.get(WaitLimit::Within(INSIDE_WAIT)).await,
         Err(ReadError::WaitInsideTask { .. })
     ))
 }
