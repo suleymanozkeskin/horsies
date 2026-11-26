@@ -22,7 +22,9 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
-use horsies_core::core::task::send_types::send_error_from_enqueue;
+use horsies_core::core::task::send_types::{
+    send_error_from_enqueue, send_failure_exception, SendFailureException,
+};
 use horsies_core::handle::CoreHandle as LazyHandle;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
@@ -544,11 +546,24 @@ async fn enqueue_operation(producer: ProducerHandle, command: EnqueueCommand) ->
             task_id: text_of_uuid(task_id),
         },
         Err(error) => EnqueueOutcome::Failed {
-            error: RawCatalogError::of(
-                ENQUEUE_SUBJECT,
-                &send_error_from_enqueue(command.task_id, command.payload.clone(), &error),
-            ),
+            error: enqueue_failure_record(&command, &error),
         },
+    }
+}
+
+/// The raw record of the send error of a failed enqueue of `command`: the
+/// class by the core's one rule (`send_error_from_enqueue`), and in the
+/// `exception` slot the exception that Python stores for `error`
+/// (`send_failure_exception`). The send error holds no rule text, no
+/// reader text and no data check, so its own slot is not exact for each
+/// error. Pure.
+fn enqueue_failure_record(command: &EnqueueCommand, error: &BrokerError) -> RawCatalogError {
+    let send_error = send_error_from_enqueue(command.task_id, command.payload.clone(), error);
+    match send_failure_exception(error) {
+        SendFailureException::Slot(exception) => {
+            RawCatalogError::of_with_exception(ENQUEUE_SUBJECT, &send_error, &exception)
+        }
+        SendFailureException::NoSlot => RawCatalogError::of(ENQUEUE_SUBJECT, &send_error),
     }
 }
 
@@ -586,7 +601,8 @@ mod tests {
     use crate::logging::levels::RecordLevel;
     use crate::logging::names::LoggerName;
     use crate::values::boundary::bigint_of_i64;
-    use crate::values::catalog_values::RawSlotValue;
+    use crate::values::catalog_values::{ClientClassName, ExceptionRecord, RawSlotValue};
+    use crate::values::core_failures::CauseRecord;
 
     /// A log bridge of a test that reads none of its records.
     fn quiet_log() -> LogBridge {
@@ -840,5 +856,162 @@ mod tests {
         let raw = RawCatalogError::of(ENQUEUE_SUBJECT, &error);
         assert_eq!(raw.class, "TaskSendEnqueueFailed");
         assert_eq!(error.code().wire_value(), "ENQUEUE_FAILED");
+    }
+
+    /// A first send of the task `report` with the input `{}`.
+    fn report_command() -> EnqueueCommand {
+        command_of(
+            EnqueueRequest {
+                task_id: "01890a5d-ac96-774b-bcce-b302099a8057".to_owned(),
+                task_name: "report".to_owned(),
+                queue_name: "default".to_owned(),
+                priority: 100.0,
+                input_json: "{}".to_owned(),
+                sent_at_micros: bigint_of_i64(1_786_525_812_654_321),
+                deadline: DeadlineFact::NoDeadline,
+                delay: DelayFact::NoDelay,
+                task_options: OptionalText::None,
+                idempotency_key: OptionalText::None,
+                retention: RetentionRecord::ClassKey {
+                    key: "standard_30d".to_owned(),
+                },
+            },
+            SendKind::First,
+            TraceArgument::NoCarrier,
+        )
+        .expect("the request crosses")
+    }
+
+    /// A refusal of the core before any statement, of the input part.
+    fn input_refusal(cause: horsies_core::EnqueueRefusalCause) -> BrokerError {
+        BrokerError::EnqueueContract(horsies_core::EnqueueRefusal {
+            part: horsies_core::SendPart::Input,
+            message: "the input is refused".to_owned(),
+            cause,
+        })
+    }
+
+    /// The class and the `exception` slot of the raw record of a failed
+    /// enqueue of `error`.
+    fn failure_exception(error: &BrokerError) -> (String, ExceptionRecord) {
+        let raw = enqueue_failure_record(&report_command(), error);
+        let exception = raw
+            .slots
+            .iter()
+            .find_map(|slot| match &slot.value {
+                RawSlotValue::Exception { exception } => Some(exception.clone()),
+                RawSlotValue::Text { .. }
+                | RawSlotValue::Flag { .. }
+                | RawSlotValue::Integer { .. }
+                | RawSlotValue::Uuid { .. }
+                | RawSlotValue::CodeMember { .. }
+                | RawSlotValue::SendPayload { .. } => None,
+            })
+            .expect("the class has an exception slot");
+        (raw.class, exception)
+    }
+
+    /// Python: `ValueError(rule)` of `EnqueueCommandV1`.
+    #[test]
+    fn a_command_rule_refusal_is_validation_failed_with_a_value_error() {
+        let error = input_refusal(horsies_core::EnqueueRefusalCause::CommandRuleRefused(
+            "retention_class_key must be non-empty".to_owned(),
+        ));
+        assert_eq!(
+            failure_exception(&error),
+            (
+                "TaskSendValidationFailed".to_owned(),
+                ExceptionRecord::ClientClass {
+                    class: ClientClassName::ValueError,
+                    text: "retention_class_key must be non-empty".to_owned(),
+                }
+            )
+        );
+    }
+
+    /// Python: `ValueError(rule)` of `ScopedIdempotencyKey`.
+    #[test]
+    fn a_key_rule_refusal_is_validation_failed_with_a_value_error() {
+        let error = input_refusal(horsies_core::EnqueueRefusalCause::KeyRuleRefused(
+            "idempotency key must be non-empty".to_owned(),
+        ));
+        assert_eq!(
+            failure_exception(&error),
+            (
+                "TaskSendValidationFailed".to_owned(),
+                ExceptionRecord::ClientClass {
+                    class: ClientClassName::ValueError,
+                    text: "idempotency key must be non-empty".to_owned(),
+                }
+            )
+        );
+    }
+
+    /// Python: the JSON reader's `SerializationError` with its text.
+    #[test]
+    fn an_unreadable_json_text_is_validation_failed_with_a_serialization_error() {
+        let error = input_refusal(horsies_core::EnqueueRefusalCause::JsonUnreadable(
+            "EOF while parsing a value at line 1 column 0".to_owned(),
+        ));
+        assert_eq!(
+            failure_exception(&error),
+            (
+                "TaskSendValidationFailed".to_owned(),
+                ExceptionRecord::ClientClass {
+                    class: ClientClassName::SerializationError,
+                    text: "EOF while parsing a value at line 1 column 0".to_owned(),
+                }
+            )
+        );
+    }
+
+    /// Python: `NoCause()`; the broker found the gone row by a data check.
+    #[test]
+    fn an_unverifiable_conflict_is_enqueue_failed_with_no_cause() {
+        let error = BrokerError::EnqueueConflictUnverifiable {
+            task_id: Uuid::from_u128(7),
+            task_name: "report".to_owned(),
+        };
+        assert_eq!(
+            failure_exception(&error),
+            ("TaskSendEnqueueFailed".to_owned(), ExceptionRecord::NoCause)
+        );
+    }
+
+    /// Python: the core's class of the error, with its text and its retry
+    /// rule, and the operation as its subject.
+    #[test]
+    fn a_connection_failure_is_enqueue_failed_with_the_core_class() {
+        let error = BrokerError::ConnectionFailed("connection refused".to_owned());
+        assert_eq!(
+            failure_exception(&error),
+            (
+                "TaskSendEnqueueFailed".to_owned(),
+                ExceptionRecord::CoreFailure {
+                    cause: CauseRecord::Connection {
+                        subject: ENQUEUE_SUBJECT.to_owned(),
+                        message: "connection failed: connection refused".to_owned(),
+                        retryable: true,
+                    }
+                }
+            )
+        );
+    }
+
+    /// A task id with another command has no `exception` slot: the record
+    /// is the send error's own.
+    #[test]
+    fn a_payload_mismatch_is_the_record_of_the_send_error() {
+        let command = report_command();
+        let error = BrokerError::PayloadMismatch {
+            task_id: command.task_id,
+        };
+        assert_eq!(
+            enqueue_failure_record(&command, &error),
+            RawCatalogError::of(
+                ENQUEUE_SUBJECT,
+                &send_error_from_enqueue(command.task_id, command.payload.clone(), &error)
+            )
+        );
     }
 }
