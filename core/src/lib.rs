@@ -192,6 +192,9 @@ pub use crate::process_exit::{ExitDrain, ProcessExit, EXIT_DRAIN_BOUND};
 // Python `_catalog`.
 pub use crate::worker::liveness::LIVENESS_LOCK_LOST_EXIT_CODE;
 pub use crate::worker::runner_beats::RUNNER_HEARTBEAT_LOST_EXIT_CODE;
+// The bounds of a task's `timeout_ms`: the check of a declared task
+// (`core::task::declared_options`) and a client's text of its refusal.
+pub use crate::worker::retry::{MAX_TASK_TIMEOUT_MS, MIN_TASK_TIMEOUT_MS};
 // The worker connection check of a client's live check (`check --live`):
 // on a connected broker (the Rust client), and on a lazy handle (the Python
 // bridge).

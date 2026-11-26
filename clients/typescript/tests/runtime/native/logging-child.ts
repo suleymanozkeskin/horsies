@@ -3,12 +3,20 @@
 
 import { writeSync } from "node:fs";
 
+import { DEFAULT_QUEUE_ROUTE } from "../../../horsies/src/app/contract-list.ts";
+import { taskOptionsFacts } from "../../../horsies/src/app/core-checks.ts";
+import { parseAppConfig } from "../../../horsies/src/config/app-config.ts";
+import { contractRecord } from "../../../horsies/src/contract/definition.ts";
+import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { configureLogging } from "../../../horsies/src/logging.ts";
 import { addonSettlement, settlingCallback } from "../../../horsies/src/native/call/callback.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
-import { setPanicRule } from "../../../horsies/src/native/process-core/process-core.ts";
+import { coreState, setPanicRule } from "../../../horsies/src/native/process-core/process-core.ts";
+import type { NativeSendRules, NativeTaskOptions } from "../../../horsies/src/native/sends/addon.ts";
+import { checkAppConfig, checkTaskOptions, prepareSendFacts } from "../../../horsies/src/native/sends/sends.ts";
+import { h } from "../../../horsies/src/wire/public.ts";
 import { probeAddon } from "./callback-probe.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
 
@@ -24,6 +32,19 @@ const SINK_CALL_WAIT_MS = 5_000;
 /** The pause between two looks at the sink calls. */
 const SINK_CALL_POLL_MS = 20;
 
+/** A database URL of the config of the payload case: the prepare step opens no connection. */
+const UNUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
+
+/** The task of the payload case. No other case sends it: the core warns once per task name in a process. */
+const PAYLOAD_TASK_NAME = "first_payload_warning";
+
+/** The warn bound of the payload case, and an input one byte above it. */
+const WARN_BYTES = 10;
+const INPUT_BYTES = WARN_BYTES + 1;
+
+/** The start of the core's payload warning, as a sink line of `firstPayloadWarning`. */
+const PAYLOAD_WARNING_LINE = "WARNING horsies.app payload size guardrail";
+
 /** Run the case that the first argument names. */
 async function runCase(name: string | undefined): Promise<string> {
   switch (name) {
@@ -33,6 +54,8 @@ async function runCase(name: string | undefined): Promise<string> {
       return throwingSink();
     case "defect-record-to-sink":
       return defectRecordToSink();
+    case "first-payload-warning":
+      return firstPayloadWarning();
     default:
       return `unknown case ${String(name)}`;
   }
@@ -91,6 +114,76 @@ function defectRecordToSink(): string {
   envelopeValue({ kind: "thrown", thrown: { code: "CLIENT_DEFECT", subject: "taskId", rule: "a UUID" } });
 
   return "no abort";
+}
+
+/**
+ * The first input of a task above the warn bound, before any core call: the core's warning reaches the sink, and the
+ * core does not start (the prepare step starts the log forwarder only).
+ */
+async function firstPayloadWarning(): Promise<string> {
+  const lines: string[] = [];
+
+  configureLogging({
+    levels: { default: "WARNING" },
+    sink: (records) => {
+      for (const record of records) {
+        lines.push(`${record.level} ${record.logger} ${record.message}`);
+      }
+    },
+  });
+
+  const prepared = prepareSendFacts(
+    warningRules(),
+    {
+      retention: { kind: "queueOrDefault" },
+      deadline: { kind: "noDeadline" },
+      inputBytes: INPUT_BYTES,
+    },
+    payloadTaskOptions(),
+  );
+
+  const warning = (): string | undefined => lines.find((line) => line.startsWith(PAYLOAD_WARNING_LINE));
+
+  for (let waited = 0; waited < SINK_CALL_WAIT_MS && warning() === undefined; waited += SINK_CALL_POLL_MS) {
+    await sleep(SINK_CALL_POLL_MS);
+  }
+
+  return `${prepared.kind}; core ${coreState()}; ${warning() ?? `no warning in: ${lines.join(" | ")}`}`;
+}
+
+/** The send rules of a config whose payload warn bound is `WARN_BYTES`. */
+function warningRules(): NativeSendRules {
+  const config = parseAppConfig(
+    {
+      broker: { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } },
+      payload: { warnBytes: { kind: "bytes", bytes: WARN_BYTES } },
+    },
+    () => undefined,
+  );
+
+  if (!config.ok) {
+    throw new Error(`the config is refused: ${JSON.stringify(config.error)}`);
+  }
+
+  const checked = checkAppConfig(config.value.coreConfigJson);
+
+  if (checked.kind !== "accepted") {
+    throw new Error(`the core refuses the config: ${JSON.stringify(checked.refusals)}`);
+  }
+
+  return checked.rules;
+}
+
+/** The checked options of the task of the payload case. */
+function payloadTaskOptions(): NativeTaskOptions {
+  const contract = defineTask({ name: PAYLOAD_TASK_NAME, input: {}, output: h.null() });
+  const checked = checkTaskOptions(taskOptionsFacts(contractRecord(contract), DEFAULT_QUEUE_ROUTE));
+
+  if (checked.kind !== "accepted") {
+    throw new Error(`the core refuses the options: ${JSON.stringify(checked.refusals)}`);
+  }
+
+  return checked.options;
 }
 
 async function sleep(milliseconds: number): Promise<void> {

@@ -39,6 +39,15 @@ const TESTS_DIR: string = fileURLToPath(new URL("../../", import.meta.url));
 
 const READER_PATHS: readonly ReaderPath[] = [
   {
+    module: "read/handle.ts",
+    maker: "jsonTextCheckedByCore",
+    checkedBy: "getResult",
+    proof: {
+      file: "unit/read/handle.test.ts",
+      test: "a stored result text that the core's strict check refuses ends as the core's refusal and never reaches the reader",
+    },
+  },
+  {
     module: "codec/error-data.ts",
     maker: "writtenJsonText",
     checkedBy: "errorDataText",
