@@ -8,7 +8,7 @@
              |- generate_invoice
              \\-> SubWorkflow: shipping(courier, express)
                     \\-> capture_payment  (args_from = authorize_payment)
-                          \\-> send_order_email  (allow_failed_deps=True)
+                          \\-> send_order_email  (allow_failed_dependencies=True)
 
 The shape changes per order: an order with three lines fans out three
 reservations, and the courier and express flag come from the order id. That is
@@ -21,7 +21,7 @@ Failure semantics, all visible in the graph view:
     downstream is SKIPPED;
   * `generate_invoice` running past its deadline fails the shipping join the
     same way;
-  * `send_order_email` sets `allow_failed_deps=True`, so it runs anyway,
+  * `send_order_email` sets `allow_failed_dependencies=True`, so it runs anyway,
     receives the upstream error, and completes — a COMPLETED node underneath a
     FAILED one. The workflow still fails: `OnError.FAIL` accounts for the
     failure regardless of the handler.
@@ -126,7 +126,7 @@ class OrderFulfillment(WorkflowDefinition[PaymentCapture]):
             kwargs={'order_id': order_id},
             waits_for=[capture],
             args_from={'capture': capture},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
             node_id='send_order_email',
         )
         return app.workflow(

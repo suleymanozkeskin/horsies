@@ -129,8 +129,8 @@ def _node(document: Document) -> SpecNode:
         input_json=document['input_json'],
         dependencies=tuple(document['dependencies']),
         args_from=dict(document['args_from']),
-        workflow_ctx_from=tuple(document['workflow_ctx_from']),
-        allow_failed_deps=document['allow_failed_deps'],
+        workflow_context_from=tuple(document['workflow_context_from']),
+        allow_failed_dependencies=document['allow_failed_dependencies'],
         join=_join(document['join']),
         body=_body(document['body']),
     )

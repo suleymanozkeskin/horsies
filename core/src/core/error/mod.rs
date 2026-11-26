@@ -90,7 +90,7 @@ pub enum ErrorCode {
     /// An `args_from` reference is not valid.
     #[code_catalog(value = "HRS-008")]
     WorkflowInvalidArgsFrom,
-    /// A `workflow_ctx_from` reference is not valid.
+    /// A `workflow_context_from` reference is not valid.
     #[code_catalog(value = "HRS-009")]
     WorkflowInvalidCtxFrom,
     /// The workflow context parameter is missing.
@@ -144,7 +144,7 @@ pub enum ErrorCode {
     #[code_catalog(value = "HRS-025")]
     WorkflowOutputTypeMismatch,
     /// A node's input is positional (not a JSON object) while the node takes
-    /// `args_from` or `workflow_ctx_from` members, which merge only into an
+    /// `args_from` or `workflow_context_from` members, which merge only into an
     /// object.
     #[code_catalog(value = "HRS-026")]
     WorkflowPositionalArgsNotSupported,

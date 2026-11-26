@@ -140,9 +140,9 @@ class NodeRow:
     dependencies: tuple[int, ...]
     args_from: tuple[tuple[str, int], ...]
     """``args_from`` keys and the index of the node each names, in spec order."""
-    workflow_ctx_from: tuple[str, ...] | None
+    workflow_context_from: tuple[str, ...] | None
     """Node ids of the context nodes; ``None`` when the node takes no context."""
-    allow_failed_deps: bool
+    allow_failed_dependencies: bool
     join_type: str
     min_success: int | None
     task_options: str | None
@@ -529,10 +529,10 @@ def _graph_columns(
     dependencies = tuple(_index_of(dependency) for dependency in node.waits_for)
     args_from = tuple((key, _index_of(source)) for key, source in node.args_from.items())
     context: tuple[str, ...] | None = None
-    if node.workflow_ctx_from:
+    if node.workflow_context_from:
         context = tuple(
             context_node.node_id
-            for context_node in node.workflow_ctx_from
+            for context_node in node.workflow_context_from
             if context_node.node_id is not None
         )
     return dependencies, args_from, context
@@ -558,8 +558,8 @@ def subworkflow_node_row(node: SubWorkflowNode[Any], owner: NodeOwner) -> NodeRo
         priority=SUBWORKFLOW_NODE_PRIORITY,
         dependencies=dependencies,
         args_from=args_from,
-        workflow_ctx_from=context,
-        allow_failed_deps=node.allow_failed_deps,
+        workflow_context_from=context,
+        allow_failed_dependencies=node.allow_failed_dependencies,
         join_type=node.join,
         min_success=node.min_success,
         task_options=None,
@@ -642,8 +642,8 @@ def task_node_row(
         priority=priority,
         dependencies=dependencies,
         args_from=args_from,
-        workflow_ctx_from=context,
-        allow_failed_deps=node.allow_failed_deps,
+        workflow_context_from=context,
+        allow_failed_dependencies=node.allow_failed_dependencies,
         join_type=node.join,
         min_success=node.min_success,
         task_options=task_options,

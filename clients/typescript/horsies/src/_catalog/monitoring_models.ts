@@ -486,7 +486,7 @@ export interface WorkflowEdge {
 }
 
 export interface WorkflowNodeInfo {
-  readonly allowFailedDeps: boolean;
+  readonly allowFailedDependencies: boolean;
   readonly childFailed: number | null;
   readonly childTotal: number | null;
   readonly completedAt: Temporal.Instant | null;
@@ -2986,7 +2986,7 @@ function readWorkflowNodeInfo(
   }
 
   const results = {
-    allowFailedDeps: fields.value.read("allow_failed_deps", decodeBoolean),
+    allowFailedDependencies: fields.value.read("allow_failed_dependencies", decodeBoolean),
     childFailed: fields.value.read("child_failed", nullableOf(decodeInteger)),
     childTotal: fields.value.read("child_total", nullableOf(decodeInteger)),
     completedAt: fields.value.read("completed_at", nullableOf(decodeDateTime)),
@@ -3013,7 +3013,7 @@ function readWorkflowNodeInfo(
 
   return ok(
     Object.freeze({
-      allowFailedDeps: results.allowFailedDeps.value,
+      allowFailedDependencies: results.allowFailedDependencies.value,
       childFailed: results.childFailed.value,
       childTotal: results.childTotal.value,
       completedAt: results.completedAt.value,

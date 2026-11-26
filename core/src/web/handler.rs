@@ -41,10 +41,11 @@ use super::task_stats_cache::{ReadCache, TaskStatsCache};
 pub const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
 
 /// The largest request body that [`MonitoringHandler::handle`] takes: 1 MiB.
-/// The one route that reads a body (the task cancel) takes a JSON object of
-/// one flag. A host reads at most one byte more than this bound and passes
-/// what it read; a body over the bound is refused with 413 before any
-/// route reads it.
+/// The action routes read a body: the task cancel takes a JSON object of
+/// one flag, and a workflow action takes a JSON object with no keys. A host
+/// reads at most one byte more than this bound and passes what it read; a
+/// body over the bound is refused with 413 before any route reads it, so
+/// before a route refuses an unknown key.
 pub const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 
 /// Which verdicts of the user's policy a request needs, in the order that

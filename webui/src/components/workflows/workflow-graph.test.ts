@@ -22,7 +22,7 @@ describe('graphNodeFacts', () => {
   });
 
   it('says what the dashed border of a tolerant join is', () => {
-    expect(graphNodeFacts(node({ allow_failed_deps: true }), 'COMPLETED')).toEqual([
+    expect(graphNodeFacts(node({ allow_failed_dependencies: true }), 'COMPLETED')).toEqual([
       'Tolerant join (dashed border): the node runs even when a dependency failed.',
     ]);
   });

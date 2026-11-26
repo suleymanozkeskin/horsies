@@ -140,15 +140,15 @@ pub(crate) fn stored_queue_and_priority(node: &AnyNode) -> Result<(&str, i32), W
     }
 }
 
-/// The `workflow_ctx_from` that a node row stores: the node ids of the node's context sources, or
-/// `None` (SQL NULL) when the node takes no context.
+/// The `workflow_context_from` that a node row stores: the node ids of the node's context
+/// sources, or `None` (SQL NULL) when the node takes no context.
 ///
 /// A node defined with an empty list takes no context, and its row stores NULL, as for no list
 /// (Python `_graph_columns`, `clients/python/horsies/core/workflows/child_build.py:479-485`). The task input of
 /// the baseline mint adds the context member for any stored array, an empty one included
 /// (`horsies_workflow_task_input`). Pure.
-pub(crate) fn stored_workflow_ctx_from(node: &AnyNode) -> Option<&[String]> {
-    match node.workflow_ctx_from.as_deref() {
+pub(crate) fn stored_workflow_context_from(node: &AnyNode) -> Option<&[String]> {
+    match node.workflow_context_from.as_deref() {
         None | Some([]) => None,
         Some(node_ids) => Some(node_ids),
     }
@@ -311,10 +311,10 @@ mod tests {
             input_json: "{}".to_owned(),
             dependencies: vec![],
             args_from: std::collections::HashMap::new(),
-            workflow_ctx_from: None,
+            workflow_context_from: None,
             queue: Some("default".to_owned()),
             priority,
-            allow_failed_deps: false,
+            allow_failed_dependencies: false,
             join: crate::core::workflow::node::JoinType::All,
             min_success: None,
             good_until: None,
@@ -416,12 +416,12 @@ mod tests {
     #[test]
     fn an_empty_context_list_is_no_context() {
         let mut node = node_with(false, Some(10));
-        assert_eq!(stored_workflow_ctx_from(&node), None);
-        node.workflow_ctx_from = Some(Vec::new());
-        assert_eq!(stored_workflow_ctx_from(&node), None);
-        node.workflow_ctx_from = Some(vec!["a".to_owned(), "b".to_owned()]);
+        assert_eq!(stored_workflow_context_from(&node), None);
+        node.workflow_context_from = Some(Vec::new());
+        assert_eq!(stored_workflow_context_from(&node), None);
+        node.workflow_context_from = Some(vec!["a".to_owned(), "b".to_owned()]);
         assert_eq!(
-            stored_workflow_ctx_from(&node),
+            stored_workflow_context_from(&node),
             Some(["a".to_owned(), "b".to_owned()].as_slice())
         );
     }
@@ -912,7 +912,7 @@ mod tests {
         slow.node_id = Some("slow".to_owned());
         slow.index = 1;
         // A root that names a context source takes the per-row slow path.
-        slow.workflow_ctx_from = Some(vec!["fast".to_owned()]);
+        slow.workflow_context_from = Some(vec!["fast".to_owned()]);
         let spec = keyed_spec(Some("tests.enqueue_time.root.v1"), vec![fast, slow]);
         let broker = Arc::new(PostgresBroker::from_test_url(
             pool.url(),
