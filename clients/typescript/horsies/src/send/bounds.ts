@@ -17,7 +17,7 @@ export const MAX_WAIT_LIMIT_MS = 4_294_967_295;
  */
 export const DEFAULT_QUEUE_PRIORITY = 100;
 
-/** Resends of a retryable `ENQUEUE_FAILED` after the first send, when `resendOnTransientErr` is on. */
+/** Resends of a retryable `ENQUEUE_FAILED` after the first send, when `resendOnTransientError` is on. */
 export const RESEND_COUNT = 3;
 
 /** The wait before the first resend, in milliseconds; each later wait doubles. */

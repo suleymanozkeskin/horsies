@@ -19,7 +19,7 @@ const add = defineTask({ name: "add", input: { a: h.int(), b: h.taskOutcome(ping
 const maybe = defineTask({ name: "maybe", input: { first: h.taskOutcome(ping).optional() }, output: h.int() });
 
 const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", output: h.int(), params: {} }, (w) => ({
-  output: w.task(ping, {}, { id: "ping" }),
+  output: w.task(ping, {}, { nodeId: "ping" }),
 }));
 
 const region = defineWorkflow(
@@ -30,7 +30,7 @@ const region = defineWorkflow(
     params: { name: h.string(), count: h.taskOutcome(ping).optional() },
     checkCases: [{ name: "eu" }],
   },
-  (w) => ({ output: w.task(ping, {}, { id: "ping" }) }),
+  (w) => ({ output: w.task(ping, {}, { nodeId: "ping" }) }),
 );
 
 const view = viewOf([ping, add, maybe], [leaf, region]);
@@ -75,7 +75,7 @@ function taskNode(index: number, id: string, rest: string): string {
 
 describe("specDataTextOf", () => {
   test("a task node with an ALL join and no policy: the whole document", () => {
-    const text = textOf((w) => ({ output: w.task(ping, {}, { id: "ping" }) }));
+    const text = textOf((w) => ({ output: w.task(ping, {}, { nodeId: "ping" }) }));
 
     assert.equal(
       text,
@@ -94,9 +94,9 @@ describe("specDataTextOf", () => {
 
   test("a node parameter: args_from, the dependency, and the static input without the member", () => {
     const text = textOf((w) => {
-      const source = w.task(ping, {}, { id: "source" });
+      const source = w.task(ping, {}, { nodeId: "source" });
 
-      return { output: w.task(add, { a: 2, b: source }, { id: "add", allowFailedDeps: true }) };
+      return { output: w.task(add, { a: 2, b: source }, { nodeId: "add", allowFailedDependencies: true }) };
     });
 
     assert.match(
@@ -107,14 +107,14 @@ describe("specDataTextOf", () => {
 
   test("ANY and QUORUM joins, and a CASES policy with optional nodes", () => {
     const text = textOf((w) => {
-      const first = w.task(ping, {}, { id: "first" });
-      const second = w.task(ping, {}, { id: "second" });
-      const any = w.task(maybe, { first }, { id: "any", waitsFor: [second], join: { kind: "any" } });
+      const first = w.task(ping, {}, { nodeId: "first" });
+      const second = w.task(ping, {}, { nodeId: "second" });
+      const any = w.task(maybe, { first }, { nodeId: "any", waitsFor: [second], join: { kind: "any" } });
 
       const quorum = w.task(
         ping,
         {},
-        { id: "quorum", waitsFor: [first, second], join: { kind: "quorum", minSuccess: 1 } },
+        { nodeId: "quorum", waitsFor: [first, second], join: { kind: "quorum", minSuccess: 1 } },
       );
 
       return {
@@ -135,9 +135,9 @@ describe("specDataTextOf", () => {
     const facts = { ...fakeFacts(), queuePriority: () => 37 };
 
     const text = textOf((w) => {
-      w.task(ping, {}, { id: "own", priority: 5 });
+      w.task(ping, {}, { nodeId: "own", priority: 5 });
 
-      return { output: w.task(ping, {}, { id: "queue" }) };
+      return { output: w.task(ping, {}, { nodeId: "queue" }) };
     }, facts);
 
     assert.match(text, /"node_id":"own".*?"priority":5,/);
@@ -149,7 +149,7 @@ describe("specDataTextOf", () => {
 
     textOf(
       (w) => ({
-        output: w.task(ping, {}, { id: "ping", goodUntil: Temporal.Instant.from("2026-08-12T09:10:12.654321Z") }),
+        output: w.task(ping, {}, { nodeId: "ping", goodUntil: Temporal.Instant.from("2026-08-12T09:10:12.654321Z") }),
       }),
       fakeFacts(asked),
     );
@@ -159,11 +159,11 @@ describe("specDataTextOf", () => {
 
   test("sub-workflow nodes: NOT_GIVEN with {}, GIVEN with the static params and the args_from of a node", () => {
     const text = textOf((w) => {
-      const counted = w.task(ping, {}, { id: "count" });
+      const counted = w.task(ping, {}, { nodeId: "count" });
 
-      w.subWorkflow(leaf, {}, { id: "leaf" });
+      w.subWorkflow(leaf, {}, { nodeId: "leaf" });
 
-      return { output: w.subWorkflow(region, { name: "eu", count: counted }, { id: "region" }) };
+      return { output: w.subWorkflow(region, { name: "eu", count: counted }, { nodeId: "region" }) };
     });
 
     assert.match(
@@ -191,10 +191,10 @@ describe("specDataTextOf", () => {
     const workflow = defineWorkflow(
       { name: "queues", definitionKey: "tests.queues.v1", output: h.int(), params: {} },
       (w) => {
-        w.task(urgent, {}, { id: "first" });
-        w.task(numbered, {}, { id: "second" });
+        w.task(urgent, {}, { nodeId: "first" });
+        w.task(numbered, {}, { nodeId: "second" });
 
-        return { output: w.task(urgent, {}, { id: "third" }) };
+        return { output: w.task(urgent, {}, { nodeId: "third" }) };
       },
     );
 
@@ -208,7 +208,7 @@ describe("specDataTextOf", () => {
     const workflow = defineWorkflow(
       { name: "bad\uD800", definitionKey: "tests.bad.v1", output: h.int(), params: {} },
       (w) => ({
-        output: w.task(ping, {}, { id: "ping" }),
+        output: w.task(ping, {}, { nodeId: "ping" }),
       }),
     );
 

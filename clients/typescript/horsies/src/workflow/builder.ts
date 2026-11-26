@@ -6,7 +6,8 @@
 
 import { NODE_INDEX_MAX } from "../_catalog/workflow_spec.ts";
 import { isFunction, isObjectLike } from "../codec/values.ts";
-import type { ContextUse, ExecutionClass, TaskContract } from "../contract/define-task.ts";
+import type { Execution } from "../_catalog/monitoring_models.ts";
+import type { ContextUse, TaskContract } from "../contract/define-task.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
 import type { WorkflowContract } from "./define.ts";
 import type {
@@ -28,7 +29,7 @@ export interface WorkflowBuilder {
     P extends ParameterSchemas,
     O extends OutputSchema,
     E extends string,
-    X extends ExecutionClass,
+    X extends Execution,
     C extends ContextUse,
     const Id extends string,
     const J extends Join = DefaultJoin,
@@ -52,14 +53,14 @@ export interface WorkflowBuilder {
 
 /** The options of a node as the build gave them, before the checks. Every node option type is one of these. */
 export type RecordedOptions = {
-  readonly id: string;
+  readonly nodeId: string;
   readonly waitsFor?: readonly AnyNode[];
   readonly join?: Join;
-  readonly allowFailedDeps?: boolean;
+  readonly allowFailedDependencies?: boolean;
   readonly queue?: string;
   readonly priority?: number;
   readonly goodUntil?: Temporal.Instant;
-  readonly ctxFrom?: readonly AnyNode[];
+  readonly workflowContextFrom?: readonly AnyNode[];
 };
 
 /** One node as the build gave it. The input and the options are the given values, not checked. */
@@ -109,7 +110,7 @@ export class BuildSession {
       this.#nodes.push(node);
     }
 
-    return nodeRefOf(this, index, node.options.id);
+    return nodeRefOf(this, index, node.options.nodeId);
   }
 
   /** End the build: no node is added after it. */
@@ -127,9 +128,9 @@ const slots = new WeakMap<object, { readonly session: BuildSession; readonly ind
 
 const NOT_A_NODE: NodeSlot = Object.freeze({ kind: "notANode" });
 
-function nodeRefOf(session: BuildSession, index: number, id: string): AnyNode {
+function nodeRefOf(session: BuildSession, index: number, nodeId: string): AnyNode {
   // SAFETY: `nodeTypes` is a type-only key; the node's types are the type parameters of the builder call.
-  const ref = Object.freeze({ kind: "node", id }) as AnyNode;
+  const ref = Object.freeze({ kind: "node", nodeId }) as AnyNode;
 
   slots.set(ref, Object.freeze({ session, index }));
 

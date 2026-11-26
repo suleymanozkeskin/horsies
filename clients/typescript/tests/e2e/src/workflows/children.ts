@@ -91,14 +91,14 @@ export const CompletedChildProbe = h.object({
 });
 
 /** Python `e2e_sub_int_ok`: returns `value`. */
-export const subIntOk = defineTask({ name: "e2e_sub_int_ok", input: { value: h.int() }, output: h.int(), errors: WF_CODES });
+export const subIntOk = defineTask({ name: "e2e_sub_int_ok", input: { value: h.int() }, output: h.int(), errorCodes: WF_CODES });
 
 /** Python `e2e_sub_int_fail`: always the code `errorCode`. */
 export const subIntFail = defineTask({
   name: "e2e_sub_int_fail",
   input: { errorCode: h.enum(WF_CODES) },
   output: h.int(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
 /** Python `e2e_sub_report_input`: returns what the build saw of its upstream param. */
@@ -106,18 +106,18 @@ export const subReportInput = defineTask({
   name: "e2e_sub_report_input",
   input: { seen: UpstreamSeen },
   output: UpstreamSeen,
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
 /** Python `e2e_sub_pet_report`: returns what the build saw of its pet. */
-export const subPetReport = defineTask({ name: "e2e_sub_pet_report", input: { seen: PetSeen }, output: PetSeen, errors: WF_CODES });
+export const subPetReport = defineTask({ name: "e2e_sub_pet_report", input: { seen: PetSeen }, output: PetSeen, errorCodes: WF_CODES });
 
 /** Python `e2e_sub_probe_success_ctx`: what the node read of the completed child of the node `childNode`. */
 export const subProbeCompletedChild = defineTask({
   name: "e2e_sub_probe_success_ctx",
   input: { childNode: h.string() },
   output: CompletedChildProbe,
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
   workflowContext: true,
 });
 
@@ -126,18 +126,18 @@ export const listShards = defineTask({
   name: "e2e_fanout_list_shards",
   input: { tenantId: h.string() },
   output: h.array(h.string()),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
 /** Python `e2e_fanout_count_shard_rows`: the length of the shard name. */
-export const countShardRows = defineTask({ name: "e2e_fanout_count_shard_rows", input: { shard: h.string() }, output: h.int(), errors: WF_CODES });
+export const countShardRows = defineTask({ name: "e2e_fanout_count_shard_rows", input: { shard: h.string() }, output: h.int(), errorCodes: WF_CODES });
 
 /** Python `e2e_fanout_sum_shard_rows`: the sum of the nodes `shard_<n>`, read from the workflow context. */
 export const sumShardRows = defineTask({
   name: "e2e_fanout_sum_shard_rows",
   input: { shardCount: h.int() },
   output: h.int(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
   workflowContext: true,
 });
 
@@ -158,7 +158,7 @@ export const subProbeFailedChild = defineTask({
   name: "e2e_sub_probe_failed_child",
   input: { childResult: h.taskOutcome(subFail), childNode: h.string() },
   output: FailedChildProbe,
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
   workflowContext: true,
 });
 

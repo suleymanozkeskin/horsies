@@ -6,7 +6,7 @@ import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";
 
-const validateOrder = defineTask({ name: "validate_order", input: {}, output: h.int(), errors: ["EMPTY_ORDER"] });
+const validateOrder = defineTask({ name: "validate_order", input: {}, output: h.int(), errorCodes: ["EMPTY_ORDER"] });
 const report = defineTask({ name: "report", input: { total: h.int() }, output: h.int() });
 
 export const child = defineWorkflow(
@@ -17,5 +17,5 @@ export const child = defineWorkflow(
     output: h.int(),
     checkCases: [{}],
   },
-  (w, { order }) => ({ output: w.task(report, { total: order.kind === "succeeded" ? order.value : 0 }, { id: "report" }) }),
+  (w, { order }) => ({ output: w.task(report, { total: order.kind === "succeeded" ? order.value : 0 }, { nodeId: "report" }) }),
 );

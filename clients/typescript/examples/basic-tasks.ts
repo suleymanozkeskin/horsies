@@ -34,7 +34,7 @@ const charge = defineTask({
   name: "charge",
   input: { amountCents: h.int() },
   output: h.string(),
-  errors: ["OVER_LIMIT"],
+  errorCodes: ["OVER_LIMIT"],
 });
 
 const created = Horsies.create({

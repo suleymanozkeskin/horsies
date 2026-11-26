@@ -30,13 +30,13 @@ const hello = defineWorkflow(
     params: { who: h.string() },
     checkCases: [{ who: "a" }],
   },
-  (w, { who }) => ({ output: w.task(greet, { who }, { id: "greet" }) }),
+  (w, { who }) => ({ output: w.task(greet, { who }, { nodeId: "greet" }) }),
 );
 
 const parent = defineWorkflow(
   { name: "end_to_end_parent", definitionKey: "tests.end_to_end_parent.v1", output: h.string(), params: {} },
   (w) => ({
-    output: w.subWorkflow(hello, { who: "child" }, { id: "child" }),
+    output: w.subWorkflow(hello, { who: "child" }, { nodeId: "child" }),
   }),
 );
 

@@ -3,8 +3,9 @@
 
 import { isEngineKey } from "../codec/engine-keys.ts";
 import { memberPath } from "../codec/refusal.ts";
+import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { AnyWire } from "../wire/infer.ts";
-import type { ContextUse, ExecutionClass } from "./define-task.ts";
+import type { ContextUse } from "./define-task.ts";
 import type { ParameterSchema, StandardSchemaMarker, ZodSchemaLike } from "./schema.ts";
 
 /** The Standard Schema vendor name of zod. */
@@ -75,7 +76,7 @@ export type ContractRecord = {
   readonly parameters: readonly ParameterSource[];
   readonly output: SchemaSource;
   readonly codes: DeclaredCodes;
-  readonly execution: ExecutionClass;
+  readonly execution: Execution;
   readonly timeout: MillisecondsSetting;
   readonly cancelGrace: MillisecondsSetting;
   readonly retry: RetrySetting;
@@ -90,9 +91,9 @@ export type DefinitionFields = {
   readonly queue?: string;
   readonly input: { readonly [name: string]: ParameterSchema };
   readonly output: ParameterSchema;
-  readonly errors?: readonly string[];
-  readonly execution?: ExecutionClass;
-  readonly retry?: RetryFields;
+  readonly errorCodes?: readonly string[];
+  readonly execution?: Execution;
+  readonly retryPolicy?: RetryFields;
   readonly timeoutMs?: number;
   readonly cancelGraceMs?: number;
   readonly workflowContext?: boolean;
@@ -155,11 +156,14 @@ function recordOf(fields: DefinitionFields): ContractRecord {
     queue: fields.queue === undefined ? { kind: "noQueue" } : { kind: "named", name: fields.queue },
     parameters: Object.freeze(parameters),
     output,
-    codes: fields.errors === undefined ? { kind: "open" } : { kind: "declared", codes: Object.freeze([...fields.errors]) },
+    codes:
+      fields.errorCodes === undefined
+        ? { kind: "open" }
+        : { kind: "declared", codes: Object.freeze([...fields.errorCodes]) },
     execution: fields.execution ?? "ISOLATED",
     timeout: millisecondsSetting(fields.timeoutMs),
     cancelGrace: millisecondsSetting(fields.cancelGraceMs),
-    retry: retrySetting(fields.retry),
+    retry: retrySetting(fields.retryPolicy),
     context: fields.workflowContext === true ? "takesContext" : "noContext",
     refusals: Object.freeze(refusals),
   };

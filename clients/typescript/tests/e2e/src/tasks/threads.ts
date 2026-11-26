@@ -111,10 +111,10 @@ export const threadOverrun = defineTask({
   name: "e2e_thread_overrun",
   input: { token: h.string() },
   output: h.string(),
-  errors: THREAD_CODES,
+  errorCodes: THREAD_CODES,
   execution: "SHARED_THREAD",
   timeoutMs: OVERRUN_TIMEOUT_MS,
-  retry: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, autoRetryFor: ["TASK_TIMEOUT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, autoRetryFor: ["TASK_TIMEOUT"] },
 });
 
 /** A sync body: where it ran. */
@@ -143,7 +143,7 @@ export const threadSyncCooperative = defineTask({
   name: "e2e_thread_sync_cooperative",
   input: { token: h.string() },
   output: h.string(),
-  errors: THREAD_CODES,
+  errorCodes: THREAD_CODES,
   execution: "SHARED_THREAD",
   timeoutMs: THREAD_STOP_TIMEOUT_MS,
 });
@@ -153,7 +153,7 @@ export const threadAsyncCooperative = defineTask({
   name: "e2e_thread_async_cooperative",
   input: { token: h.string() },
   output: h.string(),
-  errors: THREAD_CODES,
+  errorCodes: THREAD_CODES,
   execution: "SHARED_THREAD",
   timeoutMs: THREAD_STOP_TIMEOUT_MS,
 });
@@ -172,7 +172,7 @@ export const threadSendsFromSeat = defineTask({
   name: "e2e_thread_sends_from_seat",
   input: { x: h.int() },
   output: h.object({ place, addonLoads: h.int(), sentId: h.string() }),
-  errors: THREAD_CODES,
+  errorCodes: THREAD_CODES,
   execution: "SHARED_THREAD",
   timeoutMs: THREAD_TIMEOUT_MS,
 });
@@ -185,10 +185,10 @@ export const threadBlocksMain = defineTask({
   name: "e2e_thread_blocks_main",
   input: { token: h.string() },
   output: h.int(),
-  errors: THREAD_CODES,
+  errorCodes: THREAD_CODES,
   execution: "SHARED_THREAD",
   timeoutMs: THREAD_TIMEOUT_MS,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
 });
 
 /** Every contract of this module. */

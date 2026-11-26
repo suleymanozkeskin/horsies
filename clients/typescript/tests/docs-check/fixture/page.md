@@ -13,7 +13,7 @@ export const validateOrder = defineTask({
   name: "validate_order",
   input: { orderId: h.uuid() },
   output: ValidatedOrder,
-  errors: ["EMPTY_ORDER"],
+  errorCodes: ["EMPTY_ORDER"],
 });
 
 type Order = h.Infer<typeof ValidatedOrder>;

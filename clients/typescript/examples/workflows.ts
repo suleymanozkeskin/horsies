@@ -39,31 +39,31 @@ const sumPrices = defineTask({
   name: "sum_prices",
   input: { prices: h.taskOutcome(loadPrices) },
   output: h.int(),
-  errors: ["UPSTREAM_FAILED"],
+  errorCodes: ["UPSTREAM_FAILED"],
 });
 
 const countItems = defineTask({
   name: "count_items",
   input: { prices: h.taskOutcome(loadPrices) },
   output: h.int(),
-  errors: ["UPSTREAM_FAILED"],
+  errorCodes: ["UPSTREAM_FAILED"],
 });
 
 const summarize = defineTask({
   name: "summarize",
   input: { total: h.taskOutcome(sumPrices), count: h.taskOutcome(countItems) },
   output: h.string(),
-  errors: ["UPSTREAM_FAILED"],
+  errorCodes: ["UPSTREAM_FAILED"],
 });
 
 /** The workflow: its nodes, and the node whose result is the workflow's. It has no params, so no check cases. */
 const orderSummary = defineWorkflow(
   { name: "order_summary", definitionKey: "examples.order_summary.v1", params: {}, output: h.string() },
   (w) => {
-    const load = w.task(loadPrices, { orderId: ORDER_ID }, { id: "load_prices" });
-    const total = w.task(sumPrices, { prices: load }, { id: "sum_prices" });
-    const count = w.task(countItems, { prices: load }, { id: "count_items" });
-    const summary = w.task(summarize, { total, count }, { id: "summarize" });
+    const load = w.task(loadPrices, { orderId: ORDER_ID }, { nodeId: "load_prices" });
+    const total = w.task(sumPrices, { prices: load }, { nodeId: "sum_prices" });
+    const count = w.task(countItems, { prices: load }, { nodeId: "count_items" });
+    const summary = w.task(summarize, { total, count }, { nodeId: "summarize" });
 
     return { output: summary };
   },

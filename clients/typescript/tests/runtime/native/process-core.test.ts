@@ -49,7 +49,7 @@ describe("the process core with a built addon", () => {
         setPanicRule("STOP_CORE");
       },
       () => {
-        configureLogging({ levels: { default: "WARNING" }, sink: "stderr" });
+        configureLogging({ levels: { default: "WARNING" }, sink: { kind: "stderr" } });
       },
     ];
 

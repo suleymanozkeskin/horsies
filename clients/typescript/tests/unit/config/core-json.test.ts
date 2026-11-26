@@ -10,7 +10,7 @@ import {
   coreAppConfigJson,
   parseAppConfig,
   queueSetup,
-  resendOnTransientErr,
+  resendOnTransientError,
 } from "../../../horsies/src/config/app-config.ts";
 
 const DATABASE_URL = "postgresql://horsies@127.0.0.1:55432/horsies";
@@ -45,7 +45,7 @@ const FULL_INPUT: AppConfigInput = {
     maxOverflow: 2,
     retainRerunInputDefault: "keep",
     poolTimeoutSeconds: 15,
-    poolRecycle: { kind: "afterSeconds", seconds: 600 },
+    poolRecycle: { kind: "after", seconds: 600 },
     echo: true,
     tcpKeepalives: { kind: "on", idleSeconds: 60, intervalSeconds: 5, probes: 4 },
     tcpUserTimeout: { kind: "after", milliseconds: 20_000 },
@@ -83,13 +83,13 @@ const FULL_INPUT: AppConfigInput = {
     retentionDeleteBatchSize: 1000,
   },
   resilience: {
-    dbRetryInitialMs: 200,
-    dbRetryMaxMs: 10_000,
-    dbRetryMaxAttempts: { kind: "noLimit" },
+    databaseRetryInitialMs: 200,
+    databaseRetryMaxMs: 10_000,
+    databaseRetryMaxAttempts: { kind: "noLimit" },
     notifyPollIntervalMs: 2000,
   },
-  workerProfiles: { default: { isolated: { count: 2 } } },
-  resendOnTransientErr: true,
+  workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 2 } } },
+  resendOnTransientError: true,
 };
 
 /** The serde form of `FULL_INPUT`. */
@@ -267,9 +267,9 @@ describe("queueSetup", () => {
   });
 });
 
-describe("resendOnTransientErr", () => {
+describe("resendOnTransientError", () => {
   test("the flag is the config's, and off when the config leaves it out", () => {
-    assert.equal(resendOnTransientErr(parsed(FULL_INPUT)), true);
-    assert.equal(resendOnTransientErr(parsed({ broker: { databaseUrl: { kind: "value", value: DATABASE_URL } } })), false);
+    assert.equal(resendOnTransientError(parsed(FULL_INPUT)), true);
+    assert.equal(resendOnTransientError(parsed({ broker: { databaseUrl: { kind: "value", value: DATABASE_URL } } })), false);
   });
 });

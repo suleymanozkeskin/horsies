@@ -262,7 +262,7 @@ export function priceUpdate(sku: string, campaignId: string): PriceUpdate {
 /** Implement the promotion, loyalty and price tasks on `app`; `apply_promotions` uses the store of `store`. */
 export function implementPromotionTasks(app: Horsies, store: StoreKey): void {
   app.implement(applyPromotions, async ({ orderId }, runtime) => applyPromotionsWith(runtime.state(store), orderId, runtime), {
-    exceptions: [[SizeCodeError, "DATA_CORRUPTION"]],
+    exceptionMapper: [[SizeCodeError, "DATA_CORRUPTION"]],
   });
   app.implement(computeLoyaltyPoints, async ({ customerId, orderId }, results) => loyaltyPoints(customerId, orderId, results));
   app.implement(publishCdn, async ({ campaignId, sku }, { ok }) => ok(pricePush(sku, `cdn:${campaignId}`)));

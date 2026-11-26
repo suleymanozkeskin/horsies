@@ -179,7 +179,7 @@ describe("Horsies.create: the contract list", () => {
 
 describe("Horsies.create: the core's checks of a contract", () => {
   test("a declared code that the core refuses keeps its code (HRS-112)", () => {
-    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errors: ["bad code"] });
+    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errorCodes: ["bad code"] });
     const environment = fakeEnvironment({ checks: fakeChecks({ codes: [catalogRefusal("HRS-112", "not UPPER_SNAKE_CASE")] }) });
 
     assert.deepEqual(refusalsOf(config([coded]), environment), [["HRS-112", "tasks[0] coded"]]);
@@ -188,7 +188,7 @@ describe("Horsies.create: the core's checks of a contract", () => {
   test("the help of a core refusal: its one line, or no line", () => {
     const withHelp = { ...catalogRefusal("HRS-109", "execution SHARED_ASYNC requires timeoutMs"), help: { kind: "help", line: "set timeoutMs" } } as const;
     const environment = fakeEnvironment({ checks: fakeChecks({ options: [withHelp], codes: [catalogRefusal("HRS-112", "bad code")] }) });
-    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errors: ["BAD"] });
+    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errorCodes: ["BAD"] });
     const created = createHorsies(config([coded]), environment);
 
     assert.deepEqual(created.ok ? [] : created.error.refusals.map((refused) => [refused.code, refused.help]), [
@@ -210,10 +210,10 @@ describe("Horsies.create: the core's checks of a contract", () => {
       name: "charge",
       input: {},
       output: h.null(),
-      errors: ["PROVIDER_DOWN"],
+      errorCodes: ["PROVIDER_DOWN"],
       execution: "SHARED_ASYNC",
       timeoutMs: 30_000,
-      retry: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, autoRetryFor: ["PROVIDER_DOWN"] },
+      retryPolicy: { kind: "fixed", intervalsSeconds: [60, 300], jitter: false, autoRetryFor: ["PROVIDER_DOWN"] },
     });
 
     assert.equal(createHorsies(config([charge]), fakeEnvironment({ checks })).ok, true);

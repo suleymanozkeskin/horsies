@@ -59,7 +59,7 @@ export const endedSpansThreadOverrun = defineTask({
 export const endedSpansFlow = defineWorkflow(
   { name: "e2e_worker_ended_spans_flow", definitionKey: "tests.e2e.worker_ended_spans.flow.v1", params: {}, output: h.string() },
   (w) => {
-    const sleeper = w.task(endedSpansSleeper, {}, { id: "sleeper" });
+    const sleeper = w.task(endedSpansSleeper, {}, { nodeId: "sleeper" });
 
     return { output: sleeper };
   },

@@ -8,7 +8,7 @@ const ping = defineTask({ name: "ping", input: { region: h.string() }, output: h
 
 const child = defineWorkflow(
   { name: "child", definitionKey: "tests.child.v1", output: h.null(), params: { region: h.string() }, checkCases: [{ region: "eu" }] },
-  (w, { region }) => ({ output: w.task(ping, { region }, { id: "ping" }) }),
+  (w, { region }) => ({ output: w.task(ping, { region }, { nodeId: "ping" }) }),
 );
 
 export const parent = defineWorkflow(
@@ -16,6 +16,6 @@ export const parent = defineWorkflow(
   (w) => ({
     output: w.subWorkflow(child,
       { region: 7 },
-      { id: "child" }),
+      { nodeId: "child" }),
   }),
 );

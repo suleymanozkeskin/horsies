@@ -1,6 +1,6 @@
 // The workflow context of a task that takes it (`defineTask({ ..., workflowContext: true })`): the results and the
-// sub-workflow summaries of the dependencies that its node names in `ctxFrom`, by node id. The core writes it into the
-// input member `workflow_ctx` (the core's `WorkflowContext`: `workflow_id`, `task_index`, `task_name`,
+// sub-workflow summaries of the dependencies that its node names in `workflowContextFrom`, by node id. The core writes
+// it into the input member `workflow_ctx` (the core's `WorkflowContext`: `workflow_id`, `task_index`, `task_name`,
 // `results_by_id`, `summaries_by_id`); the Node child takes that member out of the input, reads it with
 // `workflowContextOfTree` and gives the value as `runtime.workflowContext` (`RuntimeWorkflowContext`). The reads are
 // those of the Rust and Python clients: `resultFor`, `hasResult`, `summaryFor`, `outputFor`, `hasSummary`.
@@ -10,7 +10,8 @@ import type { JsonText } from "../codec/json-text.ts";
 import { decodeEnvelopeNode, decodeNode } from "../codec/reader.ts";
 import { refusalText, ROOT_PATH } from "../codec/refusal.ts";
 import { isNumber, isString, isUuidText } from "../codec/values.ts";
-import type { ContextUse, ExecutionClass, TaskContract } from "../contract/define-task.ts";
+import type { Execution } from "../_catalog/monitoring_models.ts";
+import type { ContextUse, TaskContract } from "../contract/define-task.ts";
 import type { WorkflowId } from "../contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
 import { type ReadForm, readFormOf } from "../read/handle.ts";
@@ -26,7 +27,10 @@ import { declaredOutputForm } from "./registry.ts";
 
 /** Why a context read gave no value. */
 export type ContextReadError =
-  /** The context holds no entry for the node: it is not in the node's `ctxFrom`, or the dependency did not end. */
+  /**
+   * The context holds no entry for the node: it is not in the node's `workflowContextFrom`, or the dependency did not
+   * end.
+   */
   | { readonly kind: "notInContext"; readonly nodeId: string }
   /** The stored value does not read with the contract's types. `cause` holds no value. */
   | { readonly kind: "unreadable"; readonly nodeId: string; readonly cause: string }
@@ -45,7 +49,7 @@ export interface WorkflowContext {
     P extends ParameterSchemas,
     O extends OutputSchema,
     E extends string,
-    X extends ExecutionClass,
+    X extends Execution,
     C extends ContextUse,
   >(
     nodeId: string,
@@ -69,8 +73,8 @@ export interface WorkflowContext {
 
 /**
  * The `workflowContext` member of the runtime of a task with `workflowContext: true`: the context that the core wrote
- * into the run's input, or `noContext`. The core writes it only for a workflow node that names `ctxFrom`; a direct
- * send and a node with no `ctxFrom` give `noContext`, as Python gives `workflow_ctx = None`.
+ * into the run's input, or `noContext`. The core writes it only for a workflow node that names `workflowContextFrom`;
+ * a direct send and a node with no `workflowContextFrom` give `noContext`, as Python gives `workflow_ctx = None`.
  */
 export type RuntimeWorkflowContext =
   | { readonly kind: "context"; readonly context: WorkflowContext }

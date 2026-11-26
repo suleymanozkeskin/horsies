@@ -7,7 +7,14 @@ import type { SubWorkflowFailure, SubWorkflowSummary, WorkflowStatus } from "../
 import { SUMMARY_COUNT_MAX, SUMMARY_COUNT_MIN, SUMMARY_OUTPUT_DEPTH_LIMIT, WORKFLOW_STATUSES } from "./bounds.ts";
 import { decodeJsonNode } from "./json-value.ts";
 import { isTreeObject, type TreeObject, type TreeValue } from "./number-text.ts";
-import { type DecodeRefused, type EnvelopeRefused, envelopeRefused, type EnvelopeRule, memberPath } from "./refusal.ts";
+import {
+  type DecodeRefused,
+  type EnvelopeRefused,
+  envelopeRefused,
+  type EnvelopeRule,
+  memberPath,
+  refusalName,
+} from "./refusal.ts";
 import { isNumber, isString } from "./values.ts";
 
 const SUB_WORKFLOW_ID_KEY = "sub_workflow_id";
@@ -97,7 +104,9 @@ export function readSubWorkflowSummary(node: TreeValue, path: string): Result<Su
   const output = decodeJsonNode(node["output"] ?? null, outputPath, 0, SUMMARY_OUTPUT_DEPTH_LIMIT);
 
   if (!output.ok) {
-    return refuse("ErrorDataRefused", outputPath, `the output breaks a rule of a user value: ${output.error.kind}`);
+    const name = refusalName(output.error);
+
+    return refuse("ErrorDataRefused", outputPath, `the output breaks a rule of a user value: ${name}`);
   }
 
   const counts = readCounts(node, path);

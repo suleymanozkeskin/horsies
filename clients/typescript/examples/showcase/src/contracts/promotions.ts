@@ -16,8 +16,8 @@ export const applyPromotions = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { orderId: h.string() },
   output: PromotionOutcome,
-  errors: ["ORDER_NOT_FOUND", "DATA_CORRUPTION", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["ORDER_NOT_FOUND", "DATA_CORRUPTION", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** The loyalty points of one order of a customer. */
@@ -28,8 +28,8 @@ export const computeLoyaltyPoints = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { customerId: h.string(), orderId: h.string() },
   output: LoyaltyPoints,
-  errors: ["LOYALTY_ENGINE_BUG"],
-  retry: CRASH_RETRY,
+  errorCodes: ["LOYALTY_ENGINE_BUG"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Push the campaign price of a SKU to the CDN. */
@@ -40,8 +40,8 @@ export const publishCdn = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { campaignId: h.string(), sku: h.string() },
   output: PricePush,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Push the campaign price of a SKU to the origin servers. */
@@ -52,8 +52,8 @@ export const publishOrigin = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { campaignId: h.string(), sku: h.string() },
   output: PricePush,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Build the search index of a campaign before its start. */
@@ -64,8 +64,8 @@ export const prewarmSearch = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { campaignId: h.string() },
   output: SearchPrewarm,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Fill the edge cache of a campaign. */
@@ -76,8 +76,8 @@ export const warmCacheEdge = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { campaignId: h.string() },
   output: CacheWarm,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Change the price of a SKU for a campaign. A flash sale sends it with a short `goodUntil`. */
@@ -88,8 +88,8 @@ export const updatePrice = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { sku: h.string(), campaignId: h.string() },
   output: PriceUpdate,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 export const PROMOTION_TASKS = [

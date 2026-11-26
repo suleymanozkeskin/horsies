@@ -22,7 +22,7 @@ export const catalogImport = defineWorkflow(
   { name: "catalog_import", definitionKey: "acme.catalog_import.v1", params: {}, output: CatalogChunk },
   (w) => {
     const chunks = Array.from({ length: CATALOG_IMPORT_CHUNKS }, (_unused, chunkIndex) =>
-      w.task(catalogImportChunk, { importId: IMPORT_ID, chunkIndex }, { id: chunkNodeId(chunkIndex) }),
+      w.task(catalogImportChunk, { importId: IMPORT_ID, chunkIndex }, { nodeId: chunkNodeId(chunkIndex) }),
     );
 
     const last = chunks.at(-1);

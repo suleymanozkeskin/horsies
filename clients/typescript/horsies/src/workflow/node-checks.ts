@@ -66,7 +66,7 @@ export function checkNodes(
   const targets = new Map<string, NodeTarget>();
 
   nodes.forEach((node, index) => {
-    const context: NodeContext = { index, place: `nodes[${index}] ${node.options.id}`, session, view, outputs };
+    const context: NodeContext = { index, place: `nodes[${index}] ${node.options.nodeId}`, session, view, outputs };
     const result = checkNode(context, node);
 
     if (result.ok) {
@@ -75,7 +75,7 @@ export function checkNodes(
       findings.push(...result.error);
     }
 
-    targets.set(node.options.id, nodeTarget(node));
+    targets.set(node.options.nodeId, nodeTarget(node));
   });
 
   const [first, ...rest] = findings;
@@ -241,13 +241,13 @@ function checkedNode(
 ): CheckedNode {
   return {
     index: context.index,
-    nodeId: node.options.id,
+    nodeId: node.options.nodeId,
     name,
     staticInput: input.staticInput,
     dependencies: dependenciesOf(context.session, node, input.argsFrom),
     argsFrom: input.argsFrom,
-    ctxFrom: (node.options.ctxFrom ?? []).map((source) => source.id),
-    allowFailedDeps: node.options.allowFailedDeps === true,
+    workflowContextFrom: (node.options.workflowContextFrom ?? []).map((source) => source.nodeId),
+    allowFailedDependencies: node.options.allowFailedDependencies === true,
     join: joinOf(node.options),
     body,
   };
@@ -333,7 +333,7 @@ function contextFindings(
   use: ContextUse,
   dependencies: ReadonlySet<number>,
 ): readonly SpecFinding[] {
-  const sources = node.options.ctxFrom ?? [];
+  const sources = node.options.workflowContextFrom ?? [];
 
   if (sources.length === 0) {
     return [];
@@ -343,9 +343,9 @@ function contextFindings(
     return [
       finding(
         ErrorCode.WORKFLOW_CTX_PARAM_MISSING,
-        `${context.place} ctxFrom`,
-        "ctxFrom is given, but the task takes no workflow context",
-        ["define the task with workflowContext: true, or remove ctxFrom"],
+        `${context.place} workflowContextFrom`,
+        "workflowContextFrom is given, but the task takes no workflow context",
+        ["define the task with workflowContext: true, or remove workflowContextFrom"],
       ),
     ];
   }
@@ -355,8 +355,8 @@ function contextFindings(
     .map((source) =>
       finding(
         ErrorCode.WORKFLOW_INVALID_CTX_FROM,
-        `${context.place} ctxFrom`,
-        `the context source "${source.id}" is not a dependency`,
+        `${context.place} workflowContextFrom`,
+        `the context source "${source.nodeId}" is not a dependency`,
         ["add the node to waitsFor"],
       ),
     );

@@ -18,12 +18,12 @@ export const DISPUTE_OPENED_AT: Temporal.Instant = Temporal.Instant.from("2026-0
 export const fraudReview = defineWorkflow(
   { name: "fraud_review", definitionKey: "acme.fraud_review.v1", params: {}, output: PaymentRefund, onError: "pause" },
   (w) => {
-    const reconcile = w.task(reconcilePayments, { window: `dispute-${DISPUTED_ORDER_ID}` }, { id: "reconcile_payments" });
+    const reconcile = w.task(reconcilePayments, { window: `dispute-${DISPUTED_ORDER_ID}` }, { nodeId: "reconcile_payments" });
 
     const refund = w.task(
       refundPayment,
       { orderId: DISPUTED_ORDER_ID, amountCents: REFUND_AMOUNT_CENTS, disputedAt: DISPUTE_OPENED_AT },
-      { id: "refund_payment", waitsFor: [reconcile] },
+      { nodeId: "refund_payment", waitsFor: [reconcile] },
     );
 
     return { output: refund };

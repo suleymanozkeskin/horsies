@@ -60,7 +60,7 @@ Acme tables or that can crash their process, and 1 shared async child of 32 seat
 | notifications | 50 | 6 |
 | analytics | 90 | 4 |
 
-Each task declares the codes that it returns (`errors`). A contract imports no implementation: `src/contracts/` is
+Each task declares the codes that it returns (`errorCodes`). A contract imports no implementation: `src/contracts/` is
 what a sender needs, `src/tasks/` is what a worker runs.
 
 ## Failure table

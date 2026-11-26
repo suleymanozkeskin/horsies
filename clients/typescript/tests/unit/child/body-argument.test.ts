@@ -13,7 +13,7 @@ import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { adapterRun, RUN_TASK_ID } from "./support.ts";
 
-const add = defineTask({ name: "add", input: { a: h.int(), b: h.int() }, output: h.int(), errors: ["TOO_BIG"] });
+const add = defineTask({ name: "add", input: { a: h.int(), b: h.int() }, output: h.int(), errorCodes: ["TOO_BIG"] });
 
 /** The own member names of the second argument of a body of a task that takes no workflow context. */
 const MEMBERS = ["taskId", "fencingToken", "signal", "cancelState", "spawn", "state", "workflowContext", "ok", "err"];

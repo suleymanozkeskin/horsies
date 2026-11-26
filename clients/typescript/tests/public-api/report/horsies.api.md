@@ -29,7 +29,7 @@ export function allowAll(): MonitoringAuthPolicy;
 export type AnyEvent = TaskClaimed | ClaimReleased | AttemptPlaced | AttemptNotStarted | AttemptEnded | AttemptRecorded | TaskRecovered | ChildStarted | ChildReplaced | SlotDown | SlotRecovered;
 
 // @public
-export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, string, ExecutionClass>;
+export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, string, Execution>;
 
 // @public
 export type AnyNode = NodeRef<unknown, string, string>;
@@ -45,7 +45,7 @@ export interface AnyStateKey {
 }
 
 // @public
-export type AnyTaskContract = TaskContract<ParameterSchemas, OutputSchema, string, ExecutionClass>;
+export type AnyTaskContract = TaskContract<ParameterSchemas, OutputSchema, string, Execution>;
 
 // @public
 export type AnyWire = Wire<unknown, unknown, Presence, Role>;
@@ -64,7 +64,7 @@ export type AppConfigInput = QueueConfigInput & {
     readonly retention?: RetentionConfigInput;
     readonly resilience?: ResilienceConfigInput;
     readonly workerProfiles?: Readonly<Record<string, WorkerProfileInput>>;
-    readonly resendOnTransientErr?: boolean;
+    readonly resendOnTransientError?: boolean;
     readonly tracing?: TracingConfigInput;
 };
 
@@ -327,7 +327,7 @@ export interface AttemptStartReported {
 }
 
 // @public
-export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = "noContext"> = [X] extends ["SHARED_ASYNC"] ? (input: BodyInput<P>, runtime: RuntimeOf<X, C> & ResultConstructors<O, E>) => Promise<BodyResult<O, E>> : (input: BodyInput<P>, runtime: RuntimeOf<X, C> & ResultConstructors<O, E>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
+export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse = "noContext"> = [X] extends ["SHARED_ASYNC"] ? (input: BodyInput<P>, runtime: RuntimeOf<X, C> & ResultConstructors<O, E>) => Promise<BodyResult<O, E>> : (input: BodyInput<P>, runtime: RuntimeOf<X, C> & ResultConstructors<O, E>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
 
 // @public
 export type BodyInput<P extends ParameterSchemas> = ParametersValue<P>;
@@ -901,7 +901,10 @@ export interface ContextBodyRuntimes {
 
 // @public
 export type ContextReadError =
-/** The context holds no entry for the node: it is not in the node's `ctxFrom`, or the dependency did not end. */
+/**
+* The context holds no entry for the node: it is not in the node's `workflowContextFrom`, or the dependency did not
+* end.
+*/
     {
     readonly kind: "notInContext";
     readonly nodeId: string;
@@ -936,7 +939,7 @@ export const ContractCode: {
 export type ContractCode = (typeof ContractCode)[keyof typeof ContractCode];
 
 // @public
-export interface ContractTypes<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = ContextUse> {
+export interface ContractTypes<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse = ContextUse> {
     // (undocumented)
     readonly code: E;
     // (undocumented)
@@ -1259,7 +1262,7 @@ export type DefaultJoin = {
 };
 
 // @public
-export function defineTask<const P extends ParameterSchemas, O extends OutputSchema, const E extends string = string, const X extends ExecutionClass = "ISOLATED", const C extends boolean = false>(definition: TaskDefinition<P, O, E, X, C> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X, ContextUseOf<C>>;
+export function defineTask<const P extends ParameterSchemas, O extends OutputSchema, const E extends string = string, const X extends Execution = "ISOLATED", const C extends boolean = false>(definition: TaskDefinition<P, O, E, X, C> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X, ContextUseOf<C>>;
 
 // @public
 export function defineWorkflow<const P extends ParameterSchemas, O extends OutputSchema, const R extends BuildReturnOf<SchemaValue<O>>>(definition: WorkflowDefinition<P, O> & NoInfer<CheckCases<P>>, build: WorkflowBuild<P, R>): WorkflowContract<P, R>;
@@ -1323,8 +1326,8 @@ export type EncodeRefusalKind =
 
 // @public
 export type EncodeRefused = {
-    readonly side: "encode";
-    readonly kind: EncodeRefusalKind;
+    readonly kind: "encodeRefused";
+    readonly refusal: EncodeRefusalKind;
     readonly path: string;
     readonly detail: string;
 };
@@ -1347,8 +1350,7 @@ export interface EndpointTerminalInfo {
 
 // @public
 export type EnvelopeRefused = {
-    readonly side: "decode";
-    readonly kind: "EnvelopeRefused";
+    readonly kind: "envelopeRefused";
     readonly rule: EnvelopeRule;
     readonly path: string;
     readonly detail: string;
@@ -1522,18 +1524,15 @@ export type ExceptionRecord = {
 export type Execution = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
 
 // @public
-export type ExecutionClass = "ISOLATED" | "SHARED_ASYNC" | "SHARED_THREAD";
-
-// @public
 export type ExecutionFact = {
     readonly kind: "class";
-    readonly execution: ExecutionClass;
+    readonly execution: Execution;
 } | {
     readonly kind: "notKeptInHistory";
 };
 
 // @public
-export type ExecutionRules<X extends ExecutionClass> = [X] extends ["SHARED_ASYNC"] ? {
+export type ExecutionRules<X extends Execution> = [X] extends ["SHARED_ASYNC"] ? {
     readonly timeoutMs: number;
     readonly cancelGraceMs?: number;
 } : [X] extends ["SHARED_THREAD"] ? {
@@ -1760,7 +1759,7 @@ export interface HistoryContractError {
 // @public
 export class Horsies {
     static create(config: HorsiesConfig): Result<Horsies, CreateRefused>;
-    implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse>(contract: TaskContract<P, O, E, X, C>, body: NoInfer<BodyFor<P, O, E, X, C>>, options?: ImplementOptions<NoInfer<E>>): Implementation<P, O, E, X, C>;
+    implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse>(contract: TaskContract<P, O, E, X, C>, body: NoInfer<BodyFor<P, O, E, X, C>>, options?: ImplementOptions<NoInfer<E>>): Implementation<P, O, E, X, C>;
     readonly monitoring: Monitoring;
     onChildStart(hook: ChildStartHook): void;
     onEvent<T extends EventTypeName>(eventType: T, options: EventHandlerOptions, handler: NoInfer<EventHandler<T>>): void;
@@ -1773,9 +1772,9 @@ export class Horsies {
     retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
     retryStart<R extends BuildReturn>(error: StartEnqueueFailed<R>): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
     schedules<const T extends readonly AnyTaskContract[]>(entries: ScheduleEntries<T>, section?: ScheduleSection): void;
-    send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
+    send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
     start<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, params: NoInfer<SendableInput<P>>, options?: StartOptions): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
-    taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
+    taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
     workflowHandle<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, workflowId: WorkflowId): WorkflowHandleById<R>;
 }
 
@@ -1809,7 +1808,7 @@ export type IdRefused = {
 };
 
 // @public
-export interface Implementation<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = ContextUse> {
+export interface Implementation<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse = ContextUse> {
     // (undocumented)
     readonly contract: TaskContract<P, O, E, X, C>;
     // (undocumented)
@@ -1819,7 +1818,7 @@ export interface Implementation<P extends ParameterSchemas, O extends OutputSche
 
 // @public
 export interface ImplementOptions<E extends string> {
-    readonly exceptions?: readonly ExceptionMapping<E>[];
+    readonly exceptionMapper?: readonly ExceptionMapping<E>[];
 }
 
 // @public
@@ -1830,9 +1829,11 @@ export interface IntervalSchedule {
 }
 
 // @public
-export interface IsolatedChildrenInput {
+export interface IsolatedChildren {
     // (undocumented)
     readonly count: number;
+    // (undocumented)
+    readonly kind: "isolatedChildren";
     // (undocumented)
     readonly pool?: IsolatedPoolInput;
     // (undocumented)
@@ -1857,6 +1858,9 @@ export interface IsolatedRecycleInput {
     // (undocumented)
     readonly after?: TaskLimit;
 }
+
+// @public
+export type IsolatedSetting = IsolatedChildren | NoIsolatedChildren;
 
 // @public
 export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "taskOutcome" ? true : false) : false;
@@ -1979,7 +1983,8 @@ export type LoggerName = (typeof LOGGER_NAMES)[number];
 export interface LoggingOptions {
     // (undocumented)
     readonly levels?: LogLevels;
-    readonly sink?: LogSink | "stderr";
+    // (undocumented)
+    readonly sink?: LogSinkSetting;
 }
 
 // @public
@@ -2012,6 +2017,14 @@ export interface LogRecord {
 
 // @public
 export type LogSink = (records: readonly LogRecord[]) => undefined;
+
+// @public
+export type LogSinkSetting = {
+    readonly kind: "stderr";
+} | {
+    readonly kind: "function";
+    readonly sink: LogSink;
+};
 
 // @public
 export type LogSource = {
@@ -2239,9 +2252,9 @@ export type NodeInput<P extends ParameterSchemas, J extends Join> = keyof P exte
 
 // @public
 export interface NodeOptionsBase<Id extends string, J extends Join> {
-    readonly allowFailedDeps?: boolean;
-    readonly id: Id;
+    readonly allowFailedDependencies?: boolean;
     readonly join?: J;
+    readonly nodeId: Id;
     readonly waitsFor?: readonly AnyNode[];
 }
 
@@ -2259,9 +2272,9 @@ export type NodeParameter<S, J extends Join, K> = IsUpstreamOutcome<S> extends t
 export interface NodeRef<O, E extends string, Id extends string> {
     // (undocumented)
     readonly [nodeTypes]: NodeTypes<O, E>;
-    readonly id: Id;
     // (undocumented)
     readonly kind: "node";
+    readonly nodeId: Id;
 }
 
 // @public
@@ -2321,12 +2334,30 @@ export type NodeTypes<O, E extends string> = {
 };
 
 // @public
+export interface NoIsolatedChildren {
+    // (undocumented)
+    readonly kind: "noIsolatedChildren";
+}
+
+// @public
 export type NonEmpty<T> = readonly [T, ...T[]];
 
 // @public
 export type NoRunningTask = {
     readonly kind: "noTask";
 };
+
+// @public
+export interface NoSharedAsyncChildren {
+    // (undocumented)
+    readonly kind: "noSharedAsyncChildren";
+}
+
+// @public
+export interface NoSharedThreadChildren {
+    // (undocumented)
+    readonly kind: "noSharedThreadChildren";
+}
 
 // @public
 export type NoSpanIds = {
@@ -2664,7 +2695,7 @@ export type PolicyNodes<S> = S extends SuccessPolicy ? S["cases"][number]["requi
 export type PoolRecycle = {
     readonly kind: "never";
 } | {
-    readonly kind: "afterSeconds";
+    readonly kind: "after";
     readonly seconds: number;
 };
 
@@ -2717,16 +2748,14 @@ export type QueueRetention = {
 
 // @public
 export type ReadBackChanged = {
-    readonly side: "readBack";
-    readonly kind: "ReadBackChanged";
+    readonly kind: "readBackChanged";
     readonly path: string;
     readonly detail: string;
 };
 
 // @public
 export type ReadBackRefused = {
-    readonly side: "readBack";
-    readonly kind: "ReadBackRefused";
+    readonly kind: "readBackRefused";
     readonly path: string;
     readonly detail: string;
     readonly cause: DecodeRefused;
@@ -2760,7 +2789,7 @@ export type ReadError =
     readonly kind: "storedResultUnreadable";
     readonly cause: string;
 }
-/** The stored error has a custom code that the contract's `errors` does not list. */
+/** The stored error has a custom code that the contract's `errorCodes` does not list. */
 | {
     readonly kind: "unknownUserCode";
     readonly code: string;
@@ -3229,11 +3258,11 @@ export type ReservedCode = BuiltInTaskCode | (typeof RESERVED_NON_TASK_CODES)[nu
 // @public
 export interface ResilienceConfigInput {
     // (undocumented)
-    readonly dbRetryInitialMs?: number;
+    readonly databaseRetryInitialMs?: number;
     // (undocumented)
-    readonly dbRetryMaxAttempts?: RetryAttempts;
+    readonly databaseRetryMaxAttempts?: RetryAttempts;
     // (undocumented)
-    readonly dbRetryMaxMs?: number;
+    readonly databaseRetryMaxMs?: number;
     // (undocumented)
     readonly notifyPollIntervalMs?: number;
 }
@@ -3405,7 +3434,7 @@ export type RunningTask = {
 };
 
 // @public
-export type RuntimeOf<X extends ExecutionClass, C extends ContextUse = "noContext"> = [C] extends ["takesContext"] ? ContextBodyRuntimes[X] : BodyRuntimes[X];
+export type RuntimeOf<X extends Execution, C extends ContextUse = "noContext"> = [C] extends ["takesContext"] ? ContextBodyRuntimes[X] : BodyRuntimes[X];
 
 // @public
 export type RuntimeWorkflowContext = {
@@ -3486,7 +3515,7 @@ export interface ScheduleEntry<C> {
 }
 
 // @public
-export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, ExecutionClass> ? SendableInput<P> : never;
+export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, Execution> ? SendableInput<P> : never;
 
 // @public
 export type SchedulePattern = IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule | CronSchedule;
@@ -3608,9 +3637,11 @@ export type SessionDatabase = {
 };
 
 // @public
-export interface SharedAsyncChildrenInput {
+export interface SharedAsyncChildren {
     // (undocumented)
     readonly count: number;
+    // (undocumented)
+    readonly kind: "sharedAsyncChildren";
     // (undocumented)
     readonly pool?: SharedPoolInput;
     // (undocumented)
@@ -3620,6 +3651,9 @@ export interface SharedAsyncChildrenInput {
     // (undocumented)
     readonly taskSendPool?: PoolSize;
 }
+
+// @public
+export type SharedAsyncSetting = SharedAsyncChildren | NoSharedAsyncChildren;
 
 // @public
 export interface SharedPoolInput {
@@ -3645,9 +3679,11 @@ export interface SharedRecycleInput {
 }
 
 // @public
-export interface SharedThreadChildrenInput {
+export interface SharedThreadChildren {
     // (undocumented)
     readonly count: number;
+    // (undocumented)
+    readonly kind: "sharedThreadChildren";
     // (undocumented)
     readonly pool?: SharedPoolInput;
     // (undocumented)
@@ -3657,6 +3693,9 @@ export interface SharedThreadChildrenInput {
     // (undocumented)
     readonly taskSendPool?: PoolSize;
 }
+
+// @public
+export type SharedThreadSetting = SharedThreadChildren | NoSharedThreadChildren;
 
 // @public (undocumented)
 export type ShortageErrno = "EMFILE" | "ENFILE" | "ENOMEM" | "EAGAIN";
@@ -4108,7 +4147,7 @@ export interface TaskClaimed {
 }
 
 // @public
-export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = ContextUse> {
+export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse = ContextUse> {
     // (undocumented)
     readonly [contractTypes]: ContractTypes<P, O, E, X, C>;
     // (undocumented)
@@ -4118,9 +4157,8 @@ export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema
 }
 
 // @public
-export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends boolean = boolean> {
-    readonly errors?: string extends E ? readonly WidenedCodes[] : readonly CustomCode<E>[];
-    // (undocumented)
+export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends boolean = boolean> {
+    readonly errorCodes?: string extends E ? readonly WidenedCodes[] : readonly CustomCode<E>[];
     readonly execution?: X;
     readonly input: P;
     readonly name: string;
@@ -4128,7 +4166,7 @@ export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSche
     readonly output: O;
     readonly queue?: string;
     // (undocumented)
-    readonly retry?: RetryPolicy<NoInfer<E>>;
+    readonly retryPolicy?: RetryPolicy<NoInfer<E>>;
     readonly workflowContext?: C;
 }
 
@@ -4302,9 +4340,9 @@ export type TaskNodeOptions<Id extends string, J extends Join, C extends Context
     readonly priority?: number;
     readonly goodUntil?: Temporal.Instant;
 } & ([C] extends ["takesContext"] ? {
-    readonly ctxFrom?: readonly AnyNode[];
+    readonly workflowContextFrom?: readonly AnyNode[];
 } : {
-    readonly ctxFrom?: never;
+    readonly workflowContextFrom?: never;
 });
 
 // @public
@@ -4712,8 +4750,8 @@ export type ValueOf<W extends AnyWire> = W[typeof wireValue];
 
 // @public
 export type ValueRefused = {
-    readonly side: "decode";
-    readonly kind: DecodeRefusalKind;
+    readonly kind: "decodeRefused";
+    readonly refusal: DecodeRefusalKind;
     readonly path: string;
     readonly detail: string;
 };
@@ -4738,7 +4776,7 @@ export interface WeeklySchedule {
 }
 
 // @public
-export type WidenedCodes = "horsies: declare errors as literal codes, not as a string[]";
+export type WidenedCodes = "horsies: declare errorCodes as literal codes, not as a string[]";
 
 // @public
 export interface Wire<V, S = V, P extends Presence = "required", R extends Role = "value"> {
@@ -4837,15 +4875,15 @@ export interface WorkerProfileInput {
     readonly claim?: ClaimLimitsInput;
     readonly drainTimeoutMs?: number;
     // (undocumented)
-    readonly isolated?: IsolatedChildrenInput;
+    readonly isolated?: IsolatedSetting;
     // (undocumented)
     readonly parentCpu?: ParentCpu;
     // (undocumented)
     readonly pool?: ParentPoolInput;
     // (undocumented)
-    readonly sharedAsync?: SharedAsyncChildrenInput;
+    readonly sharedAsync?: SharedAsyncSetting;
     // (undocumented)
-    readonly sharedThread?: SharedThreadChildrenInput;
+    readonly sharedThread?: SharedThreadSetting;
 }
 
 // @public
@@ -4915,7 +4953,7 @@ export type WorkflowBuild<P extends ParameterSchemas, R extends BuildReturn> = (
 // @public
 export interface WorkflowBuilder {
     subWorkflow<P extends ParameterSchemas, R extends BuildReturn, const Id extends string, const J extends Join = DefaultJoin>(workflow: WorkflowContract<P, R>, params: NoInfer<NodeInput<P, J>>, options: SubWorkflowNodeOptions<Id, J>): NodeRef<WorkflowOutput<R>, string, Id>;
-    task<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse, const Id extends string, const J extends Join = DefaultJoin>(contract: TaskContract<P, O, E, X, C>, input: NoInfer<NodeInput<P, J>>, options: TaskNodeOptions<Id, J, C>): NodeRef<SchemaValue<O>, E, Id>;
+    task<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse, const Id extends string, const J extends Join = DefaultJoin>(contract: TaskContract<P, O, E, X, C>, input: NoInfer<NodeInput<P, J>>, options: TaskNodeOptions<Id, J, C>): NodeRef<SchemaValue<O>, E, Id>;
 }
 
 // @public
@@ -4923,7 +4961,7 @@ export interface WorkflowContext {
     hasResult(nodeId: string): boolean;
     hasSummary(nodeId: string): boolean;
     outputFor<P extends ParameterSchemas, R extends BuildReturn>(nodeId: string, workflow: WorkflowContract<P, R>): Result<Recorded<WorkflowOutput<R>>, ContextReadError>;
-    resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse>(nodeId: string, contract: TaskContract<P, O, E, X, C>): Result<TaskOutcome<SchemaValue<O>, E>, ContextReadError>;
+    resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse>(nodeId: string, contract: TaskContract<P, O, E, X, C>): Result<TaskOutcome<SchemaValue<O>, E>, ContextReadError>;
     summaryFor(nodeId: string): Result<SubWorkflowSummary, ContextReadError>;
     readonly taskIndex: number;
     readonly taskName: string;
@@ -4966,7 +5004,7 @@ export type WorkflowEventKind = "NODE_ENQUEUED" | "NODE_READY" | "TASK_MOVED" | 
 
 // @public
 export interface WorkflowHandle<R extends BuildReturn> extends WorkflowHandleBase<R> {
-    resultFor<const Id extends ReturnedNodes<R>["id"]>(id: Id): Promise<Result<TaskOutcome<NodeOutput<NodeById<ReturnedNodes<R>, Id>>, NodeCode<NodeById<ReturnedNodes<R>, Id>>>, WorkflowReadError>>;
+    resultFor<const Id extends ReturnedNodes<R>["nodeId"]>(nodeId: Id): Promise<Result<TaskOutcome<NodeOutput<NodeById<ReturnedNodes<R>, Id>>, NodeCode<NodeById<ReturnedNodes<R>, Id>>>, WorkflowReadError>>;
 }
 
 // @public
@@ -4985,8 +5023,8 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
 
 // @public
 export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandleBase<R> {
-    resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse>(id: string, contract: TaskContract<P, O, E, X, C>): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
-    resultFor<P extends ParameterSchemas, C extends BuildReturn>(id: string, workflow: WorkflowContract<P, C>): Promise<Result<TaskOutcome<WorkflowOutput<C>, string>, WorkflowReadError>>;
+    resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse>(nodeId: string, contract: TaskContract<P, O, E, X, C>): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
+    resultFor<P extends ParameterSchemas, C extends BuildReturn>(nodeId: string, workflow: WorkflowContract<P, C>): Promise<Result<TaskOutcome<WorkflowOutput<C>, string>, WorkflowReadError>>;
 }
 
 // @public

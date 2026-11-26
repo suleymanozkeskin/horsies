@@ -31,7 +31,7 @@ function contextOf(script: ProducerScript, resend: boolean): SendContext {
 
   return {
     contracts: contractLookup(list.entries),
-    resendOnTransientErr: resend,
+    resendOnTransientError: resend,
     core,
     observer,
     suppression: new SuppressionState({ kind: "open" }, () => undefined),

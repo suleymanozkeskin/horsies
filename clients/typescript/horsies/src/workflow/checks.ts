@@ -160,7 +160,7 @@ function gateOne(record: WorkflowRecord, session: BuildSession, nodes: readonly 
 
 /** The place of a node in a finding: `nodes[2] charge`; only `nodes[2]` for an id that breaks the id rule. Pure. */
 export function nodePlace(index: number, node: RecordedNode): string {
-  const id: unknown = node.options.id;
+  const id: unknown = node.options.nodeId;
 
   return isValidNodeId(id) ? `nodes[${index}] ${id}` : `nodes[${index}]`;
 }
@@ -179,7 +179,7 @@ function idFindings(nodes: readonly RecordedNode[]): readonly SpecFinding[] {
   const seen = new Map<string, number>();
 
   nodes.forEach((node, index) => {
-    const id: unknown = node.options.id;
+    const id: unknown = node.options.nodeId;
 
     if (!isValidNodeId(id)) {
       const detail = isString(id) ? `invalid node id ${JSON.stringify(id)}` : "invalid node id that is not a string";
@@ -214,7 +214,11 @@ function idFindings(nodes: readonly RecordedNode[]): readonly SpecFinding[] {
 
 /** `HRS-006` for each node that a node names and that is not a node of this build. */
 function referenceFindings(session: BuildSession, node: RecordedNode, index: number): readonly SpecFinding[] {
-  const named = [...inputNodes(node.input), ...(node.options.waitsFor ?? []), ...(node.options.ctxFrom ?? [])];
+  const named = [
+    ...inputNodes(node.input),
+    ...(node.options.waitsFor ?? []),
+    ...(node.options.workflowContextFrom ?? []),
+  ];
 
   return named.some((value) => !isNodeOf(session, value))
     ? [

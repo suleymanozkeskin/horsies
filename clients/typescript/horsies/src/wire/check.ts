@@ -287,7 +287,7 @@ function storedDefaultRefusals(fallback: DefaultText, path: string): readonly Ki
     case "stored":
       return [];
     case "refused":
-      return [{ rule: "DefaultNotStored", path, detail: `the default is refused: ${fallback.refusal.kind}` }];
+      return [{ rule: "DefaultNotStored", path, detail: `the default is refused: ${fallback.refusal.refusal}` }];
     default:
       return unreachable(fallback, "storedDefaultRefusals");
   }

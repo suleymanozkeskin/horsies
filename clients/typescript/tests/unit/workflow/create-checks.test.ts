@@ -25,14 +25,14 @@ function createRefusals(workflows: readonly object[]): readonly { readonly code:
 /** A valid workflow with no params, named `name`. */
 function namedWorkflow(name: string): object {
   return defineWorkflow({ name, definitionKey: "tests.named.v1", output: h.int(), params: {} }, (w) => ({
-    output: w.task(ping, {}, { id: "a" }),
+    output: w.task(ping, {}, { nodeId: "a" }),
   }));
 }
 
 /** A valid workflow with no params, named `keyed`, with the definition key `definitionKey`. */
 function keyedWorkflow(definitionKey: string): object {
   return defineWorkflow({ name: "keyed", definitionKey, output: h.int(), params: {} }, (w) => ({
-    output: w.task(ping, {}, { id: "a" }),
+    output: w.task(ping, {}, { nodeId: "a" }),
   }));
 }
 
@@ -112,7 +112,7 @@ describe("checkWorkflowsAtCreate", () => {
     const sameKey = defineWorkflow(
       { name: "other", definitionKey: "tests.plain.v1", output: h.int(), params: {} },
       (w) => ({
-        output: w.task(ping, {}, { id: "a" }),
+        output: w.task(ping, {}, { nodeId: "a" }),
       }),
     );
 
@@ -125,7 +125,7 @@ describe("checkWorkflowsAtCreate", () => {
     const noCases = defineWorkflow(
       { name: "c", definitionKey: "tests.c.v1", output: h.int(), params: { n: h.int() } } as never,
       (w) => ({
-        output: w.task(ping, {}, { id: "a" }),
+        output: w.task(ping, {}, { nodeId: "a" }),
       }),
     );
 
@@ -137,7 +137,7 @@ describe("checkWorkflowsAtCreate", () => {
     const badRule = defineWorkflow(
       { name: "d", definitionKey: "tests.d.v1", output: h.int(), params: {}, onError: "stop" as never },
       (w) => ({
-        output: w.task(ping, {}, { id: "a" }),
+        output: w.task(ping, {}, { nodeId: "a" }),
       }),
     );
 
@@ -149,7 +149,7 @@ describe("checkWorkflowsAtCreate", () => {
         params: { workflow_ctx: h.int() },
         checkCases: [{ workflow_ctx: 1 }],
       },
-      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+      (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
 
     assert.deepEqual(createCodes([badRule]), ["HRS-033"]);
@@ -165,13 +165,13 @@ describe("checkWorkflowsAtCreate", () => {
         params: { workflow_ctx: h.int() },
         checkCases: [{ workflow_ctx: 1 }],
       },
-      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+      (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
     // SAFETY: a JavaScript caller can give an output that the types refuse; the create check refuses it.
 
     const badOutput = defineWorkflow(
       { name: "out", definitionKey: "tests.out.v1", output: h.int().optional() as never, params: {} },
-      ((w: WorkflowBuilder) => ({ output: w.task(ping, {}, { id: "a" }) })) as never,
+      ((w: WorkflowBuilder) => ({ output: w.task(ping, {}, { nodeId: "a" }) })) as never,
     );
 
     const [params] = checkedAtCreate([badParams]).refusals;
@@ -215,7 +215,7 @@ describe("checkWorkflows", () => {
         params: { n: h.int() },
         checkCases: [{ n: "one" } as never],
       },
-      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+      (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
 
     const throws = defineWorkflow(
@@ -233,7 +233,7 @@ describe("checkWorkflows", () => {
     const finding = defineWorkflow(
       { name: "i", definitionKey: "tests.i.v1", output: h.int(), params: { n: h.int() }, checkCases: [{ n: 1 }] },
       (w) => ({
-        output: w.task(ping, {}, { id: "bad id" }),
+        output: w.task(ping, {}, { nodeId: "bad id" }),
       }),
     );
 
@@ -245,7 +245,7 @@ describe("checkWorkflows", () => {
       { name: "loop", definitionKey: "tests.loop.v1", output: h.int(), params: {} },
       (w) => {
         // SAFETY: the test nests the workflow in itself; the contract of `loop` is complete when the build runs.
-        const again = w.subWorkflow(loop as never, {}, { id: "again" });
+        const again = w.subWorkflow(loop as never, {}, { nodeId: "again" });
 
         // SAFETY: the child's declared output is `h.int()`; the self reference leaves its type unknown here.
         return { output: again as NodeRef<number, string, "again"> };
@@ -274,12 +274,12 @@ describe("checkWorkflows", () => {
         },
         checkCases: [{ n: 1 }],
       },
-      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+      (w) => ({ output: w.task(ping, {}, { nodeId: "a" }) }),
     );
 
     const parent = defineWorkflow(
       { name: "parent", definitionKey: "tests.impure_parent.v1", output: h.int(), params: {} },
-      (w) => ({ output: w.subWorkflow(child, { n: 2 }, { id: "child" }) }),
+      (w) => ({ output: w.subWorkflow(child, { n: 2 }, { nodeId: "child" }) }),
     );
 
     assert.deepEqual(checkCodes([child, parent]), []);
@@ -302,7 +302,7 @@ describe("checkWorkflows", () => {
       // SAFETY: the test nests the workflow in itself; the contract of `deep` is complete when the build runs.
       (w, { level }) => ({
         // SAFETY: as above; the child's declared output is `h.int()`.
-        output: w.subWorkflow(deep as never, { level: level + 1 }, { id: "next" }) as NodeRef<number, string, "next">,
+        output: w.subWorkflow(deep as never, { level: level + 1 }, { nodeId: "next" }) as NodeRef<number, string, "next">,
       }),
     );
 

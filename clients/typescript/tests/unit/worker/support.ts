@@ -17,7 +17,7 @@ export const charge = defineTask({
   name: "charge",
   input: { amount: h.int() },
   output: h.null(),
-  errors: ["CARD_DECLINED", "BANK_DOWN"],
+  errorCodes: ["CARD_DECLINED", "BANK_DOWN"],
   execution: "SHARED_ASYNC",
   timeoutMs: 5_000,
   cancelGraceMs: 1_000,

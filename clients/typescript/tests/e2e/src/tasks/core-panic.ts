@@ -37,7 +37,7 @@ export const panicAfterReturn = defineTask({
   name: "e2e_core_panic_after_return",
   input: {},
   output: h.int(),
-  errors: PANIC_CODES,
+  errorCodes: PANIC_CODES,
 });
 
 /** The first run of `token` panics while its body waits; every run that reaches its end returns its process id. */
@@ -45,8 +45,8 @@ export const panicInBody = defineTask({
   name: "e2e_core_panic_in_body",
   input: { token: h.string() },
   output: h.int(),
-  errors: PANIC_CODES,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
+  errorCodes: PANIC_CODES,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
 });
 
 /** The first run of `token` panics while its body waits before a send of `e2e_pid`; later runs return their process id. */
@@ -54,8 +54,8 @@ export const panicThenSend = defineTask({
   name: "e2e_core_panic_then_send",
   input: { token: h.string() },
   output: h.int(),
-  errors: PANIC_CODES,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
+  errorCodes: PANIC_CODES,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
 });
 
 /** Every contract of this module. */

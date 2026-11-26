@@ -5,7 +5,7 @@ import { describe, test } from "node:test";
 
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { decodeValue } from "../../../horsies/src/codec/reader.ts";
-import type { DecodeRefused, EncodeRefused } from "../../../horsies/src/codec/refusal.ts";
+import type { EncodeRefused, ValueRefused } from "../../../horsies/src/codec/refusal.ts";
 import { isObjectLike } from "../../../horsies/src/codec/values.ts";
 import { encodeValue } from "../../../horsies/src/codec/writer.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";
@@ -29,10 +29,11 @@ function writeRefused<V>(wire: AnyWire, value: V): EncodeRefused {
   return result.error;
 }
 
-function readRefused(wire: AnyWire, text: string): DecodeRefused {
+function readRefused(wire: AnyWire, text: string): ValueRefused {
   const result = decodeValue(kindOf(wire), jsonTextCheckedByCore(text), "worker");
 
   assert(!result.ok, "decoded a refused text");
+  assert(result.error.kind === "decodeRefused", `a value refusal: ${JSON.stringify(result.error)}`);
 
   return result.error;
 }
@@ -135,13 +136,13 @@ describe("h.decimal()", () => {
   });
 
   test("WrongType: a decimal text that is not a Decimal", () => {
-    assert.equal(writeRefused(h.decimal(), "1.10").kind, "WrongType");
-    assert.equal(readRefused(h.decimal(), "1.1").kind, "WrongType");
+    assert.equal(writeRefused(h.decimal(), "1.10").refusal, "WrongType");
+    assert.equal(readRefused(h.decimal(), "1.1").refusal, "WrongType");
   });
 
   test("BadDecimalText: a stored text that is not a finite decimal", () => {
-    assert.equal(readRefused(h.decimal(), '"abc"').kind, "BadDecimalText");
-    assert.equal(readRefused(h.decimal(), '"NaN"').kind, "BadDecimalText");
+    assert.equal(readRefused(h.decimal(), '"abc"').refusal, "BadDecimalText");
+    assert.equal(readRefused(h.decimal(), '"NaN"').refusal, "BadDecimalText");
   });
 });
 
@@ -162,13 +163,13 @@ describe("h.uuid()", () => {
 
   test("NotCanonicalUuid: upper case, no hyphens, braces", () => {
     for (const text of [id.toUpperCase(), id.replaceAll("-", ""), `{${id}}`]) {
-      assert.equal(writeRefused(h.uuid(), text).kind, "NotCanonicalUuid", text);
+      assert.equal(writeRefused(h.uuid(), text).refusal, "NotCanonicalUuid", text);
     }
   });
 
   test("WrongType and BadUuidText", () => {
-    assert.equal(writeRefused(h.uuid(), 1).kind, "WrongType");
-    assert.equal(readRefused(h.uuid(), "1").kind, "WrongType");
-    assert.equal(readRefused(h.uuid(), JSON.stringify(id.toUpperCase())).kind, "BadUuidText");
+    assert.equal(writeRefused(h.uuid(), 1).refusal, "WrongType");
+    assert.equal(readRefused(h.uuid(), "1").refusal, "WrongType");
+    assert.equal(readRefused(h.uuid(), JSON.stringify(id.toUpperCase())).refusal, "BadUuidText");
   });
 });
