@@ -80,6 +80,8 @@ export function appRerunError(failure: AppRerunFailure): RerunError {
     case RerunErrorCode.ID_MINT_REFUSED:
     case RerunErrorCode.CLIENT_FAMILY_MISMATCH:
     case RerunErrorCode.UNKNOWN_STORED_FAMILY:
+    case RerunErrorCode.RETRY_CODE_NOT_DECLARED:
+    case RerunErrorCode.TASK_NOT_REGISTERED:
     case RerunErrorCode.CONTRACT_VIOLATION:
       return stepRefused(failure);
     default:
@@ -96,6 +98,16 @@ export function stepRefused(refusal: CallerStepRefusal): RerunStepRefused {
       return { code: refusal.code, retryable: false, message: refusal.message, stored: refusal.stored };
     case RerunErrorCode.UNKNOWN_STORED_FAMILY:
       return { code: refusal.code, retryable: false, message: refusal.message, stored: refusal.stored };
+    case RerunErrorCode.RETRY_CODE_NOT_DECLARED:
+      return {
+        code: refusal.code,
+        retryable: false,
+        message: refusal.message,
+        taskName: refusal.taskName,
+        retryCode: refusal.retryCode,
+      };
+    case RerunErrorCode.TASK_NOT_REGISTERED:
+      return { code: refusal.code, retryable: false, message: refusal.message, taskName: refusal.taskName };
     case RerunErrorCode.CALLER_KEY_REFUSED:
     case RerunErrorCode.ID_MINT_REFUSED:
     case RerunErrorCode.CONTRACT_VIOLATION:

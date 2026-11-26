@@ -12,19 +12,23 @@
 //! commits. The functions do no I/O and start no core; the fork and stop
 //! rules apply, as for every core call. The client family of every rerun
 //! here is `TYPESCRIPT`, and the new task is sent at the core's clock when
-//! `prepareRerunWrite` runs.
+//! `prepareRerunWrite` runs. The stored retry list of the source is checked
+//! against the declared custom codes of the calling app's tasks, which the
+//! caller passes to `prepareRerunWrite`.
 
 use chrono::{DateTime, Utc};
 use horsies_core::{
     decode_rerun_write, prepare_rerun_write as prepare_core_write, rerun_read, ClientFamily,
-    RerunEnqueuePolicy, RerunError, RerunOutcome, RerunPreparation, RerunTask, RerunWrite,
+    RegisteredTaskCodes, RerunEnqueuePolicy, RerunError, RerunOutcome, RerunPreparation, RerunTask,
+    RerunWrite,
 };
 use napi_derive::napi;
 
 use crate::call::guard::sync_call;
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::facades::rerun::arguments::{
-    rerun_command, rerun_policy, RerunCommandArg, RerunPolicyArg,
+    registered_task_codes, rerun_command, rerun_policy, RegisteredTaskCodesArg, RerunCommandArg,
+    RerunPolicyArg,
 };
 use crate::facades::rerun::caller_values::{
     caller_row, statement_record, CallerRowArg, CallerStatementRecord,
@@ -130,7 +134,9 @@ pub fn rerun_read_statement(
 
 /// Decide the rerun from `read_row`, the row of the source read of
 /// `command` and `policy`. The new task stores the carrier of `trace`.
-/// Pure apart from the id mint and the clock.
+/// `codes` are the declared custom codes of the calling app's tasks: the
+/// stored retry list of the source is checked against them. Pure apart from
+/// the id mint and the clock.
 #[napi(ts_return_type = "NativeEnvelope<RerunPreparationRecord>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -141,16 +147,22 @@ pub fn prepare_rerun_write(
     policy: RerunPolicyArg,
     trace: TraceArgument,
     read_row: CallerRowArg,
+    codes: RegisteredTaskCodesArg,
 ) -> Envelope<RerunPreparationRecord> {
     sync_call("prepare_rerun_write", || {
         let request = match step_request(command, &policy) {
             Ok(request) => request,
             Err(thrown) => return Envelope::Thrown(thrown),
         };
+        let codes = match registered_task_codes(&codes) {
+            Ok(codes) => codes,
+            Err(refusal) => return Envelope::Thrown(refusal.into()),
+        };
         match trace.send_trace() {
             Ok(trace) => Envelope::Value(preparation_of_row(
                 &request.command.with_trace(trace),
                 &request.policy,
+                &codes,
                 read_row,
                 Utc::now(),
             )),
@@ -182,6 +194,7 @@ fn step_request(
 fn preparation_of_row(
     command: &RerunTask,
     policy: &RerunEnqueuePolicy,
+    codes: &RegisteredTaskCodes,
     read_row: CallerRowArg,
     sent_at: DateTime<Utc>,
 ) -> RerunPreparationRecord {
@@ -190,7 +203,7 @@ fn preparation_of_row(
         Ok(row) => row,
         Err(refused) => return row_refused(refused.to_string()),
     };
-    match prepare_core_write(&read, &row, command, policy, OWN_FAMILY, sent_at) {
+    match prepare_core_write(&read, &row, command, policy, codes, OWN_FAMILY, sent_at) {
         Ok(preparation) => preparation_record(preparation),
         Err(refused) => row_refused(RerunError::CallerRow(refused).to_string()),
     }
@@ -235,6 +248,24 @@ fn preparation_record(preparation: RerunPreparation) -> RerunPreparationRecord {
         },
         RerunPreparation::CallerKeyRefused(refused) => CallerStepRefusal::CallerKeyRefused {
             message: RerunError::Idempotency(refused).to_string(),
+        },
+        RerunPreparation::RetryCodeNotDeclared { task_name, code } => {
+            CallerStepRefusal::RetryCodeNotDeclared {
+                message: RerunError::RetryCodeNotDeclared {
+                    task_name: task_name.clone(),
+                    code: code.clone(),
+                }
+                .to_string(),
+                task_name,
+                retry_code: code,
+            }
+        }
+        RerunPreparation::TaskNotRegistered { task_name } => CallerStepRefusal::TaskNotRegistered {
+            message: RerunError::TaskNotRegistered {
+                task_name: task_name.clone(),
+            }
+            .to_string(),
+            task_name,
         },
         RerunPreparation::IdMintRefused(refused) => CallerStepRefusal::IdMintRefused {
             message: RerunError::Identity(refused).to_string(),
@@ -309,7 +340,13 @@ mod tests {
     fn prepared(class_key: &str, values: &[(&str, &str)]) -> RerunPreparationRecord {
         let policy = policy(class_key);
         let read = rerun_read(&command(), &policy);
-        preparation_of_row(&command(), &policy, row_of(&read, values), Utc::now())
+        preparation_of_row(
+            &command(),
+            &policy,
+            &RegisteredTaskCodes::NONE,
+            row_of(&read, values),
+            Utc::now(),
+        )
     }
 
     #[test]
@@ -424,6 +461,7 @@ mod tests {
         let refused = preparation_of_row(
             &command(),
             &policy,
+            &RegisteredTaskCodes::NONE,
             CallerRowArg {
                 cells: vec![SqlTextValue::Null],
             },
@@ -461,6 +499,45 @@ mod tests {
                 error: CallerStepRefusal::IdMintRefused {
                     message: "rerun identity mint failed: entropy source exceeded 62 bits"
                         .to_owned()
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn an_undeclared_retry_code_is_refused_with_the_task_and_the_code() {
+        assert_eq!(
+            preparation_record(RerunPreparation::RetryCodeNotDeclared {
+                task_name: "charge".to_owned(),
+                code: "CARD_DECLINED".to_owned(),
+            }),
+            RerunPreparationRecord::Refused {
+                error: CallerStepRefusal::RetryCodeNotDeclared {
+                    message: RerunError::RetryCodeNotDeclared {
+                        task_name: "charge".to_owned(),
+                        code: "CARD_DECLINED".to_owned(),
+                    }
+                    .to_string(),
+                    task_name: "charge".to_owned(),
+                    retry_code: "CARD_DECLINED".to_owned(),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn an_unlisted_task_is_refused_with_its_name() {
+        assert_eq!(
+            preparation_record(RerunPreparation::TaskNotRegistered {
+                task_name: "charge".to_owned(),
+            }),
+            RerunPreparationRecord::Refused {
+                error: CallerStepRefusal::TaskNotRegistered {
+                    message: RerunError::TaskNotRegistered {
+                        task_name: "charge".to_owned(),
+                    }
+                    .to_string(),
+                    task_name: "charge".to_owned(),
                 }
             }
         );

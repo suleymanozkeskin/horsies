@@ -33,7 +33,7 @@ const POLICY: RerunPolicy = {
 
 /** The rerun area of a handle of `databaseUrl`, with no active span. */
 function areaOf(handle: CoreHandle): RerunArea {
-  return createRerunArea({ coreHandle: () => handle, activeCarrier: () => NO_ACTIVE_CARRIER });
+  return createRerunArea({ coreHandle: () => handle, activeCarrier: () => NO_ACTIVE_CARRIER, registeredCodes: () => ({ tasks: [] }) });
 }
 
 /** The task id of a canonical UUID text. */

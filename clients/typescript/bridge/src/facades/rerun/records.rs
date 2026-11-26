@@ -250,6 +250,16 @@ pub enum AppRerunFailure {
     /// The family check could not read the family row. Nothing is read or
     /// written.
     FamilyCheckFailed { message: String, cause: CauseRecord },
+    /// The stored retry list of the source names a custom code that the
+    /// task does not declare. Nothing is written.
+    RetryCodeNotDeclared {
+        message: String,
+        task_name: String,
+        retry_code: String,
+    },
+    /// The stored retry list of the source names a custom code, and the app
+    /// does not list the task. Nothing is written.
+    TaskNotRegistered { message: String, task_name: String },
     /// A row or stored data broke the rerun's contract. Nothing committed.
     ContractViolation { message: String },
 }
@@ -281,6 +291,16 @@ pub fn app_failure(error: RerunError) -> AppRerunFailure {
             stored: unknown.stored,
         },
         RerunError::FamilyCheckFailed(failure) => family_check_failed(message, failure),
+        RerunError::RetryCodeNotDeclared { task_name, code } => {
+            AppRerunFailure::RetryCodeNotDeclared {
+                message,
+                task_name,
+                retry_code: code,
+            }
+        }
+        RerunError::TaskNotRegistered { task_name } => {
+            AppRerunFailure::TaskNotRegistered { message, task_name }
+        }
         RerunError::RowDecode(_)
         | RerunError::CallerRow(_)
         | RerunError::EnqueuePreparation(_)
@@ -367,6 +387,19 @@ pub enum CallerStepRefusal {
     UnknownStoredFamily {
         message: String,
         stored: String,
+    },
+    /// The stored retry list of the source names a custom code that the
+    /// task does not declare.
+    RetryCodeNotDeclared {
+        message: String,
+        task_name: String,
+        retry_code: String,
+    },
+    /// The stored retry list of the source names a custom code, and the app
+    /// does not list the task.
+    TaskNotRegistered {
+        message: String,
+        task_name: String,
     },
     /// A row that the caller's driver read does not fit its statement.
     ContractViolation {
@@ -699,6 +732,38 @@ mod tests {
             app_failure(serialization),
             AppRerunFailure::ContractViolation { .. }
         ));
+    }
+
+    #[test]
+    fn an_undeclared_retry_code_names_the_task_and_the_code() {
+        let error = RerunError::RetryCodeNotDeclared {
+            task_name: "charge".to_owned(),
+            code: "CARD_DECLINED".to_owned(),
+        };
+        let text = error.to_string();
+        assert_eq!(
+            app_failure(error),
+            AppRerunFailure::RetryCodeNotDeclared {
+                message: text,
+                task_name: "charge".to_owned(),
+                retry_code: "CARD_DECLINED".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_unlisted_task_names_the_task() {
+        let error = RerunError::TaskNotRegistered {
+            task_name: "charge".to_owned(),
+        };
+        let text = error.to_string();
+        assert_eq!(
+            app_failure(error),
+            AppRerunFailure::TaskNotRegistered {
+                message: text,
+                task_name: "charge".to_owned(),
+            }
+        );
     }
 
     #[test]

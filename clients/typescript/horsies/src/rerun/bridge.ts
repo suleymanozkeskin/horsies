@@ -11,6 +11,7 @@ import type {
   CallerStatementRecord,
   CallerStepRefusal,
   PreparedRerunWrite,
+  RegisteredTaskCodesArg,
   RerunOutcomeRecord,
   RerunPreparationRecord,
   WriteDecodeRecord,
@@ -35,11 +36,21 @@ export type BridgePreparation =
 /** The rerun functions of the addon, with each envelope read. */
 export interface RerunBridge {
   /** The rerun in a transaction of `handle`; in a seat isolate, `seatRelayFull` when the relay sent nothing. */
-  rerunTask(handle: CoreHandle, request: RerunRequest, trace: TraceArgument): Promise<AppRerunAnswer | SeatRelayFullOutcome>;
+  rerunTask(
+    handle: CoreHandle,
+    request: RerunRequest,
+    trace: TraceArgument,
+    codes: RegisteredTaskCodesArg,
+  ): Promise<AppRerunAnswer | SeatRelayFullOutcome>;
   /** The source read as a caller statement. */
   readStatement(request: RerunRequest): CallerStatementRecord;
   /** What the source read's row decides. */
-  prepareWrite(request: RerunRequest, trace: TraceArgument, readRow: CallerRowArg): BridgePreparation;
+  prepareWrite(
+    request: RerunRequest,
+    trace: TraceArgument,
+    readRow: CallerRowArg,
+    codes: RegisteredTaskCodesArg,
+  ): BridgePreparation;
 }
 
 /**
@@ -48,21 +59,35 @@ export interface RerunBridge {
  * call.
  */
 export const addonRerunBridge: RerunBridge = {
-  rerunTask: async (handle: CoreHandle, request: RerunRequest, trace: TraceArgument): Promise<AppRerunAnswer> => {
+  rerunTask: async (
+    handle: CoreHandle,
+    request: RerunRequest,
+    trace: TraceArgument,
+    codes: RegisteredTaskCodesArg,
+  ): Promise<AppRerunAnswer> => {
     const addon = rerunAddon();
 
-    return nativeValueAsync("rerunTask", () => addon.rerunTask(handle.native, request.command, request.policy, trace));
+    return nativeValueAsync("rerunTask", () =>
+      addon.rerunTask(handle.native, request.command, request.policy, trace, codes),
+    );
   },
   readStatement: (request: RerunRequest): CallerStatementRecord => {
     const addon = rerunAddon();
 
     return nativeValue("rerunReadStatement", () => addon.rerunReadStatement(request.command, request.policy));
   },
-  prepareWrite: (request: RerunRequest, trace: TraceArgument, readRow: CallerRowArg): BridgePreparation => {
+  prepareWrite: (
+    request: RerunRequest,
+    trace: TraceArgument,
+    readRow: CallerRowArg,
+    codes: RegisteredTaskCodesArg,
+  ): BridgePreparation => {
     const addon = rerunAddon();
 
     return bridgePreparation(
-      nativeValue("prepareRerunWrite", () => addon.prepareRerunWrite(request.command, request.policy, trace, readRow)),
+      nativeValue("prepareRerunWrite", () =>
+        addon.prepareRerunWrite(request.command, request.policy, trace, readRow, codes),
+      ),
     );
   },
 };

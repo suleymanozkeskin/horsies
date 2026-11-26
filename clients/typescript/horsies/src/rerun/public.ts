@@ -38,10 +38,12 @@ export type {
   RerunNoOpenTransaction,
   RerunRequestRefused,
   RerunResultNotText,
+  RerunRetryCodeNotDeclared,
   RerunStatementFailed,
   RerunStatementOutcome,
   RerunStepRefused,
   RerunStoredFamily,
+  RerunTaskNotRegistered,
   RerunUnknownStoredFamily,
 } from "./errors.ts";
 

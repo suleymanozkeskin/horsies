@@ -67,6 +67,30 @@ export interface RerunCallerKeyRefused {
   readonly message: string;
 }
 
+/**
+ * The stored retry list of the source names the custom code `retryCode`, and the app's contract for the task `taskName`
+ * does not declare it: the new task would not retry on it. Nothing is written. The same call meets it again until the
+ * contract declares the code in `errorCodes`.
+ */
+export interface RerunRetryCodeNotDeclared {
+  readonly code: typeof RerunErrorCode.RETRY_CODE_NOT_DECLARED;
+  readonly retryable: false;
+  readonly message: string;
+  readonly taskName: string;
+  readonly retryCode: string;
+}
+
+/**
+ * The stored retry list of the source names a custom code, and the app does not list the task `taskName`, so the code
+ * cannot be checked. Nothing is written. The same call meets it again until the app lists the task's contract.
+ */
+export interface RerunTaskNotRegistered {
+  readonly code: typeof RerunErrorCode.TASK_NOT_REGISTERED;
+  readonly retryable: false;
+  readonly message: string;
+  readonly taskName: string;
+}
+
 /** The task id source refused to mint the new task's id. Nothing is written. */
 export interface RerunIdMintRefused {
   readonly code: typeof RerunErrorCode.ID_MINT_REFUSED;
@@ -158,6 +182,8 @@ export type RerunStepRefused =
   | RerunIdMintRefused
   | RerunClientFamilyMismatch
   | RerunUnknownStoredFamily
+  | RerunRetryCodeNotDeclared
+  | RerunTaskNotRegistered
   | RerunContractViolation;
 
 /**

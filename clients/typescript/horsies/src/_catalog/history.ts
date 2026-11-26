@@ -23,6 +23,8 @@ export const RerunErrorCode = {
   DRIVER_FAILED: "DRIVER_FAILED",
   NO_OPEN_TRANSACTION: "NO_OPEN_TRANSACTION",
   RESULT_NOT_TEXT: "RESULT_NOT_TEXT",
+  RETRY_CODE_NOT_DECLARED: "RETRY_CODE_NOT_DECLARED",
+  TASK_NOT_REGISTERED: "TASK_NOT_REGISTERED",
 } as const;
 
 export type RerunErrorCode = (typeof RerunErrorCode)[keyof typeof RerunErrorCode];
