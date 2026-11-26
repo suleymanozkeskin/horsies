@@ -37,10 +37,11 @@ import {
   type ListRefusal,
 } from "./contract-list.ts";
 import { type AcceptedConfig, checkConfigWithCore, checkTaskWithCore, type CoreChecks } from "./core-checks.ts";
-import type { CoreAccess, ProducerCore } from "./core-access.ts";
+import type { AddonCore, CoreAccess, ProducerCore } from "./core-access.ts";
 import { NO_OP_OBSERVER } from "./observers.ts";
 import type { Refusal } from "./refusal.ts";
 import { RefusalSink } from "./refusals.ts";
+import { NO_TELEMETRY } from "./telemetry.ts";
 import { initialSuppression, type ProcessStart, processStart, SuppressionState } from "./suppression.ts";
 
 /** The config of `Horsies.create`: the app config and the contract list. */
@@ -59,8 +60,8 @@ export interface CreateEnvironment {
   readonly processStart: ProcessStart;
   /** The core's check functions. Called on a main thread only; the first call loads the addon. */
   readonly coreChecks: () => CoreChecks;
-  /** The core operations of the app's sends and reads, on a main thread. */
-  readonly producer: (accepted: AcceptedConfig, options: ReadonlyMap<string, NativeTaskOptions>) => ProducerCore;
+  /** The core of the app on a main thread: the operations of its sends and reads, and its core handle. */
+  readonly addonCore: (accepted: AcceptedConfig, options: ReadonlyMap<string, NativeTaskOptions>) => AddonCore;
 }
 
 /** The facts of this process. Effects: reads the thread, the environment and the arguments. */
@@ -70,7 +71,7 @@ export function processEnvironment(): CreateEnvironment {
     environment: (name) => process.env[name],
     processStart: processStart(),
     coreChecks: () => ({ checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions }),
-    producer: addonProducer,
+    addonCore: addonCoreOf,
   };
 }
 
@@ -103,7 +104,7 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
     return refused(refusals);
   }
 
-  const core: CoreAccess = { kind: "addon", producer: environment.producer(accepted.value, options.options) };
+  const core: CoreAccess = { kind: "addon", ...environment.addonCore(accepted.value, options.options) };
 
   return ok(contextOf(parsed.value, list.entries, core, environment));
 }
@@ -166,11 +167,15 @@ function contextOf(
       now: () => Temporal.Now.instant(),
     },
     implementations: new Map(),
+    telemetry: NO_TELEMETRY,
   };
 }
 
-/** The core operations of an app on a main thread: a core handle of the app's manifest, and its send rules. */
-function addonProducer(accepted: AcceptedConfig, options: ReadonlyMap<string, NativeTaskOptions>): ProducerCore {
+/**
+ * The core of an app on a main thread: one core handle of the app's manifest, and the operations of its sends and
+ * reads on it, with its send rules. Builds the handle; starts nothing.
+ */
+function addonCoreOf(accepted: AcceptedConfig, options: ReadonlyMap<string, NativeTaskOptions>): AddonCore {
   const handle = buildCoreHandle(accepted.manifestJson, "PRODUCER").withInstallCoverage(accepted.installCoverage);
 
   const producer: ProducerCore = {
@@ -181,7 +186,7 @@ function addonProducer(accepted: AcceptedConfig, options: ReadonlyMap<string, Na
     processRole: async () => processRole(),
   };
 
-  return Object.freeze(producer);
+  return Object.freeze({ producer: Object.freeze(producer), handle });
 }
 
 function optionsOf(options: ReadonlyMap<string, NativeTaskOptions>, taskName: string): NativeTaskOptions {

@@ -20,6 +20,8 @@ import {
 } from "./app/create.ts";
 import { registerImplementation } from "./app/implement.ts";
 import { recordAppContext } from "./app/internals.ts";
+import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
+import type { StateKey } from "./child/state.ts";
 
 /** The constructor of an app, for `createHorsies` in this module. */
 let constructApp: (context: AppContext) => Horsies;
@@ -60,6 +62,25 @@ export class Horsies {
     registerImplementation(this.#context, implementation);
 
     return implementation;
+  }
+
+  /**
+   * Add a provider of app state and give its key; `runtime.state(key)` gives the value. Calls nothing: the factory
+   * runs in each task child, before the child reports ready, in registration order and before the `onChildStart`
+   * hooks, for at most 10 s. A factory that throws, rejects or runs past its bound stops the worker with
+   * `CHILD_HOOK_FAILED` (exit 173). A call after `cli.run` serves a child is a defect: `ClientDefect`.
+   */
+  provide<T>(factory: ProviderFactory<T>): StateKey<Awaited<T>> {
+    return provideFor(this.#context, factory);
+  }
+
+  /**
+   * Run `hook` once in each task child, a replacement child included, after the providers and before the child
+   * reports ready, for at most 10 s. A hook that throws, rejects or runs past its bound stops the worker with
+   * `CHILD_HOOK_FAILED` (exit 173). A call after `cli.run` serves a child is a defect: `ClientDefect`.
+   */
+  onChildStart(hook: ChildStartHook): void {
+    onChildStartFor(this.#context, hook);
   }
 
   /** Send a task: its handle, or the send error. A delay is the only start option. */

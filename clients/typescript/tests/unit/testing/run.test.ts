@@ -1,0 +1,169 @@
+// The test helpers: `TaskRuntime.forTest` and `implementation.run` with no worker, no database and no addon; the app
+// members `provide` and `onChildStart` of the hub.
+
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+import { servedMembers } from "../../../horsies/src/child/app-members.ts";
+import { AttemptNumber } from "../../../horsies/src/child/attempt.ts";
+import { TaskRuntime } from "../../../horsies/src/child/runtime.ts";
+import { taskIdFromCore } from "../../../horsies/src/contract/ids.ts";
+import { defineTask } from "../../../horsies/src/contract/public.ts";
+import { h } from "../../../horsies/src/wire/public.ts";
+import { contextOf, testApp } from "../worker/support.ts";
+
+const TASK_ID = taskIdFromCore("0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b", "test");
+
+const add = defineTask({ name: "ping", input: { n: h.int() }, output: h.int() });
+
+const charge = defineTask({
+  name: "charge",
+  input: { amount: h.int() },
+  output: h.null(),
+  errors: ["CARD_DECLINED", "BANK_DOWN"],
+  execution: "SHARED_ASYNC",
+  timeoutMs: 5_000,
+  cancelGraceMs: 1_000,
+});
+
+class CardDeclined extends Error {
+  override readonly name = "CardDeclined";
+}
+
+function attempt(value: number): AttemptNumber {
+  const parsed = AttemptNumber.parse(value);
+
+  return parsed.ok ? parsed.value : assert.fail(parsed.error.reason);
+}
+
+function runtime(): TaskRuntime {
+  return TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(3) });
+}
+
+describe("TaskRuntime.forTest", () => {
+  test("the task id, the fencing token, a signal that never fires, and spawn that runs its work", async () => {
+    const forTest = runtime();
+    const spawned = forTest.spawn("work", async () => "done");
+
+    assert.equal(forTest.taskId, TASK_ID);
+    assert.deepEqual(forTest.fencingToken, { taskId: TASK_ID, value: 3 });
+    assert.equal(forTest.signal.aborted, false);
+    assert.deepEqual(forTest.cancelState(), { kind: "notRequested" });
+    assert.equal(await (spawned.ok ? spawned.value : Promise.reject(new Error("refused"))), "done");
+  });
+
+  test("state gives the value of each entry; a key with no entry is a defect", () => {
+    const app = testApp();
+    const pool = app.provide(() => ({ size: 4 }));
+    const region = app.provide(async () => "eu-1");
+    const other = app.provide(() => 1);
+    const forTest = TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(1), state: [[pool, { size: 4 }], [region, "eu-1"]] });
+
+    assert.deepEqual(forTest.state(pool), { size: 4 });
+    assert.equal(forTest.state(region), "eu-1");
+    assert.throws(() => forTest.state(other), /belongs to another app/u);
+  });
+});
+
+describe("implementation.run", () => {
+  test("a value is checked with the output type and given as a task read gives it", async () => {
+    const app = testApp();
+    const implementation = app.implement(add, ({ n }) => add.ok(n + 1));
+
+    assert.deepEqual(await implementation.run({ n: 41 }, runtime()), { kind: "succeeded", value: 42 });
+  });
+
+  test("a task error keeps its code, message and data", async () => {
+    const app = testApp();
+    const implementation = app.implement(charge, async () => charge.err({ code: "BANK_DOWN", message: "retry later", data: { wait: 30 } }));
+
+    assert.deepEqual(await implementation.run({ amount: 5 }, runtime()), {
+      kind: "failed",
+      error: {
+        code: { kind: "user", code: "BANK_DOWN" },
+        message: "retry later",
+        data: { wait: 30 },
+        exception: null,
+        subWorkflow: null,
+      },
+    });
+  });
+
+  test("a thrown error of a mapped class is stored with the mapped code and its record", async () => {
+    const app = testApp();
+
+    const implementation = app.implement(
+      charge,
+      async () => {
+        throw new CardDeclined("declined by the bank");
+      },
+      { exceptions: [[CardDeclined, "CARD_DECLINED"]] },
+    );
+
+    const outcome = await implementation.run({ amount: 5 }, runtime());
+
+    assert.equal(outcome.kind, "failed");
+
+    const error = outcome.kind === "failed" ? outcome.error : assert.fail("the run failed");
+
+    assert.deepEqual(error.code, { kind: "user", code: "CARD_DECLINED" });
+    assert.equal(error.message, "Unhandled exception in task charge: CardDeclined: declined by the bank");
+    assert.deepEqual(error.data, { exception_type: "CardDeclined" });
+    assert.equal(error.exception?.type, "CardDeclined");
+  });
+
+  test("an input that does not encode is WORKER_SERIALIZATION_ERROR, and the body does not run", async () => {
+    let calls = 0;
+    const app = testApp();
+
+    const implementation = app.implement(add, ({ n }) => {
+      calls += 1;
+
+      return add.ok(n);
+    });
+    // SAFETY: the test gives an input outside the parameter type on purpose: the encode refuses it.
+
+    const outcome = await implementation.run({ n: "secret-text" } as never, runtime());
+
+    assert.equal(calls, 0);
+    assert.deepEqual(outcome.kind === "failed" ? outcome.error.code : undefined, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
+    assert.doesNotMatch(JSON.stringify(outcome), /secret-text/u);
+  });
+
+  test("an output that does not read back is WORKER_SERIALIZATION_ERROR", async () => {
+    const app = testApp();
+    // SAFETY: the body returns a value outside the output type on purpose: the read-back refuses it.
+    const implementation = app.implement(add, () => add.ok("not an int" as never));
+    const outcome = await implementation.run({ n: 1 }, runtime());
+
+    assert.deepEqual(outcome.kind === "failed" ? outcome.error.code : undefined, { kind: "library", code: "WORKER_SERIALIZATION_ERROR" });
+    assert.match(outcome.kind === "failed" ? (outcome.error.message ?? "") : "", /^task returned a value of type ping\.output/u);
+  });
+});
+
+describe("the child members of the app hub", () => {
+  test("provide returns a key and calls nothing; onChildStart keeps its hook; both keep their order", () => {
+    const app = testApp();
+    let calls = 0;
+
+    const key = app.provide(function openPool() {
+      calls += 1;
+
+      return 1;
+    });
+
+    app.onChildStart(function warmCache() {
+      calls += 1;
+    });
+
+    const members = servedMembers(contextOf(app));
+
+    assert.equal(calls, 0);
+    assert.equal(key.name, "provide #1 openPool");
+    assert.deepEqual(
+      members.hooks.map((hook) => hook.name),
+      ["onChildStart #1 warmCache"],
+    );
+    assert.throws(() => app.provide(() => 2), /before cli\.run serves the child/u);
+  });
+});
