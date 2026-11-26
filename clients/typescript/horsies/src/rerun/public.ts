@@ -52,3 +52,7 @@ export type {
   CallerType,
   SqlText,
 } from "./caller.ts";
+
+export type { CoreFailure } from "../_catalog/error_detail.ts";
+
+export type { TaskAbsenceReason } from "../_catalog/history.ts";

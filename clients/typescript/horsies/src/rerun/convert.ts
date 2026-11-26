@@ -3,6 +3,7 @@
 
 import type { CoreFailure } from "../_catalog/error_detail.ts";
 import { unreachable } from "../native/call/never.ts";
+import { coreFailure } from "../native/facades/catalog-record.ts";
 import type {
   AppRerunFailure,
   CallerRowArg,
@@ -11,7 +12,6 @@ import type {
   RerunOutcomeRecord,
   SqlTextValue,
 } from "../native/facades/rerun.ts";
-import type { CauseRecord } from "../native/values/records.ts";
 import type { CallerRow, CallerStatement, SqlText } from "./caller.ts";
 import type { RerunError, RerunStepRefused } from "./errors.ts";
 import type { RerunOutcome } from "./types.ts";
@@ -72,34 +72,6 @@ export function stepRefused(refusal: CallerStepRefusal): RerunStepRefused {
       return { code: refusal.code, retryable: false, message: refusal.message };
     default:
       return unreachable(refusal);
-  }
-}
-
-/** The public cause of a cause record. Pure. */
-function coreFailure(cause: CauseRecord): CoreFailure {
-  switch (cause.kind) {
-    case "server":
-      return {
-        kind: "coreFailure",
-        failure: "server",
-        subject: cause.subject,
-        message: cause.message,
-        retryable: cause.retryable,
-        sqlstate: cause.sqlstate,
-      };
-    case "connection":
-    case "preconditionFailed":
-      return {
-        kind: "coreFailure",
-        failure: cause.kind,
-        subject: cause.subject,
-        message: cause.message,
-        retryable: cause.retryable,
-      };
-    case "contractViolation":
-      return { kind: "coreFailure", failure: "contractViolation", subject: cause.subject, message: cause.message };
-    default:
-      return unreachable(cause);
   }
 }
 

@@ -95,7 +95,7 @@ function clientCause(className: ClientClassName, text: string): CoreCause {
 }
 
 /** The core failure of a cause record. Pure. */
-function coreFailure(cause: CauseRecord): CoreFailure {
+export function coreFailure(cause: CauseRecord): CoreFailure {
   switch (cause.kind) {
     case "server":
       return {
