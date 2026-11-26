@@ -1,12 +1,13 @@
 // The public API gate of the published entry points (`horsies`, `horsies/zod`). Run from `clients/typescript/`:
 //
-//   bun tests/public-api/run.ts check   compares the API report of each entry point with the committed report, and
-//                                       runs the no-`any` check with the `unknown` allow list
+//   bun tests/public-api/run.ts check   compares the API report of each entry point with the committed report,
+//                                       refuses each type that a public declaration names and the entry point does
+//                                       not export, and runs the no-`any` check with the `unknown` allow list
 //   bun tests/public-api/run.ts write   writes the API report files of `report/`
 //
-// Exit status: 0 when the check passes or the files are written; 1 when a report differs or a top type is refused;
-// 2 when a tool fails or the command is unknown. Needs `node` on PATH (API Extractor runs on Node). The work files are
-// in a new folder of the system's temporary folder, removed at the end.
+// Exit status: 0 when the check passes or the files are written; 1 when a report differs, a type is not exported or
+// a top type is refused; 2 when a tool fails or the command is unknown. The work files are in a new folder of the
+// system's temporary folder, removed at the end.
 
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import { allowListOf, allowListRefusedText, judgeTopTypes, topTypesPass, type TopTypeVerdict } from "./allow-list.ts";
 import { type BuiltPackage, buildPackage, manifestRefusedText } from "./package.ts";
-import { apiReport, compareReport, REPORT_DIR, reportFailedText, reportFileName } from "./report.ts";
+import { apiReport, compareReport, type EntryReport, REPORT_DIR, reportFailedText, reportFileName } from "./report.ts";
 import { anyPlaces, declarationProgram, type SurfaceWalkFailed, type TopTypePlace, unknownPlaces } from "./surface.ts";
 import { toolFailedText } from "./tools.ts";
 
@@ -58,9 +59,9 @@ function built(workFolder: string): BuiltPackage | "toolFailed" {
   return "toolFailed";
 }
 
-/** The report text of each entry point, by file name, or `toolFailed` (its message is printed). */
-function reports(builtPackage: BuiltPackage, workFolder: string): ReadonlyMap<string, string> | "toolFailed" {
-  const texts = new Map<string, string>();
+/** The report of each entry point, by file name, or `toolFailed` (its message is printed). */
+function reports(builtPackage: BuiltPackage, workFolder: string): ReadonlyMap<string, EntryReport> | "toolFailed" {
+  const texts = new Map<string, EntryReport>();
   const reportsFolder = join(workFolder, "reports");
 
   mkdirSync(reportsFolder);
@@ -85,9 +86,9 @@ function committedReportFiles(): readonly string[] {
 }
 
 /** Writes each report file and removes each committed report file that no entry point has. */
-function writeReports(texts: ReadonlyMap<string, string>): Verdict {
-  for (const [fileName, text] of texts) {
-    writeFileSync(join(REPORT_DIR, fileName), text);
+function writeReports(texts: ReadonlyMap<string, EntryReport>): Verdict {
+  for (const [fileName, report] of texts) {
+    writeFileSync(join(REPORT_DIR, fileName), report.text);
     console.log(`wrote tests/public-api/report/${fileName}`);
   }
 
@@ -111,12 +112,13 @@ function shownLines(mark: "-" | "+", lines: readonly string[]): readonly string[
 }
 
 /** Compares each report with its committed file; prints each difference and the command that writes them. */
-function compareReports(texts: ReadonlyMap<string, string>): Verdict {
+function compareReports(texts: ReadonlyMap<string, EntryReport>): Verdict {
   const committed = new Set(committedReportFiles());
   const problems: string[] = [];
 
-  for (const [fileName, text] of texts) {
-    const comparison = compareReport(committed.has(fileName) ? readFileSync(join(REPORT_DIR, fileName), "utf8") : undefined, text);
+  for (const [fileName, report] of texts) {
+    const committedText = committed.has(fileName) ? readFileSync(join(REPORT_DIR, fileName), "utf8") : undefined;
+    const comparison = compareReport(committedText, report.text);
 
     switch (comparison.state) {
       case "same":
@@ -149,6 +151,19 @@ function compareReports(texts: ReadonlyMap<string, string>): Verdict {
   console.error(`A change of the public API needs the owner's word. To write the reports of this tree: ${REGENERATE_COMMAND}`);
 
   return "refused";
+}
+
+/** Each type that a public declaration names and its entry point does not export: each one is refused. */
+function checkExported(texts: ReadonlyMap<string, EntryReport>): Verdict {
+  const forgotten = [...texts].flatMap(([fileName, report]) =>
+    report.forgotten.map((item) => `report/${fileName}: ${item.file}:${item.line} ${item.text}`),
+  );
+
+  for (const line of forgotten) {
+    console.error(`not exported (export it from the entry point, or name an exported type): ${line}`);
+  }
+
+  return forgotten.length === 0 ? "passed" : "refused";
 }
 
 function surfaceWalkFailedText(failure: SurfaceWalkFailed): string {
@@ -237,7 +252,7 @@ function runCommand(command: Command, workFolder: string): Verdict {
     case "write":
       return writeReports(texts);
     case "check":
-      return worse(compareReports(texts), checkTopTypes(builtPackage));
+      return worse(worse(compareReports(texts), checkExported(texts)), checkTopTypes(builtPackage));
   }
 }
 
