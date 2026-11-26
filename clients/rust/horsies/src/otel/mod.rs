@@ -51,7 +51,7 @@
 //! `horsies.workflow.root_id` (the top-level workflow of its tree), as the
 //! start read them. The task id, the task name and the attempt are fields of
 //! the `tracing` span, so each log record of the body carries them. Its
-//! status is OK when the body returned a value, and ERROR with `error.type`
+//! status stays unset when the body returned a value, and is ERROR with `error.type`
 //! (the error code) when it returned an error, panicked
 //! (`UNHANDLED_EXCEPTION`) or ran past its deadline (`TASK_TIMEOUT`).
 //!

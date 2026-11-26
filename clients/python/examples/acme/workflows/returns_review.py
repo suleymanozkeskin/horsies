@@ -9,7 +9,7 @@ PAUSED, no further node is enqueued, and it stays that way until someone
 resumes or cancels it from the dashboard.
 
 Resuming runs `restock_or_writeoff`, which is reachable on the damaged branch
-only because its node declares `allow_failed_deps=True`. It receives the
+only because its node declares `allow_failed_dependencies=True`. It receives the
 inspection's `TaskOutcome`, sees the error, and writes the item off. Cancelling
 instead leaves the return open — which is also a legitimate answer, and the
 reason the decision is a person's.
@@ -71,7 +71,7 @@ class ReturnsReview(WorkflowDefinition[RestockDecision]):
             kwargs={'return_id': return_id},
             waits_for=[inspect],
             args_from={'inspection': inspect},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
             node_id='restock_or_writeoff',
         )
         return app.workflow(

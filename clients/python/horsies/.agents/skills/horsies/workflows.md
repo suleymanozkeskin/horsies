@@ -117,10 +117,10 @@ class TaskNode(Generic[OkT]):
     kwargs: Mapping[str, Any] = {}                                 # static task kwargs (JSON-serializable)
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = [] # dependencies
     args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = {}  # inject upstream TaskOutcome
-    workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
+    workflow_context_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
     queue: str | None = None                  # override @task decorator queue
     priority: int | None = None               # 1 (highest)..100 (lowest); outside raises HRS-034 at build
-    allow_failed_deps: bool = False
+    allow_failed_dependencies: bool = False
     join: Literal['all', 'any', 'quorum'] = 'all'
     min_success: int | None = None            # required when join='quorum'
     good_until: datetime | None = None        # task expiry deadline; naive raises HRS-035 at build
@@ -184,7 +184,7 @@ def summarize_rows(
 ```
 
 - The key's type argument (`list[int]`) is not checked against the node. Keep it equal to the node's `TaskNode[T]`.
-- The node must be in `workflow_ctx_from`. A missing result raises `KeyError`.
+- The node must be in `workflow_context_from`. A missing result raises `KeyError`.
 - `NodeKey("fetch")` for an id that no node has also raises `KeyError`. Keep the id in one shared constant.
 
 ## SubWorkflowNode
@@ -197,10 +197,10 @@ class SubWorkflowNode(Generic[OkT]):
     kwargs: Mapping[str, Any] = {}                 # forwarded to build_with()
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = []
     args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = {}
-    workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
+    workflow_context_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
     join: Literal['all', 'any', 'quorum'] = 'all'
     min_success: int | None = None
-    allow_failed_deps: bool = False
+    allow_failed_dependencies: bool = False
     node_id: str | None = None
     index: int | None = None
 ```
@@ -289,7 +289,7 @@ The core compares the start command of the start with the stored one:
 - A run started before this release (no stored start command): `Ok(handle)`, no compare.
 - A row that retention deleted: a new workflow starts.
 
-The start command is the workflow name, `definition_key`, `on_error`, output, success policy, and each top-level node: index, `node_id`, task name, kwargs (byte for byte), queue, priority, dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join, `min_success`, task options (with `good_until`), retention class, sub-workflow facts. Not in it: `workflow_id`, `sent_at`, trace, `resend_on_transient_error`, pre-built child workflows. A value that changes per call (a `good_until` from now, a timestamp kwarg, a changed spec after a deploy) makes each repeat a conflict. `retry_start` rebuilds the same spec, so a committed first attempt comes back as the existing handle. See `/horsies/guides/start-workflow-once/`.
+The start command is the workflow name, `definition_key`, `on_error`, output, success policy, and each top-level node: index, `node_id`, task name, kwargs (byte for byte), queue, priority, dependencies, `args_from`, `workflow_context_from`, `allow_failed_dependencies`, join, `min_success`, task options (with `good_until`), retention class, sub-workflow facts. Not in it: `workflow_id`, `sent_at`, trace, `resend_on_transient_error`, pre-built child workflows. A value that changes per call (a `good_until` from now, a timestamp kwarg, a changed spec after a deploy) makes each repeat a conflict. `retry_start` rebuilds the same spec, so a committed first attempt comes back as the existing handle. See `/horsies/guides/start-workflow-once/`.
 
 ### Auto-retry
 
@@ -482,9 +482,9 @@ class WorkflowTaskInfo:
 ### `OnError.FAIL` (default)
 
 1. Task fails → error stored, workflow stays `RUNNING`.
-2. DAG continues: dependents without `allow_failed_deps` are SKIPPED; other branches run.
+2. DAG continues: dependents without `allow_failed_dependencies` are SKIPPED; other branches run.
 3. All tasks terminal → workflow becomes `FAILED`.
-4. Recovery handlers with `allow_failed_deps=True` can run before finalization.
+4. Recovery handlers with `allow_failed_dependencies=True` can run before finalization.
 
 ### `OnError.PAUSE`
 
@@ -520,7 +520,7 @@ policy = SuccessPolicy(
   - For a `SKIPPED` output node, `get()` returns `Ok(Failed(task_error))` with `WORKFLOW_OUTPUT_SKIPPED`. The workflow succeeded and has no output; no stored data is corrupt. `data` holds `workflow_id`, `output_node_id`, `output_task_index` and `output_task_name`.
   - For a `FAILED` output node, `get()` returns `Ok(Failed(task_error))` with that node's error.
 - A node is `COMPLETED` only when its result is a success. A `SubWorkflowNode` of a child that is `COMPLETED` with a `Failed` output is `FAILED` and holds the child's error.
-  - `on_error` runs. A dependent with `allow_failed_deps=False` is `SKIPPED`; with `allow_failed_deps=True` it receives `Failed(error)`. `join="any"` and `join="quorum"` do not count the node. A `SuccessCase` that requires the node is not met.
+  - `on_error` runs. A dependent with `allow_failed_dependencies=False` is `SKIPPED`; with `allow_failed_dependencies=True` it receives `Failed(error)`. `join="any"` and `join="quorum"` do not count the node. A `SuccessCase` that requires the node is not met.
   - `result_for()` returns `Ok(Failed(error))`. `results()` and `tasks()` hold `Failed(error)`. Without a success policy the parent is `FAILED`, and its `get()` returns `Ok(Failed(error))`.
   - `SubWorkflowSummary.status` is `COMPLETED` on this `FAILED` node. `SubWorkflowSummary.output` is `None`.
   - A parent can complete when the node is in `optional` or in no case. `OnError.FAIL` stores the node's error on the workflow, and the workflow stays `RUNNING`; the success case then decides. A `COMPLETED` parent keeps that error in its error column, as for a failed `TaskNode`. `OnError.PAUSE` pauses the parent.
@@ -545,11 +545,11 @@ class WorkflowContext(BaseModel):
 ```
 
 **Requirements:**
-1. `TaskNode.workflow_ctx_from` must list the upstream nodes to include.
-2. Every node in `workflow_ctx_from` must also be in `waits_for` (HRS-009).
-3. If `workflow_ctx_from` is set but param is missing: HRS-010.
+1. `TaskNode.workflow_context_from` must list the upstream nodes to include.
+2. Every node in `workflow_context_from` must also be in `waits_for` (HRS-009).
+3. If `workflow_context_from` is set but param is missing: HRS-010.
 
-**Scope:** Only nodes in `workflow_ctx_from` are accessible. Others raise `KeyError`.
+**Scope:** Only nodes in `workflow_context_from` are accessible. Others raise `KeyError`.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -579,7 +579,7 @@ class WorkflowMeta:
 ```
 
 Auto-injected when task declares `workflow_meta: WorkflowMeta | None = None`.
-Does **not** require `workflow_ctx_from`.
+Does **not** require `workflow_context_from`.
 
 ## NodeKey
 
@@ -626,12 +626,12 @@ A recovery repair that raises rolls back, and the next reaper pass runs it again
 
 ### SKIPPED cascade
 
-When a task becomes SKIPPED, all dependents are SKIPPED too (unless `allow_failed_deps=True`). Cascades transitively: `A→B→C→D` where A fails → B, C, D all SKIPPED. Independent branches unaffected.
+When a task becomes SKIPPED, all dependents are SKIPPED too (unless `allow_failed_dependencies=True`). Cascades transitively: `A→B→C→D` where A fails → B, C, D all SKIPPED. Independent branches unaffected.
 
-### `allow_failed_deps`
+### `allow_failed_dependencies`
 
 <!-- members: WorkflowTaskStatus subset -->
-| Upstream state | `allow_failed_deps=False` | `allow_failed_deps=True` |
+| Upstream state | `allow_failed_dependencies=False` | `allow_failed_dependencies=True` |
 |---|---|---|
 | COMPLETED | Runs normally | Runs normally |
 | FAILED | SKIPPED | Runs; receives `Failed(original_error)` |
@@ -641,7 +641,7 @@ When a task becomes SKIPPED, all dependents are SKIPPED too (unless `allow_faile
 
 | Mode | Triggers when | Skips when |
 |---|---|---|
-| `"all"` (default) | ALL deps terminal | ANY dep failed/skipped (unless `allow_failed_deps`) |
+| `"all"` (default) | ALL deps terminal | ANY dep failed/skipped (unless `allow_failed_dependencies`) |
 | `"any"` | ANY dep COMPLETED | ALL deps failed/skipped |
 | `"quorum"` | `min_success` deps COMPLETED | Threshold mathematically unreachable |
 
@@ -660,7 +660,7 @@ no-default targets (`WORKFLOW_INVALID_JOIN`).
 - Receiving function parameter must be typed `TaskOutcome[T, TaskError]`.
 - Upstream must be in `waits_for` (HRS-008). Keys must not overlap with `kwargs` (HRS-021).
 - Positional args not supported on workflow nodes (HRS-026).
-- With the defaults (`join="all"`, `allow_failed_deps=False`), a failed or skipped upstream makes the node SKIPPED. The node does not run and does not receive a `Failed`. A `Failed` arrives only with `allow_failed_deps=True`, with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
+- With the defaults (`join="all"`, `allow_failed_dependencies=False`), a failed or skipped upstream makes the node SKIPPED. The node does not run and does not receive a `Failed`. A `Failed` arrives only with `allow_failed_dependencies=True`, with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -689,8 +689,8 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | HRS-006 | `WORKFLOW_INVALID_DEPENDENCY` | `waits_for` references node not in task list |
 | HRS-007 | `WORKFLOW_CYCLE_DETECTED` | Cycle in dependency graph |
 | HRS-008 | `WORKFLOW_INVALID_ARGS_FROM` | `args_from` node not in `waits_for` |
-| HRS-009 | `WORKFLOW_INVALID_CTX_FROM` | `workflow_ctx_from` node not in `waits_for` |
-| HRS-010 | `WORKFLOW_CTX_PARAM_MISSING` | `workflow_ctx_from` set but fn lacks param |
+| HRS-009 | `WORKFLOW_INVALID_CTX_FROM` | `workflow_context_from` node not in `waits_for` |
+| HRS-010 | `WORKFLOW_CTX_PARAM_MISSING` | `workflow_context_from` set but fn lacks param |
 | HRS-011 | `WORKFLOW_INVALID_OUTPUT` | `output` node not in task list |
 | HRS-012 | `WORKFLOW_INVALID_SUCCESS_POLICY` | Policy references unknown nodes |
 | HRS-013 | `WORKFLOW_INVALID_JOIN` | `quorum` without valid `min_success` |
@@ -724,7 +724,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 - The DAG of a workflow is fixed when it starts. A `SubWorkflowNode` builds its child DAG from upstream results when the node becomes ready (`build_with()` with `args_from`).
 - A child workflow has at most depth 32 (a top-level workflow has depth 0). A deeper child is not started: its `SubWorkflowNode` fails with `SUBWORKFLOW_DEPTH_LIMIT_REACHED`, and `on_error` applies.
 - A `WorkflowSpec` holds at most 10,000 nodes; more raises HRS-038 when the spec is built. Split larger work into `SubWorkflowNode`s.
-- `workflow_ctx_from` scope is per-task, does not propagate downstream.
+- `workflow_context_from` scope is per-task, does not propagate downstream.
 - A start with an existing `workflow_id` must send the same start command; another command is `WorkflowStartCommandConflict`. Runs started before this release are not checked. The protection ends when retention deletes the workflow row.
 - WorkflowSpec and all nodes are frozen after construction. Reusing node objects across specs is safe (they are copied internally).
 - `PAUSED` is not terminal. `handle.get()` returns immediately with `Ok(Failed(task_error))` with `WORKFLOW_PAUSED`; does not wait for resume.

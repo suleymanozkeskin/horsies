@@ -18,7 +18,7 @@ const ping = defineTask({ name: "ping", input: {}, output: h.int() });
 const add = defineTask({ name: "add", input: { a: h.int(), b: h.taskOutcome(ping) }, output: h.int() });
 const maybe = defineTask({ name: "maybe", input: { first: h.taskOutcome(ping).optional() }, output: h.int() });
 
-const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", output: h.int(), params: {} }, (w) => ({
+const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", outputType: h.int(), parameters: {} }, (w) => ({
   output: w.task(ping, {}, { nodeId: "ping" }),
 }));
 
@@ -26,8 +26,8 @@ const region = defineWorkflow(
   {
     name: "region",
     definitionKey: "tests.region.v1",
-    output: h.int(),
-    params: { name: h.string(), count: h.taskOutcome(ping).optional() },
+    outputType: h.int(),
+    parameters: { name: h.string(), count: h.taskOutcome(ping).optional() },
     checkCases: [{ name: "eu" }],
   },
   (w) => ({ output: w.task(ping, {}, { nodeId: "ping" }) }),
@@ -53,7 +53,7 @@ function fakeFacts(asked: Asked = []): ConversionFacts {
 
 function textOf(build: (w: WorkflowBuilder) => BuildReturn, facts: ConversionFacts = fakeFacts()): string {
   const workflow = defineWorkflow(
-    { name: "flow", definitionKey: "tests.flow.v1", output: h.int(), params: {}, onError: "pause" },
+    { name: "flow", definitionKey: "tests.flow.v1", outputType: h.int(), parameters: {}, onError: "pause" },
     // SAFETY: each build of these tests returns an output node of `h.int()`; the checks compare it at run time.
     build as never,
   );
@@ -85,8 +85,8 @@ describe("specDataTextOf", () => {
         taskNode(
           0,
           "ping",
-          '"task_name":"ping","input_json":"{}","dependencies":[],"args_from":{},"workflow_ctx_from":[],' +
-            '"allow_failed_deps":false,"join":{"kind":"ALL"}',
+          '"task_name":"ping","input_json":"{}","dependencies":[],"args_from":{},"workflow_context_from":[],' +
+            '"allow_failed_dependencies":false,"join":{"kind":"ALL"}',
         ) +
         "]}",
     );
@@ -101,7 +101,7 @@ describe("specDataTextOf", () => {
 
     assert.match(
       text,
-      /"node_id":"add","task_name":"add","input_json":"\{\\"a\\":2\}","dependencies":\[0\],"args_from":\{"b":0\},"workflow_ctx_from":\[\],"allow_failed_deps":true/,
+      /"node_id":"add","task_name":"add","input_json":"\{\\"a\\":2\}","dependencies":\[0\],"args_from":\{"b":0\},"workflow_context_from":\[\],"allow_failed_dependencies":true/,
     );
   });
 
@@ -189,7 +189,7 @@ describe("specDataTextOf", () => {
     const custom = viewOf([urgent, numbered], [], { kind: "custom", queues });
 
     const workflow = defineWorkflow(
-      { name: "queues", definitionKey: "tests.queues.v1", output: h.int(), params: {} },
+      { name: "queues", definitionKey: "tests.queues.v1", outputType: h.int(), parameters: {} },
       (w) => {
         w.task(urgent, {}, { nodeId: "first" });
         w.task(numbered, {}, { nodeId: "second" });
@@ -206,7 +206,7 @@ describe("specDataTextOf", () => {
 
   test("a workflow name with a lone surrogate has no text: LoneSurrogate at its path", () => {
     const workflow = defineWorkflow(
-      { name: "bad\uD800", definitionKey: "tests.bad.v1", output: h.int(), params: {} },
+      { name: "bad\uD800", definitionKey: "tests.bad.v1", outputType: h.int(), parameters: {} },
       (w) => ({
         output: w.task(ping, {}, { nodeId: "ping" }),
       }),

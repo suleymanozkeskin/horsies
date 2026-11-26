@@ -300,7 +300,7 @@ pub struct WorkflowNodeInfo {
     pub node_status: String,
     pub is_subworkflow: bool,
     pub sub_workflow_id: Option<Uuid>,
-    pub allow_failed_deps: bool,
+    pub allow_failed_dependencies: bool,
     #[serde(serialize_with = "time_text::optional_utc")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(serialize_with = "time_text::optional_utc")]
@@ -440,7 +440,10 @@ pub struct ScheduleStateInfo {
     pub updated_at: DateTime<Utc>,
 }
 
+/// The body of `POST /api/tasks/{task_id}/cancel`. A key other than
+/// `include_running` is refused (`deny_unknown_fields`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CancelTaskBody {
     #[serde(default)]
     pub include_running: bool,

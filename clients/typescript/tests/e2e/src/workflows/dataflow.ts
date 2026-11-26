@@ -28,14 +28,14 @@ import { contextNode, node } from "./node-options.ts";
 export const CONTEXT_GATE_MS = { a: 100, b: 300 } as const;
 
 /** a gives 5; b doubles it. */
-export const argsFromSingle = defineWorkflow({ ...named("args_from_single"), params: {}, output: h.int() }, (w) => {
+export const argsFromSingle = defineWorkflow({ ...named("args_from_single"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(produceInt, { value: 5 }, node("a"));
 
   return { output: w.task(double, { inputResult: a }, node("b")) };
 });
 
 /** a gives 3 and b gives 4; sum adds them, one parameter each. */
-export const argsFromMultiple = defineWorkflow({ ...named("args_from_multiple"), params: {}, output: h.int() }, (w) => {
+export const argsFromMultiple = defineWorkflow({ ...named("args_from_multiple"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(produceInt, { value: 3 }, node("a"));
   const b = w.task(produceInt, { value: 4 }, node("b"));
 
@@ -43,7 +43,7 @@ export const argsFromMultiple = defineWorkflow({ ...named("args_from_multiple"),
 });
 
 /** a gives 3; b doubles it; c doubles b. */
-export const argsFromChain = defineWorkflow({ ...named("args_from_chain"), params: {}, output: h.int() }, (w) => {
+export const argsFromChain = defineWorkflow({ ...named("args_from_chain"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(produceInt, { value: 3 }, node("a"));
   const b = w.task(double, { inputResult: a }, node("b"));
 
@@ -51,21 +51,21 @@ export const argsFromChain = defineWorkflow({ ...named("args_from_chain"), param
 });
 
 /** a gives an object with a nested object; b returns it as it arrived. */
-export const argsFromObject = defineWorkflow({ ...named("args_from_object"), params: {}, output: DictResult }, (w) => {
+export const argsFromObject = defineWorkflow({ ...named("args_from_object"), parameters: {}, outputType: DictResult }, (w) => {
   const a = w.task(produceDict, { value: "test_value" }, node("a"));
 
   return { output: w.task(receiveDict, { inputResult: a }, node("b")) };
 });
 
 /** a fails; b allows failed dependencies, gets the failure and passes its code on. No success policy. */
-export const failurePassedOn = defineWorkflow({ ...named("failure_passed_on"), params: {}, output: h.int() }, (w) => {
+export const failurePassedOn = defineWorkflow({ ...named("failure_passed_on"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(fail, {}, node("a"));
 
   return { output: w.task(double, { inputResult: a }, node("b", { runsAfterFailure: true })) };
 });
 
 /** a fails; b allows failed dependencies and reports what it got; the policy requires b only. */
-export const failureReported = defineWorkflow({ ...named("failure_reported"), params: {}, output: h.string() }, (w) => {
+export const failureReported = defineWorkflow({ ...named("failure_reported"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(fail, {}, node("a"));
   const b = w.task(checkUpstream, { inputResult: a }, node("b", { runsAfterFailure: true }));
 
@@ -73,7 +73,7 @@ export const failureReported = defineWorkflow({ ...named("failure_reported"), pa
 });
 
 /** a fails; b is skipped; c allows failed dependencies and reports what it got of b; the policy requires c only. */
-export const skipReported = defineWorkflow({ ...named("skip_reported"), params: {}, output: h.string() }, (w) => {
+export const skipReported = defineWorkflow({ ...named("skip_reported"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(fail, {}, node("a"));
   const b = w.task(double, { inputResult: a }, node("b"));
   const c = w.task(checkUpstream, { inputResult: b }, node("c", { runsAfterFailure: true }));
@@ -82,21 +82,21 @@ export const skipReported = defineWorkflow({ ...named("skip_reported"), params: 
 });
 
 /** a fails; b, which does not allow failed dependencies, is skipped. */
-export const failureSkips = defineWorkflow({ ...named("failure_skips"), params: {}, output: h.int() }, (w) => {
+export const failureSkips = defineWorkflow({ ...named("failure_skips"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(fail, {}, node("a"));
 
   return { output: w.task(double, { inputResult: a }, node("b")) };
 });
 
 /** a gives 7; reader reads it from its context. */
-export const contextSingle = defineWorkflow({ ...named("context_single"), params: {}, output: h.int() }, (w) => {
+export const contextSingle = defineWorkflow({ ...named("context_single"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(produceInt, { value: 7 }, node("a"));
 
   return { output: w.task(ctxReader, { source: "a" }, contextNode("reader", [a], { after: [a] })) };
 });
 
 /** a gives 3 and b gives 4; sum reads both from its context. */
-export const contextMultiple = defineWorkflow({ ...named("context_multiple"), params: {}, output: h.int() }, (w) => {
+export const contextMultiple = defineWorkflow({ ...named("context_multiple"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(produceInt, { value: 3 }, node("a"));
   const b = w.task(produceInt, { value: 4 }, node("b"));
 
@@ -105,7 +105,7 @@ export const contextMultiple = defineWorkflow({ ...named("context_multiple"), pa
 
 /** a gives 7; b doubles it; c gives 3 after a; d gets b as a parameter and c from its context. */
 export const mixedSources = defineWorkflow(
-  { ...named("mixed_sources"), params: {}, output: h.object({ fromArgs: h.int(), fromCtx: h.int() }) },
+  { ...named("mixed_sources"), parameters: {}, outputType: h.object({ fromArgs: h.int(), fromCtx: h.int() }) },
   (w) => {
     const a = w.task(produceInt, { value: 7 }, node("a"));
     const b = w.task(double, { inputResult: a }, node("b"));
@@ -117,7 +117,7 @@ export const mixedSources = defineWorkflow(
 
 /** a gives 77; reader gets a as a parameter and from its context. */
 export const sameSourceTwice = defineWorkflow(
-  { ...named("same_source_twice"), params: {}, output: h.object({ fromArgs: h.int(), fromCtx: h.int() }) },
+  { ...named("same_source_twice"), parameters: {}, outputType: h.object({ fromArgs: h.int(), fromCtx: h.int() }) },
   (w) => {
     const a = w.task(produceInt, { value: 77 }, node("a"));
 
@@ -126,7 +126,7 @@ export const sameSourceTwice = defineWorkflow(
 );
 
 /** a and b of `CONTEXT_GATE_MS`; c joins on any of them and reads b, its context source, which ends last. */
-export const anyJoinContextGate = defineWorkflow({ ...named("any_join_context_gate"), params: {}, output: h.string() }, (w) => {
+export const anyJoinContextGate = defineWorkflow({ ...named("any_join_context_gate"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(slowStep, { step: "a", delayMs: CONTEXT_GATE_MS.a }, node("a"));
   const b = w.task(slowStep, { step: "b", delayMs: CONTEXT_GATE_MS.b }, node("b"));
 
@@ -136,7 +136,7 @@ export const anyJoinContextGate = defineWorkflow({ ...named("any_join_context_ga
 });
 
 /** a fails and b gives 9; reader joins on any of them and reads b from its context. */
-export const anyJoinReadsSuccess = defineWorkflow({ ...named("any_join_reads_success"), params: {}, output: h.int() }, (w) => {
+export const anyJoinReadsSuccess = defineWorkflow({ ...named("any_join_reads_success"), parameters: {}, outputType: h.int() }, (w) => {
   const a = w.task(fail, {}, node("a"));
   const b = w.task(produceInt, { value: 9 }, node("b"));
 
@@ -149,7 +149,7 @@ export const anyJoinReadsSuccess = defineWorkflow({ ...named("any_join_reads_suc
 export const REPORTED_SOURCE_VALUE = 21;
 
 /** a gives `REPORTED_SOURCE_VALUE`; report, a node with context sources, reports its workflow context. */
-export const contextOfNode = defineWorkflow({ ...named("context_of_node"), params: {}, output: ContextReport }, (w) => {
+export const contextOfNode = defineWorkflow({ ...named("context_of_node"), parameters: {}, outputType: ContextReport }, (w) => {
   const a = w.task(produceInt, { value: REPORTED_SOURCE_VALUE }, node("a"));
 
   return { output: w.task(contextReport, { source: "a" }, contextNode("report", [a], { after: [a] })) };
@@ -157,7 +157,7 @@ export const contextOfNode = defineWorkflow({ ...named("context_of_node"), param
 
 /** a gives `REPORTED_SOURCE_VALUE`; report waits for a and has no context sources; plain, a task with no context, runs too. */
 export const contextOfNodeWithoutSources = defineWorkflow(
-  { ...named("context_of_node_without_sources"), params: {}, output: ContextReport },
+  { ...named("context_of_node_without_sources"), parameters: {}, outputType: ContextReport },
   (w) => {
     const a = w.task(produceInt, { value: REPORTED_SOURCE_VALUE }, node("a"));
 

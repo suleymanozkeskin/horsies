@@ -36,9 +36,9 @@ function describeReadError(error: ReadError): string {
       return `${code} ${error.status}`;
     }
 
-    case "storedResultUnreadable":
+    case "resultDeserializationError":
       return error.cause;
-    case "unknownUserCode":
+    case "unknownCustomCode":
       return error.code;
     case "waitInsideTask": {
       const code: "WAIT_INSIDE_TASK" = error.code;

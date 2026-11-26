@@ -110,7 +110,7 @@ export function NodeDetailContent({
               {RESIDUAL_COPY[residual].badge}
             </span>
           )}
-          {node.allow_failed_deps && (
+          {node.allow_failed_dependencies && (
             <Hint text="Tolerant join: the node runs even when a dependency failed. The graph draws it with a dashed border.">
               <span className="rounded-full border border-dashed border-hairline-strong px-2 py-0.5 text-10 text-muted-foreground">
                 tolerant join

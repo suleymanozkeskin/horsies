@@ -45,7 +45,7 @@ export interface RetentionConfigInput {
   readonly workerStateRetention?: HoursRetention;
   /** Terminal workflow records. */
   readonly terminalRecordRetention?: HoursRetention;
-  readonly pausedWorkflowAutoCancelAfter?: PausedWorkflowExpiry;
+  readonly pausedWorkflowCancelAfter?: PausedWorkflowExpiry;
   readonly historyLeafHorizonDays?: number;
   readonly heartbeatLeafHorizonHours?: number;
   /** The periods that a send may choose besides the 30-day default and the periods of `queueRetention`. */
@@ -93,8 +93,8 @@ export function retentionJson(input: RetentionConfigInput, path: string): Checke
     optionalEntry("terminal_record_retention_hours", input.terminalRecordRetention, (value) =>
       hoursJson(value, memberPath(path, "terminalRecordRetention.hours")),
     ),
-    optionalEntry("paused_workflow_auto_cancel_after", input.pausedWorkflowAutoCancelAfter, (value) =>
-      pausedExpiryJson(value, memberPath(path, "pausedWorkflowAutoCancelAfter.age")),
+    optionalEntry("paused_workflow_auto_cancel_after", input.pausedWorkflowCancelAfter, (value) =>
+      pausedExpiryJson(value, memberPath(path, "pausedWorkflowCancelAfter.age")),
     ),
     optionalEntry(
       "history_leaf_horizon_days",

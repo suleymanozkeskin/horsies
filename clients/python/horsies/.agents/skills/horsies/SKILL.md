@@ -175,8 +175,8 @@ Best for static, reusable DAGs. Use `build_with(app, **params)` for parameterize
 
 ### Node options
 
-`waits_for`, `args_from`, `workflow_ctx_from`, `queue`, `priority`,
-`allow_failed_deps`, `join` (`"all"` | `"any"` | `"quorum"`),
+`waits_for`, `args_from`, `workflow_context_from`, `queue`, `priority`,
+`allow_failed_dependencies`, `join` (`"all"` | `"any"` | `"quorum"`),
 `min_success`, `good_until`, `node_id`.
 
 ## Start a Workflow

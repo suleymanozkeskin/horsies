@@ -9,7 +9,7 @@ The aggregate declares `join='quorum'` with `min_success=2`, so it fires as
 soon as two feeds land rather than waiting for all three, and the workflow
 COMPLETES with a failed branch still showing in the graph.
 
-It reads the feeds through `workflow_ctx_from` rather than `args_from`. Under a
+It reads the feeds through `workflow_context_from` rather than `args_from`. Under a
 quorum join an `args_from` source may not be terminal when the node fires, and
 its kwarg is then simply not injected; `WorkflowContext` makes the same
 uncertainty explicit — the aggregate asks `has_result` before reading, and
@@ -68,7 +68,7 @@ class Restock(WorkflowDefinition[RestockPlan]):
             fn=update_stock_levels,
             kwargs={'feed_node_ids': [_feed_node_id(s) for s in suppliers]},
             waits_for=feeds,
-            workflow_ctx_from=feeds,
+            workflow_context_from=feeds,
             join='quorum',
             min_success=min(tuning.RESTOCK_MIN_SUCCESSFUL_FEEDS, len(feeds)),
             node_id='update_stock_levels',

@@ -430,7 +430,7 @@ class TestWorkflowStartErrors:
 
         The start runs in the core. The child of the broken root cannot be
         built, so its node fails, and the start owes the start of the child
-        that waits for it (allow_failed_deps): the start statement and that
+        that waits for it (allow_failed_dependencies): the start statement and that
         child start run in one transaction. A trigger refuses the insert of
         the second child's workflow row."""
         session, broker, app = setup
@@ -458,7 +458,7 @@ class TestWorkflowStartErrors:
 
         broken = SubWorkflowNode(workflow_def=RollbackBroken)
         started_after = SubWorkflowNode(
-            workflow_def=RollbackChild, waits_for=[broken], allow_failed_deps=True,
+            workflow_def=RollbackChild, waits_for=[broken], allow_failed_dependencies=True,
         )
         spec = app.workflow(
             'rollback_wf', [broken, started_after], definition_key=f'rollback-wf-{suffix}',

@@ -16,7 +16,7 @@ export const REFUND_AMOUNT_CENTS = 4_900;
 export const DISPUTE_OPENED_AT: Temporal.Instant = Temporal.Instant.from("2026-01-15T09:00:00Z");
 
 export const fraudReview = defineWorkflow(
-  { name: "fraud_review", definitionKey: "acme.fraud_review.v1", params: {}, output: PaymentRefund, onError: "pause" },
+  { name: "fraud_review", definitionKey: "acme.fraud_review.v1", parameters: {}, outputType: PaymentRefund, onError: "pause" },
   (w) => {
     const reconcile = w.task(reconcilePayments, { window: `dispute-${DISPUTED_ORDER_ID}` }, { nodeId: "reconcile_payments" });
 

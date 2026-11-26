@@ -711,11 +711,11 @@ class NodeFactory(Generic[P, T, C]):
 
     _fn: 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[P, T, C] | AsyncRuntimeTaskFunction[P, T, C]'
     _waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
-    _workflow_ctx_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
+    _workflow_context_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
     _args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None
     _queue: str | None
     _priority: int | None
-    _allow_failed_deps: bool
+    _allow_failed_dependencies: bool
     _join: Literal['all', 'any', 'quorum']
     _min_success: int | None
     _good_until: datetime | None
@@ -726,11 +726,11 @@ class NodeFactory(Generic[P, T, C]):
         fn: 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[P, T, C] | AsyncRuntimeTaskFunction[P, T, C]',
         *,
         waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None,
-        workflow_ctx_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None,
+        workflow_context_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None,
         args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None,
         queue: str | None,
         priority: int | None,
-        allow_failed_deps: bool,
+        allow_failed_dependencies: bool,
         join: Literal['all', 'any', 'quorum'],
         min_success: int | None,
         good_until: datetime | None,
@@ -738,11 +738,11 @@ class NodeFactory(Generic[P, T, C]):
     ) -> None:
         self._fn = fn
         self._waits_for = waits_for
-        self._workflow_ctx_from = workflow_ctx_from
+        self._workflow_context_from = workflow_context_from
         self._args_from = args_from
         self._queue = queue
         self._priority = priority
-        self._allow_failed_deps = allow_failed_deps
+        self._allow_failed_dependencies = allow_failed_dependencies
         self._join = join
         self._min_success = min_success
         self._good_until = good_until
@@ -804,13 +804,13 @@ class NodeFactory(Generic[P, T, C]):
             fn=self._fn,
             kwargs=static_kwargs,
             waits_for=waits_for,
-            workflow_ctx_from=list(self._workflow_ctx_from)
-            if self._workflow_ctx_from
+            workflow_context_from=list(self._workflow_context_from)
+            if self._workflow_context_from
             else None,
             args_from=merged_args_from,
             queue=self._queue,
             priority=self._priority,
-            allow_failed_deps=self._allow_failed_deps,
+            allow_failed_dependencies=self._allow_failed_dependencies,
             join=self._join,
             min_success=self._min_success,
             good_until=self._good_until,
@@ -909,11 +909,11 @@ class _TaskFunctionMembers(Protocol[P, T, C]):
         self,
         *,
         waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
-        workflow_ctx_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
+        workflow_context_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
         args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
         queue: str | None = None,
         priority: int | None = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Literal['all', 'any', 'quorum'] = 'all',
         min_success: int | None = None,
         good_until: datetime | None = None,
@@ -3272,11 +3272,11 @@ def create_task_wrapper(
             self,
             *,
             waits_for: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
-            workflow_ctx_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
+            workflow_context_from: Sequence['TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
             args_from: dict[str, 'TaskNode[Any, Any] | SubWorkflowNode[Any]'] | None = None,
             queue: str | None = None,
             priority: int | None = None,
-            allow_failed_deps: bool = False,
+            allow_failed_dependencies: bool = False,
             join: Literal['all', 'any', 'quorum'] = 'all',
             min_success: int | None = None,
             good_until: datetime | None = None,
@@ -3285,11 +3285,11 @@ def create_task_wrapper(
             return NodeFactory(
                 fn=self,  # type: ignore[arg-type]
                 waits_for=waits_for,
-                workflow_ctx_from=workflow_ctx_from,
+                workflow_context_from=workflow_context_from,
                 args_from=args_from,
                 queue=queue,
                 priority=priority,
-                allow_failed_deps=allow_failed_deps,
+                allow_failed_dependencies=allow_failed_dependencies,
                 join=join,
                 min_success=min_success,
                 good_until=good_until,

@@ -50,7 +50,7 @@ describe("the worker command", () => {
   });
 
   test("each flag, in both forms", () => {
-    assert.deepEqual(parseWorkerStart(["--profile", "io", "--loglevel=debug", "--metrics-listen", "0.0.0.0:9464"], checkAddress), {
+    assert.deepEqual(parseWorkerStart(["--profile", "io", "--log-level=debug", "--metrics-listen", "0.0.0.0:9464"], checkAddress), {
       ok: true,
       value: {
         profile: { kind: "NAMED", name: "io" },
@@ -61,7 +61,7 @@ describe("the worker command", () => {
   });
 
   test("a refused --metrics-listen value, a bad level, an unknown flag and a positional argument give 2", async () => {
-    for (const args of [["--metrics-listen", "localhost"], ["--loglevel", "loud"], ["--queues", "a"], ["io"]]) {
+    for (const args of [["--metrics-listen", "localhost"], ["--log-level", "loud"], ["--queues", "a"], ["io"]]) {
       const output = recordingOutput();
 
       const deps: WorkerCommandDeps = {
@@ -148,7 +148,7 @@ function checkDeps(staticOutcome: CheckOutcome, liveOutcome: LiveStepsOutcome): 
 describe("the check command", () => {
   test("no flag: the static check only, at WARNING", () => {
     assert.deepEqual(parseCheckFlags([]), { ok: true, value: { steps: "staticOnly", logLevel: "WARNING" } });
-    assert.deepEqual(parseCheckFlags(["--live", "--loglevel=info"]), { ok: true, value: { steps: "staticAndLive", logLevel: "INFO" } });
+    assert.deepEqual(parseCheckFlags(["--live", "--log-level=info"]), { ok: true, value: { steps: "staticAndLive", logLevel: "INFO" } });
   });
 
   test("a passing check gives 0 with its summary on stdout, and no live step", async () => {

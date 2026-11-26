@@ -1,5 +1,5 @@
 // The OpenTelemetry start observer: one span of kind PRODUCER around the core's start of each `app.start` and
-// `app.retryStart` call (`start <workflow_name>`), and the carrier that the global propagator injects for that span.
+// `app.resendStart` call (`start <workflow_name>`), and the carrier that the global propagator injects for that span.
 // The core stores the carrier on every row of the workflow tree, so the attempt spans of the nodes join the trace of
 // the start. The span and its attributes are those of the Python and Rust clients.
 //

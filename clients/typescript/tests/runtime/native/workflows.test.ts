@@ -26,15 +26,15 @@ const hello = defineWorkflow(
   {
     name: "end_to_end_hello",
     definitionKey: "tests.end_to_end_hello.v1",
-    output: h.string(),
-    params: { who: h.string() },
+    outputType: h.string(),
+    parameters: { who: h.string() },
     checkCases: [{ who: "a" }],
   },
   (w, { who }) => ({ output: w.task(greet, { who }, { nodeId: "greet" }) }),
 );
 
 const parent = defineWorkflow(
-  { name: "end_to_end_parent", definitionKey: "tests.end_to_end_parent.v1", output: h.string(), params: {} },
+  { name: "end_to_end_parent", definitionKey: "tests.end_to_end_parent.v1", outputType: h.string(), parameters: {} },
   (w) => ({
     output: w.subWorkflow(hello, { who: "child" }, { nodeId: "child" }),
   }),
@@ -93,7 +93,7 @@ describe("the workflow start with a database", () => {
       assert.fail(`the start failed: ${started.error.code}: ${started.error.message}`);
     }
 
-    const nodes = await started.value.tasks();
+    const nodes = await started.value.nodes();
 
     assert(nodes.ok);
     assert.equal(nodes.value[0]?.subWorkflowId.kind, "recorded");

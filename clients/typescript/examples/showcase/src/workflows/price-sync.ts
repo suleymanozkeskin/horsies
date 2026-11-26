@@ -13,7 +13,7 @@ export const SYNC_CAMPAIGN_ID = "SYNC-CHECK";
 export const SYNC_SKU = "ACME-SKU-0001";
 
 export const priceSync = defineWorkflow(
-  { name: "price_sync", definitionKey: "acme.price_sync.v1", params: {}, output: CacheWarm },
+  { name: "price_sync", definitionKey: "acme.price_sync.v1", parameters: {}, outputType: CacheWarm },
   (w) => {
     const cdn = w.task(publishCdn, { campaignId: SYNC_CAMPAIGN_ID, sku: SYNC_SKU }, { nodeId: "publish_cdn" });
     const origin = w.task(publishOrigin, { campaignId: SYNC_CAMPAIGN_ID, sku: SYNC_SKU }, { nodeId: "publish_origin" });

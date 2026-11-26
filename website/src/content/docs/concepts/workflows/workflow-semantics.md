@@ -117,10 +117,10 @@ A workflow is marked **FAILED** if **any task fails** (when `on_error=OnError.FA
 
 The failure flow:
 1. Task fails → workflow stores error, but status remains `RUNNING`
-2. DAG continues resolving (dependents may be SKIPPED or run with `allow_failed_deps`)
+2. DAG continues resolving (dependents may be SKIPPED or run with `allow_failed_dependencies`)
 3. Once all tasks reach terminal state → workflow marked `FAILED`
 
-This design allows recovery handlers (`allow_failed_deps=True`) to execute before the workflow finalizes.
+This design allows recovery handlers (`allow_failed_dependencies=True`) to execute before the workflow finalizes.
 
 ### on_error Policies
 
@@ -133,7 +133,7 @@ This design allows recovery handlers (`allow_failed_deps=True`) to execute befor
 
 Horsies does **not** stop the entire workflow on first failure. It resolves the DAG to terminal state and applies failure rules **per dependency**. Short-circuiting happens **along the failed path**, not globally.
 
-**Default behavior (`join="all"`, `allow_failed_deps=False`, `on_error=OnError.FAIL`):**
+**Default behavior (`join="all"`, `allow_failed_dependencies=False`, `on_error=OnError.FAIL`):**
 
 - When a dependency fails or is skipped, any downstream task that requires all dependencies is **SKIPPED**.
 - That skip propagates to its dependents.
@@ -155,7 +155,7 @@ A → D
 
 **To run recovery logic downstream:**
 
-Set `allow_failed_deps=True` on the downstream task. It will run and receive the failed outcome of the dependency.
+Set `allow_failed_dependencies=True` on the downstream task. It will run and receive the failed outcome of the dependency.
 
 **Join rules change the short-circuit behavior:**
 
@@ -170,7 +170,7 @@ Set `allow_failed_deps=True` on the downstream task. It will run and receive the
 **Result access is separate:**
 
 - `WorkflowHandle.get()` returns the workflow-level outcome (output value or error, not a status enum). A read that gives no outcome, for example a wait timeout, returns a read error.
-- A FAILED workflow stores no output. This is also true when its output node ran with `allow_failed_deps=True` and succeeded. Read that node's result with `WorkflowHandle.result_for()`.
+- A FAILED workflow stores no output. This is also true when its output node ran with `allow_failed_dependencies=True` and succeeded. Read that node's result with `WorkflowHandle.result_for()`.
 - A COMPLETED workflow can have a SKIPPED or FAILED output node. See [Output Node Under a Success Policy](#output-node-under-a-success-policy).
 - `WorkflowHandle.result_for()` is non-blocking and may return the read error `RESULT_NOT_READY` if the task has not completed.
 
@@ -178,16 +178,16 @@ Set `allow_failed_deps=True` on the downstream task. It will run and receive the
 
 When an upstream task fails and the downstream task uses `join="all"` (the default):
 
-- **`allow_failed_deps=False` (default):** The downstream task is **SKIPPED**. It does not execute and does not receive the failed result.
-- **`allow_failed_deps=True`:** The downstream task **runs** and receives the upstream outcome as `Failed`, with the upstream error.
+- **`allow_failed_dependencies=False` (default):** The downstream task is **SKIPPED**. It does not execute and does not receive the failed result.
+- **`allow_failed_dependencies=True`:** The downstream task **runs** and receives the upstream outcome as `Failed`, with the upstream error.
 
-`on_error=OnError.FAIL` does **not** short-circuit the DAG. The workflow stores the error and continues resolving dependents — downstream tasks are SKIPPED (or run if `allow_failed_deps=True`) before the workflow is marked FAILED.
+`on_error=OnError.FAIL` does **not** short-circuit the DAG. The workflow stores the error and continues resolving dependents — downstream tasks are SKIPPED (or run if `allow_failed_dependencies=True`) before the workflow is marked FAILED.
 
 With `join="any"`, a downstream task runs when **any** dependency succeeds, so a single upstream failure does not cause a skip unless **all** dependencies fail. With `join="quorum"`, the task runs when `min_success` dependencies succeed, so failures only matter if they make the threshold unreachable.
 
 The Python example is in [Upstream Failure and args_from](/horsies/concepts/workflows/workflow-examples/#upstream-failure-and-args_from).
 
-A match on `Succeeded` and `Failed` is the intended pattern when `allow_failed_deps=True`. With the defaults (`join="all"`, no `allow_failed_deps`), the task does not run on an upstream failure. A `Failed` input still arrives with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
+A match on `Succeeded` and `Failed` is the intended pattern when `allow_failed_dependencies=True`. With the defaults (`join="all"`, no `allow_failed_dependencies`), the task does not run on an upstream failure. A `Failed` input still arrives with `join="any"` / `join="quorum"`, or when the stored upstream result fails to decode (`RESULT_DESERIALIZATION_ERROR`).
 
 ### PAUSE Semantics (Cooperative Stop)
 
@@ -282,7 +282,7 @@ Task runs when: ALL dependencies are in terminal state (COMPLETED/FAILED/SKIPPED
 
 **Behavior matrix:**
 
-| Dependency State | allow_failed_deps=False | allow_failed_deps=True |
+| Dependency State | allow_failed_dependencies=False | allow_failed_dependencies=True |
 |------------------|-------------------------|------------------------|
 | All COMPLETED | Task runs normally | Task runs normally |
 | Any FAILED | Task is SKIPPED | Task runs with the `Failed` outcome |
@@ -305,15 +305,15 @@ Task runs when: ALL dependencies are in terminal state (COMPLETED/FAILED/SKIPPED
 
 ### SKIPPED Propagation
 
-When a task is SKIPPED, all its dependents are also SKIPPED (unless they have `allow_failed_deps=True`). This cascades through the DAG.
+When a task is SKIPPED, all its dependents are also SKIPPED (unless they have `allow_failed_dependencies=True`). This cascades through the DAG.
 
 ```
 A (FAILED) → B (SKIPPED) → C (SKIPPED) → D (SKIPPED)
 ```
 
-### allow_failed_deps=True
+### allow_failed_dependencies=True
 
-Tasks with `allow_failed_deps=True` receive the outcome of each dependency:
+Tasks with `allow_failed_dependencies=True` receive the outcome of each dependency:
 
 - **FAILED deps**: Receive `Failed` with the original error
 - **SKIPPED deps**: Receive a sentinel `Failed` with `error_code=UPSTREAM_SKIPPED`
@@ -322,13 +322,13 @@ The Python example is in [Recovery Handlers](/horsies/concepts/workflows/workflo
 
 ### UPSTREAM_SKIPPED Sentinel
 
-When a dependency is SKIPPED (due to upstream failure), tasks with `allow_failed_deps=True` receive a sentinel error result instead of missing kwargs: the code `UPSTREAM_SKIPPED`, the message `Upstream dependency was SKIPPED`, and `data` `{"dependency_index": <index>}`. The Python form is in [Sentinels](/horsies/concepts/workflows/workflow-examples/#sentinels).
+When a dependency is SKIPPED (due to upstream failure), tasks with `allow_failed_dependencies=True` receive a sentinel error result instead of missing kwargs: the code `UPSTREAM_SKIPPED`, the message `Upstream dependency was SKIPPED`, and `data` `{"dependency_index": <index>}`. The Python form is in [Sentinels](/horsies/concepts/workflows/workflow-examples/#sentinels).
 
-This applies to both `args_from` kwargs and `workflow_ctx_from` context data.
+This applies to both `args_from` kwargs and `workflow_context_from` context data.
 
 ### A dependency with no stored result
 
-A COMPLETED or FAILED dependency always stores its result. If its stored result is missing (for example a row changed by hand), the dependent task receives an error result in `args_from` kwargs and in `workflow_ctx_from` context data, in place of no entry: the code `RESULT_DESERIALIZATION_ERROR`, the message `Dependency node <node_id> (index <index>, task <task_name>) is <status> with no stored result`, and `data` `{"dependency_index": <index>}`. The Python form is in [Sentinels](/horsies/concepts/workflows/workflow-examples/#sentinels).
+A COMPLETED or FAILED dependency always stores its result. If its stored result is missing (for example a row changed by hand), the dependent task receives an error result in `args_from` kwargs and in `workflow_context_from` context data, in place of no entry: the code `RESULT_DESERIALIZATION_ERROR`, the message `Dependency node <node_id> (index <index>, task <task_name>) is <status> with no stored result`, and `data` `{"dependency_index": <index>}`. The Python form is in [Sentinels](/horsies/concepts/workflows/workflow-examples/#sentinels).
 
 ### args_from with join='any' / 'quorum'
 
@@ -381,7 +381,7 @@ A ──┼→ C ─┼→ E
 
 ```
         ┌→ B ─┐
-    A ──┤     ├→ D (allow_failed_deps=True)
+    A ──┤     ├→ D (allow_failed_dependencies=True)
         └→ C ─┘
 ```
 
@@ -425,7 +425,7 @@ To create nodes from runtime data, use a `SubWorkflowNode`. Its `build_with()` r
 | Fan-out (parallel branches) | Yes | Independent parallel execution |
 | Fan-in (convergence) | Yes | AND-join: all branches must complete |
 | Diamond pattern | Yes | Classic DAG pattern |
-| AND-join with error handling | Yes | `allow_failed_deps=True` |
+| AND-join with error handling | Yes | `allow_failed_dependencies=True` |
 | OR-join (any branch succeeds) | Yes | `join="any"` parameter |
 | Quorum join (N of M succeed) | Yes | `join="quorum"` with `min_success` |
 | Partial success workflow | Yes | Via `success_policy` with success cases |
@@ -488,7 +488,7 @@ The Python example is in [Output Node Under a Success Policy](/horsies/concepts/
 A node is COMPLETED only when its result is ok, so the status of a `SubWorkflowNode` follows the output of its child, not the status of its child. A `SubWorkflowNode` of such a child workflow is FAILED and holds the child's error:
 
 - `on_error` runs, as for a failed task.
-- A dependent with `allow_failed_deps=False` is SKIPPED. A dependent with `allow_failed_deps=True` receives the error through `args_from` or `workflow_ctx_from`.
+- A dependent with `allow_failed_dependencies=False` is SKIPPED. A dependent with `allow_failed_dependencies=True` receives the error through `args_from` or `workflow_context_from`.
 - `join="any"` and `join="quorum"` do not count the node.
 - A `SuccessCase` that requires the node is not met.
 - `result_for()`, `results()` and `tasks()` give the error as a `Failed` outcome.
@@ -512,8 +512,8 @@ An outputless workflow has no output node, so its terminal nodes are its output.
 
 ## Best Practices
 
-1. **Use `allow_failed_deps` for recovery.** A recovery node with `allow_failed_deps=True` runs after a failed dependency and receives its error.
-2. **Design for failure visibility.** An aggregator node with `allow_failed_deps=True` that waits for every branch reports all branch outcomes in one result. The workflow is still FAILED, so read the aggregator by its node result.
+1. **Use `allow_failed_dependencies` for recovery.** A recovery node with `allow_failed_dependencies=True` runs after a failed dependency and receives its error.
+2. **Design for failure visibility.** An aggregator node with `allow_failed_dependencies=True` that waits for every branch reports all branch outcomes in one result. The workflow is still FAILED, so read the aggregator by its node result.
 3. **Use `OnError.PAUSE` for critical workflows.** A failure then stops the workflow for review.
 4. **Name the output node.** The workflow result is then the result of that node.
 
@@ -533,12 +533,12 @@ Tasks can access upstream results via `WorkflowContext` using the type-safe `res
 
 ### Enabling WorkflowContext
 
-1. Set `workflow_ctx_from` on the TaskNode to specify which upstream results to include
+1. Set `workflow_context_from` on the TaskNode to specify which upstream results to include
 2. Declare `workflow_ctx: WorkflowContext | None` parameter in the task function
 
-**Important:** `workflow_ctx_from` is **per-task**. The context is built fresh for each task that opts in, and does **not** persist or propagate to downstream tasks.
+**Important:** `workflow_context_from` is **per-task**. The context is built fresh for each task that opts in, and does **not** persist or propagate to downstream tasks.
 
-**Scope:** Inside a task function, only results from nodes listed in `workflow_ctx_from` are accessible via `workflow_ctx.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
+**Scope:** Inside a task function, only results from nodes listed in `workflow_context_from` are accessible via `workflow_ctx.result_for()`. Accessing a node not in the list raises `KeyError` with `"TaskNode id '{id}' not in workflow context"`.
 
 This is distinct from `WorkflowHandle.result_for()`, which queries the database for any node in the workflow and returns the read error `RESULT_NOT_READY` if the task hasn't completed.
 
@@ -553,11 +553,11 @@ The Python API (typed `result_for`, `NodeKey`, `slugify`) is in [WorkflowContext
 
 ### WorkflowMeta (Metadata Only)
 
-A task that needs only the workflow metadata (the workflow id, the task index, the task name), and no results, declares a workflow meta parameter. The engine injects it when the task declares it, with no `workflow_ctx_from`. The Python example is in [WorkflowMeta](/horsies/concepts/workflows/workflow-examples/#workflowmeta).
+A task that needs only the workflow metadata (the workflow id, the task index, the task name), and no results, declares a workflow meta parameter. The engine injects it when the task declares it, with no `workflow_context_from`. The Python example is in [WorkflowMeta](/horsies/concepts/workflows/workflow-examples/#workflowmeta).
 
-### Comparison: args_from vs workflow_ctx_from
+### Comparison: args_from vs workflow_context_from
 
-| Feature | `args_from` | `workflow_ctx_from` |
+| Feature | `args_from` | `workflow_context_from` |
 |---------|-------------|---------------------|
 | Use case | Direct typed parameters | Access multiple upstream results |
 | Type safety | Full (typed parameter) | Full (via `result_for(node)`) |
@@ -566,9 +566,9 @@ A task that needs only the workflow metadata (the workflow id, the task index, t
 
 **Prefer `args_from`** for simple cases - it's more explicit and keeps data flow obvious.
 
-**Use `workflow_ctx_from`** when you need to access many upstream results or want workflow metadata.
+**Use `workflow_context_from`** when you need to access many upstream results or want workflow metadata.
 
-**Important:** When using `args_from` or `workflow_ctx_from`, positional `args` are not allowed.
+**Important:** When using `args_from` or `workflow_context_from`, positional `args` are not allowed.
 Put static values in `kwargs` instead.
 
 **Important:** `kwargs` and `args_from` keys must be disjoint. If the same key appears in both,

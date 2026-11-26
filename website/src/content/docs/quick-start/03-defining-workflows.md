@@ -304,7 +304,7 @@ def start_order_processing(order: Order) -> None:
 
 `args_from` injects upstream `TaskOutcome` values as keyword arguments into the receiving task function: `Succeeded(value)` or `Failed(task_error)`. Use `match` to get the value or the error:
 
-**Note:** When using `args_from` or `workflow_ctx_from`, positional `args` are not allowed. Put static inputs in `kwargs` instead.
+**Note:** When using `args_from` or `workflow_context_from`, positional `args` are not allowed. Put static inputs in `kwargs` instead.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python

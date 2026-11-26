@@ -37,9 +37,9 @@ export function workflowReadErrorText(error: WorkflowReadError): string {
       return "no workflow has the id";
     case "resultNotReady":
       return "the node stores no result yet";
-    case "storedResultUnreadable":
+    case "resultDeserializationError":
       return `the stored result does not read: ${error.cause}`;
-    case "unknownUserCode":
+    case "unknownCustomCode":
       return `the stored error has the undeclared code ${error.code}`;
     case "waitInsideTask":
       return "a wait inside a task";

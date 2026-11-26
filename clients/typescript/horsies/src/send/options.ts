@@ -7,10 +7,10 @@ import { instantText } from "../codec/temporal-text.ts";
 import { IDEMPOTENCY_KEY_MAX_BYTES } from "./bounds.ts";
 
 /** The retention of the task's history record: a period of whole days that the app registers, or forever. */
-export type Retention = { readonly kind: "days"; readonly days: number } | { readonly kind: "forever" };
+export type SendRetention = { readonly kind: "period"; readonly days: number } | { readonly kind: "forever" };
 
 /** The options of `app.send`. */
-export interface SendOptions {
+export interface TaskSendOptions {
   /** A key of 1 to 255 UTF-8 bytes: a second send with the key in its reservation window gives the first task. */
   readonly idempotencyKey?: string;
   /** The task expires if no worker starts it before this instant. Cut to the microsecond, toward the past. */
@@ -18,7 +18,7 @@ export interface SendOptions {
   /** Whole seconds before a worker may start the task: 0 to 4,294,967,295. */
   readonly delaySeconds?: number;
   /** Left out: the queue's retention, else the 30-day default. */
-  readonly retention?: Retention;
+  readonly retention?: SendRetention;
 }
 
 /** The checked options of one send, as the core takes them. */
@@ -41,7 +41,7 @@ const RETENTION_DAYS_FIELD_MAX = 65_535;
 const NANOSECONDS_PER_MICROSECOND = 1000n;
 
 /** The checked options, or the first refusal in field order. Pure. */
-export function checkSendOptions(options: SendOptions): Result<CheckedSendOptions, SendOptionRefused> {
+export function checkSendOptions(options: TaskSendOptions): Result<CheckedSendOptions, SendOptionRefused> {
   const key = checkKey(options.idempotencyKey);
   const deadline = checkDeadline(options.goodUntil);
   const delay = checkDelay(options.delaySeconds);
@@ -122,7 +122,7 @@ function checkDelay(seconds: number | undefined): Result<DelayFact, SendOptionRe
   return ok({ kind: "seconds", seconds });
 }
 
-function checkRetention(retention: Retention | undefined): Result<RetentionChoice, SendOptionRefused> {
+function checkRetention(retention: SendRetention | undefined): Result<RetentionChoice, SendOptionRefused> {
   if (retention === undefined) {
     return ok({ kind: "queueOrDefault" });
   }
@@ -130,7 +130,7 @@ function checkRetention(retention: Retention | undefined): Result<RetentionChoic
   switch (retention.kind) {
     case "forever":
       return ok({ kind: "forever" });
-    case "days":
+    case "period":
       return Number.isSafeInteger(retention.days) && retention.days >= 1 && retention.days <= RETENTION_DAYS_FIELD_MAX
         ? ok({ kind: "days", days: retention.days })
         : refuse("retention", "a retention period is a whole number of days from 1");

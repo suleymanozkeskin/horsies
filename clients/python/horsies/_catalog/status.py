@@ -133,7 +133,7 @@ class WorkflowTaskStatus(str, Enum):
     State machine:
       PENDING → READY → ENQUEUED → RUNNING → COMPLETED
                                             → FAILED
-                      → SKIPPED (deps failed and allow_failed_deps=False)
+                      → SKIPPED (deps failed and allow_failed_dependencies=False)
     """
 
     PENDING = 'PENDING'

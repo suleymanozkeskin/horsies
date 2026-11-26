@@ -98,7 +98,7 @@ def _spec() -> WorkflowSpec[Any]:
         waits_for=[first, second],
         join='quorum',
         min_success=1,
-        allow_failed_deps=True,
+        allow_failed_dependencies=True,
     )
     return APP.workflow(
         'start_core.flow',
@@ -154,7 +154,7 @@ class TestSpecData:
         assert [node.index for node in data.nodes] == [0, 1, 2, 3]
         assert data.nodes[2].body.kind == 'SUB_WORKFLOW'
         assert data.nodes[3].join.kind == 'QUORUM'
-        assert data.nodes[3].allow_failed_deps is True
+        assert data.nodes[3].allow_failed_dependencies is True
         assert data.queue_classes == {'default': 'standard_30d'}
         policy = json.loads(_spec_json(spec))['success_policy']
         assert policy == {'kind': 'CASES', 'cases': [{'required': [3]}], 'optional': [2]}

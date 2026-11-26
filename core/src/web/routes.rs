@@ -4,7 +4,6 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use async_stream::stream;
-use axum::body::to_bytes;
 use axum::extract::{Path, RawQuery, Request, State};
 use axum::http::{header, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -35,6 +34,7 @@ use super::common::{
     ApiError, PathInteger, QueryValues,
 };
 use super::events::{data_frame, degraded_frame};
+use super::request_body::{read_action_body, WorkflowActionBody};
 use super::stdlib_uuid_text::parse_stdlib_uuid_text;
 
 pub(crate) fn read_router() -> Router<WebState> {
@@ -699,45 +699,16 @@ fn action_response(route: &'static str, entity_id: Uuid, outcome: ActionOutcome)
     }
 }
 
+/// Cancel one task. The body is read first ([`read_action_body`]: no body,
+/// or `{"include_running": bool}`), then the path id.
 async fn cancel_task(
     State(state): State<WebState>,
     Path(task_id): Path<String>,
     request: Request,
 ) -> Response {
-    let content_type = request
-        .headers()
-        .get(header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_owned);
-    let body = match to_bytes(request.into_body(), usize::MAX).await {
-        Ok(bytes) if bytes.is_empty() => CancelTaskBody::default(),
-        Ok(bytes)
-            if content_type
-                .as_deref()
-                .is_some_and(|value| value.starts_with("application/json")) =>
-        {
-            match serde_json::from_slice(&bytes) {
-                Ok(body) => body,
-                Err(error) => {
-                    return ApiError::body_validation(
-                        error.to_string(),
-                        String::from_utf8_lossy(&bytes).into_owned().into(),
-                    )
-                    .into_response();
-                }
-            }
-        }
-        Ok(bytes) => {
-            return ApiError::body_validation(
-                "Input should be a valid JSON object",
-                String::from_utf8_lossy(&bytes).into_owned().into(),
-            )
-            .into_response();
-        }
-        Err(error) => {
-            return ApiError::body_validation(error.to_string(), serde_json::Value::Null)
-                .into_response();
-        }
+    let body: CancelTaskBody = match read_action_body(request).await {
+        Ok(body) => body,
+        Err(refused) => return refused.into_response(),
     };
     let task_uuid = match parse_path_uuid("task_id", &task_id) {
         Ok(task_uuid) => task_uuid,
@@ -750,18 +721,21 @@ async fn cancel_task(
     )
 }
 
-/// The workflow path id of an action route. Text that is not a UUID is
-/// refused with 400 `INVALID_INPUT` before any statement, as the task
-/// cancel route refuses its id (Python `require_path_uuid`).
-fn workflow_action_id(workflow_id: &str) -> Result<Uuid, ApiError> {
+/// The input of a workflow action route, read before any statement: the
+/// body first ([`read_action_body`]: no body, or `{}`), then the path id.
+/// Path text that is not a UUID is refused with 400 `INVALID_INPUT`, as the
+/// task cancel route refuses its id (Python `require_path_uuid`).
+async fn workflow_action_input(workflow_id: &str, request: Request) -> Result<Uuid, ApiError> {
+    let WorkflowActionBody {} = read_action_body(request).await?;
     parse_path_uuid("workflow_id", workflow_id)
 }
 
 async fn pause_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
+    request: Request,
 ) -> Response {
-    let workflow_id = match workflow_action_id(&workflow_id) {
+    let workflow_id = match workflow_action_input(&workflow_id, request).await {
         Ok(workflow_id) => workflow_id,
         Err(refused) => return refused.into_response(),
     };
@@ -775,8 +749,9 @@ async fn pause_workflow(
 async fn resume_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
+    request: Request,
 ) -> Response {
-    let workflow_id = match workflow_action_id(&workflow_id) {
+    let workflow_id = match workflow_action_input(&workflow_id, request).await {
         Ok(workflow_id) => workflow_id,
         Err(refused) => return refused.into_response(),
     };
@@ -790,8 +765,9 @@ async fn resume_workflow(
 async fn cancel_workflow(
     State(state): State<WebState>,
     Path(workflow_id): Path<String>,
+    request: Request,
 ) -> Response {
-    let workflow_id = match workflow_action_id(&workflow_id) {
+    let workflow_id = match workflow_action_input(&workflow_id, request).await {
         Ok(workflow_id) => workflow_id,
         Err(refused) => return refused.into_response(),
     };

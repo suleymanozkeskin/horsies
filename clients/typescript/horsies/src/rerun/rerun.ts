@@ -25,7 +25,7 @@ import type {
 } from "./errors.ts";
 import { parseRerunRequest } from "./parse.ts";
 import type { RerunRequest } from "./parse.ts";
-import type { RerunCommand, RerunOutcome, RerunPolicy } from "./types.ts";
+import type { RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "./types.ts";
 
 /** The outcome of a rerun in the app's transaction. */
 export type AppRerunResult = Result<RerunOutcome, RerunError>;
@@ -42,7 +42,7 @@ export async function rerunInApp(
   handle: CoreHandle,
   trace: TraceArgument,
   command: RerunCommand,
-  policy: RerunPolicy,
+  policy: RerunEnqueuePolicy,
 ): Promise<AppRerunResult> {
   const request = parseRerunRequest(command, policy);
 
@@ -74,7 +74,7 @@ export async function rerunInCaller(
   trace: TraceArgument,
   transaction: CallerTransaction,
   command: RerunCommand,
-  policy: RerunPolicy,
+  policy: RerunEnqueuePolicy,
 ): Promise<CallerRerunResult> {
   const request = parseRerunRequest(command, policy);
 

@@ -99,7 +99,7 @@ impl WorkflowDefinition for OrderFulfillment {
                 .node_id("send_order_email")
                 .set(send_order_email::params::order_id(), order_id)?
                 .arg_from(send_order_email::params::capture(), capture)
-                .allow_failed_deps(true),
+                .allow_failed_dependencies(true),
         )?;
         builder.output(capture);
         builder.build()

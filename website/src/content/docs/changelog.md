@@ -57,6 +57,27 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: `allow_failed_deps` is `allow_failed_dependencies`, and
+  `workflow_ctx_from` is `workflow_context_from`.** Each concept has one name
+  in every client. The old names have no alias.
+  - Python: the `TaskNode` and `SubWorkflowNode` fields and the keyword
+    arguments of `task.node(...)`.
+  - Rust: `TaskNode::allow_failed_dependencies`,
+    `TaskNode::workflow_context_from` and
+    `SubWorkflowNode::allow_failed_dependencies`.
+  - `horsies-core`: the fields of `AnyNode`, `WorkflowTaskRow` and the
+    workflow spec data `SpecNode`, and
+    `WorkflowNodeInfo::allow_failed_dependencies`.
+  - Monitoring: `WorkflowNodeInfo.allow_failed_dependencies` (Python) and the
+    key `allow_failed_dependencies` of each node of
+    `GET /api/workflows/{workflow_id}`.
+  - The workflow spec data that a client sends to the core: the node members
+    `allow_failed_dependencies` and `workflow_context_from`. The core refuses
+    a node with the old member names (an unknown field).
+  - The validation messages name `workflow_context_from`.
+  - The database does not change: the columns `allow_failed_deps` and
+    `workflow_ctx_from` of `horsies_workflow_tasks` and the SQL function
+    parameters keep their names. There is no migration.
 - **Breaking (Python): typed custom error codes.** `TaskError[C]` is generic
   in the type of its custom code, with the default `str`; `TaskError` with
   no argument keeps its meaning. `error_code` is `C | BuiltInTaskCode`.
@@ -323,6 +344,26 @@ there is no migration contract between pre-1.0 versions.
   one of `never_retryable` and `always_retryable`. Code that matches on
   `ErrorSlot` takes the new variant.
 
+- **Breaking: the web API refuses an unknown key in an action body.**
+  `POST /api/tasks/{id}/cancel` takes the key `include_running` (no body,
+  or a JSON object), and `POST /api/workflows/{id}/pause`, `/resume` and
+  `/cancel` take no key (no body, or `{}`). A key that the route does not
+  know is refused with 422 before any statement of the action. The response
+  has one issue, for the first unknown key in body order: `type`
+  `extra_forbidden`, `loc` `["body", key]`, `input` the value of the key,
+  and `ctx.known_keys` the keys that the route knows (`[]` for a workflow
+  action); `msg` names the key and the known keys. Before, the task cancel
+  dropped an unknown key (a misspelled `include_running` read as `false`),
+  and a workflow action did not read its body. A workflow action now reads
+  its body as the task cancel does: a body whose content type is not
+  `application/json`, and JSON that is not an object, are refused with 422
+  `value_error`. The task cancel also refuses JSON that is not an object;
+  before, it took an array of the field values (`[true]`). Each action route
+  reads its body before its path id. The 413 of a body over 1 MiB comes
+  before every check of the body, as before. `CancelTaskBody` refuses an
+  unknown key for any serde reader (`#[serde(deny_unknown_fields)]`). The web
+  UI sends known keys only.
+
 ### Fixed
 
 - **A schema install of the `TYPESCRIPT` client family into an empty
@@ -357,6 +398,24 @@ there is no migration contract between pre-1.0 versions.
   10000). Before, its stored error had no `data`. A reader that reads
   `data.field` now reads it for the rows of each client. The Python child
   writes the same `data` as before.
+- **The Rust scheduler run ends at a stop request during its connect.**
+  `PreparedScheduler::run` waited for the connect and the schema install
+  before it read the stop request, so `SIGTERM` during them ended the run
+  only after the connect, the start and its first state write. A stop
+  request before or during them now returns `Ok(SchedulerStopped)`, drops
+  the connect and writes no schedule state, as the TypeScript and Python
+  schedulers do. A stop request after the connect is unchanged.
+- **The Rust client leaves the status of a successful attempt span unset.**
+  The span of a task attempt that returned a value had the status OK. It
+  now has no status, as the Python and TypeScript clients write it and as
+  the OpenTelemetry specification asks of instrumentation libraries. The
+  status ERROR with `error.type` for a failure is unchanged.
+- **The Python and Rust web handlers refuse a trusted identity header with a
+  blank comma-separated member.** A request with two copies of the header,
+  one blank, reaches the handler as `alice, `. `TrustedHeader` now refuses
+  it for reads and for actions, as the TypeScript client does. Every value
+  of a repeated header is checked. A value with all members present, such as
+  `alice, bob`, is still allowed.
 
 ## 0.8.1 — 2026-11-25
 

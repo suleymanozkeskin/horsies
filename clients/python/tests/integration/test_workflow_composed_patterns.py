@@ -1,7 +1,7 @@
 """Integration tests for composed workflow patterns.
 
 These tests cross two axes:
-- **Features**: join modes, args_from, allow_failed_deps, success_policy
+- **Features**: join modes, args_from, allow_failed_dependencies, success_policy
 - **Topologies**: diamond, fan-out, wide fan-in, mixed DAG
 
 Existing tests cover features on simple topologies and topologies with default
@@ -230,14 +230,14 @@ class TestComposedPatterns:
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
     # -----------------------------------------------------------------
-    # Test 3: Diamond + allow_failed_deps + args_from on sink
+    # Test 3: Diamond + allow_failed_dependencies + args_from on sink
     # -----------------------------------------------------------------
 
-    async def test_diamond_allow_failed_deps_on_sink(
+    async def test_diamond_allow_failed_dependencies_on_sink(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """A→[B,C]→D(allow_failed_deps, args_from={b_result: B, c_result: C}).
+        """A→[B,C]→D(allow_failed_dependencies, args_from={b_result: B, c_result: C}).
 
         B fails, C succeeds → D ENQUEUED with both results injected.
         """
@@ -262,7 +262,7 @@ class TestComposedPatterns:
             fn=diamond_sink,
             waits_for=[node_b, node_c],
             args_from={'b_result': node_b, 'c_result': node_c},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -289,7 +289,7 @@ class TestComposedPatterns:
         # D still PENDING (C not terminal yet)
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'PENDING'
 
-        # C succeeds → all deps terminal → D ENQUEUED (allow_failed_deps=True)
+        # C succeeds → all deps terminal → D ENQUEUED (allow_failed_dependencies=True)
         await finish_task(session, broker, str(handle.workflow_id), 2, Ok(100))
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
 
@@ -450,7 +450,7 @@ class TestComposedPatterns:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """A→[B,C], B→D(allow_failed_deps, args_from={input_result: B}), [C,D]→E.
+        """A→[B,C], B→D(allow_failed_dependencies, args_from={input_result: B}), [C,D]→E.
 
         B fails → D runs (recovery). C and D complete → E ENQUEUED.
         Workflow FAILED (B failed, no success_policy to override).
@@ -470,7 +470,7 @@ class TestComposedPatterns:
             fn=task_d,
             waits_for=[node_b],
             args_from={'input_result': node_b},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
         node_e = TaskNode(fn=task_e, kwargs={'value': 5}, waits_for=[node_c, node_d])
 
@@ -487,7 +487,7 @@ class TestComposedPatterns:
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
-        # B fails → D ENQUEUED (allow_failed_deps=True)
+        # B fails → D ENQUEUED (allow_failed_dependencies=True)
         await finish_task(
             session,
             broker,
@@ -591,7 +591,7 @@ class TestComposedPatterns:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """A→B(allow_failed_deps, args_from)→C→D.
+        """A→B(allow_failed_dependencies, args_from)→C→D.
 
         A fails → B runs (recovery) but also fails → C SKIPPED → D SKIPPED.
         Workflow FAILED.
@@ -616,7 +616,7 @@ class TestComposedPatterns:
             fn=failing_recovery,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
         node_c = TaskNode(fn=task_c, kwargs={'value': 1}, waits_for=[node_b])
         node_d = TaskNode(fn=task_d, kwargs={'value': 2}, waits_for=[node_c])
@@ -629,7 +629,7 @@ class TestComposedPatterns:
 
         handle = await start_ok(spec, broker)
 
-        # A fails → B ENQUEUED (allow_failed_deps=True)
+        # A fails → B ENQUEUED (allow_failed_dependencies=True)
         await finish_task(
             session,
             broker,
@@ -658,14 +658,14 @@ class TestComposedPatterns:
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'FAILED'
 
     # -----------------------------------------------------------------
-    # Test 12: success_policy + allow_failed_deps + recovery on diamond
+    # Test 12: success_policy + allow_failed_dependencies + recovery on diamond
     # -----------------------------------------------------------------
 
     async def test_success_policy_with_recovery_on_diamond(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """A→[B,C], B→D(allow_failed_deps, args_from), success_policy requires D.
+        """A→[B,C], B→D(allow_failed_dependencies, args_from), success_policy requires D.
 
         B fails, C fails → D runs (recovery), D completes.
         Workflow COMPLETED (policy requires only D, D completed).
@@ -685,7 +685,7 @@ class TestComposedPatterns:
             fn=task_d,
             waits_for=[node_b],
             args_from={'input_result': node_b},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         policy = SuccessPolicy(cases=[SuccessCase(required=[node_d])])
@@ -704,7 +704,7 @@ class TestComposedPatterns:
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
         assert await self._get_task_status(session, str(handle.workflow_id), 2) == 'ENQUEUED'
 
-        # B fails → D ENQUEUED (allow_failed_deps=True)
+        # B fails → D ENQUEUED (allow_failed_dependencies=True)
         await finish_task(
             session,
             broker,

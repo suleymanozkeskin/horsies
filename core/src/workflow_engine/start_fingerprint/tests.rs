@@ -26,8 +26,8 @@ fn command() -> StartCommandV1<'static> {
                 priority: 100,
                 dependencies: "[]",
                 args_from: None,
-                workflow_ctx_from: None,
-                allow_failed_deps: false,
+                workflow_context_from: None,
+                allow_failed_dependencies: false,
                 join_type: "all",
                 min_success: None,
                 task_options: Some(r#"{"retry":"none"}"#),
@@ -45,8 +45,8 @@ fn command() -> StartCommandV1<'static> {
                 priority: 50,
                 dependencies: "[0]",
                 args_from: Some(r#"{"rows":0}"#),
-                workflow_ctx_from: Some(r#"["fetch"]"#),
-                allow_failed_deps: false,
+                workflow_context_from: Some(r#"["fetch"]"#),
+                allow_failed_dependencies: false,
                 join_type: "all",
                 min_success: None,
                 task_options: None,
@@ -128,8 +128,12 @@ fn each_element_of_the_command_changes_the_fingerprint() {
         ("priority", |c| c.nodes[0].priority = 99),
         ("dependencies", |c| c.nodes[1].dependencies = "[]"),
         ("args_from", |c| c.nodes[1].args_from = None),
-        ("workflow_ctx_from", |c| c.nodes[1].workflow_ctx_from = None),
-        ("allow_failed_deps", |c| c.nodes[1].allow_failed_deps = true),
+        ("workflow_context_from", |c| {
+            c.nodes[1].workflow_context_from = None;
+        }),
+        ("allow_failed_dependencies", |c| {
+            c.nodes[1].allow_failed_dependencies = true;
+        }),
         ("join_type", |c| c.nodes[1].join_type = "any"),
         ("min_success", |c| c.nodes[1].min_success = Some(1)),
         ("task_options", |c| c.nodes[0].task_options = None),

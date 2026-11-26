@@ -37,8 +37,8 @@ const regionalReport = defineWorkflow(
   {
     name: "regional_report",
     definitionKey: "examples.regional_report.v1",
-    params: { region: h.string() },
-    output: h.string(),
+    parameters: { region: h.string() },
+    outputType: h.string(),
     checkCases: [{ region: "emea" }],
   },
   (w, { region }) => {

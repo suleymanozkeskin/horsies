@@ -54,7 +54,7 @@ impl WorkflowDefinition for Pipeline {
         let _summary = builder.task(
             summarize::node()
                 .waits_for(consumed)
-                .workflow_ctx_from([consumed]),
+                .workflow_context_from([consumed]),
         )?;
         Ok(WorkflowDefConfig::new().output(consumed))
     }

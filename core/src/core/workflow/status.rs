@@ -100,7 +100,7 @@ impl std::fmt::Display for WorkflowStatus {
 /// State machine:
 ///   PENDING → READY → ENQUEUED → RUNNING → COMPLETED
 ///                                         → FAILED
-///                   → SKIPPED (deps failed and allow_failed_deps=False)
+///                   → SKIPPED (deps failed and allow_failed_dependencies=False)
 #[derive(
     Debug,
     Clone,
@@ -174,7 +174,7 @@ impl std::fmt::Display for WorkflowTaskStatus {
 #[serde(rename_all = "snake_case")]
 pub enum OnError {
     /// Continue DAG resolution but mark workflow as will-fail.
-    /// Skip tasks without allow_failed_deps.
+    /// Skip tasks without allow_failed_dependencies.
     Fail,
     /// Pause workflow immediately. No new tasks enqueued until resume().
     Pause,

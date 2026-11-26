@@ -63,7 +63,7 @@ class OnError(str, Enum):
     """
 
     FAIL = 'fail'
-    """Continue DAG resolution but mark workflow as will-fail. Skip tasks without allow_failed_deps."""
+    """Continue DAG resolution but mark workflow as will-fail. Skip tasks without allow_failed_dependencies."""
 
     PAUSE = 'pause'
     """Pause workflow immediately. No new tasks enqueued until resume()."""

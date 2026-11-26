@@ -587,7 +587,7 @@ class TestWorkflowBoundRowsAreUntouched:
                 task_name='action_task',
                 status='FAILED',
                 dependencies=(),
-                allow_failed_deps=False,
+                allow_failed_dependencies=False,
                 kind=TaskNode(task_id=task.id),
                 result=None,
                 created_at=ago(120),

@@ -262,7 +262,7 @@ A workflow node that waits for its dependencies is only a row, and the worker st
 | sends several tasks, then combines their results | fan-out, then a fan-in node |
 | gets the number of tasks from a result | a `SubWorkflowNode`: `build_with()` runs when the node is ready, with the upstream results ([Dynamic Fan-Out with `args_from`](/horsies/concepts/workflows/subworkflows/#dynamic-fan-out-with-args_from)) |
 | chooses the next step from a result | `build_with()` chooses the nodes |
-| has steps that can fail | `allow_failed_deps`, `join="any"` or `join="quorum"`, `success_policy` |
+| has steps that can fail | `allow_failed_dependencies`, `join="any"` or `join="quorum"`, `success_policy` |
 
 ## Domain Errors vs Library Errors
 

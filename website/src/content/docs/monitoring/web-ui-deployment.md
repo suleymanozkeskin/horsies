@@ -42,7 +42,7 @@ and can it act (`can_act`).
 |---|---|---|---|
 | `AllowAll` | `True` | `True` | The mount already sits behind the host app's authentication |
 | `ViewOnly` | `True` | `False` | Read-only dashboard |
-| `TrustedHeader` (a header name, and whether actions are allowed) | header present and non-empty | same check, when actions are allowed | A reverse proxy is the identity boundary |
+| `TrustedHeader` (a header name, and whether actions are allowed) | header present, non-empty, and no blank comma-separated member | same check, when actions are allowed | A reverse proxy is the identity boundary |
 
 Every `/api` route depends on `can_view`; a false verdict returns 403
 `{"detail": "Not authorized."}` and the SPA renders a full-screen

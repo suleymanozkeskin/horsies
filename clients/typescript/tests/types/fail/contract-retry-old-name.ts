@@ -7,5 +7,5 @@ export const charge = defineTask({
   name: "charge",
   input: {},
   output: h.null(),
-  retry: { kind: "fixed", intervalsSeconds: [60], autoRetryFor: ["TASK_TIMEOUT"] },
+  retry: { kind: "fixed", intervalsSeconds: [60], retryFor: ["TASK_TIMEOUT"] },
 });

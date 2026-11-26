@@ -26,7 +26,7 @@ const takesFloat = defineTask({ name: "takes_float", input: { value: h.taskOutco
  * int for a float.
  */
 export const widenedSources = defineWorkflow(
-  { name: "widened_sources", definitionKey: "tests.widened_sources.v1", output: h.int(), params: {} },
+  { name: "widened_sources", definitionKey: "tests.widened_sources.v1", outputType: h.int(), parameters: {} },
   (w) => {
     const maybe = w.task(takesMaybeText, { value: w.task(text, {}, { nodeId: "text" }) }, { nodeId: "maybe" });
     const base = w.task(takesText, { value: w.task(letter, {}, { nodeId: "letter" }) }, { nodeId: "base" });
@@ -43,6 +43,6 @@ export const widenedSources = defineWorkflow(
 
 /** A string output node for a declared nullable string output. */
 export const widenedOutput = defineWorkflow(
-  { name: "widened_output", definitionKey: "tests.widened_output.v1", output: h.string().nullable(), params: {} },
+  { name: "widened_output", definitionKey: "tests.widened_output.v1", outputType: h.string().nullable(), parameters: {} },
   (w) => ({ output: w.task(text, {}, { nodeId: "text" }) }),
 );

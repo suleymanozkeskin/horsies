@@ -90,7 +90,7 @@ impl WorkflowDefinition for Checkout {
         let _audit = builder.task(
             audit_checkout::node()
                 .waits_for(charged)
-                .workflow_ctx_from([charged]),
+                .workflow_context_from([charged]),
         )?;
         builder.output(receipt);
         builder.build()
@@ -157,11 +157,11 @@ the task's registration on the builder's app.
 | `.input_json(text)` | Sets the whole input from one JSON object in the stored form. `Result<Self, HorsiesError>` |
 | `.arg_from(field, source)` | Gives the outcome of `source` to a parameter of type `TaskOutcome<S, E>`. The node waits for `source` |
 | `.waits_for(node)`, `.waits_for_all(nodes)` | Waits for nodes, with no data |
-| `.workflow_ctx_from(nodes)` | Gives the results of these dependencies in the workflow context |
+| `.workflow_context_from(nodes)` | Gives the results of these dependencies in the workflow context |
 | `.node_id(id)` | Unique in the spec, `[A-Za-z0-9_\-:.]`, at most 128 characters |
 | `.queue(name)` | Runs on this queue in place of the task's queue |
 | `.priority(p)` | 1 (first) to 100 (last), in place of the queue's priority |
-| `.allow_failed_deps(true)` | Runs even when a dependency failed |
+| `.allow_failed_dependencies(true)` | Runs even when a dependency failed |
 | `.join_all()` (default), `.join_any()`, `.join_quorum(n)` | When the node becomes ready |
 | `.good_until(deadline)` | The task expires when it has not started by then |
 | `.key()` | `Option<NodeKey<T>>`: the key when the node has a given node id |
@@ -175,7 +175,7 @@ the task's registration on the builder's app.
 
 Data flow rules:
 
-| Dependency | Default | `allow_failed_deps(true)` |
+| Dependency | Default | `allow_failed_dependencies(true)` |
 |---|---|---|
 | COMPLETED | Runs with `TaskOutcome::Succeeded(value)` | Same |
 | FAILED | The node is SKIPPED | Runs with `TaskOutcome::Failed(error)` |
@@ -203,10 +203,10 @@ worker writes the context into that parameter.
 | `output_for::<T>(&key)` | `Result<Option<T>, WorkflowContextError>`: the child's output |
 
 - `WorkflowContextError`: `NotInContext { node_id }` (the node is not in
-  `workflow_ctx_from`, or it did not end), `Unreadable { node_id, cause }`,
+  `workflow_context_from`, or it did not end), `Unreadable { node_id, cause }`,
   `UnknownUserCode { node_id, cause }`.
-- Each node of `workflow_ctx_from` must be a dependency of the node.
-- `workflow_ctx_from` on a task without the `workflow_ctx` attribute is
+- Each node of `workflow_context_from` must be a dependency of the node.
+- `workflow_context_from` on a task without the `workflow_ctx` attribute is
   refused (`HRS-010`).
 - Use a given `node_id` for each context source, and read it with
   `NodeKey::new(id)`.
@@ -291,7 +291,7 @@ impl WorkflowDefinition for AllRegions {
   input `{}`. `Given(params)`: the engine calls the child's `build_with`.
   Params given to a definition without params are refused (`HRS-022`).
 - `SubWorkflowNode` has `set`, `set_params`, `arg_from`, `waits_for`,
-  `waits_for_all`, `node_id`, `allow_failed_deps`, `join_all`,
+  `waits_for_all`, `node_id`, `allow_failed_dependencies`, `join_all`,
   `join_any`, `join_quorum` and `key`.
 - `SubWorkflowNode::of::<D>(params)` and a registered template's
   `template.node(params)` also make one.
@@ -364,7 +364,7 @@ async fn run_checkout(
 - The start command is the workflow name, definition key, `on_error`,
   output, success policy, and each top-level node: index, node id, task
   name, input (byte for byte), queue, priority, dependencies, `args_from`,
-  `workflow_ctx_from`, `allow_failed_deps`, join, `min_success`, task
+  `workflow_context_from`, `allow_failed_dependencies`, join, `min_success`, task
   options (with `good_until`), retention class and sub-workflow facts. The
   workflow id, the start time, the trace and the pre-built child workflows
   are not in it. A spec that changes between two starts with one id (a
@@ -542,7 +542,7 @@ For a template, pass the builder to `build_with`:
 |---|---|
 | `HRS-004` | Two nodes with one node id |
 | `HRS-006`, `HRS-011`, `HRS-012` | A reference of another builder (dependency, output, success policy) |
-| `HRS-010` | `workflow_ctx_from` on a task without `workflow_ctx` |
+| `HRS-010` | `workflow_context_from` on a task without `workflow_ctx` |
 | `HRS-013` | A quorum outside 1 to the node's dependencies, or `arg_from` on an `any` or quorum join |
 | `HRS-016` | A definition with an empty definition key |
 | `HRS-017` | A definition key or a workflow name that another registered definition has |

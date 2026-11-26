@@ -9,7 +9,7 @@
 //   setting (`HRS-202`).
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
-import type { Refusal } from "../app/refusal.ts";
+import type { HorsiesError } from "../app/refusal.ts";
 import type { TracingConfigInput } from "../telemetry/tracing-config.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -67,7 +67,7 @@ export type AppConfigInput = QueueConfigInput & {
   readonly workerProfiles?: Readonly<Record<string, WorkerProfileInput>>;
   /** Send again, up to 3 times, after a send fails with a transient database error. Left out: no resend. */
   readonly resendOnTransientError?: boolean;
-  /** The spans and producer metrics of the app. Left out: `{ kind: "none" }`. `Horsies.create` reads it; the core does not. */
+  /** The spans and producer metrics of the app. Left out: `{ kind: "noTracing" }`. `Horsies.create` reads it; the core does not. */
   readonly tracing?: TracingConfigInput;
 };
 
@@ -102,7 +102,7 @@ const SOFT_CAP_PREFETCH_BUFFER: IntegerBound = Object.freeze({
  * The parsed config of `input`, or every refusal in field order. Reads each `fromEnv` secret through `environment`.
  * The parse checks the shape that the core's config reader needs; the bridge's `checkAppConfig` checks the rules.
  */
-export function parseAppConfig(input: AppConfigInput, environment: EnvironmentRead): Result<AppConfig, readonly Refusal[]> {
+export function parseAppConfig(input: AppConfigInput, environment: EnvironmentRead): Result<AppConfig, readonly HorsiesError[]> {
   const parsed = coreConfigObject(input, environment);
 
   switch (parsed.kind) {
