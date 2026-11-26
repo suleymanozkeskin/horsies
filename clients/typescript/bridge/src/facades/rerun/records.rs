@@ -16,7 +16,7 @@
 //! (`horsies_core::prepare_rerun_write`), so the three reach no rerun of
 //! this core; the map keeps them total.
 
-use horsies_core::db::{StatementFailure, Transience};
+use horsies_core::db::{FailedTransactionOutcome, StatementFailure, Transience};
 use horsies_core::{
     BrokerError, ClientFamily, FamilyCheckFailure, NotEligibleReason, RecordedFamily, RerunError,
     RerunOutcome, TaskAbsenceReason,
@@ -28,10 +28,6 @@ use crate::values::core_failures::CauseRecord;
 
 /// The subject of the cause of a failed rerun.
 pub const RERUN_SUBJECT: &str = "rerun_task";
-
-/// The name of the `COMMIT` of a transaction in a statement failure
-/// (`StatementFailure::statement`).
-const COMMIT_STATEMENT: &str = "commit";
 
 /// Why no live or history record has the source id.
 #[napi(string_enum = "UPPER_SNAKE")]
@@ -316,17 +312,12 @@ fn statement_failed(message: String, failure: &StatementFailure) -> AppRerunFail
     }
 }
 
-/// Whether `failure` may have committed the rerun: only a lost reply to
-/// `COMMIT`. A lost reply to an earlier statement ends the session with the
-/// transaction open, and the server rolls it back. Pure.
+/// Whether `failure` may have committed the rerun's transaction, by the
+/// core's rule ([`FailedTransactionOutcome::of`]). Pure.
 fn statement_outcome(failure: &StatementFailure) -> StatementOutcome {
-    match failure {
-        StatementFailure::OutcomeUnknown { statement, .. } if *statement == COMMIT_STATEMENT => {
-            StatementOutcome::Unknown
-        }
-        StatementFailure::OutcomeUnknown { .. }
-        | StatementFailure::NotSent { .. }
-        | StatementFailure::StatementRefused { .. } => StatementOutcome::NotCommitted,
+    match FailedTransactionOutcome::of(failure) {
+        FailedTransactionOutcome::NotCommitted => StatementOutcome::NotCommitted,
+        FailedTransactionOutcome::Unknown => StatementOutcome::Unknown,
     }
 }
 
@@ -387,7 +378,9 @@ pub enum CallerStepRefusal {
 mod tests {
     use std::time::Duration;
 
-    use horsies_core::db::{CancelRequestOutcome, NotSentCause, UnknownOutcomeCause};
+    use horsies_core::db::{
+        CancelRequestOutcome, NotSentCause, UnknownOutcomeCause, COMMIT_STATEMENT_NAME,
+    };
     use horsies_core::{IdempotencyKeyError, RowDecodeError, UnknownStoredFamily, Uuid7Error};
     use uuid::Uuid;
 
@@ -577,7 +570,7 @@ mod tests {
     #[test]
     fn a_lost_reply_to_commit_has_an_unknown_outcome() {
         assert_eq!(
-            statement_outcome(&lost_reply(COMMIT_STATEMENT)),
+            statement_outcome(&lost_reply(COMMIT_STATEMENT_NAME)),
             StatementOutcome::Unknown
         );
     }
