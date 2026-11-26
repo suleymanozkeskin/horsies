@@ -110,9 +110,9 @@ export function readErrorText(error: ReadError): string {
       return `no task has this id (${error.reason})`;
     case "resultNotAvailable":
       return `the task is ${error.status} and stores no result`;
-    case "storedResultUnreadable":
+    case "resultDeserializationError":
       return `the stored result does not read with the contract: ${error.cause}`;
-    case "unknownUserCode":
+    case "unknownCustomCode":
       return `the stored error has the code ${error.code}, which the contract does not declare`;
     case "waitInsideTask":
       return "a wait inside a task body";
@@ -139,9 +139,9 @@ export function workflowReadErrorText(error: WorkflowReadError): string {
       return "no workflow has this id";
     case "resultNotReady":
       return "the node stores no result yet";
-    case "storedResultUnreadable":
+    case "resultDeserializationError":
       return `the stored result does not read with the contract: ${error.cause}`;
-    case "unknownUserCode":
+    case "unknownCustomCode":
       return `the stored error has the code ${error.code}, which the contract does not declare`;
     case "waitInsideTask":
       return "a wait inside a task body";

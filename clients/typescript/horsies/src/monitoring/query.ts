@@ -11,6 +11,7 @@ import type { TaskStatus } from "../_catalog/status.ts";
 import type {
   CountArg,
   FiltersArg,
+  RetriedArg,
   SortArg,
   TaskBreakdownArg,
   TaskFacetsArg,
@@ -38,9 +39,6 @@ export interface MonitoringWindow {
 
 /** An error category, by its wire value. */
 export type ErrorCategory = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "DOMAIN";
-
-/** Which tasks the retried filter keeps: every task, or only the tasks that ran more than one attempt. */
-export type RetriedFilter = "any" | "retriedOnly";
 
 /** The sort field of the task list. */
 export type TaskSortField =
@@ -77,14 +75,15 @@ export interface TaskFilters {
   readonly workers?: readonly string[];
   readonly errorCodes?: readonly string[];
   readonly errorCategories?: readonly ErrorCategory[];
-  readonly retried?: RetriedFilter;
+  /** Keep only the tasks that ran more than one attempt. Left out: every task. */
+  readonly retriedOnly?: boolean;
 }
 
 /** The task stats read: every filter but the statuses (the stats count each status). */
 export type TaskStatsQuery = Omit<TaskFilters, "statuses">;
 
 /** The task facets read: only the coarse filters, so one selection never empties the option lists of the others. */
-export type TaskFacetsQuery = Pick<TaskFilters, "window" | "statuses" | "errorCategories" | "retried">;
+export type TaskFacetsQuery = Pick<TaskFilters, "window" | "statuses" | "errorCategories" | "retriedOnly">;
 
 /** The task breakdown read. `limit`: the most groups, 1 to `MAX_BREAKDOWN_LIMIT`; left out, the core's default. */
 export interface TaskBreakdownQuery extends TaskFilters {
@@ -104,7 +103,7 @@ export interface TaskListQuery extends TaskFilters {
 
 /** The workflow runs read. `limit`: 1 to `MAX_WORKFLOW_RUNS_LIMIT`; left out, the core's default. */
 export interface WorkflowRunsQuery {
-  readonly name?: string;
+  readonly workflowName?: string;
   readonly status?: WorkflowStatus;
   readonly limit?: number;
 }
@@ -128,7 +127,7 @@ export function taskFacetsArg(query: TaskFacetsQuery): TaskFacetsArg {
     window: windowArg(query.window),
     statuses: [...(query.statuses ?? [])],
     errorCategories: [...(query.errorCategories ?? [])],
-    retried: query.retried ?? "any",
+    retried: retriedArg(query.retriedOnly),
   };
 }
 
@@ -185,12 +184,12 @@ export function workflowRunsArg(query: WorkflowRunsQuery): Result<WorkflowRunsAr
     return limit;
   }
 
-  if (query.name !== undefined && !query.name.isWellFormed()) {
+  if (query.workflowName !== undefined && !query.workflowName.isWellFormed()) {
     return err(queryRefused("workflowName", "the workflow name is not well-formed text (it holds a lone surrogate)"));
   }
 
   return ok({
-    name: query.name === undefined ? { kind: "anyName" } : { kind: "named", name: query.name },
+    name: query.workflowName === undefined ? { kind: "anyName" } : { kind: "named", name: query.workflowName },
     status: query.status === undefined ? { kind: "anyStatus" } : { kind: "status", status: query.status },
     limit: limit.value,
   });
@@ -254,7 +253,7 @@ function filtersArg(query: TaskFilters): Result<FiltersArg, QueryRefused> {
     workers: [...(query.workers ?? [])],
     errorCodes: [...(query.errorCodes ?? [])],
     errorCategories: [...(query.errorCategories ?? [])],
-    retried: query.retried ?? "any",
+    retried: retriedArg(query.retriedOnly),
   });
 }
 
@@ -265,4 +264,9 @@ export function wholeNumber(field: QueryRefusedField, value: number): Result<num
     : err(
         queryRefused(field, `${field} must be a whole number from -9007199254740991 to 9007199254740991; got ${value}`),
       );
+}
+
+/** The addon argument of the retried filter: only retried tasks when `retriedOnly` is `true`, else every task. Pure. */
+function retriedArg(retriedOnly: boolean | undefined): RetriedArg {
+  return retriedOnly === true ? "retriedOnly" : "any";
 }

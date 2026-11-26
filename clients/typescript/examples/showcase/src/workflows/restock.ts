@@ -19,7 +19,7 @@ export function feedNodeId(supplier: string): `feed_${string}` {
 const [ATLAS, BRERA, COASTLINE] = SUPPLIERS;
 
 export const restock = defineWorkflow(
-  { name: "restock", definitionKey: "acme.restock.v1", params: {}, output: StockUpdate },
+  { name: "restock", definitionKey: "acme.restock.v1", parameters: {}, outputType: StockUpdate },
   (w) => {
     const atlasFeed = w.task(syncSupplierFeed, { supplier: ATLAS }, { nodeId: feedNodeId(ATLAS) });
     const breraFeed = w.task(syncSupplierFeed, { supplier: BRERA }, { nodeId: feedNodeId(BRERA) });

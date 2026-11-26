@@ -85,8 +85,10 @@ impl std::fmt::Debug for PreparedScheduler {
 }
 
 impl PreparedScheduler {
-    /// The stop request of this scheduler. A request before the run ends
-    /// the run after its start; a fire in flight runs to its end.
+    /// The stop request of this scheduler. A request before or during the
+    /// connect and the schema install ends the run with nothing written, and
+    /// drops the connect. A request after the connect ends the run after its
+    /// start; a fire in flight runs to its end.
     pub fn stop_handle(&self) -> SchedulerStop {
         self.stop.clone()
     }
@@ -95,7 +97,9 @@ impl PreparedScheduler {
     /// state, then fire one tick at once and one per
     /// `check_interval_seconds` until a stop request. A failed tick is
     /// logged and the next one runs; a schedule section with no schedule
-    /// waits for the stop request.
+    /// waits for the stop request. A stop request before or during the
+    /// connect and the install returns `Ok(SchedulerStopped)` and writes no
+    /// schedule state.
     ///
     /// Errors: `StartRefused`, `StartFailed`.
     ///
@@ -105,11 +109,14 @@ impl PreparedScheduler {
     /// process runtime started. Nothing started.
     pub async fn run(self) -> Result<SchedulerStopped, SchedulerRunError> {
         refuse_in_a_fork(format_args!("PreparedScheduler::run"));
-        let broker = self.handle.initialized_broker().await.map_err(|error| {
-            SchedulerRunError::StartFailed {
-                message: error.to_string(),
-                retryable: error.is_retryable(),
-            }
+        let connected = tokio::select! {
+            biased;
+            () = self.stop.requested() => return Ok(SchedulerStopped),
+            connected = self.handle.initialized_broker() => connected,
+        };
+        let broker = connected.map_err(|error| SchedulerRunError::StartFailed {
+            message: error.to_string(),
+            retryable: error.is_retryable(),
         })?;
         let started = SchedulerService::from_manifest(broker, self.manifest, &self.stop)
             .start()
@@ -384,6 +391,24 @@ mod tests {
             .into_iter()
             .map(|error| error.message)
             .collect()
+    }
+
+    /// A stop requested before `run`, on a database URL that refuses the
+    /// connect, ends the run `Ok(SchedulerStopped)`, not `StartFailed`.
+    #[tokio::test]
+    async fn a_stop_before_the_connect_ends_the_run() {
+        let mut config = AppConfig::for_database_url("postgresql://127.0.0.1:1/horsies");
+        config.schedule = Some(ScheduleConfig {
+            enabled: true,
+            schedules: vec![schedule("every", "count", &json!({"count": 5}))],
+            ..ScheduleConfig::default()
+        });
+        let mut app = Horsies::new(config).unwrap();
+        app.register("count", crate::blocking_task_fn!(count_task, CountInput))
+            .unwrap();
+        let prepared = app.scheduler().unwrap();
+        prepared.stop_handle().request_stop();
+        assert!(matches!(prepared.run().await, Ok(SchedulerStopped)));
     }
 
     #[test]

@@ -3,8 +3,8 @@
 //
 // `defineWorkflow` refuses no rule of the definition with a throw: `Horsies.create` and `check` report what the
 // definition breaks. The params are compiled with the rules of a task input (the same parameter names, wire types and
-// zod schemas). A call that leaves out a field that the type requires (untyped code with no `output`) is a defect of
-// the call: `defineTask` throws `TypeError` for the params contract.
+// zod schemas). A call that leaves out a field that the type requires (untyped code with no `outputType`) is a defect
+// of the call: `defineTask` throws `TypeError` for the params contract.
 
 import type { SpecOnError } from "../_catalog/workflow_spec.ts";
 import { defineTask } from "../contract/define-task.ts";
@@ -25,12 +25,12 @@ export interface WorkflowDefinition<P extends ParameterSchemas, O extends Output
   /** The key under which a sub-workflow node finds this workflow. Not empty; unique in the app. */
   readonly definitionKey: string;
   /** One schema per parameter of the build, with the rules of a task input. `{}` for none. */
-  readonly params: P;
+  readonly parameters: P;
   /**
    * The schema of the workflow's result, with the rules of a task output. The output node of every build has this
    * type (`HRS-025`), and every read of the workflow's result decodes with it.
    */
-  readonly output: O;
+  readonly outputType: O;
   readonly onError?: OnError;
 }
 
@@ -55,8 +55,8 @@ export type CheckCase<P extends ParameterSchemas> = keyof P extends never
     >;
 
 /**
- * The check cases of a workflow: `check` builds the workflow with each one. Required when `params` has a key; a
- * workflow with no params takes none.
+ * The check cases of a workflow: `check` builds the workflow with each one. Required when `parameters` has a key;
+ * a workflow with no parameters takes none.
  */
 export type CheckCases<P extends ParameterSchemas> = keyof P extends never
   ? { readonly checkCases?: readonly [] }
@@ -67,7 +67,7 @@ export declare const workflowTypes: unique symbol;
 
 /** The params type and the build return type of a workflow. */
 export type WorkflowTypes<P extends ParameterSchemas, R extends BuildReturn> = {
-  readonly params: P;
+  readonly parameters: P;
   readonly build: R;
 };
 
@@ -85,7 +85,7 @@ export type AnyWorkflowContract = WorkflowContract<ParameterSchemas, BuildReturn
 /** The build function of a workflow: sync, no I/O, no clock and no random source. It may run more than once. */
 export type WorkflowBuild<P extends ParameterSchemas, R extends BuildReturn> = (
   w: WorkflowBuilder,
-  params: BodyInput<P>,
+  parameters: BodyInput<P>,
 ) => R;
 
 /** The error rule of a definition: a value of `OnError`, or a value outside it (a refusal at create). */
@@ -115,8 +115,8 @@ export type WorkflowRecord = {
 type DefinitionFields = {
   readonly name: string;
   readonly definitionKey: string;
-  readonly params: ParameterSchemas;
-  readonly output: OutputSchema;
+  readonly parameters: ParameterSchemas;
+  readonly outputType: OutputSchema;
   readonly onError?: string;
   readonly checkCases?: readonly object[];
 };
@@ -165,13 +165,13 @@ export function isWorkflowContract(value: object): boolean {
 }
 
 function recordOf(fields: DefinitionFields, build: (w: WorkflowBuilder, params: never) => unknown): WorkflowRecord {
-  const params: ParameterSchemas = fields.params;
+  const params: ParameterSchemas = fields.parameters;
 
   return Object.freeze({
     name: fields.name,
     definitionKey: fields.definitionKey,
     onError: onErrorSetting(fields.onError),
-    paramsContract: defineTask({ name: PARAMS_CONTRACT_NAME, input: params, output: fields.output }),
+    paramsContract: defineTask({ name: PARAMS_CONTRACT_NAME, input: params, output: fields.outputType }),
     paramNames: Object.freeze(Object.keys(params)),
     checkCases: Object.freeze([...(fields.checkCases ?? [])]),
     build,

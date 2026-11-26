@@ -32,9 +32,9 @@ export function readErrorText(error: ReadError): string {
       return `no task (${error.reason})`;
     case "resultNotAvailable":
       return `the task is ${error.status} and stores no result`;
-    case "storedResultUnreadable":
+    case "resultDeserializationError":
       return `the stored result does not read: ${error.cause}`;
-    case "unknownUserCode":
+    case "unknownCustomCode":
       return `the stored error has the undeclared code ${error.code}`;
     case "waitInsideTask":
       return "a wait inside a task";

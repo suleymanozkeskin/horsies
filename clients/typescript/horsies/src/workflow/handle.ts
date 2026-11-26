@@ -1,5 +1,5 @@
 // The handle of a started workflow: its status, its result (`get`), the result of one node (`resultFor`), the results
-// and the nodes, and pause, resume and cancel. Built by a start, by `retryStart`, or by `app.workflowHandle` from a
+// and the nodes, and pause, resume and cancel. Built by a start, by `resendStart`, or by `app.workflowHandle` from a
 // stored id; it does no I/O until a call.
 //
 // Every stored text that a read gives passed the core's strict JSON check in the addon; the codec reader then decodes
@@ -7,7 +7,7 @@
 // reads one node with that node's contract.
 
 import { WorkflowTaskStatus } from "../_catalog/status.ts";
-import { ContractCode, RetrievalCode } from "../_catalog/task_codes.ts";
+import { ContractCode, OperationalErrorCode, RetrievalCode } from "../_catalog/task_codes.ts";
 import type { HandleCoreError } from "../_catalog/workflow_handle_errors.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { readStoredError } from "../codec/envelope.ts";
@@ -74,10 +74,10 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
   /** The stored result of each node that has one, by node id. */
   results(): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>>;
   /** Every node, in index order. */
-  tasks(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
-  /** Pause a RUNNING workflow: `true` when it paused. */
+  nodes(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
+  /** Pause a RUNNING workflow. `true`: it paused. `false`: it is not RUNNING, no change. */
   pause(): Promise<Result<boolean, WorkflowHandleError>>;
-  /** Resume a PAUSED workflow: `true` when it resumed. */
+  /** Resume a PAUSED workflow. `true`: it resumed. `false`: it is not PAUSED, no change. */
   resume(): Promise<Result<boolean, WorkflowHandleError>>;
   /** Cancel the workflow and its descendants. */
   cancel(): Promise<Result<void, WorkflowHandleError>>;
@@ -186,7 +186,7 @@ function handleBase<R extends BuildReturn>(facts: HandleFacts): WorkflowHandleBa
     // SAFETY: the reader decodes with the output form of the workflow, whose value type is `WorkflowOutput<R>`.
     get: async (options: GetOptions = {}) => (await workflowOutcome(facts, options)) as never,
     results: async () => nodeResults(facts),
-    tasks: async () => nodeInfos(facts),
+    nodes: async () => nodeInfos(facts),
     pause: async () => changed(await facts.core.pause(id)),
     resume: async () => changed(await facts.core.resume(id)),
     cancel: async () => {
@@ -392,7 +392,7 @@ function envelopeOutcome(text: string, form: ReadForm, codes: CodeRule): ReadOut
 
       return form.codes.codes.includes(outcome.error.code)
         ? ok(outcome)
-        : err(Object.freeze({ kind: "unknownUserCode", code: outcome.error.code }));
+        : err(Object.freeze({ kind: "unknownCustomCode", code: outcome.error.code }));
     }
 
     default:
@@ -423,7 +423,7 @@ function checkedOutcome(result: CheckedText, form: ReadForm): ReadOutcome {
 }
 
 function unreadable(cause: string): ReadOutcome {
-  return err(Object.freeze({ kind: "storedResultUnreadable", cause }));
+  return err(Object.freeze({ kind: "resultDeserializationError", code: OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, cause }));
 }
 
 /** The result of one node with open codes and a JSON value. Pure. */

@@ -46,7 +46,7 @@ export const fenceRetry = defineTask({
   input: { marker: h.string() },
   output: h.object({ fence, countedRun: h.int() }),
   errorCodes: FENCE_CODES,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["TRANSIENT"] },
 });
 
 /** Every contract of this module. */

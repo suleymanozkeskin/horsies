@@ -1,4 +1,4 @@
-// The workflow calls of a seat body past the bound of the relay: a start, a retry (`retryStart`) and each handle call
+// The workflow calls of a seat body past the bound of the relay: a start, a retry (`resendStart`) and each handle call
 // give `SEAT_RELAY_FULL`, retryable, through the error union of the call, with the bound in the text and in the cause.
 // Nothing goes to the main thread.
 
@@ -27,7 +27,7 @@ import { TEST_RELAY_BOUNDS } from "./support.ts";
 const greet = defineTask({ name: "greet", input: { who: h.string() }, output: h.string() });
 
 const hello = defineWorkflow(
-  { name: "hello", definitionKey: "tests.hello.v1", output: h.string(), params: { who: h.string() }, checkCases: [{ who: "a" }] },
+  { name: "hello", definitionKey: "tests.hello.v1", outputType: h.string(), parameters: { who: h.string() }, checkCases: [{ who: "a" }] },
   (w, { who }) => ({ output: w.task(greet, { who }, { nodeId: "greet" }) }),
 );
 
@@ -114,14 +114,14 @@ describe("each workflow call kind past the bound of the relay gives SEAT_RELAY_F
     assert.deepEqual(sent, []);
   });
 
-  test("a retry of a start (retryStart of an ENQUEUE_FAILED)", async () => {
+  test("a retry of a start (resendStart of an ENQUEUE_FAILED)", async () => {
     const failing = fakeCore({ started: [{ kind: "failed", error: rawStartEnqueueFailed("hello", true) }] });
     const first = errorOf(await areaOn(failing).start(hello, { who: "a" }));
 
     assert.ok(first.code === "ENQUEUE_FAILED", first.code);
 
     const { core, sent } = fullCore();
-    const error = errorOf(await areaOn(core).retryStart(first));
+    const error = errorOf(await areaOn(core).resendStart(first));
 
     assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
     assertRelayFull(error);
@@ -148,7 +148,7 @@ describe("each workflow call kind past the bound of the relay gives SEAT_RELAY_F
 
   test("a nodes read", async () => {
     const { core, sent } = fullCore();
-    const error = errorOf(await handleOn(core).tasks());
+    const error = errorOf(await handleOn(core).nodes());
 
     assert.ok(error.code === SeatRelayCode.SEAT_RELAY_FULL, error.code);
     assertRelayFull(error);

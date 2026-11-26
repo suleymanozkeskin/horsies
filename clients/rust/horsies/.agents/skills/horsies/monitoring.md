@@ -278,7 +278,7 @@ read when the last read is 15 s old or more).
 |---|---|---|
 | `AllowAll` | Yes | Yes. The host owns authentication: mount the router behind it |
 | `ViewOnly` | Yes | No |
-| `TrustedHeader::new(header_name, allow_actions)` | The header has a value that is not blank | `allow_actions` and the header check. `new` returns `Result<_, InvalidHeaderName>` |
+| `TrustedHeader::new(header_name, allow_actions)` | The header has a value that is not blank, with no blank comma-separated member | `allow_actions` and the header check. `new` returns `Result<_, InvalidHeaderName>` |
 
 ```rust
 use horsies::web::{MonitoringAuthPolicy, MonitoringRequest};

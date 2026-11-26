@@ -12,7 +12,7 @@ import { contractRecord, type ContractRecord } from "../contract/definition.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import type { ContractLookup, ListedLookup, ListedTask, QueueRoute } from "../send/send.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { refusal, type Refusal, type RefusalCode } from "./refusal.ts";
+import { refusal, type HorsiesError, type RefusalCode } from "./refusal.ts";
 
 /**
  * The one queue of the default queue mode. The Python and Rust clients hold the same value
@@ -31,7 +31,7 @@ export type ListedEntry = {
 };
 
 /** A refusal of the contract at `index` of the list. */
-export type ListRefusal = { readonly index: number; readonly refusal: Refusal };
+export type ListRefusal = { readonly index: number; readonly refusal: HorsiesError };
 
 /** The outcome of the list checks: every entry that passed, and every refusal in list order. */
 export type ListChecked = { readonly entries: readonly ListedEntry[]; readonly refusals: readonly ListRefusal[] };
@@ -83,7 +83,7 @@ export function checkContractList(contracts: readonly object[], queues: QueueSet
 
 type EntryChecked =
   | { readonly kind: "listed"; readonly task: ListedTask }
-  | { readonly kind: "refused"; readonly refusals: readonly Refusal[] };
+  | { readonly kind: "refused"; readonly refusals: readonly HorsiesError[] };
 
 function checkEntry(contract: object, record: ContractRecord, queues: QueueSetup, path: string): EntryChecked {
   const route = queueRoute(record, queues, path);
@@ -102,7 +102,7 @@ function checkEntry(contract: object, record: ContractRecord, queues: QueueSetup
 }
 
 /** A contract refusal at the listed contract `path`, with the catalog code of its rule and its help. Pure. */
-function contractRefusal(refused: ContractRefused, path: string): Refusal {
+function contractRefusal(refused: ContractRefused, path: string): HorsiesError {
   return refusal(contractRuleCode(refused.rule), path, `${refused.path}: ${refused.detail} [${refused.rule}]`, refused.help);
 }
 
@@ -130,7 +130,7 @@ function listedTask(compiled: CompiledContract, route: QueueRoute): ListedTask {
   return Object.freeze({ compiled, route });
 }
 
-type RouteChecked = { readonly ok: true; readonly value: QueueRoute } | { readonly ok: false; readonly error: Refusal };
+type RouteChecked = { readonly ok: true; readonly value: QueueRoute } | { readonly ok: false; readonly error: HorsiesError };
 
 /** The queue route of a contract under the queue mode. Pure. */
 function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): RouteChecked {
@@ -193,6 +193,6 @@ function found(task: ListedTask | undefined): ListedLookup {
 }
 
 /** The refusals in list order; for one contract, in their own order (a stable sort). Pure. */
-export function inListOrder(refusals: readonly ListRefusal[]): readonly Refusal[] {
+export function inListOrder(refusals: readonly ListRefusal[]): readonly HorsiesError[] {
   return refusals.toSorted((first, second) => first.index - second.index).map((listed) => listed.refusal);
 }

@@ -7,7 +7,7 @@
 //   <runtime> src/main.ts scheduler                the schedule table (src/schedules.ts)
 //   <runtime> src/main.ts steady --orders 10       a scenario (see `SCENARIO_NAMES`)
 //   <runtime> src/main.ts report                   the monitoring and health reads
-//   <runtime> src/main.ts web --auth none          the monitoring web page and API on 127.0.0.1:8600
+//   <runtime> src/main.ts web --authorization none          the monitoring web page and API on 127.0.0.1:8600
 //   <runtime> src/main.ts check                    the app and every workflow, with no database
 //
 // The worker starts each child with this entry and `--horsies-child`; every line before `cli.run` runs in the child

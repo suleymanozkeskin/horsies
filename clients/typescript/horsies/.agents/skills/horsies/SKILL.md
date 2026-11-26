@@ -16,10 +16,10 @@ folder only when the task needs it:
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `defineTask`, the `h.*` wire types, the zod adapter, the stored input, `app.implement`, `ok` and `err` of the body's second argument, the exception map, `TaskRuntime`, the fencing token, the cancel signal, `runtime.spawn`, app state, retry policies, `app.send`, `TaskSendError`, `retrySend`, `TaskHandle`, `TaskOutcome`, `ReadError`, tests of a body |
-| `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.taskOutcome`, joins, the workflow context (`runtime.workflowContext`), the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `retryStart`, `WorkflowHandle`, `app.workflowHandle` |
+| `tasks.md` | `defineTask`, the `h.*` wire types, the zod adapter, the stored input, `app.implement`, `ok` and `err` of the body's second argument, the exception map, `TaskRuntime`, the fencing token, the cancel signal, `runtime.spawn`, app state, retry policies, `app.send`, `TaskSendError`, `resend`, `TaskHandle`, `TaskOutcome`, `ReadError`, tests of a body |
+| `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.taskOutcome`, joins, the workflow context (`runtime.workflowContext`), the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `resendStart`, `WorkflowHandle`, `app.workflowHandle` |
 | `configs.md` | `Horsies.create` and its refusals, the broker, queues, worker profiles, recovery, retention, `cli.run` and its commands |
-| `monitoring.md` | `app.pingDatabase`, `app.pingWorkers`, `app.monitoring`, the operator cancel, `createMonitoringHandler`, `app.rerun` and `app.rerunIn` |
+| `monitoring.md` | `app.pingDatabase`, `app.pingWorkers`, `app.monitoring`, the operator cancel, `createMonitoringHandler`, `app.rerunTask` and `app.rerunTaskIn` |
 
 The package has four entry points. The `exports` map allows no deep import:
 
@@ -192,8 +192,8 @@ export const dailyReport = defineWorkflow(
   {
     name: "daily_report",
     definitionKey: "reports.daily_report.v1",
-    params: { region: h.string() },
-    output: h.int(),
+    parameters: { region: h.string() },
+    outputType: h.int(),
     checkCases: [{ region: "eu" }],
   },
   (w, { region }) => {
@@ -208,7 +208,7 @@ export const dailyReport = defineWorkflow(
 - A parameter declared `h.taskOutcome(contract)` takes an upstream node of
   that contract. The node waits for it, and the body gets the upstream
   outcome, with the output type and the codes of the contract.
-- Every node has a `nodeId`. A workflow with `params` declares `checkCases`.
+- Every node has a `nodeId`. A workflow with `parameters` declares `checkCases`.
 - List the workflow in `Horsies.create({ tasks, workflows })` and start it
   with `app.start(dailyReport, { region: "eu" })`. See `workflows.md`.
 
@@ -217,11 +217,11 @@ export const dailyReport = defineWorkflow(
 | Operation | Returns |
 |---|---|
 | Task body | `ok(value)` or `err({ code, message, data })` of its second argument, or a Promise of one |
-| `Horsies.create` | `Result<Horsies, CreateRefused>` |
-| `app.send`, `app.retrySend` | `Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>` |
+| `Horsies.create` | `Result<Horsies, ValidationReport>` |
+| `app.send`, `app.resend` | `Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>` |
 | `handle.get` | `Promise<Result<TaskOutcome<O, E>, ReadError>>` |
 | `handle.info` | `Promise<Result<TaskInfo, ReadError>>` |
-| `app.start`, `app.retryStart` | `Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>` |
+| `app.start`, `app.resendStart` | `Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>` |
 | Workflow `get`, `resultFor` | `Promise<Result<TaskOutcome<O, E>, WorkflowReadError>>` |
 | Workflow `status`, `results`, `tasks`, `pause`, `resume`, `cancel` | `Promise<Result<_, HandleCoreError>>` |
 | Health and monitoring reads | See `monitoring.md` |
@@ -258,10 +258,10 @@ base of the defects.
 ## CLI
 
 ```bash
-node app.ts worker --profile NAME [--loglevel LEVEL] [--metrics-listen HOST:PORT]
-node app.ts check [--live] [--loglevel LEVEL]
-node app.ts web [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]
-node app.ts metrics --listen HOST:PORT [--loglevel LEVEL]
+node app.ts worker --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]
+node app.ts check [--live] [--log-level LEVEL]
+node app.ts web [--host HOST] [--port PORT] [--authorization none|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]
+node app.ts metrics --metrics-listen HOST:PORT [--log-level LEVEL]
 npx horsies get-docs [--output DIR] [--ref main]
 npx horsies skills install --target DIR [--force]
 ```

@@ -1,4 +1,4 @@
-// The start and retryStart: each outcome of a start, the refusals before the core, the kept retry, and the params
+// The start and resendStart: each outcome of a start, the refusals before the core, the kept retry, and the params
 // text that no error shows.
 
 import assert from "node:assert/strict";
@@ -31,15 +31,15 @@ const hello = defineWorkflow(
   {
     name: "hello",
     definitionKey: "tests.hello.v1",
-    output: h.string(),
-    params: { who: h.string() },
+    outputType: h.string(),
+    parameters: { who: h.string() },
     checkCases: [{ who: "a" }],
   },
   (w, { who }) => ({ output: w.task(greet, { who }, { nodeId: "greet" }) }),
 );
 
 const thrower = defineWorkflow(
-  { name: "thrower", definitionKey: "tests.thrower.v1", output: h.null(), params: {} },
+  { name: "thrower", definitionKey: "tests.thrower.v1", outputType: h.null(), parameters: {} },
   () => {
     throw new RangeError("no node today");
   },
@@ -47,12 +47,12 @@ const thrower = defineWorkflow(
 
 // SAFETY: the test returns a thenable from a build, which the types refuse; the start refuses it at run time too.
 const later = defineWorkflow(
-  { name: "later", definitionKey: "tests.later.v1", output: h.null(), params: {} },
+  { name: "later", definitionKey: "tests.later.v1", outputType: h.null(), parameters: {} },
   (async () => ({})) as never,
 );
 
 const duplicate = defineWorkflow(
-  { name: "duplicate", definitionKey: "tests.duplicate.v1", output: h.string(), params: {} },
+  { name: "duplicate", definitionKey: "tests.duplicate.v1", outputType: h.string(), parameters: {} },
   (w) => {
     w.task(greet, { who: "a" }, { nodeId: "same" });
 
@@ -61,7 +61,7 @@ const duplicate = defineWorkflow(
 );
 
 const unlisted = defineWorkflow(
-  { name: "unlisted", definitionKey: "tests.unlisted.v1", output: h.string(), params: {} },
+  { name: "unlisted", definitionKey: "tests.unlisted.v1", outputType: h.string(), parameters: {} },
   (w) => ({
     output: w.task(greet, { who: "a" }, { nodeId: "greet" }),
   }),
@@ -232,7 +232,7 @@ describe("app.start", () => {
   });
 });
 
-describe("app.retryStart", () => {
+describe("app.resendStart", () => {
   test("ENQUEUE_FAILED: the retry sends the same text, id and sent instant again, and gives a handle", async () => {
     const core = fakeCore({
       started: [{ kind: "failed", error: rawStartEnqueueFailed("hello", true) }, { kind: "started" }],
@@ -245,7 +245,7 @@ describe("app.retryStart", () => {
     assert.equal(started.error.retryable, true);
     assert.doesNotMatch(JSON.stringify(started.error), /secret-value/);
 
-    const retried = await area.retryStart(started.error);
+    const retried = await area.resendStart(started.error);
 
     assert(retried.ok);
     assert.equal(core.prepares.length, 1, "the retry prepares nothing");
@@ -273,7 +273,7 @@ describe("app.retryStart", () => {
     } as const;
 
     // SAFETY: the test gives an error that no start gave; the type of its `exception` is not the point.
-    const retried = await area.retryStart(forged as never);
+    const retried = await area.resendStart(forged as never);
 
     assert(!retried.ok && retried.error.code === "VALIDATION_FAILED");
     assert.deepEqual(core.starts, []);

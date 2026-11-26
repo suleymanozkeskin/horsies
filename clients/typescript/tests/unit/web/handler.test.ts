@@ -6,9 +6,11 @@ import { describe, test } from "node:test";
 
 import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { allowAll, viewOnly } from "../../../horsies/src/web/auth.ts";
-import type { MonitoringAuthPolicy } from "../../../horsies/src/web/auth.ts";
+import type { MonitoringAuthorizationPolicy } from "../../../horsies/src/web/auth.ts";
 import {
   EVENT_HEARTBEAT_MS,
+  INTENT_HEADER,
+  INTENT_VALUE,
   INTERNAL_SERVER_ERROR_TEXT,
   handlerSettings,
   monitoringHandlerOver,
@@ -28,10 +30,10 @@ function request(path: string, init: RequestInit = {}): Request {
 }
 
 /** A handler over a fake core with `policy` and the other options. */
-function handlerWith(policy: MonitoringAuthPolicy, options: Omit<MonitoringHandlerOptions, "auth"> = {}) {
+function handlerWith(policy: MonitoringAuthorizationPolicy, options: Omit<MonitoringHandlerOptions, "authorizationPolicy"> = {}) {
   const fake = fakeBridge();
 
-  return { ...fake, handler: monitoringHandlerOver(fake.bridge, { auth: policy, ...options }) };
+  return { ...fake, handler: monitoringHandlerOver(fake.bridge, { authorizationPolicy: policy, ...options }) };
 }
 
 describe("the policy calls", () => {
@@ -87,7 +89,7 @@ describe("the policy calls", () => {
 
   test("only an answer of true allows", async () => {
     // SAFETY: a policy of untyped JavaScript code can give any value; the test sends one.
-    const loose = { canView: () => "yes", canAct: () => 1 } as unknown as MonitoringAuthPolicy;
+    const loose = { canView: () => "yes", canAct: () => 1 } as unknown as MonitoringAuthorizationPolicy;
     const { handler, calls } = handlerWith(loose);
     const response = await handler(request("/api/tasks"));
 
@@ -98,7 +100,7 @@ describe("the policy calls", () => {
 
 describe("the request of the policy", () => {
   test("a policy that reads the body leaves the body of an action to the core", async () => {
-    const policy: MonitoringAuthPolicy = {
+    const policy: MonitoringAuthorizationPolicy = {
       canView: async (incoming) => (await incoming.text()) === "",
       canAct: async (incoming) => (await incoming.text()) === "",
     };
@@ -299,10 +301,11 @@ describe("the request facts", () => {
       request(`/api/tasks/${TASK_ID}/cancel`, {
         method: "POST",
         body: "{}",
-        headers: { "X-Horsies-Intent": "action", "Content-Type": "application/json" },
+        headers: { [INTENT_HEADER]: INTENT_VALUE, "Content-Type": "application/json" },
       }),
     );
 
+    assert.equal(INTENT_HEADER, "X-Horsies-Intent");
     assert.equal(calls.handled[0]?.intentHeader, "action");
     assert.equal(calls.handled[0]?.contentType, "application/json");
   });
@@ -347,7 +350,7 @@ describe("the settings of the core handler", () => {
   };
 
   test("the defaults: actions enabled, no stylesheet, no trace link", () => {
-    assert.deepEqual(handlerSettings(app, { auth: viewOnly() }, EVENT_HEARTBEAT_MS), {
+    assert.deepEqual(handlerSettings(app, { authorizationPolicy: viewOnly() }, EVENT_HEARTBEAT_MS), {
       actions: "enabled",
       clientVersion: "0.1.0",
       heartbeatMs: 15_000,
@@ -364,7 +367,7 @@ describe("the settings of the core handler", () => {
     const settings = handlerSettings(
       app,
       {
-        auth: viewOnly(),
+        authorizationPolicy: viewOnly(),
         actions: "disabled",
         ui: { customCssUrl: "/theme.css", traceLink: template.value },
       },

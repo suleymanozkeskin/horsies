@@ -103,10 +103,12 @@ export class TaskRuntime {
 
   /**
    * A runtime for a test of a task body, with no worker, no database and no addon: the task id and the attempt of
-   * `options`; a signal that never fires; `spawn` that runs its work at once; `state` from the entries of `options`,
-   * each a key that `app.provide` returned and a value of the key's type; `workflowContext` read from the stored form
-   * of `options.workflowContext`, or `noContext` when `options` has none. The runtime fits the body of a task with or
-   * without `workflowContext: true`. A stored form that does not read as a workflow context throws `TypeError`.
+   * `options`; the cancel state of `options` (`notRequested` when it has none), whose `requested` form also fires the
+   * signal and the signal of spawned work before they start; `spawn` that runs its work at once; `state` from the
+   * entries of `options`, each a key that `app.provide` returned and a value of the key's type; `workflowContext` read
+   * from the stored form of `options.workflowContext`, or `noContext` when `options` has none. The runtime fits the
+   * body of a task with or without `workflowContext: true`. A stored form that does not read as a workflow context
+   * throws `TypeError`.
    */
   static forTest<const Keys extends readonly AnyStateKey[]>(options: TestRuntimeOptions<Keys>): WorkflowTaskRuntime {
     return constructRuntime(testRunControls(options), testWorkflowContext(options.workflowContext));

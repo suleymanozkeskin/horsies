@@ -14,7 +14,7 @@ import type {
   AnyNode,
   BuildReturn,
   DefaultJoin,
-  Join,
+  JoinType,
   NodeInput,
   NodeRef,
   SubWorkflowNodeOptions,
@@ -32,21 +32,21 @@ export interface WorkflowBuilder {
     X extends Execution,
     C extends ContextUse,
     const Id extends string,
-    const J extends Join = DefaultJoin,
+    const J extends JoinType = DefaultJoin,
   >(
     contract: TaskContract<P, O, E, X, C>,
     input: NoInfer<NodeInput<P, J>>,
     options: TaskNodeOptions<Id, J, C>,
   ): NodeRef<SchemaValue<O>, E, Id>;
-  /** A node that runs the workflow of `workflow` as a child. A child with `params: {}` takes `{}`. */
+  /** A node that runs the workflow of `workflow` as a child. A child with `parameters: {}` takes `{}`. */
   subWorkflow<
     P extends ParameterSchemas,
     R extends BuildReturn,
     const Id extends string,
-    const J extends Join = DefaultJoin,
+    const J extends JoinType = DefaultJoin,
   >(
     workflow: WorkflowContract<P, R>,
-    params: NoInfer<NodeInput<P, J>>,
+    parameters: NoInfer<NodeInput<P, J>>,
     options: SubWorkflowNodeOptions<Id, J>,
   ): NodeRef<WorkflowOutput<R>, string, Id>;
 }
@@ -55,7 +55,7 @@ export interface WorkflowBuilder {
 export type RecordedOptions = {
   readonly nodeId: string;
   readonly waitsFor?: readonly AnyNode[];
-  readonly join?: Join;
+  readonly join?: JoinType;
   readonly allowFailedDependencies?: boolean;
   readonly queue?: string;
   readonly priority?: number;

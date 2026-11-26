@@ -1,5 +1,5 @@
 // Compile-pass cases of a send and a read through the app: the send error switch with a full match (one case for
-// `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`, which both carry `retryable`), `retrySend` of either, the send
+// `ENQUEUE_FAILED` and `IDEMPOTENCY_KEY_CONFLICT`, which both carry `retryable`), `resend` of either, the send
 // options, and the read switch over the tag and the code of the task error.
 
 import { defineTask, type Horsies, TaskId } from "../../../horsies/src/index.ts";
@@ -28,7 +28,7 @@ export async function sendAndRead(): Promise<void> {
       case "ENQUEUE_FAILED":
       case "IDEMPOTENCY_KEY_CONFLICT":
         if (sent.error.retryable) {
-          void (await app.retrySend(sent.error));
+          void (await app.resend(sent.error));
         }
 
         break;
@@ -113,13 +113,13 @@ export async function sendWithOptions(): Promise<void> {
       idempotencyKey: "validate:1",
       goodUntil: Temporal.Now.instant().add({ minutes: 10 }),
       delaySeconds: 30,
-      retention: { kind: "days", days: 30 },
+      retention: { kind: "period", days: 30 },
     },
   ));
   void (await app.send(validateOrder, { orderId: crypto.randomUUID(), lines: [] }, { retention: { kind: "forever" } }));
 }
 
-/** A key conflict is retryable (`retryable: true`), and `retrySend` takes it with no `retryable` check. */
+/** A key conflict is retryable (`retryable: true`), and `resend` takes it with no `retryable` check. */
 export async function retryKeyConflict(): Promise<void> {
   const sent = await app.send(validateOrder, { orderId: crypto.randomUUID(), lines: [] }, { idempotencyKey: "validate:2" });
 
@@ -127,6 +127,6 @@ export async function retryKeyConflict(): Promise<void> {
     const retryable: true = sent.error.retryable;
 
     console.warn(retryable, sent.error.ownerTaskId);
-    void (await app.retrySend(sent.error));
+    void (await app.resend(sent.error));
   }
 }

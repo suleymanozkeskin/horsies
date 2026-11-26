@@ -47,8 +47,8 @@ export const orderFulfillment = defineWorkflow(
   {
     name: "order_fulfillment",
     definitionKey: "acme.order_fulfillment.v1",
-    params: { order: Order },
-    output: PaymentCapture,
+    parameters: { order: Order },
+    outputType: PaymentCapture,
     onError: "fail",
     checkCases: [{ order: checkOrder() }],
   },

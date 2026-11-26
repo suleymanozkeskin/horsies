@@ -25,9 +25,9 @@ const fixture: { readonly patterns: readonly PatternRow[] } = JSON.parse(readFil
 const CASES: readonly (readonly [string, SchedulePattern])[] = [
   ["interval", { kind: "interval", every: Temporal.Duration.from({ seconds: 30 }) }],
   ["hourly", { kind: "hourly", minute: 15 }],
-  ["daily", { kind: "daily", at: Temporal.PlainTime.from("09:00") }],
-  ["weekly", { kind: "weekly", days: ["monday", "friday"], at: Temporal.PlainTime.from("09:30") }],
-  ["monthly", { kind: "monthly", day: 15, at: Temporal.PlainTime.from("08:00:00") }],
+  ["daily", { kind: "daily", time: Temporal.PlainTime.from("09:00") }],
+  ["weekly", { kind: "weekly", weekdays: ["monday", "friday"], time: Temporal.PlainTime.from("09:30") }],
+  ["monthly", { kind: "monthly", dayOfMonth: 15, time: Temporal.PlainTime.from("08:00:00") }],
   [
     "cron_every_day",
     {
@@ -136,7 +136,7 @@ describe("patternText: each kind maps to Python's stored text", () => {
   });
 
   test("a time of day with a fraction of a second keeps it in the text, which the core refuses", () => {
-    assert.equal(textOf({ kind: "daily", at: Temporal.PlainTime.from("09:30:00.5") }), '{"type":"daily","time":"09:30:00.5"}');
+    assert.equal(textOf({ kind: "daily", time: Temporal.PlainTime.from("09:30:00.5") }), '{"type":"daily","time":"09:30:00.5"}');
   });
 
   test("a negative interval keeps its parts, which the core refuses", () => {
@@ -169,7 +169,7 @@ describe("patternText: each form that the stored text cannot hold is refused", (
   const notWhole: readonly (readonly [string, SchedulePattern])[] = [
     ["minute", { kind: "hourly", minute: 1.5 }],
     ["second", { kind: "hourly", minute: 1, second: Number.NaN }],
-    ["day", { kind: "monthly", day: 2 ** 53, at: Temporal.PlainTime.from("08:00") }],
+    ["dayOfMonth", { kind: "monthly", dayOfMonth: 2 ** 53, time: Temporal.PlainTime.from("08:00") }],
     ["minute[0].step", cronWithMinute([{ kind: "step", step: 0.5 }])],
     ["minute[1].values[1]", cronWithMinute([{ kind: "every" }, { kind: "values", values: [1, 2.5] }])],
     ["minute[0].start", cronWithMinute([{ kind: "range", start: 0.1, end: 5 }])],
@@ -223,9 +223,9 @@ describe("patternText: each form that the stored text cannot hold is refused", (
   }
 
   test("a whole number above 2^53 - 1 names the safe integer bound", () => {
-    const refused = refusalOf({ kind: "monthly", day: 2 ** 53, at: Temporal.PlainTime.from("08:00") });
+    const refused = refusalOf({ kind: "monthly", dayOfMonth: 2 ** 53, time: Temporal.PlainTime.from("08:00") });
 
-    assert.equal(patternRefusalText(refused), "pattern.day: 9007199254740992 is not a whole number from -9007199254740991 to 9007199254740991");
+    assert.equal(patternRefusalText(refused), "pattern.dayOfMonth: 9007199254740992 is not a whole number from -9007199254740991 to 9007199254740991");
   });
 
   test("the first field that is not a whole number wins", () => {

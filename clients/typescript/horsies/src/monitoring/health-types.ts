@@ -31,8 +31,8 @@ export type MinResponses = { readonly kind: "fullWindow" } | { readonly kind: "a
 /** The options of a worker ping. The defaults: every worker, a window of 2,000 ms, the full window. */
 export interface PingWorkersOptions {
   readonly target?: PingTarget;
-  /** The window of the ping, a whole number of milliseconds above 0. */
-  readonly timeoutMs?: number;
+  /** How long the ping waits for replies, a whole number of milliseconds above 0. */
+  readonly waitMs?: number;
   readonly minResponses?: MinResponses;
 }
 

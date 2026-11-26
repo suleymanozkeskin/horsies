@@ -19,7 +19,7 @@ export const PAUSABLE_MS = { a: 100, b: 200, c: 200, d: 100 } as const;
 export const MIXED_INPUT_VALUE = 21;
 
 /** a, b and c of `QUORUM_GATE_MS`; d needs two of them to succeed, and reads c, its context source. */
-export const quorumContextGate = defineWorkflow({ ...named("quorum_context_gate"), params: {}, output: h.string() }, (w) => {
+export const quorumContextGate = defineWorkflow({ ...named("quorum_context_gate"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(slowStep, { step: "a", delayMs: QUORUM_GATE_MS.a }, node("a"));
   const b = w.task(slowStep, { step: "b", delayMs: QUORUM_GATE_MS.b }, node("b"));
   const c = w.task(slowStep, { step: "c", delayMs: QUORUM_GATE_MS.c }, node("c"));
@@ -29,7 +29,7 @@ export const quorumContextGate = defineWorkflow({ ...named("quorum_context_gate"
 });
 
 /** a and b fail, c completes; d needs all three to succeed. */
-export const quorumImpossible = defineWorkflow({ ...named("quorum_impossible"), params: {}, output: h.string() }, (w) => {
+export const quorumImpossible = defineWorkflow({ ...named("quorum_impossible"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(fail, {}, node("a"));
   const b = w.task(fail, {}, node("b"));
   const c = w.task(step, { step: "c" }, node("c"));
@@ -38,7 +38,7 @@ export const quorumImpossible = defineWorkflow({ ...named("quorum_impossible"), 
 });
 
 /** a and b fail; c joins on any of them. */
-export const anyJoinAllFail = defineWorkflow({ ...named("any_join_all_fail"), params: {}, output: h.string() }, (w) => {
+export const anyJoinAllFail = defineWorkflow({ ...named("any_join_all_fail"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(fail, {}, node("a"));
   const b = w.task(fail, {}, node("b"));
 
@@ -46,7 +46,7 @@ export const anyJoinAllFail = defineWorkflow({ ...named("any_join_all_fail"), pa
 });
 
 /** Python `spec_pausable`: a, b, c, d of `PAUSABLE_MS`, each after the one before. */
-export const pausable = defineWorkflow({ ...named("pausable"), params: {}, output: h.string() }, (w) => {
+export const pausable = defineWorkflow({ ...named("pausable"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(slowStep, { step: "a", delayMs: PAUSABLE_MS.a }, node("a"));
   const b = w.task(slowStep, { step: "b", delayMs: PAUSABLE_MS.b }, node("b", { after: [a] }));
   const c = w.task(slowStep, { step: "c", delayMs: PAUSABLE_MS.c }, node("c", { after: [b] }));
@@ -56,7 +56,7 @@ export const pausable = defineWorkflow({ ...named("pausable"), params: {}, outpu
 
 /** Python `spec_on_error_pause`: a, then b that fails, then c; a failure pauses the workflow. */
 export const pauseOnError = defineWorkflow(
-  { ...named("pause_on_error"), params: {}, output: h.string(), onError: "pause" },
+  { ...named("pause_on_error"), parameters: {}, outputType: h.string(), onError: "pause" },
   (w) => {
     const a = w.task(step, { step: "a" }, node("a"));
     const b = w.task(fail, {}, node("b", { after: [a] }));
@@ -66,7 +66,7 @@ export const pauseOnError = defineWorkflow(
 );
 
 /** a is required; b is optional and fails with `OPTIONAL_FAIL`. */
-export const policySatisfied = defineWorkflow({ ...named("policy_satisfied"), params: {}, output: h.string() }, (w) => {
+export const policySatisfied = defineWorkflow({ ...named("policy_satisfied"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(mark, { value: "required_A" }, node("a"));
   const b = w.task(failWith, { errorCode: "OPTIONAL_FAIL" }, node("b"));
 
@@ -74,7 +74,7 @@ export const policySatisfied = defineWorkflow({ ...named("policy_satisfied"), pa
 });
 
 /** a and b are required; b fails with `REQUIRED_FAIL`. */
-export const policyNotMet = defineWorkflow({ ...named("policy_not_met"), params: {}, output: h.string() }, (w) => {
+export const policyNotMet = defineWorkflow({ ...named("policy_not_met"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(mark, { value: "required_A" }, node("a"));
   const b = w.task(failWith, { errorCode: "REQUIRED_FAIL" }, node("b"));
 
@@ -82,7 +82,7 @@ export const policyNotMet = defineWorkflow({ ...named("policy_not_met"), params:
 });
 
 /** The first case requires a, which fails with `CASE1_FAIL`; the second requires b, which completes. */
-export const policyCases = defineWorkflow({ ...named("policy_cases"), params: {}, output: h.string() }, (w) => {
+export const policyCases = defineWorkflow({ ...named("policy_cases"), parameters: {}, outputType: h.string() }, (w) => {
   const a = w.task(failWith, { errorCode: "CASE1_FAIL" }, node("a"));
   const b = w.task(mark, { value: "case2_ok" }, node("b"));
 
@@ -90,7 +90,7 @@ export const policyCases = defineWorkflow({ ...named("policy_cases"), params: {}
 });
 
 /** Two nodes that fail: `first` (index 0) with `FIRST_ERROR`, `second` (index 1) with `SECOND_ERROR`. */
-export const twoFailures = defineWorkflow({ ...named("two_failures"), params: {}, output: h.int() }, (w) => {
+export const twoFailures = defineWorkflow({ ...named("two_failures"), parameters: {}, outputType: h.int() }, (w) => {
   const first = w.task(failWith, { errorCode: "FIRST_ERROR" }, node("first"));
 
   w.task(failWith, { errorCode: "SECOND_ERROR" }, node("second"));
@@ -102,15 +102,15 @@ export const twoFailures = defineWorkflow({ ...named("two_failures"), params: {}
 export const retryingNode = defineWorkflow(
   {
     ...named("retrying_node"),
-    params: { token: h.string(), succeedOnAttempt: h.int() },
-    output: h.string(),
+    parameters: { token: h.string(), succeedOnAttempt: h.int() },
+    outputType: h.string(),
     checkCases: [{ token: "check", succeedOnAttempt: 1 }],
   },
   (w, params) => ({ output: w.task(retryThenOk, params, node("a")) }),
 );
 
 /** A sub-workflow node that gives its child the static param `label` and the result of `produce`. */
-export const subworkflowMixedInput = defineWorkflow({ ...named("subworkflow_mixed_input"), params: {}, output: h.string() }, (w) => {
+export const subworkflowMixedInput = defineWorkflow({ ...named("subworkflow_mixed_input"), parameters: {}, outputType: h.string() }, (w) => {
   const source = w.task(produceInt, { value: MIXED_INPUT_VALUE }, node("produce"));
 
   return { output: w.subWorkflow(subLabel, { label: "count", value: source }, node("child")) };

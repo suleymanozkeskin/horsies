@@ -7,7 +7,7 @@
 // section of its field.
 
 import type { ErrorCode } from "../_catalog/error_codes.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { unreachable } from "../wire/unreachable.ts";
 
 /** A JSON value of the core's config text. */
@@ -22,7 +22,7 @@ export type JsonEntry = readonly [string, ConfigJson];
 /** A value that the parse built, or every refusal that it found, in field order. */
 export type Checked<T> =
   | { readonly kind: "accepted"; readonly value: T }
-  | { readonly kind: "refused"; readonly refusals: readonly Refusal[] };
+  | { readonly kind: "refused"; readonly refusals: readonly HorsiesError[] };
 
 /** The range of a whole number, and the catalog code of a refusal of a value outside it. */
 export type IntegerBound = { readonly min: number; readonly max: number; readonly code: ErrorCode };
@@ -52,7 +52,7 @@ export function accepted<T>(value: T): Checked<T> {
 }
 
 /** One refusal. Pure. */
-export function refused<T>(one: Refusal): Checked<T> {
+export function refused<T>(one: HorsiesError): Checked<T> {
   return { kind: "refused", refusals: [one] };
 }
 

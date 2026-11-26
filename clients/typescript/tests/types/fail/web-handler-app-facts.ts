@@ -10,4 +10,4 @@ declare const handle: CoreHandle;
 const facts = { coreHandle: handle, queueNames: ["default"], scheduleNames: [], clientVersion: "0.0.0" };
 
 // The facts of an app, with a handle that may hold no child spec source.
-export const handler = createMonitoringHandler(facts, { auth: allowAll() });
+export const handler = createMonitoringHandler(facts, { authorizationPolicy: allowAll() });
