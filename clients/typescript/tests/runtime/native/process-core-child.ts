@@ -28,6 +28,7 @@ async function runCase(name: string | undefined): Promise<string> {
       return secondEnvironment();
     case "never-connected-close":
       return neverConnectedClose();
+    case undefined:
     default:
       return `unknown case ${String(name)}`;
   }

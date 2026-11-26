@@ -261,6 +261,7 @@ function commandOf(argument: string | undefined): Command | "unknown" {
     case "check":
     case "write":
       return argument;
+    case undefined:
     default:
       return "unknown";
   }
