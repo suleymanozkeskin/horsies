@@ -1,0 +1,128 @@
+// The `worker` area of the addon with a built addon: the listen address check, the preparation of a worker for each
+// of its outcomes, a stop request before a run, the log backlog, and the live check on a database. No worker runs:
+// a run starts task children, which the end-to-end tests cover.
+//
+// Runs only where a built addon exists (`HORSIES_NATIVE_ADDON_PATH`) and `HORSIES_TEST_DATABASE_URL` names a
+// throwaway PostgreSQL database. Run it under the memory watchdog (2 GiB, with a wall-time bound).
+
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
+import { coreState } from "../../../horsies/src/native/process-core/process-core.ts";
+import {
+  checkLive,
+  parseListenAddress,
+  prepareWorker,
+  requestWorkerStop,
+  workerLogBacklog,
+} from "../../../horsies/src/native/worker/worker.ts";
+import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+
+/** A database URL whose connect is refused at once: nothing listens on port 1. */
+const REFUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
+
+/** The core's config text of an app with one profile `io` of one isolated child, on `databaseUrl`. */
+function configText(databaseUrl: string): string {
+  return JSON.stringify({
+    broker: { database_url: databaseUrl },
+    worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
+  });
+}
+
+/** The start members of a worker of `profile`, in the manifest's own forms. */
+function startText(profile: object): string {
+  return JSON.stringify({
+    profile,
+    metrics_endpoint: { kind: "NO_METRICS_ENDPOINT" },
+    tasks: { ping: { execution: "ISOLATED", error_codes: [] } },
+    handlers: { kind: "NO_HANDLERS" },
+    worker_ended_spans: "NO_SPANS",
+    child_launch: {
+      command: { program: process.execPath, args: ["/app/main.js", "--horsies-child"] },
+      preload: { kind: "NO_PRELOAD_PROGRAM" },
+      program: { kind: "RUST" },
+      log_level: "INFO",
+    },
+  });
+}
+
+describe("the worker area of the addon", () => {
+  test("a host and port is an address; a text with no port is the core's refusal", () => {
+    assert.deepEqual(parseListenAddress("0.0.0.0:9464"), { kind: "address", host: "0.0.0.0", port: 9464 });
+    assert.equal(parseListenAddress("localhost").kind, "refused");
+    assert.equal(coreState(), "not_started");
+  });
+
+  test("each preparation outcome; the core does not start", () => {
+    const config = configText("postgresql://127.0.0.1:55432/horsies");
+
+    assert.equal(prepareWorker(config, startText({ kind: "NAMED", name: "io" })).kind, "prepared");
+    assert.equal(prepareWorker(config, startText({ kind: "NAMED", name: "absent" })).kind, "profileRefused");
+    assert.equal(prepareWorker(config, startText({ kind: "NOT_GIVEN" })).kind, "profileRefused");
+
+    const pooled = JSON.stringify({
+      broker: { database_url: "postgresql://127.0.0.1:6432/horsies", pgbouncer_transaction_mode: true },
+      worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
+    });
+
+    assert.equal(prepareWorker(pooled, startText({ kind: "NAMED", name: "io" })).kind, "connectionSettingsRefused");
+
+    const capped = JSON.stringify({
+      broker: { database_url: "postgresql://127.0.0.1:55432/horsies" },
+      cluster_wide_cap: 4_294_967_295,
+      worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
+    });
+
+    const bound = prepareWorker(capped, startText({ kind: "NAMED", name: "io" }));
+
+    assert.equal(bound.kind === "manifestBound" ? bound.path : bound.kind, "clusterWideCap.tasks");
+    assert.equal(coreState(), "not_started");
+  });
+
+  test("a start member that the core's parser refuses throws ManifestRefused", () => {
+    const config = configText("postgresql://127.0.0.1:55432/horsies");
+    const start = startText({ kind: "NAMED", name: "io" }).replace('"ISOLATED"', '"FORKED"');
+
+    assert.throws(() => prepareWorker(config, start), { name: "ManifestRefused" });
+  });
+
+  test("a stop request before the run returns at once", () => {
+    const prepared = prepareWorker(
+      configText("postgresql://127.0.0.1:55432/horsies"),
+      startText({ kind: "NAMED", name: "io" }),
+    );
+
+    assert.equal(prepared.kind, "prepared");
+
+    if (prepared.kind === "prepared") {
+      requestWorkerStop(prepared.worker);
+      requestWorkerStop(prepared.worker);
+    }
+  });
+
+  test("the log backlog is one of its states", () => {
+    assert.ok(["empty", "waiting", "noForwarder"].includes(workerLogBacklog()));
+  });
+
+  test("the live check passes on the test database", async () => {
+    const url = testDatabaseUrl();
+    const handle = buildCoreHandle(manifestJson(url, false), "PRODUCER");
+
+    assert.deepEqual(await checkLive(handle, configText(url)), { kind: "passed" });
+    await handle.close();
+  });
+
+  test("a refused connect is the connectivity step CONNECT or MAIN_URL", async () => {
+    const handle = buildCoreHandle(manifestJson(REFUSED_DATABASE_URL, false), "PRODUCER");
+    const outcome = await checkLive(handle, configText(REFUSED_DATABASE_URL));
+
+    assert.equal(outcome.kind, "connectivityRefused");
+
+    if (outcome.kind === "connectivityRefused") {
+      assert.ok(["CONNECT", "MAIN_URL"].includes(outcome.step), outcome.step);
+    }
+
+    await handle.close();
+  });
+});
