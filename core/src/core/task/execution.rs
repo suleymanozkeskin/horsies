@@ -62,6 +62,27 @@ impl Execution {
         }
     }
 
+    /// Whether the class needs a `timeout_ms`. One fact for the check of a
+    /// declaration (`check_declared_options`) and the check of a new send
+    /// (`check_shared_timeout`).
+    pub fn timeout_use(self) -> TimeoutUse {
+        match self {
+            Self::Isolated => TimeoutUse::Optional,
+            Self::SharedAsync | Self::SharedThread => TimeoutUse::Required,
+        }
+    }
+
+    /// What the class does with a `cancel_grace_ms`. One fact for the check
+    /// of a declaration (`check_declared_options`) and the check of stored
+    /// options at enqueue (`stored_execution`).
+    pub fn grace_use(self) -> GraceUse {
+        match self {
+            Self::SharedAsync => GraceUse::Needed,
+            Self::Isolated => GraceUse::Optional,
+            Self::SharedThread => GraceUse::NotTaken,
+        }
+    }
+
     /// The class of a stored value; `None` for a value outside the three
     /// class names.
     pub(crate) fn from_stored(value: &str) -> Option<Self> {
@@ -72,6 +93,30 @@ impl Execution {
             _ => None,
         }
     }
+}
+
+/// Whether a class needs a `timeout_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimeoutUse {
+    /// `SHARED_ASYNC` and `SHARED_THREAD`: a shared child runs other tasks
+    /// next to this one, and the timeout ends a task that does not return.
+    Required,
+    /// `ISOLATED`: the task runs with or without a timeout.
+    Optional,
+}
+
+/// What a class does with a `cancel_grace_ms`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraceUse {
+    /// `SHARED_ASYNC`: a grace from [`MIN_CANCEL_GRACE_MS`] to
+    /// [`MAX_CANCEL_GRACE_MS`]. A declaration with none takes the default
+    /// grace; a stored row holds the grace.
+    Needed,
+    /// `ISOLATED`: a grace in the same bounds (the time from an operator
+    /// cancel to the kill of the child), or none.
+    Optional,
+    /// `SHARED_THREAD`: no grace, since a thread cannot be stopped.
+    NotTaken,
 }
 
 impl std::fmt::Display for Execution {
@@ -192,17 +237,16 @@ fn stored_execution_class(options: &Map<String, Value>) -> Result<Execution, Inv
 }
 
 fn grace_error(execution: Execution, raw: Option<&Value>) -> Option<String> {
-    match (execution, raw) {
-        (Execution::SharedAsync, None | Some(Value::Null)) => {
-            Some("cancel_grace_ms is absent for execution SHARED_ASYNC".to_owned())
-        }
-        (Execution::SharedAsync | Execution::Isolated, Some(value)) => bounded_grace_error(value),
-        (Execution::Isolated | Execution::SharedThread, None | Some(Value::Null)) => None,
-        (Execution::SharedThread, Some(_)) => Some(
-            "cancel_grace_ms is set for execution SHARED_THREAD; only SHARED_ASYNC and \
+    match (execution.grace_use(), raw) {
+        (GraceUse::Needed, None | Some(Value::Null)) => Some(format!(
+            "cancel_grace_ms is absent for execution {execution}"
+        )),
+        (GraceUse::Needed | GraceUse::Optional, Some(value)) => bounded_grace_error(value),
+        (GraceUse::Optional | GraceUse::NotTaken, None | Some(Value::Null)) => None,
+        (GraceUse::NotTaken, Some(_)) => Some(format!(
+            "cancel_grace_ms is set for execution {execution}; only SHARED_ASYNC and \
              ISOLATED have one"
-                .to_owned(),
-        ),
+        )),
     }
 }
 
@@ -250,18 +294,14 @@ pub(crate) fn check_shared_timeout(
     execution: Execution,
     timeout_ms: Option<&Value>,
 ) -> Result<(), InvalidExecution> {
-    match (execution, timeout_ms) {
-        (Execution::SharedAsync | Execution::SharedThread, None | Some(Value::Null)) => {
-            Err(InvalidExecution {
-                detail: format!(
-                    "timeout_ms is absent for execution {execution}; a shared class requires \
-                     timeout_ms"
-                ),
-            })
-        }
-        (Execution::SharedAsync | Execution::SharedThread, Some(_)) | (Execution::Isolated, _) => {
-            Ok(())
-        }
+    match (execution.timeout_use(), timeout_ms) {
+        (TimeoutUse::Required, None | Some(Value::Null)) => Err(InvalidExecution {
+            detail: format!(
+                "timeout_ms is absent for execution {execution}; a shared class requires \
+                 timeout_ms"
+            ),
+        }),
+        (TimeoutUse::Required, Some(_)) | (TimeoutUse::Optional, _) => Ok(()),
     }
 }
 
@@ -443,6 +483,25 @@ mod tests {
                 "{execution} {timeout_ms:?}"
             );
         }
+    }
+
+    /// The class facts that the declaration check and the stored-options
+    /// checks read: a shared class needs a timeout; `SHARED_ASYNC` needs a
+    /// grace, `ISOLATED` may take one and `SHARED_THREAD` takes none.
+    #[test]
+    fn each_class_has_its_timeout_use_and_its_grace_use() {
+        assert_eq!(
+            Execution::ALL.map(Execution::timeout_use),
+            [
+                TimeoutUse::Optional,
+                TimeoutUse::Required,
+                TimeoutUse::Required
+            ]
+        );
+        assert_eq!(
+            Execution::ALL.map(Execution::grace_use),
+            [GraceUse::Optional, GraceUse::Needed, GraceUse::NotTaken]
+        );
     }
 
     #[test]

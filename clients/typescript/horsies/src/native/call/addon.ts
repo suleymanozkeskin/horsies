@@ -36,8 +36,8 @@ export function addonOrThrow(load: AddonLoad): object {
 
 function sourceText(source: AddonSource): string {
   switch (source.kind) {
-    case "pathVariable":
-      return `the file ${source.path}`;
+    case "devBuild":
+      return `the dev build ${source.path}`;
     case "platformPackage":
       return `the package ${source.packageName}`;
     default:

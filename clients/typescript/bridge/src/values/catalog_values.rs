@@ -152,6 +152,43 @@ impl RawCatalogError {
     }
 }
 
+impl RawCatalogError {
+    /// The raw record of `error` with `exception` in its `exception` slot:
+    /// for a core value whose type does not hold the exact cause while the
+    /// caller holds it (the send error of a failed enqueue,
+    /// `send_failure_exception`). Every other slot is the slot of
+    /// [`Self::of`]; a class with no `exception` slot has the slots of
+    /// [`Self::of`]. Pure.
+    pub fn of_with_exception<E: ErrorClassValues>(
+        subject: &str,
+        error: &E,
+        exception: &ExceptionValue,
+    ) -> Self {
+        Self {
+            class: ErrorEnum::python_class(error).to_owned(),
+            slots: error
+                .slot_values()
+                .into_iter()
+                .map(|slot| RawSlot {
+                    name: slot.name.to_owned(),
+                    value: match slot.value {
+                        SlotData::Exception(_) => RawSlotValue::Exception {
+                            exception: exception_record(subject, exception.clone()),
+                        },
+                        value @ (SlotData::Str(_)
+                        | SlotData::Bool(_)
+                        | SlotData::Int(_)
+                        | SlotData::TaskSendPayload(_)
+                        | SlotData::Uuid(_)
+                        | SlotData::UuidText(_)
+                        | SlotData::CodeMember { .. }) => slot_value(subject, value),
+                    },
+                })
+                .collect(),
+        }
+    }
+}
+
 /// The raw value of one slot. Pure.
 fn slot_value(subject: &str, value: SlotData<'_>) -> RawSlotValue {
     match value {
@@ -329,6 +366,56 @@ mod tests {
                 class: ClientClassName::ValueError,
                 text: "priority must be between 1 and 100".to_owned(),
             }
+        );
+    }
+
+    #[test]
+    fn the_given_exception_takes_the_place_of_the_exception_slot() {
+        let refusal = horsies_core::TaskSendError::ValidationFailed {
+            message: "idempotency key refused".to_owned(),
+            cause: FailureCause::PreconditionFailed,
+        };
+        let raw = RawCatalogError::of_with_exception(
+            "enqueue",
+            &refusal,
+            &ExceptionValue::ClientClass {
+                class: ClientExceptionClass::ValueError,
+                text: "idempotency key must be non-empty".to_owned(),
+            },
+        );
+        assert_eq!(
+            raw,
+            RawCatalogError {
+                class: "TaskSendValidationFailed".to_owned(),
+                slots: vec![
+                    RawSlot {
+                        name: "message".to_owned(),
+                        value: RawSlotValue::Text {
+                            text: "idempotency key refused".to_owned()
+                        },
+                    },
+                    RawSlot {
+                        name: "exception".to_owned(),
+                        value: RawSlotValue::Exception {
+                            exception: ExceptionRecord::ClientClass {
+                                class: ClientClassName::ValueError,
+                                text: "idempotency key must be non-empty".to_owned(),
+                            }
+                        },
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn a_class_with_no_exception_slot_keeps_its_slots() {
+        let suppressed = horsies_core::TaskSendError::SendSuppressed {
+            message: "sends are suppressed".to_owned(),
+        };
+        assert_eq!(
+            RawCatalogError::of_with_exception("enqueue", &suppressed, &ExceptionValue::NoCause),
+            RawCatalogError::of("enqueue", &suppressed)
         );
     }
 

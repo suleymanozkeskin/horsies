@@ -24,7 +24,7 @@ import { refusalText, type CodecRefused } from "../codec/refusal.ts";
 import { isObjectLike, isString } from "../codec/values.ts";
 import type { CompiledContract } from "../contract/compile.ts";
 import type { ImplementationParts } from "../contract/implementation.ts";
-import type { OptionalText, TaskErrorParts } from "../native/sends/addon.ts";
+import type { ErrorDataPart, OptionalText, TaskErrorParts } from "../native/sends/addon.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { BodyEnd, BodyObservation } from "./body-observer.ts";
 import type { LoopMarks } from "./run-table.ts";
@@ -141,7 +141,7 @@ function returnedOutcome(run: BodyRun, body: BodyReturn): StoredBodyOutcome {
 }
 
 /** A user failure as the body gave it to `err`. */
-type UserFailureRead = { readonly code: string; readonly message: OptionalText; readonly data: unknown };
+type UserFailureRead = { readonly code: string; readonly message: OptionalText; readonly data: BodyErrorData };
 
 /** What a body returned. */
 type ResultRead =
@@ -188,7 +188,7 @@ function failureOf(cause: unknown): UserFailureRead | undefined {
   return {
     code,
     message: message === undefined ? NO_TEXT : { kind: "text", text: message },
-    data: Reflect.get(cause, "data") ?? null,
+    data: dataOfFailure(cause),
   };
 }
 
@@ -199,16 +199,66 @@ function actualTypeOf(cause: unknown): string {
 
 const NO_TEXT: OptionalText = Object.freeze({ kind: "none" });
 
+/** The data of a stored error: the part that the core builds the error with, and the text that a test run reads. */
+type BodyErrorData = { readonly part: ErrorDataPart; readonly text: JsonText };
+
+/** The data of an `err` with no `data`: no part; a test run reads `null`. */
+const NO_ERROR_DATA: BodyErrorData = Object.freeze({ part: Object.freeze({ kind: "noData" }), text: errorDataText(null).text });
+
+/** The data of the failure `cause` that `err` got: none when it has no `data`. */
+function dataOfFailure(cause: object): BodyErrorData {
+  const data: unknown = Reflect.get(cause, "data");
+
+  return data === undefined ? NO_ERROR_DATA : storedErrorData(data);
+}
+
+/** The data of the stored error of the data `cause`: its part and the codec's text. Pure. */
+function storedErrorData(cause: unknown): BodyErrorData {
+  const stored = errorDataText(cause);
+
+  return { part: partOfStored(stored), text: stored.text };
+}
+
+/**
+ * The data part of the stored error of the data `cause`: the codec's text; or, for data that the codec replaces, the
+ * reason that the bridge stores with Python's cause (and logs on `horsies.codec`). A replacement for data deeper than
+ * Pydantic's dump writes has no reason in the bridge: its replacement text is stored as it is.
+ */
+export function errorDataPart(cause: unknown): ErrorDataPart {
+  return partOfStored(errorDataText(cause));
+}
+
+function partOfStored(stored: StoredErrorData): ErrorDataPart {
+  switch (stored.state) {
+    case "stored":
+      return { kind: "text", text: stored.text };
+    case "replaced":
+      switch (stored.cause) {
+        case "StrictJsonError":
+          return { kind: "notStorable", reason: "notJsonNative" };
+        case "SerializationError":
+          return { kind: "notStorable", reason: "integerTooLong" };
+        case "ValueValidationError":
+          return { kind: "text", text: stored.text };
+        default:
+          return unreachable(stored.cause, "errorDataPart");
+      }
+
+    default:
+      return unreachable(stored, "errorDataPart");
+  }
+}
+
 /** The parts of a stored error with its data, and the text of the data. Pure. */
-function errorOutcome(parts: Omit<TaskErrorParts, "dataJson">, data: StoredErrorData): StoredBodyOutcome {
-  return { kind: "error", parts: { ...parts, dataJson: data.text }, data: data.text };
+function errorOutcome(parts: Omit<TaskErrorParts, "data">, data: BodyErrorData): StoredBodyOutcome {
+  return { kind: "error", parts: { ...parts, data: data.part }, data: data.text };
 }
 
 /** The outcome of a user failure. Pure. */
 function userFailureOutcome(failure: UserFailureRead): StoredBodyOutcome {
   return errorOutcome(
     { code: { kind: "user", code: failure.code }, message: failure.message, exception: { kind: "noException" } },
-    errorDataText(failure.data),
+    failure.data,
   );
 }
 
@@ -232,7 +282,7 @@ function thrownOutcome(run: BodyRun, cause: unknown): StoredBodyOutcome {
         traceback: record.traceback,
       },
     },
-    errorDataText({ exception_type: record.type }),
+    storedErrorData({ exception_type: record.type }),
   );
 }
 
@@ -271,7 +321,7 @@ function serializationError(
       message: { kind: "text", text: message },
       exception: { kind: "noException" },
     },
-    errorDataText({ expected_type: `${taskName}.${side}`, validation_error: message }),
+    storedErrorData({ expected_type: `${taskName}.${side}`, validation_error: message }),
   );
 }
 
@@ -286,7 +336,7 @@ function notAResult(taskName: string, actualType: string): StoredBodyOutcome {
       },
       exception: { kind: "noException" },
     },
-    errorDataText({ variant: "not_a_task_result", expected_type: "Result", actual_type: actualType, validation_errors: [] }),
+    storedErrorData({ variant: "not_a_task_result", expected_type: "Result", actual_type: actualType, validation_errors: [] }),
   );
 }
 
@@ -300,12 +350,12 @@ export function refusedCodeParts(taskName: string, code: string, cause: string):
   return {
     code: { kind: "library", code: "RETURN_TYPE_MISMATCH" },
     message: { kind: "text", text: message },
-    dataJson: errorDataText({
+    data: errorDataPart({
       variant: "err",
       expected_type: "a code of the task",
       actual_type: "Err",
       validation_errors: [{ loc: ["code"], msg: cause, type: "user_code" }],
-    }).text,
+    }),
     exception: { kind: "noException" },
   };
 }

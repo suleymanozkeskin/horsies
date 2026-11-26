@@ -8,7 +8,7 @@ import { z } from "zod";
 import { h } from "../../../horsies/src/wire/builders.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 import { hz } from "../../../horsies/src/zod/codecs.ts";
-import { memberText } from "../../../horsies/src/zod/self-check.ts";
+import { memberText } from "./self-check-cases.ts";
 import {
   acceptedKind,
   acceptedMember,

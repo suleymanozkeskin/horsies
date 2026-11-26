@@ -20,8 +20,8 @@ import type { TraceArgument } from "../native/values/records.ts";
  * forms have one shape. Values that cross are plain data.
  */
 export interface ProducerCore {
-  /** The prepared facts of one send of the listed task `facts.taskName`. */
-  prepareSend(facts: SendFacts): Promise<PreparedSend>;
+  /** The prepared facts of one send of the listed task `taskName`, with the task's checked options. */
+  prepareSend(taskName: string, facts: SendFacts): Promise<PreparedSend>;
   enqueue(request: EnqueueRequest, sendKind: SendKind, trace: TraceArgument): Promise<EnqueueOutcome>;
   getResult(taskId: string, wait: WaitBound): Promise<ResultRead>;
   taskInfo(taskId: string): Promise<TaskInfoRead>;
@@ -38,7 +38,7 @@ export interface SeatOperationMap {
 
 /** One send or task read that a seat isolate asks for. */
 export type SendsSeatOperation =
-  | { readonly kind: "prepareSend"; readonly facts: SendFacts }
+  | { readonly kind: "prepareSend"; readonly taskName: string; readonly facts: SendFacts }
   | {
       readonly kind: "enqueue";
       readonly request: EnqueueRequest;

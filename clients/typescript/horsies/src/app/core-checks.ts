@@ -12,12 +12,13 @@ import type {
   MillisecondsFact,
   NativeSendRules,
   NativeTaskOptions,
+  RefusalHelp,
   RetryFacts,
   TaskOptionsCheck,
   TaskOptionsFacts,
 } from "../native/sends/addon.ts";
 import type { QueueRoute } from "../send/send.ts";
-import { refusal, type Refusal, type RefusalCode } from "./refusal.ts";
+import { refusal, type Refusal } from "./refusal.ts";
 
 /** The core's pure check functions. On a main thread the addon gives them; a test gives a fake. */
 export interface CoreChecks {
@@ -146,19 +147,20 @@ function retryFacts(retry: RetrySetting): RetryFacts {
 
 /** The refusal of a core refusal at `path`. A code that the catalog does not hold is a defect: `TypeError`. Pure. */
 export function refusalOfCore(path: string, refused: CoreRefusal): Refusal {
-  return refusal(refusalCode(refused), path, [refused.message, ...refused.notes].join("; "), refused.help);
+  return refusal(catalogCode(refused.code), path, [refused.message, ...refused.notes].join("; "), helpLines(refused.help));
 }
 
-function refusalCode(refused: CoreRefusal): RefusalCode {
-  switch (refused.code.kind) {
-    case "noCode":
-      return "FIELD_BOUND";
-    case "catalog":
-      return catalogCode(refused.code.code);
+/** The help lines of a core refusal: none, or its one line. Pure. */
+function helpLines(help: RefusalHelp): readonly string[] {
+  switch (help.kind) {
+    case "noHelp":
+      return [];
+    case "help":
+      return [help.line];
     default: {
-      const unexpected: never = refused.code;
+      const unexpected: never = help;
 
-      throw new TypeError(`refusalOfCore: a code outside its type: ${String(unexpected)}`);
+      throw new TypeError(`refusalOfCore: a help outside its type: ${String(unexpected)}`);
     }
   }
 }
