@@ -70,7 +70,7 @@ export function checkWorkflowsAtCreate(input: WorkflowsAtCreate): WorkflowsCheck
           refusal(
             ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
             path,
-            `params${refused.path.slice("input".length)}: ${refused.detail} [${refused.rule}]`,
+            `${paramsContractPlace(refused.path)}: ${refused.detail} [${refused.rule}]`,
             [],
           ),
         ),
@@ -97,6 +97,16 @@ export function checkWorkflowsAtCreate(input: WorkflowsAtCreate): WorkflowsCheck
   }
 
   return { registry, refusals };
+}
+
+/**
+ * The place of a refusal of the params contract in the workflow's terms: the contract's `input` is the workflow's
+ * `params`; the declared output keeps its path (`output`, `output.total`). Pure.
+ */
+function paramsContractPlace(path: string): string {
+  const inInput = path === "input" || path.startsWith("input.") || path.startsWith("input[");
+
+  return inInput ? `params${path.slice("input".length)}` : path;
 }
 
 /** The most characters (code points) of a workflow name: the column `horsies_workflows.name` is `varchar(255)`. */

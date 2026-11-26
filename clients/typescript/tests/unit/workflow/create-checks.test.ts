@@ -8,7 +8,7 @@ import { Worker } from "node:worker_threads";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { checkWorkflows } from "../../../horsies/src/workflow/check-cases.ts";
 import { MAX_DEFINITION_KEY_CHARS, MAX_WORKFLOW_NAME_CHARS } from "../../../horsies/src/workflow/create-checks.ts";
-import { defineWorkflow, type NodeRef } from "../../../horsies/src/workflow/public.ts";
+import { defineWorkflow, type NodeRef, type WorkflowBuilder } from "../../../horsies/src/workflow/public.ts";
 import { checkedAtCreate, duplicateIds, ping, plain } from "./create-workflows.ts";
 
 function createCodes(workflows: readonly object[]): readonly string[] {
@@ -152,6 +152,31 @@ describe("checkWorkflowsAtCreate", () => {
 
     assert.deepEqual(createCodes([badRule]), ["HRS-033"]);
     assert.deepEqual(createCodes([badParams]), ["HRS-105"]);
+  });
+
+  test("a refusal of the params has a params path; a refusal of the declared output keeps the output path", () => {
+    const badParams = defineWorkflow(
+      {
+        name: "params",
+        definitionKey: "tests.params.v1",
+        output: h.int(),
+        params: { workflow_ctx: h.int() },
+        checkCases: [{ workflow_ctx: 1 }],
+      },
+      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+    );
+    // SAFETY: a JavaScript caller can give an output that the types refuse; the create check refuses it.
+
+    const badOutput = defineWorkflow(
+      { name: "out", definitionKey: "tests.out.v1", output: h.int().optional() as never, params: {} },
+      ((w: WorkflowBuilder) => ({ output: w.task(ping, {}, { id: "a" }) })) as never,
+    );
+
+    const [params] = checkedAtCreate([badParams]).refusals;
+    const [output] = checkedAtCreate([badOutput]).refusals;
+
+    assert.match(params?.message ?? "", /^workflows\[0\] params: params\.workflow_ctx: /u);
+    assert.match(output?.message ?? "", /^workflows\[0\] out: output: .*\[WireKind\]$/u);
   });
 
   test("a workflow with no params is built once with every spec check", () => {
