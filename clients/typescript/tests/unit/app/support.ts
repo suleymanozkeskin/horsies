@@ -3,9 +3,8 @@
 
 import type { CoreChecks } from "../../../horsies/src/app/core-checks.ts";
 import type { ProducerCore } from "../../../horsies/src/app/core-access.ts";
-import type { CreateEnvironment } from "../../../horsies/src/app/create.ts";
-import type { NativeCoreHandle } from "../../../horsies/src/native/handle/addon.ts";
 import { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
+import type { CreateEnvironment } from "../../../horsies/src/app/create.ts";
 import type { ProcessStart } from "../../../horsies/src/app/suppression.ts";
 import type {
   AppConfigCheck,
@@ -204,22 +203,20 @@ export function fakeProducer(script: ProducerScript = {}): FakeProducer {
   };
 }
 
-/** A core handle whose addon methods are never called: the fake producer and the fake checks answer instead. */
+/** A core handle whose operations fail the test: the fakes of the app hub call none of them. */
 export function fakeCoreHandle(): CoreHandle {
-  const notCalled = (method: string) => (): never => {
-    throw new Error(`fakeCoreHandle: ${method} is not called in this test`);
+  const notCalled = (operation: string): never => {
+    throw new TypeError(`fakeCoreHandle: ${operation} is not called by the fakes`);
   };
 
-  const native: NativeCoreHandle = {
-    manifestVersion: notCalled("manifestVersion"),
-    withInstallCoverage: notCalled("withInstallCoverage"),
-    close: notCalled("close"),
-    pingDatabase: notCalled("pingDatabase"),
-    installSchema: notCalled("installSchema"),
-    schemaStatus: notCalled("schemaStatus"),
-  };
-
-  return new CoreHandle(native);
+  return new CoreHandle({
+    manifestVersion: () => notCalled("manifestVersion"),
+    withInstallCoverage: () => notCalled("withInstallCoverage"),
+    close: async () => notCalled("close"),
+    pingDatabase: async () => notCalled("pingDatabase"),
+    installSchema: async () => notCalled("installSchema"),
+    schemaStatus: async () => notCalled("schemaStatus"),
+  });
 }
 
 /** The start facts of a plain producer process. */
@@ -232,6 +229,7 @@ export type EnvironmentParts = {
   readonly start?: ProcessStart;
   readonly checks?: FakeChecks;
   readonly producer?: FakeProducer;
+  readonly handle?: CoreHandle;
 };
 
 /** The environment of a fake create, and the counter of the loads of the core checks. */
@@ -239,6 +237,8 @@ export type FakeEnvironment = CreateEnvironment & {
   readonly loads: { checks: number; producers: number };
   readonly checks: FakeChecks;
   readonly fakeProducer: FakeProducer;
+  /** The core handle that the fake addon core gives the app. */
+  readonly handle: CoreHandle;
 };
 
 /** A create environment with fakes: a main thread, no variables, a plain start, accepting checks. */
@@ -246,12 +246,14 @@ export function fakeEnvironment(parts: EnvironmentParts = {}): FakeEnvironment {
   const loads = { checks: 0, producers: 0 };
   const checks = parts.checks ?? fakeChecks();
   const producer = parts.producer ?? fakeProducer();
+  const handle = parts.handle ?? fakeCoreHandle();
   const variables = parts.variables ?? {};
 
   return {
     loads,
     checks,
     fakeProducer: producer,
+    handle,
     mainThread: parts.mainThread ?? true,
     environment: (name) => variables[name],
     processStart: parts.start ?? PLAIN_START,
@@ -260,11 +262,10 @@ export function fakeEnvironment(parts: EnvironmentParts = {}): FakeEnvironment {
 
       return checks;
     },
-    coreHandle: () => fakeCoreHandle(),
-    producer: () => {
+    addonCore: () => {
       loads.producers += 1;
 
-      return producer;
+      return { producer, handle };
     },
   };
 }

@@ -50,5 +50,14 @@ export default defineConfig({
         "anti-slop/no-runtime-typeof": "off",
       },
     },
+    {
+      // The writer of the worker manifest's start members: it tells the
+      // members of `WireJson` apart by their runtime type to write each one as
+      // JSON text for the core's manifest parser.
+      files: ["horsies/src/worker/manifest-text.ts"],
+      rules: {
+        "anti-slop/no-runtime-typeof": "off",
+      },
+    },
   ],
 });

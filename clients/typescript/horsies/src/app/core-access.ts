@@ -63,10 +63,14 @@ export interface SeatRelay {
 }
 
 /**
- * How this thread reaches the core. On a main thread, `handle` is the app's core handle (the facades call the addon
- * with it) and `producer` runs the sends and the task reads on the same handle.
+ * The core of an app on a main thread: its send and read operations, and the one core handle that `Horsies.create`
+ * built for the app. The worker run and the live check use that handle, so the child spec source that the app
+ * registers on it is the one that the worker serves.
  */
+export type AddonCore = { readonly producer: ProducerCore; readonly handle: CoreHandle };
+
+/** How this thread reaches the core. */
 export type CoreAccess =
-  | { readonly kind: "addon"; readonly handle: CoreHandle; readonly producer: ProducerCore }
+  | ({ readonly kind: "addon" } & AddonCore)
   | { readonly kind: "seatRelay"; readonly relay: SeatRelay }
   | { readonly kind: "noCore" };

@@ -308,6 +308,19 @@ impl LogSink {
         self.stderr_only.load(Ordering::SeqCst)
     }
 
+    /// The state of the channel now, with no wait: `Drained` when no record
+    /// waits, `ForwarderStopped` when records wait and the forwarder does not
+    /// run, `BoundReached` when records wait for the running forwarder.
+    /// Reads only counters.
+    pub fn drain_state(&self) -> DrainOutcome {
+        let left = self.in_channel.load(Ordering::SeqCst);
+        match (left, self.forwarder_running.load(Ordering::SeqCst)) {
+            (0, _) => DrainOutcome::Drained,
+            (_, false) => DrainOutcome::ForwarderStopped { left },
+            (_, true) => DrainOutcome::BoundReached { left },
+        }
+    }
+
     /// Wait until the forwarder has handled every record in the channel, the
     /// forwarder stops, or `bound` passes. Reads only counters.
     pub fn wait_for_drain(&self, bound: Duration) -> DrainOutcome {

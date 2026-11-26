@@ -25,9 +25,9 @@ import { AddonOutsideMainThread } from "../../../horsies/src/thrown-errors.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import {
   DATABASE_URL,
-  fakeCoreHandle,
   fakeEnvironment,
   fakeProducer,
+  fakeCoreHandle,
   type FakeProducer,
   OPTIONS_TEXT,
   PLAIN_START,
@@ -76,7 +76,7 @@ function harness(parts: HarnessParts = {}): Harness {
   const context: SendContext = {
     contracts: contractLookup(list.entries),
     resendOnTransientErr: parts.resend ?? false,
-    core: { kind: "addon", handle: fakeCoreHandle(), producer },
+    core: { kind: "addon", producer, handle: fakeCoreHandle() },
     observer: parts.observer ?? NO_OP_OBSERVER,
     suppression: new SuppressionState(parts.suppression ?? { kind: "open" }, () => undefined),
     pause: async (milliseconds) => {

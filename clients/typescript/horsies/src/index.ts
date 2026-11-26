@@ -18,6 +18,10 @@ export * from "./monitoring/public.ts";
 
 export * from "./thrown-errors.ts";
 
+export * from "./cli/public.ts";
+
+export * from "./child/public.ts";
+
 export {
   configureLogging,
   LOGGER_NAMES,
