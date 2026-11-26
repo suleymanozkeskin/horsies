@@ -7,7 +7,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use horsies::{
-    HorsiesError, OutputlessResults, TaskNode, TaskOutcome, WorkflowHandle, WorkflowSpecBuilder,
+    HorsiesError, OutputlessResults, TaskNode, TaskOutcome, TypedNodeRef, WorkflowHandle,
+    WorkflowSpecBuilder,
 };
 use horsies_test_support::poll;
 use horsies_test_support::rows::{self, NodeRow};
@@ -22,10 +23,21 @@ const BIN: &str = env!("CARGO_BIN_EXE_horsies-test-worker");
 /// The longest wait for a workflow to end.
 const WORKFLOW_WAIT: Duration = Duration::from_secs(30);
 
-fn builder(name: &str) -> WorkflowSpecBuilder {
-    let mut builder = WorkflowSpecBuilder::new(name);
+fn builder(suite: &Suite, name: &str) -> WorkflowSpecBuilder {
+    let mut builder = suite.app.workflow_builder(name);
     let _key = builder.definition_key(format!("tests.e2e.{name}.v1"));
     builder
+}
+
+/// Add `node` to `spec`, a workflow builder of the suite's app. The app
+/// registers every task of the test binary, so a refusal is a defect of the
+/// test.
+fn add<T: 'static, I: 'static>(
+    spec: &mut WorkflowSpecBuilder,
+    node: TaskNode<T, I>,
+) -> TypedNodeRef<T> {
+    spec.task(node)
+        .expect("the app of the suite registers the task of the node")
 }
 
 /// A step node `id` that returns `completed_<id>`.
@@ -104,10 +116,10 @@ async fn failed_code<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
 async fn test_linear_workflow() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("linear");
-    let a = spec.task(step(&suite, "a"));
-    let b = spec.task(step(&suite, "b").waits_for(a));
-    let c = spec.task(step(&suite, "c").waits_for(b));
+    let mut spec = builder(&suite, "linear");
+    let a = add(&mut spec, step(&suite, "a"));
+    let b = add(&mut spec, step(&suite, "b").waits_for(a));
+    let c = add(&mut spec, step(&suite, "c").waits_for(b));
     let _output = spec.output(c);
     let handle = start::<String>(&suite, spec).await;
     let outcome = handle
@@ -127,10 +139,10 @@ async fn test_linear_workflow() {
 async fn test_fanout_parallel_execution() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated4).await;
-    let mut spec = builder("fanout");
-    let root = spec.task(step(&suite, "root"));
+    let mut spec = builder(&suite, "fanout");
+    let root = add(&mut spec, step(&suite, "root"));
     for id in ["b", "c", "d"] {
-        let _branch = spec.task(slow_step(&suite, id, 1_000).waits_for(root));
+        let _branch = add(&mut spec, slow_step(&suite, id, 1_000).waits_for(root));
     }
     let handle = start::<OutputlessResults>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
@@ -153,12 +165,15 @@ async fn test_fanout_parallel_execution() {
 async fn test_fanin_waits_for_all() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated4).await;
-    let mut spec = builder("fanin");
+    let mut spec = builder(&suite, "fanin");
     let sources: Vec<_> = [("a", 200), ("b", 400), ("c", 600)]
         .into_iter()
-        .map(|(id, delay)| spec.task(slow_step(&suite, id, delay)))
+        .map(|(id, delay)| add(&mut spec, slow_step(&suite, id, delay)))
         .collect();
-    let aggregate = spec.task(step(&suite, "aggregate").waits_for_all(sources.iter().copied()));
+    let aggregate = add(
+        &mut spec,
+        step(&suite, "aggregate").waits_for_all(sources.iter().copied()),
+    );
     let _output = spec.output(aggregate);
     let handle = start::<String>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "COMPLETED").await;
@@ -179,11 +194,11 @@ async fn test_fanin_waits_for_all() {
 async fn test_diamond_structure() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated2).await;
-    let mut spec = builder("diamond");
-    let a = spec.task(step(&suite, "a"));
-    let b = spec.task(step(&suite, "b").waits_for(a));
-    let c = spec.task(step(&suite, "c").waits_for(a));
-    let d = spec.task(step(&suite, "d").waits_for(b).waits_for(c));
+    let mut spec = builder(&suite, "diamond");
+    let a = add(&mut spec, step(&suite, "a"));
+    let b = add(&mut spec, step(&suite, "b").waits_for(a));
+    let c = add(&mut spec, step(&suite, "c").waits_for(a));
+    let d = add(&mut spec, step(&suite, "d").waits_for(b).waits_for(c));
     let _output = spec.output(d);
     let handle = start::<String>(&suite, spec).await;
     let outcome = handle
@@ -201,8 +216,8 @@ async fn test_diamond_structure() {
 async fn test_single_node_workflow() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("single");
-    let only = spec.task(step(&suite, "only"));
+    let mut spec = builder(&suite, "single");
+    let only = add(&mut spec, step(&suite, "only"));
     let _output = spec.output(only);
     let handle = start::<String>(&suite, spec).await;
     let outcome = handle
@@ -218,10 +233,10 @@ async fn test_single_node_workflow() {
 async fn test_linear_failure_cascades_to_skip() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("linear_fail_first");
-    let a = spec.task(fail(&suite, "a"));
-    let b = spec.task(step(&suite, "b").waits_for(a));
-    let _c = spec.task(step(&suite, "c").waits_for(b));
+    let mut spec = builder(&suite, "linear_fail_first");
+    let a = add(&mut spec, fail(&suite, "a"));
+    let b = add(&mut spec, step(&suite, "b").waits_for(a));
+    let _c = add(&mut spec, step(&suite, "c").waits_for(b));
     let handle = start::<OutputlessResults>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(statuses(&nodes), vec!["FAILED", "SKIPPED", "SKIPPED"]);
@@ -233,10 +248,10 @@ async fn test_linear_failure_cascades_to_skip() {
 async fn test_workflow_fails_with_error() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = builder("linear_fail_mid");
-    let a = spec.task(step(&suite, "a"));
-    let b = spec.task(fail(&suite, "b").waits_for(a));
-    let c = spec.task(step(&suite, "c").waits_for(b));
+    let mut spec = builder(&suite, "linear_fail_mid");
+    let a = add(&mut spec, step(&suite, "a"));
+    let b = add(&mut spec, fail(&suite, "b").waits_for(a));
+    let c = add(&mut spec, step(&suite, "c").waits_for(b));
     let _output = spec.output(c);
     let handle = start::<String>(&suite, spec).await;
     let _nodes = ended_nodes(&suite, &handle, "FAILED").await;
@@ -249,11 +264,11 @@ async fn test_workflow_fails_with_error() {
 async fn test_fanout_one_branch_fails() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated4).await;
-    let mut spec = builder("fanout_one_fail");
-    let root = spec.task(step(&suite, "root"));
-    let _b = spec.task(fail(&suite, "b").waits_for(root));
-    let _c = spec.task(step(&suite, "c").waits_for(root));
-    let _d = spec.task(step(&suite, "d").waits_for(root));
+    let mut spec = builder(&suite, "fanout_one_fail");
+    let root = add(&mut spec, step(&suite, "root"));
+    let _b = add(&mut spec, fail(&suite, "b").waits_for(root));
+    let _c = add(&mut spec, step(&suite, "c").waits_for(root));
+    let _d = add(&mut spec, step(&suite, "d").waits_for(root));
     let handle = start::<OutputlessResults>(&suite, spec).await;
     let nodes = ended_nodes(&suite, &handle, "FAILED").await;
     assert_eq!(
@@ -268,11 +283,12 @@ async fn test_fanout_one_branch_fails() {
 async fn test_fanin_one_dep_fails_skips_aggregator() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated4).await;
-    let mut spec = builder("fanin_one_fail");
-    let a = spec.task(fail(&suite, "a"));
-    let b = spec.task(step(&suite, "b"));
-    let c = spec.task(step(&suite, "c"));
-    let _aggregate = spec.task(
+    let mut spec = builder(&suite, "fanin_one_fail");
+    let a = add(&mut spec, fail(&suite, "a"));
+    let b = add(&mut spec, step(&suite, "b"));
+    let c = add(&mut spec, step(&suite, "c"));
+    let _aggregate = add(
+        &mut spec,
         step(&suite, "aggregate")
             .waits_for(a)
             .waits_for(b)
@@ -295,10 +311,10 @@ async fn test_workflow_cancellation() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = builder("slow_linear");
-    let a = spec.task(slow_step(&suite, "a", 500));
-    let b = spec.task(slow_step(&suite, "b", 3_000).waits_for(a));
-    let c = spec.task(slow_step(&suite, "c", 3_000).waits_for(b));
+    let mut spec = builder(&suite, "slow_linear");
+    let a = add(&mut spec, slow_step(&suite, "a", 500));
+    let b = add(&mut spec, slow_step(&suite, "b", 3_000).waits_for(a));
+    let c = add(&mut spec, slow_step(&suite, "c", 3_000).waits_for(b));
     let _output = spec.output(c);
     let handle = start::<String>(&suite, spec).await;
     rows::wait_for_node_status(&client, handle.workflow_id(), 0, "COMPLETED", WORKFLOW_WAIT).await;
@@ -346,9 +362,10 @@ async fn test_workflow_task_expired_while_claimed_before_start() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = builder("expiring_node");
-    let a = spec.task(slow_step(&suite, "a", 3_000));
-    let b = spec.task(
+    let mut spec = builder(&suite, "expiring_node");
+    let a = add(&mut spec, slow_step(&suite, "a", 3_000));
+    let b = add(
+        &mut spec,
         step(&suite, "b")
             .waits_for(a)
             .good_until(Utc::now() + chrono::Duration::seconds(1)),

@@ -100,8 +100,25 @@ fn each_profile_of_the_config_is_its_manifest_profile() {
         &named("batch"),
     ));
     let mut config = config();
-    config.worker_profiles = manifest.profile_set();
+    config.worker_profiles = manifest.config_profiles();
     assert_eq!(sections(&config).profiles, manifest.profiles);
+}
+
+/// A client builds the sections only of a config that `AppConfig::validate`
+/// accepted. A profile value outside its bound is a defect of the client:
+/// the builder panics with its path and its bounds.
+#[test]
+#[should_panic(
+    expected = "worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024"
+)]
+fn a_profile_value_outside_its_bound_is_a_defect_of_the_client() {
+    let mut config = config();
+    let profile = crate::core::config::worker_profile::input::WorkerProfile {
+        isolated: crate::core::config::worker_profile::input::IsolatedChildren::new(0).into(),
+        ..crate::core::config::worker_profile::input::WorkerProfile::default()
+    };
+    let _replaced = config.worker_profiles.insert("web".to_owned(), profile);
+    let _sections = config_sections(&config);
 }
 
 /// The custom queues in config order, with their priority and limit, and

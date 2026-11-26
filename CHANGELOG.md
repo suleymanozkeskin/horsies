@@ -112,6 +112,96 @@ and there is no migration contract between pre-1.0 versions.
   `exit`, and `Worker::from_plan` takes the exit as its fourth argument.
   The Rust client and the Python bridge pass `Standard`; their exits do
   not change.
+- **Rust: each send, each workflow builder and each workflow start names
+  its app; the delay is a send option.** The module that `#[horsies::task]` and
+  `#[horsies::blocking_task]` generate holds no state. It kept the typed
+  function of the first `register` in the process, so in a process with
+  two apps every generated send and node used the first app.
+  - `task_name::send(&app, ...)` and
+    `task_name::with_options(options).send(&app, ...)` take the app that
+    they send through. `SendOptions::send` takes the options by value, so
+    its future borrows only the app; `SendOptions` is `Clone` for one more
+    send. A send through an app that does not register the
+    task returns `TaskSendError::ValidationFailed` with the cause
+    `PreconditionFailed`, and writes nothing. The TypeScript client gives
+    the same code for a contract that the app does not list.
+  - The delay is the send option `TaskSendOptions::delay(WholeSeconds)`.
+    A send with it stores the row that the removed `schedule` stored.
+    `retry_send` takes the error of a send with a delay and sends the
+    payload again with its delay. Removed: the generated
+    `task_name::schedule` and `SendOptions::schedule`;
+    `TaskFunction::schedule`, `schedule_with_options` and
+    `retry_schedule`; `TaskFunctionSendOptions::schedule`; and the same
+    methods of the blocking views `TaskFunctionView` and
+    `TaskFunctionSendOptionsView`. The word "schedule" names the recurring
+    schedules only.
+  - `task_name::node()` returns `TaskNode<T, I>` and reads no
+    registration. A workflow builder comes from an app:
+    `Horsies::workflow_builder(name)`, or `TaskRuntime::workflow_builder(name)`
+    in a task body. `WorkflowSpecBuilder::new` is no longer public.
+    `builder.task(node)` returns `Result<TypedNodeRef<T>, HorsiesError>`.
+    It gives the node the queue (unless the node names one), the options
+    and the workflow context flag of the task's registration on the
+    builder's app. It refuses with `HRS-302`
+    (`WORKFLOW_UNREGISTERED_TASK`) a task that the app does not register
+    with the node's input and output types, and does not add the node.
+  - `WorkflowDefinition::build(builder)` and
+    `WorkflowDefinition::build_with(builder, params)` take a builder of the
+    app, named after the definition. The app gives it at the registration,
+    at each build of a template and at each build of a child.
+    `define(builder)` does not change. A definition without params builds
+    when it registers, so its tasks register first.
+  - `Horsies::check_workflow_builder(name, builder)`: `builder` gets a new
+    workflow builder of the app named `name`, then the case.
+  - A start of a definition by its type is a method of the app:
+    `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)`,
+    and on the blocking view `app.blocking().start_workflow::<D>()` and
+    `app.blocking().start_workflow_with::<D>(params)`. The app finds `D` in
+    its own registry, in the form of its registration
+    (`register_workflow_definition` or `workflow_template`). A start on an
+    app that does not register `D` in that form returns
+    `WorkflowStartError::ValidationFailed` with the cause
+    `PreconditionFailed`, with the id of the start; nothing is written and
+    the build does not run. Removed: the free functions
+    `horsies::start_workflow` and `horsies::start_workflow_with`, and
+    `horsies::blocking::start_workflow` and
+    `horsies::blocking::start_workflow_with`, which started through the
+    first registration in the process.
+- **Rust client: worker profile counts are plain numbers.** Each count,
+  size and task limit of a worker profile is a `u32`, and `drain_timeout`
+  is a `Duration`: `IsolatedChildren::new(2)`,
+  `SharedAsyncChildren::new(4, 25)`, `SharedThreadChildren::new(1, 4)`,
+  `TaskLimitSetting::TaskLimit { tasks: 500 }`. `From` builds each setting
+  from its children, so a profile reads
+  `WorkerProfile { isolated: IsolatedChildren::new(2).into(), ..WorkerProfile::default() }`.
+  `Horsies::new` checks each value against its bounds and refuses the
+  config with every refusal in one error, `HRS-218`. Each refusal names the
+  field path and the bounds, for example
+  `worker_profiles['default'].isolated.count: 0 is outside the bounds 1 to 1024`.
+  The crate does not export the bounded count types (`IsolatedChildCount`,
+  `SharedAsyncChildCount`, `SharedAsyncSeats`, `SharedThreadChildCount`,
+  `SharedThreadSeats`, `TaskCount`, `MemoryMb`, `PoolConnectionCount`,
+  `PoolMinSize`, `ExecutorThreadCount`), `DrainTimeout`,
+  `DrainTimeoutRefused`, `BoundedU32` and `OutOfBounds` now. It exports
+  `ProfileValueRefused`. The JSON form of a profile and the worker manifest
+  do not change.
+- **Core: the config form of a worker profile.**
+  `horsies_core::core::config::worker_profile::input` holds the profile
+  types of `AppConfig.worker_profiles`: plain numbers, with the JSON form of
+  the checked types. `input::WorkerProfile::checked(name)` gives the
+  checked profile, or one `ProfileValueRefused` (`OutOfBounds` or
+  `DrainTimeout`, each with the field path) for each value outside its
+  bounds. `worker_profiles_shape_errors` and `worker_profiles_claim_errors`
+  take the config form. A value outside its bounds is a refusal of
+  `AppConfig::validate` with its path, not a parse error, so the TypeScript
+  client gets it together with every other refusal of the config.
+  `checked_worker_profiles` checks a profile set of the config.
+  `config_sections` checks the profiles into the checked form; it panics on
+  a value outside its bounds, because `AppConfig::validate` refuses that
+  config first. `check_worker_connections` returns the bound refusals and
+  reads nothing. `WorkerManifest::config_profiles` gives the profiles of a
+  manifest in the config form. The checked types, `parse_worker_profiles`
+  and `select_worker_profile` do not change.
 
 - **Rust client: a wait limit is built directly, and a limit above the
   bound is the read error `InvalidInput`.** `WaitLimit::Within` holds a

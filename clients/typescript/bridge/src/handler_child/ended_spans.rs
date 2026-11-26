@@ -156,7 +156,7 @@ impl EndedSpanMaker for JsEndedSpans {
         match call_status(status) {
             CallStatus::Queued => {}
             CallStatus::QueueFull => {
-                not_made(attempt, "the queue of the JavaScript thread is full")
+                not_made(attempt, "the queue of the JavaScript thread is full");
             }
             CallStatus::Closing => not_made(attempt, "the JavaScript environment is closing"),
             CallStatus::Refused { status } => {

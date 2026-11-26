@@ -44,9 +44,10 @@ use std::time::Duration;
 
 use crate::broker::core_rows::{column, one_row, StatementLog};
 use crate::broker::{BrokerError, PostgresBroker};
+use crate::core::config::worker_profile::input::ProfileValueRefused;
 use crate::core::config::worker_profile::{
-    profile_path, quoted_profile_name, IsolatedSetting, SharedAsyncSetting, SharedThreadSetting,
-    WorkerProfile,
+    checked_worker_profiles, profile_path, quoted_profile_name, IsolatedSetting,
+    SharedAsyncSetting, SharedThreadSetting, WorkerProfile,
 };
 use crate::core::config::{AppConfig, PostgresConfig};
 use crate::core::error::{ErrorCode, HorsiesError};
@@ -607,6 +608,9 @@ async fn read_and_compare(
 /// broker (the Rust client's `check_live`; Python
 /// `Horsies._check_worker_connections`).
 ///
+/// - A profile value outside its bound: reads nothing and returns the
+///   refusal of each such value (`CONFIG_INVALID_WORKER_PROFILE`, with its
+///   path), the refusals of `AppConfig::validate`.
 /// - No worker profile, or PgBouncer transaction mode: reads nothing and
 ///   returns no error.
 /// - Otherwise reads the limit once through `broker` and returns one error
@@ -618,11 +622,18 @@ pub async fn check_worker_connections(
     config: &AppConfig,
     broker: &PostgresBroker,
 ) -> Vec<HorsiesError> {
-    match limit_read(&config.worker_profiles, &config.broker) {
-        LimitRead::NotNeeded => Vec::new(),
-        LimitRead::Needed => {
-            read_and_compare(&config.worker_profiles, &config.broker, broker).await
+    let profiles = match checked_worker_profiles(&config.worker_profiles) {
+        Ok(profiles) => profiles,
+        Err(refusals) => {
+            return refusals
+                .iter()
+                .map(ProfileValueRefused::to_horsies_error)
+                .collect()
         }
+    };
+    match limit_read(&profiles, &config.broker) {
+        LimitRead::NotNeeded => Vec::new(),
+        LimitRead::Needed => read_and_compare(&profiles, &config.broker, broker).await,
     }
 }
 

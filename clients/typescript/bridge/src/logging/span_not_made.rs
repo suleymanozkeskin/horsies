@@ -71,6 +71,10 @@ impl NotMadeSpan {
 /// core; starts the log bridge of the process, and a forwarder thread that
 /// cannot start throws `CORE_START_FAILED`.
 #[napi(ts_return_type = "NativeEnvelope<undefined>")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
 pub fn log_span_not_made(span: NotMadeSpan, cause: String) -> Envelope<()> {
     sync_call("log_span_not_made", || match started_log() {
         Err(failure) => Envelope::Thrown(

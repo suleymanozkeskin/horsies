@@ -11,9 +11,8 @@ use chrono::NaiveTime;
 use horsies::{
     AppConfig, ChildPreload, CronEnumTerm, CronNumericTerm, CronSchedule, CustomQueueConfig,
     DailySchedule, DaySelector, Horsies, HorsiesError, HourlySchedule, IntervalSchedule,
-    IsolatedChildCount, IsolatedChildren, IsolatedSetting, Month, MonthlySchedule, QueueMode,
-    ScheduleConfig, SchedulePattern, SchemaMode, SharedAsyncChildCount, SharedAsyncChildren,
-    SharedAsyncSeats, SharedAsyncSetting, TaskSchedule, Weekday, WeeklySchedule, WorkerProfile,
+    IsolatedChildren, Month, MonthlySchedule, QueueMode, ScheduleConfig, SchedulePattern,
+    SchemaMode, SharedAsyncChildren, TaskSchedule, Weekday, WeeklySchedule, WorkerProfile,
 };
 use serde_json::json;
 
@@ -37,11 +36,11 @@ pub const WORKER_PROFILE: &str = "acme";
 
 /// The isolated children of the profile: the store-backed tasks, one at a
 /// time each.
-const ISOLATED_CHILDREN: IsolatedChildCount = IsolatedChildCount::from_constant(6);
+const ISOLATED_CHILDREN: u32 = 6;
 /// The shared async children of the profile.
-const SHARED_ASYNC_CHILDREN: SharedAsyncChildCount = SharedAsyncChildCount::from_constant(1);
+const SHARED_ASYNC_CHILDREN: u32 = 1;
 /// The seats of each shared async child: the light tasks run side by side.
-const SHARED_ASYNC_SEATS: SharedAsyncSeats = SharedAsyncSeats::from_constant(32);
+const SHARED_ASYNC_SEATS: u32 = 32;
 
 /// The built app with the handles that the scenarios use.
 pub struct ShowcaseApp {
@@ -127,11 +126,8 @@ pub fn config_for_url(url: &str) -> AppConfig {
 /// with `exec` of its own binary, so the profile has no preload process.
 pub fn worker_profile() -> WorkerProfile {
     WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(ISOLATED_CHILDREN)),
-        shared_async: SharedAsyncSetting::SharedAsyncChildren(SharedAsyncChildren::new(
-            SHARED_ASYNC_CHILDREN,
-            SHARED_ASYNC_SEATS,
-        )),
+        isolated: IsolatedChildren::new(ISOLATED_CHILDREN).into(),
+        shared_async: SharedAsyncChildren::new(SHARED_ASYNC_CHILDREN, SHARED_ASYNC_SEATS).into(),
         preload: ChildPreload::NoPreload,
         ..WorkerProfile::default()
     }

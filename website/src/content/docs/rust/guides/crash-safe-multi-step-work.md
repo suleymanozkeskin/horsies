@@ -225,29 +225,31 @@ impl WorkflowDefinition for Checkout {
         "shop.checkout.v1"
     }
 
-    fn build_with(params: CheckoutParams) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(Self::name());
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        params: CheckoutParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         builder.definition_key(Self::definition_key());
         let charge = builder.task(
-            charge_card::node()?
+            charge_card::node()
                 .node_id("charge_card")
                 .set(charge_card::params::order_id(), params.order_id.clone())?
                 .set(charge_card::params::customer_id(), params.customer_id)?
                 .set(charge_card::params::amount_cents(), params.amount_cents)?,
-        );
+        )?;
         let invoice = builder.task(
-            write_invoice::node()?
+            write_invoice::node()
                 .node_id("write_invoice")
                 .set(write_invoice::params::order_id(), params.order_id.clone())?
                 .arg_from(write_invoice::params::charge(), charge),
-        );
+        )?;
         let receipt = builder.task(
-            send_receipt::node()?
+            send_receipt::node()
                 .node_id("send_receipt")
                 .set(send_receipt::params::order_id(), params.order_id)?
                 .set(send_receipt::params::to_address(), params.customer_email)?
                 .arg_from(send_receipt::params::invoice(), invoice),
-        );
+        )?;
         builder.output(receipt);
         builder.build()
     }

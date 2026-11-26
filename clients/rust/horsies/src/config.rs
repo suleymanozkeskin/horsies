@@ -22,18 +22,15 @@ mod worker_manifest;
 pub(crate) use scheduler_manifest::{schedule_input_text, scheduler_manifest};
 pub(crate) use worker_manifest::{rust_child_launch, worker_manifest};
 
-pub use horsies_core::core::config::bounded::{BoundedU32, OutOfBounds};
-pub use horsies_core::core::config::worker_profile::{
-    ClaimLimits, DrainTimeout, DrainTimeoutRefused, ExecutorThreadCount, ExecutorThreadsSetting,
-    IsolatedChildCount, IsolatedChildren, IsolatedPool, IsolatedRecycle, IsolatedSetting,
-    MemoryLimitSetting, MemoryMb, ParentPool, PoolConnectionCount, PoolMinSize, PoolSize,
-    PoolSizeSetting, SharedAsyncChildCount, SharedAsyncChildren, SharedAsyncSeats,
-    SharedAsyncSetting, SharedPool, SharedRecycle, SharedThreadChildCount, SharedThreadChildren,
-    SharedThreadSeats, SharedThreadSetting, TaskCount, TaskLimitSetting,
+pub use horsies_core::core::config::worker_profile::input::{
+    ClaimLimits, ExecutorThreadsSetting, IsolatedChildren, IsolatedPool, IsolatedRecycle,
+    IsolatedSetting, MemoryLimitSetting, ParentPool, PoolSize, PoolSizeSetting,
+    ProfileValueRefused, SharedAsyncChildren, SharedAsyncSetting, SharedPool, SharedRecycle,
+    SharedThreadChildren, SharedThreadSetting, TaskLimitSetting, WorkerProfile,
 };
 pub use horsies_core::core::config::{
     ChildPreload, KeepaliveProbes, KeepaliveSeconds, ParentCpu, TcpKeepalivesConfig,
-    TcpUserTimeoutConfig, TcpUserTimeoutMs, WorkerProfile,
+    TcpUserTimeoutConfig, TcpUserTimeoutMs,
 };
 pub use horsies_core::manifest::PoolRecycle;
 pub use horsies_core::{
@@ -333,6 +330,39 @@ mod tests {
         assert!(refusals
             .iter()
             .all(|error| error.code == Some(ErrorCode::ConfigInvalidWorkerProfile)));
+    }
+
+    /// `Horsies::new` refuses a config with two profile values outside
+    /// their bounds in one error that holds both refusals, each with its
+    /// path and its bounds.
+    #[test]
+    fn horsies_new_refuses_every_profile_value_outside_its_bound_at_once() {
+        let mut config = AppConfig::for_database_url("postgresql://db/horsies");
+        let _previous = config.worker_profiles.insert(
+            "web".to_owned(),
+            WorkerProfile {
+                isolated: IsolatedChildren::new(0).into(),
+                shared_async: SharedAsyncChildren::new(1, 1001).into(),
+                ..WorkerProfile::default()
+            },
+        );
+
+        let refused = crate::Horsies::new(config).expect_err("two values are outside their bounds");
+
+        assert_eq!(refused.code, Some(ErrorCode::ConfigInvalidWorkerProfile));
+        assert_eq!(refused.notes.len(), 2, "{refused}");
+        assert!(
+            refused.notes[0].contains(
+                "worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024"
+            ),
+            "{refused}",
+        );
+        assert!(
+            refused.notes[1].contains(
+                "worker_profiles['web'].shared_async.seats: 1001 is outside the bounds 1 to 1000"
+            ),
+            "{refused}",
+        );
     }
 
     #[test]

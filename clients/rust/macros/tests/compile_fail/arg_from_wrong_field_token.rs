@@ -1,7 +1,7 @@
 // `arg_from` takes a field token of the node's own input type.
 use std::convert::Infallible;
 
-use horsies::{task, TaskError, TaskOutcome, WorkflowSpecBuilder};
+use horsies::{task, AppConfig, Horsies, TaskError, TaskOutcome};
 
 #[task("produce_number")]
 async fn produce_number() -> Result<i64, TaskError<Infallible>> {
@@ -21,9 +21,16 @@ async fn other_number(value: TaskOutcome<i64, Infallible>) -> Result<(), TaskErr
 }
 
 fn main() {
-    let mut builder = WorkflowSpecBuilder::new("wrong_field_token");
-    let produced = builder.task(produce_number::node().unwrap());
+    let mut builder = app().workflow_builder("wrong_field_token");
+    let produced = builder.task(produce_number::node()).unwrap();
     let _ = consume_number::node()
-        .unwrap()
+        .node_id("consume")
         .arg_from(other_number::params::value(), produced);
+}
+
+fn app() -> Horsies {
+    Horsies::new(AppConfig::for_database_url(
+        "postgresql://localhost/horsies",
+    ))
+    .unwrap()
 }

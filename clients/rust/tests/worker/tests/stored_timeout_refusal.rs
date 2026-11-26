@@ -10,7 +10,8 @@
 use std::time::Duration;
 
 use horsies::{
-    OutputlessResults, TaskInfoParts, TaskNode, TaskOutcome, TaskStatus, WorkflowSpecBuilder,
+    OutputlessResults, TaskInfoParts, TaskNode, TaskOutcome, TaskStatus, TypedNodeRef,
+    WorkflowSpecBuilder,
 };
 use horsies_test_support::rows::{self, TaskRow};
 use horsies_test_support::tokio_postgres::Client;
@@ -141,6 +142,17 @@ async fn assert_not_claimed_again(suite: &Suite, client: &Client, task_id: Uuid,
     );
 }
 
+/// Add `node` to `spec`, a workflow builder of the suite's app. The app
+/// registers every task of the test binary, so a refusal is a defect of the
+/// test.
+fn add<T: 'static, I: 'static>(
+    spec: &mut WorkflowSpecBuilder,
+    node: TaskNode<T, I>,
+) -> TypedNodeRef<T> {
+    spec.task(node)
+        .expect("the app of the suite registers the task of the node")
+}
+
 /// A step node `id` that returns `completed_<id>`.
 fn step(suite: &Suite, id: &str) -> TaskNode<String, workflow::step::Input> {
     suite
@@ -192,10 +204,10 @@ async fn a_refused_timeout_fails_in_one_claim_and_is_not_claimed_again() {
 async fn a_refused_timeout_fails_its_workflow_node() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let client = suite.client().await;
-    let mut spec = WorkflowSpecBuilder::new("stored_timeout_flow");
+    let mut spec = suite.app.workflow_builder("stored_timeout_flow");
     let _key = spec.definition_key("tests.e2e.stored_timeout_flow.v1");
-    let a = spec.task(step(&suite, "a"));
-    let _b = spec.task(step(&suite, "b").waits_for(a));
+    let a = add(&mut spec, step(&suite, "a"));
+    let _b = add(&mut spec, step(&suite, "b").waits_for(a));
     let spec = spec
         .build()
         .unwrap_or_else(|refused| panic!("build the spec: {refused}"));

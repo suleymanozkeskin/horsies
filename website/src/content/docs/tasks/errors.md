@@ -136,7 +136,7 @@ The codes of the client calls. The error types that carry them are on the client
 | ---- | ----------- | ------------- |
 | `SEND_SUPPRESSED` | Send suppressed during worker import/discovery to prevent side effects | Refused |
 | `ASYNC_CONTEXT` | Sync send/schedule (or sync retry variant) called inside a running event loop -- the blocking enqueue would stall the loop; `retry_*_async(err)` completes the same dispatch (or call the `*_async` entry point with the original args) | Accepted |
-| `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), or a retry method refused the payload (another task, or a schedule payload sent to a send retry) | Refused |
+| `VALIDATION_FAILED` | Argument serialization or validation failed before enqueue, the broker refused the input before the write (`INVALID_INPUT`, `INVALID_TASK_OPTIONS`), a retry method refused the payload (another task; in Python also a schedule payload sent to a send retry), or the app that a Rust send names does not register the task | Refused |
 | `ENQUEUE_FAILED` | Broker/database failure during enqueue, or the core of the process could not run the send ([Python: Calls That Run on the Core](/horsies/tasks/error-types/#calls-that-run-on-the-core)); the row may or may not exist | Accepted |
 | `PAYLOAD_MISMATCH` | The task id exists, and the command or the idempotency key differs from the original send -- the payload was altered between send and retry | Refused |
 | `PAYLOAD_TOO_LARGE` | The serialized input exceeds `payload.reject_bytes` bytes of UTF-8 text; nothing was enqueued | Refused |
@@ -313,6 +313,7 @@ deployment pattern.
 | HRS-224 | `EVENT_HANDLER_DUPLICATE_NAME` | An earlier event handler of the app has the same name. In Python the name is `module.qualname` of the function: the same function registered twice, or two lambdas of one scope |
 | HRS-225 | `EVENT_HANDLER_INVALID_NAME` | The name of an event handler is empty, longer than 255 characters, or `(unknown)`; in Python, also a function with no module name |
 | HRS-226 | `EVENT_HANDLER_LIMIT` | The app has 32 event handlers already, the most that a handler child runs |
+| HRS-227 | `CONFIG_INVALID_PAYLOAD` | A payload size bound (`warn_bytes` or `reject_bytes`) is not valid. Only the Rust and TypeScript clients raise it; in Python, `PayloadPolicy` refuses the value through its field bounds (a pydantic `ValidationError`) |
 
 ### Registry (HRS-300-HRS-399)
 
@@ -321,4 +322,4 @@ deployment pattern.
 | ---- | ---- | ----------- |
 | HRS-300 | `TASK_NOT_REGISTERED` | Task not found in registry |
 | HRS-301 | `TASK_DUPLICATE_NAME` | Duplicate task name |
-| HRS-302 | `WORKFLOW_UNREGISTERED_TASK` | A workflow node names a task that is not registered in this process. Only the Rust client raises it: `<task>::node()` before `<task>::register(&mut app)` |
+| HRS-302 | `WORKFLOW_UNREGISTERED_TASK` | A workflow node names a task that the app of its workflow builder does not register. The Rust client raises it: `builder.task(node)` on a builder of an app that does not register the task, or registers it with another input or output type. The node is not added |

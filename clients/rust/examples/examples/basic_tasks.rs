@@ -81,12 +81,12 @@ fn report<T: Debug, E: UserErrorCode>(label: &str, read: Result<TaskOutcome<T, E
     }
 }
 
-async fn demo(_app: Horsies) -> DemoResult {
+async fn demo(app: Horsies) -> DemoResult {
     let limit = WaitLimit::Within(Duration::from_secs(30));
-    let sum = add::send(2, 3).await?;
-    let words = word_count::send("the quick brown fox".to_owned()).await?;
-    let small = charge::send(500).await?;
-    let large = charge::send(500_000).await?;
+    let sum = add::send(&app, 2, 3).await?;
+    let words = word_count::send(&app, "the quick brown fox".to_owned()).await?;
+    let small = charge::send(&app, 500).await?;
+    let large = charge::send(&app, 500_000).await?;
 
     report("add", sum.get(limit).await);
     report("word_count", words.get(limit).await);

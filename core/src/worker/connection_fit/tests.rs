@@ -18,6 +18,7 @@ use crate::core::config::child_sizing::{
     parent_pool_connections, shared_async_pool_connections, shared_thread_pool_connections,
     DEFAULT_TASK_SEND_POOL_CONNECTIONS, PARENT_POOL_CONNECTIONS_FLOOR,
 };
+use crate::core::config::worker_profile::input;
 use crate::core::config::worker_profile::{
     IsolatedChildren, ParentPool, PoolSizeSetting, SharedAsyncChildren, SharedPool,
     SharedThreadChildren, MAX_CHILD_POOL_CONNECTIONS,
@@ -366,25 +367,48 @@ async fn no_profile_or_transaction_mode_reads_nothing() {
 
     assert!(check_worker_connections(&config, &broker).await.is_empty());
 
-    config
+    let _replaced = config
         .worker_profiles
-        .insert("default".to_owned(), isolated_only(1));
+        .insert("default".to_owned(), isolated_only(1).into());
     config.broker.pgbouncer_transaction_mode = true;
     config.broker.session_database_url =
         Some("postgresql://postgres:none@127.0.0.1:2/none".to_owned());
     assert!(check_worker_connections(&config, &broker).await.is_empty());
 }
 
+/// A profile value outside its bound is refused with its path, as
+/// `AppConfig::validate` refuses it, and nothing is read: the broker
+/// cannot connect, so a read would be an error of its own.
+#[tokio::test]
+async fn a_profile_value_outside_its_bound_is_refused_and_nothing_is_read() {
+    let broker = unreachable_broker();
+    let mut config = AppConfig::for_database_url("postgresql://postgres:none@127.0.0.1:1/none");
+    let outside = input::WorkerProfile {
+        isolated: input::IsolatedChildren::new(0).into(),
+        ..input::WorkerProfile::default()
+    };
+    let _replaced = config.worker_profiles.insert("web".to_owned(), outside);
+
+    let errors = check_worker_connections(&config, &broker).await;
+
+    let messages: Vec<&str> = errors.iter().map(|error| error.message.as_str()).collect();
+    assert_eq!(
+        messages,
+        ["worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024"],
+    );
+    assert_eq!(errors[0].code, Some(ErrorCode::ConfigInvalidWorkerProfile));
+}
+
 #[tokio::test]
 async fn an_unreadable_limit_is_one_error_and_no_profile_is_compared() {
     let broker = unreachable_broker();
     let mut config = AppConfig::for_database_url("postgresql://postgres:none@127.0.0.1:1/none");
-    config
+    let _replaced = config
         .worker_profiles
-        .insert("a".to_owned(), isolated_only(1));
-    config
+        .insert("a".to_owned(), isolated_only(1).into());
+    let _replaced = config
         .worker_profiles
-        .insert("b".to_owned(), isolated_only(1));
+        .insert("b".to_owned(), isolated_only(1).into());
 
     let errors = check_worker_connections(&config, &broker).await;
 
@@ -507,8 +531,11 @@ async fn each_child_kind_counts_its_own_pool_against_the_server() {
     };
     let mut config = AppConfig::for_database_url(migrated_database_url().await);
     config.worker_profiles = BTreeMap::from([
-        ("big".to_owned(), big),
-        ("small".to_owned(), isolated_only(1)),
+        ("big".to_owned(), input::WorkerProfile::from(big)),
+        (
+            "small".to_owned(),
+            input::WorkerProfile::from(isolated_only(1)),
+        ),
     ]);
     let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
@@ -576,7 +603,8 @@ async fn the_parent_pool_of_the_profile_is_counted_against_the_server() {
     let mut config = AppConfig::for_database_url(migrated_database_url().await);
     config.broker.pool_size = 1;
     config.broker.max_overflow = 0;
-    config.worker_profiles = BTreeMap::from([("parent".to_owned(), profile)]);
+    config.worker_profiles =
+        BTreeMap::from([("parent".to_owned(), input::WorkerProfile::from(profile))]);
     let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
@@ -641,7 +669,8 @@ async fn a_separate_session_url_counts_its_session_pool_against_the_server() {
         &database_url,
         "horsies_session_pool_check",
     ));
-    config.worker_profiles = BTreeMap::from([("session".to_owned(), profile)]);
+    config.worker_profiles =
+        BTreeMap::from([("session".to_owned(), input::WorkerProfile::from(profile))]);
     let broker = PostgresBroker::from_test_url(migrated_pool().await.url(), ClientFamily::Rust);
 
     let errors = check_worker_connections(&config, &broker).await;
@@ -1223,7 +1252,10 @@ fn a_set_worker_pool_is_counted_as_set() {
 async fn profiles_that_fit_have_no_error() {
     let usable = usable_slots_of_the_test_server().await;
     let mut config = AppConfig::for_database_url(migrated_database_url().await);
-    config.worker_profiles = BTreeMap::from([("small".to_owned(), isolated_only(1))]);
+    config.worker_profiles = BTreeMap::from([(
+        "small".to_owned(),
+        input::WorkerProfile::from(isolated_only(1)),
+    )]);
     let need = worker_connection_need(&isolated_only(1), &config.broker).total();
     assert!(
         need <= u64::from(usable),

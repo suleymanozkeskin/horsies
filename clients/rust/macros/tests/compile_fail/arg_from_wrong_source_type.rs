@@ -1,7 +1,7 @@
 // `arg_from` takes a source whose output type is the field's.
 use std::convert::Infallible;
 
-use horsies::{task, TaskError, TaskOutcome, WorkflowSpecBuilder};
+use horsies::{task, AppConfig, Horsies, TaskError, TaskOutcome};
 
 #[task("produce_text")]
 async fn produce_text() -> Result<String, TaskError<Infallible>> {
@@ -15,9 +15,16 @@ async fn consume_number(value: TaskOutcome<i64, Infallible>) -> Result<(), TaskE
 }
 
 fn main() {
-    let mut builder = WorkflowSpecBuilder::new("wrong_source_type");
-    let produced = builder.task(produce_text::node().unwrap());
+    let mut builder = app().workflow_builder("wrong_source_type");
+    let produced = builder.task(produce_text::node()).unwrap();
     let _ = consume_number::node()
-        .unwrap()
+        .node_id("consume")
         .arg_from(consume_number::params::value(), produced);
+}
+
+fn app() -> Horsies {
+    Horsies::new(AppConfig::for_database_url(
+        "postgresql://localhost/horsies",
+    ))
+    .unwrap()
 }

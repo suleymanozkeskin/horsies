@@ -269,10 +269,7 @@ mod tests {
     use horsies_core::core::config::worker_profile::ProfileSelectionRefused;
 
     use super::*;
-    use crate::{
-        AppConfig, ChildPreload, ErrorCode, IsolatedChildCount, IsolatedChildren, IsolatedSetting,
-        WorkerProfile,
-    };
+    use crate::{AppConfig, ChildPreload, ErrorCode, IsolatedChildren, WorkerProfile};
 
     /// An app with the profile `web`: two isolated children. The config
     /// check refuses a profile that starts no children.
@@ -281,9 +278,7 @@ mod tests {
         let _previous = config.worker_profiles.insert(
             "web".to_owned(),
             WorkerProfile {
-                isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-                    IsolatedChildCount::try_from(2).unwrap(),
-                )),
+                isolated: IsolatedChildren::new(2).into(),
                 preload: ChildPreload::NoPreload,
                 ..WorkerProfile::default()
             },
@@ -395,9 +390,7 @@ mod tests {
     #[test]
     fn a_default_profile_starts_with_no_preload() {
         let profile = WorkerProfile {
-            isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-                IsolatedChildCount::try_from(2).unwrap(),
-            )),
+            isolated: IsolatedChildren::new(2).into(),
             ..WorkerProfile::default()
         };
         assert_eq!(profile.preload, ChildPreload::NoPreload);

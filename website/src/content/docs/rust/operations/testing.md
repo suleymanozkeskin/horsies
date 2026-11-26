@@ -185,7 +185,7 @@ A test that runs code which sends can suppress the sends of the process:
 | `HORSIES_SUPPRESS_SENDS=1` (`horsies::SUPPRESS_SENDS_ENV`) | Suppresses the sends of every app in the process. The variable is read at each send |
 | `app.are_sends_suppressed()` | `true` when either is set |
 
-A suppressed send returns `TaskSendError::SendSuppressed` and writes nothing. The check runs before any other step of the send, so the test needs no database.
+A suppressed send returns `TaskSendError::SendSuppressed` and writes nothing. The check runs before any I/O of the send, so the test needs no database. A generated send (`task_name::send(&app, ...)`) is suppressed by the app that it names.
 
 ## Things to Avoid
 

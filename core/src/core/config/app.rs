@@ -9,9 +9,9 @@ use super::recovery::RecoveryConfig;
 use super::resilience::WorkerResilienceConfig;
 use super::retention::RetentionConfig;
 use super::schedule::ScheduleConfig;
+use super::worker_profile::input::WorkerProfile;
 use super::worker_profile::{
-    describe_worker_profile, worker_profiles_claim_errors, worker_profiles_shape_errors,
-    WorkerProfile,
+    describe_config_profile, worker_profiles_claim_errors, worker_profiles_shape_errors,
 };
 use crate::core::defaults::{DEFAULT_CLAIM_LEASE_MS, MAX_CLAIM_RENEW_AGE_MS};
 use crate::core::error::HorsiesError;
@@ -74,7 +74,8 @@ pub struct AppConfig {
 
     /// Named worker settings: a worker runs the profile of its name. An app
     /// that runs no worker defines none. Every profile is checked with the
-    /// app config, not only the one that a worker starts with.
+    /// app config, not only the one that a worker starts with: each count,
+    /// size and limit against its bound, then the checks of the profile.
     #[serde(default)]
     pub worker_profiles: BTreeMap<String, WorkerProfile>,
 
@@ -350,7 +351,10 @@ impl AppConfig {
         if !self.worker_profiles.is_empty() {
             lines.push("  worker_profiles:".to_owned());
             for (name, profile) in &self.worker_profiles {
-                lines.push(format!("    {name}: {}", describe_worker_profile(profile)));
+                lines.push(format!(
+                    "    {name}: {}",
+                    describe_config_profile(name, profile)
+                ));
             }
         }
 
@@ -1890,13 +1894,39 @@ EXTRA
         );
     }
 
+    /// The JSON text of a config (the form that the TypeScript client sends)
+    /// with a count and a seat count outside their bounds parses; validation
+    /// refuses both values, each with its field path, in one list.
+    #[test]
+    fn a_profile_value_outside_its_bound_in_the_json_text_is_refused_with_its_path() {
+        let config = with_profiles(
+            r#"{"web": {"isolated": {"kind": "isolated_children", "count": 0},
+                "shared_async": {"kind": "shared_async_children", "count": 1, "seats": 1001}}}"#,
+        );
+
+        let errors = config.validate();
+
+        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            messages,
+            [
+                "worker_profiles['web'].isolated.count: 0 is outside the bounds 1 to 1024",
+                "worker_profiles['web'].shared_async.seats: 1001 is outside the bounds 1 to 1000",
+            ],
+        );
+        assert!(errors.iter().all(|error| error.error_code()
+            == Some(crate::core::error::ErrorCode::ConfigInvalidWorkerProfile)));
+    }
+
     /// Python `test_worker_profile.py::TestAppConfigProfileChecks::test_log_config_lists_each_profile`.
     #[test]
     fn format_for_logging_lists_each_profile() {
         let config = with_profiles(
             r#"{"default": {"isolated": {"kind": "isolated_children", "count": 2}}}"#,
         );
-        let profile = config.worker_profiles["default"];
+        let profile = config.worker_profiles["default"]
+            .checked("default")
+            .expect("every value is inside its bound");
 
         let formatted = config.format_for_logging();
 

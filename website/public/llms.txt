@@ -678,11 +678,12 @@ Config/broker (HRS-200-HRS-299):
 - HRS-224 EVENT_HANDLER_DUPLICATE_NAME (an earlier handler has the same name, module.qualname of its function)
 - HRS-225 EVENT_HANDLER_INVALID_NAME (the function has no module name, or its name is longer than 255 characters)
 - HRS-226 EVENT_HANDLER_LIMIT (the app has 32 event handlers already)
+- HRS-227 CONFIG_INVALID_PAYLOAD (a payload size bound, warn_bytes or reject_bytes, is not valid; only the Rust and TypeScript clients raise it, Python's PayloadPolicy refuses the value through its field bounds)
 Registry (HRS-300-HRS-399):
 <!-- members: ErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED
 - HRS-301 TASK_DUPLICATE_NAME
-- HRS-302 WORKFLOW_UNREGISTERED_TASK (a workflow node names a task that is not registered in this process; only the Rust client raises it)
+- HRS-302 WORKFLOW_UNREGISTERED_TASK (a workflow node names a task that the app of its workflow builder does not register; the Rust client raises it at builder.task(node), and the node is not added)
 
 #### HorsiesError (base exception)
 - Rust-style formatted error display (like rustc compiler errors)

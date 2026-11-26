@@ -1,5 +1,12 @@
 //! The workflow spec builder and the built spec (Python `WorkflowSpec`).
 //!
+//! A builder comes from an app (`Horsies::workflow_builder`) or from the
+//! runtime of a task body (`TaskRuntime::workflow_builder`), and holds the
+//! typed functions of that app. It resolves each task node against them
+//! when the node is added: the queue, the options and the workflow context
+//! flag of the task's registration, or the refusal `HRS-302` for a task
+//! that the app does not register with the node's types.
+//!
 //! The builder takes nodes, each after the nodes it references: a node's
 //! dependencies, `args_from` sources and context sources are nodes added
 //! before it. So a spec has no cycle, and its first node is a root.
@@ -16,6 +23,7 @@
 //!    that bind to no field, missing fields, values of another type).
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use horsies_core::core::workflow::spec::MAX_WORKFLOW_NODES;
 use horsies_core::OnError;
@@ -24,11 +32,12 @@ use super::dependency::{placeholder_context_text, placeholder_result_text, Outpu
 use super::input::NodeInput;
 use super::node::{
     BuilderId, InputCheck, JoinType, NodeDeadline, NodeIdChoice, NodeKey, NodeLinks, NodePriority,
-    NodeRef, OutputType, TaskNode, TypedNodeRef,
+    NodeQueue, NodeRef, NodeRegistration, OutputType, TaskNode, TypedNodeRef,
 };
 use super::sub_workflow::{NodeParams, SubWorkflowNode};
+use crate::send::TaskFunctions;
 use crate::task::body::DecodeFailure;
-use crate::{ErrorCode, HorsiesError, ValidationReport};
+use crate::{ErrorCode, HorsiesError, TaskFunctionNotFound, ValidationReport};
 
 /// The longest node id (Python `NODE_ID_MAX_LENGTH`).
 const MAX_NODE_ID_LENGTH: usize = 128;
@@ -272,13 +281,15 @@ struct BuilderNode {
     output: OutputType,
 }
 
-/// The builder of a workflow spec (Python `WorkflowSpec(...)`).
+/// The builder of a workflow spec (Python `app.workflow(...)`), made from
+/// an app with `Horsies::workflow_builder` or from the runtime of a task
+/// body with `TaskRuntime::workflow_builder`.
 ///
 /// ```ignore
-/// let mut builder = WorkflowSpecBuilder::new("checkout");
+/// let mut builder = app.workflow_builder("checkout");
 /// builder.definition_key("shop.checkout.v1");
-/// let charge = builder.task(charge::node().set_input(order)?);
-/// let notify = builder.task(notify::node().arg_from(notify::params::charged(), charge));
+/// let charge = builder.task(charge::node().set_input(order)?)?;
+/// let notify = builder.task(notify::node().arg_from(notify::params::charged(), charge))?;
 /// builder.output(notify);
 /// let spec = builder.build()?;
 /// ```
@@ -290,6 +301,9 @@ pub struct WorkflowSpecBuilder {
     nodes: Vec<BuilderNode>,
     output: Option<NodeRef>,
     success_policy: Option<SuccessPolicy>,
+    /// The typed functions of the builder's app: the task nodes resolve
+    /// against them.
+    tasks: Arc<TaskFunctions>,
 }
 
 impl std::fmt::Debug for WorkflowSpecBuilder {
@@ -304,8 +318,11 @@ impl std::fmt::Debug for WorkflowSpecBuilder {
 }
 
 impl WorkflowSpecBuilder {
-    /// A builder of the workflow `name`, with `on_error` FAIL and no node.
-    pub fn new(name: impl Into<String>) -> Self {
+    /// A builder of the workflow `name` whose task nodes resolve against
+    /// `tasks`, with `on_error` FAIL and no node. `Horsies::workflow_builder`
+    /// and `TaskRuntime::workflow_builder` call it with the typed functions
+    /// of their app.
+    pub(crate) fn new(name: impl Into<String>, tasks: Arc<TaskFunctions>) -> Self {
         Self {
             id: BuilderId::next(),
             name: name.into(),
@@ -314,20 +331,48 @@ impl WorkflowSpecBuilder {
             nodes: Vec::new(),
             output: None,
             success_policy: None,
+            tasks,
         }
     }
 
-    /// Add a task node; its reference has the task's output type.
-    pub fn task<T: 'static, I>(&mut self, node: TaskNode<T, I>) -> TypedNodeRef<T> {
+    /// Add a task node; its reference has the task's output type. The node
+    /// takes the queue (unless it names one), the options and the workflow
+    /// context flag of its task's registration on the builder's app.
+    ///
+    /// Errors, and the node is not added: `WORKFLOW_UNREGISTERED_TASK`
+    /// (HRS-302) when the builder's app does not register the task, or
+    /// registers a task of this name with another input or output type.
+    pub fn task<T: 'static, I: 'static>(
+        &mut self,
+        node: TaskNode<T, I>,
+    ) -> Result<TypedNodeRef<T>, HorsiesError> {
+        let registration = self
+            .tasks
+            .node_registration::<T, I>(&node.task_name)
+            .map_err(|not_found| unregistered_task(&self.name, &not_found))?;
+        Ok(self.add_task(node, registration))
+    }
+
+    /// Add `node`, a node of the task whose registration is `registration`.
+    /// No check: [`Self::task`] found the registration.
+    pub(crate) fn add_task<T: 'static, I>(
+        &mut self,
+        node: TaskNode<T, I>,
+        registration: NodeRegistration,
+    ) -> TypedNodeRef<T> {
+        let queue = match node.queue {
+            NodeQueue::OfTask => registration.queue_name,
+            NodeQueue::Given(queue) => queue,
+        };
         self.push(BuilderNode {
             name: node.task_name,
             links: node.links,
             body: BuilderBody::Task {
                 input: node.input,
-                queue: node.queue,
+                queue,
                 priority: node.priority,
-                task_options: node.task_options,
-                accepts_workflow_ctx: node.accepts_workflow_ctx,
+                task_options: registration.task_options,
+                accepts_workflow_ctx: registration.accepts_workflow_ctx,
                 deadline: node.deadline,
                 input_check: node.input_check,
             },
@@ -694,6 +739,19 @@ fn spec_node(index: usize, node: BuilderNode, node_ids: &[String]) -> SpecNode {
         },
         output: node.output,
     }
+}
+
+/// The refusal of a task node whose task the builder's app does not
+/// register with the node's types (`HRS-302`). Pure.
+fn unregistered_task(workflow_name: &str, not_found: &TaskFunctionNotFound) -> HorsiesError {
+    HorsiesError::new(format!(
+        "a node of workflow '{workflow_name}' was not added: {not_found}"
+    ))
+    .with_code(ErrorCode::WorkflowUnregisteredTask)
+    .with_help(
+        "register the task on the app of this workflow builder before the node is added, with \
+         the types of the node",
+    )
 }
 
 /// The join rules (Python `_collect_join_semantics_errors`): a quorum

@@ -15,8 +15,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    start_workflow, task, AppConfig, Horsies, HorsiesError, TaskError, TaskOutcome, UserErrorCode,
-    WaitLimit, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+    task, AppConfig, Horsies, HorsiesError, TaskError, TaskOutcome, UserErrorCode, WaitLimit,
+    WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
 };
 use horsies_examples::{
     app_refused, database_url, isolated_profile, main_of, DemoResult, DEFAULT_PROFILE,
@@ -95,15 +95,16 @@ impl WorkflowDefinition for OrderSummary {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let load =
-            builder.task(load_prices::node()?.set(load_prices::params::order_id(), ORDER_ID)?);
-        let total = builder.task(sum_prices::node()?.arg_from(sum_prices::params::prices(), load));
+            builder.task(load_prices::node().set(load_prices::params::order_id(), ORDER_ID)?)?;
+        let total =
+            builder.task(sum_prices::node().arg_from(sum_prices::params::prices(), load))?;
         let count =
-            builder.task(count_items::node()?.arg_from(count_items::params::prices(), load));
+            builder.task(count_items::node().arg_from(count_items::params::prices(), load))?;
         let summary = builder.task(
-            summarize::node()?
+            summarize::node()
                 .arg_from(summarize::params::total(), total)
                 .arg_from(summarize::params::count(), count),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(summary))
     }
 }
@@ -121,8 +122,8 @@ fn build_app() -> Result<Horsies, HorsiesError> {
     Ok(app)
 }
 
-async fn demo(_app: Horsies) -> DemoResult {
-    let handle = start_workflow::<OrderSummary>().await?;
+async fn demo(app: Horsies) -> DemoResult {
+    let handle = app.start_workflow::<OrderSummary>().await?;
     println!("started workflow {}", handle.workflow_id());
     let limit = WaitLimit::Within(Duration::from_secs(60));
     match handle.get(limit).await? {
