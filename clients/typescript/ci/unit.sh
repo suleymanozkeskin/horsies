@@ -12,10 +12,92 @@ set -euo pipefail
 
 workspace_folder="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 floor_compiler_folder="$workspace_folder/ci/typescript-floor"
-floor_compiler="$floor_compiler_folder/node_modules/.bin/tsc"
+floor_typescript_folder="$floor_compiler_folder/node_modules/typescript"
+
+# The V8 heap bound, in MiB, of each tsc process of the step "Type check with
+# tsc of TypeScript 6.0" (`node --max-old-space-size`). The value is the
+# largest peak memory footprint of one process of the step over 5 runs, plus
+# the spread of that peak over the 5 runs, rounded up to the next 256 MiB.
+readonly floor_compiler_heap_bound_megabytes=1280
 
 print_step_title() {
   printf '\n==> %s\n' "$1"
+}
+
+# Prints the folder of each project that tsconfig.json references, one per
+# line, as the floor compiler resolves them. Fails when tsconfig.json has an
+# error or references no project.
+print_workspace_projects() {
+  node -e '
+    const ts = require(process.argv[1]);
+    const configPath = process.argv[2];
+    const read = ts.readConfigFile(configPath, ts.sys.readFile);
+    if (read.error !== undefined) {
+      console.error(ts.formatDiagnostics([read.error], formatHost()));
+      process.exit(1);
+    }
+    const directory = require("node:path").dirname(configPath);
+    const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, directory, undefined, configPath);
+    if (parsed.errors.length > 0) {
+      console.error(ts.formatDiagnostics(parsed.errors, formatHost()));
+      process.exit(1);
+    }
+    const references = parsed.projectReferences ?? [];
+    if (references.length === 0) {
+      console.error(`error: ${configPath} references no project`);
+      process.exit(1);
+    }
+    for (const reference of references) console.log(reference.path);
+    function formatHost() {
+      return { getCanonicalFileName: (name) => name, getCurrentDirectory: ts.sys.getCurrentDirectory, getNewLine: () => "\n" };
+    }
+  ' "$floor_typescript_folder/lib/typescript.js" "$workspace_folder/tsconfig.json"
+}
+
+# Runs tsc of TypeScript 6.0 with the heap bound; the arguments go to tsc.
+# When the process reaches the bound, prints the bound and how to raise it.
+# Returns the exit status of tsc.
+run_floor_compiler() {
+  local error_output_file
+  error_output_file="$(mktemp)"
+  local status=0
+  node --max-old-space-size="$floor_compiler_heap_bound_megabytes" "$floor_typescript_folder/lib/tsc.js" "$@" \
+    </dev/null 2>"$error_output_file" || status=$?
+  cat "$error_output_file" >&2
+  if grep -q 'JavaScript heap out of memory' "$error_output_file"; then
+    printf '\nerror: floor compiler heap bound reached: `tsc %s` needs more than %s MiB of V8 heap.\n' \
+      "$*" "$floor_compiler_heap_bound_megabytes" >&2
+    printf 'To raise the bound, set floor_compiler_heap_bound_megabytes in ci/unit.sh to the largest peak memory\n' >&2
+    printf 'footprint of one process of this step over 5 runs, plus its spread, rounded up to the next 256 MiB.\n' >&2
+  fi
+  rm -f "$error_output_file"
+  return "$status"
+}
+
+# Type checks each project that tsconfig.json references with tsc of
+# TypeScript 6.0, one process per project, then removes the build info files
+# of that project. Checks every project, also after a project fails, so the
+# step reports the errors of all projects. Returns the exit status of the
+# first project that fails, or 0.
+type_check_workspace_projects() {
+  local workspace_projects project_folder project_name
+  local failed_projects="" first_failure_status=0 status
+  workspace_projects="$(print_workspace_projects)"
+  while IFS= read -r project_folder; do
+    project_name="${project_folder#"$workspace_folder/"}"
+    printf -- '-- %s\n' "$project_name"
+    status=0
+    run_floor_compiler --build "$project_name" || status=$?
+    run_floor_compiler --build --clean "$project_name"
+    if ((status != 0)); then
+      failed_projects="$failed_projects $project_name"
+      if ((first_failure_status == 0)); then first_failure_status=$status; fi
+    fi
+  done <<<"$workspace_projects"
+  if ((first_failure_status != 0)); then
+    printf '\nerror: the TypeScript 6.0 type check failed in:%s\n' "$failed_projects" >&2
+  fi
+  return "$first_failure_status"
 }
 
 cd "$workspace_folder"
@@ -68,13 +150,14 @@ print_step_title "Lint the client's own code with ESLint: dropped results and sw
 node eslint-plugin/lint-client.ts
 
 # TypeScript 6.0 is the oldest compiler that the published types support.
-# This step type checks the workspace projects with it. Build mode reads the
-# project list of tsconfig.json, as `bun check` does; `--clean` then removes
-# the build info files that build mode writes.
+# This step type checks each project that tsconfig.json references, as
+# `bun check` does, with the options of that project's tsconfig.json. Each
+# project runs in a tsc process of its own (`tsc --build <project>`), so no
+# process holds the programs of all projects. `--clean` then removes the build
+# info files that build mode writes.
 print_step_title "Type check with tsc of TypeScript 6.0"
-"$floor_compiler" --version
-"$floor_compiler" --build
-"$floor_compiler" --build --clean
+run_floor_compiler --version
+type_check_workspace_projects
 
 # The public API gate of the published entry points (`horsies`,
 # `horsies/zod`, `horsies/rerun/pg`, `horsies/rerun/postgres`): the API
