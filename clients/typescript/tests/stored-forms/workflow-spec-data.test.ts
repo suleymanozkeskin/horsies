@@ -1,14 +1,16 @@
-// The workflow spec data documents of workflow_spec_data.json through the writer. The product takes the document type
-// from the codegen output; this test declares it with h.* in the member order of the generated Python dataclasses
-// (`kind` first in each tagged union), which the vectors pin.
+// workflow_spec_data.json: the writer's text of each document. The core alone reads spec data, so the refused texts
+// (read at `core_field_path`) are the core's tests. The product takes the document type from the codegen output; this
+// test declares it with h.* in the member order of the generated Python dataclasses (`kind` first in each tagged
+// union), which the vectors pin.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { encodeValue } from "../../../horsies/src/codec/writer.ts";
-import { h } from "../../../horsies/src/wire/builders.ts";
-import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
-import { show, specDataFile } from "./support/vectors.ts";
+import { encodeValue } from "../../horsies/src/codec/writer.ts";
+import { h } from "../../horsies/src/wire/builders.ts";
+import { kindOf } from "../../horsies/src/wire/wire-type.ts";
+import { show } from "../support/values.ts";
+import { specDataFile } from "./vectors.ts";
 
 const join = h.union("kind", [
   h.object({ kind: h.literal("ALL") }),

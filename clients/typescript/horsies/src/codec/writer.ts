@@ -7,6 +7,8 @@
 // - A key that the value leaves out is left out of the text; `null` is written only for a nullable kind; a key whose
 //   value is `undefined` is refused. A default is never written by the sender.
 // - An undeclared key, a key that only the engine writes, and a value deeper than the core's bound are refused.
+// - A user-side check runs after its kind is written, on the value with its defaults filled; a union member whose kind
+//   does not take the value runs no check.
 
 import { Decimal } from "../wire/decimal.ts";
 import type {
@@ -21,6 +23,7 @@ import type {
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
+import { checkView } from "./check-view.ts";
 import { issuesText } from "./conversion.ts";
 import { isEngineKey } from "./engine-keys.ts";
 import { type JsonText, writtenJsonText } from "./json-text.ts";
@@ -313,11 +316,29 @@ function writeConverted(kind: ConversionKind, value: unknown, path: string, dept
 }
 
 /** A value that the user-side check accepts, written under its kind. */
+/**
+ * A value that the user-side check accepts, written under its kind. The inner kind is written first, so the check
+ * sees only a value of that kind's structure (as zod runs a check only after its parse). The check then sees the value
+ * with its defaults filled (`checkView`), and the text keeps only the keys that the value gives.
+ */
 function writeChecked(kind: CheckedKind, value: unknown, path: string, depth: number, sink: Sink): Written {
-  const checked = kind.check(value);
+  const trial: Sink = { text: "" };
+  const written = writeValue(kind.inner, value, path, depth, trial);
+
+  if (!written.ok) {
+    return written;
+  }
+
+  const view = checkView(kind.inner, value, path, depth);
+
+  if (!view.ok) {
+    return view;
+  }
+
+  const checked = kind.check(view.value);
 
   return checked.ok
-    ? writeValue(kind.inner, value, path, depth, sink)
+    ? append(sink, trial.text)
     : refuse("CheckFailed", path, `the check refused the value: ${issuesText(checked.error)}`);
 }
 

@@ -97,5 +97,10 @@ export const WORKFLOW_STATUSES = [
   "EXPIRED",
 ] as const;
 
+// `horsies` exports LIBRARY_TASK_CODES and WORKFLOW_STATUSES (the public types name them), so both lists are frozen.
+void Object.freeze(LIBRARY_TASK_CODES);
+
+void Object.freeze(WORKFLOW_STATUSES);
+
 /** The key of the replacement `data` of a task error (core `DATA_REFUSED_KEY`, `core/src/core/task/error.rs`). */
 export const DATA_REFUSED_KEY = "data_refused";

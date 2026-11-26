@@ -9,8 +9,8 @@ export type ZodRule =
   | "UNTYPED"
   /**
    * A one-way change of the value: `.transform()`, `z.preprocess()`, `.pipe()` that is not a codec, `z.success()`,
-   * and the checks that replace the value (`.trim()`, `.toLowerCase()`, `.toUpperCase()`, `.normalize()`,
-   * `.overwrite()`).
+   * `z.coerce.*()`, and the checks that replace the value (`.trim()`, `.toLowerCase()`, `.toUpperCase()`,
+   * `.normalize()`, `.overwrite()`).
    */
   | "TRANSFORM"
   /** `.catch()`: it hides a decode failure. */
@@ -36,6 +36,14 @@ export type ZodRule =
   | "ENGINE_KEY"
   /** A definition type that this version of horsies does not know. */
   | "UNKNOWN_DEFINITION"
+  /** A definition field, or a field value, that this version of horsies does not know (`name` is the field). */
+  | "UNKNOWN_DEFINITION_FIELD"
+  /** A string, number or bigint format that this version of horsies does not know (`name` is the format). */
+  | "UNKNOWN_FORMAT"
+  /** A check that this version of horsies does not know (`name` is zod's check name). */
+  | "UNKNOWN_CHECK"
+  /** `z.xor()`: zod refuses a value that two options take; the union kind takes the first. */
+  | "EXCLUSIVE_UNION"
   /** `z.intersection()`, `.and()`. */
   | "INTERSECTION"
   /**
@@ -56,26 +64,54 @@ export type ZodRule =
   /** A schema nested deeper than the adapter walks (`MAX_SCHEMA_DEPTH` nodes). */
   | "TOO_DEEP";
 
+/** The rules that name the unknown part of a definition. */
+export type NamedZodRule = "UNKNOWN_DEFINITION_FIELD" | "UNKNOWN_FORMAT" | "UNKNOWN_CHECK";
+
 /**
  * A refusal of a zod schema. `path` names the place in the schema (`$` is the whole schema, `.name` a member, `[*]` an
  * array item, `[i]` a tuple item or a union option, `.*` a record value). `zodType` is zod's definition type of the
- * refused node (`any`, `pipe`, `date`, ...). `fix` names the form to use instead.
+ * refused node (`any`, `pipe`, `date`, ...). `fix` names the form to use instead. A rule of an unknown definition part
+ * also has `name`: the field, the format or the check.
  */
-export type ZodSchemaRefused = {
-  readonly rule: ZodRule;
-  readonly path: string;
-  readonly zodType: string;
-  readonly fix: string;
-};
+export type ZodSchemaRefused =
+  | {
+      readonly rule: Exclude<ZodRule, NamedZodRule>;
+      readonly path: string;
+      readonly zodType: string;
+      readonly fix: string;
+    }
+  | {
+      readonly rule: NamedZodRule;
+      readonly path: string;
+      readonly zodType: string;
+      readonly name: string;
+      readonly fix: string;
+    };
 
 /** A refusal of a zod schema node at `path`. Pure. */
-export function zodRefused(rule: ZodRule, path: string, zodType: string): ZodSchemaRefused {
+export function zodRefused(rule: Exclude<ZodRule, NamedZodRule>, path: string, zodType: string): ZodSchemaRefused {
   return Object.freeze({ rule, path, zodType, fix: fixOf(rule) });
 }
 
-/** The text of a refusal: `<path>: zod type <zodType> is refused [<rule>]; <fix>`. Pure. */
+/** A refusal of an unknown part of a zod definition at `path`: `name` is the field, the format or the check. Pure. */
+export function zodPartRefused(rule: NamedZodRule, path: string, zodType: string, name: string): ZodSchemaRefused {
+  return Object.freeze({ rule, path, zodType, name, fix: fixOf(rule) });
+}
+
+/** The text of a refusal: `<path>: zod type <zodType> is refused [<rule>]; <fix>`, with `<rule> <name>` if named. */
 export function zodRefusalText(refused: ZodSchemaRefused): string {
-  return `${refused.path}: zod type ${refused.zodType} is refused [${refused.rule}]; ${refused.fix}`;
+  return `${refused.path}: zod type ${refused.zodType} is refused [${ruleText(refused)}]; ${refused.fix}`;
+}
+
+function ruleText(refused: ZodSchemaRefused): string {
+  switch (refused.rule) {
+    case "UNKNOWN_DEFINITION_FIELD":
+    case "UNKNOWN_FORMAT":
+    case "UNKNOWN_CHECK":
+      return `${refused.rule} ${refused.name}`;
+    default:
+      return refused.rule;
+  }
 }
 
 /** The form to use instead of a refused one. Pure. */
@@ -84,7 +120,7 @@ function fixOf(rule: ZodRule): string {
     case "UNTYPED":
       return "use h.json() or z.json() for untyped JSON";
     case "TRANSFORM":
-      return "use z.codec() with a decode and an encode";
+      return "use z.codec() with a decode and an encode; put a check on the schema itself (z.email(), not .pipe())";
     case "CATCH":
       return "remove .catch(): it hides a decode failure";
     case "DATE":
@@ -100,11 +136,16 @@ function fixOf(rule: ZodRule): string {
     case "INT_FLOAT_UNION":
       return "use one number kind: z.int() or z.number()";
     case "RECORD_KEY":
-      return "use string keys: z.string(), a string format, or a string enum";
+      return "use string keys: z.string(), a string format, or z.enum([...]) of strings";
     case "ENGINE_KEY":
       return "rename the member: keys that start with __h_ or __horsies_ belong to the engine";
     case "UNKNOWN_DEFINITION":
-      return "upgrade horsies, or use h.* for this value";
+    case "UNKNOWN_DEFINITION_FIELD":
+    case "UNKNOWN_FORMAT":
+    case "UNKNOWN_CHECK":
+      return "use a zod release that this horsies supports, or h.* for this value";
+    case "EXCLUSIVE_UNION":
+      return "use z.union() of members that store different JSON types, or z.discriminatedUnion()";
     case "INTERSECTION":
       return "merge the members into one z.object()";
     case "OPTIONAL_NOT_A_MEMBER":
