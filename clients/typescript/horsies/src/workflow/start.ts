@@ -106,6 +106,7 @@ export async function startWorkflow<R extends BuildReturn>(
   );
 
   return startOutcome<R>(context, call, {
+    workflow,
     workflowName: record.name,
     workflowId,
     sentAtMicros,
@@ -155,6 +156,7 @@ function buildChecked(registry: WorkflowRegistry, workflow: object, given: objec
 
 /** The facts of one start that its outcome and a retry read. */
 type StartFacts = {
+  readonly workflow: object;
   readonly workflowName: string;
   readonly workflowId: string;
   readonly sentAtMicros: bigint;
@@ -204,6 +206,7 @@ function handleOf<R extends BuildReturn>(context: StartContext, facts: StartFact
   return workflowHandleOf<R>({
     core: context.core,
     registry: context.registry,
+    workflow: facts.workflow,
     workflowId,
     targets: facts.targets,
   });

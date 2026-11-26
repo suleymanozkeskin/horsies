@@ -17,7 +17,7 @@ use crate::core::workflow::handle_types::{HandleOperation, HandleResult};
 use crate::core::WorkflowStatus;
 use crate::workflow_engine::lifecycle::handle_operation_error;
 use crate::workflow_engine::query::{
-    self, NodeResultsRead, NodesRead, OutputNodeRead, StoredNodeResult, WorkflowWait,
+    self, NodeResultsRead, NodesRead, StoredNodeResult, WorkflowWait,
 };
 
 impl PostgresBroker {
@@ -95,19 +95,5 @@ impl PostgresBroker {
         query::read_workflow_nodes(self, workflow_id)
             .await
             .map_err(|error| handle_operation_error(&HandleOperation::Tasks, error, workflow_id))
-    }
-
-    /// The stored output node of a workflow: one read. A client reads it to find the declared
-    /// type of the workflow's result (the output node's task, or the child workflow of a
-    /// sub-workflow output node), with no build of the workflow. Part of the result read, so a
-    /// failure names the `get` operation.
-    ///
-    /// Outcomes: [`OutputNodeRead`]; `DB_OPERATION_FAILED` for a failed read.
-    ///
-    /// Panics: a row that does not decode (a defect).
-    pub async fn workflow_output_node(&self, workflow_id: Uuid) -> HandleResult<OutputNodeRead> {
-        query::read_workflow_output_node(self, workflow_id)
-            .await
-            .map_err(|error| handle_operation_error(&HandleOperation::Get, error, workflow_id))
     }
 }

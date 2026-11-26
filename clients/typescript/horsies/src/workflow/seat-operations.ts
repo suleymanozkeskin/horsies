@@ -8,7 +8,6 @@ import type {
   NodeResultRead,
   NodeResultsRead,
   NodesRead,
-  OutputNodeFact,
   WorkflowStatusRead,
 } from "../native/workflows/addon.ts";
 import type { RestartRequest, StartCall, StartRequest } from "./core.ts";
@@ -23,8 +22,7 @@ export type WorkflowsSeatOperation =
   | { readonly kind: "cancel"; readonly workflowId: string }
   | { readonly kind: "pause"; readonly workflowId: string }
   | { readonly kind: "resume"; readonly workflowId: string }
-  | { readonly kind: "nodeResult"; readonly workflowId: string; readonly nodeId: string }
-  | { readonly kind: "outputNode"; readonly workflowId: string };
+  | { readonly kind: "nodeResult"; readonly workflowId: string; readonly nodeId: string };
 
 /** The answer to a `WorkflowsSeatOperation`, of the same `kind`. */
 export type WorkflowsSeatReply =
@@ -36,8 +34,7 @@ export type WorkflowsSeatReply =
   | { readonly kind: "cancel"; readonly done: HandleDone }
   | { readonly kind: "pause"; readonly change: HandleChange }
   | { readonly kind: "resume"; readonly change: HandleChange }
-  | { readonly kind: "nodeResult"; readonly read: NodeResultRead }
-  | { readonly kind: "outputNode"; readonly read: OutputNodeFact };
+  | { readonly kind: "nodeResult"; readonly read: NodeResultRead };
 
 declare module "../app/core-access.ts" {
   interface SeatOperationMap {

@@ -35,8 +35,8 @@ use std::time::Duration;
 use horsies_core::core::codec::check_json_text;
 use horsies_core::{
     HandleOperation, HandleOperationError, HandleResult, NodeResultsRead as CoreNodeResultsRead,
-    NodesRead as CoreNodesRead, OutputNodeRead as CoreOutputNodeRead, PostgresBroker, StoredNode,
-    StoredNodeResult, TerminalErrorStatus, WorkflowEnd, WorkflowStatus, WorkflowWait,
+    NodesRead as CoreNodesRead, PostgresBroker, StoredNode, StoredNodeResult, TerminalErrorStatus,
+    WorkflowEnd, WorkflowStatus, WorkflowWait,
 };
 use napi::bindgen_prelude::{Object, ToNapiValue};
 use napi::Env;
@@ -427,87 +427,6 @@ fn status_read_of(read: HandleResult<WorkflowStatus>) -> WorkflowStatusRead {
     }
 }
 
-/// The stored output node of a workflow: the facts with which the package
-/// finds the type of the workflow's result, with no build.
-#[napi(
-    discriminant = "kind",
-    discriminant_case = "camelCase",
-    object_from_js = false
-)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum OutputNodeFact {
-    /// No workflow has the id.
-    WorkflowAbsent,
-    /// The workflow stores no output node.
-    NoOutput,
-    /// The output index names no node row: stored data that breaks the
-    /// workflow's spec.
-    NodeMissing {
-        task_index: i32,
-    },
-    /// The output node runs the task `taskName`.
-    Task {
-        task_name: String,
-    },
-    /// The output node runs a child workflow, recorded once it started.
-    SubWorkflow {
-        child_workflow_id: RecordedText,
-    },
-    Failed {
-        error: RawCatalogError,
-    },
-}
-
-/// Read the stored output node of the workflow `workflowId`.
-#[napi(ts_return_type = "Promise<NativeEnvelope<OutputNodeFact>>")]
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "napi-rs passes the arguments of a JavaScript call by value"
-)]
-pub fn workflow_output_node<'env>(
-    env: &'env Env,
-    handle: &CoreHandle,
-    workflow_id: String,
-) -> napi::Result<Object<'env>> {
-    spawn_checked(
-        env,
-        HandleOperation::Get.subject(),
-        CallKind::Read,
-        handle.connection(),
-        || workflow_id_of(&workflow_id).map_err(NativeThrown::from),
-        output_node_operation,
-    )
-}
-
-/// One output node read.
-async fn output_node_operation(connection: BrokerConnection, workflow_id: Uuid) -> OutputNodeFact {
-    let read = match broker_for(&connection, &HandleOperation::Get, workflow_id).await {
-        Ok(broker) => broker.workflow_output_node(workflow_id).await,
-        Err(error) => Err(error),
-    };
-    output_node_fact_of(read)
-}
-
-/// The output node fact of the core's answer. Pure.
-fn output_node_fact_of(read: HandleResult<CoreOutputNodeRead>) -> OutputNodeFact {
-    match read {
-        Ok(CoreOutputNodeRead::WorkflowAbsent) => OutputNodeFact::WorkflowAbsent,
-        Ok(CoreOutputNodeRead::NoOutput) => OutputNodeFact::NoOutput,
-        Ok(CoreOutputNodeRead::NodeMissing { task_index }) => {
-            OutputNodeFact::NodeMissing { task_index }
-        }
-        Ok(CoreOutputNodeRead::Task { task_name, .. }) => OutputNodeFact::Task { task_name },
-        Ok(CoreOutputNodeRead::SubWorkflow {
-            child_workflow_id, ..
-        }) => OutputNodeFact::SubWorkflow {
-            child_workflow_id: RecordedText::of(child_workflow_id.map(text_of_uuid)),
-        },
-        Err(error) => OutputNodeFact::Failed {
-            error: RawCatalogError::of(HandleOperation::Get.subject(), &error),
-        },
-    }
-}
-
 /// Read the stored result of each node of the workflow `workflowId` that
 /// has one.
 #[napi(ts_return_type = "Promise<NativeEnvelope<NodeResultsRead>>")]
@@ -813,48 +732,6 @@ mod tests {
 
     use super::*;
     use crate::values::boundary::bigint_of_i64;
-
-    #[test]
-    fn each_stored_output_node_has_its_fact() {
-        let child = Uuid::from_u128(7);
-        assert_eq!(
-            output_node_fact_of(Ok(CoreOutputNodeRead::WorkflowAbsent)),
-            OutputNodeFact::WorkflowAbsent
-        );
-        assert_eq!(
-            output_node_fact_of(Ok(CoreOutputNodeRead::NoOutput)),
-            OutputNodeFact::NoOutput
-        );
-        assert_eq!(
-            output_node_fact_of(Ok(CoreOutputNodeRead::NodeMissing { task_index: 3 })),
-            OutputNodeFact::NodeMissing { task_index: 3 }
-        );
-        assert_eq!(
-            output_node_fact_of(Ok(CoreOutputNodeRead::Task {
-                task_index: 1,
-                task_name: "app.charge".to_owned()
-            })),
-            OutputNodeFact::Task {
-                task_name: "app.charge".to_owned()
-            }
-        );
-        assert_eq!(
-            output_node_fact_of(Ok(CoreOutputNodeRead::SubWorkflow {
-                task_index: 0,
-                child_workflow_id: Some(child)
-            })),
-            OutputNodeFact::SubWorkflow {
-                child_workflow_id: RecordedText::Recorded {
-                    text: text_of_uuid(child)
-                }
-            }
-        );
-        let failed = output_node_fact_of(Err(HandleOperationError::not_found(child)));
-        assert!(
-            matches!(&failed, OutputNodeFact::Failed { error } if error.class == "HandleWorkflowNotFound"),
-            "{failed:?}"
-        );
-    }
 
     fn workflow() -> Uuid {
         Uuid::from_u128(11)

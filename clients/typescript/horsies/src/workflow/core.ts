@@ -22,7 +22,6 @@ import type {
   NodeResultRead,
   NodeResultsRead,
   NodesRead,
-  OutputNodeFact,
   WorkflowStartOutcome,
   WorkflowStatusRead,
   WorkflowWaitRead,
@@ -77,8 +76,6 @@ export interface WorkflowCore {
   resume(workflowId: string): Promise<HandleChange>;
   waitEnd(workflowId: string, wait: WaitBound): Promise<WorkflowWaitRead>;
   nodeResult(workflowId: string, nodeId: string): Promise<NodeResultRead>;
-  /** The stored output node of a workflow: the facts that give the type of its result. */
-  outputNode(workflowId: string): Promise<OutputNodeFact>;
   /** Whether this process runs task bodies: a wait for a result is refused there. */
   processRole(): Promise<ProcessRoleName>;
 }
@@ -177,7 +174,6 @@ export function addonWorkflowCore(facts: MainThreadFacts, conversion: Conversion
     resume: async (workflowId) => native.resumeWorkflow(handle, workflowId),
     waitEnd: async (workflowId, wait) => native.waitWorkflowEnd(handle, workflowId, wait),
     nodeResult: async (workflowId, nodeId) => native.nodeResult(handle, workflowId, nodeId),
-    outputNode: async (workflowId) => native.workflowOutputNode(handle, workflowId),
     processRole: async () => processRole(),
   };
 
@@ -208,8 +204,6 @@ export async function serveWorkflowsSeatOperation(
       return { kind: "resume", change: await core.resume(operation.workflowId) };
     case "nodeResult":
       return { kind: "nodeResult", read: await core.nodeResult(operation.workflowId, operation.nodeId) };
-    case "outputNode":
-      return { kind: "outputNode", read: await core.outputNode(operation.workflowId) };
     default:
       return unreachable(operation, "serveWorkflowsSeatOperation");
   }
@@ -276,11 +270,6 @@ export function relayedWorkflowCore(relay: SeatRelay): WorkflowCore {
 
       return reply.kind === "nodeResult" ? reply.read : wrong("nodeResult", reply);
     },
-    outputNode: async (workflowId) => {
-      const reply = await ask({ kind: "outputNode", workflowId });
-
-      return reply.kind === "outputNode" ? reply.read : wrong("outputNode", reply);
-    },
     processRole: async () => "RUNS_TASK_BODIES",
   };
 
@@ -304,7 +293,6 @@ export function noWorkflowCore(): WorkflowCore {
     resume: refuse,
     waitEnd: refuse,
     nodeResult: refuse,
-    outputNode: refuse,
     processRole: refuse,
   });
 }

@@ -171,18 +171,6 @@ export type NodeResultRead =
   | { readonly kind: "notReady" }
   | { readonly kind: "failed"; readonly error: RawCatalogError };
 
-/**
- * The stored output node of a workflow: the facts with which the package finds the type of the workflow's result,
- * with no build. `nodeMissing`: the output index names no node row (stored data that breaks the workflow's spec).
- */
-export type OutputNodeFact =
-  | { readonly kind: "workflowAbsent" }
-  | { readonly kind: "noOutput" }
-  | { readonly kind: "nodeMissing"; readonly taskIndex: number }
-  | { readonly kind: "task"; readonly taskName: string }
-  | { readonly kind: "subWorkflow"; readonly childWorkflowId: RecordedText }
-  | { readonly kind: "failed"; readonly error: RawCatalogError };
-
 /** The functions of the `workflows` area. */
 export interface WorkflowsAddon {
   /**
@@ -225,7 +213,6 @@ export interface WorkflowsAddon {
     wait: WaitBound,
   ): Promise<NativeEnvelope<WorkflowWaitRead>>;
   nodeResult(handle: NativeCoreHandle, workflowId: string, nodeId: string): Promise<NativeEnvelope<NodeResultRead>>;
-  workflowOutputNode(handle: NativeCoreHandle, workflowId: string): Promise<NativeEnvelope<OutputNodeFact>>;
 }
 
 /** The `workflows` functions of the addon. Throws as `requireAddon` does. */

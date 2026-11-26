@@ -2188,15 +2188,6 @@ export type WorkflowReadError =
     readonly kind: "unknownUserCode";
     readonly code: string;
 }
-/** The stored output node runs a task that the app does not list, so its result has no declared type here. */
-| {
-    readonly kind: "taskNotListed";
-    readonly taskName: string;
-}
-/** The stored workflow has no output node, so its result has no declared type. */
-| {
-    readonly kind: "noOutputNode";
-}
 /** A wait in a process that runs task bodies; nothing was read. */
 | {
     readonly kind: "waitInsideTask";

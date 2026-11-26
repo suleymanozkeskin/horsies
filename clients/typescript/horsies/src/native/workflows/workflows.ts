@@ -17,7 +17,6 @@ import {
   type NodeResultRead,
   type NodeResultsRead,
   type NodesRead,
-  type OutputNodeFact,
   type SourceRegistration,
   type WorkflowStartOutcome,
   type WorkflowStatusRead,
@@ -109,9 +108,4 @@ export async function waitWorkflowEnd(
 /** The stored result of the node `nodeId` of a workflow. Not a wait; changes nothing. */
 export async function nodeResult(handle: CoreHandle, workflowId: string, nodeId: string): Promise<NodeResultRead> {
   return nativeValueAsync("nodeResult", () => workflowsAddon().nodeResult(handle.native, workflowId, nodeId));
-}
-
-/** The stored output node of a workflow. Changes nothing. */
-export async function workflowOutputNode(handle: CoreHandle, workflowId: string): Promise<OutputNodeFact> {
-  return nativeValueAsync("workflowOutputNode", () => workflowsAddon().workflowOutputNode(handle.native, workflowId));
 }

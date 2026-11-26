@@ -36,8 +36,7 @@ import {
 } from "./handle-error.ts";
 import type { NodeTarget } from "./node-checks.ts";
 import type { BuildReturn, NodeById, NodeCode, NodeOutput, ReturnedNodes, WorkflowOutput } from "./node.ts";
-import type { WorkflowRegistry } from "./registry.ts";
-import { type StoredForm, storedOutputForm } from "./stored-output.ts";
+import { nodeTargetForm, workflowOutputForm, type WorkflowRegistry } from "./registry.ts";
 
 /** The stored result of one node read with no type: its outcome with open codes, or why it does not read. */
 export type NodeResult =
@@ -106,10 +105,11 @@ export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandl
   ): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
 }
 
-/** What a handle reads with: the core, the app's workflows, and the nodes of the build that started the run. */
+/** What a handle reads with: the core, the app's workflows, the workflow contract, and the nodes of its build. */
 export type HandleFacts = {
   readonly core: WorkflowCore;
   readonly registry: WorkflowRegistry;
+  readonly workflow: object;
   readonly workflowId: WorkflowId;
   /** What each node id runs: the nodes of the build that started the workflow; empty for a handle by id. */
   readonly targets: ReadonlyMap<string, NodeTarget>;
@@ -125,53 +125,17 @@ export function workflowHandleOf<R extends BuildReturn>(facts: HandleFacts): Wor
 
   return Object.freeze({
     ...base,
-    // SAFETY: the reader decodes with the node's own type: a task node's contract, or the stored output node of a
-    // sub-workflow node's child run, whose types are the node's types.
-    resultFor: async (id: string) => (await targetOutcome(facts, id)) as never,
+    resultFor: async (id: string) => {
+      const target = facts.targets.get(id);
+
+      // SAFETY: the reader decodes with the node's contract: its output type and its codes are the node's types.
+      return (
+        target === undefined
+          ? err(Object.freeze({ kind: "resultNotReady" }))
+          : nodeOutcome(facts, id, nodeTargetForm(target, facts.registry))
+      ) as never;
+    },
   });
-}
-
-/** The outcome of the node `id` of a started workflow, by what the node runs. */
-async function targetOutcome(facts: HandleFacts, id: string): Promise<ReadOutcome> {
-  const target = facts.targets.get(id);
-
-  switch (target?.kind) {
-    case undefined:
-      return err(Object.freeze({ kind: "resultNotReady" }));
-    case "task":
-      return nodeOutcome(facts, id, async () => ok(readFormOf(target.contract)), "declared");
-    case "subWorkflow":
-      return nodeOutcome(facts, id, async () => childOutputForm(facts, id), "open");
-    default:
-      return unreachable(target, "targetOutcome");
-  }
-}
-
-/** The read form of the result of a sub-workflow node: the stored output node of its child run. */
-async function childOutputForm(facts: HandleFacts, nodeId: string): Promise<StoredForm> {
-  const read = await facts.core.nodes(facts.workflowId);
-
-  switch (read.kind) {
-    case "nodes": {
-      const node = read.nodes.find((stored) => stored.nodeId.kind === "recorded" && stored.nodeId.text === nodeId);
-      const child = node?.subWorkflowId;
-
-      return child?.kind === "recorded"
-        ? storedOutputForm(facts.core, facts.registry, child.text)
-        : unreadableForm("the sub-workflow node has no stored child workflow");
-    }
-
-    case "workflowAbsent":
-      return err(Object.freeze({ kind: "workflowNotFound" }));
-    case "failed":
-      return err(readErrorOfHandle(handleErrorOfRaw(read.error)));
-    default:
-      return unreachable(read, "childOutputForm");
-  }
-}
-
-function unreadableForm(cause: string): StoredForm {
-  return err(Object.freeze({ kind: "storedResultUnreadable", cause }));
 }
 
 /** A handle of a stored workflow id. Pure. */
@@ -180,7 +144,7 @@ export function workflowHandleByIdOf<R extends BuildReturn>(facts: HandleFacts):
     ...handleBase<R>(facts),
     resultFor: async (id: string, contract: object) =>
       // SAFETY: the reader decodes with `contract`: its output type and its codes are the result's types.
-      (await nodeOutcome(facts, id, async () => ok(readFormOf(contract)), "declared")) as never,
+      (await nodeOutcome(facts, id, readFormOf(contract))) as never,
   });
 }
 
@@ -226,11 +190,11 @@ async function workflowOutcome(facts: HandleFacts, options: GetOptions): Promise
 
   const read = await facts.core.waitEnd(facts.workflowId, wait.value);
 
-  return endOutcome(read, async () => storedOutputForm(facts.core, facts.registry, facts.workflowId));
+  return endOutcome(read, () => workflowOutputForm(facts.workflow, facts.registry));
 }
 
-/** The outcome of what a wait found. A completed result reads its form from the stored run (`outputForm`). */
-export async function endOutcome(read: WorkflowWaitRead, outputForm: () => Promise<StoredForm>): Promise<ReadOutcome> {
+/** The outcome of what a wait found. Pure apart from the output form, which may run the build once. */
+export function endOutcome(read: WorkflowWaitRead, outputForm: () => ReadForm): ReadOutcome {
   switch (read.kind) {
     case "completed":
       return completedOutcome(read.result, outputForm);
@@ -249,18 +213,14 @@ export async function endOutcome(read: WorkflowWaitRead, outputForm: () => Promi
   }
 }
 
-async function completedOutcome(result: StoredTextFact, outputForm: () => Promise<StoredForm>): Promise<ReadOutcome> {
+function completedOutcome(result: StoredTextFact, outputForm: () => ReadForm): ReadOutcome {
   switch (result.kind) {
     case "none":
       return unreadable("the workflow is COMPLETED and its stored result is NULL");
     case "refused":
       return unreadable(result.cause);
-    case "checked": {
-      const form = await outputForm();
-
-      return form.ok ? envelopeOutcome(result.text, form.value, "open") : form;
-    }
-
+    case "checked":
+      return envelopeOutcome(result.text, outputForm(), "open");
     default:
       return unreachable(result, "completedOutcome");
   }
@@ -352,12 +312,7 @@ function envelopeOutcome(text: string, form: ReadForm, codes: CodeRule): ReadOut
 }
 
 /** `resultFor`: the stored result of one node, under the node's read form. Not a wait. */
-async function nodeOutcome(
-  facts: HandleFacts,
-  nodeId: string,
-  form: () => Promise<StoredForm>,
-  codes: CodeRule,
-): Promise<ReadOutcome> {
+async function nodeOutcome(facts: HandleFacts, nodeId: string, form: ReadForm): Promise<ReadOutcome> {
   const read = await facts.core.nodeResult(facts.workflowId, nodeId);
 
   switch (read.kind) {
@@ -366,24 +321,14 @@ async function nodeOutcome(
     case "failed":
       return err(readErrorOfHandle(handleErrorOfRaw(read.error)));
     case "stored":
-      return checkedOutcome(read.result, form, codes);
+      return checkedOutcome(read.result, form);
     default:
       return unreachable(read, "nodeOutcome");
   }
 }
 
-async function checkedOutcome(
-  result: CheckedText,
-  form: () => Promise<StoredForm>,
-  codes: CodeRule,
-): Promise<ReadOutcome> {
-  if (result.kind === "refused") {
-    return unreadable(result.cause);
-  }
-
-  const read = await form();
-
-  return read.ok ? envelopeOutcome(result.text, read.value, codes) : read;
+function checkedOutcome(result: CheckedText, form: ReadForm): ReadOutcome {
+  return result.kind === "checked" ? envelopeOutcome(result.text, form, "declared") : unreadable(result.cause);
 }
 
 function unreadable(cause: string): ReadOutcome {

@@ -188,15 +188,6 @@ describe("the workflow reads of a workflow that does not exist, with a database"
     });
     await handle.close();
   });
-
-  test("the stored output node is workflowAbsent", async () => {
-    const handle = testHandle();
-
-    assert.deepEqual(envelopeValue(await workflowsAddon().workflowOutputNode(handle.native, randomUUID())), {
-      kind: "workflowAbsent",
-    });
-    await handle.close();
-  });
 });
 
 /** The spec data text of one sub-workflow root of the child `tests.strict_child.v1` with the stored input `input`. */
@@ -225,40 +216,6 @@ function subWorkflowRootText(input: string): string {
     nodes: [node],
   });
 }
-
-describe("the stored output node of a started workflow, with a database", () => {
-  test("a started tree's stored output node is its task node, by its stored task name", async () => {
-    const handle = testHandle();
-    const vector = specDataFile().vectors.find((row) => row.name === "one_task_node");
-
-    assert(vector !== undefined);
-    assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(handle.native, neverCalled)), "registered");
-
-    const prepared = envelopeValue(workflowsAddon().prepareClientSpec(vector.text));
-
-    assert(prepared.kind === "prepared");
-
-    const workflowId = randomUUID();
-
-    const started = envelopeValue(
-      await workflowsAddon().startWorkflow(
-        handle.native,
-        prepared.spec,
-        workflowId,
-        1_795_687_200_000_000n,
-        { kind: "noCarrier" },
-        false,
-      ),
-    );
-
-    assert.equal(started.kind, "started");
-    assert.deepEqual(envelopeValue(await workflowsAddon().workflowOutputNode(handle.native, workflowId)), {
-      kind: "task",
-      taskName: "app.charge",
-    });
-    await handle.close();
-  });
-});
 
 describe("the child spec source and the core's strict check, with a database", () => {
   test("a merged input that the core's strict check refuses fails the node and never calls the build", async () => {

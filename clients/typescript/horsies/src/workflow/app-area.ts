@@ -36,10 +36,16 @@ export function createWorkflowArea(context: StartContext): WorkflowArea {
       options: StartOptions = {},
     ) => startWorkflow<R>(context, workflow, Object(params), options),
     retryStart: async <R extends BuildReturn>(error: StartEnqueueFailed<R>) => retryStart<R>(context, error),
-    // The contract gives the types of the handle only: every read takes its form from the stored run.
     workflowHandle: <P extends ParameterSchemas, R extends BuildReturn>(
-      _workflow: WorkflowContract<P, R>,
+      workflow: WorkflowContract<P, R>,
       workflowId: WorkflowId,
-    ) => workflowHandleByIdOf<R>({ core: context.core, registry: context.registry, workflowId, targets: new Map() }),
+    ) =>
+      workflowHandleByIdOf<R>({
+        core: context.core,
+        registry: context.registry,
+        workflow,
+        workflowId,
+        targets: new Map(),
+      }),
   });
 }
