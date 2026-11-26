@@ -152,7 +152,7 @@ describe("the producer handle of a task child", () => {
 
       assert.deepEqual(result, {
         kind: "found",
-        record: { taskId, taskName: TASK_NAME, status: "PENDING", envelope: { kind: "notFinished" } },
+        record: { taskId, taskName: TASK_NAME, envelope: { kind: "waitEnded", status: "PENDING" } },
       });
     });
 
