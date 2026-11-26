@@ -122,13 +122,13 @@ describe("workerProfilesJson", () => {
     assert.deepEqual(profileObject({}), {});
   });
 
-  test("a profile name with a lone surrogate is refused at its key", () => {
+  test("a profile name with a lone surrogate is refused at its key with HRS-218", () => {
     const written = workerProfilesJson({ "io\uD800": { isolated: { count: 1 } } }, "workerProfiles");
 
     assert.equal(written.kind, "refused");
     assert.deepEqual(
       written.kind === "refused" ? written.refusals.map((one) => one.code) : [],
-      ["FIELD_BOUND"],
+      ["HRS-218"],
     );
   });
 });

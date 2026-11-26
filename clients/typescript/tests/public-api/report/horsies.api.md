@@ -32,8 +32,7 @@ export type AnyWire = Wire<unknown, unknown, Presence, Role>;
 export type AppConfigInput = QueueConfigInput & {
     readonly broker: BrokerConfigInput;
     readonly clusterWideCap?: TaskCap;
-    readonly prefetchBuffer?: number;
-    readonly claimLeaseMs?: number;
+    readonly claim?: ClaimMode;
     readonly maxClaimRenewAgeMs?: number;
     readonly payload?: PayloadPolicyInput;
     readonly recovery?: RecoveryConfigInput;
@@ -66,10 +65,10 @@ export interface BodyRuntimes {
 
 // @public
 export interface BrokerConfigInput {
+    readonly connection?: BrokerConnection;
     readonly databaseUrl: Secret;
     readonly echo?: boolean;
     readonly maxOverflow?: number;
-    readonly pgbouncerTransactionMode?: boolean;
     // (undocumented)
     readonly poolPrePing?: boolean;
     // (undocumented)
@@ -79,13 +78,20 @@ export interface BrokerConfigInput {
     // (undocumented)
     readonly retainRerunInputDefault?: RerunInputDefault;
     // (undocumented)
-    readonly sessionDatabase?: SessionDatabase;
-    // (undocumented)
     readonly tcpKeepalives?: TcpKeepalives;
     // (undocumented)
     readonly tcpUserTimeout?: TcpUserTimeout;
     readonly workerPoolPrePing?: boolean;
 }
+
+// @public
+export type BrokerConnection = {
+    readonly kind: "direct";
+    readonly sessionDatabase?: SessionDatabase;
+} | {
+    readonly kind: "pgbouncerTransaction";
+    readonly sessionDatabaseUrl: Secret;
+};
 
 // @public (undocumented)
 export const BrokerErrorCode: {
@@ -119,6 +125,16 @@ export interface ClaimLimitsInput {
     readonly claimedPerWorker?: TaskLimit;
     readonly perQueuePerPass?: TaskLimit;
 }
+
+// @public
+export type ClaimMode = {
+    readonly kind: "hardCap";
+    readonly leaseMs?: number;
+} | {
+    readonly kind: "softCap";
+    readonly prefetchBuffer: number;
+    readonly leaseMs: number;
+};
 
 // @public
 export class ClientDefect extends CoreDefect {
@@ -1112,7 +1128,7 @@ export type Refusal = {
 };
 
 // @public
-export type RefusalCode = ErrorCode | "FIELD_BOUND";
+export type RefusalCode = ErrorCode;
 
 // @public
 export type RequiredWire = Wire<unknown, unknown, "required", "value">;

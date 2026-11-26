@@ -38,8 +38,7 @@ const FULL_INPUT: AppConfigInput = {
   ],
   broker: {
     databaseUrl: { kind: "value", value: DATABASE_URL },
-    sessionDatabase: { kind: "separate", url: { kind: "fromEnv", name: "SESSION_URL" } },
-    pgbouncerTransactionMode: true,
+    connection: { kind: "pgbouncerTransaction", sessionDatabaseUrl: { kind: "fromEnv", name: "SESSION_URL" } },
     poolPrePing: false,
     workerPoolPrePing: true,
     poolSize: 8,
@@ -52,8 +51,7 @@ const FULL_INPUT: AppConfigInput = {
     tcpUserTimeout: { kind: "after", milliseconds: 20_000 },
   },
   clusterWideCap: { kind: "cap", tasks: 200 },
-  prefetchBuffer: 4,
-  claimLeaseMs: 30_000,
+  claim: { kind: "softCap", prefetchBuffer: 4, leaseMs: 30_000 },
   maxClaimRenewAgeMs: 600_000,
   payload: { warnBytes: { kind: "noBound" }, rejectBytes: { kind: "bytes", bytes: 4_194_304 } },
   recovery: {
@@ -177,12 +175,51 @@ describe("coreAppConfigJson", () => {
     );
   });
 
-  test("a session database that uses the database URL leaves the session URL out", () => {
+  test("a direct connection whose session uses the database URL leaves the session URL out", () => {
     const config = parsed({
-      broker: { databaseUrl: { kind: "value", value: DATABASE_URL }, sessionDatabase: { kind: "sameAsDatabaseUrl" } },
+      broker: {
+        databaseUrl: { kind: "value", value: DATABASE_URL },
+        connection: { kind: "direct", sessionDatabase: { kind: "sameAsDatabaseUrl" } },
+      },
     });
 
-    assert.deepEqual(JSON.parse(coreAppConfigJson(config)).broker, { database_url: DATABASE_URL });
+    assert.deepEqual(JSON.parse(coreAppConfigJson(config)).broker, {
+      database_url: DATABASE_URL,
+      pgbouncer_transaction_mode: false,
+    });
+  });
+
+  test("a direct connection with a separate session database gives the session URL and no PgBouncer mode", () => {
+    const config = parsed({
+      broker: {
+        databaseUrl: { kind: "value", value: DATABASE_URL },
+        connection: { kind: "direct", sessionDatabase: { kind: "separate", url: { kind: "fromEnv", name: "SESSION_URL" } } },
+      },
+    });
+
+    assert.deepEqual(JSON.parse(coreAppConfigJson(config)).broker, {
+      database_url: DATABASE_URL,
+      session_database_url: SESSION_URL,
+      pgbouncer_transaction_mode: false,
+    });
+  });
+
+  test("the hard cap mode gives a prefetch buffer of 0, and its lease only when the config gives one", () => {
+    const withoutLease = parsed({ broker: { databaseUrl: { kind: "value", value: DATABASE_URL } }, claim: { kind: "hardCap" } });
+
+    const withLease = parsed({
+      broker: { databaseUrl: { kind: "value", value: DATABASE_URL } },
+      claim: { kind: "hardCap", leaseMs: 90_000 },
+    });
+
+    assert.equal(
+      coreAppConfigJson(withoutLease),
+      `{"broker":{"database_url":"${DATABASE_URL}"},"prefetch_buffer":0,"resend_on_transient_err":false}`,
+    );
+    assert.equal(
+      coreAppConfigJson(withLease),
+      `{"broker":{"database_url":"${DATABASE_URL}"},"prefetch_buffer":0,"claim_lease_ms":90000,"resend_on_transient_err":false}`,
+    );
   });
 
   test("a queue named __proto__ in the queue retention is a member of the text", () => {
