@@ -166,11 +166,11 @@ async fn a_replayed_child_completion_does_not_rewrite_a_terminal_parent_node() {
         let child_error = match child_status {
             "FAILED" => Some(
                 serde_json::to_string(
-                    &TaskError::new(
+                    &TaskError::custom(
                         "SUBWORKFLOW_REPLAY_PROBE",
                         "child failed for replay-guard test",
                     )
-                    .expect("a user error code"),
+                    .expect("a custom error code"),
                 )
                 .expect("encode"),
             ),

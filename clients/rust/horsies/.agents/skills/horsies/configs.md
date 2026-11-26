@@ -347,7 +347,7 @@ The check stops at the first phase that refuses:
 
 `CheckPassed::task_count()` is the number of registered tasks.
 `CheckPassed::declared_error_codes()` is a `BTreeMap` from task name to
-the declared error codes (`UserErrorCode::CODES`) of each task that
+the declared error codes (`CustomErrorCode::CODES`) of each task that
 declares at least one. The success text lists them under
 `declared error codes:`, or prints `declared error codes: none`.
 `CheckReport::errors()` holds the refusals; `phase()` is `check`,

@@ -18,7 +18,9 @@ use uuid::Uuid;
 
 use crate::handle::{checked_task_wait, read_task_info};
 use crate::process_state::refuse_in_a_fork;
-use crate::{Horsies, ReadError, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, UserErrorCode};
+use crate::{
+    CustomErrorCode, Horsies, ReadError, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome,
+};
 
 /// The stored result of a task, not read with any type (Python
 /// `get_raw_result`): for tools that read results without the task's
@@ -54,7 +56,7 @@ impl Horsies {
     ) -> Result<TaskOutcome<T, E>, ReadError>
     where
         T: DeserializeOwned + Clone,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         self.task_handle_of::<T, E>(task_id).get(limit).await
     }

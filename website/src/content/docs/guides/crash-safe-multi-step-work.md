@@ -100,18 +100,18 @@ def post_with_key(
             timeout=HTTP_TIMEOUT_SECONDS,
         )
     except httpx.TransportError as error:
-        return Err(TaskError(error_code=unavailable_code, message=f"POST {url}: {error!r}"))
+        return Err(TaskError(code=unavailable_code, message=f"POST {url}: {error!r}"))
     match response.status_code // 100:
         case 2:
             return Ok(response.json())
         case 5:
             return Err(TaskError(
-                error_code=unavailable_code,
+                code=unavailable_code,
                 message=f"POST {url}: HTTP {response.status_code}",
             ))
         case _:
             return Err(TaskError(
-                error_code=refused_code,
+                code=refused_code,
                 message=f"POST {url}: HTTP {response.status_code}",
             ))
 

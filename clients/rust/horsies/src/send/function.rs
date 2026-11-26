@@ -49,7 +49,7 @@ use crate::app::SendSuppression;
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::encode_send_input;
 use crate::telemetry::{CallEnd, TaskSendSpan, TaskSendSubject};
-use crate::{ErrorCode, Horsies, HorsiesError, TaskHandle, UserErrorCode};
+use crate::{CustomErrorCode, ErrorCode, Horsies, HorsiesError, TaskHandle};
 
 /// Resends of a retryable `ENQUEUE_FAILED` after the first send (Python
 /// `_SEND_RETRY_COUNT`).
@@ -140,7 +140,7 @@ impl<A, T, E> TaskFunction<A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// The function of the task registered on `app` as `task_name`, with
     /// the queue, priority and options of its registration. The task
@@ -551,7 +551,7 @@ impl<A, T, E> TaskFunctionWithOptions<'_, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// Send the task with these options: now, or after their delay.
     pub async fn send(&self, input: A) -> Result<TaskHandle<T, E>, TaskSendError> {

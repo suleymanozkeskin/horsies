@@ -22,13 +22,13 @@ def validate_order(
 ) -> Result[ValidatedOrder, TaskError]:
     if not order.order_id:
         return Err(TaskError(
-            error_code="INVALID_ORDER_ID",
+            code="INVALID_ORDER_ID",
             message="Order ID is required",
         ))
 
     if not order.items:
         return Err(TaskError(
-            error_code="EMPTY_ORDER",
+            code="EMPTY_ORDER",
             message="Order must contain at least one item",
         ))
 
@@ -59,7 +59,7 @@ match validate_order.send(order=order):
             case Ok(Succeeded(validated)):
                 print(f"Validated: {validated.order_id}")
             case Ok(Failed(task_error)):
-                print(f"Validation failed: {task_error.error_code}")
+                print(f"Validation failed: {task_error.code}")
             case Err(WaitTimeout()):
                 print("Not done after 5 seconds; the task may still run")
             case Err(read_error):

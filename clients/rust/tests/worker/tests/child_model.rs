@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use horsies::{TaskHandle, TaskInfoParts, TaskOutcome, TaskStatus, UserErrorCode};
+use horsies::{CustomErrorCode, TaskHandle, TaskInfoParts, TaskOutcome, TaskStatus};
 use horsies_test_support::process::StopEnd;
 use horsies_test_support::rows;
 use horsies_test_worker::harness::{failed_code, outcome, succeeded, Suite};
@@ -62,11 +62,11 @@ fn stamp_parts(stamp: &str) -> (String, u128, u128) {
 async fn cancel_end<T, E>(handle: &TaskHandle<T, E>) -> Option<String>
 where
     T: DeserializeOwned + Clone + std::fmt::Debug,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     match outcome(handle, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "TASK_TIMEOUT");
+            assert_eq!(error.code().as_str(), "TASK_TIMEOUT");
             error
                 .data()
                 .map(|data| {
@@ -112,7 +112,7 @@ async fn shared_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished() {
     }
     match outcome(&hang, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "TASK_TIMEOUT");
+            assert_eq!(error.code().as_str(), "TASK_TIMEOUT");
             let data: serde_json::Value = error
                 .data()
                 .expect("TASK_TIMEOUT stores data")
@@ -285,7 +285,7 @@ async fn thread_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished() {
     }
     match outcome(&hang, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "TASK_TIMEOUT");
+            assert_eq!(error.code().as_str(), "TASK_TIMEOUT");
             let data: serde_json::Value = error
                 .data()
                 .expect("TASK_TIMEOUT stores data")

@@ -57,7 +57,7 @@ type BuiltInTaskCode = (
 BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] = {}
 """Maps every built-in error code string to its canonical enum member.
 
-Used by ``TaskError._coerce_error_code`` for round-trip coercion and by
+Used by ``TaskError._validate_code`` for round-trip coercion and by
 ``horsies check`` for reserved-code collision detection.
 """
 for _family in (
@@ -131,7 +131,7 @@ class TaskError(BaseModel, Generic[C]):
     """The error of a task: the ``Err`` of what a body returns, and the
     ``Failed`` of what a reader gets.
 
-    ``error_code`` carries one of four built-in families
+    ``code`` carries one of four built-in families
     (``OperationalErrorCode``, ``ContractCode``, ``RetrievalCode``,
     ``OutcomeCode``) or a custom code of the task: a ``str``, or a member of
     the ``Enum`` class that the task declares with ``error_codes=``.
@@ -140,13 +140,13 @@ class TaskError(BaseModel, Generic[C]):
     ``Result[T, TaskError[E]]`` declares ``error_codes=E``; its body passes
     members of ``E``, and its readers get members of ``E``.
 
-    **Required field**: ``error_code`` is required and must not be null, on
+    **Required field**: ``code`` is required and must not be null, on
     the wire and in the type, because retry matching and outcome routing read
     it. A stored error without a code is stored data that does not parse.
     ``message``, ``data`` and ``exception`` are optional.
 
     **Construction**: built-in code values must be passed as enum
-    members, not raw strings.  ``TaskError(error_code="BROKER_ERROR",
+    members, not raw strings.  ``TaskError(code="BROKER_ERROR",
     message="...")`` raises ``ValueError``.  Use ``OperationalErrorCode.BROKER_ERROR``
     instead.  A custom code is a ``str`` or a member of a custom ``Enum``
     whose value is that ``str``; both follow the code-text rules.
@@ -162,6 +162,11 @@ class TaskError(BaseModel, Generic[C]):
     ``model_validate_json()`` everywhere — including nested models.
     No special rehydration methods needed.
 
+    **Stored form**: the ``err`` slot of a stored result holds the code
+    under the key ``error_code``, the field name of the core's task error.
+    ``encode_task_error`` writes that key at the place of ``code``, and
+    ``decode_task_error`` reads it back into ``code``.
+
     **Unknown keys**: refused at construction and at decode. A stored value
     with a key that this class does not declare is stored data that does not
     parse. Subclasses inherit the rule, so ``SubWorkflowError`` accepts its
@@ -175,9 +180,9 @@ class TaskError(BaseModel, Generic[C]):
     # before validator is the one check: it keeps a custom `Enum` member as
     # the member, which a `str` field would turn into its text.
     if TYPE_CHECKING:
-        error_code: C | BuiltInTaskCode
+        code: C | BuiltInTaskCode
     else:
-        error_code: SkipValidation[object]
+        code: SkipValidation[object]
     # A writer gives `JsonInput`, and a reader gets `JsonValue`. No check runs at
     # construction: a TaskError is built inside `except` blocks, and that build must
     # not raise. `reportable_error` checks `data` at the wire.
@@ -187,10 +192,10 @@ class TaskError(BaseModel, Generic[C]):
         data: SkipValidation[JsonValue] = None
     message: str | None = None
 
-    @field_validator('error_code', mode='before')
+    @field_validator('code', mode='before')
     @classmethod
-    def _validate_error_code(cls, value: object) -> object:
-        """Validate and coerce error_code values.
+    def _validate_code(cls, value: object) -> object:
+        """Validate and coerce code values.
 
         Accepts:
         - BuiltInTaskCode enum members (pass through)
@@ -210,11 +215,11 @@ class TaskError(BaseModel, Generic[C]):
         if isinstance(value, _BUILTIN_FAMILIES):
             return value
         if value is None:
-            raise ValueError('error_code must not be null')
+            raise ValueError('code must not be null')
         if isinstance(value, dict):
             if '__builtin_task_code__' not in value:
                 raise ValueError(
-                    'error_code dict must contain "__builtin_task_code__" key',
+                    'code dict must contain "__builtin_task_code__" key',
                 )
             raw = cast('dict[str, object]', value)['__builtin_task_code__']
             if not isinstance(raw, str):
@@ -241,18 +246,18 @@ class TaskError(BaseModel, Generic[C]):
             _refuse_reserved_code_text(value)
             return value
         raise ValueError(
-            f'error_code must be a str, a custom Enum member or a built-in '
+            f'code must be a str, a custom Enum member or a built-in '
             f'code; got {type(value).__name__}',
         )
 
-    @field_serializer('error_code', when_used='always')
+    @field_serializer('code', when_used='always')
     @classmethod
-    def _serialize_error_code(
+    def _serialize_code(
         cls,
         value: object,
         _info: Any,
     ) -> dict[str, str] | str:
-        """Serialize error_code with tagged format for built-in codes.
+        """Serialize code with tagged format for built-in codes.
 
         Built-in enum members become ``{"__builtin_task_code__": "VALUE"}``
         so round-trip identity is preserved. A custom code becomes its text:
@@ -297,7 +302,7 @@ def _refuse_reserved_code_text(text: str) -> None:
         )
     if text in RESERVED_NON_TASK_CODES:
         raise ValueError(
-            reserved_code_message(text, field_name='error_code'),
+            reserved_code_message(text, field_name='code'),
         )
 
 

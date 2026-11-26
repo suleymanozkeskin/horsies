@@ -188,7 +188,7 @@ state. The same run on the shared process pool lost 37 tasks to 7 pool restarts.
 
 `store.py` contains every psycopg exception at the one call that performs I/O
 and converts it into a `StoreError` carrying the operation name. Tasks turn that
-into `TaskError(error_code='STORE_UNAVAILABLE')` with the failing operation in
+into `TaskError(code='STORE_UNAVAILABLE')` with the failing operation in
 `data`.
 
 This was demonstrated by accident. During development the host volume filled

@@ -62,7 +62,7 @@ def fail_task(*, error_code: str) -> Result[int, TaskError]:
     """Always fails with the specified error code."""
     time.sleep(0.05)
     return Err(
-        TaskError(error_code=error_code, message=f'Failed: {error_code}')
+        TaskError(code=error_code, message=f'Failed: {error_code}')
     )
 
 
@@ -378,7 +378,7 @@ def fail_with_task(*, error_code: str) -> Result[int, TaskError]:
     """Returns an error with the specified code."""
     time.sleep(0.05)
     return Err(
-        TaskError(error_code=error_code, message=f'Failed with {error_code}')
+        TaskError(code=error_code, message=f'Failed with {error_code}')
     )
 
 
@@ -390,7 +390,7 @@ def ctx_reader_task(
     time.sleep(0.05)
     if workflow_ctx is None:
         return Err(
-            TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+            TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
     match workflow_ctx.result_for(node_ctx_a.key()):
         case Succeeded(value):
@@ -407,7 +407,7 @@ def ctx_reader_str_task(
     time.sleep(0.05)
     if workflow_ctx is None:
         return Err(
-            TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+            TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
     for node_id in workflow_ctx._results_by_id:
         match workflow_ctx._results_by_id[node_id]:
@@ -416,7 +416,7 @@ def ctx_reader_str_task(
             case Failed(error):
                 return Err(error)
     return Err(
-        TaskError(error_code='NO_RESULT', message='No results in context')
+        TaskError(code='NO_RESULT', message='No results in context')
     )
 
 
@@ -428,7 +428,7 @@ def ctx_sum_task(
     time.sleep(0.05)
     if workflow_ctx is None:
         return Err(
-            TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+            TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
     first = workflow_ctx.result_for(node_ctx_multi_a.key())
     second = workflow_ctx.result_for(node_ctx_multi_b.key())
@@ -451,10 +451,10 @@ def check_upstream_skipped_task(
     """Checks if input is UPSTREAM_SKIPPED error."""
     time.sleep(0.05)
     match input_result:
-        case Failed(error) if error.error_code == 'UPSTREAM_SKIPPED':
+        case Failed(error) if error.code == 'UPSTREAM_SKIPPED':
             return Ok('received_upstream_skipped')
         case Failed(error):
-            return Ok(f'received_error_{error.error_code}')
+            return Ok(f'received_error_{error.code}')
         case Succeeded(value):
             return Ok(f'received_value_{value}')
 
@@ -485,7 +485,7 @@ def mixed_reader_task(
     # Get value from workflow_ctx
     if workflow_ctx is None:
         return Err(
-            TaskError(error_code='NO_CTX', message='WorkflowContext not provided')
+            TaskError(code='NO_CTX', message='WorkflowContext not provided')
         )
 
     for node_id in workflow_ctx._results_by_id:
@@ -534,7 +534,7 @@ def dual_reader_task(
 
     if workflow_ctx is None:
         return Err(
-            TaskError(error_code='NO_CTX', message='WorkflowContext not provided'),
+            TaskError(code='NO_CTX', message='WorkflowContext not provided'),
         )
     match workflow_ctx.result_for(node_dual_a.key()):
         case Failed(error):
@@ -850,7 +850,7 @@ def retry_then_ok_task(
     if attempt < succeed_on_attempt:
         return Err(
             TaskError(
-                error_code='RETRY_NEEDED',
+                code='RETRY_NEEDED',
                 message=f'Attempt {attempt}, need {succeed_on_attempt}',
             )
         )
@@ -1071,7 +1071,7 @@ def e2e_sub_int_ok_task(*, value: int = 11) -> Result[int, TaskError]:
 def e2e_sub_int_fail_task(*, error_code: str) -> Result[int, TaskError]:
     time.sleep(0.05)
     return Err(
-        TaskError(error_code=error_code, message=f'Subworkflow failed: {error_code}'),
+        TaskError(code=error_code, message=f'Subworkflow failed: {error_code}'),
     )
 
 
@@ -1120,7 +1120,7 @@ def e2e_sub_probe_failed_child_task(
                     ctx_err = None
         except Exception as exc:
             ctx_err = TaskError(
-                error_code='CTX_LOOKUP_FAILED',
+                code='CTX_LOOKUP_FAILED',
                 message=f'{type(exc).__name__}: {exc}',
             )
 
@@ -1172,7 +1172,7 @@ def e2e_sub_probe_success_ctx_task(
 
     if workflow_ctx is None:
         return Err(
-            TaskError(error_code='NO_CTX', message='WorkflowContext not provided'),
+            TaskError(code='NO_CTX', message='WorkflowContext not provided'),
         )
 
     try:
@@ -1182,7 +1182,7 @@ def e2e_sub_probe_success_ctx_task(
                 result_value = value
             case Failed(error):
                 result_ok = False
-                result_error_code = str(error.error_code)
+                result_error_code = str(error.code)
     except Exception as exc:
         result_error_code = f'{type(exc).__name__}: {exc}'
 
@@ -1302,7 +1302,7 @@ class E2ESubFailedInputWorkflow(WorkflowDefinition[dict[str, JsonValue]]):
             case Failed(error):
                 input_kwargs = {
                     'input_is_err': True,
-                    'input_error_code': str(error.error_code),
+                    'input_error_code': str(error.code),
                     'input_value': None,
                 }
             case Succeeded(succeeded_value):

@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use super::function::TaskFunction;
 use crate::workflow::NodeRegistration;
-use crate::{TaskNode, UserErrorCode};
+use crate::{CustomErrorCode, TaskNode};
 
 /// Why the app gives no typed function, send or node for a task name.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -67,7 +67,7 @@ impl TaskFunctions {
     where
         A: Serialize + DeserializeOwned + 'static,
         T: Serialize + DeserializeOwned + 'static,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         let node = NodeRegistration {
             queue_name: function.queue_name().to_owned(),

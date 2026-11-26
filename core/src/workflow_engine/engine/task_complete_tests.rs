@@ -334,7 +334,7 @@ async fn a_node_finish_that_raises_commits_nothing() {
 /// claimed by [`WORKER`].
 async fn seed_after_a_failed_node(pool: &TestPool, workflow_id: Uuid, task_id: Uuid) {
     let prior_result = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
-        TaskError::new("PRIOR_FAILURE", "prior node failed").expect("a user error code"),
+        TaskError::custom("PRIOR_FAILURE", "prior node failed").expect("a custom error code"),
     ))
     .expect("encode the prior result");
     sql::query(
@@ -437,7 +437,7 @@ async fn a_pausing_workflow_records_the_error_of_the_node_that_phase_two_failed(
     let task_id = Uuid::new_v4();
     seed_after_a_failed_node(&pool, workflow_id, task_id).await;
     let current_error =
-        TaskError::new("CURRENT_FAILURE", "current node failed").expect("a user error code");
+        TaskError::custom("CURRENT_FAILURE", "current node failed").expect("a custom error code");
     fail_task(&pool, task_id, &current_error).await;
 
     let completion = complete(&broker, task_id).await.expect("phase 2");

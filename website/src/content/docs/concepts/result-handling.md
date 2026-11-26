@@ -27,7 +27,7 @@ from horsies import Err, Ok, Result, TaskError
 def divide(*, a: int, b: int) -> Result[float, TaskError]:
     if b == 0:
         return Err(TaskError(
-            error_code="DIVISION_BY_ZERO",
+            code="DIVISION_BY_ZERO",
             message="Cannot divide by zero",
         ))
     return Ok(a / b)
@@ -59,7 +59,7 @@ def describe_quotient(*, quotient: TaskOutcome[float, TaskError]) -> Result[str,
         case Succeeded(value):
             return Ok(f"quotient={value}")
         case Failed(error):
-            return Err(TaskError(error_code="UPSTREAM_FAILED", message=error.message))
+            return Err(TaskError(code="UPSTREAM_FAILED", message=error.message))
 ```
 
 ## ReadResult
@@ -88,7 +88,7 @@ match divide.send(a=10, b=2):
             case Ok(Succeeded(value)):
                 print(f"Result: {value}")
             case Ok(Failed(task_error)):
-                print(f"Task failed: {task_error.error_code} - {task_error.message}")
+                print(f"Task failed: {task_error.code} - {task_error.message}")
             case Err(read_error):
                 print(f"Read failed: {read_error.code} - {read_error.message}")
     case Err(send_err):
@@ -138,7 +138,7 @@ def describe_read(read: ReadResult[float, TaskError]) -> str:
         case Ok(Succeeded(value)):
             return f"value {value}"
         case Ok(Failed(task_error)):
-            return f"task failed: {task_error.error_code}"
+            return f"task failed: {task_error.code}"
         case Err(WaitTimeout() | TaskNotFound() | BrokerError()):
             return "no outcome yet: read again later"
         case Err(read_error):
@@ -147,13 +147,13 @@ def describe_read(read: ReadResult[float, TaskError]) -> str:
 
 ## TaskError Structure
 
-`TaskError` is a Pydantic model. `error_code` is required. The other fields are optional. A key that the model does not declare is refused.
+`TaskError` is a Pydantic model. `code` is required. The other fields are optional. A key that the model does not declare is refused.
 
 `TaskError[C]` is generic in the type `C` of its custom code, with the default `str`. A task that declares an `Enum` `E` with `error_codes=` and returns `TaskError[E]` has members of `E` as its custom codes ([Declare Error Codes](/horsies/tasks/defining-tasks/#declare-error-codes)).
 
 | Field | Type | Purpose |
 |-------|------|---------|
-| `error_code` | `C \| BuiltInTaskCode` (required): a custom code, or a built-in code | Identifies the error type |
+| `code` | `C \| BuiltInTaskCode` (required): a custom code, or a built-in code | Identifies the error type |
 | `message` | `str` | Human-readable description |
 | `data` | `Any` | Additional context (dict, list, etc.) |
 | `exception` | `BaseException` or `FlattenedException` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |
@@ -161,7 +161,7 @@ def describe_read(read: ReadResult[float, TaskError]) -> str:
 <!-- check: skip elided -- a return statement shown without its function -->
 ```python
 return Err(TaskError(
-    error_code="VALIDATION_FAILED",
+    code="VALIDATION_FAILED",
     message="Input validation failed",
     data={"field": "email", "reason": "invalid format"},
 ))
@@ -274,7 +274,7 @@ def transfer_funds(*, amount: float) -> Result[str, TaskError]:
     if amount <= 0:
         # This is a domain error - expected, handled
         return Err(TaskError(
-            error_code="INVALID_AMOUNT",
+            code="INVALID_AMOUNT",
             message="Amount must be positive",
         ))
     return Ok("Transfer complete")
@@ -339,7 +339,7 @@ def assert_succeeded(read: ReadResult[int, TaskError]) -> None:
 def assert_task_timeout(read: ReadResult[int, TaskError]) -> None:
     match read:
         case Ok(Failed(task_error)):
-            assert task_error.error_code == OutcomeCode.TASK_TIMEOUT
+            assert task_error.code == OutcomeCode.TASK_TIMEOUT
         case _:
             pytest.fail(f"expected a failed outcome, got {read!r}")
 

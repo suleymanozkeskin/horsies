@@ -80,7 +80,7 @@ class NothingRaised:
 @dataclass(frozen=True, slots=True)
 class ResultFailed:
     """The envelope holds a task error. ``error_code`` is the text of its
-    code: the value of a built-in code, or the user's code."""
+    code: the value of a built-in code, or the custom code."""
 
     error_code: str
     raised: RaisedInRun | NothingRaised

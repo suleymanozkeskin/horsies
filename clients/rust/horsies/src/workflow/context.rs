@@ -17,7 +17,7 @@ use uuid::Uuid;
 use super::node::NodeKey;
 use crate::handle::read_stored_result;
 use crate::task::body::value_free_decode_text;
-use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode};
+use crate::{CustomErrorCode, TaskError, TaskOutcome, UnknownUserCode};
 
 /// The context of one workflow task: its place in the workflow, and the
 /// results and sub-workflow summaries of the dependencies that its node
@@ -62,7 +62,7 @@ pub enum WorkflowContextError {
     /// (`RESULT_DESERIALIZATION_ERROR`). `cause` names no value.
     #[error("the stored value of node '{node_id}' does not read: {cause}")]
     Unreadable { node_id: String, cause: String },
-    /// The stored error has a user code that the asked code type does not
+    /// The stored error has a custom code that the asked code type does not
     /// name.
     #[error("the stored error of node '{node_id}': {cause}")]
     UnknownUserCode {
@@ -97,7 +97,7 @@ impl WorkflowContext {
     ) -> Result<TaskOutcome<T, E>, WorkflowContextError>
     where
         T: DeserializeOwned,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         let node_id = key.node_id();
         let stored =
@@ -209,7 +209,7 @@ mod tests {
             .unwrap();
         assert_eq!(fetched, TaskOutcome::Succeeded(vec![1, 2]));
         let checked = context
-            .result_for::<u32, horsies_core::UserCode>(&NodeKey::new("check"))
+            .result_for::<u32, horsies_core::CustomCode>(&NodeKey::new("check"))
             .unwrap();
         assert!(matches!(checked, TaskOutcome::Failed(_)));
     }

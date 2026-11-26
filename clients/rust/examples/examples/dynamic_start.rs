@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, TaskError, TaskOutcome, TaskRuntime, UserErrorCode,
+    task, AppConfig, CustomErrorCode, Horsies, HorsiesError, TaskError, TaskOutcome, TaskRuntime,
     WaitLimit, WorkflowSpec, WorkflowSpecBuilder,
 };
 use horsies_examples::{
@@ -23,7 +23,7 @@ use horsies_examples::{
 use uuid::Uuid;
 
 /// The codes of `start_report`'s own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ReportCode {
     SpecRefused,
     StartFailed,
@@ -62,11 +62,11 @@ fn report_spec(
 async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError<ReportCode>> {
     // The runtime gives a builder of the app that runs the task.
     let spec = report_spec(rt.workflow_builder("regional_report"), region)
-        .map_err(|refused| TaskError::user(ReportCode::SpecRefused, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(ReportCode::SpecRefused, refused.to_string()))?;
     let handle = rt
         .start::<String>(&spec)
         .await
-        .map_err(|error| TaskError::user(ReportCode::StartFailed, error.to_string()))?;
+        .map_err(|error| TaskError::custom(ReportCode::StartFailed, error.to_string()))?;
     Ok(handle.workflow_id())
 }
 

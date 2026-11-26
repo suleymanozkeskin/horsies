@@ -101,7 +101,7 @@ match spec.start():
             case Ok(Succeeded(value)):
                 print(f"Success: {value}")
             case Ok(Failed(task_error)):
-                print(f"Workflow failed: {task_error.error_code}")
+                print(f"Workflow failed: {task_error.code}")
             case Err(read_error):
                 print(f"Read failed: {read_error.code}")
 
@@ -111,7 +111,7 @@ match spec.start():
             case Ok(handle):
                 match handle.get(timeout_ms=30000):
                     case Ok(Failed(task_error)):
-                        print(f"Workflow failed: {task_error.error_code}")
+                        print(f"Workflow failed: {task_error.code}")
                     case _:
                         pass
             case Err(retry_err):

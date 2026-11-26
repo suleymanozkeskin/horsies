@@ -158,7 +158,7 @@ class TestCascadeResumeMissingCompletionCheck:
             broker,
             child_wf_id,
             0,
-            Err(TaskError(error_code='CHILD_FAIL', message='C failed')),
+            Err(TaskError(code='CHILD_FAIL', message='C failed')),
         )
         await session.commit()
         session.expire_all()
@@ -176,7 +176,7 @@ class TestCascadeResumeMissingCompletionCheck:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='PARENT_FAIL', message='A failed')),
+            Err(TaskError(code='PARENT_FAIL', message='A failed')),
         )
         await session.commit()
         session.expire_all()

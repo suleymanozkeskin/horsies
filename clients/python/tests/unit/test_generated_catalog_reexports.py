@@ -283,7 +283,7 @@ def test_is_terminal_holds_exactly_for_the_terminal_members(
 
 def test_the_built_in_registry_holds_every_generated_member() -> None:
     # `BUILTIN_CODE_REGISTRY` is built from the four re-exported families;
-    # `WORKFLOW_START_INCOMPLETE` is a built-in name, so a user code cannot
+    # `WORKFLOW_START_INCOMPLETE` is a built-in name, so a custom code cannot
     # take it.
     families = (
         tasks.OperationalErrorCode,
@@ -298,4 +298,4 @@ def test_the_built_in_registry_holds_every_generated_member() -> None:
         is tasks.OperationalErrorCode.WORKFLOW_START_INCOMPLETE
     )
     with pytest.raises(ValueError, match='reserved built-in error code'):
-        tasks.TaskError(error_code='WORKFLOW_START_INCOMPLETE')
+        tasks.TaskError(code='WORKFLOW_START_INCOMPLETE')

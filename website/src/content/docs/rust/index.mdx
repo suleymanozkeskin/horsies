@@ -16,7 +16,7 @@ A database belongs to one client: the core refuses a database that the Python cl
   <LinkCard title="Getting Started" href="/horsies/rust/quick-start/getting-started/" description="Add the crate, define a task, run a worker, send the task" />
   <LinkCard title="App Config" href="/horsies/rust/configuration/app-config/" description="Horsies::new, AppConfig, schema modes, queues, state" />
   <LinkCard title="Defining Tasks" href="/horsies/rust/tasks/defining-tasks/" description="#[horsies::task], execution classes, retry codes, TaskRuntime" />
-  <LinkCard title="Task Errors" href="/horsies/rust/tasks/errors/" description="TaskError<E>, the UserErrorCode derive, library codes" />
+  <LinkCard title="Task Errors" href="/horsies/rust/tasks/errors/" description="TaskError<E>, the CustomErrorCode derive, built-in codes" />
   <LinkCard title="Sending Tasks" href="/horsies/rust/tasks/sending-tasks/" description="send, the delay and other send options, TaskSendError, resends" />
   <LinkCard title="Retrieving Results" href="/horsies/rust/tasks/retrieving-results/" description="TaskHandle::get, TaskOutcome, ReadError, task info" />
   <LinkCard title="Blocking API" href="/horsies/rust/tasks/blocking-api/" description="Blocking views for a program with no tokio runtime" />
@@ -52,7 +52,7 @@ The sidebar lists every page of the Rust API.
 |-------|-------------|
 | Components and data flow | [Architecture](/horsies/concepts/architecture/) |
 | Task states and transitions | [Task Lifecycle](/horsies/concepts/task-lifecycle/) |
-| Library error codes and config error codes | [Errors Reference](/horsies/tasks/errors/) |
+| Built-in error codes and config error codes | [Errors Reference](/horsies/tasks/errors/) |
 | When a retry starts | [Retry Policy](/horsies/tasks/retry-policy/) |
 | The three execution classes | [Choosing an Execution Mode](/horsies/workers/execution-modes/) |
 | The meaning of each config field | [Broker Config](/horsies/configuration/broker-config/), [Recovery Config](/horsies/configuration/recovery-config/), [Retention Config](/horsies/configuration/retention-config/) |

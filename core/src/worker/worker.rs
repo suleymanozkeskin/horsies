@@ -2424,7 +2424,9 @@ mod tests {
     use crate::core::config::recovery::RecoveryConfig;
     use crate::core::history::maintenance::coverage::StartupCoverageOutcome;
     use crate::core::task::fn_trait::{AsyncTaskFn, RawTaskResult, RegisteredTask, TaskMeta};
-    use crate::core::task::{OperationalErrorCode, TaskError, TaskErrorCode, TaskResult, UserCode};
+    use crate::core::task::{
+        CustomCode, OperationalErrorCode, TaskError, TaskErrorCode, TaskResult,
+    };
     use chrono::Utc;
     use futures::FutureExt;
     use serial_test::serial;
@@ -4141,11 +4143,11 @@ mod tests {
     }
 
     async fn retryable_failure(_: ()) -> Result<String, TaskError> {
-        Err(TaskError::new("RETRY_ME", "retry me").unwrap())
+        Err(TaskError::custom("RETRY_ME", "retry me").unwrap())
     }
 
     async fn fatal_failure(_: ()) -> Result<String, TaskError> {
-        Err(TaskError::new("FATAL", "boom").unwrap())
+        Err(TaskError::custom("FATAL", "boom").unwrap())
     }
 
     async fn callback_success_task(_: ()) -> Result<String, TaskError> {
@@ -5144,7 +5146,7 @@ mod tests {
         let persisted_error = persisted.unwrap_err();
         assert_eq!(
             persisted_error.error_code,
-            TaskErrorCode::User(UserCode::parse("FATAL").unwrap())
+            TaskErrorCode::Custom(CustomCode::parse("FATAL").unwrap())
         );
 
         let (outcome, will_retry, attempt_error_code) =
@@ -5230,7 +5232,7 @@ mod tests {
                     max_retries: 3,
                 },
             ),
-            TaskResult::Err(TaskError::new("RETRY_ME", "try again").unwrap()),
+            TaskResult::Err(TaskError::custom("RETRY_ME", "try again").unwrap()),
             "worker-1",
             &crate::core::config::payload::PayloadPolicy::default(),
         )

@@ -772,7 +772,7 @@ async def test_linear_failure_cascades_to_skip(broker: PostgresBroker) -> None:
 async def test_handle_get_returns_error_on_failed_workflow(
     broker: PostgresBroker,
 ) -> None:
-    """handle.get() returns err with first failed task's error_code."""
+    """handle.get() returns err with first failed task's code."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',

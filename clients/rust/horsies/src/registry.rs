@@ -6,7 +6,7 @@
 //! `Horsies.validate_queue_name`). Each registered task carries its resolved
 //! queue and priority, which sends and workflow nodes inherit.
 //!
-//! The user error codes that a task declares (`UserErrorCode::CODES` of its
+//! The custom error codes that a task declares (`CustomErrorCode::CODES` of its
 //! code type, which the task macros fill) follow the rules of a declared
 //! set (`DeclaredErrorCodes::parse`).
 //!
@@ -193,8 +193,8 @@ fn declared_code_error(name: &str, refusal: &DeclaredCodeRefusal) -> HorsiesErro
             ..
         }
         | DeclaredCodeRefusal::BuiltInName { .. } => {
-            "rename the code: a built-in or reserved name is not a user code; derive the code \
-             type with #[derive(horsies::UserErrorCode)]"
+            "rename the code: a built-in or reserved name is not a custom code; derive the code \
+             type with #[derive(horsies::CustomErrorCode)]"
         }
         DeclaredCodeRefusal::Text {
             refusal:
@@ -203,11 +203,11 @@ fn declared_code_error(name: &str, refusal: &DeclaredCodeRefusal) -> HorsiesErro
                 | CodeTextRefusal::NotUpperSnakeCase,
             ..
         } => "give the code an UPPER_SNAKE_CASE name, for example RATE_LIMITED",
-        DeclaredCodeRefusal::Repeated { .. } => "list each code once in UserErrorCode::CODES",
+        DeclaredCodeRefusal::Repeated { .. } => "list each code once in CustomErrorCode::CODES",
     };
     HorsiesError::new(format!("task '{name}': {refusal}"))
         .with_code(refusal.error_code())
-        .with_note("the error codes of a task are UserErrorCode::CODES of its code type")
+        .with_note("the error codes of a task are CustomErrorCode::CODES of its code type")
         .with_help(help)
 }
 

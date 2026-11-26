@@ -129,7 +129,7 @@ class ProductRecord:
 def fetch_product_page(*, url: str) -> Result[str, TaskError]:
     if "missing" in url:
         return Err(TaskError(
-            error_code="FETCH_FAILED",
+            code="FETCH_FAILED",
             message=f"Could not fetch {url}",
         ))
     return Ok("<html>...</html>")
@@ -143,7 +143,7 @@ def parse_product_page(
     match page_result:
         case Failed():
             return Err(TaskError(
-                error_code="UPSTREAM_FAILED",
+                code="UPSTREAM_FAILED",
                 message="Cannot parse product page: fetch failed",
             ))
         case Succeeded():
@@ -162,7 +162,7 @@ def save_product_record(
     match product_result:
         case Failed():
             return Err(TaskError(
-                error_code="UPSTREAM_FAILED",
+                code="UPSTREAM_FAILED",
                 message="Cannot save product: parse failed",
             ))
         case Succeeded(product):
@@ -255,7 +255,7 @@ Create a handler that **returns actions**, not just logs.
 # Wrong - exceptions break control flow
 match handle.get():
     case Ok(Failed(task_error)):
-        raise RuntimeError(f"Task failed: {task_error.error_code}")
+        raise RuntimeError(f"Task failed: {task_error.code}")
     case _:
         ...  # the other arms
 
@@ -284,7 +284,7 @@ match handle.get():
 match handle.get():
     case Ok(Failed(task_error)):
         handle_error(task_error)
-        return task_error.error_code
+        return task_error.code
     case _:
         ...  # the other arms
 ```
@@ -294,7 +294,7 @@ match handle.get():
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
 # Wrong - duplicates library retry logic
-if error.error_code == "RATE_LIMITED":
+if error.code == "RATE_LIMITED":
     manually_schedule_retry(task_id)
 
 # Correct - configure auto_retry_for on the retry policy

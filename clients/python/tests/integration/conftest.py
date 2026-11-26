@@ -170,7 +170,7 @@ def make_failing_task(app: Horsies, name: str = 'failing_task') -> Any:
 
     @app.task(task_name=name)
     def failing_task() -> Result[int, TaskError]:
-        return Err(TaskError(error_code='DELIBERATE_FAIL', message='Test failure'))
+        return Err(TaskError(code='DELIBERATE_FAIL', message='Test failure'))
 
     return failing_task
 
@@ -198,7 +198,7 @@ def make_args_receiver_task(app: Horsies, name: str = 'args_receiver') -> Any:
             case Failed(error=error):
                 return Err(
                     TaskError(
-                        error_code='UPSTREAM_FAILED',
+                        code='UPSTREAM_FAILED',
                         message='Upstream task failed',
                         data={'upstream_error': error},
                     )
@@ -271,7 +271,7 @@ def make_multi_args_receiver_task(
             case _:
                 return Err(
                     TaskError(
-                        error_code='UPSTREAM_FAILED', message='One or more upstreams failed'
+                        code='UPSTREAM_FAILED', message='One or more upstreams failed'
                     )
                 )
 
@@ -331,7 +331,7 @@ _RUN_NODE_TASK_SQL = text("""
 
 
 def _error_code_text(error: TaskError) -> str:
-    code = error.error_code
+    code = error.code
     match code:
         case Enum():
             return str(code.value)

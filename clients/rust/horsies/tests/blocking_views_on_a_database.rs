@@ -743,7 +743,7 @@ async fn blocking_reads_of_a_cancelled_task_answer_task_cancelled() {
             .blocking()
             .get(wait_of(ENDED_WAIT))
         {
-            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().text(), "TASK_CANCELLED"),
+            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().as_str(), "TASK_CANCELLED"),
             other => panic!("expected TASK_CANCELLED, got {other:?}"),
         }
         match app.blocking().get_raw_result(task_id, wait_of(ENDED_WAIT)) {
@@ -1167,7 +1167,7 @@ async fn blocking_pause_and_resume_move_the_workflow_between_running_and_paused(
         let paused_again = view.pause();
         assert!(matches!(paused_again, Ok(false)), "{paused_again:?}");
         match view.get(wait_of(ENDED_WAIT)) {
-            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().text(), "WORKFLOW_PAUSED"),
+            Ok(TaskOutcome::Failed(error)) => assert_eq!(error.code().as_str(), "WORKFLOW_PAUSED"),
             other => panic!("expected WORKFLOW_PAUSED, got {other:?}"),
         }
         let resumed = view.resume();
@@ -1202,7 +1202,7 @@ async fn a_blocking_cancel_ends_the_workflow_as_cancelled() {
         );
         match view.get(wait_of(ENDED_WAIT)) {
             Ok(TaskOutcome::Failed(error)) => {
-                assert_eq!(error.code().text(), "WORKFLOW_CANCELLED");
+                assert_eq!(error.code().as_str(), "WORKFLOW_CANCELLED");
             }
             other => panic!("expected WORKFLOW_CANCELLED, got {other:?}"),
         }

@@ -16,7 +16,7 @@ use crate::broker::ClearableBootCause;
 use crate::core::boot_failure::ShortageErrno;
 use crate::core::config::bounded::BoundedU32;
 use crate::core::task::Execution;
-use crate::core::{BuiltInTaskCode, OperationalErrorCode, OutcomeCode, TaskErrorCode, UserCode};
+use crate::core::{BuiltInTaskCode, CustomCode, OperationalErrorCode, OutcomeCode, TaskErrorCode};
 use crate::worker::executor::protocol::{BoundedText, ProcessId, StopReason};
 use crate::worker::executor::slots::dispatch::NotRunCause;
 
@@ -623,7 +623,7 @@ fn the_reasons_of_the_core_convert_one_to_one() {
 }
 
 #[test]
-fn a_task_error_code_converts_and_a_long_user_code_is_named() {
+fn a_task_error_code_converts_and_a_long_custom_code_is_named() {
     let built_in = TaskErrorCode::BuiltIn(OutcomeCode::TaskTimeout.into());
     assert_eq!(
         AttemptErrorCode::from(&built_in),
@@ -631,16 +631,17 @@ fn a_task_error_code_converts_and_a_long_user_code_is_named() {
             code: OutcomeCode::TaskTimeout.into()
         }
     );
-    let at_bound = "C".repeat(MAX_EVENT_USER_CODE_CHARS);
-    let user = TaskErrorCode::User(UserCode::parse(at_bound.clone()).unwrap());
+    let at_bound = "C".repeat(MAX_EVENT_CUSTOM_CODE_CHARS);
+    let custom = TaskErrorCode::Custom(CustomCode::parse(at_bound.clone()).unwrap());
     assert_eq!(
-        AttemptErrorCode::from(&user),
+        AttemptErrorCode::from(&custom),
         AttemptErrorCode::Custom {
-            code: UserCodeText::new(at_bound).unwrap()
+            code: CustomCodeText::new(at_bound).unwrap()
         }
     );
-    let over =
-        TaskErrorCode::User(UserCode::parse("C".repeat(MAX_EVENT_USER_CODE_CHARS + 1)).unwrap());
+    let over = TaskErrorCode::Custom(
+        CustomCode::parse("C".repeat(MAX_EVENT_CUSTOM_CODE_CHARS + 1)).unwrap(),
+    );
     assert_eq!(
         AttemptErrorCode::from(&over),
         AttemptErrorCode::CustomOverBound

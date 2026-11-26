@@ -28,7 +28,7 @@ pub struct PromotionTasks {
 
 /// The task error of a size code that no size has.
 pub fn map_size_code_error(size_code: &str) -> TaskError<AcmeCode> {
-    TaskError::user(
+    TaskError::custom(
         AcmeCode::DataCorruption,
         format!("unknown promotion size code {size_code}"),
     )
@@ -143,7 +143,7 @@ pub fn loyalty_points(
             .copied()
             .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
             .unwrap_or("loyalty engine panic");
-        TaskError::user(AcmeCode::LoyaltyEngineBug, detail)
+        TaskError::custom(AcmeCode::LoyaltyEngineBug, detail)
     })
 }
 
@@ -332,7 +332,7 @@ mod tests {
     fn size_mapping_is_data_corruption() {
         assert_eq!(
             map_size_code_error("XXL").code(),
-            &TaskErrorCode::User(AcmeCode::DataCorruption)
+            &TaskErrorCode::Custom(AcmeCode::DataCorruption)
         );
     }
 
@@ -346,7 +346,10 @@ mod tests {
             })
             .expect("seeded population contains a non-panicking size-code draw");
         let error = promotion_outcome(&order_id).expect_err("size-code draw");
-        assert_eq!(error.code(), &TaskErrorCode::User(AcmeCode::DataCorruption));
+        assert_eq!(
+            error.code(),
+            &TaskErrorCode::Custom(AcmeCode::DataCorruption)
+        );
     }
 
     #[test]
@@ -355,7 +358,7 @@ mod tests {
         let error = loyalty_points(&customer_id, "order").expect_err("bug draw");
         assert_eq!(
             error.code(),
-            &TaskErrorCode::User(AcmeCode::LoyaltyEngineBug)
+            &TaskErrorCode::Custom(AcmeCode::LoyaltyEngineBug)
         );
     }
 

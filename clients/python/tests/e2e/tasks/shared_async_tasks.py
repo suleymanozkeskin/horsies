@@ -195,5 +195,5 @@ async def shared_sends(*, x: int) -> Result[str, TaskError]:
             return Ok(str(handle.task_id))
         case Err(send_err):
             return Err(
-                TaskError(error_code='SEND_FAILED', message=send_err.message),
+                TaskError(code='SEND_FAILED', message=send_err.message),
             )

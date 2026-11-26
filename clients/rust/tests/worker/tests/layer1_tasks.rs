@@ -126,7 +126,7 @@ async fn test_explicit_error_result() {
         .expect("send e2e_error");
     match outcome(&handle, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "DELIBERATE_ERROR");
+            assert_eq!(error.code().as_str(), "DELIBERATE_ERROR");
             assert_eq!(error.message(), Some("This is intentional"));
             assert_eq!(
                 error.data().map(|data| data
@@ -516,7 +516,7 @@ async fn test_task_cancelled() {
         .expect("cancel the pending task");
     match outcome(&handle, Duration::from_secs(1)).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "TASK_CANCELLED");
+            assert_eq!(error.code().as_str(), "TASK_CANCELLED");
             let data: serde_json::Value = error
                 .data()
                 .expect("TASK_CANCELLED stores data")
@@ -551,7 +551,7 @@ async fn test_task_cancelled_get_result() {
         .await
         .expect("read the result by id");
     match read {
-        TaskOutcome::Failed(error) => assert_eq!(error.code().text(), "TASK_CANCELLED"),
+        TaskOutcome::Failed(error) => assert_eq!(error.code().as_str(), "TASK_CANCELLED"),
         TaskOutcome::Succeeded(value) => panic!("the cancelled task succeeded with {value}"),
     }
 }
@@ -849,7 +849,7 @@ async fn test_library_error_code_in_user_task() {
         .expect("send");
     match outcome(&handle, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "TASK_EXCEPTION");
+            assert_eq!(error.code().as_str(), "TASK_EXCEPTION");
             assert_eq!(error.message(), Some("boom"));
         }
         TaskOutcome::Succeeded(value) => panic!("e2e_error_code succeeded with {value}"),
@@ -870,7 +870,7 @@ async fn test_exception_becomes_error() {
         .expect("send");
     match outcome(&handle, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), "UNHANDLED_EXCEPTION");
+            assert_eq!(error.code().as_str(), "UNHANDLED_EXCEPTION");
             assert!(error.exception().is_some(), "a panic stores its record");
             let data: serde_json::Value = error
                 .data()

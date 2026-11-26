@@ -58,7 +58,7 @@ def send_order_email(
             if order is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to write about',
                         data={'order_id': order_id},
                     ),
@@ -100,7 +100,7 @@ def send_shipping_sms(
             if order is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to notify',
                         data={'order_id': order_id},
                     ),

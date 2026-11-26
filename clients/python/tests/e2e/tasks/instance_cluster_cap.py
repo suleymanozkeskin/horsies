@@ -66,4 +66,4 @@ def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
 @app.task(task_name='e2e_cluster_cap_fail')
 def fail_task() -> Result[str, TaskError]:
     """Task that always fails, for cap-leak testing."""
-    return Err(TaskError(error_code='DELIBERATE_FAIL', message='always fails'))
+    return Err(TaskError(code='DELIBERATE_FAIL', message='always fails'))

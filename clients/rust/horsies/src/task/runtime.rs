@@ -22,7 +22,7 @@ use crate::app::{AppState, StateNotProvided};
 use crate::send::TaskFunctions;
 use crate::workflow::WorkflowStarter;
 use crate::{
-    TaskFunction, TaskFunctionNotFound, UserErrorCode, WorkflowHandle, WorkflowSpec,
+    CustomErrorCode, TaskFunction, TaskFunctionNotFound, WorkflowHandle, WorkflowSpec,
     WorkflowSpecBuilder, WorkflowStartError,
 };
 
@@ -33,10 +33,10 @@ use crate::{
 /// async fn sync_feed(rt: horsies::TaskRuntime, feed: Feed) -> Result<u32, TaskError<FeedCode>> {
 ///     let client = rt
 ///         .state::<HttpClient>()
-///         .map_err(|missing| TaskError::user(FeedCode::NotConfigured, missing.to_string()))?;
+///         .map_err(|missing| TaskError::custom(FeedCode::NotConfigured, missing.to_string()))?;
 ///     tokio::select! {
 ///         count = client.sync(&feed) => Ok(count),
-///         () = rt.cancelled() => Err(TaskError::user(FeedCode::Interrupted, "cancelled")),
+///         () = rt.cancelled() => Err(TaskError::custom(FeedCode::Interrupted, "cancelled")),
 ///     }
 /// }
 /// ```
@@ -116,7 +116,7 @@ impl TaskRuntime {
     where
         A: Serialize + DeserializeOwned + 'static,
         T: Serialize + DeserializeOwned + 'static,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         self.functions.get::<A, T, E>(task_name)
     }
@@ -187,7 +187,7 @@ impl TaskRuntime {
     ///     for row in file.rows() {
     ///         match rt.cancel_state() {
     ///             RunCancelState::Requested { .. } => {
-    ///                 return Err(TaskError::user(ImportCode::Stopped, "cancelled"))
+    ///                 return Err(TaskError::custom(ImportCode::Stopped, "cancelled"))
     ///             }
     ///             RunCancelState::NotRequested | RunCancelState::NotInARun => {}
     ///         }
@@ -223,7 +223,7 @@ impl TaskRuntime {
     /// async fn charge(rt: TaskRuntime, order: Order) -> Result<(), TaskError<ChargeCode>> {
     ///     let token = rt
     ///         .fencing_token()
-    ///         .map_err(|refused| TaskError::user(ChargeCode::NoRun, refused.to_string()))?;
+    ///         .map_err(|refused| TaskError::custom(ChargeCode::NoRun, refused.to_string()))?;
     ///     // UPDATE payments SET state = 'charged', fence = $2
     ///     //  WHERE task_id = $1 AND fence <= $2
     ///     store.charge(token.task_id(), i64::from(token.value().get()), &order).await

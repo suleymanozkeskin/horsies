@@ -101,7 +101,7 @@ pub async fn update_stock_levels(
     workflow_ctx: Option<WorkflowContext>,
 ) -> Result<StockUpdate, TaskError<AcmeCode>> {
     let context = workflow_ctx.ok_or_else(|| {
-        TaskError::user(
+        TaskError::custom(
             AcmeCode::NoWorkflowContext,
             "update_stock_levels runs as a node of the restock workflow",
         )
@@ -118,7 +118,7 @@ pub async fn update_stock_levels(
     let required = payload_len(tuning::RESTOCK_MIN_SUCCESSFUL_FEEDS.min(feed_node_ids.len()));
     let reporting = payload_len(feed_node_ids.len()) - skipped;
     if reporting < required {
-        return Err(TaskError::user(
+        return Err(TaskError::custom(
             AcmeCode::QuorumNotMet,
             format!("{reporting} supplier feeds reported, {required} needed"),
         ));

@@ -10,12 +10,12 @@
 
 use std::time::Duration;
 
-use horsies::{blocking_task, task, RunCancelState, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{blocking_task, task, CustomErrorCode, RunCancelState, TaskError, TaskRuntime};
 
 use crate::markers;
 
 /// The codes of these tasks' own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 pub enum CancelCode {
     /// A marker operation failed in the child.
     MarkerFailed,
@@ -43,7 +43,7 @@ pub const KILL_GRACE_MS: u64 = 500;
 pub const SAW_SEPARATOR: char = '|';
 
 fn marker_failed(cause: &markers::MarkerError) -> TaskError<CancelCode> {
-    TaskError::user(CancelCode::MarkerFailed, cause.to_string())
+    TaskError::custom(CancelCode::MarkerFailed, cause.to_string())
 }
 
 /// Write the marker `<token>-<suffix>` with the pid of this child.

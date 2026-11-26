@@ -29,10 +29,10 @@ pub use horsies_core::events::AnyEvent;
 pub use horsies_core::events::{
     AttemptEnd, AttemptEnded, AttemptErrorCode, AttemptNotStarted, AttemptNumber, AttemptPlaced,
     AttemptRecord, AttemptRecorded, AttemptStart, ChildReplaced, ChildResult, ChildStarted,
-    ClaimReleased, OperatorCancelEnd, Priority, QueueName, RecoveryAction, ReleaseReason,
-    ReplaceReason, RetryCount, RunTrace, ShortageErrno, SlotDown, SlotDownCause, SlotIndex,
-    SlotRecovered, StopReason, TaskClaimed, TaskName, TaskRecovered, TraceCarrierText, UnionEvent,
-    UserCodeText, WorkerDecision, WorkerIdText, WorkflowPlace,
+    ClaimReleased, CustomCodeText, OperatorCancelEnd, Priority, QueueName, RecoveryAction,
+    ReleaseReason, ReplaceReason, RetryCount, RunTrace, ShortageErrno, SlotDown, SlotDownCause,
+    SlotIndex, SlotRecovered, StopReason, TaskClaimed, TaskName, TaskRecovered, TraceCarrierText,
+    UnionEvent, WorkerDecision, WorkerIdText, WorkflowPlace,
 };
 pub use horsies_core::{
     HandlerError, HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY, HANDLER_QUEUE_EVENTS,

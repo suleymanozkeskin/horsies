@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = add.blocking().send(add_numbers::Input { a: 2, b: 3 })?;
     match handle.blocking().get(WaitLimit::NoLimit)? {
         TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
-        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -53,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = daily_report.blocking().start()?;
     match handle.blocking().get(WaitLimit::NoLimit)? {
         TaskOutcome::Succeeded(length) => println!("published {length} bytes"),
-        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().as_str()),
     }
     let status = handle.blocking().status()?;
     println!("status: {status:?}");

@@ -133,9 +133,9 @@ pub enum EventRoute {
     HandlerChildLink(EventLink),
 }
 
-/// The user error codes that each task of a worker declares: the
+/// The custom error codes that each task of a worker declares: the
 /// `error_codes` of each task of the worker manifest. The `error_code` label
-/// of a user code is the code when its task declares it, else `undeclared`.
+/// of a custom code is the code when its task declares it, else `undeclared`.
 #[derive(Debug, Clone, Default)]
 pub struct DeclaredCodesByTask {
     by_task: HashMap<String, DeclaredErrorCodes>,

@@ -6,8 +6,8 @@ The library uses two distinct error systems:
 
 1. ``ReadResult[T, TaskError]`` -- user-facing task reads. Returned by
    ``get_result_async`` / ``get_result`` and the handles. Its outcome
-   (``Succeeded`` / ``Failed``) carries domain error codes
-   (``BuiltInTaskCode`` families) and user-defined error codes; a read
+   (``Succeeded`` / ``Failed``) carries built-in codes
+   (``BuiltInTaskCode`` families) and custom codes; a read
    failure is a ``ReadError`` class.
 
 2. ``BrokerResult[T]`` (this module) -- infrastructure operation outcomes.

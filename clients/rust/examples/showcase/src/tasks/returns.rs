@@ -82,7 +82,7 @@ pub async fn inspect_item(
         .await
         .map_err(|error| store_failure("record_inspection", error))?;
     match damaged {
-        true => Err(TaskError::user(
+        true => Err(TaskError::custom(
             AcmeCode::DamagedItem,
             format!("{} came back damaged and cannot be resold", case.sku),
         )
@@ -146,7 +146,9 @@ async fn return_case(store: &Store, return_id: &str) -> Result<ReturnCase, TaskE
         .get_return(return_id)
         .await
         .map_err(|error| store_failure("get_return", error))?
-        .ok_or_else(|| TaskError::user(AcmeCode::ReturnNotFound, format!("no return {return_id}")))
+        .ok_or_else(|| {
+            TaskError::custom(AcmeCode::ReturnNotFound, format!("no return {return_id}"))
+        })
 }
 
 /// Register the return tasks on `app`.

@@ -456,7 +456,7 @@ pub(super) fn refusal_end(task_name: &str, refusal: &StoredOptionsRefusal) -> Ru
             }),
         ),
     };
-    let mut error = TaskError::builtin(
+    let mut error = TaskError::built_in(
         OperationalErrorCode::WorkerSerializationError,
         reason.as_str(),
     );
@@ -480,7 +480,7 @@ pub(super) fn prepare(app: &ChildApp, task_name: &str, input: &TaskInputText) ->
     let task = match app.registry.get(task_name) {
         Ok(task) => task.clone(),
         Err(error) => {
-            return Prepared::Ended(error_envelope(TaskError::builtin(
+            return Prepared::Ended(error_envelope(TaskError::built_in(
                 OperationalErrorCode::WorkerResolutionError,
                 format!("task '{task_name}' is not registered in this binary: {error}"),
             )))
@@ -503,12 +503,12 @@ pub(super) fn result_end(result: TaskResult<Vec<u8>>) -> RunEnd {
         TaskResult::Ok(bytes) => match serde_json::from_slice::<&RawValue>(&bytes) {
             Ok(raw) => match serde_json::to_string(&TaskResult::Ok(raw)) {
                 Ok(text) => RunEnd::Result(ResultEnvelopeText::new(text)),
-                Err(error) => error_envelope(TaskError::builtin(
+                Err(error) => error_envelope(TaskError::built_in(
                     OperationalErrorCode::WorkerSerializationError,
                     format!("failed to encode the result envelope: {error}"),
                 )),
             },
-            Err(error) => error_envelope(TaskError::builtin(
+            Err(error) => error_envelope(TaskError::built_in(
                 OperationalErrorCode::WorkerSerializationError,
                 format!("failed to parse task result JSON: {error}"),
             )),

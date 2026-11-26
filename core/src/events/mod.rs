@@ -50,10 +50,10 @@ pub use schema::{
 };
 pub use values::{
     AttemptEnd, AttemptErrorCode, AttemptNumber, AttemptRecord, AttemptStart, ChildResult,
-    OperatorCancelEnd, Priority, QueueName, RetryCount, RunTrace, SlotDownCause, SlotIndex,
-    TaskName, TraceCarrierText, UserCodeText, WorkerDecision, WorkerIdText, WorkflowPlace,
-    BUILT_IN_TASK_CODES, MAX_ATTEMPT, MAX_EVENT_QUEUE_NAME_CHARS, MAX_EVENT_TASK_NAME_CHARS,
-    MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_USER_CODE_CHARS, MAX_EVENT_WORKER_ID_CHARS,
+    CustomCodeText, OperatorCancelEnd, Priority, QueueName, RetryCount, RunTrace, SlotDownCause,
+    SlotIndex, TaskName, TraceCarrierText, WorkerDecision, WorkerIdText, WorkflowPlace,
+    BUILT_IN_TASK_CODES, MAX_ATTEMPT, MAX_EVENT_CUSTOM_CODE_CHARS, MAX_EVENT_QUEUE_NAME_CHARS,
+    MAX_EVENT_TASK_NAME_CHARS, MAX_EVENT_TRACE_CARRIER_CHARS, MAX_EVENT_WORKER_ID_CHARS,
     MAX_RETRY_COUNT, MAX_SLOT_INDEX,
 };
 

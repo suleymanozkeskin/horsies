@@ -69,7 +69,7 @@ def process(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
     match data:
         case Failed():
             return Err(TaskError(
-                error_code="UPSTREAM_FAILED",
+                code="UPSTREAM_FAILED",
                 message="Upstream task failed",
             ))
         case Succeeded(value):
@@ -149,7 +149,7 @@ from horsies import Failed, Ok, OutcomeCode, Result, Succeeded, TaskError, TaskO
 @app.task(task_name="recovery_handler")
 def recovery_handler(*, input_result: TaskOutcome[Data, TaskError]) -> Result[...]:
     match input_result:
-        case Failed(err) if err.error_code == OutcomeCode.UPSTREAM_SKIPPED:
+        case Failed(err) if err.code == OutcomeCode.UPSTREAM_SKIPPED:
             # Dependency was skipped (upstream failure)
             return Ok({"status": "skipped_upstream"})
         case Failed(err):
@@ -166,7 +166,7 @@ The entry that a node with `allow_failed_dependencies=True` receives for a SKIPP
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 Failed(TaskError(
-    error_code=OutcomeCode.UPSTREAM_SKIPPED,
+    code=OutcomeCode.UPSTREAM_SKIPPED,
     message="Upstream dependency was SKIPPED",
     data={"dependency_index": <index>},
 ))
@@ -177,7 +177,7 @@ The entry for a dependency with no stored result:
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
 Failed(TaskError(
-    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+    code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
     message="Dependency node <node_id> (index <index>, task <task_name>) is <status> with no stored result",
     data={"dependency_index": <index>},
 ))
@@ -292,7 +292,7 @@ def read_label(handle: WorkflowHandle[str]) -> str | None:
     match handle.get(timeout_ms=30000):
         case Ok(Succeeded(label)):
             return label
-        case Ok(Failed(error)) if error.error_code == OutcomeCode.WORKFLOW_OUTPUT_SKIPPED:
+        case Ok(Failed(error)) if error.code == OutcomeCode.WORKFLOW_OUTPUT_SKIPPED:
             return None  # The workflow succeeded and has no label.
         case Ok(Failed(error)):
             raise RuntimeError(error.message)
@@ -422,7 +422,7 @@ node_c: TaskNode[Summary] = TaskNode(
 @app.task(task_name="aggregate")
 def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> Result[Summary, TaskError]:
     if workflow_ctx is None:
-        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
+        return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     # Type-safe access: result_for returns TaskOutcome[T, TaskError] matching the node's type
     a_result: TaskOutcome[int, TaskError] = workflow_ctx.result_for(node_a)
@@ -491,7 +491,7 @@ app = Horsies(config)
 @app.task("fan_in")
 def fan_in(*, workflow_ctx: WorkflowContext | None = None) -> Result[str, TaskError]:
     if workflow_ctx is None:
-        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
+        return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     i: int = 0
     match workflow_ctx.result_for(NodeKey(f"save_{i}")):

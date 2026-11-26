@@ -1,7 +1,7 @@
-"""The user error codes that a task declares: `@app.task(..., error_codes=...)`.
+"""The custom error codes that a task declares: `@app.task(..., error_codes=...)`.
 
 The `error_code` metric label of one task has every built-in code by its
-value, each code that the task declares, and `undeclared`. A user code that
+value, each code that the task declares, and `undeclared`. A custom code that
 the task does not declare counts as `undeclared` in that label only; events,
 traces, logs and the history row keep the exact code. Declaring is
 optional, and no count limits a set.
@@ -133,12 +133,12 @@ def with_mapper_codes(
 ) -> tuple[str, ...]:
     """The declared set of a task: the codes that `error_codes=` declares
     (`declared`, as `parse_declared_error_codes` accepted them), then the
-    user codes that the task's exception mapper `task_mapper` can produce,
+    custom codes that the task's exception mapper `task_mapper` can produce,
     then those of the app's mapper `app_mapper`. Each code comes once, in
     the order of its first place: the declaration, then each mapper in the
     order of its entries. Pure.
 
-    A mapper value that is not a user code is not added: a built-in code
+    A mapper value that is not a custom code is not added: a built-in code
     (every built-in code is a value of the `error_code` label already), a
     reserved name, or a text outside the code-text rule. The mapper checks
     refuse such a value: `HRS-209` when the task or the app config is
@@ -150,7 +150,7 @@ def with_mapper_codes(
     )
     codes: list[str] = list(declared)
     for code in (*task_codes, *app_mapper.values()):
-        match _is_user_code(code) and code not in codes:
+        match _is_custom_code(code) and code not in codes:
             case True:
                 codes.append(code)
             case False:
@@ -158,7 +158,7 @@ def with_mapper_codes(
     return tuple(codes)
 
 
-def _is_user_code(code: object) -> bool:
+def _is_custom_code(code: object) -> bool:
     """Whether `code` is a text that a task may declare: it passes the
     code-text rule, it is not a reserved name, and it is not the name of a
     built-in code. Pure."""

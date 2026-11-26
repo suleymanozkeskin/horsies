@@ -7,8 +7,8 @@
 //! value that a result read returns: `Succeeded(S)` for the value the
 //! dependency returned, `Failed(TaskError<E>)` for its error or for a code
 //! the library recorded (`UPSTREAM_SKIPPED` for a skipped dependency with
-//! `allow_failed_dependencies`). `E` reads the user codes of the dependency's task;
-//! `UserCode` reads any user code.
+//! `allow_failed_dependencies`). `E` reads the custom codes of the dependency's task;
+//! `CustomCode` reads any custom code.
 //!
 //! The serde form is the stored envelope:
 //! `{"__h_task_result__": true, "ok": <value>, "err": null}` or
@@ -16,19 +16,19 @@
 
 use std::collections::BTreeMap;
 
-use horsies_core::{JsonText, OutcomeCode, TaskResult, UserCode};
+use horsies_core::{CustomCode, JsonText, OutcomeCode, TaskResult};
 use serde::de::{DeserializeOwned, Error as _};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
 use super::node::engine_member_text;
 use crate::handle::read_stored_result;
-use crate::{TaskError, TaskOutcome, UserErrorCode};
+use crate::{CustomErrorCode, TaskError, TaskOutcome};
 
 impl<T, E> Serialize for TaskOutcome<T, E>
 where
     T: Serialize,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
@@ -51,7 +51,7 @@ where
 impl<'de, T, E> Deserialize<'de> for TaskOutcome<T, E>
 where
     T: DeserializeOwned,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let envelope = Box::<RawValue>::deserialize(deserializer)?;
@@ -69,20 +69,20 @@ where
 /// The result of a workflow with no output node (Python's outputless
 /// result): the outcome of each node by node id, with the value as its
 /// stored text (`JsonText::decode` reads it with the node's type) and the
-/// user codes as text, because the nodes are of many tasks.
+/// custom codes as text, because the nodes are of many tasks.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OutputlessResults {
-    by_node_id: BTreeMap<String, TaskOutcome<JsonText, UserCode>>,
+    by_node_id: BTreeMap<String, TaskOutcome<JsonText, CustomCode>>,
 }
 
 impl OutputlessResults {
     /// The outcome of the node `node_id`, when the result holds it.
-    pub fn get(&self, node_id: &str) -> Option<&TaskOutcome<JsonText, UserCode>> {
+    pub fn get(&self, node_id: &str) -> Option<&TaskOutcome<JsonText, CustomCode>> {
         self.by_node_id.get(node_id)
     }
 
     /// Every node id and its outcome, by node id.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &TaskOutcome<JsonText, UserCode>)> {
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &TaskOutcome<JsonText, CustomCode>)> {
         self.by_node_id
             .iter()
             .map(|(node_id, outcome)| (node_id.as_str(), outcome))
@@ -98,7 +98,7 @@ impl OutputlessResults {
         self.by_node_id.is_empty()
     }
 
-    pub(crate) fn new(by_node_id: BTreeMap<String, TaskOutcome<JsonText, UserCode>>) -> Self {
+    pub(crate) fn new(by_node_id: BTreeMap<String, TaskOutcome<JsonText, CustomCode>>) -> Self {
         Self { by_node_id }
     }
 }
@@ -110,7 +110,7 @@ impl<'de> Deserialize<'de> for OutputlessResults {
     /// the workflow handle reads the stored result of an outputless workflow
     /// through its own envelope.
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        BTreeMap::<String, TaskOutcome<JsonText, UserCode>>::deserialize(deserializer)
+        BTreeMap::<String, TaskOutcome<JsonText, CustomCode>>::deserialize(deserializer)
             .map(Self::new)
     }
 }
@@ -119,7 +119,7 @@ impl<'de> Deserialize<'de> for OutputlessResults {
 /// place of each `args_from` member: a failed dependency
 /// (`UPSTREAM_SKIPPED`), which every `TaskOutcome<S, E>` reads.
 pub(crate) fn placeholder_result_text() -> String {
-    engine_member_text(&TaskResult::<()>::Err(horsies_core::TaskError::builtin(
+    engine_member_text(&TaskResult::<()>::Err(horsies_core::TaskError::built_in(
         OutcomeCode::UpstreamSkipped,
         "placeholder of the input check",
     )))
@@ -153,10 +153,10 @@ mod tests {
         Declined,
     }
 
-    impl UserErrorCode for ChargeCode {
+    impl CustomErrorCode for ChargeCode {
         const CODES: &'static [&'static str] = &["DECLINED"];
 
-        fn code(&self) -> &'static str {
+        fn as_str(&self) -> &'static str {
             match self {
                 Self::Declined => "DECLINED",
             }
@@ -197,7 +197,7 @@ mod tests {
         let Some(TaskOutcome::Failed(error)) = results.get("b") else {
             panic!("a stored error reads as Failed");
         };
-        assert_eq!(error.code().text(), "DECLINED");
+        assert_eq!(error.code().as_str(), "DECLINED");
         assert_eq!(results.get("c"), None);
     }
 
@@ -239,21 +239,21 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_user_code_reads_with_the_code_type_or_as_text() {
+    fn a_stored_custom_code_reads_with_the_code_type_or_as_text() {
         let outcome: TaskOutcome<u32, ChargeCode> = serde_json::from_value(declined()).unwrap();
         let TaskOutcome::Failed(error) = outcome else {
             panic!("a stored error reads as Failed");
         };
-        assert_eq!(error.code(), &TaskErrorCode::User(ChargeCode::Declined));
-        let as_text: TaskOutcome<u32, UserCode> = serde_json::from_value(declined()).unwrap();
+        assert_eq!(error.code(), &TaskErrorCode::Custom(ChargeCode::Declined));
+        let as_text: TaskOutcome<u32, CustomCode> = serde_json::from_value(declined()).unwrap();
         let TaskOutcome::Failed(error) = as_text else {
             panic!("a stored error reads as Failed");
         };
-        assert_eq!(error.code().text(), "DECLINED");
+        assert_eq!(error.code().as_str(), "DECLINED");
     }
 
     #[test]
-    fn a_user_code_that_the_code_type_does_not_name_is_refused() {
+    fn a_custom_code_that_the_code_type_does_not_name_is_refused() {
         let refused = serde_json::from_value::<TaskOutcome<u32, Infallible>>(declined());
         assert!(refused.is_err());
     }
@@ -265,7 +265,7 @@ mod tests {
             written,
             json!({"__h_task_result__": true, "ok": 3, "err": null})
         );
-        let failed = TaskOutcome::<u32, ChargeCode>::Failed(TaskError::user(
+        let failed = TaskOutcome::<u32, ChargeCode>::Failed(TaskError::custom(
             ChargeCode::Declined,
             "card declined",
         ));
@@ -283,7 +283,7 @@ mod tests {
         };
         assert_eq!(
             error.code(),
-            &TaskErrorCode::Library(BuiltInTaskCode::from(OutcomeCode::UpstreamSkipped))
+            &TaskErrorCode::BuiltIn(BuiltInTaskCode::from(OutcomeCode::UpstreamSkipped))
         );
     }
 }

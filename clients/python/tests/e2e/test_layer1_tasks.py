@@ -245,7 +245,7 @@ def test_explicit_error_result() -> None:
     ):
         result = unwrap_send(basic_tasks.error_task.send()).get(timeout_ms=5000)
         task_error = failed_error(result)
-        assert task_error.error_code == 'DELIBERATE_ERROR'
+        assert task_error.code == 'DELIBERATE_ERROR'
         assert task_error.message == 'This is intentional'
         assert task_error.data == {'key': 'value'}
 
@@ -259,7 +259,7 @@ def test_exception_becomes_error() -> None:
     ):
         result = unwrap_send(basic_tasks.exception_task.send()).get(timeout_ms=5000)
         task_error = failed_error(result)
-        assert task_error.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert task_error.code == OperationalErrorCode.UNHANDLED_EXCEPTION
         assert task_error.message is not None
         assert 'ValueError' in task_error.message
 
@@ -900,7 +900,7 @@ def test_unencodable_return_value_is_a_type_mismatch() -> None:
     ):
         result = unwrap_send(basic_tasks.unserializable_result_task.send()).get(timeout_ms=5000)
         task_error = failed_error(result)
-        assert task_error.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert task_error.code == ContractCode.RETURN_TYPE_MISMATCH
         assert 'Ok(<function>)' in (task_error.message or '')
         assert 'identity' not in (task_error.message or '')
         assert 'identity' not in json.dumps(task_error.data)
@@ -942,7 +942,7 @@ def test_return_none_from_task() -> None:
     ):
         result = unwrap_send(basic_tasks.return_none_task.send()).get(timeout_ms=5000)
         task_error = failed_error(result)
-        assert task_error.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert task_error.code == ContractCode.RETURN_TYPE_MISMATCH
         assert 'None' in (task_error.message or '')
 
 
@@ -956,7 +956,7 @@ def test_library_error_code_in_user_task() -> None:
     ):
         result = unwrap_send(basic_tasks.error_code_task.send()).get(timeout_ms=5000)
         task_error = failed_error(result)
-        assert task_error.error_code == OperationalErrorCode.TASK_EXCEPTION
+        assert task_error.code == OperationalErrorCode.TASK_EXCEPTION
         assert task_error.message == 'boom'
 
 
@@ -1074,7 +1074,7 @@ async def test_task_cancelled(broker: PostgresBroker, app: Horsies) -> None:
 
     result = await asyncio.to_thread(app.get_result, task_id, timeout_ms=1000)
     task_error = failed_error(result)
-    assert task_error.error_code == OutcomeCode.TASK_CANCELLED
+    assert task_error.code == OutcomeCode.TASK_CANCELLED
     assert task_error.data is not None
     assert task_error.data['task_id'] == str(task_id)
 

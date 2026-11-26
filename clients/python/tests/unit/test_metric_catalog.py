@@ -22,7 +22,7 @@ _TWO_METRICS = """horsies.task.attempts
   help: Attempts.
   label task (horsies.task.name): declared task names, fallback "(unregistered)"
   label outcome (horsies.task.outcome): "COMPLETED" "FAILED" "WORKER_FAILURE"
-  label error_code (error.type): "" "TASK_TIMEOUT" then declared user error codes, fallback "undeclared"
+  label error_code (error.type): "" "TASK_TIMEOUT" then declared custom error codes, fallback "undeclared"
 horsies.task.run.duration
   prometheus: horsies_task_run_duration_seconds
   kind: histogram

@@ -97,18 +97,18 @@ pub mod __private {
         crate::InputField::raw(name)
     }
 
-    /// Whether `text` may be a user error code: not the name of a built-in
-    /// code and not a reserved name. `#[derive(UserErrorCode)]` asserts it
+    /// Whether `text` may be a custom error code: not the name of a built-in
+    /// code and not a reserved name. `#[derive(CustomErrorCode)]` asserts it
     /// for each code at compile time.
-    pub const fn is_free_user_code(text: &str) -> bool {
-        crate::task::is_free_user_code(text)
+    pub const fn is_free_custom_code(text: &str) -> bool {
+        crate::task::is_free_custom_code(text)
     }
 
     /// Whether `text` may stand in `auto_retry_for` of a task whose code
-    /// type has `user_codes`: a built-in code or one of `user_codes`. The
+    /// type has `custom_codes`: a built-in code or one of `custom_codes`. The
     /// task attribute asserts it for each entry at compile time.
-    pub const fn is_retry_code(text: &str, user_codes: &[&str]) -> bool {
-        crate::task::is_retry_code(text, user_codes)
+    pub const fn is_retry_code(text: &str, custom_codes: &[&str]) -> bool {
+        crate::task::is_retry_code(text, custom_codes)
     }
 
     /// The stored code of an `auto_retry_for` entry that passed
@@ -133,7 +133,7 @@ pub mod __private {
     where
         F: Fn(I) -> Fut,
         Fut: std::future::Future<Output = Result<T, crate::TaskError<E>>>,
-        E: crate::UserErrorCode,
+        E: crate::CustomErrorCode,
     {
         E::CODES
     }
@@ -144,7 +144,7 @@ pub mod __private {
     pub fn blocking_task_codes<I, F, T, E>(_function: &F) -> &'static [&'static str]
     where
         F: Fn(I) -> Result<T, crate::TaskError<E>>,
-        E: crate::UserErrorCode,
+        E: crate::CustomErrorCode,
     {
         E::CODES
     }
@@ -172,7 +172,7 @@ pub mod __private {
     where
         A: serde::Serialize + serde::de::DeserializeOwned + 'static,
         T: serde::Serialize + serde::de::DeserializeOwned + 'static,
-        E: crate::UserErrorCode,
+        E: crate::CustomErrorCode,
     {
         app.functions()
             .get::<A, T, E>(task_name)

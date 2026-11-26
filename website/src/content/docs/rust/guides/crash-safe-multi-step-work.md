@@ -42,7 +42,7 @@ The rules are on [Stale RUNNING Recovery](/horsies/workers/heartbeats-recovery/#
 Each step is a task with its own retry policy. A step takes the result of the step before it as a parameter of type `TaskOutcome<T, E>`.
 
 ```rust
-use horsies::{task, RetryPolicy, TaskError, TaskOutcome, UserErrorCode};
+use horsies::{task, CustomErrorCode, RetryPolicy, TaskError, TaskOutcome};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +57,7 @@ struct Invoice {
     charge_id: String,
 }
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum CheckoutCode {
     PaymentsUnavailable,
     ChargeRefused,
@@ -83,8 +83,8 @@ impl CallFailure {
         refused: CheckoutCode,
     ) -> TaskError<CheckoutCode> {
         match self {
-            Self::Unavailable(detail) => TaskError::user(unavailable, detail),
-            Self::Refused(detail) => TaskError::user(refused, detail),
+            Self::Unavailable(detail) => TaskError::custom(unavailable, detail),
+            Self::Refused(detail) => TaskError::custom(refused, detail),
         }
     }
 }

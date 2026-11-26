@@ -68,9 +68,9 @@ use crate::check::{connectivity_report, CHECK};
 use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::{
-    CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
-    StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
-    UserErrorCode, WaitLimit, WorkerHistoryLimit,
+    CheckPassed, CheckReport, CustomErrorCode, ErrorCode, Horsies, HorsiesError, PingTarget,
+    ReadError, StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome,
+    TaskSendOptions, WaitLimit, WorkerHistoryLimit,
 };
 
 /// Where a blocking call can run.
@@ -127,7 +127,7 @@ impl<'a, A, T, E> TaskFunctionView<'a, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// `TaskFunction::send`, blocking.
     pub fn send(&self, input: A) -> Result<TaskHandle<T, E>, TaskSendError> {
@@ -241,7 +241,7 @@ impl<A, T, E> TaskFunctionWithOptionsView<'_, A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// Send the task with these options, now or after their delay,
     /// blocking.
@@ -267,7 +267,7 @@ impl<T, E> TaskHandle<T, E> {
 impl<T, E> TaskHandleView<'_, T, E>
 where
     T: DeserializeOwned + Clone,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// `TaskHandle::get`, blocking. The limit is the first check, as in
     /// the async form: a `Within` limit above `MAX_WAIT_LIMIT_MS` is
@@ -377,7 +377,7 @@ impl HorsiesView<'_> {
     ) -> Result<TaskOutcome<T, E>, ReadError>
     where
         T: DeserializeOwned + Clone,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         self.app
             .task_handle_of::<T, E>(task_id)
@@ -614,7 +614,7 @@ mod tests {
         let handle = app.task_handle_of::<u32, Infallible>(Uuid::from_u128(5));
         let refused = handle.blocking().get(WaitLimit::NoLimit).unwrap_err();
         assert!(matches!(refused, ReadError::AsyncContext { .. }));
-        assert_eq!(refused.code().value(), "ASYNC_CONTEXT");
+        assert_eq!(refused.code().as_str(), "ASYNC_CONTEXT");
         assert!(handle.kept().is_none());
         let info = app
             .blocking()

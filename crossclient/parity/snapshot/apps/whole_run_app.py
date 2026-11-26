@@ -210,14 +210,14 @@ def double(*, value: int) -> Result[int, TaskError]:
 @app.task(task_name='whole_run.refuse')
 def refuse(*, value: int) -> Result[int, TaskError]:
     """A task error with no retry."""
-    return Err(TaskError(error_code='REFUSED', message=f'refused {value}'))
+    return Err(TaskError(code='REFUSED', message=f'refused {value}'))
 
 
 @app.task(task_name='whole_run.transient', retry_policy=RETRY_POLICY)
 def transient(*, value: int) -> Result[int, TaskError]:
     """A task error that the policy retries until the retries run out."""
     return Err(
-        TaskError(error_code='TRANSIENT', message=f'transient {value}')
+        TaskError(code='TRANSIENT', message=f'transient {value}')
     )
 
 
@@ -292,7 +292,7 @@ async def blocks_loop_once() -> Result[str, TaskError]:
         return Ok('unblocked')
     if not await _wait_for_marker(NEIGHBOUR_RUNNING):
         return Err(
-            TaskError(error_code='NO_NEIGHBOUR', message='the neighbour never ran'),
+            TaskError(code='NO_NEIGHBOUR', message='the neighbour never ran'),
         )
     time.sleep(PAST_THE_DEADLINE_S)
     return Ok('late')
@@ -348,7 +348,7 @@ def waits_for_release() -> Result[str, TaskError]:
     while not os.path.exists(_marker(FIRST_NODE_RELEASED)):
         if time.monotonic() > deadline:
             return Err(
-                TaskError(error_code='NOT_RELEASED', message='no release marker'),
+                TaskError(code='NOT_RELEASED', message='no release marker'),
             )
         time.sleep(MARKER_POLL_S)
     return Ok('released')

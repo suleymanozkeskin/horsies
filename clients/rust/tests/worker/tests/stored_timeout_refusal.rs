@@ -183,7 +183,7 @@ async fn a_refused_timeout_fails_in_one_claim_and_is_not_claimed_again() {
     let _worker = suite.worker(Profile::Isolated1).await;
     match outcome(&handle, RESULT_WAIT).await {
         TaskOutcome::Failed(error) => {
-            assert_eq!(error.code().text(), REFUSAL_CODE);
+            assert_eq!(error.code().as_str(), REFUSAL_CODE);
             assert_eq!(error.message(), Some(above_bound_message().as_str()));
         }
         TaskOutcome::Succeeded(value) => panic!("the task succeeded with {value:?}"),

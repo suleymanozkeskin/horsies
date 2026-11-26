@@ -102,7 +102,7 @@ fn distinct_start() -> DateTime<Utc> {
 
 /// The result frame of `task` with the error envelope of code `code`.
 fn error_frame(task: &ClaimedTask, code: &str) -> ChildFrame {
-    let error = TaskError::new(code, "the task failed").expect("a code of the task's own");
+    let error = TaskError::custom(code, "the task failed").expect("a code of the task's own");
     let envelope = ResultEnvelopeText::new(
         serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error))
             .expect("a task error holds only JSON values"),
@@ -294,7 +294,8 @@ async fn a_failed_attempt_that_retries_counts_its_retry_under_its_code_once() {
                 } if *start == scripted_start() => assert_eq!(
                     error_code,
                     &crate::events::AttemptErrorCode::Custom {
-                        code: crate::events::UserCodeText::new("RATE_LIMITED".to_owned()).unwrap(),
+                        code: crate::events::CustomCodeText::new("RATE_LIMITED".to_owned())
+                            .unwrap(),
                     }
                 ),
                 other => panic!("a reported failure, not {other:?}"),
@@ -312,7 +313,7 @@ async fn a_failed_attempt_that_retries_counts_its_retry_under_its_code_once() {
         }
         other => panic!("ended, recorded, not {other:?}"),
     }
-    // The task declares no code, so its user code is `undeclared` in every
+    // The task declares no code, so its custom code is `undeclared` in every
     // label; the event keeps the exact code.
     assert_eq!(
         watched.series(MetricId::TaskRetries),

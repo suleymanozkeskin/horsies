@@ -10,10 +10,11 @@ pub mod seat_relay;
 pub mod send_types;
 
 pub use error::{
-    error_code_label, BuiltInTaskCode, ContractCode, DeclaredCodeRefusal, DeclaredCodesRefused,
-    DeclaredErrorCode, DeclaredErrorCodes, ErrorCodeLabel, ExceptionRecord, OperationalErrorCode,
-    OutcomeCode, RetrievalCode, StoredErrorRefused, SubWorkflowFailure, TaskError, TaskErrorCode,
-    TaskErrorKind, UserCode, UserCodeRefused, UNDECLARED_LABEL,
+    error_code_label, BuiltInTaskCode, ContractCode, CustomCode, CustomCodeRefused,
+    DeclaredCodeRefusal, DeclaredCodesRefused, DeclaredErrorCode, DeclaredErrorCodes,
+    ErrorCodeLabel, ExceptionRecord, OperationalErrorCode, OutcomeCode, RetrievalCode,
+    StoredErrorRefused, SubWorkflowFailure, TaskError, TaskErrorCode, TaskErrorKind,
+    UNDECLARED_LABEL,
 };
 pub use execution::{Execution, ExecutionClass, GraceUse, InvalidExecution, TimeoutUse};
 pub use fencing::{FencingToken, FencingTokenRefused};

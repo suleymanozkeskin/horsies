@@ -216,7 +216,7 @@ class TestComposedPatterns:
 
         # B fails → D stays PENDING (join='any' waits for at least one success)
         fail_result: Result[int, TaskError] = Err(
-            TaskError(error_code='ARM_FAIL', message='B failed'),
+            TaskError(code='ARM_FAIL', message='B failed'),
         )
         await finish_task(session, broker, str(handle.workflow_id), 1, fail_result)
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'PENDING'
@@ -284,7 +284,7 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='B_FAILED', message='B failed')),
+            Err(TaskError(code='B_FAILED', message='B failed')),
         )
         # D still PENDING (C not terminal yet)
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'PENDING'
@@ -359,14 +359,14 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             2,
-            Err(TaskError(error_code='C_FAIL', message='C failed')),
+            Err(TaskError(code='C_FAIL', message='C failed')),
         )
         await finish_task(
             session,
             broker,
             str(handle.workflow_id),
             3,
-            Err(TaskError(error_code='D_FAIL', message='D failed')),
+            Err(TaskError(code='D_FAIL', message='D failed')),
         )
 
         # C and D are FAILED
@@ -493,7 +493,7 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='B_FAILED', message='B failed')),
+            Err(TaskError(code='B_FAILED', message='B failed')),
         )
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'FAILED'
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
@@ -608,7 +608,7 @@ class TestComposedPatterns:
             *, input_result: TaskOutcome[int, TaskError],
         ) -> Result[int, TaskError]:
             return Err(
-                TaskError(error_code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
+                TaskError(code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
             )
 
         node_a = TaskNode(fn=task_a)
@@ -635,7 +635,7 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='A_FAIL', message='A failed')),
+            Err(TaskError(code='A_FAIL', message='A failed')),
         )
         assert await self._get_task_status(session, str(handle.workflow_id), 0) == 'FAILED'
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'ENQUEUED'
@@ -647,7 +647,7 @@ class TestComposedPatterns:
             str(handle.workflow_id),
             1,
             Err(
-                TaskError(error_code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
+                TaskError(code='RECOVERY_ALSO_FAILED', message='Recovery failed too'),
             ),
         )
         assert await self._get_task_status(session, str(handle.workflow_id), 1) == 'FAILED'
@@ -710,7 +710,7 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             1,
-            Err(TaskError(error_code='B_FAIL', message='B failed')),
+            Err(TaskError(code='B_FAIL', message='B failed')),
         )
         assert await self._get_task_status(session, str(handle.workflow_id), 3) == 'ENQUEUED'
 
@@ -720,7 +720,7 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             2,
-            Err(TaskError(error_code='C_FAIL', message='C failed')),
+            Err(TaskError(code='C_FAIL', message='C failed')),
         )
 
         # D completes (recovery value)
@@ -839,7 +839,7 @@ class TestComposedPatterns:
             broker,
             str(handle.workflow_id),
             0,
-            Err(TaskError(error_code='A_FAIL', message='A failed')),
+            Err(TaskError(code='A_FAIL', message='A failed')),
         )
         assert await self._get_workflow_status(session, str(handle.workflow_id)) == 'PAUSED'
 

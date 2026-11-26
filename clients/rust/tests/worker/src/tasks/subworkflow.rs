@@ -53,7 +53,7 @@ pub fn sub_int_ok(value: i64) -> Result<i64, TaskError<WfCode>> {
 )]
 pub fn sub_int_fail(error_code: String) -> Result<i64, TaskError<WfCode>> {
     node_run();
-    Err(TaskError::user(
+    Err(TaskError::custom(
         WfCode::of_text(&error_code),
         format!("Subworkflow failed: {error_code}"),
     ))
@@ -105,7 +105,7 @@ pub fn sub_pet_report(
 fn failed_code<T>(outcome: &TaskOutcome<T, WfCode>) -> Option<String> {
     match outcome {
         TaskOutcome::Succeeded(_) => None,
-        TaskOutcome::Failed(error) => Some(error.code().text()),
+        TaskOutcome::Failed(error) => Some(error.code().as_str().to_owned()),
     }
 }
 
@@ -128,16 +128,16 @@ pub async fn sub_probe_failed_child(
     workflow_ctx: Option<WorkflowContext>,
 ) -> Result<serde_json::Value, TaskError<WfCode>> {
     let context = workflow_ctx
-        .ok_or_else(|| TaskError::user(WfCode::NoCtx, "WorkflowContext not provided"))?;
+        .ok_or_else(|| TaskError::custom(WfCode::NoCtx, "WorkflowContext not provided"))?;
     let key = NodeKey::<i64>::new(FAILURE_PROBE_CHILD);
     let args_child = failed_child_id(&child_result);
     let ctx_child = match context.result_for::<i64, WfCode>(&key) {
         Ok(outcome) => failed_child_id(&outcome),
-        Err(missing) => return Err(TaskError::user(WfCode::NotInContext, missing.to_string())),
+        Err(missing) => return Err(TaskError::custom(WfCode::NotInContext, missing.to_string())),
     };
     let summary = context
         .summary_for(&key)
-        .map_err(|missing| TaskError::user(WfCode::NotInContext, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(WfCode::NotInContext, missing.to_string()))?;
     Ok(serde_json::json!({
         "args_is_subworkflow_error": args_child.is_some(),
         "args_error_code": failed_code(&child_result),
@@ -155,17 +155,17 @@ pub async fn sub_probe_success_ctx(
     workflow_ctx: Option<WorkflowContext>,
 ) -> Result<serde_json::Value, TaskError<WfCode>> {
     let context = workflow_ctx
-        .ok_or_else(|| TaskError::user(WfCode::NoCtx, "WorkflowContext not provided"))?;
+        .ok_or_else(|| TaskError::custom(WfCode::NoCtx, "WorkflowContext not provided"))?;
     let key = NodeKey::<i64>::new(SUCCESS_CTX_CHILD);
     let result = context
         .result_for::<i64, WfCode>(&key)
-        .map_err(|missing| TaskError::user(WfCode::NotInContext, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(WfCode::NotInContext, missing.to_string()))?;
     let summary = context
         .summary_for(&key)
-        .map_err(|missing| TaskError::user(WfCode::NotInContext, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(WfCode::NotInContext, missing.to_string()))?;
     let output = context
         .output_for(&key)
-        .map_err(|unreadable| TaskError::user(WfCode::NotInContext, unreadable.to_string()))?;
+        .map_err(|unreadable| TaskError::custom(WfCode::NotInContext, unreadable.to_string()))?;
     let result_value = match &result {
         TaskOutcome::Succeeded(value) => Some(*value),
         TaskOutcome::Failed(_) => None,
@@ -354,7 +354,7 @@ impl WorkflowDefinition for SubFailedInput {
     ) -> Result<WorkflowSpec, HorsiesError> {
         let (input_is_err, input_error_code, input_value) = match params.value {
             TaskOutcome::Succeeded(value) => (false, None, Some(value)),
-            TaskOutcome::Failed(error) => (true, Some(error.code().text()), None),
+            TaskOutcome::Failed(error) => (true, Some(error.code().as_str().to_owned()), None),
         };
         let mut builder = definition_builder::<Self>(builder);
         let child = builder.task(
@@ -402,7 +402,7 @@ impl WorkflowDefinition for SubLabel {
     ) -> Result<WorkflowSpec, HorsiesError> {
         let value = match params.value {
             TaskOutcome::Succeeded(value) => value.to_string(),
-            TaskOutcome::Failed(error) => error.code().text(),
+            TaskOutcome::Failed(error) => error.code().as_str().to_owned(),
         };
         let mut builder = definition_builder::<Self>(builder);
         let child = builder.task(super::workflow::mark::node().node_id("child").set(

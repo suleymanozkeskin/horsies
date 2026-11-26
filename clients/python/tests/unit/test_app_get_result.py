@@ -22,6 +22,7 @@ from horsies.core.brokers.result_types import (
     BrokerErrorCode,
     RawResultRecord,
 )
+from horsies.core.codec.typed import encode_task_error
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import (
@@ -247,7 +248,7 @@ class TestHorsiesGetResultEnvelopeGuards:
 
         match result:
             case Ok(Failed(task_error)):
-                assert task_error.error_code == OutcomeCode.TASK_CANCELLED
+                assert task_error.code == OutcomeCode.TASK_CANCELLED
             case _:
                 pytest.fail(f'expected a failed outcome, got {result!r}')
 
@@ -261,7 +262,7 @@ class TestHorsiesGetResultEnvelopeGuards:
         from horsies.core.models.workflow.enums import WorkflowStatus
 
         original = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+            code=OperationalErrorCode.UNHANDLED_EXCEPTION,
             message='child died',
             sub_workflow_id='wf-abc',
             sub_workflow_summary=SubWorkflowSummary(
@@ -277,7 +278,7 @@ class TestHorsiesGetResultEnvelopeGuards:
         wire = {
             '__h_task_result__': True,
             'ok': None,
-            'err': original.model_dump(mode='json'),
+            'err': encode_task_error(original),
         }
         record = RawResultRecord(
             task_id='parent-task',
@@ -390,7 +391,7 @@ class TestHorsiesGetTaskInfoErrFastPath:
         from horsies.core.models.workflow.enums import WorkflowStatus
 
         original = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+            code=OperationalErrorCode.UNHANDLED_EXCEPTION,
             message='child died',
             sub_workflow_id='wf-xyz',
             sub_workflow_summary=SubWorkflowSummary(
@@ -406,7 +407,7 @@ class TestHorsiesGetTaskInfoErrFastPath:
         wire = {
             '__h_task_result__': True,
             'ok': None,
-            'err': original.model_dump(mode='json'),
+            'err': encode_task_error(original),
         }
         info = _make_task_info(
             task_id='task-2', task_name='not.registered', raw_result=wire,

@@ -27,13 +27,12 @@ pub use error::{ErrorCategory, ErrorCode, HorsiesError, ValidationReport};
 pub use registry::TaskRegistry;
 pub use task::{
     error_code_label, AsyncTaskFn, BackoffStrategy, BlockingTaskFn, BuiltInTaskCode, CancelGraceMs,
-    CancelGraceOutOfRange, ContractCode, DeclaredCodeRefusal, DeclaredCodesRefused,
-    DeclaredErrorCode, DeclaredErrorCodes, ErrorCodeLabel, ExceptionRecord, Execution,
-    ExecutionClass, OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode, RetryPolicy,
-    RetryPolicyError, StoredErrorRefused, SubWorkflowFailure, TaskAttemptInfo, TaskError,
-    TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions, TaskResult, TaskSendError,
-    TaskSendErrorCode, TaskSendPayload, TaskSendResult, UserCode, UserCodeRefused,
-    UNDECLARED_LABEL,
+    CancelGraceOutOfRange, ContractCode, CustomCode, CustomCodeRefused, DeclaredCodeRefusal,
+    DeclaredCodesRefused, DeclaredErrorCode, DeclaredErrorCodes, ErrorCodeLabel, ExceptionRecord,
+    Execution, ExecutionClass, OperationalErrorCode, OutcomeCode, RegisteredTask, RetrievalCode,
+    RetryPolicy, RetryPolicyError, StoredErrorRefused, SubWorkflowFailure, TaskAttemptInfo,
+    TaskError, TaskErrorCode, TaskErrorKind, TaskInfo, TaskOptions, TaskResult, TaskSendError,
+    TaskSendErrorCode, TaskSendPayload, TaskSendResult, UNDECLARED_LABEL,
 };
 pub use types::{TaskAttemptOutcome, TaskStatus, TASK_TERMINAL_STATES, TASK_TERMINAL_VALUES};
 pub use workflow::{

@@ -191,7 +191,7 @@ class TestWithMapperCodes:
         'value',
         ['TASK_TIMEOUT', 'UNHANDLED_EXCEPTION', 'WORKFLOW_STOPPED', 'timeout', '', 7],
     )
-    def test_a_mapper_value_that_is_not_a_user_code_is_not_added(
+    def test_a_mapper_value_that_is_not_a_custom_code_is_not_added(
         self,
         value: object,
     ) -> None:

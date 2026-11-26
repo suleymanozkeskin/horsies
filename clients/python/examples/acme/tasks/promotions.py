@@ -137,7 +137,7 @@ def apply_promotions(*, order_id: str) -> Result[PromotionOutcome, TaskError]:
             if order is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to price',
                         data={'order_id': order_id},
                     ),
@@ -192,7 +192,7 @@ def compute_loyalty_points(
             if order is None:
                 return Err(
                     TaskError(
-                        error_code=ORDER_NOT_FOUND,
+                        code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to award points for',
                         data={'order_id': order_id},
                     ),
@@ -226,7 +226,7 @@ def publish_cdn(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError]:
     if simulate.draw(tuning.CDN_REJECT_RATE, campaign_id, 'cdn-reject'):
         return Err(
             TaskError(
-                error_code=CDN_REJECTED,
+                code=CDN_REJECTED,
                 message=f'CDN refused the {campaign_id} price bundle',
                 data={'campaign_id': campaign_id},
             ),
@@ -251,7 +251,7 @@ def publish_origin(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError
     if simulate.draw(tuning.ORIGIN_REJECT_RATE, campaign_id, 'origin-reject'):
         return Err(
             TaskError(
-                error_code=ORIGIN_REJECTED,
+                code=ORIGIN_REJECTED,
                 message=f'origin refused the {campaign_id} price bundle',
                 data={'campaign_id': campaign_id},
             ),
@@ -281,7 +281,7 @@ def prewarm_search(*, campaign_id: str) -> Result[SearchPrewarm, TaskError]:
     if simulate.draw(tuning.SEARCH_PREWARM_FAIL_RATE, campaign_id, 'search-fail'):
         return Err(
             TaskError(
-                error_code=SEARCH_INDEX_STALE,
+                code=SEARCH_INDEX_STALE,
                 message=f'search index for {campaign_id} did not finish rebuilding',
                 data={'campaign_id': campaign_id},
             ),
@@ -350,7 +350,7 @@ def update_price(*, sku: str, campaign_id: str) -> Result[PriceUpdate, TaskError
     if not listed:
         return Err(
             TaskError(
-                error_code=UNKNOWN_SKU,
+                code=UNKNOWN_SKU,
                 message=f'{sku} is not in the catalog',
                 data={'sku': sku},
             ),

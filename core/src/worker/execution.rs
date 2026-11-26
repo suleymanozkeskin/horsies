@@ -353,7 +353,7 @@ fn task_input_text(members: &[(String, TaskMember<'_>)], workflow_ctx: Option<&s
 }
 
 fn serialization_error(message: String) -> TaskError {
-    TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+    TaskError::built_in(OperationalErrorCode::WorkerSerializationError, message)
 }
 
 fn input_refused(refusal: &InputRefused) -> TaskError {
@@ -621,7 +621,7 @@ pub(crate) async fn persist_undecodable_result(
     placement: AttemptPlacement,
 ) -> Result<FinalizeOutcome, FinalizeError> {
     let message = format!("failed to parse task result JSON: {diagnosis}");
-    let error = TaskError::builtin(
+    let error = TaskError::built_in(
         OperationalErrorCode::WorkerSerializationError,
         message.clone(),
     );
@@ -1490,7 +1490,7 @@ mod parse {
     pub(crate) fn workflow_ctx_text(payload_text: &str) -> Result<String, TaskError> {
         let payload: WorkflowCtxPayload =
             crate::core::codec::from_json_str(payload_text).map_err(|e| {
-                TaskError::builtin(
+                TaskError::built_in(
                     OperationalErrorCode::WorkerSerializationError,
                     format!("failed to parse workflow context payload: {}", e),
                 )
@@ -1518,7 +1518,7 @@ mod parse {
             summaries_by_id: context_summaries(summaries_by_id)?,
         };
         serde_json::to_string(&field).map_err(|e| {
-            TaskError::builtin(
+            TaskError::built_in(
                 OperationalErrorCode::WorkerSerializationError,
                 format!("failed to serialize workflow context: {}", e),
             )
@@ -1535,7 +1535,7 @@ mod parse {
                 continue;
             };
             let parsed: SubWorkflowSummary = serde_json::from_str(&summary_text).map_err(|e| {
-                TaskError::builtin(
+                TaskError::built_in(
                     OperationalErrorCode::WorkerSerializationError,
                     format!(
                         "failed to parse workflow context summary for node_id '{}': {}",

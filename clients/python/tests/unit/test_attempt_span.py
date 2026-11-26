@@ -179,7 +179,7 @@ def thread_seat_work() -> Result[int, TaskError]:
 
 @APP.task(task_name='returns_error')
 def returns_error() -> Result[int, TaskError]:
-    return Err(TaskError(error_code='LIMIT_REACHED', message='over the limit'))
+    return Err(TaskError(code='LIMIT_REACHED', message='over the limit'))
 
 
 @APP.task(task_name='raises')
@@ -1143,9 +1143,9 @@ class TestTheOutcomeOfAResult:
     def test_a_value_succeeds(self) -> None:
         assert child_runner.result_outcome_of(Ok(3)) == ResultSucceeded()
 
-    def test_a_user_code_fails_with_its_text(self) -> None:
+    def test_a_custom_code_fails_with_its_text(self) -> None:
         out: Result[int, TaskError] = Err(
-            TaskError(error_code='LIMIT_REACHED', message='m'),
+            TaskError(code='LIMIT_REACHED', message='m'),
         )
         assert child_runner.result_outcome_of(out) == ResultFailed('LIMIT_REACHED', NothingRaised())
 
@@ -1153,7 +1153,7 @@ class TestTheOutcomeOfAResult:
         exception = ValueError('v')
         out: Result[int, TaskError] = Err(
             TaskError(
-                error_code=child_runner.OperationalErrorCode.TASK_EXCEPTION,
+                code=child_runner.OperationalErrorCode.TASK_EXCEPTION,
                 message='m',
                 exception=exception,
             ),

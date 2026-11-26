@@ -78,7 +78,7 @@ pub(crate) fn child_workflow_depth(
                 "workflow_id": parent_workflow_id.to_string(),
                 "task_index": task_index,
             }))),
-            ..TaskError::builtin(
+            ..TaskError::built_in(
                 OperationalErrorCode::SubworkflowDepthLimitReached,
                 format!(
                     "Subworkflow not started: the child workflow would have depth {child_depth}, \

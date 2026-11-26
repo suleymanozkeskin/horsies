@@ -41,7 +41,7 @@ from horsies import (
 
 def body(*, email: str) -> Result[str, TaskError]:
     if '@' not in email:
-        return Err(TaskError(error_code='INVALID_EMAIL', message='the address has no @'))
+        return Err(TaskError(code='INVALID_EMAIL', message='the address has no @'))
     return Ok(email)
 
 
@@ -50,7 +50,7 @@ def every_arm(read: ReadResult[str, TaskError]) -> str:
         case Ok(Succeeded(value)):
             return value
         case Ok(Failed(task_error)):
-            return str(task_error.error_code)
+            return str(task_error.code)
         case Err(read_error):
             return str(read_error.code)
         case _ as unreachable:

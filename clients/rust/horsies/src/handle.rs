@@ -10,7 +10,7 @@
 //!
 //! The handle keeps the first final read, as Python does: an outcome,
 //! `RESULT_NOT_AVAILABLE`, a stored result that does not read, and a stored
-//! user code that `E` does not name. A wait that timed out, a task not
+//! custom code that `E` does not name. A wait that timed out, a task not
 //! found, a wait limit above the bound, a refused wait and a database
 //! failure are not kept: a later read may succeed.
 
@@ -37,7 +37,7 @@ use uuid::Uuid;
 
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::value_free_decode_text;
-use crate::{TaskError, UserErrorCode};
+use crate::{CustomErrorCode, TaskError};
 
 /// Why neither the live table nor the task history holds a task.
 pub use horsies_core::TaskAbsenceReason;
@@ -97,10 +97,10 @@ pub enum ReadError {
     /// the result of this task's types. `cause` names no value.
     #[error("the stored result of task {task_id} does not read: {cause}")]
     StoredResultUnreadable { task_id: Uuid, cause: String },
-    /// The stored error has a user code that `E` does not name: the task
+    /// The stored error has a custom code that `E` does not name: the task
     /// that stored it has another code type, or another version of it.
     #[error(
-        "the stored error of task {task_id} has user code {code}, which {code_type} does not name"
+        "the stored error of task {task_id} has custom code {code}, which {code_type} does not name"
     )]
     UnknownUserCode {
         task_id: Uuid,
@@ -135,8 +135,8 @@ pub enum ReadError {
 }
 
 impl ReadError {
-    /// The library code of this failure, as Python's `TaskHandle.get`
-    /// stores it. A user code that `E` does not name is a stored result
+    /// The built-in code of this failure, as Python's `TaskHandle.get`
+    /// stores it. A custom code that `E` does not name is a stored result
     /// that does not read: `RESULT_DESERIALIZATION_ERROR`.
     pub fn code(&self) -> BuiltInTaskCode {
         match self {
@@ -252,7 +252,7 @@ impl<T, E> TaskHandle<T, E> {
 impl<T, E> TaskHandle<T, E>
 where
     T: DeserializeOwned + Clone,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// The outcome of the task, waiting while it has not finished, up to
     /// `limit` (`WaitLimit::NoLimit` waits until it ends).
@@ -424,13 +424,13 @@ pub(crate) fn outcome_of_record<T, E>(
 ) -> Result<TaskOutcome<T, E>, ReadError>
 where
     T: DeserializeOwned,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     let task_id = record.task_id;
     let envelope = match (record.status, record.raw_result) {
         (TaskStatus::Cancelled, _) => {
             return Ok(TaskOutcome::Failed(
-                TaskError::library(
+                TaskError::built_in(
                     OutcomeCode::TaskCancelled,
                     format!("Task {task_id} was cancelled before completion"),
                 )
@@ -570,10 +570,10 @@ mod tests {
         Declined,
     }
 
-    impl UserErrorCode for ChargeCode {
+    impl CustomErrorCode for ChargeCode {
         const CODES: &'static [&'static str] = &["DECLINED"];
 
-        fn code(&self) -> &'static str {
+        fn as_str(&self) -> &'static str {
             match self {
                 Self::Declined => "DECLINED",
             }
@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_user_error_is_failed_with_the_code_of_the_type() {
+    fn a_stored_custom_error_is_failed_with_the_code_of_the_type() {
         let Ok(TaskOutcome::Failed(error)) =
             outcome(record(TaskStatus::Failed, Some(error_envelope("DECLINED"))))
         else {
@@ -636,12 +636,12 @@ mod tests {
         };
         assert_eq!(
             error.code(),
-            &crate::TaskErrorCode::User(ChargeCode::Declined)
+            &crate::TaskErrorCode::Custom(ChargeCode::Declined)
         );
     }
 
     #[test]
-    fn a_stored_library_code_is_failed() {
+    fn a_stored_built_in_code_is_failed() {
         let envelope = json!({
             "__h_task_result__": true,
             "ok": null,
@@ -656,7 +656,7 @@ mod tests {
         else {
             panic!("a stored library error is a failed outcome");
         };
-        assert_eq!(error.code().text(), "TASK_TIMEOUT");
+        assert_eq!(error.code().as_str(), "TASK_TIMEOUT");
     }
 
     #[test]
@@ -664,7 +664,7 @@ mod tests {
         let Ok(TaskOutcome::Failed(error)) = outcome(record(TaskStatus::Cancelled, None)) else {
             panic!("a cancelled task is a failed outcome");
         };
-        assert_eq!(error.code().text(), "TASK_CANCELLED");
+        assert_eq!(error.code().as_str(), "TASK_CANCELLED");
         assert_eq!(
             error
                 .data()
@@ -678,7 +678,7 @@ mod tests {
         )) else {
             panic!("a cancelled task with a stored result is a failed outcome");
         };
-        assert_eq!(stored.code().text(), "TASK_CANCELLED");
+        assert_eq!(stored.code().as_str(), "TASK_CANCELLED");
     }
 
     /// A stored result that is not a result envelope (the legacy
@@ -724,11 +724,11 @@ mod tests {
         else {
             panic!("an expired task with a stored error is a failed outcome");
         };
-        assert_eq!(error.code().text(), "TASK_EXPIRED");
+        assert_eq!(error.code().as_str(), "TASK_EXPIRED");
     }
 
     #[test]
-    fn a_stored_user_code_that_the_type_does_not_name_is_unknown() {
+    fn a_stored_custom_code_that_the_type_does_not_name_is_unknown() {
         assert_eq!(
             outcome(record(
                 TaskStatus::Failed,
@@ -926,7 +926,7 @@ mod tests {
             },
         ]
         .iter()
-        .map(|error| error.code().value())
+        .map(|error| error.code().as_str().to_owned())
         .collect();
         assert_eq!(
             codes,
@@ -1144,7 +1144,7 @@ mod tests {
                 cause: WaitLimitRefused,
             },
         );
-        assert_eq!(refused.code().value(), "INVALID_INPUT");
+        assert_eq!(refused.code().as_str(), "INVALID_INPUT");
         assert!(handle.kept().is_none());
     }
 

@@ -14,7 +14,7 @@ from typing import Final, Literal
 from pydantic import BaseModel
 
 # --- Domain error codes -------------------------------------------------
-# Plain `str`, never `str, Enum`: user codes must survive a JSON round trip
+# Plain `str`, never `str, Enum`: custom codes must survive a JSON round trip
 # as strings, and none of them may collide with a reserved built-in code.
 
 CARD_DECLINED: Final[str] = 'CARD_DECLINED'

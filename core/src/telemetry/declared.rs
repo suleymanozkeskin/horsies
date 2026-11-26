@@ -1,5 +1,5 @@
 //! The label values that are names declared at start: task, queue, handler
-//! and schedule names, and the user error codes of the `error_code` label.
+//! and schedule names, and the custom error codes of the `error_code` label.
 //!
 //! A declared set holds its names in the order given, each once. A value of
 //! the set is the position of one name, or of the fallback of the set. Only
@@ -347,7 +347,7 @@ fn position_of(index: usize) -> u32 {
 }
 
 /// The values of the `error_code` label in one registry: no code, every
-/// built-in code, the user codes that the tasks declare (each once, sorted
+/// built-in code, the custom codes that the tasks declare (each once, sorted
 /// by text), and `undeclared`.
 #[derive(Debug, Clone)]
 pub struct ErrorCodeValues {
@@ -393,7 +393,7 @@ impl ErrorCodeValues {
         let folded = past_bound
             .into_iter()
             .map(|code| FoldedName {
-                set: DeclaredSource::UserErrorCodes,
+                set: DeclaredSource::CustomErrorCodes,
                 name: code,
                 reason: FoldReason::PastBound,
             })
@@ -404,7 +404,7 @@ impl ErrorCodeValues {
         }
     }
 
-    /// The values with no declared code: every user code is `undeclared`.
+    /// The values with no declared code: every custom code is `undeclared`.
     pub fn none() -> Self {
         Self::of_sorted(Vec::new())
     }
@@ -429,8 +429,8 @@ impl ErrorCodeValues {
     }
 
     /// The value of the label of an error code. A built-in code is its own
-    /// value; a user code that these values declare is its own value;
-    /// another user code is `undeclared`. A task declares its codes in the
+    /// value; a custom code that these values declare is its own value;
+    /// another custom code is `undeclared`. A task declares its codes in the
     /// registry's set, so a code that a task declares and that these values
     /// do not hold (a set that was not given to [`ErrorCodeValues::new`])
     /// is `undeclared` too.
@@ -441,7 +441,7 @@ impl ErrorCodeValues {
         }
     }
 
-    /// The declared user codes, sorted by text.
+    /// The declared custom codes, sorted by text.
     pub fn declared(&self) -> &[String] {
         &self.declared
     }

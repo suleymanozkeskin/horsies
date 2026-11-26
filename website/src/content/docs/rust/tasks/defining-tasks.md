@@ -12,7 +12,7 @@ A task is an `async fn` with `#[horsies::task]` or a `fn` with `#[horsies::block
 ## Define a Task
 
 ```rust
-use horsies::{task, TaskError, UserErrorCode};
+use horsies::{task, CustomErrorCode, TaskError};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,7 +21,7 @@ struct Order {
     total_cents: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum OrderCode {
     LimitExceeded, // LIMIT_EXCEEDED
 }
@@ -29,7 +29,7 @@ enum OrderCode {
 #[task("validate_order")]
 async fn validate_order(order: Order) -> Result<String, TaskError<OrderCode>> {
     if order.total_cents > 1_000_000 {
-        return Err(TaskError::user(OrderCode::LimitExceeded, "order over the limit"));
+        return Err(TaskError::custom(OrderCode::LimitExceeded, "order over the limit"));
     }
     Ok(order.order_id)
 }
@@ -41,7 +41,7 @@ async fn validate_order(order: Order) -> Result<String, TaskError<OrderCode>> {
 - A first parameter of type `horsies::TaskRuntime` is not input: the body gets the runtime of the app. See [Task Runtime](#task-runtime).
 - A task with no codes of its own uses `TaskError<std::convert::Infallible>`. `TaskError` without its code type is a compile error.
 
-See [Task Errors](/horsies/rust/tasks/errors/) for `TaskError<E>` and the `UserErrorCode` derive.
+See [Task Errors](/horsies/rust/tasks/errors/) for `TaskError<E>` and the `CustomErrorCode` derive.
 
 ## Attributes
 
@@ -78,9 +78,9 @@ fn resize(path: String) -> Result<String, TaskError<std::convert::Infallible>> {
 `retry_policy` and `auto_retry_for` go together: one without the other is a compile error. An `auto_retry_for` entry is a built-in code (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...), stored as that code, or a code of the task's code type `E`; any other entry is a compile error.
 
 ```rust
-use horsies::{task, RetryPolicy, TaskError, UserErrorCode};
+use horsies::{task, CustomErrorCode, RetryPolicy, TaskError};
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum FetchCode {
     RateLimited,
     UpstreamDown,
@@ -93,7 +93,7 @@ enum FetchCode {
     timeout_ms = 5_000
 )]
 async fn fetch_prices(symbol: String) -> Result<String, TaskError<FetchCode>> {
-    Err(TaskError::user(FetchCode::RateLimited, format!("rate limited for {symbol}")))
+    Err(TaskError::custom(FetchCode::RateLimited, format!("rate limited for {symbol}")))
 }
 ```
 
@@ -111,7 +111,7 @@ The attribute generates a module with the name of the function. The module holds
 
 | Item | Does |
 |------|------|
-| `validate_order::register(&mut app)` | Registers the task and returns its `TaskFunction<validate_order::Input, String, OrderCode>`. The task declares the codes of `OrderCode` (`UserErrorCode::CODES`); a code that breaks a rule is refused (`HRS-212`, `HRS-112`, `HRS-113`; see [Task Errors](/horsies/rust/tasks/errors/#the-code-type)) |
+| `validate_order::register(&mut app)` | Registers the task and returns its `TaskFunction<validate_order::Input, String, OrderCode>`. The task declares the codes of `OrderCode` (`CustomErrorCode::CODES`); a code that breaks a rule is refused (`HRS-212`, `HRS-112`, `HRS-113`; see [Task Errors](/horsies/rust/tasks/errors/#the-code-type)) |
 | `validate_order::send(&app, order)` | Sends the task now through `app` |
 | `validate_order::with_options(options).send(&app, order)` | Sends the task through `app` with `TaskSendOptions`: a delay (`TaskSendOptions::delay`), a deadline, an idempotency key, a retention |
 | `validate_order::node()` | A workflow node of the task (`TaskNode<String, validate_order::Input>`). The builder of an app resolves it when the node is added |
@@ -125,7 +125,7 @@ A send through an app that does not register the task returns `TaskSendError::Va
 A body whose first parameter is `horsies::TaskRuntime` reads the app's state, the cancel and the fencing token of its run, and starts work that belongs to its run.
 
 ```rust
-use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{task, CustomErrorCode, TaskError, TaskRuntime};
 
 struct HttpClient;
 
@@ -135,7 +135,7 @@ impl HttpClient {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum FeedCode {
     NotConfigured,
     Interrupted,
@@ -145,10 +145,10 @@ enum FeedCode {
 async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<u32, TaskError<FeedCode>> {
     let client = rt
         .state::<HttpClient>()
-        .map_err(|missing| TaskError::user(FeedCode::NotConfigured, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(FeedCode::NotConfigured, missing.to_string()))?;
     tokio::select! {
         count = client.sync(&feed_url) => Ok(count),
-        () = rt.cancelled() => Err(TaskError::user(FeedCode::Interrupted, "cancelled")),
+        () = rt.cancelled() => Err(TaskError::custom(FeedCode::Interrupted, "cancelled")),
     }
 }
 ```
@@ -224,10 +224,10 @@ A stalled attempt can run on after the worker retries its task. horsies refuses 
 
 <!-- rust-check: alone -->
 ```rust
-use horsies::{task, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{task, CustomErrorCode, TaskError, TaskRuntime};
 use sqlx::PgPool;
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum PaymentCode {
     NotConfigured,
     NotInARun,
@@ -245,10 +245,10 @@ async fn record_payment(
 ) -> Result<String, TaskError<PaymentCode>> {
     let pool = rt
         .state::<PgPool>()
-        .map_err(|missing| TaskError::user(PaymentCode::NotConfigured, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(PaymentCode::NotConfigured, missing.to_string()))?;
     let token = rt
         .fencing_token()
-        .map_err(|refused| TaskError::user(PaymentCode::NotInARun, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(PaymentCode::NotInARun, refused.to_string()))?;
     // One conditional write: the row changes only when no later attempt of
     // this task wrote it.
     let written = sqlx::query(
@@ -263,9 +263,9 @@ async fn record_payment(
     .bind(cents)
     .execute(&*pool)
     .await
-    .map_err(|error| TaskError::user(PaymentCode::StoreFailed, error.to_string()))?;
+    .map_err(|error| TaskError::custom(PaymentCode::StoreFailed, error.to_string()))?;
     match written.rows_affected() {
-        0 => Err(TaskError::user(
+        0 => Err(TaskError::custom(
             PaymentCode::LaterAttempt,
             "a later attempt of this task holds the fence",
         )),

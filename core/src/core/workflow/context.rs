@@ -72,7 +72,7 @@ impl WorkflowContext {
         key: &NodeKey<T>,
     ) -> Result<TaskResult<T>, TaskError> {
         let value = self.results_by_id.get(key.node_id()).ok_or_else(|| {
-            TaskError::builtin(
+            TaskError::built_in(
                 crate::core::task::error::ContractCode::WorkflowCtxMissingId,
                 format!(
                     "no result found for node_id '{}' in workflow context",
@@ -84,7 +84,7 @@ impl WorkflowContext {
         match value {
             TaskResult::Ok(ok_value) => {
                 let parsed = ok_value.decode::<T>().map_err(|e| {
-                    TaskError::builtin(
+                    TaskError::built_in(
                         crate::core::task::error::OperationalErrorCode::ResultDeserializationError,
                         format!(
                             "failed to deserialize result for node_id '{}': {}",
@@ -107,7 +107,7 @@ impl WorkflowContext {
     /// Retrieve the sub-workflow summary for a node.
     pub fn summary_for<T>(&self, key: &NodeKey<T>) -> Result<SubWorkflowSummary, TaskError> {
         let summary = self.summaries_by_id.get(key.node_id()).ok_or_else(|| {
-            TaskError::builtin(
+            TaskError::built_in(
                 crate::core::task::error::ContractCode::WorkflowCtxMissingId,
                 format!(
                     "no summary found for node_id '{}' in workflow context",
@@ -131,7 +131,7 @@ impl WorkflowContext {
         key: &NodeKey<T>,
     ) -> Result<Option<T>, TaskError> {
         let summary = self.summaries_by_id.get(key.node_id()).ok_or_else(|| {
-            TaskError::builtin(
+            TaskError::built_in(
                 crate::core::task::error::ContractCode::WorkflowCtxMissingId,
                 format!(
                     "no summary found for node_id '{}' in workflow context",
@@ -144,7 +144,7 @@ impl WorkflowContext {
             None => Ok(None),
             Some(output) => {
                 let parsed = output.decode::<T>().map_err(|e| {
-                    TaskError::builtin(
+                    TaskError::built_in(
                         crate::core::task::error::OperationalErrorCode::ResultDeserializationError,
                         format!(
                             "failed to deserialize sub-workflow output for node_id '{}': {}",
@@ -488,7 +488,7 @@ mod tests {
         results.insert(
             "failed:0".to_owned(),
             TaskResult::Err(
-                TaskError::new("CUSTOM_ERR".to_owned(), "something broke".to_owned()).unwrap(),
+                TaskError::custom("CUSTOM_ERR".to_owned(), "something broke".to_owned()).unwrap(),
             ),
         );
         let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
@@ -500,7 +500,9 @@ mod tests {
         let mut results = HashMap::new();
         results.insert(
             "failed:0".to_owned(),
-            TaskResult::Err(TaskError::new("CUSTOM_ERR".to_owned(), "broke".to_owned()).unwrap()),
+            TaskResult::Err(
+                TaskError::custom("CUSTOM_ERR".to_owned(), "broke".to_owned()).unwrap(),
+            ),
         );
         let ctx = WorkflowContext::new(Uuid::nil(), 1, "next".to_owned(), results, HashMap::new());
         let key: NodeKey<String> = NodeKey::new("failed:0".to_owned());

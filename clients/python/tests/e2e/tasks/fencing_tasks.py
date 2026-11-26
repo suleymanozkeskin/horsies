@@ -77,7 +77,7 @@ def fence_retry(runtime: TaskRuntime) -> Result[FencingToken, TaskError]:
     match token.value:
         case 1:
             return Err(
-                TaskError(error_code=RETRY_CODE, message='first attempt'),
+                TaskError(code=RETRY_CODE, message='first attempt'),
             )
         case _:
             return Ok(token)

@@ -308,7 +308,7 @@ impl ArgsFromConflict {
                     "task_index": task_index,
                 }),
             )),
-            ..TaskError::builtin(
+            ..TaskError::built_in(
                 OperationalErrorCode::WorkflowEnqueueFailed,
                 format!(
                     "args_from key '{}' conflicts with static kwarg ({node})",
@@ -596,7 +596,7 @@ pub(crate) fn missing_result_error(
 }
 
 fn dep_parse_error(dep_idx: i32, error: &serde_json::Error) -> TaskError {
-    TaskError::builtin(
+    TaskError::built_in(
         OperationalErrorCode::ResultDeserializationError,
         format!(
             "failed to parse upstream task result at index {}: {}",

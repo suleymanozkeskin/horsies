@@ -66,7 +66,7 @@ Every retry policy requires an explicit list of error codes to retry on. This gi
 
 They don't crash the worker and they don't disappear. You still get your `TaskError`.
 
-Any unhandled exception inside a task is caught, wrapped into a `TaskError` with `error_code=UNHANDLED_EXCEPTION`, and stored as a normal error result. The worker continues processing other tasks.
+Any unhandled exception inside a task is caught, wrapped into a `TaskError` with `code=UNHANDLED_EXCEPTION`, and stored as a normal error result. The worker continues processing other tasks.
 
 For finer control, the exception mapper lets you assign specific error codes to specific exception classes  without try/except boilerplate in your task functions. You can set it per-task or globally on the app. The mapper uses exact class matching only; map each class you need explicitly.
 

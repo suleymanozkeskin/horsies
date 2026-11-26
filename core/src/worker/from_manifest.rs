@@ -146,7 +146,7 @@ pub struct TelemetryPlan {
     pub task_names: Vec<String>,
     /// The values of the `queue` label: every queue of the app.
     pub queue_names: Vec<String>,
-    /// The user error codes that each task declares, for the `error_code`
+    /// The custom error codes that each task declares, for the `error_code`
     /// label.
     pub declared_codes: BTreeMap<String, DeclaredErrorCodes>,
 }

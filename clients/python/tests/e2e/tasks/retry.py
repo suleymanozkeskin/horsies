@@ -23,7 +23,7 @@ def _get_state_path(env_key: str) -> Path:
     retry_policy=RetryPolicy.fixed([1, 1, 1], auto_retry_for=['TRANSIENT']),
 )
 def retry_exhausted_task() -> Result[str, TaskError]:
-    return Err(TaskError(error_code='TRANSIENT', message='always fails'))
+    return Err(TaskError(code='TRANSIENT', message='always fails'))
 
 
 @app.task(
@@ -42,7 +42,7 @@ def retry_success_task() -> Result[str, TaskError]:
 
     if count < 3:
         return Err(
-            TaskError(error_code='TRANSIENT', message=f'attempt {count}')
+            TaskError(code='TRANSIENT', message=f'attempt {count}')
         )
     return Ok(f'succeeded_on_attempt_{count}')
 
@@ -52,7 +52,7 @@ def retry_success_task() -> Result[str, TaskError]:
     retry_policy=RetryPolicy.exponential(base_seconds=1, max_retries=3, auto_retry_for=['TRANSIENT']),
 )
 def exponential_task() -> Result[str, TaskError]:
-    return Err(TaskError(error_code='TRANSIENT', message='fail'))
+    return Err(TaskError(code='TRANSIENT', message='fail'))
 
 
 @app.task(
@@ -60,7 +60,7 @@ def exponential_task() -> Result[str, TaskError]:
     retry_policy=RetryPolicy.fixed([1], auto_retry_for=['RETRYABLE_ERROR']),
 )
 def retry_error_code_task() -> Result[str, TaskError]:
-    return Err(TaskError(error_code='RETRYABLE_ERROR', message='Retryable error'))
+    return Err(TaskError(code='RETRYABLE_ERROR', message='Retryable error'))
 
 
 @app.task(

@@ -45,7 +45,7 @@ def _decode_envelope(wire: str) -> dict[str, Any]:
 class TestSerializeErrorPayloadFlattensException:
     def test_exception_none_round_trips_unchanged(self) -> None:
         error: TaskError = TaskError(
-            error_code=OperationalErrorCode.BROKER_ERROR,
+            code=OperationalErrorCode.BROKER_ERROR,
             message='nothing to flatten',
         )
         wire = serialize_error_payload(error)
@@ -77,7 +77,7 @@ class TestSerializeErrorPayloadFlattensException:
             original = caught
 
         error: TaskError = TaskError(
-            error_code=OperationalErrorCode.TASK_EXCEPTION,
+            code=OperationalErrorCode.TASK_EXCEPTION,
             message=f'{type(original).__name__}: {original}',
             exception=original,
         )
@@ -112,7 +112,7 @@ class TestSerializeErrorPayloadFlattensException:
 
         original = MyDomainError('domain problem')
         error: TaskError = TaskError(
-            error_code=OperationalErrorCode.TASK_EXCEPTION,
+            code=OperationalErrorCode.TASK_EXCEPTION,
             message='custom failure',
             exception=original,
         )
@@ -144,7 +144,7 @@ class TestSerializeErrorPayloadFlattensException:
             'traceback': 'Traceback (most recent call last):\n  ConnectionError: db down\n',
         }
         error: TaskError = TaskError(
-            error_code=OperationalErrorCode.BROKER_ERROR,
+            code=OperationalErrorCode.BROKER_ERROR,
             message='db down',
             exception=pre_flattened,
         )
@@ -179,7 +179,7 @@ class TestSerializeErrorPayloadFlattensException:
             error_summary='downstream',
         )
         error: TaskError = SubWorkflowError(
-            error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
+            code=OperationalErrorCode.UNHANDLED_EXCEPTION,
             message='subworkflow failed',
             sub_workflow_id='wf-child',
             sub_workflow_summary=summary,
@@ -212,7 +212,7 @@ class TestTaskErrorModelDumpException:
             raise ValueError('boom')
         except ValueError as caught:
             te = TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
+                code=OperationalErrorCode.TASK_EXCEPTION,
                 message='m',
                 exception=caught,
             )
@@ -227,7 +227,7 @@ class TestTaskErrorModelDumpException:
         assert 'ValueError: boom' in flattened['traceback']
 
     def test_model_dump_json_string_does_not_raise(self) -> None:
-        te = TaskError(error_code='MY_CODE', message='m', exception=ValueError('boom'))
+        te = TaskError(code='MY_CODE', message='m', exception=ValueError('boom'))
         wire = te.model_dump_json()
         parsed: dict[str, Any] = json.loads(wire)
         assert parsed['exception']['type'] == 'ValueError'
@@ -235,12 +235,12 @@ class TestTaskErrorModelDumpException:
     def test_python_mode_keeps_live_exception_object(self) -> None:
         """when_used='json' must not touch python-mode dumps."""
         original = ValueError('boom')
-        te = TaskError(error_code='MY_CODE', message='m', exception=original)
+        te = TaskError(code='MY_CODE', message='m', exception=original)
         dumped = te.model_dump()
         assert dumped['exception'] is original
 
     def test_none_exception_json_mode_is_none(self) -> None:
-        te = TaskError(error_code='MY_CODE', message='m')
+        te = TaskError(code='MY_CODE', message='m')
         assert te.model_dump(mode='json')['exception'] is None
 
     def test_already_flattened_dict_passes_through(self) -> None:
@@ -248,5 +248,5 @@ class TestTaskErrorModelDumpException:
             'type': 'ValueError', 'module': 'builtins', 'message': 'boom',
             'repr': "ValueError('boom')", 'traceback': 'tb',
         }
-        te = TaskError(error_code='MY_CODE', message='m', exception=flat)
+        te = TaskError(code='MY_CODE', message='m', exception=flat)
         assert te.model_dump(mode='json')['exception'] == flat

@@ -163,7 +163,7 @@ Decoders:
 `{"__h_task_result__":true,"ok":null,"err":<error>}`. An error object has the
 keys `exception`, `error_code`, `data`, `message`, in this order, nulls kept;
 a sub-workflow error adds `sub_workflow_id` and `sub_workflow_summary`. A
-built-in code is `{"__builtin_task_code__": "<NAME>"}`, a user code its text.
+built-in code is `{"__builtin_task_code__": "<NAME>"}`, a custom code its text.
 A vector holds an `ok` typed value (the notation above) or an `err` task error
 (`{"error_code": {"built_in" | "user": ...}, "message", "data", "exception",
 "sub_workflow"?}`).
@@ -218,7 +218,7 @@ Decoders:
 
 The Rust client builds an error from a code, a message and `data`. The
 exception record and the sub-workflow failure are written by the library, and
-`TaskError::user` and `TaskError::library` take a message: the Rust tests only
+`TaskError::custom` and `TaskError::built_in` take a message: the Rust tests only
 read those vectors.
 
 ## Error data (`error_data.json`)

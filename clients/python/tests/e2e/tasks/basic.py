@@ -96,7 +96,7 @@ def kwargs_task(
 def error_task() -> Result[int, TaskError]:
     return Err(
         TaskError(
-            error_code='DELIBERATE_ERROR',
+            code='DELIBERATE_ERROR',
             message='This is intentional',
             data={'key': 'value'},
         )
@@ -125,7 +125,7 @@ def complex_result_task() -> Result[OutputModel, TaskError]:
 
 @app.task(task_name='e2e_no_retry')
 def no_retry_task() -> Result[str, TaskError]:
-    return Err(TaskError(error_code='PERMANENT', message='not retryable'))
+    return Err(TaskError(code='PERMANENT', message='not retryable'))
 
 
 @app.task(task_name='e2e_return_none')
@@ -136,7 +136,7 @@ def return_none_task() -> Result[int, TaskError]:
 @app.task(task_name='e2e_error_code')
 def error_code_task() -> Result[str, TaskError]:
     return Err(
-        TaskError(error_code=OperationalErrorCode.TASK_EXCEPTION, message='boom')
+        TaskError(code=OperationalErrorCode.TASK_EXCEPTION, message='boom')
     )
 
 
@@ -234,7 +234,7 @@ def idempotent_task(*, token: str) -> Result[str, TaskError]:
     if not log_dir:
         return Err(
             TaskError(
-                error_code='CONFIG_ERROR', message='E2E_IDEMPOTENT_LOG_DIR not set'
+                code='CONFIG_ERROR', message='E2E_IDEMPOTENT_LOG_DIR not set'
             )
         )
 
@@ -248,7 +248,7 @@ def idempotent_task(*, token: str) -> Result[str, TaskError]:
     except FileExistsError:
         return Err(
             TaskError(
-                error_code='DOUBLE_EXECUTION', message=f'Token {token} already executed'
+                code='DOUBLE_EXECUTION', message=f'Token {token} already executed'
             )
         )
 
@@ -277,7 +277,7 @@ def wait_inside_task() -> Result[dict[str, bool], TaskError]:
     sent = simple_task.send(x=1)
     if is_err(sent):
         return Err(
-            TaskError(error_code='E2E_SEND_FAILED', message=str(sent.err_value)),
+            TaskError(code='E2E_SEND_FAILED', message=str(sent.err_value)),
         )
     handle = sent.ok_value
     thread_refusals: list[bool] = []

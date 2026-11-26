@@ -607,7 +607,7 @@ fn child_input_error(request: &ChildSpecRequest, message: String) -> TaskError {
                 "task_index": request.task_index,
             }),
         )),
-        ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+        ..TaskError::built_in(OperationalErrorCode::WorkerSerializationError, message)
     }
 }
 
@@ -684,7 +684,7 @@ pub fn params_refused_error(
                 "task_index": task_index,
             }),
         )),
-        ..TaskError::builtin(OperationalErrorCode::WorkerSerializationError, message)
+        ..TaskError::built_in(OperationalErrorCode::WorkerSerializationError, message)
     }
 }
 
@@ -745,7 +745,7 @@ fn child_build_failure(
                 "task_index": task_index,
             }),
         )),
-        ..TaskError::builtin(
+        ..TaskError::built_in(
             OperationalErrorCode::WorkflowEnqueueFailed,
             format!("Subworkflow build failed: {failure} (workflow {workflow_name}:{task_index})"),
         )
@@ -784,7 +784,7 @@ pub fn subworkflow_load_failed_error(
         data: Some(crate::core::codec::JsonText::of_engine_value(
             &serde_json::json!({ "definition_key": definition_key }),
         )),
-        ..TaskError::builtin(
+        ..TaskError::built_in(
             OperationalErrorCode::SubworkflowLoadFailed,
             format!(
                 "Failed to load subworkflow definition for {parent_workflow_name}:{task_index}"

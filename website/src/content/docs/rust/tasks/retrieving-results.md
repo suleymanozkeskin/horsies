@@ -19,7 +19,7 @@ use horsies::{ReadError, TaskHandle, TaskOutcome, WaitLimit};
 async fn print_outcome(handle: &TaskHandle<String, std::convert::Infallible>) -> Result<(), ReadError> {
     match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(order_id) => println!("validated {order_id}"),
-        TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("failed with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -39,7 +39,7 @@ The read checks the limit first. A `Within` limit above `MAX_WAIT_LIMIT_MS` (4,2
 | Variant | The task |
 |---------|----------|
 | `Succeeded(T)` | Returned this value |
-| `Failed(TaskError<E>)` | Returned this error, or the library recorded it: a library code such as `TASK_CANCELLED`, `TASK_EXPIRED`, `TASK_TIMEOUT` or `WORKER_CRASHED` |
+| `Failed(TaskError<E>)` | Returned this error, or the library recorded it: a built-in code such as `TASK_CANCELLED`, `TASK_EXPIRED`, `TASK_TIMEOUT` or `WORKER_CRASHED` |
 
 ## ReadError
 
@@ -55,7 +55,7 @@ The read checks the limit first. A `Within` limit above `MAX_WAIT_LIMIT_MS` (4,2
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking read on a thread where a tokio runtime is current. Nothing was read. See [Blocking API](/horsies/rust/tasks/blocking-api/#on-a-runtime-thread) | – |
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `retryable` is the classification of the cause | May succeed |
 
-`ReadError::code()` returns the library code of the failure.
+`ReadError::code()` returns the built-in code of the failure.
 
 `TaskAbsenceReason` tells why the task is held nowhere:
 

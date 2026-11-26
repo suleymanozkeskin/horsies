@@ -1,4 +1,4 @@
-//! `#[derive(UserErrorCode)]`: the code type of a task's own errors.
+//! `#[derive(CustomErrorCode)]`: the code type of a task's own errors.
 //!
 //! The enum has unit variants only. Each variant's code is its name in
 //! UPPER_SNAKE_CASE. The derive refuses at compile time: a struct or a
@@ -18,17 +18,17 @@ struct CodeVariant {
     span: Span,
 }
 
-pub fn derive_user_error_code(input: DeriveInput) -> syn::Result<TokenStream> {
+pub fn derive_custom_error_code(input: DeriveInput) -> syn::Result<TokenStream> {
     let Data::Enum(data) = &input.data else {
         return Err(syn::Error::new_spanned(
             &input.ident,
-            "UserErrorCode can only be derived for an enum of unit variants",
+            "CustomErrorCode can only be derived for an enum of unit variants",
         ));
     };
     if !input.generics.params.is_empty() {
         return Err(syn::Error::new_spanned(
             &input.generics,
-            "UserErrorCode cannot be derived for a generic enum",
+            "CustomErrorCode cannot be derived for a generic enum",
         ));
     }
     let variants = data
@@ -49,7 +49,7 @@ fn code_variant(variant: &syn::Variant) -> syn::Result<CodeVariant> {
         }),
         Fields::Named(_) | Fields::Unnamed(_) => Err(syn::Error::new_spanned(
             variant,
-            "a UserErrorCode variant has no fields: its code is its name",
+            "a CustomErrorCode variant has no fields: its code is its name",
         )),
     }
 }
@@ -81,15 +81,15 @@ fn render(ident: &Ident, variants: &[CodeVariant]) -> TokenStream {
     let checks = variants.iter().map(|variant| {
         let code = &variant.code;
         let message = format!(
-            "user error code {code} of variant `{}` is the name of a built-in or reserved \
+            "custom error code {code} of variant `{}` is the name of a built-in or reserved \
              code; rename the variant",
             variant.ident
         );
         quote_spanned! {variant.span=>
-            const _: () = ::core::assert!(::horsies::__private::is_free_user_code(#code), #message);
+            const _: () = ::core::assert!(::horsies::__private::is_free_custom_code(#code), #message);
         }
     });
-    let code_body = match variants.is_empty() {
+    let as_str_body = match variants.is_empty() {
         true => quote! { match *self {} },
         false => quote! { match self { #(Self::#idents => #codes,)* } },
     };
@@ -108,11 +108,11 @@ fn render(ident: &Ident, variants: &[CodeVariant]) -> TokenStream {
     quote! {
         #(#checks)*
 
-        impl ::horsies::UserErrorCode for #ident {
+        impl ::horsies::CustomErrorCode for #ident {
             const CODES: &'static [&'static str] = &[#(#codes),*];
 
-            fn code(&self) -> &'static str {
-                #code_body
+            fn as_str(&self) -> &'static str {
+                #as_str_body
             }
 
             fn from_code(text: &str) -> ::core::option::Option<Self> {

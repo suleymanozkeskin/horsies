@@ -37,7 +37,7 @@ async fn send_receipt(
 ) -> Result<String, TaskError<Infallible>> {
     match charged {
         TaskOutcome::Succeeded(cents) => Ok(format!("{order_id}: charged {cents}")),
-        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().text())),
+        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().as_str())),
     }
 }
 
@@ -94,7 +94,7 @@ Each method returns `Result<TaskNode<T, I>, HorsiesError>`. The text of `input_j
 `.arg_from(field, source)` gives the outcome of `source` to a parameter of type `TaskOutcome<S, E>`, and the node waits for `source`.
 
 - `S` is the output type of `source`. A source of another output type is a compile error.
-- `E` reads the user codes of the source's task. `horsies::UserCode` reads any user code as checked text. A stored user code that `E` does not name fails the input decode of the run with `WORKER_SERIALIZATION_ERROR`.
+- `E` reads the custom codes of the source's task. `horsies::CustomCode` reads any custom code as checked text. A stored custom code that `E` does not name fails the input decode of the run with `WORKER_SERIALIZATION_ERROR`.
 - `arg_from` refuses nothing when it is called. `build` checks the node.
 
 What the parameter gets:

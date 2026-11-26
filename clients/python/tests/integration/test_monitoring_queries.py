@@ -1123,7 +1123,7 @@ class TestTaskBreakdown:
 def _stored_error(message: str) -> str:
     """The stored result text of a failed node whose error has ``message``."""
     failed: Result[None, TaskError] = Err(
-        TaskError(error_code='ORDER_REJECTED', message=message),
+        TaskError(code='ORDER_REJECTED', message=message),
     )
     match dumps_json(encode_task_result(failed, type(None))):
         case Ok(text_value):
@@ -1772,7 +1772,7 @@ async def rows_by_category(
     return result.ok_value.rows
 
 
-# One representative code per family, plus a user-defined one for CUSTOM.
+# One representative code per family, plus a custom one for CUSTOM.
 _FAMILY_SAMPLES: dict[ErrorCategory, str] = {
     ErrorCategory.OPERATIONAL: 'TASK_EXCEPTION',
     ErrorCategory.CONTRACT: 'RETURN_TYPE_MISMATCH',

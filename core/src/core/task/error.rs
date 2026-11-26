@@ -3,6 +3,7 @@ use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::value::RawValue;
 
+use crate::catalog::CodeEnum;
 use crate::core::codec::user_value::{
     check_user_value_text, UserValueRefused, MAX_VALUE_JSON_DEPTH,
 };
@@ -235,15 +236,13 @@ pub enum BuiltInTaskCode {
 }
 
 impl BuiltInTaskCode {
-    /// Get the string value of the error code (e.g. "BROKER_ERROR").
-    pub fn value(&self) -> String {
+    /// The stored text of the code (for example `"BROKER_ERROR"`): the wire value of its catalog member.
+    pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Operational(c) => {
-                serde_plain::to_string(c).unwrap_or_else(|_| format!("{:?}", c))
-            }
-            Self::Contract(c) => serde_plain::to_string(c).unwrap_or_else(|_| format!("{:?}", c)),
-            Self::Retrieval(c) => serde_plain::to_string(c).unwrap_or_else(|_| format!("{:?}", c)),
-            Self::Outcome(c) => serde_plain::to_string(c).unwrap_or_else(|_| format!("{:?}", c)),
+            Self::Operational(code) => code.wire_value(),
+            Self::Contract(code) => code.wire_value(),
+            Self::Retrieval(code) => code.wire_value(),
+            Self::Outcome(code) => code.wire_value(),
         }
     }
 
@@ -268,7 +267,7 @@ impl BuiltInTaskCode {
 
 impl std::fmt::Display for BuiltInTaskCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.value())
+        f.write_str(self.as_str())
     }
 }
 
@@ -277,13 +276,13 @@ impl Serialize for BuiltInTaskCode {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let mut map = serializer.serialize_map(Some(1))?;
-        map.serialize_entry("__builtin_task_code__", &self.value())?;
+        map.serialize_entry("__builtin_task_code__", self.as_str())?;
         map.end()
     }
 }
 
 /// Deserializes from `{"__builtin_task_code__": "BROKER_ERROR"}`, exactly that one key (Python
-/// `_scan_task_error_error_code`, `core/codec/typed.py:1253-1302`).
+/// `_scan_task_error_code`, `core/codec/typed.py:1253-1302`).
 impl<'de> Deserialize<'de> for BuiltInTaskCode {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -324,14 +323,14 @@ impl From<OutcomeCode> for BuiltInTaskCode {
 }
 
 // =============================================================================
-// User codes
+// Custom codes
 // =============================================================================
 
 /// Code texts that are reserved and are not task codes. `WORKFLOW_STOPPED` names a run that stopped before the
 /// task body ran; a task cannot return it, so no finalize path can take a returned error for a stop.
 pub const RESERVED_NON_TASK_CODES: [&str; 1] = ["WORKFLOW_STOPPED"];
 
-// The text rule of an `auto_retry_for` code. `UserCode::parse` does not apply it.
+// The text rule of an `auto_retry_for` code. `CustomCode::parse` does not apply it.
 mod code_text;
 
 pub use code_text::{check_error_code_text, CodeTextRefusal};
@@ -346,16 +345,16 @@ pub use declared::{
 
 /// An error code that task code chose.
 ///
-/// Only [`UserCode::parse`] builds one, so a user code never has the name of a built-in code or of a reserved
-/// code (Python `TaskError._validate_error_code`, `core/models/tasks.py:278-311`). A built-in code is carried
+/// Only [`CustomCode::parse`] builds one, so a custom code never has the name of a built-in code or of a reserved
+/// code (Python `TaskError._validate_code`, `core/models/tasks.py:278-311`). A built-in code is carried
 /// only by [`TaskErrorCode::BuiltIn`], so the `error_code` column, `auto_retry_for` and the monitoring
 /// families see one meaning for each code text.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct UserCode(String);
+pub struct CustomCode(String);
 
-/// Why a text cannot be a user error code.
+/// Why a text cannot be a custom error code.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum UserCodeRefused {
+pub enum CustomCodeRefused {
     /// The text is the name of a built-in code. Python: "is a reserved built-in error code"
     /// (`core/models/tasks.py:304-311`).
     #[error("'{0}' is a reserved built-in error code; pass the built-in code instead")]
@@ -365,18 +364,18 @@ pub enum UserCodeRefused {
     ReservedName(&'static str),
 }
 
-impl UserCode {
-    /// Build a user code from its text. Refuses the name of a built-in code and a reserved name.
-    pub fn parse(text: impl Into<String>) -> Result<Self, UserCodeRefused> {
+impl CustomCode {
+    /// Build a custom code from its text. Refuses the name of a built-in code and a reserved name.
+    pub fn parse(text: impl Into<String>) -> Result<Self, CustomCodeRefused> {
         let text = text.into();
         if let Some(builtin) = BuiltInTaskCode::parse(&text) {
-            return Err(UserCodeRefused::BuiltInName(builtin));
+            return Err(CustomCodeRefused::BuiltInName(builtin));
         }
         match RESERVED_NON_TASK_CODES
             .into_iter()
             .find(|reserved| *reserved == text)
         {
-            Some(reserved) => Err(UserCodeRefused::ReservedName(reserved)),
+            Some(reserved) => Err(CustomCodeRefused::ReservedName(reserved)),
             None => Ok(Self(text)),
         }
     }
@@ -387,35 +386,35 @@ impl UserCode {
     }
 }
 
-impl std::fmt::Display for UserCode {
+impl std::fmt::Display for CustomCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
 }
 
 // =============================================================================
-// TaskErrorCode — either built-in or user-defined
+// TaskErrorCode — either built-in or custom
 // =============================================================================
 
-/// Error code discriminator: either a built-in code (4 families) or a user code.
+/// Error code discriminator: either a built-in code (4 families) or a custom code.
 ///
-/// Serialization (Python `TaskError._serialize_error_code`, `core/models/tasks.py:313-327`):
+/// Serialization (Python `TaskError._serialize_code`, `core/models/tasks.py:313-327`):
 /// - Built-in: `{"__builtin_task_code__": "BROKER_ERROR"}`
-/// - User: `"MY_CUSTOM_ERROR"`
+/// - Custom: `"MY_CUSTOM_ERROR"`
 ///
 /// A read refuses `null`, a plain text that names a built-in or reserved code, an unknown built-in name, and a
 /// tag object with any other key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskErrorCode {
     BuiltIn(BuiltInTaskCode),
-    User(UserCode),
+    Custom(CustomCode),
 }
 
 impl std::fmt::Display for TaskErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::BuiltIn(code) => write!(f, "{}", code),
-            Self::User(code) => write!(f, "{}", code),
+            Self::Custom(code) => write!(f, "{}", code),
         }
     }
 }
@@ -424,7 +423,7 @@ impl Serialize for TaskErrorCode {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {
             Self::BuiltIn(code) => code.serialize(serializer),
-            Self::User(code) => serializer.serialize_str(code.as_str()),
+            Self::Custom(code) => serializer.serialize_str(code.as_str()),
         }
     }
 }
@@ -433,8 +432,8 @@ impl<'de> Deserialize<'de> for TaskErrorCode {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
         match value {
-            serde_json::Value::String(text) => UserCode::parse(text)
-                .map(Self::User)
+            serde_json::Value::String(text) => CustomCode::parse(text)
+                .map(Self::Custom)
                 .map_err(D::Error::custom),
             serde_json::Value::Object(tag) => {
                 serde_json::from_value::<BuiltInTaskCode>(serde_json::Value::Object(tag))
@@ -476,9 +475,9 @@ impl From<OutcomeCode> for TaskErrorCode {
         Self::BuiltIn(code.into())
     }
 }
-impl From<UserCode> for TaskErrorCode {
-    fn from(code: UserCode) -> Self {
-        Self::User(code)
+impl From<CustomCode> for TaskErrorCode {
+    fn from(code: CustomCode) -> Self {
+        Self::Custom(code)
     }
 }
 
@@ -617,7 +616,7 @@ pub enum StoredErrorRefused {
 
 impl TaskError {
     /// Create a TaskError with a built-in error code and message.
-    pub fn builtin(code: impl Into<BuiltInTaskCode>, message: impl Into<String>) -> Self {
+    pub fn built_in(code: impl Into<BuiltInTaskCode>, message: impl Into<String>) -> Self {
         Self {
             exception: None,
             error_code: TaskErrorCode::BuiltIn(code.into()),
@@ -627,17 +626,17 @@ impl TaskError {
         }
     }
 
-    /// Create a TaskError with an application-defined error code and message.
+    /// Create a TaskError with a custom error code and message.
     ///
     /// Refuses a code text that names a built-in code or a reserved code (Python refuses it at construction,
     /// `core/models/tasks.py:304-311`).
-    pub fn new(
+    pub fn custom(
         code: impl Into<String>,
         message: impl Into<String>,
-    ) -> Result<Self, UserCodeRefused> {
+    ) -> Result<Self, CustomCodeRefused> {
         Ok(Self {
             exception: None,
-            error_code: TaskErrorCode::User(UserCode::parse(code)?),
+            error_code: TaskErrorCode::Custom(CustomCode::parse(code)?),
             data: None,
             message: Some(message.into()),
             kind: TaskErrorKind::Plain,
@@ -890,8 +889,8 @@ mod tests {
     use crate::core::workflow::status::WorkflowStatus;
     use serde_json::json;
 
-    fn user_code(text: &str) -> TaskErrorCode {
-        TaskErrorCode::User(UserCode::parse(text).unwrap())
+    fn custom_code(text: &str) -> TaskErrorCode {
+        TaskErrorCode::Custom(CustomCode::parse(text).unwrap())
     }
 
     /// The text of a JSON value, as the `data` of an error.
@@ -942,7 +941,7 @@ mod tests {
         assert_eq!(back, code);
     }
 
-    /// Python `_scan_task_error_error_code`: the tag object has exactly one key.
+    /// Python `_scan_task_error_code`: the tag object has exactly one key.
     #[test]
     fn a_built_in_tag_with_another_key_is_refused() {
         for text in [
@@ -968,18 +967,18 @@ mod tests {
     }
 
     #[test]
-    fn task_error_code_user_serde() {
-        let code = user_code("MY_ERROR");
+    fn task_error_code_custom_serde() {
+        let code = custom_code("MY_ERROR");
         let json = serde_json::to_string(&code).unwrap();
         assert_eq!(json, "\"MY_ERROR\"");
         let back: TaskErrorCode = serde_json::from_str(&json).unwrap();
         assert_eq!(back, code);
     }
 
-    /// Python `clients/python/tests/unit/test_error_code_families.py:200-216`: a user code with a built-in name is refused at
+    /// Python `clients/python/tests/unit/test_error_code_families.py:200-216`: a custom code with a built-in name is refused at
     /// construction, also when the text is built at run time.
     #[test]
-    fn a_user_code_with_a_built_in_name_is_refused() {
+    fn a_custom_code_with_a_built_in_name_is_refused() {
         let dynamic = format!("{}_{}", "WORKFLOW", "PAUSED");
         for text in [
             "WORKFLOW_PAUSED",
@@ -991,14 +990,14 @@ mod tests {
         ] {
             let builtin = BuiltInTaskCode::parse(text).unwrap();
             assert_eq!(
-                UserCode::parse(text),
-                Err(UserCodeRefused::BuiltInName(builtin.clone()))
+                CustomCode::parse(text),
+                Err(CustomCodeRefused::BuiltInName(builtin.clone()))
             );
             assert_eq!(
-                TaskError::new(text, "m").unwrap_err(),
-                UserCodeRefused::BuiltInName(builtin)
+                TaskError::custom(text, "m").unwrap_err(),
+                CustomCodeRefused::BuiltInName(builtin)
             );
-            assert!(UserCode::parse(text)
+            assert!(CustomCode::parse(text)
                 .unwrap_err()
                 .to_string()
                 .contains("reserved built-in error code"));
@@ -1009,8 +1008,8 @@ mod tests {
     fn workflow_stopped_is_reserved_and_not_a_task_code() {
         assert_eq!(BuiltInTaskCode::parse("WORKFLOW_STOPPED"), None);
         assert_eq!(
-            UserCode::parse("WORKFLOW_STOPPED"),
-            Err(UserCodeRefused::ReservedName("WORKFLOW_STOPPED"))
+            CustomCode::parse("WORKFLOW_STOPPED"),
+            Err(CustomCodeRefused::ReservedName("WORKFLOW_STOPPED"))
         );
         assert!(serde_json::from_str::<TaskErrorCode>(r#""WORKFLOW_STOPPED""#).is_err());
         assert!(serde_json::from_str::<TaskErrorCode>(
@@ -1028,8 +1027,8 @@ mod tests {
     }
 
     #[test]
-    fn task_error_builtin_constructor() {
-        let err = TaskError::builtin(RetrievalCode::WaitTimeout, "timed out");
+    fn task_error_built_in_constructor() {
+        let err = TaskError::built_in(RetrievalCode::WaitTimeout, "timed out");
         assert_eq!(
             err.error_code,
             TaskErrorCode::BuiltIn(BuiltInTaskCode::Retrieval(RetrievalCode::WaitTimeout))
@@ -1038,16 +1037,16 @@ mod tests {
     }
 
     #[test]
-    fn task_error_new_constructor() {
-        let err = TaskError::new("TOO_LARGE", "payload exceeds 10MB").unwrap();
-        assert_eq!(err.error_code, user_code("TOO_LARGE"));
+    fn task_error_custom_constructor() {
+        let err = TaskError::custom("TOO_LARGE", "payload exceeds 10MB").unwrap();
+        assert_eq!(err.error_code, custom_code("TOO_LARGE"));
     }
 
     /// Python stores all four keys, nulls kept, in the field order of the model
     /// (`core/codec/typed.py:1053-1075`).
     #[test]
     fn the_stored_text_has_the_four_keys_with_nulls() {
-        let err = TaskError::new("RATE_LIMITED", "slow down").unwrap();
+        let err = TaskError::custom("RATE_LIMITED", "slow down").unwrap();
         assert_eq!(
             serde_json::to_string(&err).unwrap(),
             r#"{"exception":null,"error_code":"RATE_LIMITED","data":null,"message":"slow down"}"#
@@ -1055,7 +1054,7 @@ mod tests {
         let builtin = TaskError {
             data: Some(text(&json!({"elapsed_ms": 5000}))),
             message: None,
-            ..TaskError::builtin(RetrievalCode::WaitTimeout, "")
+            ..TaskError::built_in(RetrievalCode::WaitTimeout, "")
         };
         assert_eq!(
             serde_json::to_string(&builtin).unwrap(),
@@ -1090,7 +1089,7 @@ mod tests {
     #[test]
     fn a_read_takes_missing_optional_keys_as_null() {
         let err: TaskError = serde_json::from_str(r#"{"error_code":"X"}"#).unwrap();
-        assert_eq!(err.error_code, user_code("X"));
+        assert_eq!(err.error_code, custom_code("X"));
         assert_eq!(err.exception, None);
         assert_eq!(err.data, None);
         assert_eq!(err.message, None);
@@ -1149,7 +1148,7 @@ mod tests {
         ] {
             let err = TaskError {
                 data: Some(text(&data)),
-                ..TaskError::new("RATE_LIMITED", "m").unwrap()
+                ..TaskError::custom("RATE_LIMITED", "m").unwrap()
             };
             let text = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(err)).unwrap();
             let stored: serde_json::Value = serde_json::from_str(&text).unwrap();
@@ -1157,7 +1156,7 @@ mod tests {
             let read = serde_json::from_str::<TaskResult<serde_json::Value>>(&text)
                 .unwrap()
                 .unwrap_err();
-            assert_eq!(read.error_code, user_code("RATE_LIMITED"));
+            assert_eq!(read.error_code, custom_code("RATE_LIMITED"));
             assert_eq!(read.message.as_deref(), Some("m"));
         }
     }
@@ -1168,7 +1167,7 @@ mod tests {
         let data = nested_list(ERROR_DATA_DEPTH_LIMIT);
         let err = TaskError {
             data: Some(text(&data)),
-            ..TaskError::builtin(OperationalErrorCode::BrokerError, "m")
+            ..TaskError::built_in(OperationalErrorCode::BrokerError, "m")
         };
         assert_eq!(err.storage_refusal(), None);
         let back: TaskError = serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
@@ -1185,7 +1184,7 @@ mod tests {
         ] {
             let err = TaskError {
                 data: Some(text(&data)),
-                ..TaskError::new("RATE_LIMITED", "m").unwrap()
+                ..TaskError::custom("RATE_LIMITED", "m").unwrap()
             };
             let back: TaskError =
                 serde_json::from_str(&serde_json::to_string(&err).unwrap()).unwrap();
@@ -1217,7 +1216,7 @@ mod tests {
         assert_eq!(wide.data.unwrap().decode::<u128>().unwrap(), u128::MAX);
         let written = TaskError {
             data: Some(JsonText::of(&(i128::from(i64::MIN) - 1)).unwrap()),
-            ..TaskError::new("RATE_LIMITED", "m").unwrap()
+            ..TaskError::custom("RATE_LIMITED", "m").unwrap()
         };
         let envelope =
             crate::core::codec::task_result_to_json_string(&TaskResult::<()>::Err(written))
@@ -1287,9 +1286,9 @@ mod tests {
 
     #[test]
     fn sub_workflow_details_none_for_plain_error() {
-        let err = TaskError::new("SOME_OTHER_ERROR", "nope").unwrap();
+        let err = TaskError::custom("SOME_OTHER_ERROR", "nope").unwrap();
         assert!(err.sub_workflow_details().is_none());
-        let bare = TaskError::builtin(OutcomeCode::SubworkflowFailed, "no child");
+        let bare = TaskError::built_in(OutcomeCode::SubworkflowFailed, "no child");
         assert!(bare.sub_workflow_details().is_none());
     }
 
@@ -1357,7 +1356,7 @@ mod tests {
     #[test]
     fn task_timeout_code_string_value() {
         assert_eq!(
-            BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout).value(),
+            BuiltInTaskCode::Outcome(OutcomeCode::TaskTimeout).as_str(),
             "TASK_TIMEOUT"
         );
         assert_eq!(
@@ -1394,7 +1393,7 @@ mod tests {
             "SEND_SUPPRESSED",
         ] {
             assert!(BuiltInTaskCode::parse(text).is_none(), "{text}");
-            assert!(UserCode::parse(text).is_ok(), "{text}");
+            assert!(CustomCode::parse(text).is_ok(), "{text}");
         }
     }
 
@@ -1411,7 +1410,10 @@ mod tests {
         ] {
             assert!(BuiltInTaskCode::parse(text).is_some(), "{text}");
             assert!(
-                matches!(UserCode::parse(text), Err(UserCodeRefused::BuiltInName(_))),
+                matches!(
+                    CustomCode::parse(text),
+                    Err(CustomCodeRefused::BuiltInName(_))
+                ),
                 "{text}"
             );
         }
@@ -1423,14 +1425,16 @@ mod tests {
             BuiltInTaskCode::Operational(OperationalErrorCode::BrokerError).to_string(),
             "BROKER_ERROR",
         );
-        assert_eq!(user_code("CUSTOM").to_string(), "CUSTOM");
+        assert_eq!(custom_code("CUSTOM").to_string(), "CUSTOM");
         assert_eq!(
-            TaskError::new("CUSTOM", "went wrong").unwrap().to_string(),
+            TaskError::custom("CUSTOM", "went wrong")
+                .unwrap()
+                .to_string(),
             "[CUSTOM] went wrong"
         );
         let no_message = TaskError {
             message: None,
-            ..TaskError::builtin(OperationalErrorCode::BrokerError, "")
+            ..TaskError::built_in(OperationalErrorCode::BrokerError, "")
         };
         assert_eq!(no_message.to_string(), "[BROKER_ERROR]");
     }

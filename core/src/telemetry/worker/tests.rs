@@ -11,7 +11,7 @@ use chrono::Utc;
 use super::*;
 use crate::broker::claims::ClaimRead;
 use crate::core::task::error::OperationalErrorCode;
-use crate::core::task::{Execution, TaskErrorCode, UserCode};
+use crate::core::task::{CustomCode, Execution, TaskErrorCode};
 use crate::core::{BuiltInTaskCode, OutcomeCode};
 use crate::events::{
     self, AttemptErrorCode, AttemptRecord, AttemptStart, ChildResult, OperatorCancelEnd,
@@ -324,8 +324,8 @@ fn declaring_telemetry() -> WatchedTelemetry {
     WatchedTelemetry::with(Arc::new(registry), codes)
 }
 
-fn user_code(code: &str) -> TaskErrorCode {
-    TaskErrorCode::User(UserCode::parse(code).unwrap())
+fn custom_code(code: &str) -> TaskErrorCode {
+    TaskErrorCode::Custom(CustomCode::parse(code).unwrap())
 }
 
 /// How the event of a run end is expected to read.
@@ -337,16 +337,16 @@ enum ExpectedEnd {
 
 /// Each end of a run on a child gives one `AttemptEnded` with its end, and
 /// one count of `horsies.task.attempts` with its outcome and code label: a
-/// declared user code is its own label, another user code is `undeclared`.
+/// declared custom code is its own label, another custom code is `undeclared`.
 #[test]
 fn each_end_of_a_run_gives_one_attempt_ended_with_its_outcome_and_code() {
     let value = ResultRead::Value;
-    let declared = ResultRead::TaskError(user_code("RATE_LIMITED"));
-    let other = ResultRead::TaskError(user_code("OTHER_CODE"));
+    let declared = ResultRead::TaskError(custom_code("RATE_LIMITED"));
+    let other = ResultRead::TaskError(custom_code("OTHER_CODE"));
     let unreadable = ResultRead::Unreadable;
     let failed_with = |code: &str| {
         ExpectedEnd::Reported(ChildResult::Failed {
-            error_code: AttemptErrorCode::from(&user_code(code)),
+            error_code: AttemptErrorCode::from(&custom_code(code)),
         })
     };
     let cases: Vec<(EndView<'_>, ExpectedEnd, &str, &str)> = vec![
@@ -881,7 +881,7 @@ fn each_settlement_gives_one_attempt_recorded_with_its_record() {
     for (settled, record) in cases {
         let mut watched = declaring_telemetry();
         let task = claimed_task(Execution::SharedAsync);
-        let declared = user_code("RATE_LIMITED");
+        let declared = custom_code("RATE_LIMITED");
         let noted = EndNoted::Seen {
             seen: tokio::time::Instant::now(),
             error_code: watched.registry.labels().error_codes.value_of(

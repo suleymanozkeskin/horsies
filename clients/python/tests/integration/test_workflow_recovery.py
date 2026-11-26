@@ -130,7 +130,7 @@ class TestWorkflowRecovery:
         # crash via workflow_tasks=RUNNING.
         real_err_result: Result[Any, TaskError] = Err(
             TaskError(
-                error_code=OperationalErrorCode.TASK_EXCEPTION,
+                code=OperationalErrorCode.TASK_EXCEPTION,
                 message='real failure to preserve through recovery',
             ),
         )
@@ -177,7 +177,7 @@ class TestWorkflowRecovery:
         match recovered_result:
             case Failed(error=recovered_error):
                 # Critical: the real err survives, not the synthetic WORKER_CRASHED.
-                assert recovered_error.error_code == (
+                assert recovered_error.code == (
                     OperationalErrorCode.TASK_EXCEPTION
                 )
                 assert recovered_error.message == (

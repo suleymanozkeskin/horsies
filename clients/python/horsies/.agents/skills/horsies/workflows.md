@@ -175,7 +175,7 @@ def summarize_rows(
     workflow_ctx: WorkflowContext | None = None,
 ) -> Result[int, TaskError]:
     if workflow_ctx is None:
-        return Err(TaskError(error_code="NO_CONTEXT", message="workflow_ctx is missing"))
+        return Err(TaskError(code="NO_CONTEXT", message="workflow_ctx is missing"))
     match workflow_ctx.result_for(NodeKey[list[int]](FETCH_NODE_ID)):
         case Succeeded(rows):
             return Ok(sum(rows))
@@ -330,7 +330,7 @@ All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, 
 | `status`, `cancel`, `pause`, `resume`, `results`, `tasks` | `HandleResult[T]` = `Result[T, HandleOperationError]` | `Err(HandleOperationError)` |
 | `get`, `result_for` | `ReadResult[T, TaskError]` = `Ok[Succeeded[T]] \| Ok[Failed[TaskError]] \| Err[ReadError]` | `Err(ReadError)`: the read gave no outcome |
 
-The `*_async` forms have the same return types. Read `get` and `result_for` with one `match`. `Ok(Failed(task_error))` holds the error of the workflow or of the node: `task_error.error_code` names it (for example `WORKFLOW_FAILED`, `WORKFLOW_PAUSED`). `Err(read_error)` is a read that gave no outcome. `ReadError` is a closed union of frozen classes, one per catalog code, each with `code` and `message`.
+The `*_async` forms have the same return types. Read `get` and `result_for` with one `match`. `Ok(Failed(task_error))` holds the error of the workflow or of the node: `task_error.code` names it (for example `WORKFLOW_FAILED`, `WORKFLOW_PAUSED`). `Err(read_error)` is a read that gave no outcome. `ReadError` is a closed union of frozen classes, one per catalog code, each with `code` and `message`.
 
 ```python
 from horsies import Err, Failed, Ok, Succeeded, WorkflowHandle
@@ -341,7 +341,7 @@ def report_total(workflow: WorkflowHandle[int]) -> None:
         case Ok(Succeeded(total)):
             print(f"total: {total}")
         case Ok(Failed(task_error)):
-            print(f"failed: {task_error.error_code} {task_error.message}")
+            print(f"failed: {task_error.code} {task_error.message}")
         case Err(read_error):
             print(f"not read: {read_error.code} {read_error.message}")
 ```
@@ -395,7 +395,7 @@ appearing during a pause are expected, not a fault.
 ### `get()` semantics
 
 - Polls via PostgreSQL `LISTEN` on `workflow_done` channel, with 1-second polling fallback.
-- `COMPLETED` → returns `Ok(Succeeded(value))` with the output node's value. With no `output` it returns `Ok(Succeeded(terminal_results))`, a `{node_id: TaskOutcome | None, ...}` map; the entry of a `SKIPPED` terminal node is `Failed(TaskError(error_code=OutcomeCode.WORKFLOW_OUTPUT_SKIPPED))`. With a success case that does not require the output node: a `SKIPPED` output node → `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED`, and a `FAILED` output node → `Ok(Failed(task_error))` with that node's error. A `COMPLETED` row whose result is NULL or empty → `Err(ResultDeserializationError(...))`: the library always stores a result with `COMPLETED`.
+- `COMPLETED` → returns `Ok(Succeeded(value))` with the output node's value. With no `output` it returns `Ok(Succeeded(terminal_results))`, a `{node_id: TaskOutcome | None, ...}` map; the entry of a `SKIPPED` terminal node is `Failed(TaskError(code=OutcomeCode.WORKFLOW_OUTPUT_SKIPPED))`. With a success case that does not require the output node: a `SKIPPED` output node → `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_OUTPUT_SKIPPED`, and a `FAILED` output node → `Ok(Failed(task_error))` with that node's error. A `COMPLETED` row whose result is NULL or empty → `Err(ResultDeserializationError(...))`: the library always stores a result with `COMPLETED`.
 - `FAILED` / `CANCELLED` → returns `Ok(Failed(task_error))`: the stored error, or `OutcomeCode.WORKFLOW_FAILED` / `WORKFLOW_CANCELLED` when the error is NULL (no error is stored). An empty stored error → `Err(ResultDeserializationError(...))`.
 - `EXPIRED` → returns `Ok(Failed(task_error))` with `OutcomeCode.WORKFLOW_EXPIRED`. The error `data` holds the policy name and the age.
 - A stored error that is not JSON, is JSON but not an object, or does not decode as a `TaskError` → `Err(ResultDeserializationError(...))`, with the cause in the message. Any other exception in the decode is a defect and propagates.
@@ -491,7 +491,7 @@ class WorkflowTaskInfo:
 1. Task fails → workflow immediately becomes `PAUSED`.
 2. No new `PENDING → READY` or `READY → ENQUEUED` transitions.
 3. Already-running tasks may complete (cooperative stop, no force-kill).
-4. `handle.get()` returns immediately with `Ok(Failed(task_error))`, with `error_code` `WORKFLOW_PAUSED`.
+4. `handle.get()` returns immediately with `Ok(Failed(task_error))`, with the code `WORKFLOW_PAUSED`.
 5. Only `handle.resume()` or `handle.cancel()` can un-pause.
 6. Cascades: pause propagates to all running child workflows (BFS). Resume propagates similarly.
 
@@ -557,7 +557,7 @@ class WorkflowContext(BaseModel):
 def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> Result[Report, TaskError]:
     if workflow_ctx is None:
         return Err(TaskError(
-            error_code="NO_CTX",
+            code="NO_CTX",
             message="aggregate ran without a workflow context",
         ))
     ra = workflow_ctx.result_for(ParallelPipeline.a)  # TaskOutcome[int, TaskError]
@@ -635,7 +635,7 @@ When a task becomes SKIPPED, all dependents are SKIPPED too (unless `allow_faile
 |---|---|---|
 | COMPLETED | Runs normally | Runs normally |
 | FAILED | SKIPPED | Runs; receives `Failed(original_error)` |
-| SKIPPED | SKIPPED | Runs; receives `Failed(TaskError(error_code=UPSTREAM_SKIPPED))` |
+| SKIPPED | SKIPPED | Runs; receives `Failed(TaskError(code=UPSTREAM_SKIPPED))` |
 
 ### Join modes
 

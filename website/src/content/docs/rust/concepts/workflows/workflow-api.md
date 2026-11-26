@@ -72,7 +72,7 @@ async fn run_daily_report(
     let handle = daily_report.start().await?;
     match handle.get(WaitLimit::Within(Duration::from_secs(60))).await? {
         TaskOutcome::Succeeded(length) => println!("published {length} bytes"),
-        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -183,12 +183,12 @@ A task can build a spec at run time and start it through its `TaskRuntime`. `rt.
 use std::convert::Infallible;
 
 use horsies::{
-    task, HorsiesError, TaskError, TaskOutcome, TaskRuntime, UserErrorCode, WorkflowSpec,
+    task, CustomErrorCode, HorsiesError, TaskError, TaskOutcome, TaskRuntime, WorkflowSpec,
     WorkflowSpecBuilder,
 };
 use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ReportCode {
     SpecRefused,
     StartFailed,
@@ -224,11 +224,11 @@ fn report_spec(
 #[task("start_report")]
 async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError<ReportCode>> {
     let spec = report_spec(rt.workflow_builder("regional_report"), region)
-        .map_err(|refused| TaskError::user(ReportCode::SpecRefused, refused.to_string()))?;
+        .map_err(|refused| TaskError::custom(ReportCode::SpecRefused, refused.to_string()))?;
     let handle = rt
         .start::<String>(&spec)
         .await
-        .map_err(|error| TaskError::user(ReportCode::StartFailed, error.to_string()))?;
+        .map_err(|error| TaskError::custom(ReportCode::StartFailed, error.to_string()))?;
     Ok(handle.workflow_id())
 }
 ```
@@ -264,7 +264,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 | Method | Returns |
 |--------|---------|
 | `workflow_id()` | `Uuid` |
-| `get(limit)` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>`: waits while the workflow runs, up to `limit: WaitLimit` |
+| `get(limit)` | `Result<TaskOutcome<T, CustomCode>, WorkflowReadError>`: waits while the workflow runs, up to `limit: WaitLimit` |
 | `result_for::<V, E>(&key)` | `Result<TaskOutcome<V, E>, WorkflowReadError>`: the outcome of one node, read with its types. Not a wait |
 | `status()` | `HandleResult<WorkflowStatus>` |
 | `results()` | `HandleResult<BTreeMap<String, NodeResult>>`: the stored result of each node that has one, by node id. A node stored without a node id is left out |
@@ -277,15 +277,15 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 
 `get`:
 
-- reads user codes as checked text (`UserCode`), because a workflow holds the codes of many tasks;
+- reads custom codes as checked text (`CustomCode`), because a workflow holds the codes of many tasks;
 - returns `Failed` with the stored error of a FAILED, CANCELLED or EXPIRED workflow, or with the code of its status when it stored none;
 - returns `Failed` with `WORKFLOW_PAUSED` for a PAUSED workflow, which a resume can continue;
 - checks the limit first: a `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `InvalidInput`, before any statement;
 - in a worker child, is refused with `WaitInsideTask` before any statement.
 
-A workflow with no output node is read as `OutputlessResults`: the outcome of each node by node id, as `TaskOutcome<JsonText, UserCode>`. The value is its stored text: `get()` gives the text, `decode::<T>()` reads it with the node's type, an integer of any width with all its digits. It has `get(node_id)`, `iter()`, `len()` and `is_empty()`.
+A workflow with no output node is read as `OutputlessResults`: the outcome of each node by node id, as `TaskOutcome<JsonText, CustomCode>`. The value is its stored text: `get()` gives the text, `decode::<T>()` reads it with the node's type, an integer of any width with all its digits. It has `get(node_id)`, `iter()`, `len()` and `is_empty()`.
 
-`NodeResult` is `Outcome(TaskOutcome<JsonText, UserCode>)` or `Unreadable { cause }`.
+`NodeResult` is `Outcome(TaskOutcome<JsonText, CustomCode>)` or `Unreadable { cause }`.
 
 `WorkflowNodeInfo`:
 
@@ -314,7 +314,7 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing was read |
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `code` is the `HandleErrorCode`. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
-`WorkflowReadError::code()` returns the library code of the failure.
+`WorkflowReadError::code()` returns the built-in code of the failure.
 
 ### HandleOperationError
 

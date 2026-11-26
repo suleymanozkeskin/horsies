@@ -50,10 +50,10 @@ impl CheckPassed {
         self.task_count
     }
 
-    /// The error codes that each task declares (`UserErrorCode::CODES` of
+    /// The error codes that each task declares (`CustomErrorCode::CODES` of
     /// its code type), by task name, for each task that declares at least
     /// one. Each one is a value of the `error_code` metric label of its
-    /// task; another user code of the task counts as `undeclared`.
+    /// task; another custom code of the task counts as `undeclared`.
     pub fn declared_error_codes(&self) -> &BTreeMap<String, &'static [&'static str]> {
         &self.declared_error_codes
     }
@@ -341,7 +341,7 @@ fn retry_code_refusals(name: &str, options: &TaskOptions) -> Vec<HorsiesError> {
                     name,
                     refusal.message("auto_retry_for", &text),
                     "name each auto_retry_for code in UPPER_SNAKE_CASE, as the codes of a \
-                     UserErrorCode type are named",
+                     CustomErrorCode type are named",
                 )
             })
         })
@@ -395,7 +395,7 @@ mod tests {
     use std::sync::Arc;
 
     use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
-    use horsies_core::{CancelGraceMs, RetryPolicy, TaskErrorCode, TaskResult, UserCode};
+    use horsies_core::{CancelGraceMs, CustomCode, RetryPolicy, TaskErrorCode, TaskResult};
 
     use super::*;
     use crate::AppConfig;
@@ -516,15 +516,15 @@ mod tests {
         assert!(refusal_texts("echo", &both).is_empty());
     }
 
-    /// A user code accepts any text that is not a built-in or reserved name
-    /// (`UserCode::parse`, Python's `TaskError` rule); `auto_retry_for`
+    /// A custom code accepts any text that is not a built-in or reserved name
+    /// (`CustomCode::parse`, Python's `TaskError` rule); `auto_retry_for`
     /// takes only the codes of the retry code rule, as Python's
     /// `RetryPolicy` does.
     #[test]
     fn a_retry_code_outside_the_retry_code_rule_is_refused_with_python_s_text() {
         let codes: Vec<TaskErrorCode> = ["my_error", "RateLimitError", "", "RATE_LIMITED"]
             .into_iter()
-            .map(|text| TaskErrorCode::User(UserCode::parse(text).expect("a user code")))
+            .map(|text| TaskErrorCode::Custom(CustomCode::parse(text).expect("a custom code")))
             .chain([TaskErrorCode::from(horsies_core::OutcomeCode::TaskTimeout)])
             .collect();
         let refused = TaskOptions {

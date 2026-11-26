@@ -21,6 +21,7 @@ from horsies.core.telemetry.send_telemetry import NO_SEND_TELEMETRY
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.codec.error_payload import FALLBACK_ERROR_JSON, serialize_error_payload
 from horsies.core.codec.json_value import JsonValue, StrictJsonError
+from horsies.core.codec.typed import encode_task_error
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
@@ -929,7 +930,7 @@ class TestReadOfRecord:
         from horsies.core.types.status import TaskStatus
 
         original = SubWorkflowError(
-            error_code=_OpCode.UNHANDLED_EXCEPTION,
+            code=_OpCode.UNHANDLED_EXCEPTION,
             message='child failed',
             sub_workflow_id='wf-1',
             sub_workflow_summary=SubWorkflowSummary(
@@ -945,7 +946,7 @@ class TestReadOfRecord:
         wire = {
             '__h_task_result__': True,
             'ok': None,
-            'err': original.model_dump(mode='json'),
+            'err': encode_task_error(original),
         }
         broker_result = Ok(self._record(
             status=TaskStatus.FAILED, raw_result=wire,
@@ -1058,7 +1059,7 @@ class TestTaskHandleSetImmediateResult:
     def test_an_error_is_kept_as_a_failed_outcome(self) -> None:
         """set_immediate_result keeps Err(error) as Ok(Failed(error))."""
         handle: TaskHandle[int] = TaskHandle('t-1')
-        error = TaskError(error_code='DECLINED', message='card declined')
+        error = TaskError(code='DECLINED', message='card declined')
 
         handle.set_immediate_result(Err(error))
 
@@ -1334,7 +1335,7 @@ class TestCreateTaskWrapperExecution:
         result = wrapper(x=1)
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
         assert 'returned None' in (result.err_value.message or '')
 
     def test_return_type_mismatch_produces_error(self) -> None:
@@ -1348,7 +1349,7 @@ class TestCreateTaskWrapperExecution:
         result = wrapper(x=1)
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_a_conversion_of_the_ok_value_is_refused(self) -> None:
         def wrong_fn(*, x: int) -> Result[int, TaskError]:
@@ -1357,7 +1358,7 @@ class TestCreateTaskWrapperExecution:
         result = create_task_wrapper(wrong_fn, _make_app(), 'test.wrong')(x=1)
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_keyboard_interrupt_propagates(self) -> None:
         """KeyboardInterrupt re-raises for graceful worker shutdown."""
@@ -1381,7 +1382,7 @@ class TestCreateTaskWrapperExecution:
         result = wrapper(x=1)
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == ContractCode.WORKFLOW_CTX_MISSING_ID
+        assert result.err_value.code == ContractCode.WORKFLOW_CTX_MISSING_ID
 
     def test_generic_exception_uses_exception_mapper(self) -> None:
         """Unhandled exception resolved via exception_mapper chain."""
@@ -1404,7 +1405,7 @@ class TestCreateTaskWrapperExecution:
         result = wrapper(x=1)
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == 'CUSTOM_MAPPED'
+        assert result.err_value.code == 'CUSTOM_MAPPED'
 
     def test_generic_exception_falls_back_to_global_default(self) -> None:
         """Without mapper match, uses global default_unhandled_error_code."""
@@ -1417,7 +1418,7 @@ class TestCreateTaskWrapperExecution:
         result = wrapper(x=1)
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == 'UNHANDLED_EXCEPTION'
+        assert result.err_value.code == 'UNHANDLED_EXCEPTION'
         assert 'ValueError' in (result.err_value.message or '')
 
 
@@ -1455,7 +1456,7 @@ class TestCreateTaskWrapperAsyncExecution:
 
         result = asyncio.run(wrapper(x=1))
         assert isinstance(result, Err)
-        assert result.err_value.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert result.err_value.code == ContractCode.RETURN_TYPE_MISMATCH
 
     def test_an_exception_uses_the_exception_mapper(self) -> None:
         class CustomError(Exception):
@@ -1474,7 +1475,7 @@ class TestCreateTaskWrapperAsyncExecution:
 
         result = asyncio.run(wrapper(x=1))
         assert isinstance(result, Err)
-        assert result.err_value.error_code == 'CUSTOM_MAPPED'
+        assert result.err_value.code == 'CUSTOM_MAPPED'
 
     def test_an_unmapped_exception_gets_the_default_code(self) -> None:
         async def failing_fn(*, x: int) -> Result[int, TaskError]:
@@ -1485,7 +1486,7 @@ class TestCreateTaskWrapperAsyncExecution:
         result = asyncio.run(wrapper(x=1))
         assert isinstance(result, Err)
         err = result.err_value
-        assert err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert err.code == OperationalErrorCode.UNHANDLED_EXCEPTION
         assert err.message == 'Unhandled exception in task failing_fn: ValueError: oops'
 
     def test_keyboard_interrupt_propagates(self) -> None:
@@ -1538,7 +1539,7 @@ class TestCreateTaskWrapperAsyncExecution:
         result = asyncio.run(wrapper(x=1))
         assert isinstance(result, Err)
         err = result.err_value
-        assert err.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert err.code == OperationalErrorCode.UNHANDLED_EXCEPTION
         assert 'CancelledError' in (err.message or '')
 
     def test_a_cancel_request_for_the_caller_propagates(self) -> None:
@@ -1672,7 +1673,7 @@ class TestReturnedValueWithALoneSurrogateInTheValidatorText:
         assert isinstance(result, Err)
         error = result.err_value
         text = 'a validation error holds a lone surrogate, which UTF-8 cannot encode'
-        assert error.error_code == ContractCode.RETURN_TYPE_MISMATCH
+        assert error.code == ContractCode.RETURN_TYPE_MISMATCH
         assert (error.message or '').endswith(text)
         assert 'returned Ok(<dict>)' in (error.message or '')
         assert error.exception is None
@@ -1723,7 +1724,7 @@ class TestReturnedValueWithALoneSurrogateInTheValidatorText:
         result = wrapper()
 
         assert isinstance(result, Err)
-        assert result.err_value.error_code == OperationalErrorCode.UNHANDLED_EXCEPTION
+        assert result.err_value.code == OperationalErrorCode.UNHANDLED_EXCEPTION
 
 
 @pytest.mark.unit

@@ -395,7 +395,7 @@ pub(super) async fn isolated_body(
             });
             match thread.await {
                 Ok(result) => result,
-                Err(error) => TaskResult::Err(TaskError::builtin(
+                Err(error) => TaskResult::Err(TaskError::built_in(
                     OperationalErrorCode::UnhandledException,
                     format!(
                         "the thread of blocking task '{task_name}' ended with no result: {error}"
@@ -831,7 +831,7 @@ fn joined_result(
     match joined {
         Ok(Ok(result)) => result,
         Ok(Err(record)) => TaskResult::Err(super::panic::panic_error(task_name, module, record)),
-        Err(error) => TaskResult::Err(TaskError::builtin(
+        Err(error) => TaskResult::Err(TaskError::built_in(
             OperationalErrorCode::UnhandledException,
             format!("the async body of task '{task_name}' ended with no result: {error}"),
         )),

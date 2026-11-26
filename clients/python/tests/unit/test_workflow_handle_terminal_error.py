@@ -97,7 +97,7 @@ class TestNoStoredError:
         result = await handle.get_async(timeout_ms=0)
 
         error = _failed_error(result)
-        assert error.error_code is code
+        assert error.code is code
         assert error.message == f'Workflow {status.value.lower()}'
 
 
@@ -158,7 +158,7 @@ class TestLegacyExpiryText:
         result = await handle.get_async(timeout_ms=0)
 
         error = _failed_error(result)
-        assert error.error_code is OutcomeCode.WORKFLOW_EXPIRED
+        assert error.code is OutcomeCode.WORKFLOW_EXPIRED
         assert error.message == LEGACY_EXPIRY_TEXT
 
 

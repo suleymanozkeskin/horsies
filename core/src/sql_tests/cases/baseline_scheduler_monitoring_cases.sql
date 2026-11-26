@@ -976,7 +976,7 @@ CREATE FUNCTION test_list(
 $$;
 
 -- Live: d1 PENDING (enqueued 50 min ago), d2 RUNNING (40), d3 PENDING retried (30).
--- History in the window: e1 COMPLETED (enqueued 45), e2 FAILED WORKER_CRASHED (35), e3 FAILED user code (25),
+-- History in the window: e1 COMPLETED (enqueued 45), e2 FAILED WORKER_CRASHED (35), e3 FAILED custom code (25),
 -- e4 FAILED empty code (20). Outside the window: e5 (terminal 2 days ago).
 SELECT test_live_task('00000000-0000-4000-8000-0000000000d1', 'PENDING', 'app.a', 'q1', 'w1',
                       now() - interval '50 minutes', NULL, 0, NULL);

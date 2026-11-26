@@ -15,7 +15,7 @@ use std::fmt::Debug;
 
 use horsies_core::core::codec::task_result_to_json_string;
 use horsies_core::{
-    RawResultRecord, StoredEnvelopeText, TaskErrorCode, TaskResult, TaskStatus, UserCode,
+    CustomCode, RawResultRecord, StoredEnvelopeText, TaskErrorCode, TaskResult, TaskStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -93,19 +93,19 @@ impl TypedCheck for OkValue<'_> {
             TaskResult::Err(error) => panic!("{name}: the client refused the value: {error}"),
         };
         assert_eq!(written, self.expected, "{name}");
-        match outcome_of_record::<T, UserCode>(record(name, TaskStatus::Completed, self.python)) {
+        match outcome_of_record::<T, CustomCode>(record(name, TaskStatus::Completed, self.python)) {
             Ok(TaskOutcome::Succeeded(read)) => assert_eq!(read, value, "{name}"),
             Ok(TaskOutcome::Failed(error)) => panic!("{name}: read an error: {error}"),
             Err(error) => panic!("{name}: the read refused Python's text: {error}"),
         }
-        match decode_input::<TaskOutcome<T, UserCode>>(self.python.as_bytes()) {
+        match decode_input::<TaskOutcome<T, CustomCode>>(self.python.as_bytes()) {
             Ok(TaskOutcome::Succeeded(read)) => assert_eq!(read, value, "{name}: dependency"),
             Ok(TaskOutcome::Failed(error)) => panic!("{name}: dependency read an error: {error}"),
             Err(error) => panic!("{name}: the dependency read refused Python's text: {error}"),
         }
         let context = decode_input::<WorkflowContext>(context_text(self.python).as_bytes())
             .unwrap_or_else(|error| panic!("{name}: the context refused Python's text: {error}"));
-        match context.result_for::<T, UserCode>(&NodeKey::new(CONTEXT_NODE_ID)) {
+        match context.result_for::<T, CustomCode>(&NodeKey::new(CONTEXT_NODE_ID)) {
             Ok(TaskOutcome::Succeeded(read)) => assert_eq!(read, value, "{name}: context"),
             Ok(TaskOutcome::Failed(error)) => panic!("{name}: context read an error: {error}"),
             Err(error) => panic!("{name}: the context read refused Python's text: {error}"),
@@ -127,16 +127,16 @@ fn context_text(envelope: &str) -> String {
 
 /// The error that a task body builds for the notation, or `None` when the
 /// client's API does not build it: an exception record or a sub-workflow
-/// failure (written by the library), or no message (`TaskError::user` and
-/// `TaskError::library` take one).
-fn body_error(name: &str, notation: &Value) -> Option<TaskError<UserCode>> {
+/// failure (written by the library), or no message (`TaskError::custom` and
+/// `TaskError::built_in` take one).
+fn body_error(name: &str, notation: &Value) -> Option<TaskError<CustomCode>> {
     let message = notation["message"].as_str()?;
     if !notation["exception"].is_null() || notation.get("sub_workflow").is_some() {
         return None;
     }
     let error = match error_code(name, &notation["error_code"]) {
-        TaskErrorCode::BuiltIn(code) => TaskError::library(code, message),
-        TaskErrorCode::User(code) => TaskError::user(code, message),
+        TaskErrorCode::BuiltIn(code) => TaskError::built_in(code, message),
+        TaskErrorCode::Custom(code) => TaskError::custom(code, message),
     };
     Some(match &notation["data"] {
         Value::Null => error,
@@ -147,7 +147,7 @@ fn body_error(name: &str, notation: &Value) -> Option<TaskError<UserCode>> {
 fn check_error(vector: &VectorRow, notation: &Value, expected: &str) {
     let name = vector.name.as_str();
     if let Some(error) = body_error(name, notation) {
-        let written = match body_result::<(), UserCode>(Err(error)) {
+        let written = match body_result::<(), CustomCode>(Err(error)) {
             TaskResult::Err(stored) => {
                 task_result_to_json_string(&TaskResult::<Value>::Err(stored))
                     .expect("a stored error encodes")
@@ -156,7 +156,7 @@ fn check_error(vector: &VectorRow, notation: &Value, expected: &str) {
         };
         assert_eq!(written, expected, "{name}");
     }
-    match outcome_of_record::<(), UserCode>(record(name, TaskStatus::Failed, &vector.text)) {
+    match outcome_of_record::<(), CustomCode>(record(name, TaskStatus::Failed, &vector.text)) {
         Ok(TaskOutcome::Failed(error)) => assert_eq!(
             error.into_stored(),
             stored_error(name, notation, vector.stored_data.as_ref()),
@@ -201,7 +201,7 @@ fn each_refused_text_is_refused_by_the_read() {
     for refused in form().refused_texts {
         let read = StoredEnvelopeText::parse(refused.text.clone()).map(|text| {
             text.map(|envelope| {
-                outcome_of_record::<i64, UserCode>(RawResultRecord {
+                outcome_of_record::<i64, CustomCode>(RawResultRecord {
                     task_id: Uuid::nil(),
                     task_name: "stored_form_vector".to_owned(),
                     status: TaskStatus::Completed,

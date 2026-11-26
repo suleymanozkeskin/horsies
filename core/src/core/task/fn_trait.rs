@@ -77,7 +77,7 @@ pub struct TaskMeta {
     /// The module that defines the task: the `module` of the exception
     /// record of a panic of its body.
     pub module: TaskModule,
-    /// The user error codes that the task declares: the `CODES` of its code
+    /// The custom error codes that the task declares: the `CODES` of its code
     /// type, which the Rust client's task macros fill. Empty for a task that
     /// declares none, such as a hand-built [`RegisteredTask`]. The client
     /// checks them when it registers the task
@@ -107,8 +107,8 @@ impl TaskMeta {
         }
     }
 
-    /// The same metadata, for a task that declares the user error codes
-    /// `codes`. The task macros pass `UserErrorCode::CODES` of the task's
+    /// The same metadata, for a task that declares the custom error codes
+    /// `codes`. The task macros pass `CustomErrorCode::CODES` of the task's
     /// code type.
     pub fn with_error_codes(self, codes: &'static [&'static str]) -> Self {
         Self {
@@ -222,7 +222,7 @@ impl RegisteredTask {
         }
     }
 
-    /// The user error codes that the task declares ([`TaskMeta::error_codes`]).
+    /// The custom error codes that the task declares ([`TaskMeta::error_codes`]).
     pub fn error_codes(&self) -> &'static [&'static str] {
         match self {
             Self::Async { meta, .. } | Self::Blocking { meta, .. } => meta.error_codes,
@@ -385,7 +385,7 @@ mod tests {
         struct FailingTask;
         impl BlockingTaskFn for FailingTask {
             fn execute(&self, _args: &[u8]) -> RawTaskResult {
-                TaskResult::Err(TaskError::builtin(
+                TaskResult::Err(TaskError::built_in(
                     OperationalErrorCode::TaskException,
                     "something broke",
                 ))

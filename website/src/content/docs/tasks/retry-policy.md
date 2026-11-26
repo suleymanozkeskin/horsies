@@ -53,7 +53,7 @@ A failure starts a retry only when its error code is in `auto_retry_for` and ret
 `auto_retry_for` accepts:
 
 - Codes of the task's own errors, for example `RATE_LIMITED` and `SERVICE_UNAVAILABLE`.
-- Library codes, for example `UNHANDLED_EXCEPTION`, `WORKER_CRASHED` and `TASK_TIMEOUT`. The library codes are on the [Errors Reference](/horsies/tasks/errors/).
+- Built-in codes, for example `UNHANDLED_EXCEPTION`, `WORKER_CRASHED` and `TASK_TIMEOUT`. The built-in codes are on the [Errors Reference](/horsies/tasks/errors/).
 
 A code is `UPPER_SNAKE_CASE`. `WORKFLOW_STOPPED` is reserved and is not a task code, so `auto_retry_for` refuses it.
 

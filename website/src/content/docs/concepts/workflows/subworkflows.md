@@ -230,7 +230,7 @@ def aggregate(
     workflow_ctx: WorkflowContext | None = None,
 ) -> Result[Summary, TaskError]:
     if workflow_ctx is None:
-        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
+        return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     # Access individual outcomes
     result_a = workflow_ctx.result_for(node_a)  # TaskOutcome[int, TaskError]
@@ -468,7 +468,7 @@ def sum_shard_rows(
 ) -> Result[int, TaskError]:
     if workflow_ctx is None:
         return Err(
-            TaskError(error_code="NO_CONTEXT", message="workflow_ctx is missing"),
+            TaskError(code="NO_CONTEXT", message="workflow_ctx is missing"),
         )
     total = 0
     for position in range(shard_count):
@@ -558,7 +558,7 @@ def report_health(
     workflow_ctx: WorkflowContext | None = None,
 ) -> Result[HealthReport, TaskError]:
     if workflow_ctx is None:
-        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
+        return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     # Get summary for the child subworkflow node
     summary: SubWorkflowSummary = workflow_ctx.summary_for(child_node)
@@ -744,7 +744,7 @@ def handle_any_failure(
     match upstream:
         case Succeeded(data):
             return Ok(Report(data=data))
-        case Failed(error) if error.error_code == "UPSTREAM_SKIPPED":
+        case Failed(error) if error.code == "UPSTREAM_SKIPPED":
             # Upstream was skipped (its own dependency failed)
             return Ok(Report(skipped=True))
         case Failed(error):
@@ -975,7 +975,7 @@ broker.app = app  # Attach before start_workflow
 **Runtime note (post-ENQUEUED path)**:
 If this condition is hit while a workflow is already running (for example, dependency completion triggers
 subworkflow enqueue and `broker.app` is `None`), Horsies does not re-raise `WorkflowValidationError` to the caller.
-Instead, it marks the `SubWorkflowNode` as `FAILED` with `TaskError.error_code = WORKFLOW_ENQUEUE_FAILED` so the
+Instead, it marks the `SubWorkflowNode` as `FAILED` with `TaskError.code = WORKFLOW_ENQUEUE_FAILED` so the
 workflow can continue deterministic failure propagation without leaving the node stranded in `ENQUEUED`.
 
 ### Error: `WORKFLOW_CTX_PARAM_MISSING`
@@ -1116,7 +1116,7 @@ def aggregate_sources(
     workflow_ctx: WorkflowContext | None = None,
 ) -> Result[AggregatedReport, TaskError]:
     if workflow_ctx is None:
-        return Err(TaskError(error_code="NO_CTX", message="Missing context"))
+        return Err(TaskError(code="NO_CTX", message="Missing context"))
 
     total = 0
     sources = []

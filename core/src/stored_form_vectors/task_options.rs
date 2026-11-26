@@ -16,8 +16,8 @@ use serde_json::Value;
 use super::vector_file;
 use crate::core::history::enqueue::prepare_enqueue_facts;
 use crate::core::task::{
-    BackoffStrategy, BuiltInTaskCode, CancelGraceMs, Execution, RetryPolicy, TaskErrorCode,
-    TaskOptions, UserCode,
+    BackoffStrategy, BuiltInTaskCode, CancelGraceMs, CustomCode, Execution, RetryPolicy,
+    TaskErrorCode, TaskOptions,
 };
 use crate::worker::retry::{read_stored_options, stored_max_retries, RunPermit};
 use crate::workflow_engine::merge_good_until_into_options;
@@ -64,8 +64,8 @@ fn execution(name: &str, options: &Value) -> Execution {
 fn code(name: &str, text: &str) -> TaskErrorCode {
     match BuiltInTaskCode::parse(text) {
         Some(built_in) => TaskErrorCode::BuiltIn(built_in),
-        None => TaskErrorCode::User(
-            UserCode::parse(text).unwrap_or_else(|refused| panic!("{name}: {refused}")),
+        None => TaskErrorCode::Custom(
+            CustomCode::parse(text).unwrap_or_else(|refused| panic!("{name}: {refused}")),
         ),
     }
 }

@@ -142,7 +142,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - read.unwrap() on a ReadResult gives the TaskOutcome, not the value
 
 ### TaskError
-- error_code: str | BuiltInTaskCode (required, not null)
+- code: str | BuiltInTaskCode (required, not null; stored under the key error_code)
 - message: str | None
 - data: takes JsonInput, gives JsonValue. No check runs at construction. A value that cannot cross the wire becomes {'data_refused': <cause>}, and the code stays
 - exception: dict[str, Any] | BaseException | None
@@ -155,14 +155,14 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - A read gives a RetrievalCode value as read_error.code of its ReadError class (Err(WaitTimeout(...)) has code WAIT_TIMEOUT), not inside a TaskError
 - A result wait inside a worker child (get(), get_async(), app.get_result(), WorkflowHandle.get()) returns Err(WaitInsideTask(...)) at once, as its first check; the raw reads (app.get_raw_result(), broker.get_raw_result_record()) return Err(BrokerWaitInsideTask); compose tasks with a workflow instead
 - OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET, WORKFLOW_OUTPUT_SKIPPED
-- All built-in code string values are globally reserved; user-defined error codes must not collide
+- All built-in code string values are globally reserved; custom error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
 - horsies check reports HRS-212 when exception_mapper or default_unhandled_error_code collides with a reserved code
-- User-defined error codes are plain str only (foreign str,Enum types rejected)
-- Strict construction: TaskError(error_code="BROKER_ERROR", message="...") raises ValueError (reserved string)
-- Use enum members: TaskError(error_code=OperationalErrorCode.BROKER_ERROR, message="...") — accepted
-- Serialization: built-in codes use tagged format {"__builtin_task_code__": "VALUE"}, user strings as-is
-- Deserialization: standard model_validate() / model_validate_json() work everywhere — including nested models
+- Custom error codes are plain str only (foreign str,Enum types rejected)
+- Strict construction: TaskError(code="BROKER_ERROR", message="...") raises ValueError (reserved string)
+- Use enum members: TaskError(code=OperationalErrorCode.BROKER_ERROR, message="...") — accepted
+- Serialization: built-in codes use tagged format {"__builtin_task_code__": "VALUE"}, custom codes as-is
+- Deserialization: standard model_validate() / model_validate_json() work everywhere — including nested models; the stored form has the key error_code in place of code (encode_task_error writes it, decode_task_error reads it)
 
 ### SubWorkflowError (extends TaskError)
 - sub_workflow_id: str

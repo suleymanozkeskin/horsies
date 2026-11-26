@@ -77,7 +77,7 @@ match await app.get_result_async(task_id, timeout_ms=5000):
     case Ok(Succeeded(value)):
         print(f"Result: {value}")
     case Ok(Failed(task_error)):
-        print(f"Task error: {task_error.error_code}")
+        print(f"Task error: {task_error.code}")
     case Err(read_error):
         print(f"Read error: {read_error.code} - {read_error.message}")
 

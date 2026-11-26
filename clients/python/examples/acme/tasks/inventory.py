@@ -69,7 +69,7 @@ def reserve_stock(
             if not outcome.known_sku:
                 return Err(
                     TaskError(
-                        error_code=UNKNOWN_SKU,
+                        code=UNKNOWN_SKU,
                         message=f'{sku} is not in the catalog',
                         data={'order_id': order_id, 'sku': sku},
                     ),
@@ -77,7 +77,7 @@ def reserve_stock(
             if not outcome.reserved:
                 return Err(
                     TaskError(
-                        error_code=INSUFFICIENT_STOCK,
+                        code=INSUFFICIENT_STOCK,
                         message=(
                             f'{sku} has {outcome.available} available, '
                             f'order {order_id} needs {quantity}'
@@ -124,7 +124,7 @@ def release_stock(
             if available is None:
                 return Err(
                     TaskError(
-                        error_code=UNKNOWN_SKU,
+                        code=UNKNOWN_SKU,
                         message=f'{sku} is not in the catalog',
                         data={'sku': sku},
                     ),
@@ -248,7 +248,7 @@ def update_stock_levels(
     if workflow_ctx is None:
         return Err(
             TaskError(
-                error_code=NO_WORKFLOW_CONTEXT,
+                code=NO_WORKFLOW_CONTEXT,
                 message='update_stock_levels runs only as a workflow node',
                 data={'feed_node_ids': feed_node_ids},
             ),
@@ -288,7 +288,7 @@ def update_stock_levels(
     if not reporting:
         return Err(
             TaskError(
-                error_code=QUORUM_NOT_MET,
+                code=QUORUM_NOT_MET,
                 message='no supplier feed reached the aggregate',
                 data={'missing': missing},
             ),

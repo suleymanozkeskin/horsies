@@ -14,11 +14,11 @@ The API of the error types is on the client pages: [Error Types](/horsies/tasks/
 
 ## Task Error Codes
 
-A task ends with its own code or with a library code. A task that ends `FAILED` stores its error code with its record, so a task info read returns it. Each execution attempt is recorded with its own error code, message and outcome. See [Retrieving Results](/horsies/tasks/retrieving-results/#task-metadata-and-attempt-history).
+A task ends with its own code or with a built-in code. A task that ends `FAILED` stores its error code with its record, so a task info read returns it. Each execution attempt is recorded with its own error code, message and outcome. See [Retrieving Results](/horsies/tasks/retrieving-results/#task-metadata-and-attempt-history).
 
 ### BuiltInTaskCode (4-Family Split)
 
-All library-defined error codes are grouped into four families. The umbrella type alias `BuiltInTaskCode` is the union of all four enums. User code should handle these explicitly.
+All built-in error codes are grouped into four families. The umbrella type alias `BuiltInTaskCode` is the union of all four enums. User code should handle these explicitly.
 
 #### OperationalErrorCode
 
@@ -103,7 +103,7 @@ Workflow-specific error codes are distributed across the four families above:
 
 ### Reserved Codes
 
-Every code of the four families is reserved: a task's own code must not have the name of a library code. `WORKFLOW_STOPPED` is reserved too; it is not a task code. A client refuses a reserved name as a task's own code, as an `auto_retry_for` entry of a user code, and in the config. A library code is stored in a tagged form, `{"__builtin_task_code__": "BROKER_ERROR"}`, and a task's own code as plain text, so a stored code reads back as the same kind. The client rules: [Python](/horsies/tasks/error-types/#reserved-built-in-code-enforcement), [Rust](/horsies/rust/tasks/errors/#the-code-type).
+Every code of the four families is reserved: a task's own code must not have the name of a built-in code. `WORKFLOW_STOPPED` is reserved too; it is not a task code. A client refuses a reserved name as a task's own code, as an `auto_retry_for` entry of a custom code, and in the config. A built-in code is stored in a tagged form, `{"__builtin_task_code__": "BROKER_ERROR"}`, and a task's own code as plain text, so a stored code reads back as the same kind. The client rules: [Python](/horsies/tasks/error-types/#reserved-built-in-code-enforcement), [Rust](/horsies/rust/tasks/errors/#the-code-type).
 
 ### Declared Error Codes
 
@@ -111,7 +111,7 @@ A task can declare its own error codes. The declared codes close the set of valu
 
 - each built-in code, by its value (`BROKER_ERROR`);
 - each code that the task declares (`CARD_DECLINED`);
-- `undeclared`, for every other user code of the task.
+- `undeclared`, for every other custom code of the task.
 
 A declared set has no size limit. The label holds the first 100,000 declared codes of the app, in text order; a code after them counts as `undeclared` there ([Label Rules](/horsies/observability/metrics/#a-name-that-cannot-be-a-label-value)). Only the label folds a code into `undeclared`: the task's error, its attempt record, its events, traces and logs keep the exact code. `horsies check` lists the declared codes of each task that declares some.
 
@@ -123,7 +123,7 @@ Each client refuses a bad set when the task is defined:
 | An empty code, a code that is not `UPPER_SNAKE_CASE`, or an exception class name (`TimeoutError`) | `HRS-112` |
 | A code given twice | `HRS-113` |
 
-Declaring is optional. The client APIs: [Python](/horsies/tasks/defining-tasks/#declare-error-codes) (`error_codes=` of `@app.task`, plus the values of the task's and the app's exception mappers, with no second declaration), [Rust](/horsies/rust/tasks/errors/#the-code-type) (`UserErrorCode::CODES` of the task's code type, with no other user work).
+Declaring is optional. The client APIs: [Python](/horsies/tasks/defining-tasks/#declare-error-codes) (`error_codes=` of `@app.task`, plus the values of the task's and the app's exception mappers, with no second declaration), [Rust](/horsies/rust/tasks/errors/#the-code-type) (`CustomErrorCode::CODES` of the task's code type, with no other user work).
 
 ## Call Error Codes
 

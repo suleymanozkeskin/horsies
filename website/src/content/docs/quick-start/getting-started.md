@@ -66,7 +66,7 @@ def add_numbers(*, a: int, b: int) -> Result[int, TaskError]:
 def process_data(*, data: dict[str, JsonValue]) -> Result[str, TaskError]:
     if not data:
         return Err(TaskError(
-            error_code="EMPTY_DATA",
+            code="EMPTY_DATA",
             message="Data cannot be empty",
         ))
     return Ok(f"Processed {len(data)} items")
