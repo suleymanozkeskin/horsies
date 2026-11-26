@@ -20,6 +20,7 @@ import {
   rawCommandConflict,
   rawIdConflict,
   rawStartEnqueueFailed,
+  rawValidationFailed,
   SPEC_DATA,
   WORKFLOW_ID,
 } from "./core-support.ts";
@@ -153,6 +154,37 @@ describe("app.start", () => {
       assert.equal(code, "VALIDATION_FAILED");
     });
   }
+
+  test("a spec string that the writer cannot store: VALIDATION_FAILED with the path", async () => {
+    const core = fakeCore({
+      refusedCall: {
+        kind: "textRefused",
+        refused: { kind: "LoneSurrogate", path: "$.name", detail: "a string holds a lone surrogate" },
+      },
+    });
+
+    const started = await createWorkflowArea(contextOf(core)).start(hello, { who: "eu" });
+
+    assert(!started.ok && started.error.code === "VALIDATION_FAILED");
+    assert.match(started.error.message, /no stored text at \$\.name: a string holds a lone surrogate/u);
+  });
+
+  test("spec data that the core's parse refuses: VALIDATION_FAILED with the field path", async () => {
+    const core = fakeCore({ refusedCall: { kind: "specRefused", fieldPath: "nodes[0].queue", cause: "no class" } });
+    const started = await createWorkflowArea(contextOf(core)).start(hello, { who: "eu" });
+
+    assert(!started.ok && started.error.code === "VALIDATION_FAILED");
+    assert.match(started.error.message, /the core refuses the spec data at nodes\[0\]\.queue: no class/u);
+  });
+
+  test("a VALIDATION_FAILED of the core's start is the start error, with no retry", async () => {
+    const core = fakeCore({ started: [{ kind: "failed", error: rawValidationFailed("hello") }] });
+    const started = await createWorkflowArea(contextOf(core)).start(hello, { who: "eu" });
+
+    assert(!started.ok && started.error.code === "VALIDATION_FAILED");
+    assert.equal(started.error.workflowName, "hello");
+    assert.equal(core.starts.length, 1);
+  });
 
   test("the start observer wraps the core's start and gives its carrier", async () => {
     const carrier: TraceArgument = { kind: "carrier", carrier: { traceparent: "00-a-b-01" }, traceIdHex: "a" };

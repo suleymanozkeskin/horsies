@@ -24,6 +24,8 @@ export const SPEC_DATA = '{"data_version":1}';
 /** The scripted answers of a fake core. Each answer left out is a quiet default. */
 export type CoreScript = {
   readonly started?: readonly WorkflowStartOutcome[];
+  /** A start call that never reaches the core's start: the writer or the core's parse refused the spec. */
+  readonly refusedCall?: Exclude<StartCall, { readonly kind: "outcome" }>;
   readonly status?: WorkflowStatusRead;
   readonly nodeResults?: NodeResultsRead;
   readonly nodes?: NodesRead;
@@ -52,7 +54,8 @@ export function fakeCore(script: CoreScript = {}): FakeCore {
   const outcome = (index: number): WorkflowStartOutcome =>
     script.started?.[Math.min(index, (script.started?.length ?? 1) - 1)] ?? { kind: "started" };
 
-  const startCall = (index: number): StartCall => ({ kind: "outcome", specData: SPEC_DATA, outcome: outcome(index) });
+  const startCall = (index: number): StartCall =>
+    script.refusedCall ?? { kind: "outcome", specData: SPEC_DATA, outcome: outcome(index) };
 
   const record = <T>(name: string, value: T): T => {
     calls.push(name);
@@ -126,6 +129,17 @@ export function rawIdConflict(workflowName: string, existing: string): RawCatalo
   return {
     class: "WorkflowStartIdConflict",
     slots: [...startSlots(workflowName), { name: "existing_workflow_name", value: { kind: "text", text: existing } }],
+  };
+}
+
+/** A raw `WorkflowStartValidationFailed` of the core, with no cause. */
+export function rawValidationFailed(workflowName: string): RawCatalogError {
+  return {
+    class: "WorkflowStartValidationFailed",
+    slots: [
+      ...startSlots(workflowName),
+      { name: "exception", value: { kind: "exception", exception: { kind: "noCause" } } },
+    ],
   };
 }
 
