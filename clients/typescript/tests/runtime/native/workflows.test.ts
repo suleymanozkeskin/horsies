@@ -10,6 +10,10 @@ import { randomUUID } from "node:crypto";
 import { describe, test } from "node:test";
 
 import { defineTask, defineWorkflow, h, Horsies, WorkflowId } from "../../../horsies/src/index.ts";
+import { appInternals } from "../../../horsies/src/app/internals.ts";
+import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { workflowsAddon } from "../../../horsies/src/native/workflows/addon.ts";
+import { appHandle } from "../../../horsies/src/worker/run.ts";
 import { testDatabaseUrl } from "./manifest.ts";
 
 const greet = defineTask({ name: "workflow_end_to_end_greet", input: { who: h.string() }, output: h.string() });
@@ -54,6 +58,15 @@ function newWorkflowId(): WorkflowId {
 
   return parsed.value;
 }
+
+describe("the child spec source of the app", () => {
+  test("it is registered on the app's one core handle, the handle that the worker runs on", () => {
+    const handle = appHandle(appInternals(testApp()));
+    const again = workflowsAddon().registerChildSpecSource(handle.native, () => undefined, []);
+
+    assert.equal(envelopeValue(again), "alreadySet");
+  });
+});
 
 describe("the workflow start with a database", () => {
   test("a start gives a handle; RUNNING; a bounded wait is waitTimedOut", async () => {
