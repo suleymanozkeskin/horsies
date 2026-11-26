@@ -110,6 +110,8 @@ value reads back to the same value.
 | `h.object({ ... })` | an object of the members | A JSON object in declaration order. An undeclared key is refused |
 | `h.array(item)` | `T[]` | A JSON array |
 | `h.tuple([a, b])` | `[A, B]` | A JSON array with one value per item type |
+| `h.tuple([a], rest)` | `[A, ...R[]]` | The items, then zero or more `rest` values; Python's `tuple[R, ...]` when `[]` |
+| `h.lazy(() => w)` | the value type of `w` | The stored form of `w`, for a recursive type (see below) |
 | `h.record(value)` | `Readonly<Record<string, T>>` | A JSON object in the value's own key order |
 | `h.union([a, b])` | `A \| B` | Primitive members, at most one per stored JSON type |
 | `h.union(tag, [objects])` | the member objects | Object members told apart by the string literal member `tag` |
@@ -120,6 +122,7 @@ value reads back to the same value.
 | `.optional()` | An object member or a parameter that a value may leave out. The key is left out of the stored text; it is never `null` |
 | `.nullable()` | `null` or the value |
 | `.default(value)` | A sender may leave the member out; a reader fills `value`. The sender never stores the default |
+| `.default(() => value)` | As `.default(value)`, but the reader calls the function at each read, so each read gets a new value (Python's `default_factory`). `Horsies.create` calls it once to check its value |
 
 ```ts
 import { Decimal } from "horsies";
@@ -174,6 +177,22 @@ export function totalText(text: string): string {
   order (integer-like keys first).
 - `Horsies.create` refuses `h.union` with `h.int()` and `h.float()`: one
   `number` cannot say which it is.
+- A recursive type refers to itself through `h.lazy`; give the constant its
+  type. Each cycle must pass an array or an object: `Horsies.create`
+  refuses a nullable or a union of itself. A value deeper than 200 levels
+  of arrays and objects is refused (`TooDeep`).
+
+```ts
+import type { Wire } from "horsies";
+
+type Category = { name: string; children: Category[] };
+
+export const CategoryTree: Wire<Category> = h.object({
+  name: h.string(),
+  children: h.array(h.lazy(() => CategoryTree)),
+});
+```
+
 - The published declarations carry the Temporal lib reference. A project
   with the default `lib` needs no lib setting for the `Temporal` types.
 
@@ -221,9 +240,13 @@ export const recordShipment = defineTask({
   `z.map()`, `z.set()`, `z.function()`, `z.promise()`; a union with an
   object member that is not a discriminated union; a union of an integer
   and a float; `z.intersection()`; `.optional()` or `.default()` outside an
-  object member or a parameter; a function default; `z.lazy()`; and a zod
-  definition, field, format or check that the installed horsies does not
-  know.
+  object member or a parameter; a recursive schema that is `.optional()` or
+  `.default()` at its top; and a zod definition, field, format or check
+  that the installed horsies does not know.
+- A recursive schema (`z.lazy()`, or an object with a getter member that
+  returns a schema of itself) and `z.tuple([...], rest)` map to `h.lazy`
+  and `h.tuple(items, rest)`. A zod default is read at each read, as zod
+  reads it: a function default gives a new value each time.
 - The supported zod range is the peer range of the package
   (`>=4.1.13 <4.7.0`). A zod 3 schema is refused with `Zod3Schema`, which
   names zod 4 as the fix. A Standard Schema of another vendor is refused.

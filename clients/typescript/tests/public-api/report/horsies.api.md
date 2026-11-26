@@ -1248,7 +1248,12 @@ export type DecodeRefusalKind =
 /** A stored value that is not a member of a literal, an enum or a union, or a tag that names no union member. */
 | "NotAMember"
 /** A user-side conversion or check refused the read value; `detail` names the issues (paths and codes). */
-| "CheckFailed";
+| "CheckFailed"
+/**
+* A default function gave a value that does not encode under its kind, at a worker-form decode of a text that
+* leaves the member out; `detail` names the writer's refusal.
+*/
+| "DefaultRefused";
 
 // @public
 export type DecodeRefused = ValueRefused | EnvelopeRefused;
@@ -1325,7 +1330,9 @@ export type EncodeRefusalKind =
 /** A value that is not a member of a literal, an enum or a union, or a tag that names no union member. */
 | "NotAMember"
 /** A user-side conversion or check refused the value; `detail` names the issues (paths and codes). */
-| "CheckFailed";
+| "CheckFailed"
+/** A default function gave a value that does not encode under its kind; `detail` names the writer's refusal. */
+| "DefaultRefused";
 
 // @public
 export type EncodeRefused = {
@@ -4821,7 +4828,7 @@ export interface Wire<V, S = V, P extends Presence = "required", R extends Role 
     readonly [wireSent]: S;
     // (undocumented)
     readonly [wireValue]: V;
-    default(value: S): Wire<V, S, "defaulted", R>;
+    default(value: S | (() => S)): Wire<V, S, "defaulted", R>;
     nullable(): Wire<V | null, S | null, P, R>;
     optional(): Wire<V, S, "optional", R>;
 }
@@ -4837,6 +4844,7 @@ export interface WireBuilders {
     instant(): Wire<Temporal.Instant>;
     int(): Wire<number>;
     json(): Wire<JsonValue>;
+    lazy<W extends RequiredWire>(getter: () => W): Wire<ValueOf<W>, SentOf<W>>;
     literal<const L extends NonEmpty<LiteralMember>>(...members: L): Wire<L[number]>;
     null(): Wire<null>;
     object<const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>>;
@@ -4848,6 +4856,7 @@ export interface WireBuilders {
     string(): Wire<string>;
     taskOutcome<C extends AnyTaskContract | AnyWorkflowContract>(contract: C): TaskOutcomeWire<C>;
     tuple<const T extends readonly RequiredWire[]>(items: T): Wire<TupleValue<T>, TupleSent<T>>;
+    tuple<const T extends readonly RequiredWire[], R extends RequiredWire>(items: T, rest: R): Wire<[...TupleValue<T>, ...ValueOf<R>[]], [...TupleSent<T>, ...SentOf<R>[]]>;
     union<const T extends NonEmpty<RequiredWire>>(members: T): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
     union<const K extends string, const T extends NonEmpty<ObjectWire>>(tag: K, members: T): Wire<ValueOf<T[number]>, SentOf<T[number]>>;
     uuid(): Wire<string>;
@@ -5391,8 +5400,11 @@ export type ZodContainerSent<S> = ZodDefOf<S> extends {
     readonly element: infer I;
 } ? ZodSentOf<I>[] : ZodDefOf<S> extends {
     readonly type: "tuple";
-    readonly items: infer T;
-} ? {
+    readonly items: infer T extends readonly ZodSchemaLike[];
+    readonly rest: infer R;
+} ? R extends ZodSchemaLike ? [...{
+    -readonly [K in keyof T]: ZodSentOf<T[K]>;
+}, ...ZodSentOf<R>[]] : {
     -readonly [K in keyof T]: ZodSentOf<T[K]>;
 } : ZodDefOf<S> extends {
     readonly type: "record";
@@ -5425,8 +5437,11 @@ export type ZodContainerValue<S> = ZodDefOf<S> extends {
     readonly element: infer I;
 } ? ZodValueOf<I>[] : ZodDefOf<S> extends {
     readonly type: "tuple";
-    readonly items: infer T;
-} ? {
+    readonly items: infer T extends readonly ZodSchemaLike[];
+    readonly rest: infer R;
+} ? R extends ZodSchemaLike ? [...{
+    -readonly [K in keyof T]: ZodValueOf<T[K]>;
+}, ...ZodValueOf<R>[]] : {
     -readonly [K in keyof T]: ZodValueOf<T[K]>;
 } : ZodDefOf<S> extends {
     readonly type: "record";

@@ -7,7 +7,11 @@
 //   stored kind is the kind of the codec's input; an `hz.*` codec maps to its `h.*` kind, found by its brand
 //   (`brand.ts`).
 // - `.optional()`, `.default()` and `.prefault()` are a member's presence: valid for an object member or a task input
-//   parameter only. A default is read at compile and stored as text; the reader fills it at decode only.
+//   parameter only. A default is a computed default: zod reads `defaultValue` again at each parse (a function default
+//   gives a new value, a fixed one a copy), so the reader reads it at each worker-form decode, as zod does. `checkKind`
+//   reads it once at `Horsies.create`, to refuse a default that does not encode.
+// - A recursive schema (`z.lazy()`, an object with a getter member) compiles to a `lazy` kind: a schema that the walk
+//   meets again inside itself is a lazy kind of that schema's compiled kind.
 // - Unknown keys: every object kind refuses them at decode, also for a `z.object()`, which zod would strip.
 // - The kinds that `checkKind` refuses are refused there, at `Horsies.create`, with the rules of `h.*`: an
 //   integer-like member name (`IntegerLikeMember`: JavaScript puts it first, so the declared order cannot hold), an
@@ -17,23 +21,25 @@
 import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
 import { issuesText, type ValueCheck } from "../codec/conversion.ts";
 import { isEngineKey } from "../codec/engine-keys.ts";
-import type { JsonText } from "../codec/json-text.ts";
-import { encodeRefused, type EncodeRefused, itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";
+import { encodeRefused, itemPath, memberPath, ROOT_PATH } from "../codec/refusal.ts";
 import { isBoolean, isNumber, isPlainObject, isString } from "../codec/values.ts";
 import { encodeValue } from "../codec/writer.ts";
 import {
   BIGINT_KIND,
   BOOLEAN_KIND,
   checkedKind,
+  type ComputeDefault,
   conversionKind,
   type DefaultText,
   FLOAT_KIND,
   INT_KIND,
   JSON_KIND,
   type Kind,
+  type LazyKind,
   type LiteralMember,
   type Member,
   type MemberPresence,
+  NO_TUPLE_REST,
   NULL_KIND,
   nullableKind,
   type ObjectKind,
@@ -43,7 +49,10 @@ import {
   STRING_KIND,
   taggedUnionKind,
   tagValues,
+  tupleKind,
+  type TupleRest,
 } from "../wire/kinds.ts";
+import { lazyKind } from "../wire/lazy.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { hzKindOf } from "./brand.ts";
@@ -52,6 +61,7 @@ import {
   type MemberRead,
   type OtherKeys,
   readDefinition,
+  type TupleRest as ZodTupleRest,
   type ZodDefinition,
   type ZodLiteralValue,
   type ZodSchema,
@@ -80,16 +90,38 @@ type Compiled<T> = Result<T, Refusals>;
 /** The definition of one form. */
 type FormOf<F extends DefinitionForm["form"]> = Extract<ZodDefinition, { readonly form: F }>;
 
-/** Where the walk is: the path in the schema, the depth in nodes, and the schemas on the path (to find recursion). */
-type Walk = { readonly path: string; readonly depth: number; readonly onPath: ReadonlySet<ZodSchema> };
+/**
+ * A schema on the walk path: the lazy kind that a schema inside it refers to (a recursion), filled when the schema
+ * has compiled.
+ */
+type RecursionPoint = {
+  /** The lazy kind of the schema, for a reference from inside it; marks the point as referred to. */
+  readonly reference: () => LazyKind;
+  /** Whether a schema inside it referred to it. */
+  readonly referred: () => boolean;
+  /** Sets the compiled kind of the schema: the kind that the lazy kind gives. */
+  readonly close: (kind: Kind) => void;
+};
 
-const START: Walk = Object.freeze({ path: ROOT_PATH, depth: 0, onPath: new Set<ZodSchema>() });
+/** The kind of a recursion point: open while its schema compiles, then the compiled kind. */
+type PointTarget = { readonly state: "open" } | { readonly state: "closed"; readonly kind: Kind };
+
+const OPEN_POINT: PointTarget = Object.freeze({ state: "open" });
+
+/** Where the walk is: the path in the schema, the depth in nodes, and the schemas on the path (to find recursion). */
+type Walk = {
+  readonly path: string;
+  readonly depth: number;
+  readonly onPath: ReadonlyMap<ZodSchema, RecursionPoint>;
+};
+
+const START: Walk = Object.freeze({ path: ROOT_PATH, depth: 0, onPath: new Map<ZodSchema, RecursionPoint>() });
 
 /**
  * The kind and the presence of a schema as an object member or a task input parameter.
  *
- * Fails with every refusal of the schema, in walk order. Reads each default value twice (a function default runs
- * twice) and calls the getter of each `z.lazy()` once. Does no I/O.
+ * Fails with every refusal of the schema, in walk order. Reads no default value (the reader and `checkKind` read
+ * them) and calls the getter of each `z.lazy()` once. Does no I/O.
  */
 export function compileMember(schema: ZodSchema): Compiled<ZodMemberKind> {
   return compileNode(schema, START);
@@ -108,15 +140,67 @@ function compileNode(schema: ZodSchema, walk: Walk): Compiled<ZodMemberKind> {
     return refused("TOO_DEEP", walk.path, zodTypeOf(schema));
   }
 
-  if (walk.onPath.has(schema)) {
-    return refused("RECURSIVE", walk.path, zodTypeOf(schema));
+  const point = walk.onPath.get(schema);
+
+  if (point !== undefined) {
+    return required(point.reference());
   }
 
+  const own = recursionPoint();
   const definition = readDefinition(schema);
-  const inside: Walk = { path: walk.path, depth: walk.depth + 1, onPath: new Set([...walk.onPath, schema]) };
+  const inside: Walk = { path: walk.path, depth: walk.depth + 1, onPath: new Map([...walk.onPath, [schema, own]]) };
   const compiled = compileForm(definition, schema, inside);
+  const checked = compiled.ok ? withChecks(compiled.value, definition, walk.path) : compiled;
 
-  return compiled.ok ? withChecks(compiled.value, definition, walk.path) : compiled;
+  return checked.ok ? closedAt(own, checked.value, walk.path, definition.zodType) : checked;
+}
+
+/**
+ * A new recursion point. Its lazy kind gives the kind that `close` sets; a walk of that lazy kind before `close` is a
+ * defect of the adapter (the compile is not done), so its getter throws a `TypeError` then.
+ */
+function recursionPoint(): RecursionPoint {
+  let referred = false;
+  let target: PointTarget = OPEN_POINT;
+
+  const lazy = lazyKind(() => {
+    if (target.state === "open") {
+      throw new TypeError("compileMember: a lazy kind was walked before its recursive schema compiled");
+    }
+
+    return target.kind;
+  });
+
+  return {
+    reference: () => {
+      referred = true;
+
+      return lazy;
+    },
+    referred: () => referred,
+    close: (kind) => {
+      target = { state: "closed", kind };
+    },
+  };
+}
+
+/**
+ * The compiled schema at a recursion point that the walk left. A schema that a schema inside it referred to gives its
+ * kind to the lazy kind of that reference; it must be always present there (`RECURSIVE_PRESENCE`): the reference is an
+ * item or a member of its own.
+ */
+function closedAt(point: RecursionPoint, compiled: ZodMemberKind, path: string, zodType: string): Compiled<ZodMemberKind> {
+  if (!point.referred()) {
+    return ok(compiled);
+  }
+
+  if (compiled.presence.mode !== "required") {
+    return refused("RECURSIVE_PRESENCE", path, zodType);
+  }
+
+  point.close(compiled.kind);
+
+  return ok(compiled);
 }
 
 /** A schema as an item, a union option, a codec input or a whole value: it is always present. */
@@ -254,7 +338,7 @@ function compileWrapper(definition: FormOf<WrapperForm>, schema: ZodSchema, walk
       return mapped(compileNode(definition.inner, walk), (inner) => ({ kind: inner.kind, presence: REQUIRED }));
     case "default":
     case "prefault":
-      return compileDefault(definition, walk);
+      return compileDefault(definition, schema, walk);
     case "readonly":
       return compileNode(definition.inner, walk);
     case "lazy":
@@ -410,17 +494,23 @@ function compileObjectMember(member: MemberRead, walk: Walk, zodType: string): C
   return mapped(compileNode(member.schema, at(walk, path)), (compiled) => ({ name: member.name, ...compiled }));
 }
 
+/** A tuple: its fixed items, then the rest item of `z.tuple([...], rest)` at `[*]`. */
 function compileTuple(definition: FormOf<"tuple">, walk: Walk): Compiled<Kind> {
-  switch (definition.rest.state) {
+  const items = allOf(definition.items.map((item, index) => valueAt(item, at(walk, itemPath(walk.path, index)))));
+  const rest = compileTupleRest(definition.rest, walk);
+  const refusals = [...(items.ok ? [] : items.error), ...(rest.ok ? [] : rest.error)];
+
+  return items.ok && rest.ok ? ok(tupleKind(items.value, rest.value)) : err(refusals);
+}
+
+function compileTupleRest(rest: ZodTupleRest, walk: Walk): Compiled<TupleRest> {
+  switch (rest.state) {
     case "none":
-      return mapped(
-        allOf(definition.items.map((item, index) => valueAt(item, at(walk, itemPath(walk.path, index))))),
-        (items): Kind => Object.freeze({ node: "tuple", items: Object.freeze([...items]) }),
-      );
+      return ok(NO_TUPLE_REST);
     case "items":
-      return refused("TUPLE_REST", walk.path, definition.zodType);
+      return mapped(valueAt(rest.item, at(walk, `${walk.path}[*]`)), (item) => Object.freeze({ state: "items", item }));
     default:
-      return unreachable(definition.rest, "compileTuple");
+      return unreachable(rest, "compileTupleRest");
   }
 }
 
@@ -498,6 +588,7 @@ function recordKeyOf(kind: Kind): RecordKey {
     case "json":
     case "taskOutcome":
     case "conversion":
+    case "lazy":
       return NOT_STRING_KEY;
     default:
       return unreachable(kind, "recordKeyOf");
@@ -542,6 +633,10 @@ function storedForms(kind: Kind): readonly StoredForm[] {
       return storedForms(kind.stored);
     case "union":
       return kind.members.flatMap(storedForms);
+    case "lazy":
+      // A reference to a schema that holds it: an array, a record, an object, or a level-free cycle that `checkKind`
+      // refuses. Its kind is not compiled yet.
+      return ["container"];
     default:
       return unreachable(kind, "storedForms");
   }
@@ -647,6 +742,7 @@ function variantsOf(
     case "json":
     case "taskOutcome":
     case "conversion":
+    case "lazy":
       return refused("UNION_OPTION", path, zodType);
     default:
       return unreachable(kind, "variantsOf");
@@ -712,62 +808,51 @@ function compileCustom(test: object, path: string, zodType: string): Compiled<Zo
 }
 
 /**
- * A member that a sender may leave out and a reader fills. The value is read twice: a value that changes between
- * reads (a function default) is refused, since the stored default is one text. A `.prefault()` value is an input
- * value: zod decodes it first, as zod does when the key is missing.
+ * A member that a sender may leave out and a reader fills: a computed default. zod reads `defaultValue` again at each
+ * parse, and its definition does not tell a function default from a fixed value, so each worker-form decode reads it
+ * the same way (`computeDefault`). The schema of the default node is the default's `source`.
  */
-function compileDefault(definition: FormOf<"default" | "prefault">, walk: Walk): Compiled<ZodMemberKind> {
+function compileDefault(
+  definition: FormOf<"default" | "prefault">,
+  schema: ZodSchema,
+  walk: Walk,
+): Compiled<ZodMemberKind> {
   const inner = compileNode(definition.inner, walk);
 
   if (!inner.ok) {
     return inner;
   }
 
-  const textOf = (): DefaultText => defaultText(definition, inner.value.kind);
-  const first = textOf();
-  const second = textOf();
+  const fallback: DefaultText = Object.freeze({
+    state: "computed",
+    source: schema,
+    compute: computeDefault(definition, inner.value.kind),
+  });
 
-  return sameDefault(first, second)
-    ? ok({ kind: inner.value.kind, presence: Object.freeze({ mode: "defaulted", fallback: first }) })
-    : refused("CHANGING_DEFAULT", walk.path, definition.zodType);
+  return ok({ kind: inner.value.kind, presence: Object.freeze({ mode: "defaulted", fallback }) });
 }
 
-/** The stored text of one read of a default. A `.prefault()` value is an input value: it is decoded first. */
-function defaultText(definition: FormOf<"default" | "prefault">, kind: Kind): DefaultText {
-  const value = definition.value();
-
+/**
+ * One read of a default as zod reads it at a parse, as its stored text. A `.prefault()` value is an input value: zod
+ * decodes it first, as zod does when the key is missing; a value that does not decode is `CheckFailed`.
+ */
+function computeDefault(definition: FormOf<"default" | "prefault">, kind: Kind): ComputeDefault {
   switch (definition.form) {
     case "default":
-      return storedText(encodeValue(kind, value));
+      return () => encodeValue(kind, definition.value());
     case "prefault": {
-      const decoded = decodeRun(definition.inner)(value);
-      const detail = decoded.ok ? "" : `the prefault value does not decode: ${issuesText(decoded.error)}`;
+      const decode = decodeRun(definition.inner);
 
-      return decoded.ok
-        ? storedText(encodeValue(kind, decoded.value))
-        : Object.freeze({ state: "refused", refusal: encodeRefused("CheckFailed", ROOT_PATH, detail) });
+      return () => {
+        const decoded = decode(definition.value());
+        const detail = decoded.ok ? "" : `the prefault value does not decode: ${issuesText(decoded.error)}`;
+
+        return decoded.ok ? encodeValue(kind, decoded.value) : err(encodeRefused("CheckFailed", ROOT_PATH, detail));
+      };
     }
 
     default:
-      return unreachable(definition, "defaultText");
-  }
-}
-
-function storedText(written: Result<JsonText, EncodeRefused>): DefaultText {
-  return Object.freeze(
-    written.ok ? { state: "stored", text: written.value } : { state: "refused", refusal: written.error },
-  );
-}
-
-/** Two reads of one default give one stored default: the same text, or both refused. */
-function sameDefault(first: DefaultText, second: DefaultText): boolean {
-  switch (first.state) {
-    case "stored":
-      return second.state === "stored" && second.text === first.text;
-    case "refused":
-      return second.state === "refused";
-    default:
-      return unreachable(first, "sameDefault");
+      return unreachable(definition, "computeDefault");
   }
 }
 

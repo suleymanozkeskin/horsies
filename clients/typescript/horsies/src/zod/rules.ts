@@ -51,12 +51,11 @@ export type ZodRule =
    * an array, tuple or record item, a union member, a codec input or a task output cannot be left out.
    */
   | "OPTIONAL_NOT_A_MEMBER"
-  /** A `.default()` or `.prefault()` whose value changes from one read to the next (a function default). */
-  | "CHANGING_DEFAULT"
-  /** A schema that contains itself (`z.lazy()`, a getter in an object): the kind tree has no recursive node yet. */
-  | "RECURSIVE"
-  /** `z.tuple([...], rest)`: the kind tree has no tuple with a rest item. */
-  | "TUPLE_REST"
+  /**
+   * A recursive schema that is `.optional()`, `.default()` or `.prefault()` at its top: a schema inside it refers to
+   * it, and the lazy kind of that reference cannot be left out.
+   */
+  | "RECURSIVE_PRESENCE"
   /** A member of `z.literal()` or `z.enum()` that is not a string, a number, a boolean or `null`. */
   | "LITERAL_MEMBER"
   /** An option of `z.discriminatedUnion()` that is not a `z.object()` or a discriminated union of the same tag. */
@@ -124,9 +123,7 @@ function ruleText(refused: ZodSchemaRefused): string {
     case "EXCLUSIVE_UNION":
     case "INTERSECTION":
     case "OPTIONAL_NOT_A_MEMBER":
-    case "CHANGING_DEFAULT":
-    case "RECURSIVE":
-    case "TUPLE_REST":
+    case "RECURSIVE_PRESENCE":
     case "LITERAL_MEMBER":
     case "UNION_OPTION":
     case "TOO_DEEP":
@@ -172,12 +169,8 @@ function fixOf(rule: ZodRule): string {
       return "merge the members into one z.object()";
     case "OPTIONAL_NOT_A_MEMBER":
       return "use .nullable(), or make the value an object member";
-    case "CHANGING_DEFAULT":
-      return "give a fixed default value; a sender sets a value that changes";
-    case "RECURSIVE":
-      return "use h.json() for a recursive value";
-    case "TUPLE_REST":
-      return "use z.array(), or a tuple of fixed length";
+    case "RECURSIVE_PRESENCE":
+      return "put .optional() or .default() on the member that refers to the recursive schema, not on the schema";
     case "LITERAL_MEMBER":
       return "use string, number, boolean or null members";
     case "UNION_OPTION":

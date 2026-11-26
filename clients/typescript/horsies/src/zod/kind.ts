@@ -31,7 +31,7 @@ export type ZodAdapterRefused =
  *
  * Fails with `Zod3Schema` or `ZodVersionNotSupported` (the release), `SchemaRefused` (the adapter) or `KindRefused`
  * (`checkKind`). A schema of each zod copy passes (the ES module or the CommonJS build, a bundled copy). Reads each
- * default value twice and calls the getter of each `z.lazy()` once. Does no I/O.
+ * default value once (`checkKind`) and calls the getter of each `z.lazy()` once. Does no I/O.
  */
 export function zodMemberWire(schema: StandardSchemaMarked): Result<ValueWire, ZodAdapterRefused> {
   const member = kindAfterChecks(schema, compileMember, (compiled: ZodMemberKind) =>

@@ -38,7 +38,7 @@ describe("self-check", () => {
       assert.ok(rules.has(rule), rule);
     }
 
-    for (const rule of ["INTERSECTION", "OPTIONAL_NOT_A_MEMBER", "CHANGING_DEFAULT", "RECURSIVE", "TUPLE_REST"]) {
+    for (const rule of ["INTERSECTION", "OPTIONAL_NOT_A_MEMBER", "RECURSIVE_PRESENCE"]) {
       assert.ok(rules.has(rule), rule);
     }
 
