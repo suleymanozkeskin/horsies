@@ -398,7 +398,7 @@ def resolve_node_queue_and_priority(
                 message='TaskNode queue not in app config',
                 code=ErrorCode.TASK_INVALID_QUEUE,
                 notes=[
-                    f"TaskNode '{node.name}' has queue '{queue}'",
+                    f"TaskNode '{node.task_name}' has queue '{queue}'",
                     f'valid queues: {valid_queues}',
                 ],
                 help_text='use one of the configured queue names or add this queue to app config',
@@ -408,7 +408,7 @@ def resolve_node_queue_and_priority(
             message='TaskNode has non-default queue in DEFAULT mode',
             code=ErrorCode.CONFIG_INVALID_QUEUE_MODE,
             notes=[
-                f"TaskNode '{node.name}' has queue '{queue}'",
+                f"TaskNode '{node.task_name}' has queue '{queue}'",
                 "app is in DEFAULT mode (only 'default' queue allowed)",
             ],
             help_text='either remove queue override or switch to QueueMode.CUSTOM',

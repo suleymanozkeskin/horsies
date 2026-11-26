@@ -384,8 +384,8 @@ class TestWorkflowStartSpan:
     def _spec() -> Any:
         spec = MagicMock()
         spec.name = 'nightly'
-        spec.tasks = []
-        spec.workflow_def_cls = None
+        spec.nodes = []
+        spec.workflow_definition = None
         spec.output = None
         return spec
 

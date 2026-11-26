@@ -24,7 +24,7 @@ use crate::monitoring::{
 use crate::{
     BrokerErrorCode, ContractCode, ErrorCode, HandleErrorCode, OperationalErrorCode, OutcomeCode,
     RerunErrorCode, RetrievalCode, TaskAbsenceReason, TaskAttemptOutcome, TaskSendErrorCode,
-    TaskStatus, WorkflowStartErrorCode, WorkflowStatus, WorkflowTaskStatus,
+    TaskStatus, WorkflowNodeStatus, WorkflowStartErrorCode, WorkflowStatus,
 };
 
 /// The Python base class of a generated enum.
@@ -127,7 +127,7 @@ pub const CODE_CATALOGS: &[CodeCatalog] = &[
     <TaskStatus as CodeEnum>::CATALOG,
     <TaskAttemptOutcome as CodeEnum>::CATALOG,
     <WorkflowStatus as CodeEnum>::CATALOG,
-    <WorkflowTaskStatus as CodeEnum>::CATALOG,
+    <WorkflowNodeStatus as CodeEnum>::CATALOG,
     <MonitoringQueryErrorCode as CodeEnum>::CATALOG,
     <TaskActionErrorCode as CodeEnum>::CATALOG,
     <MonitoringQueryRefusalCode as CodeEnum>::CATALOG,
@@ -184,7 +184,7 @@ mod tests {
         assert_wire_values::<TaskStatus>(ToString::to_string);
         assert_wire_values::<TaskAttemptOutcome>(ToString::to_string);
         assert_wire_values::<WorkflowStatus>(ToString::to_string);
-        assert_wire_values::<WorkflowTaskStatus>(ToString::to_string);
+        assert_wire_values::<WorkflowNodeStatus>(ToString::to_string);
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
             "CANCELLED",
             "EXPIRED",
         ]);
-        assert_python_members::<WorkflowTaskStatus>(&[
+        assert_python_members::<WorkflowNodeStatus>(&[
             "PENDING",
             "READY",
             "ENQUEUED",
@@ -489,7 +489,7 @@ mod tests {
     fn status_terminal_members_follow_the_core_rule() {
         assert_terminal_members_follow::<TaskStatus>(|status| status.is_terminal());
         assert_terminal_members_follow::<WorkflowStatus>(|status| status.is_terminal());
-        assert_terminal_members_follow::<WorkflowTaskStatus>(|status| status.is_terminal());
+        assert_terminal_members_follow::<WorkflowNodeStatus>(|status| status.is_terminal());
     }
 
     #[test]
@@ -502,8 +502,8 @@ mod tests {
         let (constant, members) = lifecycle(<WorkflowStatus as CodeEnum>::CATALOG);
         assert_eq!(constant, "WORKFLOW_TERMINAL_STATES");
         assert_eq!(members, ["COMPLETED", "FAILED", "CANCELLED", "EXPIRED"]);
-        let (constant, members) = lifecycle(<WorkflowTaskStatus as CodeEnum>::CATALOG);
-        assert_eq!(constant, "WORKFLOW_TASK_TERMINAL_STATES");
+        let (constant, members) = lifecycle(<WorkflowNodeStatus as CodeEnum>::CATALOG);
+        assert_eq!(constant, "WORKFLOW_NODE_TERMINAL_STATES");
         assert_eq!(members, ["COMPLETED", "FAILED", "SKIPPED"]);
     }
 
@@ -519,7 +519,7 @@ mod tests {
             .collect();
         assert_eq!(
             lifecycles,
-            ["TaskStatus", "WorkflowStatus", "WorkflowTaskStatus"]
+            ["TaskStatus", "WorkflowStatus", "WorkflowNodeStatus"]
         );
     }
 

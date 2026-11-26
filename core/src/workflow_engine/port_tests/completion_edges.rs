@@ -175,10 +175,10 @@ async fn child_summary_counts_follow_the_child_node_statuses() {
         let summary = parent_summary(&pool, parent_id).await;
         assert_eq!(
             (
-                summary.total_tasks,
-                summary.completed_tasks,
-                summary.failed_tasks,
-                summary.skipped_tasks,
+                summary.total_nodes,
+                summary.completed_nodes,
+                summary.failed_nodes,
+                summary.skipped_nodes,
             ),
             (
                 i32::try_from(node_count).expect("a small count"),
@@ -232,10 +232,10 @@ async fn a_child_with_no_node_reports_a_total_of_zero() {
     let summary = parent_summary(&pool, parent_id).await;
     assert_eq!(
         (
-            summary.total_tasks,
-            summary.completed_tasks,
-            summary.failed_tasks,
-            summary.skipped_tasks,
+            summary.total_nodes,
+            summary.completed_nodes,
+            summary.failed_nodes,
+            summary.skipped_nodes,
         ),
         (0, 0, 0, 0)
     );

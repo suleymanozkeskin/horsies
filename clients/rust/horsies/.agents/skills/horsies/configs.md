@@ -207,7 +207,7 @@ fn with_profiles(config: AppConfig) -> AppConfig {
 |---|---|
 | `task_name::register(&mut app)` | Registers a task of `#[horsies::task]` (see `tasks.md`) |
 | `register(name, task)`, `register_with_queue(name, task, queue)` | Registers a task built with `async_task_fn!` or `blocking_task_fn!` |
-| `register_workflow_definition::<D>()`, `workflow_template::<D>()` | Registers a workflow definition (see `workflows.md`) |
+| `register_workflow_definition::<D>()`, `register_workflow_definition_with::<D>()` | Registers a workflow definition (see `workflows.md`) |
 | `provide(value)` | Gives a value of type `T` to task bodies, which read it with `TaskRuntime::state::<T>()` |
 | `discover(registrars)` | Runs each `fn(&mut Horsies) -> Result<(), HorsiesError>` on the app in order; stops at the first refusal |
 | `on_child_start(hook)` | Runs an async hook once in every task child |

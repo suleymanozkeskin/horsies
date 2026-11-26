@@ -127,10 +127,10 @@ class TestSubWorkflowParams:
         session: AsyncSession,
     ) -> None:
         producer = TaskNode(fn=_task(app, 'params_producer'), kwargs={'value': 1})
-        given = SubWorkflowNode(workflow_def=_child_with_param(app), kwargs={'value': 2})
-        not_given = SubWorkflowNode(workflow_def=_static_child(app))
+        given = SubWorkflowNode(workflow_definition=_child_with_param(app), kwargs={'value': 2})
+        not_given = SubWorkflowNode(workflow_definition=_static_child(app))
         injected = SubWorkflowNode(
-            workflow_def=_child_with_result(app),
+            workflow_definition=_child_with_result(app),
             waits_for=[producer],
             args_from={'value': producer},
         )
@@ -159,11 +159,11 @@ class TestSubWorkflowParams:
         def child_nodes(child_fn: Any) -> list[TaskNode[Any] | SubWorkflowNode[Any]]:
             root = TaskNode(fn=child_fn, kwargs={'value': 1})
             nested = SubWorkflowNode(
-                workflow_def=grandchild, kwargs={'value': 3}, waits_for=[root],
+                workflow_definition=grandchild, kwargs={'value': 3}, waits_for=[root],
             )
             return [root, nested]
 
-        parent = SubWorkflowNode(workflow_def=_static_child(app, child_nodes))
+        parent = SubWorkflowNode(workflow_definition=_static_child(app, child_nodes))
         spec = app.workflow(
             f'params_parent_{uuid.uuid4().hex[:6]}', [parent],
             definition_key=f'params-parent-{uuid.uuid4().hex[:6]}',

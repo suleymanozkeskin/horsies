@@ -613,7 +613,7 @@ fn a_key_of_another_builder_is_none() {
     assert!(spec.key(foreign).is_none());
 }
 
-/// Python `test_workflow_models.py::TestSlugify` (spaces, valid
+/// Python `test_workflow_models.py::TestNodeIdFromText` (spaces, valid
 /// characters, invalid characters, mixed input, empty result, the node id
 /// pattern), and a letter outside ASCII, which Python's
 /// `[^A-Za-z0-9_\-:.]` removes.
@@ -640,7 +640,7 @@ fn slugify_keeps_the_node_id_characters() {
         ("caf\u{e9}", "caf"),
     ];
     for (name, slug) in cases {
-        assert_eq!(slugify(name), slug, "{name:?}");
-        assert!(is_valid_node_id(&slugify(name)), "{name:?}");
+        assert_eq!(node_id_from_text(name), slug, "{name:?}");
+        assert!(is_valid_node_id(&node_id_from_text(name)), "{name:?}");
     }
 }

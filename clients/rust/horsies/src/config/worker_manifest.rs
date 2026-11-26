@@ -229,7 +229,7 @@ mod tests {
     use std::os::unix::ffi::OsStringExt;
     use std::sync::Arc;
 
-    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
+    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
     use horsies_core::worker_manifest::parse_worker_manifest;
     use horsies_core::{CancelGraceMs, RegisteredTask, TaskOptions, TaskResult};
 
@@ -247,7 +247,7 @@ mod tests {
     fn task(execution: Option<Execution>) -> RegisteredTask {
         let plain = RegisteredTask::Blocking {
             task: Arc::new(EchoTask),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         };
         match execution {
             None => plain,
@@ -406,7 +406,8 @@ mod tests {
                 "charge",
                 RegisteredTask::Blocking {
                     task: Arc::new(EchoTask),
-                    meta: TaskMeta::default().with_error_codes(&["RATE_LIMITED", "CARD_DECLINED"]),
+                    metadata: TaskMetadata::default()
+                        .with_error_codes(&["RATE_LIMITED", "CARD_DECLINED"]),
                 },
             )
             .unwrap();
@@ -429,7 +430,7 @@ mod tests {
                 "charge",
                 RegisteredTask::Blocking {
                     task: Arc::new(EchoTask),
-                    meta: TaskMeta::default().with_error_codes(&["DUP", "DUP"]),
+                    metadata: TaskMetadata::default().with_error_codes(&["DUP", "DUP"]),
                 },
             )
             .unwrap();

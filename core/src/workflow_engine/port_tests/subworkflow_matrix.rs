@@ -18,11 +18,11 @@ use super::support::{
     stored_result, sub_workflow_node, task_node, workflow, workflow_status,
 };
 use crate::core::workflow::context::WORKFLOW_CTX_KWARG;
-use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{JoinType, SubWorkflowParameters};
 use crate::core::workflow::policy::SuccessPolicy;
 use crate::core::{
-    AnyNode, HorsiesError, SubWorkflowSummary, TaskResult, WorkflowSpec, WorkflowStatus,
-    WorkflowTaskStatus,
+    AnyNode, HorsiesError, SubWorkflowSummary, TaskResult, WorkflowNodeStatus, WorkflowSpec,
+    WorkflowStatus,
 };
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
 use crate::test_support::sql::{self, TestPool};
@@ -106,7 +106,7 @@ pub(super) fn given_params_node(
 ) -> AnyNode {
     AnyNode {
         input_json: input.to_string(),
-        sub_workflow_params: SubWorkflowParams::Given,
+        sub_workflow_params: SubWorkflowParameters::Given,
         sub_definition_key: Some(definition_key.to_owned()),
         ..sub_workflow_node(index, &spec(name, Vec::new()))
     }
@@ -331,7 +331,7 @@ pub(super) fn assert_subworkflow_error(
         assert_eq!(details.sub_workflow_id, child);
     }
     assert_eq!(details.sub_workflow_summary.status, WorkflowStatus::Failed);
-    assert!(details.sub_workflow_summary.failed_tasks >= 1);
+    assert!(details.sub_workflow_summary.failed_nodes >= 1);
     details.sub_workflow_summary.clone()
 }
 
@@ -442,7 +442,7 @@ async fn a_child_success_reads_the_same_on_every_surface() {
             .map(crate::core::codec::JsonText::get),
         Some("11")
     );
-    assert_eq!((summary.total_tasks, summary.completed_tasks), (1, 1));
+    assert_eq!((summary.total_nodes, summary.completed_nodes), (1, 1));
     let child = tree(&pool, workflow_id)
         .await
         .into_iter()
@@ -455,7 +455,7 @@ async fn a_child_success_reads_the_same_on_every_surface() {
     assert_eq!(child.root_workflow_id, Some(workflow_id));
     let infos = handle(&pool, workflow_id).tasks().await.expect("tasks()");
     assert_eq!(infos.len(), 1);
-    assert_eq!(infos[0].status, WorkflowTaskStatus::Completed);
+    assert_eq!(infos[0].status, WorkflowNodeStatus::Completed);
     assert_eq!(infos[0].sub_workflow_id, Some(child_id));
     assert_eq!(
         infos[0]
@@ -496,7 +496,7 @@ async fn a_handle_built_from_the_id_reads_status_tasks_and_results() {
     );
     let infos = rebuilt.tasks().await.expect("tasks()");
     assert_eq!(infos.len(), 1);
-    assert_eq!(infos[0].status, WorkflowTaskStatus::Completed);
+    assert_eq!(infos[0].status, WorkflowNodeStatus::Completed);
     assert!(infos[0].sub_workflow_id.is_some());
     assert_eq!(
         infos[0]
@@ -555,7 +555,7 @@ async fn a_child_failure_reads_the_same_sub_workflow_error_on_every_surface() {
     let _got = assert_subworkflow_error(&get(&pool, workflow_id).await, Some(child_id));
     let infos = handle(&pool, workflow_id).tasks().await.expect("tasks()");
     assert_eq!(infos.len(), 1);
-    assert_eq!(infos[0].status, WorkflowTaskStatus::Failed);
+    assert_eq!(infos[0].status, WorkflowNodeStatus::Failed);
     assert_eq!(infos[0].sub_workflow_id, Some(child_id));
     assert_eq!(
         infos[0]
@@ -621,7 +621,7 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
     let summary: SubWorkflowSummary =
         serde_json::from_str(summary_text).expect("the child summary decodes");
     assert_eq!(summary.status, WorkflowStatus::Failed);
-    assert_eq!(summary.failed_tasks, 1);
+    assert_eq!(summary.failed_nodes, 1);
 }
 
 pub(super) fn outputless_parent() -> WorkflowSpec {
@@ -699,7 +699,7 @@ async fn a_nested_child_failure_gives_a_sub_workflow_error_at_each_level() {
     assert_eq!(workflow_status(&pool, workflow_id).await, "FAILED");
     let middle_id = child_of(&pool, workflow_id, 0).await;
     let root_summary = assert_subworkflow_error(&get(&pool, workflow_id).await, Some(middle_id));
-    assert_eq!(root_summary.failed_tasks, 1);
+    assert_eq!(root_summary.failed_nodes, 1);
     let middle_error = stored_error(
         &workflow(&pool, middle_id)
             .await
@@ -711,7 +711,7 @@ async fn a_nested_child_failure_gives_a_sub_workflow_error_at_each_level() {
             .sub_workflow_details()
             .expect("the middle error is a sub-workflow error")
             .sub_workflow_summary
-            .failed_tasks,
+            .failed_nodes,
         1
     );
     let leaf_id = child_of(&pool, middle_id, 0).await;
@@ -730,7 +730,7 @@ async fn an_allow_failed_deps_child_builder_receives_the_failed_upstream_result(
     let mut child = after(sub_workflow_node(1, &failed_input_child()), &[0]);
     child.args_from.insert("value".to_owned(), 0);
     child.allow_failed_deps = true;
-    child.sub_workflow_params = SubWorkflowParams::Given;
+    child.sub_workflow_params = SubWorkflowParameters::Given;
     let mut allow_failed = parent(
         "subworkflow_allow_failed_deps_to_build_with",
         vec![failing(0, "E2E_UPSTREAM_FAIL"), child],
@@ -1171,7 +1171,7 @@ async fn success_allow_failed_and_nested_optional_failure_in_one_outputless_work
     let mut allow_failed = after(sub_workflow_node(2, &failed_input_child()), &[1]);
     allow_failed.args_from.insert("value".to_owned(), 1);
     allow_failed.allow_failed_deps = true;
-    allow_failed.sub_workflow_params = SubWorkflowParams::Given;
+    allow_failed.sub_workflow_params = SubWorkflowParameters::Given;
     let mut mixed = parent(
         "deep_mixed_paths",
         vec![

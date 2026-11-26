@@ -36,7 +36,7 @@ from ..tasks.notify import winback_blast
 DEFINITION_KEY: Final[str] = 'acme.daily_report.v1'
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[{'window': 'CHECK', 'older_than_minutes': tuning.ABANDONED_CART_AGE_MINUTES}],
 )
 def build_daily_report(
@@ -56,7 +56,7 @@ def build_daily_report(
 
     return app.workflow(
         name='daily_report',
-        tasks=[rollup, sweep, blast],
+        nodes=[rollup, sweep, blast],
         on_error=OnError.FAIL,
         output=sweep,
         definition_key=DEFINITION_KEY,

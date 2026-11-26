@@ -35,7 +35,7 @@ from horsies.core.models.workflow import (
     TaskNode,
     WorkflowHandle,
     WorkflowStatus,
-    WorkflowTaskStatus,
+    WorkflowNodeStatus,
     OnError,
     HandleDbOperationFailed,
     HandleErrorCode,
@@ -385,7 +385,7 @@ class TestWorkflowHandleResults:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """tasks() returns WorkflowTaskInfo list."""
+        """tasks() returns WorkflowNodeInfo list."""
         task_a = make_simple_task(app, 'tasks_info_a')
         task_b = make_simple_task(app, 'tasks_info_b')
 
@@ -398,7 +398,7 @@ class TestWorkflowHandleResults:
 
         handle = await start_ok(spec, broker)
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_ok(tasks_r)
         tasks = tasks_r.ok_value
         assert len(tasks) == 2
@@ -427,7 +427,7 @@ class TestWorkflowHandleResults:
 
         handle = await start_ok(spec, broker)
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_ok(tasks_r)
         tasks = tasks_r.ok_value
         assert tasks[0].index == 0
@@ -453,12 +453,12 @@ class TestWorkflowHandleResults:
 
         handle = await start_ok(spec, broker)
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_ok(tasks_r)
         tasks = tasks_r.ok_value
         # Root task (A) should be enqueued, dependent task (B) should be pending
-        assert tasks[0].status == WorkflowTaskStatus.ENQUEUED
-        assert tasks[1].status == WorkflowTaskStatus.PENDING
+        assert tasks[0].status == WorkflowNodeStatus.ENQUEUED
+        assert tasks[1].status == WorkflowNodeStatus.PENDING
         # Neither has a result yet
         assert tasks[0].result is None
         assert tasks[1].result is None
@@ -472,7 +472,7 @@ class TestWorkflowHandleResults:
 @pytest.mark.integration
 @pytest.mark.asyncio(loop_scope='function')
 class TestWorkflowHandleSubWorkflowFields:
-    """Tests for sub_workflow_id and sub_workflow_summary fields on WorkflowTaskInfo."""
+    """Tests for sub_workflow_id and sub_workflow_summary fields on WorkflowNodeInfo."""
 
     async def test_regular_task_has_none_subworkflow_fields(
         self,
@@ -490,7 +490,7 @@ class TestWorkflowHandleSubWorkflowFields:
         )
         handle = await start_ok(spec, broker)
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_ok(tasks_r)
         task_info = tasks_r.ok_value[0]
         assert task_info.sub_workflow_id is None
@@ -539,7 +539,7 @@ class TestWorkflowHandleSubWorkflowFields:
         )
         await session.commit()
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_ok(tasks_r)
         task_info = tasks_r.ok_value[0]
         assert task_info.sub_workflow_id == child_wf_id
@@ -577,8 +577,8 @@ class TestWorkflowHandleSubWorkflowFields:
         # (the legacy __dataclass__ envelope was retired).
         summary_json = (
             '{"status": "COMPLETED", "output": null,'
-            ' "total_tasks": 3, "completed_tasks": 3,'
-            ' "failed_tasks": 0, "skipped_tasks": 0,'
+            ' "total_nodes": 3, "completed_nodes": 3,'
+            ' "failed_nodes": 0, "skipped_nodes": 0,'
             ' "error_summary": null}'
         )
         await session.execute(
@@ -600,7 +600,7 @@ class TestWorkflowHandleSubWorkflowFields:
         )
         await session.commit()
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_ok(tasks_r)
         task_info = tasks_r.ok_value[0]
         assert task_info.sub_workflow_id == child_wf_id
@@ -608,10 +608,10 @@ class TestWorkflowHandleSubWorkflowFields:
 
         summary = task_info.sub_workflow_summary
         assert summary.status == WorkflowStatus.COMPLETED
-        assert summary.total_tasks == 3
-        assert summary.completed_tasks == 3
-        assert summary.failed_tasks == 0
-        assert summary.skipped_tasks == 0
+        assert summary.total_nodes == 3
+        assert summary.completed_nodes == 3
+        assert summary.failed_nodes == 0
+        assert summary.skipped_nodes == 0
         assert summary.error_summary is None
 
     async def test_subworkflow_node_with_corrupt_summary_returns_err(
@@ -661,7 +661,7 @@ class TestWorkflowHandleSubWorkflowFields:
         )
         await session.commit()
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_err(tasks_r)
         err = tasks_r.err_value
         assert isinstance(err, HandleStoredDataInvalid)
@@ -715,13 +715,13 @@ class TestWorkflowHandleSubWorkflowFields:
             """),
             {
                 'child_id': child_wf_id,
-                'summary': '{"status": "NOT_A_STATUS", "total_tasks": 1}',
+                'summary': '{"status": "NOT_A_STATUS", "total_nodes": 1}',
                 'wf_id': handle.workflow_id,
             },
         )
         await session.commit()
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_err(tasks_r)
         err = tasks_r.err_value
         assert isinstance(err, HandleStoredDataInvalid)
@@ -835,10 +835,10 @@ class TestWorkflowHandleCancel:
         cancel_r = await handle.cancel_async()
         assert is_ok(cancel_r)
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_ok(tasks_r)
         # B should be SKIPPED
-        assert tasks_r.ok_value[1].status == WorkflowTaskStatus.SKIPPED
+        assert tasks_r.ok_value[1].status == WorkflowNodeStatus.SKIPPED
 
     async def test_cancel_sets_completed_at_on_the_skipped_nodes(
         self,
@@ -1623,7 +1623,7 @@ class TestWorkflowHandleInfraErrors:
         assert is_err(results_r)
         assert results_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
 
-        tasks_r = await handle.tasks_async()
+        tasks_r = await handle.nodes_async()
         assert is_err(tasks_r)
         assert tasks_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
 
@@ -1685,7 +1685,7 @@ class TestListenerFallbackContract:
         handle: WorkflowHandle[Any] = WorkflowHandle(
             workflow_id=started.workflow_id,
             broker=listener_refused_broker,
-            out_type=started.out_type,
+            output_type=started.output_type,
         )
         status_r = await handle.status_async()
         assert is_ok(status_r), f'Expected Ok, got {status_r}'

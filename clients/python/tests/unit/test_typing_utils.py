@@ -714,7 +714,7 @@ class TestResolveSourceNodeOkType:
         # Arrange
         mock_def = MagicMock()
         node = MagicMock(spec=SubWorkflowNode)
-        node.workflow_def = mock_def
+        node.workflow_definition = mock_def
 
         # Act
         with patch(

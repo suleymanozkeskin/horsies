@@ -81,7 +81,7 @@ class FlashSale(WorkflowDefinition[CacheWarm]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[cdn, origin, search, warm],
+            nodes=[cdn, origin, search, warm],
             on_error=OnError.FAIL,
             output=warm,
             success_policy=SuccessPolicy(
@@ -97,7 +97,7 @@ class FlashSale(WorkflowDefinition[CacheWarm]):
 _CHECK_CAMPAIGN: Final[str] = 'FLASH-CHECK'
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[{'campaign_id': _CHECK_CAMPAIGN, 'sku': 'ACME-SKU-0001'}],
 )
 def build_flash_sale(*, campaign_id: str, sku: str) -> WorkflowSpec[CacheWarm]:

@@ -16,7 +16,7 @@ from horsies import (
     Result,
     RetryPolicy,
     TaskError,
-    WorkflowMeta,
+    WorkflowMetadata,
 )
 
 from .. import simulate, store, tuning
@@ -82,7 +82,7 @@ def validate_order(*, order_id: str) -> Result[OrderValidation, TaskError]:
 def pick_pack(
     *,
     order_id: str,
-    workflow_meta: WorkflowMeta | None = None,
+    workflow_meta: WorkflowMetadata | None = None,
 ) -> Result[PickPack, TaskError]:
     """Pick and pack the order.
 
@@ -127,7 +127,7 @@ def pick_pack(
                     station=simulate.choice(tuning.PICK_STATIONS, order_id, 'station'),
                     units_picked=units,
                     workflow_id=None if workflow_meta is None else workflow_meta.workflow_id,
-                    task_index=None if workflow_meta is None else workflow_meta.task_index,
+                    task_index=None if workflow_meta is None else workflow_meta.node_index,
                 ),
             )
 

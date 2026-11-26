@@ -1671,7 +1671,7 @@ class TestRunTaskEntryWorkflowInjectionErrors:
                 'task_name': 'my_task',
                 'results_by_id': {},
                 'summaries_by_id': {
-                    'sub_wf': json.dumps({'status': 'NOT_A_STATUS', 'total_tasks': 1}),
+                    'sub_wf': json.dumps({'status': 'NOT_A_STATUS', 'total_nodes': 1}),
                 },
             },
         })
@@ -2134,10 +2134,10 @@ class TestRunTaskEntryWorkflowHappyPaths:
         valid_summary = json.dumps({
             'status': 'COMPLETED',
             'output': None,
-            'total_tasks': 3,
-            'completed_tasks': 3,
-            'failed_tasks': 0,
-            'skipped_tasks': 0,
+            'total_nodes': 3,
+            'completed_nodes': 3,
+            'failed_nodes': 0,
+            'skipped_nodes': 0,
         })
         _run_entry_defaults['input_json'] = json.dumps({
             '__h_workflow_ctx__': {

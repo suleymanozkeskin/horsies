@@ -13,7 +13,7 @@ Two approaches: functional (inline) and class-based.
 ```python
 spec = app.workflow(
     name: str,
-    tasks: list[TaskNode[Any] | SubWorkflowNode[Any]],
+    nodes: list[TaskNode[Any] | SubWorkflowNode[Any]],
     on_error: OnError = OnError.FAIL,
     output: TaskNode[OutT] | SubWorkflowNode[OutT] | None = None,
     success_policy: SuccessPolicy | None = None,
@@ -76,11 +76,11 @@ class ChildPipeline(WorkflowDefinition[ProcessedData]):
         fetch = TaskNode(fn=fetch_raw, kwargs={"source_url": source_url})
         process = TaskNode(fn=process_data, waits_for=[fetch], args_from={"raw": fetch})
         return WorkflowSpec(
-            name=cls.name, tasks=[fetch, process], output=process,
+            name=cls.name, nodes=[fetch, process], output=process,
         )
 
 # In a parent workflow. The engine calls build_with() when it enqueues this node.
-child = SubWorkflowNode(workflow_def=ChildPipeline, kwargs={"source_url": "https://..."})
+child = SubWorkflowNode(workflow_definition=ChildPipeline, kwargs={"source_url": "https://..."})
 ```
 
 A `WorkflowSpec(...)` built directly has `broker=None` and no bound queue or priority on its `TaskNode` items.
@@ -94,12 +94,12 @@ Requirements:
 - Must build the `WorkflowSpec` from its arguments only: no network, database or file-system calls, and no sleep. Put that work in an upstream `TaskNode`, and pass its result to `build_with()` through `args_from`.
 - `definition_key` is auto-populated via ContextVar when returning a `WorkflowSpec` from `build_with()`; manual setting is unnecessary.
 
-### `@app.workflow_builder` decorator
+### `@app.check_workflow_builder` decorator
 
 Registers a function for `horsies check` validation:
 
 ```python
-@app.workflow_builder(cases=[{"region": "us-east"}, {"region": "eu-west"}])
+@app.check_workflow_builder(cases=[{"region": "us-east"}, {"region": "eu-west"}])
 def build_regional_workflow(region: str) -> WorkflowSpec:
     ...
 ```
@@ -129,20 +129,20 @@ class TaskNode(Generic[OkT]):
     index: int | None = None                  # position in DAG (0-based)
 ```
 
-Properties: `.name` → `fn.task_name`, `.key()` → `NodeKey[OkT]`.
+Properties: `.task_name` → `fn.task_name`, `.key()` → `NodeKey[OkT]`.
 
 **Auto-assigned `node_id` format:**
 - In `WorkflowDefinition`: attribute name (e.g., `"fetch"`)
-- In `app.workflow()`: `"{slugify(workflow_name)}:{index}"` (e.g., `"etl_pipeline:0"`)
+- In `app.workflow()`: `"{node_id_from_text(workflow_name)}:{index}"` (e.g., `"etl_pipeline:0"`)
 - Explicit: must match `[A-Za-z0-9_\-:.]+`, max 128 chars.
 
 ### Set `node_id` explicitly
 
 Set `node_id` on every node. The docs site recommends it too.
 
-- An auto-assigned id in `app.workflow()` is `{slugify(name)}:{index}`. It changes when you reorder or insert tasks.
+- An auto-assigned id in `app.workflow()` is `{node_id_from_text(name)}:{index}`. It changes when you reorder or insert tasks.
 - In a `WorkflowDefinition`, the auto id is the attribute name. A renamed attribute changes the id.
-- The id is the key of `handle.results()`, the lookup key of `result_for()`, and `WorkflowTaskInfo.node_id`.
+- The id is the key of `handle.results()`, the lookup key of `result_for()`, and `WorkflowNodeInfo.node_id`.
 - An explicit id stays the same through reorders and renames.
 
 <!-- check: skip partial -- uses names that the page does not define -->
@@ -193,7 +193,7 @@ def summarize_rows(
 ```python
 @dataclass
 class SubWorkflowNode(Generic[OkT]):
-    workflow_def: type[WorkflowDefinition[OkT]]   # child class
+    workflow_definition: type[WorkflowDefinition[OkT]]   # child class
     kwargs: Mapping[str, Any] = {}                 # forwarded to build_with()
     waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = []
     args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = {}
@@ -207,7 +207,8 @@ class SubWorkflowNode(Generic[OkT]):
 
 Differences from `TaskNode`:
 - No `fn`, `queue`, `priority`, `good_until` fields.
-- `kwargs` forwarded to `workflow_def.build_with(app, **kwargs)` at execution time.
+- Property `.workflow_name` → `workflow_definition.name`, in place of `TaskNode.task_name`.
+- `kwargs` forwarded to `workflow_definition.build_with(app, **kwargs)` at execution time.
 - `args_from` injects the upstream `TaskOutcome` into `build_with()`.
 - The node follows the child's output: child COMPLETED with a `Succeeded` output → node COMPLETED with that output; child COMPLETED with a `Failed` output → node FAILED with that error (see SuccessPolicy / SuccessCase); child FAILED → node FAILED with `SubWorkflowError`.
 - Outputless child (`WorkflowDefinition[None]`, no `config.output`): the parent node completes with `Succeeded(None)`. The child's terminal-results map is top-level `handle.get()` behavior only and is never exposed as a nested subworkflow output.
@@ -242,7 +243,7 @@ match spec.start():
     case Ok(handle):
         result = handle.get(timeout_ms=30_000)
     case Err(WorkflowStartEnqueueFailed(retryable=True) as err):
-        match spec.retry_start(err):
+        match spec.resend_start(err):
             case Ok(handle): ...
             case Err(retry_err): ...  # give up
     case Err(err):
@@ -272,11 +273,11 @@ match spec.start():
 | `WORKFLOW_ID_CONFLICT` | No | The workflow id exists for another workflow name; nothing was written — use another id |
 | `WORKFLOW_COMMAND_CONFLICT` | No | The workflow id holds a workflow of the same name that another start command started, or a sub-workflow; nothing was written — send the same start command, or use another id |
 | `ENQUEUE_FAILED` | Maybe | Schema init or the start transaction failed with a database or driver error; any other exception in the start transaction propagates |
-| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `retry_start()` called on a thread that runs an event loop; nothing was written — call `await spec.retry_start_async(err)` |
+| `ASYNC_CONTEXT` | No | Sync `spec.start()` / `resend_start()` called on a thread that runs an event loop; nothing was written — call `await spec.resend_start_async(err)` |
 
 ### Retry
 
-`retry_start()` / `retry_start_async()` take `WorkflowStartRetryable` = `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext` and start again with the error's `workflow_id`. Another variant is a type error and fails an assertion at run time. An error of another workflow returns `Err(WorkflowStartValidationFailed)`. The retry methods refuse `WorkflowStartCommandConflict` and `WorkflowStartIdConflict`.
+`resend_start()` / `resend_start_async()` take `WorkflowStartRetryable` = `WorkflowStartEnqueueFailed | WorkflowStartAsyncContext` and start again with the error's `workflow_id`. Another variant is a type error and fails an assertion at run time. An error of another workflow returns `Err(WorkflowStartValidationFailed)`. The resend methods refuse `WorkflowStartCommandConflict` and `WorkflowStartIdConflict`.
 
 ### Start with an existing `workflow_id`
 
@@ -289,7 +290,7 @@ The core compares the start command of the start with the stored one:
 - A run started before this release (no stored start command): `Ok(handle)`, no compare.
 - A row that retention deleted: a new workflow starts.
 
-The start command is the workflow name, `definition_key`, `on_error`, output, success policy, and each top-level node: index, `node_id`, task name, kwargs (byte for byte), queue, priority, dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join, `min_success`, task options (with `good_until`), retention class, sub-workflow facts. Not in it: `workflow_id`, `sent_at`, trace, `resend_on_transient_err`, pre-built child workflows. A value that changes per call (a `good_until` from now, a timestamp kwarg, a changed spec after a deploy) makes each repeat a conflict. `retry_start` rebuilds the same spec, so a committed first attempt comes back as the existing handle. See `/horsies/guides/start-workflow-once/`.
+The start command is the workflow name, `definition_key`, `on_error`, output, success policy, and each top-level node: index, `node_id`, task name, kwargs (byte for byte), queue, priority, dependencies, `args_from`, `workflow_ctx_from`, `allow_failed_deps`, join, `min_success`, task options (with `good_until`), retention class, sub-workflow facts. Not in it: `workflow_id`, `sent_at`, trace, `resend_on_transient_err`, pre-built child workflows. A value that changes per call (a `good_until` from now, a timestamp kwarg, a changed spec after a deploy) makes each repeat a conflict. `resend_start` rebuilds the same spec, so a committed first attempt comes back as the existing handle. See `/horsies/guides/start-workflow-once/`.
 
 ### Auto-retry
 
@@ -297,7 +298,7 @@ The start command is the workflow name, `definition_key`, `on_error`, output, su
 
 ## WorkflowHandle
 
-Obtained from `spec.start()`, or from `WorkflowHandle.for_id(text, broker)` to reconnect to an existing workflow by ID.
+Obtained from `spec.start()`, or from `app.workflow_handle(workflow_id)` to reconnect to an existing workflow by ID.
 
 ```python
 handle.workflow_id  # uuid.UUID — the workflow's id; str(handle.workflow_id) is its canonical text
@@ -305,15 +306,15 @@ handle.workflow_id  # uuid.UUID — the workflow's id; str(handle.workflow_id) i
 
 ### Reconnecting to an Existing Workflow
 
-`WorkflowHandle` is a `@dataclass` with `workflow_id: uuid.UUID` and `broker: PostgresBroker`; pyright refuses a `str` id. To reconnect to a workflow whose id you have as text (from a database, an HTTP request, or a previous session), parse it once with `WorkflowHandle.for_id(text, broker)`:
+`WorkflowHandle` is a `@dataclass` with `workflow_id: uuid.UUID` and `broker: PostgresBroker`; pyright refuses a `str` id. To reconnect to a workflow whose id you have as text (from a database, an HTTP request, or a previous session), parse it once with `app.workflow_handle(workflow_id)`. The handle reads through the broker of the app:
 
 - `Ok(handle)`: the text is a UUID in any spelling that `uuid.UUID` accepts (upper case, braces, `urn:uuid:`, no hyphens); `handle.workflow_id` is the UUID. Nothing is read.
 - `Err(HandleInvalidWorkflowId)`: the text is not a UUID. Fields: `message`, `workflow_id_text` (the text as given), `exception` (the `ValueError` of `uuid.UUID`). No handle is built. It is not a `HandleOperationError` variant.
 
 ```python
-from horsies import Err, Ok, WorkflowHandle
+from horsies import Err, Ok
 
-match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_broker()):
+match app.workflow_handle("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f"):
     case Ok(ok_value=handle):
         status = handle.status()       # queries DB by workflow_id
         result = handle.get()          # waits for completion
@@ -321,13 +322,13 @@ match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_brok
         print(invalid.message)         # the text is not a UUID
 ```
 
-All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `tasks`) work identically whether the handle came from `spec.start()` or `for_id`. If the `workflow_id` does not exist, `get` and `result_for` return `Err(WorkflowNotFound(...))`. The other methods return `Err(HandleWorkflowNotFound)`. `pause_workflow()`, `resume_workflow()` and their sync forms take the `uuid.UUID` too. The `workflow_id` of every handle error class is the canonical text of the UUID.
+All handle methods (`status`, `get`, `result_for`, `cancel`, `pause`, `resume`, `results`, `nodes`) work identically whether the handle came from `spec.start()` or `app.workflow_handle()`. If the `workflow_id` does not exist, `get` and `result_for` return `Err(WorkflowNotFound(...))`. The other methods return `Err(HandleWorkflowNotFound)`. `pause_workflow()`, `resume_workflow()` and their `*_async` forms take the `uuid.UUID` too. The `workflow_id` of every handle error class is the canonical text of the UUID.
 
 ### Return types
 
 | Methods | Return type | A failure |
 |---|---|---|
-| `status`, `cancel`, `pause`, `resume`, `results`, `tasks` | `HandleResult[T]` = `Result[T, HandleOperationError]` | `Err(HandleOperationError)` |
+| `status`, `cancel`, `pause`, `resume`, `results`, `nodes` | `HandleResult[T]` = `Result[T, HandleOperationError]` | `Err(HandleOperationError)` |
 | `get`, `result_for` | `ReadResult[T, TaskError]` = `Ok[Succeeded[T]] \| Ok[Failed[TaskError]] \| Err[ReadError]` | `Err(ReadError)`: the read gave no outcome |
 
 The `*_async` forms have the same return types. Read `get` and `result_for` with one `match`. `Ok(Failed(task_error))` holds the error of the workflow or of the node: `task_error.error_code` names it (for example `WORKFLOW_FAILED`, `WORKFLOW_PAUSED`). `Err(read_error)` is a read that gave no outcome. `ReadError` is a closed union of frozen classes, one per catalog code, each with `code` and `message`.
@@ -368,8 +369,8 @@ def results(self) -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]]
 async def results_async(self) -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]]
 
 # Task info list. Err(HandleWorkflowNotFound) when no workflow has the id.
-def tasks(self) -> HandleResult[list[WorkflowTaskInfo]]
-async def tasks_async(self) -> HandleResult[list[WorkflowTaskInfo]]
+def nodes(self) -> HandleResult[list[WorkflowNodeInfo]]
+async def nodes_async(self) -> HandleResult[list[WorkflowNodeInfo]]
 
 # Cancel — idempotent, no-op if already terminal
 def cancel(self) -> HandleResult[None]
@@ -410,7 +411,7 @@ Non-blocking single DB query. Returns `Err(ResultNotReady(...))` if the node has
 
 ### HandleOperationError / HandleErrorCode
 
-`HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `exception` needs the match first. Any other exception, for example a defect in `pause_workflow()` or `resume_workflow()`, propagates.
+`HandleOperationError` is a union with one frozen variant per `HandleErrorCode` member. Every variant has `code`, `message`, `retryable` and `workflow_id`. Match on the variant; a read of `exception` needs the match first. Any other exception, for example a defect in `pause_workflow_async()` or `resume_workflow_async()`, propagates.
 
 <!-- members: HandleErrorCode -->
 | Code | Variant | Other fields | Retryable | After the failure |
@@ -419,7 +420,7 @@ Non-blocking single DB query. Returns `Err(ResultNotReady(...))` if the node has
 | `DB_OPERATION_FAILED` | `HandleDbOperationFailed` | `exception: BaseException` | the core's classification | A read changed nothing; `cancel`, `pause` and `resume` before its commit rolled back, or the commit outcome is unknown |
 | `STORED_DATA_INVALID` | `HandleStoredDataInvalid` | `exception: BaseException` | No | A stored workflow status or subworkflow summary does not parse; nothing changed, a repeat returns the same error |
 | `RESUME_RECOVERY_FAILED` | `HandleResumeRecoveryFailed` | `exception: BaseException` | No | `resume` committed and the recovery pass after the commit failed; the workflow is `RUNNING`, the worker reaper runs the same pass, a repeated `resume` returns `Ok(False)` |
-| `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow_sync` / `resume_workflow_sync` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `Err(AsyncContext(...))` instead) |
+| `ASYNC_CONTEXT` | `HandleAsyncContext` | – | No | A sync handle method or `pause_workflow` / `resume_workflow` called on a thread that runs an event loop; nothing ran — call the `*_async` form (sync `get()` / `result_for()` return `Err(AsyncContext(...))` instead) |
 
 ```python
 from horsies import Err, HandleResumeRecoveryFailed, Ok
@@ -454,7 +455,7 @@ policy name and age recorded on the run's `error`. An expired child
 propagates to its parent exactly as a cancelled one. **Exhaustive matches
 over `WorkflowStatus` must handle `EXPIRED`.**
 
-### WorkflowTaskStatus
+### WorkflowNodeStatus
 
 ```
 PENDING → READY → ENQUEUED → RUNNING → COMPLETED | FAILED | SKIPPED
@@ -462,16 +463,16 @@ PENDING → READY → ENQUEUED → RUNNING → COMPLETED | FAILED | SKIPPED
 
 `is_terminal` is `True` for `COMPLETED`, `FAILED`, `SKIPPED`.
 
-### WorkflowTaskInfo
+### WorkflowNodeInfo
 
 <!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 @dataclass
-class WorkflowTaskInfo:
+class WorkflowNodeInfo:
     node_id: str | None
     index: int
     name: str
-    status: WorkflowTaskStatus
+    status: WorkflowNodeStatus
     result: TaskOutcome[Any, TaskError] | None
     started_at: datetime | None
     completed_at: datetime | None
@@ -535,7 +536,7 @@ Injected when a task declares `workflow_ctx: WorkflowContext | None = None`:
 ```python
 class WorkflowContext(BaseModel):
     workflow_id: str
-    task_index: int
+    node_index: int
     task_name: str
 
     def result_for(self, node: TaskNode[T] | SubWorkflowNode[T] | NodeKey[T]) -> TaskOutcome[T, TaskError]
@@ -565,20 +566,20 @@ def aggregate(*, workflow_ctx: WorkflowContext | None = None) -> Result[Report, 
     ...  # match each outcome: case Succeeded(value) / case Failed(error)
 ```
 
-## WorkflowMeta
+## WorkflowMetadata
 
 Lighter alternative — metadata only, no result access:
 
 <!-- check: skip elided -- shows the library definition, not user code -->
 ```python
 @dataclass
-class WorkflowMeta:
+class WorkflowMetadata:
     workflow_id: str
-    task_index: int
+    node_index: int
     task_name: str
 ```
 
-Auto-injected when task declares `workflow_meta: WorkflowMeta | None = None`.
+Auto-injected when task declares `workflow_meta: WorkflowMetadata | None = None`.
 Does **not** require `workflow_ctx_from`.
 
 ## NodeKey
@@ -602,10 +603,10 @@ class NodeKey(Generic[OkT]):
 class SubWorkflowSummary(Generic[OkT]):
     status: WorkflowStatus
     output: OkT | None
-    total_tasks: int
-    completed_tasks: int
-    failed_tasks: int
-    skipped_tasks: int
+    total_nodes: int
+    completed_nodes: int
+    failed_nodes: int
+    skipped_nodes: int
     error_summary: str | None = None
 ```
 
@@ -630,7 +631,7 @@ When a task becomes SKIPPED, all dependents are SKIPPED too (unless `allow_faile
 
 ### `allow_failed_deps`
 
-<!-- members: WorkflowTaskStatus subset -->
+<!-- members: WorkflowNodeStatus subset -->
 | Upstream state | `allow_failed_deps=False` | `allow_failed_deps=True` |
 |---|---|---|
 | COMPLETED | Runs normally | Runs normally |
@@ -682,7 +683,7 @@ node_b = TaskNode(fn=process, waits_for=[node_a], args_from={"data": node_a})
 | Code | Name | Trigger |
 |---|---|---|
 | HRS-001 | `WORKFLOW_NO_NAME` | Missing `name` |
-| HRS-002 | `WORKFLOW_NO_NODES` | WorkflowSpec has no tasks |
+| HRS-002 | `WORKFLOW_NO_NODES` | WorkflowSpec has no nodes |
 | HRS-003 | `WORKFLOW_INVALID_NODE_ID` | Empty, >128 chars, or invalid chars, or `key()` on a node with no `node_id` |
 | HRS-004 | `WORKFLOW_DUPLICATE_NODE_ID` | Duplicate `node_id` |
 | HRS-005 | `WORKFLOW_NO_ROOT_TASKS` | All tasks have deps |
@@ -740,12 +741,12 @@ from horsies import (
     # Success policy
     SuccessPolicy, SuccessCase,
     # Context
-    WorkflowContext, WorkflowMeta, SubWorkflowSummary,
+    WorkflowContext, WorkflowMetadata, SubWorkflowSummary,
     # Enums
-    WorkflowStatus, WorkflowTaskStatus,
-    WORKFLOW_TERMINAL_STATES, WORKFLOW_TASK_TERMINAL_STATES,
+    WorkflowStatus, WorkflowNodeStatus,
+    WORKFLOW_TERMINAL_STATES, WORKFLOW_NODE_TERMINAL_STATES,
     # Handle
-    WorkflowHandle, WorkflowTaskInfo,
+    WorkflowHandle, WorkflowNodeInfo,
     # Handle result types
     HandleResult, HandleOperationError, HandleErrorCode,
     HandleWorkflowNotFound, HandleDbOperationFailed, HandleStoredDataInvalid,

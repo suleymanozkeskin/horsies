@@ -56,7 +56,7 @@ from horsies.core.task_runtime import TaskRuntime
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
     WorkflowContext,
-    WorkflowMeta,
+    WorkflowMetadata,
 )
 from horsies.core.types.result import (
     Err,
@@ -83,7 +83,7 @@ _SCHEMA_HOOK = '__get_pydantic_core_schema__'
 INTERNAL_CODEC_TYPES: frozenset[type] = frozenset({
     TaskError,
     WorkflowContext,
-    WorkflowMeta,
+    WorkflowMetadata,
     SubWorkflowSummary,
 })
 

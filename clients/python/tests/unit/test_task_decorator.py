@@ -235,7 +235,7 @@ def _make_node(
     node = MagicMock()
     node.queue = queue
     node.priority = priority
-    node.name = name
+    node.task_name = name
     node.fn = MagicMock()
     node.fn.task_queue_name = fn_queue
     return node
@@ -935,10 +935,10 @@ class TestReadOfRecord:
             sub_workflow_summary=SubWorkflowSummary(
                 status=WorkflowStatus.FAILED,
                 output=None,
-                total_tasks=1,
-                completed_tasks=0,
-                failed_tasks=1,
-                skipped_tasks=0,
+                total_nodes=1,
+                completed_nodes=0,
+                failed_nodes=1,
+                skipped_nodes=0,
                 error_summary='downstream',
             ),
         )

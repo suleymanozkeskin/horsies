@@ -59,10 +59,11 @@ from .nodes import (
     AnyNode,
     SuccessCase,
     SuccessPolicy,
+    node_target_name,
 )
 from .typing_utils import (
     NODE_ID_PATTERN,
-    slugify,
+    node_id_from_text,
     _task_accepts_workflow_ctx,
     _get_signature,
     _signature_accepts_kwargs,
@@ -103,7 +104,7 @@ def _task_node_option_errors(node: TaskNode[Any, Any]) -> list[WorkflowValidatio
             WorkflowValidationError(
                 message='task node priority is outside 1..100',
                 code=ErrorCode.WORKFLOW_INVALID_PRIORITY,
-                notes=[f"node '{node.name}' sets priority={priority}"],
+                notes=[f"node '{node.task_name}' sets priority={priority}"],
                 help_text=(
                     'set a priority from 1 (highest) to 100 (lowest), '
                     'or omit it to use the queue priority'
@@ -117,7 +118,7 @@ def _task_node_option_errors(node: TaskNode[Any, Any]) -> list[WorkflowValidatio
                 message='task node good_until is a naive datetime',
                 code=ErrorCode.WORKFLOW_NAIVE_GOOD_UNTIL,
                 notes=[
-                    f"node '{node.name}' sets good_until="
+                    f"node '{node.task_name}' sets good_until="
                     f'{good_until.isoformat()} with no tzinfo',
                 ],
                 help_text=(
@@ -165,7 +166,7 @@ def _kwargs_target_hints(
     """
     if not isinstance(node, SubWorkflowNode):
         return resolve_hints_and_sig(task_fn)
-    match resolve_build_with_hints(node.workflow_def):
+    match resolve_build_with_hints(node.workflow_definition):
         case Ok(ok_value=resolved):
             return resolved
         case Err():
@@ -188,7 +189,7 @@ def _default_build_with() -> Callable[..., Any]:
 def _build_with_type_hints(node: SubWorkflowNode[Any]) -> dict[str, Any]:
     """The hints of a `build_with`, with `Annotated` removed: the wiring check
     compares types only."""
-    match resolve_build_with_hints(node.workflow_def):
+    match resolve_build_with_hints(node.workflow_definition):
         case Ok(ok_value=(hints, _)):
             return {name: _without_annotated(hint) for name, hint in hints.items()}
         case Err():
@@ -206,14 +207,14 @@ def _kwargs_target_callable(
     bound callable matches the one ``@app.task`` strict-serde validation
     ran against at registration.
 
-    ``SubWorkflowNode``: prefers ``workflow_def._original_build_with``
+    ``SubWorkflowNode``: prefers ``workflow_definition._original_build_with``
     (the unwrapped user method captured at WorkflowDefinition class
     construction) and falls back to ``build_with`` if the unwrapped
     form is missing. ``cls`` / ``app`` are engine-supplied and don't
     appear in user-supplied kwargs.
     """
     if isinstance(node, SubWorkflowNode):
-        wf_def = node.workflow_def
+        wf_def = node.workflow_definition
         original = getattr(wf_def, '_original_build_with', None)
         if original is not None:
             return cast('Callable[..., Any]', original)
@@ -237,7 +238,7 @@ class WorkflowSpec(Generic[OutT]):
     Example:
         spec = app.workflow(
             name="my_pipeline",
-            tasks=[fetch, process, persist],
+            nodes=[fetch, process, persist],
             output=persist,
             on_error=OnError.PAUSE,
         )
@@ -249,10 +250,10 @@ class WorkflowSpec(Generic[OutT]):
     """
     Human-readable workflow name (used in logs, DB, registry).
     Can contain any characters including spaces. When auto-generating
-    node_ids, the name is passed through slugify() to ensure validity.
+    node_ids, the name is passed through node_id_from_text() to ensure validity.
     """
 
-    tasks: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]]
+    nodes: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]]
     """
     - All nodes in the DAG (order determines index assignment)
     - Root nodes (empty waits_for) start immediately
@@ -281,7 +282,7 @@ class WorkflowSpec(Generic[OutT]):
     - Stable workflow definition key for runtime lookup and persistence
     """
 
-    workflow_def_cls: type[Any] | None = field(default=None, repr=False)
+    workflow_definition: type[Any] | None = field(default=None, repr=False)
     """
     - Reference to the WorkflowDefinition subclass that built this spec.
     - Used by start APIs for output type mismatch validation (HRS-025).
@@ -329,15 +330,15 @@ class WorkflowSpec(Generic[OutT]):
         Phase-gated: node_id errors gate the rest (downstream needs valid IDs).
         All other validations run and collect errors together.
         """
-        if not self.tasks:
+        if not self.nodes:
             raise WorkflowValidationError(
-                'WorkflowSpec has no tasks',
+                'WorkflowSpec has no nodes',
                 code=ErrorCode.WORKFLOW_NO_NODES,
-                help_text='add at least one TaskNode or SubWorkflowNode to tasks',
+                help_text='add at least one TaskNode or SubWorkflowNode to nodes',
             )
-        if len(self.tasks) > MAX_WORKFLOW_NODES:
+        if len(self.nodes) > MAX_WORKFLOW_NODES:
             raise WorkflowValidationError(
-                f'WorkflowSpec has {len(self.tasks)} nodes, more than the limit of {MAX_WORKFLOW_NODES}',
+                f'WorkflowSpec has {len(self.nodes)} nodes, more than the limit of {MAX_WORKFLOW_NODES}',
                 code=ErrorCode.WORKFLOW_TOO_MANY_NODES,
                 help_text='split the nodes into SubWorkflowNodes; each child workflow has its own limit',
             )
@@ -402,8 +403,8 @@ class WorkflowSpec(Generic[OutT]):
         # objects need node_id assigned for WorkflowContext lookups.
         # Gated behind validation: invalid specs must not mutate caller nodes.
         # Skip frozen originals — they already carry valid stamps from a
-        # prior spec construction (e.g. tasks=list(old_spec.tasks)).
-        for orig, copy in zip(originals, self.tasks):
+        # prior spec construction (e.g. nodes=list(old_spec.nodes)).
+        for orig, copy in zip(originals, self.nodes):
             if getattr(orig, '_frozen', False):
                 continue
             orig.index = copy.index
@@ -417,7 +418,7 @@ class WorkflowSpec(Generic[OutT]):
         """Copy input node graph so each spec has independent nodes.
 
         Uses copy.copy() for shallow copies — callables (fn) and class
-        refs (workflow_def) are shared, not copied.
+        refs (workflow_definition) are shared, not copied.
         index is always reset. node_id is only reset when _node_id_auto_derived
         is True (stale auto-derived value from a previous spec). User-provided
         and attribute-name-derived node_ids are preserved.
@@ -428,11 +429,11 @@ class WorkflowSpec(Generic[OutT]):
         Returns the original task list (for propagation of stamps back to
         originals — needed for task-body WorkflowContext injection).
         """
-        originals = list(self.tasks)
+        originals = list(self.nodes)
         old_to_new: dict[int, TaskNode[Any, Any] | SubWorkflowNode[Any]] = {}
         copied_tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]] = []
 
-        for node in self.tasks:
+        for node in self.nodes:
             node_copy = copy_module.copy(node)
             src_is_frozen = bool(getattr(node, '_frozen', False))
             # Ensure copy is mutable (source may be frozen from a prior spec).
@@ -442,7 +443,7 @@ class WorkflowSpec(Generic[OutT]):
             # Only reset node_id when it was auto-derived by a previous spec.
             # User-provided and attribute-name-derived node_ids are preserved.
             #
-            # For frozen-source reuse (tasks=list(old_spec.tasks)), preserve
+            # For frozen-source reuse (nodes=list(old_spec.nodes)), preserve
             # auto-derived node_id as-is so condition closures that captured
             # earlier node objects still resolve via ctx.result_for(...).
             if node_copy._node_id_auto_derived and not src_is_frozen:
@@ -468,7 +469,7 @@ class WorkflowSpec(Generic[OutT]):
                     for ref in node_copy.workflow_ctx_from
                 ])
 
-        self.tasks = copied_tasks
+        self.nodes = copied_tasks
 
         if self.output is not None:
             self.output = old_to_new.get(id(self.output), self.output)
@@ -501,7 +502,7 @@ class WorkflowSpec(Generic[OutT]):
             if ctx is not None:
                 definition_key, wf_cls = ctx
                 object.__setattr__(self, 'definition_key', definition_key)
-                object.__setattr__(self, 'workflow_def_cls', wf_cls)
+                object.__setattr__(self, 'workflow_definition', wf_cls)
 
         # Read construction token for fresh-spec-per-call enforcement.
         from .definition import _build_call_token  # noqa: F811
@@ -521,7 +522,7 @@ class WorkflowSpec(Generic[OutT]):
 
         - ``TaskNode``: binds against ``node.fn`` (the user task).
         - ``SubWorkflowNode``: binds against
-          ``workflow_def._original_build_with`` (or ``build_with``) —
+          ``workflow_definition._original_build_with`` (or ``build_with``) —
           the user's typed subworkflow entry. ``cls`` and ``app`` are
           engine-supplied; user kwargs bind only against the remaining
           declared parameters.
@@ -539,7 +540,7 @@ class WorkflowSpec(Generic[OutT]):
         report = ValidationReport('workflow')
         snapshotted_by_index: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
 
-        for i, node in enumerate(self.tasks):
+        for i, node in enumerate(self.nodes):
             if node.wire_kwargs is not None:
                 # A node from an earlier spec: its kwargs are proved and frozen.
                 continue
@@ -552,7 +553,7 @@ class WorkflowSpec(Generic[OutT]):
                 report.add(WorkflowValidationError(
                     message='TaskNode/SubWorkflowNode target has no readable hints',
                     code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
-                    notes=[f"node '{node.name}' has kwargs"],
+                    notes=[f"node '{node_target_name(node)}' has kwargs"],
                     help_text='declare the types of the parameters of its callable',
                 ))
                 continue
@@ -571,7 +572,7 @@ class WorkflowSpec(Generic[OutT]):
                         ),
                         code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                         notes=[
-                            f"node '{node.name}' kwargs[{key!r}]",
+                            f"node '{node_target_name(node)}' kwargs[{key!r}]",
                             binding.error_message or '',
                         ],
                         help_text=(
@@ -594,7 +595,7 @@ class WorkflowSpec(Generic[OutT]):
                             ),
                             code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                             notes=[
-                                f"node '{node.name}' kwargs[{key!r}]",
+                                f"node '{node_target_name(node)}' kwargs[{key!r}]",
                                 f'codec error: {cause}',
                             ],
                             help_text=(
@@ -611,7 +612,7 @@ class WorkflowSpec(Generic[OutT]):
                             ),
                             code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                             notes=[
-                                f"node '{node.name}' kwargs[{key!r}]",
+                                f"node '{node_target_name(node)}' kwargs[{key!r}]",
                                 f'codec error: {cause}',
                             ],
                             help_text=(
@@ -628,7 +629,7 @@ class WorkflowSpec(Generic[OutT]):
                             ),
                             code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                             notes=[
-                                f"node '{node.name}' kwargs[{key!r}]",
+                                f"node '{node_target_name(node)}' kwargs[{key!r}]",
                                 detail,
                             ],
                             help_text=(
@@ -645,8 +646,8 @@ class WorkflowSpec(Generic[OutT]):
         raise_collected(report)
 
         for i, snapshotted, wire in snapshotted_by_index:
-            self.tasks[i].kwargs = snapshotted
-            self.tasks[i].wire_kwargs = wire
+            self.nodes[i].kwargs = snapshotted
+            self.nodes[i].wire_kwargs = wire
 
     def _freeze_graph(self) -> None:
         """Freeze all nodes and containers in-place after validation.
@@ -656,7 +657,7 @@ class WorkflowSpec(Generic[OutT]):
         object.__setattr__ to bypass the frozen guard (this IS the
         construction step that sets it).
         """
-        for node in self.tasks:
+        for node in self.nodes:
             frozen_kwargs = {
                 k: self._deep_freeze_value(v) for k, v in node.kwargs.items()
             }
@@ -683,7 +684,7 @@ class WorkflowSpec(Generic[OutT]):
                 )
             object.__setattr__(self.success_policy, '_frozen', True)
 
-        object.__setattr__(self, 'tasks', tuple(self.tasks))
+        object.__setattr__(self, 'nodes', tuple(self.nodes))
         object.__setattr__(self, '_frozen', True)
 
     @classmethod
@@ -711,7 +712,7 @@ class WorkflowSpec(Generic[OutT]):
 
     def _assign_indices(self) -> None:
         """Assign index to each TaskNode based on list position."""
-        for i, task in enumerate(self.tasks):
+        for i, task in enumerate(self.nodes):
             task.index = i
 
     def _collect_node_id_errors(self) -> list[WorkflowValidationError]:
@@ -722,13 +723,13 @@ class WorkflowSpec(Generic[OutT]):
         node_id source:
         - User provides workflow NAME (e.g., "My Pipeline")
         - node_id is either:
-          a) Derived from workflow name: slugify(name) + ":" + index
+          a) Derived from workflow name: node_id_from_text(name) + ":" + index
           b) Explicitly provided by user on TaskNode
         - Errors must distinguish between (a) and (b) so users know what to fix
         """
         errors: list[WorkflowValidationError] = []
         seen_ids: set[str] = set()
-        for task in self.tasks:
+        for task in self.nodes:
             # Track whether node_id comes from workflow name or was explicitly set
             node_id_from_workflow_name = task.node_id is None
             if node_id_from_workflow_name:
@@ -741,7 +742,7 @@ class WorkflowSpec(Generic[OutT]):
                         )
                     )
                     continue
-                task.node_id = f'{slugify(self.name)}:{task.index}'
+                task.node_id = f'{node_id_from_text(self.name)}:{task.index}'
                 task._node_id_auto_derived = True
 
             node_id = task.node_id
@@ -781,7 +782,7 @@ class WorkflowSpec(Generic[OutT]):
                 continue
             if NODE_ID_PATTERN.match(node_id) is None:
                 if node_id_from_workflow_name:
-                    # This should never happen since slugify() sanitizes the name
+                    # This should never happen since node_id_from_text() sanitizes the name
                     errors.append(
                         WorkflowValidationError(
                             message='workflow name produced invalid characters (internal error)',
@@ -789,7 +790,7 @@ class WorkflowSpec(Generic[OutT]):
                             notes=[
                                 f"workflow name: '{self.name}'",
                                 f"derived node_id: '{node_id}'",
-                                'slugify() failed to sanitize the name',
+                                'node_id_from_text() failed to sanitize the name',
                             ],
                             help_text='please report this bug',
                         )
@@ -820,7 +821,7 @@ class WorkflowSpec(Generic[OutT]):
         errors: list[WorkflowValidationError] = []
 
         # 1. Check for roots (tasks with no dependencies)
-        roots = [t for t in self.tasks if not t.waits_for]
+        roots = [t for t in self.nodes if not t.waits_for]
         if not roots:
             errors.append(
                 WorkflowValidationError(
@@ -834,8 +835,8 @@ class WorkflowSpec(Generic[OutT]):
             )
 
         # 2. Validate dependency references exist in workflow
-        task_ids = set(id(t) for t in self.tasks)
-        for task in self.tasks:
+        task_ids = set(id(t) for t in self.nodes)
+        for task in self.nodes:
             for dep in task.waits_for:
                 if id(dep) not in task_ids:
                     errors.append(
@@ -843,9 +844,9 @@ class WorkflowSpec(Generic[OutT]):
                             message='dependency references task not in workflow',
                             code=ErrorCode.WORKFLOW_INVALID_DEPENDENCY,
                             notes=[
-                                f"task '{task.name}' waits for a TaskNode not in this workflow",
+                                f"task '{node_target_name(task)}' waits for a TaskNode not in this workflow",
                             ],
-                            help_text='ensure all dependencies are included in the workflow tasks list',
+                            help_text='ensure all dependencies are included in the workflow nodes list',
                         )
                     )
 
@@ -854,7 +855,7 @@ class WorkflowSpec(Generic[OutT]):
         # so the algorithm is robust independent of unique_node_refs upstream
         # and avoids recomputing dep indices on every outer visit.
         dep_indices_by_task: dict[int, set[int]] = {}
-        for task in self.tasks:
+        for task in self.nodes:
             if task.index is None:
                 continue
             dep_ids: set[int] = set()
@@ -870,15 +871,15 @@ class WorkflowSpec(Generic[OutT]):
 
         in_degree: dict[int, int] = {
             task.index: len(dep_indices_by_task[id(task)])
-            for task in self.tasks
+            for task in self.nodes
             if task.index is not None
         }
 
         # Dependents in task order, so the visit order is the same as a scan of
-        # self.tasks for each removed node, at O(nodes + edges) in place of
+        # self.nodes for each removed node, at O(nodes + edges) in place of
         # O(nodes squared).
         dependents_by_index: dict[int, list[int]] = {}
-        for task in self.tasks:
+        for task in self.nodes:
             task_idx = task.index
             if task_idx is None:
                 continue
@@ -896,10 +897,10 @@ class WorkflowSpec(Generic[OutT]):
                 if in_degree[task_idx] == 0:
                     queue.append(task_idx)
 
-        if visited != len(self.tasks):
+        if visited != len(self.nodes):
             cycle_nodes = [
-                t.name
-                for t in self.tasks
+                node_target_name(t)
+                for t in self.nodes
                 if t.index is not None and in_degree.get(t.index, 0) > 0
             ]
             errors.append(
@@ -919,7 +920,7 @@ class WorkflowSpec(Generic[OutT]):
     def _collect_args_from_errors(self) -> list[WorkflowValidationError]:
         """Validate args_from references are valid dependencies. Returns all errors."""
         errors: list[WorkflowValidationError] = []
-        for task in self.tasks:
+        for task in self.nodes:
             deps_ids = set(id(d) for d in task.waits_for)
             for kwarg_name, source_node in task.args_from.items():
                 if id(source_node) not in deps_ids:
@@ -928,10 +929,10 @@ class WorkflowSpec(Generic[OutT]):
                             message='args_from references task not in waits_for',
                             code=ErrorCode.WORKFLOW_INVALID_ARGS_FROM,
                             notes=[
-                                f"task '{task.name}' args_from['{kwarg_name}'] references '{source_node.name}'",
-                                f"'{source_node.name}' must be in waits_for to inject its result",
+                                f"task '{node_target_name(task)}' args_from['{kwarg_name}'] references '{node_target_name(source_node)}'",
+                                f"'{node_target_name(source_node)}' must be in waits_for to inject its result",
                             ],
-                            help_text=f"add '{source_node.name}' to waits_for list",
+                            help_text=f"add '{node_target_name(source_node)}' to waits_for list",
                         )
                     )
         return errors
@@ -939,7 +940,7 @@ class WorkflowSpec(Generic[OutT]):
     def _collect_workflow_ctx_from_errors(self) -> list[WorkflowValidationError]:
         """Validate workflow_ctx_from references are valid dependencies. Returns all errors."""
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             if node.workflow_ctx_from is None:
                 continue
             deps_ids = set(id(d) for d in node.waits_for)
@@ -950,10 +951,10 @@ class WorkflowSpec(Generic[OutT]):
                             message='workflow_ctx_from references task not in waits_for',
                             code=ErrorCode.WORKFLOW_INVALID_CTX_FROM,
                             notes=[
-                                f"node '{node.name}' references '{ctx_node.name}'",
-                                f"'{ctx_node.name}' must be in waits_for to use in workflow_ctx_from",
+                                f"node '{node_target_name(node)}' references '{node_target_name(ctx_node)}'",
+                                f"'{node_target_name(ctx_node)}' must be in waits_for to use in workflow_ctx_from",
                             ],
-                            help_text=f"add '{ctx_node.name}' to waits_for list",
+                            help_text=f"add '{node_target_name(ctx_node)}' to waits_for list",
                         )
                     )
 
@@ -974,8 +975,8 @@ class WorkflowSpec(Generic[OutT]):
                         location=fn_location,  # May be None for non-function callables
                         notes=[
                             f"workflow '{self.name}'\n"
-                            f"TaskNode '{task.name}' declares workflow_ctx_from=[...]\n"
-                            f"but function '{task.name}' has no workflow_ctx parameter",
+                            f"TaskNode '{node_target_name(task)}' declares workflow_ctx_from=[...]\n"
+                            f"but function '{node_target_name(task)}' has no workflow_ctx parameter",
                         ],
                         help_text=(
                             'either:\n'
@@ -991,7 +992,7 @@ class WorkflowSpec(Generic[OutT]):
     ) -> list[WorkflowValidationError]:
         """Reject positional args on workflow nodes."""
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             if not node.args:
                 continue
             errors.append(
@@ -999,7 +1000,7 @@ class WorkflowSpec(Generic[OutT]):
                     message='positional args are not supported for workflow nodes',
                     code=ErrorCode.WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED,
                     notes=[
-                        f"node '{node.name}' sets args=(...)",
+                        f"node '{node_target_name(node)}' sets args=(...)",
                         'workflow node inputs must be provided via kwargs and/or args_from',
                     ],
                     help_text='remove args=... and pass static values via kwargs=...',
@@ -1014,7 +1015,7 @@ class WorkflowSpec(Generic[OutT]):
         neither field.
         """
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             match node:
                 case SubWorkflowNode():
                     pass
@@ -1036,7 +1037,7 @@ class WorkflowSpec(Generic[OutT]):
         from horsies.core.task_decorator import FromNodeMarker
 
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             marker_keys = [
                 key
                 for key, value in node.kwargs.items()
@@ -1050,7 +1051,7 @@ class WorkflowSpec(Generic[OutT]):
                     message='from_node() markers are not allowed in kwargs',
                     code=ErrorCode.WORKFLOW_INVALID_ARGS_FROM,
                     notes=[
-                        f"node '{node.name}' has from_node() marker value(s) in kwargs: {sorted(marker_keys)}",
+                        f"node '{node_target_name(node)}' has from_node() marker value(s) in kwargs: {sorted(marker_keys)}",
                         'from_node() markers must be translated to args_from mappings',
                     ],
                     help_text=(
@@ -1065,7 +1066,7 @@ class WorkflowSpec(Generic[OutT]):
     def _collect_kwargs_args_from_overlap_errors(self) -> list[WorkflowValidationError]:
         """Reject nodes where kwargs and args_from share any key."""
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             overlap = set(node.kwargs.keys()) & set(node.args_from.keys())
             if not overlap:
                 continue
@@ -1074,7 +1075,7 @@ class WorkflowSpec(Generic[OutT]):
                     message='kwargs and args_from keys must be disjoint',
                     code=ErrorCode.WORKFLOW_KWARGS_ARGS_FROM_OVERLAP,
                     notes=[
-                        f"node '{node.name}' has overlapping key(s): {sorted(overlap)}",
+                        f"node '{node_target_name(node)}' has overlapping key(s): {sorted(overlap)}",
                         'args_from would silently overwrite the static kwarg value at runtime',
                     ],
                     help_text='remove the overlapping key from either kwargs or args_from',
@@ -1088,14 +1089,14 @@ class WorkflowSpec(Generic[OutT]):
         """
         Reject parameterized SubWorkflowNode when build_with is not overridden.
 
-        Default WorkflowDefinition.build_with(app, **params) ignores all
+        Default WorkflowDefinition.build_with(app, **parameters) ignores all
         runtime parameters and just forwards to build(app), which is a silent
         data-loss foot-gun when users pass kwargs/args_from.
         """
         errors: list[WorkflowValidationError] = []
 
         default_build_with = _default_build_with()
-        for node in self.tasks:
+        for node in self.nodes:
             if not isinstance(node, SubWorkflowNode):
                 continue
             has_runtime_params = bool(node.kwargs) or bool(node.args_from)
@@ -1103,15 +1104,15 @@ class WorkflowSpec(Generic[OutT]):
                 continue
 
             build_with_fn = getattr(
-                node.workflow_def,
+                node.workflow_definition,
                 '_original_build_with',
-                node.workflow_def.build_with,
+                node.workflow_definition.build_with,
             )
             if build_with_fn is not default_build_with:
                 continue
 
             notes: list[str] = [
-                f"subworkflow '{node.name}' provides runtime params but uses default build_with()",
+                f"subworkflow '{node_target_name(node)}' provides runtime params but uses default build_with()",
             ]
             if node.kwargs:
                 notes.append(f'kwargs keys: {sorted(node.kwargs.keys())}')
@@ -1124,7 +1125,7 @@ class WorkflowSpec(Generic[OutT]):
                     code=ErrorCode.WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH,
                     notes=notes,
                     help_text=(
-                        f"override {node.workflow_def.__name__}.build_with(app, ...) "
+                        f"override {node.workflow_definition.__name__}.build_with(app, ...) "
                         'to explicitly accept and apply runtime parameters'
                     ),
                 )
@@ -1135,10 +1136,10 @@ class WorkflowSpec(Generic[OutT]):
     def _collect_subworkflow_definition_key_errors(self) -> list[WorkflowValidationError]:
         """Reject SubWorkflowNodes whose WorkflowDefinition has no definition_key."""
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             if not isinstance(node, SubWorkflowNode):
                 continue
-            definition_key = node.workflow_def.__dict__.get('definition_key')
+            definition_key = node.workflow_definition.__dict__.get('definition_key')
             if isinstance(definition_key, str) and definition_key.strip():
                 continue
             errors.append(
@@ -1146,7 +1147,7 @@ class WorkflowSpec(Generic[OutT]):
                     message='Subworkflow definition is missing definition_key',
                     code=ErrorCode.WORKFLOW_NO_DEFINITION_KEY,
                     notes=[
-                        f"subworkflow '{node.name}' uses definition '{node.workflow_def.__qualname__}'",
+                        f"subworkflow '{node_target_name(node)}' uses definition '{node.workflow_definition.__qualname__}'",
                         "WorkflowDefinition subclasses must declare a stable 'definition_key'",
                     ],
                     help_text="add definition_key = 'your.workflow.v1' to the child workflow definition",
@@ -1157,7 +1158,7 @@ class WorkflowSpec(Generic[OutT]):
     def _collect_invalid_kwargs_errors(self) -> list[WorkflowValidationError]:
         """Validate kwargs/args_from keys match function parameter names."""
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             if not node.kwargs and not node.args_from:
                 continue
 
@@ -1167,9 +1168,9 @@ class WorkflowSpec(Generic[OutT]):
             else:
                 # SubWorkflowNode - validate against build_with signature
                 fn = getattr(
-                    node.workflow_def,
+                    node.workflow_definition,
                     '_original_build_with',
-                    node.workflow_def.build_with,
+                    node.workflow_definition.build_with,
                 )
                 if fn is _default_build_with():
                     continue  # Covered by WORKFLOW_SUBWORKFLOW_PARAMS_REQUIRE_BUILD_WITH.
@@ -1193,11 +1194,11 @@ class WorkflowSpec(Generic[OutT]):
             notes: list[str] = []
             if invalid_kwargs:
                 notes.append(
-                    f"node '{node.name}' has unknown kwargs: {sorted(invalid_kwargs)}"
+                    f"node '{node_target_name(node)}' has unknown kwargs: {sorted(invalid_kwargs)}"
                 )
             if invalid_args_from:
                 notes.append(
-                    f"node '{node.name}' has unknown args_from keys: {sorted(invalid_args_from)}"
+                    f"node '{node_target_name(node)}' has unknown args_from keys: {sorted(invalid_args_from)}"
                 )
             notes.append(f"valid parameters: {sorted(valid_names)}")
             if _signature_accepts_kwargs(sig):
@@ -1227,13 +1228,13 @@ class WorkflowSpec(Generic[OutT]):
         )
 
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             if not isinstance(node, SubWorkflowNode):
                 continue
             try:
                 check_build_with_signature(
-                    node.workflow_def,
-                    workflow_name=node.name,
+                    node.workflow_definition,
+                    workflow_name=node_target_name(node),
                 )
             except SignatureValidationError as refusal:
                 errors.append(
@@ -1241,7 +1242,7 @@ class WorkflowSpec(Generic[OutT]):
                         message='subworkflow build_with cannot cross the wire',
                         code=ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
                         notes=[
-                            f"node '{node.name}'",
+                            f"node '{node_target_name(node)}'",
                             refusal.detail.headline,
                             refusal.detail.reason,
                         ],
@@ -1258,7 +1259,7 @@ class WorkflowSpec(Generic[OutT]):
         annotated as TaskOutcome[OkT, TaskError] (or Optional/Union containing it).
         """
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             if not node.args_from:
                 continue
             # Overlapping keys are skipped per-key below (not whole-node) so a
@@ -1274,9 +1275,9 @@ class WorkflowSpec(Generic[OutT]):
                 fn = node.fn
             else:
                 fn = getattr(
-                    node.workflow_def,
+                    node.workflow_definition,
                     '_original_build_with',
-                    node.workflow_def.build_with,
+                    node.workflow_definition.build_with,
                 )
 
             sig = _get_signature(fn)
@@ -1316,7 +1317,7 @@ class WorkflowSpec(Generic[OutT]):
                             message='args_from target parameter must be annotated as TaskOutcome[OkT, TaskError]',
                             code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
                             notes=[
-                                f"node '{node.name}' args_from['{kwarg_name}'] targets parameter '{kwarg_name}'",
+                                f"node '{node_target_name(node)}' args_from['{kwarg_name}'] targets parameter '{kwarg_name}'",
                                 f"parameter annotation is {_format_type_name(annotation)}",
                                 'args_from injects TaskOutcome values, not raw payloads',
                             ],
@@ -1334,7 +1335,7 @@ class WorkflowSpec(Generic[OutT]):
                             message='unable to resolve args_from source output type',
                             code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
                             notes=[
-                                f"node '{node.name}' args_from['{kwarg_name}'] references source '{source_node.name}'",
+                                f"node '{node_target_name(node)}' args_from['{kwarg_name}'] references source '{node_target_name(source_node)}'",
                                 "source output type could not be inferred from task return annotation or workflow generic",
                             ],
                             help_text=(
@@ -1354,7 +1355,7 @@ class WorkflowSpec(Generic[OutT]):
                             message='args_from source declares no output type',
                             code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
                             notes=[
-                                f"node '{node.name}' args_from['{kwarg_name}'] references source '{source_node.name}'",
+                                f"node '{node_target_name(node)}' args_from['{kwarg_name}'] references source '{node_target_name(source_node)}'",
                                 'source subworkflow subclasses WorkflowDefinition[Any]',
                             ],
                             help_text='subclass WorkflowDefinition[ConcreteType], so the value can be decoded and checked',
@@ -1368,7 +1369,7 @@ class WorkflowSpec(Generic[OutT]):
                             message='args_from source type does not match target parameter type',
                             code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
                             notes=[
-                                f"node '{node.name}' args_from['{kwarg_name}'] receives from '{source_node.name}'",
+                                f"node '{node_target_name(node)}' args_from['{kwarg_name}'] receives from '{node_target_name(source_node)}'",
                                 f'source ok type: {_format_type_name(source_ok)}',
                                 f"target expects TaskOutcome[{_format_type_name(expected_ok)}, TaskError]",
                             ],
@@ -1378,7 +1379,7 @@ class WorkflowSpec(Generic[OutT]):
                     continue
 
                 code_error = _args_from_code_type_error(
-                    node.name, kwarg_name, source_node, annotation,
+                    node_target_name(node), kwarg_name, source_node, annotation,
                 )
                 if code_error is not None:
                     errors.append(code_error)
@@ -1388,7 +1389,7 @@ class WorkflowSpec(Generic[OutT]):
     def _collect_missing_required_param_errors(self) -> list[WorkflowValidationError]:
         """Validate required parameters are provided via kwargs/args_from."""
         errors: list[WorkflowValidationError] = []
-        for node in self.tasks:
+        for node in self.nodes:
             # Get the function to inspect (TaskNode vs SubWorkflowNode)
             if isinstance(node, TaskNode):
                 fn = node.fn
@@ -1404,9 +1405,9 @@ class WorkflowSpec(Generic[OutT]):
                 injected_kwargs: set[str] = set()
             else:
                 fn = getattr(
-                    node.workflow_def,
+                    node.workflow_definition,
                     '_original_build_with',
-                    node.workflow_def.build_with,
+                    node.workflow_definition.build_with,
                 )
                 # _original_build_with is a raw function: (cls, app, **kwargs).
                 # Two sentinels account for cls and app being provided automatically.
@@ -1423,7 +1424,7 @@ class WorkflowSpec(Generic[OutT]):
             if isinstance(node, TaskNode):
                 if node.workflow_ctx_from is not None and 'workflow_ctx' in sig.parameters:
                     injected_kwargs.add('workflow_ctx')
-                # WorkflowMeta is auto-injected if declared
+                # WorkflowMetadata is auto-injected if declared
                 if 'workflow_meta' in sig.parameters:
                     injected_kwargs.add('workflow_meta')
 
@@ -1467,7 +1468,7 @@ class WorkflowSpec(Generic[OutT]):
                     message=f'missing required parameters for {target}',
                     code=ErrorCode.WORKFLOW_MISSING_REQUIRED_PARAMS,
                     notes=[
-                        f"node '{node.name}' missing required parameter(s): {sorted(missing)}",
+                        f"node '{node_target_name(node)}' missing required parameter(s): {sorted(missing)}",
                     ],
                     help_text='provide required params via kwargs=... or args_from',
                 )
@@ -1479,17 +1480,17 @@ class WorkflowSpec(Generic[OutT]):
         errors: list[WorkflowValidationError] = []
         if self.output is None:
             return errors
-        task_ids = set(id(t) for t in self.tasks)
+        task_ids = set(id(t) for t in self.nodes)
         if id(self.output) not in task_ids:
             errors.append(
                 WorkflowValidationError(
-                    f"Output task '{self.output.name}' is not in workflow",
+                    f"Output task '{node_target_name(self.output)}' is not in workflow",
                     code=ErrorCode.WORKFLOW_INVALID_OUTPUT,
                     notes=[
-                        f"output task: '{self.output.name}'",
-                        f"workflow tasks: {[t.name for t in self.tasks]}",
+                        f"output task: '{node_target_name(self.output)}'",
+                        f"workflow nodes: {[node_target_name(t) for t in self.nodes]}",
                     ],
-                    help_text='add the output task to the tasks list, or change output to a task already in the workflow',
+                    help_text='add the output task to the nodes list, or change output to a task already in the workflow',
                 )
             )
         elif (
@@ -1498,10 +1499,10 @@ class WorkflowSpec(Generic[OutT]):
         ):
             errors.append(
                 WorkflowValidationError(
-                    f"Output node '{self.output.name}' declares no output type",
+                    f"Output node '{node_target_name(self.output)}' declares no output type",
                     code=ErrorCode.WORKFLOW_OUTPUT_TYPE_MISMATCH,
                     notes=[
-                        f"output node: '{self.output.name}'",
+                        f"output node: '{node_target_name(self.output)}'",
                         'its child subclasses WorkflowDefinition[Any]',
                     ],
                     help_text='subclass WorkflowDefinition[ConcreteType], so the output can be decoded',
@@ -1526,7 +1527,7 @@ class WorkflowSpec(Generic[OutT]):
             )
             return errors
 
-        task_ids = set(id(t) for t in self.tasks)
+        task_ids = set(id(t) for t in self.nodes)
 
         # Validate each success case
         for i, case in enumerate(self.success_policy.cases):
@@ -1543,13 +1544,13 @@ class WorkflowSpec(Generic[OutT]):
                 if id(task) not in task_ids:
                     errors.append(
                         WorkflowValidationError(
-                            f"SuccessCase[{i}] required task '{task.name}' is not in workflow",
+                            f"SuccessCase[{i}] required task '{node_target_name(task)}' is not in workflow",
                             code=ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
                             notes=[
                                 f'case index: {i}',
-                                f"task: '{task.name}'",
+                                f"task: '{node_target_name(task)}'",
                             ],
-                            help_text='add the task to the workflow tasks list',
+                            help_text='add the task to the workflow nodes list',
                         )
                     )
 
@@ -1559,10 +1560,10 @@ class WorkflowSpec(Generic[OutT]):
                 if id(task) not in task_ids:
                     errors.append(
                         WorkflowValidationError(
-                            f"SuccessPolicy optional task '{task.name}' is not in workflow",
+                            f"SuccessPolicy optional task '{node_target_name(task)}' is not in workflow",
                             code=ErrorCode.WORKFLOW_INVALID_SUCCESS_POLICY,
-                            notes=[f"task: '{task.name}'"],
-                            help_text='add the task to the workflow tasks list',
+                            notes=[f"task: '{node_target_name(task)}'"],
+                            help_text='add the task to the workflow nodes list',
                         )
                     )
 
@@ -1571,12 +1572,12 @@ class WorkflowSpec(Generic[OutT]):
     def _collect_join_semantics_errors(self) -> list[WorkflowValidationError]:
         """Validate join and min_success settings. Returns all errors."""
         errors: list[WorkflowValidationError] = []
-        for task in self.tasks:
+        for task in self.nodes:
             if task.join == 'quorum':
                 if task.min_success is None:
                     errors.append(
                         WorkflowValidationError(
-                            f"Task '{task.name}' has join='quorum' but min_success is not set",
+                            f"Task '{node_target_name(task)}' has join='quorum' but min_success is not set",
                             code=ErrorCode.WORKFLOW_INVALID_JOIN,
                             help_text='set min_success to the number of dependencies that must succeed',
                         )
@@ -1584,7 +1585,7 @@ class WorkflowSpec(Generic[OutT]):
                 elif task.min_success < 1:
                     errors.append(
                         WorkflowValidationError(
-                            f"Task '{task.name}' min_success must be >= 1, got {task.min_success}",
+                            f"Task '{node_target_name(task)}' min_success must be >= 1, got {task.min_success}",
                             code=ErrorCode.WORKFLOW_INVALID_JOIN,
                             help_text='set min_success to 1 or more',
                         )
@@ -1594,7 +1595,7 @@ class WorkflowSpec(Generic[OutT]):
                     if task.min_success > dep_count:
                         errors.append(
                             WorkflowValidationError(
-                                f"Task '{task.name}' min_success ({task.min_success}) exceeds "
+                                f"Task '{node_target_name(task)}' min_success ({task.min_success}) exceeds "
                                 f'dependency count ({dep_count})',
                                 code=ErrorCode.WORKFLOW_INVALID_JOIN,
                                 help_text='add nodes to waits_for, or set min_success to at most their number',
@@ -1604,7 +1605,7 @@ class WorkflowSpec(Generic[OutT]):
                 if task.min_success is not None:
                     errors.append(
                         WorkflowValidationError(
-                            f"Task '{task.name}' has min_success set but join='{task.join}' "
+                            f"Task '{node_target_name(task)}' has min_success set but join='{task.join}' "
                             "(min_success is only used with join='quorum')",
                             code=ErrorCode.WORKFLOW_INVALID_JOIN,
                             help_text="remove min_success, or use join='quorum'",
@@ -1631,9 +1632,9 @@ class WorkflowSpec(Generic[OutT]):
             fn = task.fn
         else:
             fn = getattr(
-                task.workflow_def,
+                task.workflow_definition,
                 '_original_build_with',
-                task.workflow_def.build_with,
+                task.workflow_definition.build_with,
             )
         sig = _get_signature(fn)
         if sig is None:
@@ -1646,7 +1647,7 @@ class WorkflowSpec(Generic[OutT]):
             if param.default is inspect.Parameter.empty:
                 errors.append(
                     WorkflowValidationError(
-                        f"Task '{task.name}' has join='{task.join}' and "
+                        f"Task '{node_target_name(task)}' has join='{task.join}' and "
                         f"args_from['{kwarg_name}'], but parameter "
                         f"'{kwarg_name}' has no default. With "
                         f"join='{task.join}' the source may not be terminal "
@@ -1722,16 +1723,16 @@ class WorkflowSpec(Generic[OutT]):
                 for _, wf_node in nodes:
                     if isinstance(wf_node, SubWorkflowNode):
                         wf_node_any = cast(SubWorkflowNode[Any], wf_node)
-                        workflow_def = wf_node_any.workflow_def
+                        workflow_def = wf_node_any.workflow_definition
                         visit(workflow_def)
 
             # Done exploring this workflow
             stack.remove(key)
 
         # Start DFS from each SubWorkflowNode in this workflow's tasks
-        for node in self.tasks:
+        for node in self.nodes:
             if isinstance(node, SubWorkflowNode):
-                visit(node.workflow_def)
+                visit(node.workflow_definition)
 
         return errors
 
@@ -1833,7 +1834,7 @@ class WorkflowSpec(Generic[OutT]):
         """Refuse a sync start called inside a running event loop.
 
         Nothing was written. The message names the async form of
-        ``operation`` (``start`` or ``retry_start``).
+        ``operation`` (``start`` or ``resend_start``).
         """
         import uuid as _uuid
 
@@ -1884,7 +1885,7 @@ class WorkflowSpec(Generic[OutT]):
             ))
         return _Ok(error.workflow_id)
 
-    def retry_start(
+    def resend_start(
         self, error: 'WorkflowStartRetryable',
     ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
         """Retry a failed workflow start using the stored workflow_id.
@@ -1906,19 +1907,19 @@ class WorkflowSpec(Generic[OutT]):
             ``Ok(WorkflowHandle)`` on success,
             ``Err(WorkflowStartError)`` on failure. On a thread that runs an
             event loop, a valid retry returns ``Err(ASYNC_CONTEXT)`` and
-            writes nothing; use ``retry_start_async()`` there.
+            writes nothing; use ``resend_start_async()`` there.
         """
         v = self._validate_start_retry(error)
         if is_err(v):
             return v
         if in_running_event_loop():
-            return self._async_context_start_err(v.ok_value, 'retry_start')
+            return self._async_context_start_err(v.ok_value, 'resend_start')
         return self.start(workflow_id=v.ok_value)
 
-    async def retry_start_async(
+    async def resend_start_async(
         self, error: 'WorkflowStartRetryable',
     ) -> 'WorkflowStartResult[WorkflowHandle[OutT]]':
-        """Async variant of ``retry_start()``.
+        """Async variant of ``resend_start()``.
 
         It completes the start of an ``ASYNC_CONTEXT`` error with the error's
         id.
@@ -1969,7 +1970,7 @@ def _args_from_code_type_error(
         message='args_from source custom codes do not match target parameter type',
         code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
         notes=[
-            f"node '{node_name}' args_from['{kwarg_name}'] receives from '{source_node.name}'",
+            f"node '{node_name}' args_from['{kwarg_name}'] receives from '{node_target_name(source_node)}'",
             f'target expects TaskOutcome[..., TaskError[{target_codes.__name__}]]',
             'the source task does not return Result[..., '
             f'TaskError[{target_codes.__name__}]]',

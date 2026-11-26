@@ -323,7 +323,7 @@ mod tests {
             task_options_json: None,
             is_subworkflow,
             sub_definition_key: None,
-            sub_workflow_params: crate::core::workflow::node::SubWorkflowParams::NotGiven,
+            sub_workflow_params: crate::core::workflow::node::SubWorkflowParameters::NotGiven,
         }
     }
 

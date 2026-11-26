@@ -85,11 +85,11 @@ class TestSubworkflowPriorityBinding:
                 scrape = TaskNode(
                     fn=scrape_task, kwargs={'run_postproc': False}, node_id='scrape',
                 )
-                return WorkflowSpec(name=cls.name, tasks=[scrape], output=scrape)
+                return WorkflowSpec(name=cls.name, nodes=[scrape], output=scrape)
 
         parent = app.workflow(
             f'parent_{suffix}',
-            [SubWorkflowNode(workflow_def=ClientSync)],
+            [SubWorkflowNode(workflow_definition=ClientSync)],
             definition_key=f'parent-{suffix}',
         )
         r = await start_workflow_async(parent, broker)

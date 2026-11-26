@@ -8,7 +8,7 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use horsies::{
-    HorsiesError, NodeKey, OnError, OutputlessResults, SubWorkflowParams, SuccessCase,
+    HorsiesError, NodeKey, OnError, OutputlessResults, SubWorkflowParameters, SuccessCase,
     SuccessPolicy, TaskNode, TaskOutcome, TypedNodeRef, WorkflowDefinition, WorkflowHandle,
     WorkflowSpecBuilder,
 };
@@ -545,7 +545,7 @@ async fn test_cancel_cascades_to_child_workflow() {
     let client = suite.client().await;
     let mut spec = builder(&suite, "cancel_running_child_cascade");
     let child = spec.sub_workflow(
-        subworkflow::SubSlow::node(SubWorkflowParams::Given(subworkflow::SlowParams {
+        subworkflow::SubSlow::node(SubWorkflowParameters::Given(subworkflow::SlowParams {
             value: "cancel_me".to_owned(),
             delay_ms: 2_000,
         }))
@@ -852,7 +852,7 @@ async fn test_subworkflow_mixed_explicit_and_args_from() {
     let mut spec = builder(&suite, "subworkflow_mixed_input");
     let source: TypedNodeRef<i64> = add(&mut spec, produce(&suite, "produce", 21));
     let child = spec.sub_workflow(
-        subworkflow::SubLabel::node(SubWorkflowParams::NotGiven)
+        subworkflow::SubLabel::node(SubWorkflowParameters::NotGiven)
             .expect("a label child node")
             .node_id("child")
             .set(subworkflow::LabelParams::field_label(), "count".to_owned())

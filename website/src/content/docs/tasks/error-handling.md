@@ -192,7 +192,7 @@ save: TaskNode[None] = TaskNode(
 
 spec = app.workflow(
     name="product_ingest",
-    tasks=[fetch, parse, save],
+    nodes=[fetch, parse, save],
     output=save,
     on_error=OnError.FAIL,
     definition_key="myapp.product_ingest.v1",

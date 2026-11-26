@@ -115,9 +115,9 @@ from myapp.tasks import FIRST_KEY, summarize
 def test_workflow_context() -> None:
     ctx = WorkflowContext.from_serialized(
         workflow_id='wf-1',
-        task_index=1,
+        node_index=1,
         task_name='summarize',
-        results_by_id={FIRST_KEY.node_id: Succeeded(7)},
+        results_by_node_id={FIRST_KEY.node_id: Succeeded(7)},
     )
     assert summarize(workflow_ctx=ctx) == Ok(7)
 ```
@@ -125,12 +125,12 @@ def test_workflow_context() -> None:
 | Parameter | Type | Description |
 | --------- | ---- | ----------- |
 | `workflow_id` | `str` | Id of the workflow |
-| `task_index` | `int` | Index of the node |
+| `node_index` | `int` | Index of the node |
 | `task_name` | `str` | Name of the task |
-| `results_by_id` | `dict[str, TaskOutcome[Any, TaskError]]` | Upstream outcomes (`Succeeded(value)` or `Failed(task_error)`), keyed by `node_id` |
-| `summaries_by_id` | `dict[str, SubWorkflowSummary[Any]] \| None` | Subworkflow summaries, keyed by `node_id`. Default `None` |
+| `results_by_node_id` | `dict[str, TaskOutcome[Any, TaskError]]` | Upstream outcomes (`Succeeded(value)` or `Failed(task_error)`), keyed by `node_id` |
+| `summaries_by_node_id` | `dict[str, SubWorkflowSummary[Any]] \| None` | Subworkflow summaries, keyed by `node_id`. Default `None` |
 
-`result_for(node)` raises `KeyError` for a node whose id is not in `results_by_id`.
+`result_for(node)` raises `KeyError` for a node whose id is not in `results_by_node_id`.
 
 ### Pass a Task Runtime
 

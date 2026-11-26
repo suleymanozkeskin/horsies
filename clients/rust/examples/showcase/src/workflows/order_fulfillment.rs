@@ -3,7 +3,8 @@
 
 use chrono::{TimeZone, Utc};
 use horsies::{
-    HorsiesError, OnError, SubWorkflowParams, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder,
+    HorsiesError, OnError, SubWorkflowParameters, WorkflowDefinition, WorkflowSpec,
+    WorkflowSpecBuilder,
 };
 
 use crate::domain::{Order, OrderLine, PaymentCapture};
@@ -20,7 +21,7 @@ pub struct OrderFulfillment;
 
 impl WorkflowDefinition for OrderFulfillment {
     type Output = PaymentCapture;
-    type Params = Order;
+    type Parameters = Order;
 
     fn name() -> &'static str {
         "order_fulfillment"
@@ -78,7 +79,7 @@ impl WorkflowDefinition for OrderFulfillment {
                 .waits_for(authorize),
         )?;
         let shipment = builder.sub_workflow(
-            Shipping::node(SubWorkflowParams::Given(ShippingParams {
+            Shipping::node(SubWorkflowParameters::Given(ShippingParams {
                 order_id: order_id.clone(),
                 courier: simulate::choice(tuning::COURIERS, &[&order_id, "courier"]).to_owned(),
                 express: simulate::draw(tuning::EXPRESS_RATE, &[&order_id, "express"]),

@@ -1,13 +1,13 @@
 //! The registered forms of a workflow, and the app's registration methods.
 //!
-//! - [`WorkflowFunction<T>`]: a definition without params, registered with
+//! - [`WorkflowFunction<T>`]: a definition without parameters, registered with
 //!   `Horsies::register_workflow_definition`; it starts its one spec.
-//! - [`WorkflowTemplate<P, T>`]: a definition with params, registered with
-//!   `Horsies::workflow_template`; it builds a spec from params and starts
+//! - [`WorkflowTemplate<P, T>`]: a definition with parameters, registered with
+//!   `Horsies::register_workflow_definition_with`; it builds a spec from parameters and starts
 //!   it, and makes the sub-workflow nodes of the definition.
 //!
 //! A start of a registered definition by its type names the app:
-//! `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)`.
+//! `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(parameters)`.
 //! The app finds `D` in its own workflow registry. No start reads a
 //! process-wide registration, so two apps of one process start apart.
 
@@ -23,10 +23,10 @@ use super::handle::WorkflowHandle;
 use super::registry::{CaseBuild, CheckCase, Definition, DefinitionKind};
 use super::spec::{WorkflowSpec, WorkflowSpecBuilder};
 use super::start::{new_workflow_id, WorkflowStarter};
-use super::sub_workflow::{SubWorkflowNode, SubWorkflowParams};
+use super::sub_workflow::{SubWorkflowNode, SubWorkflowParameters};
 use crate::{ErrorCode, Horsies, HorsiesError};
 
-/// A registered workflow definition without params, with the result type
+/// A registered workflow definition without parameters, with the result type
 /// `T`. Clones share one app.
 pub struct WorkflowFunction<T> {
     spec: Arc<WorkflowSpec>,
@@ -99,11 +99,11 @@ where
     /// Errors: `VALIDATION_FAILED` for an error that is not
     /// `ENQUEUE_FAILED` or `ASYNC_CONTEXT`, or of another workflow; else the
     /// start errors.
-    pub async fn retry_start(
+    pub async fn resend_start(
         &self,
         error: &WorkflowStartError,
     ) -> Result<WorkflowHandle<T>, WorkflowStartError> {
-        self.starter.retry_start(&self.spec, error).await
+        self.starter.resend_start(&self.spec, error).await
     }
 
     /// The handle of the workflow `workflow_id`, started earlier. No I/O.
@@ -112,10 +112,10 @@ where
     }
 }
 
-/// The build of a template: a spec from params.
+/// The build of a template: a spec from parameters.
 type TemplateBuild<P> = Arc<dyn Fn(P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync>;
 
-/// A registered workflow definition with params `P`, with the result type
+/// A registered workflow definition with parameters `P`, with the result type
 /// `T`. Clones share one app.
 pub struct WorkflowTemplate<P, T> {
     name: &'static str,
@@ -164,46 +164,46 @@ where
 
     /// A sub-workflow node of this definition.
     ///
-    /// Errors: for `Given(params)`, the refusals of
-    /// `SubWorkflowNode::set_params`.
+    /// Errors: for `Given(parameters)`, the refusals of
+    /// `SubWorkflowNode::set_parameters`.
     pub fn node(
         &self,
-        params: SubWorkflowParams<P>,
+        parameters: SubWorkflowParameters<P>,
     ) -> Result<SubWorkflowNode<P, T>, HorsiesError> {
-        SubWorkflowNode::named(self.name, self.definition_key).set_params(params)
+        SubWorkflowNode::named(self.name, self.definition_key).set_parameters(parameters)
     }
 
-    /// The spec of the definition with `params`.
+    /// The spec of the definition with `parameters`.
     ///
     /// Errors: the refusals of `build_with` and of the spec build.
-    pub fn build(&self, params: P) -> Result<WorkflowSpec, HorsiesError> {
-        (self.build)(params)
+    pub fn build(&self, parameters: P) -> Result<WorkflowSpec, HorsiesError> {
+        (self.build)(parameters)
     }
 
-    /// Build the spec with `params` and start it with a new id.
+    /// Build the spec with `parameters` and start it with a new id.
     ///
     /// Errors: `VALIDATION_FAILED` for a build that refused; else the start
     /// errors.
-    pub async fn start(&self, params: P) -> Result<WorkflowHandle<T>, WorkflowStartError> {
-        self.start_with_id(params, new_workflow_id()).await
+    pub async fn start(&self, parameters: P) -> Result<WorkflowHandle<T>, WorkflowStartError> {
+        self.start_with_id(parameters, new_workflow_id()).await
     }
 
-    /// Build the spec with `params` and start it with the id `workflow_id`.
+    /// Build the spec with `parameters` and start it with the id `workflow_id`.
     ///
     /// Errors: as [`Self::start`].
     pub async fn start_with_id(
         &self,
-        params: P,
+        parameters: P,
         workflow_id: Uuid,
     ) -> Result<WorkflowHandle<T>, WorkflowStartError> {
-        let spec = self
-            .build(params)
-            .map_err(|error| WorkflowStartError::ValidationFailed {
-                message: error.to_string(),
-                workflow_name: self.name.to_owned(),
-                workflow_id,
-                cause: StartRefusalCause::Check,
-            })?;
+        let spec =
+            self.build(parameters)
+                .map_err(|error| WorkflowStartError::ValidationFailed {
+                    message: error.to_string(),
+                    workflow_name: self.name.to_owned(),
+                    workflow_id,
+                    cause: StartRefusalCause::Check,
+                })?;
         self.starter.start(&spec, workflow_id).await
     }
 
@@ -219,7 +219,7 @@ type CaseSpecBuilder<P> =
     Arc<dyn Fn(WorkflowSpecBuilder, &P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync>;
 
 /// The check cases of one workflow builder, registered with
-/// [`Self::register`] (Python `@app.workflow_builder(cases=...)`).
+/// [`Self::register`] (Python `@app.check_workflow_builder(cases=...)`).
 pub struct WorkflowCheckBuilderRegistration<'a, P> {
     app: &'a Horsies,
     name: String,
@@ -289,7 +289,7 @@ impl Horsies {
         WorkflowSpecBuilder::new(name, Arc::clone(self.functions()))
     }
 
-    /// Register the workflow definition `D`, which takes no params, and
+    /// Register the workflow definition `D`, which takes no parameters, and
     /// return its function (Python `WorkflowDefinition` registered for
     /// `start`). `D::build` runs now on a builder of this app, so the tasks
     /// of its nodes register first. [`Self::start_workflow`] starts `D`
@@ -303,32 +303,32 @@ impl Horsies {
         &mut self,
     ) -> Result<WorkflowFunction<D::Output>, HorsiesError>
     where
-        D: WorkflowDefinition<Params = ()>,
+        D: WorkflowDefinition<Parameters = ()>,
         D::Output: DeserializeOwned + Send + Sync,
     {
         let definition = Definition::without_params::<D>(self.functions())?;
         let spec = match &definition.kind {
             DefinitionKind::WithoutParams(spec) => Arc::clone(spec),
             DefinitionKind::WithParams(_) => {
-                unreachable!("Definition::without_params makes a definition without params")
+                unreachable!("Definition::without_params makes a definition without parameters")
             }
         };
         self.workflows().register(definition)?;
         Ok(self.function_of::<D::Output>(spec))
     }
 
-    /// Register the workflow definition `D`, which takes params, and return
+    /// Register the workflow definition `D`, which takes parameters, and return
     /// its template (Python `WorkflowDefinition` with `build_with`). Each
     /// build runs `D::build_with` on a new builder of this app.
     /// [`Self::start_workflow_with`] starts `D` through this registration.
     ///
     /// Errors: the refusals of the registry.
-    pub fn workflow_template<D>(
+    pub fn register_workflow_definition_with<D>(
         &mut self,
-    ) -> Result<WorkflowTemplate<D::Params, D::Output>, HorsiesError>
+    ) -> Result<WorkflowTemplate<D::Parameters, D::Output>, HorsiesError>
     where
         D: WorkflowDefinition,
-        D::Params: Send + Sync,
+        D::Parameters: Send + Sync,
         D::Output: DeserializeOwned + Send + Sync,
     {
         self.workflows()
@@ -336,7 +336,7 @@ impl Horsies {
         Ok(self.template_of::<D>())
     }
 
-    /// The function of the spec `spec` of a definition without params on
+    /// The function of the spec `spec` of a definition without parameters on
     /// this app. No I/O.
     fn function_of<T>(&self, spec: Arc<WorkflowSpec>) -> WorkflowFunction<T> {
         WorkflowFunction {
@@ -346,13 +346,13 @@ impl Horsies {
         }
     }
 
-    /// The template of the definition `D` with params on this app: each
+    /// The template of the definition `D` with parameters on this app: each
     /// build runs `D::build_with` on a new builder of this app, then checks
     /// the output type. No I/O; it does not register `D`.
-    fn template_of<D>(&self) -> WorkflowTemplate<D::Params, D::Output>
+    fn template_of<D>(&self) -> WorkflowTemplate<D::Parameters, D::Output>
     where
         D: WorkflowDefinition,
-        D::Params: Send + Sync,
+        D::Parameters: Send + Sync,
         D::Output: DeserializeOwned + Send + Sync,
     {
         let tasks = Arc::clone(self.functions());
@@ -360,9 +360,9 @@ impl Horsies {
             name: D::name(),
             definition_key: D::definition_key(),
             build: Arc::new(
-                move |params: D::Params| -> Result<WorkflowSpec, HorsiesError> {
+                move |parameters: D::Parameters| -> Result<WorkflowSpec, HorsiesError> {
                     let builder = WorkflowSpecBuilder::new(D::name(), Arc::clone(&tasks));
-                    let spec = D::build_with(builder, params)?;
+                    let spec = D::build_with(builder, parameters)?;
                     spec.check_output_type::<D::Output>()?;
                     Ok(spec)
                 },
@@ -372,16 +372,16 @@ impl Horsies {
         }
     }
 
-    /// Start the workflow definition `D`, which takes no params, with a new
+    /// Start the workflow definition `D`, which takes no parameters, with a new
     /// id, through its registration on this app
     /// ([`Self::register_workflow_definition`]).
     ///
     /// Errors: `VALIDATION_FAILED` with the cause `PreconditionFailed`
     /// (`StartRefusalCause::Check`) when this app does not register `D`
-    /// without params; nothing is written. Else the start errors.
+    /// without parameters; nothing is written. Else the start errors.
     pub async fn start_workflow<D>(&self) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
     where
-        D: WorkflowDefinition<Params = ()>,
+        D: WorkflowDefinition<Parameters = ()>,
         D::Output: DeserializeOwned + Send + Sync,
     {
         self.start_workflow_as::<D>(new_workflow_id()).await
@@ -394,7 +394,7 @@ impl Horsies {
         workflow_id: Uuid,
     ) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
     where
-        D: WorkflowDefinition<Params = ()>,
+        D: WorkflowDefinition<Parameters = ()>,
         D::Output: DeserializeOwned + Send + Sync,
     {
         let spec = match self
@@ -416,24 +416,24 @@ impl Horsies {
             .await
     }
 
-    /// Start the workflow definition `D` with `params` and a new id, through
-    /// its registration on this app ([`Self::workflow_template`]): the
+    /// Start the workflow definition `D` with `parameters` and a new id, through
+    /// its registration on this app ([`Self::register_workflow_definition_with`]): the
     /// build of the template, then its start.
     ///
     /// Errors: `VALIDATION_FAILED` with the cause `PreconditionFailed`
     /// (`StartRefusalCause::Check`) when this app does not register `D`
-    /// with params; the build does not run and nothing is written. Else the
+    /// with parameters; the build does not run and nothing is written. Else the
     /// errors of `WorkflowTemplate::start`.
     pub async fn start_workflow_with<D>(
         &self,
-        params: D::Params,
+        parameters: D::Parameters,
     ) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
     where
         D: WorkflowDefinition,
-        D::Params: Send + Sync,
+        D::Parameters: Send + Sync,
         D::Output: DeserializeOwned + Send + Sync,
     {
-        self.start_workflow_with_as::<D>(params, new_workflow_id())
+        self.start_workflow_with_as::<D>(parameters, new_workflow_id())
             .await
     }
 
@@ -441,12 +441,12 @@ impl Horsies {
     /// refusal carries too.
     pub(crate) async fn start_workflow_with_as<D>(
         &self,
-        params: D::Params,
+        parameters: D::Parameters,
         workflow_id: Uuid,
     ) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
     where
         D: WorkflowDefinition,
-        D::Params: Send + Sync,
+        D::Parameters: Send + Sync,
         D::Output: DeserializeOwned + Send + Sync,
     {
         match self
@@ -456,17 +456,21 @@ impl Horsies {
         {
             Some(DefinitionKind::WithParams(_)) => {}
             Some(DefinitionKind::WithoutParams(_)) | None => {
-                return Err(not_registered(D::name(), "workflow_template", workflow_id))
+                return Err(not_registered(
+                    D::name(),
+                    "register_workflow_definition_with",
+                    workflow_id,
+                ))
             }
         }
         self.template_of::<D>()
-            .start_with_id(params, workflow_id)
+            .start_with_id(parameters, workflow_id)
             .await
     }
 
     /// Register check cases of a workflow builder: the check builds a spec
     /// from each case with `builder` and checks it (Python
-    /// `@app.workflow_builder(cases=...)`). `builder` gets a new workflow
+    /// `@app.check_workflow_builder(cases=...)`). `builder` gets a new workflow
     /// builder of this app named `name`, and the case.
     pub fn check_workflow_builder<P, F>(
         &self,

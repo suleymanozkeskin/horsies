@@ -330,7 +330,7 @@ fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -
 }
 
 /// The `RegisteredTask` of the function: a body struct that decodes the
-/// input, calls the function and stores what it returned. Its meta declares
+/// input, calls the function and stores what it returned. Its metadata declares
 /// the codes of the code type `code` (`UserErrorCode::CODES`); the
 /// registration checks them.
 fn registered_task(
@@ -350,8 +350,8 @@ fn registered_task(
     };
     let decode = decode_statement(signature, input);
     let call = call_expression(signature, fn_name);
-    let meta = quote! {
-        ::horsies::__private::TaskMeta::for_input::<#input>()
+    let metadata = quote! {
+        ::horsies::__private::TaskMetadata::for_input::<#input>()
             .in_module(::horsies::__private::parent_module(::std::module_path!()))
             .with_error_codes(<#code as ::horsies::UserErrorCode>::CODES)
     };
@@ -400,7 +400,7 @@ fn registered_task(
 
             ::horsies::__private::RegisteredTask::Async {
                 task: ::std::sync::Arc::new(__HorsiesBody { #runtime_init }),
-                meta: #meta,
+                metadata: #metadata,
             }
         }},
         BodyKind::Blocking => quote! {{
@@ -420,7 +420,7 @@ fn registered_task(
 
             ::horsies::__private::RegisteredTask::Blocking {
                 task: ::std::sync::Arc::new(__HorsiesBody { #runtime_init }),
-                meta: #meta,
+                metadata: #metadata,
             }
         }},
     }

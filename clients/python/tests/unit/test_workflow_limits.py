@@ -59,7 +59,7 @@ def _wide_spec(node_count: int) -> WorkflowSpec[Any]:
     fn = _task_fn()
     return WorkflowSpec(
         name='wide',
-        tasks=[TaskNode(fn=fn, node_id=f'node_{index}') for index in range(node_count)],
+        nodes=[TaskNode(fn=fn, node_id=f'node_{index}') for index in range(node_count)],
     )
 
 
@@ -67,7 +67,7 @@ class TestNodeLimit:
     def test_a_spec_with_the_limit_of_nodes_builds(self) -> None:
         spec = _wide_spec(MAX_WORKFLOW_NODES)
 
-        assert len(spec.tasks) == MAX_WORKFLOW_NODES
+        assert len(spec.nodes) == MAX_WORKFLOW_NODES
 
     def test_a_spec_over_the_limit_raises_hrs_038(self) -> None:
         with pytest.raises(WorkflowValidationError) as caught:
@@ -89,18 +89,18 @@ class TestNestingFindingsInCheck:
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
                 child = SubWorkflowNode(
-                    workflow_def=Deeper, kwargs={'level': level + 1}
+                    workflow_definition=Deeper, kwargs={'level': level + 1}
                 )
-                return WorkflowSpec(name=cls.name, tasks=[child])
+                return WorkflowSpec(name=cls.name, nodes=[child])
 
         def root() -> WorkflowSpec[Any]:
             return app.workflow(
                 'deeper_root',
-                [SubWorkflowNode(workflow_def=Deeper, kwargs={'level': 0})],
+                [SubWorkflowNode(workflow_definition=Deeper, kwargs={'level': 0})],
                 definition_key='tests.limits.deeper_root.v1',
             )
 
-        app.workflow_builder()(root)
+        app.check_workflow_builder()(root)
 
         errors = app.check(live=False)
 
@@ -121,17 +121,17 @@ class TestNestingFindingsInCheck:
             def build_with(
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
-                child = SubWorkflowNode(workflow_def=Same, kwargs={'level': level})
-                return WorkflowSpec(name=cls.name, tasks=[child])
+                child = SubWorkflowNode(workflow_definition=Same, kwargs={'level': level})
+                return WorkflowSpec(name=cls.name, nodes=[child])
 
         def root() -> WorkflowSpec[Any]:
             return app.workflow(
                 'same_root',
-                [SubWorkflowNode(workflow_def=Same, kwargs={'level': 0})],
+                [SubWorkflowNode(workflow_definition=Same, kwargs={'level': 0})],
                 definition_key='tests.limits.same_root.v1',
             )
 
-        app.workflow_builder()(root)
+        app.check_workflow_builder()(root)
 
         errors = app.check(live=False)
 
@@ -152,18 +152,18 @@ class TestNestingFindingsInCheck:
             ) -> WorkflowSpec[Any]:
                 if level >= LEVEL_WHERE_THE_NESTING_ENDS:
                     leaf = TaskNode(fn=_task_fn(), node_id='leaf')
-                    return WorkflowSpec(name=cls.name, tasks=[leaf], output=leaf)
-                child = SubWorkflowNode(workflow_def=Ends, kwargs={'level': level + 1})
-                return WorkflowSpec(name=cls.name, tasks=[child])
+                    return WorkflowSpec(name=cls.name, nodes=[leaf], output=leaf)
+                child = SubWorkflowNode(workflow_definition=Ends, kwargs={'level': level + 1})
+                return WorkflowSpec(name=cls.name, nodes=[child])
 
         def root() -> WorkflowSpec[Any]:
             return app.workflow(
                 'ends_root',
-                [SubWorkflowNode(workflow_def=Ends, kwargs={'level': 0})],
+                [SubWorkflowNode(workflow_definition=Ends, kwargs={'level': 0})],
                 definition_key='tests.limits.ends_root.v1',
             )
 
-        app.workflow_builder()(root)
+        app.check_workflow_builder()(root)
 
         assert app.check(live=False) == []
 
@@ -184,18 +184,18 @@ class TestNestingBehindADependency:
             ) -> WorkflowSpec[Any]:
                 gate = TaskNode(fn=_task_fn(), node_id='gate')
                 child = SubWorkflowNode(
-                    workflow_def=Gated, kwargs={'level': level}, waits_for=[gate],
+                    workflow_definition=Gated, kwargs={'level': level}, waits_for=[gate],
                 )
-                return WorkflowSpec(name=cls.name, tasks=[gate, child])
+                return WorkflowSpec(name=cls.name, nodes=[gate, child])
 
         def root() -> WorkflowSpec[Any]:
             return app.workflow(
                 'gated_root',
-                [SubWorkflowNode(workflow_def=Gated, kwargs={'level': 0})],
+                [SubWorkflowNode(workflow_definition=Gated, kwargs={'level': 0})],
                 definition_key='tests.limits.gated_root.v1',
             )
 
-        app.workflow_builder()(root)
+        app.check_workflow_builder()(root)
 
         assert app.check(live=False) == []
 
@@ -212,20 +212,20 @@ class TestNestingBehindADependency:
             ) -> WorkflowSpec[Any]:
                 gate = TaskNode(fn=_task_fn(), node_id='gate')
                 child = SubWorkflowNode(
-                    workflow_def=GatedDeeper,
+                    workflow_definition=GatedDeeper,
                     kwargs={'level': level + 1},
                     waits_for=[gate],
                 )
-                return WorkflowSpec(name=cls.name, tasks=[gate, child])
+                return WorkflowSpec(name=cls.name, nodes=[gate, child])
 
         def root() -> WorkflowSpec[Any]:
             return app.workflow(
                 'gated_deeper_root',
-                [SubWorkflowNode(workflow_def=GatedDeeper, kwargs={'level': 0})],
+                [SubWorkflowNode(workflow_definition=GatedDeeper, kwargs={'level': 0})],
                 definition_key='tests.limits.gated_deeper_root.v1',
             )
 
-        app.workflow_builder()(root)
+        app.check_workflow_builder()(root)
 
         assert app.check(live=False) == []
 
@@ -241,13 +241,13 @@ class TestNestingBehindADependency:
             def build_with(
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
-                child = SubWorkflowNode(workflow_def=Same, kwargs={'level': level})
-                return WorkflowSpec(name=cls.name, tasks=[child])
+                child = SubWorkflowNode(workflow_definition=Same, kwargs={'level': level})
+                return WorkflowSpec(name=cls.name, nodes=[child])
 
         def root() -> WorkflowSpec[Any]:
             gate = TaskNode(fn=_task_fn(), node_id='gate')
             child = SubWorkflowNode(
-                workflow_def=Same, kwargs={'level': 0}, waits_for=[gate],
+                workflow_definition=Same, kwargs={'level': 0}, waits_for=[gate],
             )
             return app.workflow(
                 'same_after_gate_root',
@@ -255,7 +255,7 @@ class TestNestingBehindADependency:
                 definition_key='tests.limits.same_after_gate_root.v1',
             )
 
-        app.workflow_builder()(root)
+        app.check_workflow_builder()(root)
 
         errors = app.check(live=False)
 
@@ -276,14 +276,14 @@ class TestNestingBehindADependency:
                 cls, app: Horsies, level: int = 0, *_args: Any, **_kwargs: Any
             ) -> WorkflowSpec[Any]:
                 child = SubWorkflowNode(
-                    workflow_def=Deeper, kwargs={'level': level + 1}
+                    workflow_definition=Deeper, kwargs={'level': level + 1}
                 )
-                return WorkflowSpec(name=cls.name, tasks=[child])
+                return WorkflowSpec(name=cls.name, nodes=[child])
 
         def root() -> WorkflowSpec[Any]:
             gate = TaskNode(fn=_task_fn(), node_id='gate')
             child = SubWorkflowNode(
-                workflow_def=Deeper, kwargs={'level': 0}, waits_for=[gate],
+                workflow_definition=Deeper, kwargs={'level': 0}, waits_for=[gate],
             )
             return app.workflow(
                 'deeper_after_gate_root',
@@ -291,7 +291,7 @@ class TestNestingBehindADependency:
                 definition_key='tests.limits.deeper_after_gate_root.v1',
             )
 
-        app.workflow_builder()(root)
+        app.check_workflow_builder()(root)
 
         assert app.check(live=False) == []
 

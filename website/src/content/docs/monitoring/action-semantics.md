@@ -248,7 +248,7 @@ the expected steady state after cancelling a run with work in flight.
 ## No workflow restart
 
 There is no restart or retry action for a workflow run, because no such
-primitive exists. `retry_start` retries a failed *start call*, not a run. To
+primitive exists. `resend_start` repeats a failed *start call*, not a run. To
 re-execute a workflow, send it again.
 
 ## What the reads see

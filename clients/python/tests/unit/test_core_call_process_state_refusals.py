@@ -34,10 +34,10 @@ from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowHandle, WorkflowSpec
 from horsies.core.types.result import Ok, Result
 from horsies.core.workflows.lifecycle import (
+    pause_workflow_async,
     pause_workflow,
-    pause_workflow_sync,
+    resume_workflow_async,
     resume_workflow,
-    resume_workflow_sync,
     start_workflow,
     start_workflow_async,
 )
@@ -383,7 +383,7 @@ _HANDLE_CALLS: Final[dict[str, tuple[str, HandleCall]]] = {
         lambda h: asyncio.run(h.result_for_async(NodeKey[int](node_id='first'))),
     ),
     'results_async': ('workflow_node_results_async', lambda h: asyncio.run(h.results_async())),
-    'tasks_async': ('workflow_nodes_async', lambda h: asyncio.run(h.tasks_async())),
+    'nodes_async': ('workflow_nodes_async', lambda h: asyncio.run(h.nodes_async())),
     'cancel_async': ('cancel_workflow_async', lambda h: asyncio.run(h.cancel_async())),
     'pause_async': ('pause_workflow_async', lambda h: asyncio.run(h.pause_async())),
     'resume_async': ('resume_workflow_async', lambda h: asyncio.run(h.resume_async())),
@@ -391,7 +391,7 @@ _HANDLE_CALLS: Final[dict[str, tuple[str, HandleCall]]] = {
         'workflow_node_result', lambda h: h.result_for(NodeKey[int](node_id='first')),
     ),
     'results': ('workflow_node_results', lambda h: h.results()),
-    'tasks': ('workflow_nodes', lambda h: h.tasks()),
+    'nodes': ('workflow_nodes', lambda h: h.nodes()),
     'cancel': ('cancel_workflow', lambda h: h.cancel()),
     'pause': ('pause_workflow', lambda h: h.pause()),
     'resume': ('resume_workflow', lambda h: h.resume()),
@@ -412,14 +412,14 @@ class TestWorkflowHandle:
 
 
 _LIFECYCLE_CALLS: Final[dict[str, tuple[str, BrokerCall]]] = {
-    'pause_workflow': (
-        'pause_workflow_async', lambda b: asyncio.run(pause_workflow(b, uuid.UUID(_WORKFLOW_ID))),
+    'pause_workflow_async': (
+        'pause_workflow_async', lambda b: asyncio.run(pause_workflow_async(b, uuid.UUID(_WORKFLOW_ID))),
     ),
-    'pause_workflow_sync': ('pause_workflow', lambda b: pause_workflow_sync(b, uuid.UUID(_WORKFLOW_ID))),
-    'resume_workflow': (
-        'resume_workflow_async', lambda b: asyncio.run(resume_workflow(b, uuid.UUID(_WORKFLOW_ID))),
+    'pause_workflow': ('pause_workflow', lambda b: pause_workflow(b, uuid.UUID(_WORKFLOW_ID))),
+    'resume_workflow_async': (
+        'resume_workflow_async', lambda b: asyncio.run(resume_workflow_async(b, uuid.UUID(_WORKFLOW_ID))),
     ),
-    'resume_workflow_sync': ('resume_workflow', lambda b: resume_workflow_sync(b, uuid.UUID(_WORKFLOW_ID))),
+    'resume_workflow': ('resume_workflow', lambda b: resume_workflow(b, uuid.UUID(_WORKFLOW_ID))),
 }
 
 

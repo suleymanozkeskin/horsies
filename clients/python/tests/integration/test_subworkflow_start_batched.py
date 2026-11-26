@@ -83,7 +83,7 @@ def _child_def(
                 waits = [nodes[-1]] if (shape == 'chain' and nodes) else []
                 if broken_def is not None and i == 0:
                     nodes.append(
-                        SubWorkflowNode(workflow_def=broken_def, waits_for=waits),
+                        SubWorkflowNode(workflow_definition=broken_def, waits_for=waits),
                     )
                     continue
                 fn = corrupt_fn if (corrupt_root and i == 0) else child_task
@@ -92,7 +92,7 @@ def _child_def(
             if on_error is not None:
                 kwargs['on_error'] = on_error
             return app.workflow(
-                name=cls.name, tasks=list(nodes), output=nodes[0], **kwargs,
+                name=cls.name, nodes=list(nodes), output=nodes[0], **kwargs,
             )
 
     return BulkChild
@@ -101,7 +101,7 @@ def _child_def(
 async def _start_parent(
     app: Horsies, broker: PostgresBroker, child_def: type[WorkflowDefinition[int]],
 ) -> str:
-    sub = SubWorkflowNode(workflow_def=child_def)
+    sub = SubWorkflowNode(workflow_definition=child_def)
     spec = app.workflow(
         f'bulk_parent_{uuid.uuid4().hex[:6]}', [sub],
         definition_key=f'bulk-parent-{uuid.uuid4().hex[:6]}',
@@ -210,7 +210,7 @@ class TestBulkChildStart:
         child_def = _child_def(app, 2, shape='flat', corrupt_root=True)
         parent_name = f'bulk_parent_corrupt_{uuid.uuid4().hex[:6]}'
         spec = app.workflow(
-            parent_name, [SubWorkflowNode(workflow_def=child_def)],
+            parent_name, [SubWorkflowNode(workflow_definition=child_def)],
             definition_key=f'bulk-parent-corrupt-{uuid.uuid4().hex[:6]}',
         )
 
@@ -285,9 +285,9 @@ class TestBulkChildStart:
         ).scalar()
         assert n_tasks == 0  # zero runnable rows under the paused child
 
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
-        resume_r = await resume_workflow(broker, uuid.UUID(child_id))
+        resume_r = await resume_workflow_async(broker, uuid.UUID(child_id))
         assert not is_err(resume_r), resume_r
         good_status = (
             await session.execute(
@@ -328,8 +328,8 @@ class TestBulkChildStart:
 
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
-                node = SubWorkflowNode(workflow_def=broken_def)
-                return app.workflow(name=cls.name, tasks=[node], output=node)
+                node = SubWorkflowNode(workflow_definition=broken_def)
+                return app.workflow(name=cls.name, nodes=[node], output=node)
 
         class PausingChild(WorkflowDefinition[int]):
             name = f'nested_pause_child_{suffix}'
@@ -338,10 +338,10 @@ class TestBulkChildStart:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 fast = TaskNode(fn=fast_task, kwargs={'value': 1})
-                nested = SubWorkflowNode(workflow_def=BadGrandchild)
+                nested = SubWorkflowNode(workflow_definition=BadGrandchild)
                 return app.workflow(
                     name=cls.name,
-                    tasks=[fast, nested],
+                    nodes=[fast, nested],
                     output=fast,
                     on_error=OnError.PAUSE,
                 )
@@ -383,9 +383,9 @@ class TestBulkChildStart:
         ).scalar()
         assert n_tasks == 0
 
-        from horsies.core.workflows.lifecycle import resume_workflow
+        from horsies.core.workflows.lifecycle import resume_workflow_async
 
-        resume_r = await resume_workflow(broker, uuid.UUID(child_id))
+        resume_r = await resume_workflow_async(broker, uuid.UUID(child_id))
         assert not is_err(resume_r), resume_r
         fast_status = (
             await session.execute(

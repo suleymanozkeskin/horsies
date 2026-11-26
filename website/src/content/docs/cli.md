@@ -91,7 +91,7 @@ horsies scheduler myapp.instance:app --loglevel=DEBUG
 
 Validate configuration, task registration, workflow structure, and optionally broker connectivity without starting services. Runs the same validation that workers and schedulers perform at startup.
 
-For details on validation phases, `@app.workflow_builder`, the guarantee model, and CI usage, see [Startup Validation](../configuration/app-config#startup-validation-appcheck).
+For details on validation phases, `@app.check_workflow_builder`, the guarantee model, and CI usage, see [Startup Validation](../configuration/app-config#startup-validation-appcheck).
 
 `horsies check` validates every worker profile of the app, and each error names the profile and the field path (`HRS-218`). With `--live`, a profile whose worker opens more Postgres connections itself than the server has usable slots is an error (`HRS-219`). The error also states the connections that task code that sends adds. See [Worker Profiles](/horsies/workers/worker-profiles/#validation).
 

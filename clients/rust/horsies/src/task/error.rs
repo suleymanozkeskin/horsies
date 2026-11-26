@@ -412,10 +412,10 @@ mod tests {
             sub_workflow_summary: SubWorkflowSummary {
                 status: horsies_core::WorkflowStatus::Failed,
                 output: None,
-                total_tasks: 2,
-                completed_tasks: 1,
-                failed_tasks: 1,
-                skipped_tasks: 0,
+                total_nodes: 2,
+                completed_nodes: 1,
+                failed_nodes: 1,
+                skipped_nodes: 0,
                 error_summary: Some("child task failed".to_owned()),
             },
         };

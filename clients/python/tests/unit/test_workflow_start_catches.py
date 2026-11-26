@@ -50,8 +50,8 @@ class TestPrevalidationCatch:
     ) -> None:
         spec = MagicMock()
         spec.name = 'zone-one-wf'
-        spec.tasks = []
-        spec.workflow_def_cls = object()
+        spec.nodes = []
+        spec.workflow_definition = object()
         broker = MagicMock()
         broker.app = None
 

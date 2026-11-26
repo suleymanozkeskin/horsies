@@ -120,7 +120,7 @@ class TestEngineTaskSentAt:
                 return app.workflow(cls.name, [node], output=node)
 
         spec = app.workflow(
-            f'sent_at_parent_{suffix}', [SubWorkflowNode(workflow_def=SentAtChild)],
+            f'sent_at_parent_{suffix}', [SubWorkflowNode(workflow_definition=SentAtChild)],
             definition_key=f'sent-at-parent-{suffix}',
         )
         started = await start_workflow_async(spec, broker, sent_at=START_CALL_TIME)
@@ -162,11 +162,11 @@ class TestEngineTaskSentAt:
             @classmethod
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = (args, params)
-                node = SubWorkflowNode(workflow_def=SentAtLeaf)
+                node = SubWorkflowNode(workflow_definition=SentAtLeaf)
                 return app.workflow(cls.name, [node], output=node)
 
         spec = app.workflow(
-            f'sent_at_top_{suffix}', [SubWorkflowNode(workflow_def=SentAtMiddle)],
+            f'sent_at_top_{suffix}', [SubWorkflowNode(workflow_definition=SentAtMiddle)],
             definition_key=f'sent-at-top-{suffix}',
         )
         started = await start_workflow_async(spec, broker, sent_at=START_CALL_TIME)

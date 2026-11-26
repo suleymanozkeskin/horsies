@@ -475,7 +475,7 @@ impl WorkflowSpecBuilder {
             );
             return Vec::new();
         }
-        let slug = slugify(&self.name);
+        let slug = node_id_from_text(&self.name);
         let node_ids: Vec<String> = self
             .nodes
             .iter()
@@ -905,9 +905,9 @@ fn missing_field(failure: &DecodeFailure) -> Option<&str> {
 }
 
 /// The workflow name as the first part of an auto node id (Python
-/// `slugify`): a space becomes `_`; every other character outside
+/// `node_id_from_text`): a space becomes `_`; every other character outside
 /// `[A-Za-z0-9_\-:.]` is removed; an empty result is `_`. Pure.
-fn slugify(name: &str) -> String {
+fn node_id_from_text(name: &str) -> String {
     let slug: String = name
         .chars()
         .filter_map(|character| match character {

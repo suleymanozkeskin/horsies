@@ -59,7 +59,7 @@ class CustomerWinback(WorkflowDefinition[MarketingBlast]):
         )
         return app.workflow(
             name=cls.name,
-            tasks=[sweep, blast],
+            nodes=[sweep, blast],
             on_error=OnError.FAIL,
             output=blast,
         )
@@ -68,7 +68,7 @@ class CustomerWinback(WorkflowDefinition[MarketingBlast]):
 _CHECK_SEGMENT: Final[str] = 'winback-check'
 
 
-@app.workflow_builder(
+@app.check_workflow_builder(
     cases=[
         {
             'segment': _CHECK_SEGMENT,

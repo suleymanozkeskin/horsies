@@ -11,7 +11,7 @@ use super::support::{
     node_status, node_task_input, ok, shared_pool, spec, start, stored_result, stored_result_error,
     sub_workflow_node, task_node, try_finish_task, workflow, workflow_status, IsolatedDatabase,
 };
-use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{JoinType, SubWorkflowParameters};
 use crate::core::{
     AnyNode, HorsiesError, SubWorkflowSummary, TaskError, TaskResult, WorkflowSpec, WorkflowStatus,
 };
@@ -65,7 +65,7 @@ fn dynamic_node(
 ) -> AnyNode {
     AnyNode {
         input_json: input.to_string(),
-        sub_workflow_params: SubWorkflowParams::Given,
+        sub_workflow_params: SubWorkflowParameters::Given,
         sub_definition_key: Some(definition_key.to_owned()),
         ..sub_workflow_node(index, &spec(name, Vec::new()))
     }
@@ -688,8 +688,8 @@ async fn a_failed_child_summary_holds_its_counts_and_error_summary() {
     )
     .expect("the summary decodes");
     assert_eq!(summary.status, WorkflowStatus::Failed);
-    assert!(summary.failed_tasks >= 1);
-    assert!(summary.total_tasks >= 1);
+    assert!(summary.failed_nodes >= 1);
+    assert!(summary.total_nodes >= 1);
     assert!(summary.error_summary.is_some_and(|text| !text.is_empty()));
     assert_eq!(node_status(&pool, parent_id, 1).await, "ENQUEUED");
 }

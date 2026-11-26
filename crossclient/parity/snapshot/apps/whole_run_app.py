@@ -370,17 +370,17 @@ class ChildChain(WorkflowDefinition[int]):
         child = TaskNode(fn=double, kwargs={'value': value})
         return app.workflow(
             name=cls.name,
-            tasks=[child],
+            nodes=[child],
             output=child,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
 _chain_first = TaskNode(fn=double, kwargs={'value': 1}, node_id='first')
 _chain_sub = SubWorkflowNode(
-    workflow_def=ChildChain,
+    workflow_definition=ChildChain,
     kwargs={'value': 2},
     waits_for=[_chain_first],
     node_id='sub',
@@ -393,7 +393,7 @@ _chain_last = TaskNode(
 )
 chain_with_subworkflow = app.workflow(
     name='whole_run_chain',
-    tasks=[_chain_first, _chain_sub, _chain_last],
+    nodes=[_chain_first, _chain_sub, _chain_last],
     output=_chain_last,
     on_error=OnError.FAIL,
     definition_key='crossclient.parity.snapshot.whole_run.chain.v1',
@@ -418,17 +418,17 @@ class ChildFromResult(WorkflowDefinition[int]):
             case _:
                 raise ValueError(f'{cls.name} takes a completed result, not {doubled!r}')
         grandchild = SubWorkflowNode(
-            workflow_def=ChildChain,
+            workflow_definition=ChildChain,
             kwargs={'value': value},
             node_id='grandchild',
         )
         return app.workflow(
             name=cls.name,
-            tasks=[grandchild],
+            nodes=[grandchild],
             output=grandchild,
             on_error=OnError.FAIL,
             definition_key=cls.definition_key,
-            workflow_def_cls=cls,
+            workflow_definition=cls,
         )
 
 
@@ -448,14 +448,14 @@ class RefusedChild(WorkflowDefinition[int]):
 
 _from_first = TaskNode(fn=double, kwargs={'value': 5}, node_id='first')
 _from_sub = SubWorkflowNode(
-    workflow_def=ChildFromResult,
+    workflow_definition=ChildFromResult,
     waits_for=[_from_first],
     args_from={'doubled': _from_first},
     node_id='sub',
 )
 chain_from_result = app.workflow(
     name='whole_run_chain_from_result',
-    tasks=[_from_first, _from_sub],
+    nodes=[_from_first, _from_sub],
     output=_from_sub,
     on_error=OnError.FAIL,
     definition_key='crossclient.parity.snapshot.whole_run.chain_from_result.v1',
@@ -465,14 +465,14 @@ result; the child's start builds a grandchild."""
 
 _refused_first = TaskNode(fn=double, kwargs={'value': 6}, node_id='first')
 _refused_sub = SubWorkflowNode(
-    workflow_def=RefusedChild,
+    workflow_definition=RefusedChild,
     kwargs={'value': 7},
     waits_for=[_refused_first],
     node_id='sub',
 )
 chain_with_refused_child = app.workflow(
     name='whole_run_chain_with_refused_child',
-    tasks=[_refused_first, _refused_sub],
+    nodes=[_refused_first, _refused_sub],
     output=_refused_sub,
     on_error=OnError.FAIL,
     definition_key='crossclient.parity.snapshot.whole_run.refused_chain.v1',
@@ -489,7 +489,7 @@ _pause_second = TaskNode(
 )
 pause_chain = app.workflow(
     name='whole_run_pause_chain',
-    tasks=[_pause_first, _pause_second],
+    nodes=[_pause_first, _pause_second],
     output=_pause_second,
     on_error=OnError.FAIL,
     definition_key='crossclient.parity.snapshot.whole_run.pause_chain.v1',

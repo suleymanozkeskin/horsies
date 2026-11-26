@@ -31,12 +31,12 @@ def sync_retries(
     id_conflict: WorkflowStartIdConflict,
     command_conflict: WorkflowStartCommandConflict,
 ) -> None:
-    _ = spec.retry_start(enqueue_failed)
-    _ = spec.retry_start(async_context)
-    _ = spec.retry_start(broker_not_configured)  # pyright: ignore[reportArgumentType]
-    _ = spec.retry_start(validation_failed)  # pyright: ignore[reportArgumentType]
-    _ = spec.retry_start(id_conflict)  # pyright: ignore[reportArgumentType]
-    _ = spec.retry_start(command_conflict)  # pyright: ignore[reportArgumentType]
+    _ = spec.resend_start(enqueue_failed)
+    _ = spec.resend_start(async_context)
+    _ = spec.resend_start(broker_not_configured)  # pyright: ignore[reportArgumentType]
+    _ = spec.resend_start(validation_failed)  # pyright: ignore[reportArgumentType]
+    _ = spec.resend_start(id_conflict)  # pyright: ignore[reportArgumentType]
+    _ = spec.resend_start(command_conflict)  # pyright: ignore[reportArgumentType]
 
 
 async def async_retries(
@@ -45,9 +45,9 @@ async def async_retries(
     id_conflict: WorkflowStartIdConflict,
     command_conflict: WorkflowStartCommandConflict,
 ) -> None:
-    _ = await spec.retry_start_async(async_context)
-    _ = await spec.retry_start_async(id_conflict)  # pyright: ignore[reportArgumentType]
-    _ = await spec.retry_start_async(command_conflict)  # pyright: ignore[reportArgumentType]
+    _ = await spec.resend_start_async(async_context)
+    _ = await spec.resend_start_async(id_conflict)  # pyright: ignore[reportArgumentType]
+    _ = await spec.resend_start_async(command_conflict)  # pyright: ignore[reportArgumentType]
 
 
 def enqueue_cause_is_an_exception() -> None:

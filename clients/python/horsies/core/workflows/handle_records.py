@@ -8,7 +8,7 @@ the core builds with its message, and the client returns it as it is.
 core boundary error raised by the call. The calls raise
 ``ForkedAfterCoreStart`` and ``CoreStopped`` (``call_refusal_or_raise``):
 no handle error names them. The workflow id is a ``UUID`` before any call
-(``WorkflowHandle.for_id``).
+(``Horsies.workflow_handle``).
 """
 
 from __future__ import annotations

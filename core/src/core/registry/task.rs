@@ -105,7 +105,7 @@ impl std::fmt::Debug for TaskRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMeta};
+    use crate::core::task::fn_trait::{BlockingTaskFn, RawTaskResult, TaskMetadata};
 
     struct DummyTask;
 
@@ -118,7 +118,7 @@ mod tests {
     fn dummy_registered() -> RegisteredTask {
         RegisteredTask::Blocking {
             task: std::sync::Arc::new(DummyTask),
-            meta: TaskMeta::default(),
+            metadata: TaskMetadata::default(),
         }
     }
 

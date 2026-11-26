@@ -274,11 +274,11 @@ class TestWorkflowPaths:
             def build_with(cls, app: Horsies, *args: Any, **params: Any) -> Any:
                 _ = args, params
                 node = TaskNode(fn=child_task, kwargs={'value': 1})
-                return app.workflow(name=cls.name, tasks=[node], output=node)
+                return app.workflow(name=cls.name, nodes=[node], output=node)
 
         parent = app.workflow(
             f'exec_parent_{suffix}',
-            [SubWorkflowNode(workflow_def=Child)],
+            [SubWorkflowNode(workflow_definition=Child)],
             definition_key=f'exec-parent-{suffix}',
         )
         started = await start_workflow_async(parent, broker)

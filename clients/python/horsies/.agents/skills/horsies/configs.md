@@ -1164,7 +1164,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 | 2 — Imports | Import each discovered module | ImportError, HRS-210 |
 | 3 — Workflows | `WorkflowSpec` DAG validation during imports | HRS-001–HRS-031, HRS-033–HRS-038 |
 | 3.1 — Definitions | Validate imported `WorkflowDefinition` classes (each declares `definition_key`) | HRS-016 |
-| 3.2 — Builders | Execute `@app.workflow_builder` functions | HRS-027–HRS-030 |
+| 3.2 — Builders | Execute `@app.check_workflow_builder` functions | HRS-027–HRS-030 |
 | 3.3 — Undecorated | Scan for functions returning WorkflowSpec without decorator | HRS-030 |
 | 3.5 — Policies | Re-validate exception_mapper after imports | HRS-209 |
 | 3.6 — Schedules | Validate timezone, task registration, queue and kwargs wire contract of each enabled schedule (not run for workers) | — |
@@ -1172,7 +1172,7 @@ Phases are fail-fast: errors in phase N stop later phases.
 | 4.1 — Worker connections | Each worker profile against `max_connections` less reserved slots (`--live` only; skipped with no profiles or with `pgbouncer_transaction_mode=True`) | HRS-219 |
 
 **Guarantee model:**
-- **Strong:** `@app.workflow_builder` functions are fully executed and validated.
+- **Strong:** `@app.check_workflow_builder` functions are fully executed and validated.
 - **Best-effort:** Undecorated builder detection (HRS-030) only scans directly discovered modules.
 
 Worker and scheduler also run `app.check(live=False)` at startup.

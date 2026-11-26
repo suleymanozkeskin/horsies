@@ -597,10 +597,10 @@ def _summary(**fields: Any) -> SubWorkflowSummary[Any]:
         'status': WorkflowStatus.FAILED,
         'output': None,
         'error_summary': None,
-        'total_tasks': 2,
-        'completed_tasks': 1,
-        'failed_tasks': 1,
-        'skipped_tasks': 0,
+        'total_nodes': 2,
+        'completed_nodes': 1,
+        'failed_nodes': 1,
+        'skipped_nodes': 0,
     }
     return SubWorkflowSummary(**{**base, **fields})
 
@@ -770,7 +770,7 @@ class TestReportableError:
 
         assert isinstance(read, SubWorkflowError)
         assert read.sub_workflow_id == 'wf-1'
-        assert read.sub_workflow_summary.failed_tasks == 1
+        assert read.sub_workflow_summary.failed_nodes == 1
 
     def test_a_surrogate_in_the_id_keeps_the_class(self) -> None:
         read = _stored(
@@ -813,7 +813,7 @@ class TestReportableError:
         err = SubWorkflowError(
             error_code='X',
             sub_workflow_id='wf-1',
-            sub_workflow_summary=_summary(failed_tasks='many'),
+            sub_workflow_summary=_summary(failed_nodes='many'),
         )
 
         read = _stored(err)

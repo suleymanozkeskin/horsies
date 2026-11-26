@@ -175,7 +175,7 @@ class WorkflowDefinitionMeta(type):
             klass: type,
             app: Any,
             *bw_args: Any,
-            **bw_params: Any,
+            **bw_parameters: Any,
         ) -> WorkflowSpec[Any]:
             call_token = str(uuid_module.uuid4())
             ctx_token = _workflow_def_context.set(
@@ -183,7 +183,7 @@ class WorkflowDefinitionMeta(type):
             )
             call_token_reset = _build_call_token.set(call_token)
             try:
-                spec = original_fn(klass, app, *bw_args, **bw_params)
+                spec = original_fn(klass, app, *bw_args, **bw_parameters)
             finally:
                 _workflow_def_context.reset(ctx_token)
                 _build_call_token.reset(call_token_reset)
@@ -377,23 +377,23 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         if output is not None:
             spec = app.workflow(
                 name=cls.name,
-                tasks=tasks,
+                nodes=tasks,
                 output=output,
                 on_error=on_error,
                 success_policy=success_policy,
                 definition_key=definition_key,
-                workflow_def_cls=cls,
+                workflow_definition=cls,
             )
         else:
             spec = cast(
                 'WorkflowSpec[OkT_co]',
                 app.workflow(
                     name=cls.name,
-                    tasks=tasks,
+                    nodes=tasks,
                     on_error=on_error,
                     success_policy=success_policy,
                     definition_key=definition_key,
-                    workflow_def_cls=cls,
+                    workflow_definition=cls,
                 ),
             )
         validate_workflow_generic_output_match(cls, spec)
@@ -403,15 +403,15 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
     def build_with(
         cls,
         app: Horsies,
-        **params: Any,
+        **parameters: Any,
     ) -> WorkflowSpec[OkT_co]:
         """
         Build a WorkflowSpec with runtime parameters.
 
-        Subclasses can override this to apply keyword params to TaskNodes.
+        Subclasses can override this to apply keyword parameters to TaskNodes.
         Default implementation forwards to build().
         """
-        _ = params
+        _ = parameters
         return cls.build(app)
 
     @classmethod

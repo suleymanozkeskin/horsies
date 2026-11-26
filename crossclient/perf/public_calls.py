@@ -140,7 +140,7 @@ class WorkflowStartCall:
         self._broker = app.get_broker()
         self._spec = app.workflow(
             name=WORKFLOW_NAME,
-            tasks=[node],
+            nodes=[node],
             output=node,
             definition_key=WORKFLOW_DEFINITION_KEY,
         )

@@ -626,9 +626,9 @@ calling thread.
 | `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `retry_send` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
 | `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
-| `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
+| `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `resend_start` |
 | `WorkflowTemplateView` | `workflow_template.blocking()` | `start`, `start_with_id` |
-| `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `tasks`, `cancel`, `pause`, `resume` |
+| `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `nodes`, `cancel`, `pause`, `resume` |
 
 The starts of a definition by its type are methods of the app view:
 `app.blocking().start_workflow::<D>()` and
@@ -641,7 +641,7 @@ The starts of a definition by its type are methods of the app view:
   `ReadError::AsyncContext`, `BrokerOperationError::AsyncContext`, a
   `CheckReport` with `HRS-217`,
   `WorkflowStartError::AsyncContext` (with the `workflow_id` of the
-  start; `retry_start(&error).await` completes the same start from async
+  start; `resend_start(&error).await` completes the same start from async
   code), `HandleOperationError::AsyncContext`, or
   `WorkflowReadError::AsyncContext`.
 - The thread of a `#[blocking_task]` body in a worker child drives no async
@@ -651,7 +651,7 @@ The starts of a definition by its type are methods of the app view:
   `SendSuppressed` on any thread, and a read with a `Within` limit above
   `MAX_WAIT_LIMIT_MS` is `InvalidInput` on any thread. A workflow start
   checks the thread first, as Python's `WorkflowSpec.start`: on a runtime
-  thread a template's build does not run. `retry_start` checks its error
+  thread a template's build does not run. `resend_start` checks its error
   first.
 
 ## Rerun a Terminal Task

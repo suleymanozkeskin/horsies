@@ -86,7 +86,7 @@ impl RegisteredWorkflows {
 ///
 /// Errors: the first registration refusal.
 pub fn register_all(app: &mut Horsies) -> Result<RegisteredWorkflows, HorsiesError> {
-    let shipping = app.workflow_template::<shipping::Shipping>()?;
+    let shipping = app.register_workflow_definition_with::<shipping::Shipping>()?;
     app.check_workflow_builder(
         shipping::Shipping::name(),
         |builder, params: &shipping::ShippingParams| {
@@ -96,7 +96,8 @@ pub fn register_all(app: &mut Horsies) -> Result<RegisteredWorkflows, HorsiesErr
     .case(shipping::check_params())
     .register()?;
 
-    let order_fulfillment = app.workflow_template::<order_fulfillment::OrderFulfillment>()?;
+    let order_fulfillment =
+        app.register_workflow_definition_with::<order_fulfillment::OrderFulfillment>()?;
     app.check_workflow_builder(
         order_fulfillment::OrderFulfillment::name(),
         |builder, order: &Order| {
@@ -106,7 +107,8 @@ pub fn register_all(app: &mut Horsies) -> Result<RegisteredWorkflows, HorsiesErr
     .case(order_fulfillment::check_order())
     .register()?;
 
-    let returns_review = app.workflow_template::<returns_review::ReturnsReview>()?;
+    let returns_review =
+        app.register_workflow_definition_with::<returns_review::ReturnsReview>()?;
     app.check_workflow_builder(
         returns_review::ReturnsReview::name(),
         |builder, params: &returns_review::ReturnsParams| {

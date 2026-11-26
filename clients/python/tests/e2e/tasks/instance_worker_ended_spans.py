@@ -125,7 +125,7 @@ node_sleeper = TaskNode(fn=sleeper)
 
 spec_sleeper = app.workflow(
     name='e2e_worker_ended_spans_flow',
-    tasks=[node_sleeper],
+    nodes=[node_sleeper],
     definition_key='tests.e2e.tasks.instance_worker_ended_spans.flow.v1',
 )
 

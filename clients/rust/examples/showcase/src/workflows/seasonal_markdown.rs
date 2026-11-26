@@ -1,7 +1,7 @@
 //! The seasonal markdown: mark each SKU down, then roll the sales of the
 //! campaign up.
 
-use horsies::{HorsiesError, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder};
+use horsies::{HorsiesError, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder};
 
 use crate::domain::SalesRollup;
 use crate::tasks::analytics::sales_rollup;
@@ -17,7 +17,7 @@ pub struct SeasonalMarkdown;
 
 impl WorkflowDefinition for SeasonalMarkdown {
     type Output = SalesRollup;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "seasonal_markdown"
@@ -27,7 +27,7 @@ impl WorkflowDefinition for SeasonalMarkdown {
         "acme.seasonal_markdown.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         let mut markdowns = Vec::new();
         for (index, sku_number) in (1..=LAST_SKU).enumerate() {
             markdowns.push(
@@ -51,6 +51,6 @@ impl WorkflowDefinition for SeasonalMarkdown {
                 )?
                 .waits_for_all(markdowns),
         )?;
-        Ok(WorkflowDefConfig::new().output(rollup))
+        Ok(WorkflowDefinitionConfig::new().output(rollup))
     }
 }

@@ -87,7 +87,7 @@ impl<T> std::hash::Hash for NodeKey<T> {
 /// params.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SubWorkflowParams {
+pub enum SubWorkflowParameters {
     /// The node gives no params. A child definition without params takes
     /// such a node.
     NotGiven,
@@ -96,7 +96,7 @@ pub enum SubWorkflowParams {
     Given,
 }
 
-impl SubWorkflowParams {
+impl SubWorkflowParameters {
     /// The value that a sub-workflow node row stores in
     /// `horsies_workflow_tasks.sub_workflow_params`: `NOT_GIVEN` or `GIVEN`.
     /// A task node row stores `NULL`.
@@ -190,7 +190,7 @@ pub struct AnyNode {
 
     /// Whether a sub-workflow node gives its child params, as the client set
     /// it. A task node has no child, so it gives none: `NotGiven`.
-    pub sub_workflow_params: SubWorkflowParams,
+    pub sub_workflow_params: SubWorkflowParameters,
 }
 
 #[cfg(test)]
@@ -199,22 +199,29 @@ mod tests {
 
     #[test]
     fn sub_workflow_params_round_trip_through_the_stored_value() {
-        for params in [SubWorkflowParams::NotGiven, SubWorkflowParams::Given] {
+        for params in [
+            SubWorkflowParameters::NotGiven,
+            SubWorkflowParameters::Given,
+        ] {
             assert_eq!(
-                SubWorkflowParams::from_stored(params.as_stored()),
+                SubWorkflowParameters::from_stored(params.as_stored()),
                 Some(params)
             );
         }
         assert_eq!(
-            SubWorkflowParams::as_stored(SubWorkflowParams::NotGiven),
+            SubWorkflowParameters::as_stored(SubWorkflowParameters::NotGiven),
             "NOT_GIVEN"
         );
         assert_eq!(
-            SubWorkflowParams::as_stored(SubWorkflowParams::Given),
+            SubWorkflowParameters::as_stored(SubWorkflowParameters::Given),
             "GIVEN"
         );
         for refused in ["", "not_given", "NotGiven", "GIVEN "] {
-            assert_eq!(SubWorkflowParams::from_stored(refused), None, "{refused:?}");
+            assert_eq!(
+                SubWorkflowParameters::from_stored(refused),
+                None,
+                "{refused:?}"
+            );
         }
     }
 
@@ -266,14 +273,14 @@ mod tests {
             task_options_json: None,
             is_subworkflow: false,
             sub_definition_key: None,
-            sub_workflow_params: SubWorkflowParams::NotGiven,
+            sub_workflow_params: SubWorkflowParameters::NotGiven,
         };
 
         let json = serde_json::to_string(&any).unwrap();
         let back: AnyNode = serde_json::from_str(&json).unwrap();
         assert_eq!(back.task_name, "fetch");
         assert_eq!(back.input_json, r#"{"url": "https://example.com"}"#);
-        assert_eq!(back.sub_workflow_params, SubWorkflowParams::NotGiven);
+        assert_eq!(back.sub_workflow_params, SubWorkflowParameters::NotGiven);
         assert_eq!(back.node_id.as_deref(), Some("fetch:0"));
         assert_eq!(back.join, JoinType::All);
         assert!(!back.is_subworkflow);

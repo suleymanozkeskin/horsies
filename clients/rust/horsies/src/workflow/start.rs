@@ -180,7 +180,7 @@ impl WorkflowStarter {
     }
 
     /// Start `spec` again after `error`, with its workflow id (Python
-    /// `retry_start`).
+    /// `resend_start`).
     ///
     /// Errors: `VALIDATION_FAILED` for an error that is not
     /// `ENQUEUE_FAILED` or `ASYNC_CONTEXT` (`WORKFLOW_ID_CONFLICT` and
@@ -189,7 +189,7 @@ impl WorkflowStarter {
     /// [`Self::start`]. The retry builds the spec again, so a spec that
     /// changed since the failed start meets the stored command as another
     /// command.
-    pub(crate) async fn retry_start<T: 'static>(
+    pub(crate) async fn resend_start<T: 'static>(
         &self,
         spec: &WorkflowSpec,
         error: &WorkflowStartError,
@@ -248,7 +248,7 @@ mod tests {
     use super::*;
     use crate::workflow::node::tests::{add, task_node, test_builder};
     use crate::workflow::{
-        SubWorkflowParams, WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
+        SubWorkflowParameters, WorkflowDefinition, WorkflowDefinitionConfig, WorkflowSpecBuilder,
     };
     use crate::{AppConfig, HorsiesError};
 
@@ -257,7 +257,7 @@ mod tests {
 
     impl WorkflowDefinition for LateChild {
         type Output = u32;
-        type Params = ();
+        type Parameters = ();
 
         fn name() -> &'static str {
             "late_child"
@@ -267,9 +267,11 @@ mod tests {
             "tests.start.late_child.v1"
         }
 
-        fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        fn define(
+            builder: &mut WorkflowSpecBuilder,
+        ) -> Result<WorkflowDefinitionConfig, HorsiesError> {
             let tick = add(builder, task_node::<u32, ()>("tick"));
-            Ok(WorkflowDefConfig::new().output(tick))
+            Ok(WorkflowDefinitionConfig::new().output(tick))
         }
     }
 
@@ -286,7 +288,7 @@ mod tests {
         let clone = starter.clone();
         let mut builder = test_builder("late_parent");
         builder.definition_key("tests.start.late_parent.v1");
-        builder.sub_workflow(LateChild::node(SubWorkflowParams::NotGiven).unwrap());
+        builder.sub_workflow(LateChild::node(SubWorkflowParameters::NotGiven).unwrap());
         let spec = builder.build().unwrap();
         assert!(
             starter.workflows.prepare(&spec).is_err(),

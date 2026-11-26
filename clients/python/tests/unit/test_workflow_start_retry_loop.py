@@ -34,8 +34,8 @@ def _make_spec(name: str = 'test-wf') -> Any:
     """A minimal mock spec that passes prevalidation."""
     spec = MagicMock()
     spec.name = name
-    spec.tasks = []
-    spec.workflow_def_cls = None
+    spec.nodes = []
+    spec.workflow_definition = None
     spec.output = None
     spec.success_policy = None
     spec.on_error.value = 'FAIL_WORKFLOW'
@@ -138,7 +138,7 @@ class TestTransactionCatch:
         bad_task.queue = None
         bad_task.priority = 100
         bad_task.name = 'bad-task'
-        spec.tasks = [bad_task]
+        spec.nodes = [bad_task]
         broker = _broker()
 
         result = await start_workflow_async(

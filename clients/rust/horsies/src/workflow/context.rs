@@ -25,7 +25,10 @@ use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkflowContext {
     workflow_id: Uuid,
-    task_index: i32,
+    /// The index of the node. The stored key keeps the schema name
+    /// `task_index`: the SQL function that writes the context writes it.
+    #[serde(rename = "task_index")]
+    node_index: i32,
     task_name: String,
     /// The stored result envelope of each context node, by node id.
     #[serde(default)]
@@ -78,8 +81,8 @@ impl WorkflowContext {
     }
 
     /// The index of the task's node in its workflow.
-    pub fn task_index(&self) -> i32 {
-        self.task_index
+    pub fn node_index(&self) -> i32 {
+        self.node_index
     }
 
     /// The task name of the node.
@@ -203,7 +206,7 @@ mod tests {
     #[test]
     fn a_result_reads_with_its_types() {
         let context = context();
-        assert_eq!(context.task_index(), 2);
+        assert_eq!(context.node_index(), 2);
         let fetched = context
             .result_for::<Vec<u32>, Infallible>(&NodeKey::new("fetch"))
             .unwrap();
@@ -254,7 +257,7 @@ mod tests {
         }
         let summary = |output: &str| {
             format!(
-                r#"{{"status":"COMPLETED","output":{output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,"skipped_tasks":0,"error_summary":null}}"#
+                r#"{{"status":"COMPLETED","output":{output},"total_nodes":1,"completed_nodes":1,"failed_nodes":0,"skipped_nodes":0,"error_summary":null}}"#
             )
         };
         let text = format!(

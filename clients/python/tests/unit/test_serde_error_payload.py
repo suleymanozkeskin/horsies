@@ -172,10 +172,10 @@ class TestSerializeErrorPayloadFlattensException:
         summary: SubWorkflowSummary[Any] = SubWorkflowSummary(
             status=WorkflowStatus.FAILED,
             output=None,
-            total_tasks=1,
-            completed_tasks=0,
-            failed_tasks=1,
-            skipped_tasks=0,
+            total_nodes=1,
+            completed_nodes=0,
+            failed_nodes=1,
+            skipped_nodes=0,
             error_summary='downstream',
         )
         error: TaskError = SubWorkflowError(
@@ -194,7 +194,7 @@ class TestSerializeErrorPayloadFlattensException:
         # Subclass fields are now preserved through the encode helper.
         assert err['sub_workflow_id'] == 'wf-child'
         assert isinstance(err['sub_workflow_summary'], dict)
-        assert err['sub_workflow_summary']['failed_tasks'] == 1
+        assert err['sub_workflow_summary']['failed_nodes'] == 1
         assert err['sub_workflow_summary']['error_summary'] == 'downstream'
 
 

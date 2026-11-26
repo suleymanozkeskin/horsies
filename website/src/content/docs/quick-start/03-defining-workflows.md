@@ -261,7 +261,7 @@ def start_order_processing(order: Order) -> None:
 
     spec = app.workflow(
         name="order_processing",
-        tasks=[
+        nodes=[
             validate_node,
             inventory_node,
             cost_node,

@@ -186,8 +186,8 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
         ('PENDING', 'RUNNING', 'COMPLETED', 'FAILED', 'PAUSED', 'CANCELLED', 'EXPIRED'),
     ),
     (
-        enums.WorkflowTaskStatus,
-        horsies._catalog.status.WorkflowTaskStatus,
+        enums.WorkflowNodeStatus,
+        horsies._catalog.status.WorkflowNodeStatus,
         ('PENDING', 'READY', 'ENQUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'SKIPPED'),
     ),
     (
@@ -244,9 +244,9 @@ TERMINAL_STATES: Final[
         frozenset({'COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'}),
     ),
     (
-        enums.WORKFLOW_TASK_TERMINAL_STATES,
-        horsies._catalog.status.WORKFLOW_TASK_TERMINAL_STATES,
-        enums.WorkflowTaskStatus,
+        enums.WORKFLOW_NODE_TERMINAL_STATES,
+        horsies._catalog.status.WORKFLOW_NODE_TERMINAL_STATES,
+        enums.WorkflowNodeStatus,
         frozenset({'COMPLETED', 'FAILED', 'SKIPPED'}),
     ),
 )

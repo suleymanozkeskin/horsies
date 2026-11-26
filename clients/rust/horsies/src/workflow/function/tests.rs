@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::workflow::node::tests::{add, task_node, test_builder};
-use crate::workflow::{OutputlessResults, WorkflowDefConfig, WorkflowSpecBuilder};
+use crate::workflow::{OutputlessResults, WorkflowDefinitionConfig, WorkflowSpecBuilder};
 use crate::AppConfig;
 use horsies_core::WorkflowStartErrorCode;
 
@@ -25,16 +25,16 @@ fn app_without_database() -> Horsies {
     .unwrap()
 }
 
-fn one_task(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+fn one_task(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
     let tick = add(builder, task_node::<u32, ()>("tick"));
-    Ok(WorkflowDefConfig::new().output(tick))
+    Ok(WorkflowDefinitionConfig::new().output(tick))
 }
 
 struct Daily;
 
 impl WorkflowDefinition for Daily {
     type Output = u32;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "daily"
@@ -44,7 +44,7 @@ impl WorkflowDefinition for Daily {
         "tests.function.daily.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         one_task(builder)
     }
 }
@@ -58,7 +58,7 @@ struct Regional;
 
 impl WorkflowDefinition for Regional {
     type Output = u32;
-    type Params = Region;
+    type Parameters = Region;
 
     fn name() -> &'static str {
         "regional"
@@ -87,7 +87,7 @@ struct RefusingRegional;
 
 impl WorkflowDefinition for RefusingRegional {
     type Output = u32;
-    type Params = Region;
+    type Parameters = Region;
 
     fn name() -> &'static str {
         "refusing_regional"
@@ -111,7 +111,7 @@ struct DailyTwin;
 
 impl WorkflowDefinition for DailyTwin {
     type Output = u32;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "daily_twin"
@@ -121,7 +121,7 @@ impl WorkflowDefinition for DailyTwin {
         Daily::definition_key()
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
         one_task(builder)
     }
 }
@@ -133,7 +133,7 @@ struct ParentOfUnregistered;
 
 impl WorkflowDefinition for ParentOfUnregistered {
     type Output = OutputlessResults;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "parent_of_unregistered"
@@ -143,9 +143,9 @@ impl WorkflowDefinition for ParentOfUnregistered {
         "tests.function.parent_of_unregistered.v1"
     }
 
-    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        builder.sub_workflow(Unregistered::node(SubWorkflowParams::NotGiven)?);
-        Ok(WorkflowDefConfig::new())
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefinitionConfig, HorsiesError> {
+        builder.sub_workflow(Unregistered::node(SubWorkflowParameters::NotGiven)?);
+        Ok(WorkflowDefinitionConfig::new())
     }
 }
 
@@ -154,7 +154,7 @@ struct Unregistered;
 
 impl WorkflowDefinition for Unregistered {
     type Output = OutputlessResults;
-    type Params = ();
+    type Parameters = ();
 
     fn name() -> &'static str {
         "unregistered"
@@ -183,7 +183,7 @@ fn a_definition_registers_and_gives_its_function() {
 #[test]
 fn a_template_builds_from_params_and_makes_its_node() {
     let mut app = app();
-    let template = app.workflow_template::<Regional>().unwrap();
+    let template = app.register_workflow_definition_with::<Regional>().unwrap();
     assert_eq!(template.name(), "regional");
     let spec = template
         .build(Region {
@@ -192,7 +192,7 @@ fn a_template_builds_from_params_and_makes_its_node() {
         .unwrap();
     assert_eq!(spec.name(), "regional");
     assert_eq!(spec.node_ids().collect::<Vec<_>>(), vec!["eu"]);
-    let node = template.node(SubWorkflowParams::NotGiven).unwrap();
+    let node = template.node(SubWorkflowParameters::NotGiven).unwrap();
     assert_eq!(node.definition_key(), "tests.function.regional.v1");
 }
 
@@ -272,7 +272,7 @@ async fn a_spec_with_an_unregistered_child_is_refused_before_any_io() {
     let app = app();
     let mut builder = test_builder("parent");
     builder.definition_key("tests.function.parent.v1");
-    builder.sub_workflow(Daily::node(SubWorkflowParams::NotGiven).unwrap());
+    builder.sub_workflow(Daily::node(SubWorkflowParameters::NotGiven).unwrap());
     let spec = builder.build().unwrap();
     let refused = app.start::<OutputlessResults>(&spec).await.unwrap_err();
     assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
@@ -288,7 +288,7 @@ async fn a_retry_of_an_error_that_is_not_enqueue_failed_is_refused() {
         workflow_id: Uuid::nil(),
         cause: horsies_core::StartRefusalCause::Check,
     };
-    let refused = function.retry_start(&error).await.unwrap_err();
+    let refused = function.resend_start(&error).await.unwrap_err();
     assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
 }
 
@@ -318,7 +318,9 @@ async fn a_start_of_a_definition_that_the_app_does_not_register_is_refused() {
 
     let mut registered = app_without_database();
     let _function = registered.register_workflow_definition::<Daily>().unwrap();
-    let _template = registered.workflow_template::<RefusingRegional>().unwrap();
+    let _template = registered
+        .register_workflow_definition_with::<RefusingRegional>()
+        .unwrap();
     let refused = without.start_workflow::<Daily>().await.unwrap_err();
     assert_not_registered(&refused, "register_workflow_definition");
     let refused = without
@@ -327,7 +329,7 @@ async fn a_start_of_a_definition_that_the_app_does_not_register_is_refused() {
         })
         .await
         .unwrap_err();
-    assert_not_registered(&refused, "workflow_template");
+    assert_not_registered(&refused, "register_workflow_definition_with");
 }
 
 /// Python mints the id of a start before its checks: the refusal carries
@@ -351,7 +353,7 @@ async fn a_start_takes_the_registered_definition_of_its_type_and_form_only() {
     let mut app = app_without_database();
     let _function = app.register_workflow_definition::<Daily>().unwrap();
     let refused = app.start_workflow_with::<Daily>(()).await.unwrap_err();
-    assert_not_registered(&refused, "workflow_template");
+    assert_not_registered(&refused, "register_workflow_definition_with");
     let refused = app.start_workflow::<DailyTwin>().await.unwrap_err();
     assert_not_registered(&refused, "register_workflow_definition");
 }
@@ -385,7 +387,9 @@ async fn a_start_of_a_registered_definition_runs_the_checks_of_its_spec() {
 #[tokio::test]
 async fn a_template_start_through_the_app_runs_its_build() {
     let mut app = app_without_database();
-    let _template = app.workflow_template::<RefusingRegional>().unwrap();
+    let _template = app
+        .register_workflow_definition_with::<RefusingRegional>()
+        .unwrap();
     let refused = app
         .start_workflow_with::<RefusingRegional>(Region {
             region: "antarctica".to_owned(),
@@ -405,7 +409,9 @@ async fn a_template_start_through_the_app_runs_its_build() {
 #[tokio::test]
 async fn a_template_start_whose_build_refuses_is_validation_failed_before_any_io() {
     let mut app = app();
-    let template = app.workflow_template::<RefusingRegional>().unwrap();
+    let template = app
+        .register_workflow_definition_with::<RefusingRegional>()
+        .unwrap();
     let refused = template
         .start(Region {
             region: "antarctica".to_owned(),

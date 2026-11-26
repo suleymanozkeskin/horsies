@@ -236,7 +236,7 @@ def make_ctx_receiver_task(app: Horsies, name: str = 'ctx_receiver') -> Any:
         return Ok(
             {
                 'workflow_id': workflow_ctx.workflow_id,
-                'task_index': workflow_ctx.task_index,
+                'task_index': workflow_ctx.node_index,
                 'task_name': workflow_ctx.task_name,
                 'result_keys': list(workflow_ctx._results_by_id.keys()),
             }
@@ -548,7 +548,7 @@ def make_workflow_spec(
 
     spec = WorkflowSpec(
         name=name,
-        tasks=tasks,
+        nodes=tasks,
         on_error=on_error,
         output=output,
         success_policy=success_policy,

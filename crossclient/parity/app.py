@@ -287,7 +287,7 @@ _chain_double = TaskNode(
 )
 parity_chain = app.workflow(
     name=CHAIN_NAME,
-    tasks=[_chain_add, _chain_double],
+    nodes=[_chain_add, _chain_double],
     output=_chain_double,
     on_error=OnError.FAIL,
     definition_key=CHAIN_DEFINITION_KEY,
@@ -306,7 +306,7 @@ class ParityChild(WorkflowDefinition[int]):
     config = WorkflowDefinitionConfig(output=child_add, on_error=OnError.FAIL)
 
 
-_parent_child = SubWorkflowNode(workflow_def=ParityChild, node_id='child')
+_parent_child = SubWorkflowNode(workflow_definition=ParityChild, node_id='child')
 _parent_double = TaskNode(
     fn=double,
     waits_for=[_parent_child],
@@ -315,7 +315,7 @@ _parent_double = TaskNode(
 )
 parity_parent = app.workflow(
     name=PARENT_NAME,
-    tasks=[_parent_child, _parent_double],
+    nodes=[_parent_child, _parent_double],
     output=_parent_double,
     on_error=OnError.FAIL,
     definition_key=PARENT_DEFINITION_KEY,

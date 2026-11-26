@@ -89,7 +89,7 @@ pub(crate) enum ParamsBuildRefused {
 pub(crate) enum DefinitionKind {
     /// No params: the one spec.
     WithoutParams(Arc<WorkflowSpec>),
-    /// Params: the build.
+    /// Parameters: the build.
     WithParams(ParamsBuild),
 }
 
@@ -131,7 +131,7 @@ impl Definition {
             move |text: &str,
                   result_members: &[String]|
                   -> Result<WorkflowSpec, ParamsBuildRefused> {
-                let params = decode_params::<D::Params>(text, result_members)?;
+                let params = decode_params::<D::Parameters>(text, result_members)?;
                 let builder = WorkflowSpecBuilder::new(D::name(), Arc::clone(&tasks));
                 let spec = run_user_build(|| D::build_with(builder, params))
                     .map_err(ParamsBuildRefused::Failed)?;
@@ -773,7 +773,7 @@ fn unregistered_child(spec: &WorkflowSpec, node: &SpecNode, definition_key: &str
     .with_code(ErrorCode::WorkflowMissingRequiredParams)
     .with_help(
         "register the child definition on the app: register_workflow_definition or \
-         workflow_template",
+         register_workflow_definition_with",
     )
 }
 
@@ -804,8 +804,8 @@ fn params_without_build_with(
                     node.args_from.keys().collect::<Vec<_>>()
                 ))
                 .with_help(
-                    "give the definition a Params type and implement build_with, and register \
-                     it with workflow_template",
+                    "give the definition a Parameters type and implement build_with, and register \
+                     it with register_workflow_definition_with",
                 ),
         ),
         (DefinitionKind::WithoutParams(_), false) | (DefinitionKind::WithParams(_), _) => None,

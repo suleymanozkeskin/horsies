@@ -10,7 +10,7 @@
 //!   failed); the inner value is the outcome. A workflow holds the codes of
 //!   many tasks, so `get` reads user codes as checked text (`UserCode`);
 //!   `result_for` reads one node with that node's types.
-//! - `status`, `results`, `tasks`, `cancel`, `pause` and `resume` return
+//! - `status`, `results`, `nodes`, `cancel`, `pause` and `resume` return
 //!   `HandleResult`, with Python's handle codes.
 
 use std::any::{Any, TypeId};
@@ -28,7 +28,7 @@ use horsies_core::{
     HandleOperationError, HandleResult, NodeResultsRead, NodesRead, OperationalErrorCode,
     OutcomeCode, PostgresBroker, ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary,
     TaskResult, TerminalErrorStatus, UserCode, WaitLimit, WorkflowEnd, WorkflowError,
-    WorkflowStatus, WorkflowTaskStatus, WorkflowWait,
+    WorkflowNodeStatus, WorkflowStatus, WorkflowWait,
 };
 use serde::de::DeserializeOwned;
 use serde_json::value::RawValue;
@@ -150,7 +150,7 @@ pub enum NodeResult {
     },
 }
 
-/// One node of a workflow (Python `WorkflowTaskInfo`).
+/// One node of a workflow: the same type as the Python `WorkflowNodeInfo`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorkflowNodeInfo {
     /// The node id; `None` for a node stored without one.
@@ -158,7 +158,7 @@ pub struct WorkflowNodeInfo {
     pub index: i32,
     /// The task name, or the child's workflow name.
     pub name: String,
-    pub status: WorkflowTaskStatus,
+    pub status: WorkflowNodeStatus,
     /// The stored result, when the node has one.
     pub result: Option<NodeResult>,
     pub started_at: Option<DateTime<Utc>>,
@@ -281,13 +281,13 @@ impl<T> WorkflowHandle<T> {
         }
     }
 
-    /// Every node of the workflow in index order (Python `tasks`).
+    /// Every node of the workflow in index order (Python `nodes`).
     ///
     /// Errors: `WORKFLOW_NOT_FOUND`; `STORED_DATA_INVALID` for a stored
     /// node status or summary that does not read; `DB_OPERATION_FAILED`.
-    pub async fn tasks(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
+    pub async fn nodes(&self) -> HandleResult<Vec<WorkflowNodeInfo>> {
         match self
-            .broker("tasks", HandleOperation::Tasks)
+            .broker("nodes", HandleOperation::Tasks)
             .await?
             .workflow_nodes(self.workflow_id)
             .await?
@@ -389,13 +389,13 @@ fn stored_data_invalid(
     }
 }
 
-/// One stored node of `workflow_id`, read (Python `tasks`). Pure.
+/// One stored node of `workflow_id`, read (Python `nodes`). Pure.
 ///
 /// Errors: `STORED_DATA_INVALID` for a stored status outside the node
 /// statuses, and for a stored sub-workflow summary that does not read. An
 /// empty summary text does not read: a node without a summary stores NULL.
 fn node_info(workflow_id: Uuid, node: StoredNode) -> HandleResult<WorkflowNodeInfo> {
-    let status = serde_json::from_value::<WorkflowTaskStatus>(serde_json::Value::String(
+    let status = serde_json::from_value::<WorkflowNodeStatus>(serde_json::Value::String(
         node.status.clone(),
     ))
     .map_err(|_| {

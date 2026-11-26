@@ -1,8 +1,8 @@
-"""Unit tests for WorkflowSpec.retry_start / retry_start_async.
+"""Unit tests for WorkflowSpec.resend_start / resend_start_async.
 
 Tests that _validate_start_retry accepts the ``WorkflowStartRetryable``
 variants, fails an assertion on another variant, refuses another workflow's
-error, and that retry_start / retry_start_async delegate to start /
+error, and that resend_start / resend_start_async delegate to start /
 start_async with the stored workflow_id.
 """
 
@@ -31,10 +31,10 @@ from horsies.core.workflows.start_types import (
 def _make_spec(name: str = 'test-wf') -> WorkflowSpec[Any]:
     """Create a minimal WorkflowSpec bypassing __post_init__ validation."""
     spec = object.__new__(WorkflowSpec)
-    # Set only the fields needed for retry_start / _validate_start_retry
+    # Set only the fields needed for resend_start / _validate_start_retry
     object.__setattr__(spec, 'name', name)
     object.__setattr__(spec, 'broker', MagicMock())
-    object.__setattr__(spec, 'tasks', [])
+    object.__setattr__(spec, 'nodes', [])
     object.__setattr__(spec, 'resend_on_transient_err', False)
     return spec
 
@@ -133,13 +133,13 @@ class TestValidateStartRetry:
 
 
 # =============================================================================
-# retry_start (sync)
+# resend_start (sync)
 # =============================================================================
 
 
 @pytest.mark.unit
 class TestRetryStart:
-    """Tests for WorkflowSpec.retry_start sync method."""
+    """Tests for WorkflowSpec.resend_start sync method."""
 
     @pytest.mark.parametrize(
         'error', _retryable_variants('wf-retry-123'), ids=_variant_id,
@@ -150,7 +150,7 @@ class TestRetryStart:
 
         mock_handle = MagicMock()
         with patch.object(spec, 'start', return_value=Ok(mock_handle)) as mock_start:
-            result = spec.retry_start(error)
+            result = spec.resend_start(error)
 
         assert is_ok(result)
         assert result.ok_value is mock_handle
@@ -162,7 +162,7 @@ class TestRetryStart:
         error = _enqueue_failed(workflow_name='other-wf')
 
         with patch.object(spec, 'start') as mock_start:
-            result = spec.retry_start(error)
+            result = spec.resend_start(error)
 
         assert is_err(result)
         assert isinstance(result.err_value, WorkflowStartValidationFailed)
@@ -170,13 +170,13 @@ class TestRetryStart:
 
 
 # =============================================================================
-# retry_start_async
+# resend_start_async
 # =============================================================================
 
 
 @pytest.mark.unit
 class TestRetryStartAsync:
-    """Tests for WorkflowSpec.retry_start_async method."""
+    """Tests for WorkflowSpec.resend_start_async method."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -192,7 +192,7 @@ class TestRetryStartAsync:
         with patch.object(
             spec, 'start_async', new_callable=AsyncMock, return_value=Ok(mock_handle),
         ) as mock_start_async:
-            result = await spec.retry_start_async(error)
+            result = await spec.resend_start_async(error)
 
         assert is_ok(result)
         assert result.ok_value is mock_handle
@@ -205,7 +205,7 @@ class TestRetryStartAsync:
         error = _enqueue_failed(workflow_name='other-wf')
 
         with patch.object(spec, 'start_async', new_callable=AsyncMock) as mock_start_async:
-            result = await spec.retry_start_async(error)
+            result = await spec.resend_start_async(error)
 
         assert is_err(result)
         mock_start_async.assert_not_called()

@@ -58,14 +58,14 @@ pub use crate::core::{
     PostgresConfigError, QueueMode, RecoveryConfig, RecoveryConfigError, ResilienceConfigError,
     RetentionChoice, RetentionClassKeyRefused, RetentionConfig, RetentionConfigError,
     RetrievalCode, RetryPolicy, RetryPolicyError, ScheduleConfig, SchedulePattern,
-    StartRefusalCause, SubWorkflowFailure, SubWorkflowParams, SubWorkflowSummary, SuccessCase,
+    StartRefusalCause, SubWorkflowFailure, SubWorkflowParameters, SubWorkflowSummary, SuccessCase,
     SuccessPolicy, TaskAttemptInfo, TaskAttemptOutcome, TaskError, TaskErrorCode, TaskErrorKind,
     TaskInfo, TaskOptions, TaskRegistry, TaskResult, TaskSchedule, TaskSendError,
     TaskSendErrorCode, TaskSendPayload, TaskSendResult, TaskStatus, UserCode, UserCodeRefused,
     ValidationReport, Weekday, WeeklySchedule, WorkerResilienceConfig, WorkflowContext,
-    WorkflowMeta, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode, WorkflowStartResult,
-    WorkflowStatus, WorkflowTaskStatus, TASK_TERMINAL_STATES, UNDECLARED_LABEL,
-    WF_TASK_TERMINAL_VALUES, WORKFLOW_TASK_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
+    WorkflowMetadata, WorkflowNodeStatus, WorkflowSpec, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartResult, WorkflowStatus, TASK_TERMINAL_STATES, UNDECLARED_LABEL,
+    WF_TASK_TERMINAL_VALUES, WORKFLOW_NODE_TERMINAL_STATES, WORKFLOW_TERMINAL_STATES,
 };
 pub use crate::core::{AppConfig, HorsiesError};
 // A user value kept as its stored text: a sub-workflow summary output, the `data` of a task error.

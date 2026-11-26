@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use super::*;
 use crate::broker::workflow_start::ClientStartOutcome;
-use crate::core::workflow::node::{JoinType, SubWorkflowParams};
+use crate::core::workflow::node::{JoinType, SubWorkflowParameters};
 use crate::core::{SuccessCase, SuccessPolicy};
 use crate::test_support::child_specs::{TestBuildRefused, TestChildBuild, TestChildSpecs};
 use crate::test_support::sql;
@@ -48,7 +48,7 @@ fn task_node(index: usize, dependencies: Vec<usize>) -> AnyNode {
         task_options_json: None,
         is_subworkflow: false,
         sub_definition_key: None,
-        sub_workflow_params: SubWorkflowParams::NotGiven,
+        sub_workflow_params: SubWorkflowParameters::NotGiven,
     }
 }
 
@@ -723,7 +723,7 @@ fn a_client_spec_takes_its_children_and_queue_classes_from_the_client() {
             task_index: 0,
             child_depth: 1,
             definition_key: Some(CLIENT_CHILD_KEY.to_owned()),
-            params: SubWorkflowParams::NotGiven,
+            params: SubWorkflowParameters::NotGiven,
             node_input: "{}".to_owned(),
             args_from: None,
             sources: vec![],
