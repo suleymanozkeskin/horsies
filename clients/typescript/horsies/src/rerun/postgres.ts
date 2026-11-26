@@ -13,6 +13,19 @@ import { thrownFacts } from "../native/call/thrown-facts.ts";
 import { driverFailed, oneRowOf } from "./caller.ts";
 import type { CallerQueryFailure, CallerRow, CallerStatement, CallerTransaction, SqlText } from "./caller.ts";
 
+/** The types that the public declarations of this entry name: the same types as the `horsies` entry gives. */
+export type {
+  CallerColumn,
+  CallerQueryFailure,
+  CallerRow,
+  CallerStatement,
+  CallerTransaction,
+  CallerType,
+  SqlText,
+} from "./caller.ts";
+
+export type { Err, Ok, Result } from "../wire/result.ts";
+
 /** The PostgreSQL type id of `text`. */
 const TEXT_TYPE_OID = 25;
 

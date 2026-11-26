@@ -103,15 +103,6 @@ describe("parseRerunRequest accepts", () => {
 });
 
 describe("parseRerunRequest refuses with INVALID_COMMAND", () => {
-  test("a source task id that is not lower-case hyphenated UUID text", () => {
-    for (const sourceTaskId of [SOURCE_TASK_ID.toUpperCase(), SOURCE_TASK_ID.replaceAll("-", ""), `{${SOURCE_TASK_ID}}`, ""]) {
-      const refusal = refusalOf({ ...COMMAND, sourceTaskId }, POLICY);
-
-      assert.equal(refusal.code, "INVALID_COMMAND", sourceTaskId);
-      assert.match(refusal.message, /^sourceTaskId must be a task id/u);
-    }
-  });
-
   test("a deadline before the year 1 or after the year 9999", () => {
     for (const at of ["0000-12-31T23:59:59.999999Z", "+010000-01-01T00:00:00Z"]) {
       const refusal = refusalOf({ ...COMMAND, deadline: { kind: "until", at: Temporal.Instant.from(at) } }, POLICY);
@@ -164,6 +155,8 @@ describe("parseRerunRequest refuses with INVALID_POLICY", () => {
   });
 
   test("the command first: a refused command hides a refused policy", () => {
-    assert.equal(refusalOf({ ...COMMAND, sourceTaskId: "x" }, withWindow({ seconds: 0 })).code, "INVALID_COMMAND");
+    const lateDeadline = { kind: "until", at: Temporal.Instant.from("+010000-01-01T00:00:00Z") } as const;
+
+    assert.equal(refusalOf({ ...COMMAND, deadline: lateDeadline }, withWindow({ seconds: 0 })).code, "INVALID_COMMAND");
   });
 });

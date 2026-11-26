@@ -1,6 +1,8 @@
 // How an area reaches the core in this thread: the addon on a main thread, the seat relay in a seat isolate, or no
 // core in any other worker thread (where a core operation is a defect).
 
+import { threadId } from "node:worker_threads";
+
 import type {
   EnqueueOutcome,
   EnqueueRequest,
@@ -12,8 +14,10 @@ import type {
   TaskInfoRead,
   WaitBound,
 } from "../native/sends/addon.ts";
+import { unreachable } from "../native/call/never.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { TraceArgument } from "../native/values/records.ts";
+import { AddonOutsideMainThread } from "../thrown-errors.ts";
 
 /**
  * The core operations of sends and task reads. On a main thread the addon runs them; in a seat isolate the relay
@@ -70,3 +74,19 @@ export type CoreAccess =
   | { readonly kind: "addon"; readonly handle: CoreHandle; readonly producer: ProducerCore }
   | { readonly kind: "seatRelay"; readonly relay: SeatRelay }
   | { readonly kind: "noCore" };
+
+/**
+ * The app's core handle of a main thread, for an area that calls the addon with it (the facades). A seat isolate and
+ * any other worker thread have none: `AddonOutsideMainThread`.
+ */
+export function appCoreHandle(core: CoreAccess): CoreHandle {
+  switch (core.kind) {
+    case "addon":
+      return core.handle;
+    case "seatRelay":
+    case "noCore":
+      throw new AddonOutsideMainThread({ threadId });
+    default:
+      return unreachable(core);
+  }
+}

@@ -9,6 +9,7 @@ import { before, describe, test } from "node:test";
 
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { mintTaskId } from "../../../horsies/src/native/process-core/process-core.ts";
+import { TaskId } from "../../../horsies/src/contract/ids.ts";
 import { NO_ACTIVE_CARRIER, createRerunArea } from "../../../horsies/src/rerun/app-area.ts";
 import type { RerunArea } from "../../../horsies/src/rerun/app-area.ts";
 import type { CallerRerunError } from "../../../horsies/src/rerun/errors.ts";
@@ -92,9 +93,13 @@ async function postgres(): Promise<PostgresModule> {
 function unsentCommand(): RerunCommand {
   const minted = mintTaskId();
 
-  assert.equal(minted.kind, "minted");
+  assert.ok(minted.kind === "minted");
 
-  return { sourceTaskId: minted.kind === "minted" ? minted.taskId : "", deadline: { kind: "none" } };
+  const sourceTaskId = TaskId.parse(minted.taskId);
+
+  assert.ok(sourceTaskId.ok, "the core mints a canonical UUID text");
+
+  return { sourceTaskId: sourceTaskId.value, deadline: { kind: "none" } };
 }
 
 /** The answer of `rerunIn` on a `pg` client in a transaction that the test rolls back. */

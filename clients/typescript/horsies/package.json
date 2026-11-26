@@ -23,6 +23,14 @@
       "types": "./dist/zod.d.ts",
       "default": "./dist/zod.js"
     },
+    "./rerun/pg": {
+      "types": "./dist/rerun/pg.d.ts",
+      "default": "./dist/rerun/pg.js"
+    },
+    "./rerun/postgres": {
+      "types": "./dist/rerun/postgres.d.ts",
+      "default": "./dist/rerun/postgres.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -35,10 +43,18 @@
     "node": ">=26"
   },
   "peerDependencies": {
-    "zod": ">=4.1.13 <4.7.0"
+    "zod": ">=4.1.13 <4.7.0",
+    "pg": ">=8 <9",
+    "postgres": ">=3.4 <4"
   },
   "peerDependenciesMeta": {
     "zod": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    },
+    "postgres": {
       "optional": true
     }
   },

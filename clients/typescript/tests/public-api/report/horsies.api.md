@@ -251,6 +251,49 @@ export interface BudgetLoad {
 }
 
 // @public
+export interface CallerColumn {
+    // (undocumented)
+    readonly name: string;
+    // (undocumented)
+    readonly type: CallerType;
+}
+
+// @public
+export type CallerQueryFailure = {
+    readonly kind: "driverFailed";
+    readonly driverError: Error;
+} | {
+    readonly kind: "rowRefused";
+    readonly detail: string;
+};
+
+// @public
+export type CallerRerunError = RerunDriverFailed | RerunRequestRefused | RerunStepRefused;
+
+// @public
+export interface CallerRow {
+    // (undocumented)
+    readonly cells: readonly SqlText[];
+}
+
+// @public
+export interface CallerStatement {
+    readonly columns: readonly CallerColumn[];
+    readonly name: string;
+    readonly parameters: readonly SqlText[];
+    readonly sql: string;
+}
+
+// @public
+export interface CallerTransaction {
+    // (undocumented)
+    queryOne(statement: CallerStatement): Promise<Result<CallerRow, CallerQueryFailure>>;
+}
+
+// @public
+export type CallerType = "bool" | "int2" | "int4" | "int8" | "text" | "bytea" | "uuid" | "timestamptz";
+
+// @public
 export type CancelPolicy = "includeRunning" | "pendingOrClaimedOnly";
 
 // @public
@@ -1055,6 +1098,8 @@ export class Horsies {
     readonly monitoring: Monitoring;
     pingDatabase(): Promise<Result<DatabasePing, PingDatabaseError>>;
     pingWorkers(options?: PingWorkersOptions): Promise<Result<readonly WorkerPong[], PingWorkersError>>;
+    rerun(command: RerunCommand, policy: RerunPolicy): Promise<Result<RerunOutcome, RerunError>>;
+    rerunIn(transaction: CallerTransaction, command: RerunCommand, policy: RerunPolicy): Promise<Result<RerunOutcome, CallerRerunError>>;
     retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
     send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
     taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
@@ -1928,7 +1973,293 @@ export type RefusalCode = ErrorCode;
 export type RequiredWire = Wire<unknown, unknown, "required", "value">;
 
 // @public
+export interface RerunCallerKeyRefused {
+    // (undocumented)
+    readonly code: "CALLER_KEY_REFUSED";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public
+export interface RerunClassNotRegistered {
+    // (undocumented)
+    readonly classKey: string;
+    // (undocumented)
+    readonly code: "CLASS_NOT_REGISTERED";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public
+export type RerunClientFamily = "PYTHON" | "RUST" | "TYPESCRIPT";
+
+// @public
+export interface RerunClientFamilyMismatch {
+    // (undocumented)
+    readonly code: "CLIENT_FAMILY_MISMATCH";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly stored: RerunStoredFamily;
+}
+
+// @public
+export interface RerunCommand {
+    readonly callerKey?: string;
+    readonly deadline: RerunDeadline;
+    readonly sourceTaskId: TaskId;
+}
+
+// @public
+export interface RerunConnectFailed {
+    // (undocumented)
+    readonly code: "CONNECT_FAILED";
+    // (undocumented)
+    readonly exception: CoreFailure;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+}
+
+// @public
+export interface RerunContractViolation {
+    // (undocumented)
+    readonly code: "CONTRACT_VIOLATION";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public
+export type RerunDeadline = {
+    readonly kind: "until";
+    readonly at: Temporal.Instant;
+} | {
+    readonly kind: "none";
+};
+
+// @public
+export interface RerunDriverFailed {
+    // (undocumented)
+    readonly code: "DRIVER_FAILED";
+    // (undocumented)
+    readonly driverError: Error;
+    // (undocumented)
+    readonly message: string;
+    readonly statement: string;
+}
+
+// @public
+export interface RerunEnqueued {
+    // (undocumented)
+    readonly kind: "enqueued";
+    // (undocumented)
+    readonly newTaskId: TaskId;
+    readonly rerunRootTaskId: TaskId;
+    // (undocumented)
+    readonly sourceTaskId: TaskId;
+}
+
+// @public
+export type RerunError = RerunConnectFailed | RerunStatementFailed | RerunFamilyCheckFailed | RerunRequestRefused | RerunStepRefused;
+
+// @public
+export interface RerunFamilyCheckFailed {
+    // (undocumented)
+    readonly code: "FAMILY_CHECK_FAILED";
+    // (undocumented)
+    readonly exception: CoreFailure;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+}
+
+// @public
+export interface RerunIdMintRefused {
+    // (undocumented)
+    readonly code: "ID_MINT_REFUSED";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public
+export type RerunInputChoice = "keep" | "drop";
+
+// @public
+export interface RerunInputCorrupt {
+    // (undocumented)
+    readonly detail: string;
+    // (undocumented)
+    readonly kind: "inputCorrupt";
+    // (undocumented)
+    readonly taskId: TaskId;
+}
+
+// @public
 export type RerunInputDefault = "keep" | "drop";
+
+// @public
+export interface RerunInputUnavailable {
+    // (undocumented)
+    readonly disposition: string;
+    // (undocumented)
+    readonly kind: "inputUnavailable";
+    // (undocumented)
+    readonly taskId: TaskId;
+}
+
+// @public
+export interface RerunInvalidCommand {
+    // (undocumented)
+    readonly code: "INVALID_COMMAND";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public
+export interface RerunInvalidPolicy {
+    // (undocumented)
+    readonly code: "INVALID_POLICY";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+}
+
+// @public
+export interface RerunKeyConflict {
+    // (undocumented)
+    readonly kind: "keyConflict";
+    // (undocumented)
+    readonly reservedByTaskId: TaskId;
+    // (undocumented)
+    readonly taskId: TaskId;
+}
+
+// @public
+export interface RerunKeyReplay {
+    // (undocumented)
+    readonly existingTaskId: TaskId;
+    // (undocumented)
+    readonly kind: "keyReplay";
+}
+
+// @public
+export interface RerunNotEligible {
+    // (undocumented)
+    readonly kind: "notEligible";
+    // (undocumented)
+    readonly reason: RerunNotEligibleReason;
+    // (undocumented)
+    readonly taskId: TaskId;
+}
+
+// @public
+export type RerunNotEligibleReason = "COMPLETED_SOURCE" | "WORKFLOW_TASK";
+
+// @public
+export type RerunOutcome = RerunEnqueued | RerunSourceLive | RerunSourceAbsent | RerunSourceCorrupt | RerunNotEligible | RerunInputUnavailable | RerunInputCorrupt | RerunKeyConflict | RerunKeyReplay;
+
+// @public
+export interface RerunPolicy {
+    // (undocumented)
+    readonly rerunInput: RerunInputChoice;
+    readonly reservationWindow: Temporal.Duration;
+    // (undocumented)
+    readonly retention: RerunRetention;
+}
+
+// @public
+export type RerunRequestRefused = RerunInvalidCommand | RerunInvalidPolicy;
+
+// @public
+export type RerunRetention = {
+    readonly kind: "days";
+    readonly days: number;
+} | {
+    readonly kind: "forever";
+};
+
+// @public
+export interface RerunSourceAbsent {
+    // (undocumented)
+    readonly kind: "sourceAbsent";
+    // (undocumented)
+    readonly reason: TaskAbsenceReason;
+    // (undocumented)
+    readonly taskId: TaskId;
+}
+
+// @public
+export interface RerunSourceCorrupt {
+    // (undocumented)
+    readonly detail: string;
+    // (undocumented)
+    readonly kind: "sourceCorrupt";
+    // (undocumented)
+    readonly taskId: TaskId;
+}
+
+// @public
+export interface RerunSourceLive {
+    // (undocumented)
+    readonly kind: "sourceLive";
+    // (undocumented)
+    readonly taskId: TaskId;
+}
+
+// @public
+export interface RerunStatementFailed {
+    // (undocumented)
+    readonly code: "STATEMENT_FAILED";
+    // (undocumented)
+    readonly exception: CoreFailure;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly outcome: RerunStatementOutcome;
+    // (undocumented)
+    readonly retryable: boolean;
+}
+
+// @public
+export type RerunStatementOutcome = "notCommitted" | "unknown";
+
+// @public
+export type RerunStepRefused = RerunClassNotRegistered | RerunCallerKeyRefused | RerunIdMintRefused | RerunClientFamilyMismatch | RerunUnknownStoredFamily | RerunContractViolation;
+
+// @public
+export type RerunStoredFamily = {
+    readonly kind: "recorded";
+    readonly family: RerunClientFamily;
+} | {
+    readonly kind: "notRecorded";
+};
+
+// @public
+export interface RerunUnknownStoredFamily {
+    // (undocumented)
+    readonly code: "UNKNOWN_STORED_FAMILY";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly stored: string;
+}
 
 // @public
 export const RESERVED_NON_TASK_CODES: readonly ["WORKFLOW_STOPPED"];
@@ -2314,6 +2645,9 @@ export interface SourceTaskInfo {
     // (undocumented)
     readonly taskId: string;
 }
+
+// @public
+export type SqlText = string | null;
 
 // @public
 export interface StaleTaskRow {

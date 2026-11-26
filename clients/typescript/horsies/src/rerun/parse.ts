@@ -23,9 +23,6 @@ export interface RerunRequest {
   readonly policy: RerunPolicyArg;
 }
 
-/** A task id: lower-case hyphenated UUID text, the form of every id that the core gives. */
-const TASK_ID_FORM = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
-
 /** 0001-01-01T00:00:00Z in epoch microseconds: the earliest instant of Python's `datetime`. */
 const DEADLINE_EARLIEST_MICROS = -62_135_596_800_000_000n;
 
@@ -38,9 +35,6 @@ const NANOSECONDS_PER_SECOND = 1_000_000_000n;
 const NANOSECONDS_PER_MINUTE = 60_000_000_000n;
 const NANOSECONDS_PER_HOUR = 3_600_000_000_000n;
 const NANOSECONDS_PER_DAY = 86_400_000_000_000n;
-
-const SOURCE_TASK_ID_RULE =
-  "sourceTaskId must be a task id as lower-case hyphenated UUID text, for example 01890a5d-ac96-774b-bcce-b302099a8057";
 
 const CALLER_KEY_RULE = "callerKey must be well-formed text: it holds a lone UTF-16 surrogate";
 
@@ -74,10 +68,6 @@ export function parseRerunRequest(command: RerunCommand, policy: RerunPolicy): R
 
 /** The record of `command`. Pure. */
 function parseCommand(command: RerunCommand): Result<RerunCommandArg, RerunInvalidCommand> {
-  if (!TASK_ID_FORM.test(command.sourceTaskId)) {
-    return err(invalidCommand(SOURCE_TASK_ID_RULE));
-  }
-
   const deadline = parseDeadline(command.deadline);
 
   if (!deadline.ok) {

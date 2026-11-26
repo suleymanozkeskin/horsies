@@ -20,9 +20,14 @@ import {
 } from "./app/create.ts";
 import { registerImplementation } from "./app/implement.ts";
 import { recordAppContext } from "./app/internals.ts";
+import { appCoreHandle } from "./app/core-access.ts";
 import { createMonitoringArea, type Monitoring, type MonitoringArea } from "./monitoring/app-area.ts";
 import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts";
 import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/health-types.ts";
+import { createRerunArea, type RerunArea } from "./rerun/app-area.ts";
+import type { CallerTransaction } from "./rerun/caller.ts";
+import type { CallerRerunError, RerunError } from "./rerun/errors.ts";
+import type { RerunCommand, RerunOutcome, RerunPolicy } from "./rerun/types.ts";
 
 /** The constructor of an app, for `createHorsies` in this module. */
 let constructApp: (context: AppContext) => Horsies;
@@ -31,6 +36,7 @@ let constructApp: (context: AppContext) => Horsies;
 export class Horsies {
   readonly #context: AppContext;
   readonly #monitoringArea: MonitoringArea;
+  readonly #rerunArea: RerunArea;
 
   /** The monitoring reads, the health reads and the operator cancel. Each read writes nothing but a schema install. */
   readonly monitoring: Monitoring;
@@ -43,6 +49,10 @@ export class Horsies {
     this.#context = context;
     this.#monitoringArea = createMonitoringArea(context.core);
     this.monitoring = this.#monitoringArea.monitoring;
+    this.#rerunArea = createRerunArea({
+      coreHandle: () => appCoreHandle(context.core),
+      activeCarrier: () => context.observer.activeCarrier(),
+    });
     recordAppContext(this, context);
   }
 
@@ -107,6 +117,27 @@ export class Horsies {
    */
   async pingWorkers(options: PingWorkersOptions = {}): Promise<Result<readonly WorkerPong[], PingWorkersError>> {
     return this.#monitoringArea.pingWorkers(options);
+  }
+
+  /**
+   * Rerun a retained terminal task in a transaction of the app's handle, and commit it. The handle connects and
+   * installs the schema once, as a send does. Only `enqueued` writes. The new task stores the carrier of the active
+   * trace context; the rerun opens no span.
+   */
+  async rerun(command: RerunCommand, policy: RerunPolicy): Promise<Result<RerunOutcome, RerunError>> {
+    return this.#rerunArea.rerun(command, policy);
+  }
+
+  /**
+   * Rerun a retained terminal task in `transaction`, which the caller owns, so the rerun commits or rolls back with
+   * the caller's own writes. Nothing commits here; after an error the caller does not commit.
+   */
+  async rerunIn(
+    transaction: CallerTransaction,
+    command: RerunCommand,
+    policy: RerunPolicy,
+  ): Promise<Result<RerunOutcome, CallerRerunError>> {
+    return this.#rerunArea.rerunIn(transaction, command, policy);
   }
 }
 
