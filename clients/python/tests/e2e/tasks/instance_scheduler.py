@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
@@ -32,26 +33,26 @@ schedule_config = ScheduleConfig(
         TaskSchedule(
             name='e2e_scheduled_simple_interval',
             task_name='e2e_scheduled_simple',
-            pattern=IntervalSchedule(seconds=2),
+            pattern=IntervalSchedule(every=timedelta(seconds=2)),
             timezone='UTC',
             catch_up_missed=False,
         ),
         TaskSchedule(
             name='e2e_disabled_schedule',
             task_name='e2e_scheduled_simple',
-            pattern=IntervalSchedule(seconds=1),
+            pattern=IntervalSchedule(every=timedelta(seconds=1)),
             enabled=False,
         ),
         TaskSchedule(
             name='e2e_schedule_with_args',
             task_name='e2e_scheduled_with_args',
-            pattern=IntervalSchedule(seconds=2),
+            pattern=IntervalSchedule(every=timedelta(seconds=2)),
             kwargs={'value': 42},
         ),
         TaskSchedule(
             name='e2e_schedule_catch_up',
             task_name='e2e_catch_up_task',
-            pattern=IntervalSchedule(seconds=1),
+            pattern=IntervalSchedule(every=timedelta(seconds=1)),
             catch_up_missed=True,
         ),
         TaskSchedule(

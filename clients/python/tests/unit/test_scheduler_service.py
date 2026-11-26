@@ -9,6 +9,7 @@ tested in ``test_scheduler_facade.py``.
 
 from __future__ import annotations
 
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -94,7 +95,7 @@ class TestSignatureError:
                 TaskSchedule(
                     name='s',
                     task_name='task_a',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -109,7 +110,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
         )
 
         assert _signature_error(app, schedule) is None
@@ -123,7 +124,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
         )
 
         error = _signature_error(app, schedule)
@@ -141,7 +142,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
             kwargs={'unknown': 42},
         )
 
@@ -159,7 +160,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
             kwargs={'value': 42},
         )
 
@@ -174,7 +175,7 @@ class TestSignatureError:
         schedule = TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
             kwargs={'a': 1, 'b': 'hello'},
         )
 
@@ -197,7 +198,7 @@ class TestEncodeScheduleKwargs:
                 TaskSchedule(
                     name='s',
                     task_name='task_a',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -207,7 +208,7 @@ class TestEncodeScheduleKwargs:
         return TaskSchedule(
             name='s',
             task_name='task_a',
-            pattern=IntervalSchedule(seconds=5),
+            pattern=IntervalSchedule(every=timedelta(seconds=5)),
             kwargs=kwargs,
         )
 
@@ -323,7 +324,7 @@ class TestPreloadTaskModules:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -416,7 +417,7 @@ class TestSignatureErrorNoOriginalFn:
                 TaskSchedule(
                     name='s',
                     task_name='task_a',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                     kwargs={'anything': 42},
                 ),
             ],
@@ -445,7 +446,7 @@ class TestPreloadTaskModulesAdditionalPaths:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -468,7 +469,7 @@ class TestPreloadTaskModulesAdditionalPaths:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -502,7 +503,7 @@ class TestPreloadTaskModulesAdditionalPaths:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -541,7 +542,7 @@ class TestPreloadTaskModulesAdditionalPaths:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                 ),
             ],
         )
@@ -588,7 +589,7 @@ class TestValidateSchedulesCallsSignatureValidation:
                 TaskSchedule(
                     name='s',
                     task_name='my_task',
-                    pattern=IntervalSchedule(seconds=5),
+                    pattern=IntervalSchedule(every=timedelta(seconds=5)),
                     kwargs={'x': 42},
                 ),
             ],

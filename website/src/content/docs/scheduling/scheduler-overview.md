@@ -137,6 +137,17 @@ The state row stores a hash of the schedule config (`config_hash`). When the con
 
 This prevents issues when the pattern changes (for example hourly to daily), the timezone changes, or a time within the pattern changes.
 
+The hash covers the pattern and the timezone. A change of the queue, the kwargs or the catch-up settings does not change it.
+
+### The hash after an upgrade from 0.8
+
+The hash text keeps one fixed form for each pattern. It does not follow the names of the pattern fields:
+
+- The pattern tag `kind` (was `type`), the schedule `queue` (was `queue_name`), `WeeklySchedule.weekdays` (was `days`) and `MonthlySchedule.day_of_month` (was `day`) keep the stored hash.
+- The hash text holds the length of an interval in four parts, the largest unit first: days, hours, minutes and seconds, with no zero part. An interval of 90 seconds is 1 minute and 30 seconds.
+
+An interval whose 0.8 config gave another split of the same length gets a new hash: for example `seconds=90` (now `PT1M30S`) or `seconds=60` (now `PT1M`). At the first start after the upgrade, the scheduler resets `next_run_at` of that schedule one time, to the next slot after the database time. `run_count`, `last_run_at` and `last_task_id` stay. The slots between the old `next_run_at` and the start do not fire, also with `catch_up_missed`.
+
 ## Catch-Up Logic
 
 When catch-up is on (`catch_up_missed`), missed runs are executed. If the scheduler was down for 3 hours on an hourly schedule, it enqueues 3 tasks on restart (bounded by `max_catch_up_runs`). The due slots of one tick fire in one statement: all of them or none, and the fire counts as one run.

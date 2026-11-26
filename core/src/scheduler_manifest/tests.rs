@@ -1,5 +1,7 @@
 //! The parse of a scheduler manifest and its refusals.
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 use super::*;
@@ -9,7 +11,7 @@ use crate::core::config::IntervalSchedule;
 fn send() -> Value {
     json!({
         "task_name": "reports.nightly",
-        "queue_name": "default",
+        "queue": "default",
         "priority": 100,
         "input_json": "{\"day\":\"monday\",\"limit\":5}",
         "task_options": {"kind": "ENCODED", "json": "{\"task_name\":\"reports.nightly\"}"},
@@ -24,8 +26,7 @@ fn enabled_schedule(name: &str) -> Value {
         "name": name,
         "activation": {
             "kind": "ENABLED",
-            "pattern_json":
-                "{\"type\":\"interval\",\"seconds\":60,\"minutes\":null,\"hours\":null,\"days\":null}",
+            "pattern_json": "{\"kind\":\"interval\",\"every\":\"PT1M\"}",
             "timezone": "Europe/Berlin",
             "catch_up_missed": true,
             "max_catch_up_runs": 7,
@@ -92,12 +93,8 @@ fn a_manifest_of_an_enabled_and_a_disabled_schedule_parses() {
     };
     assert!(matches!(
         pattern_json.pattern(),
-        SchedulePattern::Interval(IntervalSchedule {
-            seconds: Some(60),
-            minutes: None,
-            hours: None,
-            days: None,
-        })
+        SchedulePattern::Interval(IntervalSchedule { every })
+            if *every == Duration::from_secs(60)
     ));
     assert_eq!(timezone, "Europe/Berlin");
     assert!(*catch_up_missed);
@@ -195,16 +192,26 @@ fn a_priority_outside_one_to_one_hundred_is_refused() {
 }
 
 /// Pattern texts that the parser refuses: not JSON, not a pattern kind, a
-/// field the pattern does not have, and a pattern that breaks its rules.
+/// field the pattern does not have, a pattern that breaks its rules (an
+/// interval of zero, above 365 days, in years or with a fraction), and the
+/// 0.8 forms: the tag `type`, the four interval parts, `days` of a weekly
+/// pattern and `day` of a monthly pattern.
 #[test]
 fn a_pattern_text_that_is_not_a_valid_pattern_is_refused() {
     for text in [
         "not json",
-        "{\"type\":\"yearly\",\"day\":1}",
-        "{\"type\":\"hourly\",\"minute\":5,\"second\":0,\"offset\":1}",
-        "{\"type\":\"interval\",\"seconds\":0,\"minutes\":null,\"hours\":null,\"days\":null}",
-        "{\"type\":\"interval\",\"seconds\":null,\"minutes\":null,\"hours\":null,\"days\":null}",
-        "{\"type\":\"weekly\",\"days\":[\"monday\",\"monday\"],\"time\":\"09:00:00\"}",
+        "{\"kind\":\"yearly\",\"day_of_month\":1}",
+        "{\"kind\":\"hourly\",\"minute\":5,\"second\":0,\"offset\":1}",
+        "{\"kind\":\"interval\",\"every\":\"PT0S\"}",
+        "{\"kind\":\"interval\",\"every\":\"P366D\"}",
+        "{\"kind\":\"interval\",\"every\":\"P1Y\"}",
+        "{\"kind\":\"interval\",\"every\":\"PT1.5S\"}",
+        "{\"kind\":\"interval\"}",
+        "{\"kind\":\"weekly\",\"weekdays\":[\"monday\",\"monday\"],\"time\":\"09:00:00\"}",
+        "{\"type\":\"interval\",\"every\":\"PT1M\"}",
+        "{\"kind\":\"interval\",\"seconds\":60,\"minutes\":null,\"hours\":null,\"days\":null}",
+        "{\"kind\":\"weekly\",\"days\":[\"monday\"],\"time\":\"09:00:00\"}",
+        "{\"kind\":\"monthly\",\"day\":1,\"time\":\"09:00:00\"}",
     ] {
         let mut schedule = enabled_schedule("nightly");
         schedule["activation"]["pattern_json"] = json!(text);
@@ -219,9 +226,9 @@ fn a_pattern_text_that_is_not_a_valid_pattern_is_refused() {
 /// The pattern texts of a daily, a weekly and a monthly schedule at `time`.
 fn timed_patterns(time: &str) -> [String; 3] {
     [
-        format!("{{\"type\":\"daily\",\"time\":\"{time}\"}}"),
-        format!("{{\"type\":\"weekly\",\"days\":[\"monday\"],\"time\":\"{time}\"}}"),
-        format!("{{\"type\":\"monthly\",\"day\":1,\"time\":\"{time}\"}}"),
+        format!("{{\"kind\":\"daily\",\"time\":\"{time}\"}}"),
+        format!("{{\"kind\":\"weekly\",\"weekdays\":[\"monday\"],\"time\":\"{time}\"}}"),
+        format!("{{\"kind\":\"monthly\",\"day_of_month\":1,\"time\":\"{time}\"}}"),
     ]
 }
 

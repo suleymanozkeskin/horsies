@@ -1267,7 +1267,7 @@ class TestDefaultOnASchedule:
         return TaskSchedule(
             name='nightly',
             task_name=task_name,
-            pattern=IntervalSchedule(hours=1),
+            pattern=IntervalSchedule(every=datetime.timedelta(hours=1)),
         )
 
     def test_a_refused_default_is_a_boot_refusal(self) -> None:

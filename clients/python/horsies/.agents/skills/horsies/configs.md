@@ -971,7 +971,7 @@ All `TaskSchedule.name` values must be unique (HRS-205).
 | `task_name` | `str` | required | Must match a registered task |
 | `pattern` | `SchedulePattern` | required | When to run |
 | `kwargs` | `dict` | `{}` | Keyword args to task — schedules are kwargs-only (`extra='forbid'`; `args`/unknown fields rejected at construction). Encoded once at scheduler start: a `default_factory` or a validator that reads the clock runs once per start, not once per fire |
-| `queue_name` | `str \| None` | `None` | Target queue |
+| `queue` | `str \| None` | `None` | Queue of each run; `None` uses the task's queue |
 | `enabled` | `bool` | `True` | Per-schedule on/off |
 | `timezone` | `str` | `"UTC"` | IANA timezone (validated at scheduler startup; invalid names fail boot) |
 | `catch_up_missed` | `bool` | `False` | `True`: replay missed runs on restart. `False`: drop missed runs, fire only the most recent due slot |
@@ -986,14 +986,16 @@ Use the smallest pattern that describes the schedule. `HourlySchedule`,
 fit. Use `CronSchedule` for wall-clock aligned field combinations such as
 "every 4 hours at minute 15".
 
-**IntervalSchedule** — run every N time units:
+**IntervalSchedule** — run every `every`:
 
 ```python
-IntervalSchedule(seconds=30)
-IntervalSchedule(hours=1, minutes=30)  # total = 90 minutes
+from datetime import timedelta
+
+IntervalSchedule(every=timedelta(seconds=30))
+IntervalSchedule(every=timedelta(hours=1, minutes=30))  # every 90 minutes
 ```
 
-Fields: `seconds`, `minutes`, `hours`, `days` — all `int | None`. At least one must be set (HRS-205).
+Field: `every: timedelta`, in whole seconds, from 1 second to 365 days. A length with microseconds, a length of zero or less, and a length above 365 days are refused at construction (HRS-205).
 
 **HourlySchedule** — every hour at fixed offset:
 
@@ -1010,18 +1012,18 @@ DailySchedule(time=time(3, 0, 0))  # daily at 03:00
 **WeeklySchedule** — specific weekdays at fixed time:
 
 ```python
-WeeklySchedule(days=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
+WeeklySchedule(weekdays=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
 ```
 
-`days` must have no duplicates (HRS-205).
+`weekdays` must have no duplicates (HRS-205).
 
 **MonthlySchedule** — fixed day of month:
 
 ```python
-MonthlySchedule(day=15, time=time(15, 0))  # 15th at 15:00
+MonthlySchedule(day_of_month=15, time=time(15, 0))  # 15th at 15:00
 ```
 
-If `day` > days in month (e.g., day=31 in Feb), that month is skipped.
+If `day_of_month` > days in month (e.g., `day_of_month=31` in Feb), that month is skipped.
 
 The `time` of `DailySchedule`, `WeeklySchedule` and `MonthlySchedule` is in the schedule's `timezone`. A `time` with `tzinfo` or with microseconds is refused at construction (HRS-205): set the zone in `timezone`, and give whole seconds.
 

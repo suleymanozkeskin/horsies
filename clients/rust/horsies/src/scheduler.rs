@@ -259,7 +259,7 @@ fn schedule_queue(
     task: &RegisteredTask,
     schedule: &TaskSchedule,
 ) -> Result<String, HorsiesError> {
-    match (schedule.queue_name.as_deref(), task.queue_name()) {
+    match (schedule.queue.as_deref(), task.queue_name()) {
         (Some(queue), _) => resolve_task_queue(app.config(), Some(queue)),
         (None, Some(task_queue)) => Ok(task_queue.to_owned()),
         (None, None) => resolve_task_queue(app.config(), None),
@@ -300,6 +300,8 @@ fn start_error(error: &SchedulerStartError) -> SchedulerRunError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde::{Deserialize, Serialize};
     use serde_json::json;
 
@@ -350,10 +352,7 @@ mod tests {
             name,
             task_name,
             SchedulePattern::Interval(IntervalSchedule {
-                seconds: Some(30),
-                minutes: None,
-                hours: None,
-                days: None,
+                every: Duration::from_secs(30),
             }),
         )
     }
@@ -498,7 +497,7 @@ mod tests {
             max_concurrency: Some(10),
         }]);
         let mut on_unknown = schedule("bad_queue_job", "count", &json!({"count": 5}));
-        on_unknown.queue_name = Some("nonexistent_queue".to_owned());
+        on_unknown.queue = Some("nonexistent_queue".to_owned());
         config.schedule = Some(ScheduleConfig {
             enabled: true,
             schedules: vec![on_unknown],

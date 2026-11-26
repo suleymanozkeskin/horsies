@@ -532,8 +532,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - MONDAY, TUESDAY, WEDNESDAY, THURSDAY, FRIDAY, SATURDAY, SUNDAY
 
 #### IntervalSchedule
-- IntervalSchedule(seconds=30) | IntervalSchedule(hours=1, minutes=30)
-- At least one of: seconds, minutes, hours, days
+- IntervalSchedule(every=timedelta(seconds=30)) | IntervalSchedule(every=timedelta(hours=1, minutes=30))
+- every: timedelta, whole seconds, 1 second to 365 days (microseconds, zero or less, above 365 days -> ConfigurationError)
 
 #### HourlySchedule
 - HourlySchedule(minute=30, second=0) -> every hour at XX:30:00
@@ -542,10 +542,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - DailySchedule(time=time(3, 0, 0)) -> daily at 03:00:00
 
 #### WeeklySchedule
-- WeeklySchedule(days=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
+- WeeklySchedule(weekdays=[Weekday.MONDAY, Weekday.FRIDAY], time=time(9, 0))
 
 #### MonthlySchedule
-- MonthlySchedule(day=15, time=time(15, 0)) -> 15th at 15:00
+- MonthlySchedule(day_of_month=15, time=time(15, 0)) -> 15th at 15:00
 
 #### CronSchedule
 - Typed 5-field cron-style schedule (minute hour day-of-month month day-of-week); fires at second :00
@@ -560,13 +560,14 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 #### SchedulePattern
 - Type union: IntervalSchedule | HourlySchedule | DailySchedule | WeeklySchedule | MonthlySchedule | CronSchedule
+- Each pattern names its kind in the field `kind` ('interval', 'hourly', 'daily', 'weekly', 'monthly', 'cron')
 
 #### TaskSchedule
 - name: str (unique schedule identifier)
 - task_name: str (registered task name)
 - pattern: SchedulePattern
 - kwargs: dict (task keyword arguments; schedules are kwargs-only)
-- queue_name: str | None
+- queue: str | None (None = the task's queue)
 - enabled: bool (default True)
 - timezone: str (default "UTC")
 - catch_up_missed: bool (default False)

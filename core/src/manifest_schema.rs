@@ -21,10 +21,11 @@
 //! scheduler manifest. The Python package keeps its own pattern models, so
 //! the Python renderer does not render it. Its types use forms that no
 //! rendered manifest uses: a variant that holds the fields of a record type
-//! ([`VariantFields::OfRecord`]), a generic enum recorded once per use, an
-//! optional field ([`PythonValue::Optional`]), a field with a serde default
-//! ([`MemberDefault`]), a time of day ([`PythonValue::TimeOfDay`]), and an
-//! integer field whose bound the type that holds it names ([`bounded_int`]).
+//! ([`VariantFields::OfRecord`]), a generic enum recorded once per use, a
+//! field with a serde default ([`MemberDefault`]), a time of day
+//! ([`PythonValue::TimeOfDay`]), a length of time in whole seconds
+//! ([`PythonValue::Duration`]), and an integer field whose bound the type
+//! that holds it names ([`bounded_int`]).
 
 use std::collections::BTreeMap;
 
@@ -93,6 +94,13 @@ pub enum PythonValue {
     /// `NaiveTime`, a Python `datetime.time`). The reader of each type that
     /// holds one refuses a fraction of a second and a UTC offset.
     TimeOfDay,
+    /// A length of time in whole seconds inside the bound, as ISO 8601
+    /// duration text with days, hours, minutes and seconds only (`PT30S`,
+    /// `P1DT2H`; a Rust `std::time::Duration`, a Python
+    /// `datetime.timedelta`). The writer puts the largest unit first and
+    /// writes no zero part; the reader refuses years, months, weeks, a
+    /// fraction and a sign.
+    Duration(IntBound),
 }
 
 /// The Python type of an item of a tuple or a value of a `dict`: a value
@@ -104,6 +112,7 @@ pub enum PythonItem {
     Int(IntBound),
     Named(&'static str),
     TimeOfDay,
+    Duration(IntBound),
 }
 
 impl PythonItem {
@@ -117,6 +126,7 @@ impl PythonItem {
             PythonValue::Int(bound) => PythonItem::Int(bound),
             PythonValue::Named(name) => PythonItem::Named(name),
             PythonValue::TimeOfDay => PythonItem::TimeOfDay,
+            PythonValue::Duration(bound) => PythonItem::Duration(bound),
             PythonValue::List(_) | PythonValue::Map(_) | PythonValue::Optional(_) => {
                 panic!("a manifest container holds no container")
             }
@@ -131,6 +141,7 @@ impl PythonItem {
             PythonItem::Int(bound) => PythonValue::Int(bound),
             PythonItem::Named(name) => PythonValue::Named(name),
             PythonItem::TimeOfDay => PythonValue::TimeOfDay,
+            PythonItem::Duration(bound) => PythonValue::Duration(bound),
         }
     }
 }
@@ -173,11 +184,15 @@ pub enum IntFieldForm {
     Optional,
     /// A list of integers.
     List,
+    /// A length of time in whole seconds (a `std::time::Duration`): the
+    /// bound holds its seconds.
+    WholeSeconds,
 }
 
-/// The Rust type of an integer field whose bound the type that holds the
-/// field names (`#[manifest_schema(int_bound = <IntBound constant>)]`): the
-/// bound is a rule of that type, not of the integer type.
+/// The Rust type of an integer field, or of a length of time in whole
+/// seconds, whose bound the type that holds the field names
+/// (`#[manifest_schema(int_bound = <IntBound constant>)]`): the bound is a
+/// rule of that type, not of the field type.
 pub trait IntField {
     const FORM: IntFieldForm;
 }
@@ -198,12 +213,17 @@ impl IntField for Vec<i64> {
     const FORM: IntFieldForm = IntFieldForm::List;
 }
 
-/// The value of an integer field of the Rust type `F` inside `bound`. Pure.
+impl IntField for std::time::Duration {
+    const FORM: IntFieldForm = IntFieldForm::WholeSeconds;
+}
+
+/// The value of a field of the Rust type `F` inside `bound`. Pure.
 pub const fn bounded_int<F: IntField>(bound: IntBound) -> PythonValue {
     match F::FORM {
         IntFieldForm::One => PythonValue::Int(bound),
         IntFieldForm::Optional => PythonValue::Optional(PythonItem::Int(bound)),
         IntFieldForm::List => PythonValue::List(PythonItem::Int(bound)),
+        IntFieldForm::WholeSeconds => PythonValue::Duration(bound),
     }
 }
 
@@ -242,7 +262,8 @@ impl MemberDefault {
             | PythonValue::List(_)
             | PythonValue::Map(_)
             | PythonValue::Optional(_)
-            | PythonValue::TimeOfDay => {
+            | PythonValue::TimeOfDay
+            | PythonValue::Duration(_) => {
                 panic!("a field default is modeled on an integer field only")
             }
         }
@@ -507,9 +528,12 @@ impl ManifestModule {
             for field in type_fields(manifest_type) {
                 let bound = match field.value {
                     PythonValue::Int(bound)
-                    | PythonValue::List(PythonItem::Int(bound))
-                    | PythonValue::Map(PythonItem::Int(bound))
-                    | PythonValue::Optional(PythonItem::Int(bound)) => bound,
+                    | PythonValue::Duration(bound)
+                    | PythonValue::List(PythonItem::Int(bound) | PythonItem::Duration(bound))
+                    | PythonValue::Map(PythonItem::Int(bound) | PythonItem::Duration(bound))
+                    | PythonValue::Optional(PythonItem::Int(bound) | PythonItem::Duration(bound)) => {
+                        bound
+                    }
                     PythonValue::Bool
                     | PythonValue::Str
                     | PythonValue::Named(_)
@@ -570,8 +594,8 @@ mod tests {
 
     use super::*;
     use crate::core::config::schedule::{
-        CRON_ENUM_STEP, CRON_NUMERIC_STEP, CRON_NUMERIC_VALUE, HOURLY_MINUTE, HOURLY_SECOND,
-        INTERVAL_DAYS, INTERVAL_HOURS, INTERVAL_MINUTES, INTERVAL_SECONDS, MONTHLY_DAY,
+        parse_interval_text, CRON_ENUM_STEP, CRON_NUMERIC_STEP, CRON_NUMERIC_VALUE, HOURLY_MINUTE,
+        HOURLY_SECOND, INTERVAL_EVERY_SECONDS, MONTHLY_DAY,
     };
     use crate::manifest::{parse_producer_manifest, ManifestRefused};
     use crate::scheduler_manifest::parse_scheduler_manifest;
@@ -653,6 +677,10 @@ mod tests {
             }
             PythonValue::Optional(item) => sample(sampling, item.value(), depth + 1),
             PythonValue::TimeOfDay => Value::String(SAMPLE_TIME_OF_DAY.to_owned()),
+            PythonValue::Duration(bound) => match sampling.end {
+                IntEnd::Min => Value::String(format!("PT{}S", bound.min)),
+                IntEnd::Max => Value::String(format!("PT{}S", bound.max)),
+            },
         }
     }
 
@@ -835,23 +863,27 @@ mod tests {
                         | PythonValue::Str
                         | PythonValue::Int(_)
                         | PythonValue::TimeOfDay
+                        | PythonValue::Duration(_)
                         | PythonValue::List(
                             PythonItem::Bool
                             | PythonItem::Str
                             | PythonItem::Int(_)
-                            | PythonItem::TimeOfDay,
+                            | PythonItem::TimeOfDay
+                            | PythonItem::Duration(_),
                         )
                         | PythonValue::Map(
                             PythonItem::Bool
                             | PythonItem::Str
                             | PythonItem::Int(_)
-                            | PythonItem::TimeOfDay,
+                            | PythonItem::TimeOfDay
+                            | PythonItem::Duration(_),
                         )
                         | PythonValue::Optional(
                             PythonItem::Bool
                             | PythonItem::Str
                             | PythonItem::Int(_)
-                            | PythonItem::TimeOfDay,
+                            | PythonItem::TimeOfDay
+                            | PythonItem::Duration(_),
                         ) => continue,
                     };
                     assert!(module.type_named(named).is_some(), "{named}");
@@ -1049,6 +1081,14 @@ mod tests {
             bounded_int::<Vec<i64>>(SAMPLE_BOUND),
             PythonValue::List(PythonItem::Int(SAMPLE_BOUND))
         );
+        assert_eq!(
+            bounded_int::<std::time::Duration>(SAMPLE_BOUND),
+            PythonValue::Duration(SAMPLE_BOUND)
+        );
+        assert_eq!(
+            PythonItem::of(PythonValue::Duration(SAMPLE_BOUND)).value(),
+            PythonValue::Duration(SAMPLE_BOUND)
+        );
     }
 
     #[test]
@@ -1126,7 +1166,7 @@ mod tests {
     #[test]
     fn each_pattern_kind_holds_the_fields_of_its_record() {
         let (tag_field, variants) = tagged_variants("SchedulePattern");
-        assert_eq!(tag_field, "type");
+        assert_eq!(tag_field, "kind");
         let kinds: Vec<(&str, &str, VariantFields)> = variants
             .iter()
             .map(|variant| (variant.python_class, variant.tag_value, variant.fields))
@@ -1242,28 +1282,35 @@ mod tests {
     }
 
     #[test]
-    fn an_optional_field_is_an_integer_or_no_value() {
+    fn the_length_of_an_interval_is_a_duration_of_whole_seconds() {
         assert_eq!(
             field_values(record_fields("IntervalSchedule")),
+            [("every", PythonValue::Duration(INTERVAL_EVERY_SECONDS))]
+        );
+        assert_eq!(
+            (INTERVAL_EVERY_SECONDS.min, INTERVAL_EVERY_SECONDS.max),
+            (1, 31_536_000)
+        );
+        assert_eq!(
+            SCHEDULE_PATTERN
+                .int_bounds()
+                .iter()
+                .map(|bound| bound.name)
+                .collect::<Vec<&str>>(),
             [
-                (
-                    "seconds",
-                    PythonValue::Optional(PythonItem::Int(INTERVAL_SECONDS)),
-                ),
-                (
-                    "minutes",
-                    PythonValue::Optional(PythonItem::Int(INTERVAL_MINUTES)),
-                ),
-                (
-                    "hours",
-                    PythonValue::Optional(PythonItem::Int(INTERVAL_HOURS)),
-                ),
-                (
-                    "days",
-                    PythonValue::Optional(PythonItem::Int(INTERVAL_DAYS))
-                ),
+                "INTERVAL_EVERY_SECONDS",
+                "HOURLY_MINUTE",
+                "HOURLY_SECOND",
+                "MONTHLY_DAY",
+                "CRON_NUMERIC_STEP",
+                "CRON_NUMERIC_VALUE",
+                "CRON_ENUM_STEP",
             ]
         );
+    }
+
+    #[test]
+    fn an_optional_field_is_an_item_or_no_value() {
         assert_eq!(
             <Option<String> as ManifestValue>::PYTHON,
             PythonValue::Optional(PythonItem::Str)
@@ -1317,14 +1364,14 @@ mod tests {
         assert_eq!(
             field_values(record_fields("WeeklySchedule")),
             [
-                ("days", PythonValue::List(PythonItem::Named("Weekday"))),
+                ("weekdays", PythonValue::List(PythonItem::Named("Weekday"))),
                 ("time", PythonValue::TimeOfDay),
             ]
         );
         assert_eq!(
             field_values(record_fields("MonthlySchedule")),
             [
-                ("day", PythonValue::Int(MONTHLY_DAY)),
+                ("day_of_month", PythonValue::Int(MONTHLY_DAY)),
                 ("time", PythonValue::TimeOfDay),
             ]
         );
@@ -1375,12 +1422,13 @@ mod tests {
     }
 
     /// The shared fixture of the schedule pattern texts: one text per
-    /// pattern kind, and one cron text per day selector, in the form of
-    /// Python's `pattern.model_dump(mode='json')`: every member in the order
-    /// of Python's model, `null` for an unset optional field, a time of day
-    /// as `HH:MM:SS`. Together the texts hold every variant of every tagged
-    /// type of the pattern. The Python client (`crossclient/`) and the
-    /// TypeScript client read the same file.
+    /// pattern kind, two more interval lengths, and one cron text per day
+    /// selector, in the form of Python's `pattern.model_dump(mode='json')`:
+    /// every member in the order of Python's model, the tag `kind` first, a
+    /// time of day as `HH:MM:SS`, an interval length as ISO 8601 text with
+    /// the largest unit first. Together the texts hold every variant of
+    /// every tagged type of the pattern. The Python client (`crossclient/`)
+    /// and the TypeScript client read the same file.
     const PATTERN_TEXTS_FIXTURE: &str =
         include_str!("../tests/fixtures/schedule_pattern/pattern_texts.json");
 
@@ -1418,7 +1466,7 @@ mod tests {
                     "max_catch_up_runs": 1,
                     "send": {
                         "task_name": "reports.nightly",
-                        "queue_name": "default",
+                        "queue": "default",
                         "priority": 100,
                         "input_json": "{}",
                         "task_options": {"kind": "NO_OPTIONS"},
@@ -1460,6 +1508,15 @@ mod tests {
                 assert!(
                     NaiveTime::parse_from_str(text, "%H:%M:%S").is_ok(),
                     "{text} is not HH:MM:SS"
+                );
+            }
+            (PythonValue::Duration(bound), Value::String(text)) => {
+                let every = parse_interval_text(text)
+                    .unwrap_or_else(|refused| panic!("{text} is not a duration: {refused}"));
+                assert_eq!(every.subsec_nanos(), 0, "{text} is not whole seconds");
+                assert!(
+                    (bound.min..=bound.max).contains(&every.as_secs()),
+                    "{text} is outside {bound:?}"
                 );
             }
             (PythonValue::Optional(item), present) => {

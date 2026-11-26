@@ -40,7 +40,7 @@ class TestCronScheduleConstruction:
     """Valid construction and field access."""
 
     def test_minimal_valid(self) -> None:
-        """A wildcard-everything cron schedule constructs with type 'cron'."""
+        """A wildcard-everything cron schedule constructs with kind 'cron'."""
         schedule = CronSchedule(
             minute=[CronEvery()],
             hour=[CronEvery()],
@@ -48,7 +48,7 @@ class TestCronScheduleConstruction:
             day=EveryDay(),
         )
 
-        assert schedule.type == 'cron'
+        assert schedule.kind == 'cron'
         assert schedule.day.kind == 'every_day'
 
     def test_mixed_terms_in_one_field(self) -> None:
@@ -359,7 +359,7 @@ class TestCronScheduleSerde:
         """model_dump(mode='json') emits the term/day discriminators."""
         dumped = self._rich().model_dump(mode='json')
 
-        assert dumped['type'] == 'cron'
+        assert dumped['kind'] == 'cron'
         assert dumped['month'][0]['kind'] == 'enum_range'
         assert dumped['day']['kind'] == 'either_day'
 

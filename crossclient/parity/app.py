@@ -113,7 +113,7 @@ config = AppConfig(
             TaskSchedule(
                 name=SCHEDULE_NAME,
                 task_name=SLOT_TASK_NAME,
-                pattern=IntervalSchedule(hours=SCHEDULE_INTERVAL // timedelta(hours=1)),
+                pattern=IntervalSchedule(every=SCHEDULE_INTERVAL),
                 kwargs={'a': 2, 'b': 3},
                 timezone='UTC',
                 catch_up_missed=True,

@@ -21,8 +21,9 @@
 //!
 //! `pattern_json` is the JSON text of the client's pattern model, in the
 //! form of Python's `pattern.model_dump(mode='json')`: an object with a
-//! `type` key and every field of the pattern, `null` for an unset optional
-//! field, a time of day as `HH:MM:SS`. The zone of a schedule comes only
+//! `kind` key and every field of the pattern, a time of day as `HH:MM:SS`,
+//! the length of an interval as ISO 8601 text with days, hours, minutes and
+//! seconds only (`{"kind":"interval","every":"PT1M30S"}`). The zone of a schedule comes only
 //! from its `timezone`, and slots fire at whole seconds: the parser refuses
 //! a time of day with a UTC offset or with a fraction of a second, as the
 //! Python config refuses a `time` with `tzinfo` or with microseconds.
@@ -208,7 +209,7 @@ pub struct ScheduleSendManifest {
     /// The task that each slot sends.
     pub task_name: String,
     /// The queue of each slot: the schedule's queue, else the task's queue.
-    pub queue_name: String,
+    pub queue: String,
     /// The priority of that queue: 1 is claimed first, 100 last.
     pub priority: QueuePriority,
     /// The input of each slot as one JSON value; the row stores the text as

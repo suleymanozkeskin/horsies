@@ -13,6 +13,7 @@ tags: [rust, scheduling, ScheduleConfig, TaskSchedule, SchedulePattern, CronSche
 
 ```rust
 use std::convert::Infallible;
+use std::time::Duration;
 
 use chrono::NaiveTime;
 use horsies::{
@@ -42,7 +43,7 @@ fn schedules() -> Result<ScheduleConfig, Box<dyn std::error::Error>> {
     let cache_cleanup = TaskSchedule::new(
         "cache-cleanup",
         "clean_cache",
-        SchedulePattern::Interval(IntervalSchedule { minutes: Some(15), ..IntervalSchedule::default() }),
+        SchedulePattern::Interval(IntervalSchedule { every: Duration::from_secs(15 * 60) }),
     );
     Ok(ScheduleConfig::new(vec![nightly_report, cache_cleanup]))
 }
@@ -85,7 +86,7 @@ The `scheduler` command, its options and its exit codes are on [CLI Reference](/
 | `task_name` | `new` | `String`: a registered task | – |
 | `pattern` | `new` | `SchedulePattern` | – |
 | `input` | `.input(&value)?` | `Option<JsonText>`: the input's JSON text | `None`: the task gets the input `{}` |
-| `queue_name` | `.queue(name)` | `Option<String>` | `None`: the queue of the task |
+| `queue` | `.queue(queue)` | `Option<String>` | `None`: the queue of the task |
 | `enabled` | `.enabled(bool)` | `bool` | `true` |
 | `timezone` | `.timezone(name)` | `String`: an IANA name | `UTC` |
 | `catch_up_missed` | `.catch_up_missed(bool)` | `bool` | `false` |
@@ -102,14 +103,40 @@ The `scheduler` command, its options and its exit codes are on [CLI Reference](/
 
 | Variant | Fields | Rule |
 |---------|--------|------|
-| `Interval(IntervalSchedule)` | `seconds`, `minutes`, `hours`, `days`: `Option<u32>` | At least one unit. `seconds` 1 to 86,400; `minutes` 1 to 1,440; `hours` 1 to 168; `days` 1 to 365. The interval is the sum of the units |
+| `Interval(IntervalSchedule)` | `every: Duration` (`std::time::Duration`) | Whole seconds, 1 second to 365 days (`INTERVAL_EVERY_SECONDS`) |
 | `Hourly(HourlySchedule)` | `minute`, `second`: `u32` | Each 0 to 59 |
 | `Daily(DailySchedule)` | `time: NaiveTime` | A whole second |
-| `Weekly(WeeklySchedule)` | `days: Vec<Weekday>`, `time: NaiveTime` | At least one day, no repeat; `time` a whole second |
-| `Monthly(MonthlySchedule)` | `day: u32`, `time: NaiveTime` | `day` 1 to 31; `time` a whole second |
+| `Weekly(WeeklySchedule)` | `weekdays: Vec<Weekday>`, `time: NaiveTime` | At least one day, no repeat; `time` a whole second |
+| `Monthly(MonthlySchedule)` | `day_of_month: u32`, `time: NaiveTime` | `day_of_month` 1 to 31; `time` a whole second |
 | `Cron(CronSchedule)` | `minute`, `hour`, `month`, `day` | See [Typed Cron](#typed-cron) |
 
-`IntervalSchedule::default()` has no unit; set at least one with struct update syntax. `Weekday` is `Monday` to `Sunday`; `Month` is `January` to `December`. Both are enums of the crate.
+`IntervalSchedule` has no default: give `every`. A fraction of a second, zero and a length above 365 days break the rule. `Weekday` is `Monday` to `Sunday`; `Month` is `January` to `December`. Both are enums of the crate.
+
+### Patterns in a Config File
+
+A config text (TOML, JSON) names the kind of a pattern in the member `kind`. The other members are the fields of the variant:
+
+```toml
+[[schedule.schedules]]
+name = "cache-cleanup"
+task_name = "clean_cache"
+queue = "maintenance"
+pattern = { kind = "interval", every = "PT15M" }
+
+[[schedule.schedules]]
+name = "weekly-audit"
+task_name = "audit"
+pattern = { kind = "weekly", weekdays = ["monday", "friday"], time = "09:00:00" }
+
+[[schedule.schedules]]
+name = "month-start"
+task_name = "close_month"
+pattern = { kind = "monthly", day_of_month = 1, time = "05:00:00" }
+```
+
+- `every` is ISO 8601 duration text with days (`D`), hours (`H`), minutes (`M`) and seconds (`S`) only: `PT30S`, `PT1M30S`, `PT1H30M`, `P1D`, `P1DT2H`, `P365D`. The writer puts the largest unit first and writes no zero part.
+- The read refuses years (`Y`), months (`M` before `T`), weeks (`W`), a fraction (`PT1.5S`), a sign (`-PT5S`) and a text without a part (`P`, `PT`). The refusal names the field `every` and the text.
+- The read refuses a key that the config does not declare. A config with the keys of 0.8 (`type`, `queue_name`, `days` of a weekly pattern, `day` of a monthly pattern, or `seconds`, `minutes`, `hours`, `days` of an interval) does not load.
 
 ### Typed Cron
 
@@ -174,7 +201,7 @@ A step is 1 or more and at most the span of its field. A range has `start` at mo
 | Check | Code |
 |-------|------|
 | `task_name` is a task registered in this binary | `HRS-300` |
-| `queue_name` is a queue of the app | `HRS-205` |
+| `queue` (else the task's queue) is a queue of the app | `HRS-205` |
 | `input` reads back with the task's input type | `HRS-205` |
 | The input size is within `AppConfig.payload.reject_bytes` | `HRS-205` |
 
