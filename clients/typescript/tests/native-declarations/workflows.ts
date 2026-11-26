@@ -72,6 +72,9 @@ export const resumeWorkflowMatches: SameFunction<typeof Generated.resumeWorkflow
 export const waitWorkflowEndMatches: SameFunction<typeof Generated.waitWorkflowEnd, WorkflowsAddon["waitWorkflowEnd"]> =
   true;
 
+export const queuePrioritiesMatches: SameFunction<typeof Generated.queuePriorities, WorkflowsAddon["queuePriorities"]> =
+  true;
+
 export const nodeResultMatches: SameFunction<typeof Generated.nodeResult, WorkflowsAddon["nodeResult"]> = true;
 
 // The class, method by method, and its member set: no method on one side only.

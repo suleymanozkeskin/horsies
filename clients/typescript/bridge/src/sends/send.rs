@@ -93,6 +93,12 @@ impl SendRules {
     pub fn retention(&self) -> &RetentionConfig {
         &self.retention
     }
+
+    /// The priority of a send on `queue`, or the refusal of a queue that the
+    /// custom mode does not hold. Pure.
+    pub fn queue_priority(&self, queue: &str) -> Result<SendPriority, BoundaryRefusal> {
+        self.queues.priority_of(queue)
+    }
 }
 
 /// The queues of an accepted config, as the priority of a send reads them.
