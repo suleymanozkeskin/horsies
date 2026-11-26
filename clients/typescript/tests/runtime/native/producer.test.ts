@@ -8,7 +8,11 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { defineTask, h, Horsies } from "../../../horsies/src/index.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 const ping = defineTask({ name: "producer_end_to_end_ping", input: { n: h.int() }, output: h.int() });
 

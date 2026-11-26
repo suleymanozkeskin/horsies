@@ -16,7 +16,15 @@ import {
 } from "../_catalog/workflow_spec.ts";
 import type { Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import type { CheckedBody, CheckedJoin, CheckedNode, CheckedPolicy, CheckedSpec, NodeDeadline } from "./findings.ts";
+import type {
+  CheckedBody,
+  CheckedJoin,
+  CheckedNode,
+  CheckedPolicy,
+  CheckedSpec,
+  NodeDeadline,
+  NodePriority,
+} from "./findings.ts";
 import { specDataText, type SpecTextRefused } from "./spec-text.ts";
 
 /** The facts of the app's core that a conversion reads. Each is pure. */
@@ -25,6 +33,8 @@ export interface ConversionFacts {
   taskOptionsText(taskName: string, deadline: NodeDeadline): string;
   /** The retention class key of a queue that the app admits. */
   queueClass(queueName: string): string;
+  /** The priority of a queue that the app admits, in the core's accepted config. */
+  queuePriority(queueName: string): number;
 }
 
 /** The spec data document of a checked spec. Pure apart from the facts. */
@@ -102,13 +112,25 @@ function join(value: CheckedJoin): SpecJoin {
   }
 }
 
+/** The priority of a task node: its own, or its queue's. Pure apart from the facts. */
+function priorityOf(queue: string, priority: NodePriority, facts: ConversionFacts): number {
+  switch (priority.kind) {
+    case "given":
+      return priority.priority;
+    case "queue":
+      return facts.queuePriority(queue);
+    default:
+      return unreachable(priority, "priorityOf");
+  }
+}
+
 function body(name: string, value: CheckedBody, facts: ConversionFacts): SpecNodeBody {
   switch (value.kind) {
     case "task":
       return {
         kind: "TASK",
         queue: value.queue,
-        priority: value.priority,
+        priority: priorityOf(value.queue, value.priority, facts),
         task_options: { kind: "ENCODED", json: facts.taskOptionsText(name, value.deadline) },
       };
     case "subWorkflow":

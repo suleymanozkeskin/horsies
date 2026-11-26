@@ -2,17 +2,23 @@
 // form. The checks here are TypeScript code, so they run on every thread.
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
-import { compileContract, type CompiledContract } from "../contract/compile.ts";
+import {
+  compileContract,
+  type CompiledContract,
+  type ContractRefused,
+  type ContractRule,
+} from "../contract/compile.ts";
 import { contractRecord, type ContractRecord } from "../contract/definition.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import type { ContractLookup, ListedLookup, ListedTask, QueueRoute } from "../send/send.ts";
-import { refusal, type Refusal } from "./refusal.ts";
+import { unreachable } from "../wire/unreachable.ts";
+import { refusal, type Refusal, type RefusalCode } from "./refusal.ts";
 
 /**
- * The one queue of the default queue mode, and its priority. The Python and Rust clients hold the same values
- * (`clients/rust/horsies/src/registry.rs`, `DEFAULT_QUEUE`, `DEFAULT_PRIORITY`); issue #2425 moves them to the core.
+ * The one queue of the default queue mode. The Python and Rust clients hold the same value
+ * (`clients/rust/horsies/src/registry.rs`, `DEFAULT_QUEUE`); issue #2425 moves it to the core.
  */
-export const DEFAULT_QUEUE_ROUTE: QueueRoute = Object.freeze({ queueName: "default", priority: 100 });
+export const DEFAULT_QUEUE_ROUTE: QueueRoute = Object.freeze({ queueName: "default" });
 
 const NOT_LISTED: ListedLookup = Object.freeze({ kind: "notListed" });
 
@@ -37,7 +43,8 @@ export function listPath(index: number, name: string): string {
 
 /**
  * Check each listed contract, in list order: no name twice and no object twice (HRS-301); the queue against the
- * queue mode (HRS-200, HRS-103); the definition and the wire types (HRS-105). Effects: compiles each contract.
+ * queue mode (HRS-200, HRS-103); the task name (HRS-102); the parameter names and the wire types (HRS-105). Effects:
+ * compiles each contract.
  */
 export function checkContractList(contracts: readonly object[], queues: QueueSetup): ListChecked {
   const names = new Map<string, object>();
@@ -84,11 +91,7 @@ function checkEntry(contract: object, record: ContractRecord, queues: QueueSetup
 
   const refusals = [
     ...(route.ok ? [] : [route.error]),
-    ...(compiled.ok
-      ? []
-      : compiled.error.map((refused) =>
-          refusal(ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION, path, `${refused.path}: ${refused.detail} [${refused.rule}]`, []),
-        )),
+    ...(compiled.ok ? [] : compiled.error.map((refused) => contractRefusal(refused, path))),
   ];
 
   if (!route.ok || !compiled.ok) {
@@ -96,6 +99,31 @@ function checkEntry(contract: object, record: ContractRecord, queues: QueueSetup
   }
 
   return { kind: "listed", task: listedTask(compiled.value, route.value) };
+}
+
+/** A contract refusal at the listed contract `path`, with the catalog code of its rule and its help. Pure. */
+function contractRefusal(refused: ContractRefused, path: string): Refusal {
+  return refusal(contractRuleCode(refused.rule), path, `${refused.path}: ${refused.detail} [${refused.rule}]`, refused.help);
+}
+
+/**
+ * The catalog code of a contract rule: a task name that cannot be stored is an invalid task option (HRS-102, as the
+ * Python client and the core's task registry give it); each other rule is a signature that has no stored form (HRS-105).
+ */
+function contractRuleCode(rule: ContractRule): RefusalCode {
+  switch (rule) {
+    case "TaskName":
+      return ErrorCode.TASK_INVALID_OPTIONS;
+    case "ParameterName":
+    case "SchemaVendor":
+    case "Zod3Schema":
+    case "ZodVersionNotSupported":
+    case "ZodSchema":
+    case "WireKind":
+      return ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION;
+    default:
+      return unreachable(rule, "contractRuleCode");
+  }
 }
 
 function listedTask(compiled: CompiledContract, route: QueueRoute): ListedTask {
@@ -112,15 +140,18 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
         ? { ok: true, value: DEFAULT_QUEUE_ROUTE }
         : {
             ok: false,
-            error: refusal(ErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "a task names no queue in the default queue mode", [
-              "remove queue, or set queueMode: \"custom\" with customQueues",
-            ]),
+            error: refusal(
+              ErrorCode.CONFIG_INVALID_QUEUE_MODE,
+              path,
+              `the task names the queue "${record.queue.name}", and the default queue mode takes no queue`,
+              ["remove queue, or set queueMode: \"custom\" with customQueues"],
+            ),
           };
     case "custom": {
       if (record.queue.kind === "noQueue") {
         return {
           ok: false,
-          error: refusal(ErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "a task names its queue in the custom queue mode", [
+          error: refusal(ErrorCode.CONFIG_INVALID_QUEUE_MODE, path, "the custom queue mode needs a queue on each task", [
             "set queue to one of the customQueues",
           ]),
         };
@@ -135,7 +166,7 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
               "add the queue to customQueues, or name one of them",
             ]),
           }
-        : { ok: true, value: Object.freeze({ queueName: queue.name, priority: queue.priority }) };
+        : { ok: true, value: Object.freeze({ queueName: queue.name }) };
     }
 
     default: {

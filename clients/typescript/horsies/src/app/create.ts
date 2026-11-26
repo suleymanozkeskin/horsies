@@ -9,7 +9,8 @@
 
 import { isMainThread } from "node:worker_threads";
 
-import { type AppConfig, type AppConfigInput, parseAppConfig, queueSetup, resendOnTransientErr } from "../config/app-config.ts";
+import { type AppConfig, type AppConfigInput, parseAppConfig, resendOnTransientErr } from "../config/app-config.ts";
+import { queueSetupOf } from "../config/queues.ts";
 import type { EnvironmentRead } from "../config/secret.ts";
 import type { AnyTaskContract } from "../contract/define-task.ts";
 import { buildCoreHandle } from "../native/handle/core-handle.ts";
@@ -76,7 +77,8 @@ export function processEnvironment(): CreateEnvironment {
 /** The app context of `config`, or every refusal in order. */
 export function createApp(config: HorsiesConfig, environment: CreateEnvironment): Result<AppContext, CreateRefused> {
   const parsed = parseAppConfig(config, environment.environment);
-  const list = checkContractList(config.tasks, parsed.ok ? queueSetup(parsed.value) : { kind: "default" });
+  // The queue check reads only the queue fields of the input, so a refused config adds no false queue refusal.
+  const list = checkContractList(config.tasks, queueSetupOf(config));
 
   if (!parsed.ok) {
     return refused([...parsed.error, ...inListOrder(list.refusals)]);
@@ -145,7 +147,7 @@ function contextOf(
   core: CoreAccess,
   environment: CreateEnvironment,
 ): AppContext {
-  const suppression = new SuppressionState(initialSuppression(environment.processStart));
+  const suppression = new SuppressionState(initialSuppression(environment.processStart), environment.environment);
 
   return {
     config,
@@ -172,7 +174,7 @@ function addonProducer(accepted: AcceptedConfig, options: ReadonlyMap<string, Na
   const handle = buildCoreHandle(accepted.manifestJson, "PRODUCER").withInstallCoverage(accepted.installCoverage);
 
   const producer: ProducerCore = {
-    prepareSend: async (facts) => prepareSendFacts(accepted.rules, facts, optionsOf(options, facts.taskName)),
+    prepareSend: async (taskName, facts) => prepareSendFacts(accepted.rules, facts, optionsOf(options, taskName)),
     enqueue: async (request, sendKind, trace) => enqueue(handle, request, sendKind, trace),
     getResult: async (taskId, wait) => getResult(handle, taskId, wait),
     taskInfo: async (taskId) => taskInfo(handle, taskId),

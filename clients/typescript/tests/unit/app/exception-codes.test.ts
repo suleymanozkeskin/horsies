@@ -30,7 +30,7 @@ function checks(): CoreChecks & { readonly codeLists: string[][] } {
       return codes.includes("bad code")
         ? {
             kind: "refused",
-            refusals: [{ code: { kind: "catalog", code: "HRS-112" }, message: "'bad code' is invalid", notes: [], help: [] }],
+            refusals: [{ code: "HRS-112", message: "'bad code' is invalid", notes: [], help: { kind: "noHelp" } }],
           }
         : { kind: "accepted" };
     },
@@ -44,7 +44,7 @@ function checks(): CoreChecks & { readonly codeLists: string[][] } {
 const environment: CreateEnvironment = {
   mainThread: false,
   environment: () => undefined,
-  processStart: { argumentAfterScript: undefined, seatIsolate: false, suppressVariable: undefined },
+  processStart: { argumentAfterScript: undefined, seatIsolate: false },
   coreChecks: () => {
     throw new TypeError("not called on a worker thread");
   },

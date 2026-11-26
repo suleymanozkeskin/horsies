@@ -22,8 +22,27 @@ export function manifestJson(databaseUrl: string, echo: boolean): string {
   return manifestJsonWithSchema(databaseUrl, echo, "MIGRATE_AND_VALIDATE");
 }
 
+/** The pool of a producer manifest: `size` connections, and up to `maxOverflow` more under load. */
+export interface ManifestPool {
+  readonly size: number;
+  readonly maxOverflow: number;
+}
+
+/** The pool of the manifests of the native tests: 5 connections, no overflow. */
+export const TEST_POOL: ManifestPool = { size: 5, maxOverflow: 0 };
+
 /** The JSON text of a producer manifest for `databaseUrl` with the schema mode `schema`. */
 export function manifestJsonWithSchema(databaseUrl: string, echo: boolean, schema: ManifestSchemaMode): string {
+  return manifestJsonWithPool(databaseUrl, echo, schema, TEST_POOL);
+}
+
+/** The JSON text of a producer manifest for `databaseUrl` with the schema mode `schema` and the pool `pool`. */
+export function manifestJsonWithPool(
+  databaseUrl: string,
+  echo: boolean,
+  schema: ManifestSchemaMode,
+  pool: ManifestPool,
+): string {
   return JSON.stringify({
     manifest_version: 1,
     database: {
@@ -31,8 +50,8 @@ export function manifestJsonWithSchema(databaseUrl: string, echo: boolean, schem
       session_database: { kind: "SAME_AS_DATABASE_URL" },
       pgbouncer_transaction_mode: false,
       pool_pre_ping: true,
-      pool_size: 5,
-      max_overflow: 0,
+      pool_size: pool.size,
+      max_overflow: pool.maxOverflow,
       pool_timeout: 30,
       pool_recycle: { kind: "AFTER_SECONDS", seconds: 1800 },
       echo,
