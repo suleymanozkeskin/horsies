@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 
 import { z } from "zod";
 
-import { defineTask } from "../../../horsies/src/contract/public.ts";
+import { defineTask, type UserFailure } from "../../../horsies/src/contract/public.ts";
 import { contractRecord } from "../../../horsies/src/contract/definition.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 
@@ -97,6 +97,16 @@ describe("result constructors", () => {
     assert.deepEqual(value, { ok: false, error: { code: "EMPTY_ORDER", message: "no lines", data: { lines: 0 } } });
     assert.equal(Object.isFrozen(value), true);
     assert.equal(Object.isFrozen(value.error), true);
+  });
+
+  test("err with data: undefined gives an error with no data member, as a left-out data does", () => {
+    // SAFETY: a project without exactOptionalPropertyTypes, or a JavaScript caller, can pass `data: undefined`.
+    const failure = { code: "EMPTY_ORDER", message: "no lines", data: undefined } as unknown as UserFailure<"EMPTY_ORDER">;
+    const value = contract.err(failure);
+
+    assert.deepEqual(value, { ok: false, error: { code: "EMPTY_ORDER", message: "no lines" } });
+    assert.equal(value.ok ? true : Object.hasOwn(value.error, "data"), false);
+    assert.equal(Object.isFrozen(value.ok ? value : value.error), true);
   });
 
   test("err with a built-in name throws TypeError", () => {

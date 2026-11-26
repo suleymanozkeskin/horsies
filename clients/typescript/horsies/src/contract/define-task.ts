@@ -26,7 +26,10 @@ export type UserCode<C extends string> = C extends ReservedCode ? `horsies: "${C
 /** The element type of an `errors` list whose codes the types cannot know (`string[]`): no code fits it. */
 export type WidenedCodes = "horsies: declare errors as literal codes, not as a string[]";
 
-/** The error that a body returns: a code that the task chose, an optional message and optional data. */
+/**
+ * The error that a body returns: a code that the task chose, an optional message and optional data. `data: undefined`
+ * is no data, as a left-out `data` is: `err` gives an error with no `data` member.
+ */
 export type UserFailure<E extends string> = {
   readonly code: E;
   readonly message?: string;
@@ -115,13 +118,18 @@ export type BodyResult<O extends OutputSchema, E extends string> = Ok<SchemaSent
 /** The codes that `err` refuses at run time: the built-in names and the reserved names. */
 const RESERVED_CODES: ReadonlySet<string> = new Set<string>([...LIBRARY_TASK_CODES, ...RESERVED_NON_TASK_CODES]);
 
-/** The error of a body. Throws `TypeError` for a reserved code (a defect that the static type refuses for a literal). */
+/**
+ * The error of a body, frozen. `data: undefined` is left out: the error holds no `data` member. Throws `TypeError` for
+ * a reserved code (a defect that the static type refuses for a literal).
+ */
 function failureOf<E extends string>(taskName: string, failure: UserFailure<E>): Err<UserFailure<E>> {
   if (RESERVED_CODES.has(failure.code)) {
     throw new TypeError(`${taskName}.err: "${failure.code}" is a built-in error code; a task cannot return it`);
   }
 
-  return Object.freeze(errOf(Object.freeze({ ...failure })));
+  const { data, ...withoutData } = failure;
+
+  return Object.freeze(errOf(Object.freeze(data === undefined ? withoutData : { ...withoutData, data })));
 }
 
 /**
