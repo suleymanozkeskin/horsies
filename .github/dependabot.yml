@@ -59,3 +59,22 @@ updates:
         update-types:
           - minor
           - patch
+
+  - package-ecosystem: bun
+    # The workspace of the TypeScript client (package.json, bun.lock).
+    directory: "/clients/typescript"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    cooldown:
+      default-days: 10
+      semver-major-days: 14
+    ignore:
+      # The zod major is pinned: the adapter needs the codecs of zod 4.
+      - dependency-name: "zod"
+        versions: [">=5.0.0"]
+    groups:
+      typescript-minor-patch:
+        update-types:
+          - minor
+          - patch

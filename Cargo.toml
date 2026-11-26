@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "clients/rust/horsies",
     "clients/python/codegen",
+    "clients/typescript/codegen",
     "core",
     "core/derive",
     "clients/rust/macros",
