@@ -16,6 +16,11 @@ export function isBigint(value: unknown): value is bigint {
   return typeof value === "bigint";
 }
 
+/** Whether `value` is a function, of this realm or of another one (a `vm` context). Pure. */
+export function isFunction(value: unknown): value is (...args: never[]) => unknown {
+  return typeof value === "function";
+}
+
 /** Whether `value` is `true` or `false`. Pure. */
 export function isBoolean(value: unknown): value is boolean {
   return typeof value === "boolean";
