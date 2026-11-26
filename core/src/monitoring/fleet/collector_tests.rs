@@ -79,17 +79,17 @@ fn oldest(queue: &str, execution: Execution, wait: StreamWait) -> StreamOldest {
 
 /// The oldest due row has waited `seconds`.
 fn waiting(seconds: i64) -> StreamWait {
-    StreamWait::OldestWaiting {
-        enqueued_at: at() - TimeDelta::seconds(seconds),
+    StreamWait::Due {
+        oldest_due_at: at() - TimeDelta::seconds(seconds),
         wait: TimeDelta::seconds(seconds),
     }
 }
 
 fn coverage(queue: &str, execution: Execution, state: StreamCoverageState) -> StreamCoverage {
     StreamCoverage {
-        queue_name: queue.to_owned(),
+        queue: queue.to_owned(),
         execution,
-        state,
+        coverage: state,
     }
 }
 
@@ -171,7 +171,7 @@ fn full_state() -> FleetState {
                 handler_child: 0,
             },
         }),
-        class_coverage: answered(ClassCoverage {
+        class_coverage: answered(ExecutionClassCoverage {
             checked_at: at(),
             live_workers: 3,
             streams: vec![
@@ -311,7 +311,7 @@ fn a_workers_part_without_an_answer_leaves_the_telemetry_down_gauge_with_no_seri
 fn an_unserved_class_is_one_and_a_served_class_or_one_without_capacity_is_zero() {
     let collector = FleetCollector::new(labels());
     let mut state = full_state();
-    state.class_coverage = answered(ClassCoverage {
+    state.class_coverage = answered(ExecutionClassCoverage {
         checked_at: at(),
         live_workers: 2,
         streams: vec![
@@ -323,11 +323,7 @@ fn an_unserved_class_is_one_and_a_served_class_or_one_without_capacity_is_zero()
                     capacity: 4,
                 },
             ),
-            coverage(
-                "a",
-                ASYNC,
-                StreamCoverageState::WithoutCapacity { workers: 1 },
-            ),
+            coverage("a", ASYNC, StreamCoverageState::NoCapacity { workers: 1 }),
             coverage("b", ISOLATED, StreamCoverageState::Unserved),
         ],
     });
@@ -390,17 +386,13 @@ fn undeclared_names_share_the_fallback_series_counts_add_up_and_ages_take_the_la
             oldest("y", ISOLATED, waiting(90)),
         ],
     });
-    state.class_coverage = answered(ClassCoverage {
+    state.class_coverage = answered(ExecutionClassCoverage {
         checked_at: at(),
         live_workers: 1,
         streams: vec![
             coverage("x", ISOLATED, StreamCoverageState::Unserved),
             coverage("y", ISOLATED, StreamCoverageState::Unserved),
-            coverage(
-                "z",
-                ASYNC,
-                StreamCoverageState::WithoutCapacity { workers: 1 },
-            ),
+            coverage("z", ASYNC, StreamCoverageState::NoCapacity { workers: 1 }),
         ],
     });
     state.schedules = answered(ScheduleRuns {

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from typing import Annotated, ClassVar, Final, Self, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from horsies.core.defaults import WORKER_STATE_LIVE_WINDOW_S
+from horsies.core.defaults import WORKER_STATE_LIVE_WINDOW_SECONDS
 from horsies.core.errors import (
     ConfigurationError,
     ErrorCode,
@@ -16,7 +16,7 @@ DEFAULT_WORKFLOW_RECOVERY_FAILURE_LIMIT: Final = 25
 """Reaper passes with a persistent recovery raise before a workflow fails."""
 
 
-WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: Final = WORKER_STATE_LIVE_WINDOW_S * 1_000 // 2
+WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: Final = WORKER_STATE_LIVE_WINDOW_SECONDS * 1_000 // 2
 """Largest `worker_state_snapshot_interval_ms`: half the live window.
 
 A worker reads as live only while its latest snapshot is inside the live
@@ -282,7 +282,7 @@ class RecoveryConfig(BaseModel):
             'How often each worker persists a worker-state snapshot (monitoring '
             'timeseries) in milliseconds '
             f'(1000-{WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS}); at most half the '
-            f'{WORKER_STATE_LIVE_WINDOW_S} s live window, so a running worker '
+            f'{WORKER_STATE_LIVE_WINDOW_SECONDS} s live window, so a running worker '
             'stays live when a snapshot write is late by up to half the window; '
             'each snapshot is one row in '
             'horsies_worker_states, so shorter intervals grow the table faster'
@@ -473,7 +473,7 @@ class RecoveryConfig(BaseModel):
                 code=ErrorCode.CONFIG_INVALID_RECOVERY,
                 notes=[
                     'the cap is half the live window '
-                    f'(WORKER_STATE_LIVE_WINDOW_S={WORKER_STATE_LIVE_WINDOW_S}s)',
+                    f'(WORKER_STATE_LIVE_WINDOW_SECONDS={WORKER_STATE_LIVE_WINDOW_SECONDS}s)',
                     'a worker reads as live only while its latest snapshot is '
                     'inside the live window; the other half of the window is '
                     'room for a late snapshot write',

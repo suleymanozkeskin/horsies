@@ -16,8 +16,8 @@ from datetime import datetime, timedelta
 import psycopg
 from horsies._catalog.manifest import dump_producer_manifest
 from horsies._core import (
-    ClassCoverageRecord,
-    ClassReportRecord,
+    ExecutionClassCoverageRecord,
+    ExecutionClassReportRecord,
     CoreError,
     CoreFailure,
     TaskListComplete,
@@ -58,8 +58,8 @@ from horsies.core.brokers.enqueue_task import (
 )
 from horsies.core.telemetry.send_telemetry import NO_TRACE_CARRIER, TraceArgument
 from horsies.core.brokers.worker_state_records import (
-    class_coverage_of,
-    class_report_of,
+    execution_class_coverage_of,
+    execution_class_report_of,
     worker_state_snapshot,
 )
 from horsies.core.brokers.result_types import (
@@ -102,7 +102,7 @@ from horsies.core.types.status import (
 from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.codec.json_io import Json, loads_json
 from horsies.core.models.tasks import Execution, TaskInfo, TaskAttemptInfo
-from horsies.core.models.class_coverage import ClassCoverage, ClassReport
+from horsies.core.models.class_coverage import ExecutionClassCoverage, ExecutionClassReport
 from horsies.core.models.health import (
     DatabasePing,
     WorkerPong,
@@ -356,13 +356,13 @@ def _worker_state_answer(
 
 
 def _class_coverage_answer(
-    outcome: ClassCoverageRecord | BrokerOperationFailed,
-) -> BrokerResult[ClassCoverage]:
+    outcome: ExecutionClassCoverageRecord | BrokerOperationFailed,
+) -> BrokerResult[ExecutionClassCoverage]:
     """The answer of the fleet check; a failure is the core's class as it
     is. Pure."""
     match outcome:
-        case ClassCoverageRecord() as coverage:
-            return Ok(class_coverage_of(coverage))
+        case ExecutionClassCoverageRecord() as coverage:
+            return Ok(execution_class_coverage_of(coverage))
         case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
             return Err(outcome)
         case BrokerOperationFailed(code=code):
@@ -372,13 +372,13 @@ def _class_coverage_answer(
 
 
 def _class_report_answer(
-    outcome: ClassReportRecord | BrokerOperationFailed,
-) -> BrokerResult[ClassReport]:
+    outcome: ExecutionClassReportRecord | BrokerOperationFailed,
+) -> BrokerResult[ExecutionClassReport]:
     """The answer of the class report; a failure is the core's class as it
     is. Pure."""
     match outcome:
-        case ClassReportRecord() as report:
-            return Ok(class_report_of(report))
+        case ExecutionClassReportRecord() as report:
+            return Ok(execution_class_report_of(report))
         case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
             return Err(outcome)
         case BrokerOperationFailed(code=code):
@@ -1679,12 +1679,12 @@ class PostgresBroker:
             return _monitoring_call_failed('get_worker_state_history', call_refusal_or_raise(exc))
         return _worker_states_answer(outcome)
 
-    async def get_class_coverage_async(self) -> BrokerResult[ClassCoverage]:
+    async def get_execution_class_coverage_async(self) -> BrokerResult[ExecutionClassCoverage]:
         """The fleet check: for each (queue, class) with PENDING rows, whether
         a live worker serves it.
 
         A worker is live while its latest snapshot is at most
-        ``WORKER_STATE_LIVE_WINDOW_S`` old. It serves a (queue, class) when
+        ``WORKER_STATE_LIVE_WINDOW_SECONDS`` old. It serves a (queue, class) when
         the queue is one of its queues and one of its budgets serves the
         class. Reads only, in one statement that the core runs on the
         broker's core handle.
@@ -1694,14 +1694,14 @@ class PostgresBroker:
         the core of this process cannot run the read (``CoreCallRefusal``).
         """
         try:
-            outcome = await self._core_handle.class_coverage_async()
+            outcome = await self._core_handle.execution_class_coverage_async()
         except CoreError as exc:
-            return _monitoring_call_failed('get_class_coverage', call_refusal_or_raise(exc))
+            return _monitoring_call_failed('get_execution_class_coverage', call_refusal_or_raise(exc))
         return _class_coverage_answer(outcome)
 
-    def _get_class_coverage_blocking(self) -> BrokerResult[ClassCoverage]:
-        """The blocking form of ``get_class_coverage_async``, for
-        ``Horsies.get_class_coverage``: ``CoreHandle.class_coverage`` on the calling
+    def _get_execution_class_coverage_blocking(self) -> BrokerResult[ExecutionClassCoverage]:
+        """The blocking form of ``get_execution_class_coverage_async``, for
+        ``Horsies.get_execution_class_coverage``: ``CoreHandle.execution_class_coverage`` on the calling
         thread, with the GIL released, and the same outcomes. A call past the
         core's bound of a blocking call is ``MONITORING_QUERY_FAILED`` with
         the ``CoreCallTimedOut``.
@@ -1710,30 +1710,30 @@ class PostgresBroker:
         event loop.
         """
         try:
-            outcome = self._core_handle.class_coverage()
+            outcome = self._core_handle.execution_class_coverage()
         except CoreError as exc:
-            return _monitoring_call_failed('get_class_coverage', call_refusal_or_raise(exc))
+            return _monitoring_call_failed('get_execution_class_coverage', call_refusal_or_raise(exc))
         return _class_coverage_answer(outcome)
 
-    async def get_class_report_async(self) -> BrokerResult[ClassReport]:
+    async def get_execution_class_report_async(self) -> BrokerResult[ExecutionClassReport]:
         """Pending streams with the wait of their oldest due row and their
         coverage, and the budget load of each live worker.
 
         Reads only, in one statement that the core runs on the broker's core
         handle.
-        ``Err(MONITORING_QUERY_FAILED)``: as ``get_class_coverage_async``, or
+        ``Err(MONITORING_QUERY_FAILED)``: as ``get_execution_class_coverage_async``, or
         a live worker holds rows of a class that its recorded budgets do not
         serve.
         """
         try:
-            outcome = await self._core_handle.class_report_async()
+            outcome = await self._core_handle.execution_class_report_async()
         except CoreError as exc:
-            return _monitoring_call_failed('get_class_report', call_refusal_or_raise(exc))
+            return _monitoring_call_failed('get_execution_class_report', call_refusal_or_raise(exc))
         return _class_report_answer(outcome)
 
-    def _get_class_report_blocking(self) -> BrokerResult[ClassReport]:
-        """The blocking form of ``get_class_report_async``, for
-        ``Horsies.get_class_report``: ``CoreHandle.class_report`` on the calling
+    def _get_execution_class_report_blocking(self) -> BrokerResult[ExecutionClassReport]:
+        """The blocking form of ``get_execution_class_report_async``, for
+        ``Horsies.get_execution_class_report``: ``CoreHandle.execution_class_report`` on the calling
         thread, with the GIL released, and the same outcomes. A call past the
         core's bound of a blocking call is ``MONITORING_QUERY_FAILED`` with
         the ``CoreCallTimedOut``.
@@ -1742,9 +1742,9 @@ class PostgresBroker:
         event loop.
         """
         try:
-            outcome = self._core_handle.class_report()
+            outcome = self._core_handle.execution_class_report()
         except CoreError as exc:
-            return _monitoring_call_failed('get_class_report', call_refusal_or_raise(exc))
+            return _monitoring_call_failed('get_execution_class_report', call_refusal_or_raise(exc))
         return _class_report_answer(outcome)
 
     async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:

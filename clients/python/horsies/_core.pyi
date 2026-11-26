@@ -409,17 +409,17 @@ class CoreHandle:
         """
     def worker_state_history_async(self, worker_id: str, *, limit: int | None) -> asyncio.Future[WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput]:
         """The awaitable form of the method above."""
-    def class_coverage(self) -> ClassCoverageRecord | BrokerOperationFailed:
+    def execution_class_coverage(self) -> ExecutionClassCoverageRecord | BrokerOperationFailed:
         """The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves
         it. Reads only, in one statement.
         """
-    def class_coverage_async(self) -> asyncio.Future[ClassCoverageRecord | BrokerOperationFailed]:
+    def execution_class_coverage_async(self) -> asyncio.Future[ExecutionClassCoverageRecord | BrokerOperationFailed]:
         """The awaitable form of the method above."""
-    def class_report(self) -> ClassReportRecord | BrokerOperationFailed:
-        """The pending streams with their oldest wait and coverage, and the budget load of each
-        live worker. Reads only, in one statement.
+    def execution_class_report(self) -> ExecutionClassReportRecord | BrokerOperationFailed:
+        """The execution class report: the pending streams with their oldest wait and coverage,
+        and the budget load of each live worker. Reads only, in one statement.
         """
-    def class_report_async(self) -> asyncio.Future[ClassReportRecord | BrokerOperationFailed]:
+    def execution_class_report_async(self) -> asyncio.Future[ExecutionClassReportRecord | BrokerOperationFailed]:
         """The awaitable form of the method above."""
 
 
@@ -1624,7 +1624,7 @@ class SlotsDownRecord:
 
 
 @final
-class ClassBudgetRecord:
+class ExecutionClassBudgetRecord:
     """One claim budget of a worker, as its snapshot recorded it; serves is in Execution order."""
     @property
     def budget(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
@@ -1658,11 +1658,11 @@ class WorkerStateRecord:
     @property
     def pid(self) -> int: ...
     @property
-    def processes(self) -> int: ...
+    def child_count(self) -> int: ...
     @property
-    def max_claim_batch(self) -> int: ...
+    def per_queue_per_pass(self) -> int | None: ...
     @property
-    def max_claim_per_worker(self) -> int: ...
+    def claimed_per_worker(self) -> int | None: ...
     @property
     def cluster_wide_cap(self) -> int | None: ...
     @property
@@ -1690,7 +1690,7 @@ class WorkerStateRecord:
     @property
     def slot_health(self) -> AllSlotsServingRecord | SlotsDownRecord: ...
     @property
-    def class_capacity(self) -> list[ClassBudgetRecord]: ...
+    def execution_class_budgets(self) -> list[ExecutionClassBudgetRecord]: ...
     @property
     def profile(self) -> ProfileNamedRecord | ProfileNotRecordedRecord: ...
 
@@ -1736,15 +1736,15 @@ class StreamUnservedRecord:
 class StreamCoverageRecord:
     """The coverage of one pending stream."""
     @property
-    def queue_name(self) -> str: ...
+    def queue(self) -> str: ...
     @property
     def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
     @property
-    def state(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
+    def coverage(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
 
 
 @final
-class ClassCoverageRecord:
+class ExecutionClassCoverageRecord:
     """The fleet check, read at checked_at (database time)."""
     @property
     def checked_at(self) -> datetime.datetime: ...
@@ -1758,7 +1758,7 @@ class ClassCoverageRecord:
 class OldestWaitingRecord:
     """At least one row of the stream is due; wait is how long the oldest due row waited."""
     @property
-    def enqueued_at(self) -> datetime.datetime: ...
+    def oldest_due_at(self) -> datetime.datetime: ...
     @property
     def wait(self) -> datetime.timedelta: ...
 
@@ -1772,15 +1772,15 @@ class NoneDueRecord:
 
 @final
 class PendingStreamRecord:
-    """One pending stream of the class report."""
+    """One pending stream of the execution class report."""
     @property
-    def queue_name(self) -> str: ...
+    def queue(self) -> str: ...
     @property
     def execution(self) -> Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']: ...
     @property
-    def wait(self) -> OldestWaitingRecord | NoneDueRecord: ...
+    def coverage(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
     @property
-    def state(self) -> StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord: ...
+    def wait(self) -> OldestWaitingRecord | NoneDueRecord: ...
 
 
 @final
@@ -1797,7 +1797,7 @@ class BudgetLoadRecord:
 
 
 @final
-class WorkerClassLoadRecord:
+class WorkerExecutionClassLoadRecord:
     """The claim budgets of one live worker, in Execution order."""
     @property
     def worker_id(self) -> str: ...
@@ -1808,14 +1808,16 @@ class WorkerClassLoadRecord:
 
 
 @final
-class ClassReportRecord:
-    """The class report, read at checked_at (database time); workers by worker id."""
+class ExecutionClassReportRecord:
+    """The execution class report, read at checked_at (database time); workers by worker id."""
     @property
     def checked_at(self) -> datetime.datetime: ...
     @property
+    def live_window(self) -> datetime.timedelta: ...
+    @property
     def streams(self) -> list[PendingStreamRecord]: ...
     @property
-    def workers(self) -> list[WorkerClassLoadRecord]: ...
+    def workers(self) -> list[WorkerExecutionClassLoadRecord]: ...
 
 
 @final

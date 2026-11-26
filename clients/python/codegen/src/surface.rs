@@ -976,8 +976,9 @@ const PING_WORKERS_OUTCOME: &str =
 const WORKER_STATES_OUTCOME: &str =
     "WorkerStatesRecord | BrokerOperationFailed | BrokerInvalidInput";
 const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed";
-const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerOperationFailed";
-const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerOperationFailed";
+const EXECUTION_CLASS_COVERAGE_OUTCOME: &str =
+    "ExecutionClassCoverageRecord | BrokerOperationFailed";
+const EXECUTION_CLASS_REPORT_OUTCOME: &str = "ExecutionClassReportRecord | BrokerOperationFailed";
 const TASK_LIST_OUTCOME: &str =
     "TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
 const MONITORING_DETAIL_OUTCOME: &str =
@@ -1106,27 +1107,27 @@ const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
-        name: "class_coverage",
+        name: "execution_class_coverage",
         parameters: &[],
-        returns: TypeText::Plain(CLASS_COVERAGE_OUTCOME),
+        returns: TypeText::Plain(EXECUTION_CLASS_COVERAGE_OUTCOME),
         doc: "The fleet check: for each (queue, class) with PENDING rows, whether a live worker serves\nit. Reads only, in one statement.",
     },
     StubFunction {
-        name: "class_coverage_async",
+        name: "execution_class_coverage_async",
         parameters: &[],
-        returns: TypeText::FutureOf(CLASS_COVERAGE_OUTCOME),
+        returns: TypeText::FutureOf(EXECUTION_CLASS_COVERAGE_OUTCOME),
         doc: "The awaitable form of the method above.",
     },
     StubFunction {
-        name: "class_report",
+        name: "execution_class_report",
         parameters: &[],
-        returns: TypeText::Plain(CLASS_REPORT_OUTCOME),
-        doc: "The pending streams with their oldest wait and coverage, and the budget load of each\nlive worker. Reads only, in one statement.",
+        returns: TypeText::Plain(EXECUTION_CLASS_REPORT_OUTCOME),
+        doc: "The execution class report: the pending streams with their oldest wait and coverage,\nand the budget load of each live worker. Reads only, in one statement.",
     },
     StubFunction {
-        name: "class_report_async",
+        name: "execution_class_report_async",
         parameters: &[],
-        returns: TypeText::FutureOf(CLASS_REPORT_OUTCOME),
+        returns: TypeText::FutureOf(EXECUTION_CLASS_REPORT_OUTCOME),
         doc: "The awaitable form of the method above.",
     },
 ];
@@ -2357,7 +2358,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "ClassBudgetRecord",
+        name: "ExecutionClassBudgetRecord",
         doc: "One claim budget of a worker, as its snapshot recorded it; serves is in Execution order.",
         constructor: Constructor::NoConstructor,
         properties: &[
@@ -2392,9 +2393,9 @@ const MONITORING_CLASSES: &[StubClass] = &[
             property("snapshot_at", "datetime.datetime"),
             property("hostname", "str"),
             property("pid", "int"),
-            property("processes", "int"),
-            property("max_claim_batch", "int"),
-            property("max_claim_per_worker", "int"),
+            property("child_count", "int"),
+            property("per_queue_per_pass", "int | None"),
+            property("claimed_per_worker", "int | None"),
             property("cluster_wide_cap", "int | None"),
             property("queues", "list[str]"),
             property("queue_priorities", "dict[str, int]"),
@@ -2408,7 +2409,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
             property("children_memory_mb", "float | None"),
             property("worker_started_at", "datetime.datetime"),
             property("slot_health", "AllSlotsServingRecord | SlotsDownRecord"),
-            property("class_capacity", "list[ClassBudgetRecord]"),
+            property("execution_class_budgets", "list[ExecutionClassBudgetRecord]"),
             property("profile", "ProfileNamedRecord | ProfileNotRecordedRecord"),
         ],
         methods: &[],
@@ -2462,14 +2463,14 @@ const MONITORING_CLASSES: &[StubClass] = &[
         doc: "The coverage of one pending stream.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("queue_name", "str"),
+            property("queue", "str"),
             property("execution", "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"),
-            property("state", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
+            property("coverage", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
         ],
         methods: &[],
     },
     StubClass {
-        name: "ClassCoverageRecord",
+        name: "ExecutionClassCoverageRecord",
         doc: "The fleet check, read at checked_at (database time).",
         constructor: Constructor::NoConstructor,
         properties: &[
@@ -2484,7 +2485,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
         doc: "At least one row of the stream is due; wait is how long the oldest due row waited.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("enqueued_at", "datetime.datetime"),
+            property("oldest_due_at", "datetime.datetime"),
             property("wait", "datetime.timedelta"),
         ],
         methods: &[],
@@ -2500,13 +2501,13 @@ const MONITORING_CLASSES: &[StubClass] = &[
     },
     StubClass {
         name: "PendingStreamRecord",
-        doc: "One pending stream of the class report.",
+        doc: "One pending stream of the execution class report.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("queue_name", "str"),
+            property("queue", "str"),
             property("execution", "Literal['ISOLATED', 'SHARED_ASYNC', 'SHARED_THREAD']"),
+            property("coverage", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
             property("wait", "OldestWaitingRecord | NoneDueRecord"),
-            property("state", "StreamServedRecord | StreamWithoutCapacityRecord | StreamUnservedRecord"),
         ],
         methods: &[],
     },
@@ -2523,7 +2524,7 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "WorkerClassLoadRecord",
+        name: "WorkerExecutionClassLoadRecord",
         doc: "The claim budgets of one live worker, in Execution order.",
         constructor: Constructor::NoConstructor,
         properties: &[
@@ -2534,13 +2535,14 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "ClassReportRecord",
-        doc: "The class report, read at checked_at (database time); workers by worker id.",
+        name: "ExecutionClassReportRecord",
+        doc: "The execution class report, read at checked_at (database time); workers by worker id.",
         constructor: Constructor::NoConstructor,
         properties: &[
             property("checked_at", "datetime.datetime"),
+            property("live_window", "datetime.timedelta"),
             property("streams", "list[PendingStreamRecord]"),
-            property("workers", "list[WorkerClassLoadRecord]"),
+            property("workers", "list[WorkerExecutionClassLoadRecord]"),
         ],
         methods: &[],
     },

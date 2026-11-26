@@ -2,11 +2,11 @@
 
 import type {
   BudgetLoad,
-  ClassReport,
   DownSlot,
   ExecutionClass,
+  ExecutionClassReport,
   SnapshotProfile,
-  WorkerClassLoad,
+  WorkerExecutionClassLoad,
   WorkerState,
 } from '@/types/workers';
 
@@ -22,11 +22,11 @@ export const named = (name: string): SnapshotProfile => ({ kind: 'named', name }
 /** The profile of a snapshot that a worker of an earlier build wrote. */
 export const NOT_RECORDED: SnapshotProfile = { kind: 'not_recorded' };
 
-/** A live worker of the profile `default` with `processes` children and no
+/** A live worker of the profile `default` with `childCount` children and no
  * down slot. */
 export function workerState(
   workerId: string,
-  processes: number,
+  childCount: number,
   fields: Partial<WorkerState> = {}
 ): WorkerState {
   return {
@@ -38,7 +38,7 @@ export function workerState(
     stale: false,
     worker_started_at: '2026-11-24T08:00:00Z',
     uptime_s: 4260,
-    processes,
+    child_count: childCount,
     queues: ['payments', 'analytics'],
     queue_max_concurrency: { payments: 4 },
     tasks_running: 0,
@@ -47,8 +47,7 @@ export function workerState(
     memory_usage_mb: 32.8,
     memory_percent: 0.2,
     cpu_percent: 0.25,
-    slot_health: 'all_serving',
-    down_slots: [],
+    slot_health: { kind: 'all_serving' },
     profile: named('default'),
     ...fields,
   };
@@ -64,8 +63,7 @@ export function downSlot(slot: number): DownSlot {
   };
 }
 
-/** One budget with `in_flight` rows; `free` is the capacity that holds no
- * row, at least 0, as the API computes it. */
+/** One budget with `in_flight` rows. */
 export function budgetLoad(
   budget: ExecutionClass,
   capacity: number,
@@ -77,22 +75,23 @@ export function budgetLoad(
     capacity,
     serves,
     in_flight: inFlight,
-    free: Math.max(0, capacity - inFlight),
   };
 }
 
 export function classLoad(
   workerId: string,
   budgets: BudgetLoad[]
-): WorkerClassLoad {
+): WorkerExecutionClassLoad {
   return { worker_id: workerId, snapshot_at: '2026-11-24T09:11:00Z', budgets };
 }
 
 /** A class report with no pending stream and these worker budgets. */
-export function classReport(workers: WorkerClassLoad[]): ClassReport {
+export function classReport(
+  workers: WorkerExecutionClassLoad[]
+): ExecutionClassReport {
   return {
     checked_at: '2026-11-24T09:11:08Z',
-    live_window_s: 120,
+    live_window_seconds: 120,
     streams: [],
     workers,
   };

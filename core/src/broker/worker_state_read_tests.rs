@@ -52,7 +52,7 @@ async fn insert_snapshot(
 }
 
 /// Python `test_worker_state_reads_the_slot_health`: a row with down slots
-/// reads as `SlotsDown`, an empty list as `AllSlotsServing`.
+/// reads as `SlotsDown`, an empty list as `AllServing`.
 #[tokio::test]
 async fn worker_state_reads_the_slot_health() {
     let database = MonitoringTestDatabase::create().await;
@@ -78,7 +78,7 @@ async fn worker_state_reads_the_slot_health() {
         .expect("the read answers")
         .expect("the worker reported");
 
-    let SlotHealth::SlotsDown(slots) = &degraded.slot_health else {
+    let SlotHealth::SlotsDown { slots } = &degraded.slot_health else {
         panic!("a degraded worker: {:?}", degraded.slot_health);
     };
     assert_eq!(
@@ -91,7 +91,7 @@ async fn worker_state_reads_the_slot_health() {
             failed_boots: NonZeroU64::new(2).unwrap(),
         }]
     );
-    assert_eq!(serving.slot_health, SlotHealth::AllSlotsServing);
+    assert_eq!(serving.slot_health, SlotHealth::AllServing);
     assert_eq!(serving.children_memory_mb, Some(96.5));
     database.drop().await;
 }
@@ -123,7 +123,7 @@ async fn worker_state_reads_the_class_capacity() {
         .expect("the list read answers");
 
     let budgets: Vec<(Execution, u64, Vec<Execution>)> = latest
-        .class_capacity
+        .execution_class_budgets
         .as_slice()
         .iter()
         .map(|budget| (budget.budget, budget.capacity, budget.serves.clone()))
@@ -140,9 +140,15 @@ async fn worker_state_reads_the_class_capacity() {
         ]
     );
     assert_eq!(history.len(), 1);
-    assert_eq!(history[0].class_capacity, latest.class_capacity);
+    assert_eq!(
+        history[0].execution_class_budgets,
+        latest.execution_class_budgets
+    );
     assert_eq!(listed.len(), 1);
-    assert_eq!(listed[0].class_capacity, latest.class_capacity);
+    assert_eq!(
+        listed[0].execution_class_budgets,
+        latest.execution_class_budgets
+    );
     database.drop().await;
 }
 
@@ -439,9 +445,9 @@ async fn a_worker_with_no_budget_reads_as_no_budgets() {
         .expect("the worker reported");
 
     assert!(
-        read.class_capacity.as_slice().is_empty(),
+        read.execution_class_budgets.as_slice().is_empty(),
         "{:?}",
-        read.class_capacity
+        read.execution_class_budgets
     );
     database.drop().await;
 }
@@ -539,7 +545,7 @@ async fn the_class_capacity_a_worker_of_each_profile_writes_reads_back() {
             .expect("the worker reported");
 
         let budgets: Vec<(Execution, u64, Vec<Execution>)> = read
-            .class_capacity
+            .execution_class_budgets
             .as_slice()
             .iter()
             .map(|budget| (budget.budget, budget.capacity, budget.serves.clone()))

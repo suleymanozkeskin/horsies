@@ -21,9 +21,9 @@ from horsies._core import (
     AllSlotsServingRecord,
     CoreConnectionError,
     BudgetLoadRecord,
-    ClassBudgetRecord,
-    ClassCoverageRecord,
-    ClassReportRecord,
+    ExecutionClassBudgetRecord,
+    ExecutionClassCoverageRecord,
+    ExecutionClassReportRecord,
     DownSlotRecord,
     NoneDueRecord,
     OldestWaitingRecord,
@@ -37,7 +37,7 @@ from horsies._core import (
     StreamUnservedRecord,
     StreamWithoutCapacityRecord,
     TooManyPendingCalls,
-    WorkerClassLoadRecord,
+    WorkerExecutionClassLoadRecord,
     WorkerPongRecord,
     WorkerPongsRecord,
     WorkerStateAbsent,
@@ -59,8 +59,8 @@ from horsies.core.models.boot_failure import (
 )
 from horsies.core.models.class_coverage import (
     BudgetLoad,
-    ClassCoverage,
-    ClassReport,
+    ExecutionClassCoverage,
+    ExecutionClassReport,
     NoneDue,
     OldestWaiting,
     PendingStream,
@@ -68,12 +68,12 @@ from horsies.core.models.class_coverage import (
     StreamServed,
     StreamUnserved,
     StreamWithoutCapacity,
-    WorkerClassLoad,
+    WorkerExecutionClassLoad,
 )
 from horsies.core.models.health import (
     AllSlotsServing,
-    ClassBudget,
-    ClassBudgets,
+    ExecutionClassBudget,
+    ExecutionClassBudgets,
     DownSlot,
     ProfileNamed,
     ProfileNotRecorded,
@@ -83,6 +83,7 @@ from horsies.core.models.health import (
     WorkerStateSnapshot,
 )
 from horsies.core.models.tasks import Execution
+from horsies.core.models.worker_profile import ClaimLimits, NoTaskLimit, TaskLimit
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok
 from tests.unit.test_broker_postgres import _make_broker  # pyright: ignore[reportPrivateUsage]
@@ -130,9 +131,9 @@ def _state_record(
         snapshot_at=_AT,
         hostname='host-1',
         pid=4242,
-        processes=4,
-        max_claim_batch=8,
-        max_claim_per_worker=4,
+        child_count=4,
+        per_queue_per_pass=8,
+        claimed_per_worker=None,
         cluster_wide_cap=None,
         queues=['default', 'priority'],
         queue_priorities={'default': 10},
@@ -146,9 +147,9 @@ def _state_record(
         children_memory_mb=None,
         worker_started_at=_STARTED,
         slot_health=slot_health,
-        class_capacity=[
+        execution_class_budgets=[
             _record(
-                ClassBudgetRecord,
+                ExecutionClassBudgetRecord,
                 budget='ISOLATED',
                 capacity=2,
                 serves=['ISOLATED', 'SHARED_ASYNC'],
@@ -191,9 +192,11 @@ def _snapshot(
         snapshot_at=_AT,
         hostname='host-1',
         pid=4242,
-        processes=4,
-        max_claim_batch=8,
-        max_claim_per_worker=4,
+        child_count=4,
+        claim_limits=ClaimLimits(
+            per_queue_per_pass=TaskLimit(tasks=8),
+            claimed_per_worker=NoTaskLimit(),
+        ),
         cluster_wide_cap=None,
         queues=['default', 'priority'],
         queue_priorities={'default': 10},
@@ -207,9 +210,9 @@ def _snapshot(
         children_memory_mb=None,
         worker_started_at=_STARTED,
         slot_health=slot_health,
-        class_capacity=ClassBudgets(
+        execution_class_budgets=ExecutionClassBudgets(
             (
-                ClassBudget(
+                ExecutionClassBudget(
                     budget=Execution.ISOLATED,
                     capacity=2,
                     serves=(Execution.ISOLATED, Execution.SHARED_ASYNC),
@@ -365,38 +368,38 @@ class TestClassReads:
     @pytest.mark.asyncio
     async def test_the_coverage_record_becomes_the_fleet_check(self) -> None:
         broker = _broker_answering(
-            'class_coverage_async',
+            'execution_class_coverage_async',
             _record(
-                ClassCoverageRecord,
+                ExecutionClassCoverageRecord,
                 checked_at=_AT,
                 live_workers=2,
                 streams=[
                     _record(
                         StreamCoverageRecord,
-                        queue_name='a',
+                        queue='a',
                         execution='ISOLATED',
-                        state=_record(StreamServedRecord, workers=2, capacity=4),
+                        coverage=_record(StreamServedRecord, workers=2, capacity=4),
                     ),
                     _record(
                         StreamCoverageRecord,
-                        queue_name='a',
+                        queue='a',
                         execution='SHARED_ASYNC',
-                        state=_record(StreamWithoutCapacityRecord, workers=1),
+                        coverage=_record(StreamWithoutCapacityRecord, workers=1),
                     ),
                     _record(
                         StreamCoverageRecord,
-                        queue_name='b',
+                        queue='b',
                         execution='SHARED_THREAD',
-                        state=_record(StreamUnservedRecord),
+                        coverage=_record(StreamUnservedRecord),
                     ),
                 ],
             ),
         )
 
-        result = await broker.get_class_coverage_async()
+        result = await broker.get_execution_class_coverage_async()
 
         assert result == Ok(
-            ClassCoverage(
+            ExecutionClassCoverage(
                 checked_at=_AT,
                 live_workers=2,
                 streams=(
@@ -410,33 +413,34 @@ class TestClassReads:
     @pytest.mark.asyncio
     async def test_the_report_record_becomes_the_class_report(self) -> None:
         broker = _broker_answering(
-            'class_report_async',
+            'execution_class_report_async',
             _record(
-                ClassReportRecord,
+                ExecutionClassReportRecord,
                 checked_at=_AT,
+                live_window=timedelta(seconds=120),
                 streams=[
                     _record(
                         PendingStreamRecord,
-                        queue_name='a',
+                        queue='a',
                         execution='ISOLATED',
+                        coverage=_record(StreamUnservedRecord),
                         wait=_record(
                             OldestWaitingRecord,
-                            enqueued_at=_STARTED,
+                            oldest_due_at=_STARTED,
                             wait=timedelta(seconds=90),
                         ),
-                        state=_record(StreamUnservedRecord),
                     ),
                     _record(
                         PendingStreamRecord,
-                        queue_name='b',
+                        queue='b',
                         execution='SHARED_ASYNC',
+                        coverage=_record(StreamServedRecord, workers=1, capacity=8),
                         wait=_record(NoneDueRecord, next_due_at=_AT),
-                        state=_record(StreamServedRecord, workers=1, capacity=8),
                     ),
                 ],
                 workers=[
                     _record(
-                        WorkerClassLoadRecord,
+                        WorkerExecutionClassLoadRecord,
                         worker_id='w1',
                         snapshot_at=_AT,
                         budgets=[
@@ -453,27 +457,28 @@ class TestClassReads:
             ),
         )
 
-        result = await broker.get_class_report_async()
+        result = await broker.get_execution_class_report_async()
 
         assert result == Ok(
-            ClassReport(
+            ExecutionClassReport(
                 checked_at=_AT,
+                live_window=timedelta(seconds=120),
                 streams=(
                     PendingStream(
                         'a',
                         Execution.ISOLATED,
-                        OldestWaiting(enqueued_at=_STARTED, wait=timedelta(seconds=90)),
                         StreamUnserved(),
+                        OldestWaiting(oldest_due_at=_STARTED, wait=timedelta(seconds=90)),
                     ),
                     PendingStream(
                         'b',
                         Execution.SHARED_ASYNC,
-                        NoneDue(next_due_at=_AT),
                         StreamServed(workers=1, capacity=8),
+                        NoneDue(next_due_at=_AT),
                     ),
                 ),
                 workers=(
-                    WorkerClassLoad(
+                    WorkerExecutionClassLoad(
                         worker_id='w1',
                         snapshot_at=_AT,
                         budgets=(
@@ -506,19 +511,19 @@ async def _history(broker: PostgresBroker) -> BrokerResult[Any]:
 
 
 async def _coverage(broker: PostgresBroker) -> BrokerResult[Any]:
-    return await broker.get_class_coverage_async()
+    return await broker.get_execution_class_coverage_async()
 
 
 async def _report(broker: PostgresBroker) -> BrokerResult[Any]:
-    return await broker.get_class_report_async()
+    return await broker.get_execution_class_report_async()
 
 
 _READS: Final[list[tuple[str, str, _Read]]] = [
     ('worker_states_async', 'list_worker_states', _list),
     ('worker_state_async', 'get_worker_state', _one),
     ('worker_state_history_async', 'get_worker_state_history', _history),
-    ('class_coverage_async', 'get_class_coverage', _coverage),
-    ('class_report_async', 'get_class_report', _report),
+    ('execution_class_coverage_async', 'get_execution_class_coverage', _coverage),
+    ('execution_class_report_async', 'get_execution_class_report', _report),
 ]
 _READ_IDS: Final = [read for _, read, _ in _READS]
 

@@ -625,7 +625,7 @@ calling thread.
 |---|---|---|
 | `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `retry_send` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
-| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
+| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_execution_class_coverage`, `get_execution_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
 | `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
 | `WorkflowTemplateView` | `workflow_template.blocking()` | `start`, `start_with_id` |
 | `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `tasks`, `cancel`, `pause`, `resume` |

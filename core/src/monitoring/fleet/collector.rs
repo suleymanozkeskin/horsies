@@ -33,7 +33,7 @@ use crate::telemetry::registry::{
     Counter, Gauge, HandleRefused, Histogram, ProcessFacts, Recorded, Registry, RegistryLabels,
     Replaced,
 };
-use crate::{AppConfig, ClassCoverage, PostgresBroker, QueueMode};
+use crate::{AppConfig, ExecutionClassCoverage, PostgresBroker, QueueMode};
 
 use super::gauges::{
     oldest_pending_series, queue_task_series, schedule_series, schema_version_series,
@@ -326,7 +326,11 @@ impl FleetCollector {
         recorded.replaced(self.gauges.seats_in_use.replace_all(series.seats_in_use));
     }
 
-    fn record_class_coverage(&self, part: &FleetPart<ClassCoverage>, recorded: &mut FleetRecorded) {
+    fn record_class_coverage(
+        &self,
+        part: &FleetPart<ExecutionClassCoverage>,
+        recorded: &mut FleetRecorded,
+    ) {
         self.note_part(FleetQuery::ClassCoverage, part, recorded);
         let series = match &part.outcome {
             Ok(coverage) => unserved_series(coverage, self.queues()),

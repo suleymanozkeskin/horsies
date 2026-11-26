@@ -35,7 +35,7 @@ from horsies.core.models.broker import (
     PostgresConfig,
 )
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
-from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_S
+from horsies.core.models.health import WORKER_STATE_LIVE_WINDOW_SECONDS
 from horsies.core.models.recovery import (
     WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS,
     RecoveryConfig,
@@ -1756,7 +1756,7 @@ class TestWorkerStateSnapshotInterval:
             RecoveryConfig(worker_state_snapshot_interval_ms=999)
 
     def test_cap_is_60_seconds_half_the_120_second_live_window(self) -> None:
-        assert WORKER_STATE_LIVE_WINDOW_S == 120
+        assert WORKER_STATE_LIVE_WINDOW_SECONDS == 120
         assert WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS == 60_000
 
     def test_cap_follows_the_live_window(
@@ -1771,7 +1771,7 @@ class TestWorkerStateSnapshotInterval:
         import horsies.core.defaults as defaults
         import horsies.core.models.recovery as recovery
 
-        monkeypatch.setattr(defaults, 'WORKER_STATE_LIVE_WINDOW_S', 200)
+        monkeypatch.setattr(defaults, 'WORKER_STATE_LIVE_WINDOW_SECONDS', 200)
         spec = importlib.util.spec_from_file_location(
             '_recovery_with_a_200_s_live_window',
             recovery.__file__,
@@ -1822,7 +1822,7 @@ class TestWorkerStateSnapshotInterval:
         )
         notes = ' '.join(error.notes)
         assert 'half the live window' in notes
-        assert 'WORKER_STATE_LIVE_WINDOW_S=120s' in notes
+        assert 'WORKER_STATE_LIVE_WINDOW_SECONDS=120s' in notes
         assert 'latest snapshot is inside the live window' in notes
         assert error.help_text == 'set worker_state_snapshot_interval_ms <= 60000ms'
 

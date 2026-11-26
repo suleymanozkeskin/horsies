@@ -57,7 +57,7 @@ A down slot has its slot index, its cause (a resource shortage with its errno na
 
 ### Which classes does a worker serve?
 
-`class_capacity` holds the claim budget of each execution class that the worker runs children for. A budget's capacity counts its children (`ISOLATED`) or seats (a shared class) in service, and the budget lists the classes whose rows it claims. A class that no budget serves is not claimed by the worker. See [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class).
+`execution_class_budgets` holds the claim budget of each execution class that the worker runs children for (the stored column `class_capacity`). A budget's capacity counts its children (`ISOLATED`) or seats (a shared class) in service, and the budget lists the classes whose rows it claims. A class that no budget serves is not claimed by the worker. See [Budgets per Execution Class](/horsies/workers/concurrency/#budgets-per-execution-class).
 
 ### Which profile does a worker run?
 
@@ -70,9 +70,9 @@ A down slot has its slot index, its cause (a resource shortage with its errno na
 
 ## Does a live worker serve every pending class?
 
-A pending stream is the `PENDING` rows of one queue and one execution class. A worker is live while its latest snapshot is at most `WORKER_STATE_LIVE_WINDOW_S` (120) seconds old. `RecoveryConfig.worker_state_snapshot_interval_ms` is at most half of that window (60,000 ms), so a running worker stays live when a snapshot write is late by up to half the window. A live worker serves a stream when the queue is one of its `queues` and one of its budgets serves the class.
+A pending stream is the `PENDING` rows of one queue and one execution class. A worker is live while its latest snapshot is at most `WORKER_STATE_LIVE_WINDOW_SECONDS` (120) seconds old. `RecoveryConfig.worker_state_snapshot_interval_ms` is at most half of that window (60,000 ms), so a running worker stays live when a snapshot write is late by up to half the window. A live worker serves a stream when the queue is one of its `queues` and one of its budgets serves the class.
 
-The class coverage read gives each pending stream one state:
+The execution class coverage read gives each pending stream one state:
 
 | State | Meaning |
 | ----- | ------- |
@@ -80,9 +80,9 @@ The class coverage read gives each pending stream one state:
 | Without capacity | Live workers serve the stream, and every child or seat of their serving budgets was down at their snapshot. The read counts the workers |
 | Unserved | No live worker serves the stream. Its rows wait until a worker that serves the class runs on the queue |
 
-The read also returns its time (database time) and the number of live workers. The streams are ordered by queue name, then by execution class order. A delayed send and a retry that waits for its interval are `PENDING` too, so they count before they are due.
+The read also returns its time (database time) and the number of live workers. The streams are ordered by queue, then by execution class order. A delayed send and a retry that waits for its interval are `PENDING` too, so they count before they are due.
 
-The read fails with `MONITORING_QUERY_FAILED` on a database error. It fails with `retryable=False` when the `class_capacity` of a live snapshot is unreadable or missing (the message names the worker), and when it reaches a bound: 20,000 snapshot rows inside the live window, or 3,000 pending streams.
+The read fails with `MONITORING_QUERY_FAILED` on a database error. It fails with `retryable=False` when the stored `class_capacity` of a live snapshot is unreadable or missing (the message names the worker), and when it reaches a bound: 20,000 snapshot rows inside the live window, or 3,000 pending streams.
 
 ### The worker logs it
 
@@ -102,10 +102,10 @@ Each worker logs one stream at most once per 5 minutes. A check that fails logs 
 
 ## How long do pending tasks wait, and what capacity is free?
 
-The class report returns the pending streams with the wait of their oldest due row and their coverage state, and the budget load of each live worker.
+The execution class report returns the pending streams with their coverage state and the wait of their oldest due row, the budget load of each live worker, and the live window.
 
-- The wait of a stream is the oldest waiting row when at least one row is due: its due time and how long it has waited. When every row is due later, the wait is the next due time. A row is due when its `enqueued_at` (its send time, or the time its retry became due) is at or before the read.
-- The live workers are ordered by worker id. `GET /api/workers/classes` returns the report.
+- The wait of a stream is due when at least one row is due: the due time of the oldest due row and how long it has waited. When every row is due later, the wait is the next due time. A row is due when its `enqueued_at` (its send time, or the time its retry became due) is at or before the read.
+- The live workers are ordered by worker id. `GET /api/workers/classes` returns the report; a duration in its JSON is a number of seconds (`wait_seconds`, `live_window_seconds`).
 - Each budget of a worker has its capacity and the classes it serves, from the worker's latest snapshot; its rows in flight (the worker's `RUNNING` rows and `CLAIMED` rows with a live lease of the classes it serves, counted at the read, as the claim counts them); and its free capacity (capacity minus rows in flight, at least 0; a prefetch buffer can hold more rows than the capacity).
 
 The report fails as the coverage read does. It also fails when a live worker holds rows of a class that its recorded budgets do not serve, and when more than 10,000 (queue, class, priority) groups have `PENDING` rows.
@@ -120,9 +120,8 @@ Both reads use the claim index. The coverage read takes one index probe per pend
 | `snapshot_at` | When the snapshot was taken |
 | `hostname` | Worker host |
 | `pid` | Worker process id |
-| `processes` | Child process count: the number of children of the worker profile |
-| `max_claim_batch` | Claim batch size |
-| `max_claim_per_worker` | Per-worker claim cap |
+| `child_count` | The number of children of the worker profile (the stored column `processes`) |
+| `claim_limits` | The claim limits of the worker: `per_queue_per_pass` (the stored column `max_claim_batch`) and `claimed_per_worker` (the stored column `max_claim_per_worker`: the limit of the profile, or the seat count of the worker when the profile sets none) |
 | `cluster_wide_cap` | Cluster-wide concurrency cap, if set |
 | `queues` | Queues this worker serves |
 | `queue_priorities` | Per-queue priorities (CUSTOM mode); empty when none is set |
@@ -136,7 +135,7 @@ Both reads use the claim index. The coverage read takes one index probe per pend
 | `children_memory_mb` | Summed resident memory of the worker's task children: the last reading of each child, from its ready frame and its result frames. `None` when no child read its size |
 | `worker_started_at` | Worker process start time |
 | `slot_health` | See [Which slots are down?](#which-slots-are-down) |
-| `class_capacity` | See [Which classes does a worker serve?](#which-classes-does-a-worker-serve) |
+| `execution_class_budgets` | See [Which classes does a worker serve?](#which-classes-does-a-worker-serve) |
 | `profile` | See [Which profile does a worker run?](#which-profile-does-a-worker-run) |
 
 ### Embedded health payloads

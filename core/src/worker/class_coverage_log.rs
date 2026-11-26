@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use tokio::time::Instant;
 
-use crate::broker::class_coverage::{ClassCoverage, StreamCoverage, StreamCoverageState};
+use crate::broker::class_coverage::{ExecutionClassCoverage, StreamCoverage, StreamCoverageState};
 use crate::broker::class_coverage_reads::read_class_coverage;
 use crate::broker::result_types::BrokerResult;
 use crate::broker::PostgresBroker;
@@ -56,15 +56,15 @@ pub(crate) struct UncoveredStream {
 impl UncoveredStream {
     /// The stream as uncovered; `None` for a served stream.
     pub(crate) fn of(stream: &StreamCoverage) -> Option<Self> {
-        let gap = match stream.state {
+        let gap = match stream.coverage {
             StreamCoverageState::Served { .. } => return None,
-            StreamCoverageState::WithoutCapacity { workers } => {
+            StreamCoverageState::NoCapacity { workers } => {
                 CoverageGap::NoCapacityInService { workers }
             }
             StreamCoverageState::Unserved => CoverageGap::NoServingWorker,
         };
         Some(Self {
-            queue_name: stream.queue_name.clone(),
+            queue_name: stream.queue.clone(),
             execution: stream.execution,
             gap,
         })
@@ -209,7 +209,7 @@ impl ClassCoverageLog {
     /// - a failed read: one warning `Class coverage check failed: <message>`.
     pub(crate) fn lines(
         &mut self,
-        coverage: &BrokerResult<ClassCoverage>,
+        coverage: &BrokerResult<ExecutionClassCoverage>,
         now: Instant,
     ) -> Vec<CoverageLogLine> {
         match coverage {
@@ -258,9 +258,9 @@ mod tests {
 
     fn stream(queue: &str, execution: Execution, state: StreamCoverageState) -> StreamCoverage {
         StreamCoverage {
-            queue_name: queue.to_owned(),
+            queue: queue.to_owned(),
             execution,
-            state,
+            coverage: state,
         }
     }
 
@@ -276,7 +276,7 @@ mod tests {
         stream(
             "default",
             Execution::SharedAsync,
-            StreamCoverageState::WithoutCapacity { workers: 2 },
+            StreamCoverageState::NoCapacity { workers: 2 },
         )
     }
 
@@ -298,8 +298,8 @@ mod tests {
         }
     }
 
-    fn coverage(streams: Vec<StreamCoverage>) -> BrokerResult<ClassCoverage> {
-        Ok(ClassCoverage {
+    fn coverage(streams: Vec<StreamCoverage>) -> BrokerResult<ExecutionClassCoverage> {
+        Ok(ExecutionClassCoverage {
             checked_at: Utc
                 .with_ymd_and_hms(2026, 11, 10, 12, 0, 0)
                 .single()
@@ -492,9 +492,9 @@ mod tests {
     fn a_failed_check_logs_one_warning_per_interval() {
         let now = Instant::now();
         let mut log = due_log(now);
-        let failed: BrokerResult<ClassCoverage> =
+        let failed: BrokerResult<ExecutionClassCoverage> =
             Err(BrokerOperationError::monitoring_query_refused(
-                "get_class_coverage",
+                "get_execution_class_coverage",
                 crate::broker::class_coverage::ClassReadRefused {
                     reason: "worker w1 ...".to_owned(),
                 },
@@ -507,7 +507,8 @@ mod tests {
         assert_eq!(
             first,
             [CoverageLogLine::Warning(
-                "Class coverage check failed: get_class_coverage refused: worker w1 ...".to_owned()
+                "Class coverage check failed: get_execution_class_coverage refused: worker w1 ..."
+                    .to_owned()
             )]
         );
         assert!(second.is_empty());

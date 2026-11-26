@@ -653,22 +653,25 @@ async fn blocking_reads_of_a_pending_task_time_out_and_report_it_pending() {
 
         let coverage = app
             .blocking()
-            .get_class_coverage()
+            .get_execution_class_coverage()
             .expect("the class coverage");
         assert_eq!(coverage.live_workers, 0);
         match coverage.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
-                assert_eq!(stream.state, StreamCoverageState::Unserved);
+                assert_eq!(stream.queue, info.queue_name);
+                assert_eq!(stream.coverage, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
         }
-        let report = app.blocking().get_class_report().expect("the class report");
+        let report = app
+            .blocking()
+            .get_execution_class_report()
+            .expect("the class report");
         assert!(report.workers.is_empty(), "{report:?}");
         match report.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
-                assert_eq!(stream.state, StreamCoverageState::Unserved);
+                assert_eq!(stream.queue, info.queue_name);
+                assert_eq!(stream.coverage, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
         }

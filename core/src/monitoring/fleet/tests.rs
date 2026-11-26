@@ -312,7 +312,7 @@ async fn the_class_parts_give_workers_seats_waits_and_coverage() {
         "SHARED_ASYNC": {"capacity": 40, "serves": ["SHARED_ASYNC"]},
     });
     let w2_budgets = json!({"ISOLATED": {"capacity": 4, "serves": ["ISOLATED"]}});
-    let gone_age = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as f64 + 5.0;
+    let gone_age = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS as f64 + 5.0;
     snapshot(pool, "w1", w1_budgets, json!([]), 5.0).await;
     snapshot(pool, "w2", w2_budgets.clone(), one_slot_down(), 5.0).await;
     snapshot(pool, "w-gone", w2_budgets, json!([]), gone_age).await;
@@ -359,10 +359,7 @@ async fn the_class_parts_give_workers_seats_waits_and_coverage() {
         .collect();
     assert_eq!(waits, [("a", ASYNC), ("c", ISOLATED)]);
     for stream in &oldest.streams {
-        assert!(
-            matches!(stream.wait, StreamWait::OldestWaiting { .. }),
-            "{stream:?}"
-        );
+        assert!(matches!(stream.wait, StreamWait::Due { .. }), "{stream:?}");
     }
     let coverage = state
         .class_coverage
@@ -373,17 +370,17 @@ async fn the_class_parts_give_workers_seats_waits_and_coverage() {
         coverage.streams,
         [
             StreamCoverage {
-                queue_name: "a".to_owned(),
+                queue: "a".to_owned(),
                 execution: ASYNC,
-                state: StreamCoverageState::Served {
+                coverage: StreamCoverageState::Served {
                     workers: 1,
                     capacity: 40
                 },
             },
             StreamCoverage {
-                queue_name: "c".to_owned(),
+                queue: "c".to_owned(),
                 execution: ISOLATED,
-                state: StreamCoverageState::Unserved,
+                coverage: StreamCoverageState::Unserved,
             },
         ]
     );
@@ -426,7 +423,7 @@ async fn the_workers_part_counts_the_live_workers_whose_telemetry_part_is_down()
             "handler_child": handler_child,
         })
     };
-    let gone_age = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S as f64 + 5.0;
+    let gone_age = crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS as f64 + 5.0;
     let snapshots = [
         (
             "w-endpoint",
@@ -706,7 +703,7 @@ async fn the_task_statements_read_no_task_row_by_a_sequential_scan() {
     let workers = WORKERS_SQL
         .replace(
             "$1",
-            &crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S.to_string(),
+            &crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS.to_string(),
         )
         .replace("$2", &(crate::LIVE_SNAPSHOT_ROW_LIMIT + 1).to_string())
         .replace(

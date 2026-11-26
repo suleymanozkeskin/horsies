@@ -1,13 +1,13 @@
 use serde::{de::Error as _, Deserialize, Deserializer, Serialize};
 
-use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
+use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS;
 
 /// Largest `worker_state_snapshot_interval_ms`: half the live window.
 ///
 /// A worker reads as live only while its latest snapshot is inside the live
 /// window. At half the window, the other half is room for a late snapshot
 /// write. Mirrors Python's `WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS`.
-pub const WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: u64 = WORKER_STATE_LIVE_WINDOW_S * 1_000 / 2;
+pub const WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS: u64 = WORKER_STATE_LIVE_WINDOW_SECONDS * 1_000 / 2;
 
 /// The fail-closed window is `running_stale_threshold_ms` divided by this.
 ///
@@ -300,7 +300,7 @@ pub enum RecoveryConfigError {
         "worker_state_snapshot_interval_ms={value}ms is above the cap of {cap}ms: \
          the cap is half the {window}s live window; a worker reads as live only \
          while its latest snapshot is inside the live window",
-        window = WORKER_STATE_LIVE_WINDOW_S
+        window = WORKER_STATE_LIVE_WINDOW_SECONDS
     )]
     SnapshotIntervalAboveLiveWindowCap { value: u64, cap: u64 },
 
@@ -882,7 +882,7 @@ mod tests {
     /// Python `test_app_config.py::TestWorkerStateSnapshotInterval::test_cap_is_60_seconds_half_the_120_second_live_window`.
     #[test]
     fn snapshot_interval_cap_is_60_seconds_half_the_120_second_live_window() {
-        assert_eq!(WORKER_STATE_LIVE_WINDOW_S, 120);
+        assert_eq!(WORKER_STATE_LIVE_WINDOW_SECONDS, 120);
         assert_eq!(WORKER_STATE_SNAPSHOT_INTERVAL_MAX_MS, 60_000);
         let previous_cap = RecoveryConfig {
             worker_state_snapshot_interval_ms: 300_000,

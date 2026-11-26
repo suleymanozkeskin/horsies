@@ -183,8 +183,7 @@ describe('WorkerProfilePanel for a named profile', () => {
     const group = oneGroup(
       [
         workerState('w1', 1, {
-          slot_health: 'slots_down',
-          down_slots: [downSlot(0)],
+          slot_health: { kind: 'slots_down', slots: [downSlot(0)] },
         }),
       ],
       [isolated(0, 0)]
@@ -203,8 +202,7 @@ describe('WorkerProfilePanel for a named profile', () => {
       [
         workerState('w1', 12),
         workerState('w2', 12, {
-          slot_health: 'slots_down',
-          down_slots: [downSlot(3), downSlot(7)],
+          slot_health: { kind: 'slots_down', slots: [downSlot(3), downSlot(7)] },
         }),
       ],
       [isolated(5), isolated(4, 10)]

@@ -25,14 +25,15 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.boot_failure import ResourceShortage, ShortageErrno
 from horsies.core.models.health import (
     AllSlotsServing,
-    ClassBudget,
-    ClassBudgets,
+    ExecutionClassBudget,
+    ExecutionClassBudgets,
     DownSlot,
     ProfileNamed,
     ProfileNotRecorded,
     SlotsDown,
 )
 from horsies.core.models.tasks import Execution
+from horsies.core.models.worker_profile import ClaimLimits, TaskLimit
 from horsies.core.types.result import is_ok
 
 
@@ -365,7 +366,7 @@ async def test_worker_state_reads_the_class_capacity(
     broker: PostgresBroker,
     session: AsyncSession,
 ) -> None:
-    """A row with budgets reads as ``ClassBudgets`` in every read."""
+    """A row with budgets reads as ``ExecutionClassBudgets`` in every read."""
     worker_id = f'itest-{uuid.uuid4().hex}'
     stored = {
         'SHARED_ASYNC': {'capacity': 40, 'serves': ['SHARED_ASYNC']},
@@ -376,14 +377,14 @@ async def test_worker_state_reads_the_class_capacity(
         {'worker_id': worker_id, 'class_capacity': json.dumps(stored)},
     )
     await session.commit()
-    expected = ClassBudgets(
+    expected = ExecutionClassBudgets(
         (
-            ClassBudget(
+            ExecutionClassBudget(
                 Execution.ISOLATED,
                 2,
                 (Execution.ISOLATED, Execution.SHARED_THREAD),
             ),
-            ClassBudget(Execution.SHARED_ASYNC, 40, (Execution.SHARED_ASYNC,)),
+            ExecutionClassBudget(Execution.SHARED_ASYNC, 40, (Execution.SHARED_ASYNC,)),
         ),
     )
     try:
@@ -392,12 +393,12 @@ async def test_worker_state_reads_the_class_capacity(
         listed = await broker.list_worker_states_async()
 
         assert is_ok(latest) and latest.ok_value is not None
-        assert latest.ok_value.class_capacity == expected
+        assert latest.ok_value.execution_class_budgets == expected
         assert is_ok(history)
-        assert [snap.class_capacity for snap in history.ok_value] == [expected]
+        assert [snap.execution_class_budgets for snap in history.ok_value] == [expected]
         assert is_ok(listed)
         assert [
-            snap.class_capacity
+            snap.execution_class_budgets
             for snap in listed.ok_value
             if snap.worker_id == worker_id
         ] == [expected]
@@ -454,6 +455,13 @@ async def test_get_worker_state_single_and_missing(
     assert is_ok(found)
     assert found.ok_value is not None
     assert found.ok_value.tasks_running == 3
+    # The stored columns `processes`, `max_claim_batch` and
+    # `max_claim_per_worker` read as the child count and the claim limits.
+    assert found.ok_value.child_count == 4
+    assert found.ok_value.claim_limits == ClaimLimits(
+        per_queue_per_pass=TaskLimit(tasks=8),
+        claimed_per_worker=TaskLimit(tasks=4),
+    )
 
     missing = await broker.get_worker_state_async('no-such-worker')
     assert is_ok(missing)

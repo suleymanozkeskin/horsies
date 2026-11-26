@@ -141,8 +141,7 @@ describe('groupByProfile', () => {
       [
         workerState('w1', 12),
         workerState('w2', 12, {
-          slot_health: 'slots_down',
-          down_slots: [downSlot(7)],
+          slot_health: { kind: 'slots_down', slots: [downSlot(7)] },
         }),
         workerState('w3', 6, io),
         workerState('w4', 6, io),
@@ -361,8 +360,7 @@ describe('group texts', () => {
         workerState('w3', 6, io),
         workerState('w4', 6, {
           ...io,
-          slot_health: 'slots_down',
-          down_slots: [downSlot(1), downSlot(4)],
+          slot_health: { kind: 'slots_down', slots: [downSlot(1), downSlot(4)] },
         }),
       ],
       classReport([

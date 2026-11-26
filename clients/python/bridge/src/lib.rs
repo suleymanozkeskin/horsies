@@ -328,7 +328,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::worker_reads::DownSlotRecord>()?;
     module.add_class::<operations::worker_reads::AllSlotsServingRecord>()?;
     module.add_class::<operations::worker_reads::SlotsDownRecord>()?;
-    module.add_class::<operations::worker_reads::ClassBudgetRecord>()?;
+    module.add_class::<operations::worker_reads::ExecutionClassBudgetRecord>()?;
     module.add_class::<operations::worker_reads::ProfileNamedRecord>()?;
     module.add_class::<operations::worker_reads::ProfileNotRecordedRecord>()?;
     module.add_class::<operations::worker_reads::WorkerStateRecord>()?;
@@ -338,13 +338,13 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::worker_reads::StreamWithoutCapacityRecord>()?;
     module.add_class::<operations::worker_reads::StreamUnservedRecord>()?;
     module.add_class::<operations::worker_reads::StreamCoverageRecord>()?;
-    module.add_class::<operations::worker_reads::ClassCoverageRecord>()?;
+    module.add_class::<operations::worker_reads::ExecutionClassCoverageRecord>()?;
     module.add_class::<operations::worker_reads::OldestWaitingRecord>()?;
     module.add_class::<operations::worker_reads::NoneDueRecord>()?;
     module.add_class::<operations::worker_reads::PendingStreamRecord>()?;
     module.add_class::<operations::worker_reads::BudgetLoadRecord>()?;
-    module.add_class::<operations::worker_reads::WorkerClassLoadRecord>()?;
-    module.add_class::<operations::worker_reads::ClassReportRecord>()?;
+    module.add_class::<operations::worker_reads::WorkerExecutionClassLoadRecord>()?;
+    module.add_class::<operations::worker_reads::ExecutionClassReportRecord>()?;
     module.add_class::<operations::monitoring_window::MonitoringWindowRecord>()?;
     module.add_class::<operations::monitoring_window::WindowRefusedRecord>()?;
     module.add_class::<operations::workflow_lifecycle::WorkflowPaused>()?;

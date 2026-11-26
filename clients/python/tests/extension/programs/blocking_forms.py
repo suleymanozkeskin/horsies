@@ -142,9 +142,9 @@ def describe(outcome: object) -> JsonValue:
             return [name, len(states)]
         case core.WorkerPongsRecord(pongs=pongs):
             return [name, len(pongs)]
-        case core.ClassCoverageRecord(live_workers=live_workers, streams=streams):
+        case core.ExecutionClassCoverageRecord(live_workers=live_workers, streams=streams):
             return [name, live_workers, len(streams)]
-        case core.ClassReportRecord(streams=streams, workers=workers):
+        case core.ExecutionClassReportRecord(streams=streams, workers=workers):
             return [name, len(streams), len(workers)]
         case _:
             return [name]
@@ -256,8 +256,8 @@ def _monitoring_steps(handle: core.CoreHandle) -> list[Step]:
             lambda: handle.worker_state_history('tests.extension.no_such_worker', limit=0),
             lambda: handle.worker_state_history_async('tests.extension.no_such_worker', limit=0),
         ),
-        ('class_coverage', handle.class_coverage, handle.class_coverage_async),
-        ('class_report', handle.class_report, handle.class_report_async),
+        ('execution_class_coverage', handle.execution_class_coverage, handle.execution_class_coverage_async),
+        ('execution_class_report', handle.execution_class_report, handle.execution_class_report_async),
         (
             'ping',
             lambda: handle.ping_workers(

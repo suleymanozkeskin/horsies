@@ -55,9 +55,9 @@ use std::time::Duration;
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
     process_role, thread_role, BrokerError, BrokerErrorCode, BrokerOperationError,
-    BrokerOperationFailedCode, BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing,
-    FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole, WorkerPong,
-    WorkerStateSnapshot,
+    BrokerOperationFailedCode, BrokerOperationSource, DatabasePing, ExecutionClassCoverage,
+    ExecutionClassReport, FailureCause, ProcessRole, SendKind, TaskSendError, ThreadRole,
+    WorkerPong, WorkerStateSnapshot,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -480,23 +480,25 @@ impl HorsiesView<'_> {
         )
     }
 
-    /// `Horsies::get_class_coverage`, blocking.
-    pub fn get_class_coverage(&self) -> Result<ClassCoverage, BrokerOperationError> {
+    /// `Horsies::get_execution_class_coverage`, blocking.
+    pub fn get_execution_class_coverage(
+        &self,
+    ) -> Result<ExecutionClassCoverage, BrokerOperationError> {
         block_health(
-            self.app.get_class_coverage(),
+            self.app.get_execution_class_coverage(),
             BrokerOperationFailedCode::MonitoringQueryFailed,
-            "Horsies::get_class_coverage()",
-            "app.get_class_coverage()",
+            "Horsies::get_execution_class_coverage()",
+            "app.get_execution_class_coverage()",
         )
     }
 
-    /// `Horsies::get_class_report`, blocking.
-    pub fn get_class_report(&self) -> Result<ClassReport, BrokerOperationError> {
+    /// `Horsies::get_execution_class_report`, blocking.
+    pub fn get_execution_class_report(&self) -> Result<ExecutionClassReport, BrokerOperationError> {
         block_health(
-            self.app.get_class_report(),
+            self.app.get_execution_class_report(),
             BrokerOperationFailedCode::MonitoringQueryFailed,
-            "Horsies::get_class_report()",
-            "app.get_class_report()",
+            "Horsies::get_execution_class_report()",
+            "app.get_execution_class_report()",
         )
     }
 

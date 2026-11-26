@@ -6,7 +6,7 @@ subscription, `_ping_responder_loop`, `_handle_ping`, and worker-state writes.
 A worker that fails to subscribe to the ping channel at startup — or leaks/
 crashes during start — would not reply here.
 
-The class reads (`get_class_report_async`, `get_class_coverage_async`)
+The class reads (`get_execution_class_report_async`, `get_execution_class_coverage_async`)
 read the snapshot that a real worker of a shared profile writes: its budgets
 and the classes each one serves.
 """
@@ -26,7 +26,7 @@ from horsies.core.models.class_coverage import (
     StreamCoverage,
     StreamServed,
     StreamUnserved,
-    WorkerClassLoad,
+    WorkerExecutionClassLoad,
 )
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import Err, Ok, is_ok
@@ -167,7 +167,7 @@ def _make_shared_ready_check():
 
 async def _forget_other_workers(session: AsyncSession) -> None:
     """Delete the snapshots of the workers of earlier tests, which stay live
-    for `WORKER_STATE_LIVE_WINDOW_S` after their exit, so the class reads
+    for `WORKER_STATE_LIVE_WINDOW_SECONDS` after their exit, so the class reads
     see only the worker of this test."""
     await session.execute(text('DELETE FROM horsies_worker_states'))
     await session.commit()
@@ -220,7 +220,7 @@ async def test_the_report_gives_the_seats_of_the_shared_budget(
         ).scalar_one()
         await session.commit()
 
-        match await broker.get_class_report_async():
+        match await broker.get_execution_class_report_async():
             case Ok(report):
                 pass
             case Err(error):
@@ -228,7 +228,7 @@ async def test_the_report_gives_the_seats_of_the_shared_budget(
 
     seats = 2 * SPLIT_SHARED_SEATS
     (worker,) = report.workers
-    assert worker == WorkerClassLoad(
+    assert worker == WorkerExecutionClassLoad(
         worker_id=worker_id,
         snapshot_at=worker.snapshot_at,
         budgets=(
@@ -237,8 +237,8 @@ async def test_the_report_gives_the_seats_of_the_shared_budget(
         ),
     )
     (stream,) = report.streams
-    assert (stream.queue_name, stream.execution) == ('default', ASYNC)
-    assert stream.state == StreamServed(workers=1, capacity=seats)
+    assert (stream.queue, stream.execution) == ('default', ASYNC)
+    assert stream.coverage == StreamServed(workers=1, capacity=seats)
 
 
 @pytest.mark.e2e
@@ -259,7 +259,7 @@ async def test_a_worker_with_only_shared_children_serves_only_shared_rows(
         profile=SHARED_ONLY_1X4,
         ready_check=_make_shared_ready_check(),
     ):
-        match await broker.get_class_coverage_async():
+        match await broker.get_execution_class_coverage_async():
             case Ok(coverage):
                 pass
             case Err(error):

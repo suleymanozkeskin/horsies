@@ -168,8 +168,8 @@ APP_CALLS: dict[str, Callable[[Horsies], Any]] = {
     'list_worker_states': lambda app: app.list_worker_states(),
     'get_worker_state': lambda app: app.get_worker_state('worker-1'),
     'get_worker_state_history': lambda app: app.get_worker_state_history('worker-1'),
-    'get_class_coverage': lambda app: app.get_class_coverage(),
-    'get_class_report': lambda app: app.get_class_report(),
+    'get_execution_class_coverage': lambda app: app.get_execution_class_coverage(),
+    'get_execution_class_report': lambda app: app.get_execution_class_report(),
     'get_raw_result': lambda app: app.get_raw_result(TASK_ID, 0),
 }
 
@@ -515,14 +515,14 @@ BLOCKING_SITES: dict[str, BlockingSite] = {
         'worker_state_history',
         BrokerErrorCode.MONITORING_QUERY_FAILED,
     ),
-    'app.get_class_coverage': BlockingSite(
-        lambda app, broker: app.get_class_coverage(),
-        'class_coverage',
+    'app.get_execution_class_coverage': BlockingSite(
+        lambda app, broker: app.get_execution_class_coverage(),
+        'execution_class_coverage',
         BrokerErrorCode.MONITORING_QUERY_FAILED,
     ),
-    'app.get_class_report': BlockingSite(
-        lambda app, broker: app.get_class_report(),
-        'class_report',
+    'app.get_execution_class_report': BlockingSite(
+        lambda app, broker: app.get_execution_class_report(),
+        'execution_class_report',
         BrokerErrorCode.MONITORING_QUERY_FAILED,
     ),
     'WorkflowHandle.status': BlockingSite(

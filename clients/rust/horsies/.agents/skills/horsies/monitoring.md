@@ -33,8 +33,8 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 | `get_worker_state_history(worker_id, limit)` | `Vec<WorkerStateSnapshot>`, newest first. `WorkerHistoryLimit::AllRetained` or `Newest(NonZeroU32)` |
 | `get_stale_tasks(StaleMinutes)` | `BoundedTaskList<StaleTaskRow>`. `StaleMinutes::parse(0..=525_600)` |
 | `get_expired_tasks()` | `BoundedTaskList<ExpiredTaskRow>`: PENDING tasks past their `good_until` |
-| `get_class_coverage()` | `ClassCoverage`: whether a live worker can run each pending execution class |
-| `get_class_report()` | `ClassReport`: the load of each execution class |
+| `get_execution_class_coverage()` | `ExecutionClassCoverage`: whether a live worker can run each pending execution class |
+| `get_execution_class_report()` | `ExecutionClassReport`: the load of each execution class |
 
 - Every read returns `Result<_, BrokerOperationError>`: one variant per
   state, with `code()`, `message()` and `retryable()`. A failed read is
@@ -55,8 +55,17 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
   most `TASK_LIST_BOUND` (10,000) rows.
 - `WorkerStateSnapshot::profile` is `SnapshotProfile::Named { name }` (the
   worker profile that the worker runs) or `SnapshotProfile::NotRecorded` (a
-  worker of a build before schema migration 1004 wrote the snapshot). The web
-  model `WorkerStateInfo::profile` is `SnapshotProfileInfo`.
+  worker of a build before schema migration 1004 wrote the snapshot).
+  `child_count` counts its children; `claim_limits` is a `ClaimLimits`
+  (`claimed_per_worker` is the limit that the worker resolved, its seat count
+  when its profile sets none); `slot_health` is `SlotHealth::AllServing` or
+  `SlotHealth::SlotsDown { slots }`; `execution_class_budgets` is
+  `ExecutionClassBudgets`.
+- One type per health record: the web models `WorkerStateInfo::slot_health`
+  and `WorkerStateInfo::profile` hold `SlotHealth` and `SnapshotProfile`, the
+  route of the execution class report answers `ExecutionClassReport`, and
+  `LivenessReport` holds `database: DatabaseLiveness` (`Ping { latency_ms }`
+  or `Unreachable`) and `workers: Vec<WorkerPong>`.
 - `app.blocking()` has the same reads, except `get_stale_tasks` and
   `get_expired_tasks`.
 - The meaning of each read is on the shared docs page
@@ -486,7 +495,8 @@ use horsies::{
     // Health reads
     PingTarget, WorkerHistoryLimit, DatabasePing, WorkerPong, WorkerStateSnapshot,
     SnapshotProfile, StaleMinutes, StaleThresholdRefusal, StaleTaskRow, ExpiredTaskRow,
-    BoundedTaskList, ClassCoverage, ClassReport, BrokerOperationError, BrokerErrorCode,
+    BoundedTaskList, ExecutionClassCoverage, ExecutionClassReport, BrokerOperationError,
+    BrokerErrorCode,
     TASK_LIST_BOUND, MAX_STALE_THRESHOLD_MINUTES,
 };
 use horsies::monitoring::{

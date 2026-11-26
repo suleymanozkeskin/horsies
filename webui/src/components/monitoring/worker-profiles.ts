@@ -7,7 +7,7 @@
 //
 // - its load: each budget summed over the workers of the group;
 // - its shapes: what the profile gives a worker, as the worker recorded it.
-//   A shape is the number of children of a worker (`processes`) and its
+//   A shape is the number of children of a worker (`child_count`) and its
 //   budget classes. These two facts do not change while a worker runs. The
 //   capacity of a budget is not a part of the shape: it counts the children
 //   or seats in service, so it goes down while a slot is down or a shared
@@ -20,11 +20,13 @@
 import { assertNever } from '@/lib/exhaustive';
 import type {
   BudgetLoad,
-  ClassReport,
   ExecutionClass,
+  ExecutionClassReport,
   SnapshotProfile,
   WorkerState,
 } from '@/types/workers';
+
+import { downSlotsOf, freeCapacity } from './class-coverage';
 
 /** The execution classes, in the order of the monitoring API. */
 export const EXECUTION_CLASSES: readonly ExecutionClass[] = [
@@ -145,7 +147,7 @@ function sumBudgets(loads: readonly BudgetLoad[]): GroupBudget[] {
       budget,
       capacity: ofClass.reduce((sum, load) => sum + load.capacity, 0),
       inFlight: ofClass.reduce((sum, load) => sum + load.in_flight, 0),
-      free: ofClass.reduce((sum, load) => sum + load.free, 0),
+      free: ofClass.reduce((sum, load) => sum + freeCapacity(load), 0),
       serves: inClassOrder(ofClass.flatMap(load => load.serves)),
     };
   });
@@ -163,7 +165,7 @@ function countShapes(reported: NonEmpty<WorkerBudgets>): NonEmpty<ShapeCount> {
   const counts = new Map<string, ShapeCount>();
   for (const { worker, budgets } of reported) {
     const shape: WorkerShape = {
-      children: worker.processes,
+      children: worker.child_count,
       classes: inClassOrder(budgets.map(budget => budget.budget)),
     };
     const key = shapeKey(shape);
@@ -216,7 +218,7 @@ function groupLoad(
  */
 export function groupByProfile(
   workers: readonly WorkerState[],
-  report: ClassReport | undefined
+  report: ExecutionClassReport | undefined
 ): WorkerGroup[] {
   const budgetsById = new Map(
     (report?.workers ?? []).map(load => [load.worker_id, load.budgets])
@@ -274,7 +276,7 @@ export function seatsInService(load: KnownLoad): number {
 /** The down slots of the workers of a group. */
 export function downSlotCount(group: WorkerGroup): number {
   return group.workers.reduce(
-    (sum, worker) => sum + worker.down_slots.length,
+    (sum, worker) => sum + downSlotsOf(worker.slot_health).length,
     0
   );
 }
