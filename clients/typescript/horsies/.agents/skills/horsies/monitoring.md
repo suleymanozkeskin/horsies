@@ -719,7 +719,7 @@ import {
   MAX_WORKFLOW_RUNS_LIMIT, MonitoringQueryRefusalCode, TaskStatus,
   type MonitoringWindow, type TaskFilters, type TaskStatsQuery, type TaskFacetsQuery, type TaskBreakdownQuery,
   type TaskListQuery, type TaskSort, type TaskSortField, type SortDirection, type TaskGroupBy,
-  type ErrorCategory, type RetriedFilter, type WorkflowRunsQuery,
+  type ErrorCategory, type WorkflowRunsQuery,
   type StatusCount, type Facets, type Breakdown, type TaskListPage, type TaskSummary, type TaskDetail,
   type TaskDetailRead, type WorkflowRunSummary, type WorkflowRunDetail, type WorkflowRunRead,
   type WorkflowTaskDetail, type WorkflowNodeRead, type ScheduleStateInfo, type TaskAbsenceReason,

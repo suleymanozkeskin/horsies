@@ -44,7 +44,7 @@ if (!created.ok) {
   for (const refusal of created.error.refusals) {
     console.error(`error[${refusal.code}]: ${refusal.message}`);
 
-    for (const line of refusal.help) {
+    for (const line of refusal.helpText) {
       console.error(`  = help: ${line}`);
     }
   }
