@@ -14,9 +14,9 @@ import type { CancelAddon, CancelPolicy } from "../native/facades/cancel.ts";
 import type { NativeCoreHandle } from "../native/handle/addon.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import type { TaskId } from "../contract/ids.ts";
 import { type CancelTaskError, taskActionError } from "./errors.ts";
 import type { TaskCancelled } from "./health-types.ts";
-import { uuidText } from "./reads.ts";
 
 /** The options of a cancel. The policy has no default: the caller names whether a running body is cancelled. */
 export interface CancelTaskOptions {
@@ -32,22 +32,16 @@ export interface CancelTarget {
 /** Cancel one task that no workflow holds. Writes, in one statement. */
 export async function cancelTask(
   target: CancelTarget,
-  taskId: string,
+  taskId: TaskId,
   options: CancelTaskOptions,
 ): Promise<Result<TaskCancelled, CancelTaskError>> {
-  const id = uuidText("taskId", taskId);
-
-  if (!id.ok) {
-    return id;
-  }
-
   const outcome = await nativeValueAsync("cancelTask", () =>
-    target.addon.cancelTask(target.handle, id.value, options.policy),
+    target.addon.cancelTask(target.handle, taskId, options.policy),
   );
 
   switch (outcome.kind) {
     case "done":
-      return ok(Object.freeze({ taskId: outcome.record.taskId, wasStatus: leftStatus(outcome.record.wasStatus) }));
+      return ok(Object.freeze({ taskId, wasStatus: leftStatus(outcome.record.wasStatus) }));
     case "failed":
       return err(taskActionError(outcome.error));
     default:

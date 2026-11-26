@@ -4,6 +4,8 @@
 import type { CoreChecks } from "../../../horsies/src/app/core-checks.ts";
 import type { ProducerCore } from "../../../horsies/src/app/core-access.ts";
 import type { CreateEnvironment } from "../../../horsies/src/app/create.ts";
+import type { NativeCoreHandle } from "../../../horsies/src/native/handle/addon.ts";
+import { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { ProcessStart } from "../../../horsies/src/app/suppression.ts";
 import type {
   AppConfigCheck,
@@ -202,6 +204,24 @@ export function fakeProducer(script: ProducerScript = {}): FakeProducer {
   };
 }
 
+/** A core handle whose addon methods are never called: the fake producer and the fake checks answer instead. */
+export function fakeCoreHandle(): CoreHandle {
+  const notCalled = (method: string) => (): never => {
+    throw new Error(`fakeCoreHandle: ${method} is not called in this test`);
+  };
+
+  const native: NativeCoreHandle = {
+    manifestVersion: notCalled("manifestVersion"),
+    withInstallCoverage: notCalled("withInstallCoverage"),
+    close: notCalled("close"),
+    pingDatabase: notCalled("pingDatabase"),
+    installSchema: notCalled("installSchema"),
+    schemaStatus: notCalled("schemaStatus"),
+  };
+
+  return new CoreHandle(native);
+}
+
 /** The start facts of a plain producer process. */
 export const PLAIN_START: ProcessStart = { argumentAfterScript: undefined, seatIsolate: false };
 
@@ -240,6 +260,7 @@ export function fakeEnvironment(parts: EnvironmentParts = {}): FakeEnvironment {
 
       return checks;
     },
+    coreHandle: () => fakeCoreHandle(),
     producer: () => {
       loads.producers += 1;
 

@@ -185,7 +185,7 @@ describe("the task lists", () => {
           bound: 10_000n,
           rows: [
             {
-              id: "t1",
+              id: "01890a5d-ac96-774b-bcce-b302099a8057",
               taskName: "resize",
               workerHostname: { kind: "notRecorded" },
               workerPid: { kind: "recorded", value: 7 },
@@ -212,7 +212,7 @@ describe("the task lists", () => {
           kind: "complete",
           rows: [
             {
-              id: "t2",
+              id: "01890a5d-ac96-774b-bcce-b302099a8058",
               taskName: "send",
               queueName: "default",
               priority: 100,

@@ -3,10 +3,14 @@
 import { readFileSync } from "node:fs";
 
 import type { WireJson } from "../../../../horsies/src/_catalog/wire_json.ts";
+import type { CoreAccess } from "../../../../horsies/src/app/core-access.ts";
+import { TaskId, WorkflowId } from "../../../../horsies/src/contract/ids.ts";
+import { CoreHandle } from "../../../../horsies/src/native/handle/core-handle.ts";
 import { listItems, wireJsonOfCoreText } from "../../../../horsies/src/monitoring/model-json.ts";
 import type { NativeEnvelope } from "../../../../horsies/src/native/call/envelope.ts";
 import type { NativeCoreHandle } from "../../../../horsies/src/native/handle/addon.ts";
 import type { CauseRecord, RawCatalogError, RawSlot } from "../../../../horsies/src/native/values/records.ts";
+import { fakeProducer } from "../../app/support.ts";
 
 /** One sample of each monitoring model, as the core writes it. */
 const SAMPLES_URL = new URL("../../../runtime/generated/monitoring-model-samples.json", import.meta.url);
@@ -16,6 +20,33 @@ const TIMING_EXAMPLES_URL = new URL("../../../../../../core/src/monitoring/timin
 
 /** The deepest nesting of a fixture value that `coreText` writes. */
 const MAX_FIXTURE_DEPTH = 64;
+
+/** The task id of a canonical UUID text. */
+export function taskIdOf(text: string): TaskId {
+  const parsed = TaskId.parse(text);
+
+  if (!parsed.ok) {
+    throw new Error(`not a task id: ${text}`);
+  }
+
+  return parsed.value;
+}
+
+/** The workflow id of a canonical UUID text. */
+export function workflowIdOf(text: string): WorkflowId {
+  const parsed = WorkflowId.parse(text);
+
+  if (!parsed.ok) {
+    throw new Error(`not a workflow id: ${text}`);
+  }
+
+  return parsed.value;
+}
+
+/** The core access of a main thread with the app's handle `native`; the producer is never called. */
+export function mainThreadAccess(native: NativeCoreHandle): CoreAccess {
+  return { kind: "addon", handle: new CoreHandle(native), producer: fakeProducer() };
+}
 
 /** A handle that the fake addon functions take; the tests never call its methods. */
 export function fakeHandle(): NativeCoreHandle {

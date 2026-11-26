@@ -6,9 +6,19 @@ import { describe, test } from "node:test";
 import { cancelTask, type CancelTarget } from "../../../horsies/src/monitoring/cancel.ts";
 import type { CancelAddon, TaskCancelledRecord } from "../../../horsies/src/native/facades/cancel.ts";
 import type { NativeOutcome, RawCatalogError } from "../../../horsies/src/native/values/records.ts";
-import { causeSlot, codeSlot, connectionCause, fakeHandle, flagSlot, textSlot, uuidSlot, valueEnvelope } from "./support/fakes.ts";
+import {
+  causeSlot,
+  codeSlot,
+  connectionCause,
+  fakeHandle,
+  flagSlot,
+  taskIdOf,
+  textSlot,
+  uuidSlot,
+  valueEnvelope,
+} from "./support/fakes.ts";
 
-const TASK_ID = "01890a5d-ac96-774b-bcce-b302099a8057";
+const TASK_ID = taskIdOf("01890a5d-ac96-774b-bcce-b302099a8057");
 
 /** A fake addon that answers `outcome` and logs the id and the policy of each call. */
 function fakeTarget(outcome: NativeOutcome<TaskCancelledRecord>): { readonly target: CancelTarget; readonly calls: string[][] } {
@@ -91,14 +101,6 @@ describe("cancelTask", () => {
     const answer = await cancelTask(fakeTarget(refused(raw)).target, TASK_ID, { policy: "includeRunning" });
 
     assert.ok(!answer.ok && answer.error.code === "TASK_NOT_CANCELLABLE" && answer.error.currentStatus === "CANCELLED");
-  });
-
-  test("an id that is not a UUID is QUERY_REFUSED and the addon is not called", async () => {
-    const { target, calls } = fakeTarget({ kind: "done", record: { taskId: TASK_ID, wasStatus: "PENDING" } });
-    const answer = await cancelTask(target, "not-an-id", { policy: "includeRunning" });
-
-    assert.ok(!answer.ok && answer.error.code === "QUERY_REFUSED" && answer.error.field === "taskId");
-    assert.equal(calls.length, 0);
   });
 
   test("a status that cannot move to CANCELLED is a defect of the core", async () => {

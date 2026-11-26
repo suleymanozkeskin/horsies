@@ -5,6 +5,8 @@
 
 import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { JsonValue } from "../codec/json-value.ts";
+import type { TaskId } from "../contract/ids.ts";
+import type { Recorded } from "../read/info.ts";
 
 /** One round trip of a database ping. */
 export interface DatabasePing {
@@ -74,8 +76,11 @@ export type Measure = { readonly kind: "measured"; readonly value: number } | { 
 /** The cluster-wide cap of a worker's claims. */
 export type ClusterWideCap = { readonly kind: "capped"; readonly cap: number } | { readonly kind: "uncapped" };
 
-/** The recovery settings and the health of a worker's maintenance passes: untyped JSON that the worker wrote. */
-export type RecoveryConfig = { readonly [key: string]: JsonValue };
+/**
+ * The recovery settings and the health of a worker's maintenance passes, as the worker wrote them in its snapshot:
+ * untyped JSON. The config input of the recovery settings is `RecoveryConfigInput`.
+ */
+export type RecoveryConfigSnapshot = { readonly [key: string]: JsonValue };
 
 /** One worker state snapshot. */
 export interface WorkerStateSnapshot {
@@ -90,7 +95,7 @@ export interface WorkerStateSnapshot {
   readonly queues: readonly string[];
   readonly queuePriorities: ReadonlyMap<string, bigint>;
   readonly queueMaxConcurrency: ReadonlyMap<string, bigint>;
-  readonly recoveryConfig: RecoveryConfig;
+  readonly recoveryConfig: RecoveryConfigSnapshot;
   readonly tasksRunning: number;
   readonly tasksClaimed: number;
   /** Resident memory of the worker process only, in MB. */
@@ -110,15 +115,12 @@ export type WorkerStateRead =
   | { readonly kind: "found"; readonly snapshot: WorkerStateSnapshot }
   | { readonly kind: "notFound"; readonly workerId: string };
 
-/** A column that may hold no value. */
-export type Recorded<T> = { readonly kind: "recorded"; readonly value: T } | { readonly kind: "notRecorded" };
-
 /** The latest runner beat of a task since its start: the start writes no beat. */
 export type LastBeat = { readonly kind: "beat"; readonly at: Temporal.Instant } | { readonly kind: "noBeatSinceStart" };
 
 /** A `RUNNING` task whose latest beat, or its start, is older than the threshold. */
 export interface StaleTaskRow {
-  readonly id: string;
+  readonly id: TaskId;
   readonly taskName: string;
   readonly workerHostname: Recorded<string>;
   readonly workerPid: Recorded<number>;
@@ -129,7 +131,7 @@ export interface StaleTaskRow {
 
 /** A `PENDING` task past its `goodUntil`: no worker claims it. */
 export interface ExpiredTaskRow {
-  readonly id: string;
+  readonly id: TaskId;
   readonly taskName: string;
   readonly queueName: string;
   readonly priority: number;
@@ -202,6 +204,6 @@ export interface ClassReport {
 
 /** The task that a cancel moved to `CANCELLED`, and the status that it left. */
 export interface TaskCancelled {
-  readonly taskId: string;
+  readonly taskId: TaskId;
   readonly wasStatus: "PENDING" | "CLAIMED" | "RUNNING";
 }

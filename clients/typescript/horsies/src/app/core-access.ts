@@ -12,6 +12,7 @@ import type {
   TaskInfoRead,
   WaitBound,
 } from "../native/sends/addon.ts";
+import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 
 /**
@@ -61,8 +62,11 @@ export interface SeatRelay {
   ): Promise<SeatOperationMap[A]["reply"]>;
 }
 
-/** How this thread reaches the core. */
+/**
+ * How this thread reaches the core. On a main thread, `handle` is the app's core handle (the facades call the addon
+ * with it) and `producer` runs the sends and the task reads on the same handle.
+ */
 export type CoreAccess =
-  | { readonly kind: "addon"; readonly producer: ProducerCore }
+  | { readonly kind: "addon"; readonly handle: CoreHandle; readonly producer: ProducerCore }
   | { readonly kind: "seatRelay"; readonly relay: SeatRelay }
   | { readonly kind: "noCore" };

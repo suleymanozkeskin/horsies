@@ -3,6 +3,7 @@
 // `core/tests/fixtures/stored_forms/result_envelope.json`.
 
 import type { CoreAccess, ProducerCore, SeatRelay, SendsSeatReply } from "../../../horsies/src/app/core-access.ts";
+import { fakeCoreHandle } from "../app/support.ts";
 import { type TaskId, TaskId as TaskIdParser } from "../../../horsies/src/contract/ids.ts";
 import type {
   FinishedStatusName,
@@ -95,7 +96,7 @@ function scripted<T>(answers: readonly T[] | undefined, call: number, operation:
 
 /** The core access of a main thread with a fake producer. */
 export function addonAccess(fake: FakeProducer): CoreAccess {
-  return { kind: "addon", producer: fake.producer };
+  return { kind: "addon", handle: fakeCoreHandle(), producer: fake.producer };
 }
 
 /** A seat relay that answers `taskInfo` with `read` and counts its requests. */

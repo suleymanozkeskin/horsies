@@ -20,6 +20,9 @@ import {
 } from "./app/create.ts";
 import { registerImplementation } from "./app/implement.ts";
 import { recordAppContext } from "./app/internals.ts";
+import { createMonitoringArea, type Monitoring, type MonitoringArea } from "./monitoring/app-area.ts";
+import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts";
+import type { DatabasePing, PingWorkersOptions, WorkerPong } from "./monitoring/health-types.ts";
 
 /** The constructor of an app, for `createHorsies` in this module. */
 let constructApp: (context: AppContext) => Horsies;
@@ -27,6 +30,10 @@ let constructApp: (context: AppContext) => Horsies;
 /** A horsies app. `Horsies.create` builds it. */
 export class Horsies {
   readonly #context: AppContext;
+  readonly #monitoringArea: MonitoringArea;
+
+  /** The monitoring reads, the health reads and the operator cancel. Each read writes nothing but a schema install. */
+  readonly monitoring: Monitoring;
 
   static {
     constructApp = (context: AppContext): Horsies => new Horsies(context);
@@ -34,6 +41,8 @@ export class Horsies {
 
   private constructor(context: AppContext) {
     this.#context = context;
+    this.#monitoringArea = createMonitoringArea(context.core);
+    this.monitoring = this.#monitoringArea.monitoring;
     recordAppContext(this, context);
   }
 
@@ -85,6 +94,19 @@ export class Horsies {
     taskId: TaskId,
   ): TaskHandle<SchemaValue<O>, E> {
     return taskHandleOf(this.#context.core, readFormOf(contract), taskId);
+  }
+
+  /** A timed `SELECT 1` round trip: the latency of the database, or `DB_PING_FAILED`. */
+  async pingDatabase(): Promise<Result<DatabasePing, PingDatabaseError>> {
+    return this.#monitoringArea.pingDatabase();
+  }
+
+  /**
+   * Ping the workers and collect the distinct replies by worker id. The defaults: every worker, a window of 2,000 ms,
+   * the full window. A worker in `monitoring.workers()` that is not in the answer did not reply.
+   */
+  async pingWorkers(options: PingWorkersOptions = {}): Promise<Result<readonly WorkerPong[], PingWorkersError>> {
+    return this.#monitoringArea.pingWorkers(options);
   }
 }
 

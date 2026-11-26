@@ -48,6 +48,9 @@ const environment: CreateEnvironment = {
   coreChecks: () => {
     throw new TypeError("not called on a worker thread");
   },
+  coreHandle: () => {
+    throw new TypeError("not called on a worker thread");
+  },
   producer: () => {
     throw new TypeError("not called on a worker thread");
   },
