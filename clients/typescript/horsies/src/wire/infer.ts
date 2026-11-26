@@ -36,7 +36,8 @@ export interface EmptyObject {
   readonly [noMembers]?: never;
 }
 
-type Flat<T> = { [K in keyof T]: T[K] } & {};
+/** An intersection of object types, shown as one object type. */
+export type Flat<T> = { [K in keyof T]: T[K] } & {};
 
 /** The value that a reader gives for an object: an `.optional()` member may be absent; a defaulted one is filled. */
 export type ObjectValue<M extends WireMembers> = keyof M extends never

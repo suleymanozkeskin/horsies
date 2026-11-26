@@ -5,8 +5,7 @@
 #
 # Needs on PATH: `bun` (1.4) and `node` (26). The workflows install the exact
 # versions that their `env` block names. `bun test` needs `node`: tests/lint/
-# runs each vendored rule test in a Node process. The public API report runs
-# API Extractor on Node.
+# runs each vendored rule test in a Node process.
 #
 # The first step that fails stops the script, with the exit status of that step.
 set -euo pipefail
@@ -54,8 +53,9 @@ print_step_title "Type check with tsc of TypeScript 6.0"
 
 # The public API gate of the published entry points (`horsies`,
 # `horsies/zod`): the API report of each one against
-# tests/public-api/report/, and the no-`any` check with the `unknown` allow
-# list (tests/public-api/unknown-allowed.json). A difference prints the
+# tests/public-api/report/, each type that a public declaration names is
+# exported by its entry point, and the no-`any` check with the `unknown`
+# allow list (tests/public-api/unknown-allowed.json). A difference prints the
 # command that writes the reports; a change of the public API needs the
 # owner's word.
 print_step_title "Public API report and the no-any check"

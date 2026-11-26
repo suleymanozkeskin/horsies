@@ -4,25 +4,169 @@
 
 ```ts
 
+/// <reference lib="esnext.temporal" />
+
 import { z } from 'zod';
+
+// @public
+export type AnyWire = Wire<unknown, unknown, Presence, Role>;
+
+// @public
+export class Decimal {
+    equals(other: Decimal): boolean;
+    static isDecimal(value: object): value is Decimal;
+    static parse(text: string): Result<Decimal, DecimalRefused>;
+    toString(): string;
+}
+
+// @public
+export type DecimalRefused =
+/** The text is not a decimal text of Python's `Decimal`, or its exponent is outside the bounds. */
+    {
+    readonly kind: "NotADecimal";
+    readonly detail: string;
+}
+/** The text is an infinity or a NaN, which a stored decimal cannot hold (Pydantic refuses them). */
+| {
+    readonly kind: "NotFinite";
+    readonly detail: string;
+};
+
+// @public
+export type Err<E> = {
+    readonly ok: false;
+    readonly error: E;
+};
 
 // @public (undocumented)
 export const hz: ZodBuilders;
 
 // @public
+export type KindRefused = {
+    readonly rule: KindRule;
+    readonly path: string;
+    readonly detail: string;
+};
+
+// @public
+export type KindRule =
+/** The value of a `.default(value)` does not encode under its kind (for example `NaN` for `h.float()`). */
+"DefaultNotStored"
+/** An object member has a name that only the engine writes. */
+| "EngineKeyMember"
+/**
+* An object member has an integer-like name: a JavaScript array index, the canonical decimal text of an integer
+* from 0 to 2^32 - 2 (`"0"`, `"10"`). JavaScript puts such a key first in an object, so the declared member order
+* of `h.object` cannot hold.
+*/
+| "IntegerLikeMember"
+/** The kind nests more arrays and objects than a stored value may have, so no value fits it. */
+| "KindTooDeep"
+/** A number member of a literal that is not a safe integer. */
+| "LiteralNotSafeInteger"
+/**
+* Two members of a union store the same JSON type and are not literals: one value cannot say which member it is
+* (`h.int()` with `h.float()`, `h.string()` with `h.instant()`).
+*/
+| "AmbiguousUnion"
+/** A member of `h.union([...])` is an array or an object; use `h.union(tag, [...])` for objects. */
+| "UnionMemberNotPrimitive"
+/** A member of `h.union(tag, [...])` has no required string-literal tag member, or repeats a tag value. */
+| "UnionTagInvalid"
+/** `h.resultOf` anywhere but as a whole task input parameter (optional or nullable too). */
+| "ResultOfPlacement";
+
+// @public
+export type NamedZodRule = "UNKNOWN_DEFINITION_FIELD" | "UNKNOWN_FORMAT" | "UNKNOWN_CHECK";
+
+// @public
+export type Ok<T> = {
+    readonly ok: true;
+    readonly value: T;
+};
+
+// @public
+export type Presence = "required" | "optional" | "defaulted";
+
+// @public
+export type RequiredWire = Wire<unknown, unknown, "required", "value">;
+
+// @public
+export type Result<T, E> = Ok<T> | Err<E>;
+
+// @public
+export type Role = "value" | "resultOf";
+
+// @public
+export type SelfCheckFailure = {
+    readonly name: string;
+    readonly expected: string;
+    readonly found: string;
+};
+
+// @public
+export type SentOf<W extends AnyWire> = W[typeof wireSent];
+
+// @public
+export type StandardSchemaMarked = {
+    readonly "~standard": {
+        readonly vendor: string;
+        readonly version: number;
+    };
+};
+
+// @public
 export type TextCodec<T> = z.ZodCodec<z.ZodString, z.ZodCustom<T, T>>;
 
-// Warning: (ae-forgotten-export) The symbol "RequiredWire" needs to be exported by the entry point zod.d.ts
-// Warning: (ae-forgotten-export) The symbol "ValueOf" needs to be exported by the entry point zod.d.ts
-//
+// @public
+export type ValueOf<W extends AnyWire> = W[typeof wireValue];
+
+// @public
+export type ValueWire = Wire<unknown, unknown, Presence, "value">;
+
+// @public
+export interface Wire<V, S = V, P extends Presence = "required", R extends Role = "value"> {
+    // (undocumented)
+    readonly [wirePresence]: P;
+    // (undocumented)
+    readonly [wireRole]: R;
+    // (undocumented)
+    readonly [wireSent]: S;
+    // (undocumented)
+    readonly [wireValue]: V;
+    default(value: S): Wire<V, S, "defaulted", R>;
+    nullable(): Wire<V | null, S | null, P, R>;
+    optional(): Wire<V, S, "optional", R>;
+}
+
 // @public
 export type WireSchema<W extends RequiredWire> = z.ZodCustom<ValueOf<W>, ValueOf<W>> & {
     readonly [zodWireSent]: SentOf<W>;
 };
 
 // @public
+export type ZodAdapterRefused = ZodReleaseRefused
+/**
+* The installed zod reads its known schemas to other kinds than this adapter expects (a renamed definition field):
+* every zod schema is refused until horsies reads the new field.
+*/
+| {
+    readonly kind: "SelfCheckFailed";
+    readonly failures: readonly SelfCheckFailure[];
+}
+/** The schema has forms without a stored form: every refusal, in walk order. */
+| {
+    readonly kind: "SchemaRefused";
+    readonly refusals: readonly ZodSchemaRefused[];
+}
+/** The compiled kind breaks a rule of the wire types (`checkKind`), with the rules of `h.*`. */
+| {
+    readonly kind: "KindRefused";
+    readonly refusals: readonly KindRefused[];
+};
+
+// @public
 export interface ZodBuilders {
-    // Warning: (ae-forgotten-export) The symbol "Decimal" needs to be exported by the entry point zod.d.ts
     decimal(): TextCodec<Decimal>;
     instant(): TextCodec<Temporal.Instant>;
     offsetDateTime(): TextCodec<Temporal.ZonedDateTime>;
@@ -33,13 +177,39 @@ export interface ZodBuilders {
 }
 
 // @public
+export function zodMemberWire(schema: StandardSchemaMarked): Result<ValueWire, ZodAdapterRefused>;
+
+// @public
+export type ZodReleaseRefused =
+/** The schema has no zod 4 internals: a zod 3 schema (zod 3.24 and later, or the `zod/v3` export of zod 4). */
+    {
+    readonly kind: "Zod3Schema";
+    readonly fix: string;
+}
+/** A zod 4 release outside `SUPPORTED_ZOD`. */
+| {
+    readonly kind: "ZodVersionNotSupported";
+    readonly found: ZodVersion;
+    readonly supported: string;
+}
+/**
+* A zod release inside the range, but another copy of zod than the one that horsies loads (two installs, or the
+* CommonJS and the ES module copy of one install): the self-check ran on the other copy.
+*/
+| {
+    readonly kind: "OtherZodCopy";
+    readonly found: ZodVersion;
+    readonly loaded: ZodVersion;
+};
+
+// @public
 export type ZodRule =
 /** `z.any()`, `z.unknown()`: the type names no stored form. */
 "UNTYPED"
 /**
 * A one-way change of the value: `.transform()`, `z.preprocess()`, `.pipe()` that is not a codec, `z.success()`,
-* and the checks that replace the value (`.trim()`, `.toLowerCase()`, `.toUpperCase()`, `.normalize()`,
-* `.overwrite()`).
+* `z.coerce.*()`, and the checks that replace the value (`.trim()`, `.toLowerCase()`, `.toUpperCase()`,
+* `.normalize()`, `.overwrite()`).
 */
 | "TRANSFORM"
 /** `.catch()`: it hides a decode failure. */
@@ -65,6 +235,14 @@ export type ZodRule =
 | "ENGINE_KEY"
 /** A definition type that this version of horsies does not know. */
 | "UNKNOWN_DEFINITION"
+/** A definition field, or a field value, that this version of horsies does not know (`name` is the field). */
+| "UNKNOWN_DEFINITION_FIELD"
+/** A string, number or bigint format that this version of horsies does not know (`name` is the format). */
+| "UNKNOWN_FORMAT"
+/** A check that this version of horsies does not know (`name` is zod's check name). */
+| "UNKNOWN_CHECK"
+/** `z.xor()`: zod refuses a value that two options take; the union kind takes the first. */
+| "EXCLUSIVE_UNION"
 /** `z.intersection()`, `.and()`. */
 | "INTERSECTION"
 /**
@@ -87,15 +265,27 @@ export type ZodRule =
 
 // @public
 export type ZodSchemaRefused = {
-    readonly rule: ZodRule;
+    readonly rule: Exclude<ZodRule, NamedZodRule>;
     readonly path: string;
     readonly zodType: string;
     readonly fix: string;
+} | {
+    readonly rule: NamedZodRule;
+    readonly path: string;
+    readonly zodType: string;
+    readonly name: string;
+    readonly fix: string;
 };
 
-// Warnings were encountered during analysis:
-//
-// dist/zod/codecs.d.ts:11:5 - (ae-forgotten-export) The symbol "SentOf" needs to be exported by the entry point zod.d.ts
+// @public
+export function zodValueWire(schema: StandardSchemaMarked): Result<RequiredWire, ZodAdapterRefused>;
+
+// @public
+export type ZodVersion = {
+    readonly major: number;
+    readonly minor: number;
+    readonly patch: number;
+};
 
 // (No @packageDocumentation comment for this package)
 
