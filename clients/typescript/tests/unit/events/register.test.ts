@@ -13,6 +13,7 @@ import { staticCheck } from "../../../horsies/src/check/static-check.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
 import { MAX_EVENT_HANDLERS } from "../../../horsies/src/events/bounds.ts";
 import { onEventFor, registeredHandlers, servedEventMembers } from "../../../horsies/src/events/register.ts";
+import type { EventHandlerOptions, HandlerChildStartHook } from "../../../horsies/src/events/types.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import { DATABASE_URL, fakeChecks, fakeEnvironment } from "../app/support.ts";
@@ -90,6 +91,35 @@ describe("app.onEvent", () => {
     );
   });
 
+  test("a JavaScript caller's options with no name, or a name that is not a text, are HRS-225, with no throw", () => {
+    const hub = app();
+    const context = appInternals(hub);
+    // SAFETY: a JavaScript caller can pass options that the static types refuse; the call must refuse them.
+    const calls = [undefined, null, {}, { name: 7 }, { name: null }] as unknown as readonly EventHandlerOptions[];
+
+    for (const options of calls) {
+      assert.doesNotThrow(() => {
+        hub.onEvent("TaskClaimed", options, noop);
+      });
+    }
+
+    assert.deepEqual(
+      refusalCodes(context),
+      calls.map(() => ["events", "HRS-225"]),
+    );
+    assert.deepEqual(
+      context.refusals.recorded().map((recorded) => recorded.refusal.message),
+      [
+        "onEvent TaskClaimed (no name): the options are not an object with a name",
+        "onEvent TaskClaimed (no name): the options are not an object with a name",
+        "onEvent TaskClaimed (no name): the name is not a text",
+        "onEvent TaskClaimed (no name): the name is not a text",
+        "onEvent TaskClaimed (no name): the name is not a text",
+      ],
+    );
+    assert.deepEqual(context.telemetry.handlers(), []);
+  });
+
   test("a handler past the most handlers is HRS-226", () => {
     const hub = app();
     const context = appInternals(hub);
@@ -143,6 +173,25 @@ describe("app.onHandlerChildStart", () => {
       hooks.map((member) => member.name),
       ["onHandlerChildStart #1 openClient", "onHandlerChildStart #2 (anonymous)"],
     );
+  });
+
+  test("a JavaScript caller's hook that is not a function is HRS-214, with no throw, and is not kept", () => {
+    const hub = app();
+    const context = appInternals(hub);
+    // SAFETY: a JavaScript caller can pass a hook that the static types refuse; the call must refuse it.
+    const hooks = [undefined, "x", { start: noop }] as unknown as readonly HandlerChildStartHook[];
+
+    for (const hook of hooks) {
+      assert.doesNotThrow(() => {
+        hub.onHandlerChildStart(hook);
+      });
+    }
+
+    assert.deepEqual(
+      refusalCodes(context),
+      hooks.map(() => ["events", "HRS-214"]),
+    );
+    assert.deepEqual(servedEventMembers(context).hooks, []);
   });
 
   test("a hook after the serve of the handler child is a defect: ClientDefect", () => {
