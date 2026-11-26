@@ -16,7 +16,8 @@ const RESULT_BRAND = "horsies.Result";
 /**
  * The horsies `Result` that a value holds:
  * - `result`: the value is a `Result`, a union with a `Result` member, or an array or tuple whose element type is
- *   one of these (`Result[]`, `[Result, Result]`), to the depth `MAX_COLLECTION_DEPTH`.
+ *   one of these (`Result[]`, `[Result, Result]`, `PromiseSettledResult<Result>[]`), to the depth
+ *   `MAX_COLLECTION_DEPTH`. A settled member counts through its fulfilled shape; the rule never reads its `value`.
  * - `promisedResult`: the value is a `Promise` (or another thenable) whose awaited value is a `Result`.
  * - `noResult`: neither.
  */
@@ -55,6 +56,26 @@ function hasBrandProperty(checker: ts.TypeChecker, type: ts.Type): boolean {
   return checker.getPropertiesOfType(type).some((property) => isBrandProperty(checker, property));
 }
 
+/** The text type of the `status` property that marks a fulfilled member of `Promise.allSettled`. */
+const FULFILLED_STATUS = "fulfilled";
+
+/**
+ * The type of the `value` property of a fulfilled settled member (`{ status: "fulfilled"; value: T }`), the shape of
+ * `PromiseFulfilledResult<T>`, or none. The rule reads the shape, not a name. Pure.
+ */
+function fulfilledValueType(checker: ts.TypeChecker, type: ts.Type): ts.Type | undefined {
+  const status = type.getProperty("status");
+  const value = type.getProperty("value");
+
+  if (status === undefined || value === undefined) {
+    return undefined;
+  }
+
+  const statusType = checker.getTypeOfSymbol(status);
+
+  return statusType.isStringLiteral() && statusType.value === FULFILLED_STATUS ? checker.getTypeOfSymbol(value) : undefined;
+}
+
 /** The element types of an array or a tuple type, or none for any other type. Pure. */
 function elementTypesOf(checker: ts.TypeChecker, type: ts.Type): readonly ts.Type[] {
   if (!checker.isArrayType(type) && !checker.isTupleType(type)) {
@@ -65,6 +86,13 @@ function elementTypesOf(checker: ts.TypeChecker, type: ts.Type): readonly ts.Typ
   return checker.getTypeArguments(type as ts.TypeReference);
 }
 
+/** `type` is a fulfilled settled member whose value carries the brand (`PromiseSettledResult<Result>`). Pure. */
+function settledCarriesBrand(checker: ts.TypeChecker, type: ts.Type, depth: number): boolean {
+  const value = fulfilledValueType(checker, type);
+
+  return value !== undefined && depth < MAX_COLLECTION_DEPTH && carriesBrand(checker, value, depth + 1);
+}
+
 /** A member of `type` (the type itself, or a member of its union) has the brand property, or is a collection of such. Pure. */
 function carriesBrand(checker: ts.TypeChecker, type: ts.Type, depth: number = 0): boolean {
   const members = type.isUnion() ? type.types : [type];
@@ -72,6 +100,7 @@ function carriesBrand(checker: ts.TypeChecker, type: ts.Type, depth: number = 0)
   return members.some(
     (member) =>
       hasBrandProperty(checker, member) ||
+      settledCarriesBrand(checker, member, depth) ||
       (depth < MAX_COLLECTION_DEPTH && elementTypesOf(checker, member).some((element) => carriesBrand(checker, element, depth + 1))),
   );
 }
