@@ -2,17 +2,21 @@
 // check gives the list of its problems; an empty list passes.
 
 import { isArray, isPlainObject, isString } from "../../horsies/src/codec/values.ts";
+import { PACKAGE_SKILL_FOLDER, SKILL_FILE_NAMES } from "../../horsies/src/tools/skills.ts";
 import type { ParsedJson } from "../public-api/package.ts";
 import { NAPI_CROSS_GLIBC_FLOOR } from "./glibc-floor.ts";
 import type { JsonObject } from "./manifest.ts";
 import { platformPackageOf } from "./platforms.ts";
 import type { CLibrary, NpmBuild, ReleasePlatform } from "./platforms.ts";
 
-/** The folder of the skill files in the package. */
-export const SKILL_FOLDER = ".agents/skills/horsies";
+/** The folder of the skill files in the package: the folder that `horsies skills install` copies from. */
+export const SKILL_FOLDER: string = PACKAGE_SKILL_FOLDER;
 
-/** The skill files that the Python and the Rust packages ship, by name. */
-export const SKILL_FILES: readonly string[] = ["SKILL.md", "configs.md", "monitoring.md", "tasks.md", "workflows.md"];
+/** The skill files that the Python and the Rust packages ship, by name: the files that `skills install` copies. */
+export const SKILL_FILES: readonly string[] = SKILL_FILE_NAMES;
+
+/** The command that the `bin` field of `horsies` names: the tool with `get-docs` and `skills install`. */
+export const BIN_NAME = "horsies";
 
 /** The skill folder of the package source: not written yet, or the names of its files. */
 export type SkillFolder = { readonly kind: "notWritten" } | { readonly kind: "written"; readonly files: readonly string[] };
@@ -70,6 +74,22 @@ function skillProblems(files: readonly string[], skills: SkillFolder): readonly 
       ];
     }
   }
+}
+
+/**
+ * The problems of the `bin` field of the packed manifest: it must name the command `horsies`, and the tarball must hold
+ * the file that it names. Pure.
+ */
+export function binFileProblems(files: readonly string[], binField: ParsedJson | undefined): readonly string[] {
+  const target = isPlainObject(binField) ? binField[BIN_NAME] : undefined;
+
+  if (!isString(target)) {
+    return [`the manifest has no bin ${BIN_NAME}`];
+  }
+
+  const file = target.startsWith("./") ? target.slice(2) : target;
+
+  return files.includes(file) ? [] : [`the bin ${BIN_NAME} names ${file}, which is not packed`];
 }
 
 /** Whether two JSON values are equal, with object members in any order. Pure. */
