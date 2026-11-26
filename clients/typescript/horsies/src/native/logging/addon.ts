@@ -47,6 +47,14 @@ export interface LoggerLevelArg {
 }
 
 /**
+ * A span that the package did not make: the span of a workflow start, or the attempt span of a body in a seat
+ * isolate. Ids are canonical UUID texts.
+ */
+export type NotMadeSpan =
+  | { readonly kind: "workflowStart"; readonly workflowId: string }
+  | { readonly kind: "seatAttempt"; readonly taskId: string };
+
+/**
  * The sink function that the addon calls with each batch: `true` when the sink took the batch,
  * `false` when it threw. It never throws.
  */
@@ -57,6 +65,11 @@ export interface LoggingAddon {
   setLogLevels(levels: LogLevelsArg): NativeEnvelope<undefined>;
   setLogSink(sink: NativeLogSink): NativeEnvelope<undefined>;
   resetLogSink(): NativeEnvelope<undefined>;
+  /**
+   * Write the ERROR record of `span`, not made for `cause`: on `horsies.app` for a start, on `horsies.worker` for a
+   * seat attempt. Starts the log bridge; a forwarder that cannot start throws `CORE_START_FAILED`.
+   */
+  logSpanNotMade(span: NotMadeSpan, cause: string): NativeEnvelope<undefined>;
 }
 
 /** The `logging` functions of the addon. Throws as `requireAddon` does. */

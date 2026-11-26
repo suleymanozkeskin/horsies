@@ -11,6 +11,7 @@ import { bodyObserverOf, NO_BODY_OBSERVER } from "../../../../horsies/src/child/
 import { defineTask } from "../../../../horsies/src/contract/public.ts";
 import { NO_SEAT_BODY_OBSERVER, seatBodyObserverOf } from "../../../../horsies/src/seats/body-observer.ts";
 import { tracingPartsOf, tracingPartsOfApp } from "../../../../horsies/src/telemetry/create-hook.ts";
+import { SpansNotMade } from "../../../../horsies/src/telemetry/not-made.ts";
 import { ClientDefect } from "../../../../horsies/src/thrown-errors.ts";
 import { type OtelApiLoad, requireOtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import { tracingSettingOf } from "../../../../horsies/src/telemetry/tracing-config.ts";
@@ -38,7 +39,13 @@ function countingLoader(load: OtelApiLoad): { readonly loader: () => OtelApiLoad
 const MISSING: OtelApiLoad = { kind: "otelApiMissing", cause: "Cannot find module '@opentelemetry/api'" };
 
 function environmentOf(loader: () => OtelApiLoad): Parameters<typeof tracingPartsOf>[1] {
-  return { loadApi: loader, warnings: recordedWarnings().warnings, clock: () => 0, now: () => Temporal.Now.instant() };
+  return {
+    loadApi: loader,
+    warnings: recordedWarnings().warnings,
+    clock: () => 0,
+    now: () => Temporal.Now.instant(),
+    notMade: new SpansNotMade(() => undefined),
+  };
 }
 
 describe("the tracing setting", () => {

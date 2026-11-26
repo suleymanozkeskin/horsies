@@ -1,7 +1,8 @@
 // The attempt span of a body in a seat isolate: the span of a Node child (name, kind, attributes, the parent from the
 // stored carrier), active where the body runs; its start at the isolate's clock and its end at the main thread's
 // `endedAt`; the status of each verdict; the cancel signal ends nothing; a thrown value is recorded; no span for facts
-// that are not recorded; a throw of the SDK changes no run; the flush of the isolate's provider.
+// that are not recorded; a throw of the SDK changes no run (at the open or the end it is one report of a span not made
+// per process, at the record of a thrown value one warning); the flush of the isolate's provider.
 
 import assert from "node:assert/strict";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -14,7 +15,7 @@ import type { BodyCarrierRecord, BodyFactsRecord } from "../../../../horsies/src
 import type { SeatBodyObserver } from "../../../../horsies/src/seats/body-observer.ts";
 import type { OtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import { highResolutionTimeOfInstant, otelSeatBodyObserver } from "../../../../horsies/src/telemetry/seat-span.ts";
-import { installSdk, loadedApi, onlySpan, recordedWarnings, type TestSdk } from "../support.ts";
+import { installSdk, loadedApi, onlySpan, recordedNotMade, recordedWarnings, type TestSdk } from "../support.ts";
 
 const TASK_ID = "0192f6a1-7b3c-7d4e-8f00-0123456789ab";
 
@@ -40,10 +41,47 @@ function factsWith(carrier: BodyCarrierRecord): BodyFactsRecord {
 
 const NO_CARRIER: BodyCarrierRecord = { kind: "noCarrier" };
 
-function observerOf(api: OtelApi = loadedApi()): { readonly observer: SeatBodyObserver; readonly lines: string[] } {
-  const { warnings, lines } = recordedWarnings();
+/** The observer of a test, the warnings it wrote and the reports of spans not made that it wrote. */
+type TestObserver = { readonly observer: SeatBodyObserver; readonly lines: string[]; readonly written: string[] };
 
-  return { observer: otelSeatBodyObserver({ api, parentage: "childOfSend", warnings, now: () => OPENED_AT }), lines };
+function observerOf(api: OtelApi = loadedApi()): TestObserver {
+  const { warnings, lines } = recordedWarnings();
+  const { notMade, written } = recordedNotMade();
+
+  return { observer: otelSeatBodyObserver({ api, parentage: "childOfSend", warnings, now: () => OPENED_AT, notMade }), lines, written };
+}
+
+/** The API whose spans throw at `member`. */
+function apiWithBrokenSpans(member: "end" | "recordException"): OtelApi {
+  const api = loadedApi();
+
+  return {
+    ...api,
+    trace: {
+      ...api.trace,
+      getTracer: (name) => ({
+        startSpan: (spanName, options, context) => {
+          const span = api.trace.getTracer(name).startSpan(spanName, options, context);
+
+          const broken = (): never => {
+            throw new Error(`the SDK is broken at ${member}`);
+          };
+
+          return {
+            setAttribute: (key, value) => span.setAttribute(key, value),
+            setStatus: (status) => span.setStatus(status),
+            recordException: member === "recordException" ? broken : (exception) => {
+              span.recordException(exception);
+            },
+            end: member === "end" ? broken : (endTime) => {
+              span.end(endTime);
+            },
+            spanContext: () => span.spanContext(),
+          };
+        },
+      }),
+    },
+  };
 }
 
 /** The carrier of a send span that the test opens and ends. */
@@ -197,7 +235,7 @@ describe("the attempt span of a seat body", () => {
 });
 
 describe("the attempt span of a seat body with a broken SDK", () => {
-  test("a tracer that throws: the body runs with no span, and one warning", async () => {
+  test("a tracer that throws: the body runs with no span, and one report of a span not made per process", async () => {
     const api = loadedApi();
 
     const broken: OtelApi = {
@@ -210,7 +248,7 @@ describe("the attempt span of a seat body with a broken SDK", () => {
       },
     };
 
-    const { observer, lines } = observerOf(broken);
+    const { observer, lines, written } = observerOf(broken);
     let runs = 0;
 
     for (let run = 0; run < 2; run += 1) {
@@ -220,8 +258,27 @@ describe("the attempt span of a seat body with a broken SDK", () => {
     }
 
     assert.equal(runs, 2);
+    assert.deepEqual(written, [`seatAttempt ${TASK_ID} Error: the SDK is broken`]);
+    assert.deepEqual(lines, []);
+  });
+
+  test("a span whose end throws is a span not made: one report per process", async () => {
+    const { observer, written } = observerOf(apiWithBrokenSpans("end"));
+
+    await runSeatBody(observer, factsWith(NO_CARRIER), { kind: "returned" });
+    await runSeatBody(observer, factsWith(NO_CARRIER), { kind: "timedOut" });
+    assert.deepEqual(written, [`seatAttempt ${TASK_ID} Error: the SDK is broken at end`]);
+  });
+
+  test("a throw when the span records a thrown value is one warning: the span is still made", () => {
+    const { observer, lines, written } = observerOf(apiWithBrokenSpans("recordException"));
+    const observation = observer.enter(factsWith(NO_CARRIER));
+
+    observation.thrown(new RangeError("out of range"));
+    observation.end({ kind: "failed", code: "UNHANDLED_EXCEPTION" }, ENDED_AT);
+    assert.deepEqual(written, []);
     assert.equal(lines.length, 1);
-    assert.match(lines[0] ?? "", /the span of an attempt did not open.*the SDK is broken/u);
+    assert.match(lines[0] ?? "", /the span of an attempt did not end.*the SDK is broken at recordException/u);
   });
 });
 

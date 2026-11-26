@@ -18,7 +18,8 @@
 //   not start, or is not ready within the start-hook bound ends the child with 173.
 // - Once the pool ends the child, it is `ending`: the child ends after its exit flush, so a run or a cancel that the
 //   core posts in that time is left (the core gives such a run the crash path).
-// - A `defect` of an isolate goes to the defect rule (the child aborts); a `log` line of an isolate goes to stderr.
+// - A `defect` of an isolate goes to the defect rule (the child aborts); a `log` line of an isolate goes to stderr; a
+//   `spanNotMade` report of an isolate goes to the reports of the process.
 // - At the child's stop the exit rule asks for `flush`: each isolate that took its runs (free or running) flushes its
 //   seat body observer and answers `flushed`; the flush ends when each one answered or ended. A booting isolate ran no
 //   body and is not asked. The exit rule bounds the wait, so a sync body that holds its isolate does not hold the end.
@@ -26,6 +27,7 @@
 
 import type { BodyEnd } from "../child/body-observer.ts";
 import type { CancelCauseName, ChildPost } from "../native/child/addon.ts";
+import type { NotMadeSpan } from "../native/logging/addon.ts";
 import type { SeatBounds } from "../native/seats/addon.ts";
 import { CHILD_HOOK_FAILED_EXIT_CODE } from "../_catalog/exit_codes.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
@@ -90,6 +92,8 @@ export interface SeatPoolDeps extends SeatHost {
   /** End the child with `code` through the exit rule. */
   readonly endChild: (code: number) => void;
   readonly writeLine: (line: string) => void;
+  /** The report of a span that an isolate did not make, with the text of the cause: once per process and kind. */
+  readonly spanNotMade: (span: NotMadeSpan, cause: string) => void;
   /** The defect rule: it never throws. */
   readonly reportDefect: (defect: CoreDefect) => void;
 }
@@ -388,6 +392,10 @@ export class SeatPool {
         return;
       case "flushed":
         state.isolate.flushesEnded();
+
+        return;
+      case "spanNotMade":
+        this.#deps.spanNotMade(message.span, message.cause);
 
         return;
       default:

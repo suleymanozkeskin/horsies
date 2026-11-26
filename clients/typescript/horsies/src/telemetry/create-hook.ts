@@ -19,6 +19,7 @@ import { NO_OP_START_OBSERVER, type StartObserver } from "../workflow/start.ts";
 import { OTEL_API_MODULE, type OtelApi, type OtelApiLoader } from "./otel-api.ts";
 import { type AttemptSpanDeps, otelBodyObserver } from "./attempt-span.ts";
 import { type EndedSpans, NO_ENDED_SPANS, otelEndedSpans } from "./ended-span.ts";
+import { processSpansNotMade, type SpansNotMade } from "./not-made.ts";
 import { otelSeatBodyObserver } from "./seat-span.ts";
 import { otelSendObserver } from "./send-span.ts";
 import { otelStartObserver } from "./start-span.ts";
@@ -58,11 +59,19 @@ export type TracingEnvironment = {
   readonly clock: () => number;
   /** The wall clock: the start of the span of a seat run, whose end is the main thread's wall-clock time. */
   readonly now: () => Temporal.Instant;
+  /** The reports of the start spans and the seat attempt spans that were not made. */
+  readonly notMade: SpansNotMade;
 };
 
 /** The tracing environment of this process. */
 export function processTracingEnvironment(loadApi: OtelApiLoader): TracingEnvironment {
-  return { loadApi, warnings: processWarnings, clock: () => performance.now(), now: () => Temporal.Now.instant() };
+  return {
+    loadApi,
+    warnings: processWarnings,
+    clock: () => performance.now(),
+    now: () => Temporal.Now.instant(),
+    notMade: processSpansNotMade,
+  };
 }
 
 /** The config path of the tracing setting. */
@@ -100,9 +109,9 @@ function otelParts(setting: OtelTracingSetting, api: OtelApi, environment: Traci
   return Object.freeze({
     setting,
     sendObserver: otelSendObserver({ api, warnings, clock: environment.clock }),
-    startObserver: otelStartObserver({ api, warnings }),
+    startObserver: otelStartObserver({ api, notMade: environment.notMade }),
     bodyObserver: otelBodyObserver(spanDeps),
-    seatBodyObserver: otelSeatBodyObserver({ ...spanDeps, now: environment.now }),
+    seatBodyObserver: otelSeatBodyObserver({ ...spanDeps, now: environment.now, notMade: environment.notMade }),
     endedSpans: endedSpansOf(setting, spanDeps),
   });
 }

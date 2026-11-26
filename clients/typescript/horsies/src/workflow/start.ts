@@ -2,9 +2,9 @@
 //
 // A start: the workflow is listed; the workflow id is a UUID (a new one when left out); the params encode with a
 // read-back, and the build gets the value that a child build gets from the stored text; the build runs once and passes
-// the spec checks; the start observer wraps the core's start (the conversion to spec data, the parse, the write) and
-// reads its outcome. Every refusal before the core writes nothing and opens no span. The same id with the same command
-// returns the existing run.
+// the spec checks; the core prepares the spec data (the conversion and the parse, no I/O); the start observer wraps the
+// core's write of that text and reads its outcome. Every refusal before the write writes nothing and opens no span, as
+// in the Rust client. The same id with the same command returns the existing run.
 
 import type { CoreCause, NoCause } from "../_catalog/error_detail.ts";
 import { refusalText } from "../codec/refusal.ts";
@@ -19,7 +19,7 @@ import { unreachable } from "../wire/unreachable.ts";
 import { runBuild } from "./builder.ts";
 import { type CheckedBuild, checkBuild } from "./checks.ts";
 import type { SeatRelayFullOutcome } from "../seats/relay-full.ts";
-import type { StartCall, WorkflowCore } from "./core.ts";
+import type { SpecRefusal, StartCall, WorkflowCore } from "./core.ts";
 import { workflowRecord } from "./define.ts";
 import { type WorkflowHandle, workflowHandleOf } from "./handle.ts";
 import type { NodeTarget } from "./node-checks.ts";
@@ -73,7 +73,7 @@ export type StartContext = {
 
 type StartOutcome<R extends BuildReturn> = Result<WorkflowHandle<R>, WorkflowStartError<R>>;
 
-/** Start `workflow` with `params`. Effects: the build, and one start through the core. */
+/** Start `workflow` with `params`. Effects: the build, the core's prepare, and one start through the core. */
 export async function startWorkflow<R extends BuildReturn>(
   context: StartContext,
   workflow: object,
@@ -108,10 +108,50 @@ export async function startWorkflow<R extends BuildReturn>(
 
   const sentAtMicros = epochMicrosTowardPast(context.now());
   const facts: StartFacts = { workflow, workflowName: record.name, workflowId, sentAtMicros, targets: built.value.targets };
+  const prepared = await context.core.prepare(built.value.spec);
 
-  return context.observer.observeStart({ workflowName: record.name, workflowId }, async (trace) =>
-    startOutcome<R>(context, await context.core.start({ spec: built.value.spec, workflowId, sentAtMicros, trace }), facts),
+  switch (prepared.kind) {
+    case "textRefused":
+    case "specRefused":
+      return err(specRefused(prepared, facts));
+    case "seatRelayFull":
+      return err(prepared.error);
+    case "prepared":
+      return startPrepared<R>(context, prepared.specData, facts);
+    default:
+      return unreachable(prepared, "startWorkflow");
+  }
+}
+
+/** The core's write of the prepared spec data `specData`, inside the start observer. */
+async function startPrepared<R extends BuildReturn>(
+  context: StartContext,
+  specData: string,
+  facts: StartFacts,
+): Promise<StartOutcome<R>> {
+  const { workflowId, sentAtMicros } = facts;
+
+  return context.observer.observeStart({ workflowName: facts.workflowName, workflowId }, async (trace) =>
+    startOutcome<R>(context, await context.core.start({ specData, workflowId, sentAtMicros, trace }), facts),
   );
+}
+
+/** `VALIDATION_FAILED` of a spec that the conversion to spec data or the core's parse refused. Pure. */
+function specRefused(refusal: SpecRefusal, facts: StartFacts): WorkflowStartError<never> {
+  const message = specRefusalText(refusal);
+
+  return startValidationFailed(message, facts.workflowName, facts.workflowId, ruleRefused(message));
+}
+
+function specRefusalText(refusal: SpecRefusal): string {
+  switch (refusal.kind) {
+    case "textRefused":
+      return `the spec has a string with no stored text at ${refusal.refused.path}: ${refusal.refused.detail}`;
+    case "specRefused":
+      return `the core refuses the spec data at ${refusal.fieldPath}: ${refusal.cause}`;
+    default:
+      return unreachable(refusal, "specRefusalText");
+  }
 }
 
 /** The checked build of `workflow` with `params`, or the message of the first refusal. Effects: the user's build. */
@@ -169,14 +209,9 @@ function startOutcome<R extends BuildReturn>(
   call: StartCall | SeatRelayFullOutcome,
   facts: StartFacts,
 ): StartOutcome<R> {
-  const refuse = (message: string): StartOutcome<R> =>
-    err(startValidationFailed(message, facts.workflowName, facts.workflowId, ruleRefused(message)));
-
   switch (call.kind) {
-    case "textRefused":
-      return refuse(`the spec has a string with no stored text at ${call.refused.path}: ${call.refused.detail}`);
     case "specRefused":
-      return refuse(`the core refuses the spec data at ${call.fieldPath}: ${call.cause}`);
+      return err(specRefused(call, facts));
     case "seatRelayFull":
       return err(call.error);
     case "outcome":
@@ -230,13 +265,5 @@ export async function retryStart<R extends BuildReturn>(
     return err(startValidationFailed(message, error.workflowName, error.workflowId, ruleRefused(message)));
   }
 
-  const retry = kept.retry;
-
-  return context.observer.observeStart({ workflowName: retry.workflowName, workflowId: retry.workflowId }, async (trace) =>
-    startOutcome<R>(
-      context,
-      await context.core.restart({ specData: retry.specData, workflowId: retry.workflowId, sentAtMicros: retry.sentAtMicros, trace }),
-      retry,
-    ),
-  );
+  return startPrepared<R>(context, kept.retry.specData, kept.retry);
 }

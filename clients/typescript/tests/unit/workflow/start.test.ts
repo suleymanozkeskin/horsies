@@ -93,16 +93,15 @@ function contextOf(core: FakeCore, observer: StartObserver = NO_OP_START_OBSERVE
 }
 
 describe("app.start", () => {
-  test("a started tree gives a handle; the core gets the checked spec, the id, the sent instant and no carrier", async () => {
+  test("a started tree gives a handle; the core prepares the checked spec, then starts its text with the id, the sent instant and no carrier", async () => {
     const core = fakeCore();
     const started = await createWorkflowArea(contextOf(core)).start(hello, { who: "eu" });
 
     assert(started.ok);
     assert.equal(started.value.workflowId, WORKFLOW_ID);
-    assert.equal(core.starts.length, 1);
-    assert.equal(core.starts[0]?.spec.nodes[0]?.staticInput, '{"who":"eu"}');
-    assert.equal(core.starts[0]?.sentAtMicros, 1_795_687_200_123_456n);
-    assert.deepEqual(core.starts[0]?.trace, { kind: "noCarrier" });
+    assert.equal(core.prepares.length, 1);
+    assert.equal(core.prepares[0]?.nodes[0]?.staticInput, '{"who":"eu"}');
+    assert.deepEqual(core.starts, [{ specData: SPEC_DATA, workflowId: WORKFLOW_ID, sentAtMicros: 1_795_687_200_123_456n, trace: { kind: "noCarrier" } }]);
   });
 
   test("the same id with the same command gives the existing run as a handle", async () => {
@@ -150,14 +149,14 @@ describe("app.start", () => {
       const core = fakeCore();
       const code = await start(createWorkflowArea(contextOf(core)));
 
-      assert.deepEqual(core.starts, []);
+      assert.deepEqual([core.prepares, core.starts], [[], []]);
       assert.equal(code, "VALIDATION_FAILED");
     });
   }
 
-  test("a spec string that the writer cannot store: VALIDATION_FAILED with the path", async () => {
+  test("a spec string that the writer cannot store: VALIDATION_FAILED with the path, and no start", async () => {
     const core = fakeCore({
-      refusedCall: {
+      refusedPrepare: {
         kind: "textRefused",
         refused: { kind: "LoneSurrogate", path: "$.name", detail: "a string holds a lone surrogate" },
       },
@@ -167,14 +166,16 @@ describe("app.start", () => {
 
     assert(!started.ok && started.error.code === "VALIDATION_FAILED");
     assert.match(started.error.message, /no stored text at \$\.name: a string holds a lone surrogate/u);
+    assert.deepEqual(core.starts, []);
   });
 
-  test("spec data that the core's parse refuses: VALIDATION_FAILED with the field path", async () => {
-    const core = fakeCore({ refusedCall: { kind: "specRefused", fieldPath: "nodes[0].queue", cause: "no class" } });
+  test("spec data that the core's parse refuses: VALIDATION_FAILED with the field path, and no start", async () => {
+    const core = fakeCore({ refusedPrepare: { kind: "specRefused", fieldPath: "nodes[0].queue", cause: "no class" } });
     const started = await createWorkflowArea(contextOf(core)).start(hello, { who: "eu" });
 
     assert(!started.ok && started.error.code === "VALIDATION_FAILED");
     assert.match(started.error.message, /the core refuses the spec data at nodes\[0\]\.queue: no class/u);
+    assert.deepEqual(core.starts, []);
   });
 
   test("a VALIDATION_FAILED of the core's start is the start error, with no retry", async () => {
@@ -207,7 +208,7 @@ describe("app.start", () => {
     assert.deepEqual(core.starts[0]?.trace, carrier);
   });
 
-  test("the start observer reads the outcome of the core's start; a refusal before the core calls no observer", async () => {
+  test("the start observer reads the outcome of the core's start; a refusal before the write (a build, a spec that the core's parse refuses) calls no observer", async () => {
     const outcomes: string[] = [];
 
     const observer: StartObserver = {
@@ -220,14 +221,14 @@ describe("app.start", () => {
       },
     };
 
-    const refused = fakeCore({ refusedCall: { kind: "specRefused", fieldPath: "nodes[0].queue", cause: "no class" } });
+    const refused = fakeCore({ refusedPrepare: { kind: "specRefused", fieldPath: "nodes[0].queue", cause: "no class" } });
     const conflict = fakeCore({ started: [{ kind: "failed", error: rawIdConflict("hello", "other") }] });
 
     assert.equal(codeOf(await createWorkflowArea(contextOf(fakeCore(), observer)).start(hello, { who: "a" })), "started");
-    assert.equal(codeOf(await createWorkflowArea(contextOf(refused, observer)).start(hello, { who: "a" })), "VALIDATION_FAILED");
     assert.equal(codeOf(await createWorkflowArea(contextOf(conflict, observer)).start(hello, { who: "a" })), "WORKFLOW_ID_CONFLICT");
+    assert.equal(codeOf(await createWorkflowArea(contextOf(refused, observer)).start(hello, { who: "a" })), "VALIDATION_FAILED");
     assert.equal(codeOf(await createWorkflowArea(contextOf(fakeCore(), observer)).start(thrower, {})), "VALIDATION_FAILED");
-    assert.deepEqual(outcomes, ["started", "VALIDATION_FAILED", "WORKFLOW_ID_CONFLICT"]);
+    assert.deepEqual(outcomes, ["started", "WORKFLOW_ID_CONFLICT"]);
   });
 });
 
@@ -247,7 +248,8 @@ describe("app.retryStart", () => {
     const retried = await area.retryStart(started.error);
 
     assert(retried.ok);
-    assert.deepEqual(core.restarts, [
+    assert.equal(core.prepares.length, 1, "the retry prepares nothing");
+    assert.deepEqual(core.starts.slice(1), [
       {
         specData: SPEC_DATA,
         workflowId: WORKFLOW_ID,
@@ -274,6 +276,6 @@ describe("app.retryStart", () => {
     const retried = await area.retryStart(forged as never);
 
     assert(!retried.ok && retried.error.code === "VALIDATION_FAILED");
-    assert.deepEqual(core.restarts, []);
+    assert.deepEqual(core.starts, []);
   });
 });

@@ -39,6 +39,7 @@ import {
 import { setPanicRule } from "../native/process-core/process-core.ts";
 import { fillHandlerChild } from "../native/handler-child/handler-child.ts";
 import { fillHandlerChildOf, type HandlerChildNative } from "../events/handler-child.ts";
+import { processSpansNotMade } from "../telemetry/not-made.ts";
 import type { TracingSetting } from "../telemetry/tracing-config.ts";
 import { buildTaskError, checkAppConfig } from "../native/sends/sends.ts";
 import type {
@@ -263,20 +264,7 @@ async function servedChild(
     reportDefect: deps.reportDefect,
   };
 
-  const router = new SeatRouter({
-    ...deps.seats,
-    settle: (runKey, taskName, outcome) => {
-      settleRun(serve, runKey, taskName, outcome);
-    },
-    serve: async (request) => serveSeatOperation(context.core, request),
-    endChild: (code) => {
-      void ending.childEnd.end(code);
-    },
-    writeLine: deps.writeLine,
-    reportDefect: deps.reportDefect,
-  });
-
-  ending.flushes.route(router);
+  const router = seatRouterOf(context, serve, deps, ending);
 
   const post = router.posts(postDispatcher(serve));
 
@@ -303,6 +291,33 @@ async function servedChild(
   const end = await deps.native.serveChild(plan, post, settlingCallback(hooks, deps.settlement));
 
   return { kind: "served", code: end.code };
+}
+
+/**
+ * The router of the posts of the child: the seat pool of a thread child settles its runs through `serve`, ends the
+ * child through the exit rule, and writes the span reports of its isolates once per process. The exit rule flushes the
+ * seat isolates through it from here on.
+ */
+function seatRouterOf(context: AppContext, serve: ChildServe, deps: ChildModeDeps, ending: ChildEnding): SeatRouter {
+  const router = new SeatRouter({
+    ...deps.seats,
+    settle: (runKey, taskName, outcome) => {
+      settleRun(serve, runKey, taskName, outcome);
+    },
+    serve: async (request) => serveSeatOperation(context.core, request),
+    endChild: (code) => {
+      void ending.childEnd.end(code);
+    },
+    writeLine: deps.writeLine,
+    spanNotMade: (span, cause) => {
+      processSpansNotMade.reportText(span, cause);
+    },
+    reportDefect: deps.reportDefect,
+  });
+
+  ending.flushes.route(router);
+
+  return router;
 }
 
 /** The body facts that a child of an app with `tracing` records: the facts of each run for its spans, or none. Pure. */

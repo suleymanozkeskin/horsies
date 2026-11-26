@@ -122,7 +122,9 @@ export function otelBodyObserver(deps: AttemptSpanDeps): BodyObserver {
 
 /** The observation of one body: its span, or none when the user's SDK threw at the open. */
 function openedObservation(deps: AttemptSpanDeps, facts: RecordedFacts): BodyObservation {
-  const opened = openedAttemptSpan(deps, facts, SDK_CLOCK);
+  const opened = openedAttemptSpan(deps, facts, SDK_CLOCK, (cause) => {
+    deps.warnings.warnOnce("attemptSpanOpen", cause);
+  });
 
   switch (opened.kind) {
     case "notOpen":
@@ -147,10 +149,15 @@ export type OpenedAttemptSpan = { readonly kind: "open"; readonly open: OpenSpan
 
 /**
  * Open the attempt span of `facts` from `start`: `run <task_name>`, CONSUMER, the parent and the links by the
- * parentage, the attributes of the run and of its workflow node. A throw of the user's SDK gives `notOpen` and one
- * warning per process.
+ * parentage, the attributes of the run and of its workflow node. A throw of the user's SDK goes to `openFailed` and
+ * gives `notOpen`.
  */
-export function openedAttemptSpan(deps: AttemptSpanDeps, facts: RecordedFacts, start: SpanTime): OpenedAttemptSpan {
+export function openedAttemptSpan(
+  deps: AttemptSpanDeps,
+  facts: RecordedFacts,
+  start: SpanTime,
+  openFailed: (cause: unknown) => void,
+): OpenedAttemptSpan {
   const { api } = deps;
 
   try {
@@ -166,7 +173,7 @@ export function openedAttemptSpan(deps: AttemptSpanDeps, facts: RecordedFacts, s
 
     return { kind: "open", open: { span, active, ids: spanIdsOf(api, span), execution: facts.execution } };
   } catch (cause) {
-    deps.warnings.warnOnce("attemptSpanOpen", cause);
+    openFailed(cause);
 
     return { kind: "notOpen" };
   }

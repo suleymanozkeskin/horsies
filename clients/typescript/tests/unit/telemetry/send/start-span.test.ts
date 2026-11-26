@@ -1,7 +1,8 @@
 // The start span of a workflow start and its carrier: name, kind, attributes and parent; a start error sets the status
 // and `error.type`; the carrier that the core gets has the span's trace id; a throw of the start path ends the span
-// with ERROR; no SDK gives no carrier; a throw of the SDK changes no start. Through the app: each start and each retry
-// of a start has one span, and the core gets its carrier; an app with no tracing gives the core no carrier.
+// with ERROR; no SDK gives no carrier; a throw of the SDK changes no start and is one report of a span not made per
+// process. Through the app: each start and each retry of a start has one span, and the core gets its carrier; a spec
+// that the core's parse refuses opens no span; an app with no tracing gives the core no carrier.
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, test } from "node:test";
@@ -20,16 +21,16 @@ import { defineWorkflow } from "../../../../horsies/src/workflow/public.ts";
 import type { StartCallResult, StartObserver } from "../../../../horsies/src/workflow/start.ts";
 import { DATABASE_URL, fakeEnvironment, fakeProducer } from "../../app/support.ts";
 import { fakeCore, type FakeCore, rawStartEnqueueFailed, WORKFLOW_ID } from "../../workflow/core-support.ts";
-import { API, installSdk, loadedApi, onlySpan, recordedWarnings, type TestSdk } from "../support.ts";
+import { API, installSdk, loadedApi, onlySpan, recordedNotMade, type TestSdk } from "../support.ts";
 
 const FACTS = { workflowName: "nightly", workflowId: WORKFLOW_ID };
 const STARTED: StartCallResult = ok("the handle");
 const FAILED: StartCallResult = err({ code: "WORKFLOW_ID_CONFLICT" });
 
-function observerOf(api: OtelApi = loadedApi()): { readonly observer: StartObserver; readonly lines: string[] } {
-  const { warnings, lines } = recordedWarnings();
+function observerOf(api: OtelApi = loadedApi()): { readonly observer: StartObserver; readonly written: string[] } {
+  const { notMade, written } = recordedNotMade();
 
-  return { observer: otelStartObserver({ api, warnings }), lines };
+  return { observer: otelStartObserver({ api, notMade }), written };
 }
 
 /** Run one start through `observer`, keeping the trace that the core would get. */
@@ -146,13 +147,12 @@ describe("the start span", () => {
     assert.equal(span.attributes["error.type"], "RangeError");
   });
 
-  test("a span whose end throws: one warning, and the outcome of the start is unchanged", async () => {
-    const { observer, lines } = observerOf(apiWithBrokenEnd());
+  test("a span whose end throws is a span not made: one report per process, and the outcome of the start is unchanged", async () => {
+    const { observer, written } = observerOf(apiWithBrokenEnd());
 
     await startThrough(observer, STARTED);
     await startThrough(observer, FAILED);
-    assert.equal(lines.length, 1);
-    assert.match(lines[0] ?? "", /the span of a workflow start did not end.*the exporter is broken/u);
+    assert.deepEqual(written, [`workflowStart ${WORKFLOW_ID} Error: the exporter is broken`]);
   });
 });
 
@@ -181,7 +181,7 @@ describe("the start span with no SDK or a broken SDK", () => {
     assert.deepEqual(await startThrough(observerOf().observer, STARTED), [{ kind: "noCarrier" }]);
   });
 
-  test("a tracer that throws gives no carrier and one warning; the outcome of the start is unchanged", async () => {
+  test("a tracer that throws gives no carrier and one report of a span not made; the outcome of the start is unchanged", async () => {
     const api = loadedApi();
 
     const broken: OtelApi = {
@@ -194,12 +194,11 @@ describe("the start span with no SDK or a broken SDK", () => {
       },
     };
 
-    const { observer, lines } = observerOf(broken);
+    const { observer, written } = observerOf(broken);
     const traces = [...(await startThrough(observer, STARTED)), ...(await startThrough(observer, FAILED))];
 
     assert.deepEqual(traces, [{ kind: "noCarrier" }, { kind: "noCarrier" }]);
-    assert.equal(lines.length, 1);
-    assert.match(lines[0] ?? "", /the span of a workflow start did not open.*the SDK is broken/u);
+    assert.deepEqual(written, [`workflowStart ${WORKFLOW_ID} Error: the SDK is broken`]);
   });
 });
 
@@ -257,7 +256,15 @@ describe("Horsies.create and the start span", () => {
     );
     assert.deepEqual([retry.name, retry.status.code], ["start hello", otel.SpanStatusCode.UNSET]);
     assert.equal(traceIdOf(core.starts[0]?.trace), first.spanContext().traceId);
-    assert.equal(traceIdOf(core.restarts[0]?.trace), retry.spanContext().traceId);
+    assert.equal(traceIdOf(core.starts[1]?.trace), retry.spanContext().traceId);
+  });
+
+  test("with otel tracing, a spec that the core's parse refuses opens no span: the start never reached the core", async () => {
+    const core = fakeCore({ refusedPrepare: { kind: "specRefused", fieldPath: "nodes[0].queue", cause: "no class" } });
+    const started = await workflowApp(core, { kind: "otel" }).start(hello, { who: "eu" });
+
+    assert(!started.ok && started.error.code === "VALIDATION_FAILED");
+    assert.deepEqual([sdk.spans(), core.starts], [[], []]);
   });
 
   test("with no tracing, the core gets no carrier and no span ends", async () => {

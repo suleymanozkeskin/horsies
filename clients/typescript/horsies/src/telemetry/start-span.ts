@@ -8,9 +8,10 @@
 // - A throw of the start path (a defect) ends the span with ERROR and `error.type` = the thrown value's type
 //   (`thrownRecord`), and passes on.
 // - A start refused before the core (an unlisted workflow, a workflow id that is not a UUID, a build that fails its
-//   checks) calls no observer, so it opens no span, as in the Rust client.
-// - Telemetry never changes the start: a throw of the user's SDK at the open gives no span and no carrier; a throw at
-//   the end is written once per process (`TelemetryWarnings`).
+//   checks, a spec that the conversion to spec data or the core's parse refuses) calls no observer, so it opens no
+//   span, as in the Rust client.
+// - Telemetry never changes the start: a throw of the user's SDK at the open gives no span and no carrier. A throw at
+//   the open or the end is a span that was not made: one ERROR record per process on `horsies.app` (`not-made.ts`).
 
 import { thrownRecord } from "../child/thrown-error.ts";
 import type { TraceArgument } from "../native/values/records.ts";
@@ -27,14 +28,14 @@ import {
   WORKFLOW_NAME_KEY,
 } from "./attributes.ts";
 import { NO_CARRIER, sendTraceOf } from "./carrier.ts";
+import type { SpansNotMade } from "./not-made.ts";
 import { INSTRUMENTATION_SCOPE, type OtelApi, type OtelSpan } from "./otel-api.ts";
 import { markError } from "./send-span.ts";
-import type { TelemetryWarnings } from "./warnings.ts";
 
 /** What the start observer reads. */
 export type StartTelemetryDeps = {
   readonly api: OtelApi;
-  readonly warnings: TelemetryWarnings;
+  readonly notMade: SpansNotMade;
 };
 
 /** The span of one start, or none when the user's SDK threw at the open. */
@@ -75,12 +76,14 @@ async function observedStart<T extends StartCallResult>(
   try {
     result = await run(opened.trace);
   } catch (cause) {
-    endStartSpan(deps, opened.span, { kind: "threw", errorType: thrownRecord(cause).type });
+    endStartSpan(deps, opened.span, facts.workflowId, { kind: "threw", errorType: thrownRecord(cause).type });
 
     throw cause;
   }
 
-  endStartSpan(deps, opened.span, result.ok ? { kind: "started" } : { kind: "failed", code: result.error.code });
+  const end: StartCallEnd = result.ok ? { kind: "started" } : { kind: "failed", code: result.error.code };
+
+  endStartSpan(deps, opened.span, facts.workflowId, end);
 
   return result;
 }
@@ -109,14 +112,14 @@ function openStartSpan(deps: StartTelemetryDeps, facts: StartSpanFacts): OpenedS
 
     return { kind: "open", span, trace: sendTraceOf(api, api.trace.setSpan(parent, span)) };
   } catch (cause) {
-    deps.warnings.warnOnce("startSpanOpen", cause);
+    deps.notMade.report({ kind: "workflowStart", workflowId: facts.workflowId }, cause);
 
     return { kind: "notOpen" };
   }
 }
 
-/** End `span` by how the core's start ended. */
-function endStartSpan(deps: StartTelemetryDeps, span: OtelSpan, end: StartCallEnd): void {
+/** End `span` of the start of `workflowId` by how the core's start ended. */
+function endStartSpan(deps: StartTelemetryDeps, span: OtelSpan, workflowId: string, end: StartCallEnd): void {
   try {
     switch (end.kind) {
       case "started":
@@ -133,6 +136,6 @@ function endStartSpan(deps: StartTelemetryDeps, span: OtelSpan, end: StartCallEn
 
     span.end();
   } catch (cause) {
-    deps.warnings.warnOnce("startSpanEnd", cause);
+    deps.notMade.report({ kind: "workflowStart", workflowId }, cause);
   }
 }

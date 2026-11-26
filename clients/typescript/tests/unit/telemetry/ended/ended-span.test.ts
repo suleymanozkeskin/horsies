@@ -13,6 +13,7 @@ import { tracingPartsOf } from "../../../../horsies/src/telemetry/create-hook.ts
 import { highResolutionTimeOf, otelEndedSpans } from "../../../../horsies/src/telemetry/ended-span.ts";
 import type { OtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import { tracingSettingOf } from "../../../../horsies/src/telemetry/tracing-config.ts";
+import { SpansNotMade } from "../../../../horsies/src/telemetry/not-made.ts";
 import { installSdk, loadedApi, onlySpan, recordedWarnings, type TestSdk } from "../support.ts";
 
 const TASK_ID = "0192f6a1-7b3c-7d4e-8f00-0123456789ab";
@@ -121,7 +122,13 @@ describe("the worker-ended span", () => {
   });
 
   test("the tracing setting: makeSpans gives the maker; noSpans and none give no spans", () => {
-    const environment = { loadApi: () => ({ kind: "loaded", api: loadedApi() }) as const, warnings: recordedWarnings().warnings, clock: () => 0, now: () => Temporal.Now.instant() };
+    const environment = {
+      loadApi: () => ({ kind: "loaded", api: loadedApi() }) as const,
+      warnings: recordedWarnings().warnings,
+      clock: () => 0,
+      now: () => Temporal.Now.instant(),
+      notMade: new SpansNotMade(() => undefined),
+    };
 
     const kinds = [
       tracingSettingOf({ kind: "otel" }),
