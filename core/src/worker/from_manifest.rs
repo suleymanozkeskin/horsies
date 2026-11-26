@@ -297,6 +297,11 @@ fn serve_metrics(
 ///
 /// Errors: [`WorkerError::Config`], always.
 #[cfg(not(feature = "metrics-endpoint"))]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the build with the feature `metrics-endpoint` takes the address by value; both builds \
+              have one signature"
+)]
 fn serve_metrics(
     worker: Worker,
     address: ListenAddress,
@@ -419,6 +424,11 @@ fn serve_registry(
 ///
 /// Errors: [`WorkerError::Config`], always.
 #[cfg(not(feature = "metrics-endpoint"))]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "the build with the feature `metrics-endpoint` takes the address by value; both builds \
+              have one signature"
+)]
 fn serve_registry(
     worker: Worker,
     address: ListenAddress,
