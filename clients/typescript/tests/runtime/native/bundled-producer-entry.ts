@@ -4,7 +4,11 @@
 import { z } from "zod";
 
 import { defineTask, Horsies } from "../../../horsies/src/index.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { testDatabaseUrl } from "./manifest.ts";
+
+// The bundle runs in a process of its own: its addon is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 const placeOrder = defineTask({
   name: "bundled_producer_place_order",

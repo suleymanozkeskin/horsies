@@ -21,6 +21,7 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { mintTaskId } from "../../../horsies/src/native/process-core/process-core.ts";
@@ -31,6 +32,9 @@ import { epochMicrosTowardPast } from "../../../horsies/src/send/options.ts";
 import { childProducerProbeAddon } from "./child-producer-probe.ts";
 import type { NativeProbeChildProducer, ProbeClose } from "./child-producer-probe.ts";
 import { manifestJson, manifestJsonWithPool, testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** The `task_send_pool` of the stand-in: its pool size, with no overflow. */
 const TASK_SEND_POOL = 2;

@@ -16,6 +16,7 @@ import { taskOptionsFacts } from "../../../horsies/src/app/core-checks.ts";
 import { parseAppConfig } from "../../../horsies/src/config/app-config.ts";
 import { contractRecord } from "../../../horsies/src/contract/definition.ts";
 import { defineTask, type ExecutionClass } from "../../../horsies/src/contract/public.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import type { NativeSendRules, NativeTaskOptions } from "../../../horsies/src/native/sends/addon.ts";
 import {
   checkAppConfig,
@@ -26,6 +27,9 @@ import {
 import { coreState } from "../../../horsies/src/native/process-core/process-core.ts";
 import { epochMicrosTowardPast } from "../../../horsies/src/send/options.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** The task options vectors of the core. */
 const VECTOR_FILE = fileURLToPath(
