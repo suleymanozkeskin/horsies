@@ -448,9 +448,9 @@ class ChargeCode(Enum):
 
 def register(app: Horsies) -> None:
     @app.task("charge_card", error_codes=ChargeCode)
-    def charge_card(*, amount_cents: int) -> Result[str, TaskError]:
+    def charge_card(*, amount_cents: int) -> Result[str, TaskError[ChargeCode]]:
         if amount_cents > 100_000:
-            return Err(TaskError(error_code=ChargeCode.CARD_DECLINED.value))
+            return Err(TaskError(error_code=ChargeCode.CARD_DECLINED))
         return Ok("charged")
 
     @app.task("send_receipt", error_codes=("BOUNCED",))
@@ -458,16 +458,28 @@ def register(app: Horsies) -> None:
         return Ok(email)
 ```
 
-A `TaskError` takes the code as a plain `str`: pass `ChargeCode.CARD_DECLINED.value`, not the member. Declaring is optional, and the default is `()`. A user code that the task does not declare still works everywhere; its metric label is `undeclared`.
+`TaskError` is generic in the type of its custom code. `TaskError` with no argument is `TaskError[str]`: the code is a `str`. A task that declares an `Enum` with `error_codes=` and returns `Result[T, TaskError[E]]` has typed codes:
 
-The codes that the exception mappers can produce are declared with no second declaration: the values of the task's `exception_mapper` and of `AppConfig.exception_mapper` (as the app config holds it when the task is defined). A code that a task body returns directly needs `error_codes=`.
+- The body passes members of `E` (`ChargeCode.CARD_DECLINED`). A `str` code is a `RETURN_TYPE_MISMATCH`.
+- The stored text is the value of the member. It does not change.
+- These reads give members of `E` back: `TaskHandle.get()`; `WorkflowHandle.result_for(node)` and `WorkflowContext.result_for(node)` for a node of the task (`task.node()(...)` gives a `TaskNode[T, E]`); an `args_from` parameter annotated `TaskOutcome[T, TaskError[E]]`; the entries of `results()`, `tasks()` and the map of an outputless workflow's `get()`; and `app.get_result()`, typed `TaskError[Any]`.
+- A stored code that `E` does not name (a row of another version of the task) is the read failure `UnknownCustomCode`. In a map of node outcomes and in a workflow context, it is a failed entry with `RESULT_DESERIALIZATION_ERROR`; for an `args_from` input, the node fails with `WORKER_SERIALIZATION_ERROR`.
+- The error of a workflow that `WorkflowHandle.get()` gives keeps its custom code as text. That error is the error of the failed node, which can be any node of the workflow, with the codes of its own task, so no one `Enum` names it.
+- A `SubWorkflowNode` gives custom codes as text: a child workflow holds the codes of many tasks.
+- A `match` on `task_error.error_code` that leaves out a member of `E` fails pyright's exhaustiveness check.
+
+A task that returns `TaskError` keeps `str` codes with any declaration. Declaring is optional, and the default is `()`. A user code that the task does not declare still works everywhere; its metric label is `undeclared`.
+
+The codes that the exception mappers can produce are declared with no second declaration: the values of the task's `exception_mapper` and of `AppConfig.exception_mapper` (as the app config holds it when the task is defined). A code that a task body returns directly needs `error_codes=`. For a task with `TaskError[E]`, a mapped exception gives the member of `E`, so each custom code of both mappers and both `default_unhandled_error_code` values must be the value of a member of `E`.
 
 The decorator refuses:
 
 - a value that is neither an `Enum` class nor a tuple (a list, a string, an `Enum` member): `HRS-102`;
 - a code that is empty, not `UPPER_SNAKE_CASE`, or an exception class name: `HRS-112`;
 - a built-in code or `WORKFLOW_STOPPED`: `HRS-212`;
-- a code given twice: `HRS-113`.
+- a code given twice: `HRS-113`;
+- `TaskError[E]` in the return annotation without `error_codes=E`: `HRS-105`;
+- for a task with `TaskError[E]`, a mapper code or a default code that `E` does not name: `HRS-209`.
 
 The task function keeps the codes in `task_error_codes`: the declared codes in the order of the declaration, then each mapper code that is not in the list yet, first the task's mapper, then the app's. `horsies check` lists them.
 

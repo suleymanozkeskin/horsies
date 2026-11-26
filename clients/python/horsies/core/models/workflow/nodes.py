@@ -15,6 +15,7 @@ from typing import (
 from horsies.core.errors import ErrorCode, WorkflowValidationError
 
 from .enums import (
+    CodeT_co,
     OkT_co,
 )
 
@@ -36,8 +37,9 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class NodeKey(Generic[OkT_co]):
-    """Typed stable identifier for a TaskNode."""
+class NodeKey(Generic[OkT_co, CodeT_co]):
+    """Typed stable identifier for a TaskNode: its value type and the type
+    of its custom codes."""
 
     node_id: str
 
@@ -48,7 +50,7 @@ class NodeKey(Generic[OkT_co]):
 
 
 @dataclass
-class TaskNode(Generic[OkT_co]):
+class TaskNode(Generic[OkT_co, CodeT_co]):
     """
     A node in the workflow DAG representing a single task execution.
 
@@ -68,10 +70,10 @@ class TaskNode(Generic[OkT_co]):
     """
 
     fn: (
-        TaskFunction[Any, OkT_co]
-        | AsyncTaskFunction[Any, OkT_co]
-        | RuntimeTaskFunction[Any, OkT_co]
-        | AsyncRuntimeTaskFunction[Any, OkT_co]
+        TaskFunction[Any, OkT_co, CodeT_co]
+        | AsyncTaskFunction[Any, OkT_co, CodeT_co]
+        | RuntimeTaskFunction[Any, OkT_co, CodeT_co]
+        | AsyncRuntimeTaskFunction[Any, OkT_co, CodeT_co]
     )
     """
     - The task to run: a `def` task or an `async def` task, with or without a
@@ -89,7 +91,7 @@ class TaskNode(Generic[OkT_co]):
       tuple and a dict is a mappingproxy. It does not fit the declared types, so code
       that uses the values reads `wire_kwargs`
     """
-    waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    waits_for: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: [],
     )
     """
@@ -97,7 +99,7 @@ class TaskNode(Generic[OkT_co]):
     - The node with the dependencies will wait for all dependencies to be terminal (COMPLETED/FAILED/SKIPPED)
     """
 
-    args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    args_from: Mapping[str, TaskNode[Any, Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: {},
     )
     """
@@ -106,7 +108,7 @@ class TaskNode(Generic[OkT_co]):
     - Task receives: def my_task(validated: TaskOutcome[A, E], transformed: TaskOutcome[B, E])
     """
 
-    workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
+    workflow_ctx_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
     """
     - Optional context: subset of dependencies to include in WorkflowContext
     - Only injected if task declares `workflow_ctx: WorkflowContext | None` parameter
@@ -207,7 +209,7 @@ class TaskNode(Generic[OkT_co]):
         """Get the task name from the wrapped function."""
         return self.fn.task_name
 
-    def key(self) -> NodeKey[OkT_co]:
+    def key(self) -> NodeKey[OkT_co, CodeT_co]:
         """Return a typed NodeKey for this task node."""
         if self.node_id is None:
             raise WorkflowValidationError(
@@ -268,7 +270,7 @@ class SubWorkflowNode(Generic[OkT_co]):
       that uses the values reads `wire_kwargs`
     """
 
-    waits_for: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    waits_for: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: [],
     )
     """
@@ -277,7 +279,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     - Same semantics as TaskNode.waits_for
     """
 
-    args_from: Mapping[str, TaskNode[Any] | SubWorkflowNode[Any]] = field(
+    args_from: Mapping[str, TaskNode[Any, Any] | SubWorkflowNode[Any]] = field(
         default_factory=lambda: {},
     )
     """
@@ -286,7 +288,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     - Example: args_from={"input_data": fetch_node} → kwargs["input_data"] = TaskOutcome[T, E]
     """
 
-    workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
+    workflow_ctx_from: Sequence[TaskNode[Any, Any] | SubWorkflowNode[Any]] | None = None
     """
     - Optional context: subset of dependencies to include in WorkflowContext
     - For SubWorkflowNodes: access via ctx.summary_for(node) → SubWorkflowSummary
@@ -381,7 +383,7 @@ class SubWorkflowNode(Generic[OkT_co]):
         return NodeKey(self.node_id)
 
 
-AnyNode = TaskNode[Any] | SubWorkflowNode[Any]
+AnyNode = TaskNode[Any, Any] | SubWorkflowNode[Any]
 """
 Type alias for any node type
 """
@@ -494,7 +496,7 @@ class SuccessPolicy:
         object.__delattr__(self, name)
 
 
-WorkflowTerminalResults = dict[str, 'TaskOutcome[Any, TaskError] | None']
+WorkflowTerminalResults = dict[str, 'TaskOutcome[Any, TaskError[Any]] | None']
 """
 Aggregated terminal results returned by workflow get()/get_async() when no explicit
 output node is configured.

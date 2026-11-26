@@ -41,7 +41,7 @@ def my_task(*, ...) -> Result[T, TaskError]: ...
 - Pre-decorated functions (with `__wrapped__` chain) are rejected — `HRS-104`.
 - The function is `def` or `async def`. A function that yields is rejected — `HRS-101`, for a generator and for an async generator.
 - `exception_mapper` keys must be `BaseException` subclasses, values must be `UPPER_SNAKE_CASE`.
-- `error_codes`: a value that is neither an `Enum` class nor a tuple raises `HRS-102`; a code that is empty, not `UPPER_SNAKE_CASE` or an exception class name raises `HRS-112`; a built-in code or `WORKFLOW_STOPPED` raises `HRS-212`; a code given twice raises `HRS-113`. One error per refused code; several come in one `MultipleValidationErrors`. A `TaskError` takes the plain `str` value of an `Enum` code (`ChargeCode.CARD_DECLINED.value`).
+- `error_codes`: a value that is neither an `Enum` class nor a tuple raises `HRS-102`; a code that is empty, not `UPPER_SNAKE_CASE` or an exception class name raises `HRS-112`; a built-in code or `WORKFLOW_STOPPED` raises `HRS-212`; a code given twice raises `HRS-113`. One error per refused code; several come in one `MultipleValidationErrors`. `TaskError[C]` is generic in its custom code type, default `str`. A task with `error_codes=ChargeCode` that returns `Result[T, TaskError[ChargeCode]]` passes members (`ChargeCode.CARD_DECLINED`), and `TaskHandle.get()` and `args_from` parameters annotated `TaskOutcome[T, TaskError[ChargeCode]]` give members back; so do `WorkflowHandle.result_for(node)` and `WorkflowContext.result_for(node)` for a `TaskNode[T, ChargeCode]` (from `task.node()(...)`), the entries of `results()`, `tasks()` and an outputless `get()` map, and `app.get_result()` (typed `TaskError[Any]`). The error of a workflow from `WorkflowHandle.get()` and a `SubWorkflowNode` keep text: the failed node can be any task. `TaskError[E]` without `error_codes=E` raises `HRS-105`; a mapper or default code that `E` does not name raises `HRS-209`. A task that returns `TaskError` keeps `str` codes (`ChargeCode.CARD_DECLINED.value`).
 - `queue_name` cross-validated against `AppConfig.queue_mode`.
 - `good_until` rejected — raises `HRS-102` with help text directing to `.with_options()` or `.node()`.
 - Top-level `auto_retry_for` kwarg is rejected — it belongs inside `RetryPolicy`.
@@ -214,6 +214,7 @@ def show_total(handle: TaskHandle[int]) -> None:
 | `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form |
 | `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read |
 | `ResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types |
+| `UnknownCustomCode` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` does not name (a row of another version of the task); `custom_code` is the stored text |
 | `BrokerError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed. A later read may succeed |
 | `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The stored value succeeded, and this process has no declared type to read it with: the handle was built by id, or the task or workflow is not registered here |
 | `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read |
@@ -508,7 +509,7 @@ async def info_async(*, include_result: bool = False, include_failed_reason: boo
 
 ### Caching semantics
 
-- An outcome (`Ok(Succeeded(...))`, `Ok(Failed(...))`) and the final read errors `ResultNotAvailable`, `ResultDeserializationError` and `NoTypeAvailable` **are** cached — repeated `get()` returns the cached value without DB query.
+- An outcome (`Ok(Succeeded(...))`, `Ok(Failed(...))`) and the final read errors `ResultNotAvailable`, `ResultDeserializationError`, `UnknownCustomCode` and `NoTypeAvailable` **are** cached — repeated `get()` returns the cached value without DB query.
 - The other read errors (`WaitTimeout`, `TaskNotFound`, `BrokerError`, `AsyncContext`, `WaitInsideTask`, `InvalidInput`) are **not** cached — subsequent `get()` calls read from the broker again.
 
 ### `TaskInfo` fields
@@ -917,8 +918,8 @@ from horsies import (
     # Read result types: the outcome and the read errors
     ReadResult, TaskOutcome, Succeeded, Failed, ReadError,
     WaitTimeout, TaskNotFound, WorkflowNotFound, ResultNotAvailable, ResultNotReady,
-    WaitInsideTask, AsyncContext, InvalidInput, ResultDeserializationError, BrokerError,
-    NoTypeAvailable, WorkflowCtxMissingId,
+    WaitInsideTask, AsyncContext, InvalidInput, ResultDeserializationError, UnknownCustomCode,
+    BrokerError, NoTypeAvailable, WorkflowCtxMissingId,
     # The run of a task: cancel state
     TaskRuntime, RunCancelState, CancelNotRequested, CancelRequested, CancelCause,
     # Error code families

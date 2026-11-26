@@ -7,6 +7,7 @@ both return. It does no I/O.
 
 from __future__ import annotations
 
+from enum import Enum
 from typing import Any, assert_never
 from uuid import UUID
 
@@ -51,19 +52,28 @@ from horsies.core.models.outcome import (
     Succeeded,
     TaskNotFound,
     TaskOutcome,
+    UnknownCustomCode,
     WaitInsideTask,
     WaitTimeout,
     WorkflowCtxMissingId,
     WorkflowNotFound,
 )
-from horsies.core.models.tasks import OutcomeCode, TaskError
-from horsies.core.types.result import Err, Ok
+from horsies.core.models.tasks import (
+    BUILTIN_FAMILIES,
+    CustomCodeType,
+    EnumCodes,
+    OutcomeCode,
+    TaskError,
+    TextCodes,
+)
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.types.status import TaskStatus
 
 __all__ = [
     'is_final_read',
     'ok_of_outcome',
     'read_of_record',
+    'typed_outcome',
 ]
 
 
@@ -93,7 +103,12 @@ def is_final_read(read: ReadResult[Any, TaskError]) -> bool:
 def _is_final_error(error: ReadError) -> bool:
     """``is_final_read`` for a read failure. Pure."""
     match error:
-        case ResultNotAvailable() | ResultDeserializationError() | NoTypeAvailable():
+        case (
+            ResultNotAvailable()
+            | ResultDeserializationError()
+            | UnknownCustomCode()
+            | NoTypeAvailable()
+        ):
             return True
         case (
             WaitTimeout()
@@ -158,7 +173,8 @@ def read_of_record(
     broker_result: BrokerResult[RawResultRecord | None],
     ok_type: TypeAnnotation | None,
     timeout_ms: int | None,
-) -> ReadResult[Any, TaskError]:
+    code_type: CustomCodeType,
+) -> ReadResult[Any, TaskError[Any]]:
     """The read of a task from the broker's raw result record. Pure.
 
     Outcomes:
@@ -170,7 +186,9 @@ def read_of_record(
         - A stored result: the outcome of ``_read_of_envelope``.
 
     ``ok_type`` is the declared value type of the task, or ``None`` when the
-    reader has none.
+    reader has none. ``code_type`` is the type of its custom codes: with
+    ``EnumCodes(E)``, a stored custom code reads as the member of ``E``, and
+    a code that ``E`` does not name is ``UnknownCustomCode``.
     """
     match broker_result:
         case Err(err_value=broker_error):
@@ -182,7 +200,7 @@ def read_of_record(
                         message=f'Task {task_id} not found in database',
                     ))
                 case RawResultRecord():
-                    return _read_of_row(task_id, found, ok_type, timeout_ms)
+                    return _read_of_row(task_id, found, ok_type, timeout_ms, code_type)
 
 
 def _read_of_row(
@@ -190,7 +208,8 @@ def _read_of_row(
     record: RawResultRecord,
     ok_type: TypeAnnotation | None,
     timeout_ms: int | None,
-) -> ReadResult[Any, TaskError]:
+    code_type: CustomCodeType,
+) -> ReadResult[Any, TaskError[Any]]:
     """``read_of_record`` for a row that the broker found. Pure."""
     if record.status == TaskStatus.CANCELLED:
         return Ok(Failed(TaskError(
@@ -210,7 +229,11 @@ def _read_of_row(
                 f'its status is {record.status.value} and it may still run'
             )))
         case raw:
-            return _read_of_envelope(task_id, raw, ok_type)
+            match _read_of_envelope(task_id, raw, ok_type):
+                case Ok(ok_value=outcome):
+                    return _typed_read(task_id, outcome, code_type)
+                case Err() as failed:
+                    return failed
 
 
 def _read_of_envelope(
@@ -253,6 +276,67 @@ def _read_of_envelope(
                 return Err(ResultDeserializationError(
                     message=f'decode_task_result failed for task {task_id}: {exc}',
                 ))
+
+
+def _typed_read(
+    task_id: UUID,
+    outcome: TaskOutcome[Any, TaskError],
+    code_type: CustomCodeType,
+) -> ReadResult[Any, TaskError[Any]]:
+    """The read of a decoded outcome with the custom codes of ``code_type``. Pure."""
+    match typed_outcome(outcome, code_type):
+        case Ok(ok_value=typed):
+            return ok_of_outcome(typed)
+        case Err(err_value=unknown):
+            return Err(UnknownCustomCode(
+                message=f'the stored error of task {task_id}: {unknown.message}',
+                custom_code=unknown.custom_code,
+            ))
+
+
+def typed_outcome(
+    outcome: TaskOutcome[Any, TaskError],
+    code_type: CustomCodeType,
+) -> Result[TaskOutcome[Any, TaskError[Any]], UnknownCustomCode]:
+    """``outcome`` with its custom code as a member of the declared ``Enum``. Pure.
+
+    A decode gives a custom code as its stored text. With ``TextCodes`` the
+    outcome stays as it is. With ``EnumCodes(E)``, the text of a failed
+    outcome becomes the member of ``E`` that has it as its value; a text
+    that no member has is ``UnknownCustomCode``. A built-in code and a
+    succeeded outcome stay as they are.
+    """
+    match outcome:
+        case Succeeded():
+            return Ok(outcome)
+        case Failed(error=error):
+            match code_type:
+                case TextCodes():
+                    return Ok(outcome)
+                case EnumCodes(code_type=enum_class):
+                    return _typed_failed(error, enum_class)
+
+
+def _typed_failed(
+    error: TaskError, enum_class: type[Enum],
+) -> Result[TaskOutcome[Any, TaskError[Any]], UnknownCustomCode]:
+    """``typed_outcome`` of a failed outcome with the codes of ``enum_class``. Pure."""
+    match error.error_code:
+        case code if isinstance(code, BUILTIN_FAMILIES) or isinstance(code, enum_class):
+            return Ok(Failed(error))
+        case str() as text:
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
+    members = {member.value: member for member in enum_class}
+    match members.get(text):
+        case None:
+            return Err(UnknownCustomCode(
+                message=f'custom code {text!r} is not a member of {enum_class.__name__}',
+                custom_code=text,
+            ))
+        case member:
+            return Ok(Failed(error.model_copy(update={'error_code': member})))
 
 
 def ok_of_outcome[T, E](outcome: TaskOutcome[T, E]) -> ReadResult[T, E]:

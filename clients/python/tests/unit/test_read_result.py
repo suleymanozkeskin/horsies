@@ -63,6 +63,7 @@ from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.nodes import NodeKey
 from horsies.core.process_role import ProcessRole
 from horsies.core.task_decorator import TaskHandle
+from horsies.core.models.tasks import TextCodes
 from horsies.core.task_read import is_final_read, read_of_record
 from horsies.core.task_runtime import TaskRuntime
 from horsies.core.types.error_detail import NoCause
@@ -101,7 +102,7 @@ def _err_envelope(code: str) -> dict[str, Any]:
 def _read(
     answer: BrokerResult[RawResultRecord | None], ok_type: object | None = int,
 ) -> ReadResult[Any, TaskError]:
-    return read_of_record(TASK_ID, answer, ok_type, 1_000)
+    return read_of_record(TASK_ID, answer, ok_type, 1_000, TextCodes())
 
 
 def _read_error(read: ReadResult[Any, TaskError]) -> object:

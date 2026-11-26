@@ -27,6 +27,7 @@ from horsies.core.errors import (
 from .nodes import TaskNode, SubWorkflowNode
 
 if TYPE_CHECKING:
+    from horsies.core.models.tasks import CustomCodeType
     from .definition import WorkflowDefinition
     from .spec import WorkflowSpec
 
@@ -153,6 +154,31 @@ def _extract_outcome_ok_type(annotation: Any) -> Any | None:
     return None
 
 
+def _extract_outcome_error_type(annotation: Any) -> Any | None:
+    """Extract the E of an args_from slot: TaskOutcome[T, E], including
+    Optional/Union wrappers."""
+    if annotation is None:
+        return None
+
+    from horsies.core.models.outcome import TaskOutcome
+
+    origin = get_origin(annotation)
+    if origin is TaskOutcome:
+        args = get_args(annotation)
+        if len(args) == 2:
+            return args[1]
+        return None
+
+    if origin in (Union, UnionType):
+        extracted = [_extract_outcome_error_type(member) for member in get_args(annotation)]
+        non_none = [value for value in extracted if value is not None]
+        if len(non_none) == 1:
+            return non_none[0]
+        return None
+
+    return None
+
+
 def _extract_return_ok_type(annotation: Any) -> Any | None:
     """Extract the T of a task return annotation: Result[T, E]."""
     from horsies.core.types.result import (
@@ -262,7 +288,35 @@ def resolve_source_ok_type(
     return _normalize_resolved_ok_type(getattr(source_task, 'task_ok_type', None))
 
 
-def _resolve_source_node_ok_type(node: TaskNode[Any] | SubWorkflowNode[Any]) -> Any | None:
+def resolve_source_code_type(
+    app: Any | None,
+    task_name: str,
+    *,
+    sub_definition_key: str | None = None,
+) -> CustomCodeType:
+    """The custom code type of the source of a persisted node. Pure apart
+    from the registry lookup.
+
+    A TaskNode source has the code type of its registered task
+    (``task_code_type``): ``EnumCodes(E)`` for a task that returns
+    ``TaskError[E]``. A SubWorkflowNode source (``sub_definition_key``
+    given), a task that this process does not register, and a task that
+    returns ``TaskError`` give ``TextCodes()``: a child workflow holds the
+    codes of many tasks, and an unknown task has no declared ``Enum``.
+    """
+    from horsies.core.models.tasks import EnumCodes, TextCodes
+
+    if sub_definition_key is not None or app is None:
+        return TextCodes()
+    source_task = app.tasks.get(task_name)
+    match getattr(source_task, 'task_code_type', None):
+        case EnumCodes() as enum_codes:
+            return enum_codes
+        case _:
+            return TextCodes()
+
+
+def _resolve_source_node_ok_type(node: TaskNode[Any, Any] | SubWorkflowNode[Any]) -> Any | None:
     """Resolve output ok-type for TaskNode/SubWorkflowNode source used in args_from."""
     if isinstance(node, TaskNode):
         return _resolve_task_fn_ok_type(node.fn)

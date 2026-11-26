@@ -61,6 +61,7 @@ from horsies.core.models.workflow.handle_types import (
     HandleErrorCode,
 )
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
+from horsies.core.models.tasks import TextCodes
 from horsies.core.task_read import read_of_record
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
@@ -436,7 +437,7 @@ def test_result_read_mapping_asserts_on_async_context() -> None:
     ))
 
     with pytest.raises(AssertionError, match='got ASYNC_CONTEXT'):
-        read_of_record(UUID(TASK_ID), broker_result, int, None)
+        read_of_record(UUID(TASK_ID), broker_result, int, None, TextCodes())
 
 
 # =============================================================================

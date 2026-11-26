@@ -60,7 +60,7 @@ class WorkflowDefinitionConfig(Generic[OkT_co]):
         success_policy: Custom success policy.
     """
 
-    output: TaskNode[OkT_co] | SubWorkflowNode[OkT_co] | None = None
+    output: TaskNode[OkT_co, Any] | SubWorkflowNode[OkT_co] | None = None
     on_error: OnError = OnError.FAIL
     success_policy: SuccessPolicy | None = None
 
@@ -132,7 +132,7 @@ class WorkflowDefinitionMeta(type):
         # Stamp node_id = attr_name on unstamped nodes so that condition
         # closures captured at module level always see a valid node_id —
         # even in fresh worker processes where build() is never called.
-        nodes: list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]] = []
+        nodes: list[tuple[str, TaskNode[Any, Any] | SubWorkflowNode[Any]]] = []
         for attr_name, attr_value in namespace.items():
             if isinstance(attr_value, (TaskNode, SubWorkflowNode)):
                 if attr_value.node_id is None:
@@ -255,17 +255,17 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
     config: ClassVar[WorkflowDefinitionConfig[Any]] = WorkflowDefinitionConfig()
 
     # Populated by metaclass
-    _workflow_nodes: ClassVar[list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]]]
+    _workflow_nodes: ClassVar[list[tuple[str, TaskNode[Any, Any] | SubWorkflowNode[Any]]]]
 
     @classmethod
     def get_workflow_nodes(
         cls,
-    ) -> list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]]:
+    ) -> list[tuple[str, TaskNode[Any, Any] | SubWorkflowNode[Any]]]:
         """Return collected workflow nodes or an empty list if none were defined."""
         nodes = getattr(cls, '_workflow_nodes', None)
         if not isinstance(nodes, list):
             return []
-        return cast(list[tuple[str, TaskNode[Any] | SubWorkflowNode[Any]]], nodes)
+        return cast(list[tuple[str, TaskNode[Any, Any] | SubWorkflowNode[Any]]], nodes)
 
     @classmethod
     def build(cls, app: Horsies) -> WorkflowSpec[OkT_co]:
@@ -307,8 +307,8 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
 
         # Copy-on-build: shallow-copy class-level nodes so app.workflow()
         # enrichment (queue/priority) never mutates class-level originals.
-        old_to_new: dict[int, TaskNode[Any] | SubWorkflowNode[Any]] = {}
-        tasks: list[TaskNode[Any] | SubWorkflowNode[Any]] = []
+        old_to_new: dict[int, TaskNode[Any, Any] | SubWorkflowNode[Any]] = {}
+        tasks: list[TaskNode[Any, Any] | SubWorkflowNode[Any]] = []
         for attr_name, node in nodes:
             node_copy = copy_module.copy(node)
             if node_copy.node_id is None:
@@ -337,14 +337,14 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
         # Read the config, remapping output/success_policy refs to copies.
         # Class creation guarantees that config is a WorkflowDefinitionConfig.
         config = cls.config
-        output: TaskNode[OkT_co] | SubWorkflowNode[OkT_co] | None = None
+        output: TaskNode[OkT_co, Any] | SubWorkflowNode[OkT_co] | None = None
         on_error: OnError = config.on_error
         success_policy: SuccessPolicy | None = None
 
         raw_output = config.output
         if raw_output is not None:
             output = cast(
-                'TaskNode[OkT_co] | SubWorkflowNode[OkT_co]',
+                'TaskNode[OkT_co, Any] | SubWorkflowNode[OkT_co]',
                 old_to_new.get(id(raw_output), raw_output),
             )
         raw_policy = config.success_policy

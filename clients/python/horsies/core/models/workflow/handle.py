@@ -47,6 +47,7 @@ from horsies.core.models.outcome import (
     ResultNotReady,
     Succeeded,
     TaskOutcome,
+    UnknownCustomCode,
     WaitInsideTask,
     WaitTimeout,
     WorkflowCtxMissingId,
@@ -57,7 +58,7 @@ from horsies.core.models.tasks import (
     OperationalErrorCode,
     OutcomeCode,
 )
-from horsies.core.task_read import ok_of_outcome
+from horsies.core.task_read import ok_of_outcome, typed_outcome
 from horsies.core.types.core_failure import (
     CoreCallRefusal,
     call_refusal_or_raise,
@@ -69,6 +70,7 @@ from horsies.core.types.result import Ok, Err, Result, is_err
 
 from .context import SubWorkflowSummary
 from .enums import (
+    CodeT,
     OkT,
     OutT,
     WorkflowStatus,
@@ -127,7 +129,7 @@ class WorkflowTaskInfo:
     index: int
     name: str
     status: WorkflowTaskStatus
-    result: TaskOutcome[Any, TaskError] | None
+    result: TaskOutcome[Any, TaskError[Any]] | None
     started_at: datetime | None
     completed_at: datetime | None
     sub_workflow_id: str | None = None
@@ -341,17 +343,31 @@ class _NodeUnreadable:
         ))
 
 
+def _unknown_code_outcome(node_id: str, unknown: UnknownCustomCode) -> Failed[TaskError]:
+    """The entry of a node whose stored custom code its task's ``Enum`` does
+    not name, in a map of node outcomes."""
+    return Failed(TaskError(
+        error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+        message=f'node {node_id!r}: {unknown.message}',
+        data={'node_id': node_id, 'custom_code': unknown.custom_code},
+    ))
+
+
 def _folded(
-    decoded: Result[TaskOutcome[Any, TaskError], _NodeUnreadable],
-) -> TaskOutcome[Any, TaskError]:
+    node_id: str,
+    decoded: Result[TaskOutcome[Any, TaskError[Any]], _NodeUnreadable | UnknownCustomCode],
+) -> TaskOutcome[Any, TaskError[Any]]:
     """The entry of a node in a map of node outcomes (``results``,
-    ``tasks``): a node that does not read is a failed outcome with
+    ``tasks``): a node that does not read, or whose stored custom code its
+    task's ``Enum`` does not name, is a failed outcome with
     ``RESULT_DESERIALIZATION_ERROR``, so the other entries stay readable."""
     match decoded:
         case Ok(ok_value=outcome):
             return outcome
-        case Err(err_value=unreadable):
+        case Err(err_value=_NodeUnreadable() as unreadable):
             return unreadable.as_outcome()
+        case Err(err_value=UnknownCustomCode() as unknown):
+            return _unknown_code_outcome(node_id, unknown)
 
 
 def _decode_per_task_envelope(
@@ -361,13 +377,16 @@ def _decode_per_task_envelope(
     task_name: str | None,
     node_id: str,
     sub_definition_key: str | None = None,
-) -> Result[TaskOutcome[Any, TaskError], _NodeUnreadable]:
-    """Decode a single workflow_task row's envelope using the source's OkT.
+) -> Result[TaskOutcome[Any, TaskError[Any]], _NodeUnreadable | UnknownCustomCode]:
+    """Decode a single workflow_task row's envelope using the source's OkT
+    and the source task's custom code type.
 
     Used by ``result_for``, ``results``, and ``tasks``. A node that does not
-    read is ``Err(_NodeUnreadable)``: ``result_for`` returns it as a read
-    failure, and the maps of ``results`` and ``tasks`` fold it into the
-    node's entry (``_folded``).
+    read is ``Err(_NodeUnreadable)``, and a stored custom code that the
+    source task's ``Enum`` does not name is ``Err(UnknownCustomCode)``:
+    ``result_for`` returns them as read failures, and the maps of
+    ``results`` and ``tasks`` fold them into the node's entry
+    (``_folded``).
 
     ``sub_definition_key`` (from the row's ``sub_definition_key`` column)
     is passed for SubWorkflowNode rows so OkT resolves via the unique
@@ -378,7 +397,7 @@ def _decode_per_task_envelope(
             message=f'Workflow task node {node_id!r} is missing task_name',
             data={'node_id': node_id},
         ))
-    from .typing_utils import resolve_source_ok_type
+    from .typing_utils import resolve_source_code_type, resolve_source_ok_type
 
     source_ok_type = resolve_source_ok_type(
         app, task_name, sub_definition_key=sub_definition_key,
@@ -392,12 +411,16 @@ def _decode_per_task_envelope(
             data={'node_id': node_id, 'task_name': task_name},
         ))
     try:
-        return Ok(decode_task_result(loaded, source_ok_type))
+        outcome = decode_task_result(loaded, source_ok_type)
     except (StrictJsonError, ValueValidationError) as exc:
         return Err(_NodeUnreadable(
             message=f'decode_task_result failed for node {node_id!r}: {exc}',
             data={'node_id': node_id, 'task_name': task_name},
         ))
+    return typed_outcome(
+        outcome,
+        resolve_source_code_type(app, task_name, sub_definition_key=sub_definition_key),
+    )
 
 
 def _stored_node_decode(
@@ -407,7 +430,7 @@ def _stored_node_decode(
     task_name: str | None,
     node_id: str,
     sub_definition_key: str | None,
-) -> Result[TaskOutcome[Any, TaskError], _NodeUnreadable]:
+) -> Result[TaskOutcome[Any, TaskError[Any]], _NodeUnreadable | UnknownCustomCode]:
     """Decode the stored result text of one node. Pure apart from the type
     lookups of the decode.
 
@@ -430,6 +453,22 @@ def _stored_node_decode(
     )
 
 
+def _node_read(
+    decoded: Result[TaskOutcome[Any, TaskError[Any]], _NodeUnreadable | UnknownCustomCode],
+) -> ReadResult[Any, TaskError[Any]]:
+    """The read of ``result_for`` for a decoded node: its outcome, or the
+    read failure. A node that does not read is
+    ``ResultDeserializationError``; a stored custom code that the task's
+    ``Enum`` does not name is ``UnknownCustomCode``. Pure."""
+    match decoded:
+        case Ok(ok_value=outcome):
+            return ok_of_outcome(outcome)
+        case Err(err_value=_NodeUnreadable() as unreadable):
+            return _unreadable(unreadable.message)
+        case Err(err_value=UnknownCustomCode() as unknown):
+            return Err(unknown)
+
+
 def _stored_node_result(
     stored: str | None,
     *,
@@ -437,7 +476,7 @@ def _stored_node_result(
     task_name: str,
     node_id: str,
     sub_definition_key: str | None,
-) -> TaskOutcome[Any, TaskError] | None:
+) -> TaskOutcome[Any, TaskError[Any]] | None:
     """The ``result`` of one node of ``tasks()``, from its stored result
     text. Pure apart from the type lookups of the decode.
 
@@ -449,7 +488,7 @@ def _stored_node_result(
         case None:
             return None
         case text:
-            return _folded(_stored_node_decode(
+            return _folded(node_id, _stored_node_decode(
                 text,
                 app=app,
                 task_name=task_name,
@@ -466,16 +505,19 @@ def _outputless_node_outcome(
     *,
     app: Any | None,
     sub_definition_key: object,
-) -> TaskOutcome[Any, TaskError]:
+) -> TaskOutcome[Any, TaskError[Any]]:
     """The entry of one node in the outputless map of ``get()``.
 
     A node with no payload or no task name, or whose stored value does not
     decode, is a failed outcome with ``RESULT_DESERIALIZATION_ERROR``; a
     source that this process does not know is a failed outcome with
-    ``NO_TYPE_AVAILABLE``. The other entries stay readable.
+    ``NO_TYPE_AVAILABLE``. A failed entry has the custom codes of its task
+    (``resolve_source_code_type``); a stored code that the task's ``Enum``
+    does not name is a failed outcome with ``RESULT_DESERIALIZATION_ERROR``.
+    The other entries stay readable.
     """
     from horsies.core.models.tasks import ContractCode
-    from .typing_utils import resolve_source_ok_type
+    from .typing_utils import resolve_source_code_type, resolve_source_ok_type
 
     if per_node_envelope is None or not isinstance(source_task_name, str):
         return Failed(TaskError(
@@ -505,13 +547,25 @@ def _outputless_node_outcome(
             data={'node_id': node_id, 'source_task_name': source_task_name},
         ))
     try:
-        return decode_task_result(per_node_envelope, source_ok_type)
+        outcome = decode_task_result(per_node_envelope, source_ok_type)
     except (StrictJsonError, ValueValidationError) as exc:
         return Failed(TaskError(
             error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
             message=f'decode_task_result failed for node {node_id!r}: {exc}',
             data={'node_id': node_id},
         ))
+    code_type = resolve_source_code_type(
+        app,
+        source_task_name,
+        sub_definition_key=(
+            sub_definition_key if isinstance(sub_definition_key, str) else None
+        ),
+    )
+    match typed_outcome(outcome, code_type):
+        case Ok(ok_value=typed):
+            return typed
+        case Err(err_value=unknown):
+            return _unknown_code_outcome(node_id, unknown)
 
 
 def _decode_outputless_ok(
@@ -533,7 +587,7 @@ def _decode_outputless_ok(
             'Outputless workflow envelope missing or malformed '
             'results_by_id / task_name_by_id / definition_key_by_id',
         )
-    decoded_results: dict[str, TaskOutcome[Any, TaskError]] = {
+    decoded_results: dict[str, TaskOutcome[Any, TaskError[Any]]] = {
         node_id: _outputless_node_outcome(
             workflow_id,
             node_id,
@@ -990,8 +1044,8 @@ class WorkflowHandle(Generic[OutT]):
     # ─── result_for ──────────────────────────────────────────────────
 
     def result_for(
-        self, node: TaskNode[OkT] | NodeKey[OkT],
-    ) -> ReadResult[OkT, TaskError]:
+        self, node: TaskNode[OkT, CodeT] | NodeKey[OkT, CodeT],
+    ) -> ReadResult[OkT, TaskError[CodeT]]:
         """
         Get the result for a specific TaskNode or NodeKey.
 
@@ -1037,11 +1091,11 @@ class WorkflowHandle(Generic[OutT]):
             )
         except CoreError as exc:
             return self._node_result_call_failed(node_id, call_refusal_or_raise(exc))
-        return cast('ReadResult[OkT, TaskError]', self._node_result_answer(node_id, record))
+        return cast('ReadResult[OkT, TaskError[CodeT]]', self._node_result_answer(node_id, record))
 
     async def result_for_async(
-        self, node: TaskNode[OkT] | NodeKey[OkT],
-    ) -> ReadResult[OkT, TaskError]:
+        self, node: TaskNode[OkT, CodeT] | NodeKey[OkT, CodeT],
+    ) -> ReadResult[OkT, TaskError[CodeT]]:
         """Async version of result_for(). See result_for() for full documentation.
 
         One read in the core (``CoreHandle.workflow_node_result_async``); the
@@ -1062,10 +1116,10 @@ class WorkflowHandle(Generic[OutT]):
             )
         except CoreError as exc:
             return self._node_result_call_failed(node_id, call_refusal_or_raise(exc))
-        return cast('ReadResult[OkT, TaskError]', self._node_result_answer(node_id, record))
+        return cast('ReadResult[OkT, TaskError[CodeT]]', self._node_result_answer(node_id, record))
 
     def _node_result_key(
-        self, node: TaskNode[Any] | NodeKey[Any],
+        self, node: TaskNode[Any, Any] | NodeKey[Any, Any],
     ) -> Result[tuple[UUID, str], WorkflowCtxMissingId]:
         """The workflow id and the node id of a result read, or the refusal
         of the read before any read: ``WorkflowCtxMissingId`` for a node
@@ -1105,7 +1159,7 @@ class WorkflowHandle(Generic[OutT]):
             | HandleDbOperationFailed
             | HandleStoredDataInvalid
         ),
-    ) -> ReadResult[Any, TaskError]:
+    ) -> ReadResult[Any, TaskError[Any]]:
         """The answer of ``result_for`` and ``result_for_async`` for the core's
         record. A failure of the core is ``BrokerError`` with the core's
         message. Pure apart from the type lookups of the decode."""
@@ -1138,15 +1192,11 @@ class WorkflowHandle(Generic[OutT]):
                 record.sub_definition_key if record.is_subworkflow else None
             ),
         )
-        match decoded:
-            case Ok(ok_value=outcome):
-                return ok_of_outcome(outcome)
-            case Err(err_value=unreadable):
-                return _unreadable(unreadable.message)
+        return _node_read(decoded)
 
     # ─── results ─────────────────────────────────────────────────────
 
-    def results(self) -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]]:
+    def results(self) -> HandleResult[dict[str, TaskOutcome[Any, TaskError[Any]]]]:
         """
         Get all task results keyed by unique identifier.
 
@@ -1179,7 +1229,7 @@ class WorkflowHandle(Generic[OutT]):
             ))
         return self._results_answer(record)
 
-    async def results_async(self) -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]]:
+    async def results_async(self) -> HandleResult[dict[str, TaskOutcome[Any, TaskError[Any]]]]:
         """
         Async version of results(): one read in the core
         (``CoreHandle.workflow_node_results_async``); the handle decodes each
@@ -1212,7 +1262,7 @@ class WorkflowHandle(Generic[OutT]):
             | HandleDbOperationFailed
             | HandleStoredDataInvalid
         ),
-    ) -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]]:
+    ) -> HandleResult[dict[str, TaskOutcome[Any, TaskError[Any]]]]:
         """The answer of ``results`` and ``results_async`` for the core's record.
         A failure is the core's class, returned as it is. Pure apart from the
         type lookups of the decode."""
@@ -1231,12 +1281,12 @@ class WorkflowHandle(Generic[OutT]):
             case _ as unreachable:
                 assert_never(unreachable)
 
-        out: dict[str, TaskOutcome[Any, TaskError]] = {}
+        out: dict[str, TaskOutcome[Any, TaskError[Any]]] = {}
         for node in nodes:
             # The column is nullable; every spec assigns a node id, and the
             # read before the switch used the stored value as it is.
             node_id = cast(str, node.node_id)
-            out[node_id] = _folded(_stored_node_decode(
+            out[node_id] = _folded(node_id, _stored_node_decode(
                 node.result_json,
                 app=self.broker.app,
                 task_name=node.task_name,

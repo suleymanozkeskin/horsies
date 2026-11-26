@@ -54,6 +54,7 @@ The cause object follows the same rule. Where the library catches a pydantic `Va
 | `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form | No |
 | `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is not `None` or an int from 0 to `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
 | `ResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types | Yes |
+| `UnknownCustomCode` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` of the task does not name. `custom_code` holds the stored text | Yes |
 | `BrokerError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed. A later read may succeed | No |
 | `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value: the handle was built by id, or the task is not registered here | Yes |
 | `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `result_for()` got a node with no `node_id`. Nothing was read | – |
@@ -329,6 +330,43 @@ def validate_order(*, order_id: str) -> Result[dict[str, JsonValue], TaskError]:
 ```
 
 Declare a task's codes with `error_codes=` to give each one its own value of the `error_code` metric label; another user code counts as `undeclared` there. See [Declare Error Codes](/horsies/tasks/defining-tasks/#declare-error-codes).
+
+With an `Enum` and `TaskError[E]`, the codes are typed from the body to the reader. A `match` on the code names each member and each built-in family:
+
+```python
+from enum import Enum
+
+from horsies import (
+    ContractCode,
+    Err,
+    Failed,
+    Ok,
+    OperationalErrorCode,
+    OutcomeCode,
+    ReadResult,
+    RetrievalCode,
+    Succeeded,
+    TaskError,
+)
+
+
+class WelcomeCode(str, Enum):
+    INVALID_EMAIL = "INVALID_EMAIL"
+
+
+def welcome_text(read: ReadResult[str, TaskError[WelcomeCode]]) -> str:
+    match read:
+        case Ok(Succeeded(message)):
+            return message
+        case Ok(Failed(task_error)):
+            match task_error.error_code:
+                case WelcomeCode.INVALID_EMAIL:
+                    return "the address is not valid"
+                case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
+                    return f"library failure: {task_error.error_code.value}"
+        case Err(read_error):
+            return f"no outcome: {read_error.code}"
+```
 
 User-defined codes are auto-retried when listed in `auto_retry_for`:
 

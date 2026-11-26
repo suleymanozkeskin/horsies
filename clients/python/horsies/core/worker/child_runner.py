@@ -37,6 +37,7 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     NoRuntimeParameter,
     TakesRuntime,
+    declared_outcome_code_type,
     declared_outcome_ok_type,
     decode_kwargs,
     fill_omitted_defaults,
@@ -75,13 +76,14 @@ from horsies.core.models.tasks import (
     MAX_TASK_TIMEOUT_MS,
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
-    BuiltInTaskCode,
     ContractCode,
     Execution,
     OutcomeCode,
     RetrievalCode,
+    CustomCodeType,
     TaskError,
     OperationalErrorCode,
+    custom_code_text,
 )
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
@@ -151,6 +153,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.task_decorator import TaskBodyKind, await_task_call_in_worker
 from horsies.core.models.outcome import Failed, TaskOutcome
+from horsies.core.task_read import typed_outcome
 from horsies.core.types.result import Err, Ok, Result, is_err
 
 
@@ -240,14 +243,15 @@ def isolated_work_of(work: Literal['RUN'] | core.StoredOptionsRefused) -> Isolat
             assert_never(unreachable)
 
 
-def error_code_text(code: BuiltInTaskCode | str) -> str:
-    """The text of an error code: the value of a built-in code, or the user's
-    code. Pure."""
+def error_code_text(code: object) -> str:
+    """The text of an error code: the value of a built-in code, or the stored
+    text of a custom code (``custom_code_text``: the ``str``, or the value of
+    the member). Pure."""
     match code:
         case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
             return code.value
-        case str():
-            return code
+        case _:
+            return custom_code_text(code)
 
 
 def result_outcome_of(out: Result[Any, TaskError]) -> ResultOutcome:
@@ -1414,18 +1418,29 @@ def _prepare_task_call(
                 ),
             )
         target_ok_type = declared_outcome_ok_type(underlying_fn, key)
-        if target_ok_type is None or target_ok_type == source_ok_type:
-            kwargs[key] = decoded_result
-            continue
-        match conform_to_target(decoded_result, target_ok_type):
-            case Ok(ok_value=conformed):
-                kwargs[key] = conformed
-            case Err(err_value=refusal):
+        if target_ok_type is not None and target_ok_type != source_ok_type:
+            match conform_to_target(decoded_result, target_ok_type):
+                case Ok(ok_value=conformed):
+                    decoded_result = conformed
+                case Err(err_value=refusal):
+                    return _serialization_error_response(
+                        task_name,
+                        SerializationError(
+                            f'kwarg {key!r} does not fit its declared type '
+                            f'(source task {source_task_name!r}): {refusal}'
+                        ),
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
+        match typed_outcome(decoded_result, declared_outcome_code_type(underlying_fn, key)):
+            case Ok(ok_value=typed):
+                kwargs[key] = typed
+            case Err(err_value=unknown):
                 return _serialization_error_response(
                     task_name,
                     SerializationError(
                         f'kwarg {key!r} does not fit its declared type '
-                        f'(source task {source_task_name!r}): {refusal}'
+                        f'(source task {source_task_name!r}): {unknown.message}'
                     ),
                 )
             case _ as unreachable:
@@ -1450,7 +1465,7 @@ def _prepare_task_call(
             definition_key_by_id = workflow_ctx_data.get(
                 'definition_key_by_id', {},
             )
-            results_by_id: dict[str, TaskOutcome[Any, TaskError]] = {}
+            results_by_id: dict[str, TaskOutcome[Any, TaskError[Any]]] = {}
             for node_id, envelope in results_by_id_raw.items():
                 if envelope is None:
                     # Engine couldn't encode this entry (no
@@ -1484,6 +1499,7 @@ def _prepare_task_call(
                     )
                     continue
                 from horsies.core.models.workflow.typing_utils import (
+                    resolve_source_code_type,
                     resolve_source_ok_type as _resolve_src_ok,
                 )
 
@@ -1514,8 +1530,17 @@ def _prepare_task_call(
                     )
                     continue
                 try:
-                    results_by_id[node_id] = decode_task_result(
-                        envelope, source_ok_type,
+                    results_by_id[node_id] = _context_entry(
+                        node_id,
+                        decode_task_result(envelope, source_ok_type),
+                        resolve_source_code_type(
+                            app, source_task_name,
+                            sub_definition_key=(
+                                _sub_def_key
+                                if isinstance(_sub_def_key, str)
+                                else None
+                            ),
+                        ),
                     )
                 except (StrictJsonError, ValueValidationError) as exc:
                     results_by_id[node_id] = Failed(
@@ -1598,6 +1623,27 @@ def _prepare_task_call(
         case _ as unreachable:
             assert_never(unreachable)
     return _PreparedCall(task=task, app=app, args=args, kwargs=kwargs)
+
+
+def _context_entry(
+    node_id: str,
+    outcome: TaskOutcome[Any, TaskError],
+    code_type: CustomCodeType,
+) -> TaskOutcome[Any, TaskError[Any]]:
+    """The entry of one node in a workflow context: its outcome with the
+    custom codes of its task (``typed_outcome``). A stored code that the
+    task's ``Enum`` does not name is a failed outcome with
+    ``RESULT_DESERIALIZATION_ERROR``, as a node whose stored value does not
+    read. Pure."""
+    match typed_outcome(outcome, code_type):
+        case Ok(ok_value=typed):
+            return typed
+        case Err(err_value=unknown):
+            return Failed(TaskError(
+                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+                message=f'workflow_ctx node {node_id!r}: {unknown.message}',
+                data={'node_id': node_id, 'custom_code': unknown.custom_code},
+            ))
 
 
 def _task_exception_response(task_name: str, e: BaseException) -> EncodedResult:

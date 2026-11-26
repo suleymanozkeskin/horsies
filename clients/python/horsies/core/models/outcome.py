@@ -49,6 +49,7 @@ __all__ = [
     'Succeeded',
     'TaskNotFound',
     'TaskOutcome',
+    'UnknownCustomCode',
     'WaitInsideTask',
     'WaitTimeout',
     'WorkflowCtxMissingId',
@@ -177,6 +178,26 @@ class ResultDeserializationError:
 
 
 @dataclass(slots=True, frozen=True)
+class UnknownCustomCode:
+    """The stored error has a custom code that the declared ``Enum`` of the
+    task does not name: a row of another version of the task, or of a task
+    with another code type. ``custom_code`` is the stored text.
+
+    Its code is ``RESULT_DESERIALIZATION_ERROR``, as for
+    ``ResultDeserializationError``: the stored value does not read as the
+    result of the declared types. It has its own class because it names the
+    code. The same read gives the same error until the stored value or the
+    ``Enum`` changes. Kept by the handle.
+    """
+
+    code: ClassVar[Literal[OperationalErrorCode.RESULT_DESERIALIZATION_ERROR]] = (
+        OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
+    )
+    message: str
+    custom_code: str
+
+
+@dataclass(slots=True, frozen=True)
 class BrokerError:
     """The database, the connection or the core call failed.
 
@@ -225,11 +246,14 @@ type ReadError = (
     | AsyncContext
     | InvalidInput
     | ResultDeserializationError
+    | UnknownCustomCode
     | BrokerError
     | NoTypeAvailable
     | WorkflowCtxMissingId
 )
-"""Why a read gave no outcome: one class per catalog code."""
+"""Why a read gave no outcome: one class per catalog code, and
+``UnknownCustomCode``, which shares the code of
+``ResultDeserializationError`` and names the custom code."""
 
 
 type ReadResult[T, E] = Ok[Succeeded[T]] | Ok[Failed[E]] | Err[ReadError]

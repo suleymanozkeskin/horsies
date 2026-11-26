@@ -25,6 +25,7 @@
     "tests/unit/test_workflow_start_variants.py",
     "tests/typing/handle_error_variant_pin.py",
     "tests/typing/read_result_pin.py",
+    "tests/typing/typed_error_codes_pin.py",
     "horsies/core/models/outcome.py",
     "horsies/core/task_read.py",
     "horsies/core/models/workflow/handle_types.py",

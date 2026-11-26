@@ -22,6 +22,10 @@ from horsies._catalog.status import WorkflowTaskStatus as WorkflowTaskStatus
 OkT = TypeVar('OkT')
 OkT_co = TypeVar('OkT_co', covariant=True)
 OutT = TypeVar('OutT')
+# TypeVars for the type of the custom codes of a node's task (`TaskError[C]`):
+# `str`, or the `Enum` class that the task declares.
+CodeT = TypeVar('CodeT', default=str)
+CodeT_co = TypeVar('CodeT_co', covariant=True, default=str)
 
 
 # =============================================================================
