@@ -438,6 +438,10 @@ impl TaskInfoRecord {
     object_from_js = false
 )]
 #[derive(Clone, Debug, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the value becomes a JavaScript object when the call returns, and napi-rs has no conversion of a Box"
+)]
 pub enum TaskInfoRead {
     Found { record: TaskInfoRecord },
     Absent { reason: AbsenceReason },

@@ -545,8 +545,10 @@ mod tests {
     use crate::values::catalog_values::RawSlotValue;
 
     fn rules() -> SendRules {
-        let mut retention = RetentionConfig::default();
-        retention.retention_periods = vec![chrono::Duration::days(7)];
+        let mut retention = RetentionConfig {
+            retention_periods: vec![chrono::Duration::days(7)],
+            ..RetentionConfig::default()
+        };
         let _previous = retention.queue_retention.insert("audit".to_owned(), None);
         SendRules::new(
             retention,
