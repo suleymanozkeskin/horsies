@@ -15,7 +15,7 @@ import { readTree } from "../codec/number-text.ts";
 import { refusalText, ROOT_PATH } from "../codec/refusal.ts";
 import { runBody, type StoredBodyOutcome } from "../child/body.ts";
 import { NO_BODY_OBSERVER } from "../child/body-observer.ts";
-import type { LoopMarks } from "../child/run-table.ts";
+import type { LoopHolder, LoopMarks } from "../child/run-table.ts";
 import type { ThreadTaskRuntime } from "../child/runtime.ts";
 import { type CompiledContract, compileContract } from "../contract/compile.ts";
 import type { ImplementationParts } from "../contract/implementation.ts";
@@ -24,7 +24,12 @@ import type { LibraryTaskCode, TaskError, TaskOutcome } from "../wire/task-error
 import { unreachable } from "../wire/unreachable.ts";
 
 /** The loop marks of a test run: no loop watch runs. */
-const NO_LOOP_MARKS: LoopMarks = Object.freeze({ hold: () => undefined, release: () => undefined });
+const NO_LOOP_MARKS: LoopMarks = Object.freeze({
+  hold: (): LoopHolder => NO_HOLDER,
+  restore: (): void => undefined,
+});
+
+const NO_HOLDER: LoopHolder = Object.freeze({ kind: "noRun" });
 
 /** Run the body of `implementation` with `input` and `runtime`; give its outcome as a task read gives it. */
 export async function runImplementation(

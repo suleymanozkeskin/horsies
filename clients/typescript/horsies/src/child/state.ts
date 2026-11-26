@@ -2,7 +2,11 @@
 // this child (or in this seat isolate). A key exists only with its provider, so `state` returns the value, not a
 // Result. A key of another app is a defect.
 
-import { ClientDefect } from "../thrown-errors.ts";
+import { raiseDefect } from "../native/call/defect.ts";
+import { ClientDefect, type CoreDefect } from "../thrown-errors.ts";
+
+/** The defect rule: in a worker process it writes stderr and the log sink, then aborts; else it throws. */
+export type RaiseDefect = (defect: CoreDefect) => never;
 
 /** Type-only key of the value type of a state key. It does not exist at run time. */
 export declare const stateValueType: unique symbol;
@@ -41,9 +45,12 @@ type StateSlot = { readonly kind: "notBuilt" } | { readonly kind: "built"; reado
 /** The values of the providers of one app in this process, by the identity of their keys. */
 export class StateValues {
   readonly #slots = new Map<object, StateSlot>();
+  readonly #raise: RaiseDefect;
 
-  /** The values of the providers with the keys `keys`: none built yet. */
-  constructor(keys: readonly StateKeyIdentity[]) {
+  /** The values of the providers with the keys `keys`: none built yet. A defect goes to `raise`. */
+  constructor(keys: readonly StateKeyIdentity[], raise: RaiseDefect = raiseDefect) {
+    this.#raise = raise;
+
     for (const key of keys) {
       this.#slots.set(key, { kind: "notBuilt" });
     }
@@ -55,7 +62,7 @@ export class StateValues {
    */
   keep<T>(key: StateKeyIdentity, value: T): void {
     if (!this.#slots.has(key)) {
-      throw new ClientDefect({ subject: "provide", rule: `the state key ${key.name} is not a key of this app` });
+      this.#raise(new ClientDefect({ subject: "provide", rule: `the state key ${key.name} is not a key of this app` }));
     }
 
     this.#slots.set(key, { kind: "built", value });
@@ -69,7 +76,7 @@ export class StateValues {
     const slot = this.#slots.get(key);
 
     if (slot === undefined) {
-      throw new ClientDefect({ subject: "runtime.state", rule: `the state key ${key.name} belongs to another app` });
+      return this.#raise(new ClientDefect({ subject: "runtime.state", rule: `the state key ${key.name} belongs to another app` }));
     }
 
     switch (slot.kind) {
@@ -77,7 +84,9 @@ export class StateValues {
         // SAFETY: `keep` is the only writer, and it takes a value of the key's type `T`.
         return slot.value as T;
       case "notBuilt":
-        throw new ClientDefect({ subject: "runtime.state", rule: `the provider of ${key.name} has not run in this process` });
+        return this.#raise(
+          new ClientDefect({ subject: "runtime.state", rule: `the provider of ${key.name} has not run in this process` }),
+        );
       default: {
         const unexpected: never = slot;
 

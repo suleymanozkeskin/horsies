@@ -79,14 +79,14 @@ async function calledBody(run: BodyRun, input: DecodedParameters): Promise<Store
   const body = run.implementation.body as ErasedBody;
   let returned: unknown;
 
-  run.marks.hold(run.mark.taskId);
+  const before = run.marks.hold(run.mark.taskId);
 
   try {
     returned = runStore.run(run.mark, () => run.observation.run(() => body(input, run.runtime)));
   } catch (cause) {
     return thrownOutcome(run, cause);
   } finally {
-    run.marks.release();
+    run.marks.restore(before);
   }
 
   try {

@@ -24,7 +24,10 @@
 //!   settle call ends its work.
 //! - `registerSpawn` adds a piece of host-held work to an async run
 //!   (`runtime.spawn`) and `endSpawn` ends it. A round's stop request of a
-//!   piece is posted as `stopWork`.
+//!   piece is posted as `stopWork`. The run's work place (its handle) stays
+//!   until the body settled and its last piece ended, so work that spawned
+//!   work starts after the body returned belongs to the run, as in Rust and
+//!   Python; the core answers `RunEnded` once the run is over.
 //! - A body call whose `runBody` post Node-API does not queue is a defect:
 //!   the queue bound holds every post of a full child. The call panics with
 //!   the cause, and the core stores the panic record as
@@ -45,7 +48,7 @@ use horsies_core::frame_protocol::MAX_SEATS_PER_SHARED_ASYNC_CHILD;
 use horsies_core::{
     current_run, run_cancel_signal, run_cancel_state, run_fencing_token, CancelCause, FencingToken,
     HostWork, HostWorkRefused, RunCancelSignal, RunCancelState, RunHandle, TaskResult,
-    WorkStopCause, MAX_RUN_WORK,
+    WorkStopCause, HOST_LOOP_TURN_TICK, MAX_RUN_WORK,
 };
 use napi::bindgen_prelude::{BigInt, Function};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -79,8 +82,10 @@ const WORK_STOP_POST_TRIES: u32 = 100;
 /// The wait between two tries of a stop post.
 const WORK_STOP_POST_PAUSE: Duration = Duration::from_millis(10);
 
-/// How often the wait of a blocking body reads its cancel signal.
-const BLOCKING_CANCEL_READ: Duration = Duration::from_millis(2);
+/// How often the wait of a blocking body reads its cancel signal: the turn
+/// tick of the host loop. A blocking body runs on the JavaScript main thread
+/// until the thread seats fill their slot.
+const BLOCKING_CANCEL_READ: Duration = HOST_LOOP_TURN_TICK;
 
 /// The most seats of a shared async child, as a `usize`.
 const fn seats_bound() -> usize {
@@ -300,13 +305,9 @@ impl CancelSeen {
 
 /// How the run waits for its settle call.
 enum RunForm {
-    /// An async run: its handle, the runtime that runs it, the poster of
-    /// the stop requests of its spawned work, the body's host-held work, and
-    /// the waiting call.
+    /// An async run: the body's host-held work and the waiting call. Its
+    /// work place is in [`PLACES`].
     Async {
-        handle: RunHandle,
-        runtime: tokio::runtime::Handle,
-        poster: Arc<ChildPoster>,
         body: HostWork,
         done: oneshot::Sender<RawTaskResult>,
     },
@@ -340,6 +341,7 @@ struct RunEntry {
 /// One piece of host-held work that JavaScript started with
 /// `runtime.spawn`.
 struct WorkEntry {
+    run_key: u64,
     work: Arc<HostWork>,
     /// Ends the stop watch of the piece.
     ended: oneshot::Sender<()>,
@@ -349,6 +351,95 @@ static RUNS: LazyLock<Mutex<HashMap<u64, RunEntry>>> = LazyLock::new(|| Mutex::n
 
 static WORKS: LazyLock<Mutex<HashMap<u64, WorkEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Whether the body of an async run settled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BodyLife {
+    Running,
+    Settled,
+}
+
+/// The life of an async run's work place: its body, and its spawned
+/// pieces that have not ended. The core bounds the pieces (`MAX_RUN_WORK`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RunLife {
+    body: BodyLife,
+    pieces: usize,
+}
+
+/// Whether a work place stays after a change of its life.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlaceAfter {
+    Kept,
+    Removed,
+}
+
+impl RunLife {
+    /// A run whose body runs, with no piece.
+    const RUNNING: Self = Self {
+        body: BodyLife::Running,
+        pieces: 0,
+    };
+
+    fn with_piece(self) -> Self {
+        Self {
+            pieces: self.pieces + 1,
+            ..self
+        }
+    }
+
+    /// One piece ended. A piece ends once, so a life with no piece is a
+    /// defect.
+    fn without_piece(self) -> Self {
+        Self {
+            pieces: self
+                .pieces
+                .checked_sub(1)
+                .unwrap_or_else(|| panic!("a spawned piece of a run ended twice")),
+            ..self
+        }
+    }
+
+    fn settled(self) -> Self {
+        Self {
+            body: BodyLife::Settled,
+            ..self
+        }
+    }
+
+    /// The place stays while the body runs or a piece is alive. Pure.
+    fn place(self) -> PlaceAfter {
+        match (self.body, self.pieces) {
+            (BodyLife::Settled, 0) => PlaceAfter::Removed,
+            (BodyLife::Running, _) | (BodyLife::Settled, _) => PlaceAfter::Kept,
+        }
+    }
+}
+
+/// Where the spawned work of an async run goes: its handle, the runtime
+/// that runs it, the poster of the stop requests, and its life.
+struct WorkPlaceEntry {
+    handle: RunHandle,
+    runtime: tokio::runtime::Handle,
+    poster: Arc<ChildPoster>,
+    life: RunLife,
+}
+
+static PLACES: LazyLock<Mutex<HashMap<u64, WorkPlaceEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Change the life of the work place of `run_key` with `change`, and remove
+/// the place when it ends. A run with no place is left.
+fn change_place(run_key: u64, change: impl FnOnce(RunLife) -> RunLife) {
+    let mut places = lock(&PLACES);
+    let after = places.get_mut(&run_key).map(|entry| {
+        entry.life = change(entry.life);
+        entry.life.place()
+    });
+    if after == Some(PlaceAfter::Removed) {
+        let _place_ended = places.remove(&run_key);
+    }
+}
 
 /// The next run key and work key. Keys are never reused in a process.
 static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
@@ -402,13 +493,16 @@ impl JsAsyncBody {
             run_key,
             RunEntry {
                 cancel: Arc::clone(&cancel),
-                form: RunForm::Async {
-                    handle,
-                    runtime: tokio::runtime::Handle::current(),
-                    poster: Arc::clone(&self.bodies.poster),
-                    body,
-                    done,
-                },
+                form: RunForm::Async { body, done },
+            },
+        );
+        let _no_earlier_place = lock(&PLACES).insert(
+            run_key,
+            WorkPlaceEntry {
+                handle,
+                runtime: tokio::runtime::Handle::current(),
+                poster: Arc::clone(&self.bodies.poster),
+                life: RunLife::RUNNING,
             },
         );
         post_body(&self.task_name, &self.bodies, run_key, token, input);
@@ -582,6 +676,7 @@ fn post_body(
     });
     if let Err(refused) = posted {
         let _work_ends_with_the_entry = lock(&RUNS).remove(&run_key);
+        let _no_work_place = lock(&PLACES).remove(&run_key);
         panic!("the body of task {task_name} did not reach the JavaScript thread: {refused}");
     }
 }
@@ -597,12 +692,14 @@ pub enum BodySettle {
 }
 
 /// End the run `run_key` with `result`. The lock is released before the
-/// work ends and the result goes.
+/// work ends and the result goes. The work place of an async run stays
+/// while a spawned piece is alive.
 fn settle(run_key: u64, result: RawTaskResult) -> BodySettle {
     let entry = lock(&RUNS).remove(&run_key);
     match entry {
         Some(entry) => {
             entry.form.finish(result);
+            change_place(run_key, RunLife::settled);
             BodySettle::Settled
         }
         None => BodySettle::UnknownRun,
@@ -712,75 +809,96 @@ pub fn register_spawn(run_key: BigInt, name: String) -> Envelope<SpawnRegistrati
             Ok(run_key) => run_key,
             Err(refusal) => return Envelope::Thrown(refusal.into()),
         };
-        match run_work_place(run_key) {
-            WorkPlace::Ended => Envelope::Value(SpawnRegistration::RunEnded),
-            WorkPlace::Blocking => Envelope::Thrown(NativeThrown::ClientDefect {
+        match registration(run_key, &name) {
+            Registration::Started(started) => Envelope::Value(started.watched()),
+            Registration::Refused(refused) => Envelope::Value(refused),
+            Registration::Blocking => Envelope::Thrown(NativeThrown::ClientDefect {
                 subject: "registerSpawn".to_owned(),
                 rule: "the runtime of a SHARED_THREAD body has no spawn".to_owned(),
             }),
-            WorkPlace::Async {
-                handle,
-                runtime,
-                poster,
-            } => Envelope::Value(registered(&handle, &runtime, &name, poster)),
         }
     })
 }
 
-/// Where new work of a run goes.
-enum WorkPlace {
-    Ended,
+/// How a registration of spawned work ended, before its stop watch.
+enum Registration {
+    Started(StartedPiece),
+    Refused(SpawnRegistration),
+    /// A blocking run has no work set.
     Blocking,
-    Async {
-        handle: RunHandle,
-        runtime: tokio::runtime::Handle,
-        poster: Arc<ChildPoster>,
-    },
 }
 
-/// The place of new work of `run_key`. The lock is released on return.
-fn run_work_place(run_key: u64) -> WorkPlace {
-    match lock(&RUNS).get(&run_key).map(|entry| &entry.form) {
-        None => WorkPlace::Ended,
-        Some(RunForm::Blocking { .. }) => WorkPlace::Blocking,
-        Some(RunForm::Async {
-            handle,
-            runtime,
-            poster,
-            ..
-        }) => WorkPlace::Async {
-            handle: handle.clone(),
-            runtime: runtime.clone(),
-            poster: Arc::clone(poster),
-        },
+/// A registered piece whose stop watch starts next.
+struct StartedPiece {
+    work_key: u64,
+    work: Arc<HostWork>,
+    ended: oneshot::Receiver<()>,
+    runtime: tokio::runtime::Handle,
+    poster: Arc<ChildPoster>,
+}
+
+impl StartedPiece {
+    /// Start the stop watch of the piece on its run's runtime.
+    fn watched(self) -> SpawnRegistration {
+        let work_key = self.work_key;
+        let _watch_runs_alone = self.runtime.spawn(watch_work_stop(
+            work_key,
+            self.work,
+            self.ended,
+            self.poster,
+        ));
+        SpawnRegistration::Registered {
+            work_key: bigint_of_u64(work_key),
+        }
     }
 }
 
-/// Register one piece on `handle`, keep it in the work table, and start its
-/// stop watch on `runtime`.
-fn registered(
-    handle: &RunHandle,
-    runtime: &tokio::runtime::Handle,
-    name: &str,
-    poster: Arc<ChildPoster>,
-) -> SpawnRegistration {
-    let work = match handle.register_host_work(name) {
-        Ok(work) => Arc::new(work),
-        Err(HostWorkRefused::RunEnded) => return SpawnRegistration::RunEnded,
-        Err(HostWorkRefused::TooMuchWork { bound }) => {
-            return SpawnRegistration::TooMuchWork {
-                bound: u32::try_from(bound).unwrap_or(u32::MAX),
+/// Register one piece of the run `run_key` on its work place. The place and
+/// its count of pieces change under one lock, so the place cannot end
+/// between the read and the count. The core refuses a piece of a run that is
+/// over (`RunEnded`) or full (`TooMuchWork`).
+fn registration(run_key: u64, name: &str) -> Registration {
+    let mut places = lock(&PLACES);
+    let Some(place) = places.get_mut(&run_key) else {
+        drop(places);
+        return match lock(&RUNS).get(&run_key).map(|entry| &entry.form) {
+            Some(RunForm::Blocking { .. }) => Registration::Blocking,
+            Some(RunForm::Async { .. }) | None => {
+                Registration::Refused(SpawnRegistration::RunEnded)
             }
+        };
+    };
+    let work = match place.handle.register_host_work(name) {
+        Ok(work) => Arc::new(work),
+        Err(HostWorkRefused::RunEnded) => {
+            return Registration::Refused(SpawnRegistration::RunEnded)
+        }
+        Err(HostWorkRefused::TooMuchWork { bound }) => {
+            return Registration::Refused(SpawnRegistration::TooMuchWork {
+                bound: u32::try_from(bound).unwrap_or(u32::MAX),
+            })
         }
     };
+    place.life = place.life.with_piece();
     let work_key = next_key();
     let (ended, ended_watch) = oneshot::channel();
-    let watched = Arc::clone(&work);
-    let _no_earlier_entry = lock(&WORKS).insert(work_key, WorkEntry { work, ended });
-    let _watch_runs_alone = runtime.spawn(watch_work_stop(work_key, watched, ended_watch, poster));
-    SpawnRegistration::Registered {
-        work_key: bigint_of_u64(work_key),
-    }
+    let started = StartedPiece {
+        work_key,
+        work: Arc::clone(&work),
+        ended: ended_watch,
+        runtime: place.runtime.clone(),
+        poster: Arc::clone(&place.poster),
+    };
+    drop(places);
+    let _no_earlier_entry = lock(&WORKS).insert(
+        work_key,
+        WorkEntry {
+            run_key,
+            work,
+            ended,
+        },
+    );
+    Registration::Started(started)
 }
 
 /// Wait for a round's stop request of the piece `work_key`, and post it;
@@ -842,9 +960,14 @@ pub fn end_spawn(work_key: BigInt) -> Envelope<SpawnEnd> {
         Ok(work_key) => {
             let entry = lock(&WORKS).remove(&work_key);
             Envelope::Value(match entry {
-                Some(WorkEntry { work, ended }) => {
+                Some(WorkEntry {
+                    run_key,
+                    work,
+                    ended,
+                }) => {
                     let _watch_ended_before = ended.send(());
                     drop(work);
+                    change_place(run_key, RunLife::without_piece);
                     SpawnEnd::Ended
                 }
                 None => SpawnEnd::UnknownWork,
@@ -930,7 +1053,32 @@ mod tests {
         );
         assert!(matches!(settled.recv(), Ok(TaskResult::Ok(bytes)) if bytes == b"7"));
         assert!(!lock(&RUNS).contains_key(&run_key));
-        assert!(matches!(run_work_place(run_key), WorkPlace::Ended));
+        assert!(matches!(
+            registration(run_key, "late"),
+            Registration::Refused(SpawnRegistration::RunEnded)
+        ));
+    }
+
+    #[test]
+    fn a_work_place_stays_while_the_body_runs_or_a_piece_is_alive() {
+        let one_piece = RunLife::RUNNING.with_piece();
+        assert_eq!(one_piece.place(), PlaceAfter::Kept);
+        let settled_with_a_piece = one_piece.settled();
+        assert_eq!(settled_with_a_piece.place(), PlaceAfter::Kept);
+        assert_eq!(
+            settled_with_a_piece.with_piece().without_piece().place(),
+            PlaceAfter::Kept
+        );
+        assert_eq!(
+            settled_with_a_piece.without_piece().place(),
+            PlaceAfter::Removed
+        );
+        assert_eq!(RunLife::RUNNING.settled().place(), PlaceAfter::Removed);
+    }
+
+    #[test]
+    fn a_change_of_a_run_with_no_place_is_left() {
+        change_place(next_key(), RunLife::settled);
     }
 
     #[test]

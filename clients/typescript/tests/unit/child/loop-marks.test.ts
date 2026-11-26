@@ -14,7 +14,24 @@ import {
   startTurns,
 } from "../../../horsies/src/child/loop-marks.ts";
 import { runStore } from "../../../horsies/src/child/run-store.ts";
-import { RUN_TASK_ID } from "./support.ts";
+import { FakeRunNative, RUN_TASK_ID, tableRun } from "./support.ts";
+
+/** The core's holder cell: one mark, no nesting (`HostLoop::hold` sets it, `release` clears it). */
+class HolderCell implements LoopNative {
+  holder = "noRun";
+
+  loopTurned(): void {
+    return undefined;
+  }
+
+  loopHold(taskId: string): void {
+    this.holder = taskId;
+  }
+
+  loopRelease(): void {
+    this.holder = "noRun";
+  }
+}
 
 class RecordingLoop implements LoopNative {
   readonly marks: string[] = [];
@@ -57,13 +74,27 @@ describe("the loop marks", () => {
     assert.equal(stopped, true);
   });
 
-  test("hold and release reach the addon", () => {
+  test("hold gives the holder before it, and restore puts it back on the addon", () => {
     const loop = new RecordingLoop();
     const marks = loopMarksOf(loop);
+    const before = marks.hold(RUN_TASK_ID);
 
-    marks.hold(RUN_TASK_ID);
-    marks.release();
+    marks.restore(before);
+    assert.deepEqual(before, { kind: "noRun" });
     assert.deepEqual(loop.marks, [`hold ${RUN_TASK_ID}`, "release"]);
+  });
+
+  test("a spawn in the synchronous part of a body keeps the body's mark in the core's cell", () => {
+    const cell = new HolderCell();
+    const marks = loopMarksOf(cell);
+    const { runtime } = tableRun(new FakeRunNative(), marks);
+    const body = marks.hold(RUN_TASK_ID);
+
+    void runtime.spawn("audit", async () => undefined);
+    // A block here names the body's run: every sample of the core reads the body's task id.
+    assert.equal(cell.holder, RUN_TASK_ID);
+    marks.restore(body);
+    assert.equal(cell.holder, "noRun");
   });
 
   test("the culprit method marks the run of a Promise at each continuation, and no run for another Promise", () => {
@@ -79,7 +110,7 @@ describe("the loop marks", () => {
           return () => undefined;
         },
       },
-      loop,
+      loopMarksOf(loop),
     );
 
     const ofRun = Promise.resolve(1);
@@ -96,6 +127,6 @@ describe("the loop marks", () => {
 
   test("the method of this runtime: the Promise hooks on Node, none on Bun", () => {
     assert.equal(runtimeCulpritMethod().kind, "bun" in process.versions ? "none" : "promiseHooks");
-    assert.equal(startCulpritMarks({ kind: "none" }, new RecordingLoop())(), undefined);
+    assert.equal(startCulpritMarks({ kind: "none" }, loopMarksOf(new RecordingLoop()))(), undefined);
   });
 });
