@@ -193,12 +193,52 @@ function compileForm(definition: ZodDefinition, schema: ZodSchema, walk: Walk): 
       return requiredOf(compileTagged(definition, walk));
     case "codec":
       return requiredOf(compileCodec(definition, walk));
-    default:
+    case "nullable":
+    case "optional":
+    case "nonoptional":
+    case "default":
+    case "prefault":
+    case "readonly":
+    case "lazy":
+    case "custom":
+    case "untyped":
+    case "transform":
+    case "catch":
+    case "date":
+    case "intersection":
+    case "notData":
+    case "coerced":
+    case "exclusiveUnion":
+    case "unknownDefinition":
+    case "unknownField":
       return compileWrapper(definition, schema, walk);
+    default:
+      return unreachable(definition, "compileForm");
   }
 }
 
-function compileWrapper(definition: ZodDefinition, schema: ZodSchema, walk: Walk): Compiled<ZodMemberKind> {
+/** The forms that `compileForm` passes on to `compileWrapper`: the wrappers, and the forms that have no kind. */
+type WrapperForm =
+  | "nullable"
+  | "optional"
+  | "nonoptional"
+  | "default"
+  | "prefault"
+  | "readonly"
+  | "lazy"
+  | "custom"
+  | "untyped"
+  | "transform"
+  | "catch"
+  | "date"
+  | "intersection"
+  | "notData"
+  | "coerced"
+  | "exclusiveUnion"
+  | "unknownDefinition"
+  | "unknownField";
+
+function compileWrapper(definition: FormOf<WrapperForm>, schema: ZodSchema, walk: Walk): Compiled<ZodMemberKind> {
   switch (definition.form) {
     case "nullable":
       return mapped(compileNode(definition.inner, walk), (inner) => ({
@@ -221,8 +261,19 @@ function compileWrapper(definition: ZodDefinition, schema: ZodSchema, walk: Walk
       return isZodJson(schema, definition.inner) ? required(JSON_KIND) : compileNode(definition.inner, walk);
     case "custom":
       return compileCustom(definition.test, walk.path, definition.zodType);
-    default:
+    case "untyped":
+    case "transform":
+    case "catch":
+    case "date":
+    case "intersection":
+    case "notData":
+    case "coerced":
+    case "exclusiveUnion":
+    case "unknownDefinition":
+    case "unknownField":
       return refusedForm(definition, walk.path);
+    default:
+      return unreachable(definition, "compileWrapper");
   }
 }
 

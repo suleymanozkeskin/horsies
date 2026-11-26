@@ -109,8 +109,30 @@ function ruleText(refused: ZodSchemaRefused): string {
     case "UNKNOWN_FORMAT":
     case "UNKNOWN_CHECK":
       return `${refused.rule} ${refused.name}`;
-    default:
+    case "UNTYPED":
+    case "TRANSFORM":
+    case "CATCH":
+    case "DATE":
+    case "LOOSE_OBJECT":
+    case "NOT_DATA":
+    case "UNDISCRIMINATED_UNION":
+    case "MIXED_UNION":
+    case "INT_FLOAT_UNION":
+    case "RECORD_KEY":
+    case "ENGINE_KEY":
+    case "UNKNOWN_DEFINITION":
+    case "EXCLUSIVE_UNION":
+    case "INTERSECTION":
+    case "OPTIONAL_NOT_A_MEMBER":
+    case "CHANGING_DEFAULT":
+    case "RECURSIVE":
+    case "TUPLE_REST":
+    case "LITERAL_MEMBER":
+    case "UNION_OPTION":
+    case "TOO_DEEP":
       return refused.rule;
+    default:
+      return unreachable(refused, "ruleText");
   }
 }
 

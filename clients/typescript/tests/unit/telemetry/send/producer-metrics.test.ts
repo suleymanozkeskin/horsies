@@ -65,7 +65,7 @@ describe("the producer metrics", () => {
   });
 
   test("a send that the core takes is one point of each, with the result ok", async () => {
-    await sendTask(contextOf({}, false), report, { n: 1 }, {});
+    assert.equal((await sendTask(contextOf({}, false), report, { n: 1 }, {})).ok, true);
 
     const metrics = await sdk.metrics();
     const sent = sentPoints(metrics);
@@ -84,7 +84,9 @@ describe("the producer metrics", () => {
   test("a failed send has its code as the result, and the resends of one call are one point", async () => {
     const failed = { kind: "failed", error: rawEnqueueFailed("report", true) } as const;
 
-    await sendTask(contextOf({ enqueued: [failed] }, true), report, { n: 1 }, {});
+    const outcome = await sendTask(contextOf({ enqueued: [failed] }, true), report, { n: 1 }, {});
+
+    assert.equal(outcome.ok ? "sent" : outcome.error.code, "ENQUEUE_FAILED");
 
     const sent = sentPoints(await sdk.metrics());
 
@@ -95,7 +97,7 @@ describe("the producer metrics", () => {
   });
 
   test("the duration buckets are the bounds of the catalog", async () => {
-    await sendTask(contextOf({}, false), report, { n: 1 }, {});
+    assert.equal((await sendTask(contextOf({}, false), report, { n: 1 }, {})).ok, true);
 
     const [duration] = durationPoints(await sdk.metrics());
 

@@ -24,10 +24,15 @@ describe("entryPointsOf", () => {
     });
   });
 
-  test("the package's own package.json names the two entry points", () => {
+  test("the package's own package.json names its four entry points", () => {
     const entryPoints = entryPointsOf(JSON.parse(readFileSync(`${PACKAGE_DIR}package.json`, "utf8")));
 
-    expect(entryPoints.ok && entryPoints.value.map((entry) => entry.specifier)).toEqual(["horsies", "horsies/zod"]);
+    expect(entryPoints.ok && entryPoints.value.map((entry) => entry.specifier)).toEqual([
+      "horsies",
+      "horsies/zod",
+      "horsies/rerun/pg",
+      "horsies/rerun/postgres",
+    ]);
   });
 
   test("NoName: a manifest without a name", () => {
