@@ -9,6 +9,7 @@ mod common;
 mod events;
 mod fleet_metrics;
 mod handler;
+mod request_body;
 mod routes;
 mod schema;
 mod spa;
