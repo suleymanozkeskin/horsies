@@ -83,6 +83,21 @@ describe("the worker area of the addon", () => {
     const bound = prepareWorker(capped, startText({ kind: "NAMED", name: "io" }));
 
     assert.equal(bound.kind === "manifestBound" ? bound.path : bound.kind, "clusterWideCap.tasks");
+
+    const threads = JSON.stringify({
+      broker: { database_url: "postgresql://127.0.0.1:55432/horsies" },
+      worker_profiles: {
+        cpu: {
+          isolated: { kind: "isolated_children", count: 1 },
+          shared_thread: { kind: "shared_thread_children", count: 1, seats: 4 },
+        },
+      },
+    });
+
+    assert.deepEqual(prepareWorker(threads, startText({ kind: "NAMED", name: "cpu" })), {
+      kind: "sharedThreadUnavailable",
+      profile: "cpu",
+    });
     assert.equal(coreState(), "not_started");
   });
 

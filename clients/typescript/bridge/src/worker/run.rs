@@ -6,8 +6,9 @@
 //!   reads the config that `Horsies.create` accepted, builds the worker
 //!   manifest (the config sections and the start members), parses it with
 //!   the core's parser and picks the profile (`WorkerPlan::of_manifest`).
-//!   Answers `prepared`, `manifestBound`, `profileRefused` or
-//!   `connectionSettingsRefused`. A start member that the core's parser
+//!   Answers `prepared`, `manifestBound`, `profileRefused`,
+//!   `connectionSettingsRefused` or `sharedThreadUnavailable` (a profile
+//!   with `SHARED_THREAD` children: this addon has no thread seat isolates). A start member that the core's parser
 //!   refuses is `MANIFEST_REFUSED`, a defect of the package.
 //! - `runWorker(worker, handle)`: a service run on the core's process
 //!   runtime. The worker builds its own broker for the client family
@@ -21,12 +22,13 @@
 //! - `PreparedWorker.requestStop()`: idempotent, returns at once. A request
 //!   before the run ends the run after its start.
 //! - `workerLogBacklog()`: whether core log records still wait in the
-//!   channel, for the bounded wait before the process ends. Starts nothing.
+//!   channel, for the bounded wait before the process ends. Starts nothing
+//!   and does not wait.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
 
+use horsies_core::core::config::worker_profile::SharedThreadSetting;
 use horsies_core::manifest::{parse_producer_manifest, ManifestRefused, ProducerManifest};
 use horsies_core::worker_manifest::{parse_worker_manifest, WorkerManifest, WorkerManifestVersion};
 use horsies_core::{
@@ -41,13 +43,13 @@ use napi_derive::napi;
 use serde_json::Value;
 
 use crate::call::guard::sync_call;
-use crate::call::operation::{guarded_start, resolve, EnvelopeResolver};
-use crate::call::service_run::spawn_service_run;
+use crate::call::operation::{resolve, EnvelopeResolver};
+use crate::call::service_run::spawn_refusable_service_run;
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::handle::core_handle::CoreHandle;
 use crate::logging::bridge::{running_log, DrainOutcome};
 use crate::logging::levels::RecordLevel;
-use crate::process_core::runtime::{core_for_call, pure_call_refusal, Core};
+use crate::process_core::runtime::{pure_call_refusal, Core};
 use crate::sends::checks::{check_app_config, AppConfigCheck};
 use crate::sends::refusals::{CoreRefusal, RefusalHelp};
 use crate::values::boundary::bigint_of_u64;
@@ -126,6 +128,12 @@ pub enum WorkerPreparation {
     /// The connection settings fail the broker config check (for example
     /// PgBouncer transaction mode with no session URL). Nothing started.
     ConnectionSettingsRefused { cause: String },
+    /// The profile `profile` starts `SHARED_THREAD` children, and this addon
+    /// has no thread seat isolates: a child would run each `SHARED_THREAD`
+    /// body on its JavaScript main thread, one at a time, and a body that
+    /// holds that thread for the blocked-loop limit would end the child.
+    /// Nothing started.
+    SharedThreadUnavailable { profile: String },
 }
 
 /// Prepare the worker of the accepted app config `appConfigJson` (the core's
@@ -159,8 +167,13 @@ fn preparation(app_config_json: &str, start_json: &str) -> Result<WorkerPreparat
     };
     let manifest = worker_manifest(&sections, start).map_err(manifest_refused)?;
     Ok(match WorkerPlan::of_manifest(&manifest) {
-        Ok(plan) => WorkerPreparation::Prepared {
-            worker: PreparedWorker::of(plan),
+        Ok(plan) => match thread_seats(&plan) {
+            ThreadSeats::NotNeeded => WorkerPreparation::Prepared {
+                worker: PreparedWorker::of(plan),
+            },
+            ThreadSeats::Needed { profile } => {
+                WorkerPreparation::SharedThreadUnavailable { profile }
+            }
         },
         Err(WorkerPlanRefused::Profile(refused)) => WorkerPreparation::ProfileRefused {
             refusals: refused.errors().iter().map(coded_refusal).collect(),
@@ -169,6 +182,26 @@ fn preparation(app_config_json: &str, start_json: &str) -> Result<WorkerPreparat
             WorkerPreparation::ConnectionSettingsRefused { cause }
         }
     })
+}
+
+/// Whether a worker of a plan needs thread seat isolates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ThreadSeats {
+    NotNeeded,
+    /// The profile `profile` starts `SHARED_THREAD` children.
+    Needed {
+        profile: String,
+    },
+}
+
+/// Whether the profile of `plan` starts `SHARED_THREAD` children. Pure.
+fn thread_seats(plan: &WorkerPlan) -> ThreadSeats {
+    match &plan.profile.profile.shared_thread {
+        SharedThreadSetting::SharedThreadChildren(_) => ThreadSeats::Needed {
+            profile: plan.profile.name.clone(),
+        },
+        SharedThreadSetting::NoSharedThreadChildren {} => ThreadSeats::NotNeeded,
+    }
 }
 
 /// The core's config of `text` and the producer manifest of its broker
@@ -389,36 +422,29 @@ impl WorkerRunEnded {
 }
 
 /// Run `worker` until a stop request or a failure, with the child spec
-/// source of `handle`. A prepared worker runs once: a second run resolves
-/// with `CLIENT_DEFECT` at once. A refusal of the core resolves at once too,
-/// before the plan is taken, so it changes nothing.
+/// source of `handle`. The plan is taken only after the core of the process
+/// was taken for the call, so a refusal of the core changes nothing. A
+/// prepared worker runs once: a second run resolves with `CLIENT_DEFECT` at
+/// once.
 #[napi(ts_return_type = "Promise<NativeEnvelope<WorkerRunEnded>>")]
 pub fn run_worker<'env>(
     env: &'env Env,
     worker: &PreparedWorker,
     handle: &CoreHandle,
 ) -> napi::Result<Object<'env>> {
-    let taken = guarded_start(RUN_SUBJECT, || {
-        let _core = core_for_call().map_err(|refusal| refusal.thrown())?;
-        worker
+    let source = handle
+        .child_spec_source()
+        .unwrap_or_else(|| Arc::new(NoWorkflowsListed));
+    let stop = worker.stop.clone();
+    spawn_refusable_service_run(env, RUN_SUBJECT, move |core| {
+        let plan = worker
             .take_plan()
             .ok_or_else(|| NativeThrown::ClientDefect {
                 subject: RUN_SUBJECT.to_owned(),
                 rule: "a prepared worker runs once".to_owned(),
-            })
-    });
-    match taken {
-        Err(thrown) => thrown_now::<WorkerRunEnded>(env, thrown),
-        Ok(plan) => {
-            let source = handle
-                .child_spec_source()
-                .unwrap_or_else(|| Arc::new(NoWorkflowsListed));
-            let stop = worker.stop.clone();
-            spawn_service_run(env, RUN_SUBJECT, move |core| {
-                run_plan(core, plan, source, stop)
-            })
-        }
-    }
+            })?;
+        Ok(run_plan(core, plan, source, stop))
+    })
 }
 
 /// A Promise that resolves with `thrown` at once.
@@ -497,13 +523,13 @@ pub enum LogBacklog {
 }
 
 /// Whether core log records wait in the channel. Starts nothing; reads
-/// counters and returns within one poll pause of the log bridge.
+/// counters and does not wait.
 #[napi(ts_return_type = "NativeEnvelope<LogBacklog>")]
 pub fn worker_log_backlog() -> Envelope<LogBacklog> {
     sync_call("worker_log_backlog", || {
         Envelope::Value(match running_log() {
             None => LogBacklog::Empty,
-            Some(log) => backlog_of(log.wait_for_drain(Duration::ZERO)),
+            Some(log) => backlog_of(log.sink().drain_state()),
         })
     })
 }
@@ -643,6 +669,17 @@ mod tests {
                 );
             }
             other => panic!("the config check refuses the text first, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_profile_with_shared_thread_children_is_refused_with_its_name() {
+        let config = r#"{"broker": {"database_url": "postgresql://127.0.0.1:55432/horsies"}, "worker_profiles": {"cpu": {"isolated": {"kind": "isolated_children", "count": 1}, "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4}}}}"#;
+        match preparation(config, &start(r#"{"kind": "NAMED", "name": "cpu"}"#)) {
+            Ok(WorkerPreparation::SharedThreadUnavailable { profile }) => {
+                assert_eq!(profile, "cpu")
+            }
+            other => panic!("a SHARED_THREAD profile is refused, got {other:?}"),
         }
     }
 

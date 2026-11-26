@@ -22,7 +22,7 @@ use napi::Env;
 
 use crate::call::guard::{guard, CallKind};
 use crate::call::operation::{guarded_start, resolve, EnvelopeResolver};
-use crate::call::thrown::Envelope;
+use crate::call::thrown::{Envelope, NativeThrown};
 use crate::process_core::runtime::{core_for_call, Core};
 
 /// Asks a service run to stop.
@@ -65,7 +65,7 @@ impl StopSignal {
 /// create. Every other end is an envelope.
 #[allow(
     dead_code,
-    reason = "the run exports of the worker and scheduler areas call it"
+    reason = "the run exports of the scheduler and facades areas call it"
 )]
 pub fn spawn_service_run<'env, T, Build, Run>(
     env: &'env Env,
@@ -77,10 +77,31 @@ where
     Build: FnOnce(&'static Core) -> Run,
     Run: Future<Output = T> + Send + 'static,
 {
+    spawn_refusable_service_run(env, subject, |core| Ok(build(core)))
+}
+
+/// As [`spawn_service_run`], with a build that can refuse the run. The build
+/// runs only after the core of the process was taken for the call, so a
+/// refusal of the core comes before it and changes nothing that the build
+/// owns. A refusal of the build resolves the Promise at once with its
+/// thrown code; nothing runs.
+///
+/// Failure exits: the `napi::Error` of a deferred that Node-API cannot
+/// create. Every other end is an envelope.
+pub fn spawn_refusable_service_run<'env, T, Build, Run>(
+    env: &'env Env,
+    subject: &'static str,
+    build: Build,
+) -> napi::Result<Object<'env>>
+where
+    T: ToNapiValue + Send + 'static,
+    Build: FnOnce(&'static Core) -> Result<Run, NativeThrown>,
+    Run: Future<Output = T> + Send + 'static,
+{
     let (deferred, promise) = env.create_deferred::<Envelope<T>, EnvelopeResolver<T>>()?;
     let started = guarded_start(subject, || {
         let core = core_for_call().map_err(|refusal| refusal.thrown())?;
-        Ok((core, build(core)))
+        Ok((core, build(core)?))
     });
     match started {
         Err(thrown) => resolve(deferred, Envelope::Thrown(thrown)),
@@ -95,10 +116,6 @@ where
 
 /// Run `run` inside `guard` to its end: its value, `CORE_PANIC`, or
 /// `CORE_STOPPED` with an unknown outcome (a run writes).
-#[allow(
-    dead_code,
-    reason = "spawn_service_run, which the worker and scheduler areas call, runs it"
-)]
 async fn run_to_envelope<T, Run>(
     core: &'static Core,
     subject: &'static str,

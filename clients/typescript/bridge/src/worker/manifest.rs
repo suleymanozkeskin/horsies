@@ -54,9 +54,10 @@ pub struct ConfigSections {
 /// Pure: no I/O.
 ///
 /// Errors: [`ManifestBoundRefused`] for the first value outside its
-/// manifest bound, in the core's order: the claim values (`prefetchBuffer`,
-/// `claimLeaseMs`, `maxClaimRenewAgeMs`, `clusterWideCap`, each custom
-/// queue), then the recovery, retention, resilience and payload sections.
+/// manifest bound, in the core's order: the claim values
+/// (`claim.prefetchBuffer`, `claim.leaseMs`, `maxClaimRenewAgeMs`,
+/// `clusterWideCap.tasks`, each custom queue), then the recovery,
+/// retention, resilience and payload sections.
 pub fn config_sections(
     config: &AppConfig,
     producer: &ProducerManifest,
@@ -108,12 +109,14 @@ fn database_manifest(
 }
 
 /// The path of `field` as the TypeScript config writes it: camelCase
-/// members, the member of a variant object (`clusterWideCap.tasks`), a
-/// position as `[n]` and a queue name as a JSON string. Pure.
+/// members, the member of a variant object (`clusterWideCap.tasks`), the
+/// members of the claim mode under `claim` (`claim.prefetchBuffer`,
+/// `claim.leaseMs`), a position as `[n]` and a queue name as a JSON string.
+/// Pure.
 fn typescript_path(field: &ConfigField) -> String {
     match field {
-        ConfigField::PrefetchBuffer => "prefetchBuffer".to_owned(),
-        ConfigField::ClaimLeaseMs => "claimLeaseMs".to_owned(),
+        ConfigField::PrefetchBuffer => "claim.prefetchBuffer".to_owned(),
+        ConfigField::ClaimLeaseMs => "claim.leaseMs".to_owned(),
         ConfigField::MaxClaimRenewAgeMs => "maxClaimRenewAgeMs".to_owned(),
         ConfigField::ClusterWideCap => "clusterWideCap.tasks".to_owned(),
         ConfigField::CustomQueue { position, field } => {
@@ -309,11 +312,11 @@ mod tests {
         let cases: Vec<(ConfigChange, &str)> = vec![
             (
                 Box::new(|config: &mut AppConfig| config.prefetch_buffer = u32::MAX),
-                "prefetchBuffer",
+                "claim.prefetchBuffer",
             ),
             (
                 Box::new(|config: &mut AppConfig| config.claim_lease_ms = Some(0)),
-                "claimLeaseMs",
+                "claim.leaseMs",
             ),
             (
                 Box::new(|config: &mut AppConfig| config.cluster_wide_cap = Some(u32::MAX)),
@@ -376,7 +379,10 @@ mod tests {
     #[test]
     fn each_kind_of_field_has_its_typescript_path() {
         let cases = [
-            (ConfigField::ClaimLeaseMs, "claimLeaseMs"),
+            (ConfigField::PrefetchBuffer, "claim.prefetchBuffer"),
+            (ConfigField::ClaimLeaseMs, "claim.leaseMs"),
+            (ConfigField::MaxClaimRenewAgeMs, "maxClaimRenewAgeMs"),
+            (ConfigField::ClusterWideCap, "clusterWideCap.tasks"),
             (
                 ConfigField::CustomQueue {
                     position: 2,
