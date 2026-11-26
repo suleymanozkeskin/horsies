@@ -44,7 +44,7 @@ pub struct ProbeChildProducer {
 impl ProbeChildProducer {
     /// The handle of a call on `given` in a task child whose child host
     /// published the stand-in. Pure.
-    fn chosen_for(&self, given: &CoreHandle) -> ProducerHandle {
+    pub(crate) fn chosen_for(&self, given: &CoreHandle) -> ProducerHandle {
         ProducerHandle::chosen(ChildProducer::InChild(Arc::clone(&self.handle)), given)
     }
 }
