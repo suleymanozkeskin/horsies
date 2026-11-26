@@ -12,8 +12,11 @@ import type { zodWireSent } from "./codecs.ts";
 /** The value that a reader gives for a zod schema. */
 export type ZodValueOf<S extends core.$ZodType> = core.output<S>;
 
-/** A member that a sender may leave out: zod marks `.optional()`, `.default()` and `.prefault()` with `optin`. */
-type OptionalIn = { readonly _zod: { readonly optin: "optional" } };
+/**
+ * A member that a sender may leave out: zod marks `.optional()`, `.default()` and `.prefault()` with `optin`. zod 4.1
+ * marks each one `"optional"`; later zod 4 releases mark a default `"defaulted"`.
+ */
+type OptionalIn = { readonly _zod: { readonly optin: "optional" | "defaulted" } };
 
 type Flat<T> = { [K in keyof T]: T[K] } & {};
 

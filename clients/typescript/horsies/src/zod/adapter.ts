@@ -8,8 +8,10 @@
 // - `.optional()`, `.default()` and `.prefault()` are a member's presence: valid for an object member or a task input
 //   parameter only. A default is read at compile and stored as text; the reader fills it at decode only.
 // - Unknown keys: every object kind refuses them at decode, also for a `z.object()`, which zod would strip.
-// - The kinds that `checkKind` refuses (an ambiguous union, a literal that is not a safe integer, a default that does
-//   not encode, a kind deeper than a stored value) are refused there, at `Horsies.create`.
+// - The kinds that `checkKind` refuses are refused there, at `Horsies.create`, with the rules of `h.*`: an
+//   integer-like member name (`IntegerLikeMember`: JavaScript puts it first, so the declared order cannot hold), an
+//   ambiguous union, a literal that is not a safe integer, a default that does not encode, a kind deeper than a
+//   stored value.
 
 import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
 import type { ValueCheck } from "../codec/conversion.ts";

@@ -9,7 +9,7 @@ import { MAX_VALUE_JSON_DEPTH } from "../codec/bounds.ts";
 import type { JsonValue } from "../codec/json-value.ts";
 import { encodeValue } from "../codec/writer.ts";
 import { h } from "../wire/builders.ts";
-import type { Kind, MemberPresence } from "../wire/kinds.ts";
+import type { Kind, Member, MemberPresence } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { compileMember, type ZodMemberKind } from "./adapter.ts";
@@ -140,7 +140,7 @@ export function kindText(kind: Kind, depth: number): string {
     case "taggedUnion":
       return `tagged.${kind.tag}(${kind.variants.map(inner).join("|")})`;
     case "object":
-      return `object(${kind.members.map((member) => `${member.name}:${presenceMark(member.presence)}${inner(member.kind)}`).join(",")})`;
+      return `object(${kind.members.map((member) => memberEntryText(member, inner)).join(",")})`;
     case "tuple":
       return `tuple(${kind.items.map(inner).join(",")})`;
     case "array":
@@ -158,6 +158,10 @@ export function kindText(kind: Kind, depth: number): string {
   }
 }
 
+function memberEntryText(member: Member, inner: (kind: Kind) => string): string {
+  return `${member.name}:${presenceMark(member.presence)}${inner(member.kind)}`;
+}
+
 /** A function default whose value changes at each read. */
 function changingDefault(): () => number {
   let reads = 0;
@@ -169,7 +173,12 @@ function changingDefault(): () => number {
   };
 }
 
-function kindCase(name: string, schema: ZodSchema, text: string, probes: readonly SelfCheckProbe[] = []): SelfCheckCase {
+function kindCase(
+  name: string,
+  schema: ZodSchema,
+  text: string,
+  probes: readonly SelfCheckProbe[] = [],
+): SelfCheckCase {
   return { name, schema, expected: { outcome: "kind", text }, probes };
 }
 
@@ -235,7 +244,11 @@ function containerCases(): readonly SelfCheckCase[] {
       { value: {}, written: "stored" },
     ]),
     kindCase("union", z.union([z.string(), z.boolean()]), "union(string|boolean)"),
-    kindCase("discriminated union", tagged, 'tagged.kind(object(kind:literal("a"))|object(kind:literal("b"),size:boolean))'),
+    kindCase(
+      "discriminated union",
+      tagged,
+      'tagged.kind(object(kind:literal("a"))|object(kind:literal("b"),size:boolean))',
+    ),
     kindCase("refine", z.object({}).refine(() => false), "checked(object())", [{ value: {}, written: "refused" }]),
   ];
 }
