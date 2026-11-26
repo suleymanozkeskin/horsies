@@ -1,18 +1,18 @@
-// The facts of the app that the `web` and `metrics` commands read: the core handle, the queue names of the config, the
-// schedule names and the package version.
+// The facts of the app that the monitoring handler and the `metrics` command read: the core handle, the queue names of
+// the config, the schedule names and the package version.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 
-import type { AppContext } from "../../../../horsies/src/app/context.ts";
-import { monitoringAppOf } from "../../../../horsies/src/cli/web-command.ts";
-import { queueSetupOf, type QueueSetup } from "../../../../horsies/src/config/queues.ts";
-import { clientVersion } from "../../../../horsies/src/web/client-version.ts";
-import { fakeCoreHandle, fakeProducer } from "../../app/support.ts";
+import type { AppContext } from "../../../horsies/src/app/context.ts";
+import { monitoringAppOf } from "../../../horsies/src/web/app-facts.ts";
+import { queueSetupOf, type QueueSetup } from "../../../horsies/src/config/queues.ts";
+import { clientVersion } from "../../../horsies/src/web/client-version.ts";
+import { fakeCoreHandle, fakeProducer } from "../app/support.ts";
 
 /** The `package.json` of the horsies package. */
-const PACKAGE_JSON_URL = new URL("../../../../horsies/package.json", import.meta.url);
+const PACKAGE_JSON_URL = new URL("../../../horsies/package.json", import.meta.url);
 
 /** A context of a main thread with `queues`: only the fields that the commands read. */
 function contextWith(queues: QueueSetup): { readonly context: AppContext; readonly handle: object } {
