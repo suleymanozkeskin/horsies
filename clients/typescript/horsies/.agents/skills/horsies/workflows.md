@@ -115,6 +115,60 @@ The input of a node has one member per parameter:
   (untyped code: `HRS-010`). Each `ctxFrom` node is a dependency of the node
   (`HRS-009`): name it in `waitsFor` or as a parameter source.
 
+### The Workflow Context
+
+A task with `workflowContext: true` has `runtime.workflowContext`. A task
+without it has no such member (typecheck).
+
+| Value | When |
+|---|---|
+| `{ kind: "context", context }` | The run is a workflow node that names `ctxFrom` |
+| `{ kind: "noContext" }` | A direct send, or a node with no `ctxFrom` |
+
+- `context` holds `workflowId`, `taskIndex` and `taskName`, and reads the
+  nodes of `ctxFrom`: `resultFor(nodeId, contract)` (the node's
+  `TaskOutcome`, read with the contract's output type and codes),
+  `hasResult(nodeId)`, and for a sub-workflow node `summaryFor(nodeId)`,
+  `outputFor(nodeId, workflow)` and `hasSummary(nodeId)`.
+- A read gives `notInContext` for a node that is not in `ctxFrom` or that
+  did not end, `unreadable` for a value that does not read with the
+  contract, and `unknownUserCode` for a code that the contract does not
+  list.
+
+<!-- ts-check: alone -->
+```ts
+import { defineTask, defineWorkflow, h, type Horsies } from "horsies";
+
+const charge = defineTask({ name: "charge", input: { amount: h.int() }, output: h.int() });
+const audit = defineTask({ name: "audit", input: {}, output: h.boolean(), workflowContext: true });
+
+export const checkout = defineWorkflow(
+  { name: "checkout", definitionKey: "shop.checkout.v1", params: {}, output: h.boolean() },
+  (w) => {
+    const charged = w.task(charge, { amount: 10 }, { id: "charge" });
+
+    return { output: w.task(audit, {}, { id: "audit", waitsFor: [charged], ctxFrom: [charged] }) };
+  },
+);
+
+export function implementAudit(app: Horsies) {
+  return app.implement(audit, (_input, runtime) => {
+    const context = runtime.workflowContext;
+
+    switch (context.kind) {
+      case "context": {
+        const charged = context.context.resultFor("charge", charge);
+
+        return audit.ok(charged.ok && charged.value.kind === "succeeded");
+      }
+
+      case "noContext":
+        return audit.ok(false);
+    }
+  });
+}
+```
+
 Data flow of an `h.resultOf` parameter:
 
 | Source | Default | `allowFailedDeps: true` |
@@ -503,5 +557,7 @@ import {
   type WorkflowHandle, type WorkflowHandleById, type WorkflowReadError, type HandleCoreError,
   type NodeResult, type WorkflowTaskInfo, type WorkflowStatus, WorkflowTaskStatus,
   WORKFLOW_STATUSES, type SubWorkflowSummary, type SubWorkflowFailure, type TaskOutcome,
+  // The workflow context of a task
+  type RuntimeWorkflowContext, type WorkflowContext, type ContextReadError,
 } from "horsies";
 ```

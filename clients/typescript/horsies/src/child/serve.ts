@@ -16,7 +16,14 @@ import { compileContract } from "../contract/compile.ts";
 import { contractRecord } from "../contract/definition.ts";
 import { taskIdFromCore } from "../contract/ids.ts";
 import type { ImplementationParts } from "../contract/implementation.ts";
-import type { BodySettle, ChildPost, StartFactsRecord, StartHookCall, StartHookEnd } from "../native/child/addon.ts";
+import type {
+  BodySettle,
+  ChildPost,
+  StartFactsRecord,
+  StartHookCall,
+  StartHookEnd,
+  TaskContextUse,
+} from "../native/child/addon.ts";
 import type { NativeTaskError, TaskErrorBuild, TaskErrorParts } from "../native/sends/addon.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
@@ -26,7 +33,6 @@ import { attemptFromCore } from "./attempt.ts";
 import { refusedCodeParts, runBody, type StoredBodyOutcome } from "./body.ts";
 import type { BodyObservation, BodyObserver } from "./body-observer.ts";
 import type { LoopMarks, RunNative, RunTable } from "./run-table.ts";
-import { taskRuntimeOf } from "./runtime.ts";
 import type { StateValues } from "./state.ts";
 
 /** The name of the child's own start hook, the first of the plan. */
@@ -108,13 +114,16 @@ function startRun(serve: ChildServe, observations: RunObservations, post: Extrac
   observations.set(post.runKey, observation);
 
   void runBody({
-    // The core's child host reads each run input with its strict read rule (`build_task_input` in its `prepare`)
-    // before it calls the body; an input that the rule refuses ends the run with WORKER_SERIALIZATION_ERROR and is
-    // never posted.
-    inputJson: jsonTextCheckedByCore(post.inputJson),
+    start: {
+      kind: "posted",
+      // The core's child host reads each run input with its strict read rule (`build_task_input` in its `prepare`)
+      // before it calls the body; an input that the rule refuses ends the run with WORKER_SERIALIZATION_ERROR and is
+      // never posted.
+      inputJson: jsonTextCheckedByCore(post.inputJson),
+      controls,
+    },
     implementation,
     compiled: compiled.value,
-    runtime: taskRuntimeOf(controls),
     mark: { taskId, taskName: post.taskName, attempt },
     marks: serve.marks,
     observation,
@@ -249,5 +258,22 @@ export function bodyFormOf(contract: object): "ASYNC" | "BLOCKING" {
       return "BLOCKING";
     default:
       return unreachable(execution, "bodyFormOf");
+  }
+}
+
+/**
+ * The context use of the task of `contract` in the child host's registry: `TAKES_CONTEXT` for `workflowContext: true`,
+ * so the core writes the node's workflow context into the run's input; else `NO_CONTEXT`, and the core removes it.
+ */
+export function taskContextUseOf(contract: object): TaskContextUse {
+  const context = contractRecord(contract).context;
+
+  switch (context) {
+    case "takesContext":
+      return "TAKES_CONTEXT";
+    case "noContext":
+      return "NO_CONTEXT";
+    default:
+      return unreachable(context, "taskContextUseOf");
   }
 }

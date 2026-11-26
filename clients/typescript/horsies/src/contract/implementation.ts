@@ -1,10 +1,15 @@
 // The implementation of a contract: the body and the map of thrown error classes to codes. `app.implement` builds
 // it; only the worker imports the module that calls it.
 
-import type { TaskRuntime, ThreadTaskRuntime } from "../child/runtime.ts";
+import type {
+  TaskRuntime,
+  ThreadTaskRuntime,
+  ThreadWorkflowTaskRuntime,
+  WorkflowTaskRuntime,
+} from "../child/runtime.ts";
 import { runImplementation } from "../testing/run.ts";
 import type { TaskOutcome } from "../wire/task-error.ts";
-import type { BodyResult, ExecutionClass, TaskContract } from "./define-task.ts";
+import type { BodyResult, ContextUse, ExecutionClass, TaskContract } from "./define-task.ts";
 import type { BodyInput, ParameterSchemas, OutputSchema, SchemaValue } from "./schema.ts";
 
 /**
@@ -17,18 +22,37 @@ export interface BodyRuntimes {
   readonly SHARED_THREAD: ThreadTaskRuntime;
 }
 
-/** The run context of a body of the execution class `X`. */
-export type RuntimeOf<X extends ExecutionClass> = BodyRuntimes[X];
+/**
+ * The run context of a body of a task with `workflowContext: true`, by execution class: the runtime of `BodyRuntimes`
+ * with the member `workflowContext`.
+ */
+export interface ContextBodyRuntimes {
+  readonly ISOLATED: WorkflowTaskRuntime;
+  readonly SHARED_ASYNC: WorkflowTaskRuntime;
+  readonly SHARED_THREAD: ThreadWorkflowTaskRuntime;
+}
+
+/**
+ * The run context of a body of the execution class `X` and the context use `C`: only a task that takes the workflow
+ * context (`"takesContext"`) has `workflowContext` in its runtime.
+ */
+export type RuntimeOf<X extends ExecutionClass, C extends ContextUse = "noContext"> = [C] extends ["takesContext"]
+  ? ContextBodyRuntimes[X]
+  : BodyRuntimes[X];
 
 /**
  * The body of a task. `SHARED_ASYNC` takes an async body only: its runs share one event loop. `ISOLATED` and
  * `SHARED_THREAD` take a sync or an async body.
  */
-export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> = [
-  X,
-] extends ["SHARED_ASYNC"]
-  ? (input: BodyInput<P>, runtime: RuntimeOf<X>) => Promise<BodyResult<O, E>>
-  : (input: BodyInput<P>, runtime: RuntimeOf<X>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
+export type BodyFor<
+  P extends ParameterSchemas,
+  O extends OutputSchema,
+  E extends string,
+  X extends ExecutionClass,
+  C extends ContextUse = "noContext",
+> = [X] extends ["SHARED_ASYNC"]
+  ? (input: BodyInput<P>, runtime: RuntimeOf<X, C>) => Promise<BodyResult<O, E>>
+  : (input: BodyInput<P>, runtime: RuntimeOf<X, C>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
 
 /** A class of thrown errors. */
 export type ErrorClass = abstract new (...parameters: never[]) => Error;
@@ -46,15 +70,21 @@ export interface ImplementOptions<E extends string> {
 }
 
 /** The implementation of a contract. */
-export interface Implementation<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+export interface Implementation<
+  P extends ParameterSchemas,
+  O extends OutputSchema,
+  E extends string,
+  X extends ExecutionClass,
+  C extends ContextUse = ContextUse,
+> {
   readonly kind: "implementation";
-  readonly contract: TaskContract<P, O, E, X>;
+  readonly contract: TaskContract<P, O, E, X, C>;
   /**
    * Run the body with `input` and `runtime` (`TaskRuntime.forTest`), with no worker and no database: the input and
    * the output are checked with the contract's types, as a worker checks them, and a thrown error goes through the
-   * exception map. Gives the outcome as a task read gives it.
+   * exception map. Gives the outcome as a task read gives it. The body gets the workflow context of `runtime`.
    */
-  run(input: BodyInput<P>, runtime: RuntimeOf<X>): Promise<TaskOutcome<SchemaValue<O>, E>>;
+  run(input: BodyInput<P>, runtime: RuntimeOf<X, C>): Promise<TaskOutcome<SchemaValue<O>, E>>;
 }
 
 /** Any implementation: the constraint of a generic parameter. */
@@ -73,17 +103,23 @@ export type ImplementationParts = {
 const parts = new WeakMap<object, ImplementationParts>();
 
 /** A frozen implementation, with its parts kept out of its public members. Pure apart from the kept parts. */
-export function implementationOf<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(
-  contract: TaskContract<P, O, E, X>,
-  body: BodyFor<P, O, E, X>,
+export function implementationOf<
+  P extends ParameterSchemas,
+  O extends OutputSchema,
+  E extends string,
+  X extends ExecutionClass,
+  C extends ContextUse,
+>(
+  contract: TaskContract<P, O, E, X, C>,
+  body: BodyFor<P, O, E, X, C>,
   exceptions: readonly ExceptionMapping<E>[],
-): Implementation<P, O, E, X> {
+): Implementation<P, O, E, X, C> {
   const kept: ImplementationParts = Object.freeze({ contract, body, exceptions: Object.freeze([...exceptions]) });
 
-  const implementation: Implementation<P, O, E, X> = Object.freeze({
+  const implementation: Implementation<P, O, E, X, C> = Object.freeze({
     kind: "implementation",
     contract,
-    run: async (input: BodyInput<P>, runtime: RuntimeOf<X>): Promise<TaskOutcome<SchemaValue<O>, E>> =>
+    run: async (input: BodyInput<P>, runtime: RuntimeOf<X, C>): Promise<TaskOutcome<SchemaValue<O>, E>> =>
       // SAFETY: the runner decodes the value with the contract's output kind, and a user code of the error is a code
       // of the contract (a declared code, by typecheck of `err` and of the exception map).
       runImplementation(kept, input, runtime) as Promise<TaskOutcome<SchemaValue<O>, E>>,
