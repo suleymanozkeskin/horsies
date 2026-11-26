@@ -10,6 +10,7 @@
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import type { Refusal } from "../app/refusal.ts";
+import type { TracingConfigInput } from "../telemetry/tracing-config.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { type BrokerConfigInput, brokerJson } from "./broker.ts";
@@ -66,6 +67,8 @@ export type AppConfigInput = QueueConfigInput & {
   readonly workerProfiles?: Readonly<Record<string, WorkerProfileInput>>;
   /** Send again, up to 3 times, after a send fails with a transient database error. Left out: no resend. */
   readonly resendOnTransientErr?: boolean;
+  /** The spans and producer metrics of the app. Left out: `{ kind: "none" }`. `Horsies.create` reads it; the core does not. */
+  readonly tracing?: TracingConfigInput;
 };
 
 /** A parsed config. The core's config text is not enumerable, so a log of the value never shows a secret. */

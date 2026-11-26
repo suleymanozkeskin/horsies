@@ -138,6 +138,15 @@ and there is no migration contract between pre-1.0 versions.
   its run as before. The Rust task macro and the Python task decorator
   refuse such a task at registration, so the tasks that they register do not
   change.
+- **A run whose stored options the worker cannot use stores the error
+  `data` that Python writes.** A child of the Rust client fails such a run
+  with `WORKER_SERIALIZATION_ERROR` and the reason as the message, as
+  before, and now writes `data`: `task_name` and `field` (`task_options`,
+  `timeout_ms` or `cancel_grace_ms`), then `min_ms` and `max_ms` for
+  `timeout_ms` (1000 and 4294967295) and for `cancel_grace_ms` (100 and
+  10000). Before, its stored error had no `data`. A reader that reads
+  `data.field` now reads it for the rows of each client. The Python child
+  writes the same `data` as before.
 
 ## [0.8.1] - 2026-11-25
 

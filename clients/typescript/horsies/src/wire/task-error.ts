@@ -1,10 +1,13 @@
 // The outcome of a task and its stored error: what a task read, an `h.resultOf` parameter and a workflow read give.
 
-import type { LIBRARY_TASK_CODES, WORKFLOW_STATUSES } from "../codec/bounds.ts";
+import type { BuiltInTaskCode as LibraryTaskCode } from "../_catalog/task_code.ts";
+import type { WORKFLOW_STATUSES } from "../codec/bounds.ts";
 import type { JsonValue } from "../codec/json-value.ts";
 
-/** A task error code that the library records: a timeout, a crash, a cancel, an unhandled exception, and others. */
-export type LibraryTaskCode = (typeof LIBRARY_TASK_CODES)[number];
+// A task error code that the library records (a timeout, a crash, a cancel, an unhandled exception, and others): the
+// core's built-in task codes of the generated catalog, under the one public name of the set. The generated event types
+// name the same type.
+export type { LibraryTaskCode };
 
 /** The status of a workflow. */
 export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];

@@ -31,6 +31,8 @@ export function areaScopes(area: RefusalArea): readonly CheckScope[] {
       return ["withSchedules", "withoutSchedules"];
     case "schedules":
       return ["withSchedules"];
+    case "events":
+      return ["withSchedules", "withoutSchedules"];
     default:
       return unreachable(area);
   }
