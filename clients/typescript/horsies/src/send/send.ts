@@ -202,7 +202,7 @@ async function preparedRequest(
 }
 
 /** The priority of a prepared send: the client's priority of the default queue, or the configured one. Pure. */
-function sendPriority(priority: SendPriority): number {
+export function sendPriority(priority: SendPriority): number {
   switch (priority.kind) {
     case "defaultQueue":
       return DEFAULT_QUEUE_PRIORITY;
