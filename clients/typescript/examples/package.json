@@ -1,0 +1,9 @@
+{
+  "name": "horsies-examples",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "horsies": "workspace:*",
+    "zod": "4.1.13"
+  }
+}

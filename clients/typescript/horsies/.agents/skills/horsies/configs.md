@@ -351,21 +351,25 @@ I/O and stops at the first phase that refuses:
 
 1. Registrations: each refusal of `app.implement` (an unlisted contract, a
    second implementation).
-2. Implementations: each listed contract has an implementation in this
+2. Workflows: each listed workflow with no params and each check case is
+   built and checked (`HRS-028`, `HRS-029`, the spec checks), and the walk
+   into its sub-workflows refuses a nesting that fails for certain
+   (`HRS-036`, `HRS-037`). The builds run in the check's process.
+3. Implementations: each listed contract has an implementation in this
    entry (`HRS-300`), so a passing check means that a worker start from the
    same entry passes the same rule.
-3. Exception codes: the codes of each implementation's `exceptions` list
+4. Exception codes: the codes of each implementation's `exceptions` list
    pass the core's code rules.
 
-The config, the contracts and the workflows are checked earlier, at
-`Horsies.create`.
+The config, the contracts and each workflow definition are checked earlier,
+at `Horsies.create`.
 
 `check --live` adds, after a passing static check:
 
-4. Connectivity: a connect and `SELECT 1` on the database, and in
+5. Connectivity: a connect and `SELECT 1` on the database, and in
    PgBouncer transaction mode a LISTEN probe on the session URL. A refusal
    is `HRS-203`.
-5. Worker connections: each worker profile against the connection limit of
+6. Worker connections: each worker profile against the connection limit of
    the server (`HRS-219`).
 
 `check --live` installs no schema and writes nothing but the LISTEN probe's

@@ -3,6 +3,7 @@
   "files": [],
   "references": [
     { "path": "./eslint-plugin" },
+    { "path": "./examples" },
     { "path": "./horsies" },
     { "path": "./lint" },
     { "path": "./tests" }

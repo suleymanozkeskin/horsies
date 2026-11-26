@@ -1,5 +1,6 @@
 // The worker run with fakes at the addon boundary: the order of the first steps, each run error, the stop handlers
-// around the run, and the text of each error.
+// around the run, the text of each error, and the facts of the app in the start members (the event handlers and the
+// worker-ended spans) and in the run (the core handle that holds the child spec source).
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -31,6 +32,7 @@ import {
   type WorkerStart,
 } from "../../../horsies/src/worker/run.ts";
 import { catalogRefusal, DATABASE_URL, fakeChecks, fakeCoreHandle, fakeEnvironment } from "../app/support.ts";
+import { API } from "../telemetry/support.ts";
 import { contextOf, implementedApp, testApp } from "./support.ts";
 
 const START: WorkerStart = {
@@ -106,6 +108,17 @@ function fakeDeps(script: Script = {}): { readonly deps: WorkerRunDeps; readonly
   };
 
   return { deps, steps };
+}
+
+/** The member `name` of the start members of the one preparation in `steps`. */
+function startMember(steps: readonly Step[], name: string): unknown {
+  const prepares = steps.flatMap((step) => (step.kind === "prepare" ? [step.startJson] : []));
+
+  assert.equal(prepares.length, 1);
+
+  const members: unknown = JSON.parse(prepares[0] ?? "null");
+
+  return Reflect.get(Object(members), name);
 }
 
 async function runError(context: AppContext, script: Script): Promise<WorkerRunError> {
@@ -277,26 +290,37 @@ describe("the worker run", () => {
     await assert.rejects(runWorkerOf(contextOf(implementedApp()), START, fakeDeps({ prepare: () => ({ kind: "profileRefused", refusals: [] }) }).deps), ClientDefect);
   });
 
-  test("the start members take the event handlers and the tracing of the app", async () => {
+  test("the handlers of the start members are the handlers that app.onEvent registered", async () => {
+    const { deps, steps } = fakeDeps();
+    const app = implementedApp();
+
+    app.onEvent("AttemptEnded", { name: "alerts" }, () => undefined);
+    app.onEvent("TaskClaimed", { name: "claims" }, () => undefined);
+
+    assert.deepEqual(await runWorkerOf(contextOf(app), START, deps), { ok: true, value: { kind: "stopped" } });
+    assert.deepEqual(startMember(steps, "handlers"), {
+      kind: "HANDLERS",
+      handlers: [
+        { name: "alerts", event_type: "AttemptEnded" },
+        { name: "claims", event_type: "TaskClaimed" },
+      ],
+    });
+  });
+
+  test("the worker-ended spans of the start members follow the tracing of Horsies.create", async () => {
     const { deps, steps } = fakeDeps();
 
-    const context: AppContext = {
-      ...contextOf(implementedApp()),
-      telemetry: {
-        handlers: () => [{ name: "alerts", eventType: "AttemptEnded" }],
-        tracing: { kind: "otel", parentage: "childOfSend", workerEndedSpans: "makeSpans" },
-      },
-    };
-
-    void (await runWorkerOf(context, START, deps));
-
-    const prepared = steps.find((step) => step.kind === "prepare");
-    const members: unknown = JSON.parse(prepared?.kind === "prepare" ? prepared.startJson : "null");
-
-    assert.deepEqual(
-      [Reflect.get(Object(members), "handlers"), Reflect.get(Object(members), "worker_ended_spans")],
-      [{ kind: "HANDLERS", handlers: [{ name: "alerts", event_type: "AttemptEnded" }] }, "MAKE_SPANS"],
+    const created = createHorsies(
+      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otel" }, tasks: [] },
+      fakeEnvironment({ otelApi: () => ({ kind: "loaded", api: API }) }),
     );
+
+    if (!created.ok) {
+      assert.fail("the app is created");
+    }
+
+    assert.deepEqual(await runWorkerOf(contextOf(created.value), START, deps), { ok: true, value: { kind: "stopped" } });
+    assert.equal(startMember(steps, "worker_ended_spans"), "MAKE_SPANS");
   });
 });
 
