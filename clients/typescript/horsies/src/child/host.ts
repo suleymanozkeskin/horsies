@@ -17,7 +17,6 @@ import { hostname } from "node:os";
 
 import type { Horsies } from "../app.ts";
 import type { AppContext } from "../app/context.ts";
-import type { TracingKind } from "../app/telemetry.ts";
 import { appInternals } from "../app/internals.ts";
 import { addonSettlement, settlingCallback, type CallbackSettlement } from "../native/call/callback.ts";
 import { reportDefect } from "../native/call/defect.ts";
@@ -34,6 +33,7 @@ import {
   settleBodyValue,
 } from "../native/child/child.ts";
 import { setPanicRule } from "../native/process-core/process-core.ts";
+import type { TracingSetting } from "../telemetry/tracing-config.ts";
 import { buildTaskError, checkAppConfig } from "../native/sends/sends.ts";
 import type {
   BodyFactsMode,
@@ -226,8 +226,8 @@ async function servedChild(
 }
 
 /** The body facts that a child of an app with `tracing` records: the facts of each run for its spans, or none. Pure. */
-export function bodyFactsMode(tracing: TracingKind): BodyFactsMode {
-  switch (tracing) {
+export function bodyFactsMode(tracing: TracingSetting): BodyFactsMode {
+  switch (tracing.kind) {
     case "otel":
       return "SPANS";
     case "none":

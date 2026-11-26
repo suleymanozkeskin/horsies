@@ -39,9 +39,10 @@ bun test
 # Bun, and the zod adapter runs where a contract is checked, so the codec, wire
 # type and zod adapter tests and the stored-form tests (the vectors and the
 # corpus of Python's texts) run on Node too (`node:test`). The task child code
-# (the body adapter, the runtime, the run store) runs on Node too.
-print_step_title "Run the codec, wire type, zod adapter, child and stored-form tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
+# (the body adapter, the runtime, the run store) and the telemetry (the spans
+# and the context across `await` with the OpenTelemetry SDK) run on Node too.
+print_step_title "Run the codec, wire type, zod adapter, child, telemetry and stored-form tests on Node"
+node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/telemetry/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
 
 # TypeScript 6.0 is the oldest compiler that the published types support.
 # This step type checks the workspace projects with it. Build mode reads the

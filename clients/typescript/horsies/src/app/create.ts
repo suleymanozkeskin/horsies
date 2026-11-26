@@ -1,7 +1,7 @@
 // `Horsies.create`: the checks of the config and of each listed contract, in order, and the app context.
 //
-// Order of the refusals: the config (the TypeScript parse, then the core's check), then the contracts in list order
-// (the list, the queue, the wire types, then the core's checks of the codes and the options).
+// Order of the refusals: the config (the TypeScript parse and the tracing step, then the core's check), then the
+// contracts in list order (the list, the queue, the wire types, then the core's checks of the codes and the options).
 //
 // The thread rule: the addon loads only on the main thread of a process. On a main thread every check runs; the core's
 // checks call the addon's pure check functions, which start no core. On a worker thread only the checks that are
@@ -25,6 +25,9 @@ import {
   processRole,
   taskInfo,
 } from "../native/sends/sends.ts";
+import { processTracingEnvironment, type TracingParts, tracingPartsOf } from "../telemetry/create-hook.ts";
+import { type OtelApiLoader, requireOtelApi } from "../telemetry/otel-api.ts";
+import { tracingSettingOf } from "../telemetry/tracing-config.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 import { err, ok, type Result } from "../wire/result.ts";
@@ -38,7 +41,6 @@ import {
 } from "./contract-list.ts";
 import { type AcceptedConfig, checkConfigWithCore, checkTaskWithCore, type CoreChecks } from "./core-checks.ts";
 import type { AddonCore, CoreAccess, ProducerCore } from "./core-access.ts";
-import { NO_OP_OBSERVER } from "./observers.ts";
 import type { Refusal } from "./refusal.ts";
 import { RefusalSink } from "./refusals.ts";
 import { NO_TELEMETRY } from "./telemetry.ts";
@@ -62,6 +64,8 @@ export interface CreateEnvironment {
   readonly coreChecks: () => CoreChecks;
   /** The core of the app on a main thread: the operations of its sends and reads, and its core handle. */
   readonly addonCore: (accepted: AcceptedConfig, options: ReadonlyMap<string, NativeTaskOptions>) => AddonCore;
+  /** The load of the OpenTelemetry API; called only for `tracing: { kind: "otel" }`, on every thread. */
+  readonly otelApi: OtelApiLoader;
 }
 
 /** The facts of this process. Effects: reads the thread, the environment and the arguments. */
@@ -72,23 +76,25 @@ export function processEnvironment(): CreateEnvironment {
     processStart: processStart(),
     coreChecks: () => ({ checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions }),
     addonCore: addonCoreOf,
+    otelApi: requireOtelApi,
   };
 }
 
 /** The app context of `config`, or every refusal in order. */
 export function createApp(config: HorsiesConfig, environment: CreateEnvironment): Result<AppContext, CreateRefused> {
   const parsed = parseAppConfig(config, environment.environment);
+  const tracing = tracingPartsOf(tracingSettingOf(config.tracing), processTracingEnvironment(environment.otelApi));
   // The queue check reads only the queue fields of the input, so a refused config adds no false queue refusal.
   const list = checkContractList(config.tasks, queueSetupOf(config));
 
-  if (!parsed.ok) {
-    return refused([...parsed.error, ...inListOrder(list.refusals)]);
+  if (!parsed.ok || !tracing.ok) {
+    return refused([...(parsed.ok ? [] : parsed.error), ...(tracing.ok ? [] : [tracing.error]), ...inListOrder(list.refusals)]);
   }
 
   if (!environment.mainThread) {
     return list.refusals.length > 0
       ? refused(inListOrder(list.refusals))
-      : ok(contextOf(parsed.value, list.entries, { kind: "noCore" }, environment));
+      : ok(contextOf(parsed.value, list.entries, { kind: "noCore" }, environment, tracing.value));
   }
 
   const checks = environment.coreChecks();
@@ -106,7 +112,7 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
 
   const core: CoreAccess = { kind: "addon", ...environment.addonCore(accepted.value, options.options) };
 
-  return ok(contextOf(parsed.value, list.entries, core, environment));
+  return ok(contextOf(parsed.value, list.entries, core, environment, tracing.value));
 }
 
 /** The core checks of each listed contract, in list order, and the checked options by task name. */
@@ -147,6 +153,7 @@ function contextOf(
   listed: readonly ListedEntry[],
   core: CoreAccess,
   environment: CreateEnvironment,
+  tracing: TracingParts,
 ): AppContext {
   const suppression = new SuppressionState(initialSuppression(environment.processStart), environment.environment);
 
@@ -155,19 +162,19 @@ function contextOf(
     listed,
     core,
     refusals: new RefusalSink(),
-    observer: NO_OP_OBSERVER,
+    observer: tracing.sendObserver,
     suppression,
     send: {
       contracts: contractLookupOf(listed),
       resendOnTransientErr: resendOnTransientErr(config),
       core,
-      observer: NO_OP_OBSERVER,
+      observer: tracing.sendObserver,
       suppression,
       pause: async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
       now: () => Temporal.Now.instant(),
     },
     implementations: new Map(),
-    telemetry: NO_TELEMETRY,
+    telemetry: { ...NO_TELEMETRY, tracing: tracing.setting },
   };
 }
 

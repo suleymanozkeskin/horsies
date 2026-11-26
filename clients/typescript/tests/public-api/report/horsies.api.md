@@ -50,6 +50,7 @@ export type AppConfigInput = QueueConfigInput & {
     readonly resilience?: ResilienceConfigInput;
     readonly workerProfiles?: Readonly<Record<string, WorkerProfileInput>>;
     readonly resendOnTransientErr?: boolean;
+    readonly tracing?: TracingConfigInput;
 };
 
 // @public
@@ -63,6 +64,9 @@ export const AttemptNumber: {
     readonly MIN: number;
     readonly MAX: number;
 };
+
+// @public
+export type AttemptParentage = "childOfSend" | "linkedToSend";
 
 // @public
 export type AttemptRefused = {
@@ -1819,6 +1823,15 @@ export class TooManyPendingCalls extends CoreError {
 }
 
 // @public
+export type TracingConfigInput = {
+    readonly kind: "none";
+} | {
+    readonly kind: "otel";
+    readonly parentage?: AttemptParentage;
+    readonly workerEndedSpans?: WorkerEndedSpans;
+};
+
+// @public
 export type TupleSent<T extends readonly RequiredWire[]> = {
     -readonly [K in keyof T]: SentOf<T[K]>;
 };
@@ -1909,6 +1922,9 @@ export type WireMembers = {
 export type WithSentTypes<V, O, E extends string> = V & {
     readonly [sentTypes]?: SentTypes<O, E>;
 };
+
+// @public
+export type WorkerEndedSpans = "makeSpans" | "noSpans";
 
 // @public
 export interface WorkerProfileInput {

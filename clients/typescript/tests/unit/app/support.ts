@@ -31,6 +31,7 @@ import type {
   RawRecordField,
   TraceArgument,
 } from "../../../horsies/src/native/values/records.ts";
+import type { OtelApiLoader } from "../../../horsies/src/telemetry/otel-api.ts";
 
 /** A canonical task id of the fakes. */
 export const TASK_ID = "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b";
@@ -230,6 +231,7 @@ export type EnvironmentParts = {
   readonly checks?: FakeChecks;
   readonly producer?: FakeProducer;
   readonly handle?: CoreHandle;
+  readonly otelApi?: OtelApiLoader;
 };
 
 /** The environment of a fake create, and the counter of the loads of the core checks. */
@@ -267,6 +269,7 @@ export function fakeEnvironment(parts: EnvironmentParts = {}): FakeEnvironment {
 
       return { producer, handle };
     },
+    otelApi: parts.otelApi ?? (() => ({ kind: "otelApiMissing", cause: "the fake environment loads no API" })),
   };
 }
 

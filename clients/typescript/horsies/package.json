@@ -35,9 +35,13 @@
     "node": ">=26"
   },
   "peerDependencies": {
+    "@opentelemetry/api": ">=1.7.0 <2",
     "zod": ">=4.1.13 <4.7.0"
   },
   "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    },
     "zod": {
       "optional": true
     }
@@ -46,6 +50,7 @@
     "access": "public"
   },
   "devDependencies": {
+    "@opentelemetry/api": "1.10.0",
     "zod": "4.1.13"
   }
 }

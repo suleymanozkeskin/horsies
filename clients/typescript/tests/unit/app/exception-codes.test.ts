@@ -51,6 +51,9 @@ const environment: CreateEnvironment = {
   addonCore: () => {
     throw new TypeError("not called on a worker thread");
   },
+  otelApi: () => {
+    throw new TypeError("not called with no tracing");
+  },
 };
 
 const open = defineTask({ name: "open", input: {}, output: h.null() });
