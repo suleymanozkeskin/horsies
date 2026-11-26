@@ -2,14 +2,16 @@
 // command of its arguments, then ends the process with the command's exit code.
 //
 // Modes, in order:
-// 1. A worker thread: a defect. `cli.run` runs on the main thread of a process.
-// 2. The argument after the entry script is the child flag (`--horsies-child`): child mode. The worker started this
+// 1. A worker thread whose `workerData` holds the seat marker: a seat isolate of a `SHARED_THREAD` child. The child
+//    started this entry again in the thread; the isolate serves runs until its process ends (`src/seats/isolate.ts`).
+// 2. Another worker thread: a defect. `cli.run` runs on the main thread of a process, or in a seat isolate.
+// 3. The argument after the entry script is the child flag (`--horsies-child`): child mode. The worker started this
 //    entry again as a task child or as its handler child; the child ends its process itself (`src/child/host.ts`).
-// 3. Else: the command named by the argument after the entry script, from the command table.
+// 4. Else: the command named by the argument after the entry script, from the command table.
 //
 // The command table is a closed record: one runner per command name. A command module parses its own flags.
 //
-// The exit rule: `cli.run` ends the process itself in every mode, so an open handle of user code (a pool, a timer)
+// The exit rule: `cli.run` ends the process itself in every mode but the seat isolate, so an open handle of user code (a pool, a timer)
 // does not keep a stopped service alive. Before the end it waits, at most `EXIT_LOG_WAIT_MS` by the clock, for the core
 // log records that still wait in the channel to reach the log sink. A command that throws ends the process with 1
 // through the same rule: a defect of the package first follows the defect rule (in a worker process it aborts), and
@@ -19,8 +21,9 @@ import { isMainThread } from "node:worker_threads";
 
 import type { Horsies } from "../app.ts";
 import { appInternals } from "../app/internals.ts";
-import { CHILD_MODE_FLAG } from "../app/suppression.ts";
+import { CHILD_MODE_FLAG, processStart } from "../app/suppression.ts";
 import { processChildModeDeps, runChildMode } from "../child/host.ts";
+import { processSeatIsolateDeps, runSeatIsolate } from "../seats/isolate.ts";
 import { workerLogBacklog } from "../native/worker/worker.ts";
 import { raiseDefect, reportDefect } from "../native/call/defect.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
@@ -74,6 +77,7 @@ export const MAX_EXIT_LOG_POLLS: number = EXIT_LOG_WAIT_MS / EXIT_LOG_POLL_MS;
 
 /** The mode of this process. `child`: the arguments after the entry script, the child flag first. */
 export type ProcessMode =
+  | { readonly kind: "seatIsolate" }
   | { readonly kind: "workerThread" }
   | { readonly kind: "child"; readonly args: readonly string[] }
   | { readonly kind: "command"; readonly command: CommandName; readonly args: readonly string[] }
@@ -81,27 +85,48 @@ export type ProcessMode =
 
 /** The facts of this process that decide its mode. */
 export type ProcessFacts = {
-  /** The thread: the main thread of the process, or a `worker_threads` isolate. */
-  readonly thread: "main" | "worker";
+  /**
+   * The thread: the main thread of the process, a seat isolate (a `worker_threads` isolate with the seat marker), or
+   * another `worker_threads` isolate.
+   */
+  readonly thread: "main" | "seatIsolate" | "worker";
   /** The arguments of the process (`process.argv`): the runtime, the entry script, the command and its flags. */
   readonly argv: readonly string[];
 };
 
-/** The facts of this process. Effects: reads the thread and `process.argv`. */
+/** The facts of this process. Effects: reads the thread, its `workerData` and `process.argv`. */
 export function processFacts(): ProcessFacts {
-  return { thread: isMainThread ? "main" : "worker", argv: [...process.argv] };
+  return { thread: threadOf(isMainThread, processStart().seatIsolate), argv: [...process.argv] };
+}
+
+function threadOf(mainThread: boolean, seatIsolate: boolean): ProcessFacts["thread"] {
+  if (mainThread) {
+    return "main";
+  }
+
+  return seatIsolate ? "seatIsolate" : "worker";
 }
 
 /** The mode of a process with `facts`. Pure. */
 export function processMode(facts: ProcessFacts): ProcessMode {
-  if (facts.thread === "worker") {
-    return { kind: "workerThread" };
+  switch (facts.thread) {
+    case "seatIsolate":
+      return { kind: "seatIsolate" };
+    case "worker":
+      return { kind: "workerThread" };
+    case "main":
+      return mainThreadMode(facts.argv);
+    default:
+      return unreachable(facts.thread);
   }
+}
 
-  const [command, ...args] = facts.argv.slice(2);
+/** The mode of the main thread with the process arguments `argv`. Pure. */
+function mainThreadMode(argv: readonly string[]): ProcessMode {
+  const [command, ...args] = argv.slice(2);
 
   if (command === CHILD_MODE_FLAG) {
-    return { kind: "child", args: facts.argv.slice(2) };
+    return { kind: "child", args: argv.slice(2) };
   }
 
   if (command === undefined) {
@@ -118,11 +143,15 @@ export function processMode(facts: ProcessFacts): ProcessMode {
 /** Child mode: serve the app as a child with the arguments after the entry script; the process ends at its end. */
 export type ChildRunner = (app: Horsies, args: readonly string[]) => Promise<never>;
 
+/** Seat isolate mode: serve the app as a seat isolate until the process ends. */
+export type SeatRunner = (app: Horsies) => Promise<never>;
+
 /** What `cli.run` does that has effects. */
 export interface CliDeps {
   readonly facts: ProcessFacts;
   readonly table: CommandTable;
   readonly child: ChildRunner;
+  readonly seat: SeatRunner;
   readonly output: CommandOutput;
   /** Whether core log records wait in the channel. Does not wait. */
   logBacklog(): LogBacklog;
@@ -141,9 +170,13 @@ export async function runCli(app: Horsies, deps: CliDeps): Promise<number> {
   const mode = processMode(deps.facts);
 
   switch (mode.kind) {
+    case "seatIsolate":
+      return deps.seat(app);
     case "workerThread":
       // A worker thread has no process to end: the defect is thrown.
-      return raiseDefect(new ClientDefect({ subject: "cli.run", rule: "cli.run runs on the main thread of a process" }));
+      return raiseDefect(
+        new ClientDefect({ subject: "cli.run", rule: "cli.run runs on the main thread of a process, or in a seat isolate" }),
+      );
     case "child":
       return deps.child(app, mode.args);
     case "usageError":
@@ -219,6 +252,7 @@ export function processCliDeps(): CliDeps {
     facts: processFacts(),
     table: COMMANDS,
     child: async (app, args) => runChildMode(app, args, processChildModeDeps()),
+    seat: async (app) => runSeatIsolate(app, processSeatIsolateDeps()),
     output: processOutput(),
     logBacklog: workerLogBacklog,
     pause: async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),

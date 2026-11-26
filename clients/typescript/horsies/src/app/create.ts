@@ -5,7 +5,8 @@
 //
 // The thread rule: the addon loads only on the main thread of a process. On a main thread every check runs; the core's
 // checks call the addon's pure check functions, which start no core. On a worker thread only the checks that are
-// TypeScript code run, and no addon loads.
+// TypeScript code run, and no addon loads: a seat isolate reaches the core through the relay of its seat, another
+// worker thread has no core.
 
 import { isMainThread } from "node:worker_threads";
 
@@ -25,6 +26,7 @@ import {
   processRole,
   taskInfo,
 } from "../native/sends/sends.ts";
+import { workerThreadCore } from "../seats/channel.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 import { err, ok, type Result } from "../wire/result.ts";
@@ -88,7 +90,7 @@ export function createApp(config: HorsiesConfig, environment: CreateEnvironment)
   if (!environment.mainThread) {
     return list.refusals.length > 0
       ? refused(inListOrder(list.refusals))
-      : ok(contextOf(parsed.value, list.entries, { kind: "noCore" }, environment));
+      : ok(contextOf(parsed.value, list.entries, workerThreadCore(), environment));
   }
 
   const checks = environment.coreChecks();
