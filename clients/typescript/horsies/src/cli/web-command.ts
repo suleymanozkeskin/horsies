@@ -11,6 +11,7 @@
 import { isIPv4, isIPv6 } from "node:net";
 
 import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
+import { appCoreHandle } from "../app/core-access.ts";
 import type { AppContext } from "../app/context.ts";
 import type { WorkerLogLevel } from "../_catalog/worker_manifest.ts";
 import { reportText } from "../check/report.ts";
@@ -18,7 +19,6 @@ import { staticCheck } from "../check/static-check.ts";
 import { configureLogging } from "../logging.ts";
 import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
 import { clientVersion } from "../web/client-version.ts";
-import { appHandle } from "../worker/run.ts";
 import { unreachable } from "../native/call/never.ts";
 import { allowAll, trustedHeader, trustedHeaderRefusalText, viewOnly } from "../web/auth.ts";
 import type { ActionsSwitch, MonitoringAuthPolicy } from "../web/auth.ts";
@@ -117,12 +117,12 @@ export interface WebCommandDeps {
 
 /**
  * The facts of the app of `context` that the monitoring handler and the fleet metrics read, on a main thread: the
- * app's core handle, the queue names of its config, its schedule names (none: the config holds no schedules yet) and
- * the package version.
+ * app's core handle (`appCoreHandle`), the queue names of its config, its schedule names (none: the config holds no
+ * schedules yet) and the package version.
  */
 export function monitoringAppOf(context: AppContext): MonitoringHandlerApp {
   return {
-    coreHandle: appHandle(context),
+    coreHandle: appCoreHandle(context.core),
     queueNames: queueNamesOf(context),
     scheduleNames: [],
     clientVersion: clientVersion(),
