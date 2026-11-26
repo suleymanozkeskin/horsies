@@ -22,7 +22,7 @@ use uuid::Uuid;
 use super::definition::WorkflowDefinition;
 use super::handle::WorkflowHandle;
 use super::registry::{CaseBuild, CheckCase, Definition};
-use super::spec::WorkflowSpec;
+use super::spec::{WorkflowSpec, WorkflowSpecBuilder};
 use super::start::{new_workflow_id, WorkflowStarter};
 use super::sub_workflow::{SubWorkflowNode, SubWorkflowParams};
 use crate::{ErrorCode, Horsies, HorsiesError};
@@ -215,8 +215,9 @@ where
 }
 
 /// A workflow builder that the check runs on each case: it builds the spec
-/// of one case.
-type CaseSpecBuilder<P> = Arc<dyn Fn(&P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync>;
+/// of one case on the workflow builder of the app that it gets.
+type CaseSpecBuilder<P> =
+    Arc<dyn Fn(WorkflowSpecBuilder, &P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync>;
 
 /// The check cases of one workflow builder, registered with
 /// [`Self::register`] (Python `@app.workflow_builder(cases=...)`).
@@ -243,7 +244,8 @@ where
         self
     }
 
-    /// Register the cases; the app's check builds and checks each.
+    /// Register the cases; the app's check builds and checks each, with a
+    /// new workflow builder of the app named after this check builder.
     ///
     /// Errors: `WORKFLOW_CHECK_CASES_REQUIRED` (HRS-027) for a builder with
     /// no case.
@@ -261,7 +263,14 @@ where
             .into_iter()
             .map(|case| {
                 let builder = Arc::clone(&self.builder);
-                let build: CaseBuild = Arc::new(move || builder(&case));
+                let tasks = Arc::clone(self.app.functions());
+                let name = self.name.clone();
+                let build: CaseBuild = Arc::new(move || {
+                    builder(
+                        WorkflowSpecBuilder::new(name.clone(), Arc::clone(&tasks)),
+                        &case,
+                    )
+                });
                 CheckCase {
                     builder_name: self.name.clone(),
                     build,
@@ -274,12 +283,21 @@ where
 }
 
 impl Horsies {
+    /// A workflow builder of the workflow `name` on this app: each task node
+    /// resolves against the tasks of this app when it is added
+    /// (`WorkflowSpecBuilder::task`).
+    pub fn workflow_builder(&self, name: impl Into<String>) -> WorkflowSpecBuilder {
+        WorkflowSpecBuilder::new(name, Arc::clone(self.functions()))
+    }
+
     /// Register the workflow definition `D`, which takes no params, and
     /// return its function (Python `WorkflowDefinition` registered for
-    /// `start`). The first registration of `D` in a process also serves
-    /// [`start_workflow::<D>()`](start_workflow).
+    /// `start`). `D::build` runs now on a builder of this app, so the tasks
+    /// of its nodes register first. The first registration of `D` in a
+    /// process also serves [`start_workflow::<D>()`](start_workflow).
     ///
-    /// Errors: the refusals of `D::build`, and of the registry (a name or a
+    /// Errors: the refusals of `D::build` (`HRS-302` for a node of a task
+    /// that this app does not register), and of the registry (a name or a
     /// definition key that another definition has, a task queue that the
     /// app does not admit).
     pub fn register_workflow_definition<D>(
@@ -289,7 +307,7 @@ impl Horsies {
         D: WorkflowDefinition<Params = ()>,
         D::Output: DeserializeOwned + Send + Sync,
     {
-        let definition = Definition::without_params::<D>()?;
+        let definition = Definition::without_params::<D>(self.functions())?;
         let spec = match &definition.kind {
             super::registry::DefinitionKind::WithoutParams(spec) => Arc::clone(spec),
             super::registry::DefinitionKind::WithParams(_) => {
@@ -307,8 +325,9 @@ impl Horsies {
     }
 
     /// Register the workflow definition `D`, which takes params, and return
-    /// its template (Python `WorkflowDefinition` with `build_with`). The
-    /// first registration of `D` in a process also serves
+    /// its template (Python `WorkflowDefinition` with `build_with`). Each
+    /// build runs `D::build_with` on a new builder of this app. The first
+    /// registration of `D` in a process also serves
     /// [`start_workflow_with::<D>(params)`](start_workflow_with).
     ///
     /// Errors: the refusals of the registry.
@@ -320,15 +339,20 @@ impl Horsies {
         D::Params: Send + Sync,
         D::Output: DeserializeOwned + Send + Sync,
     {
-        self.workflows().register(Definition::with_params::<D>())?;
+        self.workflows()
+            .register(Definition::with_params::<D>(self.functions()))?;
+        let tasks = Arc::clone(self.functions());
         let template = WorkflowTemplate {
             name: D::name(),
             definition_key: D::definition_key(),
-            build: Arc::new(|params: D::Params| -> Result<WorkflowSpec, HorsiesError> {
-                let spec = D::build_with(params)?;
-                spec.check_output_type::<D::Output>()?;
-                Ok(spec)
-            }),
+            build: Arc::new(
+                move |params: D::Params| -> Result<WorkflowSpec, HorsiesError> {
+                    let builder = WorkflowSpecBuilder::new(D::name(), Arc::clone(&tasks));
+                    let spec = D::build_with(builder, params)?;
+                    spec.check_output_type::<D::Output>()?;
+                    Ok(spec)
+                },
+            ),
             starter: WorkflowStarter::of(self),
             types: PhantomData,
         };
@@ -338,7 +362,8 @@ impl Horsies {
 
     /// Register check cases of a workflow builder: the check builds a spec
     /// from each case with `builder` and checks it (Python
-    /// `@app.workflow_builder(cases=...)`).
+    /// `@app.workflow_builder(cases=...)`). `builder` gets a new workflow
+    /// builder of this app named `name`, and the case.
     pub fn check_workflow_builder<P, F>(
         &self,
         name: &str,
@@ -346,7 +371,10 @@ impl Horsies {
     ) -> WorkflowCheckBuilderRegistration<'_, P>
     where
         P: Send + Sync + 'static,
-        F: Fn(&P) -> Result<WorkflowSpec, HorsiesError> + Send + Sync + 'static,
+        F: Fn(WorkflowSpecBuilder, &P) -> Result<WorkflowSpec, HorsiesError>
+            + Send
+            + Sync
+            + 'static,
     {
         WorkflowCheckBuilderRegistration {
             app: self,

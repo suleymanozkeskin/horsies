@@ -224,8 +224,8 @@ mod tests {
     use chrono::{TimeZone, Utc};
 
     use super::*;
-    use crate::workflow::node::tests::{task_node, ChargeInput};
-    use crate::workflow::{SuccessCase, SuccessPolicy, WorkflowSpecBuilder};
+    use crate::workflow::node::tests::{add, task_node, test_builder, ChargeInput};
+    use crate::workflow::{SuccessCase, SuccessPolicy};
     use crate::{CustomQueueConfig, QueueMode};
 
     fn config() -> AppConfig {
@@ -243,11 +243,14 @@ mod tests {
 
     #[test]
     fn a_spec_reads_back_as_core_spec_data() {
-        let mut builder = WorkflowSpecBuilder::new("checkout");
+        let mut builder = test_builder("checkout");
         builder.definition_key("tests.checkout.v1");
         builder.on_error(OnError::Pause);
-        let first = builder.task(charge().node_id("first"));
-        let second = builder.task(charge().waits_for(first).join_quorum(1).priority(3));
+        let first = add(&mut builder, charge().node_id("first"));
+        let second = add(
+            &mut builder,
+            charge().waits_for(first).join_quorum(1).priority(3),
+        );
         builder.output(second);
         builder
             .success_policy(SuccessPolicy::new(vec![SuccessCase::new([second])]).optional([first]));
@@ -298,8 +301,8 @@ mod tests {
 
     #[test]
     fn a_queue_that_the_app_does_not_admit_is_refused() {
-        let mut builder = WorkflowSpecBuilder::new("queues");
-        builder.task(charge().queue("bulk"));
+        let mut builder = test_builder("queues");
+        add(&mut builder, charge().queue("bulk"));
         let spec = builder.build().unwrap();
         let refused = client_spec(&spec, &config()).unwrap_err();
         assert_eq!(refused.code, Some(ErrorCode::WorkflowUnresolvedQueue));
@@ -323,9 +326,9 @@ mod tests {
             ]),
             ..config()
         };
-        let mut builder = WorkflowSpecBuilder::new("queues");
-        builder.task(charge().queue("bulk"));
-        builder.task(charge().queue("bulk").priority(1));
+        let mut builder = test_builder("queues");
+        add(&mut builder, charge().queue("bulk"));
+        add(&mut builder, charge().queue("bulk").priority(1));
         let spec = builder.build().unwrap();
         let client = client_spec(&spec, &custom).unwrap();
         assert_eq!(client.spec().tasks[0].queue.as_deref(), Some("bulk"));

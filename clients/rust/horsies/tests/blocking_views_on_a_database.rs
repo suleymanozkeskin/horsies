@@ -1,6 +1,6 @@
 //! The blocking views of the Rust client on PostgreSQL: each view method
 //! runs its async method on the core's process runtime and returns its
-//! answer (Python's sync calls: `send`, `schedule`, `retry_send`,
+//! answer (Python's sync calls: `send` and `schedule`, `retry_send`,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
 //! reads, `check(live=True)`, the workflow starts and `retry_start`, and the
 //! sync methods of `WorkflowHandle`). One test per outcome of the database.
@@ -27,8 +27,8 @@ use horsies::blocking::{start_workflow, start_workflow_with};
 use horsies::{
     task, AppConfig, HandleOperationError, HandleResult, Horsies, HorsiesError, NodeKey,
     NodeResult, PingTarget, ReadError, TaskError, TaskFunction, TaskInfoParts, TaskOutcome,
-    TaskSendErrorCode, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit, WorkflowDefConfig,
-    WorkflowDefinition, WorkflowReadError, WorkflowSpec, WorkflowSpecBuilder,
+    TaskSendErrorCode, TaskSendOptions, TaskStatus, WaitLimit, WholeSeconds, WorkerHistoryLimit,
+    WorkflowDefConfig, WorkflowDefinition, WorkflowReadError, WorkflowSpec, WorkflowSpecBuilder,
     WorkflowStartErrorCode, WorkflowStatus,
 };
 use horsies_core::core::lifecycle::{OwnedClaim, TerminalizationOutcome, WorkflowSuccessOutcome};
@@ -105,7 +105,7 @@ const ENDED_WAIT: Duration = Duration::from_secs(10);
 /// The window of a worker ping with no worker on the database.
 const PING_WINDOW: Duration = Duration::from_millis(300);
 
-/// The delay of a scheduled send.
+/// The delay of a delayed send (`TaskSendOptions::delay`).
 const SCHEDULE_DELAY_SECS: u32 = 3_600;
 
 /// A worker id that never reported a state.
@@ -126,9 +126,9 @@ async fn answer() -> Result<u32, TaskError<Infallible>> {
 const TEMPLATE_PARAMS: u32 = 1;
 
 /// One node, the task `answer` with the node id [`ANSWER_NODE`], which is
-/// the output. `answer` is registered in this process before any build.
+/// the output. The app of the builder registers `answer` before any build.
 fn answer_output(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-    let output = builder.task(answer::node()?.node_id(ANSWER_NODE));
+    let output = builder.task(answer::node().node_id(ANSWER_NODE))?;
     Ok(WorkflowDefConfig::new().output(output))
 }
 
@@ -261,21 +261,19 @@ fn thread_runtime() -> tokio::runtime::Runtime {
 }
 
 /// The spec of a workflow `name` of one node, the task `answer`, which is
-/// its output. `answer` is registered in this process before the call.
-fn one_node_spec(name: &str) -> WorkflowSpec {
-    one_node_spec_with_node_id(name, ANSWER_NODE)
+/// its output, built on a builder of `app`, which registers `answer`.
+fn one_node_spec(app: &Horsies, name: &str) -> WorkflowSpec {
+    one_node_spec_with_node_id(app, name, ANSWER_NODE)
 }
 
 /// [`one_node_spec`] whose node has the id `node_id`: with another id, a
 /// start command of the same name that differs from [`one_node_spec`].
-fn one_node_spec_with_node_id(name: &str, node_id: &str) -> WorkflowSpec {
-    let mut builder = WorkflowSpecBuilder::new(name);
+fn one_node_spec_with_node_id(app: &Horsies, name: &str, node_id: &str) -> WorkflowSpec {
+    let mut builder = app.workflow_builder(name);
     builder.definition_key(format!("tests.blocking_views.{name}.v1"));
-    let output = builder.task(
-        answer::node()
-            .expect("answer is registered in this process")
-            .node_id(node_id),
-    );
+    let output = builder
+        .task(answer::node().node_id(node_id))
+        .expect("the app registers answer");
     builder.output(output);
     builder.build().expect("the spec builds")
 }
@@ -296,7 +294,7 @@ fn send_echo(url: &str) -> Uuid {
 fn start_one_node_workflow(url: &str, name: &str) -> Uuid {
     let (app, _echo_function) = app_on(url);
     app.blocking()
-        .start::<u32>(&one_node_spec(name))
+        .start::<u32>(&one_node_spec(&app, name))
         .expect("the blocking start")
         .workflow_id()
 }
@@ -490,24 +488,26 @@ fn assert_workflow_not_found<V: Debug>(answer: HandleResult<V>, workflow_id: Uui
     }
 }
 
-/// `send` and `schedule` write PENDING tasks with the sent input; the
-/// scheduled one is due after its delay. `retry_send` of a send refused on
-/// a runtime thread writes the task id of the refused send.
+/// A send now and a send with a delay write PENDING tasks with the sent
+/// input; the delayed one is due after its delay. `retry_send` of a send
+/// refused on a runtime thread writes the task id of the refused send.
 #[tokio::test]
 async fn blocking_sends_write_their_tasks() {
     let (database, worker) = covered_database().await;
     let url = database.url().to_owned();
-    let (sent, scheduled, retried) = off_the_runtime(move || {
+    let (sent, delayed, retried) = off_the_runtime(move || {
         let (_app, echo_function) = app_on(&url);
         let sent = echo_function
             .blocking()
             .send(echo_input())
             .expect("the blocking send")
             .task_id();
-        let scheduled = echo_function
+        let delayed = TaskSendOptions::new().delay(WholeSeconds::from_secs(SCHEDULE_DELAY_SECS));
+        let delayed_id = echo_function
             .blocking()
-            .schedule(WholeSeconds::from_secs(SCHEDULE_DELAY_SECS), echo_input())
-            .expect("the blocking schedule")
+            .with_options(delayed)
+            .send(echo_input())
+            .expect("the blocking send with a delay")
             .task_id();
         let refused = thread_runtime()
             .block_on(async { echo_function.blocking().send(echo_input()) })
@@ -522,11 +522,11 @@ async fn blocking_sends_write_their_tasks() {
             .expect("the blocking retry of the refused send")
             .task_id();
         assert_eq!(retried, refused_id);
-        (sent, scheduled, retried)
+        (sent, delayed_id, retried)
     })
     .await;
 
-    for (task_id, due_later) in [(sent, false), (scheduled, true), (retried, false)] {
+    for (task_id, due_later) in [(sent, false), (delayed, true), (retried, false)] {
         let row = database
             .client()
             .query_one(
@@ -819,7 +819,7 @@ async fn blocking_app_starts_write_find_or_refuse_by_the_workflow_id() {
     let url = database.url().to_owned();
     let started = off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
-        let spec = one_node_spec("blocking_views_app_start");
+        let spec = one_node_spec(&app, "blocking_views_app_start");
         let started = app
             .blocking()
             .start::<u32>(&spec)
@@ -831,7 +831,7 @@ async fn blocking_app_starts_write_find_or_refuse_by_the_workflow_id() {
             .expect("a start again with the same id and name")
             .workflow_id();
         assert_eq!(found, started);
-        let other_name = one_node_spec("blocking_views_other_name");
+        let other_name = one_node_spec(&app, "blocking_views_other_name");
         match app.blocking().start_with_id::<u32>(&other_name, started) {
             Err(refused) => {
                 assert_eq!(
@@ -846,7 +846,8 @@ async fn blocking_app_starts_write_find_or_refuse_by_the_workflow_id() {
                 handle.workflow_id()
             ),
         }
-        let other_command = one_node_spec_with_node_id("blocking_views_app_start", "other_node");
+        let other_command =
+            one_node_spec_with_node_id(&app, "blocking_views_app_start", "other_node");
         match app.blocking().start_with_id::<u32>(&other_command, started) {
             Err(refused) => {
                 assert_eq!(
@@ -891,8 +892,8 @@ async fn two_concurrent_starts_with_one_id_and_two_commands_write_one_workflow()
     let (database, worker) = covered_database().await;
     let (app, _echo_function) = app_on(database.url());
     let workflow_id = Uuid::new_v4();
-    let first = one_node_spec("start_once_race");
-    let second = one_node_spec_with_node_id("start_once_race", "other_node");
+    let first = one_node_spec(&app, "start_once_race");
+    let second = one_node_spec_with_node_id(&app, "start_once_race", "other_node");
 
     let (first_start, second_start) = tokio::join!(
         app.start_with_id::<u32>(&first, workflow_id),
@@ -943,7 +944,7 @@ async fn a_run_with_no_stored_start_command_is_returned_to_a_start_with_its_id()
         .expect("insert a run with no stored start command");
 
     let found = app
-        .start_with_id::<u32>(&one_node_spec("start_once_unrecorded"), workflow_id)
+        .start_with_id::<u32>(&one_node_spec(&app, "start_once_unrecorded"), workflow_id)
         .await
         .expect("the start returns the run")
         .workflow_id();
@@ -1104,7 +1105,7 @@ async fn blocking_handle_reads_of_a_running_workflow() {
         let (app, _echo_function) = app_on(&url);
         let handle = app
             .blocking()
-            .start::<u32>(&one_node_spec("blocking_views_running"))
+            .start::<u32>(&one_node_spec(&app, "blocking_views_running"))
             .expect("the blocking start");
         let workflow_id = handle.workflow_id();
         let view = handle.blocking();

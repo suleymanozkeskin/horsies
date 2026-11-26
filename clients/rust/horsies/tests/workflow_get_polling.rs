@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use horsies::{
     task, AppConfig, Horsies, SchemaMode, TaskError, TaskOutcome, WaitLimit, WorkflowHandle,
-    WorkflowReadError, WorkflowSpecBuilder, WorkflowStatus,
+    WorkflowReadError, WorkflowStatus,
 };
 use horsies_core::core::lifecycle::{OwnedClaim, WorkflowSuccessOutcome};
 use horsies_core::{
@@ -112,9 +112,11 @@ async fn covered_database() -> (TestDatabase, PostgresBroker) {
 async fn start_one_node_workflow(url: &str, name: &str) -> Uuid {
     let mut writer = Horsies::new(AppConfig::for_database_url(url)).expect("the writing app");
     let answer_function = answer::register(&mut writer).expect("register the task");
-    let mut builder = WorkflowSpecBuilder::new(name);
+    let mut builder = writer.workflow_builder(name);
     builder.definition_key(format!("tests.workflow_get_polling.{name}.v1"));
-    let output = builder.task(answer_function.node());
+    let output = builder
+        .task(answer_function.node())
+        .expect("the writing app registers answer");
     builder.output(output);
     let spec = builder.build().expect("the spec builds");
     let started: WorkflowHandle<u32> = writer.start(&spec).await.expect("the workflow starts");

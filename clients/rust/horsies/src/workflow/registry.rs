@@ -4,10 +4,11 @@
 //!
 //! A definition has params or has none. One without params has one spec,
 //! built and checked when it registers. One with params has a build: decode
-//! the params text with the params type, run `build_with`, check the output
-//! type. The core calls the build for each sub-workflow node of the
-//! definition (with the node's params, its `args_from` members merged), and
-//! a start with params calls it.
+//! the params text with the params type, run `build_with` on a builder of
+//! the app that registered it, check the output type. The core calls the
+//! build for each sub-workflow node of the definition (with the node's
+//! params, its `args_from` members merged), and a start with params calls
+//! it.
 //!
 //! The registry is the child spec source of the core's workflow steps
 //! ([`ChildSpecSource`]): for a sub-workflow node, it loads the definition
@@ -34,9 +35,10 @@ use serde::Serialize;
 
 use super::definition::WorkflowDefinition;
 use super::node::unread_node_member;
-use super::spec::{SpecBody, SpecNode, WorkflowSpec};
+use super::spec::{SpecBody, SpecNode, WorkflowSpec, WorkflowSpecBuilder};
 use super::spec_data::client_spec;
 use super::sub_workflow::NodeParams;
+use crate::send::TaskFunctions;
 use crate::task::body::{decode_checked, raw_value_of, value_parts, DecodeFailure, ValueParts};
 use crate::{AppConfig, ErrorCode, HorsiesError, ValidationReport};
 
@@ -100,25 +102,35 @@ pub(crate) struct Definition {
 }
 
 impl Definition {
-    /// The definition `D` without params: its spec, built and checked now.
+    /// The definition `D` without params: its spec, built and checked now
+    /// on a builder whose task nodes resolve against `tasks`, the typed
+    /// functions of the registering app.
     ///
     /// Errors: the refusals of `D::build`.
-    pub(crate) fn without_params<D: WorkflowDefinition>() -> Result<Self, HorsiesError> {
+    pub(crate) fn without_params<D: WorkflowDefinition>(
+        tasks: &Arc<TaskFunctions>,
+    ) -> Result<Self, HorsiesError> {
+        let builder = WorkflowSpecBuilder::new(D::name(), Arc::clone(tasks));
         Ok(Self {
             name: D::name().to_owned(),
             definition_key: D::definition_key().to_owned(),
-            kind: DefinitionKind::WithoutParams(Arc::new(D::build()?)),
+            kind: DefinitionKind::WithoutParams(Arc::new(D::build(builder)?)),
         })
     }
 
     /// The definition `D` with params: `D::build_with` over the params
-    /// text, with the output type checked.
-    pub(crate) fn with_params<D: WorkflowDefinition>() -> Self {
+    /// text, on a new builder of `tasks` (the typed functions of the
+    /// registering app) for each build, with the output type checked.
+    pub(crate) fn with_params<D: WorkflowDefinition>(tasks: &Arc<TaskFunctions>) -> Self {
+        let tasks = Arc::clone(tasks);
         let build: ParamsBuild = Arc::new(
-            |text: &str, result_members: &[String]| -> Result<WorkflowSpec, ParamsBuildRefused> {
+            move |text: &str,
+                  result_members: &[String]|
+                  -> Result<WorkflowSpec, ParamsBuildRefused> {
                 let params = decode_params::<D::Params>(text, result_members)?;
-                let spec =
-                    run_user_build(|| D::build_with(params)).map_err(ParamsBuildRefused::Failed)?;
+                let builder = WorkflowSpecBuilder::new(D::name(), Arc::clone(&tasks));
+                let spec = run_user_build(|| D::build_with(builder, params))
+                    .map_err(ParamsBuildRefused::Failed)?;
                 spec.check_output_type::<D::Output>()
                     .map_err(ParamsBuildRefused::Failed)?;
                 Ok(spec)

@@ -60,8 +60,8 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     Ok(app)
 }
 
-async fn send_greeting() -> Result<(), Box<dyn std::error::Error>> {
-    let handle = greet::send("world".to_owned()).await?;
+async fn send_greeting(app: &Horsies) -> Result<(), Box<dyn std::error::Error>> {
+    let handle = greet::send(app, "world".to_owned()).await?;
     let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
     match handle.get(limit).await? {
         TaskOutcome::Succeeded(greeting) => println!("{greeting}"),
@@ -70,7 +70,7 @@ async fn send_greeting() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_send(_app: Horsies) -> ExitCode {
+fn run_send(app: Horsies) -> ExitCode {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -78,7 +78,7 @@ fn run_send(_app: Horsies) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(send_greeting()) {
+    match runtime.block_on(send_greeting(&app)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");

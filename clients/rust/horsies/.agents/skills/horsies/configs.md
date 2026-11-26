@@ -212,6 +212,7 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 | `on_event::<E>(name, handler)`, `on_event_blocking::<E>(name, handler)` | Registers a handler of the events of type `E`; it runs in the worker's handler child (monitoring.md, Event Handlers) |
 | `on_handler_child_start(hook)` | Runs an async hook once in every handler child |
 | `task_runtime()` | The `TaskRuntime` that task bodies take |
+| `workflow_builder(name)` | A `WorkflowSpecBuilder` whose task nodes resolve against the tasks of this app (see `workflows.md`) |
 
 ```rust
 use horsies::{Horsies, HorsiesError};

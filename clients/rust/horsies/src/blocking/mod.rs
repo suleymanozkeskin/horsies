@@ -1,5 +1,5 @@
 //! Blocking forms of the async API, for a program that does not run a
-//! tokio runtime (Python's sync calls: `send`, `schedule`, the retries,
+//! tokio runtime (Python's sync calls: `send` and `schedule`, the retries,
 //! `TaskHandle.get` and `info`, the app's reads by task id and health
 //! reads, `check(live=True)`, the workflow starts and the sync methods of
 //! `WorkflowHandle`).
@@ -66,11 +66,10 @@ use uuid::Uuid;
 
 use crate::check::{connectivity_report, CHECK};
 use crate::process_state::{runtime_for, RuntimeStartFailed};
-use crate::send::{RetryOf, SendStart};
 use crate::{
     CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
     StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
-    UserErrorCode, WaitLimit, WholeSeconds, WorkerHistoryLimit,
+    UserErrorCode, WaitLimit, WorkerHistoryLimit,
 };
 
 /// Where a blocking call can run.
@@ -146,32 +145,7 @@ where
         options: TaskSendOptions,
         input: A,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.first_send(SendStart::Now, &options, &input)
-    }
-
-    /// `TaskFunction::schedule`, blocking.
-    pub fn schedule(
-        &self,
-        delay: WholeSeconds,
-        input: A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.schedule_with_options(TaskSendOptions::new(), delay, input)
-    }
-
-    /// `TaskFunction::schedule_with_options`, blocking.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "the blocking form takes the arguments of \
-                  `TaskFunction::schedule_with_options` by value; a reference would change \
-                  every caller"
-    )]
-    pub fn schedule_with_options(
-        &self,
-        options: TaskSendOptions,
-        delay: WholeSeconds,
-        input: A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.first_send(SendStart::AfterDelay(delay), &options, &input)
+        self.first_send(&options, &input)
     }
 
     /// `TaskFunction::with_options`, blocking.
@@ -188,30 +162,19 @@ where
     /// `TaskFunction::retry_send`, blocking. On a runtime thread it answers
     /// `AsyncContext` again, with the same task id and payload.
     pub fn retry_send(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.function.retry_target(error, RetryOf::Send)?;
+        let (task_id, payload) = self.function.retry_target(error)?;
         self.enqueue(task_id, payload, SendKind::Repeat, "retry_send")
-    }
-
-    /// `TaskFunction::retry_schedule`, blocking.
-    pub fn retry_schedule(&self, error: &TaskSendError) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.function.retry_target(error, RetryOf::Schedule)?;
-        self.enqueue(task_id, payload, SendKind::Repeat, "retry_schedule")
     }
 
     /// The checks of a first send, then the enqueue. A refused input is
     /// refused before the thread is checked, as in Python.
     fn first_send(
         &self,
-        start: SendStart,
         options: &TaskSendOptions,
         input: &A,
     ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        let (task_id, payload) = self.function.prepare(start, options, input)?;
-        let call = match start {
-            SendStart::Now => "send",
-            SendStart::AfterDelay(_) => "schedule",
-        };
-        self.enqueue(task_id, payload, SendKind::First, call)
+        let (task_id, payload) = self.function.prepare(options, input)?;
+        self.enqueue(task_id, payload, SendKind::First, "send")
     }
 
     /// The enqueue with resends of a prepared send, on the process runtime.
@@ -279,22 +242,12 @@ where
     T: Serialize + DeserializeOwned + 'static,
     E: UserErrorCode,
 {
-    /// Send the task now with these options, blocking.
+    /// Send the task with these options, now or after their delay,
+    /// blocking.
     pub fn send(&self, input: A) -> Result<TaskHandle<T, E>, TaskSendError> {
         self.function
             .blocking()
             .send_with_options(self.options.clone(), input)
-    }
-
-    /// Send the task to start after `delay` with these options, blocking.
-    pub fn schedule(
-        &self,
-        delay: WholeSeconds,
-        input: A,
-    ) -> Result<TaskHandle<T, E>, TaskSendError> {
-        self.function
-            .blocking()
-            .schedule_with_options(self.options.clone(), delay, input)
     }
 }
 
@@ -625,7 +578,7 @@ mod tests {
         };
         assert_eq!(payload.input_json, r#"{"id":7}"#);
         assert!(refused.message().contains("blocking send of task 'bill'"));
-        let (retried_id, _payload) = function.retry_target(&refused, RetryOf::Send).unwrap();
+        let (retried_id, _payload) = function.retry_target(&refused).unwrap();
         assert_eq!(retried_id, *task_id);
         let again = function.blocking().retry_send(&refused).unwrap_err();
         assert_eq!(again.task_id(), Some(*task_id));
@@ -688,7 +641,7 @@ mod tests {
     fn a_send_whose_runtime_did_not_start_is_a_retryable_enqueue_failed() {
         let app = app();
         let (task_id, payload) = function(&app)
-            .prepare(SendStart::Now, &TaskSendOptions::new(), &Invoice { id: 3 })
+            .prepare(&TaskSendOptions::new(), &Invoice { id: 3 })
             .unwrap();
         let refused = start_failed_send(
             task_id,

@@ -2,10 +2,12 @@
 //! core's spec data, the start forms and the workflow handle.
 //!
 //! The DSL builds a spec as data, in the client: the nodes of registered
-//! tasks ([`TaskNode`], from `TaskFunction::node`), sub-workflow nodes
-//! ([`SubWorkflowNode`], from a definition), their links, and the output.
-//! `WorkflowSpecBuilder::build` checks the spec with Python's rules and
-//! codes before anything is written.
+//! tasks ([`TaskNode`], from the generated `name::node()`), sub-workflow
+//! nodes ([`SubWorkflowNode`], from a definition), their links, and the
+//! output. A builder comes from an app (`Horsies::workflow_builder`) and
+//! resolves each task node against the tasks of that app when the node is
+//! added. `WorkflowSpecBuilder::build` checks the spec with Python's rules
+//! and codes before anything is written.
 
 mod context;
 mod definition;
@@ -33,11 +35,14 @@ pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};
 pub use spec::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};
 pub use sub_workflow::{SubWorkflowNode, SubWorkflowParams};
 
+pub(crate) use node::NodeRegistration;
 pub(crate) use registry::WorkflowRegistry;
 
-/// Nodes for the tests of other modules of the crate.
+/// Nodes and builders for the tests of other modules of the crate.
 #[cfg(test)]
 pub(crate) mod tests_support {
+    pub(crate) use super::node::tests::{add, test_builder};
+
     /// A task node of `task_name` with no parameters and the output `u32`.
     pub(crate) fn unit_task_node(task_name: &str) -> crate::TaskNode<u32, ()> {
         super::node::tests::task_node::<u32, ()>(task_name)
@@ -51,6 +56,9 @@ mod stored_form_vector_tests;
 // vectors (`crate::stored_form_vectors::task_options`).
 #[cfg(test)]
 pub(crate) use node::NodeDeadline;
+// The body of a built node, for the tests of the node resolution.
+#[cfg(test)]
+pub(crate) use spec::SpecBody;
 #[cfg(test)]
 pub(crate) use spec_data::task_options_text;
 

@@ -112,6 +112,47 @@ and there is no migration contract between pre-1.0 versions.
   `exit`, and `Worker::from_plan` takes the exit as its fourth argument.
   The Rust client and the Python bridge pass `Standard`; their exits do
   not change.
+- **Rust: each send and each workflow builder names its app; the delay is
+  a send option.** The module that `#[horsies::task]` and
+  `#[horsies::blocking_task]` generate holds no state. It kept the typed
+  function of the first `register` in the process, so in a process with
+  two apps every generated send and node used the first app.
+  - `task_name::send(&app, ...)` and
+    `task_name::with_options(options).send(&app, ...)` take the app that
+    they send through. A send through an app that does not register the
+    task returns `TaskSendError::ValidationFailed` with the cause
+    `PreconditionFailed`, and writes nothing. The TypeScript client gives
+    the same code for a contract that the app does not list.
+  - The delay is the send option `TaskSendOptions::delay(WholeSeconds)`.
+    A send with it stores the row that the removed `schedule` stored.
+    `retry_send` takes the error of a send with a delay and sends the
+    payload again with its delay. Removed: the generated
+    `task_name::schedule` and `SendOptions::schedule`;
+    `TaskFunction::schedule`, `schedule_with_options` and
+    `retry_schedule`; `TaskFunctionSendOptions::schedule`; and the same
+    methods of the blocking views `TaskFunctionView` and
+    `TaskFunctionSendOptionsView`. The word "schedule" names the recurring
+    schedules only.
+  - `task_name::node()` returns `TaskNode<T, I>` and reads no
+    registration. A workflow builder comes from an app:
+    `Horsies::workflow_builder(name)`, or `TaskRuntime::workflow_builder(name)`
+    in a task body. `WorkflowSpecBuilder::new` is no longer public.
+    `builder.task(node)` returns `Result<TypedNodeRef<T>, HorsiesError>`.
+    It gives the node the queue (unless the node names one), the options
+    and the workflow context flag of the task's registration on the
+    builder's app. It refuses with `HRS-302`
+    (`WORKFLOW_UNREGISTERED_TASK`) a task that the app does not register
+    with the node's input and output types, and does not add the node.
+  - `WorkflowDefinition::build(builder)` and
+    `WorkflowDefinition::build_with(builder, params)` take a builder of the
+    app, named after the definition. The app gives it at the registration,
+    at each build of a template and at each build of a child.
+    `define(builder)` does not change. A definition without params builds
+    when it registers, so its tasks register first.
+  - `Horsies::check_workflow_builder(name, builder)`: `builder` gets a new
+    workflow builder of the app named `name`, then the case.
+  - The process-wide workflow starts `start_workflow::<D>()` and
+    `start_workflow_with::<D>(params)` do not change.
 
 ### Fixed
 

@@ -222,16 +222,16 @@ impl WorkflowDefinition for ParityChain {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let first = builder.task(
-            add::node()?
+            add::node()
                 .node_id("add")
                 .set(add::params::a(), 2)?
                 .set(add::params::b(), 3)?,
-        );
+        )?;
         let second = builder.task(
-            double::node()?
+            double::node()
                 .node_id("double")
                 .arg_from(double::params::upstream(), first),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(second))
     }
 }
@@ -254,11 +254,11 @@ impl WorkflowDefinition for ParityChild {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let added = builder.task(
-            add::node()?
+            add::node()
                 .node_id("add")
                 .set(add::params::a(), 2)?
                 .set(add::params::b(), 3)?,
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(added))
     }
 }
@@ -283,10 +283,10 @@ impl WorkflowDefinition for ParityParent {
         let child =
             builder.sub_workflow(ParityChild::node(SubWorkflowParams::NotGiven)?.node_id("child"));
         let doubled = builder.task(
-            double::node()?
+            double::node()
                 .node_id("double")
                 .arg_from(double::params::upstream(), child),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(doubled))
     }
 }

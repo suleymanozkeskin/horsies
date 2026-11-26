@@ -107,18 +107,18 @@ Each interval is 1 to 86,400 s and a policy has 1 to 20 retries; a value outside
 
 ## The Generated Module
 
-The attribute generates a module with the name of the function:
+The attribute generates a module with the name of the function. The module holds no state: each send names its app, and a workflow builder resolves a node against its own app.
 
 | Item | Does |
 |------|------|
 | `validate_order::register(&mut app)` | Registers the task and returns its `TaskFunction<validate_order::Input, String, OrderCode>`. The task declares the codes of `OrderCode` (`UserErrorCode::CODES`); a code that breaks a rule is refused (`HRS-212`, `HRS-112`, `HRS-113`; see [Task Errors](/horsies/rust/tasks/errors/#the-code-type)) |
-| `validate_order::send(input)` | Sends the task through the function of the first `register` in this process |
-| `validate_order::schedule(delay, input)` | Sends the task to start after `delay: WholeSeconds` |
-| `validate_order::with_options(options)` | The two sends with `TaskSendOptions` |
+| `validate_order::send(&app, order)` | Sends the task now through `app` |
+| `validate_order::with_options(options).send(&app, order)` | Sends the task through `app` with `TaskSendOptions`: a delay (`TaskSendOptions::delay`), a deadline, an idempotency key, a retention |
+| `validate_order::node()` | A workflow node of the task (`TaskNode<String, validate_order::Input>`). The builder of an app resolves it when the node is added |
 | `validate_order::handle(&runtime)` | The `TaskFunction` from a `TaskRuntime`; `Err(TaskFunctionNotFound)` when the app did not register the task with these types |
 | `validate_order::params::order()` | The field token of the parameter `order` (`InputField<validate_order::Input, Order>`), for a workflow node's `set` and `arg_from` |
 
-A send before `register` in the process returns `TaskSendError::ValidationFailed`, which names the task. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/).
+A send through an app that does not register the task returns `TaskSendError::ValidationFailed` with the cause `PreconditionFailed`. The message names the task. Nothing is written. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/).
 
 ## Task Runtime
 
@@ -162,6 +162,7 @@ async fn sync_feed(rt: TaskRuntime, feed_url: String) -> Result<u32, TaskError<F
 | `spawn(name, future)` | `Result<JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
 | `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id and the value of the run. See [Fencing Token](#fencing-token) |
 | `task_handle::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` (`NotRegistered`, `OtherTypes`) |
+| `workflow_builder(name)` | A `WorkflowSpecBuilder` of the app of the runtime: its task nodes resolve against that app. See [Workflow API](/horsies/rust/concepts/workflows/workflow-api/) |
 
 The cancel signal fires in two cases. The first cause stays: a later cause does not change it.
 

@@ -27,7 +27,6 @@ use horsies::monitoring::{cancel_task, list_workflow_names, pause_workflow_actio
 use horsies::rerun::{RerunEnqueuePolicy, RerunTask};
 use horsies::{
     task, AppConfig, Horsies, TaskError, TaskInfoParts, WaitLimit, WorkflowHandle, WorkflowSpec,
-    WorkflowSpecBuilder,
 };
 use horsies_core::process_runtime::process_runtime;
 use uuid::Uuid;
@@ -90,9 +89,11 @@ fn first_poll<F: Future>(future: F) -> Poll<F::Output> {
 /// A workflow of one node whose output is `answer`.
 fn one_node_spec(app: &mut Horsies) -> WorkflowSpec {
     let answer_function = answer::register(app).expect("register the workflow task");
-    let mut builder = WorkflowSpecBuilder::new("fork_refusal_flow");
+    let mut builder = app.workflow_builder("fork_refusal_flow");
     builder.definition_key("tests.fork_refusal.flow.v1");
-    let output = builder.task(answer_function.node());
+    let output = builder
+        .task(answer_function.node())
+        .expect("the app registers answer");
     builder.output(output);
     builder.build().expect("the spec builds")
 }

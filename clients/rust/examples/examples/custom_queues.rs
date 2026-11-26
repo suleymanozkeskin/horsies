@@ -53,14 +53,14 @@ fn build_app() -> Result<Horsies, HorsiesError> {
     Ok(app)
 }
 
-async fn demo(_app: Horsies) -> DemoResult {
+async fn demo(app: Horsies) -> DemoResult {
     let limit = WaitLimit::parse(Some(Duration::from_secs(60)))?;
     let mut shards = Vec::new();
     for shard in 0..4 {
-        shards.push(rebuild_index::send(shard).await?);
+        shards.push(rebuild_index::send(&app, shard).await?);
     }
     // Sent last, claimed first: `critical` has the higher priority.
-    let alert = send_alert::send("disk almost full".to_owned()).await?;
+    let alert = send_alert::send(&app, "disk almost full".to_owned()).await?;
 
     match alert.get(limit).await? {
         TaskOutcome::Succeeded(text) => println!("{text}"),

@@ -30,51 +30,53 @@ impl WorkflowDefinition for OrderFulfillment {
         "acme.order_fulfillment.v1"
     }
 
-    fn build_with(order: Order) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(Self::name());
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        order: Order,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         builder
             .definition_key(Self::definition_key())
             .on_error(OnError::Fail);
         let order_id = order.order_id.clone();
 
         let validate = builder.task(
-            validate_order::node()?
+            validate_order::node()
                 .node_id("validate_order")
                 .set(validate_order::params::order_id(), order_id.clone())?,
-        );
+        )?;
         let mut reservations = Vec::new();
         for line in &order.lines {
             reservations.push(
                 builder.task(
-                    reserve_stock::node()?
+                    reserve_stock::node()
                         .node_id(format!("reserve_stock_{}", line.line_no))
                         .set(reserve_stock::params::order_id(), order_id.clone())?
                         .set(reserve_stock::params::line_no(), line.line_no)?
                         .set(reserve_stock::params::sku(), line.sku.clone())?
                         .set(reserve_stock::params::quantity(), line.quantity)?
                         .waits_for(validate),
-                ),
+                )?,
             );
         }
         let authorize = builder.task(
-            authorize_payment::node()?
+            authorize_payment::node()
                 .node_id("authorize_payment")
                 .set(authorize_payment::params::order_id(), order_id.clone())?
                 .set(authorize_payment::params::amount_cents(), order.total_cents)?
                 .waits_for_all(reservations.iter().copied()),
-        );
+        )?;
         let pick = builder.task(
-            pick_pack::node()?
+            pick_pack::node()
                 .node_id("pick_pack")
                 .set(pick_pack::params::order_id(), order_id.clone())?
                 .waits_for(authorize),
-        );
+        )?;
         let invoice = builder.task(
-            generate_invoice::node()?
+            generate_invoice::node()
                 .node_id("generate_invoice")
                 .set(generate_invoice::params::order_id(), order_id.clone())?
                 .waits_for(authorize),
-        );
+        )?;
         let shipment = builder.sub_workflow(
             Shipping::node(SubWorkflowParams::Given(ShippingParams {
                 order_id: order_id.clone(),
@@ -86,19 +88,19 @@ impl WorkflowDefinition for OrderFulfillment {
             .waits_for(invoice),
         );
         let capture = builder.task(
-            capture_payment::node()?
+            capture_payment::node()
                 .node_id("capture_payment")
                 .set(capture_payment::params::order_id(), order_id.clone())?
                 .arg_from(capture_payment::params::authorization(), authorize)
                 .waits_for(shipment),
-        );
+        )?;
         let _email = builder.task(
-            send_order_email::node()?
+            send_order_email::node()
                 .node_id("send_order_email")
                 .set(send_order_email::params::order_id(), order_id)?
                 .arg_from(send_order_email::params::capture(), capture)
                 .allow_failed_deps(true),
-        );
+        )?;
         builder.output(capture);
         builder.build()
     }

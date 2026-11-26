@@ -65,8 +65,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | View | From | Methods |
 |------|------|---------|
-| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `schedule`, `schedule_with_options`, `with_options`, `retry_send`, `retry_schedule` |
-| `TaskFunctionSendOptionsView` | `task_function.blocking().with_options(options)` | `send`, `schedule` |
+| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options`, `retry_send` |
+| `TaskFunctionSendOptionsView` | `task_function.blocking().with_options(options)` | `send` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
 | `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id` |
 | `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |

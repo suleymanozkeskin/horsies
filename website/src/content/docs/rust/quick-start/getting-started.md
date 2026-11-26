@@ -60,8 +60,8 @@ fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     Ok(app)
 }
 
-async fn send_greeting() -> Result<(), Box<dyn std::error::Error>> {
-    let handle = greet::send("world".to_owned()).await?;
+async fn send_greeting(app: &Horsies) -> Result<(), Box<dyn std::error::Error>> {
+    let handle = greet::send(app, "world".to_owned()).await?;
     let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
     match handle.get(limit).await? {
         TaskOutcome::Succeeded(greeting) => println!("{greeting}"),
@@ -70,7 +70,7 @@ async fn send_greeting() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn run_send(_app: Horsies) -> ExitCode {
+fn run_send(app: Horsies) -> ExitCode {
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
         Err(error) => {
@@ -78,7 +78,7 @@ fn run_send(_app: Horsies) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(send_greeting()) {
+    match runtime.block_on(send_greeting(&app)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -105,7 +105,7 @@ fn main() -> ExitCode {
 - `#[task("greet")]` defines the task `greet`. Its parameter `name` is stored under its name: the input `{"name": "world"}`. See [Defining Tasks](/horsies/rust/tasks/defining-tasks/).
 - `Horsies::new` does no I/O. The app connects at its first operation and installs the schema there. See [App Config](/horsies/rust/configuration/app-config/).
 - The worker profile `default` has two isolated children. It does not set `preload`: the default, `ChildPreload::NoPreload`, is the only value that a Rust worker takes. See [Worker Setup](/horsies/rust/workers/worker-setup/).
-- `greet::send` sends through the function of `greet::register`. `get` waits for the outcome. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/) and [Retrieving Results](/horsies/rust/tasks/retrieving-results/).
+- `greet::send(app, ...)` sends through the app that registered `greet`. `get` waits for the outcome. See [Sending Tasks](/horsies/rust/tasks/sending-tasks/) and [Retrieving Results](/horsies/rust/tasks/retrieving-results/).
 - The worker starts this binary again for each child, with arguments of its own. `horsies::cli::run` serves them. Every line of `main` before it runs in each child too: build the app there and start nothing else.
 
 ## Run It

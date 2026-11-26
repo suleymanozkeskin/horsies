@@ -170,11 +170,15 @@ pub async fn idempotent(token: String) -> Result<String, TaskError<BasicCode>> {
     }
 }
 
-/// Python `e2e_wait_inside_task`: send a task, then try to wait for it. The
-/// output is whether the wait was refused with `WAIT_INSIDE_TASK`.
+/// Python `e2e_wait_inside_task`: send a task through the typed function of
+/// the runtime, then try to wait for it. The output is whether the wait was
+/// refused with `WAIT_INSIDE_TASK`.
 #[task("e2e_wait_inside_task")]
-pub async fn wait_inside_task() -> Result<bool, TaskError<BasicCode>> {
-    let handle = simple::send(1)
+pub async fn wait_inside_task(rt: TaskRuntime) -> Result<bool, TaskError<BasicCode>> {
+    let function = simple::handle(&rt)
+        .map_err(|missing| TaskError::user(BasicCode::SendFailed, missing.to_string()))?;
+    let handle = function
+        .send(simple::Input { x: 1 })
         .await
         .map_err(|error| TaskError::user(BasicCode::SendFailed, error.to_string()))?;
     let limit = WaitLimit::parse(Some(INSIDE_WAIT))

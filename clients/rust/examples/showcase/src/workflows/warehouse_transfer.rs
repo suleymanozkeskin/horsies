@@ -29,18 +29,18 @@ impl WorkflowDefinition for WarehouseTransfer {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let allocate = builder.task(
-            allocate_warehouse::node()?
+            allocate_warehouse::node()
                 .node_id("allocate_warehouse")
                 .set(allocate_warehouse::params::sku(), SKU.to_owned())?
                 .set(allocate_warehouse::params::quantity(), QUANTITY)?,
-        );
+        )?;
         let release = builder.task(
-            release_stock::node()?
+            release_stock::node()
                 .node_id("release_stock")
                 .set(release_stock::params::sku(), SKU.to_owned())?
                 .set(release_stock::params::quantity(), QUANTITY)?
                 .waits_for(allocate),
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(release))
     }
 }

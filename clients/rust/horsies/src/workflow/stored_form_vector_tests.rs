@@ -8,9 +8,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::node::tests::{task_node, ChargeInput};
+use super::node::tests::{add, task_node, test_builder, ChargeInput};
 use super::spec_data::spec_data_text;
-use super::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};
+use super::{SuccessCase, SuccessPolicy, WorkflowSpec};
 use crate::stored_form_vectors::{vector_file, RustCase, RustDrift};
 use crate::{AppConfig, CustomQueueConfig, OnError, QueueMode};
 
@@ -69,9 +69,9 @@ fn assert_vector(name: &str, spec: &WorkflowSpec, config: &AppConfig) {
 
 #[test]
 fn one_task_node() {
-    let mut builder = WorkflowSpecBuilder::new("checkout");
+    let mut builder = test_builder("checkout");
     builder.definition_key("tests.checkout.v1");
-    let node = builder.task(charge().node_id("charge"));
+    let node = add(&mut builder, charge().node_id("charge"));
     builder.output(node);
     let spec = builder.build().unwrap();
     assert_vector("one_task_node", &spec, &config());
@@ -79,11 +79,12 @@ fn one_task_node() {
 
 #[test]
 fn two_nodes_with_a_policy_and_a_quorum() {
-    let mut builder = WorkflowSpecBuilder::new("checkout");
+    let mut builder = test_builder("checkout");
     builder.definition_key("tests.checkout.v1");
     builder.on_error(OnError::Pause);
-    let first = builder.task(charge().node_id("first"));
-    let second = builder.task(
+    let first = add(&mut builder, charge().node_id("first"));
+    let second = add(
+        &mut builder,
         charge()
             .node_id("second")
             .waits_for(first)
@@ -114,10 +115,10 @@ fn queues_in_first_seen_order() {
         ]),
         ..config()
     };
-    let mut builder = WorkflowSpecBuilder::new("queues");
+    let mut builder = test_builder("queues");
     builder.definition_key("tests.queues.v1");
-    let _first_seen = builder.task(charge().node_id("a").queue("zeta"));
-    let _second_seen = builder.task(charge().node_id("b").queue("alpha"));
+    let _first_seen = add(&mut builder, charge().node_id("a").queue("zeta"));
+    let _second_seen = add(&mut builder, charge().node_id("b").queue("alpha"));
     let spec = builder.build().unwrap();
     assert_vector("queues_in_first_seen_order", &spec, &custom);
 }
@@ -127,9 +128,10 @@ fn queues_in_first_seen_order() {
 /// writes them.
 #[test]
 fn non_ascii_text() {
-    let mut builder = WorkflowSpecBuilder::new("Ünïcode ✓ 🐎");
+    let mut builder = test_builder("Ünïcode ✓ 🐎");
     builder.definition_key("tests.ünïcode.v1");
-    let node = builder.task(
+    let node = add(
+        &mut builder,
         task_node::<f64, NoteInput>("app.Ünïcode")
             .set_input(NoteInput {
                 note: "Ünïcode ✓ 🐎".to_owned(),

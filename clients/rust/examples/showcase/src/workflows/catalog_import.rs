@@ -31,14 +31,14 @@ impl WorkflowDefinition for CatalogImport {
             .map_err(|_| HorsiesError::new("CATALOG_IMPORT_CHUNKS is above i32::MAX"))?;
         for chunk_index in 0..chunks {
             let _chunk = builder.task(
-                catalog_import_chunk::node()?
+                catalog_import_chunk::node()
                     .node_id(format!("chunk_{chunk_index:02}"))
                     .set(
                         catalog_import_chunk::params::import_id(),
                         IMPORT_ID.to_owned(),
                     )?
                     .set(catalog_import_chunk::params::chunk_index(), chunk_index)?,
-            );
+            )?;
         }
         Ok(WorkflowDefConfig::new())
     }

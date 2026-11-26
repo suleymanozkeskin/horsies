@@ -76,23 +76,26 @@ Python stores keyword arguments.
 ## The Generated Module
 
 `#[task("validate_order")] async fn validate_order(order: Order)`
-generates the module `validate_order`:
+generates the module `validate_order`. The module holds no state: each
+send names its app, and a workflow builder resolves a node against its own
+app. Two apps in one process share no registration.
 
 | Item | Does |
 |---|---|
 | `validate_order::Input` | The input struct: `Input { order }` |
 | `validate_order::register(&mut app)` | Registers the task. Returns `Result<TaskFunction<validate_order::Input, T, E>, HorsiesError>` |
-| `validate_order::send(order)` | Sends now through the function of the first `register` in the process |
-| `validate_order::schedule(delay, order)` | Sends to start after `delay: WholeSeconds` |
-| `validate_order::with_options(options).send(order)` | Sends with `TaskSendOptions`; `.schedule(delay, order)` too |
-| `validate_order::node()` | `Result<TaskNode<T, validate_order::Input>, HorsiesError>`: a workflow node |
+| `validate_order::send(&app, order)` | Sends now through `app` |
+| `validate_order::with_options(options).send(&app, order)` | Sends through `app` with `TaskSendOptions`; the delay is `TaskSendOptions::delay(WholeSeconds)` |
+| `validate_order::node()` | `TaskNode<T, validate_order::Input>`: a workflow node. `builder.task(node)` resolves it against the builder's app |
 | `validate_order::params::order()` | The field token `InputField<validate_order::Input, Order>` of a workflow node |
 | `validate_order::handle(&runtime)` | `Result<TaskFunction<..>, TaskFunctionNotFound>` from a `TaskRuntime` |
 
-- `send`, `schedule` and `with_options` before `register` in the process
-  return `TaskSendError::ValidationFailed`, which names the task.
-  `node()` before `register` returns a `HorsiesError` with `HRS-302`
-  (`ErrorCode::WorkflowUnregisteredTask`).
+- `send` and `with_options(..).send` through an app that does not register
+  the task return `TaskSendError::ValidationFailed` with the cause
+  `PreconditionFailed`. The message names the task. Nothing is written.
+- `builder.task(node)` on a builder of an app that does not register the
+  task returns a `HorsiesError` with `HRS-302`
+  (`ErrorCode::WorkflowUnregisteredTask`). The node is not added.
 - `register` checks the codes of the code type (`UserErrorCode::CODES`):
   a built-in or reserved name is `HRS-212`; a code that is empty, not
   `UPPER_SNAKE_CASE` or an exception class name is `HRS-112`; a code given
@@ -210,6 +213,7 @@ fn register_mail(app: &mut Horsies) -> Result<(), HorsiesError> {
 | `spawn(name, future)` | `Result<tokio::task::JoinHandle<_>, RunSpawnRefused>`: starts `future` as work of the run |
 | `fencing_token()` | `Result<FencingToken, FencingTokenRefused>`: the task id (`task_id()`) and the value (`value().get()`) of the run |
 | `task_handle::<A, T, E>(task_name)` | `Result<TaskFunction<A, T, E>, TaskFunctionNotFound>` |
+| `workflow_builder(name)` | A `WorkflowSpecBuilder` of the app of the runtime; its task nodes resolve against that app |
 | `start::<T>(&spec)`, `start_with_id::<T>(&spec, workflow_id)` | Starts a workflow that the task built (see `workflows.md`) |
 
 - Each process builds its own state: every worker child runs `main` again.
@@ -428,11 +432,9 @@ as the built-in code. When a retry starts is on the shared docs page
 | Method | Sends |
 |---|---|
 | `send(input)` | Now |
-| `schedule(delay, input)` | To start after `delay: WholeSeconds` (`WholeSeconds::from_secs(300)`) |
-| `send_with_options(options, input)` | Now, with `TaskSendOptions` |
-| `schedule_with_options(options, delay, input)` | After `delay`, with `TaskSendOptions` |
-| `with_options(options)` | A `TaskFunctionSendOptions` with `send(input)` and `schedule(delay, input)` |
-| `retry_send(&error)`, `retry_schedule(&error)` | The task of a failed send again (below) |
+| `send_with_options(options, input)` | With `TaskSendOptions`: now, or after `TaskSendOptions::delay(WholeSeconds::from_secs(300))` |
+| `with_options(options)` | A `TaskFunctionSendOptions` with `send(input)` |
+| `retry_send(&error)` | The task of a failed send again, the delay included (below) |
 | `node()` | A workflow node (see `workflows.md`) |
 | `blocking()` | The blocking view (see Blocking API) |
 
@@ -441,15 +443,17 @@ registration.
 
 A send runs these steps in order and stops at the first refusal:
 
-1. Send suppression: a suppressed send returns `SendSuppressed`.
-2. The retention of the send.
-3. The read-back of the input: encode it, decode the text with `A`, encode
+1. A generated send finds the task in the app that it names. An app that
+   does not register the task refuses with `ValidationFailed`.
+2. Send suppression: a suppressed send returns `SendSuppressed`.
+3. The retention of the send.
+4. The read-back of the input: encode it, decode the text with `A`, encode
    that value again. Two different texts refuse the send with
    `ValidationFailed` before any statement.
-4. The payload size: an input over `AppConfig.payload.reject_bytes` is
+5. The payload size: an input over `AppConfig.payload.reject_bytes` is
    `PayloadTooLarge`.
-5. A new task id and the sent instant.
-6. One enqueue through the core.
+6. A new task id and the sent instant.
+7. One enqueue through the core.
 
 In a worker child a send goes through the child's own producer handle.
 
@@ -457,10 +461,11 @@ In a worker child a send goes through the child's own producer handle.
 
 ```rust
 use chrono::{Duration, Utc};
-use horsies::{SendRetention, TaskSendOptions};
+use horsies::{SendRetention, TaskSendOptions, WholeSeconds};
 
 fn invoice_options(invoice_id: u64) -> TaskSendOptions {
     TaskSendOptions::new()
+        .delay(WholeSeconds::from_secs(60))
         .good_until(Utc::now() + Duration::hours(1))
         .idempotency_key(format!("invoice-{invoice_id}"))
         .retention(SendRetention::Forever)
@@ -469,6 +474,7 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 
 | Option | Does |
 |---|---|
+| `delay(WholeSeconds)` | The task starts no earlier than the delay after the send (`enqueue_delay_seconds`). Without it, the task starts when a worker claims it |
 | `good_until(deadline)` | The task expires (`TASK_EXPIRED`) when no worker started it by `deadline` |
 | `idempotency_key(key)` | Stores the task once per key within the reservation window (24 hours). A second send of the same command answers with the task that holds the key |
 | `retention(SendRetention)` | The retention of the task's history record |
@@ -492,6 +498,8 @@ fn invoice_options(invoice_id: u64) -> TaskSendOptions {
 | `PayloadTooLarge` | `PAYLOAD_TOO_LARGE` | `message`, `size_bytes`, `limit_bytes` | Refused |
 | `IdempotencyKeyConflict` | `IDEMPOTENCY_KEY_CONFLICT` | `task_id`, `payload`, `message`, `owner_task_id` | Accepted |
 
+- `ValidationFailed` with the cause `PreconditionFailed` is also the answer
+  of a generated send through an app that does not register the task.
 - `EnqueueFailed`: the row may or may not exist. `retryable` is the
   classification of the cause.
 - `cause` (`failure_cause()` on every variant): what the send met, a
@@ -529,11 +537,11 @@ async fn send_with_one_retry(
 }
 ```
 
-`retry_send` and `retry_schedule` send the same task id and payload again,
-as a repeat. A task that an earlier call wrote answers with its id, also
-after it finished, and does not run again. Both refuse with
-`ValidationFailed` an error with no payload, the error of another task, and
-the error of the other method.
+`retry_send` sends the same task id and payload again, as a repeat. The
+payload of a send with a delay keeps its delay. A task that an earlier call
+wrote answers with its id, also after it finished, and does not run again.
+It refuses with `ValidationFailed` an error with no payload and the error of
+another task.
 
 With `AppConfig.resend_on_transient_err`, a retryable `EnqueueFailed` is
 sent again up to 3 times, after 200, 400 and 800 ms, as a repeat.
@@ -611,7 +619,7 @@ calling thread.
 
 | View | From | Methods |
 |---|---|---|
-| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `schedule`, `schedule_with_options`, `with_options(..).send/.schedule`, `retry_send`, `retry_schedule` |
+| `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `retry_send` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
 | `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id` |
 | `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
@@ -758,7 +766,7 @@ let total = other_task_handle.get(WaitLimit::NoLimit).await;
 
 // CORRECT: a workflow node receives the dependency's outcome
 // fn report(total: TaskOutcome<u64, Infallible>) ...
-// report::node()?.arg_from(report::params::total(), totals_node)
+// builder.task(report::node().arg_from(report::params::total(), totals_node))?
 ```
 
 **Rename a parameter only when nothing stored holds the old name.** The
@@ -777,9 +785,10 @@ that runs a tokio runtime returns `ASYNC_CONTEXT` and runs nothing.
 body.** Plain `tokio::spawn` work is not tracked, not waited for and not
 cancelled with the run.
 
-**Register before you send.** The generated `send`, `schedule`,
-`with_options` and `node` use the function of the first `register` in the
-process. Before it, they refuse.
+**Send through the app that registered the task.** The generated `send`
+and `with_options(..).send` find the task in the app that they name. An app
+that does not register the task refuses the send with `ValidationFailed`.
+A workflow builder of such an app refuses the node with `HRS-302`.
 
 **Do not name a code type without its code.** `TaskError` without `<E>` is
 a compile error. Use `TaskError<std::convert::Infallible>` for a task with

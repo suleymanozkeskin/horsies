@@ -682,7 +682,7 @@ Registry (HRS-300-HRS-399):
 <!-- members: ErrorCode part -->
 - HRS-300 TASK_NOT_REGISTERED
 - HRS-301 TASK_DUPLICATE_NAME
-- HRS-302 WORKFLOW_UNREGISTERED_TASK (a workflow node names a task that is not registered in this process; only the Rust client raises it)
+- HRS-302 WORKFLOW_UNREGISTERED_TASK (a workflow node names a task that the app of its workflow builder does not register; the Rust client raises it at builder.task(node), and the node is not added)
 
 #### HorsiesError (base exception)
 - Rust-style formatted error display (like rustc compiler errors)

@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::*;
-use crate::workflow::node::tests::task_node;
+use crate::workflow::node::tests::{add, task_node, test_builder};
 use crate::workflow::{OutputlessResults, WorkflowDefConfig, WorkflowSpecBuilder};
 use crate::AppConfig;
 use horsies_core::WorkflowStartErrorCode;
@@ -18,7 +18,7 @@ fn app() -> Horsies {
 }
 
 fn one_task(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-    let tick = builder.task(task_node::<u32, ()>("tick"));
+    let tick = add(builder, task_node::<u32, ()>("tick"));
     Ok(WorkflowDefConfig::new().output(tick))
 }
 
@@ -60,10 +60,15 @@ impl WorkflowDefinition for Regional {
         "tests.function.regional.v1"
     }
 
-    fn build_with(params: Region) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(format!("regional_{}", params.region));
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        params: Region,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         builder.definition_key(Self::definition_key());
-        let tick = builder.task(task_node::<u32, ()>("tick"));
+        let tick = add(
+            &mut builder,
+            task_node::<u32, ()>("tick").node_id(params.region),
+        );
         builder.output(tick);
         builder.build()
     }
@@ -84,7 +89,10 @@ impl WorkflowDefinition for RefusingRegional {
         "tests.function.refusing_regional.v1"
     }
 
-    fn build_with(params: Region) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        _builder: WorkflowSpecBuilder,
+        params: Region,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         Err(HorsiesError::new(format!("bad region: {}", params.region)))
     }
 }
@@ -130,7 +138,8 @@ fn a_template_builds_from_params_and_makes_its_node() {
             region: "eu".to_owned(),
         })
         .unwrap();
-    assert_eq!(spec.name(), "regional_eu");
+    assert_eq!(spec.name(), "regional");
+    assert_eq!(spec.node_ids().collect::<Vec<_>>(), vec!["eu"]);
     let node = template.node(SubWorkflowParams::NotGiven).unwrap();
     assert_eq!(node.definition_key(), "tests.function.regional.v1");
 }
@@ -139,7 +148,7 @@ fn a_template_builds_from_params_and_makes_its_node() {
 fn a_builder_without_a_case_is_refused() {
     let app = app();
     let refused = app
-        .check_workflow_builder("empty", |_case: &u32| Daily::build())
+        .check_workflow_builder("empty", |builder, _case: &u32| Daily::build(builder))
         .register()
         .unwrap_err();
     assert_eq!(refused.code, Some(ErrorCode::WorkflowCheckCasesRequired));
@@ -148,8 +157,8 @@ fn a_builder_without_a_case_is_refused() {
 #[test]
 fn the_check_builds_each_case() {
     let app = app();
-    app.check_workflow_builder("by_region", |case: &u32| match case {
-        0 => Daily::build(),
+    app.check_workflow_builder("by_region", |builder, case: &u32| match case {
+        0 => Daily::build(builder),
         _ => Err(HorsiesError::new("no region")),
     })
     .cases([0, 1])
@@ -170,9 +179,9 @@ fn the_check_runs_each_case_with_the_sends_suppressed() {
     let suppression = app.send_suppression();
     let seen = Arc::new(AtomicBool::new(false));
     let seen_in_case = Arc::clone(&seen);
-    app.check_workflow_builder("suppressed", move |_case: &u32| {
+    app.check_workflow_builder("suppressed", move |builder, _case: &u32| {
         seen_in_case.store(suppression.is_active(), Ordering::Relaxed);
-        Daily::build()
+        Daily::build(builder)
     })
     .case(0)
     .register()
@@ -187,8 +196,8 @@ fn the_check_runs_each_case_with_the_sends_suppressed() {
 #[tokio::test]
 async fn a_spec_without_a_definition_key_is_refused_before_any_io() {
     let app = app();
-    let mut builder = WorkflowSpecBuilder::new("keyless");
-    let tick = builder.task(task_node::<u32, ()>("tick"));
+    let mut builder = test_builder("keyless");
+    let tick = add(&mut builder, task_node::<u32, ()>("tick"));
     builder.output(tick);
     let spec = builder.build().unwrap();
     let refused = app.start::<u32>(&spec).await.unwrap_err();
@@ -200,7 +209,7 @@ async fn a_spec_without_a_definition_key_is_refused_before_any_io() {
 #[tokio::test]
 async fn an_output_type_that_is_not_the_handle_s_is_refused_before_any_io() {
     let app = app();
-    let spec = Daily::build().unwrap();
+    let spec = Daily::build(app.workflow_builder(Daily::name())).unwrap();
     let refused = app.start::<String>(&spec).await.unwrap_err();
     assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
     assert!(refused.message().contains("HRS-025"), "{refused}");
@@ -209,7 +218,7 @@ async fn an_output_type_that_is_not_the_handle_s_is_refused_before_any_io() {
 #[tokio::test]
 async fn a_spec_with_an_unregistered_child_is_refused_before_any_io() {
     let app = app();
-    let mut builder = WorkflowSpecBuilder::new("parent");
+    let mut builder = test_builder("parent");
     builder.definition_key("tests.function.parent.v1");
     builder.sub_workflow(Daily::node(SubWorkflowParams::NotGiven).unwrap());
     let spec = builder.build().unwrap();
