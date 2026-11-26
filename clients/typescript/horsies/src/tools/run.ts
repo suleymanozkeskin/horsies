@@ -1,7 +1,7 @@
 // The `horsies` tool of the npm package: `get-docs` and `skills install`, as the Python client's CLI and the Rust
-// client's shipped binary have them. The worker, the check, the web UI and the metrics endpoint of an app run from
-// the app's own entry through `cli.run(app)`, because they need the app's task implementations; this tool refuses
-// those commands by name and says where they run. No module of this tool loads the native addon.
+// client's shipped binary have them. The worker, the check, the scheduler, the web UI and the metrics endpoint of an
+// app run from the app's own entry through `cli.run(app)`, because they need the app's task implementations; this
+// tool refuses those commands by name and says where they run. No module of this tool loads the native addon.
 //
 // Exit codes: 0 when a command succeeds; 1 when a command fails; 2 for arguments that do not parse and for a command
 // of the app's entry.
@@ -18,6 +18,7 @@ import { runSkillsInstall, SKILLS_INSTALL_USAGE } from "./skills-command.ts";
 const APP_ENTRY_COMMAND_SET: { readonly [Name in CommandName]: Name } = {
   worker: "worker",
   check: "check",
+  scheduler: "scheduler",
   web: "web",
   metrics: "metrics",
 };
@@ -42,8 +43,8 @@ export const TOOL_HELP: readonly string[] = [
   "  -h, --help      show this help message and exit",
   "  -V, --version   show the version of the package and exit",
   "",
-  "The worker, the check, the web UI and the metrics endpoint of an app run from the app's own entry, which imports",
-  "the app's task implementations. End the entry with `process.exitCode = await cli.run(app)`, then run:",
+  "The worker, the check, the scheduler, the web UI and the metrics endpoint of an app run from the app's own entry,",
+  "which imports the app's task implementations. End the entry with `process.exitCode = await cli.run(app)`, then run:",
   "  <your entry> worker --profile <name>",
   "  <your entry> check [--live]",
   "",
