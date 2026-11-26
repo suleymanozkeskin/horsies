@@ -67,10 +67,10 @@ class TaskAttemptOutcome(str, Enum):
     """Task completed successfully."""
 
     FAILED = 'FAILED'
-    """Task returned a domain or library error (with a `TaskResult`)."""
+    """The task ended with an error: its own error, or a library error."""
 
     WORKER_FAILURE = 'WORKER_FAILURE'
-    """Worker process crashed without producing a `TaskResult`."""
+    """Worker process crashed without producing a result."""
 
     CANCELLED = 'CANCELLED'
     """An operator cancelled the task while the attempt ran

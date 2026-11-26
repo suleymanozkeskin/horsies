@@ -179,7 +179,7 @@ class ErrorCode(str, Enum):
     TASK_STRICT_SIGNATURE_VIOLATION = 'HRS-105'
     """The task signature fails the strict check: a parameter that is not
     keyword-only, a type that is not allowed, or a return type that is not
-    `TaskResult[OkT, TaskError]`.
+    `Result[OkT, TaskError]`.
     """
 
     TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF = 'HRS-107'
