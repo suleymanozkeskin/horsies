@@ -7,12 +7,14 @@
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import { NO_OP_OBSERVER, type SendObserver } from "../app/observers.ts";
-import { type BodyObserver, NO_BODY_OBSERVER } from "../child/body-observer.ts";
+import type { AppContext } from "../app/context.ts";
+import { type BodyObserver, NO_BODY_OBSERVER, setBodyObserver } from "../child/body-observer.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { OTEL_API_MODULE, type OtelApi, type OtelApiLoader } from "./otel-api.ts";
-import { otelBodyObserver } from "./attempt-span.ts";
+import { type AttemptSpanDeps, otelBodyObserver } from "./attempt-span.ts";
+import { type EndedSpans, NO_ENDED_SPANS, otelEndedSpans } from "./ended-span.ts";
 import { otelSendObserver } from "./send-span.ts";
 import type { OtelTracingSetting, TracingSetting } from "./tracing-config.ts";
 import { processWarnings, type TelemetryWarnings } from "./warnings.ts";
@@ -24,7 +26,17 @@ export type TracingParts = {
   readonly sendObserver: SendObserver;
   /** Wraps each task body in a child of the app. */
   readonly bodyObserver: BodyObserver;
+  /** Makes the span of each attempt that the worker ended, in the handler child. */
+  readonly endedSpans: EndedSpans;
 };
+
+/** The parts of an app with no tracing. */
+const NO_TRACING_PARTS: TracingParts = Object.freeze({
+  setting: Object.freeze({ kind: "none" }),
+  sendObserver: NO_OP_OBSERVER,
+  bodyObserver: NO_BODY_OBSERVER,
+  endedSpans: NO_ENDED_SPANS,
+});
 
 /** What the tracing step reads. A test gives its own. */
 export type TracingEnvironment = {
@@ -48,7 +60,7 @@ const TRACING_PATH = "tracing";
 export function tracingPartsOf(setting: TracingSetting, environment: TracingEnvironment): Result<TracingParts, Refusal> {
   switch (setting.kind) {
     case "none":
-      return ok(Object.freeze({ setting, sendObserver: NO_OP_OBSERVER, bodyObserver: NO_BODY_OBSERVER }));
+      return ok(NO_TRACING_PARTS);
     case "otel": {
       const loaded = environment.loadApi();
 
@@ -69,12 +81,39 @@ export function tracingPartsOf(setting: TracingSetting, environment: TracingEnvi
 
 function otelParts(setting: OtelTracingSetting, api: OtelApi, environment: TracingEnvironment): TracingParts {
   const { warnings } = environment;
+  const spanDeps = { api, parentage: setting.parentage, warnings };
 
   return Object.freeze({
     setting,
     sendObserver: otelSendObserver({ api, warnings, clock: environment.clock }),
-    bodyObserver: otelBodyObserver({ api, parentage: setting.parentage, warnings }),
+    bodyObserver: otelBodyObserver(spanDeps),
+    endedSpans: endedSpansOf(setting, spanDeps),
   });
+}
+
+/** The span maker of the worker-ended spans by the setting's switch. */
+function endedSpansOf(setting: OtelTracingSetting, deps: AttemptSpanDeps): EndedSpans {
+  switch (setting.workerEndedSpans) {
+    case "makeSpans":
+      return otelEndedSpans(deps);
+    case "noSpans":
+      return NO_ENDED_SPANS;
+    default:
+      return unreachable(setting.workerEndedSpans, "endedSpansOf");
+  }
+}
+
+const partsByApp = new WeakMap<AppContext, TracingParts>();
+
+/** Keep the tracing parts of the app of `context`, and set its body observer. `Horsies.create` calls it. */
+export function recordTracingParts(context: AppContext, parts: TracingParts): void {
+  partsByApp.set(context, parts);
+  setBodyObserver(context, parts.bodyObserver);
+}
+
+/** The tracing parts of the app of `context`: the recorded ones, or those of no tracing. */
+export function tracingPartsOfApp(context: AppContext): TracingParts {
+  return partsByApp.get(context) ?? NO_TRACING_PARTS;
 }
 
 /** The refusal of `otel` with no API: the cause of the failed load, and the two fixes. Pure. */

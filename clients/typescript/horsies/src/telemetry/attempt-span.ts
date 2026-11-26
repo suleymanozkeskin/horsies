@@ -14,7 +14,7 @@
 import { OutcomeCode } from "../_catalog/task_codes.ts";
 import { thrownRecord } from "../child/thrown-error.ts";
 import type { BodyEnd, BodyObservation, BodyObserver } from "../child/body-observer.ts";
-import type { BodyFactsRecord, BodyWorkflowRecord } from "../native/child/addon.ts";
+import type { BodyCarrierRecord, BodyExecution, BodyFactsRecord, BodyWorkflowRecord } from "../native/child/addon.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import {
   MESSAGING_DESTINATION_NAME_KEY,
@@ -62,7 +62,17 @@ export type AttemptSpanDeps = {
 type RecordedFacts = Extract<BodyFactsRecord, { readonly kind: "recorded" }>;
 
 /** Where the attempt span takes its parent from. */
-type SpanPlace = { readonly parent: OtelContext; readonly links: OtelLink[] };
+export type SpanPlace = { readonly parent: OtelContext; readonly links: OtelLink[] };
+
+/** The facts of a run that every attempt span carries. `execution` is the class of the child that runs it. */
+export type RunSpanFacts = {
+  readonly taskId: string;
+  readonly taskName: string;
+  readonly queueName: string;
+  readonly attempt: number;
+  readonly workerId: string;
+  readonly execution: BodyExecution;
+};
 
 const NO_SPAN_IDS: NoSpanIds = Object.freeze({ kind: "noSpanIds" });
 
@@ -96,11 +106,12 @@ function openedObservation(deps: AttemptSpanDeps, facts: RecordedFacts): BodyObs
   let active: OtelContext;
 
   try {
-    const place = spanPlace(api, deps.parentage, facts);
+    const place = spanPlace(api, deps.parentage, facts.carrier);
+    const attributes = { ...runAttributes(facts), ...workflowAttributes(facts.workflow) };
 
     span = api.trace
       .getTracer(INSTRUMENTATION_SCOPE)
-      .startSpan(`${RUN_OPERATION} ${facts.taskName}`, { kind: api.SpanKind.CONSUMER, attributes: runAttributes(facts), links: place.links }, place.parent);
+      .startSpan(`${RUN_OPERATION} ${facts.taskName}`, { kind: api.SpanKind.CONSUMER, attributes, links: place.links }, place.parent);
     active = api.trace.setSpan(place.parent, span);
   } catch (cause) {
     deps.warnings.warnOnce("attemptSpanOpen", cause);
@@ -139,20 +150,19 @@ function runInSpan<T>(api: OtelApi, active: OtelContext, ids: SpanIds | NoSpanId
   }
 }
 
-/** The parent and the links of the attempt span of `facts`. */
-function spanPlace(api: OtelApi, parentage: AttemptParentage, facts: RecordedFacts): SpanPlace {
-  switch (facts.carrier.kind) {
+/** The parent and the links of an attempt span whose task has the stored carrier `carrier`. */
+export function spanPlace(api: OtelApi, parentage: AttemptParentage, carrier: BodyCarrierRecord): SpanPlace {
+  switch (carrier.kind) {
     case "noCarrier":
       return { parent: api.ROOT_CONTEXT, links: [] };
     case "carrier": {
-      const carrier = new Map(facts.carrier.entries.map((entry) => [entry.key, entry.value] as const));
-      const extracted = extractedContextOf(api, carrier);
+      const entries = new Map(carrier.entries.map((entry) => [entry.key, entry.value] as const));
 
-      return placeByParentage(api, parentage, extracted);
+      return placeByParentage(api, parentage, extractedContextOf(api, entries));
     }
 
     default:
-      return unreachable(facts.carrier, "spanPlace");
+      return unreachable(carrier, "spanPlace");
   }
 }
 
@@ -172,8 +182,8 @@ function placeByParentage(api: OtelApi, parentage: AttemptParentage, extracted: 
   }
 }
 
-/** The attributes of the attempt span of `facts`: those of the Python and Rust clients. Pure. */
-export function runAttributes(facts: RecordedFacts): OtelAttributes {
+/** The attributes of the attempt span of `facts` but the workflow ones: those of the Python and Rust clients. Pure. */
+export function runAttributes(facts: RunSpanFacts): OtelAttributes {
   return {
     [TASK_ID_KEY]: facts.taskId,
     [TASK_NAME_KEY]: facts.taskName,
@@ -186,7 +196,6 @@ export function runAttributes(facts: RecordedFacts): OtelAttributes {
     [MESSAGING_OPERATION_NAME_KEY]: RUN_OPERATION,
     [MESSAGING_DESTINATION_NAME_KEY]: facts.queueName,
     [MESSAGING_MESSAGE_ID_KEY]: facts.taskId,
-    ...workflowAttributes(facts.workflow),
   };
 }
 

@@ -57,7 +57,7 @@ pub enum BodyExecution {
 
 impl BodyExecution {
     /// The name of the core's class. Pure.
-    fn of(execution: Execution) -> Self {
+    pub(crate) fn of(execution: Execution) -> Self {
         match execution {
             Execution::Isolated => Self::Isolated,
             Execution::SharedAsync => Self::SharedAsync,
@@ -84,7 +84,7 @@ pub enum BodyWorkflowRecord {
 
 impl BodyWorkflowRecord {
     /// The record of the core's node. Pure.
-    fn of(workflow: RunWorkflow) -> Self {
+    pub(crate) fn of(workflow: RunWorkflow) -> Self {
         match workflow {
             RunWorkflow::NotInWorkflow => Self::NotInWorkflow,
             RunWorkflow::InWorkflow {
@@ -125,7 +125,7 @@ pub enum BodyCarrierRecord {
 
 impl BodyCarrierRecord {
     /// The record of the core's carrier. Pure.
-    fn of(carrier: &BodyCarrier) -> Self {
+    pub(crate) fn of(carrier: &BodyCarrier) -> Self {
         match carrier {
             BodyCarrier::NoCarrier => Self::NoCarrier,
             BodyCarrier::Carrier(map) => Self::Carrier {

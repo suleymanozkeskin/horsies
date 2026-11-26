@@ -35,10 +35,6 @@ pub enum HandlerSlotRefused {
 
 /// Put `app` in the slot, before the serve. Refused when the slot holds an
 /// app or the serve took it; nothing changes then.
-#[allow(
-    dead_code,
-    reason = "the handler child area fills the slot with its event handlers"
-)]
 pub fn fill_handler_slot(app: HandlerChildApp) -> Result<(), HandlerSlotRefused> {
     let mut slot = SLOT.lock().unwrap_or_else(PoisonError::into_inner);
     match *slot {

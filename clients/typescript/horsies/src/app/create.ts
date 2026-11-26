@@ -25,10 +25,14 @@ import {
   processRole,
   taskInfo,
 } from "../native/sends/sends.ts";
-import { processTracingEnvironment, type TracingParts, tracingPartsOf } from "../telemetry/create-hook.ts";
+import {
+  processTracingEnvironment,
+  recordTracingParts,
+  type TracingParts,
+  tracingPartsOf,
+} from "../telemetry/create-hook.ts";
 import { type OtelApiLoader, requireOtelApi } from "../telemetry/otel-api.ts";
 import { tracingSettingOf } from "../telemetry/tracing-config.ts";
-import { setBodyObserver } from "../child/body-observer.ts";
 import { registeredHandlers } from "../events/register.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import type { NonEmpty } from "../wire/builders.ts";
@@ -178,7 +182,7 @@ function contextOf(
     telemetry: { handlers: () => registeredHandlers(context), tracing: tracing.setting },
   };
 
-  setBodyObserver(context, tracing.bodyObserver);
+  recordTracingParts(context, tracing);
 
   return context;
 }
