@@ -419,9 +419,9 @@ fn json_action_request(uri: &str, body: &str) -> Request<Body> {
 /// declares.
 fn unknown_key_refusal(
     key: &str,
-    input: serde_json::Value,
+    input: &serde_json::Value,
     message: &str,
-    known_keys: serde_json::Value,
+    known_keys: &serde_json::Value,
 ) -> serde_json::Value {
     serde_json::json!({"detail": [{
         "type": "extra_forbidden",
@@ -480,9 +480,9 @@ async fn the_task_cancel_body_refuses_an_unknown_key_and_accepts_the_known_body(
             json(response).await,
             unknown_key_refusal(
                 key,
-                input,
+                &input,
                 &format!("Unknown key \"{key}\". Known keys: \"include_running\"."),
-                serde_json::json!(["include_running"]),
+                &serde_json::json!(["include_running"]),
             ),
             "{body}"
         );
@@ -564,9 +564,9 @@ async fn assert_the_workflow_body_has_no_keys(action: &str) {
         json(response).await,
         unknown_key_refusal(
             "include_running",
-            serde_json::json!(true),
+            &serde_json::json!(true),
             "Unknown key \"include_running\". Known keys: none.",
-            serde_json::json!([]),
+            &serde_json::json!([]),
         ),
         "{action}"
     );
