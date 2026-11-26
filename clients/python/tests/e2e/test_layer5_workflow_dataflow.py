@@ -208,7 +208,7 @@ async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> Non
 
 
 # =============================================================================
-# T5.5: FAILED propagation (allow_failed_deps=True)
+# T5.5: FAILED propagation (allow_failed_dependencies=True)
 # =============================================================================
 
 
@@ -221,7 +221,7 @@ async def test_failed_propagation(broker: PostgresBroker) -> None:
         profile='isolated-1',
         ready_check=_make_ready_check(),
     ):
-        # spec_failed_propagation: A fails with DELIBERATE_FAIL, B has allow_failed_deps=True
+        # spec_failed_propagation: A fails with DELIBERATE_FAIL, B has allow_failed_dependencies=True
         handle = await start_ok_in_thread(wf_tasks.spec_failed_propagation)
 
         status = await wait_for_workflow_completion(
@@ -271,8 +271,8 @@ async def test_skipped_propagation(broker: PostgresBroker) -> None:
         profile='isolated-1',
         ready_check=_make_ready_check(),
     ):
-        # spec_skipped_propagation: A fails, B is SKIPPED (no allow_failed_deps),
-        # C has allow_failed_deps=True and should see UPSTREAM_SKIPPED for B
+        # spec_skipped_propagation: A fails, B is SKIPPED (no allow_failed_dependencies),
+        # C has allow_failed_dependencies=True and should see UPSTREAM_SKIPPED for B
         handle = await start_ok_in_thread(wf_tasks.spec_skipped_propagation)
 
         status = await wait_for_workflow_completion(
@@ -289,7 +289,7 @@ async def test_skipped_propagation(broker: PostgresBroker) -> None:
             db_tasks[0]['status'] == 'FAILED'
         ), f"A should be FAILED, got {db_tasks[0]['status']}"
 
-        # B should be SKIPPED (default allow_failed_deps=False)
+        # B should be SKIPPED (default allow_failed_dependencies=False)
         assert (
             db_tasks[1]['status'] == 'SKIPPED'
         ), f"B should be SKIPPED, got {db_tasks[1]['status']}"
@@ -328,7 +328,7 @@ async def test_join_ctx_gating(broker: PostgresBroker) -> None:
         ready_check=_make_ready_check(),
     ):
         # spec_join_ctx_gating: A (100ms), B (300ms), C waits for both with join=any
-        # but workflow_ctx_from=[B], so C must wait for B
+        # but workflow_context_from=[B], so C must wait for B
         handle = await start_ok_in_thread(wf_tasks.spec_join_ctx_gating)
 
         status = await wait_for_workflow_completion(
@@ -458,7 +458,7 @@ async def test_args_from_transitive_chain(broker: PostgresBroker) -> None:
 async def test_args_from_failed_dep_skips_and_fails_workflow(
     broker: PostgresBroker,
 ) -> None:
-    """T5.10: A fails, B (allow_failed_deps=False) is SKIPPED, workflow FAILED."""
+    """T5.10: A fails, B (allow_failed_dependencies=False) is SKIPPED, workflow FAILED."""
     with run_worker(
         DEFAULT_INSTANCE,
         profile='isolated-1',

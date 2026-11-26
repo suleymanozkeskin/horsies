@@ -66,7 +66,7 @@ impl WorkflowDefinition for ReturnsReview {
                 .node_id("restock_or_writeoff")
                 .set(restock_or_writeoff::params::return_id(), params.return_id)?
                 .arg_from(restock_or_writeoff::params::inspection(), inspect)
-                .allow_failed_deps(true),
+                .allow_failed_dependencies(true),
         )?;
         builder.output(settle);
         builder.build()

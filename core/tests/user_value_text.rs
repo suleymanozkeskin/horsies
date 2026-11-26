@@ -343,6 +343,15 @@ const KNOWN_SITES: &[Known] = &[
         ),
     },
     Known {
+        file: "core/src/web/request_body.rs",
+        item: "parse_action_body",
+        kind: SiteKind::TurbofishValue,
+        count: 1,
+        allowed: Allowed::NotUserValue(
+            "a web action request body; read as a JSON object only to name an unknown key before the typed parse",
+        ),
+    },
+    Known {
         file: "core/src/worker/executor/protocol/metadata.rs",
         item: "parse_metadata",
         kind: SiteKind::TurbofishValue,
@@ -1314,7 +1323,7 @@ fn every_read_into_value_of_the_core_and_the_rust_client_is_listed() {
 
 #[test]
 fn each_listed_site_has_a_reason_and_a_file_of_a_scanned_crate() {
-    assert_eq!(KNOWN_SITES.len(), 30);
+    assert_eq!(KNOWN_SITES.len(), 31);
     for site in KNOWN_SITES {
         assert!(!site.allowed.reason().is_empty(), "{}", site.file);
         assert!(site.count > 0, "{}", site.file);

@@ -892,10 +892,10 @@ async fn a_paused_workflow_cancels_and_skips_its_pending_node() {
 
 /// `clients/python/tests/e2e/test_layer6_workflow_advanced.py::test_workflow_recovers_after_worker_crash`:
 /// the reaper fails the two running nodes of a crashed worker with
-/// `WORKER_CRASHED`; the `allow_failed_deps` node and its dependent then run
+/// `WORKER_CRASHED`; the `allow_failed_dependencies` node and its dependent then run
 /// on their own queue, and the workflow ends FAILED.
 #[tokio::test]
-async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
+async fn a_crashed_worker_fails_its_nodes_and_allow_failed_dependencies_nodes_run() {
     let db = IsolatedDatabase::create().await;
     let child_specs = TestChildSpecs::empty();
     let done = serde_json::to_string(&ok(serde_json::json!(1))).expect("encode the result");
@@ -934,7 +934,7 @@ async fn a_crashed_worker_fails_its_nodes_and_allow_failed_deps_nodes_run() {
     .expect("age the crashed tasks");
     let mut recovery_node = NodeSeed::task(workflow_id, 4, "PENDING")
         .deps(&[2, 3])
-        .allow_failed_deps();
+        .allow_failed_dependencies();
     recovery_node.queue_name = "recovery";
     seed_node(&db.pool, &recovery_node).await;
     let mut after = NodeSeed::task(workflow_id, 5, "PENDING").deps(&[4]);

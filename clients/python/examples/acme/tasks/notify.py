@@ -2,7 +2,7 @@
 """Customer notifications.
 
 `send_order_email` is the workflow's recovery handler. Its node sets
-`allow_failed_deps=True`, so it runs whether the capture completed, failed, or
+`allow_failed_dependencies=True`, so it runs whether the capture completed, failed, or
 was skipped — it reads the upstream `TaskOutcome` and picks the template. The
 workflow still fails by policy; the customer still hears from Acme Clothing.
 """

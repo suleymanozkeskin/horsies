@@ -187,7 +187,7 @@ async fn a_pending_node_after_a_failed_dependency_is_skipped_and_the_workflow_fa
 
 /// `test_recover_pending_deps_failed_allow_continue` (case 0)
 #[tokio::test]
-async fn a_pending_allow_failed_deps_node_after_a_failure_is_enqueued() {
+async fn a_pending_allow_failed_dependencies_node_after_a_failure_is_enqueued() {
     let db = IsolatedDatabase::create().await;
     let workflow_id = seed_workflow(&db.pool, &WorkflowSeed::running()).await;
     seed_node(
@@ -199,7 +199,7 @@ async fn a_pending_allow_failed_deps_node_after_a_failure_is_enqueued() {
         &db.pool,
         &NodeSeed::task(workflow_id, 1, "PENDING")
             .deps(&[0])
-            .allow_failed_deps(),
+            .allow_failed_dependencies(),
     )
     .await;
 

@@ -180,8 +180,8 @@ where
     }
 
     /// Start the child even when a dependency failed.
-    pub fn allow_failed_deps(mut self, allow: bool) -> Self {
-        self.links.allow_failed_deps = allow;
+    pub fn allow_failed_dependencies(mut self, allow: bool) -> Self {
+        self.links.allow_failed_dependencies = allow;
         self
     }
 

@@ -259,8 +259,8 @@ pub(crate) struct NodeLinks {
     /// The input members that take a dependency's result, by member name.
     pub(crate) args_from: BTreeMap<String, NodeRef>,
     /// The dependencies whose results the workflow context takes.
-    pub(crate) workflow_ctx_from: Vec<NodeRef>,
-    pub(crate) allow_failed_deps: bool,
+    pub(crate) workflow_context_from: Vec<NodeRef>,
+    pub(crate) allow_failed_dependencies: bool,
     pub(crate) join: JoinType,
     pub(crate) node_id: NodeIdChoice,
 }
@@ -270,8 +270,8 @@ impl NodeLinks {
         Self {
             dependencies: Vec::new(),
             args_from: BTreeMap::new(),
-            workflow_ctx_from: Vec::new(),
-            allow_failed_deps: false,
+            workflow_context_from: Vec::new(),
+            allow_failed_dependencies: false,
             join: JoinType::All,
             node_id: NodeIdChoice::Auto,
         }
@@ -649,15 +649,15 @@ impl<T, I> TaskNode<T, I> {
     /// Give the task the results of `sources` in its workflow context. Each
     /// source must be a dependency of the node, and the task must take the
     /// context (`workflow_ctx` on the task attribute).
-    pub fn workflow_ctx_from<D, R>(mut self, sources: D) -> Self
+    pub fn workflow_context_from<D, R>(mut self, sources: D) -> Self
     where
         D: IntoIterator<Item = R>,
         R: Into<NodeRef>,
     {
         for source in sources {
             let source = source.into();
-            if !self.links.workflow_ctx_from.contains(&source) {
-                self.links.workflow_ctx_from.push(source);
+            if !self.links.workflow_context_from.contains(&source) {
+                self.links.workflow_context_from.push(source);
             }
         }
         self
@@ -686,8 +686,8 @@ impl<T, I> TaskNode<T, I> {
     }
 
     /// Run the node even when a dependency failed.
-    pub fn allow_failed_deps(mut self, allow: bool) -> Self {
-        self.links.allow_failed_deps = allow;
+    pub fn allow_failed_dependencies(mut self, allow: bool) -> Self {
+        self.links.allow_failed_dependencies = allow;
         self
     }
 

@@ -65,14 +65,14 @@ fn ok_value(result: &TaskResult<serde_json::Value>) -> &serde_json::Value {
 fn recovering_pair(name: &str) -> WorkflowSpec {
     let mut recovery = after(1, "recovery_task", &[0]);
     recovery.args_from.insert("input_result".to_owned(), 0);
-    recovery.allow_failed_deps = true;
+    recovery.allow_failed_dependencies = true;
     spec(name, vec![after(0, "failing_task", &[]), recovery])
 }
 
 /// `test_workflow_args_from.py::TestArgsFromInjection.test_args_from_err_result`
 /// and `.test_failed_dep_passes_original_error_not_skipped_sentinel`
 #[tokio::test]
-async fn a_failed_dependency_passes_its_own_error_to_an_allow_failed_deps_node() {
+async fn a_failed_dependency_passes_its_own_error_to_an_allow_failed_dependencies_node() {
     let pool = shared_pool().await;
     let workflow_id = run(&pool, &recovering_pair("err_result_test")).await;
 
@@ -119,7 +119,7 @@ async fn a_skipped_dependency_is_injected_as_upstream_skipped_with_its_index() {
     let pool = shared_pool().await;
     let mut receiver = after(2, "skipped_sentinel_c", &[1]);
     receiver.args_from.insert("input_result".to_owned(), 1);
-    receiver.allow_failed_deps = true;
+    receiver.allow_failed_dependencies = true;
     let workflow_id = run(
         &pool,
         &spec(
@@ -186,7 +186,7 @@ async fn only_mapped_dependencies_are_injected() {
 async fn the_context_names_the_node_and_holds_its_dependency_result() {
     let pool = shared_pool().await;
     let mut reader = after(1, "ctx_inject_b", &[0]);
-    reader.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
+    reader.workflow_context_from = Some(vec!["node_0".to_owned()]);
     let workflow_id = run(
         &pool,
         &spec(
@@ -219,7 +219,7 @@ async fn no_context_is_injected_without_a_context_dependency() {
     let pool = shared_pool().await;
     for ctx_from in [None, Some(Vec::new())] {
         let mut reader = after(1, "no_ctx_from_b", &[0]);
-        reader.workflow_ctx_from = ctx_from.clone();
+        reader.workflow_context_from = ctx_from.clone();
         let workflow_id = run(
             &pool,
             &spec(
@@ -268,8 +268,8 @@ async fn the_workflow_meta_is_injected_without_a_context_dependency() {
 async fn a_skipped_context_dependency_reads_as_upstream_skipped_with_its_index() {
     let pool = shared_pool().await;
     let mut reader = after(2, "ctx_skipped_c", &[1]);
-    reader.workflow_ctx_from = Some(vec!["node_1".to_owned()]);
-    reader.allow_failed_deps = true;
+    reader.workflow_context_from = Some(vec!["node_1".to_owned()]);
+    reader.allow_failed_dependencies = true;
     let workflow_id = run(
         &pool,
         &spec(
@@ -300,8 +300,8 @@ async fn a_skipped_context_dependency_reads_as_upstream_skipped_with_its_index()
 async fn a_failed_context_dependency_reads_as_its_original_error() {
     let pool = shared_pool().await;
     let mut reader = after(1, "ctx_failed_c", &[0]);
-    reader.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
-    reader.allow_failed_deps = true;
+    reader.workflow_context_from = Some(vec!["node_0".to_owned()]);
+    reader.allow_failed_dependencies = true;
     let workflow_id = run(
         &pool,
         &spec(
@@ -443,7 +443,7 @@ async fn a_node_after_a_skip_receives_upstream_skipped() {
     let pool = shared_pool().await;
     let mut checker = after(2, "check_upstream_skipped", &[1]);
     checker.args_from.insert("input_result".to_owned(), 1);
-    checker.allow_failed_deps = true;
+    checker.allow_failed_dependencies = true;
     let mut workflow_spec = spec(
         "e2e_skipped_propagation",
         vec![
@@ -480,7 +480,7 @@ async fn one_node_gets_args_from_of_one_dependency_and_the_context_of_another() 
     let pool = shared_pool().await;
     let mut reader = after(3, "mixed_reader", &[1, 2]);
     reader.args_from.insert("from_args".to_owned(), 1);
-    reader.workflow_ctx_from = Some(vec!["node_2".to_owned()]);
+    reader.workflow_context_from = Some(vec!["node_2".to_owned()]);
     let workflow_id = run(
         &pool,
         &spec(
@@ -516,7 +516,7 @@ async fn one_dependency_read_through_args_from_and_the_context_gives_one_value()
     let pool = shared_pool().await;
     let mut reader = after(1, "dual_reader", &[0]);
     reader.args_from.insert("from_args".to_owned(), 0);
-    reader.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
+    reader.workflow_context_from = Some(vec!["node_0".to_owned()]);
     let workflow_id = run(
         &pool,
         &spec("e2e_dual_injection", vec![after(0, "produce", &[]), reader]),

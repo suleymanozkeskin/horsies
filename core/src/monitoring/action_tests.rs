@@ -207,6 +207,31 @@ async fn seed_workflow_task_link(pool: &TestPool, workflow_id: Uuid, task_id: Uu
     .expect("seed W3 workflow task link");
 }
 
+/// `CancelTaskBody` refuses a key that it does not declare, for any serde
+/// reader: serde's text names the key and the known key. The known key and
+/// the empty object read as before.
+#[test]
+fn the_cancel_body_type_refuses_an_unknown_key() {
+    let refused = serde_json::from_str::<CancelTaskBody>(r#"{"include_runing": true}"#)
+        .expect_err("a key that the type does not declare");
+    assert!(
+        refused
+            .to_string()
+            .starts_with("unknown field `include_runing`, expected `include_running`"),
+        "{refused}"
+    );
+    assert_eq!(
+        serde_json::from_str::<CancelTaskBody>(r#"{"include_running": true}"#).ok(),
+        Some(CancelTaskBody {
+            include_running: true
+        })
+    );
+    assert_eq!(
+        serde_json::from_str::<CancelTaskBody>("{}").ok(),
+        Some(CancelTaskBody::default())
+    );
+}
+
 #[test]
 fn action_models_and_task_mapping_serialize_exactly() {
     assert_eq!(

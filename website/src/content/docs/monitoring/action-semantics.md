@@ -102,7 +102,8 @@ curl -X POST "$BASE/api/tasks/$TASK_ID/cancel" \
 
 Without `include_running`, a `RUNNING` task is refused with 409 like any other
 ineligible state. The flag keeps a cancel of running code deliberate; the UI
-gates it behind a checkbox.
+gates it behind a checkbox. A key other than `include_running` is refused with
+422, and nothing changes (see [Request bodies](#request-bodies)).
 
 **Settled when:** the task reads `CANCELLED` with its `CANCELLED` attempt. That
 is immediate. The task code stops when it reads the cancel, or at the kill of an
@@ -271,6 +272,36 @@ active, a planner estimate on the unfiltered view.** An unfiltered total is
 therefore approximate by design on both sides of the split; narrow with any
 filter to get an exact count.
 
+## Request bodies
+
+Each action route reads its JSON body before the path id and before any
+statement of the action. The body is optional.
+
+| Route | Body | Keys |
+|---|---|---|
+| `POST /api/tasks/{id}/cancel` | No body, or a JSON object | `include_running`: a boolean, default `false` |
+| `POST /api/workflows/{id}/pause`, `/resume`, `/cancel` | No body, or `{}` | None |
+
+- The route reads a body only when the `Content-Type` starts with
+  `application/json`.
+- A body over 1 MiB is refused with 413 before any other check of the body.
+- A key that the route does not know is refused with 422, and the action does
+  not run. The response names the first unknown key in body order, its value,
+  and the known keys:
+
+  ```json
+  {"detail": [{
+    "type": "extra_forbidden",
+    "loc": ["body", "include_runing"],
+    "msg": "Unknown key \"include_runing\". Known keys: \"include_running\".",
+    "input": true,
+    "ctx": {"known_keys": ["include_running"]}
+  }]}
+  ```
+
+- A body that is not JSON, JSON that is not an object, and a known key with a
+  value of the wrong type are refused with 422 `value_error` at `["body"]`.
+
 ## Conflict handling
 
 There is no optimistic-concurrency token on any action. The CAS is the
@@ -283,6 +314,8 @@ concurrency control.
 | 400 | A task id in the path of a task route, or a workflow id in the path of a workflow action (`pause`, `resume`, `cancel`), is not a UUID (`INVALID_INPUT`, with a `detail`); nothing was read or changed | Send the id as UUID text |
 | 404 | The row no longer exists. On the workflow read routes also a workflow id that is not a UUID, and a node index outside the 32-bit node index column; nothing was read | Retention may have removed it |
 | 409 | Another change won the race, or the schema does not match this build | Re-read the entity; the body carries `current_status` |
+| 413 | The request body is over 1 MiB; the action did not run | Send a smaller body |
+| 422 | The request body is not valid: not JSON, not a JSON object, a known key with a value of the wrong type, or an unknown key (`extra_forbidden`, with the key and the known keys). The action did not run | Send only the keys of [Request bodies](#request-bodies) |
 | 500 | Stored data that does not parse (`STORED_DATA_INVALID`): a stored value of the workflow run, or, on a task cancel, a history status that is not a task status. Or a database failure that stays (see below). Or a server defect | Check the server logs and re-read the entity. A repeat gets the same answer until the stored row, the schema or the connection settings change. For `STORED_DATA_INVALID`, nothing was committed |
 | 503 | A database failure that may clear (see below) | The action may or may not have committed; re-read before retrying |
 

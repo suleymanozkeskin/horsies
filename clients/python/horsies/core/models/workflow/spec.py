@@ -361,7 +361,7 @@ class WorkflowSpec(Generic[OutT]):
             report.add(error)
         for error in self._collect_args_from_errors():
             report.add(error)
-        for error in self._collect_workflow_ctx_from_errors():
+        for error in self._collect_workflow_context_from_errors():
             report.add(error)
         for error in self._collect_positional_args_not_supported_errors():
             report.add(error)
@@ -459,13 +459,13 @@ class WorkflowSpec(Generic[OutT]):
                 k: old_to_new.get(id(v), v)
                 for k, v in node_copy.args_from.items()
             }
-            if node_copy.workflow_ctx_from is not None:
+            if node_copy.workflow_context_from is not None:
                 # Dedupe for symmetry with waits_for. Downstream validators
                 # already tolerate duplicates via set(id(...)), so this is
                 # cosmetic — guards against future readers expecting uniqueness.
-                node_copy.workflow_ctx_from = unique_node_refs([
+                node_copy.workflow_context_from = unique_node_refs([
                     old_to_new.get(id(ref), ref)
-                    for ref in node_copy.workflow_ctx_from
+                    for ref in node_copy.workflow_context_from
                 ])
 
         self.tasks = copied_tasks
@@ -663,9 +663,9 @@ class WorkflowSpec(Generic[OutT]):
             object.__setattr__(node, 'kwargs', MappingProxyType(frozen_kwargs))
             object.__setattr__(node, 'waits_for', tuple(node.waits_for))
             object.__setattr__(node, 'args_from', MappingProxyType(dict(node.args_from)))
-            if node.workflow_ctx_from is not None:
+            if node.workflow_context_from is not None:
                 object.__setattr__(
-                    node, 'workflow_ctx_from', tuple(node.workflow_ctx_from),
+                    node, 'workflow_context_from', tuple(node.workflow_context_from),
                 )
             object.__setattr__(node, '_frozen', True)
 
@@ -936,22 +936,22 @@ class WorkflowSpec(Generic[OutT]):
                     )
         return errors
 
-    def _collect_workflow_ctx_from_errors(self) -> list[WorkflowValidationError]:
-        """Validate workflow_ctx_from references are valid dependencies. Returns all errors."""
+    def _collect_workflow_context_from_errors(self) -> list[WorkflowValidationError]:
+        """Validate workflow_context_from references are valid dependencies. Returns all errors."""
         errors: list[WorkflowValidationError] = []
         for node in self.tasks:
-            if node.workflow_ctx_from is None:
+            if node.workflow_context_from is None:
                 continue
             deps_ids = set(id(d) for d in node.waits_for)
-            for ctx_node in node.workflow_ctx_from:
+            for ctx_node in node.workflow_context_from:
                 if id(ctx_node) not in deps_ids:
                     errors.append(
                         WorkflowValidationError(
-                            message='workflow_ctx_from references task not in waits_for',
+                            message='workflow_context_from references task not in waits_for',
                             code=HorsiesErrorCode.WORKFLOW_INVALID_CONTEXT_FROM,
                             notes=[
                                 f"node '{node.name}' references '{ctx_node.name}'",
-                                f"'{ctx_node.name}' must be in waits_for to use in workflow_ctx_from",
+                                f"'{ctx_node.name}' must be in waits_for to use in workflow_context_from",
                             ],
                             help_text=f"add '{ctx_node.name}' to waits_for list",
                         )
@@ -969,18 +969,18 @@ class WorkflowSpec(Generic[OutT]):
 
                 errors.append(
                     WorkflowValidationError(
-                        message='workflow_ctx_from declared but function missing workflow_ctx param',
+                        message='workflow_context_from declared but function missing workflow_ctx param',
                         code=HorsiesErrorCode.WORKFLOW_CONTEXT_PARAMETER_MISSING,
                         location=fn_location,  # May be None for non-function callables
                         notes=[
                             f"workflow '{self.name}'\n"
-                            f"TaskNode '{task.name}' declares workflow_ctx_from=[...]\n"
+                            f"TaskNode '{task.name}' declares workflow_context_from=[...]\n"
                             f"but function '{task.name}' has no workflow_ctx parameter",
                         ],
                         help_text=(
                             'either:\n'
                             '  1. add `workflow_ctx: WorkflowContext | None` param to the function above if needs context\n'
-                            '  2. remove `workflow_ctx_from` from the TaskNode definition if this was a mistake'
+                            '  2. remove `workflow_context_from` from the TaskNode definition if this was a mistake'
                         ),
                     )
                 )
@@ -1419,9 +1419,9 @@ class WorkflowSpec(Generic[OutT]):
 
             provided_kwargs = set(node.kwargs.keys()) | set(node.args_from.keys())
 
-            # Auto-injected workflow context for TaskNode when workflow_ctx_from is set
+            # Auto-injected workflow context for TaskNode when workflow_context_from is set
             if isinstance(node, TaskNode):
-                if node.workflow_ctx_from is not None and 'workflow_ctx' in sig.parameters:
+                if node.workflow_context_from is not None and 'workflow_ctx' in sig.parameters:
                     injected_kwargs.add('workflow_ctx')
                 # WorkflowMeta is auto-injected if declared
                 if 'workflow_meta' in sig.parameters:

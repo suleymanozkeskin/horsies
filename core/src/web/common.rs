@@ -1,5 +1,7 @@
 //! Shared HTTP response and query parsing rules.
 
+use std::borrow::Cow;
+
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -49,7 +51,7 @@ pub(crate) enum ApiError {
 pub(crate) struct ValidationIssue {
     #[serde(rename = "type")]
     error_type: &'static str,
-    loc: Vec<&'static str>,
+    loc: Vec<Cow<'static, str>>,
     msg: String,
     input: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -85,7 +87,7 @@ impl ApiError {
     ) -> Self {
         Self::Validation(vec![ValidationIssue {
             error_type,
-            loc: vec!["query", field],
+            loc: vec!["query".into(), field.into()],
             msg: message.into(),
             input: input.into(),
             ctx: None,
@@ -104,7 +106,7 @@ impl ApiError {
         context.insert(context_key.to_owned(), context_value.into());
         Self::Validation(vec![ValidationIssue {
             error_type,
-            loc: vec!["query", field],
+            loc: vec!["query".into(), field.into()],
             msg: message.into(),
             input: input.into(),
             ctx: Some(serde_json::Value::Object(context)),
@@ -120,7 +122,7 @@ impl ApiError {
     ) -> ValidationIssue {
         ValidationIssue {
             error_type,
-            loc: vec!["path", field],
+            loc: vec!["path".into(), field.into()],
             msg: message.into(),
             input: input.into(),
             ctx: None,
@@ -130,12 +132,45 @@ impl ApiError {
     pub(crate) fn body_validation(message: impl Into<String>, input: serde_json::Value) -> Self {
         Self::Validation(vec![ValidationIssue {
             error_type: "value_error",
-            loc: vec!["body"],
+            loc: vec!["body".into()],
             msg: message.into(),
             input,
             ctx: None,
         }])
     }
+
+    /// A key of the body object that the body type does not declare:
+    /// pydantic's `extra_forbidden` issue at `["body", key]`, with the value
+    /// of the key as `input`. The message and `ctx.known_keys` name the keys
+    /// that the body type declares, in declaration order; `[]` when it
+    /// declares none.
+    pub(crate) fn unknown_body_key(
+        key: String,
+        value: serde_json::Value,
+        known_keys: &'static [&'static str],
+    ) -> Self {
+        let known = match known_keys {
+            [] => "none".to_owned(),
+            keys => keys
+                .iter()
+                .copied()
+                .map(json_quoted)
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+        Self::Validation(vec![ValidationIssue {
+            error_type: "extra_forbidden",
+            msg: format!("Unknown key {}. Known keys: {known}.", json_quoted(&key)),
+            loc: vec!["body".into(), key.into()],
+            input: value,
+            ctx: Some(serde_json::json!({ "known_keys": known_keys })),
+        }])
+    }
+}
+
+/// `text` as a JSON string, with its quotes.
+fn json_quoted(text: &str) -> String {
+    serde_json::Value::from(text).to_string()
 }
 
 impl IntoResponse for ApiError {

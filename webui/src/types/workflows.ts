@@ -39,7 +39,7 @@ export interface WorkflowNode {
   node_status: WorkflowStatus;
   is_subworkflow: boolean;
   sub_workflow_id: string | null;
-  allow_failed_deps: boolean;
+  allow_failed_dependencies: boolean;
   started_at: string | null;
   completed_at: string | null;
   /** Execution time only, in seconds, exact to the microsecond; null until

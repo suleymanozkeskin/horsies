@@ -192,7 +192,7 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         spec = make_workflow_spec(
@@ -218,7 +218,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """No workflow_ctx injected when workflow_ctx_from is not set."""
+        """No workflow_ctx injected when workflow_context_from is not set."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'no_ctx_from_a')
 
@@ -250,7 +250,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_meta is injected even when workflow_ctx_from is not used."""
+        """workflow_meta is injected even when workflow_context_from is not used."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'meta_only_a')
 
@@ -309,7 +309,7 @@ class TestWorkflowCtx:
         node_c: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a, node_b],
-            workflow_ctx_from=[node_a, node_b],
+            workflow_context_from=[node_a, node_b],
         )
 
         spec = make_workflow_spec(
@@ -330,7 +330,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """SKIPPED dep in workflow_ctx_from yields UPSTREAM_SKIPPED sentinel."""
+        """SKIPPED dep in workflow_context_from yields UPSTREAM_SKIPPED sentinel."""
         session, broker, app = setup
 
         @app.task(task_name='ctx_skipped_failing')
@@ -356,8 +356,8 @@ class TestWorkflowCtx:
         node_c = TaskNode(
             fn=ctx_reader,
             waits_for=[node_b],
-            workflow_ctx_from=[node_b],
-            allow_failed_deps=True,
+            workflow_context_from=[node_b],
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -390,7 +390,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """FAILED dep in workflow_ctx_from yields original TaskError."""
+        """FAILED dep in workflow_context_from yields original TaskError."""
         session, broker, app = setup
 
         @app.task(task_name='ctx_failed_failing')
@@ -413,8 +413,8 @@ class TestWorkflowCtx:
         node_c = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
-            allow_failed_deps=True,
+            workflow_context_from=[node_a],
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -423,7 +423,7 @@ class TestWorkflowCtx:
 
         handle = await start_ok(spec, broker)
 
-        # Complete A as FAILED -> B should be ENQUEUED (allow_failed_deps)
+        # Complete A as FAILED -> B should be ENQUEUED (allow_failed_dependencies)
         await finish_task(
             session,
             broker,
@@ -446,7 +446,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Tasks without workflow_ctx param reject workflow_ctx_from."""
+        """Tasks without workflow_ctx param reject workflow_context_from."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'no_ctx_param_a')
         task_b = make_no_ctx_task(app, 'no_ctx_param_b')
@@ -455,12 +455,12 @@ class TestWorkflowCtx:
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         with pytest.raises(
             WorkflowValidationError,
-            match='workflow_ctx_from declared but function missing workflow_ctx param',
+            match='workflow_context_from declared but function missing workflow_ctx param',
         ) as exc_info:
             make_workflow_spec(
                 broker=broker, name='no_ctx_param', tasks=[node_a, node_b]
@@ -491,7 +491,7 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_worker_b,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         spec = make_workflow_spec(
@@ -643,7 +643,7 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_missing_id_b,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         spec = make_workflow_spec(
@@ -702,7 +702,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_ctx_from referencing a node not in waits_for raises HRS-009."""
+        """workflow_context_from referencing a node not in waits_for raises HRS-009."""
         _session, broker, app = setup
         task_a = make_simple_task(app, 'e009_a')
 
@@ -716,12 +716,12 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             # waits_for intentionally omitted — node_a is NOT a dependency
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         with pytest.raises(
             WorkflowValidationError,
-            match='workflow_ctx_from references task not in waits_for',
+            match='workflow_context_from references task not in waits_for',
         ) as exc_info:
             make_workflow_spec(
                 broker=broker, name='e009', tasks=[node_a, node_b],
@@ -746,7 +746,7 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         spec = make_workflow_spec(
@@ -785,7 +785,7 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         spec = make_workflow_spec(
@@ -817,7 +817,7 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         spec = make_workflow_spec(
@@ -857,7 +857,7 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         spec = make_workflow_spec(
@@ -878,7 +878,7 @@ class TestWorkflowCtx:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_ctx_from=[] behaves like None — no context injected."""
+        """workflow_context_from=[] behaves like None — no context injected."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'empty_ctx_a')
 
@@ -892,7 +892,7 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=ctx_reader,
             waits_for=[node_a],
-            workflow_ctx_from=[],
+            workflow_context_from=[],
         )
 
         spec = make_workflow_spec(
@@ -916,7 +916,7 @@ class TestWorkflowCtx:
         def no_ctx_task(*, value: int = 0) -> Result[int, TaskError]:
             return Ok(value + 100)
 
-        # Build a workflow where node_b has workflow_ctx_from but the function
+        # Build a workflow where node_b has workflow_context_from but the function
         # does NOT declare workflow_ctx. Normally WorkflowSpec validation rejects
         # this (HRS-010), so we bypass validation by manually injecting
         # __h_workflow_ctx__ into the task's kwargs at the DB level.
@@ -924,7 +924,7 @@ class TestWorkflowCtx:
         node_b: TaskNode[int] = TaskNode(
             fn=no_ctx_task,
             waits_for=[node_a],
-            # No workflow_ctx_from — the spec is valid
+            # No workflow_context_from — the spec is valid
         )
 
         spec = make_workflow_spec(

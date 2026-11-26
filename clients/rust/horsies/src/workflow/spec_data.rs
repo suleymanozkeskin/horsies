@@ -160,8 +160,8 @@ fn node_document(
         "input_json": input_json,
         "dependencies": node.dependencies,
         "args_from": node.args_from,
-        "workflow_ctx_from": node.workflow_ctx_from,
-        "allow_failed_deps": node.allow_failed_deps,
+        "workflow_context_from": node.workflow_context_from,
+        "allow_failed_dependencies": node.allow_failed_dependencies,
         "join": match node.join {
             JoinType::All => json!({"kind": "ALL"}),
             JoinType::Any => json!({"kind": "ANY"}),

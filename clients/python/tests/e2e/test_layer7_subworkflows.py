@@ -797,7 +797,7 @@ async def test_runtime_built_child_reads_its_shard_nodes_through_workflow_ctx(
         ]
 
 
-async def test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with(
+async def test_subworkflow_allow_failed_dependencies_passes_failed_task_result_to_build_with(
     broker: PostgresBroker,
 ) -> None:
     with run_worker(
@@ -806,7 +806,7 @@ async def test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_
         ready_check=_make_ready_check(),
     ):
         handle = await start_ok_in_thread(
-            wf_tasks.spec_subworkflow_allow_failed_deps_to_build_with,
+            wf_tasks.spec_subworkflow_allow_failed_dependencies_to_build_with,
         )
 
         status = await wait_for_workflow_completion(
@@ -1159,7 +1159,7 @@ async def test_subworkflow_skip_sub_fail_to_task_skip(
         assert rows[downstream.node_id or '']['status'] == 'SKIPPED'
 
 
-async def test_subworkflow_skip_allow_failed_deps(
+async def test_subworkflow_skip_allow_failed_dependencies(
     broker: PostgresBroker,
 ) -> None:
     with run_worker(
@@ -1168,7 +1168,7 @@ async def test_subworkflow_skip_allow_failed_deps(
         ready_check=_make_ready_check(),
     ):
         handle = await start_ok_in_thread(
-            wf_tasks.spec_subworkflow_allow_failed_deps_to_build_with,
+            wf_tasks.spec_subworkflow_allow_failed_dependencies_to_build_with,
         )
 
         status = await wait_for_workflow_completion(
@@ -2176,7 +2176,7 @@ async def test_subworkflow_deep_mixed_paths(
         node_id='l7_deep_mixed_allow_failed_sub',
         waits_for=[failed_source],
         args_from={'value': failed_source},
-        allow_failed_deps=True,
+        allow_failed_dependencies=True,
     )
     nested_optional_fail = SubWorkflowNode(
         workflow_def=wf_tasks.E2ESubNestedFailMiddleWorkflow,

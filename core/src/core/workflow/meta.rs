@@ -11,7 +11,7 @@ use uuid::Uuid;
 /// (e.g., for logging, metrics, or external correlation) but does not
 /// need access to upstream task results.
 ///
-/// For full result access, use [`WorkflowContext`] via `workflow_ctx_from`.
+/// For full result access, use [`WorkflowContext`] via `workflow_context_from`.
 ///
 /// # Example
 ///

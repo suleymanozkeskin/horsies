@@ -35,7 +35,7 @@ WORKFLOW_TASK_TERMINAL_STATES  # frozenset({COMPLETED, FAILED, SKIPPED})
 
 ## Upstream Failure and args_from
 
-`process` receives the `TaskOutcome` of `produce`: `Succeeded(value)` or `Failed(task_error)`. With the defaults, the node is SKIPPED when `produce` fails. With `allow_failed_deps=True`, it runs and receives `Failed(task_error)`. See [Upstream Failure and args_from](/horsies/concepts/workflows/workflow-semantics/#upstream-failure-and-args_from).
+`process` receives the `TaskOutcome` of `produce`: `Succeeded(value)` or `Failed(task_error)`. With the defaults, the node is SKIPPED when `produce` fails. With `allow_failed_dependencies=True`, it runs and receives `Failed(task_error)`. See [Upstream Failure and args_from](/horsies/concepts/workflows/workflow-semantics/#upstream-failure-and-args_from).
 
 ```python
 from pydantic import SecretStr
@@ -77,19 +77,19 @@ def process(*, data: TaskOutcome[int, TaskError]) -> Result[str, TaskError]:
 
 node_a: TaskNode[int] = TaskNode(fn=produce)
 
-# Default (join="all", allow_failed_deps=False): downstream is SKIPPED when upstream fails
+# Default (join="all", allow_failed_dependencies=False): downstream is SKIPPED when upstream fails
 node_b_skip: TaskNode[str] = TaskNode(
     fn=process,
     waits_for=[node_a],
     args_from={"data": node_a},
 )
 
-# With allow_failed_deps: downstream runs and receives Failed(task_error)
+# With allow_failed_dependencies: downstream runs and receives Failed(task_error)
 node_b_recover: TaskNode[str] = TaskNode(
     fn=process,
     waits_for=[node_a],
     args_from={"data": node_a},
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
 )
 ```
 
@@ -140,7 +140,7 @@ quorum_task = TaskNode(
 
 ## Recovery Handlers
 
-A node with `allow_failed_deps=True` receives `Failed(task_error)` for a failed dependency, or the `UPSTREAM_SKIPPED` sentinel for a skipped dependency. See [allow_failed_deps=True](/horsies/concepts/workflows/workflow-semantics/#allow_failed_depstrue).
+A node with `allow_failed_dependencies=True` receives `Failed(task_error)` for a failed dependency, or the `UPSTREAM_SKIPPED` sentinel for a skipped dependency. See [allow_failed_dependencies=True](/horsies/concepts/workflows/workflow-semantics/#allow_failed_dependenciestrue).
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -161,7 +161,7 @@ def recovery_handler(*, input_result: TaskOutcome[Data, TaskError]) -> Result[..
 
 ## Sentinels
 
-The entry that a node with `allow_failed_deps=True` receives for a SKIPPED dependency:
+The entry that a node with `allow_failed_dependencies=True` receives for a SKIPPED dependency:
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
@@ -302,7 +302,7 @@ def read_label(handle: WorkflowHandle[str]) -> str | None:
 
 ## Best Practices
 
-### 1. Use allow_failed_deps for Recovery
+### 1. Use allow_failed_dependencies for Recovery
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -312,7 +312,7 @@ primary = TaskNode(fn=fetch_data)
 # Recovery handler receives the error
 recovery = TaskNode(
     fn=recovery_handler,
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
     waits_for=[primary],
     args_from={"primary": primary},
 )
@@ -327,7 +327,7 @@ Structure DAGs so failures are visible in one node's result. The workflow is sti
 # Final aggregator that reports all branch outcomes
 final = TaskNode(
     fn=summarize_results,
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
     waits_for=[branch_a, branch_b, branch_c],
 )
 ```
@@ -405,7 +405,7 @@ typed_b = handle.result_for(fetch_b)
 
 ## WorkflowContext
 
-Set `workflow_ctx_from` on the node, and declare `workflow_ctx: WorkflowContext | None` in the task. See [WorkflowContext](/horsies/concepts/workflows/workflow-semantics/#workflowcontext-type-safe-result-access) for its scope.
+Set `workflow_context_from` on the node, and declare `workflow_ctx: WorkflowContext | None` in the task. See [WorkflowContext](/horsies/concepts/workflows/workflow-semantics/#workflowcontext-type-safe-result-access) for its scope.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -416,7 +416,7 @@ node_b: TaskNode[str] = TaskNode(fn=transform, waits_for=[node_a], args_from={"d
 node_c: TaskNode[Summary] = TaskNode(
     fn=aggregate,
     waits_for=[node_a, node_b],
-    workflow_ctx_from=[node_a, node_b],  # Include both in context
+    workflow_context_from=[node_a, node_b],  # Include both in context
 )
 
 @app.task(task_name="aggregate")
@@ -543,7 +543,7 @@ def my_task(*, workflow_meta: WorkflowMeta | None = None) -> Result[str, TaskErr
     return Ok("done")
 ```
 
-`WorkflowMeta` is auto-injected if the task declares the parameter. Unlike `WorkflowContext`, it doesn't require `workflow_ctx_from`.
+`WorkflowMeta` is auto-injected if the task declares the parameter. Unlike `WorkflowContext`, it doesn't require `workflow_context_from`.
 
 ## What the Receiving Function Gets
 

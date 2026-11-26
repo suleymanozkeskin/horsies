@@ -141,7 +141,7 @@ The parameters of a task have their tokens in the task's own module: `task_name:
 | `.arg_from(field, source)` | Gives the child the outcome of `source` as the param `field` of type `TaskOutcome<S, E>`. The node then gives params and waits for `source` |
 | `.waits_for(node)`, `.waits_for_all(nodes)` | Waits for the nodes, with no data |
 | `.node_id(id)` | Sets the node id, as `TaskNode::node_id` |
-| `.allow_failed_deps(true)` | Starts the child when a dependency failed or was skipped |
+| `.allow_failed_dependencies(true)` | Starts the child when a dependency failed or was skipped |
 | `.join_all()` (default), `.join_any()`, `.join_quorum(min_success)` | When the node becomes ready |
 | `.key()` | `Option<NodeKey<T>>`: the key of the node's result when the node has a given node id |
 | `.workflow_name()`, `.definition_key()` | The child's workflow name and definition key |
@@ -235,7 +235,7 @@ impl WorkflowDefinition for DailyRegions {
 
 `fetch_report` is the task of [A Definition with Params](#a-definition-with-params).
 
-- A FAILED or SKIPPED source skips the node, unless the node has `allow_failed_deps(true)`; then `build_with` gets `TaskOutcome::Failed`.
+- A FAILED or SKIPPED source skips the node, unless the node has `allow_failed_dependencies(true)`; then `build_with` gets `TaskOutcome::Failed`.
 - A `build_with` that refuses or panics at run time fails its node with `WORKFLOW_ENQUEUE_FAILED`. A list with no element builds a spec with no node, which `build` refuses (`HRS-002`).
 - The check does not build a child whose node has an `arg_from`: its params exist only at run time.
 

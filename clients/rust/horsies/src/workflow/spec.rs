@@ -144,8 +144,8 @@ pub(crate) struct SpecNode {
     pub(crate) dependencies: Vec<usize>,
     pub(crate) args_from: BTreeMap<String, usize>,
     /// The node ids of the context sources.
-    pub(crate) workflow_ctx_from: Vec<String>,
-    pub(crate) allow_failed_deps: bool,
+    pub(crate) workflow_context_from: Vec<String>,
+    pub(crate) allow_failed_dependencies: bool,
     pub(crate) join: JoinType,
     pub(crate) body: SpecBody,
     pub(crate) output: OutputType,
@@ -519,7 +519,7 @@ impl WorkflowSpecBuilder {
                 .dependencies
                 .iter()
                 .chain(links.args_from.values())
-                .chain(links.workflow_ctx_from.iter())
+                .chain(links.workflow_context_from.iter())
                 .any(|reference| reference.builder() != self.id);
             if foreign {
                 report.add(
@@ -566,10 +566,10 @@ impl WorkflowSpecBuilder {
     ) {
         let owner = format!("'{}' at index {index}", node.name);
         check_join(&owner, &node.links, report);
-        for source in &node.links.workflow_ctx_from {
+        for source in &node.links.workflow_context_from {
             if !node.links.dependencies.contains(source) {
                 report.add(
-                    HorsiesError::new("workflow_ctx_from references a node not in waits_for")
+                    HorsiesError::new("workflow_context_from references a node not in waits_for")
                         .with_code(HorsiesErrorCode::WorkflowInvalidContextFrom)
                         .with_note(format!(
                             "node {owner} references '{}'",
@@ -587,16 +587,16 @@ impl WorkflowSpecBuilder {
                 input_check,
                 ..
             } => {
-                if !node.links.workflow_ctx_from.is_empty() && !accepts_workflow_ctx {
+                if !node.links.workflow_context_from.is_empty() && !accepts_workflow_ctx {
                     report.add(
                         HorsiesError::new(
-                            "workflow_ctx_from declared but the task takes no workflow context",
+                            "workflow_context_from declared but the task takes no workflow context",
                         )
                         .with_code(HorsiesErrorCode::WorkflowContextParameterMissing)
-                        .with_note(format!("node {owner} declares workflow_ctx_from"))
+                        .with_note(format!("node {owner} declares workflow_context_from"))
                         .with_help(
                             "add `workflow_ctx` to the task attribute and a `workflow_ctx: \
-                             WorkflowContext` parameter, or remove workflow_ctx_from",
+                             WorkflowContext` parameter, or remove workflow_context_from",
                         ),
                     );
                 }
@@ -611,7 +611,7 @@ impl WorkflowSpecBuilder {
                     }
                 }
                 let takes_context =
-                    *accepts_workflow_ctx && !node.links.workflow_ctx_from.is_empty();
+                    *accepts_workflow_ctx && !node.links.workflow_context_from.is_empty();
                 check_input(
                     &owner,
                     input,
@@ -706,12 +706,12 @@ fn spec_node(index: usize, node: BuilderNode, node_ids: &[String]) -> SpecNode {
             .iter()
             .map(|(member, source)| (member.clone(), source.index()))
             .collect(),
-        workflow_ctx_from: links
-            .workflow_ctx_from
+        workflow_context_from: links
+            .workflow_context_from
             .iter()
             .map(|source| node_ids[source.index()].clone())
             .collect(),
-        allow_failed_deps: links.allow_failed_deps,
+        allow_failed_dependencies: links.allow_failed_dependencies,
         join: links.join,
         body: match node.body {
             BuilderBody::Task {

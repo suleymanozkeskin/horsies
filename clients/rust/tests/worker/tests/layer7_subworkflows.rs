@@ -349,7 +349,7 @@ async fn test_successful_subworkflow_is_available_through_workflow_ctx() {
             .node()
             .node_id("e2e_sub_success_ctx_probe")
             .waits_for(node)
-            .workflow_ctx_from([node]),
+            .workflow_context_from([node]),
     );
     let _output = spec.output(probe);
     let handle = start::<serde_json::Value>(&suite, spec).await;
@@ -387,8 +387,8 @@ async fn test_failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
                 subworkflow::sub_probe_failed_child::params::child_result(),
                 node,
             )
-            .workflow_ctx_from([node])
-            .allow_failed_deps(true),
+            .workflow_context_from([node])
+            .allow_failed_dependencies(true),
     );
     let _output = spec.output(probe);
     let _policy =
@@ -595,13 +595,13 @@ async fn test_subworkflow_build_with_args_from_receives_typed_task_result() {
     assert_eq!(output(&handle).await, 37);
 }
 
-/// Python: `test_layer7_subworkflows.py::test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with`.
+/// Python: `test_layer7_subworkflows.py::test_subworkflow_allow_failed_dependencies_passes_failed_task_result_to_build_with`.
 #[tokio::test]
 #[serial]
-async fn test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with() {
+async fn test_subworkflow_allow_failed_dependencies_passes_failed_task_result_to_build_with() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7(&suite, "allow_failed_deps_to_build_with");
+    let mut spec = layer7(&suite, "allow_failed_dependencies_to_build_with");
     let source = add(
         &mut spec,
         suite
@@ -619,7 +619,7 @@ async fn test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_w
             .expect("a failed-input child node")
             .node_id("e2e_sub_failed_input_child")
             .arg_from(UpstreamParams::field_value(), source)
-            .allow_failed_deps(true),
+            .allow_failed_dependencies(true),
     );
     let _output = spec.output(node);
     let _policy =

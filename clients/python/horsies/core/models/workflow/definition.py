@@ -328,10 +328,10 @@ class WorkflowDefinition(Generic[OkT_co], metaclass=WorkflowDefinitionMeta):
                 k: old_to_new.get(id(v), v)
                 for k, v in node_copy.args_from.items()
             }
-            if node_copy.workflow_ctx_from is not None:
-                node_copy.workflow_ctx_from = unique_node_refs([
+            if node_copy.workflow_context_from is not None:
+                node_copy.workflow_context_from = unique_node_refs([
                     old_to_new.get(id(ref), ref)
-                    for ref in node_copy.workflow_ctx_from
+                    for ref in node_copy.workflow_context_from
                 ])
 
         # Read the config, remapping output/success_policy refs to copies.
