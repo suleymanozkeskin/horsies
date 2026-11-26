@@ -5,10 +5,13 @@
 import { Worker } from "node:worker_threads";
 
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { DEV_ADDON_PATH_VARIABLE, requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
-import { ADDON_PATH_VARIABLE } from "../../../horsies/src/native/load.ts";
 import { coreState, environmentCount, setPanicRule } from "../../../horsies/src/native/process-core/process-core.ts";
 import { manifestJson } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** Run the case that the first argument names. */
 async function runCase(name: string | undefined): Promise<string> {
@@ -71,7 +74,7 @@ async function secondEnvironment(): Promise<string> {
 
   const worker = new Worker(
     `const m = { exports: {} };
-     try { process.dlopen(m, process.env.${ADDON_PATH_VARIABLE}); require("node:worker_threads").parentPort.postMessage("opened"); }
+     try { process.dlopen(m, process.env.${DEV_ADDON_PATH_VARIABLE}); require("node:worker_threads").parentPort.postMessage("opened"); }
      catch (error) { require("node:worker_threads").parentPort.postMessage(String(error.message)); }`,
     { eval: true },
   );

@@ -4,7 +4,8 @@
 // - Each accepted form maps to one kind of the kind tree (`src/wire/kinds.ts`); each other form is a refusal with a
 //   rule of `rules.ts`, the path in the schema and zod's definition type. There is no fallback to untyped JSON.
 // - zod checks (`.refine()`, `.min()`, formats) map to `checked` nodes; a zod codec maps to a `conversion` node whose
-//   stored kind is the kind of the codec's input; an `hz.*` codec maps to its `h.*` kind.
+//   stored kind is the kind of the codec's input; an `hz.*` codec maps to its `h.*` kind, found by its brand
+//   (`brand.ts`).
 // - `.optional()`, `.default()` and `.prefault()` are a member's presence: valid for an object member or a task input
 //   parameter only. A default is read at compile and stored as text; the reader fills it at decode only.
 // - Unknown keys: every object kind refuses them at decode, also for a `z.object()`, which zod would strip.
@@ -45,7 +46,7 @@ import {
 } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { codecKindOf, wireKindOf } from "./codecs.ts";
+import { hzKindOf } from "./brand.ts";
 import {
   type DefinitionForm,
   type MemberRead,
@@ -84,30 +85,21 @@ type Walk = { readonly path: string; readonly depth: number; readonly onPath: Re
 
 const START: Walk = Object.freeze({ path: ROOT_PATH, depth: 0, onPath: new Set<ZodSchema>() });
 
-/** Type-only key of the proof of a passed self-check. It does not exist at run time. */
-declare const selfCheckPassed: unique symbol;
-
 /**
- * The proof that the self-check of this process passed. Only the self-check makes one (`self-check.ts`), so a kind
- * from the adapter always follows a passed self-check. The self-check uses one for its own known schemas.
- */
-export type SelfCheckPassed = { readonly [selfCheckPassed]: "passed" };
-
-/**
- * The kind and the presence of a schema as an object member or a task input parameter, after a passed self-check.
+ * The kind and the presence of a schema as an object member or a task input parameter.
  *
  * Fails with every refusal of the schema, in walk order. Reads each default value twice (a function default runs
  * twice) and calls the getter of each `z.lazy()` once. Does no I/O.
  */
-export function compileMember(_passed: SelfCheckPassed, schema: ZodSchema): Compiled<ZodMemberKind> {
+export function compileMember(schema: ZodSchema): Compiled<ZodMemberKind> {
   return compileNode(schema, START);
 }
 
 /**
- * The kind of a schema as a whole value (a task output, a workflow parameter value), after a passed self-check:
- * `.optional()`, `.default()` and `.prefault()` are refused at its top. Fails and reads as `compileMember`.
+ * The kind of a schema as a whole value (a task output, a workflow parameter value): `.optional()`, `.default()` and
+ * `.prefault()` are refused at its top. Fails and reads as `compileMember`.
  */
-export function compileValue(_passed: SelfCheckPassed, schema: ZodSchema): Compiled<Kind> {
+export function compileValue(schema: ZodSchema): Compiled<Kind> {
   return valueAt(schema, START);
 }
 
@@ -639,7 +631,7 @@ function tagDispatch(tag: string, variants: readonly Variant[]): ValueCheck {
 }
 
 function compileCodec(definition: FormOf<"codec">, walk: Walk): Compiled<Kind> {
-  const known = codecKindOf(definition.decode);
+  const known = hzKindOf(definition.decode);
 
   switch (known.found) {
     case "hz":
@@ -656,7 +648,7 @@ function compileCodec(definition: FormOf<"codec">, walk: Walk): Compiled<Kind> {
 }
 
 function compileCustom(test: object, path: string, zodType: string): Compiled<ZodMemberKind> {
-  const known = wireKindOf(test);
+  const known = hzKindOf(test);
 
   switch (known.found) {
     case "hz":

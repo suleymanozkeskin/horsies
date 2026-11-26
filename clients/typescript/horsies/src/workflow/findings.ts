@@ -14,12 +14,7 @@ export type SpecFinding = {
 };
 
 /** A frozen finding. Pure. */
-export function finding(
-  code: ErrorCode | "FIELD_BOUND",
-  place: string,
-  detail: string,
-  help: readonly string[],
-): SpecFinding {
+export function finding(code: ErrorCode, place: string, detail: string, help: readonly string[]): SpecFinding {
   return Object.freeze({ code, place, detail, help: Object.freeze([...help]) });
 }
 
@@ -32,12 +27,15 @@ export type CheckedJoin =
 /** The deadline of a task node: none, or an instant in epoch microseconds (cut toward the past). */
 export type NodeDeadline = { readonly kind: "noDeadline" } | { readonly kind: "until"; readonly epochMicros: bigint };
 
+/** The priority of a task node: the node's own, or the priority of its queue in the core's accepted config. */
+export type NodePriority = { readonly kind: "given"; readonly priority: number } | { readonly kind: "queue" };
+
 /** What a checked node runs. */
 export type CheckedBody =
   | {
       readonly kind: "task";
       readonly queue: string;
-      readonly priority: number;
+      readonly priority: NodePriority;
       readonly deadline: NodeDeadline;
     }
   | { readonly kind: "subWorkflow"; readonly definitionKey: string; readonly params: SpecSubWorkflowParams };

@@ -21,6 +21,7 @@ import {
   type CheckedNode,
   finding,
   type NodeDeadline,
+  type NodePriority,
   type SpecFinding,
 } from "./findings.ts";
 import { type CheckedInput, checkNodeInput, type SourceOutput } from "./node-input.ts";
@@ -337,12 +338,12 @@ function taskBody(
   taskRoute: QueueRoute,
 ): Result<CheckedBody, NonEmpty<SpecFinding>> {
   const route = options.queue === undefined ? ok(taskRoute) : admittedRoute(context, options.queue);
-  const priority = options.priority ?? (route.ok ? route.value.priority : DEFAULT_QUEUE_ROUTE.priority);
+
   const deadline = deadlineOf(context, options.goodUntil);
 
   const findings = [
     ...(route.ok ? [] : [route.error]),
-    ...priorityFindings(context.place, priority),
+    ...(options.priority === undefined ? [] : priorityFindings(context.place, options.priority)),
     ...(deadline.ok ? [] : [deadline.error]),
   ];
 
@@ -351,6 +352,9 @@ function taskBody(
   if (first !== undefined || !route.ok || !deadline.ok) {
     return err(nonEmpty(first, rest));
   }
+
+  const priority: NodePriority =
+    options.priority === undefined ? { kind: "queue" } : { kind: "given", priority: options.priority };
 
   return ok({ kind: "task", queue: route.value.queueName, priority, deadline: deadline.value });
 }
@@ -381,7 +385,7 @@ function admittedRoute(context: NodeContext, queue: string): Result<QueueRoute, 
     case "custom": {
       const found = queues.queues.get(queue);
 
-      return found === undefined ? err(refused) : ok({ queueName: found.name, priority: found.priority });
+      return found === undefined ? err(refused) : ok({ queueName: found.name });
     }
 
     default:
@@ -399,5 +403,12 @@ function deadlineOf(context: NodeContext, goodUntil: Temporal.Instant | undefine
 
   return epochMicros >= DEADLINE_MIN_EPOCH_MICROS && epochMicros <= DEADLINE_MAX_EPOCH_MICROS
     ? ok({ kind: "until", epochMicros })
-    : err(finding("FIELD_BOUND", `${context.place} goodUntil`, "the deadline is outside the years 1 to 9999", []));
+    : err(
+        finding(
+          ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+          `${context.place} goodUntil`,
+          "the deadline is outside the years 1 to 9999",
+          [],
+        ),
+      );
 }

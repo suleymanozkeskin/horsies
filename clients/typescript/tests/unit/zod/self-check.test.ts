@@ -1,5 +1,5 @@
-// The self-check of the zod adapter, and the entries that run the release check, the self-check, the adapter and
-// `checkKind` in order.
+// The self-check of the zod adapter on the installed zod (this file runs in each zod test lane), and the entries
+// that run the release check, the adapter and `checkKind` in order.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -7,17 +7,10 @@ import { describe, test } from "node:test";
 import { z } from "zod";
 import * as z3 from "zod/v3";
 
-import { hz } from "../../../horsies/src/zod/codecs.ts";
-import { compileMember } from "../../../horsies/src/zod/adapter.ts";
 import { kindOf, presenceOf } from "../../../horsies/src/wire/wire-type.ts";
-import { kindAfterChecks, zodMemberWire, zodValueWire } from "../../../horsies/src/zod/kind.ts";
-import {
-  knownCases,
-  runSelfCheck,
-  type SelfCheckCase,
-  type SelfCheckFailure,
-  selfCheckOnce,
-} from "../../../horsies/src/zod/self-check.ts";
+import { hz } from "../../../horsies/src/zod/codecs.ts";
+import { zodMemberWire, zodValueWire } from "../../../horsies/src/zod/kind.ts";
+import { knownCases, runSelfCheck, type SelfCheckCase, type SelfCheckFailure, selfCheck } from "./self-check-cases.ts";
 import { withDefinition } from "./support.ts";
 
 /** The outcome of the self-check on one case, as its failures. */
@@ -127,14 +120,12 @@ describe("self-check", () => {
     });
   });
 
-  test("runs once per process: a later call gives the first outcome", () => {
-    assert.equal(selfCheckOnce(), selfCheckOnce());
+  test("passes on the installed zod, with the cases built by its own builders", () => {
+    assert.deepEqual(selfCheck(), { ok: true, value: "passed" });
   });
 });
 
 describe("zodMemberWire and zodValueWire", () => {
-  const failure: SelfCheckFailure = { name: "loose object", expected: "LOOSE_OBJECT", found: "object()" };
-
   test("give the wire type of an accepted schema: its kind and its presence", () => {
     const member = zodMemberWire(z.string().optional());
     const value = zodValueWire(z.string());
@@ -195,23 +186,5 @@ describe("zodMemberWire and zodValueWire", () => {
         fix: 'build the schema with zod 4: import { z } from "zod", not from "zod/v3" or a zod 3 install',
       },
     });
-  });
-
-  test("give SelfCheckFailed after a failed self-check, and do not compile", () => {
-    let compiles = 0;
-
-    const outcome = kindAfterChecks(
-      z.string(),
-      () => ({ ok: false, error: [failure] }),
-      (passed, schema) => {
-        compiles += 1;
-
-        return compileMember(passed, schema);
-      },
-      () => [],
-    );
-
-    assert.deepEqual(outcome, { ok: false, error: { kind: "SelfCheckFailed", failures: [failure] } });
-    assert.equal(compiles, 0);
   });
 });
