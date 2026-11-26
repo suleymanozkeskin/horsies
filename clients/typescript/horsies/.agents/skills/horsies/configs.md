@@ -232,7 +232,7 @@ export const created = Horsies.create({
 | `WorkerProfileInput` field | Type |
 |---|---|
 | `isolated` | `IsolatedSetting`: `IsolatedChildren` (`kind: "isolatedChildren"`, `count` (1 to 1,024), `recycle` (`after: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: PoolSize`, `prePing`), `taskSendPool: PoolSize`) or `NoIsolatedChildren` (`{ kind: "noIsolatedChildren" }`) |
-| `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` (`kind: "sharedAsyncChildren"`, `count` (1 to 1,024), `seats` (1 to 1,000), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `prePing`), `taskSendPool`) or `NoSharedAsyncChildren` (`{ kind: "noSharedAsyncChildren" }`) |
+| `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` (`kind: "sharedAsyncChildren"`, `count` (1 to 1,024), `seats` (1 to 1,000), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `prePing`), `executor: ExecutorThreads`, `taskSendPool`) or `NoSharedAsyncChildren` (`{ kind: "noSharedAsyncChildren" }`) |
 | `pool` | `ParentPoolInput`: `maxSize: SharedPoolSize` |
 | `claim` | `ClaimLimitsInput`: `perQueuePerPass`, `claimedPerWorker` (`TaskLimit`) |
 | `drainTimeoutMs` | `number`: 1 to 86,400,000 ms; default 300,000 ms (300 s) |
@@ -243,6 +243,10 @@ export const created = Horsies.create({
   16,777,216) or `{ kind: "noMemoryLimit" }`. `PoolSize` is
   `{ kind: "connections", connections }` (1 to 1,000); `SharedPoolSize`
   adds `{ kind: "fromSeats" }`.
+- `ExecutorThreads` is `{ kind: "threads", threads }` (1 to 256) or
+  `{ kind: "fromSeats" }` (the default): the threads of the core's runtime in
+  each shared async child, which run its database writes, its connections and
+  its frames to the worker. Task code runs on the child's event loop.
 - A class that the profile leaves out has no children, as its
   `no...Children` setting gives. The default recycle is after 100 tasks (100
   tasks per seat for a shared child) and no memory limit.

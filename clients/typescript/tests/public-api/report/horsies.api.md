@@ -1539,6 +1539,14 @@ export type ExecutionRules<X extends Execution> = [X] extends ["SHARED_ASYNC"] ?
 };
 
 // @public
+export type ExecutorThreads = {
+    readonly kind: "threads";
+    readonly threads: number;
+} | {
+    readonly kind: "fromSeats";
+};
+
+// @public
 export interface ExpiredTaskRow {
     // (undocumented)
     readonly enqueuedAt: Temporal.Instant;
@@ -3616,6 +3624,7 @@ export type SessionDatabase = {
 export interface SharedAsyncChildren {
     // (undocumented)
     readonly count: number;
+    readonly executor?: ExecutorThreads;
     // (undocumented)
     readonly kind: "sharedAsyncChildren";
     // (undocumented)
@@ -4573,6 +4582,7 @@ export type TerminalNodeStatus = "COMPLETED" | "FAILED" | "SKIPPED";
 export interface TestRuntimeOptions<Keys extends readonly AnyStateKey[]> {
     // (undocumented)
     readonly attempt: AttemptNumber;
+    readonly cancelState?: CancelState;
     readonly state?: TestStateEntries<Keys>;
     // (undocumented)
     readonly taskId: TaskId;

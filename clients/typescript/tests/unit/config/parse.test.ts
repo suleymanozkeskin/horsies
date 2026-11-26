@@ -6,6 +6,7 @@ import { describe, test } from "node:test";
 import type { HorsiesError } from "../../../horsies/src/app/refusal.ts";
 import { type AppConfigInput, parseAppConfig } from "../../../horsies/src/config/app-config.ts";
 import type { EnvironmentRead } from "../../../horsies/src/config/secret.ts";
+import type { WorkerProfileInput } from "../../../horsies/src/config/worker-profiles.ts";
 
 const DATABASE_URL = "postgresql://horsies:secret@127.0.0.1:55432/horsies";
 
@@ -173,6 +174,60 @@ describe("parseAppConfig", () => {
         ["HRS-218", 'workerProfiles["io"].sharedAsync.seats'],
       ],
     );
+  });
+
+  // One case per bounded profile field: a value outside the bound of the field's generated constants, and the path
+  // that the refusal names.
+  const outOfBoundProfiles: readonly (readonly [path: string, profile: WorkerProfileInput])[] = [
+    ["claim.perQueuePerPass.tasks", { claim: { perQueuePerPass: { kind: "taskLimit", tasks: 0 } } }],
+    ["claim.claimedPerWorker.tasks", { claim: { claimedPerWorker: { kind: "taskLimit", tasks: 2_147_483_648 } } }],
+    ["pool.maxSize.connections", { pool: { maxSize: { kind: "connections", connections: 0 } } }],
+    ["drainTimeoutMs", { drainTimeoutMs: 86_400_001 }],
+    ["isolated.pool.minSize", { isolated: { kind: "isolatedChildren", count: 1, pool: { minSize: 1001 } } }],
+    [
+      "isolated.pool.maxSize.connections",
+      { isolated: { kind: "isolatedChildren", count: 1, pool: { maxSize: { kind: "connections", connections: 1001 } } } },
+    ],
+    [
+      "isolated.taskSendPool.connections",
+      { isolated: { kind: "isolatedChildren", count: 1, taskSendPool: { kind: "connections", connections: 0 } } },
+    ],
+    ["sharedAsync.pool.minSize", { sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 1, pool: { minSize: -1 } } }],
+    [
+      "sharedAsync.pool.maxSize.connections",
+      { sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 1, pool: { maxSize: { kind: "connections", connections: 0 } } } },
+    ],
+    [
+      "sharedAsync.executor.threads",
+      { sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 1, executor: { kind: "threads", threads: 257 } } },
+    ],
+    [
+      "sharedAsync.taskSendPool.connections",
+      { sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 1, taskSendPool: { kind: "connections", connections: 1001 } } },
+    ],
+  ];
+
+  for (const [path, profile] of outOfBoundProfiles) {
+    test(`a worker profile ${path} outside its bounds is refused with HRS-218 at its path`, () => {
+      const refusals = refusalsOf(configWith({ workerProfiles: { io: profile } }));
+
+      assert.deepEqual(
+        refusals.map((one) => [one.code, one.path]),
+        [["HRS-218", `workerProfiles["io"].${path}`]],
+      );
+    });
+  }
+
+  test("runtime threads of 0 and 1 to 256: 0 is refused, the bounds are accepted", () => {
+    const withThreads = (threads: number): AppConfigInput =>
+      configWith({ workerProfiles: { io: { sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 1, executor: { kind: "threads", threads } } } } });
+
+    assert.deepEqual(
+      refusalsOf(withThreads(0)).map((one) => [one.code, one.path]),
+      [["HRS-218", 'workerProfiles["io"].sharedAsync.executor.threads']],
+    );
+    assert.equal(parseAppConfig(withThreads(1), NO_ENVIRONMENT).ok, true);
+    assert.equal(parseAppConfig(withThreads(256), NO_ENVIRONMENT).ok, true);
   });
 
   test("a paused age that is not the core's paused age is refused with HRS-216", () => {

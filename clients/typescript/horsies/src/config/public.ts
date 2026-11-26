@@ -32,6 +32,7 @@ export type { Secret } from "./secret.ts";
 
 export type {
   ClaimLimitsInput,
+  ExecutorThreads,
   IsolatedChildren,
   IsolatedPoolInput,
   IsolatedRecycleInput,

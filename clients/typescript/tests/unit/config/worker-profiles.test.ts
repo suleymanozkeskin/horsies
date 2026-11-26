@@ -84,6 +84,20 @@ describe("workerProfilesJson", () => {
     );
   });
 
+  test("shared async children with a set number of runtime threads", () => {
+    assert.deepEqual(
+      profileObject({ sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 8, executor: { kind: "threads", threads: 3 } } }),
+      { shared_async: { kind: "shared_async_children", count: 1, seats: 8, executor: { kind: "executor_threads", threads: 3 } } },
+    );
+  });
+
+  test("shared async children with runtime threads that follow the seats", () => {
+    assert.deepEqual(
+      profileObject({ sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 8, executor: { kind: "fromSeats" } } }),
+      { shared_async: { kind: "shared_async_children", count: 1, seats: 8, executor: { kind: "executor_threads_from_seats" } } },
+    );
+  });
+
   test("shared thread children", () => {
     assert.deepEqual(
       profileObject({
