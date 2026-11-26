@@ -1,16 +1,20 @@
 // The JavaScript log sink with a built addon and a database: the statement log of a ping reaches
 // the sink at the thresholds that the package set; a sink that throws does not end the process; a
 // set sink does not keep an idle process alive; a defect in a worker process reaches the sink
-// before the abort.
+// before the abort; the first payload warning of a process reaches the sink with no core started.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { configureLogging } from "../../../horsies/src/logging.ts";
 import type { LogRecord } from "../../../horsies/src/logging.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { runChildCase } from "./child-process.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** The longest time a child case may take. */
 const CHILD_CASE_BOUND_MS = 30_000;
@@ -91,5 +95,12 @@ describe("the JavaScript log sink", () => {
     assert.equal(child.signal, "SIGABRT", child.stderr);
     assert.match(child.stderr, /horsies: worker process \d+ aborts: defect CLIENT_DEFECT of the horsies package/u);
     assert.match(child.stdout, /^SINK ERROR horsies\.bridge the worker process aborts: defect CLIENT_DEFECT/u);
+  });
+
+  test("the first payload warning of a process reaches the sink, and the core does not start", () => {
+    const child = runChildCase("logging-child.ts", "first-payload-warning", CHILD_CASE_BOUND_MS);
+
+    assert.equal(child.status, 0, child.stderr);
+    assert.match(child.stdout, /^prepared; core not_started; WARNING horsies\.app payload size guardrail/u);
   });
 });

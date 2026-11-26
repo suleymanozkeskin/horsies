@@ -312,6 +312,9 @@ class ErrorCode(str, Enum):
     child runs.
     """
 
+    CONFIG_INVALID_PAYLOAD = 'HRS-227'
+    """A payload size bound (`warn_bytes` or `reject_bytes`) is not valid."""
+
     TASK_NOT_REGISTERED = 'HRS-300'
     """The task is not registered."""
 

@@ -29,6 +29,12 @@ pub const MAX_ENGINE_LEVELS: usize = 16;
 
 const _: () = assert!(MAX_VALUE_JSON_DEPTH + MAX_ENGINE_LEVELS <= MAX_JSON_DEPTH);
 
+/// The cause that Python stores in `data_refused` for a value that its strict JSON writer refuses: the name of
+/// its error class `StrictJsonError`. The class covers a value that is not JSON-native (a non-finite float, a map
+/// key that is not a string, a value that does not serialize), a reserved key, and a value deeper than
+/// [`MAX_JSON_DEPTH`]. Each client stores this one text.
+pub const STRICT_JSON_ERROR_CAUSE: &str = "StrictJsonError";
+
 /// Why a user value cannot cross the boundary.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum UserValueRefused {
@@ -54,7 +60,7 @@ impl UserValueRefused {
     /// `ValueValidationError`.
     pub fn stored_cause(&self) -> &'static str {
         match self {
-            Self::EngineKey { .. } | Self::DeeperThanTextBound => "StrictJsonError",
+            Self::EngineKey { .. } | Self::DeeperThanTextBound => STRICT_JSON_ERROR_CAUSE,
             Self::DeeperThanValueBound { .. } => "ValueValidationError",
             Self::IntegerTooLong => "SerializationError",
         }

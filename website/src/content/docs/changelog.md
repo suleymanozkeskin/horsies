@@ -44,6 +44,16 @@ there is no migration contract between pre-1.0 versions.
   piece alive after the rounds is named in `left_work_stuck`,
   `leftover_stuck` or `run_stuck`, and the run keeps its seat until the
   piece ends. Work of `spawn_in_run` and the Rust client do not change.
+- **Worker manifest: one builder of the config sections.**
+  `horsies_core::worker_manifest::config_sections(&AppConfig)` builds the
+  sections of a worker manifest that the app config gives: every profile,
+  the queue and claim settings, and the recovery, retention, resilience and
+  payload sections (`ConfigSections`). A value outside the bound of its
+  manifest field is refused with `ManifestBoundRefused { field, min, max }`.
+  `field` is a `ConfigField`; `ConfigField::segments` gives its path in the
+  core's config text as `FieldSegment` values (`Member`, `Position`, `Key`),
+  and each client renders the path in its own form. The Rust client builds
+  its sections with it; its refusal texts and paths do not change.
 
 ### Changed
 
