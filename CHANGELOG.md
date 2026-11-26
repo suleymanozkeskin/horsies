@@ -19,8 +19,8 @@ and there is no migration contract between pre-1.0 versions.
   scheduler manifest does not change. The Python package keeps its own
   pattern models; the Python renderer does not render this module.
 - The bounds of the pattern fields are public constants of
-  `horsies_core::core::config::schedule` (`INTERVAL_SECONDS` to
-  `INTERVAL_DAYS`, `HOURLY_MINUTE`, `HOURLY_SECOND`, `MONTHLY_DAY`,
+  `horsies_core::core::config::schedule` (`INTERVAL_EVERY_SECONDS`,
+  `HOURLY_MINUTE`, `HOURLY_SECOND`, `MONTHLY_DAY`,
   `CRON_MINUTE`, `CRON_HOUR`, `CRON_DAY_OF_MONTH`, `CRON_NUMERIC_VALUE`,
   `CRON_NUMERIC_STEP`, `CRON_ENUM_STEP`, `CRON_MONTH_SPAN`,
   `CRON_WEEKDAY_SPAN`). The pattern rules read them; their messages do not
@@ -358,6 +358,228 @@ and there is no migration contract between pre-1.0 versions.
   before every check of the body, as before. `CancelTaskBody` refuses an
   unknown key for any serde reader (`#[serde(deny_unknown_fields)]`). The web
   UI sends known keys only.
+- **Breaking: one name per concept for tasks, sends, reads, schedules,
+  reruns and events (Python, Rust, core).** The entries below list each
+  rename. No old name stays as an alias. Before the upgrade, drain the
+  tasks and the workflows: stored text with an old key does not read (each
+  entry names the effect).
+- **Breaking (Python): `TaskError.error_code` is `TaskError.code`.** The
+  attribute and the constructor keyword change: `TaskError(code=...,
+  message=..., data=...)`, also on `SubWorkflowError`.
+  `TaskError(error_code=...)` is refused. `model_dump()` and
+  `model_validate()` use the key `code`. The stored form does not change:
+  a stored task error holds the code under the key `error_code`;
+  `encode_task_error` and `decode_task_error` map it, and a stored object
+  with the key `code` is refused. Records and events keep `error_code`
+  (`TaskInfo.error_code`, `TaskAttemptInfo.error_code`, event fields, the
+  `error_code` columns and metric label).
+- **Breaking (Rust): a task error code is "custom" or "built-in".**
+  `TaskErrorCode::User` / `Library` are `TaskErrorCode::Custom` /
+  `BuiltIn`. `TaskError::user` / `library` are `TaskError::custom` /
+  `built_in`. The trait and derive `UserErrorCode` are `CustomErrorCode`;
+  its method `code()` is `as_str()`. `TaskErrorCode::text()` (a `String`)
+  is `as_str()` (a `&str`); `BuiltInTaskCode::value()` (a `String`) is
+  `as_str()` (a `&'static str`). `UserCode` is `CustomCode`,
+  `UserCodeRefused` is `CustomCodeRefused`, `events::UserCodeText` is
+  `events::CustomCodeText`. In `horsies_core`: `TaskErrorCode::User(UserCode)`
+  -> `TaskErrorCode::Custom(CustomCode)`, `TaskError::builtin` / `new` ->
+  `TaskError::built_in` / `custom`, `RetryCodeScope::AnyUserCode` ->
+  `AnyCustomCode`, `DeclaredOptionRefusal::RetryCodeNotUserCode` ->
+  `RetryCodeNotCustomCode`, `DeclaredSource::UserErrorCodes` ->
+  `CustomErrorCodes`, `MAX_EVENT_USER_CODE_CHARS` ->
+  `MAX_EVENT_CUSTOM_CODE_CHARS`. No stored text changes. The metric catalog
+  text of the `error_code` label says "declared custom error codes".
+- **Read errors: one name per state.** The Python read error classes take
+  the prefix `Read`: `ReadWaitTimeout`, `ReadTaskNotFound`,
+  `ReadWorkflowNotFound`, `ReadResultNotAvailable`, `ReadResultNotReady`,
+  `ReadWaitInsideTask`, `ReadAsyncContext`, `ReadInvalidInput`,
+  `ReadResultDeserializationError`, `ReadUnknownCustomCode`,
+  `ReadNoTypeAvailable`, `ReadWorkflowContextMissingId`, and `BrokerError` ->
+  `ReadDatabaseError`. In Rust, `ReadError` and `WorkflowReadError` rename
+  `WaitTimedOut` -> `WaitTimeout`, `StoredResultUnreadable` ->
+  `ResultDeserializationError`, `UnknownUserCode` -> `UnknownCustomCode` and
+  `Database` -> `DatabaseError`; `WorkflowContextError` renames `Unreadable`
+  -> `ResultDeserializationError` and `UnknownUserCode` ->
+  `UnknownCustomCode`; the struct `UnknownUserCode` is `UnknownCustomCode`.
+  The field `code` of `UnknownCustomCode` (struct and variant) is
+  `stored_code`, and the field `code` of `DatabaseError` is `database_code`.
+- **New built-in code `UNKNOWN_CUSTOM_CODE` (`RetrievalCode`).** A read of a
+  stored error whose custom code the declared code type does not name
+  reports it in place of `RESULT_DESERIALIZATION_ERROR`: Python
+  `ReadUnknownCustomCode`, Rust `ReadError::UnknownCustomCode` and
+  `WorkflowReadError::UnknownCustomCode`. The text is reserved: a task
+  cannot declare it as its own code, and a stored row with that plain
+  custom code text no longer reads (`RESULT_DESERIALIZATION_ERROR`). The
+  `error_code` metric label values include it.
+- **Read wait: one name.** Python `timeout_ms` -> `wait_ms` on
+  `TaskHandle.get` / `get_async`, `Horsies.get_result` / `get_result_async`
+  / `get_raw_result` / `get_raw_result_async` and `WorkflowHandle.get` /
+  `get_async`; the refusal texts name `wait_ms`. `Horsies.task(timeout_ms=...)`
+  (the run time limit) keeps its name. Rust: the parameter `limit` -> `wait`
+  on the same reads and their blocking views, and `Horsies::task_handle_of`
+  -> `Horsies::task_handle`.
+- **Task record: `queue` and `due_at`.** `TaskInfo.queue_name` -> `queue`
+  and `TaskInfo.enqueued_at` -> `due_at` (the time the task became due), in
+  Python, Rust and `horsies_core`. The database columns keep their names.
+  Python `RawResultRecord` (the record of
+  `PostgresBroker.get_raw_result_record`) is `StoredResult`.
+- **A delayed send is a send option in Python.** Use
+  `task.with_options(delay_seconds=N).send(...)` or `.send_async(...)`.
+  `delay_seconds` is a whole number of seconds, 0 or more; `None`, the
+  default, sends now. A bool, a value that is not an int, or a negative value
+  returns `TaskSendValidationFailed` before any write. The stored payload
+  key `enqueue_delay_seconds` does not change.
+- **`resend` sends a failed send again.** Python `TaskFunction.retry_send`
+  -> `resend`, `retry_send_async` -> `resend_async`; Rust
+  `TaskFunction::retry_send` -> `resend`,
+  `blocking::TaskFunctionView::retry_send` -> `resend`. A resend sends the
+  stored payload: the same task id, input, `sent_at` and delay. The refusal
+  text for an error of another task is "cross-task resend".
+- **One name for the sender that `with_options()` returns.** Python
+  `TaskSendOptions` -> `TaskFunctionWithOptions`. Rust
+  `TaskFunctionSendOptions` -> `TaskFunctionWithOptions`,
+  `blocking::TaskFunctionSendOptionsView` ->
+  `blocking::TaskFunctionWithOptionsView`, the generated `<task>::SendOptions`
+  -> `<task>::WithOptions`. The Rust options value `TaskSendOptions` keeps
+  its name.
+- **Python send type names.** `TaskSendRetryable` -> `TaskSendResendable`,
+  `WorkflowStartRetryable` -> `WorkflowStartResendable`, `RetentionChoice`
+  -> `SendRetention`, `TaskSendSubject.queue_name` -> `TaskSendSubject.queue`.
+- **Tasks: the queue of a task is `queue`.** Python
+  `Horsies.task(queue_name=...)` -> `queue=`, `TaskOptions.queue_name` ->
+  `queue`, `TaskFunction.task_queue_name` -> `queue`. Rust
+  `TaskFunction::queue_name()` -> `queue()`. `horsies_core`
+  `TaskOptions.queue_name` -> `queue`, `RegisteredTask::queue_name()` /
+  `set_queue_name()` -> `queue()` / `set_queue()`, `TaskMeta.queue_name` ->
+  `queue`, `DeclaredTaskOptions.queue_name` -> `queue`. The column
+  `horsies_tasks.queue_name` keeps its name.
+- **Python tasks: full words in the task definition.**
+  `Horsies.task(task_name, func)` -> `Horsies.task(name, function)`.
+  `TaskNode.fn` -> `TaskNode.function` (`TaskNode(function=...)`),
+  `NodeFactory(fn)` -> `NodeFactory(function)`,
+  `SourceLocation.from_function(fn)` -> `from_function(function)`,
+  `TaskFunction.task_error_codes` -> `error_codes`.
+- **Rust tasks: the generated module and the workflow context.**
+  `#[task(workflow_ctx)]` -> `#[task(workflow_context)]`; the task parameter
+  keeps the name `workflow_ctx`. `TaskFunction::accepts_workflow_ctx` /
+  `RegisteredTask::accepts_workflow_ctx` -> `accepts_workflow_context`,
+  `RegisteredTask::with_workflow_ctx` -> `with_workflow_context`. The
+  generated `<task>::handle` -> `<task>::function`, `<task>::params::<name>()`
+  -> `<task>::fields::<name>()`. `TaskRuntime::task_handle` ->
+  `TaskRuntime::task_function`.
+- **Retry policy: `intervals_seconds` and `retry_for`.**
+  `RetryPolicy.intervals` -> `intervals_seconds`, `RetryPolicy.fixed(intervals)`
+  -> `fixed(intervals_seconds)` (Python and Rust). `auto_retry_for` ->
+  `retry_for`: Python `RetryPolicy`, Rust `#[task(retry_for = [...])]`,
+  `horsies_core` `TaskOptions.retry_for`. The stored task options and the
+  workflow node options write `intervals_seconds` and `retry_for`. A row
+  stored before the upgrade with `intervals` or `auto_retry_for` does not
+  read: the worker refuses the task before its body runs
+  (`WORKER_SERIALIZATION_ERROR`, "stored retry_policy does not validate:
+  retry_for: Field required ..."), and a workflow node with such options
+  fails at promotion. Schema migration 1007 gives the SQL validation of a
+  node's retry policy the new keys.
+- **Rust: the cancel grace is a plain number.** `TaskOptions.cancel_grace_ms`
+  is `Option<u32>`. `Horsies::register` refuses a grace outside 100 to
+  10,000 ms (`HRS-111`). `DEFAULT_CANCEL_GRACE_MS` and `check_cancel_grace_ms`
+  are new.
+- **Schedules: one name per field.** `TaskSchedule.queue_name` is `queue` in
+  Python and Rust; the Rust method `TaskSchedule::queue(queue)` keeps its
+  name. The pattern tag `type` is `kind`. `WeeklySchedule.days` is
+  `weekdays`. `MonthlySchedule.day` is `day_of_month`. The scheduler manifest
+  send key `queue_name` is `queue`. A Rust config file with `type`,
+  `queue_name`, `days` or `day` does not load: the config refuses an unknown
+  key.
+- **Schedules: the length of an interval is one value.**
+  `IntervalSchedule.every` is a `timedelta` in Python and a
+  `std::time::Duration` in Rust: whole seconds, 1 second to 365 days. It
+  replaces `seconds`, `minutes`, `hours` and `days`.
+  `IntervalSchedule.total_seconds()` (Python, Rust) and
+  `IntervalSchedule::default()` (Rust) are removed. `INTERVAL_EVERY_SECONDS`
+  replaces `INTERVAL_SECONDS`, `INTERVAL_MINUTES`, `INTERVAL_HOURS` and
+  `INTERVAL_DAYS`. A length with a fraction of a second, a length of zero or
+  less, and a length above 365 days are refused. The text of `every` (Rust
+  config files, the scheduler manifest) is ISO 8601 duration text with days,
+  hours, minutes and seconds only: `PT30S`, `PT1M30S`, `P1DT2H`, `P365D`.
+  The writer puts the largest unit first and writes no zero part; the read
+  refuses years, months, weeks, a fraction, a sign and a text without a
+  part, and the refusal names `every` and the text.
+- **Schedules: upgrade effect.** The stored schedule hash keeps its form, so
+  the renames keep each stored hash. An interval that the earlier build held
+  in another split of its length gets a new hash, for example `seconds=90`
+  (now `PT1M30S`) or `seconds=60` (now `PT1M`). At the first start,
+  `next_run_at` of that schedule resets one time to the next slot after the
+  database time. `run_count`, `last_run_at` and `last_task_id` stay. The
+  slots between the old `next_run_at` and the start do not fire, also with
+  `catch_up_missed`.
+- **Codegen model: a length of time.** `horsies_core::manifest_schema` has
+  `PythonValue::Duration(IntBound)` and `PythonItem::Duration(IntBound)`: a
+  length in whole seconds inside the bound, as ISO 8601 text.
+  `IntFieldForm::WholeSeconds` and `IntField for std::time::Duration` give it
+  to a field that names its bound with `int_bound`.
+- **Rerun: one name per concept.** Python: `Horsies.rerun_task` ->
+  `Horsies.rerun_task_in`, `Horsies.rerun_task_async` ->
+  `Horsies.rerun_task_in_async`, the free `rerun_task` ->
+  `rerun_task_in_async`, `RerunTask` -> `RerunCommand`, `RerunTask.deadline`
+  -> `RerunCommand.good_until`, `RerunTask.caller_key` ->
+  `RerunCommand.idempotency_key`, `RerunKeyConflict.reserved_by_task_id` ->
+  `owner_task_id`, and `RerunSourceCorrupt.exception` (a
+  `HistoryContractError`) -> `RerunSourceCorrupt.detail` (its text). The
+  `subject` of the `CorePreconditionFailed` and `CoreContractViolation` of a
+  refused rerun is `rerun_task_in`. Rust and `horsies_core`: `RerunTask` ->
+  `RerunCommand` (`new(source_task_id, good_until, idempotency_key)`,
+  `good_until()`, `idempotency_key()`), `RerunOutcome::KeyConflict.reserved_by_task_id`
+  -> `owner_task_id`, `RerunPreparation::CallerKeyRefused` ->
+  `IdempotencyKeyRefused`, `CallerRerunError::Driver` -> `DriverFailed`,
+  `CallerRerunError::CallerKeyRefused` -> `IdempotencyKeyRefused`,
+  `AppRerunError::Connect` -> `ConnectFailed`, and the rerun code
+  `CALLER_KEY_REFUSED` -> `IDEMPOTENCY_KEY_REFUSED`.
+  `RerunEnqueuePolicy::new` takes `retention: EnqueueRetention` (`Default`,
+  `Forever`, `Period(RetentionDays)`), not a class key text; the policy
+  derives the class key, and `horsies::rerun` exports `EnqueueRetention`. No
+  stored text changes: a keyed rerun of a key reserved before the upgrade
+  replays as before.
+- **Lifecycle events: `child_kind` is `child_execution`; event contract
+  version 9.** The field that holds the execution class of the child is
+  `child_execution` in `AttemptPlaced`, `ChildStarted`, `ChildReplaced`,
+  `SlotDown` and `SlotRecovered` (Python and Rust), and in the internal
+  field of `AttemptEnd::DecidedByWorker` (Python `AttemptEndDecidedByWorker`).
+  `AttemptPlaced.execution` stays the class of the task.
+  `EVENT_CONTRACT_VERSION` is 9; version 9 also adds the built-in code
+  `UNKNOWN_CUSTOM_CODE`.
+- **Rust: the union of the events is `horsies::events::AnyEvent`.** The core
+  union `horsies_core::events::Event` is `AnyEvent`, and the Rust client
+  exports it, with the name of the Python `AnyEvent`.
+- **Python: `EventHandler.kind` is `EventHandler.handler_kind`** (type
+  `HandlerKind`), and **`ResourceShortage.errno_name` is
+  `ResourceShortage.errno`**, the name of the Rust field and of the event
+  `SlotDownCauseResourceShortage.errno`.
+- **Monitoring: the code category `DOMAIN` is `CUSTOM`.** Python
+  `ErrorCategory.DOMAIN` -> `ErrorCategory.CUSTOM`; Rust
+  `ErrorCategory::Domain` -> `ErrorCategory::Custom`. The web JSON
+  (`error_category`, `error_codes[].category`, the keys of
+  `error_category_totals`) and the `error_category` query value use
+  `CUSTOM`. A request with `error_category=DOMAIN` gets 400. The web UI
+  shows the category as "Custom". Schema migration 1007 gives the
+  monitoring SQL functions the new text.
+- **Schema migration 1007: the retry policy keys and the code category
+  `CUSTOM`.** The first start of this build applies migration 1007
+  (`core/migrations/1007_retry_policy_keys_and_custom_category.sql`). It
+  replaces nine functions in place and writes no row: the four validation
+  functions of the retry policy of a workflow node read `intervals_seconds`
+  and `retry_for`, and the five monitoring functions that hold the code
+  category take `CUSTOM` (a `DOMAIN` argument gets `22023`). Stop every
+  process of an earlier build before the first start, and upgrade every
+  process together. A process of an earlier build that starts after it is
+  refused, and a database at 1007 does not go back to an earlier build.
+
+### Removed
+
+- **Python `schedule` sends.** `TaskFunction.schedule`, `schedule_async`,
+  `retry_schedule` and `retry_schedule_async` are removed, with the
+  `schedule` and `schedule_async` methods of the `with_options()` object.
+  Use `with_options(delay_seconds=...)` and `resend`.
+- **Rust `CancelGraceMs`.** Use a plain `u32` and `DEFAULT_CANCEL_GRACE_MS`.
 
 ### Fixed
 
