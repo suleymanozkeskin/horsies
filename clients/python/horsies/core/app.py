@@ -414,7 +414,7 @@ def _connectivity_failed(cause: str) -> ConfigurationError:
     return _no_location(
         ConfigurationError(
             message='broker connectivity check failed',
-            code=ErrorCode.BROKER_INVALID_URL,
+            code=ErrorCode.DATABASE_INVALID_URL,
             notes=[cause],
             help_text='check database_url in PostgresConfig',
         )
@@ -1734,7 +1734,7 @@ class Horsies:
         URL that must receive a NOTIFY within 2 s. Runs on ``handle``, the
         live check's own handle.
 
-        Returns at most one error, ``BROKER_INVALID_URL``: "broker listener
+        Returns at most one error, ``DATABASE_INVALID_URL``: "broker listener
         capability check failed" for the probe, "broker connectivity check
         failed" for every other step and for a core that cannot run the
         call. Nothing is written but the probe's one NOTIFY. Raises
@@ -1752,7 +1752,7 @@ class Horsies:
                     _no_location(
                         ConfigurationError(
                             message='broker listener capability check failed',
-                            code=ErrorCode.BROKER_INVALID_URL,
+                            code=ErrorCode.DATABASE_INVALID_URL,
                             notes=[
                                 'the session_database URL appears to be transaction-pooled; '
                                 'LISTEN notification was not delivered',

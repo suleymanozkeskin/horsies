@@ -289,7 +289,7 @@ deployment pattern.
 | HRS-200 | `CONFIG_INVALID_QUEUE_MODE` | Invalid queue mode or custom queue list: `custom_queues` in `DEFAULT` mode, missing or duplicate `custom_queues` in `CUSTOM` mode, or a `CustomQueueConfig.name` that is empty, has whitespace at the start or the end, is longer than 52 bytes of UTF-8 text (`QUEUE_NAME_MAX_BYTES`), or has no UTF-8 text |
 | HRS-201 | `CONFIG_INVALID_CLUSTER_CAP` | Invalid cluster capacity |
 | HRS-202 | `CONFIG_INVALID_PREFETCH` | Invalid prefetch setting |
-| HRS-203 | `BROKER_INVALID_URL` | Invalid broker URL |
+| HRS-203 | `DATABASE_INVALID_URL` | Invalid broker URL |
 | HRS-204 | `CONFIG_INVALID_RECOVERY` | Invalid recovery configuration |
 | HRS-205 | `CONFIG_INVALID_SCHEDULE` | Invalid schedule configuration |
 | HRS-206 | `CLI_INVALID_ARGS` | Invalid CLI arguments |

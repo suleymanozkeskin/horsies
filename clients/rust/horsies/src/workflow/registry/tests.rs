@@ -647,7 +647,7 @@ fn a_refused_check_case_keeps_the_code_and_the_text_of_its_error() {
     registry.add_check_cases(vec![CheckCase {
         builder_name: "config_err".to_owned(),
         build: Arc::new(|| -> Result<WorkflowSpec, HorsiesError> {
-            Err(HorsiesError::new("bad config").with_code(ErrorCode::BrokerInvalidUrl))
+            Err(HorsiesError::new("bad config").with_code(ErrorCode::DatabaseInvalidUrl))
         }),
     }]);
     let findings = registry.check_findings();

@@ -248,7 +248,7 @@ pub enum ErrorCode {
     ConfigInvalidPrefetch,
     /// The broker URL is not valid, or the broker connectivity check failed.
     #[code_catalog(value = "HRS-203")]
-    BrokerInvalidUrl,
+    DatabaseInvalidUrl,
     /// The recovery config is not valid.
     #[code_catalog(value = "HRS-204")]
     ConfigInvalidRecovery,
@@ -419,7 +419,7 @@ impl ErrorCode {
             Self::ConfigInvalidQueueMode
             | Self::ConfigInvalidClusterCap
             | Self::ConfigInvalidPrefetch
-            | Self::BrokerInvalidUrl
+            | Self::DatabaseInvalidUrl
             | Self::ConfigInvalidRecovery
             | Self::ConfigInvalidSchedule
             | Self::CliInvalidArgs
@@ -893,7 +893,7 @@ mod tests {
             ErrorCategory::Config
         );
         assert_eq!(
-            ErrorCode::BrokerInvalidUrl.category(),
+            ErrorCode::DatabaseInvalidUrl.category(),
             ErrorCategory::Config
         );
         assert_eq!(

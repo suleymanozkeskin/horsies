@@ -563,14 +563,14 @@ class TestLiveBrokerConnectivityCheck:
 
     def test_a_refused_step_is_the_connectivity_refusal_with_its_cause(self) -> None:
         """MAIN_URL, SESSION_URL, POOL_SETTINGS and CONNECT map to
-        BROKER_INVALID_URL with the core's cause as the note."""
+        DATABASE_INVALID_URL with the core's cause as the note."""
         for step in ('CONNECT', 'POOL_SETTINGS', 'MAIN_URL', 'SESSION_URL'):
             app = _make_app()
             with _core_check(_Refused(step=step, message='db down')) as built:
                 errors = app.check(live=True).refusals
 
             assert len(errors) == 1, step
-            assert errors[0].code == ErrorCode.BROKER_INVALID_URL
+            assert errors[0].code == ErrorCode.DATABASE_INVALID_URL
             assert errors[0].message == 'broker connectivity check failed'
             assert errors[0].notes == ['db down']
             assert built[0].closes == 1
@@ -581,7 +581,7 @@ class TestLiveBrokerConnectivityCheck:
         with _core_check(RuntimeStartFailed('the core runtime could not start')) as built:
             errors = app.check(live=True).refusals
 
-        assert [error.code for error in errors] == [ErrorCode.BROKER_INVALID_URL]
+        assert [error.code for error in errors] == [ErrorCode.DATABASE_INVALID_URL]
         assert errors[0].notes == ['the core runtime could not start']
         assert built[0].closes == 1
 
@@ -610,7 +610,7 @@ class TestLiveBrokerConnectivityCheck:
             errors = app.check(live=True).refusals
 
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.BROKER_INVALID_URL
+        assert errors[0].code == ErrorCode.DATABASE_INVALID_URL
         assert errors[0].message == 'broker listener capability check failed'
         assert errors[0].notes is not None
         assert (

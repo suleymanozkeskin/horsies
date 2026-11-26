@@ -193,7 +193,7 @@ pub(crate) fn connectivity_report(cause: &str) -> ValidationReport {
     ValidationReport::of(
         CHECK,
         vec![HorsiesError::new("broker connectivity check failed")
-            .with_code(ErrorCode::BrokerInvalidUrl)
+            .with_code(ErrorCode::DatabaseInvalidUrl)
             .with_note(cause.to_owned())
             .with_help("check database_url in PostgresConfig")],
     )
@@ -218,7 +218,7 @@ fn listener_report(cause: &str) -> ValidationReport {
     ValidationReport::of(
         CHECK,
         vec![HorsiesError::new("broker listener capability check failed")
-            .with_code(ErrorCode::BrokerInvalidUrl)
+            .with_code(ErrorCode::DatabaseInvalidUrl)
             .with_note(
                 "the session_database URL appears to be transaction-pooled; LISTEN \
                  notification was not delivered",
@@ -438,7 +438,7 @@ mod tests {
             report
                 .refusals()
                 .iter()
-                .all(|error| error.code != Some(ErrorCode::BrokerInvalidUrl)),
+                .all(|error| error.code != Some(ErrorCode::DatabaseInvalidUrl)),
             "{report}"
         );
     }
@@ -643,7 +643,7 @@ mod tests {
         let report = refusal_report(&refused);
         let error = &report.refusals()[0];
         assert_eq!(error.message, "broker listener capability check failed");
-        assert_eq!(error.code, Some(ErrorCode::BrokerInvalidUrl));
+        assert_eq!(error.code, Some(ErrorCode::DatabaseInvalidUrl));
         assert!(error.notes[0].contains("transaction-pooled"));
         assert_eq!(error.notes[1], "the listener stopped during the probe");
     }
@@ -651,7 +651,7 @@ mod tests {
     #[test]
     fn a_failed_connect_is_python_s_connectivity_refusal() {
         let report = connectivity_report("connection refused");
-        assert_eq!(report.refusals()[0].code, Some(ErrorCode::BrokerInvalidUrl));
+        assert_eq!(report.refusals()[0].code, Some(ErrorCode::DatabaseInvalidUrl));
         assert_eq!(report.refusals()[0].notes, vec!["connection refused"]);
     }
 }

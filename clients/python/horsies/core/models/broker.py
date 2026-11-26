@@ -506,7 +506,7 @@ class PostgresConfig(BaseModel):
     def validate_pgbouncer_configuration(self) -> 'PostgresConfig':
         """In PgBouncer transaction mode, require a separate session database
         whose URL is not ``database_url``. Raises ``ConfigurationError``
-        (``BROKER_INVALID_URL``)."""
+        (``DATABASE_INVALID_URL``)."""
         match self.pgbouncer_transaction_mode:
             case False:
                 return self
@@ -519,7 +519,7 @@ class PostgresConfig(BaseModel):
                         'a separate session_database is required when '
                         'pgbouncer_transaction_mode=True'
                     ),
-                    code=ErrorCode.BROKER_INVALID_URL,
+                    code=ErrorCode.DATABASE_INVALID_URL,
                     notes=[
                         'PgBouncer transaction pooling cannot support session locks or persistent LISTEN sessions',
                     ],
@@ -531,7 +531,7 @@ class PostgresConfig(BaseModel):
             case SessionDatabaseSeparate(url=url) if url == self.database_url:
                 raise ConfigurationError(
                     message='session_database must not use the transaction-pool URL',
-                    code=ErrorCode.BROKER_INVALID_URL,
+                    code=ErrorCode.DATABASE_INVALID_URL,
                     notes=[
                         'partition maintenance and LISTEN require PostgreSQL session affinity',
                     ],
@@ -770,7 +770,7 @@ def _moved_parent_pool_field_error(name: str, note: str) -> ConfigurationError:
 
 
 def _raise_for_url_scheme(field_name: str, url: str) -> None:
-    """Raise ``ConfigurationError`` (``BROKER_INVALID_URL``) for a URL whose
+    """Raise ``ConfigurationError`` (``DATABASE_INVALID_URL``) for a URL whose
     scheme is not ``postgresql`` or ``postgres``."""
     match check_database_url_scheme(url):
         case Ok():
@@ -789,7 +789,7 @@ def _url_scheme_error(
         case DatabaseUrlNamesDriver(scheme=scheme):
             return ConfigurationError(
                 message=f'invalid {field_name} scheme {scheme!r}',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=ErrorCode.DATABASE_INVALID_URL,
                 notes=[
                     f'got: {scheme}://...',
                     'the URL names a driver; horsies opens the database '
@@ -803,7 +803,7 @@ def _url_scheme_error(
         case DatabaseUrlNotPostgres(scheme=scheme):
             return ConfigurationError(
                 message=f'invalid {field_name} scheme {scheme!r}',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=ErrorCode.DATABASE_INVALID_URL,
                 notes=[
                     f'got: {scheme}://...',
                     'horsies accepts the schemes postgresql:// and postgres://',
@@ -813,7 +813,7 @@ def _url_scheme_error(
         case DatabaseUrlWithoutScheme():
             return ConfigurationError(
                 message=f'invalid {field_name}: the URL has no scheme',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=ErrorCode.DATABASE_INVALID_URL,
                 notes=['horsies accepts the schemes postgresql:// and postgres://'],
                 help_text="use 'postgresql://user:pass@host/db'",
             )

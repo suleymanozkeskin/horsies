@@ -217,7 +217,7 @@ class ErrorCode(str, Enum):
     CONFIG_INVALID_PREFETCH = 'HRS-202'
     """The prefetch setting is not valid."""
 
-    BROKER_INVALID_URL = 'HRS-203'
+    DATABASE_INVALID_URL = 'HRS-203'
     """The broker URL is not valid, or the broker connectivity check failed."""
 
     CONFIG_INVALID_RECOVERY = 'HRS-204'

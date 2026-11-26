@@ -109,6 +109,11 @@ and there is no migration contract between pre-1.0 versions.
     `horsies_worker_states.recovery_config` hold the new key names. An older
     row keeps its keys; the readers pass that map through. The paused
     workflow expiry error names `paused_workflow_cancel_after`.
+- **Breaking: the error code `BROKER_INVALID_URL` (`HRS-203`) is
+  `DATABASE_INVALID_URL`.** Python `ErrorCode.DATABASE_INVALID_URL`; Rust
+  `ErrorCode::DatabaseInvalidUrl`. The variant `AppConfigError::Broker` of
+  the core is `AppConfigError::DatabaseInvalidUrl`. The code number does not
+  change. There is no alias for the old name.
 - **Breaking: one container for the startup refusals.** `ValidationReport`
   holds the refusals of one phase: `refusals` (Python attribute, Rust
   `refusals()`) and `phase_name`. Python `check()` returns a

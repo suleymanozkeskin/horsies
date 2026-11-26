@@ -148,7 +148,7 @@ pub enum AppConfigError {
     #[error("{0}")]
     Prefetch(String),
     #[error("{0}")]
-    Broker(String),
+    DatabaseInvalidUrl(String),
     /// A TCP keepalive or user timeout value of the database config outside
     /// its bound.
     #[error("{0}")]
@@ -181,7 +181,7 @@ impl AppConfigError {
             Self::QueueMode(_) => Some(ErrorCode::ConfigInvalidQueueMode),
             Self::ClusterCap(_) => Some(ErrorCode::ConfigInvalidClusterCap),
             Self::Prefetch(_) => Some(ErrorCode::ConfigInvalidPrefetch),
-            Self::Broker(_) => Some(ErrorCode::BrokerInvalidUrl),
+            Self::DatabaseInvalidUrl(_) => Some(ErrorCode::DatabaseInvalidUrl),
             Self::Keepalive(_) => Some(ErrorCode::ConfigInvalidKeepalive),
             Self::Recovery(_) => Some(ErrorCode::ConfigInvalidRecovery),
             Self::Retention(_) => Some(ErrorCode::ConfigInvalidRetention),
@@ -202,7 +202,7 @@ impl AppConfigError {
             Self::QueueMode(_)
             | Self::ClusterCap(_)
             | Self::Prefetch(_)
-            | Self::Broker(_)
+            | Self::DatabaseInvalidUrl(_)
             | Self::Keepalive(_)
             | Self::Recovery(_)
             | Self::Retention(_)
@@ -1365,7 +1365,7 @@ mod tests {
             ),
             (
                 AppConfigError::Broker(String::new()),
-                Some(ErrorCode::BrokerInvalidUrl),
+                Some(ErrorCode::DatabaseInvalidUrl),
             ),
             (
                 AppConfigError::Recovery(String::new()),

@@ -413,7 +413,7 @@ class TestPostgresConfigPgBouncer:
                 database_url=SecretStr(f'{scheme}://user:secret@localhost/db'),
             )
         error = refused.value
-        assert error.code == ErrorCode.BROKER_INVALID_URL
+        assert error.code == ErrorCode.DATABASE_INVALID_URL
         assert error.message == f'invalid database_url scheme {scheme!r}'
         assert error.help_text == (
             f"replace '{scheme}://' with 'postgresql://' "
@@ -425,13 +425,13 @@ class TestPostgresConfigPgBouncer:
     def test_database_url_with_another_scheme_is_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(database_url=SecretStr('mysql://user:pass@localhost/db'))
-        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.code == ErrorCode.DATABASE_INVALID_URL
         assert refused.value.message == "invalid database_url scheme 'mysql'"
 
     def test_database_url_without_a_scheme_is_refused(self) -> None:
         with pytest.raises(ConfigurationError) as refused:
             PostgresConfig(database_url=SecretStr('user:pass@localhost/db'))
-        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.code == ErrorCode.DATABASE_INVALID_URL
         assert refused.value.message == 'invalid database_url: the URL has no scheme'
 
     def test_session_database_url_that_names_a_driver_is_refused(self) -> None:
@@ -439,7 +439,7 @@ class TestPostgresConfigPgBouncer:
             SessionDatabaseSeparate(
                 url=SecretStr('postgresql+psycopg://user:pass@localhost/db'),
             )
-        assert refused.value.code == ErrorCode.BROKER_INVALID_URL
+        assert refused.value.code == ErrorCode.DATABASE_INVALID_URL
         assert refused.value.message == (
             "invalid session_database.url scheme 'postgresql+psycopg'"
         )
@@ -1793,7 +1793,7 @@ class TestGetBrokerErrorHandling:
 
         original = HorsiesError(
             message='bad config',
-            code=ErrorCode.BROKER_INVALID_URL,
+            code=ErrorCode.DATABASE_INVALID_URL,
         )
         with patch(
             'horsies.core.app.PostgresBroker',
@@ -1803,7 +1803,7 @@ class TestGetBrokerErrorHandling:
                 app.get_broker()
 
             assert exc_info.value is original
-            assert exc_info.value.code == ErrorCode.BROKER_INVALID_URL
+            assert exc_info.value.code == ErrorCode.DATABASE_INVALID_URL
 
 
 @pytest.mark.unit

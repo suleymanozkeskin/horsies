@@ -343,12 +343,12 @@ class TestCheckWorkflowBuilders:
         def my_builder() -> WorkflowSpec[Any]:
             raise ConfigurationError(
                 message='bad config in builder',
-                code=ErrorCode.BROKER_INVALID_URL,
+                code=ErrorCode.DATABASE_INVALID_URL,
             )
 
         errors = app._check_workflow_builders()
         assert len(errors) == 1
-        assert errors[0].code == ErrorCode.BROKER_INVALID_URL
+        assert errors[0].code == ErrorCode.DATABASE_INVALID_URL
 
 
 # =============================================================================

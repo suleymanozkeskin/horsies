@@ -431,10 +431,10 @@ class TestConfigurationError:
     def test_basic_creation(self) -> None:
         err = ConfigurationError(
             message='invalid broker URL',
-            code=ErrorCode.BROKER_INVALID_URL,
+            code=ErrorCode.DATABASE_INVALID_URL,
         )
         assert err.message == 'invalid broker URL'
-        assert err.code == ErrorCode.BROKER_INVALID_URL
+        assert err.code == ErrorCode.DATABASE_INVALID_URL
 
 
 # =============================================================================
@@ -563,7 +563,7 @@ class TestErrorCode:
             ErrorCode.CONFIG_INVALID_QUEUE_MODE,
             ErrorCode.CONFIG_INVALID_CLUSTER_CAP,
             ErrorCode.CONFIG_INVALID_PREFETCH,
-            ErrorCode.BROKER_INVALID_URL,
+            ErrorCode.DATABASE_INVALID_URL,
             ErrorCode.CONFIG_INVALID_RECOVERY,
             ErrorCode.CONFIG_INVALID_SCHEDULE,
             ErrorCode.CLI_INVALID_ARGS,

@@ -196,7 +196,7 @@ class TestCheckLiveWorkerConnections:
         ) as built:
             errors = app.check(live=True).refusals
 
-        assert [error.code for error in errors] == [ErrorCode.BROKER_INVALID_URL]
+        assert [error.code for error in errors] == [ErrorCode.DATABASE_INVALID_URL]
         assert built[0].profiles == []
         assert built[0].closes == 1
 
