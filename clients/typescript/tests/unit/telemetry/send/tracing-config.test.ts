@@ -7,6 +7,7 @@ import { describe, test } from "node:test";
 import { createHorsies } from "../../../../horsies/src/app.ts";
 import { appInternals } from "../../../../horsies/src/app/internals.ts";
 import { NO_OP_OBSERVER } from "../../../../horsies/src/app/observers.ts";
+import { bodyObserverOf, NO_BODY_OBSERVER } from "../../../../horsies/src/child/body-observer.ts";
 import { defineTask } from "../../../../horsies/src/contract/public.ts";
 import { tracingPartsOf } from "../../../../horsies/src/telemetry/create-hook.ts";
 import { type OtelApiLoad, requireOtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
@@ -128,6 +129,18 @@ describe("Horsies.create and the tracing step", () => {
     assert.equal(created.ok, true);
     assert.equal(calls.count, 0);
     assert.deepEqual(created.ok ? appInternals(created.value).telemetry.tracing : undefined, { kind: "none" });
+  });
+
+  test("an app with otel tracing has the attempt-span observer; an app with none has the one that does nothing", () => {
+    const traced = createHorsies(
+      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otel" }, tasks: [listed] },
+      fakeEnvironment({ otelApi: countingLoader({ kind: "loaded", api: API }).loader }),
+    );
+
+    const plain = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
+
+    assert.notEqual(traced.ok ? bodyObserverOf(appInternals(traced.value)) : NO_BODY_OBSERVER, NO_BODY_OBSERVER);
+    assert.equal(plain.ok ? bodyObserverOf(appInternals(plain.value)) : undefined, NO_BODY_OBSERVER);
   });
 
   test("an app with otel tracing keeps its setting for the worker and the children", () => {

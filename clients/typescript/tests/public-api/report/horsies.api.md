@@ -363,6 +363,12 @@ export type CreateRefused = {
 };
 
 // @public
+export type CurrentTask = RunningTask | NoRunningTask;
+
+// @public
+export function currentTask(): CurrentTask;
+
+// @public
 export interface CustomQueueInput {
     // (undocumented)
     readonly maxConcurrency?: TaskCap;
@@ -926,6 +932,16 @@ export interface NoCause {
 export type NonEmpty<T> = readonly [T, ...T[]];
 
 // @public
+export type NoRunningTask = {
+    readonly kind: "noTask";
+};
+
+// @public
+export type NoSpanIds = {
+    readonly kind: "noSpanIds";
+};
+
+// @public
 export type ObjectSent<M extends WireMembers> = keyof M extends never ? EmptyObject : Flat<{
     -readonly [K in keyof M as PresenceOf<M[K]> extends "required" ? K : never]: SentOf<M[K]>;
 } & {
@@ -1305,6 +1321,15 @@ export interface RuleRefused {
 }
 
 // @public
+export type RunningTask = {
+    readonly kind: "running";
+    readonly taskId: string;
+    readonly taskName: string;
+    readonly attempt: number;
+    readonly span: SpanIds | NoSpanIds;
+};
+
+// @public
 export type RuntimeOf<X extends ExecutionClass> = BodyRuntimes[X];
 
 // @public
@@ -1409,6 +1434,13 @@ export interface SharedThreadChildrenInput {
     // (undocumented)
     readonly taskSendPool?: PoolSize;
 }
+
+// @public
+export type SpanIds = {
+    readonly kind: "spanIds";
+    readonly traceId: string;
+    readonly spanId: string;
+};
 
 // @public
 export type SpawnedWork<T> = (signal: AbortSignal) => Promise<T>;

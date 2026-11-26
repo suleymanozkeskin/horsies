@@ -7,18 +7,23 @@
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import { NO_OP_OBSERVER, type SendObserver } from "../app/observers.ts";
+import { type BodyObserver, NO_BODY_OBSERVER } from "../child/body-observer.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { OTEL_API_MODULE, type OtelApi, type OtelApiLoader } from "./otel-api.ts";
+import { otelBodyObserver } from "./attempt-span.ts";
 import { otelSendObserver } from "./send-span.ts";
-import type { TracingSetting } from "./tracing-config.ts";
+import type { OtelTracingSetting, TracingSetting } from "./tracing-config.ts";
 import { processWarnings, type TelemetryWarnings } from "./warnings.ts";
 
 /** The tracing parts of an app: its setting and the observers that the package calls. */
 export type TracingParts = {
   readonly setting: TracingSetting;
+  /** Wraps each send of the app; gives the carrier of a rerun. */
   readonly sendObserver: SendObserver;
+  /** Wraps each task body in a child of the app. */
+  readonly bodyObserver: BodyObserver;
 };
 
 /** What the tracing step reads. A test gives its own. */
@@ -43,7 +48,7 @@ const TRACING_PATH = "tracing";
 export function tracingPartsOf(setting: TracingSetting, environment: TracingEnvironment): Result<TracingParts, Refusal> {
   switch (setting.kind) {
     case "none":
-      return ok(Object.freeze({ setting, sendObserver: NO_OP_OBSERVER }));
+      return ok(Object.freeze({ setting, sendObserver: NO_OP_OBSERVER, bodyObserver: NO_BODY_OBSERVER }));
     case "otel": {
       const loaded = environment.loadApi();
 
@@ -62,10 +67,13 @@ export function tracingPartsOf(setting: TracingSetting, environment: TracingEnvi
   }
 }
 
-function otelParts(setting: TracingSetting, api: OtelApi, environment: TracingEnvironment): TracingParts {
+function otelParts(setting: OtelTracingSetting, api: OtelApi, environment: TracingEnvironment): TracingParts {
+  const { warnings } = environment;
+
   return Object.freeze({
     setting,
-    sendObserver: otelSendObserver({ api, warnings: environment.warnings, clock: environment.clock }),
+    sendObserver: otelSendObserver({ api, warnings, clock: environment.clock }),
+    bodyObserver: otelBodyObserver({ api, parentage: setting.parentage, warnings }),
   });
 }
 

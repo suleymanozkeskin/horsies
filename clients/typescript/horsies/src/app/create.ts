@@ -28,6 +28,7 @@ import {
 import { processTracingEnvironment, type TracingParts, tracingPartsOf } from "../telemetry/create-hook.ts";
 import { type OtelApiLoader, requireOtelApi } from "../telemetry/otel-api.ts";
 import { tracingSettingOf } from "../telemetry/tracing-config.ts";
+import { setBodyObserver } from "../child/body-observer.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 import { err, ok, type Result } from "../wire/result.ts";
@@ -157,7 +158,7 @@ function contextOf(
 ): AppContext {
   const suppression = new SuppressionState(initialSuppression(environment.processStart), environment.environment);
 
-  return {
+  const context: AppContext = {
     config,
     listed,
     core,
@@ -176,6 +177,10 @@ function contextOf(
     implementations: new Map(),
     telemetry: { ...NO_TELEMETRY, tracing: tracing.setting },
   };
+
+  setBodyObserver(context, tracing.bodyObserver);
+
+  return context;
 }
 
 /**

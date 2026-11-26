@@ -33,10 +33,15 @@ export type TracingConfigInput =
   | { readonly kind: "none" }
   | { readonly kind: "otel"; readonly parentage?: AttemptParentage; readonly workerEndedSpans?: WorkerEndedSpans };
 
+/** OpenTelemetry tracing, with every default filled. */
+export type OtelTracingSetting = {
+  readonly kind: "otel";
+  readonly parentage: AttemptParentage;
+  readonly workerEndedSpans: WorkerEndedSpans;
+};
+
 /** The tracing of an app, with every default filled. */
-export type TracingSetting =
-  | { readonly kind: "none" }
-  | { readonly kind: "otel"; readonly parentage: AttemptParentage; readonly workerEndedSpans: WorkerEndedSpans };
+export type TracingSetting = { readonly kind: "none" } | OtelTracingSetting;
 
 /** The tracing of an app that leaves `tracing` out. */
 export const NO_TRACING: TracingSetting = Object.freeze({ kind: "none" });
