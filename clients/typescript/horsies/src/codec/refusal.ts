@@ -10,7 +10,7 @@ export type EncodeRefusalKind =
   | "ExplicitUndefined"
   /** The value is not of the declared kind. */
   | "WrongType"
-  /** An `h.int()` value is not a safe integer. */
+  /** An `h.int()` value is not a safe integer: a fraction, `NaN`, an infinity, or a whole number outside the safe range. */
   | "NotSafeInteger"
   /** An integer has more digits than the core stores. */
   | "IntegerTooLong"

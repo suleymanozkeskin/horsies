@@ -288,7 +288,7 @@ function decodeInt(node: TreeValue, path: string): Decoded {
   }
 
   if (isBigint(node)) {
-    return refuse("IntegerOutOfRange", path, "outside the safe integer range of h.int()");
+    return refuse("IntegerOutOfRange", path, "outside the safe integer range of the integer kind");
   }
 
   return node instanceof IntegralFloat

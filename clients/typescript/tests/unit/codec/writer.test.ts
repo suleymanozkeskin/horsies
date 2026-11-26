@@ -198,6 +198,21 @@ describe("writer: each refusal", () => {
     assert.equal(refused(h.int(), Number.NaN).refusal, "NotSafeInteger");
   });
 
+  test("NotSafeInteger: a fraction, NaN and an infinity get the whole-number text, with no builder name", () => {
+    for (const value of [7.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.equal(refused(h.int(), value).detail, "the integer kind takes a whole number");
+    }
+  });
+
+  test("NotSafeInteger: a whole number outside the safe range gets the range text, with no builder name", () => {
+    for (const value of [2 ** 53, -(2 ** 53), 1e300]) {
+      assert.equal(
+        refused(h.int(), value).detail,
+        "the integer kind takes a whole number from -(2^53 - 1) to 2^53 - 1; the bigint kind takes a larger one",
+      );
+    }
+  });
+
   test("IntegerTooLong: an integer of 4,301 digits", () => {
     assert.equal(refused(h.bigint(), 10n ** 4300n).refusal, "IntegerTooLong");
   });
