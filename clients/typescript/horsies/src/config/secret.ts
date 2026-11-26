@@ -12,13 +12,14 @@ export type Secret = { readonly kind: "fromEnv"; readonly name: string } | { rea
 export type EnvironmentRead = (name: string) => string | undefined;
 
 /**
- * The text of a secret at `path`. An environment variable that is not set is a refusal with the code of an invalid
- * broker URL (`HRS-203`); its message names the variable, never a value. Reads the environment through `environment`.
+ * The text of a secret at `path`. An environment variable that is not set, and a text with a lone surrogate, are
+ * refusals with the code of an invalid broker URL (`HRS-203`); a message names the variable, never a value. Reads the
+ * environment through `environment`.
  */
 export function resolvedSecret(secret: Secret, environment: EnvironmentRead, path: string): Checked<string> {
   switch (secret.kind) {
     case "value":
-      return checkedText(secret.value, path);
+      return checkedText(secret.value, ErrorCode.BROKER_INVALID_URL, path);
     case "fromEnv":
       return secretFromEnvironment(secret.name, environment, path);
     default:
@@ -37,5 +38,5 @@ function secretFromEnvironment(name: string, environment: EnvironmentRead, path:
     );
   }
 
-  return checkedText(value, path);
+  return checkedText(value, ErrorCode.BROKER_INVALID_URL, path);
 }

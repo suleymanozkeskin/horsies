@@ -606,22 +606,18 @@ impl BrokerOperationError {
     /// and a rule that refused a value that reads has no exception; both
     /// have the text of the core's error.
     pub fn enqueue_refused(task_name: &str, refusal: &EnqueueRefusal) -> Self {
-        let contract_text = || BrokerError::EnqueueContract(refusal.clone()).to_string();
-        let (message, cause) = match &refusal.cause {
-            EnqueueRefusalCause::JsonUnreadable(reader_error) => (
-                contract_text(),
-                BrokerRefusalCause::JsonUnreadable(reader_error.clone()),
-            ),
-            EnqueueRefusalCause::RuleRefused => (contract_text(), BrokerRefusalCause::Check),
-            EnqueueRefusalCause::CommandRuleRefused(rule) => (
-                format!("enqueue input refused for {task_name}: {rule}"),
-                BrokerRefusalCause::ValueRule(rule.clone()),
-            ),
-            EnqueueRefusalCause::KeyRuleRefused(rule) => (
-                format!("idempotency key refused for {task_name}: {rule}"),
-                BrokerRefusalCause::ValueRule(rule.clone()),
-            ),
+        let message = match &refusal.cause {
+            EnqueueRefusalCause::JsonUnreadable(_) | EnqueueRefusalCause::RuleRefused => {
+                BrokerError::EnqueueContract(refusal.clone()).to_string()
+            }
+            EnqueueRefusalCause::CommandRuleRefused(rule) => {
+                format!("enqueue input refused for {task_name}: {rule}")
+            }
+            EnqueueRefusalCause::KeyRuleRefused(rule) => {
+                format!("idempotency key refused for {task_name}: {rule}")
+            }
         };
+        let cause = BrokerRefusalCause::of_enqueue_refusal(&refusal.cause);
         match refusal.part {
             SendPart::Input => Self::InvalidInput { message, cause },
             SendPart::TaskOptions => Self::InvalidTaskOptions { message, cause },
@@ -767,6 +763,24 @@ pub enum BrokerRefusalCause {
     /// A rule of the version-1 command or of the scoped idempotency key
     /// refused a value: the rule's text.
     ValueRule(String),
+}
+
+impl BrokerRefusalCause {
+    /// The cause of a refusal of the core before any statement of an
+    /// enqueue: the reader's error of a text that does not read as JSON,
+    /// the rule's text of a rule of the version-1 command or of the scoped
+    /// idempotency key, and a check for a rule that refused a value that
+    /// reads. Pure.
+    pub fn of_enqueue_refusal(cause: &EnqueueRefusalCause) -> Self {
+        match cause {
+            EnqueueRefusalCause::JsonUnreadable(reader_error) => {
+                Self::JsonUnreadable(reader_error.clone())
+            }
+            EnqueueRefusalCause::RuleRefused => Self::Check,
+            EnqueueRefusalCause::CommandRuleRefused(rule)
+            | EnqueueRefusalCause::KeyRuleRefused(rule) => Self::ValueRule(rule.clone()),
+        }
+    }
 }
 
 /// Result type for broker operations.

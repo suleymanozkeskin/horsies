@@ -18,6 +18,7 @@ import type {
   ResultRead,
   SendFacts,
   SendKind,
+  SendPriority,
   TaskInfoRead,
   TaskOptionsCheck,
   TaskOptionsFacts,
@@ -105,14 +106,9 @@ export function fakeChecks(script: CheckScript = {}): FakeChecks {
   };
 }
 
-/** A core refusal with a catalog code. */
+/** A core refusal with a catalog code and no help. */
 export function catalogRefusal(code: string, message: string): CoreRefusal {
-  return { code: { kind: "catalog", code }, message, notes: [], help: [] };
-}
-
-/** A core refusal with no code. */
-export function uncodedRefusal(message: string): CoreRefusal {
-  return { code: { kind: "noCode" }, message, notes: [], help: [] };
+  return { code, message, notes: [], help: { kind: "noHelp" } };
 }
 
 /** One recorded enqueue of the fake producer. */
@@ -127,22 +123,31 @@ export type ProducerScript = {
   readonly role?: ProcessRoleName;
 };
 
+/** One recorded prepare of the fake producer: the task name and the facts of the send. */
+export type PrepareCall = { readonly taskName: string; readonly facts: SendFacts };
+
 /** A fake producer with recorded calls. */
 export type FakeProducer = ProducerCore & {
-  readonly prepares: SendFacts[];
+  readonly prepares: PrepareCall[];
   readonly enqueues: EnqueueCall[];
   readonly results: { readonly taskId: string; readonly wait: WaitBound }[];
   readonly infos: string[];
   readonly roles: number[];
 };
 
-/** The prepared facts of an accepted send. */
-export const PREPARED: PreparedSend = {
-  kind: "prepared",
-  taskId: TASK_ID,
-  taskOptions: OPTIONS_TEXT,
-  retention: { kind: "classKey", key: "standard_30d" },
-};
+/** The prepared facts of an accepted send with `priority`. */
+export function preparedWith(priority: SendPriority): PreparedSend {
+  return {
+    kind: "prepared",
+    taskId: TASK_ID,
+    taskOptions: OPTIONS_TEXT,
+    retention: { kind: "classKey", key: "standard_30d" },
+    priority,
+  };
+}
+
+/** The prepared facts of an accepted send on the queue of the default queue mode. */
+export const PREPARED: PreparedSend = preparedWith({ kind: "defaultQueue" });
 
 /** The outcome of an accepted enqueue. */
 export const ENQUEUED: EnqueueOutcome = { kind: "enqueued", taskId: TASK_ID };
@@ -157,7 +162,7 @@ function nth<T>(list: readonly T[] | undefined, index: number, fallback: T): T {
 
 /** A fake of the core operations of sends and reads. */
 export function fakeProducer(script: ProducerScript = {}): FakeProducer {
-  const prepares: SendFacts[] = [];
+  const prepares: PrepareCall[] = [];
   const enqueues: EnqueueCall[] = [];
   const results: { readonly taskId: string; readonly wait: WaitBound }[] = [];
   const infos: string[] = [];
@@ -169,8 +174,8 @@ export function fakeProducer(script: ProducerScript = {}): FakeProducer {
     results,
     infos,
     roles,
-    prepareSend: async (facts) => {
-      prepares.push(facts);
+    prepareSend: async (taskName, facts) => {
+      prepares.push({ taskName, facts });
 
       return nth(script.prepared, prepares.length - 1, PREPARED);
     },
@@ -198,7 +203,7 @@ export function fakeProducer(script: ProducerScript = {}): FakeProducer {
 }
 
 /** The start facts of a plain producer process. */
-export const PLAIN_START: ProcessStart = { argumentAfterScript: undefined, seatIsolate: false, suppressVariable: undefined };
+export const PLAIN_START: ProcessStart = { argumentAfterScript: undefined, seatIsolate: false };
 
 /** The parts of a fake create environment. */
 export type EnvironmentParts = {

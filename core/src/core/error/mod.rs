@@ -332,6 +332,9 @@ pub enum ErrorCode {
     /// child runs.
     #[code_catalog(value = "HRS-226")]
     EventHandlerLimit,
+    /// A payload size bound (`warn_bytes` or `reject_bytes`) is not valid.
+    #[code_catalog(value = "HRS-227")]
+    ConfigInvalidPayload,
 
     // Registry (HRS-300-HRS-399)
     /// The task is not registered.
@@ -439,7 +442,8 @@ impl ErrorCode {
             | Self::EventHandlerInvalidSignature
             | Self::EventHandlerDuplicateName
             | Self::EventHandlerInvalidName
-            | Self::EventHandlerLimit => ErrorCategory::Config,
+            | Self::EventHandlerLimit
+            | Self::ConfigInvalidPayload => ErrorCategory::Config,
 
             Self::TaskNotRegistered | Self::TaskDuplicateName | Self::WorkflowUnregisteredTask => {
                 ErrorCategory::Registry

@@ -1,13 +1,21 @@
 //! The task reads on a core handle: the result read and wait, the task info
 //! read, and the role of this process.
 //!
+//! - In a task child each read goes through the child host's producer
+//!   handle, else through the given handle (`ProducerHandle`), as the Rust
+//!   client's reads do.
 //! - Each read installs the schema once per handle first, as the Python
 //!   bridge's reads do; a failed connect or install is
 //!   `TASK_INFO_QUERY_FAILED` (`BrokerOperationFailed`).
 //! - A failed read is a raw value of the broker catalog: `BrokerOperationFailed`
-//!   (`TASK_INFO_QUERY_FAILED`), `BrokerInvalidInput`,
-//!   `BrokerInvalidJsonPayload` or `BrokerWaitInsideTask`, as the core gives
-//!   it.
+//!   (`TASK_INFO_QUERY_FAILED`), `BrokerInvalidInput` or
+//!   `BrokerInvalidJsonPayload`, as the core gives it. A wait inside a task
+//!   is refused by the package before the call (`processRole`), so the read
+//!   gives no `BrokerWaitInsideTask`.
+//! - A found task has its stored result by the stage of the task when the
+//!   read ended: a stored envelope, a wait that ended before the task
+//!   finished, or a finished task that stores no result (a cancel before a
+//!   start, an expiry, a terminal row of the live table).
 //! - Reads change nothing: a stop of the core in flight leaves no change.
 //! - The package refuses a wait outside 0 to `MAX_WAIT_LIMIT_MS` before the
 //!   call, so such a value here is a defect of the package.
@@ -16,9 +24,9 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use horsies_core::{
-    BrokerOperationError, BrokerOperationSource, Execution, ExecutionClass, ProcessRole,
-    RawResultRead, RawResultRecord, StoredEnvelopeText, TaskAbsenceReason, TaskAttemptInfo,
-    TaskAttemptOutcome, TaskInfo, TaskInfoRead as CoreTaskInfoRead, TaskStatus,
+    BrokerError, BrokerOperationError, BrokerOperationSource, Execution, ExecutionClass,
+    ProcessRole, RawResultRead, RawResultRecord, StoredEnvelopeText, TaskAbsenceReason,
+    TaskAttemptInfo, TaskAttemptOutcome, TaskInfo, TaskInfoRead as CoreTaskInfoRead, TaskStatus,
 };
 use napi::bindgen_prelude::{BigInt, Object};
 use napi::Env;
@@ -28,8 +36,9 @@ use uuid::Uuid;
 use crate::call::guard::{sync_call, CallKind};
 use crate::call::operation::{guarded_start, spawn_operation};
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::handle::core_handle::{BrokerConnection, CoreHandle};
+use crate::handle::core_handle::CoreHandle;
 use crate::sends::early_end::thrown_now;
+use crate::sends::producer_handle::ProducerHandle;
 use crate::values::boundary::{epoch_micros_of, text_of_uuid, u32_of_number, uuid_of_text};
 use crate::values::catalog_values::RawCatalogError;
 
@@ -99,8 +108,54 @@ impl AbsenceReason {
     }
 }
 
-/// The stored result envelope of a task: its text, or none when the wait
-/// ended before the task.
+/// The status of a task that has not finished.
+#[napi(string_enum = "UPPER_SNAKE")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LiveStatusName {
+    Pending,
+    Claimed,
+    Running,
+}
+
+/// The status of a finished task.
+#[napi(string_enum = "UPPER_SNAKE")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FinishedStatusName {
+    Completed,
+    Failed,
+    Cancelled,
+    Expired,
+}
+
+/// The stage of a status: the task has not finished, or it has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusStage {
+    Live(LiveStatusName),
+    Finished(FinishedStatusName),
+}
+
+impl StatusStage {
+    /// The stage of the core's status. Pure.
+    fn of(status: TaskStatus) -> Self {
+        match status {
+            TaskStatus::Pending => Self::Live(LiveStatusName::Pending),
+            TaskStatus::Claimed => Self::Live(LiveStatusName::Claimed),
+            TaskStatus::Running => Self::Live(LiveStatusName::Running),
+            TaskStatus::Completed => Self::Finished(FinishedStatusName::Completed),
+            TaskStatus::Failed => Self::Finished(FinishedStatusName::Failed),
+            TaskStatus::Cancelled => Self::Finished(FinishedStatusName::Cancelled),
+            TaskStatus::Expired => Self::Finished(FinishedStatusName::Expired),
+        }
+    }
+}
+
+/// The stored result of a task when the read ended, with the status of the
+/// task:
+/// - `Stored`: the row stores this result envelope text;
+/// - `WaitEnded`: the wait ended before the task finished, so no result is
+///   stored yet;
+/// - `FinishedWithoutResult`: the task finished and stores no result (a
+///   cancel before a start, an expiry, a terminal row of the live table).
 #[napi(
     discriminant = "kind",
     discriminant_case = "camelCase",
@@ -108,35 +163,50 @@ impl AbsenceReason {
 )]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EnvelopeFact {
-    Stored { text: String },
-    NotFinished,
+    Stored {
+        status: TaskStatusName,
+        text: String,
+    },
+    WaitEnded {
+        status: LiveStatusName,
+    },
+    FinishedWithoutResult {
+        status: FinishedStatusName,
+    },
 }
 
-/// The status of one task and its stored result envelope.
+impl EnvelopeFact {
+    /// The fact of the core's status and stored text: the text as the row
+    /// stores it, so an integer outside the `i64` and `u64` range keeps
+    /// every digit. Pure.
+    fn of(status: TaskStatus, raw_result: Option<StoredEnvelopeText>) -> Self {
+        match (raw_result, StatusStage::of(status)) {
+            (Some(envelope), _) => Self::Stored {
+                status: TaskStatusName::of(status),
+                text: envelope.as_str().to_owned(),
+            },
+            (None, StatusStage::Live(status)) => Self::WaitEnded { status },
+            (None, StatusStage::Finished(status)) => Self::FinishedWithoutResult { status },
+        }
+    }
+}
+
+/// One task and its stored result.
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResultRecord {
     pub task_id: String,
     pub task_name: String,
-    pub status: TaskStatusName,
     pub envelope: EnvelopeFact,
 }
 
 impl ResultRecord {
-    /// The record of the core's read: the envelope text as the row stores
-    /// it, so an integer outside the `i64` and `u64` range keeps every
-    /// digit. Pure.
+    /// The record of the core's read. Pure.
     fn of(record: RawResultRecord) -> Self {
         Self {
             task_id: text_of_uuid(record.task_id),
             task_name: record.task_name,
-            status: TaskStatusName::of(record.status),
-            envelope: match record.raw_result {
-                Some(envelope) => EnvelopeFact::Stored {
-                    text: envelope.as_str().to_owned(),
-                },
-                None => EnvelopeFact::NotFinished,
-            },
+            envelope: EnvelopeFact::of(record.status, record.raw_result),
         }
     }
 }
@@ -155,8 +225,9 @@ pub enum ResultRead {
 }
 
 /// Read the result of one task, waiting as `wait` says while it has not
-/// finished. A task id or a wait that breaks a boundary rule resolves with
-/// `CLIENT_DEFECT` at once.
+/// finished: in a task child through the child host's producer handle,
+/// else through `handle`. A task id or a wait that breaks a boundary rule
+/// resolves with `CLIENT_DEFECT` at once.
 #[napi(ts_return_type = "Promise<NativeEnvelope<ResultRead>>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -168,12 +239,25 @@ pub fn get_result<'env>(
     task_id: String,
     wait: WaitBound,
 ) -> napi::Result<Object<'env>> {
+    result_read_on(env, ProducerHandle::of_process(handle), &task_id, &wait)
+}
+
+/// Read the result of one task through `producer`, as `getResult` does.
+///
+/// Failure exits: the `napi::Error` of a Promise that Node-API cannot
+/// create. Every other end is an envelope.
+pub fn result_read_on<'env>(
+    env: &'env Env,
+    producer: ProducerHandle,
+    task_id: &str,
+    wait: &WaitBound,
+) -> napi::Result<Object<'env>> {
     let request = guarded_start(RESULT_SUBJECT, || {
-        let task_id = uuid_of_text("taskId", &task_id)?;
+        let task_id = uuid_of_text("taskId", task_id)?;
         let limit = match wait {
             WaitBound::UntilEnd => None,
             WaitBound::UpTo { milliseconds } => Some(Duration::from_millis(u64::from(
-                u32_of_number("wait.milliseconds", milliseconds)?,
+                u32_of_number("wait.milliseconds", *milliseconds)?,
             ))),
         };
         Ok::<_, NativeThrown>((task_id, limit))
@@ -181,32 +265,35 @@ pub fn get_result<'env>(
     match request {
         Err(thrown) => thrown_now::<ResultRead>(env, thrown),
         Ok((task_id, limit)) => {
-            let connection = handle.connection();
             spawn_operation(env, RESULT_SUBJECT, CallKind::Read, move |_core| {
-                result_operation(connection, task_id, limit)
+                result_operation(producer, task_id, limit)
             })
         }
     }
 }
 
-/// One result read. Installs the schema once per handle first.
+/// One result read through `producer`. Installs the schema once per handle
+/// first.
 async fn result_operation(
-    connection: BrokerConnection,
+    producer: ProducerHandle,
     task_id: Uuid,
     limit: Option<Duration>,
 ) -> ResultRead {
-    let broker = match connection.lazy_handle().initialized_broker().await {
-        Ok(broker) => broker,
-        Err(error) => {
-            return ResultRead::Failed {
-                error: RawCatalogError::of(
-                    RESULT_SUBJECT,
-                    &BrokerOperationError::raw_result_query_failed(task_id, error),
-                ),
-            }
-        }
-    };
-    result_read_of(broker.get_raw_result_record(task_id, limit).await)
+    match producer.lazy_handle().initialized_broker().await {
+        Ok(broker) => result_read_of(broker.get_raw_result_record(task_id, limit).await),
+        Err(error) => result_install_failed(task_id, error),
+    }
+}
+
+/// The outcome of a result read whose connect or schema install failed:
+/// `BrokerOperationFailed` (`TASK_INFO_QUERY_FAILED`) with the cause. Pure.
+fn result_install_failed(task_id: Uuid, error: BrokerError) -> ResultRead {
+    ResultRead::Failed {
+        error: RawCatalogError::of(
+            RESULT_SUBJECT,
+            &BrokerOperationError::raw_result_query_failed(task_id, error),
+        ),
+    }
 }
 
 /// The outcome of a core result read. Pure.
@@ -401,6 +488,7 @@ pub struct TaskInfoRecord {
 impl TaskInfoRecord {
     /// The record of the core's info. The read asks for the attempts, so
     /// the core always gives a list (empty when no attempt is recorded).
+    /// Pure.
     fn of(info: TaskInfo<StoredEnvelopeText>) -> Self {
         let attempts = info
             .attempts
@@ -438,6 +526,10 @@ impl TaskInfoRecord {
     object_from_js = false
 )]
 #[derive(Clone, Debug, PartialEq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the value becomes a JavaScript object when the call returns, and napi-rs has no conversion of a Box"
+)]
 pub enum TaskInfoRead {
     Found { record: TaskInfoRecord },
     Absent { reason: AbsenceReason },
@@ -445,8 +537,9 @@ pub enum TaskInfoRead {
 }
 
 /// Read the info of one task: status, times, the failed reason and every
-/// attempt, newest first; no result. A task id that breaks a boundary rule
-/// resolves with `CLIENT_DEFECT` at once.
+/// attempt, newest first; no result. In a task child the read goes through
+/// the child host's producer handle, else through `handle`. A task id that
+/// breaks a boundary rule resolves with `CLIENT_DEFECT` at once.
 #[napi(ts_return_type = "Promise<NativeEnvelope<TaskInfoRead>>")]
 #[allow(
     clippy::needless_pass_by_value,
@@ -457,39 +550,58 @@ pub fn task_info<'env>(
     handle: &CoreHandle,
     task_id: String,
 ) -> napi::Result<Object<'env>> {
+    task_info_on(env, ProducerHandle::of_process(handle), &task_id)
+}
+
+/// Read the info of one task through `producer`, as `taskInfo` does.
+///
+/// Failure exits: the `napi::Error` of a Promise that Node-API cannot
+/// create. Every other end is an envelope.
+pub fn task_info_on<'env>(
+    env: &'env Env,
+    producer: ProducerHandle,
+    task_id: &str,
+) -> napi::Result<Object<'env>> {
     let task_id = guarded_start(INFO_SUBJECT, || {
-        uuid_of_text("taskId", &task_id).map_err(NativeThrown::from)
+        uuid_of_text("taskId", task_id).map_err(NativeThrown::from)
     });
     match task_id {
         Err(thrown) => thrown_now::<TaskInfoRead>(env, thrown),
-        Ok(task_id) => {
-            let connection = handle.connection();
-            spawn_operation(env, INFO_SUBJECT, CallKind::Read, move |_core| {
-                task_info_operation(connection, task_id)
-            })
-        }
+        Ok(task_id) => spawn_operation(env, INFO_SUBJECT, CallKind::Read, move |_core| {
+            task_info_operation(producer, task_id)
+        }),
     }
 }
 
-/// One task info read. Installs the schema once per handle first.
-async fn task_info_operation(connection: BrokerConnection, task_id: Uuid) -> TaskInfoRead {
-    let broker = match connection.lazy_handle().initialized_broker().await {
-        Ok(broker) => broker,
-        Err(error) => {
-            return TaskInfoRead::Failed {
-                error: RawCatalogError::of(
-                    INFO_SUBJECT,
-                    &BrokerOperationError::task_info_query_failed(
-                        task_id,
-                        BrokerOperationSource::Broker(error),
-                    ),
-                ),
-            }
-        }
-    };
-    let read = broker
-        .get_task_info_with_attempts(task_id, false, true, true)
-        .await;
+/// One task info read through `producer`. Installs the schema once per
+/// handle first.
+async fn task_info_operation(producer: ProducerHandle, task_id: Uuid) -> TaskInfoRead {
+    match producer.lazy_handle().initialized_broker().await {
+        Ok(broker) => task_info_read_of(
+            broker
+                .get_task_info_with_attempts(task_id, false, true, true)
+                .await,
+        ),
+        Err(error) => task_info_install_failed(task_id, error),
+    }
+}
+
+/// The outcome of a task info read whose connect or schema install failed:
+/// `BrokerOperationFailed` (`TASK_INFO_QUERY_FAILED`) with the cause. Pure.
+fn task_info_install_failed(task_id: Uuid, error: BrokerError) -> TaskInfoRead {
+    TaskInfoRead::Failed {
+        error: RawCatalogError::of(
+            INFO_SUBJECT,
+            &BrokerOperationError::task_info_query_failed(
+                task_id,
+                BrokerOperationSource::Broker(error),
+            ),
+        ),
+    }
+}
+
+/// The outcome of a core task info read. Pure.
+fn task_info_read_of(read: Result<CoreTaskInfoRead, BrokerOperationError>) -> TaskInfoRead {
     match read {
         Ok(CoreTaskInfoRead::Found(info)) => TaskInfoRead::Found {
             record: TaskInfoRecord::of(*info),
@@ -530,9 +642,27 @@ mod tests {
 
     use super::*;
     use crate::sends::task_options::ExecutionName;
+    use crate::values::catalog_values::RawSlotValue;
 
     fn task() -> Uuid {
         Uuid::from_u128(7)
+    }
+
+    fn found(status: TaskStatus, raw_result: Option<StoredEnvelopeText>) -> ResultRead {
+        result_read_of(Ok(RawResultRead::Found(RawResultRecord {
+            task_id: task(),
+            task_name: "add".to_owned(),
+            status,
+            raw_result,
+        })))
+    }
+
+    fn envelope_of(read: ResultRead) -> EnvelopeFact {
+        match read {
+            ResultRead::Found { record } => record.envelope,
+            ResultRead::Absent { reason } => panic!("the task is found, got {reason:?}"),
+            ResultRead::Failed { error } => panic!("the task is found, got {error:?}"),
+        }
     }
 
     #[test]
@@ -540,20 +670,14 @@ mod tests {
         let envelope = StoredEnvelopeText::parse(r#"{"ok":18446744073709551616}"#.to_owned())
             .expect("the text is strict JSON")
             .expect("an object is an envelope text");
-        let read = result_read_of(Ok(RawResultRead::Found(RawResultRecord {
-            task_id: task(),
-            task_name: "add".to_owned(),
-            status: TaskStatus::Completed,
-            raw_result: Some(envelope),
-        })));
         assert_eq!(
-            read,
+            found(TaskStatus::Completed, Some(envelope)),
             ResultRead::Found {
                 record: ResultRecord {
                     task_id: text_of_uuid(task()),
                     task_name: "add".to_owned(),
-                    status: TaskStatusName::Completed,
                     envelope: EnvelopeFact::Stored {
+                        status: TaskStatusName::Completed,
                         text: r#"{"ok":18446744073709551616}"#.to_owned()
                     },
                 }
@@ -562,18 +686,163 @@ mod tests {
     }
 
     #[test]
-    fn a_wait_that_ended_first_gives_the_status_and_no_envelope() {
-        let read = result_read_of(Ok(RawResultRead::Found(RawResultRecord {
+    fn a_wait_that_ended_first_gives_the_live_status_and_no_envelope() {
+        for (status, live) in [
+            (TaskStatus::Pending, LiveStatusName::Pending),
+            (TaskStatus::Claimed, LiveStatusName::Claimed),
+            (TaskStatus::Running, LiveStatusName::Running),
+        ] {
+            assert_eq!(
+                envelope_of(found(status, None)),
+                EnvelopeFact::WaitEnded { status: live }
+            );
+        }
+    }
+
+    /// A terminal task with no stored result: a cancel before a start, an
+    /// expiry, or a terminal row of the live table. The wait did not end
+    /// early, so this is not a wait that ended.
+    #[test]
+    fn a_terminal_task_with_no_envelope_is_finished_without_result() {
+        for (status, finished) in [
+            (TaskStatus::Completed, FinishedStatusName::Completed),
+            (TaskStatus::Failed, FinishedStatusName::Failed),
+            (TaskStatus::Cancelled, FinishedStatusName::Cancelled),
+            (TaskStatus::Expired, FinishedStatusName::Expired),
+        ] {
+            assert_eq!(
+                envelope_of(found(status, None)),
+                EnvelopeFact::FinishedWithoutResult { status: finished }
+            );
+        }
+    }
+
+    /// The code member and the retry flag of a raw `BrokerOperationFailed`.
+    fn operation_failed_slots(error: &RawCatalogError) -> (Option<String>, Option<bool>) {
+        let code = error.slots.iter().find_map(|slot| match &slot.value {
+            RawSlotValue::CodeMember { value, .. } => Some(value.clone()),
+            RawSlotValue::Text { .. }
+            | RawSlotValue::Flag { .. }
+            | RawSlotValue::Integer { .. }
+            | RawSlotValue::Uuid { .. }
+            | RawSlotValue::SendPayload { .. }
+            | RawSlotValue::Exception { .. } => None,
+        });
+        let retryable = error.slots.iter().find_map(|slot| match &slot.value {
+            RawSlotValue::Flag { value } => Some(*value),
+            RawSlotValue::Text { .. }
+            | RawSlotValue::CodeMember { .. }
+            | RawSlotValue::Integer { .. }
+            | RawSlotValue::Uuid { .. }
+            | RawSlotValue::SendPayload { .. }
+            | RawSlotValue::Exception { .. } => None,
+        });
+        (code, retryable)
+    }
+
+    /// A connect or a schema install that fails (here: the listener closed)
+    /// is `TASK_INFO_QUERY_FAILED`, retryable, for both reads.
+    #[test]
+    fn a_failed_connect_or_install_of_a_read_is_task_info_query_failed() {
+        let ResultRead::Failed { error } =
+            result_install_failed(task(), BrokerError::ListenerClosed)
+        else {
+            panic!("a failed install is a catalog value");
+        };
+        assert_eq!(error.class, "BrokerOperationFailed");
+        assert_eq!(
+            operation_failed_slots(&error),
+            (Some("TASK_INFO_QUERY_FAILED".to_owned()), Some(true))
+        );
+        let TaskInfoRead::Failed { error } =
+            task_info_install_failed(task(), BrokerError::ListenerClosed)
+        else {
+            panic!("a failed install is a catalog value");
+        };
+        assert_eq!(error.class, "BrokerOperationFailed");
+        assert_eq!(
+            operation_failed_slots(&error),
+            (Some("TASK_INFO_QUERY_FAILED".to_owned()), Some(true))
+        );
+    }
+
+    #[test]
+    fn a_task_info_maps_each_fact_and_each_attempt() {
+        let enqueued_at =
+            DateTime::<Utc>::from_timestamp(1_786_525_812, 0).expect("the instant is in range");
+        let started_at = enqueued_at + chrono::Duration::seconds(5);
+        let info = TaskInfo::<StoredEnvelopeText> {
             task_id: task(),
-            task_name: "add".to_owned(),
-            status: TaskStatus::Running,
-            raw_result: None,
-        })));
-        assert!(matches!(
-            read,
-            ResultRead::Found { record } if record.envelope == EnvelopeFact::NotFinished
-                && record.status == TaskStatusName::Running
-        ));
+            task_name: "charge".to_owned(),
+            status: TaskStatus::Failed,
+            queue_name: "billing".to_owned(),
+            priority: 7,
+            retry_count: 1,
+            max_retries: 3,
+            next_retry_at: None,
+            sent_at: Some(enqueued_at),
+            enqueued_at,
+            claimed_at: None,
+            started_at: Some(started_at),
+            completed_at: None,
+            failed_at: Some(started_at),
+            worker_hostname: Some("host-1".to_owned()),
+            worker_pid: Some(4_242),
+            worker_process_name: None,
+            error_code: Some("CARD_DECLINED".to_owned()),
+            failed_reason: None,
+            result: None,
+            attempts: Some(vec![TaskAttemptInfo {
+                task_id: task(),
+                attempt: 1,
+                outcome: TaskAttemptOutcome::Failed,
+                will_retry: true,
+                started_at,
+                finished_at: started_at,
+                error_code: Some("CARD_DECLINED".to_owned()),
+                error_message: None,
+                failed_reason: None,
+                worker_id: None,
+                worker_hostname: None,
+                worker_pid: Some(4_242),
+                worker_process_name: None,
+            }]),
+            execution: ExecutionClass::Live(Execution::Isolated),
+        };
+        let TaskInfoRead::Found { record } =
+            task_info_read_of(Ok(CoreTaskInfoRead::Found(Box::new(info))))
+        else {
+            panic!("the info is found");
+        };
+        assert_eq!(record.task_id, text_of_uuid(task()));
+        assert_eq!(record.status, TaskStatusName::Failed);
+        assert_eq!(record.queue_name, "billing");
+        assert_eq!(record.priority, 7.0);
+        assert_eq!(record.next_retry_at, RecordedInstant::NotRecorded);
+        assert_eq!(
+            record.sent_at,
+            RecordedInstant::Recorded {
+                epoch_micros: epoch_micros_of(enqueued_at)
+            }
+        );
+        assert_eq!(
+            record.worker_pid,
+            RecordedCount::Recorded { value: 4_242.0 }
+        );
+        assert_eq!(record.worker_process_name, RecordedText::NotRecorded);
+        assert_eq!(
+            record.error_code,
+            RecordedText::Recorded {
+                text: "CARD_DECLINED".to_owned()
+            }
+        );
+        assert_eq!(record.execution, ExecutionRecord::Isolated);
+        let [attempt] = record.attempts.as_slice() else {
+            panic!("the info has one attempt");
+        };
+        assert_eq!(attempt.outcome, AttemptOutcomeName::Failed);
+        assert!(attempt.will_retry);
+        assert_eq!(attempt.error_message, RecordedText::NotRecorded);
     }
 
     #[test]
