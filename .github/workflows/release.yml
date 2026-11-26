@@ -51,7 +51,9 @@ jobs:
   # publish job reads it here. The Python build jobs also read the Rust
   # toolchain that rust-toolchain.toml pins here, and give it to
   # maturin-action: the wheel jobs build from the unpacked source
-  # distribution, not from a checkout of the repository.
+  # distribution, not from a checkout of the repository. The wheel matrix
+  # comes from the platform list, .github/release-platforms.json, which the
+  # npm packages of the TypeScript client read too.
   metadata:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -60,6 +62,7 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       rust_toolchain: ${{ steps.toolchain.outputs.channel }}
+      wheel_matrix: ${{ steps.platforms.outputs.wheel_matrix }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -103,6 +106,71 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"version={version}\n")
           print(f"horsies {version}: the wheel, horsies-core-derive, horsies-core, horsies-macros and horsies")
+          PY
+
+      # One wheel row per platform of the list whose release is publish; a
+      # held row builds no wheel. The step refuses a list whose rows do not
+      # have the fields of their platform, so no row reaches build-wheels
+      # with a missing field.
+      - name: Read the wheel rows of the platform list
+        id: platforms
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          PLATFORMS_FILE = ".github/release-platforms.json"
+          ROW_FIELDS = {"name", "release", "runner", "rust_target", "c_library", "wheel", "npm"}
+          RELEASE_STATES = {"publish", "hold"}
+          # The wheel fields of a Linux row and of a macOS row.
+          WHEEL_FIELDS = {
+              "glibc": {"manylinux", "platform_tag", "import_image", "web_ui_check"},
+              "musl": {"manylinux", "platform_tag", "import_image", "web_ui_check"},
+              "libsystem": {"platform_tag", "web_ui_check"},
+          }
+
+          def refuse(message):
+              print(f"::error::{PLATFORMS_FILE}: {message}")
+              sys.exit(1)
+
+          document = json.loads(Path(PLATFORMS_FILE).read_text())
+          rows = document.get("platforms") if isinstance(document, dict) else None
+          if not isinstance(rows, list) or not rows:
+              refuse("has no list of platforms")
+          include = []
+          names = set()
+          for index, row in enumerate(rows):
+              if not isinstance(row, dict) or set(row) != ROW_FIELDS:
+                  refuse(f"row {index} does not have exactly the fields {sorted(ROW_FIELDS)}")
+              texts = [row[field] for field in ("name", "release", "runner", "rust_target", "c_library")]
+              if not all(isinstance(text, str) and text for text in texts):
+                  refuse(f"row {index}: name, release, runner, rust_target and c_library must be texts")
+              name = row["name"]
+              if name in names:
+                  refuse(f"the name {name} is on two rows")
+              names.add(name)
+              if row["release"] not in RELEASE_STATES:
+                  refuse(f"row {name}: release {row['release']!r} is not one of {sorted(RELEASE_STATES)}")
+              if row["c_library"] not in WHEEL_FIELDS:
+                  refuse(f"row {name}: c_library {row['c_library']!r} is not one of {sorted(WHEEL_FIELDS)}")
+              wheel = row["wheel"]
+              fields = WHEEL_FIELDS[row["c_library"]]
+              if not isinstance(wheel, dict) or set(wheel) != fields:
+                  refuse(f"row {name}: wheel does not have exactly the fields {sorted(fields)}")
+              if not isinstance(wheel["web_ui_check"], bool):
+                  refuse(f"row {name}: wheel.web_ui_check must be true or false")
+              if not all(isinstance(wheel[field], str) and wheel[field] for field in fields - {"web_ui_check"}):
+                  refuse(f"row {name}: the wheel fields {sorted(fields - {'web_ui_check'})} must be texts")
+              if row["release"] == "publish":
+                  include.append({"name": name, "runner": row["runner"], "target": row["rust_target"], **wheel})
+          if not include:
+              refuse("no row has release publish")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"wheel_matrix={json.dumps({'include': include})}\n")
+          for entry in include:
+              print(f"wheel row {entry['name']}: {json.dumps(entry)}")
           PY
 
       - name: Read the pinned Rust toolchain
@@ -176,19 +244,22 @@ jobs:
   # (PyO3 feature abi3-py313 in clients/python/bridge/Cargo.toml), so each
   # wheel is tagged cp313-abi3 and serves CPython 3.13 and later.
   #
-  # One matrix row per platform:
+  # One matrix row per platform of .github/release-platforms.json whose
+  # release is publish (the metadata job reads the list):
   #   name          the job name and the artifact name
   #   runner        a runner of the wheel's own platform: the build and the
   #                 import check run natively
-  #   target        the Rust target triple
+  #   target        the Rust target triple (rust_target in the list)
   #   manylinux     Linux only: the platform policy that maturin builds and
   #                 audits the wheel against
-  #   platform_tag  the platform tag that the wheel name must carry
+  #   platform_tag  the platform tag that the wheel name must carry; for
+  #                 macOS, maturin tags the wheel with the macOS version that
+  #                 rustc gives as the default deployment target of
+  #                 aarch64-apple-darwin
   #   import_image  Linux only: the Python image that the import check runs in
   #   web_ui_check  true: the web UI check runs on this wheel
-  # A musllinux wheel is one more row: a *-unknown-linux-musl target,
-  # manylinux musllinux_1_2, platform_tag musllinux_1_2_<arch> and a musl
-  # image such as python:3.13-alpine.
+  # The musllinux rows are in the list with release hold: no wheel is built
+  # for them until their release is publish.
   build-wheels:
     name: build-wheels (${{ matrix.name }})
     needs: [metadata, build-sdist]
@@ -199,29 +270,7 @@ jobs:
     strategy:
       # Every platform reports its result, also when another one fails.
       fail-fast: false
-      matrix:
-        include:
-          - name: linux-x86_64
-            runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            manylinux: '2_28'
-            platform_tag: manylinux_2_28_x86_64
-            import_image: python:3.13-slim-trixie
-            web_ui_check: true
-          - name: linux-aarch64
-            runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            manylinux: '2_28'
-            platform_tag: manylinux_2_28_aarch64
-            import_image: python:3.13-slim-trixie
-            web_ui_check: false
-          # maturin tags the wheel with the macOS version that rustc gives as
-          # the default deployment target of aarch64-apple-darwin.
-          - name: macos-arm64
-            runner: macos-15
-            target: aarch64-apple-darwin
-            platform_tag: macosx_11_0_arm64
-            web_ui_check: false
+      matrix: ${{ fromJSON(needs.metadata.outputs.wheel_matrix) }}
     env:
       # The import check. -I keeps the working folder off sys.path, so that
       # horsies comes from the installed wheel.

@@ -135,8 +135,6 @@ async function firstPayloadWarning(): Promise<string> {
   const prepared = prepareSendFacts(
     warningRules(),
     {
-      taskName: PAYLOAD_TASK_NAME,
-      queueName: DEFAULT_QUEUE_ROUTE.queueName,
       retention: { kind: "queueOrDefault" },
       deadline: { kind: "noDeadline" },
       inputBytes: INPUT_BYTES,

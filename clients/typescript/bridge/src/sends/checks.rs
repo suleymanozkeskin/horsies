@@ -7,9 +7,10 @@
 //! - Each check gives every refusal as a value, in the core's order. A
 //!   refusal never throws.
 //! - The app config check also gives what the accepted config resolves to:
-//!   the send rules of each send, the producer manifest of its broker
-//!   settings (the resolution of the Rust client, `config::producer_manifest`)
-//!   and the coverage values of its retention (`CoverageRequest::of_retention`).
+//!   the send rules of each send (retention, payload bounds and the priority
+//!   of each queue), the producer manifest of its broker settings (the
+//!   resolution of the Rust client, `config::producer_manifest`) and the
+//!   coverage values of its retention (`CoverageRequest::of_retention`).
 
 use horsies_core::manifest::{
     DatabaseManifest, DatabaseUrl, ManifestVersion, PoolConnections, PoolSize as ManifestPoolSize,
@@ -24,8 +25,8 @@ use napi_derive::napi;
 
 use crate::call::guard::sync_call;
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::sends::refusals::CoreRefusal;
-use crate::sends::send::SendRules;
+use crate::sends::refusals::{CoreRefusal, RefusalHelp};
+use crate::sends::send::{QueuePriorities, SendRules};
 
 /// The reservation window of a keyed send: 24 hours, in microseconds. The
 /// window of every app-built broker of the Python client
@@ -145,7 +146,7 @@ fn declared_codes_check(codes: &[String]) -> DeclaredCodesCheck {
                         refusal.error_code(),
                         refusal.to_string(),
                         Vec::new(),
-                        Vec::new(),
+                        RefusalHelp::NoHelp,
                     )
                 })
                 .collect(),
@@ -193,7 +194,11 @@ fn app_config_check(config: AppConfig) -> AppConfigCheck {
     match (refusals.is_empty(), manifest, coverage) {
         (true, Ok(manifest), CoverageCheck::Covered(install_coverage)) => {
             AppConfigCheck::Accepted {
-                rules: SendRules::new(config.retention, config.payload),
+                rules: SendRules::new(
+                    config.retention,
+                    config.payload,
+                    QueuePriorities::of(config.queue_mode, config.custom_queues),
+                ),
                 manifest_json: serde_json::to_string(&manifest).expect(
                     "a producer manifest writes as JSON: every field is a number, a text or a flag",
                 ),
@@ -201,7 +206,7 @@ fn app_config_check(config: AppConfig) -> AppConfigCheck {
             }
         }
         (_, manifest, coverage) => {
-            refusals.extend(manifest.err());
+            refusals.extend(manifest.err().into_iter().flatten());
             refusals.extend(coverage.refusal());
             AppConfigCheck::Refused { refusals }
         }
@@ -225,17 +230,19 @@ fn coverage_check(retention: &RetentionConfig) -> CoverageCheck {
             ErrorCode::ConfigInvalidRetention,
             format!("invalid retention config: {refused}"),
             vec!["the schema install creates the history leaves of these horizons".to_owned()],
-            vec!["use horizons and periods inside the bounds of the history leaves".to_owned()],
+            RefusalHelp::Help {
+                line: "use horizons and periods inside the bounds of the history leaves".to_owned(),
+            },
         )),
     }
 }
 
-/// The producer manifest of the broker settings `config`, or the refusal of
-/// a pool size outside 1 to 10,000 or an overflow above 10,000, which the
-/// manifest bounds and `PostgresConfig::validate` does not. The refusal has
-/// the code of a broker pool value (`HRS-213`), as Python's pool field
+/// The producer manifest of the broker settings `config`, or every refusal
+/// of a pool size outside 1 to 10,000 and of an overflow above 10,000, which
+/// the manifest bounds and `PostgresConfig::validate` does not. Each refusal
+/// has the code of a broker pool value (`HRS-213`), as Python's pool field
 /// checks. Pure.
-fn producer_manifest(config: &PostgresConfig) -> Result<ProducerManifest, CoreRefusal> {
+fn producer_manifest(config: &PostgresConfig) -> Result<ProducerManifest, Vec<CoreRefusal>> {
     Ok(ProducerManifest {
         manifest_version: ManifestVersion::CURRENT,
         database: database_manifest(config)?,
@@ -250,29 +257,38 @@ fn producer_manifest(config: &PostgresConfig) -> Result<ProducerManifest, CoreRe
     })
 }
 
-fn database_manifest(config: &PostgresConfig) -> Result<DatabaseManifest, CoreRefusal> {
+/// The database section of the manifest, or the refusal of each pool
+/// setting outside its manifest bound, in field order. Pure.
+fn database_manifest(config: &PostgresConfig) -> Result<DatabaseManifest, Vec<CoreRefusal>> {
     let pool_size = ManifestPoolSize::try_from(config.pool_size)
-        .map_err(|cause| broker_setting_refused("pool_size", &cause))?;
+        .map_err(|cause| broker_setting_refused("pool_size", &cause));
     let max_overflow = PoolConnections::try_from(config.max_overflow)
-        .map_err(|cause| broker_setting_refused("max_overflow", &cause))?;
-    Ok(DatabaseManifest {
-        database_url: core_database_url(&config.database_url),
-        session_database: match &config.session_database_url {
-            None => SessionDatabase::SameAsDatabaseUrl,
-            Some(url) => SessionDatabase::Separate {
-                url: core_database_url(url),
+        .map_err(|cause| broker_setting_refused("max_overflow", &cause));
+    match (pool_size, max_overflow) {
+        (Ok(pool_size), Ok(max_overflow)) => Ok(DatabaseManifest {
+            database_url: core_database_url(&config.database_url),
+            session_database: match &config.session_database_url {
+                None => SessionDatabase::SameAsDatabaseUrl,
+                Some(url) => SessionDatabase::Separate {
+                    url: core_database_url(url),
+                },
             },
-        },
-        pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
-        pool_pre_ping: config.pool_pre_ping,
-        pool_size,
-        max_overflow,
-        pool_timeout: WholeSeconds::from_secs(config.pool_timeout),
-        pool_recycle: config.pool_recycle,
-        echo: config.echo,
-        tcp_keepalives: config.tcp_keepalives,
-        tcp_user_timeout: config.tcp_user_timeout,
-    })
+            pgbouncer_transaction_mode: config.pgbouncer_transaction_mode,
+            pool_pre_ping: config.pool_pre_ping,
+            pool_size,
+            max_overflow,
+            pool_timeout: WholeSeconds::from_secs(config.pool_timeout),
+            pool_recycle: config.pool_recycle,
+            echo: config.echo,
+            tcp_keepalives: config.tcp_keepalives,
+            tcp_user_timeout: config.tcp_user_timeout,
+        }),
+        (pool_size, max_overflow) => Err(pool_size
+            .err()
+            .into_iter()
+            .chain(max_overflow.err())
+            .collect()),
+    }
 }
 
 /// The refusal of a broker pool setting outside a manifest bound
@@ -282,7 +298,7 @@ fn broker_setting_refused(field: &str, cause: &str) -> CoreRefusal {
         ErrorCode::ConfigInvalidBrokerPool,
         format!("invalid broker config: broker.{field}: {cause}"),
         Vec::new(),
-        Vec::new(),
+        RefusalHelp::NoHelp,
     )
 }
 
@@ -395,8 +411,51 @@ mod tests {
                 .find(|refusal| refusal.message.contains(field))
                 .unwrap_or_else(|| panic!("{field} is refused: {refusals:?}"));
             assert_eq!(pool.code, "HRS-213");
-            assert!(pool.help.is_empty());
+            assert_eq!(pool.help, RefusalHelp::NoHelp);
         }
+    }
+
+    #[test]
+    fn a_pool_size_and_an_overflow_above_the_bounds_are_two_refusals() {
+        let broker = r#"{"database_url": "postgresql://127.0.0.1/horsies", "pool_size": 10001, "max_overflow": 10001}"#;
+        let refusals = refusals_of(check_of(&config_text(broker)));
+        let pool: Vec<&str> = refusals
+            .iter()
+            .filter(|refusal| refusal.code == "HRS-213")
+            .map(|refusal| refusal.message.as_str())
+            .collect();
+        assert_eq!(pool.len(), 2, "{refusals:?}");
+        assert!(pool[0].contains("broker.pool_size"), "{}", pool[0]);
+        assert!(pool[1].contains("broker.max_overflow"), "{}", pool[1]);
+    }
+
+    #[test]
+    fn a_horizon_that_the_coverage_bounds_refuse_is_hrs_216_with_its_help() {
+        let retention = RetentionConfig {
+            history_leaf_horizon_days: 1,
+            ..RetentionConfig::default()
+        };
+        let CoverageCheck::Refused(refusal) = coverage_check(&retention) else {
+            panic!("a horizon of one day is below the coverage bound");
+        };
+        assert_eq!(refusal.code, "HRS-216");
+        assert!(
+            refusal.message.starts_with("invalid retention config: "),
+            "{}",
+            refusal.message
+        );
+        assert!(matches!(refusal.help, RefusalHelp::Help { .. }));
+    }
+
+    /// The same horizon in a config: the retention rule refuses it, and the
+    /// coverage is not checked, so the config has one refusal, not two.
+    #[test]
+    fn a_retention_refusal_leaves_the_coverage_not_checked() {
+        let text =
+            format!(r#"{{"broker": {BROKER}, "retention": {{"history_leaf_horizon_days": 1}}}}"#);
+        let refusals = refusals_of(check_of(&text));
+        assert_eq!(refusals.len(), 1, "{refusals:?}");
+        assert_eq!(refusals[0].code, "HRS-216");
     }
 
     #[test]
@@ -406,7 +465,7 @@ mod tests {
             panic!("a built-in name is refused");
         };
         assert_eq!(refusals[0].code, "HRS-212");
-        assert!(refusals[0].help.is_empty());
+        assert_eq!(refusals[0].help, RefusalHelp::NoHelp);
     }
 
     #[test]

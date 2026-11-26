@@ -174,7 +174,7 @@ function addonProducer(accepted: AcceptedConfig, options: ReadonlyMap<string, Na
   const handle = buildCoreHandle(accepted.manifestJson, "PRODUCER").withInstallCoverage(accepted.installCoverage);
 
   const producer: ProducerCore = {
-    prepareSend: async (facts) => prepareSendFacts(accepted.rules, facts, optionsOf(options, facts.taskName)),
+    prepareSend: async (taskName, facts) => prepareSendFacts(accepted.rules, facts, optionsOf(options, taskName)),
     enqueue: async (request, sendKind, trace) => enqueue(handle, request, sendKind, trace),
     getResult: async (taskId, wait) => getResult(handle, taskId, wait),
     taskInfo: async (taskId) => taskInfo(handle, taskId),

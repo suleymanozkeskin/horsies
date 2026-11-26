@@ -26,13 +26,13 @@ import {
 export type TaskCap = { readonly kind: "cap"; readonly tasks: number } | { readonly kind: "noCap" };
 
 /**
- * One custom queue. `priority`: 1 runs first, 100 runs last; the send of a task on the queue carries it, so it is
- * required. `maxConcurrency`: the most tasks of the queue that run at once (a cap of 0 pauses the queue); left out,
- * the core's default applies.
+ * One custom queue. `priority`: 1 runs first, 100 runs last; the send of a task on the queue carries it; left out, the
+ * core's default applies. `maxConcurrency`: the most tasks of the queue that run at once (a cap of 0 pauses the
+ * queue); left out, the core's default applies.
  */
 export interface CustomQueueInput {
   readonly name: string;
-  readonly priority: number;
+  readonly priority?: number;
   readonly maxConcurrency?: TaskCap;
 }
 
@@ -44,10 +44,12 @@ export type QueueConfigInput =
 /** The most tasks of a custom queue that run at once: the queue's own cap, or the core's default. */
 export type QueueConcurrency = TaskCap | { readonly kind: "coreDefault" };
 
-/** A custom queue of a parsed config. */
+/**
+ * A custom queue of a parsed config. The priority of the queue is not here: a send takes it from the core's accepted
+ * config, which holds the core's default for a queue that names none.
+ */
 export type CustomQueue = {
   readonly name: string;
-  readonly priority: number;
   readonly maxConcurrency: QueueConcurrency;
 };
 
@@ -87,7 +89,9 @@ function customEntries(queues: readonly CustomQueueInput[]): Checked<readonly Js
 function customQueueJson(queue: CustomQueueInput, path: string): Checked<ConfigJson> {
   return checkedObject([
     entry("name", checkedText(queue.name, ErrorCode.CONFIG_INVALID_QUEUE_MODE, memberPath(path, "name"))),
-    entry("priority", checkedInteger(queue.priority, QUEUE_U32, memberPath(path, "priority"))),
+    optionalEntry("priority", queue.priority, (priority) =>
+      checkedInteger(priority, QUEUE_U32, memberPath(path, "priority")),
+    ),
     optionalEntry("max_concurrency", queue.maxConcurrency, (cap) =>
       taskCapJson(cap, QUEUE_U32, memberPath(path, "maxConcurrency.tasks")),
     ),
@@ -125,7 +129,6 @@ export function queueSetupOf(input: QueueConfigInput): QueueSetup {
 function customQueueOf(queue: CustomQueueInput): CustomQueue {
   return Object.freeze({
     name: queue.name,
-    priority: queue.priority,
     maxConcurrency: Object.freeze(queue.maxConcurrency ?? { kind: "coreDefault" }),
   });
 }
