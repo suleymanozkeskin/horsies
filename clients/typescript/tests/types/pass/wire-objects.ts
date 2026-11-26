@@ -1,6 +1,8 @@
 // Compile-pass cases: the value and sent types of objects, arrays, tuples, records and the modifiers.
 
 import { h } from "../../../horsies/src/index.ts";
+import type { JsonText } from "../../../horsies/src/codec/json-text.ts";
+import { decodeWire } from "../../../horsies/src/codec/typed.ts";
 import type { SentOf } from "../../../horsies/src/wire/infer.ts";
 
 type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
@@ -33,3 +35,10 @@ expectType<Equal<h.Infer<typeof counts>, Readonly<Record<string, bigint>>>>();
 const sent: SentOf<typeof order> = { id: 1, parent: null };
 
 export { sent };
+
+/** decodeWire gives the worker form: the defaulted member is present. */
+export function retriesOf(text: JsonText): number | undefined {
+  const decoded = decodeWire(order, text, "worker");
+
+  return decoded.ok ? decoded.value.retries : undefined;
+}

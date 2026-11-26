@@ -74,8 +74,32 @@ function parameterValueKind(kind: Kind): Kind {
       return kind.inner;
     case "nullable":
       return kind.inner.node === "resultOf" ? kind.inner.inner : kind;
-    default:
+    case "null":
+    case "boolean":
+    case "int":
+    case "bigint":
+    case "float":
+    case "string":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "literal":
+    case "union":
+    case "taggedUnion":
+    case "array":
+    case "tuple":
+    case "record":
+    case "object":
+    case "json":
+    case "conversion":
+    case "checked":
       return kind;
+    default:
+      return unreachable(kind, "parameterValueKind");
   }
 }
 

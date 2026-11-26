@@ -2,6 +2,7 @@
 
 import type { RequiredWire, ValueOf } from "./infer.ts";
 import type { Kind } from "./kinds.ts";
+import { unreachable } from "./unreachable.ts";
 import type { TaskOutcome } from "./task-error.ts";
 import { kindOf, type Wire, wireOf } from "./wire-type.ts";
 
@@ -19,8 +20,32 @@ export function isResultOfKind(kind: Kind): boolean {
     case "resultOf":
       return true;
     case "nullable":
-      return kind.inner.node === "resultOf";
-    default:
+      return isResultOfKind(kind.inner);
+    case "null":
+    case "boolean":
+    case "int":
+    case "bigint":
+    case "float":
+    case "string":
+    case "uuid":
+    case "decimal":
+    case "instant":
+    case "offsetDateTime":
+    case "plainDateTime":
+    case "plainDate":
+    case "plainTime":
+    case "literal":
+    case "union":
+    case "taggedUnion":
+    case "array":
+    case "tuple":
+    case "record":
+    case "object":
+    case "json":
+    case "conversion":
+    case "checked":
       return false;
+    default:
+      return unreachable(kind, "isResultOfKind");
   }
 }

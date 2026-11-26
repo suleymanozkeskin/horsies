@@ -76,7 +76,11 @@ export interface WireBuilders {
   plainDate(): Wire<Temporal.PlainDate>;
   /** A `Temporal.PlainTime`, a time of day stored as `09:10:12.654321`. */
   plainTime(): Wire<Temporal.PlainTime>;
-  /** An object with declared members, stored in declaration order. An undeclared key is refused. */
+  /**
+   * An object with declared members, stored in the key order of `members` (`Object.keys`: JavaScript puts an
+   * integer-like name such as `"10"` first, in ascending order, then the other names in source order). An undeclared
+   * key is refused.
+   */
   object<const M extends WireMembers>(members: M): Wire<ObjectValue<M>, ObjectSent<M>>;
   /**
    * Untyped JSON that the type names explicitly. A `bigint` and a safe integer are stored as integers; any other
@@ -136,7 +140,7 @@ function requiredKindOf(wire: AnyWire, place: string): Kind {
   return valueKindOf(wire, place);
 }
 
-/** The members of an object or a task input, in declaration order. Pure. */
+/** The members of an object or a task input, in the key order of `members` (`Object.keys`). Pure. */
 function membersOf(members: ParameterWires, kindOfMember: (wire: AnyWire) => Kind): readonly Member[] {
   return Object.keys(members).map((name) => {
     const wire = members[name];

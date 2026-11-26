@@ -2,7 +2,8 @@
 // calls `JSON.stringify` for one string at a time only.
 //
 // Rules:
-// - Object members are written in declaration order, records in the value's own key order (`Object.keys`).
+// - Object members are written in the order of the kind's member list, never in the value's key order; records in
+//   the value's own key order (`Object.keys`).
 // - A key that the value leaves out is left out of the text; `null` is written only for a nullable kind; a key whose
 //   value is `undefined` is refused. A default is never written by the sender.
 // - An undeclared key, a key that only the engine writes, and a value deeper than the core's bound are refused.
@@ -102,6 +103,18 @@ function append(sink: Sink, text: string): Written {
   return WRITTEN;
 }
 
+/** The kinds of one JSON scalar: a value of one JavaScript type, stored as one JSON literal. */
+type ScalarKind = Extract<
+  Kind,
+  { readonly node: "null" | "boolean" | "int" | "bigint" | "float" | "string" | "uuid" | "decimal" }
+>;
+
+/** The date-time kinds: a Temporal value, stored as one JSON string. */
+type TimeKind = Extract<
+  Kind,
+  { readonly node: "instant" | "offsetDateTime" | "plainDateTime" | "plainDate" | "plainTime" }
+>;
+
 function writeValue(kind: Kind, value: unknown, path: string, depth: number, sink: Sink): Written {
   if (value === undefined) {
     return refuse("ExplicitUndefined", path, "undefined is not a stored value; leave the key out");
@@ -109,49 +122,20 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
 
   switch (kind.node) {
     case "null":
-      return value === null ? append(sink, "null") : refuse("WrongType", path, "expected null");
     case "boolean":
-      return isBoolean(value) ? append(sink, String(value)) : refuse("WrongType", path, "expected a boolean");
     case "int":
-      return writeInt(value, path, sink);
     case "bigint":
-      return isBigint(value)
-        ? writeScalar(bigintText(value), path, sink)
-        : refuse("WrongType", path, "expected a bigint");
     case "float":
-      return isNumber(value)
-        ? writeScalar(floatText(value), path, sink)
-        : refuse("WrongType", path, "expected a number");
     case "string":
-      return isString(value)
-        ? writeScalar(stringText(value), path, sink)
-        : refuse("WrongType", path, "expected a string");
     case "uuid":
-      return writeUuid(value, path, sink);
     case "decimal":
-      return isObjectLike(value) && Decimal.isDecimal(value)
-        ? append(sink, JSON.stringify(value.toString()))
-        : refuse("WrongType", path, "expected a Decimal");
+      return writeScalarKind(kind, value, path, sink);
     case "instant":
-      return isInstant(value)
-        ? writeTemporal(instantText(value), path, sink)
-        : refuse("WrongType", path, "expected a Temporal.Instant");
     case "offsetDateTime":
-      return isZonedDateTime(value)
-        ? writeTemporal(offsetDateTimeText(value), path, sink)
-        : refuse("WrongType", path, "expected a Temporal.ZonedDateTime");
     case "plainDateTime":
-      return isPlainDateTime(value)
-        ? writeTemporal(plainDateTimeText(value), path, sink)
-        : refuse("WrongType", path, "expected a Temporal.PlainDateTime");
     case "plainDate":
-      return isPlainDate(value)
-        ? writeTemporal(plainDateText(value), path, sink)
-        : refuse("WrongType", path, "expected a Temporal.PlainDate");
     case "plainTime":
-      return isPlainTime(value)
-        ? append(sink, `"${plainTimeText(value)}"`)
-        : refuse("WrongType", path, "expected a Temporal.PlainTime");
+      return writeTimeKind(kind, value, path, sink);
     case "literal":
       return writeLiteral(kind.members, value, path, sink);
     case "union":
@@ -178,6 +162,64 @@ function writeValue(kind: Kind, value: unknown, path: string, depth: number, sin
       return writeChecked(kind, value, path, depth, sink);
     default:
       return unreachable(kind, "writeValue");
+  }
+}
+
+function writeScalarKind(kind: ScalarKind, value: unknown, path: string, sink: Sink): Written {
+  switch (kind.node) {
+    case "null":
+      return value === null ? append(sink, "null") : refuse("WrongType", path, "expected null");
+    case "boolean":
+      return isBoolean(value) ? append(sink, String(value)) : refuse("WrongType", path, "expected a boolean");
+    case "int":
+      return writeInt(value, path, sink);
+    case "bigint":
+      return isBigint(value)
+        ? writeScalar(bigintText(value), path, sink)
+        : refuse("WrongType", path, "expected a bigint");
+    case "float":
+      return isNumber(value)
+        ? writeScalar(floatText(value), path, sink)
+        : refuse("WrongType", path, "expected a number");
+    case "string":
+      return isString(value)
+        ? writeScalar(stringText(value), path, sink)
+        : refuse("WrongType", path, "expected a string");
+    case "uuid":
+      return writeUuid(value, path, sink);
+    case "decimal":
+      return isObjectLike(value) && Decimal.isDecimal(value)
+        ? append(sink, JSON.stringify(value.toString()))
+        : refuse("WrongType", path, "expected a Decimal");
+    default:
+      return unreachable(kind, "writeScalarKind");
+  }
+}
+
+function writeTimeKind(kind: TimeKind, value: unknown, path: string, sink: Sink): Written {
+  switch (kind.node) {
+    case "instant":
+      return isInstant(value)
+        ? writeTemporal(instantText(value), path, sink)
+        : refuse("WrongType", path, "expected a Temporal.Instant");
+    case "offsetDateTime":
+      return isZonedDateTime(value)
+        ? writeTemporal(offsetDateTimeText(value), path, sink)
+        : refuse("WrongType", path, "expected a Temporal.ZonedDateTime");
+    case "plainDateTime":
+      return isPlainDateTime(value)
+        ? writeTemporal(plainDateTimeText(value), path, sink)
+        : refuse("WrongType", path, "expected a Temporal.PlainDateTime");
+    case "plainDate":
+      return isPlainDate(value)
+        ? writeTemporal(plainDateText(value), path, sink)
+        : refuse("WrongType", path, "expected a Temporal.PlainDate");
+    case "plainTime":
+      return isPlainTime(value)
+        ? append(sink, `"${plainTimeText(value)}"`)
+        : refuse("WrongType", path, "expected a Temporal.PlainTime");
+    default:
+      return unreachable(kind, "writeTimeKind");
   }
 }
 

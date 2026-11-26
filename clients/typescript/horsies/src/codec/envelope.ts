@@ -14,6 +14,7 @@ import type {
   TaskErrorCode,
 } from "../wire/task-error.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import { unreachable } from "../wire/unreachable.ts";
 import {
   BUILTIN_CODE_KEY,
   ERROR_DATA_DEPTH_LIMIT,
@@ -103,7 +104,13 @@ export function readStoredError(text: JsonText): Result<TaskError, DecodeRefused
   return readErrorNode(readTree(text), ROOT_PATH);
 }
 
-function isErrorKey(key: string, isSubWorkflow: boolean): boolean {
+/**
+ * The class of a stored error (the core's `TaskErrorKind`): a plain error, or the failure of a child workflow, which
+ * has `sub_workflow_id` and `sub_workflow_summary` next to the four keys of every error.
+ */
+type StoredErrorClass = "plain" | "subWorkflow";
+
+function isErrorKey(key: string, errorClass: StoredErrorClass): boolean {
   switch (key) {
     case EXCEPTION_KEY:
     case ERROR_CODE_KEY:
@@ -112,9 +119,20 @@ function isErrorKey(key: string, isSubWorkflow: boolean): boolean {
       return true;
     case SUB_WORKFLOW_ID_KEY:
     case SUB_WORKFLOW_SUMMARY_KEY:
-      return isSubWorkflow;
+      return hasSubWorkflowKeys(errorClass);
     default:
       return false;
+  }
+}
+
+function hasSubWorkflowKeys(errorClass: StoredErrorClass): boolean {
+  switch (errorClass) {
+    case "plain":
+      return false;
+    case "subWorkflow":
+      return true;
+    default:
+      return unreachable(errorClass, "hasSubWorkflowKeys");
   }
 }
 
@@ -124,10 +142,10 @@ export function readErrorNode(node: TreeValue, path: string): Result<TaskError, 
     return refuse("ErrorNotAnObject", path, "the error is not an object");
   }
 
-  const isSubWorkflow = Object.hasOwn(node, SUB_WORKFLOW_ID_KEY);
+  const errorClass: StoredErrorClass = Object.hasOwn(node, SUB_WORKFLOW_ID_KEY) ? "subWorkflow" : "plain";
 
   for (const key of Object.keys(node)) {
-    if (!isErrorKey(key, isSubWorkflow)) {
+    if (!isErrorKey(key, errorClass)) {
       return refuse("ErrorUnknownKey", entryPath(path), "a key that a stored error does not have");
     }
   }
@@ -140,14 +158,14 @@ export function readErrorNode(node: TreeValue, path: string): Result<TaskError, 
 
   const code = readCode(codeNode, memberPath(path, ERROR_CODE_KEY));
 
-  return code.ok ? readErrorFields(node, code.value, isSubWorkflow, path) : code;
+  return code.ok ? readErrorFields(node, code.value, errorClass, path) : code;
 }
 
 /** The fields of a stored error after its code. */
 function readErrorFields(
   node: TreeObject,
   code: TaskErrorCode,
-  isSubWorkflow: boolean,
+  errorClass: StoredErrorClass,
   path: string,
 ): Result<TaskError, DecodeRefused> {
   const exception = readException(node[EXCEPTION_KEY] ?? null, memberPath(path, EXCEPTION_KEY));
@@ -168,9 +186,7 @@ function readErrorFields(
     return data;
   }
 
-  const subWorkflow: Result<SubWorkflowFailure | null, DecodeRefused> = isSubWorkflow
-    ? readSubWorkflow(node[SUB_WORKFLOW_ID_KEY], node[SUB_WORKFLOW_SUMMARY_KEY], path)
-    : ok(null);
+  const subWorkflow = subWorkflowOf(node, errorClass, path);
 
   if (!subWorkflow.ok) {
     return subWorkflow;
@@ -185,6 +201,22 @@ function readErrorFields(
       subWorkflow: subWorkflow.value,
     }),
   );
+}
+
+/** The failed child workflow of a sub-workflow error; `null` for a plain error. */
+function subWorkflowOf(
+  node: TreeObject,
+  errorClass: StoredErrorClass,
+  path: string,
+): Result<SubWorkflowFailure | null, DecodeRefused> {
+  switch (errorClass) {
+    case "plain":
+      return ok(null);
+    case "subWorkflow":
+      return readSubWorkflow(node[SUB_WORKFLOW_ID_KEY], node[SUB_WORKFLOW_SUMMARY_KEY], path);
+    default:
+      return unreachable(errorClass, "subWorkflowOf");
+  }
 }
 
 function isLibraryCode(text: string): text is LibraryTaskCode {

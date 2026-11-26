@@ -3,7 +3,11 @@
 
 import type { Result } from "../wire/result.ts";
 
-/** One reason why a conversion or a check refused a value: where (a path inside the value) and which rule. */
+/**
+ * One reason why a conversion or a check refused a value: where (a path inside the value) and which rule. A part of
+ * the path that comes from the value (a record key) must be written `<input>`, as in the codec's own paths: the
+ * text of a refusal holds no value.
+ */
 export type CheckIssue = { readonly path: string; readonly code: string };
 
 /** A conversion or a check refused a value. The issues hold no value. */

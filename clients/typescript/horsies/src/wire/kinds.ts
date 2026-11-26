@@ -115,7 +115,7 @@ export type MemberPresence =
 /** A declared member of an object. */
 export type Member = { readonly name: string; readonly kind: Kind; readonly presence: MemberPresence };
 
-/** A JSON object with declared members, stored in declaration order. */
+/** A JSON object with declared members, stored in the order of `members`, never in a value's key order. */
 export type ObjectKind = {
   readonly node: "object";
   readonly members: readonly Member[];

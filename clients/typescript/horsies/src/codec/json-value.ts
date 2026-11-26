@@ -37,19 +37,13 @@ type Written = Result<true, EncodeRefused>;
 const WRITTEN: Written = Object.freeze(ok<true>(true));
 
 /**
- * What a walk does with a key that only the engine writes: refuse it (a user value), or write it and record it (the
- * `data` of a task error, which is replaced, not refused).
+ * What a walk does with a key that only the engine writes: refuse it (a user value), or keep it (the `data` of a task
+ * error, which the core replaces when it stores the error).
  */
-type EngineKeys = "refused" | "recorded";
+type EngineKeys = "refused" | "kept";
 
-/** The state of one walk: the text built so far, its bounds, and the facts that it records. */
-type JsonWalk = {
-  text: string;
-  readonly levelLimit: number;
-  readonly engineKeys: EngineKeys;
-  engineKeyFound: boolean;
-  deepest: number;
-};
+/** The state of one walk: the text built so far and its rules. */
+type JsonWalk = { text: string; readonly levelLimit: number; readonly engineKeys: EngineKeys };
 
 /** The stored text of a JSON value at `depth` (the arrays and objects around it), with at most `levelLimit` levels. */
 export function jsonValueText(
@@ -58,30 +52,21 @@ export function jsonValueText(
   depth: number,
   levelLimit: number,
 ): Result<string, EncodeRefused> {
-  const walk: JsonWalk = { text: "", levelLimit, engineKeys: "refused", engineKeyFound: false, deepest: 0 };
+  const walk: JsonWalk = { text: "", levelLimit, engineKeys: "refused" };
   const written = writeJson(value, path, depth, walk);
 
   return written.ok ? ok(walk.text) : written;
 }
 
-/** The text of a value with its facts: whether a key that only the engine writes is in it, and its depth. */
-export type RecordedJson = { readonly text: string; readonly engineKeyFound: boolean; readonly deepest: number };
-
 /**
- * The text of a JSON value whose engine keys are written and recorded, with at most `levelLimit` levels. The other
+ * The text of a JSON value that keeps a key that only the engine writes, with at most `levelLimit` levels. The other
  * rules of `jsonValueText` hold. Pure.
  */
-export function recordedJsonText(
-  value: unknown,
-  path: string,
-  levelLimit: number,
-): Result<RecordedJson, EncodeRefused> {
-  const walk: JsonWalk = { text: "", levelLimit, engineKeys: "recorded", engineKeyFound: false, deepest: 0 };
+export function engineKeysKeptText(value: unknown, path: string, levelLimit: number): Result<string, EncodeRefused> {
+  const walk: JsonWalk = { text: "", levelLimit, engineKeys: "kept" };
   const written = writeJson(value, path, 0, walk);
 
-  return written.ok
-    ? ok(Object.freeze({ text: walk.text, engineKeyFound: walk.engineKeyFound, deepest: walk.deepest }))
-    : written;
+  return written.ok ? ok(walk.text) : written;
 }
 
 function refuse(kind: EncodeRefusalKind, path: string, detail: string): Written {
@@ -131,7 +116,6 @@ function writeJsonContainer(value: unknown, path: string, depth: number, walk: J
     return refuse("TooDeep", path, `more than ${walk.levelLimit} levels`);
   }
 
-  walk.deepest = Math.max(walk.deepest, level);
 
   return isArray(value) ? writeJsonArray(value, path, level, walk) : writeJsonObject(value, path, level, walk);
 }
@@ -184,14 +168,12 @@ function writeJsonObject(
   return append(walk, "}");
 }
 
-/** A key that only the engine writes: refused, or recorded and kept. */
+/** A key that only the engine writes: refused, or kept. */
 function engineKey(walk: JsonWalk, path: string): Written {
   switch (walk.engineKeys) {
     case "refused":
       return refuse("EngineKey", path, "a key that only the engine writes");
-    case "recorded":
-      walk.engineKeyFound = true;
-
+    case "kept":
       return WRITTEN;
     default:
       return unreachable(walk.engineKeys, "engineKey");

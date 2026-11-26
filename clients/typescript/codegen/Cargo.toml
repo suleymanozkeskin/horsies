@@ -1,0 +1,18 @@
+[package]
+name = "horsies-typescript-codegen"
+version = "0.1.0"
+edition = "2021"
+description = "Renders the TypeScript catalog modules of the horsies npm package from horsies-core"
+license = "MIT"
+repository = "https://github.com/suleymanozkeskin/horsies"
+publish = false
+
+[[bin]]
+name = "horsies-typescript-codegen"
+path = "src/main.rs"
+
+[dependencies]
+horsies-core = { path = "../../../core" }
+
+[lints]
+workspace = true
