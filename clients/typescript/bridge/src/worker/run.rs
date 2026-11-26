@@ -690,7 +690,7 @@ mod tests {
         let config = r#"{"broker": {"database_url": "postgresql://127.0.0.1:55432/horsies"}, "worker_profiles": {"cpu": {"isolated": {"kind": "isolated_children", "count": 1}, "shared_thread": {"kind": "shared_thread_children", "count": 1, "seats": 4}}}}"#;
         match preparation(config, &start(r#"{"kind": "NAMED", "name": "cpu"}"#)) {
             Ok(WorkerPreparation::SharedThreadUnavailable { profile }) => {
-                assert_eq!(profile, "cpu")
+                assert_eq!(profile, "cpu");
             }
             other => panic!("a SHARED_THREAD profile is refused, got {other:?}"),
         }
