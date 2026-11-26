@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 import { Worker } from "node:worker_threads";
 
+import { z } from "zod";
+
 import { h } from "../../../horsies/src/wire/public.ts";
 import { checkWorkflows } from "../../../horsies/src/workflow/check-cases.ts";
 import { MAX_DEFINITION_KEY_CHARS, MAX_WORKFLOW_NAME_CHARS } from "../../../horsies/src/workflow/create-checks.ts";
@@ -251,6 +253,41 @@ describe("checkWorkflows", () => {
     );
 
     assert.deepEqual(checkCodes([loop]), ["HRS-037"]);
+  });
+
+  test("child params that read back at the node checks and then do not decode in the walk: HRS-031", () => {
+    // A check of the params that is not pure: it passes up to `passes` calls, then refuses. The first run counts the
+    // calls of a walk that passes; the second refuses only the last one, the decode of the walk.
+    let calls = 0;
+    let passes = Number.POSITIVE_INFINITY;
+
+    const child = defineWorkflow(
+      {
+        name: "child",
+        definitionKey: "tests.impure_child.v1",
+        output: h.int(),
+        params: {
+          n: z
+            .number()
+            .int()
+            .refine(() => (calls += 1) <= passes),
+        },
+        checkCases: [{ n: 1 }],
+      },
+      (w) => ({ output: w.task(ping, {}, { id: "a" }) }),
+    );
+
+    const parent = defineWorkflow(
+      { name: "parent", definitionKey: "tests.impure_parent.v1", output: h.int(), params: {} },
+      (w) => ({ output: w.subWorkflow(child, { n: 2 }, { id: "child" }) }),
+    );
+
+    assert.deepEqual(checkCodes([child, parent]), []);
+
+    passes = calls - 1;
+    calls = 0;
+
+    assert.deepEqual(checkCodes([child, parent]), ["HRS-031"]);
   });
 
   test("a nesting past depth 32 with no wait: HRS-036", () => {

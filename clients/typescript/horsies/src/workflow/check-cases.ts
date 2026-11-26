@@ -136,11 +136,24 @@ function walk(
       case "walk": {
         const params = decodeParameters(child.params, node.staticInput, "worker");
 
-        if (params.ok) {
-          const built = checkedSpec(registry, child.record, Object(params.value), nodePath);
+        if (!params.ok) {
+          // The node checks read the params back, so only a check of the params that is not pure gets here. The
+          // Rust client's walk gives the same finding.
+          refusals.push(
+            refusal(
+              ErrorCode.WORKFLOW_KWARGS_NOT_SERIALIZABLE,
+              nodePath,
+              `the params of the sub-workflow node do not decode: ${refusalText(params.error)}`,
+              ["make each check of the child's params pure"],
+            ),
+          );
 
-          refusals.push(...(built.ok ? walk(registry, built.value, decision.steps, nodePath) : built.error));
+          break;
         }
+
+        const built = checkedSpec(registry, child.record, Object(params.value), nodePath);
+
+        refusals.push(...(built.ok ? walk(registry, built.value, decision.steps, nodePath) : built.error));
 
         break;
       }
