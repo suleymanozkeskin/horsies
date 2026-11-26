@@ -108,7 +108,7 @@ pub fn u32_of_number(subject: &str, value: f64) -> Result<u32, BoundaryRefusal> 
 /// Pure.
 pub fn bytes_of_hex(subject: &str, text: &str) -> Result<Vec<u8>, BoundaryRefusal> {
     let digits = text.as_bytes();
-    if digits.len() % 2 != 0 {
+    if !digits.len().is_multiple_of(2) {
         return Err(BoundaryRefusal::new(subject, HEX_RULE));
     }
     digits
