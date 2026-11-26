@@ -519,15 +519,23 @@ export interface BudgetLoad {
 
 // @public
 export interface BuildReturn {
-    readonly output: AnyNode;
+    readonly output?: AnyNode;
     // (undocumented)
     readonly successPolicy?: SuccessPolicy;
 }
 
 // @public
+export type BuildReturnFor<O extends OutputSchema> = [O] extends [never] ? BuildReturnWithoutOutput : BuildReturnOf<SchemaValue<O>>;
+
+// @public
 export type BuildReturnOf<V> = BuildReturn & {
     readonly output: NodeRef<V, string, string>;
 };
+
+// @public
+export interface BuildReturnWithoutOutput extends BuildReturn {
+    readonly output?: never;
+}
 
 // @public
 export const BUILT_IN_TASK_CODES: readonly ["UNHANDLED_EXCEPTION", "TASK_EXCEPTION", "WORKER_CRASHED", "BROKER_ERROR", "WORKER_RESOLUTION_ERROR", "WORKER_SERIALIZATION_ERROR", "RESULT_DESERIALIZATION_ERROR", "WORKFLOW_ENQUEUE_FAILED", "SUBWORKFLOW_LOAD_FAILED", "WORKFLOW_RECOVERY_LIMIT_REACHED", "SUBWORKFLOW_DEPTH_LIMIT_REACHED", "TASK_BLOCKED_LOOP", "NEIGHBOUR_BLOCKED_LOOP", "WORKFLOW_START_INCOMPLETE", "RETURN_TYPE_MISMATCH", "WORKFLOW_CTX_MISSING_ID", "NO_TYPE_AVAILABLE", "WAIT_TIMEOUT", "TASK_NOT_FOUND", "WORKFLOW_NOT_FOUND", "RESULT_NOT_AVAILABLE", "RESULT_NOT_READY", "ASYNC_CONTEXT", "INVALID_INPUT", "WAIT_INSIDE_TASK", "TASK_CANCELLED", "TASK_EXPIRED", "TASK_TIMEOUT", "WORKFLOW_PAUSED", "WORKFLOW_EXPIRED", "WORKFLOW_FAILED", "WORKFLOW_CANCELLED", "UPSTREAM_SKIPPED", "SUBWORKFLOW_FAILED", "WORKFLOW_SUCCESS_CASE_NOT_MET", "WORKFLOW_OUTPUT_SKIPPED"];
@@ -1260,7 +1268,7 @@ export type DefaultJoin = {
 export function defineTask<const P extends ParameterSchemas, O extends OutputSchema, const E extends string = string, const X extends Execution = "ISOLATED", const C extends boolean = false>(definition: TaskDefinition<P, O, E, X, C> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X, ContextUseOf<C>>;
 
 // @public
-export function defineWorkflow<const P extends ParameterSchemas, O extends OutputSchema, const R extends BuildReturnOf<SchemaValue<O>>>(definition: WorkflowDefinition<P, O> & NoInfer<CheckCases<P>>, build: WorkflowBuild<P, R>): WorkflowContract<P, R>;
+export function defineWorkflow<const P extends ParameterSchemas, O extends OutputSchema = never, const R extends BuildReturnFor<O> = BuildReturnFor<O>>(definition: WorkflowDefinition<P, O> & NoInfer<CheckCases<P>>, build: WorkflowBuild<P, R>): WorkflowContract<P, R>;
 
 // @public
 export interface DownSlot {
@@ -2381,6 +2389,11 @@ export type NoSpanIds = {
 };
 
 // @public
+export type NoWorkflowOutput = {
+    readonly kind: "noWorkflowOutput";
+};
+
+// @public
 export type ObjectSent<M extends WireMembers> = keyof M extends never ? EmptyObject : Flat<{
     -readonly [K in keyof M as PresenceOf<M[K]> extends "required" ? K : never]: SentOf<M[K]>;
 } & {
@@ -2456,6 +2469,11 @@ export interface OutcomeDecodeError {
     // (undocumented)
     readonly message: string;
 }
+
+// @public
+export type OutputNode<R extends BuildReturn> = R extends {
+    readonly output: infer N extends AnyNode;
+} ? N : R extends BuildReturnWithoutOutput ? never : NonNullable<R["output"]>;
 
 // @public
 export type OutputSchema = RequiredWire | ZodSchemaLike;
@@ -3359,7 +3377,7 @@ export type RetryPolicy<E extends string> = {
 };
 
 // @public
-export type ReturnedNodes<R extends BuildReturn> = R["output"] | (R extends {
+export type ReturnedNodes<R extends BuildReturn> = OutputNode<R> | (R extends {
     readonly successPolicy: infer S;
 } ? PolicyNodes<S> : never);
 
@@ -3916,6 +3934,11 @@ export type SubWorkflowFailure = {
 export type SubWorkflowNodeOptions<Id extends string, J extends JoinType> = NodeOptionsBase<Id, J>;
 
 // @public
+export type SubWorkflowOutput<R extends BuildReturn> = R extends {
+    readonly output: AnyNode;
+} ? NodeOutput<R["output"]> : R extends BuildReturnWithoutOutput ? NoWorkflowOutput : NodeOutput<OutputNode<R>> | NoWorkflowOutput;
+
+// @public
 export type SubWorkflowSummary = {
     readonly status: WorkflowStatus;
     readonly output: JsonValue;
@@ -4338,7 +4361,7 @@ export type TaskOutcome<O, E extends string = string> = {
 };
 
 // @public
-export type TaskOutcomeWire<C extends AnyTaskContract | AnyWorkflowContract> = Wire<C extends AnyTaskContract ? TaskOutcome<SchemaValue<C[typeof contractTypes]["output"]>, C[typeof contractTypes]["code"]> : C extends AnyWorkflowContract ? TaskOutcome<WorkflowOutput<C[typeof workflowTypes]["build"]>, string> : never, never, "required", "taskOutcome">;
+export type TaskOutcomeWire<C extends AnyTaskContract | AnyWorkflowContract> = Wire<C extends AnyTaskContract ? TaskOutcome<SchemaValue<C[typeof contractTypes]["output"]>, C[typeof contractTypes]["code"]> : C extends AnyWorkflowContract ? TaskOutcome<SubWorkflowOutput<C[typeof workflowTypes]["build"]>, string> : never, never, "required", "taskOutcome">;
 
 // @public (undocumented)
 export interface TaskRecovered {
@@ -4962,7 +4985,7 @@ export type WorkflowBuild<P extends ParameterSchemas, R extends BuildReturn> = (
 
 // @public
 export interface WorkflowBuilder {
-    subWorkflow<P extends ParameterSchemas, R extends BuildReturn, const Id extends string, const J extends JoinType = DefaultJoin>(workflow: WorkflowContract<P, R>, parameters: NoInfer<NodeInput<P, J>>, options: SubWorkflowNodeOptions<Id, J>): NodeRef<WorkflowOutput<R>, string, Id>;
+    subWorkflow<P extends ParameterSchemas, R extends BuildReturn, const Id extends string, const J extends JoinType = DefaultJoin>(workflow: WorkflowContract<P, R>, parameters: NoInfer<NodeInput<P, J>>, options: SubWorkflowNodeOptions<Id, J>): NodeRef<SubWorkflowOutput<R>, string, Id>;
     task<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse, const Id extends string, const J extends JoinType = DefaultJoin>(contract: TaskContract<P, O, E, X, C>, input: NoInfer<NodeInput<P, J>>, options: TaskNodeOptions<Id, J, C>): NodeRef<SchemaValue<O>, E, Id>;
 }
 
@@ -4970,7 +4993,7 @@ export interface WorkflowBuilder {
 export interface WorkflowContext {
     hasResult(nodeId: string): boolean;
     hasSummary(nodeId: string): boolean;
-    outputFor<P extends ParameterSchemas, R extends BuildReturn>(nodeId: string, workflow: WorkflowContract<P, R>): Result<Recorded<WorkflowOutput<R>>, ContextReadError>;
+    outputFor<P extends ParameterSchemas, R extends BuildReturn>(nodeId: string, workflow: WorkflowContract<P, R>): Result<Recorded<SubWorkflowOutput<R>>, ContextReadError>;
     resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse>(nodeId: string, contract: TaskContract<P, O, E, X, C>): Result<TaskOutcome<SchemaValue<O>, E>, ContextReadError>;
     summaryFor(nodeId: string): Result<SubWorkflowSummary, ContextReadError>;
     readonly taskIndex: number;
@@ -4997,7 +5020,7 @@ export interface WorkflowDefinition<P extends ParameterSchemas, O extends Output
     readonly name: string;
     // (undocumented)
     readonly onError?: OnError;
-    readonly outputType: O;
+    readonly outputType?: [O] extends [never] ? OutputSchema : O;
     readonly parameters: P;
 }
 
@@ -5034,7 +5057,7 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
 // @public
 export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandleBase<R> {
     resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse>(nodeId: string, contract: TaskContract<P, O, E, X, C>): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
-    resultFor<P extends ParameterSchemas, C extends BuildReturn>(nodeId: string, workflow: WorkflowContract<P, C>): Promise<Result<TaskOutcome<WorkflowOutput<C>, string>, WorkflowReadError>>;
+    resultFor<P extends ParameterSchemas, C extends BuildReturn>(nodeId: string, workflow: WorkflowContract<P, C>): Promise<Result<TaskOutcome<SubWorkflowOutput<C>, string>, WorkflowReadError>>;
 }
 
 // @public
@@ -5094,7 +5117,9 @@ export type WorkflowNodeRead = {
 };
 
 // @public
-export type WorkflowOutput<R extends BuildReturn> = NodeOutput<R["output"]>;
+export type WorkflowOutput<R extends BuildReturn> = R extends {
+    readonly output: AnyNode;
+} ? NodeOutput<R["output"]> : R extends BuildReturnWithoutOutput ? WorkflowTerminalResults : NodeOutput<OutputNode<R>> | WorkflowTerminalResults;
 
 // @public (undocumented)
 export type WorkflowPlace = "NOT_IN_WORKFLOW" | "WORKFLOW_NOT_KNOWN";
@@ -5339,6 +5364,12 @@ export const WorkflowTaskStatus: {
 
 // @public (undocumented)
 export type WorkflowTaskStatus = (typeof WorkflowTaskStatus)[keyof typeof WorkflowTaskStatus];
+
+// @public
+export type WorkflowTerminalResults = {
+    readonly kind: "terminalResults";
+    readonly byNodeId: ReadonlyMap<string, TaskOutcome<JsonValue, string>>;
+};
 
 // @public
 export type WorkflowTypes<P extends ParameterSchemas, R extends BuildReturn> = {

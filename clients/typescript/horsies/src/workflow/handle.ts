@@ -4,7 +4,8 @@
 //
 // Every stored text that a read gives passed the core's strict JSON check in the addon; the codec reader then decodes
 // it with the types of the handle. `get` reads open custom codes (a workflow holds the codes of many tasks); `resultFor`
-// reads one node with that node's contract.
+// reads one node with that node's contract. `get` of a workflow with no `outputType` reads the outputless envelope as
+// the outcome of each terminal node (`terminal-results.ts`).
 
 import { WorkflowTaskStatus } from "../_catalog/status.ts";
 import { ContractCode, OperationalErrorCode, RetrievalCode } from "../_catalog/task_codes.ts";
@@ -12,9 +13,9 @@ import type { HandleCoreError } from "../_catalog/workflow_handle_errors.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { readStoredError } from "../codec/envelope.ts";
 import type { JsonValue } from "../codec/json-value.ts";
-import { readTree } from "../codec/number-text.ts";
-import { decodeEnvelope } from "../codec/reader.ts";
-import { refusalText } from "../codec/refusal.ts";
+import { readTree, type TreeValue } from "../codec/number-text.ts";
+import { decodeEnvelope, decodeEnvelopeNode } from "../codec/reader.ts";
+import { refusalText, ROOT_PATH } from "../codec/refusal.ts";
 import { readSubWorkflow } from "../codec/sub-workflow.ts";
 import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { TaskContract, ContextUse } from "../contract/define-task.ts";
@@ -40,8 +41,17 @@ import {
 } from "./handle-error.ts";
 import { isWorkflowContract, type WorkflowContract } from "./define.ts";
 import type { NodeTarget } from "./node-checks.ts";
-import type { BuildReturn, NodeById, NodeCode, NodeOutput, ReturnedNodes, WorkflowOutput } from "./node.ts";
-import { nodeTargetForm, workflowOutputForm, type WorkflowRegistry } from "./registry.ts";
+import type {
+  BuildReturn,
+  NodeById,
+  NodeCode,
+  NodeOutput,
+  ReturnedNodes,
+  SubWorkflowOutput,
+  WorkflowOutput,
+} from "./node.ts";
+import { nodeTargetForm, type WorkflowRegistry, type WorkflowResultForm, workflowResultForm } from "./registry.ts";
+import { isOutputlessEnvelope, terminalResultsOutcome } from "./terminal-results.ts";
 
 /** The stored result of one node read with no type: its outcome with open codes, or why it does not read. */
 export type NodeResult =
@@ -69,7 +79,10 @@ export interface WorkflowTaskInfo {
 export interface WorkflowHandleBase<R extends BuildReturn> {
   readonly workflowId: WorkflowId;
   status(): Promise<Result<WorkflowStatus, WorkflowHandleError>>;
-  /** The workflow's outcome, waiting while it runs, up to `waitMs`. The custom code is open. */
+  /**
+   * The workflow's outcome, waiting while it runs, up to `waitMs`. The custom code is open. The success value is the
+   * output node's value, or `WorkflowTerminalResults` for a workflow with no `outputType`.
+   */
   get(options?: GetOptions): Promise<Result<TaskOutcome<WorkflowOutput<R>, string>, WorkflowReadError>>;
   /** The stored result of each node that has one, by node id. */
   results(): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>>;
@@ -98,8 +111,8 @@ export interface WorkflowHandle<R extends BuildReturn> extends WorkflowHandleBas
 
 /**
  * The handle of a stored workflow id: it has no build, so `resultFor` takes what the node runs: a task contract, or
- * the workflow contract of a sub-workflow node (read with the child's declared output and open custom codes; the app
- * lists the child, else `noTypeAvailable`).
+ * the workflow contract of a sub-workflow node (read with the child's declared output, or as `NoWorkflowOutput` for a
+ * child with no `outputType`, and open custom codes; the app lists the child, else `noTypeAvailable`).
  */
 export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandleBase<R> {
   /** The outcome of the task node `nodeId`, read with the output type and the codes of `contract`. Not a wait. */
@@ -114,13 +127,13 @@ export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandl
     contract: TaskContract<P, O, E, X, C>,
   ): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
   /**
-   * The outcome of the sub-workflow node `nodeId`, read with the declared output of `workflow`, its child. Not a
-   * wait.
+   * The outcome of the sub-workflow node `nodeId`, read with the declared output of `workflow`, its child
+   * (`NoWorkflowOutput` for a child with no `outputType`). Not a wait.
    */
   resultFor<P extends ParameterSchemas, C extends BuildReturn>(
     nodeId: string,
     workflow: WorkflowContract<P, C>,
-  ): Promise<Result<TaskOutcome<WorkflowOutput<C>, string>, WorkflowReadError>>;
+  ): Promise<Result<TaskOutcome<SubWorkflowOutput<C>, string>, WorkflowReadError>>;
 }
 
 /** What a handle reads with: the core, the app's workflows, the workflow contract, and the nodes of its build. */
@@ -183,7 +196,7 @@ function handleBase<R extends BuildReturn>(facts: HandleFacts): WorkflowHandleBa
           return unreachable(read, "status");
       }
     },
-    // SAFETY: the reader decodes with the output form of the workflow, whose value type is `WorkflowOutput<R>`.
+    // SAFETY: the reader decodes with the result form of the workflow, whose value type is `WorkflowOutput<R>`.
     get: async (options: GetOptions = {}) => (await workflowOutcome(facts, options)) as never,
     results: async () => nodeResults(facts),
     nodes: async () => nodeInfos(facts),
@@ -230,15 +243,16 @@ async function workflowOutcome(facts: HandleFacts, options: GetOptions): Promise
     return wait;
   }
 
-  const output = workflowOutputForm(facts.workflow, facts.registry);
+  const result = workflowResultForm(facts.workflow, facts.registry);
 
-  switch (output.kind) {
+  switch (result.kind) {
     case "workflowNotListed":
-      return err(notListedError(output.workflowName));
+      return err(notListedError(result.workflowName));
     case "form":
+    case "terminalResults":
       break;
     default:
-      return unreachable(output, "workflowOutcome");
+      return unreachable(result, "workflowOutcome");
   }
 
   if ((await facts.core.processRole()) === "RUNS_TASK_BODIES") {
@@ -247,7 +261,7 @@ async function workflowOutcome(facts: HandleFacts, options: GetOptions): Promise
 
   const read = await facts.core.waitEnd(facts.workflowId, wait.value);
 
-  return endOutcome(read, output.form);
+  return endOutcome(facts.workflowId, read, result);
 }
 
 /** The outcome of one node of the build: the read with its form, or `noTypeAvailable` at once, with no read. */
@@ -281,11 +295,14 @@ function resultNotReady(): WorkflowReadError {
   return Object.freeze({ kind: "resultNotReady", code: RetrievalCode.RESULT_NOT_READY });
 }
 
-/** The outcome of what a wait found, read with the output form `form`. Pure. */
-export function endOutcome(read: WorkflowWaitRead, form: ReadForm): ReadOutcome {
+/** How `get` reads the stored result of a listed workflow: with its declared output form, or as terminal results. */
+export type ResultReading = Exclude<WorkflowResultForm, { readonly kind: "workflowNotListed" }>;
+
+/** The outcome of what a wait for the workflow `workflowId` found, read as `reading` says. Pure. */
+export function endOutcome(workflowId: string, read: WorkflowWaitRead, reading: ResultReading): ReadOutcome {
   switch (read.kind) {
     case "completed":
-      return completedOutcome(read.result, form);
+      return completedOutcome(workflowId, read.result, reading);
     case "endedWithError":
       return erroredOutcome(read.status, read.error);
     case "paused":
@@ -301,17 +318,51 @@ export function endOutcome(read: WorkflowWaitRead, form: ReadForm): ReadOutcome 
   }
 }
 
-function completedOutcome(result: StoredTextFact, form: ReadForm): ReadOutcome {
+function completedOutcome(workflowId: string, result: StoredTextFact, reading: ResultReading): ReadOutcome {
   switch (result.kind) {
     case "none":
       return unreadable("the workflow is COMPLETED and its stored result is NULL");
     case "refused":
       return unreadable(result.cause);
     case "checked":
-      return envelopeOutcome(result.text, form, "open");
+      return completedTreeOutcome(workflowId, readTree(jsonTextCheckedByCore(result.text)), reading);
     default:
       return unreachable(result, "completedOutcome");
   }
+}
+
+/**
+ * The outcome of the stored result tree of a COMPLETED workflow. The outputless marker of the stored envelope and the
+ * reading must agree (Python and Rust fail a mismatch closed): a workflow with no `outputType` reads the outputless
+ * envelope, any other its declared output. A mismatch is `resultDeserializationError`. Pure.
+ */
+function completedTreeOutcome(workflowId: string, tree: TreeValue, reading: ResultReading): ReadOutcome {
+  const storedOutputless = isOutputlessEnvelope(tree);
+
+  switch (reading.kind) {
+    case "form":
+      return storedOutputless ? envelopeMismatch(workflowId, true, false) : envelopeOutcome(tree, reading.form, "open");
+    case "terminalResults": {
+      if (!storedOutputless) {
+        return envelopeMismatch(workflowId, false, true);
+      }
+
+      const outcome = terminalResultsOutcome(workflowId, tree);
+
+      return outcome.ok ? outcome : unreadable(outcome.error.cause);
+    }
+
+    default:
+      return unreachable(reading, "completedTreeOutcome");
+  }
+}
+
+/** The read error of a stored envelope whose outputless marker the reading does not match (Python's text). Pure. */
+function envelopeMismatch(workflowId: string, storedOutputless: boolean, handleOutputless: boolean): ReadOutcome {
+  return unreadable(
+    `Workflow ${workflowId} outputless/typed envelope mismatch: wire_outputless=${String(storedOutputless)}, ` +
+      `handle_outputless=${String(handleOutputless)}; the workflow definition changed between the start and the read`,
+  );
 }
 
 function erroredOutcome(status: "FAILED" | "CANCELLED" | "EXPIRED", error: StoredTextFact): ReadOutcome {
@@ -367,13 +418,13 @@ function builtInFailure(
 /** Codes of the reader: open (every custom code), or the declared codes of the read form. */
 type CodeRule = "open" | "declared";
 
-/** The outcome of a stored envelope under a read form. Pure. */
-function envelopeOutcome(text: string, form: ReadForm, codes: CodeRule): ReadOutcome {
+/** The outcome of the tree of a stored envelope under a read form. Pure. */
+function envelopeOutcome(tree: TreeValue, form: ReadForm, codes: CodeRule): ReadOutcome {
   switch (form.kind) {
     case "unreadable":
       return unreadable(form.cause);
     case "readable": {
-      const decoded = decodeEnvelope(form.output, jsonTextCheckedByCore(text), "worker");
+      const decoded = decodeEnvelopeNode(form.output, tree, ROOT_PATH, "worker");
 
       if (!decoded.ok) {
         return unreadable(refusalText(decoded.error));
@@ -419,7 +470,9 @@ async function nodeOutcome(facts: HandleFacts, nodeId: string, form: ReadForm): 
 }
 
 function checkedOutcome(result: CheckedText, form: ReadForm): ReadOutcome {
-  return result.kind === "checked" ? envelopeOutcome(result.text, form, "declared") : unreadable(result.cause);
+  return result.kind === "checked"
+    ? envelopeOutcome(readTree(jsonTextCheckedByCore(result.text)), form, "declared")
+    : unreadable(result.cause);
 }
 
 function unreadable(cause: string): ReadOutcome {

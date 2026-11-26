@@ -22,7 +22,7 @@ import { err, ok, type Result } from "../wire/result.ts";
 import type { SubWorkflowSummary, TaskOutcome } from "../wire/task-error.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { WorkflowContract } from "./define.ts";
-import type { BuildReturn, WorkflowOutput } from "./node.ts";
+import type { BuildReturn, SubWorkflowOutput } from "./node.ts";
 import { declaredOutputForm } from "./registry.ts";
 
 /** Why a context read gave no value. */
@@ -61,12 +61,12 @@ export interface WorkflowContext {
   summaryFor(nodeId: string): Result<SubWorkflowSummary, ContextReadError>;
   /**
    * The output of the context sub-workflow node `nodeId`, read with the declared output of `workflow`, its child:
-   * `notRecorded` when the child stored no output (it did not complete with an ok value).
+   * `notRecorded` when the child stored no output (it did not complete with an ok value, or it has no output node).
    */
   outputFor<P extends ParameterSchemas, R extends BuildReturn>(
     nodeId: string,
     workflow: WorkflowContract<P, R>,
-  ): Result<Recorded<WorkflowOutput<R>>, ContextReadError>;
+  ): Result<Recorded<SubWorkflowOutput<R>>, ContextReadError>;
   /** Whether the context holds the summary of the node `nodeId`. */
   hasSummary(nodeId: string): boolean;
 }
@@ -195,7 +195,7 @@ function contextValue(
     resultFor: resultFor as WorkflowContext["resultFor"],
     hasResult: (nodeId: string) => Object.hasOwn(results, nodeId),
     summaryFor,
-    // SAFETY: the reader decodes with the declared output of `workflow`, whose value type is `WorkflowOutput<R>`.
+    // SAFETY: the reader decodes with the declared output of `workflow`, whose value type is `SubWorkflowOutput<R>`.
     outputFor: outputFor as WorkflowContext["outputFor"],
     hasSummary: (nodeId: string) => summaries.has(nodeId),
   });

@@ -14,18 +14,25 @@ import { isTaskOutcomeKind } from "../wire/task-outcome.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { SpecAppView, WorkflowLookup } from "./checks.ts";
-import { type WorkflowRecord, workflowRecord } from "./define.ts";
+import { type OutputDeclaration, type WorkflowRecord, workflowRecord } from "./define.ts";
 import type { NodeTarget } from "./node-checks.ts";
 
 /** The deepest child workflow (the core's `MAX_SUBWORKFLOW_DEPTH`). */
 export const MAX_SUBWORKFLOW_DEPTH = 32;
 
-/** A workflow of the app's list: its contract, its record, the kind tree of its params and its declared output. */
+/**
+ * A workflow of the app's list: its contract, its record, the kind tree of its params and the kind of the success
+ * value of a sub-workflow node of it.
+ */
 export type ListedWorkflow = {
   readonly contract: object;
   readonly record: WorkflowRecord;
   readonly params: ObjectKind;
-  /** The declared output kind: the read form of every result of the workflow. */
+  /**
+   * The kind of the success value of a sub-workflow node of the workflow: the declared output kind, or the kind of
+   * `NoWorkflowOutput` for a workflow with no `outputType`. A workflow with an `outputType` reads its own result with
+   * it too.
+   */
   readonly output: Kind;
 };
 
@@ -108,11 +115,53 @@ export type OutputReadForm =
   | { readonly kind: "workflowNotListed"; readonly workflowName: string };
 
 /**
- * The read form of a workflow's output: the output kind that the workflow declares (`defineWorkflow({ output })`),
- * with open custom codes. The checks refuse every build whose output node does not fit it (`HRS-025`), so the declared
- * kind is the one fact; no build runs. A workflow that the app does not list is `workflowNotListed`. Pure.
+ * How `get` reads a workflow's stored result: with the declared output form, as the outcome of each terminal node (a
+ * workflow with no `outputType`), or not at all (a workflow that the app does not list has no form).
  */
-export function workflowOutputForm(workflow: object, registry: WorkflowRegistry): OutputReadForm {
+export type WorkflowResultForm =
+  | { readonly kind: "form"; readonly form: ReadForm }
+  | { readonly kind: "terminalResults" }
+  | { readonly kind: "workflowNotListed"; readonly workflowName: string };
+
+const TERMINAL_RESULTS_FORM: WorkflowResultForm = Object.freeze({ kind: "terminalResults" });
+
+/**
+ * The read form of a workflow's stored result: the output kind that the workflow declares (`outputType`), with open
+ * custom codes, or `terminalResults` for a workflow with no `outputType`. The checks refuse every build whose output
+ * node does not fit the declaration (`HRS-025`), so the declaration is the one fact; no build runs. A workflow that the
+ * app does not list is `workflowNotListed`. Pure.
+ */
+export function workflowResultForm(workflow: object, registry: WorkflowRegistry): WorkflowResultForm {
+  const node = subWorkflowNodeForm(workflow, registry);
+
+  switch (node.kind) {
+    case "workflowNotListed":
+      return node;
+    case "form":
+      return resultFormOf(workflowRecord(workflow).outputDeclaration, node.form);
+    default:
+      return unreachable(node, "workflowResultForm");
+  }
+}
+
+/** The result form of a listed workflow: its node form when it declares an output, else `terminalResults`. Pure. */
+function resultFormOf(declaration: OutputDeclaration, form: ReadForm): WorkflowResultForm {
+  switch (declaration.kind) {
+    case "declared":
+      return Object.freeze({ kind: "form", form });
+    case "notDeclared":
+      return TERMINAL_RESULTS_FORM;
+    default:
+      return unreachable(declaration, "resultFormOf");
+  }
+}
+
+/**
+ * The read form of the success value of a sub-workflow node of `workflow`: the declared output kind, or the kind of
+ * `NoWorkflowOutput` for a workflow with no `outputType`, with open custom codes. A workflow that the app does not
+ * list is `workflowNotListed`. Pure.
+ */
+function subWorkflowNodeForm(workflow: object, registry: WorkflowRegistry): OutputReadForm {
   const listed = registry.byContract(workflow);
 
   switch (listed.kind) {
@@ -124,13 +173,14 @@ export function workflowOutputForm(workflow: object, registry: WorkflowRegistry)
     case "notListed":
       return Object.freeze({ kind: "workflowNotListed", workflowName: workflowRecord(workflow).name });
     default:
-      return unreachable(listed, "workflowOutputForm");
+      return unreachable(listed, "subWorkflowNodeForm");
   }
 }
 
 /**
- * The read form of a workflow's declared output from its own contract, with open custom codes: the app need not list
- * the workflow. Effects: compiles the params contract at its first use (see `compileContract`).
+ * The read form of the success value of a sub-workflow node of `workflow` from its own contract (its declared output,
+ * or `NoWorkflowOutput`), with open custom codes: the app need not list the workflow. Effects: compiles the params
+ * contract at its first use (see `compileContract`).
  */
 export function declaredOutputForm(workflow: object): ReadForm {
   const compiled = compileContract(workflowRecord(workflow).paramsContract);
@@ -144,13 +194,16 @@ export function declaredOutputForm(workflow: object): ReadForm {
   return Object.freeze({ kind: "unreadable", cause: `the workflow contract is refused: ${causes}` });
 }
 
-/** The read form of what a node runs: its task's contract, or its child's declared output with open codes. */
+/**
+ * The read form of what a node runs: its task's contract, or the success value of a sub-workflow node of its child
+ * (the child's declared output, or `NoWorkflowOutput`) with open codes.
+ */
 export function nodeTargetForm(target: NodeTarget, registry: WorkflowRegistry): OutputReadForm {
   switch (target.kind) {
     case "task":
       return Object.freeze({ kind: "form", form: readFormOf(target.contract) });
     case "subWorkflow":
-      return workflowOutputForm(target.workflow, registry);
+      return subWorkflowNodeForm(target.workflow, registry);
     default:
       return unreachable(target, "nodeTargetForm");
   }
