@@ -7,6 +7,7 @@ import { describe, test } from "node:test";
 import type { CallerStepRefusal } from "../../../horsies/src/native/facades/rerun.ts";
 import { NO_ACTIVE_CARRIER, rerunAreaOn } from "../../../horsies/src/rerun/app-area.ts";
 import type { RerunHost } from "../../../horsies/src/rerun/app-area.ts";
+import type { CallerConnectionState } from "../../../horsies/src/rerun/caller.ts";
 import type { CallerRerunError } from "../../../horsies/src/rerun/errors.ts";
 import type { RerunOutcome } from "../../../horsies/src/rerun/types.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
@@ -166,6 +167,64 @@ describe("app.rerunIn errors", () => {
     const { answer, ran } = await rerunIn(ENQUEUED_ANSWERS, [{ kind: "throw", thrown }]);
 
     assert.equal(!answer.ok && answer.error.code === "DRIVER_FAILED" && answer.error.driverError, thrown);
+    assert.deepEqual(ran, ["rerun_source_read"]);
+  });
+
+  test("NO_OPEN_TRANSACTION names the statement that did not run and the state, and runs no write", async () => {
+    const { answer, ran } = await rerunIn(ENQUEUED_ANSWERS, [
+      { kind: "result", result: { ok: false, error: { kind: "noOpenTransaction", state: { kind: "idle" } } } },
+    ]);
+
+    assert.deepEqual(answer, {
+      ok: false,
+      error: {
+        code: "NO_OPEN_TRANSACTION",
+        retryable: false,
+        message: "statement rerun_source_read did not run: the caller's connection has no open transaction; run BEGIN first",
+        statement: "rerun_source_read",
+        state: { kind: "idle" },
+      },
+    });
+    assert.deepEqual(ran, ["rerun_source_read"]);
+  });
+
+  test("NO_OPEN_TRANSACTION tells the caller what to do in each state", async () => {
+    const causes: [CallerConnectionState, string][] = [
+      [{ kind: "failedTransaction" }, "a statement of the caller's transaction failed; roll it back"],
+      [{ kind: "notConnected" }, "the caller's client is not connected"],
+      [{ kind: "unrecognized", status: "X" }, `the caller's driver gives the transaction status "X", not an open transaction`],
+    ];
+
+    for (const [state, cause] of causes) {
+      const { answer } = await rerunIn(ENQUEUED_ANSWERS, [
+        rowOf("t"),
+        { kind: "result", result: { ok: false, error: { kind: "noOpenTransaction", state } } },
+      ]);
+
+      assert.ok(!answer.ok && answer.error.code === "NO_OPEN_TRANSACTION", state.kind);
+      assert.equal(answer.error.message, `statement rerun_enqueue did not run: ${cause}`);
+      assert.deepEqual(answer.error.state, state);
+    }
+  });
+
+  test("RESULT_NOT_TEXT names the statement, the column and its format", async () => {
+    const { answer, ran } = await rerunIn(ENQUEUED_ANSWERS, [
+      { kind: "result", result: { ok: false, error: { kind: "resultNotText", column: "class_registered", format: "binary" } } },
+    ]);
+
+    assert.deepEqual(answer, {
+      ok: false,
+      error: {
+        code: "RESULT_NOT_TEXT",
+        retryable: false,
+        message:
+          "statement rerun_source_read gave the column class_registered in binary format; the rerun reads text format " +
+          "(a pg client with binary: true gives binary format)",
+        statement: "rerun_source_read",
+        column: "class_registered",
+        format: "binary",
+      },
+    });
     assert.deepEqual(ran, ["rerun_source_read"]);
   });
 

@@ -300,7 +300,7 @@ mod tests {
                 members += 1;
             }
         }
-        assert_eq!(members, 189);
+        assert_eq!(members, 204);
         let retrieval = <RetrievalCode as CodeEnum>::CATALOG;
         let async_context = retrieval
             .member_named("ASYNC_CONTEXT")

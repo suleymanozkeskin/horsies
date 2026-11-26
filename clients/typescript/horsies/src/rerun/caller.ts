@@ -41,11 +41,32 @@ export interface CallerStatement {
 
 /**
  * The one row of a caller statement: one cell per result column, in column order, each the text that
- * the server sends in text format (`bytea_output = hex`, `DateStyle` ISO), or `null` for SQL NULL.
+ * the server sends in text format (`bytea` in its hex or its escape output, `timestamptz` under
+ * `DateStyle` ISO), or `null` for SQL NULL.
  */
 export interface CallerRow {
   readonly cells: readonly SqlText[];
 }
+
+/** The state of the caller's connection when it has no open transaction for a statement. */
+export type CallerConnectionState =
+  | {
+      /** No transaction is open: no `BEGIN` ran, or the transaction ended. */
+      readonly kind: "idle";
+    }
+  | {
+      /** A statement of the transaction failed: the server runs only `ROLLBACK` in it. */
+      readonly kind: "failedTransaction";
+    }
+  | {
+      /** The client has not connected. */
+      readonly kind: "notConnected";
+    }
+  | {
+      /** The driver gives a transaction status that is not one of the protocol's: `status`. */
+      readonly kind: "unrecognized";
+      readonly status: string;
+    };
 
 /** Why a transaction could not give the row of a statement. */
 export type CallerQueryFailure =
@@ -53,6 +74,23 @@ export type CallerQueryFailure =
       /** The driver refused or failed the statement. The caller's transaction is aborted. */
       readonly kind: "driverFailed";
       readonly driverError: Error;
+    }
+  | {
+      /**
+       * The connection has no open transaction, so the statement did not run: without a transaction
+       * it would commit by itself.
+       */
+      readonly kind: "noOpenTransaction";
+      readonly state: CallerConnectionState;
+    }
+  | {
+      /**
+       * The driver gave the result column `column` in the format `format`, not in text format, for
+       * example a `pg` client with `binary: true`. The statement ran.
+       */
+      readonly kind: "resultNotText";
+      readonly column: string;
+      readonly format: string;
     }
   | {
       /** The result is not one row in text form. */

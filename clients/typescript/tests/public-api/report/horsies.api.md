@@ -259,16 +259,35 @@ export interface CallerColumn {
 }
 
 // @public
+export type CallerConnectionState = {
+    readonly kind: "idle";
+} | {
+    readonly kind: "failedTransaction";
+} | {
+    readonly kind: "notConnected";
+} | {
+    readonly kind: "unrecognized";
+    readonly status: string;
+};
+
+// @public
 export type CallerQueryFailure = {
     readonly kind: "driverFailed";
     readonly driverError: Error;
+} | {
+    readonly kind: "noOpenTransaction";
+    readonly state: CallerConnectionState;
+} | {
+    readonly kind: "resultNotText";
+    readonly column: string;
+    readonly format: string;
 } | {
     readonly kind: "rowRefused";
     readonly detail: string;
 };
 
 // @public
-export type CallerRerunError = RerunDriverFailed | RerunRequestRefused | RerunStepRefused;
+export type CallerRerunError = RerunDriverFailed | RerunNoOpenTransaction | RerunResultNotText | RerunRequestRefused | RerunStepRefused;
 
 // @public
 export interface CallerRow {
@@ -672,22 +691,10 @@ export type DecodeRefusalKind =
 export type DecodeRefused = ValueRefused | EnvelopeRefused;
 
 // @public
-export const DEFAULT_BREAKDOWN_LIMIT = 50;
-
-// @public
 export const DEFAULT_PING_TIMEOUT_MS = 2000;
 
 // @public (undocumented)
 export const DEFAULT_RETENTION_CLASS_KEY = "standard_30d";
-
-// @public
-export const DEFAULT_TASK_PAGE_LIMIT = 50;
-
-// @public
-export const DEFAULT_TASK_PAGE_OFFSET = 0;
-
-// @public
-export const DEFAULT_WORKFLOW_RUNS_LIMIT = 30;
 
 // @public
 export function defineTask<const P extends ParameterSchemas, O extends OutputSchema, const E extends string = string, const X extends ExecutionClass = "ISOLATED">(definition: TaskDefinition<P, O, E, X> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X>;
@@ -1078,7 +1085,7 @@ export type HasRequiredUpstreamOutcome<P extends ParameterSchemas> = true extend
 }[keyof P] ? true : false;
 
 // @public
-export type HealthQueryError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | QueryRefused;
+export type HealthInputError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED">;
 
 // @public
 export type HealthReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED">;
@@ -1342,6 +1349,18 @@ export class ManifestRefused extends CoreDefect {
     readonly name = "ManifestRefused";
 }
 
+// @public (undocumented)
+export const MAX_BREAKDOWN_LIMIT = 500;
+
+// @public (undocumented)
+export const MAX_TASK_PAGE_LIMIT = 200;
+
+// @public (undocumented)
+export const MAX_TASK_PAGE_REACH = 500;
+
+// @public (undocumented)
+export const MAX_WORKFLOW_RUNS_LIMIT = 200;
+
 // @public
 export type Measure = {
     readonly kind: "measured";
@@ -1382,13 +1401,13 @@ export interface Monitoring {
     // (undocumented)
     listTasks(query?: TaskListQuery): Promise<Result<TaskListPage, MonitoringReadError>>;
     // (undocumented)
-    schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringReadError>>;
+    schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryCoreError>>;
     // (undocumented)
-    staleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthQueryError>>;
+    staleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthInputError>>;
     // (undocumented)
     taskBreakdown(query: TaskBreakdownQuery): Promise<Result<Breakdown, MonitoringReadError>>;
     // (undocumented)
-    taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringReadError>>;
+    taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringQueryCoreError>>;
     // (undocumented)
     taskFacets(query?: TaskFacetsQuery): Promise<Result<Facets, MonitoringReadError>>;
     // (undocumented)
@@ -1396,18 +1415,21 @@ export interface Monitoring {
     // (undocumented)
     worker(workerId: string): Promise<Result<WorkerStateRead, WorkerReadError>>;
     // (undocumented)
-    workerHistory(workerId: string, limit?: WorkerHistoryLimit): Promise<Result<readonly WorkerStateSnapshot[], HealthQueryError>>;
+    workerHistory(workerId: string, limit?: WorkerHistoryLimit): Promise<Result<readonly WorkerStateSnapshot[], WorkerHistoryError>>;
     // (undocumented)
     workers(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
     // (undocumented)
-    workflowNames(): Promise<Result<readonly string[], MonitoringReadError>>;
+    workflowNames(): Promise<Result<readonly string[], MonitoringQueryCoreError>>;
     // (undocumented)
     workflowNode(workflowId: WorkflowId, taskIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
     // (undocumented)
-    workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringReadError>>;
+    workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringQueryCoreError>>;
     // (undocumented)
     workflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
 }
+
+// @public
+export const MONITORING_WINDOW_DEFAULT: Temporal.Duration;
 
 // @public (undocumented)
 export type MonitoringQueryCoreError = MonitoringQueryDbOperationFailed | MonitoringQueryHistoryContractViolation;
@@ -2158,6 +2180,19 @@ export interface RerunKeyReplay {
 }
 
 // @public
+export interface RerunNoOpenTransaction {
+    // (undocumented)
+    readonly code: "NO_OPEN_TRANSACTION";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly state: CallerConnectionState;
+    readonly statement: string;
+}
+
+// @public
 export interface RerunNotEligible {
     // (undocumented)
     readonly kind: "notEligible";
@@ -2184,6 +2219,19 @@ export interface RerunPolicy {
 
 // @public
 export type RerunRequestRefused = RerunInvalidCommand | RerunInvalidPolicy;
+
+// @public
+export interface RerunResultNotText {
+    // (undocumented)
+    readonly code: "RESULT_NOT_TEXT";
+    readonly column: string;
+    readonly format: string;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    readonly statement: string;
+}
 
 // @public
 export type RerunRetention = {
@@ -3453,6 +3501,9 @@ export interface WorkerClassLoad {
     // (undocumented)
     readonly workerId: string;
 }
+
+// @public
+export type WorkerHistoryError = HealthInputError | QueryRefused;
 
 // @public
 export type WorkerHistoryLimit = {

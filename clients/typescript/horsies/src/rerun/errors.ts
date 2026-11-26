@@ -2,6 +2,7 @@
 // for the rerun in the caller's transaction (`CallerRerunError`), each told apart by `code`.
 
 import type { CoreFailure } from "../_catalog/error_detail.ts";
+import type { CallerConnectionState } from "./caller.ts";
 
 /** The app's handle could not connect, install the schema, or open its closed pools again. Nothing ran. */
 export interface RerunConnectFailed {
@@ -114,6 +115,37 @@ export interface RerunDriverFailed {
   readonly driverError: Error;
 }
 
+/**
+ * The caller's connection had no open transaction for a statement of the rerun, so the statement did
+ * not run: without a transaction it would commit by itself. `state` tells why: run `BEGIN` first, or
+ * roll back a failed transaction.
+ */
+export interface RerunNoOpenTransaction {
+  readonly code: "NO_OPEN_TRANSACTION";
+  readonly retryable: false;
+  readonly message: string;
+  /** The name of the core statement that did not run. */
+  readonly statement: string;
+  readonly state: CallerConnectionState;
+}
+
+/**
+ * The caller's driver gave a result column in a format other than text, for example a `pg` client
+ * with `binary: true`; the rerun reads text. The statement ran: roll the caller's transaction back,
+ * and use a client that reads text.
+ */
+export interface RerunResultNotText {
+  readonly code: "RESULT_NOT_TEXT";
+  readonly retryable: false;
+  readonly message: string;
+  /** The name of the core statement whose result is not text. */
+  readonly statement: string;
+  /** The result column that is not text. */
+  readonly column: string;
+  /** The format that the driver gave the column, for example `binary`. */
+  readonly format: string;
+}
+
 /** A refusal of the command or the policy, before any call. */
 export type RerunRequestRefused = RerunInvalidCommand | RerunInvalidPolicy;
 
@@ -135,7 +167,12 @@ export type RerunError =
   | RerunStepRefused;
 
 /** Why a rerun in the caller's transaction failed. After it, the caller does not commit. */
-export type CallerRerunError = RerunDriverFailed | RerunRequestRefused | RerunStepRefused;
+export type CallerRerunError =
+  | RerunDriverFailed
+  | RerunNoOpenTransaction
+  | RerunResultNotText
+  | RerunRequestRefused
+  | RerunStepRefused;
 
 /** The refusal of a command field. Pure. */
 export function invalidCommand(message: string): RerunInvalidCommand {

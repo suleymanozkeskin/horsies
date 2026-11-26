@@ -9,9 +9,10 @@
 //!   lower-case hyphenated text.
 //! - A row crosses as one cell per result column, in column order: the
 //!   text that the server sends in text format, or SQL NULL. This module
-//!   reads each text as the column's declared type. A cell count or a text
-//!   that does not fit is a [`RowTextRefused`]: the caller answers
-//!   `CONTRACT_VIOLATION`.
+//!   reads each text as the column's declared type; a `bytea` text in its
+//!   hex output or in its escape output, so the session's `bytea_output`
+//!   does not change the row. A cell count or a text that does not fit is a
+//!   [`RowTextRefused`]: the caller answers `CONTRACT_VIOLATION`.
 
 use std::fmt;
 
@@ -92,9 +93,17 @@ const INTEGER_RULE: &str = "a decimal integer in the range of the column type";
 /// The prefix of the hex text of `bytea`.
 const BYTEA_HEX_PREFIX: &str = "\\x";
 
-/// The rule of a `bytea` cell.
-const BYTEA_RULE: &str = "\\x and lower-case hexadecimal digits, the hex output of bytea \
-                          (bytea_output = hex)";
+/// The escape byte of the escape text of `bytea`: a backslash.
+const BYTEA_ESCAPE: u8 = b'\\';
+
+/// The rule of a `bytea` cell in its hex form.
+const BYTEA_HEX_RULE: &str = "\\x and lower-case hexadecimal digits, the hex output of bytea \
+                              (bytea_output = hex)";
+
+/// The rule of a `bytea` cell in its escape form.
+const BYTEA_ESCAPE_RULE: &str = "the escape output of bytea (bytea_output = escape): \\\\ for a \
+                                 backslash, a backslash and three octal digits from 000 to 377 \
+                                 for one byte, any other byte as itself";
 
 /// The rule of a `uuid` cell.
 const UUID_RULE: &str = "lower-case hyphenated UUID text, the text output of uuid";
@@ -286,11 +295,54 @@ fn bool_of_text(text: &str) -> Result<bool, &'static str> {
     }
 }
 
-/// The bytes of the hex text output of `bytea`. Pure.
+/// The bytes of the text output of `bytea`: the hex form (`\x` and two
+/// digits a byte) or the escape form. The escape form never starts with
+/// `\x`: its backslash is doubled or starts three octal digits. Pure.
 fn bytea_of_text(text: &str) -> Result<Vec<u8>, &'static str> {
-    text.strip_prefix(BYTEA_HEX_PREFIX)
-        .ok_or(BYTEA_RULE)
-        .and_then(|digits| bytes_of_hex("bytea", digits).map_err(|_| BYTEA_RULE))
+    match text.strip_prefix(BYTEA_HEX_PREFIX) {
+        Some(digits) => bytes_of_hex("bytea", digits).map_err(|_| BYTEA_HEX_RULE),
+        None => bytes_of_escape_text(text.as_bytes()),
+    }
+}
+
+/// The bytes of the escape text output of `bytea`, by the escape input rule
+/// of PostgreSQL: `\\` is one backslash, a backslash and three octal digits
+/// (`000` to `377`) is one byte, and any other byte is itself. Each step
+/// reads one byte or one sequence, so the loop ends at the end of `text`.
+/// Pure.
+///
+/// Errors: [`BYTEA_ESCAPE_RULE`] for a backslash that starts neither
+/// sequence.
+fn bytes_of_escape_text(text: &[u8]) -> Result<Vec<u8>, &'static str> {
+    let mut bytes = Vec::with_capacity(text.len());
+    let mut rest = text;
+    while let Some((&first, after_first)) = rest.split_first() {
+        let (byte, after_byte) = match first {
+            BYTEA_ESCAPE => escaped_byte(after_first)?,
+            literal => (literal, after_first),
+        };
+        bytes.push(byte);
+        rest = after_byte;
+    }
+    Ok(bytes)
+}
+
+/// The byte of one escape sequence of `bytea`, from the text after its
+/// backslash, and the text after the sequence. Pure.
+fn escaped_byte(after_escape: &[u8]) -> Result<(u8, &[u8]), &'static str> {
+    match after_escape {
+        [BYTEA_ESCAPE, rest @ ..] => Ok((BYTEA_ESCAPE, rest)),
+        [high @ b'0'..=b'3', middle @ b'0'..=b'7', low @ b'0'..=b'7', rest @ ..] => {
+            Ok((octal_byte(*high, *middle, *low), rest))
+        }
+        _other => Err(BYTEA_ESCAPE_RULE),
+    }
+}
+
+/// The byte of three octal digits, the first from `0` to `3`: at most
+/// `0o377`, 255. Pure.
+fn octal_byte(high: u8, middle: u8, low: u8) -> u8 {
+    (high - b'0') * 64 + (middle - b'0') * 8 + (low - b'0')
 }
 
 /// The instant of the ISO text output of `timestamptz`. Pure.
@@ -458,6 +510,65 @@ mod tests {
     }
 
     #[test]
+    fn a_bytea_cell_in_hex_form_reads_its_bytes() {
+        let cases: [(&str, &[u8]); 3] = [
+            ("\\x", &[]),
+            ("\\x000aff", &[0x00, 0x0a, 0xff]),
+            ("\\x5c78", b"\\x"),
+        ];
+        for (cell, bytes) in cases {
+            assert_eq!(
+                cell_value(&column(CallerType::Bytea), text(cell)),
+                Ok(StatementValue::Bytea(bytes.to_vec())),
+                "{cell}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bytea_cell_in_escape_form_reads_its_bytes() {
+        // The escape output of PostgreSQL for each byte string: a printable
+        // byte as itself, a backslash doubled, any other byte as three octal
+        // digits.
+        let cases: [(&str, &[u8]); 6] = [
+            ("", &[]),
+            ("0aff", b"0aff"),
+            ("\\\\", b"\\"),
+            ("\\\\x", b"\\x"),
+            ("\\000\\012\\377", &[0x00, 0x0a, 0xff]),
+            ("a \\001~\\\\", &[b'a', b' ', 0x01, b'~', b'\\']),
+        ];
+        for (cell, bytes) in cases {
+            assert_eq!(
+                cell_value(&column(CallerType::Bytea), text(cell)),
+                Ok(StatementValue::Bytea(bytes.to_vec())),
+                "{cell}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bytea_cell_outside_its_form_names_the_rule_of_the_form() {
+        let cases = [
+            ("\\x0AFF", BYTEA_HEX_RULE),
+            ("\\x0af", BYTEA_HEX_RULE),
+            ("\\x\\000", BYTEA_HEX_RULE),
+            ("ab\\", BYTEA_ESCAPE_RULE),
+            ("\\400", BYTEA_ESCAPE_RULE),
+            ("\\01", BYTEA_ESCAPE_RULE),
+            ("\\08x", BYTEA_ESCAPE_RULE),
+            ("\\X0aff", BYTEA_ESCAPE_RULE),
+        ];
+        for (cell, rule) in cases {
+            assert_eq!(
+                cell_value(&column(CallerType::Bytea), text(cell)),
+                Err(rule),
+                "{cell}"
+            );
+        }
+    }
+
+    #[test]
     fn a_null_cell_is_null_of_its_column_type() {
         assert_eq!(
             cell_value(&column(CallerType::Int4), SqlTextValue::Null),
@@ -472,9 +583,6 @@ mod tests {
             (CallerType::Int2, "32768", INTEGER_RULE),
             (CallerType::Int4, "7.0", INTEGER_RULE),
             (CallerType::Int8, "", INTEGER_RULE),
-            (CallerType::Bytea, "0aff", BYTEA_RULE),
-            (CallerType::Bytea, "\\x0AFF", BYTEA_RULE),
-            (CallerType::Bytea, "\\012", BYTEA_RULE),
             (
                 CallerType::Uuid,
                 "01890A5D-AC96-774B-BCCE-B302099A8057",

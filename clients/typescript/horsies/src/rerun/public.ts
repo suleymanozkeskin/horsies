@@ -35,7 +35,9 @@ export type {
   RerunIdMintRefused,
   RerunInvalidCommand,
   RerunInvalidPolicy,
+  RerunNoOpenTransaction,
   RerunRequestRefused,
+  RerunResultNotText,
   RerunStatementFailed,
   RerunStatementOutcome,
   RerunStepRefused,
@@ -45,6 +47,7 @@ export type {
 
 export type {
   CallerColumn,
+  CallerConnectionState,
   CallerQueryFailure,
   CallerRow,
   CallerStatement,

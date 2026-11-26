@@ -13,9 +13,28 @@ export interface CallerColumn {
 }
 
 // @public
+export type CallerConnectionState = {
+    readonly kind: "idle";
+} | {
+    readonly kind: "failedTransaction";
+} | {
+    readonly kind: "notConnected";
+} | {
+    readonly kind: "unrecognized";
+    readonly status: string;
+};
+
+// @public
 export type CallerQueryFailure = {
     readonly kind: "driverFailed";
     readonly driverError: Error;
+} | {
+    readonly kind: "noOpenTransaction";
+    readonly state: CallerConnectionState;
+} | {
+    readonly kind: "resultNotText";
+    readonly column: string;
+    readonly format: string;
 } | {
     readonly kind: "rowRefused";
     readonly detail: string;

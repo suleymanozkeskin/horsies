@@ -26,13 +26,19 @@ interface PgTestClient {
   connect(): Promise<void>;
   query(config: PgTextQuery): Promise<PgTextResult>;
   query(text: string): Promise<object>;
-  escapeLiteral(text: string): string;
+  getTransactionStatus(): string | null;
   end(): Promise<void>;
+}
+
+/** The options of a `pg` client that the tests set. */
+interface PgTestClientConfig {
+  readonly connectionString: string;
+  readonly binary?: boolean;
 }
 
 /** The part of the `pg` module that the tests call. */
 interface PgModule {
-  readonly Client: new (config: { readonly connectionString: string }) => PgTestClient;
+  readonly Client: new (config: PgTestClientConfig) => PgTestClient;
 }
 
 /** A parameter of `postgres.js`, which the tests pass through. */
@@ -174,10 +180,11 @@ describe("app.rerunIn with a database", () => {
     });
   }
 
-  test("pg: a closed client is DRIVER_FAILED with the driver's error", async () => {
+  test("pg: a client closed in its transaction is DRIVER_FAILED with the driver's error", async () => {
     const client = new (await pg()).Client({ connectionString: testDatabaseUrl() });
 
     await client.connect();
+    await client.query("BEGIN");
     await client.end();
 
     const answer = await area.rerunIn(pgTransaction(client), unsentCommand(), POLICY);
@@ -185,6 +192,61 @@ describe("app.rerunIn with a database", () => {
     assert.ok(!answer.ok && answer.error.code === "DRIVER_FAILED", JSON.stringify(answer));
     assert.equal(answer.error.statement, "rerun_source_read");
     assert.ok(answer.error.driverError instanceof Error);
+  });
+
+  test("pg: a client with no BEGIN is NO_OPEN_TRANSACTION, and no statement runs", async () => {
+    const client = new (await pg()).Client({ connectionString: testDatabaseUrl() });
+
+    await client.connect();
+
+    try {
+      const answer = await area.rerunIn(pgTransaction(client), unsentCommand(), POLICY);
+
+      assert.ok(!answer.ok && answer.error.code === "NO_OPEN_TRANSACTION", JSON.stringify(answer));
+      assert.equal(answer.error.statement, "rerun_source_read");
+      assert.deepEqual(answer.error.state, { kind: "idle" });
+      assert.equal(client.getTransactionStatus(), "I");
+    } finally {
+      await client.end();
+    }
+  });
+
+  test("pg: a failed transaction is NO_OPEN_TRANSACTION, and the caller rolls it back", async () => {
+    const client = new (await pg()).Client({ connectionString: testDatabaseUrl() });
+
+    await client.connect();
+
+    try {
+      await client.query("BEGIN");
+      await assert.rejects(client.query("SELECT 1 / 0"));
+
+      const answer = await area.rerunIn(pgTransaction(client), unsentCommand(), POLICY);
+
+      assert.ok(!answer.ok && answer.error.code === "NO_OPEN_TRANSACTION", JSON.stringify(answer));
+      assert.deepEqual(answer.error.state, { kind: "failedTransaction" });
+    } finally {
+      await client.query("ROLLBACK");
+      await client.end();
+    }
+  });
+
+  test("pg: a client with binary: true is RESULT_NOT_TEXT", async () => {
+    const client = new (await pg()).Client({ connectionString: testDatabaseUrl(), binary: true });
+
+    await client.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      const answer = await area.rerunIn(pgTransaction(client), unsentCommand(), POLICY);
+
+      assert.ok(!answer.ok && answer.error.code === "RESULT_NOT_TEXT", JSON.stringify(answer));
+      assert.equal(answer.error.statement, "rerun_source_read");
+      assert.equal(answer.error.format, "binary");
+    } finally {
+      await client.query("ROLLBACK");
+      await client.end();
+    }
   });
 
   test("postgres.js: a transaction sql after its end is DRIVER_FAILED with the driver's error", async () => {

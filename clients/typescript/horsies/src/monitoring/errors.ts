@@ -46,7 +46,7 @@ export interface QueryRefused {
   readonly reason: string;
 }
 
-/** The error of a monitoring read. */
+/** The error of a monitoring read with a query that the read can refuse. */
 export type MonitoringReadError = MonitoringQueryCoreError | QueryRefused;
 
 /** The error of a cancel. */
@@ -73,8 +73,11 @@ export type HealthReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED
 /** The error of a health read of one worker. */
 export type WorkerReadError = BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | QueryRefused;
 
-/** The error of a health read with a count or a threshold that the core checks. */
-export type HealthQueryError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED"> | QueryRefused;
+/** The error of a health read with a count or a threshold that the core checks: `staleTasks`. */
+export type HealthInputError = BrokerInvalidInput | BrokerOperationFailedWith<"MONITORING_QUERY_FAILED">;
+
+/** The error of the history read of one worker: its limit, and its worker id. */
+export type WorkerHistoryError = HealthInputError | QueryRefused;
 
 /** The frozen `QUERY_REFUSED` of `field`. Pure. */
 export function queryRefused(field: QueryRefusedField, reason: string): QueryRefused {
@@ -130,7 +133,7 @@ export function healthReadError(read: string, raw: RawCatalogError): HealthReadE
 }
 
 /** The error of a health read with a count or a threshold. Another code is a defect. */
-export function healthQueryError(read: string, raw: RawCatalogError): HealthQueryError {
+export function healthInputError(read: string, raw: RawCatalogError): HealthInputError {
   const error = brokerError(raw);
 
   switch (error.code) {
