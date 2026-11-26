@@ -159,7 +159,7 @@ describe("found and not found", () => {
     const missing = await workflowNode(fakeTarget(jsonOutcome(null)).target, WORKFLOW_ID, 2);
 
     assert.ok(found.ok && found.value.kind === "found");
-    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: WORKFLOW_ID, taskIndex: 2 } });
+    assert.deepEqual(missing, { ok: true, value: { kind: "notFound", workflowId: WORKFLOW_ID, nodeIndex: 2 } });
   });
 });
 

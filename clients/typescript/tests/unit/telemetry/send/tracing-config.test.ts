@@ -167,7 +167,7 @@ describe("Horsies.create and the tracing step", () => {
     const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
     const context = created.ok ? appInternals(created.value) : assert.fail("the app is refused");
 
-    assert.equal(tracingPartsOfApp(context).setting.kind, "none");
+    assert.equal(tracingPartsOfApp(context).setting.kind, "noTracing");
     assert.throws(() => tracingPartsOfApp({ ...context }), ClientDefect);
   });
 

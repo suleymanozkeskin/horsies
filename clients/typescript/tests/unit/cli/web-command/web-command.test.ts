@@ -108,7 +108,7 @@ describe("the flags of web", () => {
       ok: true,
       value: {
         address: { host: WEB_DEFAULT_HOST, port: WEB_DEFAULT_PORT },
-        auth: "none",
+        authorization: "none",
         trustedHeaderName: "X-Forwarded-User",
         actions: "disabled",
         traceLink: { kind: "noTraceLink" },
@@ -138,7 +138,7 @@ describe("the flags of web", () => {
       ok: true,
       value: {
         address: { host: "0.0.0.0", port: 9000 },
-        auth: "trustedHeader",
+        authorization: "trustedHeader",
         trustedHeaderName: "X-User",
         actions: "enabled",
         traceLink: { kind: "template", text: "https://grafana.test/{trace_id}" },
@@ -159,7 +159,7 @@ describe("the flags of web", () => {
     ["a flag with no value", ["--port"], "--port"],
     ["a port past 65535", ["--port", "65536"], "--port must be a whole number from 0 to 65535"],
     ["a port that is not a number", ["--port", "80a"], "--port must be"],
-    ["an unknown auth mode", ["--authorization", "basic"], "--authorization must be none or trusted-header"],
+    ["an unknown authorization mode", ["--authorization", "basic"], "--authorization must be none or trusted-header"],
     ["an unknown log level", ["--log-level", "verbose"], "--log-level must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"],
   ] as const) {
     test(`${name} exits 2 and names the cause`, async () => {
