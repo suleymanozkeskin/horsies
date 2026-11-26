@@ -10,6 +10,7 @@ import { defineTask } from "../../../horsies/src/contract/public.ts";
 import type { BodyFactsRecord, CancelCauseName } from "../../../horsies/src/native/child/addon.ts";
 import { newCancelCells } from "../../../horsies/src/seats/cancel-cells.ts";
 import { type IsolatePort, SeatChannel } from "../../../horsies/src/seats/channel.ts";
+import type { SeatHost } from "../../../horsies/src/seats/pool.ts";
 import {
   type MainToSeat,
   SEAT_PROTOCOL_VERSION,
@@ -113,4 +114,13 @@ export async function settled(): Promise<void> {
       setTimeout(resolve, 0);
     });
   }
+}
+
+/** The seat host of a child that starts no seat isolate: its start is a test failure. */
+export function unusedSeatHost(): SeatHost {
+  return {
+    start: () => assert.fail("the child started a seat isolate"),
+    clock: () => 0,
+    timer: () => () => undefined,
+  };
 }

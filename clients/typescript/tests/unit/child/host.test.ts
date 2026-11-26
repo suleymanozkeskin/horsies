@@ -13,6 +13,7 @@ import { CHILD_KIND_HOOK_NAME } from "../../../horsies/src/child/serve.ts";
 import type { CallbackSettlement } from "../../../horsies/src/native/call/callback.ts";
 import { contextOf, implementedApp } from "../worker/support.ts";
 import { FakeChildNative, settled } from "./child-native.ts";
+import { unusedSeatHost } from "../seats/support.ts";
 
 const CHILD_ARGUMENTS = ["--horsies-child", "3", "4242"] as const;
 
@@ -76,6 +77,7 @@ function fakeDeps(native: FakeChildNative): ChildModeDeps & Recorded {
     culprit,
     settlement,
     hostname: "host-1",
+    seats: unusedSeatHost(),
     writeLine: (line) => lines.push(line),
     wait: async (milliseconds) => {
       flushes.push(`wait ${String(milliseconds)}`);

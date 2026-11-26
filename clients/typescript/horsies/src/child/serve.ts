@@ -7,8 +7,9 @@
 // - `cancelRun` and `stopWork` abort the signals of the run table.
 // - The post dispatcher never throws: a throw into Node-API ends the process. A defect of the package goes to the
 //   defect rule (in a child: stderr, the log sink, then the abort).
-// - Hook 0 is the child's own: it reads the start facts of the child (its kind). Then the providers, in registration
-//   order (each keeps its value in the state values), then the `onChildStart` hooks.
+// - Hook 0 is the child's own: it reads the start facts of the child (its kind); in a `SHARED_THREAD` child it boots the
+//   seat isolates. Then the providers, in registration order (each keeps its value in the state values), then the
+//   `onChildStart` hooks. A `SHARED_THREAD` child runs its providers in each seat isolate, not on its main thread.
 
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { compileContract } from "../contract/compile.ts";
@@ -18,6 +19,7 @@ import type { ImplementationParts } from "../contract/implementation.ts";
 import type { BodySettle, ChildPost, StartFactsRecord, StartHookCall, StartHookEnd } from "../native/child/addon.ts";
 import type { NativeTaskError, TaskErrorBuild, TaskErrorParts } from "../native/sends/addon.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
+import type { SeatOutcome } from "../seats/protocol.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { ChildMembersView } from "./app-members.ts";
@@ -119,8 +121,11 @@ function startRun(serve: ChildServe, post: Extract<ChildPost, { kind: "runBody" 
   );
 }
 
-/** Settle the run `runKey` with its stored outcome. A defect goes to the defect rule. */
-function settleRun(serve: ChildServe, runKey: bigint, taskName: string, outcome: StoredBodyOutcome): void {
+/**
+ * Settle the run `runKey` with its stored outcome: the outcome of a body on this thread, or of a body in a seat
+ * isolate. A defect goes to the defect rule.
+ */
+export function settleRun(serve: ChildServe, runKey: bigint, taskName: string, outcome: StoredBodyOutcome | SeatOutcome): void {
   try {
     switch (outcome.kind) {
       case "value":
@@ -185,17 +190,18 @@ function defectOf(subject: string, cause: unknown): CoreDefect {
 }
 
 /**
- * The start hook runner of a child: hook 0 gives the start facts to `onKind`; then each provider builds its value
- * and keeps it in `states`; then each `onChildStart` hook runs. A throw or a rejection is the hook's failure.
+ * The start hook runner of a child: hook 0 gives the start facts to `onKind` and waits for it; then each provider
+ * builds its value and keeps it in `states` (a `SHARED_THREAD` child skips them: each seat isolate runs them); then
+ * each `onChildStart` hook runs. A throw or a rejection is the hook's failure.
  */
 export function hookRunner(
   members: ChildMembersView,
   states: StateValues,
-  onKind: (facts: StartFactsRecord) => void,
+  onKind: (facts: StartFactsRecord) => Promise<void>,
 ): (call: StartHookCall) => Promise<StartHookEnd> {
   return async (call) => {
     if (call.index === 0) {
-      onKind(call.facts);
+      await onKind(call.facts);
 
       return "ended";
     }
@@ -204,7 +210,7 @@ export function hookRunner(
     const provider = members.providers[position];
 
     if (provider !== undefined) {
-      states.keep(provider.key, await provider.factory());
+      await providerHook(provider, states, call.facts);
 
       return "ended";
     }
@@ -219,6 +225,22 @@ export function hookRunner(
 
     return "ended";
   };
+}
+
+/** Run `provider` on this thread and keep its value; a `SHARED_THREAD` child runs it in each seat isolate instead. */
+async function providerHook(provider: ChildMembersView["providers"][number], states: StateValues, facts: StartFactsRecord): Promise<void> {
+  switch (facts.kind) {
+    case "isolated":
+    case "sharedAsync":
+    case "handler":
+      states.keep(provider.key, await provider.factory());
+
+      return;
+    case "sharedThread":
+      return;
+    default:
+      unreachable(facts, "providerHook");
+  }
 }
 
 /** The names of the start hooks of the plan, in run order: the child's own, the providers, the hooks. */
