@@ -112,7 +112,13 @@ pub fn child_process_exit() -> ProcessExit {
 pub enum SocketHold {
     /// A close-on-exec duplicate of the socket. Only the end of the process
     /// closes it.
-    Held(OwnedFd),
+    Held(
+        #[allow(
+            dead_code,
+            reason = "the descriptor is owned to keep it open; its drop at the end of the process closes it"
+        )]
+        OwnedFd,
+    ),
     /// The descriptor of the arguments is not open. The core's host names it
     /// and returns at once (`BAD_ARGUMENTS`); there is no socket to keep.
     NotOpen,
