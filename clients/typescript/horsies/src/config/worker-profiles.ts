@@ -43,10 +43,10 @@ import {
 } from "./checked.ts";
 
 /** A limit on a number of tasks, or no limit. */
-export type TaskLimit = { readonly kind: "tasks"; readonly tasks: number } | { readonly kind: "noLimit" };
+export type TaskLimit = { readonly kind: "taskLimit"; readonly tasks: number } | { readonly kind: "noTaskLimit" };
 
 /** A limit on the resident memory of a child in MB, or no limit. */
-export type MemoryLimit = { readonly kind: "mb"; readonly mb: number } | { readonly kind: "noLimit" };
+export type MemoryLimit = { readonly kind: "memoryLimit"; readonly mb: number } | { readonly kind: "noMemoryLimit" };
 
 /** A pool of at most `connections` connections. */
 export type PoolSize = { readonly kind: "connections"; readonly connections: number };
@@ -66,18 +66,20 @@ export interface SharedRecycleInput {
   readonly above?: MemoryLimit;
 }
 
-/** The pool of each isolated child: connections kept open, the most connections, a check of each connection. */
+/** The pool of each isolated child: connections kept open, the most connections, a test at each checkout. */
 export interface IsolatedPoolInput {
   readonly minSize?: number;
   readonly maxSize?: PoolSize;
-  readonly check?: boolean;
+  /** Test each connection before a checkout. */
+  readonly prePing?: boolean;
 }
 
 /** The pool of each shared child, which its seats share. */
 export interface SharedPoolInput {
   readonly minSize?: number;
   readonly maxSize?: SharedPoolSize;
-  readonly check?: boolean;
+  /** Test each connection before a checkout. */
+  readonly prePing?: boolean;
 }
 
 /** `count` isolated children: each runs one task at a time in its own process. */
@@ -256,7 +258,7 @@ function isolatedChildrenJson(children: IsolatedChildren, path: string): Checked
           checkedInteger(size, POOL_MIN_SIZE, memberPath(path, "pool.minSize")),
         ),
         optionalEntry("max_size", pool.maxSize, (size) => poolSizeJson(size, memberPath(path, "pool.maxSize"))),
-        optionalEntry("check", pool.check, accepted),
+        optionalEntry("check", pool.prePing, accepted),
       ]),
     ),
     optionalEntry("task_send_pool", children.taskSendPool, (size) =>
@@ -326,7 +328,7 @@ function sharedPoolJson(pool: SharedPoolInput, path: string): Checked<ConfigJson
   return checkedObject([
     optionalEntry("min_size", pool.minSize, (size) => checkedInteger(size, POOL_MIN_SIZE, memberPath(path, "minSize"))),
     optionalEntry("max_size", pool.maxSize, (size) => sharedPoolSizeJson(size, memberPath(path, "maxSize"))),
-    optionalEntry("check", pool.check, accepted),
+    optionalEntry("check", pool.prePing, accepted),
   ]);
 }
 
@@ -343,12 +345,12 @@ function claimJson(claim: ClaimLimitsInput, path: string): Checked<ConfigJson> {
 
 function taskLimitJson(limit: TaskLimit, path: string): Checked<ConfigJson> {
   switch (limit.kind) {
-    case "tasks":
+    case "taskLimit":
       return checkedObject([
         accepted([["kind", "task_limit"]]),
         entry("tasks", checkedInteger(limit.tasks, TASK_COUNT, memberPath(path, "tasks"))),
       ]);
-    case "noLimit":
+    case "noTaskLimit":
       return accepted({ kind: "no_task_limit" });
     default:
       return unreachable(limit, "taskLimitJson");
@@ -357,12 +359,12 @@ function taskLimitJson(limit: TaskLimit, path: string): Checked<ConfigJson> {
 
 function memoryLimitJson(limit: MemoryLimit, path: string): Checked<ConfigJson> {
   switch (limit.kind) {
-    case "mb":
+    case "memoryLimit":
       return checkedObject([
         accepted([["kind", "memory_limit"]]),
         entry("mb", checkedInteger(limit.mb, MEMORY_MB, memberPath(path, "mb"))),
       ]);
-    case "noLimit":
+    case "noMemoryLimit":
       return accepted({ kind: "no_memory_limit" });
     default:
       return unreachable(limit, "memoryLimitJson");

@@ -50,21 +50,21 @@ function environmentOf(loader: () => OtelApiLoad): Parameters<typeof tracingPart
 
 describe("the tracing setting", () => {
   test("left out and none are no tracing", () => {
-    assert.deepEqual(tracingSettingOf(undefined), { kind: "none" });
-    assert.deepEqual(tracingSettingOf({ kind: "none" }), { kind: "none" });
+    assert.deepEqual(tracingSettingOf(undefined), { kind: "noTracing" });
+    assert.deepEqual(tracingSettingOf({ kind: "noTracing" }), { kind: "noTracing" });
   });
 
   test("otel takes the defaults of the Python client", () => {
-    assert.deepEqual(tracingSettingOf({ kind: "otel" }), {
-      kind: "otel",
+    assert.deepEqual(tracingSettingOf({ kind: "otelTracing" }), {
+      kind: "otelTracing",
       parentage: "childOfSend",
       workerEndedSpans: "makeSpans",
     });
   });
 
   test("otel keeps the given options", () => {
-    assert.deepEqual(tracingSettingOf({ kind: "otel", parentage: "linkedToSend", workerEndedSpans: "noSpans" }), {
-      kind: "otel",
+    assert.deepEqual(tracingSettingOf({ kind: "otelTracing", parentage: "linkedToSend", workerEndedSpans: "noSpans" }), {
+      kind: "otelTracing",
       parentage: "linkedToSend",
       workerEndedSpans: "noSpans",
     });
@@ -74,7 +74,7 @@ describe("the tracing setting", () => {
 describe("the tracing step", () => {
   test("none never loads the API and gives the observers that do nothing", () => {
     const { loader, calls } = countingLoader(MISSING);
-    const parts = tracingPartsOf({ kind: "none" }, environmentOf(loader));
+    const parts = tracingPartsOf({ kind: "noTracing" }, environmentOf(loader));
     const value = parts.ok ? parts.value : assert.fail("none is refused");
 
     assert.equal(calls.count, 0);
@@ -86,19 +86,19 @@ describe("the tracing step", () => {
 
   test("otel with no API is CONFIG_OTEL_API_MISSING on the tracing path, with the cause and the fixes", () => {
     const { loader, calls } = countingLoader(MISSING);
-    const parts = tracingPartsOf(tracingSettingOf({ kind: "otel" }), environmentOf(loader));
+    const parts = tracingPartsOf(tracingSettingOf({ kind: "otelTracing" }), environmentOf(loader));
     const refusal = parts.ok ? undefined : parts.error;
 
     assert.equal(calls.count, 1);
     assert.equal(refusal?.code, "HRS-220");
     assert.equal(refusal?.path, "tracing");
     assert.match(refusal?.message ?? "", /^tracing: .*@opentelemetry\/api does not load \(Cannot find module/u);
-    assert.equal(refusal?.help.length, 2);
+    assert.equal(refusal?.helpText.length, 2);
   });
 
   test("otel with the API gives observers of its own", () => {
     const { loader } = countingLoader({ kind: "loaded", api: API });
-    const parts = tracingPartsOf(tracingSettingOf({ kind: "otel" }), environmentOf(loader));
+    const parts = tracingPartsOf(tracingSettingOf({ kind: "otelTracing" }), environmentOf(loader));
     const value = parts.ok ? parts.value : assert.fail("otel with the API is refused");
 
     assert.notEqual(value.sendObserver, NO_OP_OBSERVER);
@@ -130,7 +130,7 @@ describe("Horsies.create and the tracing step", () => {
     const { loader } = countingLoader(MISSING);
 
     const created = createHorsies(
-      { broker: { databaseUrl: { kind: "fromEnv", name: "NOT_SET" } }, tracing: { kind: "otel" }, tasks: [listed] },
+      { broker: { databaseUrl: { kind: "fromEnv", name: "NOT_SET" } }, tracing: { kind: "otelTracing" }, tasks: [listed] },
       fakeEnvironment({ otelApi: loader }),
     );
 
@@ -146,12 +146,12 @@ describe("Horsies.create and the tracing step", () => {
 
     assert.equal(created.ok, true);
     assert.equal(calls.count, 0);
-    assert.deepEqual(created.ok ? appInternals(created.value).telemetry.tracing : undefined, { kind: "none" });
+    assert.deepEqual(created.ok ? appInternals(created.value).telemetry.tracing : undefined, { kind: "noTracing" });
   });
 
   test("an app with otel tracing has the attempt-span observers; an app with none has the ones that do nothing", () => {
     const traced = createHorsies(
-      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otel" }, tasks: [listed] },
+      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing" }, tasks: [listed] },
       fakeEnvironment({ otelApi: countingLoader({ kind: "loaded", api: API }).loader }),
     );
 
@@ -167,7 +167,7 @@ describe("Horsies.create and the tracing step", () => {
     const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
     const context = created.ok ? appInternals(created.value) : assert.fail("the app is refused");
 
-    assert.equal(tracingPartsOfApp(context).setting.kind, "none");
+    assert.equal(tracingPartsOfApp(context).setting.kind, "noTracing");
     assert.throws(() => tracingPartsOfApp({ ...context }), ClientDefect);
   });
 
@@ -175,12 +175,12 @@ describe("Horsies.create and the tracing step", () => {
     const { loader } = countingLoader({ kind: "loaded", api: API });
 
     const created = createHorsies(
-      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otel", workerEndedSpans: "noSpans" }, tasks: [listed] },
+      { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otelTracing", workerEndedSpans: "noSpans" }, tasks: [listed] },
       fakeEnvironment({ otelApi: loader }),
     );
 
     assert.deepEqual(created.ok ? appInternals(created.value).telemetry.tracing : undefined, {
-      kind: "otel",
+      kind: "otelTracing",
       parentage: "childOfSend",
       workerEndedSpans: "noSpans",
     });

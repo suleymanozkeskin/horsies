@@ -131,9 +131,9 @@ describe("the worker-ended span", () => {
     };
 
     const kinds = [
-      tracingSettingOf({ kind: "otel" }),
-      tracingSettingOf({ kind: "otel", workerEndedSpans: "noSpans" }),
-      tracingSettingOf({ kind: "none" }),
+      tracingSettingOf({ kind: "otelTracing" }),
+      tracingSettingOf({ kind: "otelTracing", workerEndedSpans: "noSpans" }),
+      tracingSettingOf({ kind: "noTracing" }),
     ].map((setting) => {
       const parts = tracingPartsOf(setting, environment);
 

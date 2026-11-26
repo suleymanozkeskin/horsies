@@ -28,14 +28,14 @@ import type { BridgeAnswers, TransactionAnswer } from "./support.ts";
 /** A host with an active span. */
 const HOST: RerunHost = { coreHandle: unusedCoreHandle, activeCarrier: () => CARRIER };
 
-/** The answer of `app.rerunIn` and the names of the statements that ran, with these answers. */
+/** The answer of `app.rerunTaskIn` and the names of the statements that ran, with these answers. */
 async function rerunIn(
   answers: BridgeAnswers,
   transactionAnswers: readonly TransactionAnswer[],
 ): Promise<{ readonly answer: Result<RerunOutcome, CallerRerunError>; readonly ran: string[] }> {
   const { bridge } = fakeBridge(answers);
   const { transaction, statements } = fakeTransaction(transactionAnswers);
-  const answer = await rerunAreaOn(HOST, bridge).rerunIn(transaction, COMMAND, POLICY);
+  const answer = await rerunAreaOn(HOST, bridge).rerunTaskIn(transaction, COMMAND, POLICY);
 
   return { answer, ran: statements.map((statement) => statement.name) };
 }
@@ -47,11 +47,11 @@ const ENQUEUED: RerunOutcome = {
   rerunRootTaskId: SOURCE_TASK_ID,
 };
 
-describe("app.rerunIn", () => {
+describe("app.rerunTaskIn", () => {
   test("runs the read, then the write, on the caller's transaction and commits nothing", async () => {
     const { bridge, calls } = fakeBridge(ENQUEUED_ANSWERS);
     const { transaction, statements } = fakeTransaction([rowOf("t", null), rowOf("INSERTED", NEW_TASK_ID)]);
-    const answer = await rerunAreaOn(HOST, bridge).rerunIn(transaction, COMMAND, POLICY);
+    const answer = await rerunAreaOn(HOST, bridge).rerunTaskIn(transaction, COMMAND, POLICY);
 
     assert.deepEqual(answer, { ok: true, value: ENQUEUED });
     assert.deepEqual(statements, [
@@ -88,7 +88,7 @@ describe("app.rerunIn", () => {
     const answer = await rerunAreaOn(
       { coreHandle: unusedCoreHandle, activeCarrier: () => NO_ACTIVE_CARRIER },
       bridge,
-    ).rerunIn(transaction, COMMAND, POLICY);
+    ).rerunTaskIn(transaction, COMMAND, POLICY);
 
     assert.ok(answer.ok);
     assert.deepEqual(calls[1]?.call === "prepareWrite" && calls[1].trace, { kind: "noCarrier" });
@@ -117,7 +117,7 @@ describe("app.rerunIn", () => {
     const { bridge, calls } = fakeBridge(ENQUEUED_ANSWERS);
     const { transaction, statements } = fakeTransaction([]);
     const lateDeadline = { kind: "until", at: Temporal.Instant.from("+010000-01-01T00:00:00Z") } as const;
-    const answer = await rerunAreaOn(HOST, bridge).rerunIn(transaction, { ...COMMAND, deadline: lateDeadline }, POLICY);
+    const answer = await rerunAreaOn(HOST, bridge).rerunTaskIn(transaction, { ...COMMAND, goodUntil: lateDeadline }, POLICY);
 
     assert.equal(!answer.ok && answer.error.code, "INVALID_COMMAND");
     assert.deepEqual(calls, []);
@@ -125,7 +125,7 @@ describe("app.rerunIn", () => {
   });
 });
 
-describe("app.rerunIn errors", () => {
+describe("app.rerunTaskIn errors", () => {
   test("each refusal of the steps writes nothing and keeps its fields", async () => {
     const refusals: CallerStepRefusal[] = [
       { code: "CLASS_NOT_REGISTERED", message: "unknown retention class", classKey: "standard_8d" },

@@ -105,7 +105,7 @@ describe("the entry points", () => {
     assert.equal(hub instanceof Horsies, true);
     assert.equal(hub.implement instanceof Function, true);
     assert.equal(hub.send instanceof Function, true);
-    assert.equal(hub.retrySend instanceof Function, true);
+    assert.equal(hub.resend instanceof Function, true);
     assert.equal(hub.taskHandle instanceof Function, true);
   });
 

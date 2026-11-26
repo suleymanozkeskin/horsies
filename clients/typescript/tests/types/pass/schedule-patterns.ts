@@ -5,9 +5,9 @@ import type { SchedulePattern } from "../../../horsies/src/index.ts";
 export const patterns: readonly SchedulePattern[] = [
   { kind: "interval", every: Temporal.Duration.from({ minutes: 5 }) },
   { kind: "hourly", minute: 30 },
-  { kind: "daily", at: Temporal.PlainTime.from("09:00") },
-  { kind: "weekly", days: ["monday", "thursday"], at: Temporal.PlainTime.from("08:30") },
-  { kind: "monthly", day: 1, at: Temporal.PlainTime.from("06:00") },
+  { kind: "daily", time: Temporal.PlainTime.from("09:00") },
+  { kind: "weekly", weekdays: ["monday", "thursday"], time: Temporal.PlainTime.from("08:30") },
+  { kind: "monthly", dayOfMonth: 1, time: Temporal.PlainTime.from("06:00") },
   {
     kind: "cron",
     minute: [{ kind: "values", values: [0, 30] }],

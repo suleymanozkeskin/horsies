@@ -18,14 +18,14 @@ const HANDLE = unusedCoreHandle();
 /** A host with the test handle and an active span. */
 const HOST: RerunHost = { coreHandle: () => HANDLE, activeCarrier: () => CARRIER };
 
-/** The answer of `app.rerun` when the addon answers `rerunTask`. */
+/** The answer of `app.rerunTask` when the addon answers `rerunTask`. */
 async function rerunAnswering(rerunTask: Parameters<typeof fakeBridge>[0]["rerunTask"]): Promise<Result<RerunOutcome, RerunError>> {
   const { bridge } = fakeBridge({ ...ENQUEUED_ANSWERS, rerunTask });
 
-  return rerunAreaOn(HOST, bridge).rerun(COMMAND, POLICY);
+  return rerunAreaOn(HOST, bridge).rerunTask(COMMAND, POLICY);
 }
 
-/** The error of `app.rerun` when the addon fails with `error`. */
+/** The error of `app.rerunTask` when the addon fails with `error`. */
 async function errorOf(error: AppRerunFailure): Promise<RerunError> {
   const answer = await rerunAnswering({ kind: "failed", error });
 
@@ -36,11 +36,11 @@ async function errorOf(error: AppRerunFailure): Promise<RerunError> {
 
 const CONNECTION_CAUSE: CauseRecord = { kind: "connection", subject: "rerun_task", message: "connection refused", retryable: true };
 
-describe("app.rerun", () => {
+describe("app.rerunTask", () => {
   test("passes the parsed request, the app's handle and the active carrier to the addon", async () => {
     const { bridge, calls } = fakeBridge(ENQUEUED_ANSWERS);
 
-    const answer = await rerunAreaOn(HOST, bridge).rerun({ ...COMMAND, callerKey: "order-7" }, POLICY);
+    const answer = await rerunAreaOn(HOST, bridge).rerunTask({ ...COMMAND, idempotencyKey: "order-7" }, POLICY);
 
     assert.ok(answer.ok);
     assert.deepEqual(calls, [
@@ -58,7 +58,7 @@ describe("app.rerun", () => {
 
   test("refuses a policy before any call of the addon", async () => {
     const { bridge, calls } = fakeBridge(ENQUEUED_ANSWERS);
-    const answer = await rerunAreaOn(HOST, bridge).rerun(COMMAND, { ...POLICY, reservationWindow: Temporal.Duration.from({ days: 31 }) });
+    const answer = await rerunAreaOn(HOST, bridge).rerunTask(COMMAND, { ...POLICY, reservationWindow: Temporal.Duration.from({ days: 31 }) });
 
     assert.equal(!answer.ok && answer.error.code, "INVALID_POLICY");
     assert.deepEqual(calls, []);
@@ -73,7 +73,6 @@ describe("app.rerun", () => {
       { kind: "notEligible", taskId: SOURCE_TASK_ID, reason: "WORKFLOW_TASK" },
       { kind: "inputUnavailable", taskId: SOURCE_TASK_ID, disposition: "DECLINED_BY_POLICY" },
       { kind: "inputCorrupt", taskId: SOURCE_TASK_ID, detail: "envelope" },
-      { kind: "keyConflict", taskId: SOURCE_TASK_ID, reservedByTaskId: NEW_TASK_ID },
       { kind: "keyReplay", existingTaskId: NEW_TASK_ID },
     ];
 
@@ -81,9 +80,18 @@ describe("app.rerun", () => {
       assert.deepEqual(await rerunAnswering({ kind: "done", outcome }), { ok: true, value: outcome }, outcome.kind);
     }
   });
+
+  test("keyConflict names the task that holds the idempotency key in ownerTaskId", async () => {
+    const outcome: RerunOutcomeRecord = { kind: "keyConflict", taskId: SOURCE_TASK_ID, reservedByTaskId: NEW_TASK_ID };
+
+    assert.deepEqual(await rerunAnswering({ kind: "done", outcome }), {
+      ok: true,
+      value: { kind: "keyConflict", taskId: SOURCE_TASK_ID, ownerTaskId: NEW_TASK_ID },
+    });
+  });
 });
 
-describe("app.rerun errors", () => {
+describe("app.rerunTask errors", () => {
   test("CONNECT_FAILED keeps the retry rule and the cause", async () => {
     assert.deepEqual(await errorOf({ code: "CONNECT_FAILED", message: "the rerun could not connect: refused", cause: CONNECTION_CAUSE }), {
       code: "CONNECT_FAILED",
@@ -93,14 +101,14 @@ describe("app.rerun errors", () => {
     });
   });
 
-  test("STATEMENT_FAILED keeps its outcome and the server's SQLSTATE", async () => {
+  test("STATEMENT_FAILED keeps its state after the failure and the server's SQLSTATE", async () => {
     const cause: CauseRecord = { kind: "server", subject: "rerun_task", sqlstate: "40001", message: "could not serialize access", retryable: true };
 
     assert.deepEqual(await errorOf({ code: "STATEMENT_FAILED", message: "database error: refused", cause, outcome: "unknown" }), {
       code: "STATEMENT_FAILED",
       retryable: true,
       message: "database error: refused",
-      outcome: "unknown",
+      stateAfter: "unknown",
       exception: { kind: "coreFailure", failure: "server", subject: "rerun_task", message: "could not serialize access", retryable: true, sqlstate: "40001" },
     });
   });

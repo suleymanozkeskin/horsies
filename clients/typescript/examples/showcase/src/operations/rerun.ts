@@ -1,10 +1,10 @@
 // `rerun <task-id> [--reason TEXT]`: run a retained failed task again, in a transaction of the Acme store, with the
-// store's audit row of the rerun in the same transaction (`app.rerunIn` with the `pg` adapter of `horsies/rerun/pg`).
+// store's audit row of the rerun in the same transaction (`app.rerunTaskIn` with the `pg` adapter of `horsies/rerun/pg`).
 // The rerun and the audit row commit together, or neither is written.
 
 import { parseArgs } from "node:util";
 
-import { type CallerRerunError, type RerunCommand, type RerunOutcome, type RerunPolicy, type Result, TaskId } from "horsies";
+import { type CallerRerunError, type RerunCommand, type RerunOutcome, type RerunEnqueuePolicy, type Result, TaskId } from "horsies";
 import { pgTransaction } from "horsies/rerun/pg";
 
 import type { ShowcaseApp } from "../app.ts";
@@ -22,9 +22,9 @@ export const RERUN_REASON_MAX_LENGTH = 200;
 export const DEFAULT_RERUN_REASON = "operator rerun";
 
 /** The enqueue policy of every showcase rerun. */
-export const RERUN_POLICY: RerunPolicy = {
-  retention: { kind: "days", days: RERUN_RETENTION_DAYS },
-  rerunInput: "keep",
+export const RERUN_POLICY: RerunEnqueuePolicy = {
+  retention: { kind: "period", days: RERUN_RETENTION_DAYS },
+  retainRerunInput: "keep",
   reservationWindow: Temporal.Duration.from({ hours: RERUN_KEY_WINDOW_HOURS }),
 };
 
@@ -45,10 +45,10 @@ export async function rerunWithAudit(
   sourceTaskId: TaskId,
   reason: string,
 ): Promise<Result<RerunOutcome, RerunFailure>> {
-  const command: RerunCommand = { sourceTaskId, deadline: { kind: "none" }, callerKey: rerunCallerKey(sourceTaskId) };
+  const command: RerunCommand = { sourceTaskId, goodUntil: { kind: "none" }, idempotencyKey: rerunCallerKey(sourceTaskId) };
 
   const ran = await inTransactionUntilFailure(store, "rerun_with_audit", async (client) => {
-    const outcome = await showcase.app.rerunIn(pgTransaction(client), command, RERUN_POLICY);
+    const outcome = await showcase.app.rerunTaskIn(pgTransaction(client), command, RERUN_POLICY);
 
     if (!outcome.ok) {
       return err(outcome.error);
@@ -95,7 +95,7 @@ export function rerunOutcomeLine(outcome: RerunOutcome): string {
     case "inputCorrupt":
       return `the stored input of ${outcome.taskId} fails its checks: ${outcome.detail}; nothing written`;
     case "keyConflict":
-      return `the caller key of ${outcome.taskId} holds the rerun ${outcome.reservedByTaskId}; nothing written`;
+      return `the caller key of ${outcome.taskId} holds the rerun ${outcome.ownerTaskId}; nothing written`;
     case "keyReplay":
       return `this rerun exists already as ${outcome.existingTaskId}; nothing written`;
     default: {

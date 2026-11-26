@@ -158,7 +158,7 @@ export class Suite {
 
   /** Start a worker of `profile` of `instance` (the suite's own by default) without waiting for it. */
   spawnWorker(profile: Profile | ThreadProfile, instance: Instance = this.instance): TestProcess {
-    return this.spawnEntry(`worker ${profile}`, ["worker", "--profile", profile, "--loglevel", LOG_LEVEL], { [INSTANCE_ENV]: instance });
+    return this.spawnEntry(`worker ${profile}`, ["worker", "--profile", profile, "--log-level", LOG_LEVEL], { [INSTANCE_ENV]: instance });
   }
 
   /**

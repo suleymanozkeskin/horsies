@@ -3,6 +3,7 @@
 import type { BrokerErrorCode } from "../_catalog/broker.ts";
 import { brokerCoreErrorFromNative, type NativeBrokerCoreError } from "../_catalog/broker_errors.ts";
 import type { TaskAbsenceReason } from "../_catalog/history.ts";
+import { OperationalErrorCode } from "../_catalog/task_codes.ts";
 import type { SeatRelayCode } from "../_catalog/task_send.ts";
 import type { RawCatalogError } from "../native/values/records.ts";
 import type { SeatRelayFull } from "../seats/relay-full.ts";
@@ -19,9 +20,9 @@ export type UnfinishedStatus = "PENDING" | "CLAIMED" | "RUNNING";
 export type FinishedStatus = "COMPLETED" | "FAILED" | "EXPIRED";
 
 /**
- * Why a read of a task failed, told apart by `kind`, which is named after the catalog code in `code`. Two variants have
- * no `code` member, `storedResultUnreadable` and `unknownUserCode` (both `RESULT_DESERIALIZATION_ERROR`), and
- * `database` holds the broker code in `code` (`BROKER_ERROR`).
+ * Why a read of a task failed, told apart by `kind`, which is named after the catalog code in `code`. One variant has no
+ * `code` member, `unknownCustomCode` (`RESULT_DESERIALIZATION_ERROR`), and `database` holds the broker code in `code`
+ * (`BROKER_ERROR`).
  */
 export type ReadError =
   /** The task had not finished when the wait ended; it may still run. */
@@ -31,9 +32,13 @@ export type ReadError =
   /** The task finished and stores no result. */
   | { readonly kind: "resultNotAvailable"; readonly code: "RESULT_NOT_AVAILABLE"; readonly status: FinishedStatus }
   /** The stored result does not read with the contract's types. `cause` holds no value. */
-  | { readonly kind: "storedResultUnreadable"; readonly cause: string }
+  | {
+      readonly kind: "resultDeserializationError";
+      readonly code: "RESULT_DESERIALIZATION_ERROR";
+      readonly cause: string;
+    }
   /** The stored error has a custom code that the contract's `errorCodes` does not list. */
-  | { readonly kind: "unknownUserCode"; readonly code: string }
+  | { readonly kind: "unknownCustomCode"; readonly code: string }
   /** A wait in a process that runs task bodies; nothing was read. */
   | { readonly kind: "waitInsideTask"; readonly code: "WAIT_INSIDE_TASK" }
   /** The database or the connection failed. */
@@ -58,8 +63,7 @@ export type ReadError =
 
 /**
  * The catalog code of a read error, as the Python and Rust clients name it: the `code` member of a variant that has
- * one; `RESULT_DESERIALIZATION_ERROR` for `storedResultUnreadable` and `unknownUserCode`, `BROKER_ERROR` for
- * `database`. `SEAT_RELAY_FULL` is a code that those clients do not have. Pure.
+ * one; `RESULT_DESERIALIZATION_ERROR` for `unknownCustomCode`, `BROKER_ERROR` for `database`. `SEAT_RELAY_FULL` is a code that those clients do not have. Pure.
  */
 export function readErrorCode(error: ReadError): BuiltInTaskCode | SeatRelayCode {
   switch (error.kind) {
@@ -69,9 +73,9 @@ export function readErrorCode(error: ReadError): BuiltInTaskCode | SeatRelayCode
     case "waitInsideTask":
     case "invalidInput":
     case "seatRelayFull":
+    case "resultDeserializationError":
       return error.code;
-    case "storedResultUnreadable":
-    case "unknownUserCode":
+    case "unknownCustomCode":
       return "RESULT_DESERIALIZATION_ERROR";
     case "database":
       return "BROKER_ERROR";
@@ -89,7 +93,7 @@ export function seatRelayFullRead(error: SeatRelayFull): Extract<ReadError, { re
 }
 
 /**
- * The read error of a raw record of the broker catalog: `storedResultUnreadable` for a stored text that the core's
+ * The read error of a raw record of the broker catalog: `resultDeserializationError` for a stored text that the core's
  * strict read rule refuses (`INVALID_JSON_PAYLOAD`, a fact of the stored data, as the Python and Rust clients read it),
  * else `database`. An unknown class throws (a build defect).
  */
@@ -100,7 +104,11 @@ export function brokerReadError(raw: RawCatalogError): ReadError {
   const error = brokerCoreErrorFromNative(nativeCatalogValue(raw) as unknown as NativeBrokerCoreError);
 
   if (error.code === "INVALID_JSON_PAYLOAD") {
-    return Object.freeze({ kind: "storedResultUnreadable", cause: error.message });
+    return Object.freeze({
+      kind: "resultDeserializationError",
+      code: OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
+      cause: error.message,
+    });
   }
 
   return Object.freeze({ kind: "database", code: error.code, retryable: error.retryable, message: error.message });

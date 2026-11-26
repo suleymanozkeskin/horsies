@@ -79,7 +79,7 @@ describe("the entry's commands", () => {
   });
 
   test("every other argument list goes to cli.run", () => {
-    assert.deepEqual(entryCommand(["worker", "--profile=isolated-1", "--loglevel=info"]), { kind: "cli" });
+    assert.deepEqual(entryCommand(["worker", "--profile=isolated-1", "--log-level=info"]), { kind: "cli" });
     assert.deepEqual(entryCommand(["--horsies-child"]), { kind: "cli" });
     assert.deepEqual(entryCommand(["send"]), { kind: "cli" });
     assert.deepEqual(entryCommand(["send", "rerun", "again"]), { kind: "cli" });

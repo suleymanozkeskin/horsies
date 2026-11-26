@@ -236,7 +236,7 @@ async function stopSignal(): Promise<NodeJS.Signals> {
 
 /** Serve the app's server until `SIGINT` or `SIGTERM`. Resolves with the exit code: 0 after a stop, 1 when the address does not bind. */
 async function serve(): Promise<number> {
-  const monitoring = createMonitoringHandler(app, { auth: viewOnly(), basePath: MOUNT_PATH });
+  const monitoring = createMonitoringHandler(app, { authorizationPolicy: viewOnly(), basePath: MOUNT_PATH });
   const fetch = async (request: Request): Promise<Response> => answer(request, monitoring);
   const runtime = serverRuntime();
   const running = runtime.kind === "bun" ? serveOnBun(runtime.bun, fetch) : await serveOnNode(fetch);

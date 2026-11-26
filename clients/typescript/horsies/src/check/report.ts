@@ -1,14 +1,14 @@
 // The outcomes of a check and their text: the refusals of the first phase that refused, or the passed summary. The
 // text is the form of the Python and Rust clients (`ValidationReport`, `CheckPassed`).
 
-import type { Refusal } from "../app/refusal.ts";
+import type { HorsiesError } from "../app/refusal.ts";
 import type { NonEmpty } from "../wire/builders.ts";
 
 /** The name of the check in a report: `check`, or the check before a worker or a scheduler starts. */
 export type CheckPhaseName = "check" | "worker-startup" | "scheduler-startup";
 
 /** The refusals of the first phase of a check that refused, in the order the phase found them. */
-export type CheckReport = { readonly phase: CheckPhaseName; readonly refusals: NonEmpty<Refusal> };
+export type CheckReport = { readonly phase: CheckPhaseName; readonly refusals: NonEmpty<HorsiesError> };
 
 /** A passing check: the count of listed tasks, and the user error codes of each task that declares some. */
 export type CheckPassed = {
@@ -23,8 +23,8 @@ export type CheckOutcome =
   | { readonly kind: "refused"; readonly report: CheckReport };
 
 /** The frozen report of `first` and `rest` in `phase`. Pure. */
-export function checkReport(phase: CheckPhaseName, first: Refusal, rest: readonly Refusal[]): CheckReport {
-  const refusals: NonEmpty<Refusal> = Object.freeze([first, ...rest]);
+export function checkReport(phase: CheckPhaseName, first: HorsiesError, rest: readonly HorsiesError[]): CheckReport {
+  const refusals: NonEmpty<HorsiesError> = Object.freeze([first, ...rest]);
 
   return Object.freeze({ phase, refusals });
 }
@@ -36,7 +36,7 @@ export function checkReport(phase: CheckPhaseName, first: Refusal, rest: readonl
 export function reportText(report: CheckReport): string {
   const lines = report.refusals.flatMap((refused) => [
     `error[${refused.code}]: ${refused.message}`,
-    ...refused.help.map((line) => `  = help: ${line}`),
+    ...refused.helpText.map((line) => `  = help: ${line}`),
   ]);
 
   return [...lines, `error: aborting due to ${String(report.refusals.length)} previous errors`].join("\n");

@@ -1,4 +1,4 @@
-// The send path: each send error code, the facts of the request, the resend rule, `retrySend`, the hidden payload,
+// The send path: each send error code, the facts of the request, the resend rule, `resend`, the hidden payload,
 // the suppression of sends, and a send in a worker thread with no core.
 
 import assert from "node:assert/strict";
@@ -19,8 +19,8 @@ import type { QueueSetup } from "../../../horsies/src/config/queues.ts";
 import { defineTask } from "../../../horsies/src/contract/public.ts";
 import type { TraceArgument } from "../../../horsies/src/native/values/records.ts";
 import { sendErrorOfRaw, type RetryableSendError, type TaskSendError } from "../../../horsies/src/send/errors.ts";
-import type { SendOptions } from "../../../horsies/src/send/options.ts";
-import { retrySend, type SendContext, sendTask } from "../../../horsies/src/send/send.ts";
+import type { TaskSendOptions } from "../../../horsies/src/send/options.ts";
+import { resend, type SendContext, sendTask } from "../../../horsies/src/send/send.ts";
 import { AddonOutsideMainThread } from "../../../horsies/src/thrown-errors.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 import {
@@ -92,7 +92,7 @@ function harness(parts: HarnessParts = {}): Harness {
 async function sendReport(
   context: SendContext,
   input: object = { n: 1 },
-  options: SendOptions = {},
+  options: TaskSendOptions = {},
 ): Promise<TaskSendError<number, string> | "sent"> {
   const sent = await sendTask<number, string>(context, report, input, options);
 
@@ -140,7 +140,7 @@ describe("a send that the core takes", () => {
     const { context, producer } = harness();
     const goodUntil = Temporal.Instant.fromEpochNanoseconds(SENT_AT_MICROS * 1000n + 60_000_000_999n);
 
-    await sendReport(context, { n: 1 }, { goodUntil, retention: { kind: "days", days: 7 } });
+    await sendReport(context, { n: 1 }, { goodUntil, retention: { kind: "period", days: 7 } });
     assert.deepEqual(producer.prepares, [
       {
         taskName: "report",
@@ -265,7 +265,7 @@ describe("the send error codes", () => {
   test("VALIDATION_FAILED from the core's prepare step (a retention period that the app does not register)", async () => {
     const { context, producer } = harness({ script: { prepared: [{ kind: "refused", error: rawValidationFailed("not registered") }] } });
 
-    assert.equal(codeOf(await sendReport(context, { n: 1 }, { retention: { kind: "days", days: 9 } })), "VALIDATION_FAILED");
+    assert.equal(codeOf(await sendReport(context, { n: 1 }, { retention: { kind: "period", days: 9 } })), "VALIDATION_FAILED");
     assert.equal(producer.enqueues.length, 0);
   });
 
@@ -364,7 +364,7 @@ describe("the resend rule", () => {
     assert.equal(producer.enqueues.length, 1);
   });
 
-  test("on: an IDEMPOTENCY_KEY_CONFLICT is not sent again; only retrySend sends it again", async () => {
+  test("on: an IDEMPOTENCY_KEY_CONFLICT is not sent again; only resend sends it again", async () => {
     const { context, producer, pauses } = harness({
       resend: true,
       script: { enqueued: [{ kind: "failed", error: rawKeyConflict("report") }] },
@@ -375,10 +375,10 @@ describe("the resend rule", () => {
   });
 });
 
-describe("retrySend", () => {
+describe("resend", () => {
   test("of ENQUEUE_FAILED: one REPEAT enqueue of the payload, under the same task id", async () => {
     const { context, producer } = harness();
-    const retried = await retrySend(context, retryable(rawEnqueueFailed("report", true)));
+    const retried = await resend(context, retryable(rawEnqueueFailed("report", true)));
 
     assert.equal(retried.ok ? retried.value.taskId : "", TASK_ID);
     assert.deepEqual(producer.enqueues[0]?.sendKind, "REPEAT");
@@ -400,7 +400,7 @@ describe("retrySend", () => {
 
   test("of IDEMPOTENCY_KEY_CONFLICT (retryable): one REPEAT enqueue of the payload, under the same task id", async () => {
     const { context, producer } = harness();
-    const retried = await retrySend(context, retryable(rawKeyConflict("report")));
+    const retried = await resend(context, retryable(rawKeyConflict("report")));
 
     assert.equal(retried.ok ? retried.value.taskId : "", TASK_ID);
     assert.deepEqual(
@@ -412,7 +412,7 @@ describe("retrySend", () => {
 
   test("of IDEMPOTENCY_KEY_CONFLICT before the reservation ends: the same conflict again", async () => {
     const { context, producer } = harness({ script: { enqueued: [{ kind: "failed", error: rawKeyConflict("report") }] } });
-    const retried = await retrySend(context, retryable(rawKeyConflict("report")));
+    const retried = await resend(context, retryable(rawKeyConflict("report")));
 
     assert.equal(retried.ok ? "sent" : retried.error.code, "IDEMPOTENCY_KEY_CONFLICT");
     assert.equal(!retried.ok && retried.error.code === "IDEMPOTENCY_KEY_CONFLICT" ? retried.error.retryable : false, true);
@@ -425,13 +425,13 @@ describe("retrySend", () => {
   test("of PAYLOAD_MISMATCH (not retryable): VALIDATION_FAILED that names both codes, and no enqueue", async () => {
     const { context, producer } = harness();
     const mismatch = sendErrorOfRaw(rawPayloadMismatch("report"));
-    // SAFETY: a JavaScript caller can pass an error that the type of retrySend refuses.
-    const retried = await retrySend(context, mismatch as unknown as RetryableSendError<number, string>);
+    // SAFETY: a JavaScript caller can pass an error that the type of resend refuses.
+    const retried = await resend(context, mismatch as unknown as RetryableSendError<number, string>);
 
     assert.equal(retried.ok ? "" : retried.error.code, "VALIDATION_FAILED");
     assert.equal(
       retried.ok ? "" : retried.error.message,
-      "retrySend takes ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT only; PAYLOAD_MISMATCH is not retryable",
+      "resend takes ENQUEUE_FAILED and IDEMPOTENCY_KEY_CONFLICT only; PAYLOAD_MISMATCH is not retryable",
     );
     assert.deepEqual(producer.enqueues, []);
   });
@@ -444,7 +444,7 @@ describe("retrySend", () => {
     assert.equal(codeOf(error), "ENQUEUE_FAILED");
 
     const retried =
-      error !== "sent" && error.code === "ENQUEUE_FAILED" ? await retrySend(second.context, error) : undefined;
+      error !== "sent" && error.code === "ENQUEUE_FAILED" ? await resend(second.context, error) : undefined;
 
     assert.equal(retried?.ok, true);
     assert.deepEqual(
@@ -455,7 +455,7 @@ describe("retrySend", () => {
 
   test("of an error whose task this app does not list: VALIDATION_FAILED and no enqueue", async () => {
     const { context, producer } = harness();
-    const retried = await retrySend(context, retryable(rawEnqueueFailed("not_listed", true)));
+    const retried = await resend(context, retryable(rawEnqueueFailed("not_listed", true)));
 
     assert.equal(retried.ok ? "sent" : retried.error.code, "VALIDATION_FAILED");
     assert.equal(producer.enqueues.length, 0);
@@ -463,7 +463,7 @@ describe("retrySend", () => {
 
   test("with sends suppressed: SEND_SUPPRESSED and no enqueue", async () => {
     const { context, producer } = harness({ suppression: { kind: "suppressed", reason: "environment" } });
-    const retried = await retrySend(context, retryable(rawEnqueueFailed("report", true)));
+    const retried = await resend(context, retryable(rawEnqueueFailed("report", true)));
 
     assert.equal(retried.ok ? "sent" : retried.error.code, "SEND_SUPPRESSED");
     assert.equal(producer.enqueues.length, 0);

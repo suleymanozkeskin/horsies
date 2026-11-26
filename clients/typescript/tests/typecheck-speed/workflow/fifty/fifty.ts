@@ -92,7 +92,7 @@ const t9 = defineTask({
 });
 
 export const fifty = defineWorkflow(
-  { name: "fifty", definitionKey: "speed.fifty.v1", output: h.int(), params: {} },
+  { name: "fifty", definitionKey: "speed.fifty.v1", outputType: h.int(), parameters: {} },
   (w) => {
     const n0 = w.task(t0, { a: 0, b: "x" }, { nodeId: "n0" });
     const n1 = w.task(t1, { a: 1, b: "x", up: n0 }, { nodeId: "n1" });

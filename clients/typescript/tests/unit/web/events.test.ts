@@ -127,7 +127,7 @@ describe("eventStreamBody", () => {
 describe("the event stream route", () => {
   test("an allowed view answers the stream with the event stream headers", async () => {
     const { bridge, calls } = fakeBridge();
-    const handler = monitoringHandlerOver(bridge, { auth: allowAll() });
+    const handler = monitoringHandlerOver(bridge, { authorizationPolicy: allowAll() });
     const response = await handler(new Request("http://monitoring.test/api/events"));
 
     assert.equal(response.status, 200);
@@ -142,7 +142,7 @@ describe("the event stream route", () => {
   test("a refused view answers through the core with 403, with no subscription", async () => {
     const { bridge, calls } = fakeBridge();
     const { policy } = recordingPolicy(() => false, () => false);
-    const handler = monitoringHandlerOver(bridge, { auth: policy });
+    const handler = monitoringHandlerOver(bridge, { authorizationPolicy: policy });
     const response = await handler(new Request("http://monitoring.test/api/events"));
 
     assert.equal(response.status, 403);
@@ -151,7 +151,7 @@ describe("the event stream route", () => {
 
   test("close() ends every open stream after the degraded frame", async () => {
     const { bridge, calls } = fakeBridge();
-    const handler = monitoringHandlerOver(bridge, { auth: allowAll() });
+    const handler = monitoringHandlerOver(bridge, { authorizationPolicy: allowAll() });
     const first = await handler(new Request("http://monitoring.test/api/events"));
     const second = await handler(new Request("http://monitoring.test/api/events"));
 
@@ -164,7 +164,7 @@ describe("the event stream route", () => {
 
   test("the client's abort of the request closes its subscription", async () => {
     const { bridge, calls } = fakeBridge();
-    const handler = monitoringHandlerOver(bridge, { auth: allowAll() });
+    const handler = monitoringHandlerOver(bridge, { authorizationPolicy: allowAll() });
     const leaving = new AbortController();
     const response = await handler(new Request("http://monitoring.test/api/events", { signal: leaving.signal }));
 

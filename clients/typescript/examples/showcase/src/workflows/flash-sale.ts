@@ -15,7 +15,7 @@ export const FLASH_CAMPAIGN_ID = "FLASH-CHECK";
 export const FLASH_SKU = "ACME-SKU-0001";
 
 export const flashSale = defineWorkflow(
-  { name: "flash_sale", definitionKey: "acme.flash_sale.v1", params: {}, output: CacheWarm },
+  { name: "flash_sale", definitionKey: "acme.flash_sale.v1", parameters: {}, outputType: CacheWarm },
   (w) => {
     const cdn = w.task(publishCdn, { campaignId: FLASH_CAMPAIGN_ID, sku: FLASH_SKU }, { nodeId: "publish_cdn" });
     const origin = w.task(publishOrigin, { campaignId: FLASH_CAMPAIGN_ID, sku: FLASH_SKU }, { nodeId: "publish_origin" });
