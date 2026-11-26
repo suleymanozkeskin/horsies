@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { coreState } from "../../../horsies/src/native/process-core/process-core.ts";
 import {
@@ -18,6 +19,9 @@ import {
   workerLogBacklog,
 } from "../../../horsies/src/native/worker/worker.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** A database URL whose connect is refused at once: nothing listens on port 1. */
 const REFUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
