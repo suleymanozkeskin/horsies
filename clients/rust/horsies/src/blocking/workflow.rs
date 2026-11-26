@@ -18,8 +18,8 @@
 //!   template's build runs inside its start, so on a runtime thread the
 //!   build does not run either. Two checks come before it: `retry_start`
 //!   checks its error (`VALIDATION_FAILED` for an error that the start
-//!   cannot retry), and `get` refuses a wait in a process that runs task
-//!   bodies (`WaitInsideTask`).
+//!   cannot retry), and `get` checks its limit (`InvalidInput`) and then
+//!   refuses a wait in a process that runs task bodies (`WaitInsideTask`).
 //! - When the OS refused the threads of the process runtime, a start
 //!   answers `ENQUEUE_FAILED` with the workflow id, a handle method
 //!   `DB_OPERATION_FAILED`, and `get` and `result_for` `Database`, each
@@ -447,10 +447,13 @@ impl<T> WorkflowHandleView<'_, T>
 where
     T: DeserializeOwned + 'static,
 {
-    /// `WorkflowHandle::get`, blocking. In Python's order: a process that
-    /// runs task bodies refuses the wait (`WaitInsideTask`), then a runtime
-    /// thread answers `AsyncContext`.
+    /// `WorkflowHandle::get`, blocking. The limit is the first check, as in
+    /// the async form: a `Within` limit above `MAX_WAIT_LIMIT_MS` is
+    /// `InvalidInput`. Then, in Python's order: a process that runs task
+    /// bodies refuses the wait (`WaitInsideTask`), then a runtime thread
+    /// answers `AsyncContext`.
     pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError> {
+        let _wait = self.handle.checked_wait(limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(WorkflowReadError::WaitInsideTask {
                 message: wait_inside_task_message(&format!(

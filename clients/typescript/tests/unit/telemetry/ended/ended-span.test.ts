@@ -13,7 +13,8 @@ import { tracingPartsOf } from "../../../../horsies/src/telemetry/create-hook.ts
 import { highResolutionTimeOf, otelEndedSpans } from "../../../../horsies/src/telemetry/ended-span.ts";
 import type { OtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import { tracingSettingOf } from "../../../../horsies/src/telemetry/tracing-config.ts";
-import { installSdk, loadedApi, onlySpan, recordedWarnings, type TestSdk } from "../support.ts";
+import { SpansNotMade } from "../../../../horsies/src/telemetry/not-made.ts";
+import { installSdk, loadedApi, onlySpan, recordedNotMade, recordedWarnings, type TestSdk } from "../support.ts";
 
 const TASK_ID = "0192f6a1-7b3c-7d4e-8f00-0123456789ab";
 
@@ -39,11 +40,11 @@ function endedAttempt(carrier: BodyCarrierRecord, workflow: EndedWorkflowRecord)
 
 const NOT_IN_WORKFLOW: EndedWorkflowRecord = { kind: "known", workflow: { kind: "notInWorkflow" } };
 
-function makerOf(api: OtelApi = loadedApi()): { readonly make: (attempt: EndedAttemptRecord) => void; readonly lines: string[] } {
-  const { warnings, lines } = recordedWarnings();
-  const spans = otelEndedSpans({ api, parentage: "childOfSend", warnings });
+function makerOf(api: OtelApi = loadedApi()): { readonly make: (attempt: EndedAttemptRecord) => void; readonly written: string[] } {
+  const { notMade, written } = recordedNotMade();
+  const spans = otelEndedSpans({ api, parentage: "childOfSend", warnings: recordedWarnings().warnings, notMade });
 
-  return { make: spans.kind === "makeSpans" ? spans.make : assert.fail("no maker"), lines };
+  return { make: spans.kind === "makeSpans" ? spans.make : assert.fail("no maker"), written };
 }
 
 describe("the high-resolution time of epoch microseconds", () => {
@@ -121,7 +122,13 @@ describe("the worker-ended span", () => {
   });
 
   test("the tracing setting: makeSpans gives the maker; noSpans and none give no spans", () => {
-    const environment = { loadApi: () => ({ kind: "loaded", api: loadedApi() }) as const, warnings: recordedWarnings().warnings, clock: () => 0 };
+    const environment = {
+      loadApi: () => ({ kind: "loaded", api: loadedApi() }) as const,
+      warnings: recordedWarnings().warnings,
+      clock: () => 0,
+      now: () => Temporal.Now.instant(),
+      notMade: new SpansNotMade(() => undefined),
+    };
 
     const kinds = [
       tracingSettingOf({ kind: "otel" }),
@@ -138,7 +145,7 @@ describe("the worker-ended span", () => {
 });
 
 describe("the worker-ended span with a broken SDK", () => {
-  test("a tracer that throws makes no span, writes one warning, and never throws", () => {
+  test("a tracer that throws makes no span, writes one report of a span not made per process, and never throws", () => {
     const api = loadedApi();
 
     const broken: OtelApi = {
@@ -151,12 +158,12 @@ describe("the worker-ended span with a broken SDK", () => {
       },
     };
 
-    const { make, lines } = makerOf(broken);
+    const { make, written } = makerOf(broken);
 
     assert.doesNotThrow(() => {
       make(endedAttempt({ kind: "noCarrier" }, NOT_IN_WORKFLOW));
       make(endedAttempt({ kind: "noCarrier" }, NOT_IN_WORKFLOW));
     });
-    assert.equal(lines.length, 1);
+    assert.deepEqual(written, [`workerEnded ${TASK_ID} Error: the SDK is broken`]);
   });
 });

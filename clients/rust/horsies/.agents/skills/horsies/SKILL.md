@@ -169,8 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let add = add_numbers::register(&mut app)?;
 
     let handle = add.send(add_numbers::Input { a: 2, b: 3 }).await?;
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
-    match handle.get(limit).await? {
+    match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
         TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
     }
@@ -185,6 +184,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   what the task ended with.
 - The generated `add_numbers::send(2, 3)` takes the parameters and sends
   through the function of the first `register` in the process.
+- `WaitLimit::Within(duration)` waits at most `duration`;
+  `WaitLimit::NoLimit` waits until the task ends. A `Within` limit above
+  `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `ReadError::InvalidInput`, as
+  the first check of the read.
 - A result wait in a worker child, the process that runs task bodies, is
   refused with `WaitInsideTask` before any statement. Compose tasks with a
   workflow.

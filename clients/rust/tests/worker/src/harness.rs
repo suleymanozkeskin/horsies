@@ -43,10 +43,9 @@ pub const SCHEDULER_READY_LIMIT: Duration = Duration::from_secs(30);
 /// The worker log level of the test processes.
 const LOG_LEVEL: &str = "INFO";
 
-/// A wait limit of `duration`. Panics above the wait bound of the client.
+/// A wait limit of `duration`.
 pub fn within(duration: Duration) -> WaitLimit {
-    WaitLimit::parse(Some(duration))
-        .unwrap_or_else(|refused| panic!("a test wait limit of {duration:?}: {refused}"))
+    WaitLimit::Within(duration)
 }
 
 /// The `handle` function that the task attribute generates for a task: the

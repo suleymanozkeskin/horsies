@@ -55,7 +55,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 }
 
 async fn demo(_app: Horsies) -> DemoResult {
-    let limit = WaitLimit::parse(Some(Duration::from_secs(60)))?;
+    let limit = WaitLimit::Within(Duration::from_secs(60));
     for request in ["sync-orders", ""] {
         let handle = call_partner::send(request.to_owned()).await?;
         match handle.get(limit).await? {

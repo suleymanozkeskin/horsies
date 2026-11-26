@@ -1,21 +1,28 @@
 // The attempt spans and the spans of the attempts that the worker ended, through a live worker (Python
 // `clients/python/tests/e2e/test_worker_ended_spans.py`).
 //
-// The `worker_ended_spans` instance has OpenTelemetry tracing. Each task child and the handler child set an SDK whose
-// exporter writes one span line per ended span to the marker `span-lines` (`src/span-sdk.ts`). The test process sets
-// an SDK of its own and sends each task inside a span of its own, so the carrier that the send stores puts the spans
-// of the worker in that trace.
+// The `worker_ended_spans` instance has OpenTelemetry tracing. Each task child, each seat isolate and the handler child
+// set an SDK whose exporter writes one span line per ended span to the marker `span-lines` (`src/span-sdk.ts`). The
+// test process sets an SDK of its own and sends each task (or starts each workflow) inside a span of its own, so the
+// carrier that the send or the start stores puts the spans of the worker in that trace.
 //
 // - A task child makes the span of each attempt that it ran.
 // - An isolated task killed at its timeout: its child is gone, and the handler child makes the span of the attempt
 //   from the `AttemptEnded` event, with `horsies.span.source` = `worker`.
+// - A workflow start has its span in the test process; every row of the tree stores its carrier, so the span of a node
+//   is a child of the start span.
 // - A shared async task that its child ended at the deadline: the child lives, so its span is the one span of the
 //   attempt, and the handler child makes none.
+// - A `SHARED_THREAD` task: its seat isolate makes the span. A sync body that holds its isolate past its deadline and
+//   then returns ends its span at the settle of the run on the child's main thread, with `TASK_TIMEOUT`. A neighbour
+//   with time left keeps the thread child alive past that deadline. `SHARED_THREAD` children run on Node only: on Bun
+//   these cases are skipped (the worker refuses the profile).
 //
 // Run it with `run.ts` (see that file).
 
 import assert from "node:assert/strict";
-import { describe } from "node:test";
+import { randomUUID } from "node:crypto";
+import { describe, test } from "node:test";
 
 import * as otel from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
@@ -26,10 +33,11 @@ import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { parseSpanLine, type SpanLine, SPAN_LINES_MARKER } from "../src/span-lines.ts";
 import * as basic from "../src/tasks/basic.ts";
 import * as endedSpans from "../src/tasks/ended-spans.ts";
+import { runtimeName } from "../src/tasks/waits.ts";
 import { failedCode, sentHandle, succeeded } from "../support/outcome.ts";
 import { found, NOT_YET, pollFor } from "../support/poll.ts";
 import { pause } from "../support/process.ts";
-import { e2eTest, type Suite } from "../support/suite.ts";
+import { e2eTest, READY_LIMIT_MS, type Suite, WORKER_READY_LINE } from "../support/suite.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
 void requireDevAddon();
@@ -55,6 +63,17 @@ const ERROR_TYPE_KEY = "error.type";
 const WORKFLOW_ID_KEY = "horsies.workflow.id";
 const WORKFLOW_NODE_KEY = "horsies.workflow.node";
 const WORKFLOW_ROOT_ID_KEY = "horsies.workflow.root_id";
+
+/** The longest wait for a thread body to write its started marker. */
+const STARTED_WAIT_MS = 30_000;
+
+/** How long the neighbour of the thread overrun holds its isolate: past the overrun's return. */
+const NEIGHBOUR_HOLD_MS = 6_000;
+
+/** Why the thread seat cases do not run on Bun. */
+const THREAD_SEATS_ON_NODE_ONLY = "SHARED_THREAD children run on Node only: the worker on Bun refuses the profile";
+
+const NANOSECONDS_PER_MILLISECOND = 1_000_000n;
 
 /** The SDK of the test process: the parent span of its sends, and the spans that ended here. */
 type TestTracing = {
@@ -157,6 +176,40 @@ function sendSpanOf(tracing: TestTracing, taskId: string): ReadableSpan {
   return send;
 }
 
+/** The start span of workflow `workflowId` among the spans that ended in this process. */
+function startSpanOf(tracing: TestTracing, workflowId: string): ReadableSpan {
+  const starts = tracing.ended().filter((span) => span.attributes[WORKFLOW_ID_KEY] === workflowId);
+  const [start, ...others] = starts;
+
+  assert.ok(start !== undefined && others.length === 0, `one start span of workflow ${workflowId}, not ${String(starts.length)}`);
+
+  return start;
+}
+
+/** The case of the thread seat: on Node a test of `body`; on Bun a skipped test. */
+function threadSeatTest(name: string, body: (suite: Suite) => Promise<void>): void {
+  switch (runtimeName()) {
+    case "node":
+      e2eTest(name, "worker_ended_spans", body);
+
+      return;
+    case "bun":
+      test(name, { skip: THREAD_SEATS_ON_NODE_ONLY }, () => undefined);
+  }
+}
+
+/** Start a worker with one thread child of 4 seats, and wait until it logged that it is ready. */
+async function threadWorker(suite: Suite): Promise<void> {
+  await suite.spawnWorker("thread-only-1x4").waitForLog(WORKER_READY_LINE, READY_LIMIT_MS);
+}
+
+/** Wait until the thread body of `token` wrote its started marker. */
+async function threadStarted(suite: Suite, token: string): Promise<void> {
+  await pollFor(STARTED_WAIT_MS, `the thread body ${token} started`, async () =>
+    suite.markers.read(`${token}-started`).kind === "found" ? found(undefined) : NOT_YET,
+  );
+}
+
 describe("attempt spans and the spans of the attempts that the worker ended", () => {
   e2eTest("the child of an attempt that returned a value makes its span, a child of the send span, in the trace of the sender", "worker_ended_spans", async (suite) => {
     await suite.worker("isolated-1");
@@ -201,9 +254,9 @@ describe("attempt spans and the spans of the attempts that the worker ended", ()
   });
 
   // The event of the attempt carries no workflow; the handler child reads the node by the task id, so the span has the
-  // workflow attributes of the span of a child. A workflow start stores no carrier until the start span of #2500, so
-  // this case does not check the trace of the span (`layers.ts`, the pending scenarios).
-  e2eTest("a workflow task killed at its timeout gets a span that the worker made, with its node", "worker_ended_spans", async (suite) => {
+  // workflow attributes of the span of a child. Its parent comes from the carrier of the start span, which every row of
+  // the tree stores (Python `test_a_workflow_task_killed_at_its_timeout_gets_a_span_with_its_node`).
+  e2eTest("a workflow task killed at its timeout gets a span that the worker made, with its node, in the trace of the start", "worker_ended_spans", async (suite) => {
     await suite.worker("isolated-1");
     await withTestTracing(async (tracing) => {
       const started = await inParentSpan(tracing, async () => suite.app.start(endedSpans.endedSpansFlow, {}));
@@ -212,7 +265,15 @@ describe("attempt spans and the spans of the attempts that the worker ended", ()
 
       const workflowId = started.value.workflowId;
       const span = onlySpan(await waitForSpans(suite, WORKFLOW_ID_KEY, workflowId));
+      const start = startSpanOf(tracing, workflowId);
+      const run = await suite.app.monitoring.workflowRun(workflowId);
 
+      assert.equal(start.name, `start ${endedSpans.endedSpansFlow.name}`);
+      assert.equal(start.kind, otel.SpanKind.PRODUCER);
+      assert.equal(start.parentSpanContext?.spanId, tracing.parent.spanContext().spanId);
+      assert.equal(run.ok && run.value.kind === "found" ? run.value.run.traceId : "no run", start.spanContext().traceId);
+      assert.equal(span.traceId, tracing.parent.spanContext().traceId);
+      assert.deepEqual(span.parent, { kind: "parent", spanId: start.spanContext().spanId });
       assert.equal(span.name, `run ${endedSpans.endedSpansSleeper.name}`);
       assert.equal(span.status, "ERROR");
       assert.equal(span.attributes[ERROR_TYPE_KEY], "TASK_TIMEOUT");
@@ -243,6 +304,51 @@ describe("attempt spans and the spans of the attempts that the worker ended", ()
       assert.equal(span.attributes[ERROR_TYPE_KEY], "TASK_TIMEOUT");
       assert.equal(SPAN_SOURCE_KEY in span.attributes, false, "the child made the span");
       assert.equal(span.attributes[TASK_EXECUTION_KEY], "SHARED_ASYNC");
+    });
+  });
+
+  threadSeatTest("a SHARED_THREAD body's seat isolate makes its span, a child of the send span, in the trace of the sender", async (suite) => {
+    await threadWorker(suite);
+    await withTestTracing(async (tracing) => {
+      const input = { token: randomUUID(), holdMs: 0 };
+      const handle = await inParentSpan(tracing, async () => sentHandle("the thread hold", suite.app.send(endedSpans.endedSpansThreadHold, input)));
+
+      assert.equal(await succeeded(handle, RESULT_WAIT_MS), "held");
+
+      const span = onlySpan(await waitForSpans(suite, TASK_ID_KEY, handle.taskId));
+
+      assert.equal(span.name, `run ${endedSpans.endedSpansThreadHold.name}`);
+      assert.equal(span.status, "UNSET");
+      assert.equal(span.traceId, tracing.parent.spanContext().traceId);
+      assert.deepEqual(span.parent, { kind: "parent", spanId: sendSpanOf(tracing, handle.taskId).spanContext().spanId });
+      assert.equal(span.attributes[TASK_EXECUTION_KEY], "SHARED_THREAD");
+      assert.equal(span.attributes[TASK_ATTEMPT_KEY], 1);
+      assert.equal(SPAN_SOURCE_KEY in span.attributes, false, "the seat isolate made the span");
+    });
+  });
+
+  threadSeatTest("a sync thread body past its deadline ends its span with TASK_TIMEOUT when the run settles, not at the deadline", async (suite) => {
+    await threadWorker(suite);
+    await withTestTracing(async (tracing) => {
+      const neighbour = { token: randomUUID(), holdMs: NEIGHBOUR_HOLD_MS };
+
+      await sentHandle("the neighbour", suite.app.send(endedSpans.endedSpansThreadHold, neighbour));
+      await threadStarted(suite, neighbour.token);
+
+      const handle = await inParentSpan(tracing, async () => sentHandle("the overrun", suite.app.send(endedSpans.endedSpansThreadOverrun, {})));
+
+      assert.equal(await failedCode(handle, RESULT_WAIT_MS), "TASK_TIMEOUT");
+
+      const readAt = BigInt(Date.now()) * NANOSECONDS_PER_MILLISECOND;
+      const span = onlySpan(await waitForSpans(suite, TASK_ID_KEY, handle.taskId));
+      const heldNanos = BigInt(endedSpans.THREAD_OVERRUN_HOLD_MS) * NANOSECONDS_PER_MILLISECOND;
+
+      assert.equal(span.status, "ERROR");
+      assert.equal(span.attributes[ERROR_TYPE_KEY], "TASK_TIMEOUT");
+      assert.equal(span.traceId, tracing.parent.spanContext().traceId);
+      assert.equal(SPAN_SOURCE_KEY in span.attributes, false, "the seat isolate made the span");
+      assert.ok(BigInt(span.endNanos) - BigInt(span.startNanos) >= heldNanos, `the span holds the body: ${span.startNanos} to ${span.endNanos}`);
+      assert.ok(BigInt(span.endNanos) <= readAt, `the span ended at the settle, before the outcome was read: ${span.endNanos}`);
     });
   });
 });

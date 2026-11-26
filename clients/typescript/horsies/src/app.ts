@@ -25,7 +25,7 @@ import { workflowCoreOf } from "./workflow/core.ts";
 import type { WorkflowContract } from "./workflow/define.ts";
 import type { WorkflowHandle, WorkflowHandleById } from "./workflow/handle.ts";
 import type { BuildReturn } from "./workflow/node.ts";
-import { NO_OP_START_OBSERVER, type StartOptions } from "./workflow/start.ts";
+import type { StartOptions } from "./workflow/start.ts";
 import type { StartEnqueueFailed, WorkflowStartError } from "./workflow/start-error.ts";
 import { type ChildStartHook, onChildStartFor, provideFor, type ProviderFactory } from "./child/app-members.ts";
 import type { StateKey } from "./child/state.ts";
@@ -33,6 +33,7 @@ import { declareSchedules, scheduleCoreAccess } from "./schedules/app-member.ts"
 import { declaredEntries, type ScheduleEntries, type ScheduleSection } from "./schedules/entry.ts";
 import type { EventTypeName } from "./_catalog/worker_manifest.ts";
 import { onEventFor, onHandlerChildStartFor } from "./events/register.ts";
+import { tracingPartsOfApp } from "./telemetry/create-hook.ts";
 import type { EventHandler, EventHandlerOptions, HandlerChildStartHook } from "./events/types.ts";
 import { createMonitoringArea, type Monitoring, type MonitoringArea } from "./monitoring/app-area.ts";
 import type { PingDatabaseError, PingWorkersError } from "./monitoring/errors.ts";
@@ -64,7 +65,7 @@ export class Horsies {
     this.#workflows = createWorkflowArea({
       core: workflowCoreOf(context.core),
       registry: context.workflows,
-      observer: NO_OP_START_OBSERVER,
+      observer: tracingPartsOfApp(context).startObserver,
       now: () => Temporal.Now.instant(),
       newWorkflowId: () => crypto.randomUUID(),
     });

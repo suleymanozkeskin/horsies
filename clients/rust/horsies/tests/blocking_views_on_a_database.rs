@@ -249,7 +249,7 @@ fn echo_input() -> echo::Input {
 
 /// A wait limit of `limit`.
 fn wait_of(limit: Duration) -> WaitLimit {
-    WaitLimit::parse(Some(limit)).expect("a wait limit in bounds")
+    WaitLimit::Within(limit)
 }
 
 /// A thread runtime for a call that must run on a runtime thread: the

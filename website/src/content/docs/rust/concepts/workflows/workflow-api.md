@@ -70,8 +70,7 @@ async fn run_daily_report(
     daily_report: &WorkflowFunction<usize>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let handle = daily_report.start().await?;
-    let limit = WaitLimit::parse(Some(Duration::from_secs(60)))?;
-    match handle.get(limit).await? {
+    match handle.get(WaitLimit::Within(Duration::from_secs(60))).await? {
         TaskOutcome::Succeeded(length) => println!("published {length} bytes"),
         TaskOutcome::Failed(error) => println!("the workflow ended with {}", error.code().text()),
     }
@@ -278,6 +277,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 - reads user codes as checked text (`UserCode`), because a workflow holds the codes of many tasks;
 - returns `Failed` with the stored error of a FAILED, CANCELLED or EXPIRED workflow, or with the code of its status when it stored none;
 - returns `Failed` with `WORKFLOW_PAUSED` for a PAUSED workflow, which a resume can continue;
+- checks the limit first: a `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `InvalidInput`, before any statement;
 - in a worker child, is refused with `WaitInsideTask` before any statement.
 
 A workflow with no output node is read as `OutputlessResults`: the outcome of each node by node id, as `TaskOutcome<JsonText, UserCode>`. The value is its stored text: `get()` gives the text, `decode::<T>()` reads it with the node's type, an integer of any width with all its digits. It has `get(node_id)`, `iter()`, `len()` and `is_empty()`.
@@ -306,6 +306,7 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 | `ResultNotReady { workflow_id, node_id }` | `RESULT_NOT_READY` | `result_for`: the node stores no result yet, or no node has the id |
 | `StoredResultUnreadable { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types; `cause` names no value |
 | `UnknownUserCode { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` |
+| `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing was read |
 | `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `code` is the `HandleErrorCode`. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |

@@ -13,7 +13,7 @@ import type { BodyFactsRecord, BodyCarrierRecord } from "../../../../horsies/src
 import { otelBodyObserver } from "../../../../horsies/src/telemetry/attempt-span.ts";
 import type { OtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import type { AttemptParentage } from "../../../../horsies/src/telemetry/tracing-config.ts";
-import { installSdk, loadedApi, onlySpan, recordedWarnings, type TestSdk } from "../support.ts";
+import { installSdk, loadedApi, onlySpan, recordedNotMade, recordedWarnings, type TestSdk } from "../support.ts";
 
 const TASK_ID = "0192f6a1-7b3c-7d4e-8f00-0123456789ab";
 
@@ -33,10 +33,10 @@ function factsWith(carrier: BodyCarrierRecord, workflow: Extract<BodyFactsRecord
 
 const NOT_IN_WORKFLOW = { kind: "notInWorkflow" } as const;
 
-function observerOf(parentage: AttemptParentage, api: OtelApi = loadedApi()): { observer: BodyObserver; lines: string[] } {
-  const { warnings, lines } = recordedWarnings();
+function observerOf(parentage: AttemptParentage, api: OtelApi = loadedApi()): { observer: BodyObserver; written: string[] } {
+  const { notMade, written } = recordedNotMade();
 
-  return { observer: otelBodyObserver({ api, parentage, warnings }), lines };
+  return { observer: otelBodyObserver({ api, parentage, warnings: recordedWarnings().warnings, notMade }), written };
 }
 
 /** The carrier of a send span that the test opens and ends. */
@@ -263,7 +263,7 @@ describe("the attempt span with no SDK or a broken SDK", () => {
     assert.equal(ran, true);
   });
 
-  test("a tracer that throws: the body runs with no span, and one warning", async () => {
+  test("a tracer that throws: the body runs with no span, and one report of a span not made per process", async () => {
     const api = loadedApi();
 
     const broken: OtelApi = {
@@ -276,7 +276,7 @@ describe("the attempt span with no SDK or a broken SDK", () => {
       },
     };
 
-    const { observer, lines } = observerOf("childOfSend", broken);
+    const { observer, written } = observerOf("childOfSend", broken);
     let runs = 0;
 
     for (let body = 0; body < 2; body += 1) {
@@ -286,7 +286,6 @@ describe("the attempt span with no SDK or a broken SDK", () => {
     }
 
     assert.equal(runs, 2);
-    assert.equal(lines.length, 1);
-    assert.match(lines[0] ?? "", /the span of an attempt did not open/u);
+    assert.deepEqual(written, [`attempt ${TASK_ID} Error: the SDK is broken`]);
   });
 });

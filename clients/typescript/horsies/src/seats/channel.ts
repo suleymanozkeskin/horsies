@@ -3,8 +3,8 @@
 // - A worker thread whose `workerData` holds the seat marker is a seat isolate. Its channel is made once, at the first
 //   read in the thread (`Horsies.create` reads it for the app's core access): it parses the marker, makes the relay,
 //   and listens on the port of the thread.
-// - The channel gives each message of the main thread to its owner: `opReply` to the relay, `run`, `cancel` and
-//   `bodyEnded` to the runs of the seat once the isolate serves (`serve`).
+// - The channel gives each message of the main thread to its owner: `opReply` to the relay, `run`, `cancel`,
+//   `bodyEnded` and `flush` to the runs of the seat once the isolate serves (`serve`).
 // - A defect of the package in the isolate follows the defect rule of a worker process: the channel sends it to the
 //   main thread of the child (`defect`), which aborts the child; then the isolate throws. A `run` before the serve, a
 //   message outside the protocol, and any throw while the channel handles a message are such defects.
@@ -35,11 +35,12 @@ export interface IsolatePort {
   onMessage(listener: (message: object) => void): void;
 }
 
-/** What serves the runs of a seat: the `run`, `cancel` and `bodyEnded` messages. */
+/** What serves the runs of a seat: the `run`, `cancel`, `bodyEnded` and `flush` messages. */
 export interface SeatRunHandler {
   run(message: Extract<MainToSeat, { readonly kind: "run" }>): void;
   cancel(message: Extract<MainToSeat, { readonly kind: "cancel" }>): void;
   bodyEnded(message: Extract<MainToSeat, { readonly kind: "bodyEnded" }>): void;
+  flush(): void;
 }
 
 /** Whether the isolate serves runs yet. */
@@ -115,6 +116,10 @@ export class SeatChannel {
         return;
       case "bodyEnded":
         this.#handler(message.kind).bodyEnded(message);
+
+        return;
+      case "flush":
+        this.#handler(message.kind).flush();
 
         return;
       default:

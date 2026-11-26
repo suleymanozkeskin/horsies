@@ -1,6 +1,7 @@
 // The tracing step of `Horsies.create`: the setting of the config, the load of the OpenTelemetry API for `otel`, and
-// the observers that the send path and the children call. It runs in each process that runs the app entry, seat
-// isolates included: the API is plain JavaScript and loads no addon.
+// the observers that the send path, the workflow start path, the children and the seat isolates call. It runs in each
+// process that runs the app entry, and in each seat isolate (each isolate evaluates the entry, so its `Horsies.create`
+// loads the API there): the API is plain JavaScript and loads no addon.
 //
 // - `none`: the API is never loaded; every observer is the one that does nothing.
 // - `otel`: the API is loaded once; a failed load is the refusal `CONFIG_OTEL_API_MISSING` (`HRS-220`).
@@ -10,13 +11,18 @@ import { NO_OP_OBSERVER, type SendObserver } from "../app/observers.ts";
 import type { AppContext } from "../app/context.ts";
 import { type BodyObserver, NO_BODY_OBSERVER, setBodyObserver } from "../child/body-observer.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
+import { NO_SEAT_BODY_OBSERVER, type SeatBodyObserver, setSeatBodyObserver } from "../seats/body-observer.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
+import { NO_OP_START_OBSERVER, type StartObserver } from "../workflow/start.ts";
 import { OTEL_API_MODULE, type OtelApi, type OtelApiLoader } from "./otel-api.ts";
 import { type AttemptSpanDeps, otelBodyObserver } from "./attempt-span.ts";
 import { type EndedSpans, NO_ENDED_SPANS, otelEndedSpans } from "./ended-span.ts";
+import { processSpansNotMade, type SpansNotMade } from "./not-made.ts";
+import { otelSeatBodyObserver } from "./seat-span.ts";
 import { otelSendObserver } from "./send-span.ts";
+import { otelStartObserver } from "./start-span.ts";
 import type { OtelTracingSetting, TracingSetting } from "./tracing-config.ts";
 import { processWarnings, type TelemetryWarnings } from "./warnings.ts";
 
@@ -25,8 +31,12 @@ export type TracingParts = {
   readonly setting: TracingSetting;
   /** Wraps each send of the app; gives the carrier of a rerun. */
   readonly sendObserver: SendObserver;
+  /** Wraps the core's start of each `app.start` and `app.retryStart`; gives the carrier that the tree stores. */
+  readonly startObserver: StartObserver;
   /** Wraps each task body in a child of the app. */
   readonly bodyObserver: BodyObserver;
+  /** Wraps each task body in a seat isolate of a `SHARED_THREAD` child of the app. */
+  readonly seatBodyObserver: SeatBodyObserver;
   /** Makes the span of each attempt that the worker ended, in the handler child. */
   readonly endedSpans: EndedSpans;
 };
@@ -35,7 +45,9 @@ export type TracingParts = {
 const NO_TRACING_PARTS: TracingParts = Object.freeze({
   setting: Object.freeze({ kind: "none" }),
   sendObserver: NO_OP_OBSERVER,
+  startObserver: NO_OP_START_OBSERVER,
   bodyObserver: NO_BODY_OBSERVER,
+  seatBodyObserver: NO_SEAT_BODY_OBSERVER,
   endedSpans: NO_ENDED_SPANS,
 });
 
@@ -45,11 +57,21 @@ export type TracingEnvironment = {
   readonly warnings: TelemetryWarnings;
   /** Milliseconds on the monotonic clock. */
   readonly clock: () => number;
+  /** The wall clock: the start of the span of a seat run, whose end is the main thread's wall-clock time. */
+  readonly now: () => Temporal.Instant;
+  /** The reports of the spans that were not made, of every kind. */
+  readonly notMade: SpansNotMade;
 };
 
 /** The tracing environment of this process. */
 export function processTracingEnvironment(loadApi: OtelApiLoader): TracingEnvironment {
-  return { loadApi, warnings: processWarnings, clock: () => performance.now() };
+  return {
+    loadApi,
+    warnings: processWarnings,
+    clock: () => performance.now(),
+    now: () => Temporal.Now.instant(),
+    notMade: processSpansNotMade,
+  };
 }
 
 /** The config path of the tracing setting. */
@@ -82,12 +104,14 @@ export function tracingPartsOf(setting: TracingSetting, environment: TracingEnvi
 
 function otelParts(setting: OtelTracingSetting, api: OtelApi, environment: TracingEnvironment): TracingParts {
   const { warnings } = environment;
-  const spanDeps = { api, parentage: setting.parentage, warnings };
+  const spanDeps = { api, parentage: setting.parentage, warnings, notMade: environment.notMade };
 
   return Object.freeze({
     setting,
-    sendObserver: otelSendObserver({ api, warnings, clock: environment.clock }),
+    sendObserver: otelSendObserver({ api, warnings, notMade: environment.notMade, clock: environment.clock }),
+    startObserver: otelStartObserver({ api, notMade: environment.notMade }),
     bodyObserver: otelBodyObserver(spanDeps),
+    seatBodyObserver: otelSeatBodyObserver({ ...spanDeps, now: environment.now }),
     endedSpans: endedSpansOf(setting, spanDeps),
   });
 }
@@ -106,10 +130,11 @@ function endedSpansOf(setting: OtelTracingSetting, deps: AttemptSpanDeps): Ended
 
 const partsByApp = new WeakMap<AppContext, TracingParts>();
 
-/** Keep the tracing parts of the app of `context`, and set its body observer. `Horsies.create` calls it. */
+/** Keep the tracing parts of the app of `context`, and set its body observers. `Horsies.create` calls it. */
 export function recordTracingParts(context: AppContext, parts: TracingParts): void {
   partsByApp.set(context, parts);
   setBodyObserver(context, parts.bodyObserver);
+  setSeatBodyObserver(context, parts.seatBodyObserver);
 }
 
 /**

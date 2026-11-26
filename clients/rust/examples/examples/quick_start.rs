@@ -33,7 +33,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 
 async fn demo(_app: Horsies) -> DemoResult {
     let handle = greet::send("world".to_owned()).await?;
-    let limit = WaitLimit::parse(Some(Duration::from_secs(30)))?;
+    let limit = WaitLimit::Within(Duration::from_secs(30));
     match handle.get(limit).await? {
         TaskOutcome::Succeeded(greeting) => println!("{greeting}"),
         TaskOutcome::Failed(error) => println!("greet failed: {error}"),
