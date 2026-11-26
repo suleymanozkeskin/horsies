@@ -75,9 +75,9 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
   results(): Promise<Result<ReadonlyMap<string, NodeResult>, WorkflowHandleError>>;
   /** Every node, in index order. */
   nodes(): Promise<Result<readonly WorkflowTaskInfo[], WorkflowHandleError>>;
-  /** Pause a RUNNING workflow: `true` when it paused. */
+  /** Pause a RUNNING workflow. `true`: it paused. `false`: it is not RUNNING, no change. */
   pause(): Promise<Result<boolean, WorkflowHandleError>>;
-  /** Resume a PAUSED workflow: `true` when it resumed. */
+  /** Resume a PAUSED workflow. `true`: it resumed. `false`: it is not PAUSED, no change. */
   resume(): Promise<Result<boolean, WorkflowHandleError>>;
   /** Cancel the workflow and its descendants. */
   cancel(): Promise<Result<void, WorkflowHandleError>>;
