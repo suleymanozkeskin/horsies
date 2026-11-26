@@ -13,6 +13,7 @@ import type {
   WaitBound,
 } from "../native/sends/addon.ts";
 import type { TraceArgument } from "../native/values/records.ts";
+import type { WorkflowCore } from "../workflow/core.ts";
 
 /**
  * The core operations of sends and task reads. On a main thread the addon runs them; in a seat isolate the relay
@@ -26,6 +27,8 @@ export interface ProducerCore {
   getResult(taskId: string, wait: WaitBound): Promise<ResultRead>;
   taskInfo(taskId: string): Promise<TaskInfoRead>;
   processRole(): Promise<ProcessRoleName>;
+  /** The core operations of workflow starts and handles. */
+  readonly workflows: WorkflowCore;
 }
 
 /**

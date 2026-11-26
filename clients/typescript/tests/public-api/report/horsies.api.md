@@ -23,10 +23,16 @@ export class AddonOutsideMainThread extends CoreDefect {
 export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, string, ExecutionClass>;
 
 // @public
+export type AnyNode = NodeRef<unknown, string, string>;
+
+// @public
 export type AnyTaskContract = TaskContract<ParameterSchemas, OutputSchema, string, ExecutionClass>;
 
 // @public
 export type AnyWire = Wire<unknown, unknown, Presence, Role>;
+
+// @public
+export type AnyWorkflowContract = WorkflowContract<ParameterSchemas, BuildReturn>;
 
 // @public
 export type AppConfigInput = QueueConfigInput & {
@@ -115,6 +121,20 @@ export const BrokerErrorCode: {
 export type BrokerErrorCode = (typeof BrokerErrorCode)[keyof typeof BrokerErrorCode];
 
 // @public
+export interface BuildReturn {
+    readonly output: AnyNode;
+    // (undocumented)
+    readonly successPolicy?: SuccessPolicy;
+}
+
+// @public
+export type CheckCases<P extends ParameterSchemas> = keyof P extends never ? {
+    readonly checkCases?: readonly [];
+} : {
+    readonly checkCases: NonEmpty<SendInput<P>>;
+};
+
+// @public
 export interface ClaimLimitsInput {
     readonly claimedPerWorker?: TaskLimit;
     readonly perQueuePerPass?: TaskLimit;
@@ -141,6 +161,26 @@ export type CodecRefused = EncodeRefused | DecodeRefused | ReadBackRefused | Rea
 
 // @public
 export function configureLogging(options: LoggingOptions): void;
+
+// @public
+export type ContextReadError =
+/** The context holds no entry for the node: it is not in the node's `ctxFrom`, or the dependency did not end. */
+    {
+    readonly kind: "notInContext";
+    readonly nodeId: string;
+}
+/** The stored value does not read with the contract's types. `cause` holds no value. */
+| {
+    readonly kind: "unreadable";
+    readonly nodeId: string;
+    readonly cause: string;
+}
+/** The stored error has a user code that the contract does not list. */
+| {
+    readonly kind: "unknownUserCode";
+    readonly nodeId: string;
+    readonly code: string;
+};
 
 // @public
 export type ContextUse = "takesContext" | "noContext";
@@ -360,7 +400,15 @@ export type DecodeRefused = ValueRefused | EnvelopeRefused;
 export const DEFAULT_RETENTION_CLASS_KEY = "standard_30d";
 
 // @public
+export type DefaultJoin = {
+    readonly kind: "all";
+};
+
+// @public
 export function defineTask<const P extends ParameterSchemas, O extends OutputSchema, const E extends string = string, const X extends ExecutionClass = "ISOLATED", const C extends boolean = false>(definition: TaskDefinition<P, O, E, X, C> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X, ContextUseOf<C>>;
+
+// @public
+export function defineWorkflow<const P extends ParameterSchemas, const R extends BuildReturn>(definition: WorkflowDefinition<P> & NoInfer<CheckCases<P>>, build: WorkflowBuild<P, R>): WorkflowContract<P, R>;
 
 // @public
 export interface EmptyObject {
@@ -624,6 +672,75 @@ export namespace h {
     export type Infer<W extends AnyWire> = ValueOf<W>;
 }
 
+// @public (undocumented)
+export type HandleCoreError = HandleWorkflowNotFound | HandleDbOperationFailed | HandleStoredDataInvalid | HandleResumeRecoveryFailed;
+
+// @public (undocumented)
+export interface HandleDbOperationFailed {
+    // (undocumented)
+    readonly code: "DB_OPERATION_FAILED";
+    // (undocumented)
+    readonly exception: CoreCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+    // (undocumented)
+    readonly workflowId: string;
+}
+
+// @public (undocumented)
+export const HandleErrorCode: {
+    readonly WORKFLOW_NOT_FOUND: "WORKFLOW_NOT_FOUND";
+    readonly DB_OPERATION_FAILED: "DB_OPERATION_FAILED";
+    readonly STORED_DATA_INVALID: "STORED_DATA_INVALID";
+    readonly RESUME_RECOVERY_FAILED: "RESUME_RECOVERY_FAILED";
+    readonly ASYNC_CONTEXT: "ASYNC_CONTEXT";
+};
+
+// @public (undocumented)
+export type HandleErrorCode = (typeof HandleErrorCode)[keyof typeof HandleErrorCode];
+
+// @public (undocumented)
+export interface HandleResumeRecoveryFailed {
+    // (undocumented)
+    readonly code: "RESUME_RECOVERY_FAILED";
+    // (undocumented)
+    readonly exception: CoreCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly workflowId: string;
+}
+
+// @public (undocumented)
+export interface HandleStoredDataInvalid {
+    // (undocumented)
+    readonly code: "STORED_DATA_INVALID";
+    // (undocumented)
+    readonly exception: CoreCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly workflowId: string;
+}
+
+// @public (undocumented)
+export interface HandleWorkflowNotFound {
+    // (undocumented)
+    readonly code: "WORKFLOW_NOT_FOUND";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly workflowId: string;
+}
+
 // @public
 export type HasRequiredUpstreamOutcome<P extends ParameterSchemas> = true extends {
     [K in keyof P]: IsUpstreamOutcome<P[K]> extends true ? (LeftOutBySender<P[K]> extends true ? false : true) : false;
@@ -642,13 +759,17 @@ export class Horsies {
     static create(config: HorsiesConfig): Result<Horsies, CreateRefused>;
     implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, body: NoInfer<BodyFor<P, O, E, X>>, options?: ImplementOptions<NoInfer<E>>): Implementation<P, O, E, X>;
     retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>;
+    retryStart<R extends BuildReturn>(error: StartEnqueueFailed<R>): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
     send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, input: NoInfer<SendableInput<P>>, options?: SendOptions): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>>;
+    start<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, params: NoInfer<SendableInput<P>>, options?: StartOptions): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>>;
     taskHandle<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, taskId: TaskId): TaskHandle<SchemaValue<O>, E>;
+    workflowHandle<P extends ParameterSchemas, R extends BuildReturn>(workflow: WorkflowContract<P, R>, workflowId: WorkflowId): WorkflowHandleById<R>;
 }
 
 // @public
 export type HorsiesConfig = AppConfigInput & {
     readonly tasks: readonly AnyTaskContract[];
+    readonly workflows?: readonly AnyWorkflowContract[];
 };
 
 // @public
@@ -712,6 +833,19 @@ export type IsUpstreamOutcome<S> = S extends AnyWire ? (RoleOf<S> extends "resul
 
 // @public
 export type IsZodJson<O> = [undefined] extends [O] ? false : [string | number | boolean | null | O[]] extends [O] ? true : false;
+
+// @public
+export type Join = {
+    readonly kind: "all";
+} | {
+    readonly kind: "any";
+} | {
+    readonly kind: "quorum";
+    readonly minSuccess: number;
+};
+
+// @public
+export type JoinNeedsOptional<K> = `horsies: under an "any" or "quorum" join, parameter '${K & string}' must be declared .optional()`;
 
 // @public (undocumented)
 export interface JsonUnreadable {
@@ -854,6 +988,61 @@ export interface NoCause {
 }
 
 // @public
+export type NodeById<N, Id extends string> = N extends NodeRef<unknown, string, infer NodeId> ? (Id extends NodeId ? N : never) : never;
+
+// @public
+export type NodeCode<N> = N extends NodeRef<unknown, infer E, string> ? E : never;
+
+// @public
+export type NodeInput<P extends ParameterSchemas, J extends Join> = keyof P extends never ? EmptyObject : Flat<{
+    -readonly [K in keyof P as SenderMayLeaveOut<P[K]> extends true ? never : K]: NodeParameter<P[K], J, K>;
+} & {
+    -readonly [K in keyof P as SenderMayLeaveOut<P[K]> extends true ? K : never]?: NodeParameter<P[K], J, K>;
+}>;
+
+// @public
+export interface NodeOptionsBase<Id extends string, J extends Join> {
+    readonly allowFailedDeps?: boolean;
+    readonly id: Id;
+    readonly join?: J;
+    readonly waitsFor?: readonly AnyNode[];
+}
+
+// @public
+export type NodeOutput<N> = N extends NodeRef<infer O, string, string> ? O : never;
+
+// @public
+export type NodeParameter<S, J extends Join, K> = IsUpstreamOutcome<S> extends true ? J extends {
+    readonly kind: "any";
+} | {
+    readonly kind: "quorum";
+} ? SenderMayLeaveOut<S> extends true ? NodeRef<UpstreamValue<S>, string, string> : JoinNeedsOptional<K> : NodeRef<UpstreamValue<S>, string, string> : ParameterSent<S>;
+
+// @public
+export interface NodeRef<O, E extends string, Id extends string> {
+    // (undocumented)
+    readonly [nodeTypes]: NodeTypes<O, E>;
+    readonly id: Id;
+    // (undocumented)
+    readonly kind: "node";
+}
+
+// @public
+export type NodeResult = {
+    readonly kind: "outcome";
+    readonly outcome: TaskOutcome<JsonValue, string>;
+} | {
+    readonly kind: "unreadable";
+    readonly cause: string;
+};
+
+// @public
+export type NodeTypes<O, E extends string> = {
+    readonly output: O;
+    readonly code: E;
+};
+
+// @public
 export type NonEmpty<T> = readonly [T, ...T[]];
 
 // @public
@@ -879,6 +1068,9 @@ export type Ok<T> = {
     readonly value: T;
     readonly [resultBrand]?: "horsies.Result";
 };
+
+// @public
+export type OnError = "fail" | "pause";
 
 // @public (undocumented)
 export interface OutcomeDecodeError {
@@ -970,6 +1162,11 @@ export interface PayloadPolicyInput {
 export type PlainParameters<P extends ParameterSchemas> = {
     readonly [K in keyof P as IsUpstreamOutcome<P[K]> extends true ? never : K]: P[K];
 };
+
+// @public
+export type PolicyNodes<S> = S extends SuccessPolicy ? S["cases"][number]["required"][number] | (S extends {
+    readonly optional: infer Q extends readonly AnyNode[];
+} ? Q[number] : never) : never;
 
 // @public
 export type PoolRecycle = {
@@ -1219,6 +1416,11 @@ export type RetryPolicy<E extends string> = {
 };
 
 // @public
+export type ReturnedNodes<R extends BuildReturn> = R["output"] | (R extends {
+    readonly successPolicy: infer S;
+} ? PolicyNodes<S> : never);
+
+// @public
 export type Role = "value" | "resultOf";
 
 // @public
@@ -1347,6 +1549,16 @@ export interface StandardSchemaMarker {
 }
 
 // @public
+export type StartEnqueueFailed<R extends BuildReturn> = WorkflowStartEnqueueFailed & {
+    readonly [startTypes]?: R;
+};
+
+// @public
+export interface StartOptions {
+    readonly workflowId?: WorkflowId;
+}
+
+// @public
 export type StateAfter = "noChange" | "outcomeUnknown";
 
 // @public
@@ -1354,6 +1566,9 @@ export type SubWorkflowFailure = {
     readonly workflowId: string;
     readonly summary: SubWorkflowSummary;
 };
+
+// @public
+export type SubWorkflowNodeOptions<Id extends string, J extends Join> = NodeOptionsBase<Id, J>;
 
 // @public
 export type SubWorkflowSummary = {
@@ -1365,6 +1580,20 @@ export type SubWorkflowSummary = {
     readonly skippedTasks: number;
     readonly errorSummary: string | null;
 };
+
+// @public
+export interface SuccessCase {
+    // (undocumented)
+    readonly required: readonly AnyNode[];
+}
+
+// @public
+export interface SuccessPolicy {
+    // (undocumented)
+    readonly cases: readonly SuccessCase[];
+    // (undocumented)
+    readonly optional?: readonly AnyNode[];
+}
 
 // @public
 export type TaskAbsence =
@@ -1539,6 +1768,17 @@ export type TaskLimit = {
 };
 
 // @public
+export type TaskNodeOptions<Id extends string, J extends Join, C extends ContextUse> = NodeOptionsBase<Id, J> & {
+    readonly queue?: string;
+    readonly priority?: number;
+    readonly goodUntil?: Temporal.Instant;
+} & ([C] extends ["takesContext"] ? {
+    readonly ctxFrom?: readonly AnyNode[];
+} : {
+    readonly ctxFrom?: never;
+});
+
+// @public
 export type TaskOutcome<O, E extends string = string> = {
     readonly kind: "succeeded";
     readonly value: O;
@@ -1708,6 +1948,13 @@ export type TupleValue<T extends readonly RequiredWire[]> = {
 export type UnfinishedStatus = "PENDING" | "CLAIMED" | "RUNNING";
 
 // @public
+export type UpstreamValue<S> = S extends AnyWire ? Extract<ValueOf<S>, {
+    readonly kind: "succeeded";
+}> extends {
+    readonly value: infer T;
+} ? T : never : never;
+
+// @public
 export type UserCode<C extends string> = C extends ReservedCode ? `horsies: "${C}" is a built-in error code` : C;
 
 // @public
@@ -1804,6 +2051,70 @@ export interface WorkerProfileInput {
 export const WORKFLOW_STATUSES: readonly ["PENDING", "RUNNING", "COMPLETED", "FAILED", "PAUSED", "CANCELLED", "EXPIRED"];
 
 // @public
+export type WorkflowBuild<P extends ParameterSchemas, R extends BuildReturn> = (w: WorkflowBuilder, params: BodyInput<P>) => R;
+
+// @public
+export interface WorkflowBuilder {
+    subWorkflow<P extends ParameterSchemas, R extends BuildReturn, const Id extends string, const J extends Join = DefaultJoin>(workflow: WorkflowContract<P, R>, params: NoInfer<NodeInput<P, J>>, options: SubWorkflowNodeOptions<Id, J>): NodeRef<WorkflowOutput<R>, string, Id>;
+    task<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse, const Id extends string, const J extends Join = DefaultJoin>(contract: TaskContract<P, O, E, X, C>, input: NoInfer<NodeInput<P, J>>, options: TaskNodeOptions<Id, J, C>): NodeRef<SchemaValue<O>, E, Id>;
+}
+
+// @public
+export interface WorkflowContext {
+    resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse>(nodeId: string, contract: TaskContract<P, O, E, X, C>): Result<TaskOutcome<SchemaValue<O>, E>, ContextReadError>;
+    readonly taskIndex: number;
+    readonly taskName: string;
+    // (undocumented)
+    readonly workflowId: WorkflowId;
+}
+
+// @public
+export interface WorkflowContract<P extends ParameterSchemas, R extends BuildReturn> {
+    // (undocumented)
+    readonly [workflowTypes]: WorkflowTypes<P, R>;
+    // (undocumented)
+    readonly definitionKey: string;
+    // (undocumented)
+    readonly kind: "workflow";
+    // (undocumented)
+    readonly name: string;
+}
+
+// @public
+export interface WorkflowDefinition<P extends ParameterSchemas> {
+    readonly definitionKey: string;
+    readonly name: string;
+    // (undocumented)
+    readonly onError?: OnError;
+    readonly params: P;
+}
+
+// @public
+export interface WorkflowHandle<R extends BuildReturn> extends WorkflowHandleBase<R> {
+    resultFor<const Id extends ReturnedNodes<R>["id"]>(id: Id): Promise<Result<TaskOutcome<NodeOutput<NodeById<ReturnedNodes<R>, Id>>, NodeCode<NodeById<ReturnedNodes<R>, Id>>>, WorkflowReadError>>;
+}
+
+// @public
+export interface WorkflowHandleBase<R extends BuildReturn> {
+    cancel(): Promise<Result<void, HandleCoreError>>;
+    get(options?: GetOptions): Promise<Result<TaskOutcome<WorkflowOutput<R>, string>, WorkflowReadError>>;
+    pause(): Promise<Result<boolean, HandleCoreError>>;
+    results(): Promise<Result<ReadonlyMap<string, NodeResult>, HandleCoreError>>;
+    resume(): Promise<Result<boolean, HandleCoreError>>;
+    // (undocumented)
+    status(): Promise<Result<WorkflowStatus, HandleCoreError>>;
+    tasks(): Promise<Result<readonly WorkflowNodeInfo[], HandleCoreError>>;
+    // (undocumented)
+    readonly workflowId: WorkflowId;
+}
+
+// @public
+export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandleBase<R> {
+    // (undocumented)
+    resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse>(id: string, contract: TaskContract<P, O, E, X, C>): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
+}
+
+// @public
 export type WorkflowId = string & {
     readonly [workflowIdBrand]: "WorkflowId";
 };
@@ -1814,10 +2125,155 @@ export const WorkflowId: {
 };
 
 // @public
+export interface WorkflowNodeInfo {
+    // (undocumented)
+    readonly completedAt: Recorded<Temporal.Instant>;
+    // (undocumented)
+    readonly index: number;
+    readonly name: string;
+    readonly nodeId: Recorded<string>;
+    // (undocumented)
+    readonly result: Recorded<NodeResult>;
+    // (undocumented)
+    readonly startedAt: Recorded<Temporal.Instant>;
+    // (undocumented)
+    readonly status: WorkflowTaskStatus;
+    readonly subWorkflowId: Recorded<string>;
+    readonly subWorkflowSummary: Recorded<SubWorkflowSummary>;
+}
+
+// @public
 export type WorkflowNodeOnly = "horsies: this task takes an upstream result (h.resultOf); only a workflow node can run it";
 
 // @public
+export type WorkflowOutput<R extends BuildReturn> = NodeOutput<R["output"]>;
+
+// @public
+export type WorkflowReadError =
+/** The workflow had not ended when the wait ended; it may still run. */
+    {
+    readonly kind: "waitTimedOut";
+} | {
+    readonly kind: "workflowNotFound";
+}
+/** The node stores no result yet, or the workflow has no node of this id. */
+| {
+    readonly kind: "resultNotReady";
+}
+/** The stored value does not read with the handle's types. `cause` holds no value. */
+| {
+    readonly kind: "storedResultUnreadable";
+    readonly cause: string;
+}
+/** The stored error has a user code that the node's contract does not list. */
+| {
+    readonly kind: "unknownUserCode";
+    readonly code: string;
+}
+/** A wait in a process that runs task bodies; nothing was read. */
+| {
+    readonly kind: "waitInsideTask";
+}
+/** The database or the connection failed. */
+| {
+    readonly kind: "database";
+    readonly code: HandleErrorCode;
+    readonly retryable: boolean;
+    readonly message: string;
+}
+/** A `timeoutMs` that is not a whole number of milliseconds from 0 to `maxMs`; nothing was read. */
+| {
+    readonly kind: "invalidWait";
+    readonly maxMs: number;
+};
+
+// @public (undocumented)
+export interface WorkflowStartCommandConflict {
+    // (undocumented)
+    readonly code: "WORKFLOW_COMMAND_CONFLICT";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly workflowId: string;
+    // (undocumented)
+    readonly workflowName: string;
+}
+
+// @public (undocumented)
+export interface WorkflowStartEnqueueFailed {
+    // (undocumented)
+    readonly code: "ENQUEUE_FAILED";
+    // (undocumented)
+    readonly exception: CoreCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: boolean;
+    // (undocumented)
+    readonly workflowId: string;
+    // (undocumented)
+    readonly workflowName: string;
+}
+
+// @public
+export type WorkflowStartError<R extends BuildReturn> = WorkflowStartValidationFailed | WorkflowStartIdConflict | WorkflowStartCommandConflict | StartEnqueueFailed<R>;
+
+// @public (undocumented)
+export interface WorkflowStartIdConflict {
+    // (undocumented)
+    readonly code: "WORKFLOW_ID_CONFLICT";
+    // (undocumented)
+    readonly existingWorkflowName: string;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly workflowId: string;
+    // (undocumented)
+    readonly workflowName: string;
+}
+
+// @public (undocumented)
+export interface WorkflowStartValidationFailed {
+    // (undocumented)
+    readonly code: "VALIDATION_FAILED";
+    // (undocumented)
+    readonly exception: CoreCause | NoCause;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly workflowId: string;
+    // (undocumented)
+    readonly workflowName: string;
+}
+
+// @public
 export type WorkflowStatus = (typeof WORKFLOW_STATUSES)[number];
+
+// @public (undocumented)
+export const WorkflowTaskStatus: {
+    readonly PENDING: "PENDING";
+    readonly READY: "READY";
+    readonly ENQUEUED: "ENQUEUED";
+    readonly RUNNING: "RUNNING";
+    readonly COMPLETED: "COMPLETED";
+    readonly FAILED: "FAILED";
+    readonly SKIPPED: "SKIPPED";
+};
+
+// @public (undocumented)
+export type WorkflowTaskStatus = (typeof WorkflowTaskStatus)[keyof typeof WorkflowTaskStatus];
+
+// @public
+export type WorkflowTypes<P extends ParameterSchemas, R extends BuildReturn> = {
+    readonly params: P;
+    readonly build: R;
+};
 
 // @public (undocumented)
 export type ZodContainerSent<S> = ZodDefOf<S> extends {

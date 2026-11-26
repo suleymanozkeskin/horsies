@@ -3,6 +3,7 @@
 
 import type { CoreChecks } from "../../../horsies/src/app/core-checks.ts";
 import type { ProducerCore } from "../../../horsies/src/app/core-access.ts";
+import { noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
 import type { CreateEnvironment } from "../../../horsies/src/app/create.ts";
 import type { ProcessStart } from "../../../horsies/src/app/suppression.ts";
 import type {
@@ -169,6 +170,7 @@ export function fakeProducer(script: ProducerScript = {}): FakeProducer {
     results,
     infos,
     roles,
+    workflows: noWorkflowCore(),
     prepareSend: async (facts) => {
       prepares.push(facts);
 

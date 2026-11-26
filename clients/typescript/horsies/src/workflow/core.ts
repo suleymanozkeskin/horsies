@@ -6,12 +6,16 @@
 
 import { threadId } from "node:worker_threads";
 
-import type { SeatRelay } from "../app/core-access.ts";
+import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
+import type { CoreAccess, SeatRelay } from "../app/core-access.ts";
+import type { QueueSetup } from "../config/queues.ts";
+import { addonSettlement, settlingCallback } from "../native/call/callback.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { NativeSendRules, NativeTaskOptions, ProcessRoleName, WaitBound } from "../native/sends/addon.ts";
 import { processRole, storedOptionsText } from "../native/sends/sends.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 import type {
+  ChildSpecCall,
   HandleChange,
   HandleDone,
   NodeResultRead,
@@ -24,10 +28,13 @@ import type {
 import * as native from "../native/workflows/workflows.ts";
 import { AddonOutsideMainThread, ClientDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
+import { childSpecAnswer } from "./child-spec.ts";
 import type { CheckedSpec, NodeDeadline } from "./findings.ts";
+import type { WorkflowRegistry } from "./registry.ts";
 import type { ConversionFacts } from "./spec-data.ts";
 import { specDataTextOf } from "./spec-data.ts";
 import type { SpecTextRefused } from "./spec-text.ts";
+import type { WorkflowsSeatOperation, WorkflowsSeatReply } from "./seat-operations.ts";
 
 /** One start of a checked spec. */
 export type StartRequest = {
@@ -161,36 +168,6 @@ export function addonWorkflowCore(facts: MainThreadFacts, conversion: Conversion
   return Object.freeze(core);
 }
 
-/** One workflow operation that a seat isolate asks its child's main thread for. */
-export type WorkflowsSeatOperation =
-  | { readonly kind: "start"; readonly request: StartRequest }
-  | { readonly kind: "restart"; readonly request: RestartRequest }
-  | { readonly kind: "status"; readonly workflowId: string }
-  | { readonly kind: "nodeResults"; readonly workflowId: string }
-  | { readonly kind: "nodes"; readonly workflowId: string }
-  | { readonly kind: "cancel"; readonly workflowId: string }
-  | { readonly kind: "pause"; readonly workflowId: string }
-  | { readonly kind: "resume"; readonly workflowId: string }
-  | { readonly kind: "nodeResult"; readonly workflowId: string; readonly nodeId: string };
-
-/** The answer to a `WorkflowsSeatOperation`, of the same `kind`. */
-export type WorkflowsSeatReply =
-  | { readonly kind: "start"; readonly call: StartCall }
-  | { readonly kind: "restart"; readonly call: StartCall }
-  | { readonly kind: "status"; readonly read: WorkflowStatusRead }
-  | { readonly kind: "nodeResults"; readonly read: NodeResultsRead }
-  | { readonly kind: "nodes"; readonly read: NodesRead }
-  | { readonly kind: "cancel"; readonly done: HandleDone }
-  | { readonly kind: "pause"; readonly change: HandleChange }
-  | { readonly kind: "resume"; readonly change: HandleChange }
-  | { readonly kind: "nodeResult"; readonly read: NodeResultRead };
-
-declare module "../app/core-access.ts" {
-  interface SeatOperationMap {
-    readonly workflows: { readonly operation: WorkflowsSeatOperation; readonly reply: WorkflowsSeatReply };
-  }
-}
-
 /** The main-thread side of one seat operation: the same calls as a main-thread call. */
 export async function serveWorkflowsSeatOperation(
   core: WorkflowCore,
@@ -306,4 +283,52 @@ export function noWorkflowCore(): WorkflowCore {
     nodeResult: refuse,
     processRole: refuse,
   });
+}
+
+/**
+ * The core operations of an app on a main thread: the conversion facts read once from the core, and the app's child
+ * spec source registered on `facts.handle`, so the core's workflow steps in this process build sub-workflow children
+ * with the app's builds. Effects: reads the queue classes; registers the source.
+ */
+export function mainThreadWorkflowCore(facts: MainThreadFacts, registry: WorkflowRegistry): WorkflowCore {
+  const conversion = addonConversionFacts(facts);
+
+  const source = settlingCallback(
+    (call: ChildSpecCall) => childSpecAnswer(registry, conversion, call),
+    addonSettlement,
+  );
+
+  const registered = native.registerChildSpecSource(facts.handle, source);
+
+  if (registered === "alreadySet") {
+    throw new ClientDefect({ subject: "registerChildSpecSource", rule: "a new core handle holds a child spec source" });
+  }
+
+  return addonWorkflowCore(facts, conversion);
+}
+
+/** The queues that an app admits: the default queue, or the custom queues. Pure. */
+export function admittedQueueNames(queues: QueueSetup): readonly string[] {
+  switch (queues.kind) {
+    case "default":
+      return [DEFAULT_QUEUE_ROUTE.queueName];
+    case "custom":
+      return [...queues.queues.keys()];
+    default:
+      return unreachable(queues, "admittedQueueNames");
+  }
+}
+
+/** The workflow core of a thread's core access: the producer's on a main thread, the relay's in a seat isolate. */
+export function workflowCoreOf(access: CoreAccess): WorkflowCore {
+  switch (access.kind) {
+    case "addon":
+      return access.producer.workflows;
+    case "seatRelay":
+      return relayedWorkflowCore(access.relay);
+    case "noCore":
+      return noWorkflowCore();
+    default:
+      return unreachable(access, "workflowCoreOf");
+  }
 }

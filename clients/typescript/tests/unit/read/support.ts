@@ -12,6 +12,7 @@ import type {
   WaitBound,
 } from "../../../horsies/src/native/sends/addon.ts";
 import type { RawCatalogError } from "../../../horsies/src/native/values/records.ts";
+import { noWorkflowCore } from "../../../horsies/src/workflow/core.ts";
 
 /** A task id of the tests (a UUIDv7 text). */
 export const TASK_ID: TaskId = taskId("0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b");
@@ -52,6 +53,7 @@ export function fakeProducer(script: ProducerScript): FakeProducer {
   const calls: ProducerCalls = { getResult: 0, taskInfo: 0, processRole: 0, prepareSend: 0, enqueue: 0, waits: [] };
 
   const producer: ProducerCore = {
+    workflows: noWorkflowCore(),
     prepareSend: async () => {
       calls.prepareSend += 1;
       throw new TypeError("the read tests make no send");

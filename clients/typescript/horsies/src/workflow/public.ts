@@ -36,3 +36,32 @@ export {
   type UpstreamValue,
   type WorkflowOutput,
 } from "./node.ts";
+
+export type { ContextReadError, WorkflowContext } from "./context.ts";
+
+export type { NodeResult, WorkflowHandle, WorkflowHandleBase, WorkflowHandleById, WorkflowNodeInfo } from "./handle.ts";
+
+export type { WorkflowReadError } from "./handle-error.ts";
+
+export type { StartOptions } from "./start.ts";
+
+export type { StartEnqueueFailed, WorkflowStartError } from "./start-error.ts";
+
+export type {
+  WorkflowStartCommandConflict,
+  WorkflowStartEnqueueFailed,
+  WorkflowStartIdConflict,
+  WorkflowStartValidationFailed,
+} from "../_catalog/workflow_start_errors.ts";
+
+export type {
+  HandleCoreError,
+  HandleDbOperationFailed,
+  HandleResumeRecoveryFailed,
+  HandleStoredDataInvalid,
+  HandleWorkflowNotFound,
+} from "../_catalog/workflow_handle_errors.ts";
+
+export { HandleErrorCode } from "../_catalog/workflow_handle.ts";
+
+export { WorkflowTaskStatus } from "../_catalog/status.ts";

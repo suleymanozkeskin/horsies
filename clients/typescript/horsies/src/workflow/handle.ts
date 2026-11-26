@@ -8,7 +8,6 @@
 
 import { WorkflowTaskStatus } from "../_catalog/status.ts";
 import type { HandleCoreError } from "../_catalog/workflow_handle_errors.ts";
-import type { WorkflowStatus } from "../_catalog/status.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
 import { readStoredError } from "../codec/envelope.ts";
 import type { JsonValue } from "../codec/json-value.ts";
@@ -24,7 +23,7 @@ import { type GetOptions, type ReadForm, readFormOf } from "../read/handle.ts";
 import { instantOfMicros, type Recorded } from "../read/info.ts";
 import { JSON_KIND } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
-import type { SubWorkflowSummary, TaskOutcome } from "../wire/task-error.ts";
+import type { SubWorkflowSummary, TaskOutcome, WorkflowStatus } from "../wire/task-error.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import type { WorkflowCore } from "./core.ts";
 import {

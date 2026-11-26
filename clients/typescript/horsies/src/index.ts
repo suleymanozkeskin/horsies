@@ -14,6 +14,8 @@ export * from "./send/public.ts";
 
 export * from "./read/public.ts";
 
+export * from "./workflow/public.ts";
+
 export * from "./thrown-errors.ts";
 
 export {
