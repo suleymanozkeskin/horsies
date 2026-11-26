@@ -69,6 +69,7 @@ from horsies.core.models.task_send_types import (
     TaskSendSuppressed,
     TaskSendValidationFailed,
 )
+from horsies.core.models.tasks import TextCodes
 from horsies.core.task_read import read_of_record
 from horsies.core.types.result import Err, Ok, Result, is_ok, is_err
 
@@ -800,7 +801,7 @@ class TestReadOfRecord:
             status=TaskStatus.FAILED, raw_result=malformed,
         ))
 
-        result = read_of_record(self._TASK_ID, broker_result, int, None)
+        result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
         assert isinstance(result.err_value, ResultDeserializationError)
@@ -825,7 +826,7 @@ class TestReadOfRecord:
             status=TaskStatus.FAILED, raw_result=malformed,
         ))
 
-        result = read_of_record(self._TASK_ID, broker_result, int, None)
+        result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
         assert isinstance(result.err_value, ResultDeserializationError)
@@ -840,7 +841,7 @@ class TestReadOfRecord:
             status=TaskStatus.COMPLETED, raw_result=raw,
         ))
 
-        result = read_of_record(self._TASK_ID, broker_result, int, None)
+        result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
         assert isinstance(result.err_value, ResultDeserializationError)
@@ -866,7 +867,7 @@ class TestReadOfRecord:
             status=TaskStatus.FAILED, raw_result=stored,
         ))
 
-        result = read_of_record(self._TASK_ID, broker_result, int, None)
+        result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
         assert isinstance(result.err_value, ResultDeserializationError)
@@ -893,7 +894,7 @@ class TestReadOfRecord:
             status=TaskStatus.COMPLETED, raw_result=None,
         ))
 
-        result = read_of_record(self._TASK_ID, broker_result, int, None)
+        result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
         assert isinstance(result.err_value, ResultNotAvailable)
@@ -908,7 +909,7 @@ class TestReadOfRecord:
             status=TaskStatus.RUNNING, raw_result=None,
         ))
 
-        result = read_of_record(self._TASK_ID, broker_result, int, 100)
+        result = read_of_record(self._TASK_ID, broker_result, int, 100, TextCodes())
 
         assert isinstance(result, Err)
         assert isinstance(result.err_value, WaitTimeout)
@@ -950,7 +951,7 @@ class TestReadOfRecord:
             status=TaskStatus.FAILED, raw_result=wire,
         ))
 
-        result = read_of_record(self._TASK_ID, broker_result, int, None)
+        result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         match result:
             case Ok(ok_value=Failed(error=SubWorkflowError() as sub)):

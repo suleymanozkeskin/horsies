@@ -171,6 +171,8 @@ if TYPE_CHECKING:
 
 P = ParamSpec('P')
 T = TypeVar('T')
+C = TypeVar('C', default=str)
+"""The type of the custom codes of a task (`TaskError[C]`)."""
 OutT = TypeVar('OutT')
 
 _E = TypeVar('_E', bound=HorsiesError)
@@ -464,7 +466,7 @@ class Horsies:
         # The pool that get_broker() opens. A worker child sets its
         # task-send pool before it imports task modules.
         self._broker_pool: _ConfigBrokerPool | _TaskSendBrokerPool = _ConfigBrokerPool()
-        self.tasks: 'TaskRegistry[TaskFunction[Any, Any] | AsyncTaskFunction[Any, Any] | RuntimeTaskFunction[Any, Any] | AsyncRuntimeTaskFunction[Any, Any]]' = (
+        self.tasks: 'TaskRegistry[TaskFunction[Any, Any, Any] | AsyncTaskFunction[Any, Any, Any] | RuntimeTaskFunction[Any, Any, Any] | AsyncRuntimeTaskFunction[Any, Any, Any]]' = (
             TaskRegistry()
         )
         self.logger: logging.Logger = get_logger('app')
@@ -768,28 +770,28 @@ class Horsies:
         task_name: str,
         func: Callable[
             Concatenate['TaskRuntime', P],
-            Coroutine[Any, Any, 'Result[T, TaskError]'],
+            Coroutine[Any, Any, 'Result[T, TaskError[C]]'],
         ],
-    ) -> 'AsyncRuntimeTaskFunction[P, T]': ...
+    ) -> 'AsyncRuntimeTaskFunction[P, T, C]': ...
 
     @overload
     def task(  # pyright: ignore[reportOverlappingOverload]
         self,
         task_name: str,
-        func: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError]'],
-    ) -> 'RuntimeTaskFunction[P, T]': ...
+        func: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError[C]]'],
+    ) -> 'RuntimeTaskFunction[P, T, C]': ...
 
     @overload
     def task(
         self,
         task_name: str,
-        func: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError]']],
-    ) -> 'AsyncTaskFunction[P, T]': ...
+        func: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError[C]]']],
+    ) -> 'AsyncTaskFunction[P, T, C]': ...
 
     @overload
     def task(
-        self, task_name: str, func: Callable[P, 'Result[T, TaskError]']
-    ) -> 'TaskFunction[P, T]': ...
+        self, task_name: str, func: Callable[P, 'Result[T, TaskError[C]]']
+    ) -> 'TaskFunction[P, T, C]': ...
 
     # The last overload also accepts a literal SHARED_ASYNC with
     # cancel_grace_ms, and its return type accepts more function kinds than
@@ -887,15 +889,15 @@ class Horsies:
         self,
         task_name: str,
         func: Optional[
-            Callable[..., 'Result[Any, TaskError]']
-            | Callable[..., Coroutine[Any, Any, 'Result[Any, TaskError]']]
+            Callable[..., 'Result[Any, TaskError[Any]]']
+            | Callable[..., Coroutine[Any, Any, 'Result[Any, TaskError[Any]]']]
         ] = None,
         **task_options_kwargs: Any,
     ) -> Union[
-        'TaskFunction[Any, Any]',
-        'AsyncTaskFunction[Any, Any]',
-        'RuntimeTaskFunction[Any, Any]',
-        'AsyncRuntimeTaskFunction[Any, Any]',
+        'TaskFunction[Any, Any, Any]',
+        'AsyncTaskFunction[Any, Any, Any]',
+        'RuntimeTaskFunction[Any, Any, Any]',
+        'AsyncRuntimeTaskFunction[Any, Any, Any]',
         'TaskDecorator',
         'SharedAsyncTaskDecorator',
         'SharedThreadTaskDecorator',
@@ -947,29 +949,29 @@ class Horsies:
         def decorator(  # pyright: ignore[reportOverlappingOverload]
             fn: Callable[
                 Concatenate['TaskRuntime', P],
-                Coroutine[Any, Any, 'Result[T, TaskError]'],
+                Coroutine[Any, Any, 'Result[T, TaskError[C]]'],
             ],
-        ) -> 'AsyncRuntimeTaskFunction[P, T]': ...
+        ) -> 'AsyncRuntimeTaskFunction[P, T, C]': ...
 
         @overload
         def decorator(  # pyright: ignore[reportOverlappingOverload]
-            fn: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError]'],
-        ) -> 'RuntimeTaskFunction[P, T]': ...
+            fn: Callable[Concatenate['TaskRuntime', P], 'Result[T, TaskError[C]]'],
+        ) -> 'RuntimeTaskFunction[P, T, C]': ...
 
         @overload
         def decorator(
-            fn: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError]']],
-        ) -> 'AsyncTaskFunction[P, T]': ...
+            fn: Callable[P, Coroutine[Any, Any, 'Result[T, TaskError[C]]']],
+        ) -> 'AsyncTaskFunction[P, T, C]': ...
 
         @overload
         def decorator(
-            fn: Callable[P, 'Result[T, TaskError]'],
-        ) -> 'TaskFunction[P, T]': ...
+            fn: Callable[P, 'Result[T, TaskError[C]]'],
+        ) -> 'TaskFunction[P, T, C]': ...
 
         def decorator(
-            fn: Callable[P, 'Result[T, TaskError]']
-            | Callable[P, Coroutine[Any, Any, 'Result[T, TaskError]']],
-        ) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[Any, T] | AsyncRuntimeTaskFunction[Any, T]':
+            fn: Callable[P, 'Result[T, TaskError[C]]']
+            | Callable[P, Coroutine[Any, Any, 'Result[T, TaskError[C]]']],
+        ) -> 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[Any, T, C] | AsyncRuntimeTaskFunction[Any, T, C]':
             fn_location = SourceLocation.from_function(fn)
 
             if task_name == '':
@@ -1009,10 +1011,16 @@ class Horsies:
                 None,
             )
 
+            error_codes_value: object = task_options_kwargs.pop('error_codes', NO_ERROR_CODES)
             declared_error_codes = _declared_error_codes_or_raise(
-                task_options_kwargs.pop('error_codes', NO_ERROR_CODES),
+                error_codes_value,
                 task_label=fn.__name__,
                 location=fn_location,
+            )
+            code_enum: type[Enum] | None = (
+                error_codes_value
+                if isinstance(error_codes_value, type) and issubclass(error_codes_value, Enum)
+                else None
             )
 
             good_until_value = task_options_kwargs.pop('good_until', None)
@@ -1093,6 +1101,7 @@ class Horsies:
                     exception_mapper,
                     self.config.exception_mapper,
                 ),
+                code_enum=code_enum,
             )
 
             # Register task with this app, passing source for duplicate detection
@@ -1955,7 +1964,7 @@ class Horsies:
         self,
         task_id: UUID,
         timeout_ms: int | None = None,
-    ) -> 'ReadResult[Any, TaskError]':
+    ) -> 'ReadResult[Any, TaskError[Any]]':
         """Fetch and typed-decode a task's stored result.
 
         Returns ``Ok(Succeeded(value))`` or ``Ok(Failed(task_error))`` for a
@@ -1990,27 +1999,31 @@ class Horsies:
         task_id: UUID,
         timeout_ms: int | None,
         record_result: 'BrokerResult[RawResultRecord | None]',
-    ) -> 'ReadResult[Any, TaskError]':
+    ) -> 'ReadResult[Any, TaskError[Any]]':
         """The answer of ``get_result`` and ``get_result_async`` for the
         broker's result read (``read_of_record``). Pure apart from the lookup
         of the task's ``task_ok_type`` in the registry.
         """
+        from horsies.core.models.tasks import CustomCodeType, TextCodes
         from horsies.core.task_read import read_of_record
 
         ok_type: object | None = None
+        code_type: CustomCodeType = TextCodes()
         match record_result:
             case Ok(ok_value=record) if record is not None:
                 task = self.tasks.get(record.task_name)
-                ok_type = getattr(task, 'task_ok_type', None) if task is not None else None
+                if task is not None:
+                    ok_type = getattr(task, 'task_ok_type', None)
+                    code_type = task.task_code_type
             case _:
                 pass
-        return read_of_record(task_id, record_result, ok_type, timeout_ms)
+        return read_of_record(task_id, record_result, ok_type, timeout_ms, code_type)
 
     def get_result(
         self,
         task_id: UUID,
         timeout_ms: int | None = None,
-    ) -> 'ReadResult[Any, TaskError]':
+    ) -> 'ReadResult[Any, TaskError[Any]]':
         """Synchronous version of ``get_result_async``: the broker's blocking
         result read (``PostgresBroker.get_raw_result_record``) on the calling
         thread, with the GIL released and signals checked every 100 ms.
@@ -2170,7 +2183,7 @@ class Horsies:
 
     def _read_wait_refused(
         self, label: str, task_id: UUID, timeout_ms: object,
-    ) -> 'ReadResult[Any, TaskError] | None':
+    ) -> 'ReadResult[Any, TaskError[Any]] | None':
         """``Err(InvalidInput)`` for a wait limit that no wait can use, or
         None to go on. The first check of a typed result read. Pure."""
         from horsies.core.models.outcome import InvalidInput
@@ -2204,7 +2217,7 @@ class Horsies:
 
     def _wait_inside_task_read(
         self, label: str, task_id: UUID,
-    ) -> 'ReadResult[Any, TaskError]':
+    ) -> 'ReadResult[Any, TaskError[Any]]':
         """Refuse a result wait in a process that runs task bodies. Nothing ran."""
         from horsies.core.models.outcome import WaitInsideTask
 

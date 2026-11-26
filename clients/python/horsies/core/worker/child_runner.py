@@ -37,6 +37,7 @@ from horsies.core.codec.json_value import StrictJsonError
 from horsies.core.codec.kwargs import (
     NoRuntimeParameter,
     TakesRuntime,
+    declared_outcome_code_type,
     declared_outcome_ok_type,
     decode_kwargs,
     fill_omitted_defaults,
@@ -75,13 +76,13 @@ from horsies.core.models.tasks import (
     MAX_TASK_TIMEOUT_MS,
     MIN_CANCEL_GRACE_MS,
     MIN_TASK_TIMEOUT_MS,
-    BuiltInTaskCode,
     ContractCode,
     Execution,
     OutcomeCode,
     RetrievalCode,
     TaskError,
     OperationalErrorCode,
+    custom_code_text,
 )
 from horsies.core.worker.stored_timeout import (
     CancelGraceInvalid,
@@ -151,6 +152,7 @@ from horsies.core.lifecycle.outcomes import (
 )
 from horsies.core.task_decorator import TaskBodyKind, await_task_call_in_worker
 from horsies.core.models.outcome import Failed, TaskOutcome
+from horsies.core.task_read import typed_outcome
 from horsies.core.types.result import Err, Ok, Result, is_err
 
 
@@ -240,14 +242,15 @@ def isolated_work_of(work: Literal['RUN'] | core.StoredOptionsRefused) -> Isolat
             assert_never(unreachable)
 
 
-def error_code_text(code: BuiltInTaskCode | str) -> str:
-    """The text of an error code: the value of a built-in code, or the user's
-    code. Pure."""
+def error_code_text(code: object) -> str:
+    """The text of an error code: the value of a built-in code, or the stored
+    text of a custom code (``custom_code_text``: the ``str``, or the value of
+    the member). Pure."""
     match code:
         case OperationalErrorCode() | ContractCode() | RetrievalCode() | OutcomeCode():
             return code.value
-        case str():
-            return code
+        case _:
+            return custom_code_text(code)
 
 
 def result_outcome_of(out: Result[Any, TaskError]) -> ResultOutcome:
@@ -1414,18 +1417,29 @@ def _prepare_task_call(
                 ),
             )
         target_ok_type = declared_outcome_ok_type(underlying_fn, key)
-        if target_ok_type is None or target_ok_type == source_ok_type:
-            kwargs[key] = decoded_result
-            continue
-        match conform_to_target(decoded_result, target_ok_type):
-            case Ok(ok_value=conformed):
-                kwargs[key] = conformed
-            case Err(err_value=refusal):
+        if target_ok_type is not None and target_ok_type != source_ok_type:
+            match conform_to_target(decoded_result, target_ok_type):
+                case Ok(ok_value=conformed):
+                    decoded_result = conformed
+                case Err(err_value=refusal):
+                    return _serialization_error_response(
+                        task_name,
+                        SerializationError(
+                            f'kwarg {key!r} does not fit its declared type '
+                            f'(source task {source_task_name!r}): {refusal}'
+                        ),
+                    )
+                case _ as unreachable:
+                    assert_never(unreachable)
+        match typed_outcome(decoded_result, declared_outcome_code_type(underlying_fn, key)):
+            case Ok(ok_value=typed):
+                kwargs[key] = typed
+            case Err(err_value=unknown):
                 return _serialization_error_response(
                     task_name,
                     SerializationError(
                         f'kwarg {key!r} does not fit its declared type '
-                        f'(source task {source_task_name!r}): {refusal}'
+                        f'(source task {source_task_name!r}): {unknown.message}'
                     ),
                 )
             case _ as unreachable:

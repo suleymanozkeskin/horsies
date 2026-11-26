@@ -112,6 +112,7 @@ match divide.send(a=10, b=2):
 | `AsyncContext` | `RetrievalCode.ASYNC_CONTEXT` | A sync read on a thread that runs an event loop. Nothing was read. Call the `*_async` form there | No |
 | `InvalidInput` | `RetrievalCode.INVALID_INPUT` | `timeout_ms` is negative, not an int, or above `MAX_TASK_TIMEOUT_MS`. Nothing was read | No |
 | `ResultDeserializationError` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored result does not read as the result of the declared types. The same read gives the same error until the stored value changes | Yes |
+| `UnknownCustomCode` | `OperationalErrorCode.RESULT_DESERIALIZATION_ERROR` | The stored error has a custom code that the declared `Enum` of the task does not name: a row of another version of the task. `custom_code` holds the stored text. It shares its code with `ResultDeserializationError` and names the code | Yes |
 | `BrokerError` | `OperationalErrorCode.BROKER_ERROR` | The database, the connection or the core call failed, or a workflow handle read found stored workflow data that is not valid. The condition can clear, so a later read can succeed | No |
 | `NoTypeAvailable` | `ContractCode.NO_TYPE_AVAILABLE` | The task succeeded, and this process has no declared type to read the value with: the handle was built by id, or the task or the workflow is not registered here | Yes |
 | `WorkflowCtxMissingId` | `ContractCode.WORKFLOW_CTX_MISSING_ID` | `WorkflowHandle.result_for()` got a node with no `node_id`. Nothing was read | No |
@@ -148,9 +149,11 @@ def describe_read(read: ReadResult[float, TaskError]) -> str:
 
 `TaskError` is a Pydantic model. `error_code` is required. The other fields are optional. A key that the model does not declare is refused.
 
+`TaskError[C]` is generic in the type `C` of its custom code, with the default `str`. A task that declares an `Enum` `E` with `error_codes=` and returns `TaskError[E]` has members of `E` as its custom codes ([Declare Error Codes](/horsies/tasks/defining-tasks/#declare-error-codes)).
+
 | Field | Type | Purpose |
 |-------|------|---------|
-| `error_code` | `str` or `BuiltInTaskCode` (required) | Identifies the error type |
+| `error_code` | `C \| BuiltInTaskCode` (required): a custom code, or a built-in code | Identifies the error type |
 | `message` | `str` | Human-readable description |
 | `data` | `Any` | Additional context (dict, list, etc.) |
 | `exception` | `BaseException` or `FlattenedException` | Live exception in-process; flattened on the wire to `type`, `module`, `message`, `repr`, and `traceback` |

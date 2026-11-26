@@ -68,10 +68,10 @@ class TaskNode(Generic[OkT_co]):
     """
 
     fn: (
-        TaskFunction[Any, OkT_co]
-        | AsyncTaskFunction[Any, OkT_co]
-        | RuntimeTaskFunction[Any, OkT_co]
-        | AsyncRuntimeTaskFunction[Any, OkT_co]
+        TaskFunction[Any, OkT_co, Any]
+        | AsyncTaskFunction[Any, OkT_co, Any]
+        | RuntimeTaskFunction[Any, OkT_co, Any]
+        | AsyncRuntimeTaskFunction[Any, OkT_co, Any]
     )
     """
     - The task to run: a `def` task or an `async def` task, with or without a

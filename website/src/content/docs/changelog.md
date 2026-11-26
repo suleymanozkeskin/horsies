@@ -57,6 +57,34 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking (Python): typed custom error codes.** `TaskError[C]` is generic
+  in the type of its custom code, with the default `str`; `TaskError` with
+  no argument keeps its meaning. `error_code` is `C | BuiltInTaskCode`.
+  - A task that declares `error_codes=E` (an `Enum` class) and returns
+    `Result[T, TaskError[E]]` passes members of `E` in its body
+    (`TaskError(error_code=E.MEMBER)`, no `.value`). A `str` code in such a
+    task is `RETURN_TYPE_MISMATCH`. The stored text is the value of the
+    member, as before.
+  - `TaskHandle.get` / `get_async` give members of `E` back, and so does an
+    `args_from` parameter annotated `TaskOutcome[T, TaskError[E]]`.
+    `Horsies.get_result` gives members of the `Enum` of the registered task
+    (typed `TaskError[Any]`). The
+    handle type carries the code type: `TaskHandle[T, C]`, from the return
+    annotation of the body.
+  - A stored custom code that `E` does not name (a row of another version
+    of the task) is the new read failure `UnknownCustomCode`, with the code
+    `RESULT_DESERIALIZATION_ERROR` and the stored text in `custom_code`;
+    for an `args_from` input it is `WORKER_SERIALIZATION_ERROR`.
+  - `TaskError` now accepts a custom `Enum` member whose value is a code
+    text; it refused one before.
+  - A mapped exception of a task with `TaskError[E]` gives the member of
+    `E`. A mapper code or a default code that `E` does not name is
+    `HRS-209` when the task is defined. `TaskError[E]` without
+    `error_codes=E` is `HRS-105`. An `args_from` target with
+    `TaskError[E]` whose source task does not return `TaskError[E]` is
+    `WORKFLOW_ARGS_FROM_TYPE_MISMATCH`.
+  - `WorkflowHandle.get`, `WorkflowHandle.result_for` and
+    `WorkflowContext.result_for` give custom codes as text, typed `str`.
 - **Breaking (Python): `Result` for task bodies, `ReadResult` for reads,
   `TaskOutcome` for node inputs.** `TaskResult` is removed, with no alias.
   - A task body returns `Result[T, TaskError]`: `Ok(value)` or

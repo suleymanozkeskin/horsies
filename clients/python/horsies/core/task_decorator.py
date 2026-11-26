@@ -144,11 +144,17 @@ from horsies.core.models.tasks import (
     DEFAULT_CANCEL_GRACE_MS,
     MAX_CANCEL_GRACE_MS,
     MIN_CANCEL_GRACE_MS,
+    BUILTIN_FAMILIES,
+    CustomCodeType,
+    EnumCodes,
     Execution,
+    NotATaskErrorType,
     TaskError,
     TaskOptions,
+    TextCodes,
     BuiltInTaskCode,
     ContractCode,
+    custom_code_type_of,
 )
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.telemetry.send_telemetry import (
@@ -175,6 +181,9 @@ from horsies.core.errors import (
 
 P = ParamSpec('P')
 T = TypeVar('T')
+C = TypeVar('C', default=str)
+"""The type of the custom codes of a task: `str`, or the `Enum` class that
+the task declares with `error_codes=` and names in `TaskError[...]`."""
 _UNSET: Final[object] = object()
 
 
@@ -439,11 +448,13 @@ def bind_task_node(
     return BoundTaskNode(node=node, queue=queue, priority=priority)
 
 
-class TaskHandle(Generic[T]):
+class TaskHandle(Generic[T, C]):
     """
     Handle for a submitted task, used to read its result.
 
-    ``get()`` and ``get_async()`` return ``ReadResult[T, TaskError]``:
+    ``get()`` and ``get_async()`` return ``ReadResult[T, TaskError[C]]``,
+    where ``C`` is the type of the task's custom codes (``str``, or the
+    ``Enum`` class that it declares):
 
     - ``Ok(Succeeded(value))``: the task returned ``value``.
     - ``Ok(Failed(task_error))``: the task returned this error, or the
@@ -454,8 +465,8 @@ class TaskHandle(Generic[T]):
 
     Neither method raises for a task error or a read failure. The handle
     keeps the first final read (``is_final_read``): an outcome,
-    ``ResultNotAvailable``, ``ResultDeserializationError`` and
-    ``NoTypeAvailable``.
+    ``ResultNotAvailable``, ``ResultDeserializationError``,
+    ``UnknownCustomCode`` and ``NoTypeAvailable``.
     """
 
     def __init__(
@@ -464,6 +475,7 @@ class TaskHandle(Generic[T]):
         app: Optional['Horsies'] = None,
         broker_mode: bool = False,
         ok_type: TypeAnnotation | None = None,
+        code_type: CustomCodeType = TextCodes(),
     ):
         self.task_id = task_id
         self._app = app
@@ -474,11 +486,14 @@ class TaskHandle(Generic[T]):
         # ``None``; ``.get()`` then returns ``NoTypeAvailable`` when an ok
         # payload is present.
         self.ok_type: TypeAnnotation | None = ok_type
-        self._cached_result: Optional[ReadResult[T, TaskError]] = None
+        # The type of the custom codes of the task: a read turns a stored
+        # custom code into the member of the declared Enum (`EnumCodes`).
+        self.code_type: CustomCodeType = code_type
+        self._cached_result: Optional[ReadResult[T, TaskError[C]]] = None
 
-    def _kept(self, read: ReadResult[Any, TaskError]) -> ReadResult[T, TaskError]:
+    def _kept(self, read: ReadResult[Any, TaskError[Any]]) -> ReadResult[T, TaskError[C]]:
         """Keep ``read`` when it is final, and return it as this handle's read."""
-        typed = cast('ReadResult[T, TaskError]', read)
+        typed = cast('ReadResult[T, TaskError[C]]', read)
         if is_final_read(read):
             self._cached_result = typed
         return typed
@@ -495,7 +510,7 @@ class TaskHandle(Generic[T]):
             and process_role() is ProcessRole.RUNS_TASK_BODIES
         )
 
-    def _wait_inside_task_result(self, operation: str) -> ReadResult[T, TaskError]:
+    def _wait_inside_task_result(self, operation: str) -> ReadResult[T, TaskError[C]]:
         """Return ``WaitInsideTask`` for a refused wait. Not kept; nothing ran."""
         return Err(WaitInsideTask(message=wait_inside_task_message(
             f'TaskHandle.{operation}() for task {self.task_id}',
@@ -503,7 +518,7 @@ class TaskHandle(Generic[T]):
 
     def _before_read(
         self, operation: str, timeout_ms: Optional[int],
-    ) -> ReadResult[T, TaskError] | None:
+    ) -> ReadResult[T, TaskError[C]] | None:
         """The answer that comes before any broker read, or None to read.
 
         In order: ``InvalidInput`` for a ``timeout_ms`` that no wait can use,
@@ -532,7 +547,7 @@ class TaskHandle(Generic[T]):
     def get(
         self,
         timeout_ms: Optional[int] = None,
-    ) -> ReadResult[T, TaskError]:
+    ) -> ReadResult[T, TaskError[C]]:
         """
         Read the task result (blocking).
 
@@ -548,7 +563,7 @@ class TaskHandle(Generic[T]):
             timeout_ms: Maximum time to wait for result (milliseconds)
 
         Returns:
-            ReadResult[T, TaskError]: ``Ok(Succeeded(value))``,
+            ReadResult[T, TaskError[C]]: ``Ok(Succeeded(value))``,
             ``Ok(Failed(task_error))`` or ``Err(read_error)``. Never raises
             for a task error or a read failure.
         """
@@ -565,13 +580,15 @@ class TaskHandle(Generic[T]):
             self.task_id, timeout_ms,
         )
         return self._kept(
-            read_of_record(self.task_id, broker_result, self.ok_type, timeout_ms),
+            read_of_record(
+                self.task_id, broker_result, self.ok_type, timeout_ms, self.code_type,
+            ),
         )
 
     async def get_async(
         self,
         timeout_ms: Optional[int] = None,
-    ) -> ReadResult[T, TaskError]:
+    ) -> ReadResult[T, TaskError[C]]:
         """
         Read the task result asynchronously.
 
@@ -585,7 +602,7 @@ class TaskHandle(Generic[T]):
             timeout_ms: Maximum time to wait for result (milliseconds)
 
         Returns:
-            ReadResult[T, TaskError], as ``get()``.
+            ReadResult[T, TaskError[C]], as ``get()``.
         """
         before = self._before_read('get_async', timeout_ms)
         if before is not None:
@@ -595,7 +612,9 @@ class TaskHandle(Generic[T]):
             self.task_id, timeout_ms,
         )
         return self._kept(
-            read_of_record(self.task_id, broker_result, self.ok_type, timeout_ms),
+            read_of_record(
+                self.task_id, broker_result, self.ok_type, timeout_ms, self.code_type,
+            ),
         )
 
     def info(
@@ -668,7 +687,7 @@ class TaskHandle(Generic[T]):
 
     def set_immediate_result(
         self,
-        result: Result[T, TaskError],
+        result: Result[T, TaskError[C]],
     ) -> None:
         """Internal method to set the outcome of a synchronous execution."""
         match result:
@@ -690,7 +709,7 @@ class NodeFactory(Generic[P, T]):
         # Type checker validates 'value' against my_task's signature
     """
 
-    _fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[P, T] | AsyncRuntimeTaskFunction[P, T]'
+    _fn: 'TaskFunction[P, T, Any] | AsyncTaskFunction[P, T, Any] | RuntimeTaskFunction[P, T, Any] | AsyncRuntimeTaskFunction[P, T, Any]'
     _waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None
     _args_from: dict[str, 'TaskNode[Any] | SubWorkflowNode[Any]'] | None
@@ -704,7 +723,7 @@ class NodeFactory(Generic[P, T]):
 
     def __init__(
         self,
-        fn: 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[P, T] | AsyncRuntimeTaskFunction[P, T]',
+        fn: 'TaskFunction[P, T, Any] | AsyncTaskFunction[P, T, Any] | RuntimeTaskFunction[P, T, Any] | AsyncRuntimeTaskFunction[P, T, Any]',
         *,
         waits_for: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
         workflow_ctx_from: Sequence['TaskNode[Any] | SubWorkflowNode[Any]'] | None,
@@ -799,11 +818,11 @@ class NodeFactory(Generic[P, T]):
         )
 
 
-class _TaskFunctionMembers(Protocol[P, T]):
+class _TaskFunctionMembers(Protocol[P, T, C]):
     """The members that a `def` task and an `async def` task share.
 
     `TaskFunction` and `AsyncTaskFunction` add the direct call. The generic
-    parameter T represents the success type in Result[T, TaskError].
+    parameter T represents the success type in Result[T, TaskError[C]].
 
     The sends, the schedules and the four retry methods raise
     `ForkedAfterCoreStart` (this process was forked without `exec` after
@@ -818,20 +837,23 @@ class _TaskFunctionMembers(Protocol[P, T]):
     task_error_codes: tuple[str, ...]
     """The user error codes that the task declares (`error_codes=`), in the
     order of the declaration; `()` when it declares none."""
+    task_code_type: CustomCodeType
+    """The type of the custom codes: `EnumCodes(E)` for a task that returns
+    `Result[T, TaskError[E]]`, else `TextCodes()`."""
 
     @abstractmethod
     def send(
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     async def send_async(
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     def schedule(
@@ -839,7 +861,7 @@ class _TaskFunctionMembers(Protocol[P, T]):
         delay: int,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     async def schedule_async(
@@ -847,7 +869,7 @@ class _TaskFunctionMembers(Protocol[P, T]):
         delay: int,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     def with_options(
@@ -856,31 +878,31 @@ class _TaskFunctionMembers(Protocol[P, T]):
         good_until: datetime | None = None,
         idempotency_key: str | None = None,
         retention: RetentionChoice = _UNSET_RETENTION,
-    ) -> 'TaskSendOptions[P, T]': ...
+    ) -> 'TaskSendOptions[P, T, C]': ...
 
     @abstractmethod
     def retry_send(
         self,
         error: TaskSendRetryable,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     async def retry_send_async(
         self,
         error: TaskSendRetryable,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     def retry_schedule(
         self,
         error: TaskSendRetryable,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     async def retry_schedule_async(
         self,
         error: TaskSendRetryable,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     def node(
@@ -899,13 +921,13 @@ class _TaskFunctionMembers(Protocol[P, T]):
     ) -> 'NodeFactory[P, T]': ...
 
 
-class TaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+class TaskFunction(_TaskFunctionMembers[P, T, C], Protocol[P, T, C]):
     """
     A TaskFunction is a `def` function that gets a @task decorator applied to it.
     Protocol extends the simple function signature to include the send and send_async methods,
     thus being able to be called with or without the @task decorator.
 
-    The generic parameter T represents the success type in Result[T, TaskError].
+    The generic parameter T represents the success type in Result[T, TaskError[C]].
     """
 
     @abstractmethod
@@ -913,10 +935,10 @@ class TaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> Result[T, TaskError]: ...
+    ) -> Result[T, TaskError[C]]: ...
 
 
-class AsyncTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+class AsyncTaskFunction(_TaskFunctionMembers[P, T, C], Protocol[P, T, C]):
     """An `async def` function that gets a @task decorator applied to it.
 
     A direct call returns a coroutine. Await it to get the `Result`.
@@ -928,10 +950,10 @@ class AsyncTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> Coroutine[Any, Any, Result[T, TaskError]]: ...
+    ) -> Coroutine[Any, Any, Result[T, TaskError[C]]]: ...
 
 
-class RuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+class RuntimeTaskFunction(_TaskFunctionMembers[P, T, C], Protocol[P, T, C]):
     """A `def` task function whose first parameter takes its `TaskRuntime`.
 
     `P` is the parameters after the runtime: the sends, the schedules and
@@ -947,10 +969,10 @@ class RuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
         /,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> Result[T, TaskError]: ...
+    ) -> Result[T, TaskError[C]]: ...
 
 
-class AsyncRuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
+class AsyncRuntimeTaskFunction(_TaskFunctionMembers[P, T, C], Protocol[P, T, C]):
     """An `async def` task function whose first parameter takes its
     `TaskRuntime`.
 
@@ -964,7 +986,7 @@ class AsyncRuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
         /,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> Coroutine[Any, Any, Result[T, TaskError]]: ...
+    ) -> Coroutine[Any, Any, Result[T, TaskError[C]]]: ...
 
 
 # The runtime overloads come first. A function whose first parameter takes a
@@ -985,30 +1007,30 @@ class TaskDecorator(Protocol):
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError]]],
+        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError[C]]]],
         /,
-    ) -> AsyncRuntimeTaskFunction[P, T]: ...
+    ) -> AsyncRuntimeTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError]],
+        fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError[C]]],
         /,
-    ) -> RuntimeTaskFunction[P, T]: ...
+    ) -> RuntimeTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
+        fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
         /,
-    ) -> AsyncTaskFunction[P, T]: ...
+    ) -> AsyncTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Result[T, TaskError]],
+        fn: Callable[P, Result[T, TaskError[C]]],
         /,
-    ) -> TaskFunction[P, T]: ...
+    ) -> TaskFunction[P, T, C]: ...
 
 
 class SharedAsyncTaskDecorator(Protocol):
@@ -1021,16 +1043,16 @@ class SharedAsyncTaskDecorator(Protocol):
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError]]],
+        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError[C]]]],
         /,
-    ) -> AsyncRuntimeTaskFunction[P, T]: ...
+    ) -> AsyncRuntimeTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
+        fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
         /,
-    ) -> AsyncTaskFunction[P, T]: ...
+    ) -> AsyncTaskFunction[P, T, C]: ...
 
 
 class SharedThreadTaskDecorator(Protocol):
@@ -1043,16 +1065,16 @@ class SharedThreadTaskDecorator(Protocol):
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError]],
+        fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError[C]]],
         /,
-    ) -> RuntimeTaskFunction[P, T]: ...
+    ) -> RuntimeTaskFunction[P, T, C]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Result[T, TaskError]],
+        fn: Callable[P, Result[T, TaskError[C]]],
         /,
-    ) -> TaskFunction[P, T]: ...
+    ) -> TaskFunction[P, T, C]: ...
 
 
 class CancelGraceRefusedDecorator(Protocol):
@@ -1066,7 +1088,7 @@ class CancelGraceRefusedDecorator(Protocol):
     def __call__(self, fn: Never, /) -> Never: ...
 
 
-class TaskSendOptions(Protocol[P, T]):
+class TaskSendOptions(Protocol[P, T, C]):
     """Per-send options for ad-hoc sends.
 
     For workflow tasks, use .node(good_until=...)(...) instead.
@@ -1077,14 +1099,14 @@ class TaskSendOptions(Protocol[P, T]):
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     async def send_async(
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     def schedule(
@@ -1092,7 +1114,7 @@ class TaskSendOptions(Protocol[P, T]):
         delay: int,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
     @abstractmethod
     async def schedule_async(
@@ -1100,7 +1122,7 @@ class TaskSendOptions(Protocol[P, T]):
         delay: int,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult['TaskHandle[T]']: ...
+    ) -> TaskSendResult['TaskHandle[T, C]']: ...
 
 
 # ---- Broker-to-TaskSendError mapping ----
@@ -1187,23 +1209,23 @@ class TaskBodyKind(Enum):
 
 
 @dataclass(frozen=True, slots=True)
-class _SyncTaskBody(Generic[P, T]):
+class _SyncTaskBody(Generic[P, T, C]):
     """A task function defined with `def`."""
 
-    fn: Callable[P, Result[T, TaskError]]
+    fn: Callable[P, Result[T, TaskError[C]]]
 
 
 @dataclass(frozen=True, slots=True)
-class _AsyncTaskBody(Generic[P, T]):
+class _AsyncTaskBody(Generic[P, T, C]):
     """A task function defined with `async def`."""
 
-    fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]]
+    fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]]
 
 
 def _task_body(
-    fn: Callable[P, Result[T, TaskError]]
-    | Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
-) -> _SyncTaskBody[P, T] | _AsyncTaskBody[P, T]:
+    fn: Callable[P, Result[T, TaskError[C]]]
+    | Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
+) -> _SyncTaskBody[P, T, C] | _AsyncTaskBody[P, T, C]:
     """Sort a task function by the way it is called.
 
     `create_task_wrapper` refuses generator and async generator functions
@@ -1212,14 +1234,14 @@ def _task_body(
     """
     if inspect.iscoroutinefunction(fn):
         return _AsyncTaskBody(
-            cast('Callable[P, Coroutine[Any, Any, Result[T, TaskError]]]', fn),
+            cast('Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]]', fn),
         )
-    return _SyncTaskBody(cast('Callable[P, Result[T, TaskError]]', fn))
+    return _SyncTaskBody(cast('Callable[P, Result[T, TaskError[C]]]', fn))
 
 
 def _task_body_kind(
-    fn: Callable[P, Result[T, TaskError]]
-    | Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
+    fn: Callable[P, Result[T, TaskError[C]]]
+    | Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
 ) -> TaskBodyKind:
     """The kind of a task function, as `_task_body` sorts it."""
     match _task_body(fn):
@@ -1474,17 +1496,17 @@ def _grace_range_help(
 
 
 def _sync_task_call(
-    body: Callable[P, Result[T, TaskError]],
-    checked_result: Callable[[object], Result[T, TaskError]],
-    exception_result: Callable[[BaseException], Result[T, TaskError]],
-) -> Callable[P, Result[T, TaskError]]:
+    body: Callable[P, Result[T, TaskError[C]]],
+    checked_result: Callable[[object], Result[T, TaskError[C]]],
+    exception_result: Callable[[BaseException], Result[T, TaskError[C]]],
+) -> Callable[P, Result[T, TaskError[C]]]:
     """The direct call of a `def` task: run the body, then check its return.
 
     An exception from the body or from the check becomes an error result.
     `KeyboardInterrupt` propagates, for worker shutdown.
     """
 
-    def call(*args: P.args, **kwargs: P.kwargs) -> Result[T, TaskError]:
+    def call(*args: P.args, **kwargs: P.kwargs) -> Result[T, TaskError[C]]:
         try:
             return checked_result(body(*args, **kwargs))
         except KeyboardInterrupt:
@@ -1496,10 +1518,10 @@ def _sync_task_call(
 
 
 def _async_task_call(
-    body: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
-    checked_result: Callable[[object], Result[T, TaskError]],
-    exception_result: Callable[[BaseException], Result[T, TaskError]],
-) -> Callable[P, Coroutine[Any, Any, Result[T, TaskError]]]:
+    body: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
+    checked_result: Callable[[object], Result[T, TaskError[C]]],
+    exception_result: Callable[[BaseException], Result[T, TaskError[C]]],
+) -> Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]]:
     """The direct call of an `async def` task: a coroutine that awaits the
     body, then checks its return.
 
@@ -1511,7 +1533,7 @@ def _async_task_call(
     `GeneratorExit` propagates, so `close()` on a suspended call ends it.
     """
 
-    async def call(*args: P.args, **kwargs: P.kwargs) -> Result[T, TaskError]:
+    async def call(*args: P.args, **kwargs: P.kwargs) -> Result[T, TaskError[C]]:
         try:
             return checked_result(await body(*args, **kwargs))
         except (KeyboardInterrupt, GeneratorExit):
@@ -1527,9 +1549,9 @@ def _async_task_call(
 
 
 async def await_task_call_in_worker(
-    called: Coroutine[Any, Any, Result[T, TaskError]],
-    map_exception: Callable[[BaseException], Result[T, TaskError]],
-) -> Result[T, TaskError]:
+    called: Coroutine[Any, Any, Result[T, TaskError[C]]],
+    map_exception: Callable[[BaseException], Result[T, TaskError[C]]],
+) -> Result[T, TaskError[C]]:
     """Await the direct call of an `async def` task inside a worker child.
 
     `called` is the coroutine of the direct call, and `map_exception` the
@@ -1564,9 +1586,134 @@ def _cancel_requested() -> bool:
             return task.cancelling() > 0
 
 
+def _declared_code_type(
+    err_type: object,
+    code_enum: type[Enum] | None,
+    *,
+    mapper_codes: tuple[str, ...],
+    task_name: str,
+    location: SourceLocation | None,
+) -> CustomCodeType:
+    """The custom code type of a task, from the error type of its return
+    annotation and the `Enum` class of its `error_codes=`.
+
+    `TaskError` gives `TextCodes()`, with any declaration. `TaskError[E]`
+    gives `EnumCodes(E)` and needs `error_codes=E`, and every custom code
+    of its exception mappers and defaults (`mapper_codes`) must be the value
+    of a member of `E`.
+
+    Raises:
+        TaskDefinitionError: `HRS-105` for `TaskError[E]` without
+            `error_codes=E`; `HRS-209` for a mapper code that `E` does not
+            name. `check_task_signature` refused any other error type before.
+    """
+    match custom_code_type_of(err_type):
+        case NotATaskErrorType():
+            raise AssertionError(
+                f'task {task_name!r}: check_task_signature accepted the error type {err_type!r}',
+            )
+        case TextCodes() as text_codes:
+            return text_codes
+        case EnumCodes(code_type=enum_class) as enum_codes:
+            pass
+    if code_enum is not enum_class:
+        raise TaskDefinitionError(
+            message=f'TaskError[{enum_class.__name__}] needs error_codes={enum_class.__name__}',
+            code=ErrorCode.TASK_STRICT_SIGNATURE_VIOLATION,
+            location=location,
+            notes=[
+                f"task '{task_name}' returns Result[..., TaskError[{enum_class.__name__}]]",
+                'the custom codes of the error are the members of the Enum that the task declares',
+            ],
+            help_text=f'declare the codes: @app.task(..., error_codes={enum_class.__name__})',
+        )
+    values = {member.value for member in enum_class}
+    outside = [code for code in mapper_codes if code not in values]
+    if outside:
+        raise TaskDefinitionError(
+            message=f'an exception mapper code is not a member of {enum_class.__name__}',
+            code=ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER,
+            location=location,
+            notes=[
+                f"task '{task_name}' returns Result[..., TaskError[{enum_class.__name__}]]",
+                f'codes that {enum_class.__name__} does not name: {sorted(outside)}',
+            ],
+            help_text=(
+                f'add the codes to {enum_class.__name__}, or map the exceptions '
+                'to codes that it names'
+            ),
+        )
+    return enum_codes
+
+
+def _mapper_code_texts(
+    task_mapper: ExceptionMapper | None,
+    app_mapper: ExceptionMapper,
+    task_default: str | None,
+    app_default: str | None,
+) -> tuple[str, ...]:
+    """The custom codes that the exception mapping of a task can give: the
+    values of both mappers and both defaults that are not built-in codes.
+    Pure."""
+    from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
+
+    task_values = tuple(task_mapper.values()) if task_mapper is not None else ()
+    candidates = (*task_values, *app_mapper.values(), task_default, app_default)
+    return tuple(
+        code for code in candidates
+        if code is not None and code not in BUILTIN_CODE_REGISTRY
+    )
+
+
+def custom_code_refusal(error: object, code_type: CustomCodeType) -> str | None:
+    """Why the custom code of a returned error does not fit the task's code
+    type, or None when it fits. Pure.
+
+    With `EnumCodes(E)`, the code is a built-in code or a member of `E`; a
+    text, also one with the value of a member, does not fit. With
+    `TextCodes()`, every code that `TaskError` accepts fits.
+    """
+    match error, code_type:
+        case TaskError(), TextCodes():
+            return None
+        case TaskError(error_code=code), EnumCodes(code_type=enum_class):
+            if isinstance(code, BUILTIN_FAMILIES) or isinstance(code, enum_class):
+                return None
+            return (
+                f'error_code must be a member of {enum_class.__name__} or a '
+                f'built-in code; got {type(code).__name__}'
+            )
+        case _:
+            return None
+
+
+def mapped_code(
+    code: BuiltInTaskCode | str, code_type: CustomCodeType,
+) -> BuiltInTaskCode | str | Enum:
+    """The code of a mapped exception in the task's code type: a built-in
+    code as it is; a custom text as it is with `TextCodes()`, and as its
+    member with `EnumCodes(E)`. Pure.
+
+    Raises:
+        AssertionError: the text is not the value of a member of `E`;
+            `_declared_code_type` refused such a mapper when the task was
+            defined.
+    """
+    match code, code_type:
+        case str(), EnumCodes(code_type=enum_class) if not isinstance(code, BUILTIN_FAMILIES):
+            members = {member.value: member for member in enum_class}
+            member = members.get(code)
+            assert member is not None, (
+                f'the mapped code {code!r} is not a member of {enum_class.__name__}'
+            )
+            return member
+        case _:
+            return code
+
+
 @overload
 def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
-    fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError]]],
+    fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError[C]]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1574,12 +1721,13 @@ def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
     error_codes: tuple[str, ...] = (),
-) -> 'AsyncRuntimeTaskFunction[P, T]': ...
+    code_enum: type[Enum] | None = None,
+) -> 'AsyncRuntimeTaskFunction[P, T, C]': ...
 
 
 @overload
 def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
-    fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError]],
+    fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError[C]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1587,12 +1735,13 @@ def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
     error_codes: tuple[str, ...] = (),
-) -> 'RuntimeTaskFunction[P, T]': ...
+    code_enum: type[Enum] | None = None,
+) -> 'RuntimeTaskFunction[P, T, C]': ...
 
 
 @overload
 def create_task_wrapper(
-    fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
+    fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1600,12 +1749,13 @@ def create_task_wrapper(
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
     error_codes: tuple[str, ...] = (),
-) -> 'AsyncTaskFunction[P, T]': ...
+    code_enum: type[Enum] | None = None,
+) -> 'AsyncTaskFunction[P, T, C]': ...
 
 
 @overload
 def create_task_wrapper(
-    fn: Callable[P, Result[T, TaskError]],
+    fn: Callable[P, Result[T, TaskError[C]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1613,12 +1763,13 @@ def create_task_wrapper(
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
     error_codes: tuple[str, ...] = (),
-) -> 'TaskFunction[P, T]': ...
+    code_enum: type[Enum] | None = None,
+) -> 'TaskFunction[P, T, C]': ...
 
 
 def create_task_wrapper(
-    fn: Callable[P, Result[T, TaskError]]
-    | Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
+    fn: Callable[P, Result[T, TaskError[C]]]
+    | Callable[P, Coroutine[Any, Any, Result[T, TaskError[C]]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1626,7 +1777,8 @@ def create_task_wrapper(
     exception_mapper: ExceptionMapper | None = None,
     default_unhandled_error_code: str | None = None,
     error_codes: tuple[str, ...] = (),
-) -> 'TaskFunction[P, T] | AsyncTaskFunction[P, T] | RuntimeTaskFunction[Any, T] | AsyncRuntimeTaskFunction[Any, T]':
+    code_enum: type[Enum] | None = None,
+) -> 'TaskFunction[P, T, C] | AsyncTaskFunction[P, T, C] | RuntimeTaskFunction[Any, T, C] | AsyncRuntimeTaskFunction[Any, T, C]':
     """
     Create a task wrapper for a specific app instance.
     Called by app.task() decorator.
@@ -1640,7 +1792,10 @@ def create_task_wrapper(
     `error_codes` are the codes that the task declares, which the decorator
     checked (`parse_declared_error_codes`), with the codes of its exception
     mappers (`with_mapper_codes`); the wrapper keeps them as
-    `task_error_codes`.
+    `task_error_codes`. `code_enum` is the `Enum` class of `error_codes=`,
+    or None for a tuple or no declaration. A return annotation
+    `Result[T, TaskError[E]]` needs `code_enum` to be `E`; the wrapper keeps
+    the code type as `task_code_type`.
     """
 
     fn_location = SourceLocation.from_function(fn)
@@ -1725,7 +1880,7 @@ def create_task_wrapper(
                 location=fn_location,
                 notes=[
                     f"function '{fn.__name__}' returns `{return_hint}`",
-                    'tasks must return Result[T, TaskError]',
+                    'tasks must return Result[T, TaskError[C]]',
                 ],
                 help_text='change return type to `-> Result[YourType, TaskError]`',
             )
@@ -1752,8 +1907,24 @@ def create_task_wrapper(
             help_text=exc.detail.help_text,
         ) from exc
 
+    code_type = _declared_code_type(
+        err_type,
+        code_enum,
+        mapper_codes=_mapper_code_texts(
+            exception_mapper,
+            app.config.exception_mapper,
+            default_unhandled_error_code,
+            app.config.default_unhandled_error_code,
+        ),
+        task_name=task_name,
+        location=fn_location,
+    )
+
     ok_type_adapter: TypeAdapter[Any] = TypeAdapter(ok_type)
-    err_type_adapter: TypeAdapter[Any] = TypeAdapter(err_type)
+    # A parametrized `TaskError[E]` is a subclass that pydantic builds; a body
+    # builds the plain class. The error is validated as a `TaskError`, and
+    # its custom code against `code_type` (`custom_code_refusal`).
+    err_type_adapter: TypeAdapter[Any] = TypeAdapter(TaskError)
 
     def return_type_mismatch(
         variant: Literal['ok', 'err'],
@@ -1761,7 +1932,7 @@ def create_task_wrapper(
         summary: str,
         entries: list[Json],
         entry_count: int,
-    ) -> Result[T, TaskError]:
+    ) -> Result[T, TaskError[C]]:
         """The refusal of a returned value that does not validate.
 
         The text and the data name types and failing fields, never the value.
@@ -1784,7 +1955,7 @@ def create_task_wrapper(
             },
         ))
 
-    def not_a_result(returned: object) -> Result[T, TaskError]:
+    def not_a_result(returned: object) -> Result[T, TaskError[C]]:
         """The refusal of a return that is not an `Ok` or an `Err`.
 
         The text and the data name types, never the value. A returned
@@ -1817,7 +1988,7 @@ def create_task_wrapper(
         variant: Literal['ok', 'err'],
         value: object,
         returned: Ok[object] | Err[object],
-    ) -> Result[T, TaskError]:
+    ) -> Result[T, TaskError[C]]:
         """Validate one returned value against its declared type.
 
         The ok value is validated against T. A validator can transform it, so
@@ -1834,10 +2005,20 @@ def create_task_wrapper(
                         )
                         if validated_ok is not value:
                             return Ok(cast('T', validated_ok))
-                        return cast('Result[T, TaskError]', returned)
+                        return cast('Result[T, TaskError[C]]', returned)
                     case 'err':
                         _ = err_type_adapter.validate_python(value)
-                        return cast('Result[T, TaskError]', returned)
+                        match custom_code_refusal(value, code_type):
+                            case None:
+                                return cast('Result[T, TaskError[C]]', returned)
+                            case refusal:
+                                return return_type_mismatch(
+                                    'err',
+                                    value,
+                                    refusal,
+                                    [{'loc': ['error_code'], 'msg': refusal, 'type': 'custom_code'}],
+                                    1,
+                                )
             except ValidationError as ve:
                 # Type validation failed - return error result.
                 return return_type_mismatch(
@@ -1863,7 +2044,7 @@ def create_task_wrapper(
                 1,
             )
 
-    def checked_result(returned: object) -> Result[T, TaskError]:
+    def checked_result(returned: object) -> Result[T, TaskError[C]]:
         """Check one return of the task body against the declared types.
 
         A return that is not an `Ok` or an `Err`, or that does not fit the
@@ -1878,7 +2059,7 @@ def create_task_wrapper(
             case _:
                 return not_a_result(returned)
 
-    def exception_result(exc: BaseException) -> Result[T, TaskError]:
+    def exception_result(exc: BaseException) -> Result[T, TaskError[C]]:
         """The error result of an exception from the task body or its check.
 
         A `def` task and an `async def` task share this mapping: the
@@ -1908,7 +2089,7 @@ def create_task_wrapper(
                 )
                 return Err(TaskError(
                     exception=exc,
-                    error_code=resolved_code,
+                    error_code=cast('C | BuiltInTaskCode', mapped_code(resolved_code, code_type)),
                     message=f'Unhandled exception in task {fn.__name__}: {type(exc).__name__}: {exception_text(exc)}',
                     data={'exception_type': type(exc).__name__},
                 ))
@@ -1977,7 +2158,7 @@ def create_task_wrapper(
         payload: TaskSendPayload,
         first_kind: SendKind,
         trace: TraceArgument,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """The broker calls of one sync send: the first, and the resends of a
         transient failure when ``resend_on_transient_err`` is on. Each call
         passes ``trace``.
@@ -2035,7 +2216,9 @@ def create_task_wrapper(
                     case _:
                         return Err(send_err)
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
+            return Ok(TaskHandle(
+                result.ok_value, app, broker_mode=True, ok_type=ok_type, code_type=code_type,
+            ))
 
         # Unreachable: max_attempts >= 1, and the last attempt returns.
         assert last_err is not None, (
@@ -2048,7 +2231,7 @@ def create_task_wrapper(
         payload: TaskSendPayload,
         first_kind: SendKind,
         trace: TraceArgument,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """The broker calls of one async send, as ``_attempt_send``.
 
         ``first_kind`` is the send kind of the first broker call
@@ -2093,7 +2276,9 @@ def create_task_wrapper(
                     case _:
                         return Err(send_err)
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
+            return Ok(TaskHandle(
+                result.ok_value, app, broker_mode=True, ok_type=ok_type, code_type=code_type,
+            ))
 
         # Unreachable: max_attempts >= 1, and the last attempt returns.
         assert last_err is not None, (
@@ -2106,7 +2291,7 @@ def create_task_wrapper(
         payload: TaskSendPayload,
         first_kind: SendKind,
         trace: TraceArgument,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """The broker calls of one sync schedule, as ``_attempt_send``.
 
         ``first_kind`` is the send kind of the first broker call
@@ -2163,7 +2348,9 @@ def create_task_wrapper(
                     case _:
                         return Err(send_err)
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
+            return Ok(TaskHandle(
+                result.ok_value, app, broker_mode=True, ok_type=ok_type, code_type=code_type,
+            ))
 
         # Unreachable: max_attempts >= 1, and the last attempt returns.
         assert last_err is not None, (
@@ -2176,7 +2363,7 @@ def create_task_wrapper(
         payload: TaskSendPayload,
         first_kind: SendKind,
         trace: TraceArgument,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """The broker calls of one async schedule, as ``_attempt_send``.
 
         ``first_kind`` is the send kind of the first broker call
@@ -2222,7 +2409,9 @@ def create_task_wrapper(
                     case _:
                         return Err(send_err)
 
-            return Ok(TaskHandle(result.ok_value, app, broker_mode=True, ok_type=ok_type))
+            return Ok(TaskHandle(
+                result.ok_value, app, broker_mode=True, ok_type=ok_type, code_type=code_type,
+            ))
 
         # Unreachable: max_attempts >= 1, and the last attempt returns.
         assert last_err is not None, (
@@ -2241,7 +2430,7 @@ def create_task_wrapper(
         task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """One sync send, in the span of the app's send telemetry. Used by
         send() and retry_send()."""
         match app.send_telemetry():
@@ -2260,7 +2449,7 @@ def create_task_wrapper(
         task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """One async send, in the span of the app's send telemetry. Used by
         send_async() and retry_send_async()."""
         match app.send_telemetry():
@@ -2281,7 +2470,7 @@ def create_task_wrapper(
         task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """One sync schedule, in the span of the app's send telemetry. Used
         by schedule() and retry_schedule()."""
         match app.send_telemetry():
@@ -2300,7 +2489,7 @@ def create_task_wrapper(
         task_id: UUID,
         payload: TaskSendPayload,
         first_kind: SendKind,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """One async schedule, in the span of the app's send telemetry.
         Used by schedule_async() and retry_schedule_async()."""
         match app.send_telemetry():
@@ -2461,7 +2650,7 @@ def create_task_wrapper(
         *,
         idempotency_key: str | None = None,
         retention: RetentionChoice = _UNSET_RETENTION,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
                 message=f'Task send suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
@@ -2500,7 +2689,7 @@ def create_task_wrapper(
         *,
         idempotency_key: str | None = None,
         retention: RetentionChoice = _UNSET_RETENTION,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
                 message=f'Task send suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
@@ -2679,7 +2868,7 @@ def create_task_wrapper(
         *,
         idempotency_key: str | None = None,
         retention: RetentionChoice = _UNSET_RETENTION,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
                 message=f'Task schedule suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
@@ -2725,7 +2914,7 @@ def create_task_wrapper(
         *,
         idempotency_key: str | None = None,
         retention: RetentionChoice = _UNSET_RETENTION,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         if app.are_sends_suppressed():
             return Err(TaskSendSuppressed(
                 message=f'Task schedule suppressed for {task_name} (import/check phase or HORSIES_SUPPRESS_SENDS=1)',
@@ -2766,14 +2955,14 @@ def create_task_wrapper(
     def send(
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """Execute task asynchronously via app's broker."""
         return _send_with_options(args, kwargs, _UNSET)
 
     async def send_async(
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """Async variant for frameworks like FastAPI."""
         return await _send_async_with_options(args, kwargs, _UNSET)
 
@@ -2781,7 +2970,7 @@ def create_task_wrapper(
         delay: int,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """Execute task asynchronously after a delay."""
         return _schedule_with_options(delay, args, kwargs, _UNSET)
 
@@ -2789,7 +2978,7 @@ def create_task_wrapper(
         delay: int,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """Async variant of schedule() for callers on an event loop."""
         return await _schedule_async_with_options(delay, args, kwargs, _UNSET)
 
@@ -2811,7 +3000,7 @@ def create_task_wrapper(
             self,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return _send_with_options(
                 args, kwargs, self.good_until,
                 idempotency_key=self.idempotency_key,
@@ -2822,7 +3011,7 @@ def create_task_wrapper(
             self,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return await _send_async_with_options(
                 args, kwargs, self.good_until,
                 idempotency_key=self.idempotency_key,
@@ -2834,7 +3023,7 @@ def create_task_wrapper(
             delay: int,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return _schedule_with_options(
                 delay, args, kwargs, self.good_until,
                 idempotency_key=self.idempotency_key,
@@ -2846,7 +3035,7 @@ def create_task_wrapper(
             delay: int,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return await _schedule_async_with_options(
                 delay, args, kwargs, self.good_until,
                 idempotency_key=self.idempotency_key,
@@ -2858,7 +3047,7 @@ def create_task_wrapper(
         good_until: datetime | None = None,
         idempotency_key: str | None = None,
         retention: RetentionChoice = _UNSET_RETENTION,
-    ) -> TaskSendOptions[P, T]:
+    ) -> TaskSendOptions[P, T, C]:
         """Set options for one ad-hoc send without changing the task definition.
 
         ``retention``: omit for the queue's mapping or the 30-day default;
@@ -2921,7 +3110,7 @@ def create_task_wrapper(
 
     def retry_send(
         error: TaskSendRetryable,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """Retry a failed send using the stored payload.
 
         Each broker call is a ``SendKind.REPEAT``: a task that an earlier
@@ -2935,7 +3124,7 @@ def create_task_wrapper(
 
     async def retry_send_async(
         error: TaskSendRetryable,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """Retry a failed async send using the stored payload.
 
         Each broker call is a ``SendKind.REPEAT``: a task that an earlier
@@ -2949,7 +3138,7 @@ def create_task_wrapper(
 
     def retry_schedule(
         error: TaskSendRetryable,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """Retry a failed schedule using the stored payload.
 
         Each broker call is a ``SendKind.REPEAT``: a task that an earlier
@@ -2963,7 +3152,7 @@ def create_task_wrapper(
 
     async def retry_schedule_async(
         error: TaskSendRetryable,
-    ) -> TaskSendResult[TaskHandle[T]]:
+    ) -> TaskSendResult[TaskHandle[T, C]]:
         """Retry a failed async schedule using the stored payload.
 
         Each broker call is a ``SendKind.REPEAT``: a task that an earlier
@@ -2997,6 +3186,8 @@ def create_task_wrapper(
             self.__wrapped__ = fn
             # Expose the declared ok type for workflow args_from type checks.
             self.task_ok_type = ok_type
+            # The type of the custom codes, for the reads of this task.
+            self.task_code_type: CustomCodeType = code_type
             # Reuse the value already computed in the outer scope
             self.task_options_json: str | None = _pre_serialized_options
             # Expose mapper config for app.check() safety validation.
@@ -3014,14 +3205,14 @@ def create_task_wrapper(
             self,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return send(*args, **kwargs)
 
         async def send_async(
             self,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return await send_async(*args, **kwargs)
 
         def schedule(
@@ -3029,7 +3220,7 @@ def create_task_wrapper(
             delay: int,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return schedule(delay, *args, **kwargs)
 
         async def schedule_async(
@@ -3037,7 +3228,7 @@ def create_task_wrapper(
             delay: int,
             *args: P.args,
             **kwargs: P.kwargs,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return await schedule_async(delay, *args, **kwargs)
 
         def with_options(
@@ -3046,7 +3237,7 @@ def create_task_wrapper(
             good_until: datetime | None = None,
             idempotency_key: str | None = None,
             retention: RetentionChoice = _UNSET_RETENTION,
-        ) -> TaskSendOptions[P, T]:
+        ) -> TaskSendOptions[P, T, C]:
             return with_options(
                 good_until=good_until,
                 idempotency_key=idempotency_key,
@@ -3056,25 +3247,25 @@ def create_task_wrapper(
         def retry_send(
             self,
             error: TaskSendRetryable,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return retry_send(error)
 
         async def retry_send_async(
             self,
             error: TaskSendRetryable,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return await retry_send_async(error)
 
         def retry_schedule(
             self,
             error: TaskSendRetryable,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return retry_schedule(error)
 
         async def retry_schedule_async(
             self,
             error: TaskSendRetryable,
-        ) -> TaskSendResult[TaskHandle[T]]:
+        ) -> TaskSendResult[TaskHandle[T, C]]:
             return await retry_schedule_async(error)
 
         def node(
@@ -3130,7 +3321,7 @@ def create_task_wrapper(
                     self,
                     *args: P.args,
                     **kwargs: P.kwargs,
-                ) -> Result[T, TaskError]:
+                ) -> Result[T, TaskError[C]]:
                     return sync_call(*args, **kwargs)
 
             return SyncTaskFunctionImpl(sync_call)
@@ -3144,7 +3335,7 @@ def create_task_wrapper(
                     self,
                     *args: P.args,
                     **kwargs: P.kwargs,
-                ) -> Coroutine[Any, Any, Result[T, TaskError]]:
+                ) -> Coroutine[Any, Any, Result[T, TaskError[C]]]:
                     return async_call(*args, **kwargs)
 
             return AsyncTaskFunctionImpl(async_call)

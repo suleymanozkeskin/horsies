@@ -248,17 +248,26 @@ class TestStrictConstruction:
         class UserCode(str, _Enum):
             COLLIDES = 'BROKER_ERROR'
 
-        with pytest.raises(ValueError, match='User error codes must be plain str'):
+        with pytest.raises(ValueError, match='reserved built-in error code'):
             TaskError(error_code=UserCode.COLLIDES)
 
-    def test_user_str_enum_with_nonreserved_value_rejected(self) -> None:
-        """Foreign str,Enum types are always rejected, even for non-reserved values."""
+    def test_custom_enum_member_is_kept_as_the_member(self) -> None:
+        """A custom Enum member stays the member, and its stored text is its value."""
 
-        class UserCode(str, _Enum):
+        class UserCode(_Enum):
             CUSTOM = 'MY_CUSTOM_CODE'
 
-        with pytest.raises(ValueError, match='User error codes must be plain str'):
-            TaskError(error_code=UserCode.CUSTOM)
+        error = TaskError(error_code=UserCode.CUSTOM)
+
+        assert error.error_code is UserCode.CUSTOM
+        assert error.model_dump(mode='json')['error_code'] == 'MY_CUSTOM_CODE'
+
+    def test_custom_enum_member_with_a_value_that_is_not_text_rejected(self) -> None:
+        class UserCode(_Enum):
+            NUMBERED = 7
+
+        with pytest.raises(ValueError, match='must have a str value'):
+            TaskError(error_code=UserCode.NUMBERED)
 
     def test_unknown_tagged_dict_rejected(self) -> None:
         with pytest.raises(ValidationError):

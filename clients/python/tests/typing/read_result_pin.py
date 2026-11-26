@@ -31,6 +31,7 @@ from horsies import (
     TaskError,
     TaskNotFound,
     TaskOutcome,
+    UnknownCustomCode,
     WaitInsideTask,
     WaitTimeout,
     WorkflowCtxMissingId,
@@ -99,6 +100,7 @@ def every_read_error(error: ReadError) -> bool:
             | AsyncContext()
             | InvalidInput()
             | ResultDeserializationError()
+            | UnknownCustomCode()
             | NoTypeAvailable()
             | WorkflowCtxMissingId()
         ):

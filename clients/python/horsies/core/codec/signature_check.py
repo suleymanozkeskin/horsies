@@ -51,7 +51,7 @@ from horsies.core.codec.wire_shape import (
     shape_refusals,
 )
 from horsies.core.models.outcome import TaskOutcome
-from horsies.core.models.tasks import TaskError
+from horsies.core.models.tasks import NotATaskErrorType, TaskError, custom_code_type_of
 from horsies.core.task_runtime import TaskRuntime
 from horsies.core.models.workflow.context import (
     SubWorkflowSummary,
@@ -459,10 +459,13 @@ def _check_outcome_args(slot: object) -> None:
             reason='TaskOutcome must have exactly 2 type parameters',
             fix='use TaskOutcome[YourType, TaskError]',
         ))
-    if args[1] is not TaskError:
+    if isinstance(custom_code_type_of(args[1]), NotATaskErrorType):
         raise _RejectedError(_Rejection(
             banned=f'TaskOutcome[..., {args[1]!r}]',
-            reason=f'TaskOutcome error parameter must be TaskError, got {args[1]!r}',
+            reason=(
+                'TaskOutcome error parameter must be TaskError or '
+                f'TaskError[YourCodeEnum], got {args[1]!r}'
+            ),
             fix='use TaskOutcome[YourType, TaskError]',
         ))
 
@@ -520,12 +523,15 @@ def _validate_return_annotation(
             pass
         case _ as unreachable:
             assert_never(unreachable)
-    if err_type is not TaskError:
+    if isinstance(custom_code_type_of(err_type), NotATaskErrorType):
         raise SignatureValidationError(_refusal(
             task_name=task_name,
             position='return type',
             banned=f'Result[..., {err_type!r}]',
-            reason=f'Result error parameter must be TaskError, got {err_type!r}',
+            reason=(
+                'Result error parameter must be TaskError or '
+                f'TaskError[YourCodeEnum], got {err_type!r}'
+            ),
             fix='change return type to `-> Result[YourType, TaskError]`',
         ))
     try:

@@ -153,6 +153,31 @@ def _extract_outcome_ok_type(annotation: Any) -> Any | None:
     return None
 
 
+def _extract_outcome_error_type(annotation: Any) -> Any | None:
+    """Extract the E of an args_from slot: TaskOutcome[T, E], including
+    Optional/Union wrappers."""
+    if annotation is None:
+        return None
+
+    from horsies.core.models.outcome import TaskOutcome
+
+    origin = get_origin(annotation)
+    if origin is TaskOutcome:
+        args = get_args(annotation)
+        if len(args) == 2:
+            return args[1]
+        return None
+
+    if origin in (Union, UnionType):
+        extracted = [_extract_outcome_error_type(member) for member in get_args(annotation)]
+        non_none = [value for value in extracted if value is not None]
+        if len(non_none) == 1:
+            return non_none[0]
+        return None
+
+    return None
+
+
 def _extract_return_ok_type(annotation: Any) -> Any | None:
     """Extract the T of a task return annotation: Result[T, E]."""
     from horsies.core.types.result import (

@@ -36,9 +36,11 @@ from horsies.core.codec.json_value import StrictJsonError, escape_lone_surrogate
 from horsies.core.codec.kwargs import (
     decode_subworkflow_kwargs,
     fill_build_with_defaults,
+    subworkflow_target_code_type,
     subworkflow_target_ok_type,
 )
 from horsies.core.codec.typed import conform_to_target
+from horsies.core.task_read import typed_outcome
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.errors import ConfigurationError, ErrorCode, WorkflowValidationError
 from horsies.core.logging import get_logger
@@ -350,26 +352,56 @@ def _input_kwargs(
         dependency_result = dependency_results.get(dependency_index)
         if dependency_result is None:
             continue
-        target_ok_type = subworkflow_target_ok_type(workflow_def, kwarg_name)
-        if target_ok_type is None:
-            kwargs[kwarg_name] = dependency_result
-            continue
+        match _dependency_input(node, workflow_def, kwarg_name, dependency_result):
+            case ChildBuildFailed() as failed:
+                return failed
+            case dependency_input:
+                kwargs[kwarg_name] = dependency_input
+    return kwargs
+
+
+def _dependency_input(
+    node: ChildOfNode,
+    workflow_def: type[WorkflowDefinition[Any]],
+    kwarg_name: str,
+    dependency_result: TaskOutcome[Any, TaskError],
+) -> TaskOutcome[Any, TaskError[Any]] | ChildBuildFailed:
+    """The value of one ``args_from`` parameter of ``build_with``: the
+    dependency's outcome, validated with the value type and read with the
+    custom code type that the parameter declares. Pure apart from the
+    validators of the declared type.
+
+    A value that does not fit, or a custom code that the declared ``Enum``
+    does not name, fails the node with ``WORKER_SERIALIZATION_ERROR``.
+    """
+    outcome = dependency_result
+    target_ok_type = subworkflow_target_ok_type(workflow_def, kwarg_name)
+    refusal_text: str | None = None
+    if target_ok_type is not None:
         match conform_to_target(dependency_result, target_ok_type):
             case Ok(ok_value=conformed):
-                kwargs[kwarg_name] = conformed
+                outcome = conformed
             case Err(err_value=refusal):
-                return _failed(
-                    node,
-                    (
-                        f"args_from value for '{kwarg_name}' does not fit the type "
-                        f'that build_with declares (subworkflow task {node.task_index}): '
-                        f'{escape_lone_surrogates(str(refusal))[:BUILD_FAILURE_TEXT_CHARS]}'
-                    ),
-                    OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
-                )
+                refusal_text = str(refusal)
             case _ as unreachable:
                 assert_never(unreachable)
-    return kwargs
+    if refusal_text is None:
+        match typed_outcome(outcome, subworkflow_target_code_type(workflow_def, kwarg_name)):
+            case Ok(ok_value=typed):
+                return typed
+            case Err(err_value=unknown):
+                refusal_text = unknown.message
+            case _ as unreachable:
+                assert_never(unreachable)
+    return _failed(
+        node,
+        (
+            f"args_from value for '{kwarg_name}' does not fit the type "
+            f'that build_with declares (subworkflow task {node.task_index}): '
+            f'{escape_lone_surrogates(refusal_text)[:BUILD_FAILURE_TEXT_CHARS]}'
+        ),
+        OperationalErrorCode.WORKER_SERIALIZATION_ERROR,
+    )
 
 
 def _built_spec(

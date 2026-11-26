@@ -53,6 +53,13 @@ from horsies.core.codec.typed import (
     validate_omitted_default,
 )
 from horsies.core.models.outcome import TaskOutcome
+from horsies.core.models.tasks import (
+    CustomCodeType,
+    EnumCodes,
+    NotATaskErrorType,
+    TextCodes,
+    custom_code_type_of,
+)
 from horsies.core.task_runtime import TaskRuntime
 from horsies.core.types.result import Err, Ok, Result
 
@@ -65,6 +72,7 @@ __all__ = [
     'TakesRuntime',
     'build_with_engine_parameters',
     'decode_kwargs',
+    'declared_outcome_code_type',
     'declared_outcome_ok_type',
     'decode_subworkflow_kwargs',
     'encode_kwargs_read_back',
@@ -76,6 +84,7 @@ __all__ = [
     'resolve_hints_and_sig',
     'resolve_producer_kwarg_binding',
     'runtime_parameter_of',
+    'subworkflow_target_code_type',
     'subworkflow_target_ok_type',
     'task_runtime_parameter',
     'underlying_task_fn',
@@ -696,6 +705,47 @@ def _slot_ok_type(annot: object) -> Any | None:
     if get_origin(annot) is Annotated:
         annot = get_args(annot)[0]
     return _normalize_resolved_ok_type(_extract_outcome_ok_type(annot))
+
+
+def declared_outcome_code_type(
+    target_fn: Callable[..., Any],
+    key: str,
+) -> CustomCodeType:
+    """The custom code type of a parameter declared `TaskOutcome[T, E]`.
+
+    `EnumCodes(C)` for `E = TaskError[C]` with `C` an `Enum` class;
+    `TextCodes()` for `TaskError`, for hints that do not resolve, and for a
+    parameter that is not a `TaskOutcome` slot.
+    """
+    resolved = resolve_hints_and_sig(target_fn)
+    if resolved is None:
+        return TextCodes()
+    hints, _ = resolved
+    return _slot_code_type(hints.get(key))
+
+
+def _slot_code_type(annot: object) -> CustomCodeType:
+    """The custom code type of a `TaskOutcome[T, E]` slot, through `Annotated`."""
+    from horsies.core.models.workflow.typing_utils import _extract_outcome_error_type
+
+    if get_origin(annot) is Annotated:
+        annot = get_args(annot)[0]
+    match custom_code_type_of(_extract_outcome_error_type(annot)):
+        case EnumCodes() as enum_codes:
+            return enum_codes
+        case TextCodes() | NotATaskErrorType():
+            return TextCodes()
+
+
+def subworkflow_target_code_type(workflow_def: Any, key: str) -> CustomCodeType:
+    """`declared_outcome_code_type` for a parameter of a child `build_with`."""
+    match resolve_build_with_hints(workflow_def):
+        case Ok(ok_value=(hints, _)):
+            return _slot_code_type(hints.get(key))
+        case Err():
+            return TextCodes()
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def subworkflow_target_ok_type(workflow_def: Any, key: str) -> Any | None:

@@ -68,6 +68,7 @@ from .typing_utils import (
     _signature_accepts_kwargs,
     _valid_kwarg_names,
     _resolved_type_hints,
+    _extract_outcome_error_type,
     _extract_outcome_ok_type,
     _resolve_source_node_ok_type,
     _is_ok_type_compatible,
@@ -1361,21 +1362,26 @@ class WorkflowSpec(Generic[OutT]):
                     )
                     continue
 
-                if _is_ok_type_compatible(source_ok, expected_ok):
+                if not _is_ok_type_compatible(source_ok, expected_ok):
+                    errors.append(
+                        WorkflowValidationError(
+                            message='args_from source type does not match target parameter type',
+                            code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+                            notes=[
+                                f"node '{node.name}' args_from['{kwarg_name}'] receives from '{source_node.name}'",
+                                f'source ok type: {_format_type_name(source_ok)}',
+                                f"target expects TaskOutcome[{_format_type_name(expected_ok)}, TaskError]",
+                            ],
+                            help_text='fix args_from wiring or update the target parameter type annotation',
+                        )
+                    )
                     continue
 
-                errors.append(
-                    WorkflowValidationError(
-                        message='args_from source type does not match target parameter type',
-                        code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
-                        notes=[
-                            f"node '{node.name}' args_from['{kwarg_name}'] receives from '{source_node.name}'",
-                            f'source ok type: {_format_type_name(source_ok)}',
-                            f"target expects TaskOutcome[{_format_type_name(expected_ok)}, TaskError]",
-                        ],
-                        help_text='fix args_from wiring or update the target parameter type annotation',
-                    )
+                code_error = _args_from_code_type_error(
+                    node.name, kwarg_name, source_node, annotation,
                 )
+                if code_error is not None:
+                    errors.append(code_error)
 
         return errors
 
@@ -1929,3 +1935,47 @@ class WorkflowSpec(Generic[OutT]):
         if is_err(v):
             return v
         return await self.start_async(workflow_id=v.ok_value)
+
+
+def _args_from_code_type_error(
+    node_name: str,
+    kwarg_name: str,
+    source_node: TaskNode[Any] | SubWorkflowNode[Any],
+    annotation: object,
+) -> WorkflowValidationError | None:
+    """The refusal of an ``args_from`` target that declares custom codes
+    that its source does not give, or None. Pure.
+
+    A target ``TaskOutcome[T, TaskError[E]]`` reads the custom code of a
+    failed source as a member of ``E``. So its source is a task that returns
+    ``Result[..., TaskError[E]]``, with the same ``E``. A target with
+    ``TaskError`` reads the code as text from any source.
+    """
+    from horsies.core.models.tasks import EnumCodes, TextCodes, custom_code_type_of
+
+    match custom_code_type_of(_extract_outcome_error_type(annotation)):
+        case EnumCodes(code_type=target_codes):
+            pass
+        case _:
+            return None
+    source_codes: object = (
+        getattr(source_node.fn, 'task_code_type', TextCodes())
+        if isinstance(source_node, TaskNode)
+        else TextCodes()
+    )
+    if source_codes == EnumCodes(code_type=target_codes):
+        return None
+    return WorkflowValidationError(
+        message='args_from source custom codes do not match target parameter type',
+        code=ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH,
+        notes=[
+            f"node '{node_name}' args_from['{kwarg_name}'] receives from '{source_node.name}'",
+            f'target expects TaskOutcome[..., TaskError[{target_codes.__name__}]]',
+            'the source task does not return Result[..., '
+            f'TaskError[{target_codes.__name__}]]',
+        ],
+        help_text=(
+            'declare the same code Enum on the source task, or annotate the '
+            'target with TaskError to read the codes as text'
+        ),
+    )
