@@ -112,6 +112,10 @@ fn stream_at_load(number: RawFd) -> StreamAtLoad {
 
 /// Why a child gets `/dev/null` on a standard output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "each cause names when the stream had its state: at the load of the core or since it"
+)]
 pub(super) enum DevNullCause {
     /// The stream was closed when the process loaded the core.
     ClosedAtLoad,

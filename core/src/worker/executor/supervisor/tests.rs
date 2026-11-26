@@ -3,7 +3,7 @@
 
 use std::io::Read;
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt;
 use std::time::Duration;
 
@@ -589,35 +589,45 @@ fn mark_close_on_exec(fd: libc::c_int) {
     );
 }
 
-/// A pipe whose write end also takes number 1: the descriptor at number 1
+/// Put the write end of a new pipe at number 1: the descriptor at number 1
 /// when the child starts, which is not the stream of the probe at load.
-/// Both ends are given back, so that they stay open.
-fn pipe_on_stdout() -> (OwnedFd, OwnedFd) {
+///
+/// The read end stays open to the end of the probe process, and nothing
+/// reads it: the test harness writes its result lines to number 1 after the
+/// probe body, and a write to a pipe with no open read end fails with
+/// `EPIPE`, which fails the probe. With number 1 closed at the start
+/// ([`ProbeForm::StdoutClosedAtStart`]), `pipe` gives the read end number 1,
+/// so a duplicate of the read end above number 2 is made before the `dup2`
+/// replaces number 1.
+fn pipe_on_stdout() {
     let mut ends: [libc::c_int; 2] = [-1; 2];
     // SAFETY: pipe writes two descriptors into the array of two.
     let made = unsafe { libc::pipe(ends.as_mut_ptr()) };
     assert_eq!(made, 0, "pipe: {}", std::io::Error::last_os_error());
+    // SAFETY: fcntl with integer arguments.
+    let kept_read_end =
+        unsafe { libc::fcntl(ends[0], libc::F_DUPFD_CLOEXEC, libc::STDERR_FILENO + 1) };
+    assert_ne!(
+        kept_read_end,
+        -1,
+        "F_DUPFD_CLOEXEC: {}",
+        std::io::Error::last_os_error()
+    );
     // SAFETY: dup2 with integer arguments.
     let placed = unsafe { libc::dup2(ends[1], libc::STDOUT_FILENO) };
     assert_ne!(placed, -1, "dup2: {}", std::io::Error::last_os_error());
-    // SAFETY: pipe gave these two descriptors, and nothing else owns them.
-    unsafe { (OwnedFd::from_raw_fd(ends[0]), OwnedFd::from_raw_fd(ends[1])) }
 }
 
 /// What the probe of `form` does to its streams before the spawner starts.
-/// A pipe on number 1 is given back, so that it stays open.
-fn prepare_streams(form: ProbeForm) -> Option<(OwnedFd, OwnedFd)> {
+fn prepare_streams(form: ProbeForm) {
     match form {
-        ProbeForm::FlagsClear => None,
+        ProbeForm::FlagsClear => {}
         ProbeForm::CloseOnExec => {
             for fd in [libc::STDIN_FILENO, libc::STDOUT_FILENO, libc::STDERR_FILENO] {
                 mark_close_on_exec(fd);
             }
-            None
         }
-        ProbeForm::StdoutClosedAtStart | ProbeForm::StdoutReplacedAfterLoad => {
-            Some(pipe_on_stdout())
-        }
+        ProbeForm::StdoutClosedAtStart | ProbeForm::StdoutReplacedAfterLoad => pipe_on_stdout(),
     }
 }
 
@@ -631,7 +641,7 @@ async fn standard_streams_probe() {
         return;
     };
     let form = ProbeForm::of_name(name.to_str().expect("a form name"));
-    let _number_one = prepare_streams(form);
+    prepare_streams(form);
     let spawner = Spawner::start().unwrap();
     let mut child = spawner.handle().spawn(form.child()).await.unwrap();
     assert_eq!(wait_for_exit(&mut child.exit, TEST_WAIT).await, exited(0));
