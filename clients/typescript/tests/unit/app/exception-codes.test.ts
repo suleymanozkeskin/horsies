@@ -30,7 +30,7 @@ function checks(): CoreChecks & { readonly codeLists: string[][] } {
       return codes.includes("bad code")
         ? {
             kind: "refused",
-            refusals: [{ code: { kind: "catalog", code: "HRS-112" }, message: "'bad code' is invalid", notes: [], help: [] }],
+            refusals: [{ code: "HRS-112", message: "'bad code' is invalid", notes: [], help: [] }],
           }
         : { kind: "accepted" };
     },

@@ -528,6 +528,7 @@ export const ErrorCode: {
     readonly EVENT_HANDLER_DUPLICATE_NAME: "HRS-224";
     readonly EVENT_HANDLER_INVALID_NAME: "HRS-225";
     readonly EVENT_HANDLER_LIMIT: "HRS-226";
+    readonly CONFIG_INVALID_PAYLOAD: "HRS-227";
     readonly TASK_NOT_REGISTERED: "HRS-300";
     readonly TASK_DUPLICATE_NAME: "HRS-301";
     readonly WORKFLOW_UNREGISTERED_TASK: "HRS-302";

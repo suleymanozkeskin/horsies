@@ -12,12 +12,10 @@ import type { NativeEnvelope } from "../call/envelope.ts";
 import type { InstallCoverageArg, NativeCoreHandle } from "../handle/addon.ts";
 import type { RawCatalogError, TraceArgument } from "../values/records.ts";
 
-/** The code of a refusal of a core check: a catalog code (`HRS-nnn`), or none (a field bound with no catalog code). */
-export type CoreRefusalCode = { readonly kind: "catalog"; readonly code: string } | { readonly kind: "noCode" };
-
-/** One refusal of a core check: the code, the core's message, and its notes and help lines. */
+/** One refusal of a core check: the catalog code, the core's message, and its notes and help lines. */
 export interface CoreRefusal {
-  readonly code: CoreRefusalCode;
+  /** A code of the core's catalog, as its text (`HRS-102`). */
+  readonly code: string;
   readonly message: string;
   readonly notes: string[];
   readonly help: string[];
@@ -28,8 +26,9 @@ export interface CoreRefusal {
  * out takes the core's default):
  * - `accepted`: the send rules of the config, the JSON text of the producer manifest of its broker settings, and the
  *   coverage values of its retention for `CoreHandle.withInstallCoverage`;
- * - `refused`: every refusal, in the core's order. A text that the core's config reader refuses is one refusal with
- *   no code.
+ * - `refused`: every refusal, in the core's order.
+ *
+ * A text that the core's config reader refuses throws `ClientDefect`: the package writes the text from a parsed config.
  */
 export type AppConfigCheck =
   | {
