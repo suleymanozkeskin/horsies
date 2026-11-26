@@ -1,6 +1,6 @@
 ---
 name: horsies
-description: Guidance for the horsies Python task queue and workflow engine (PostgreSQL broker). Use when code has `import horsies`, `from horsies import ...`, `@app.task`, `TaskResult`, `TaskError`, `WorkflowSpec` or `WorkflowDefinition`, or when the user works on horsies tasks, workflows, configuration, scheduling, or monitoring.
+description: Guidance for the horsies Python task queue and workflow engine (PostgreSQL broker). Use when code has `import horsies`, `from horsies import ...`, `@app.task`, `TaskError`, `TaskOutcome`, `ReadResult`, `WorkflowSpec` or `WorkflowDefinition`, or when the user works on horsies tasks, workflows, configuration, scheduling, or monitoring.
 ---
 
 # horsies — Quick Reference
@@ -13,7 +13,7 @@ reference files in this skill folder (open one only when the task needs it):
 
 | File | When to open |
 |---|---|
-| `tasks.md` | `@app.task`, `TaskRuntime` and the fencing token, `TaskResult`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization, the cancel of a running task (`TaskRuntime.cancel_state()`) |
+| `tasks.md` | `@app.task`, `TaskRuntime` and the fencing token, `Result[T, TaskError]`, `ReadResult` and `ReadError`, `send()`, `with_options()`, `RetryPolicy`, `ExceptionMapper`, serialization, the cancel of a running task (`TaskRuntime.cancel_state()`) |
 | `workflows.md` | `WorkflowSpec`, `TaskNode`, `WorkflowHandle`, DAG construction, failure semantics |
 | `configs.md` | `AppConfig`, `PostgresConfig`, queues, recovery, recurring scheduling including `CronSchedule`, child hooks, event handlers (`@app.on_event`), CLI commands |
 | `monitoring.md` | `horsies.monitoring` query API, `cancel_task`, the `horsies[web]` dashboard, `create_monitoring_app`, `horsies web`, auth policies, schema states |
@@ -46,20 +46,20 @@ Note that these are measurements at a reference shape on an entry-tier instance,
 ```python
 from pydantic import SecretStr
 
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError
+from horsies import Horsies, AppConfig, PostgresConfig, Ok, Result, TaskError
 
 app = Horsies(config=AppConfig(
     broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
 ))
 
 @app.task("add_numbers")
-def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=a + b)
+def add_numbers(*, a: int, b: int) -> Result[int, TaskError]:
+    return Ok(a + b)
 ```
 
-Every task must return `TaskResult[T, TaskError]`.
+Every task must return `Result[T, TaskError]`.
 A task function is `def` or `async def`. With `execution=Execution.ISOLATED` (the default), a worker child runs one task at a time, and an `async def` task runs on the one event loop that the child keeps. `Execution.SHARED_ASYNC` (`async def`) and `Execution.SHARED_THREAD` (`def`) run many tasks in one child, as coroutines or on threads, and need `timeout_ms`. See `tasks.md`, Shared async tasks and Shared thread tasks, and the docs page `workers/execution-modes` to choose. In an `async def` task, send with `.send_async()`: the sync `.send()` returns `Err(TaskSendAsyncContext)` in a running event loop. See `tasks.md`, Async tasks.
-Use `TaskResult(ok=value)` for success, `TaskResult(err=TaskError(...))` for failure.
+Return `Ok(value)` for success and `Err(TaskError(...))` for failure.
 
 Register task modules for worker discovery:
 
@@ -74,14 +74,22 @@ Only records paths — actual imports happen when the worker starts.
 `send()` returns `TaskSendResult[TaskHandle[T]]` — always handle both branches:
 
 ```python
-from horsies import Ok, Err
+from horsies import Err, Failed, Ok, Succeeded
 
 match add_numbers.send(a=5, b=3):
     case Ok(handle):
-        result = handle.get(timeout_ms=5000)
+        match handle.get(timeout_ms=5000):
+            case Ok(Succeeded(total)):
+                print(f"Sum: {total}")
+            case Ok(Failed(task_error)):
+                print(f"Task failed: {task_error.error_code} - {task_error.message}")
+            case Err(read_error):
+                print(f"Read failed: {read_error.code} - {read_error.message}")
     case Err(send_err):
         print(f"Send failed: {send_err.code} - {send_err.message}")
 ```
+
+`handle.get()` returns `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error that the task returned or that the library recorded (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...). `Err(read_error)` means the read gave no outcome: `read_error` is one class of the `ReadError` union, for example `WaitTimeout`.
 
 Async: `send_async()` / `handle.get_async()`. Inside a coroutine or a Jupyter cell, use only the `*_async` forms: every sync call there returns `ASYNC_CONTEXT` and runs nothing.
 Delayed: `add_numbers.schedule(60, a=5, b=3)` dispatches after 60 seconds.
@@ -219,8 +227,8 @@ task sends and workflow starts.
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 handle.status()          # HandleResult[WorkflowStatus] — unwrap before use
-handle.get(timeout_ms=N) # TaskResult (blocks for output node)
-handle.results()         # HandleResult[dict[str, TaskResult]] — unwrap before use
+handle.get(timeout_ms=N) # ReadResult[T, TaskError] (blocks for output node)
+handle.results()         # HandleResult[dict[str, TaskOutcome[Any, TaskError]]] — unwrap before use
 handle.tasks()           # HandleResult[list[WorkflowTaskInfo]] — unwrap before use
 handle.cancel()          # cancel workflow
 handle.pause()           # pause (RUNNING -> PAUSED)
@@ -250,20 +258,22 @@ match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_brok
 Fetch a task result by ID without a `TaskHandle` (e.g. in HTTP endpoints). Use
 the app-level typed API — `broker.get_result(_async)` was removed in 0.1.2.
 
-<!-- check: skip elided -- shows a wrong form next to the right one -->
+<!-- check: skip partial -- task_id comes from the caller -->
 ```python
-from horsies.core.types.result import is_err
+from horsies import Err, Failed, Ok, Succeeded
 
-# Returns BrokerResult[TaskResult[Any, TaskError]] — unwrap the outer result.
-outer = await app.get_result_async("task-uuid", timeout_ms=5000)
-if is_err(outer):
-    ...  # infrastructure failure (INVALID_JSON_PAYLOAD / NO_TYPE_AVAILABLE)
-else:
-    task_result = outer.ok_value  # typed TaskResult[Any, TaskError]
+# Returns ReadResult[Any, TaskError]: one match reads it.
+match await app.get_result_async(task_id, timeout_ms=5000):
+    case Ok(Succeeded(value)):
+        ...  # the task returned this value
+    case Ok(Failed(task_error)):
+        ...  # the task failed: task_error.error_code
+    case Err(read_error):
+        ...  # no outcome: WaitTimeout, NoTypeAvailable, ResultDeserializationError, BrokerError, ...
 
 # Task metadata with typed-decoded result: the app-level wrapper decodes
 # when the task is registered locally (decoded_result / result_decoded set).
-info = await app.get_task_info_async("task-uuid", include_result=True)
+info = await app.get_task_info_async(task_id, include_result=True)
 
 # Broker-level variants are RAW envelope only — decoded_result is always
 # empty there. Reach for them for cross-process monitoring/dashboards:
@@ -337,19 +347,21 @@ The free `rerun_task` stores no carrier.
 
 | Operation | Result type | Ok | Err |
 |---|---|---|---|
-| Task execution | `TaskResult[T, TaskError]` | value `T` | `TaskError` |
+| Task execution | `Result[T, TaskError]` | value `T` | `TaskError` |
+| `get()` / `get_result()` / `result_for()` | `ReadResult[T, TaskError]` | `Succeeded(value)` or `Failed(task_error)` | `ReadError` |
 | `send()` / `schedule()` | `TaskSendResult[TaskHandle[T]]` | `TaskHandle` | `TaskSendError` |
 | `start()` | `WorkflowStartResult[WorkflowHandle[T]]` | `WorkflowHandle` | `WorkflowStartError` |
 | Broker infra | `BrokerResult[T]` | value `T` | `BrokerOperationError` |
 | Handle ops | `HandleResult[T]` | value `T` | `HandleOperationError` |
 
-Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
+Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a `ReadResult` with one `match`: `case Ok(Succeeded(value))`, `case Ok(Failed(task_error))`, `case Err(read_error)`. A workflow node input (`args_from`) and `WorkflowContext.result_for()` give a `TaskOutcome[T, TaskError]`: `Succeeded(value)` or `Failed(task_error)`.
 
 ### Error Code Enums
 
 - `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `WORKFLOW_COMMAND_CONFLICT`, `ENQUEUE_FAILED`, `ASYNC_CONTEXT`
 - `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`
+- `ReadError` (a union, one class per read failure; each has `code` and `message`): `WaitTimeout`, `TaskNotFound`, `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`, `WaitInsideTask`, `AsyncContext`, `InvalidInput`, `ResultDeserializationError`, `BrokerError` (adds `retryable` and `exception`), `NoTypeAvailable`, `WorkflowCtxMissingId`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors only `TaskSendEnqueueFailed` has `retryable`.
 
@@ -357,7 +369,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`.
 
 Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit.
 
-`ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, `RetrievalCode`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; `RetrievalCode.ASYNC_CONTEXT` is not cached; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
+`ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, and the read error `AsyncContext`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; a handle does not keep an `AsyncContext` read error; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
 
 ### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
 

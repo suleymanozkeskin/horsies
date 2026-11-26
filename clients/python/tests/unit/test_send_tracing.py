@@ -51,7 +51,7 @@ from horsies._catalog.producer_metrics import (
 from horsies.core.brokers.result_types import BrokerEnqueueFailed
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.task_send_types import TaskSendEnqueueFailed
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import create_task_wrapper
 from horsies.core.telemetry.producer import OtelSendRecorder
 from horsies.core.telemetry.send_telemetry import (
@@ -65,7 +65,7 @@ from horsies.core.telemetry.send_telemetry import (
     WorkflowStartSubject,
     current_context_trace,
 )
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow, start_workflow_async
 
 pytestmark = [pytest.mark.unit]
@@ -149,8 +149,8 @@ def _broker(answer: object) -> MagicMock:
 
 
 def _wrapper(app: MagicMock) -> Any:
-    def charge(*, amount: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=amount)
+    def charge(*, amount: int) -> Result[int, TaskError]:
+        return Ok(amount)
 
     return create_task_wrapper(charge, app, TASK_NAME)
 

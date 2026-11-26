@@ -21,7 +21,8 @@ from horsies.core.codec.typed import (
     decode_task_result,
     encode_task_error,
 )
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.outcome import Failed, Succeeded
+from horsies.core.models.tasks import TaskError
 from horsies.core.types.result import Err, Ok
 from crossclient.stored_form_vectors import load_form, rows, task_error_of, text_of
 
@@ -32,7 +33,7 @@ _VECTORS: Final = rows(_FORM, 'vectors')
 def _stored_text(vector: dict[str, object], error: TaskError) -> str:
     match text_of(vector, 'stored_as'):
         case 'envelope':
-            return serialize_error_payload(TaskResult(err=error))
+            return serialize_error_payload(error)
         case 'error':
             match dumps_json(encode_task_error(error)):
                 case Ok(ok_value=text):
@@ -55,9 +56,13 @@ def _read(vector: dict[str, object]) -> TaskError:
             assert_never(unreachable)
     match text_of(vector, 'stored_as'):
         case 'envelope':
-            result = decode_task_result(raw, type(None))
-            assert result.is_err()
-            return result.err_value
+            match decode_task_result(raw, type(None)):
+                case Failed(error=error):
+                    return error
+                case Succeeded() as succeeded:
+                    raise AssertionError(f'the envelope reads as a value: {succeeded!r}')
+                case _ as unreachable:
+                    assert_never(unreachable)
         case 'error':
             return decode_task_error(raw)
         case other:

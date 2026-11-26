@@ -22,9 +22,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from horsies._core import PanicException
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.broker_resources_support import current_resources
 
@@ -60,14 +60,14 @@ def _child_def(
     broken_def = _broken_build_def(suffix) if failing_sub_root else None
 
     @app.task(task_name=f'bulk_child_{suffix}')
-    def child_task(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def child_task(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     corrupt_fn: Any = None
     if corrupt_root:
         @app.task(task_name=f'bulk_child_corrupt_{suffix}')
-        def corrupt_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def corrupt_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         corrupt_task.task_options_json = '{not-json'  # type: ignore[attr-defined]
         corrupt_fn = corrupt_task
@@ -317,8 +317,8 @@ class TestBulkChildStart:
         suffix = uuid.uuid4().hex[:8]
 
         @app.task(task_name=f'nested_pause_fast_{suffix}')
-        def fast_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def fast_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         broken_def = _broken_build_def(suffix)
 

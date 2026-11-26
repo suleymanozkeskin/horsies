@@ -16,9 +16,9 @@ from horsies import (
     Err,
     Ok,
     OperationalErrorCode,
+    Result,
     RetryPolicy,
     TaskError,
-    TaskResult,
 )
 
 from .. import simulate, store, tuning
@@ -42,17 +42,17 @@ from . import store_failure
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def sales_rollup(*, window: str) -> TaskResult[SalesRollup, TaskError]:
+def sales_rollup(*, window: str) -> Result[SalesRollup, TaskError]:
     """Aggregate the day's orders. Runs on a DailySchedule at 03:00."""
     simulate.perform(tuning.SALES_ROLLUP_WORK, window, 'rollup')
 
     match store.sales_totals():
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(totals):
             orders, gross_cents, captured_cents = totals
-            return TaskResult(
-                ok=SalesRollup(
+            return Ok(
+                SalesRollup(
                     orders_counted=orders,
                     gross_cents=gross_cents,
                     captured_cents=captured_cents,
@@ -71,17 +71,17 @@ def sales_rollup(*, window: str) -> TaskResult[SalesRollup, TaskError]:
 def abandoned_cart_sweep(
     *,
     older_than_minutes: int,
-) -> TaskResult[AbandonedCartSweep, TaskError]:
+) -> Result[AbandonedCartSweep, TaskError]:
     """Count orders that never reached a capture. Runs hourly at :05."""
     simulate.perform(tuning.ABANDONED_CART_WORK, str(older_than_minutes), 'sweep')
 
     match store.abandoned_orders(older_than_minutes):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(result):
             stranded, oldest = result
-            return TaskResult(
-                ok=AbandonedCartSweep(swept=stranded, oldest_order_id=oldest),
+            return Ok(
+                AbandonedCartSweep(swept=stranded, oldest_order_id=oldest),
             )
 
 
@@ -93,18 +93,18 @@ def abandoned_cart_sweep(
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def regional_rollup(*, region: str) -> TaskResult[RegionalRollup, TaskError]:
+def regional_rollup(*, region: str) -> Result[RegionalRollup, TaskError]:
     """Roll up sales for one region. One schedule per region."""
     simulate.perform(tuning.SALES_ROLLUP_WORK, region, 'regional')
 
     match store.sales_totals():
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(totals):
             orders, gross_cents, _captured = totals
             share = simulate.integer(15, 55, region, 'share')
-            return TaskResult(
-                ok=RegionalRollup(
+            return Ok(
+                RegionalRollup(
                     region=region,
                     orders_counted=orders * share // 100,
                     gross_cents=gross_cents * share // 100,
@@ -120,7 +120,7 @@ def regional_rollup(*, region: str) -> TaskResult[RegionalRollup, TaskError]:
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def retention_audit(*, older_than_days: int) -> TaskResult[RetentionAudit, TaskError]:
+def retention_audit(*, older_than_days: int) -> Result[RetentionAudit, TaskError]:
     """Report what a retention policy would prune.
 
     Reports only — it never deletes. horsies prunes its own terminal rows on
@@ -132,11 +132,11 @@ def retention_audit(*, older_than_days: int) -> TaskResult[RetentionAudit, TaskE
 
     match store.sales_totals():
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(totals):
             orders, _gross, _captured = totals
-            return TaskResult(
-                ok=RetentionAudit(
+            return Ok(
+                RetentionAudit(
                     older_than_days=older_than_days,
                     orders_examined=orders,
                     rows_prunable=0,
@@ -156,7 +156,7 @@ def catalog_import_chunk(
     *,
     import_id: str,
     chunk_index: int,
-) -> TaskResult[CatalogChunk, TaskError]:
+) -> Result[CatalogChunk, TaskError]:
     """Import one chunk of a supplier catalog.
 
     Slow on purpose. The import fans out 40 of these onto a queue capped at 2,
@@ -165,8 +165,8 @@ def catalog_import_chunk(
     simulate.perform(tuning.CATALOG_IMPORT_CHUNK_WORK, import_id, str(chunk_index))
 
     digest = hashlib.sha256(f'{import_id}:{chunk_index}'.encode('utf-8')).hexdigest()
-    return TaskResult(
-        ok=CatalogChunk(
+    return Ok(
+        CatalogChunk(
             chunk_index=chunk_index,
             rows=tuning.CATALOG_IMPORT_ROWS_PER_CHUNK,
             checksum=digest[:16],
@@ -184,7 +184,7 @@ def catalog_import_chunk(
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def flaky_export(*, export_id: str) -> TaskResult[ExportManifest, TaskError]:
+def flaky_export(*, export_id: str) -> Result[ExportManifest, TaskError]:
     """Export a data extract, badly.
 
     Half of all export ids kill the child process outright with `os._exit(1)`.
@@ -200,8 +200,8 @@ def flaky_export(*, export_id: str) -> TaskResult[ExportManifest, TaskError]:
     if simulate.draw(tuning.CHAOS_EXPORT_CRASH_RATE, export_id, 'crash'):
         os._exit(1)
 
-    return TaskResult(
-        ok=ExportManifest(
+    return Ok(
+        ExportManifest(
             export_id=export_id,
             rows=simulate.integer(1_000, 50_000, export_id, 'rows'),
         ),

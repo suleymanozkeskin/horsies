@@ -12,26 +12,26 @@ For full scheduler documentation, see [Scheduler Overview](/horsies/scheduling/s
 
 <!-- check: skip partial -- imports a placeholder module -->
 ```python
-from horsies import TaskResult, TaskError, JsonValue
+from horsies import Ok, Result, TaskError, JsonValue
 from .config import app
 
 @app.task("sync_inventory", queue_name="low")
-def sync_inventory() -> TaskResult[dict[str, JsonValue], TaskError]:
-    return TaskResult(ok={
+def sync_inventory() -> Result[dict[str, JsonValue], TaskError]:
+    return Ok({
         "synced_items": 150,
         "status": "completed",
     })
 
 @app.task("generate_shipping_report", queue_name="low")
-def generate_shipping_report() -> TaskResult[dict[str, JsonValue], TaskError]:
-    return TaskResult(ok={
+def generate_shipping_report() -> Result[dict[str, JsonValue], TaskError]:
+    return Ok({
         "report_id": "RPT-2024-001",
         "orders_shipped": 42,
     })
 
 @app.task("cleanup_completed_orders", queue_name="low")
-def cleanup_completed_orders() -> TaskResult[dict[str, JsonValue], TaskError]:
-    return TaskResult(ok={
+def cleanup_completed_orders() -> Result[dict[str, JsonValue], TaskError]:
+    return Ok({
         "archived_count": 100,
     })
 ```

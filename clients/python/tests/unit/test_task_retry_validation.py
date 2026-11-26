@@ -12,7 +12,8 @@ from pydantic import ValidationError
 from horsies.core.errors import TaskDefinitionError, ErrorCode
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import TaskError, TaskOptions, TaskResult, RetryPolicy
+from horsies.core.models.tasks import TaskError, TaskOptions, RetryPolicy
+from horsies.core.types.result import Ok, Result
 
 
 def _make_app() -> Horsies:
@@ -115,8 +116,8 @@ class TestTaskDecoratorValidation:
                 'deprecated_auto_retry_for',
                 auto_retry_for=['RATE_LIMITED'],  # type: ignore[call-arg]
             )
-            def deprecated_auto_retry_for() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='ok')
+            def deprecated_auto_retry_for() -> Result[str, TaskError]:
+                return Ok('ok')
 
         assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
 
@@ -126,8 +127,8 @@ class TestTaskDecoratorValidation:
         with pytest.raises(TaskDefinitionError) as exc_info:
 
             @app.task('bad_option', queue_nam='default')  # type: ignore[call-arg]
-            def bad_option() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='ok')
+            def bad_option() -> Result[str, TaskError]:
+                return Ok('ok')
 
         assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
         assert 'bad_option' not in app.list_tasks()
@@ -143,8 +144,8 @@ class TestTaskDecoratorValidation:
                 'bad_default_error_code',
                 default_unhandled_error_code='TimeoutError',
             )
-            def bad_default_error_code() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='ok')
+            def bad_default_error_code() -> Result[str, TaskError]:
+                return Ok('ok')
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
@@ -159,8 +160,8 @@ class TestTaskDecoratorValidation:
                 'bad_mapper_type',
                 exception_mapper=['not', 'a', 'mapping'],  # type: ignore[arg-type]
             )
-            def bad_mapper_type() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='ok')
+            def bad_mapper_type() -> Result[str, TaskError]:
+                return Ok('ok')
 
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
 
@@ -179,8 +180,8 @@ class TestTaskDecoratorValidation:
 
             @app.task('predecorated_with_wraps')
             @passthrough
-            def predecorated_with_wraps() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='ok')
+            def predecorated_with_wraps() -> Result[str, TaskError]:
+                return Ok('ok')
 
         assert exc_info.value.code == ErrorCode.TASK_PREDECORATED_NOT_SUPPORTED
 
@@ -189,8 +190,8 @@ class TestTaskDecoratorValidation:
         app = _make_app()
 
         @app.task('async_task_function', timeout_ms=5_000)
-        async def async_task_function() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        async def async_task_function() -> Result[str, TaskError]:
+            return Ok('ok')
 
         assert app.tasks['async_task_function'] is async_task_function
         options_json = async_task_function.task_options_json
@@ -211,8 +212,8 @@ class TestTaskDecoratorValidation:
 
             @app.task('predecorated_no_wraps')
             @passthrough
-            def predecorated_no_wraps() -> TaskResult[str, TaskError]:
-                return TaskResult(ok='ok')
+            def predecorated_no_wraps() -> Result[str, TaskError]:
+                return Ok('ok')
 
         assert exc_info.value.code == ErrorCode.TASK_NO_RETURN_TYPE
 
@@ -228,8 +229,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('malformed_task_options')
-        def malformed_task_options() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def malformed_task_options() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(app.tasks['malformed_task_options'], 'task_options_json', '{')
 
@@ -246,8 +247,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('non_object_task_options')
-        def non_object_task_options() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def non_object_task_options() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(
             app.tasks['non_object_task_options'],
@@ -270,8 +271,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('bad_retry_policy_shape')
-        def bad_retry_policy_shape() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def bad_retry_policy_shape() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(
             app.tasks['bad_retry_policy_shape'],
@@ -294,8 +295,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('missing_auto_retry_for')
-        def missing_auto_retry_for() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def missing_auto_retry_for() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(
             app.tasks['missing_auto_retry_for'],
@@ -322,8 +323,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('bad_auto_retry_for_shape')
-        def bad_auto_retry_for_shape() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def bad_auto_retry_for_shape() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(
             app.tasks['bad_auto_retry_for_shape'],
@@ -344,8 +345,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('empty_auto_retry_for')
-        def empty_auto_retry_for() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def empty_auto_retry_for() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(
             app.tasks['empty_auto_retry_for'],
@@ -368,8 +369,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('non_string_auto_retry')
-        def non_string_auto_retry() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def non_string_auto_retry() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(
             app.tasks['non_string_auto_retry'],
@@ -390,8 +391,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('exc_name_retry')
-        def exc_name_retry() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def exc_name_retry() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(
             app.tasks['exc_name_retry'],
@@ -412,8 +413,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('bad_format_retry')
-        def bad_format_retry() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def bad_format_retry() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(
             app.tasks['bad_format_retry'],
@@ -436,8 +437,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('bad_policy_structure')
-        def bad_policy_structure() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def bad_policy_structure() -> Result[str, TaskError]:
+            return Ok('ok')
 
         # intervals length (1) != max_retries (3) for fixed strategy
         setattr(
@@ -500,8 +501,8 @@ class TestCheckRuntimePolicyValidation:
         app = _make_app()
 
         @app.task('bad_task_default')
-        def bad_task_default() -> TaskResult[str, TaskError]:
-            return TaskResult(ok='ok')
+        def bad_task_default() -> Result[str, TaskError]:
+            return Ok('ok')
 
         setattr(
             app.tasks['bad_task_default'],

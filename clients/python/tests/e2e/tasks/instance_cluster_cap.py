@@ -45,24 +45,25 @@ app.discover_tasks(
 )
 
 # Local tasks bound to THIS app's broker
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Err, Ok, Result
 
 
 @app.task(task_name='e2e_cluster_cap_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
 @app.task(task_name='e2e_cluster_cap_slow')
-def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
+def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Task that sleeps for specified duration."""
     import time
 
     time.sleep(duration_ms / 1000)
-    return TaskResult(ok=f'slept_{duration_ms}')
+    return Ok(f'slept_{duration_ms}')
 
 
 @app.task(task_name='e2e_cluster_cap_fail')
-def fail_task() -> TaskResult[str, TaskError]:
+def fail_task() -> Result[str, TaskError]:
     """Task that always fails, for cap-leak testing."""
-    return TaskResult(err=TaskError(error_code='DELIBERATE_FAIL', message='always fails'))
+    return Err(TaskError(error_code='DELIBERATE_FAIL', message='always fails'))

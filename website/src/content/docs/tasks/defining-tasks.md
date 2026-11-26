@@ -8,7 +8,7 @@ tags: [tasks, decorator, definition, TaskRuntime, FencingToken, fencing token]
 
 # Defining Tasks
 
-Define tasks by decorating functions with `@app.task()` and returning `TaskResult[T, TaskError]`. A task function is a `def` or an `async def` function. For argument serialization rules, see `sending-tasks`.
+Define tasks by decorating functions with `@app.task()` and returning `Result[T, TaskError]`. A task function is a `def` or an `async def` function. For argument serialization rules, see `sending-tasks`.
 
 ## How To
 
@@ -16,7 +16,7 @@ Define tasks by decorating functions with `@app.task()` and returning `TaskResul
 
 ```python
 from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, JsonValue
+from horsies import Horsies, AppConfig, PostgresConfig, Err, Ok, Result, TaskError, JsonValue
 
 config = AppConfig(
     broker=PostgresConfig(database_url=SecretStr("postgresql://...")),
@@ -24,22 +24,22 @@ config = AppConfig(
 app = Horsies(config)
 
 @app.task("process_order")
-def process_order(*, order_id: int) -> TaskResult[str, TaskError]:
+def process_order(*, order_id: int) -> Result[str, TaskError]:
     # Do work
-    return TaskResult(ok=f"Order {order_id} processed")
+    return Ok(f"Order {order_id} processed")
 ```
 
 ### Async Tasks
 
-Define a task with `async def` to await I/O in its body. `@app.task()` checks it as it checks a `def` task, and it returns a `TaskResult` in the same way.
+Define a task with `async def` to await I/O in its body. `@app.task()` checks it as it checks a `def` task, and it returns a `Result` in the same way.
 
 ```python
 import asyncio
 
 @app.task("fetch_price", timeout_ms=30_000)
-async def fetch_price(*, symbol: str) -> TaskResult[float, TaskError]:
+async def fetch_price(*, symbol: str) -> Result[float, TaskError]:
     await asyncio.sleep(0.1)  # stands in for an awaited client call
-    return TaskResult(ok=101.5)
+    return Ok(101.5)
 ```
 
 With `Execution.ISOLATED` (the default), a worker child runs one task at a time, `def` or `async def`. A `SHARED_ASYNC` task runs next to other tasks on the event loop of a shared async child instead: see [Shared Async Tasks](/horsies/workers/shared-async-tasks/). An isolated child keeps one event loop until the child stops, and an async task runs on that loop. An async client that a module keeps stays open across the tasks of one child.
@@ -74,11 +74,11 @@ async def refresh_session() -> None:
 
 
 @app.task("watch_price")
-async def watch_price(*, symbol: str) -> TaskResult[float, TaskError]:
+async def watch_price(*, symbol: str) -> Result[float, TaskError]:
     helper = asyncio.create_task(refresh_session())
     try:
         await asyncio.sleep(0.1)  # stands in for the work of the task
-        return TaskResult(ok=101.5)
+        return Ok(101.5)
     finally:
         helper.cancel()
         # gather returns the CancelledError of the helper instead of raising it.
@@ -97,12 +97,12 @@ In an async task, send with `.send_async()` or `.schedule_async()`. The sync `.s
 from horsies import Ok, Err
 
 @app.task("refresh_price")
-async def refresh_price(*, symbol: str) -> TaskResult[str, TaskError]:
+async def refresh_price(*, symbol: str) -> Result[str, TaskError]:
     match await fetch_price.send_async(symbol=symbol):
         case Ok(handle):
-            return TaskResult(ok=str(handle.task_id))
+            return Ok(str(handle.task_id))
         case Err(send_err):
-            return TaskResult(err=TaskError(error_code="SEND_FAILED", message=send_err.message))
+            return Err(TaskError(error_code="SEND_FAILED", message=send_err.message))
 ```
 
 `timeout_ms` works as for a `def` task: on expiry, the worker kills the child. An `async def` function that uses `yield` is refused with `HRS-101`.
@@ -113,7 +113,7 @@ Every task parameter must be keyword-only: declare them after a bare `*,`. The l
 
 ```python
 @app.task("send_email")
-def send_email(*, to: str, subject: str) -> TaskResult[None, TaskError]:
+def send_email(*, to: str, subject: str) -> Result[None, TaskError]:
     ...
 ```
 
@@ -130,8 +130,8 @@ from horsies import FencingToken, TaskRuntime
 
 
 @app.task('reserve_stock')
-def reserve_stock(runtime: TaskRuntime, *, sku: str) -> TaskResult[FencingToken, TaskError]:
-    return TaskResult(ok=runtime.fencing_token)
+def reserve_stock(runtime: TaskRuntime, *, sku: str) -> Result[FencingToken, TaskError]:
+    return Ok(runtime.fencing_token)
 ```
 
 The rules of the parameter:
@@ -181,7 +181,7 @@ WHERE payments.fence <= EXCLUDED.fence
 
 
 @app.task('record_payment')
-def record_payment(runtime: TaskRuntime, *, order_id: str, cents: int) -> TaskResult[str, TaskError]:
+def record_payment(runtime: TaskRuntime, *, order_id: str, cents: int) -> Result[str, TaskError]:
     token = runtime.fencing_token
     with connection.cursor() as cursor:
         cursor.execute(
@@ -192,12 +192,12 @@ def record_payment(runtime: TaskRuntime, *, order_id: str, cents: int) -> TaskRe
     connection.commit()
     match written:
         case 0:
-            return TaskResult(err=TaskError(
+            return Err(TaskError(
                 error_code='LATER_ATTEMPT',
                 message='a later attempt of this task holds the fence',
             ))
         case _:
-            return TaskResult(ok=order_id)
+            return Ok(order_id)
 ```
 
 Limits:
@@ -211,8 +211,8 @@ Limits:
 
 ```python
 @app.task("compute")
-def compute(*, x: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=x * 2)
+def compute(*, x: int) -> Result[int, TaskError]:
+    return Ok(x * 2)
 ```
 
 For void tasks:
@@ -220,9 +220,9 @@ For void tasks:
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 @app.task("fire_and_forget")
-def fire_and_forget() -> TaskResult[None, TaskError]:
+def fire_and_forget() -> Result[None, TaskError]:
     do_something()
-    return TaskResult(ok=None)
+    return Ok(None)
 ```
 
 ### Return Errors
@@ -231,23 +231,23 @@ Domain errors (expected failures):
 
 ```python
 @app.task("validate_input")
-def validate_input(*, data: dict[str, JsonValue]) -> TaskResult[dict[str, JsonValue], TaskError]:
+def validate_input(*, data: dict[str, JsonValue]) -> Result[dict[str, JsonValue], TaskError]:
     if not data.get("email"):
-        return TaskResult(err=TaskError(
+        return Err(TaskError(
             error_code="MISSING_EMAIL",
             message="Email is required",
             data={"field": "email"},
         ))
-    return TaskResult(ok=data)
+    return Ok(data)
 ```
 
 Unhandled exceptions are wrapped automatically:
 
 ```python
 @app.task("might_crash")
-def might_crash() -> TaskResult[str, TaskError]:
+def might_crash() -> Result[str, TaskError]:
     raise ValueError("Something went wrong")
-    # Becomes TaskResult(err=TaskError(
+    # Becomes Err(TaskError(
     #     error_code=OperationalErrorCode.UNHANDLED_EXCEPTION,
     #     message="Unhandled exception in task might_crash: ...",
     # ))
@@ -258,13 +258,13 @@ def might_crash() -> TaskResult[str, TaskError]:
 `retry_policy` takes a `RetryPolicy`. A failure retries when its error code is in `auto_retry_for` and retries remain. The policy fields, the delay steps and the retry rules are on [Retry Policy](/horsies/tasks/retry-policy/).
 
 ```python
-from horsies import RetryPolicy, TaskResult, TaskError, JsonValue
+from horsies import RetryPolicy, Err, Ok, Result, TaskError, JsonValue
 
 @app.task(
     "flaky_task",
     retry_policy=RetryPolicy.fixed([60, 300, 900], auto_retry_for=["TRANSIENT_ERROR"]),
 )
-def flaky_task() -> TaskResult[str, TaskError]:
+def flaky_task() -> Result[str, TaskError]:
     # Retries up to 3 times, after 1 min, 5 min and 15 min
     ...
 ```
@@ -367,17 +367,17 @@ Return a `TaskError` with a code that `auto_retry_for` lists:
         auto_retry_for=["RATE_LIMITED", "SERVICE_UNAVAILABLE"],
     ),
 )
-def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
+def call_external_api() -> Result[dict[str, JsonValue], TaskError]:
     try:
         response = requests.get("https://api.example.com")
         if response.status_code == 429:
-            return TaskResult(err=TaskError(
+            return Err(TaskError(
                 error_code="RATE_LIMITED",
                 message="the API answered 429",
             ))
-        return TaskResult(ok=response.json())
+        return Ok(response.json())
     except requests.Timeout:
-        return TaskResult(err=TaskError(
+        return Err(TaskError(
             error_code="TIMEOUT",
             message="the API did not answer in time",
         ))
@@ -398,10 +398,10 @@ def call_external_api() -> TaskResult[dict[str, JsonValue], TaskError]:
         ConnectionError: "CONNECTION_ERROR",
     },
 )
-def call_api() -> TaskResult[dict[str, JsonValue], TaskError]:
+def call_api() -> Result[dict[str, JsonValue], TaskError]:
     # No try/except: a TimeoutError becomes "TIMEOUT"
     response = requests.get("https://api.example.com", timeout=10)
-    return TaskResult(ok=response.json())
+    return Ok(response.json())
 ```
 
 A mapper on `AppConfig` applies to all tasks:
@@ -427,7 +427,7 @@ When the task raises an exception, the code comes from the first match in this o
 3. The task's `default_unhandled_error_code`
 4. `AppConfig.default_unhandled_error_code` (default `"UNHANDLED_EXCEPTION"`)
 
-A task entry has priority over a global entry. A task that returns `TaskResult(err=...)` does not use the mapper.
+A task entry has priority over a global entry. A task that returns `Err(...)` does not use the mapper.
 
 Only the exact class matches; a subclass does not. Map each subclass that you expect.
 
@@ -438,7 +438,7 @@ Only the exact class matches; a subclass does not. Map each subclass that you ex
 ```python
 from enum import Enum
 
-from horsies import Horsies, TaskError, TaskResult
+from horsies import Err, Horsies, Ok, Result, TaskError
 
 
 class ChargeCode(Enum):
@@ -448,14 +448,14 @@ class ChargeCode(Enum):
 
 def register(app: Horsies) -> None:
     @app.task("charge_card", error_codes=ChargeCode)
-    def charge_card(*, amount_cents: int) -> TaskResult[str, TaskError]:
+    def charge_card(*, amount_cents: int) -> Result[str, TaskError]:
         if amount_cents > 100_000:
-            return TaskResult(err=TaskError(error_code=ChargeCode.CARD_DECLINED.value))
-        return TaskResult(ok="charged")
+            return Err(TaskError(error_code=ChargeCode.CARD_DECLINED.value))
+        return Ok("charged")
 
     @app.task("send_receipt", error_codes=("BOUNCED",))
-    def send_receipt(*, email: str) -> TaskResult[str, TaskError]:
-        return TaskResult(ok=email)
+    def send_receipt(*, email: str) -> Result[str, TaskError]:
+        return Ok(email)
 ```
 
 A `TaskError` takes the code as a plain `str`: pass `ChargeCode.CARD_DECLINED.value`, not the member. Declaring is optional, and the default is `()`. A user code that the task does not declare still works everywhere; its metric label is `undeclared`.
@@ -475,7 +475,7 @@ The task function keeps the codes in `task_error_codes`: the declared codes in t
 
 ```python
 @app.task("urgent_task", queue_name="critical")
-def urgent_task() -> TaskResult[str, TaskError]:
+def urgent_task() -> Result[str, TaskError]:
     ...
 ```
 
@@ -485,7 +485,7 @@ def urgent_task() -> TaskResult[str, TaskError]:
 
 ```python
 @app.task("resize_video", timeout_ms=120_000)
-def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
+def resize_video(*, video_id: str) -> Result[str, TaskError]:
     ...
 ```
 
@@ -497,7 +497,7 @@ On expiry, the worker kills the child process, waits for it to exit, and then fa
     timeout_ms=120_000,
     retry_policy=RetryPolicy.fixed([60, 300], auto_retry_for=["TASK_TIMEOUT"]),
 )
-def resize_video(*, video_id: str) -> TaskResult[str, TaskError]:
+def resize_video(*, video_id: str) -> Result[str, TaskError]:
     ...
 ```
 
@@ -528,13 +528,13 @@ async def close_writer() -> None:
 
 
 @app.task('copy_rows', timeout_ms=600_000)
-async def copy_rows(*, rows: list[str]) -> TaskResult[int, TaskError]:
+async def copy_rows(*, rows: list[str]) -> Result[int, TaskError]:
     try:
         await write_rows(rows)
     except asyncio.CancelledError:
         await close_writer()
         raise
-    return TaskResult(ok=len(rows))
+    return Ok(len(rows))
 ```
 
 A `def` task reads the cancel state of its run. Its first parameter takes the `TaskRuntime` of the run, before the `*`, and `runtime.cancel_state()` returns `CancelNotRequested()` or `CancelRequested(cause)`. Read it between the steps of the work:
@@ -548,7 +548,7 @@ def import_batch(batch_id: str) -> None:
 
 
 @app.task('import_batches', timeout_ms=600_000, cancel_grace_ms=5_000)
-def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> TaskResult[int, TaskError]:
+def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> Result[int, TaskError]:
     done = 0
     for batch_id in batch_ids:
         match runtime.cancel_state():
@@ -557,7 +557,7 @@ def import_batches(runtime: TaskRuntime, *, batch_ids: list[str]) -> TaskResult[
             case CancelNotRequested():
                 import_batch(batch_id)
                 done += 1
-    return TaskResult(ok=done)
+    return Ok(done)
 ```
 
 `CancelRequested.cause` is a `CancelCause`:
@@ -590,7 +590,7 @@ cancelled_run = TaskRuntime.for_test(
     task_id=uuid.uuid4(),
     cancel_state=CancelRequested(cause=CancelCause.OPERATOR),
 )
-assert import_batches(cancelled_run, batch_ids=['b-1', 'b-2']).ok == 0
+assert import_batches(cancelled_run, batch_ids=['b-1', 'b-2']) == Ok(0)
 ```
 
 ### Choose the Execution Class
@@ -610,12 +610,12 @@ assert import_batches(cancelled_run, batch_ids=['b-1', 'b-2']).ok == 0
     timeout_ms=10_000,
     cancel_grace_ms=2_000,
 )
-async def fetch_quote(*, symbol: str) -> TaskResult[str, TaskError]:
+async def fetch_quote(*, symbol: str) -> Result[str, TaskError]:
     ...
 
 
 @app.task("render_thumbnail", execution=Execution.SHARED_THREAD, timeout_ms=30_000)
-def render_thumbnail(*, image_id: str) -> TaskResult[str, TaskError]:
+def render_thumbnail(*, image_id: str) -> Result[str, TaskError]:
     ...
 ```
 
@@ -629,11 +629,11 @@ _seen_lock = threading.Lock()
 
 
 @app.task('mark_seen', execution=Execution.SHARED_THREAD, timeout_ms=10_000)
-def mark_seen(*, key: str) -> TaskResult[bool, TaskError]:
+def mark_seen(*, key: str) -> Result[bool, TaskError]:
     with _seen_lock:
         first = key not in _seen
         _seen.add(key)
-    return TaskResult(ok=first)
+    return Ok(first)
 ```
 
 A `SHARED_ASYNC` task runs on a seat of a shared async child when the worker profile has `shared_async=SharedAsyncChildren(...)`, and in an isolated child otherwise. See [Shared Async Tasks](/horsies/workers/shared-async-tasks/). A `SHARED_THREAD` task runs on a seat thread of a shared thread child when the profile has `shared_thread=SharedThreadChildren(...)`, and in an isolated child otherwise. See [Shared Thread Tasks](/horsies/workers/shared-thread-tasks/).
@@ -685,8 +685,8 @@ def bad_task():
 
 # Correct
 @app.task("good_task")
-def good_task() -> TaskResult[dict[str, JsonValue], TaskError]:
-    return TaskResult(ok={"status": "done"})
+def good_task() -> Result[dict[str, JsonValue], TaskError]:
+    return Ok({"status": "done"})
 ```
 
 **Don't block the event loop in a `SHARED_ASYNC` task.** A blocking call stops every task of the child for that time.
@@ -696,27 +696,27 @@ import time
 
 # Wrong: stops every task of the child for 2 seconds
 @app.task('wait_wrong', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def wait_wrong() -> TaskResult[None, TaskError]:
+async def wait_wrong() -> Result[None, TaskError]:
     time.sleep(2)
-    return TaskResult(ok=None)
+    return Ok(None)
 
 
 # Correct
 @app.task('wait_right', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def wait_right() -> TaskResult[None, TaskError]:
+async def wait_right() -> Result[None, TaskError]:
     await asyncio.sleep(2)
-    return TaskResult(ok=None)
+    return Ok(None)
 ```
 
 **Don't reuse task names.**
 
 ```python
 @app.task("duplicate_name")
-def task_one() -> TaskResult[str, TaskError]:
+def task_one() -> Result[str, TaskError]:
     ...
 
 @app.task("duplicate_name")  # Raises error
-def task_two() -> TaskResult[str, TaskError]:
+def task_two() -> Result[str, TaskError]:
     ...
 ```
 
@@ -736,6 +736,6 @@ def task_two() -> TaskResult[str, TaskError]:
 | `execution` | `Execution` | No | How a worker runs the task: `ISOLATED` (default), `SHARED_ASYNC` or `SHARED_THREAD`. See [Choose the Execution Class](#choose-the-execution-class) |
 | `cancel_grace_ms` | `int` | No | `ISOLATED` and `SHARED_ASYNC`. The time to stop after a cancel, from 100 to 10,000 ms. `SHARED_ASYNC`: default 1,000 ms, then a second cancel. `ISOLATED`: no default; when set, the worker kills the child of a cancelled task that has not stopped by then. See [Cancellation](#cancellation) |
 
-**Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `TaskResult`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `TaskResult`. Both send with `.send()` / `.send_async()`. A function whose first parameter is `runtime: TaskRuntime` gives a `RuntimeTaskFunction` or an `AsyncRuntimeTaskFunction`: the sends do not take the runtime, and a direct call takes it first. See [Task Runtime](#task-runtime).
+**Returns:** For a `def` function, a `TaskFunction`: a direct call returns the `Result`. For an `async def` function, an `AsyncTaskFunction`: a direct call returns a coroutine, and `await` gives the `Result`. Both send with `.send()` / `.send_async()`. A function whose first parameter is `runtime: TaskRuntime` gives a `RuntimeTaskFunction` or an `AsyncRuntimeTaskFunction`: the sends do not take the runtime, and a direct call takes it first. See [Task Runtime](#task-runtime).
 
 `good_until` is not accepted here — task expiry deadlines are a per-send concern. See [Sending Tasks — Set a Task Deadline](/horsies/tasks/sending-tasks/#set-a-task-deadline).

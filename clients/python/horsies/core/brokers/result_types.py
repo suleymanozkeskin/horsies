@@ -4,9 +4,11 @@ Result propagation policy
 -------------------------
 The library uses two distinct error systems:
 
-1. ``TaskResult[T, TaskError]`` -- user-facing task execution outcomes.
-   Returned by ``get_result_async`` / ``get_result``.  Carries domain
-   error codes (``BuiltInTaskCode`` families) and user-defined error codes.
+1. ``ReadResult[T, TaskError]`` -- user-facing task reads. Returned by
+   ``get_result_async`` / ``get_result`` and the handles. Its outcome
+   (``Succeeded`` / ``Failed``) carries domain error codes
+   (``BuiltInTaskCode`` families) and user-defined error codes; a read
+   failure is a ``ReadError`` class.
 
 2. ``BrokerResult[T]`` (this module) -- infrastructure operation outcomes.
    Returned by broker methods (``get_task_info_async``, ``close_async``,
@@ -171,7 +173,7 @@ class RawResultRecord:
             ``ok_type`` from the local task catalog.
         status: Current row status. Lets callers map non-terminal
             outcomes (``CANCELLED``, ``WAIT_TIMEOUT``) into the
-            ``TaskResult`` / ``Result`` shape they expose.
+            ``ReadResult`` shape they expose.
         raw_result: The decoded JSON envelope from the result column,
             or ``None`` for rows that haven't reached a terminal state
             yet, were cancelled before completion, or were terminal but

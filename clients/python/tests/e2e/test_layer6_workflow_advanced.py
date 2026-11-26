@@ -14,15 +14,21 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any, Awaitable, Callable, cast
+from typing import Awaitable, Callable
 
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskResult
 
 from horsies.core.types.result import is_ok
-from tests.e2e.helpers.assertions import assert_ok, assert_err, start_ok_in_thread, unwrap_send
+from tests.e2e.helpers.assertions import (
+    assert_failed,
+    assert_succeeded,
+    read_succeeded,
+    start_ok_in_thread,
+    succeeded_value,
+    unwrap_send,
+)
 from tests.e2e.helpers.db import uuid_of_column, wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
@@ -39,16 +45,6 @@ from tests.workflow_recovery_support import workflow_recovery_pass
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 
 
-def _unwrap_task_value(value: Any) -> Any:
-    """Unwrap TaskResult value from workflow output."""
-    if isinstance(value, TaskResult):
-        task_result = cast(TaskResult[Any, Any], value)
-        if task_result.is_ok():
-            return task_result.unwrap()
-        return task_result
-    return value
-
-
 def _make_ready_check() -> Callable[[], bool]:
     """Create a ready check that sends healthcheck task."""
     from horsies.core.task_decorator import TaskHandle
@@ -59,8 +55,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(healthcheck.send())
-        result = handle.get(timeout_ms=2000)
-        return result.is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -463,7 +458,7 @@ async def test_success_policy_not_met_error_content(broker: PostgresBroker) -> N
         assert status == 'FAILED'
 
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_err(result, expected_code='REQUIRED_FAIL')
+        assert_failed(result, expected_code='REQUIRED_FAIL')
 
 
 # =============================================================================
@@ -527,8 +522,7 @@ async def test_recovery_preserves_results(broker: PostgresBroker) -> None:
 
         # Get the original result to ensure it completed properly
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
-        _ = result.unwrap()  # Verify result is accessible
+        _ = succeeded_value(result)  # Verify result is accessible
 
         # Now simulate a "stuck" workflow by artificially setting status back to RUNNING
         # but keeping all tasks terminal
@@ -650,7 +644,7 @@ async def test_workflow_task_retries(broker: PostgresBroker, tmp_path: Path) -> 
 
         # Verify the task completed with success
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
+        assert_succeeded(result)
 
         # Verify attempts were made
         assert counter_file.exists(), 'Counter file should exist'
@@ -743,7 +737,7 @@ async def test_on_error_pause_stops_workflow(broker: PostgresBroker) -> None:
 
         # handle.get() should return WORKFLOW_PAUSED error
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_err(result, expected_code='WORKFLOW_PAUSED')
+        assert_failed(result, expected_code='WORKFLOW_PAUSED')
 
 
 @pytest.mark.e2e
@@ -804,8 +798,7 @@ def _make_recovery_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(instance_recovery.healthcheck.send())
-        result = handle.get(timeout_ms=2000)
-        return result.is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 

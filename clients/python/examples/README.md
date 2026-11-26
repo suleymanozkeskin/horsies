@@ -136,7 +136,7 @@ validate_order
 its own node results — parameterized per order through `build_with`.
 
 `send_order_email` is the recovery handler. It runs whether the capture
-completed, failed, or was skipped, reads the upstream `TaskResult`, and picks
+completed, failed, or was skipped, reads the upstream `TaskOutcome`, and picks
 between the confirmation and the apology. It completes; the workflow still
 fails, because `OnError.FAIL` accounts for the failure regardless of the
 handler. A COMPLETED node underneath a FAILED one is the point.
@@ -233,7 +233,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 
 | Capability | Where it lives | What you see |
 |---|---|---|
-| `@app.task` + `TaskResult` both branches | all 36 tasks | tasks across all 7 statuses |
+| `@app.task` + `Result` both branches (`Ok`, `Err`) | all 36 tasks | tasks across all 7 statuses |
 | Custom queues, priority, `max_concurrency` | 4 queues; `marketing_blast` floods `notifications` (cap 3) | a deep backlog on one queue while `payments` stays clear |
 | `RetryPolicy.exponential` + attempt history | `authorize_payment` | attempt cards, per-try errors, `?retried=true` |
 | `RetryPolicy.fixed` | `sync_supplier_feed` on `SUPPLIER_TIMEOUT` | a scheduled task that sometimes retries |

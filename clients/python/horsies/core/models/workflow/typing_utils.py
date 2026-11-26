@@ -13,6 +13,7 @@ from typing import (
     TypeVar,
     Callable,
     Union,
+    assert_never,
     get_args,
     get_origin,
     get_type_hints,
@@ -127,28 +128,46 @@ def _resolved_type_hints(fn: Callable[..., Any]) -> dict[str, Any]:
         return {}
 
 
-def _extract_taskresult_ok_type(annotation: Any) -> Any | None:
-    """Extract Ok type from TaskResult[Ok, Err], including Optional/Union wrappers."""
+def _extract_outcome_ok_type(annotation: Any) -> Any | None:
+    """Extract the T of an args_from slot: TaskOutcome[T, E], including
+    Optional/Union wrappers."""
     if annotation is None:
         return None
 
-    from horsies.core.models.tasks import TaskResult
+    from horsies.core.models.outcome import TaskOutcome
 
     origin = get_origin(annotation)
-    if origin is TaskResult:
+    if origin is TaskOutcome:
         args = get_args(annotation)
         if len(args) == 2:
             return args[0]
         return None
 
     if origin in (Union, UnionType):
-        extracted = [_extract_taskresult_ok_type(member) for member in get_args(annotation)]
+        extracted = [_extract_outcome_ok_type(member) for member in get_args(annotation)]
         non_none = [value for value in extracted if value is not None]
         if len(non_none) == 1:
             return non_none[0]
         return None
 
     return None
+
+
+def _extract_return_ok_type(annotation: Any) -> Any | None:
+    """Extract the T of a task return annotation: Result[T, E]."""
+    from horsies.core.types.result import (
+        NotAResultAnnotation,
+        ResultTypeArguments,
+        result_type_arguments,
+    )
+
+    match result_type_arguments(annotation):
+        case ResultTypeArguments(ok_type=ok_type):
+            return ok_type
+        case NotAResultAnnotation():
+            return None
+        case _ as unreachable:
+            assert_never(unreachable)
 
 
 def _normalize_resolved_ok_type(value: Any | None) -> Any | None:
@@ -162,7 +181,7 @@ def _normalize_resolved_ok_type(value: Any | None) -> Any | None:
 
 def _resolve_task_fn_ok_type(fn: Callable[..., Any]) -> Any | None:
     """
-    Resolve TaskResult ok-type produced by a task function wrapper.
+    Resolve the ok type of the Result that a task function wrapper returns.
 
     Prefers explicit wrapper metadata (task_ok_type), then falls back to
     return-type annotations.
@@ -173,7 +192,7 @@ def _resolve_task_fn_ok_type(fn: Callable[..., Any]) -> Any | None:
         return normalized
 
     hints = _resolved_type_hints(fn)
-    ok_from_hints = _extract_taskresult_ok_type(hints.get('return'))
+    ok_from_hints = _extract_return_ok_type(hints.get('return'))
     normalized = _normalize_resolved_ok_type(ok_from_hints)
     if normalized is not None:
         return normalized
@@ -181,7 +200,7 @@ def _resolve_task_fn_ok_type(fn: Callable[..., Any]) -> Any | None:
     sig = _get_signature(fn)
     if sig is None or sig.return_annotation is inspect.Parameter.empty:
         return None
-    ok_from_sig = _extract_taskresult_ok_type(sig.return_annotation)
+    ok_from_sig = _extract_return_ok_type(sig.return_annotation)
     return _normalize_resolved_ok_type(ok_from_sig)
 
 
@@ -345,7 +364,7 @@ def _without_annotated(annotation: Any) -> Any:
 
 def _is_ok_type_compatible(source_ok: Any, expected_ok: Any) -> bool:
     """
-    Return True if source TaskResult ok-type can be injected into expected type.
+    Return True if the ok type of a source outcome can be injected into the expected type.
 
     This compares types only. `Annotated` metadata is removed from both sides,
     at every depth. A constraint on the target is enforced on the value at run

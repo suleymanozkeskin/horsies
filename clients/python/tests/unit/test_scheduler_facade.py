@@ -50,11 +50,11 @@ from horsies.core.models.schedule import (
     ScheduleConfig,
     TaskSchedule,
 )
-from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import RetryPolicy, TaskError
 from horsies.core.scheduler.manifest import to_scheduler_manifest
 from horsies.core.scheduler.service import Scheduler
 from horsies.core.scheduler.validation import PreparedSchedule, prepare_schedules
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 
 _DATABASE_URL = 'postgresql://user:pass@localhost/db'
 _REPORT_TASK = 'reports.nightly'
@@ -84,12 +84,12 @@ def _app(
         timeout_ms=30_000,
         retry_policy=RetryPolicy.fixed([1, 2], auto_retry_for=['TASK_EXCEPTION']),
     )
-    def nightly(*, day: str, limit: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=limit)
+    def nightly(*, day: str, limit: int) -> Result[int, TaskError]:
+        return Ok(limit)
 
     @app.task(_PLAIN_TASK)
-    def plain() -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def plain() -> Result[int, TaskError]:
+        return Ok(1)
 
     _ = (nightly, plain)
     return app
@@ -262,8 +262,8 @@ _OPTIONS_TASK = 'reports.options'
 
 def _register_options_task(app: Horsies) -> str | None:
     @app.task(_OPTIONS_TASK, timeout_ms=30_000)
-    def options_task(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def options_task(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     return options_task.task_options_json
 

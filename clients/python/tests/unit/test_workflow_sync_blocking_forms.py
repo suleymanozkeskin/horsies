@@ -29,7 +29,7 @@ from horsies.core.codec.json_io import SerializationError
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowSpec
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
@@ -37,7 +37,7 @@ from horsies.core.models.workflow.handle_types import (
     HandleResumeRecoveryFailed,
     HandleStoredDataInvalid,
 )
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Ok, Result, is_ok
 from horsies.core.workflows.lifecycle import (
     pause_workflow,
     pause_workflow_sync,
@@ -75,8 +75,8 @@ APP: Final = Horsies(
 
 
 @APP.task(task_name=TASK_NAME)
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 def _record(record_class: type, **fields: object) -> MagicMock:

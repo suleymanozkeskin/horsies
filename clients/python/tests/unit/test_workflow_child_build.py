@@ -23,7 +23,8 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import OperationalErrorCode, TaskError, TaskResult
+from horsies.core.models.outcome import Succeeded, TaskOutcome
+from horsies.core.models.tasks import OperationalErrorCode, TaskError
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowDefinition,
@@ -38,6 +39,7 @@ from horsies.core.workflows.child_build import (
 )
 from horsies.core.workflows.child_spec_source import build_child_spec
 from horsies.core.workflows.registry import register_workflow_definition
+from horsies.core.types.result import Ok, Result
 
 pytestmark = [pytest.mark.unit]
 
@@ -50,8 +52,8 @@ APP = Horsies(
 
 
 @APP.task(task_name='child_build.value')
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 class ValueChild(WorkflowDefinition[int]):
@@ -79,9 +81,10 @@ class ResultChild(WorkflowDefinition[int]):
 
     @classmethod
     def build_with(  # pyright: ignore[reportIncompatibleMethodOverride]
-        cls, app: Horsies, source: TaskResult[int, TaskError],
+        cls, app: Horsies, source: TaskOutcome[int, TaskError],
     ) -> WorkflowSpec[int]:
-        node = TaskNode(fn=value_task, kwargs={'value': source.unwrap()})
+        assert isinstance(source, Succeeded), f'the tests give a succeeded source, got {source!r}'
+        node = TaskNode(fn=value_task, kwargs={'value': source.value})
         return app.workflow(cls.name, [node], output=node, definition_key=cls.definition_key)
 
 
@@ -142,7 +145,7 @@ def _node(**values: Any) -> ChildOfNode:
 def _build(
     broker: MagicMock,
     node: ChildOfNode,
-    dependency_results: Mapping[int, TaskResult[Any, TaskError]],
+    dependency_results: Mapping[int, TaskOutcome[Any, TaskError]],
 ) -> ChildBuilt | ChildBuildFailed:
     """The build that the child spec source runs: the child one level below the
     node's workflow, at a depth that the core checked against the limit."""
@@ -220,7 +223,7 @@ class TestBuildChild:
             _build(
                 _broker(),
                 _node(args_from=f'{{"value": {flag}}}'),
-                {0: TaskResult(ok=4), 1: TaskResult(ok=5)},
+                {0: Succeeded(4), 1: Succeeded(5)},
             ),
         )
 
@@ -242,7 +245,7 @@ class TestBuildChild:
         built = _build(
             _broker(),
             _node(sub_definition_key=ResultChild.definition_key, args_from='{"source": 0}'),
-            {0: TaskResult(ok=9)},
+            {0: Succeeded(9)},
         )
 
         assert isinstance(built, ChildBuilt)
@@ -253,7 +256,7 @@ class TestBuildChild:
             _build(
                 _broker(),
                 _node(sub_definition_key=ResultChild.definition_key, args_from='{"source": 0}'),
-                {0: TaskResult(ok='not an int')},
+                {0: Succeeded('not an int')},
             ),
         )
 

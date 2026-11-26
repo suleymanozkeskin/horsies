@@ -27,8 +27,8 @@ from horsies.core.models.tasks import (
     OutcomeCode,
     RetrievalCode,
     TaskError,
-    TaskResult,
 )
+from horsies.core.types.result import Ok, Result
 
 
 pytestmark = [pytest.mark.unit]
@@ -586,8 +586,8 @@ class TestCheckReservedCodeCollision:
         )
 
         @app.task('boom', exception_mapper={ValueError: 'BROKER_ERROR'})
-        def boom() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)
+        def boom() -> Result[int, TaskError]:
+            return Ok(1)
 
         from types import MappingProxyType
         assert isinstance(app.tasks['boom'].exception_mapper, MappingProxyType)

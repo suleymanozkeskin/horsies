@@ -20,9 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import RetryPolicy, TaskError, TaskResult
+from horsies.core.models.tasks import RetryPolicy, TaskError
 from horsies.core.models.workflow import TaskNode
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 from tests.broker_resources_support import current_resources
 
@@ -34,8 +34,8 @@ def _fanout_spec(app: Horsies, n_roots: int, *, with_dependent: bool = False) ->
     one node depending on root 0."""
 
     @app.task(task_name=f'batched_root_{uuid.uuid4().hex[:8]}')
-    def root_task(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def root_task(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     nodes: list[Any] = [
         TaskNode(fn=root_task, kwargs={'value': i}) for i in range(n_roots)
@@ -215,8 +215,8 @@ class TestBatchedStartShape:
                 auto_retry_for=['TASK_EXCEPTION'],
             ),
         )
-        def retry_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def retry_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         deadline = datetime.now(timezone.utc) + timedelta(hours=1)
         node = TaskNode(fn=retry_task, kwargs={'value': 1}, good_until=deadline)
@@ -266,8 +266,8 @@ class TestBatchedStartShape:
         from horsies._core import PanicException
 
         @app.task(task_name=f'batched_corrupt_{uuid.uuid4().hex[:8]}')
-        def corrupt_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def corrupt_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         # Force unparseable decorator-attached options.
         corrupt_task.task_options_json = '{not-json'  # type: ignore[attr-defined]
@@ -313,12 +313,12 @@ class TestStartPauseGate:
         from horsies.core.workflows import child_build as child_build_mod
 
         @app.task(task_name=f'pause_gate_root_{uuid.uuid4().hex[:8]}')
-        def fast_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def fast_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         @app.task(task_name=f'pause_gate_child_{uuid.uuid4().hex[:8]}')
-        def child_task() -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
+        def child_task() -> Result[int, TaskError]:
+            return Ok(0)
 
         class GateChild(WorkflowDefinition[int]):
             name = f'pause_gate_child_wf_{uuid.uuid4().hex[:8]}'
@@ -421,8 +421,8 @@ class TestStartPauseGate:
         )
 
         @app.task(task_name=f'pause_prop_root_{uuid.uuid4().hex[:8]}')
-        def fast_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def fast_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         class BrokenGrandchild(WorkflowDefinition[int]):
             name = f'pause_prop_grandchild_wf_{uuid.uuid4().hex[:8]}'

@@ -29,8 +29,8 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.history.periods import period_class_key
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.models.task_send_types import TaskSendValidationFailed
-from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result, is_err, is_ok
 from tests.broker_resources_support import current_resources
 
 pytestmark = [
@@ -58,8 +58,8 @@ def _test_app(broker: PostgresBroker) -> Horsies:
         _TEST_APP = Horsies(cfg)
 
         @_TEST_APP.task(task_name='retention_enqueue_test')
-        def _retention_enqueue_test(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
+        def _retention_enqueue_test(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
 
     _TEST_APP._broker = broker  # pyright: ignore[reportPrivateUsage]
     return _TEST_APP
@@ -88,8 +88,8 @@ def _declaring_app(broker: PostgresBroker) -> Horsies:
         _DECLARING_APP = Horsies(cfg)
 
         @_DECLARING_APP.task(task_name='retention_declared_test')
-        def _retention_declared_test(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x)
+        def _retention_declared_test(*, x: int) -> Result[int, TaskError]:
+            return Ok(x)
 
     _DECLARING_APP._broker = broker  # pyright: ignore[reportPrivateUsage]
     return _DECLARING_APP

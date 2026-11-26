@@ -97,7 +97,7 @@ A database belongs to one client: the core refuses a database that the other cli
 
 ```python
 from pydantic import SecretStr
-from horsies import Horsies, AppConfig, PostgresConfig, TaskResult, TaskError, Ok, Err
+from horsies import Horsies, AppConfig, PostgresConfig, Result, TaskError, Ok, Err, Succeeded, Failed
 
 app = Horsies(AppConfig(
     broker=PostgresConfig(
@@ -106,15 +106,19 @@ app = Horsies(AppConfig(
 ))
 
 @app.task("add_numbers")
-def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=a + b)
+def add_numbers(*, a: int, b: int) -> Result[int, TaskError]:
+    return Ok(a + b)
 
 # Send and get result
 match add_numbers.send(a=5, b=3):
     case Ok(handle):
-        result = handle.get()
-        if result.is_ok():
-            print(result.ok_value)  # 8
+        match handle.get():
+            case Ok(Succeeded(total)):
+                print(total)  # 8
+            case Ok(Failed(task_error)):
+                print(f"Task failed: {task_error.error_code}")
+            case Err(read_error):
+                print(f"Read failed: {read_error.code}")
     case Err(send_err):
         print(f"Send failed: {send_err.code} - {send_err.message}")
 ```

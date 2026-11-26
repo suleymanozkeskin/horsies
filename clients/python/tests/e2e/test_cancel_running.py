@@ -32,7 +32,7 @@ from horsies.core.types.result import is_err
 from horsies.monitoring import TaskDetail, cancel_task, get_task_detail
 from horsies.monitoring.models import PhasesCapturedInfo, RecordedByCancelInfo
 
-from tests.e2e.helpers.assertions import assert_err, unwrap_send
+from tests.e2e.helpers.assertions import assert_failed, read_succeeded, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks import cancel_tasks
@@ -57,7 +57,7 @@ def _make_ready_check() -> Any:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(basic_tasks.healthcheck.send())
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -105,7 +105,7 @@ def _assert_cancelled_attempt(detail: TaskDetail) -> None:
 
 async def _result_is_cancelled(handle: TaskHandle[Any]) -> None:
     result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
-    assert_err(result, expected_code=OutcomeCode.TASK_CANCELLED)
+    assert_failed(result, expected_code=OutcomeCode.TASK_CANCELLED)
 
 
 def _process_is_gone(pid: int) -> bool:

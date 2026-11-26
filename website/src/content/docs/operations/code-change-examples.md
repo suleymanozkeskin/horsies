@@ -15,7 +15,7 @@ The order of each deploy and the error of each change are on [Deploying Code Cha
 Give the new parameter a default value. See [Add a Parameter](/horsies/operations/deploying-code-changes/#add-a-parameter) for the deploy order.
 
 ```python
-from horsies import TaskError, TaskResult
+from horsies import Ok, Result, TaskError
 
 from myapp.instance import app
 
@@ -26,8 +26,8 @@ def send_email(
     to: str,
     subject: str,
     locale: str = 'en',
-) -> TaskResult[None, TaskError]:
-    return TaskResult(ok=None)
+) -> Result[None, TaskError]:
+    return Ok(None)
 ```
 
 ## Rename or Remove a Task
@@ -35,23 +35,23 @@ def send_email(
 Register the old name and the new name, both calling one function body. Remove the old task after no row with its name remains. See [Rename or Remove a Task](/horsies/operations/deploying-code-changes/#rename-or-remove-a-task) for the deploy order.
 
 ```python
-from horsies import TaskError, TaskResult
+from horsies import Ok, Result, TaskError
 
 from myapp.instance import app
 
 
-def _deliver_report(*, report_id: str) -> TaskResult[None, TaskError]:
-    return TaskResult(ok=None)
+def _deliver_report(*, report_id: str) -> Result[None, TaskError]:
+    return Ok(None)
 
 
 @app.task('build_report')
-def build_report(*, report_id: str) -> TaskResult[None, TaskError]:
+def build_report(*, report_id: str) -> Result[None, TaskError]:
     return _deliver_report(report_id=report_id)
 
 
 # Old name. Remove it after no row with this name remains.
 @app.task('make_report')
-def make_report(*, report_id: str) -> TaskResult[None, TaskError]:
+def make_report(*, report_id: str) -> Result[None, TaskError]:
     return _deliver_report(report_id=report_id)
 ```
 

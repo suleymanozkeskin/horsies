@@ -16,10 +16,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed, RawResultRecord
+from horsies.core.models.outcome import (
+    BrokerError,
+    Failed,
+    ReadResult,
+    Succeeded,
+    TaskNotFound,
+)
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
     OutcomeCode,
-    RetrievalCode,
     TaskError,
 )
 from horsies.core.task_decorator import TaskHandle
@@ -56,10 +61,12 @@ def _ok_record(value: int) -> Ok[RawResultRecord]:
     )
 
 
-def _assert_err_code(result: Any, code: object) -> None:
-    assert result.is_err()
-    err: TaskError = result.unwrap_err()
-    assert err.error_code == code
+def _assert_failed_with(read: ReadResult[int, TaskError], code: OutcomeCode) -> None:
+    match read:
+        case Ok(Failed(task_error)):
+            assert task_error.error_code == code
+        case _:
+            pytest.fail(f'expected a failed outcome with {code}, got {read!r}')
 
 
 @pytest.mark.asyncio
@@ -78,11 +85,10 @@ class TestTransientErrorsNotCached:
         assert exc_info.value is defect
 
         second = await handle.get_async()
-        assert second.is_ok(), (
+        assert second == Ok(Succeeded(42)), (
             'Handle must re-query after a transient broker exception, '
             f'got {second}'
         )
-        assert second.unwrap() == 42
         assert broker.get_raw_result_record_async.await_count == 2
 
     async def test_broker_error_result_then_success(self) -> None:
@@ -102,11 +108,10 @@ class TestTransientErrorsNotCached:
         handle = _make_handle(broker)
 
         first = await handle.get_async()
-        _assert_err_code(first, OperationalErrorCode.BROKER_ERROR)
+        assert isinstance(first, Err) and isinstance(first.err_value, BrokerError), first
 
         second = await handle.get_async()
-        assert second.is_ok()
-        assert second.unwrap() == 7
+        assert second == Ok(Succeeded(7))
 
     async def test_task_not_found_then_success(self) -> None:
         """TASK_NOT_FOUND (handle racing the enqueue) must not be cached."""
@@ -117,11 +122,10 @@ class TestTransientErrorsNotCached:
         handle = _make_handle(broker)
 
         first = await handle.get_async()
-        _assert_err_code(first, RetrievalCode.TASK_NOT_FOUND)
+        assert isinstance(first, Err) and isinstance(first.err_value, TaskNotFound), first
 
         second = await handle.get_async()
-        assert second.is_ok()
-        assert second.unwrap() == 3
+        assert second == Ok(Succeeded(3))
 
 
 @pytest.mark.asyncio
@@ -142,10 +146,10 @@ class TestTerminalErrorsStillCached:
         handle = _make_handle(broker)
 
         first = await handle.get_async()
-        _assert_err_code(first, OutcomeCode.TASK_CANCELLED)
+        _assert_failed_with(first, OutcomeCode.TASK_CANCELLED)
 
         second = await handle.get_async()
-        _assert_err_code(second, OutcomeCode.TASK_CANCELLED)
+        _assert_failed_with(second, OutcomeCode.TASK_CANCELLED)
         assert broker.get_raw_result_record_async.await_count == 1, (
             'Terminal errors must stay cached (single broker query)'
         )
@@ -159,7 +163,7 @@ class TestTerminalErrorsStillCached:
         handle = _make_handle(broker)
 
         first = await handle.get_async()
-        assert first.is_ok() and first.unwrap() == 11
+        assert first == Ok(Succeeded(11))
         second = await handle.get_async()
-        assert second.is_ok() and second.unwrap() == 11
+        assert second == Ok(Succeeded(11))
         assert broker.get_raw_result_record_async.await_count == 1

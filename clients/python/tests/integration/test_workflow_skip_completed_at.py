@@ -20,8 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
+from horsies.core.types.result import Err, Result
 
 from .conftest import (
     finish_task,
@@ -34,7 +35,7 @@ from tests.workflow_recovery_support import workflow_recovery_pass
 
 pytestmark = [pytest.mark.integration]
 
-_FAILED = TaskResult[int, TaskError](err=TaskError(error_code='FAIL', message='dependency failed'))
+_FAILED: Result[int, TaskError] = Err(TaskError(error_code='FAIL', message='dependency failed'))
 
 
 async def _node(session: AsyncSession, workflow_id: str, index: int) -> tuple[str, object]:

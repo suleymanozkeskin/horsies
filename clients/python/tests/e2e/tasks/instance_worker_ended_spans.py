@@ -28,7 +28,8 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError
+from horsies.core.types.result import Ok, Result
 from horsies.core.models.tracing import OtelTracing
 from horsies.core.models.workflow import TaskNode
 
@@ -96,14 +97,14 @@ def set_child_tracer_provider() -> None:
 
 
 @app.task(task_name='e2e_worker_ended_spans_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
 @app.task(task_name='e2e_worker_ended_spans_sleeper', timeout_ms=SLEEPER_TIMEOUT_MS)
-def sleeper() -> TaskResult[str, TaskError]:
+def sleeper() -> Result[str, TaskError]:
     time.sleep(60)
-    return TaskResult(ok='woke')
+    return Ok('woke')
 
 
 @app.task(
@@ -111,11 +112,11 @@ def sleeper() -> TaskResult[str, TaskError]:
     execution=Execution.SHARED_ASYNC,
     timeout_ms=SLEEPER_TIMEOUT_MS,
 )
-async def shared_sleeper() -> TaskResult[str, TaskError]:
+async def shared_sleeper() -> Result[str, TaskError]:
     """The shared async child cancels it at its deadline and reports the
     timeout: the child lives, and its span is the span of the attempt."""
     await asyncio.sleep(60)
-    return TaskResult(ok='woke')
+    return Ok('woke')
 
 
 # One node of the sleeper: the worker kills it at its timeout, and the

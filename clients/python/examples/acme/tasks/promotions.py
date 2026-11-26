@@ -30,9 +30,9 @@ from horsies import (
     Err,
     Ok,
     OperationalErrorCode,
+    Result,
     RetryPolicy,
     TaskError,
-    TaskResult,
 )
 
 from .. import simulate, store, tuning
@@ -120,7 +120,7 @@ def _bundle_discount_cents(order: Order) -> int:
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def apply_promotions(*, order_id: str) -> TaskResult[PromotionOutcome, TaskError]:
+def apply_promotions(*, order_id: str) -> Result[PromotionOutcome, TaskError]:
     """Price an order's promotions.
 
     Sent standalone per order, not as a workflow node, so its failures land in
@@ -132,11 +132,11 @@ def apply_promotions(*, order_id: str) -> TaskResult[PromotionOutcome, TaskError
 
     match store.get_order(order_id):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(order):
             if order is None:
-                return TaskResult(
-                    err=TaskError(
+                return Err(
+                    TaskError(
                         error_code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to price',
                         data={'order_id': order_id},
@@ -151,8 +151,8 @@ def apply_promotions(*, order_id: str) -> TaskResult[PromotionOutcome, TaskError
         for code in tuning.PROMOTION_CODES
         if simulate.draw(0.5, order_id, 'promo', code)
     ]
-    return TaskResult(
-        ok=PromotionOutcome(
+    return Ok(
+        PromotionOutcome(
             order_id=order_id,
             discount_cents=min(discount_cents, weighted_cents),
             applied_codes=codes,
@@ -181,17 +181,17 @@ def compute_loyalty_points(
     *,
     customer_id: str,
     order_id: str,
-) -> TaskResult[LoyaltyPoints, TaskError]:
+) -> Result[LoyaltyPoints, TaskError]:
     """Award points for an order, at the customer's tier multiplier."""
     simulate.perform(tuning.LOYALTY_POINTS_WORK, customer_id, order_id, 'loyalty')
 
     match store.get_order(order_id):
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(order):
             if order is None:
-                return TaskResult(
-                    err=TaskError(
+                return Err(
+                    TaskError(
                         error_code=ORDER_NOT_FOUND,
                         message=f'no order {order_id} to award points for',
                         data={'order_id': order_id},
@@ -201,8 +201,8 @@ def compute_loyalty_points(
 
     tier = _TIER_TABLE[_tier_name(_lifetime_points(customer_id))]
     base_points = awarded.total_cents // 100 * tuning.LOYALTY_POINTS_PER_EURO
-    return TaskResult(
-        ok=LoyaltyPoints(
+    return Ok(
+        LoyaltyPoints(
             customer_id=customer_id,
             order_id=order_id,
             points=base_points * tier.multiplier // 100,
@@ -219,20 +219,20 @@ def compute_loyalty_points(
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def publish_cdn(*, campaign_id: str, sku: str) -> TaskResult[PricePush, TaskError]:
+def publish_cdn(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError]:
     """Push sale prices to the CDN edge. One of two ways a sale can succeed."""
     simulate.perform(tuning.PUBLISH_CDN_WORK, campaign_id, 'cdn')
 
     if simulate.draw(tuning.CDN_REJECT_RATE, campaign_id, 'cdn-reject'):
-        return TaskResult(
-            err=TaskError(
+        return Err(
+            TaskError(
                 error_code=CDN_REJECTED,
                 message=f'CDN refused the {campaign_id} price bundle',
                 data={'campaign_id': campaign_id},
             ),
         )
-    return TaskResult(
-        ok=PricePush(sku=sku, price_cents=_sale_price(sku), target='cdn'),
+    return Ok(
+        PricePush(sku=sku, price_cents=_sale_price(sku), target='cdn'),
     )
 
 
@@ -244,20 +244,20 @@ def publish_cdn(*, campaign_id: str, sku: str) -> TaskResult[PricePush, TaskErro
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def publish_origin(*, campaign_id: str, sku: str) -> TaskResult[PricePush, TaskError]:
+def publish_origin(*, campaign_id: str, sku: str) -> Result[PricePush, TaskError]:
     """Push sale prices to origin. The other way a sale can succeed."""
     simulate.perform(tuning.PUBLISH_ORIGIN_WORK, campaign_id, 'origin')
 
     if simulate.draw(tuning.ORIGIN_REJECT_RATE, campaign_id, 'origin-reject'):
-        return TaskResult(
-            err=TaskError(
+        return Err(
+            TaskError(
                 error_code=ORIGIN_REJECTED,
                 message=f'origin refused the {campaign_id} price bundle',
                 data={'campaign_id': campaign_id},
             ),
         )
-    return TaskResult(
-        ok=PricePush(sku=sku, price_cents=_sale_price(sku), target='origin'),
+    return Ok(
+        PricePush(sku=sku, price_cents=_sale_price(sku), target='origin'),
     )
 
 
@@ -269,7 +269,7 @@ def publish_origin(*, campaign_id: str, sku: str) -> TaskResult[PricePush, TaskE
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def prewarm_search(*, campaign_id: str) -> TaskResult[SearchPrewarm, TaskError]:
+def prewarm_search(*, campaign_id: str) -> Result[SearchPrewarm, TaskError]:
     """Rebuild the search index for the sale.
 
     No case of the workflow's SuccessPolicy requires it, so it fails half the
@@ -279,15 +279,15 @@ def prewarm_search(*, campaign_id: str) -> TaskResult[SearchPrewarm, TaskError]:
     simulate.perform(tuning.PREWARM_SEARCH_WORK, campaign_id, 'search')
 
     if simulate.draw(tuning.SEARCH_PREWARM_FAIL_RATE, campaign_id, 'search-fail'):
-        return TaskResult(
-            err=TaskError(
+        return Err(
+            TaskError(
                 error_code=SEARCH_INDEX_STALE,
                 message=f'search index for {campaign_id} did not finish rebuilding',
                 data={'campaign_id': campaign_id},
             ),
         )
-    return TaskResult(
-        ok=SearchPrewarm(
+    return Ok(
+        SearchPrewarm(
             documents=simulate.integer(5_000, 50_000, campaign_id, 'docs'),
             index_name=f'catalog-{campaign_id}',
         ),
@@ -302,7 +302,7 @@ def prewarm_search(*, campaign_id: str) -> TaskResult[SearchPrewarm, TaskError]:
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def warm_cache_edge(*, campaign_id: str) -> TaskResult[CacheWarm, TaskError]:
+def warm_cache_edge(*, campaign_id: str) -> Result[CacheWarm, TaskError]:
     """Warm the edge cache as soon as *either* publish lands.
 
     Its node uses `join='any'`, so it fires on the first of the two publishes
@@ -310,8 +310,8 @@ def warm_cache_edge(*, campaign_id: str) -> TaskResult[CacheWarm, TaskError]:
     """
     simulate.perform(tuning.WARM_CACHE_EDGE_WORK, campaign_id, 'warm')
 
-    return TaskResult(
-        ok=CacheWarm(
+    return Ok(
+        CacheWarm(
             target='edge',
             keys_warmed=simulate.integer(200, 2_000, campaign_id, 'keys'),
         ),
@@ -331,7 +331,7 @@ def warm_cache_edge(*, campaign_id: str) -> TaskResult[CacheWarm, TaskError]:
         auto_retry_for=[OperationalErrorCode.WORKER_CRASHED],
     ),
 )
-def update_price(*, sku: str, campaign_id: str) -> TaskResult[PriceUpdate, TaskError]:
+def update_price(*, sku: str, campaign_id: str) -> Result[PriceUpdate, TaskError]:
     """Apply one sale price.
 
     Sent in bulk with `with_options(good_until=...)`. The queue cannot drain
@@ -343,21 +343,21 @@ def update_price(*, sku: str, campaign_id: str) -> TaskResult[PriceUpdate, TaskE
 
     match store.list_catalog():
         case Err(error):
-            return TaskResult(err=store_failure(error))
+            return Err(store_failure(error))
         case Ok(catalog):
             listed = [entry for entry in catalog if entry.product.sku == sku]
 
     if not listed:
-        return TaskResult(
-            err=TaskError(
+        return Err(
+            TaskError(
                 error_code=UNKNOWN_SKU,
                 message=f'{sku} is not in the catalog',
                 data={'sku': sku},
             ),
         )
     was_cents = listed[0].product.price_cents
-    return TaskResult(
-        ok=PriceUpdate(sku=sku, was_cents=was_cents, now_cents=_sale_price(sku)),
+    return Ok(
+        PriceUpdate(sku=sku, was_cents=was_cents, now_cents=_sale_price(sku)),
     )
 
 

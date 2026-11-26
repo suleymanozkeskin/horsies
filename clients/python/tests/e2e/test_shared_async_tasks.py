@@ -31,7 +31,7 @@ from horsies.core.models.tasks import OperationalErrorCode, OutcomeCode
 from horsies.core.task_decorator import TaskHandle
 
 from tests.broker_resources_support import current_resources
-from tests.e2e.helpers.assertions import assert_ok, unwrap_get_result, unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
@@ -59,7 +59,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(basic_tasks.healthcheck.send())
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -72,7 +72,7 @@ def _make_shared_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(shared_async_tasks.shared_sleep.send(seconds=0))
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -85,8 +85,7 @@ READY_CHECKS: dict[str, Callable[[], Callable[[], bool]]] = {
 
 async def _value(handle: TaskHandle[str]) -> str:
     result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
-    assert_ok(result)
-    return result.unwrap()
+    return succeeded_value(result)
 
 
 @pytest.mark.e2e
@@ -105,8 +104,7 @@ async def test_shared_tasks_run_at_once_and_a_timeout_leaves_neighbours_finished
             isolated.get,
             timeout_ms=RESULT_TIMEOUT_MS,
         )
-        assert_ok(isolated_result)
-        isolated_pid = str(isolated_result.unwrap())
+        isolated_pid = str(succeeded_value(isolated_result))
         hang = unwrap_send(await shared_async_tasks.shared_hang.send_async())
         sleepers = [
             unwrap_send(
@@ -192,15 +190,12 @@ async def test_a_shared_task_sends_with_send_async(
             sent_id = await _value(
                 unwrap_send(await shared_async_tasks.shared_sends.send_async(x=x)),
             )
-            result = unwrap_get_result(
-                await asyncio.to_thread(
-                    app.get_result,
-                    UUID(sent_id),
-                    timeout_ms=RESULT_TIMEOUT_MS,
-                ),
+            result = await asyncio.to_thread(
+                app.get_result,
+                UUID(sent_id),
+                timeout_ms=RESULT_TIMEOUT_MS,
             )
-            assert_ok(result)
-            assert result.unwrap() == x * 2
+            assert succeeded_value(result) == x * 2
 
 
 @pytest.mark.e2e
@@ -273,8 +268,7 @@ async def test_a_shared_row_with_unusable_options_fails_once(
 async def _isolated_pid() -> str:
     handle = unwrap_send(await basic_tasks.pid_task.send_async())
     result = await asyncio.to_thread(handle.get, timeout_ms=RESULT_TIMEOUT_MS)
-    assert_ok(result)
-    return str(result.unwrap())
+    return str(succeeded_value(result))
 
 
 async def _row_and_attempts(

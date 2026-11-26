@@ -93,23 +93,27 @@ Returned by `.start()`, `.start_async()`, `start_workflow()`, and `start_workflo
 **Usage:**
 
 ```python
-from horsies import Ok, Err, WorkflowStartEnqueueFailed
+from horsies import Err, Failed, Ok, Succeeded, WorkflowStartEnqueueFailed
 
 match spec.start():
     case Ok(handle):
-        result = handle.get(timeout_ms=30000)  # Wait for completion
-        if result.is_ok():
-            print(f"Success: {result.ok_value}")
-        else:
-            print(f"Task failed: {result.err_value.error_code}")
+        match handle.get(timeout_ms=30000):  # Wait for completion
+            case Ok(Succeeded(value)):
+                print(f"Success: {value}")
+            case Ok(Failed(task_error)):
+                print(f"Workflow failed: {task_error.error_code}")
+            case Err(read_error):
+                print(f"Read failed: {read_error.code}")
 
     case Err(WorkflowStartEnqueueFailed(retryable=True) as err):
         # Transient infra failure — retry with stored workflow_id
         match spec.retry_start(err):
             case Ok(handle):
-                result = handle.get(timeout_ms=30000)
-                if result.is_err():
-                    print(f"Task failed: {result.err_value.error_code}")
+                match handle.get(timeout_ms=30000):
+                    case Ok(Failed(task_error)):
+                        print(f"Workflow failed: {task_error.error_code}")
+                    case _:
+                        pass
             case Err(retry_err):
                 print(f"Retry failed: {retry_err.code} - {retry_err.message}")
 
@@ -133,9 +137,9 @@ match spec.start():
 | `WorkflowHandle.for_id(text, broker)` | `(str, PostgresBroker) -> Result[WorkflowHandle[Any], HandleInvalidWorkflowId]` | The handle of a workflow id text, or `HandleInvalidWorkflowId` when the text is not a UUID. Reads nothing |
 | `.workflow_id` | `uuid.UUID` | Workflow id; `str(handle.workflow_id)` is its canonical text |
 | `.status()` / `.status_async()` | `-> HandleResult[WorkflowStatus]` | Current workflow status |
-| `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> TaskResult[OutT, TaskError]` | Block until completion or timeout. A COMPLETED workflow whose output node is SKIPPED returns `WORKFLOW_OUTPUT_SKIPPED`: see [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy) |
-| `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskResult[Any, TaskError]]]` | All results keyed by node_id; `Ok({})` before any node has a result, `HandleWorkflowNotFound` when no workflow has the id |
-| `.result_for()` / `.result_for_async()` | `(TaskNode[T] \| NodeKey[T]) -> TaskResult[T, TaskError]` | Single node result (non-blocking) |
+| `.get()` / `.get_async()` | `(timeout_ms: int \| None) -> ReadResult[OutT, TaskError]` | Block until completion or timeout. The outcome is in `Ok(...)`. A read failure is in `Err(ReadError)`, for example `Err(WaitTimeout(...))`. A COMPLETED workflow whose output node is SKIPPED returns `Ok(Failed(task_error))` with `WORKFLOW_OUTPUT_SKIPPED`: see [Output Node Under a Success Policy](/horsies/concepts/workflows/workflow-semantics/#output-node-under-a-success-policy) |
+| `.results()` / `.results_async()` | `-> HandleResult[dict[str, TaskOutcome[Any, TaskError]]]` | All results keyed by node_id; `Ok({})` before any node has a result, `HandleWorkflowNotFound` when no workflow has the id |
+| `.result_for()` / `.result_for_async()` | `(TaskNode[T] \| NodeKey[T]) -> ReadResult[T, TaskError]` | Single node result (non-blocking). No stored result yet is `Err(ResultNotReady(...))` |
 | `.tasks()` / `.tasks_async()` | `-> HandleResult[list[WorkflowTaskInfo]]` | Status of all workflow tasks; `HandleWorkflowNotFound` when no workflow has the id |
 | `.cancel()` / `.cancel_async()` | `-> HandleResult[None]` | Cancel workflow |
 | `.pause()` / `.pause_async()` | `-> HandleResult[bool]` | Pause running workflow |
@@ -147,7 +151,7 @@ match spec.start():
 
 `HandleResult[T] = Result[T, HandleOperationError]`
 
-Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()` and their `*_async` forms, and by `pause_workflow()`, `resume_workflow()`, `pause_workflow_sync()` and `resume_workflow_sync()`. These four functions take the workflow id as a `uuid.UUID`.
+Returned by the `WorkflowHandle` methods `.status()`, `.results()`, `.tasks()`, `.cancel()`, `.pause()`, `.resume()` and their `*_async` forms, and by `pause_workflow()`, `resume_workflow()`, `pause_workflow_sync()` and `resume_workflow_sync()`. These four functions take the workflow id as a `uuid.UUID`. `.get()` and `.result_for()` do not return a `HandleResult`: they return a `ReadResult`.
 
 **HandleOperationError variants:**
 
@@ -189,7 +193,7 @@ match handle.resume():
 | `.index` | `int` | Task position in the DAG |
 | `.name` | `str` | Task name |
 | `.status` | `WorkflowTaskStatus` | Current task status |
-| `.result` | `TaskResult[Any, TaskError] \| None` | Task result if stored (COMPLETED/FAILED; SKIPPED often None) |
+| `.result` | `TaskOutcome[Any, TaskError] \| None` | Task outcome if stored: `Succeeded(value)` or `Failed(task_error)` (COMPLETED/FAILED; SKIPPED often None) |
 | `.started_at` | `datetime \| None` | When execution started |
 | `.completed_at` | `datetime \| None` | When execution completed |
 | `.sub_workflow_id` | `str \| None` | Child workflow id when the node is a subworkflow node; `None` otherwise |

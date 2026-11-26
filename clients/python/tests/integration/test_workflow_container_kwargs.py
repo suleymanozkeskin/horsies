@@ -15,13 +15,14 @@ from horsies import JsonValue
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import loads_json
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     OnError,
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
 )
+from horsies.core.types.result import Ok, Result
 from horsies.core.workflows.registry import (
     register_workflow_definition,
     unregister_workflow_definition,
@@ -51,12 +52,12 @@ _ROWS: list[tuple[str, Any, Any, Any]] = [
 
 
 def _task(app: Horsies, name: str, annotation: Any) -> Any:
-    def take(*, value: Any) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=1)
+    def take(*, value: Any) -> Result[int, TaskError]:
+        return Ok(1)
 
     take.__annotations__ = {
         'value': annotation,
-        'return': TaskResult[int, TaskError],
+        'return': Result[int, TaskError],
     }
     return app.task(task_name=name)(take)
 
@@ -113,8 +114,8 @@ class _GrandchildWorkflow(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, values: list[int]) -> Any:
         @app.task(task_name='container_kwargs_grandchild_task')
-        def grandchild_task(*, values: list[int]) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=len(values))
+        def grandchild_task(*, values: list[int]) -> Result[int, TaskError]:
+            return Ok(len(values))
 
         node = TaskNode(fn=grandchild_task, kwargs={'values': values})
         return app.workflow(
@@ -133,8 +134,8 @@ class _ChildWorkflow(WorkflowDefinition[int]):
     @classmethod
     def build_with(cls, app: Horsies, values: list[int]) -> Any:
         @app.task(task_name='container_kwargs_child_task')
-        def child_task(*, values: list[int]) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=len(values))
+        def child_task(*, values: list[int]) -> Result[int, TaskError]:
+            return Ok(len(values))
 
         node = TaskNode(fn=child_task, kwargs={'values': values})
         nested: SubWorkflowNode[int] = SubWorkflowNode(

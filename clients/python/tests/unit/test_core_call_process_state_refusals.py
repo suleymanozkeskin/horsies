@@ -30,8 +30,9 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowHandle, WorkflowSpec
+from horsies.core.types.result import Ok, Result
 from horsies.core.workflows.lifecycle import (
     pause_workflow,
     pause_workflow_sync,
@@ -77,8 +78,8 @@ _APP: Final = Horsies(
 
 
 @_APP.task(task_name='refusals.value')
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 def _refusals() -> list[Any]:

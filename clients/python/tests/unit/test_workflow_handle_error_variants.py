@@ -6,8 +6,8 @@
 cause. Every variant carries ``workflow_id``. Stored data that does not
 parse is ``HandleStoredDataInvalid`` with its parse error. A failure that
 the core answers is its generated class with the core's message, returned
-as it is. ``get()`` folds a status read failure into a ``TaskResult``, and
-the web routes map each variant onto one response.
+as it is. ``get()`` returns a failed wait as a read failure (``ReadError``),
+and the web routes map each variant onto one response.
 """
 
 from __future__ import annotations
@@ -22,7 +22,14 @@ import pytest
 
 import horsies._core as core
 from horsies.core.codec.json_io import EmptyJsonTextError, SerializationError
-from horsies.core.models.tasks import OperationalErrorCode, RetrievalCode
+from horsies.core.models.outcome import (
+    BrokerError,
+    Failed,
+    ReadError,
+    ResultDeserializationError,
+    WorkflowNotFound,
+)
+from horsies.core.models.tasks import OperationalErrorCode
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.models.workflow.handle_types import (
@@ -34,7 +41,7 @@ from horsies.core.models.workflow.handle_types import (
     HandleStoredDataInvalid,
     HandleWorkflowNotFound,
 )
-from horsies.core.types.result import Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, is_err, is_ok
 from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
@@ -269,58 +276,54 @@ class TestCancelOutcome:
 
 
 # =============================================================================
-# get() folds a status read failure into a TaskResult
+# get() returns a failed wait as a read failure
 # =============================================================================
 
 
-def _wait_failures() -> list[tuple[Any, object, str]]:
-    """Each failure answer of the core wait, with its folded code and
-    message: a failure of the core keeps the core's message."""
+def _wait_failures() -> list[tuple[Any, ReadError]]:
+    """Each failure answer of the core wait, with its read failure: a failure
+    of the core keeps the core's message, its classification and its cause."""
     failed_message = f'Get failed for workflow {WORKFLOW_ID}: {CAUSE_MARKER}'
+    connection_lost = core.CoreConnectionError('wait_workflow_result', CAUSE_MARKER, True)
+    contract_violated = core.CoreContractViolation('wait_workflow_result', CAUSE_MARKER)
     return [
         (
             _core_record(core.WorkflowAbsent),
-            RetrievalCode.WORKFLOW_NOT_FOUND,
-            f'Workflow {WORKFLOW_ID} not found',
+            WorkflowNotFound(message=f'Workflow {WORKFLOW_ID} not found'),
         ),
         (
             HandleDbOperationFailed(
                 message=failed_message,
                 retryable=True,
                 workflow_id=WORKFLOW_ID,
-                exception=core.CoreConnectionError('wait_workflow_result', CAUSE_MARKER, True),
+                exception=connection_lost,
             ),
-            OperationalErrorCode.BROKER_ERROR,
-            failed_message,
+            BrokerError(message=failed_message, retryable=True, exception=connection_lost),
         ),
         (
             HandleStoredDataInvalid(
                 message=failed_message,
                 workflow_id=WORKFLOW_ID,
-                exception=core.CoreContractViolation('wait_workflow_result', CAUSE_MARKER),
+                exception=contract_violated,
             ),
-            OperationalErrorCode.BROKER_ERROR,
-            failed_message,
+            BrokerError(message=failed_message, retryable=False, exception=contract_violated),
         ),
     ]
 
 
 @pytest.mark.parametrize(
-    ('answer', 'folded_code', 'folded_message'),
+    ('answer', 'read_error'),
     _wait_failures(),
     ids=['absent', 'db_operation_failed', 'stored_data_invalid'],
 )
-def test_get_folds_each_wait_failure(
-    answer: Any, folded_code: object, folded_message: str,
+def test_get_returns_each_wait_failure_as_a_read_error(
+    answer: Any, read_error: ReadError,
 ) -> None:
     handle = _handle_answering('wait_workflow_result_async', answer)
 
     result = asyncio.run(handle.get_async(timeout_ms=0))
 
-    assert result.is_err()
-    task_error = result.unwrap_err()
-    assert task_error.error_code is folded_code
-    assert task_error.message == folded_message
+    assert result == Err(read_error)
 
 
 # =============================================================================
@@ -457,9 +460,8 @@ class TestStoredNodeResult:
 
         assert is_ok(result)
         node_result = result.ok_value[0].result
-        assert node_result is not None
-        assert node_result.is_err()
-        error = node_result.unwrap_err()
+        assert isinstance(node_result, Failed)
+        error = node_result.error
         assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert error.message == (
             'Result JSON corrupt for node parent:0: '
@@ -474,8 +476,8 @@ class TestStoredNodeResult:
 
         assert is_ok(result)
         node_result = result.ok_value[0].result
-        assert node_result is not None
-        error = node_result.unwrap_err()
+        assert isinstance(node_result, Failed)
+        error = node_result.error
         assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
         assert error.message is not None
         assert error.message.startswith(
@@ -505,12 +507,10 @@ class TestStoredWorkflowResult:
 
         result = handle._completed_result(stored)
 
-        assert result.err is not None
-        assert (
-            result.err.error_code
-            == OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        )
-        assert result.err.message is not None
-        assert 'nested deeper than' in result.err.message
+        match result:
+            case Err(ResultDeserializationError(message=message)):
+                assert 'nested deeper than' in message
+            case _:
+                pytest.fail(f'expected Err(ResultDeserializationError), got {result!r}')
 
 

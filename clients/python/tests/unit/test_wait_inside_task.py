@@ -2,10 +2,10 @@
 """Result waits refuse at once in a process that runs task bodies.
 
 The broker is real and its URL is unreachable; a mock that records the calls
-wraps its core handle. The refusal is the first check of each wait, so no
-database is needed. With a refusal removed or moved after another check, the
-call reads the broker or returns that check's code, and the nothing-ran, code
-and label assertions fail.
+wraps its core handle. The refusal comes right after the check of the wait
+limit, which is the first check of each wait, so no database is needed. With a
+refusal removed or moved after another check, the call reads the broker or
+returns that check's code, and the nothing-ran, code and label assertions fail.
 """
 
 from __future__ import annotations
@@ -25,12 +25,21 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.brokers.result_types import (
     BrokerErrorCode,
+    BrokerInvalidInput,
     BrokerResult,
     BrokerWaitInsideTask,
 )
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
-from horsies.core.models.tasks import RetrievalCode, TaskError, TaskResult
+from horsies.core.models.outcome import (
+    InvalidInput,
+    ReadError,
+    ReadResult,
+    Succeeded,
+    TaskNotFound,
+    WaitInsideTask,
+)
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.process_role import (
     ProcessRole,
@@ -47,14 +56,11 @@ pytestmark = [pytest.mark.unit]
 UNREACHABLE_URL = 'postgresql://u:p@127.0.0.1:1/db'
 WORKFLOW_ID = '0b6f2f0e-6c1d-4f7a-9a52-3d2b1c0e9f81'
 TASK_ID = '0b6f2f0e-6c1d-7f7a-9a52-3d2b1c0e9f82'
+VALID_TIMEOUT_MS = 0
+"""A timeout that each wait accepts."""
 REFUSED_TIMEOUT_MS = -1
-"""A timeout that each wait refuses with INVALID_INPUT outside a task process."""
-
-TIMEOUTS = pytest.mark.parametrize(
-    'timeout_ms',
-    [0, REFUSED_TIMEOUT_MS],
-    ids=['valid_timeout', 'refused_timeout'],
-)
+"""A timeout that each wait refuses with INVALID_INPUT. The wait limit is the
+first check, so a task process gets INVALID_INPUT for it, not WAIT_INSIDE_TASK."""
 
 
 @pytest.fixture
@@ -86,44 +92,44 @@ def _handle(app: Horsies) -> TaskHandle[int]:
     return TaskHandle(TASK_ID, app=app, broker_mode=True, ok_type=int)
 
 
-def _refused_code(result: TaskResult[Any, TaskError]) -> object:
-    assert result.is_err()
-    return result.unwrap_err().error_code
+def _read_error(result: ReadResult[Any, TaskError]) -> ReadError:
+    assert isinstance(result, Err), f'expected a read failure, got {result!r}'
+    return result.err_value
 
 
 def _workflow_handle(app: Horsies) -> WorkflowHandle[Any]:
     return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=app.get_broker())
 
 
-def _task_get(app: Horsies, timeout_ms: int | None) -> TaskResult[Any, TaskError]:
+def _task_get(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
     return _handle(app).get(timeout_ms=timeout_ms)
 
 
-def _task_get_async(app: Horsies, timeout_ms: int | None) -> TaskResult[Any, TaskError]:
+def _task_get_async(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
     return asyncio.run(_handle(app).get_async(timeout_ms=timeout_ms))
 
 
-def _app_get_result(app: Horsies, timeout_ms: int | None) -> TaskResult[Any, TaskError]:
-    return app.get_result(TASK_ID, timeout_ms).unwrap()
+def _app_get_result(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
+    return app.get_result(uuid.UUID(TASK_ID), timeout_ms)
 
 
 def _app_get_result_async(
     app: Horsies, timeout_ms: int | None,
-) -> TaskResult[Any, TaskError]:
-    return asyncio.run(app.get_result_async(TASK_ID, timeout_ms)).unwrap()
+) -> ReadResult[Any, TaskError]:
+    return asyncio.run(app.get_result_async(uuid.UUID(TASK_ID), timeout_ms))
 
 
-def _workflow_get(app: Horsies, timeout_ms: int | None) -> TaskResult[Any, TaskError]:
+def _workflow_get(app: Horsies, timeout_ms: int | None) -> ReadResult[Any, TaskError]:
     return _workflow_handle(app).get(timeout_ms=timeout_ms)
 
 
 def _workflow_get_async(
     app: Horsies, timeout_ms: int | None,
-) -> TaskResult[Any, TaskError]:
+) -> ReadResult[Any, TaskError]:
     return asyncio.run(_workflow_handle(app).get_async(timeout_ms=timeout_ms))
 
 
-WAITS: dict[str, Callable[[Horsies, int | None], TaskResult[Any, TaskError]]] = {
+WAITS: dict[str, Callable[[Horsies, int | None], ReadResult[Any, TaskError]]] = {
     'TaskHandle.get': _task_get,
     'TaskHandle.get_async': _task_get_async,
     'app.get_result': _app_get_result,
@@ -188,31 +194,56 @@ def test_marking_a_process_records_that_it_runs_task_bodies(
 
 
 @pytest.mark.parametrize('name', sorted(WAITS))
-@TIMEOUTS
 @pytest.mark.usefixtures('task_process')
 def test_a_wait_in_a_task_process_returns_wait_inside_task_and_reads_nothing(
     app: Horsies,
     name: str,
-    timeout_ms: int,
 ) -> None:
-    result = WAITS[name](app, timeout_ms)
+    result = WAITS[name](app, VALID_TIMEOUT_MS)
 
-    assert _refused_code(result) is RetrievalCode.WAIT_INSIDE_TASK
-    assert 'workflow' in (result.unwrap_err().message or '')
+    error = _read_error(result)
+    assert isinstance(error, WaitInsideTask)
+    assert 'workflow' in error.message
+    _assert_nothing_ran(app.get_broker())
+
+
+@pytest.mark.parametrize('name', sorted(WAITS))
+@pytest.mark.usefixtures('task_process')
+def test_a_refused_timeout_in_a_task_process_returns_invalid_input_first(
+    app: Horsies,
+    name: str,
+) -> None:
+    """The wait limit is checked before the process role."""
+    result = WAITS[name](app, REFUSED_TIMEOUT_MS)
+
+    assert isinstance(_read_error(result), InvalidInput)
     _assert_nothing_ran(app.get_broker())
 
 
 @pytest.mark.parametrize('name', sorted(RAW_WAITS))
-@TIMEOUTS
 @pytest.mark.usefixtures('task_process')
 def test_a_raw_wait_in_a_task_process_returns_the_broker_refusal_and_reads_nothing(
     app: Horsies,
     name: str,
-    timeout_ms: int,
 ) -> None:
-    result = RAW_WAITS[name](app, timeout_ms)
+    result = RAW_WAITS[name](app, VALID_TIMEOUT_MS)
 
     _assert_broker_refusal(result, name)
+    _assert_nothing_ran(app.get_broker())
+
+
+@pytest.mark.parametrize('name', sorted(RAW_WAITS))
+@pytest.mark.usefixtures('task_process')
+def test_a_refused_timeout_of_a_raw_wait_in_a_task_process_returns_invalid_input_first(
+    app: Horsies,
+    name: str,
+) -> None:
+    """The wait limit is checked before the process role."""
+    result = RAW_WAITS[name](app, REFUSED_TIMEOUT_MS)
+
+    assert isinstance(result, Err)
+    assert isinstance(result.err_value, BrokerInvalidInput)
+    assert result.err_value.code is BrokerErrorCode.INVALID_INPUT
     _assert_nothing_ran(app.get_broker())
 
 
@@ -222,12 +253,12 @@ def test_a_sync_wait_inside_a_running_loop_of_a_task_process_is_a_wait_inside_ta
     app: Horsies,
     name: str,
 ) -> None:
-    async def inside() -> TaskResult[Any, TaskError]:
-        return WAITS[name](app, 0)
+    async def inside() -> ReadResult[Any, TaskError]:
+        return WAITS[name](app, VALID_TIMEOUT_MS)
 
     result = asyncio.run(inside())
 
-    assert _refused_code(result) is RetrievalCode.WAIT_INSIDE_TASK
+    assert isinstance(_read_error(result), WaitInsideTask)
 
 
 @pytest.mark.parametrize('name', SYNC_RAW_WAITS)
@@ -237,7 +268,7 @@ def test_a_sync_raw_wait_inside_a_running_loop_of_a_task_process_is_refused(
     name: str,
 ) -> None:
     async def inside() -> BrokerResult[Any]:
-        return RAW_WAITS[name](app, 0)
+        return RAW_WAITS[name](app, VALID_TIMEOUT_MS)
 
     result = asyncio.run(inside())
 
@@ -250,7 +281,7 @@ def test_the_refusal_is_not_cached_on_the_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     handle = _handle(app)
-    assert _refused_code(handle.get(timeout_ms=0)) is RetrievalCode.WAIT_INSIDE_TASK
+    assert isinstance(_read_error(handle.get(timeout_ms=0)), WaitInsideTask)
 
     monkeypatch.setattr(process_role_module, '_role', ProcessRole.RUNS_NO_TASK_BODIES)
     with patch.object(
@@ -259,7 +290,7 @@ def test_the_refusal_is_not_cached_on_the_handle(
         outside = handle.get(timeout_ms=0)
 
     read.assert_called_once()
-    assert _refused_code(outside) is RetrievalCode.TASK_NOT_FOUND
+    assert isinstance(_read_error(outside), TaskNotFound)
 
 
 @pytest.mark.usefixtures('task_process')
@@ -268,11 +299,11 @@ def test_a_handle_without_a_broker_returns_its_result_in_a_task_process(
 ) -> None:
     """Such a handle holds its result and does not wait, so it is not refused."""
     handle: TaskHandle[int] = TaskHandle(TASK_ID, app=app, broker_mode=False, ok_type=int)
-    handle.set_immediate_result(TaskResult(ok=7))
+    handle.set_immediate_result(Ok(7))
 
     result = handle.get(timeout_ms=0)
 
-    assert result.unwrap() == 7
+    assert result == Ok(Succeeded(7))
     _assert_nothing_ran(app.get_broker())
 
 

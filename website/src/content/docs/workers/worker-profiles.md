@@ -114,10 +114,11 @@ from horsies import (
     Execution,
     Horsies,
     IsolatedChildren,
+    Ok,
     PostgresConfig,
+    Result,
     SharedAsyncChildren,
     TaskError,
-    TaskResult,
     WorkerProfile,
 )
 
@@ -140,9 +141,9 @@ app = Horsies(AppConfig(
     timeout_ms=10_000,
     cancel_grace_ms=2_000,
 )
-async def fetch_quote(*, symbol: str) -> TaskResult[str, TaskError]:
+async def fetch_quote(*, symbol: str) -> Result[str, TaskError]:
     await asyncio.sleep(0.1)
-    return TaskResult(ok=symbol)
+    return Ok(symbol)
 ```
 
 ```bash
@@ -161,10 +162,11 @@ from horsies import (
     Execution,
     Horsies,
     IsolatedChildren,
+    Ok,
     PostgresConfig,
+    Result,
     SharedThreadChildren,
     TaskError,
-    TaskResult,
     WorkerProfile,
 )
 
@@ -182,12 +184,12 @@ app = Horsies(AppConfig(
 
 
 @app.task('digest_file', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
-def digest_file(*, path: str) -> TaskResult[str, TaskError]:
+def digest_file(*, path: str) -> Result[str, TaskError]:
     digest = hashlib.sha256()
     with open(path, 'rb') as source:
         for block in iter(lambda: source.read(1 << 20), b''):
             digest.update(block)
-    return TaskResult(ok=digest.hexdigest())
+    return Ok(digest.hexdigest())
 ```
 
 ```bash
@@ -240,23 +242,23 @@ One task of each mode:
 import asyncio
 import zlib
 
-from horsies import Execution, TaskError, TaskResult
+from horsies import Execution, Ok, Result, TaskError
 
 
 @app.task('fetch_rate', execution=Execution.SHARED_ASYNC, timeout_ms=10_000)
-async def fetch_rate(*, currency: str) -> TaskResult[str, TaskError]:
+async def fetch_rate(*, currency: str) -> Result[str, TaskError]:
     await asyncio.sleep(0.1)  # stands in for an HTTP call with its own timeout
-    return TaskResult(ok=currency)
+    return Ok(currency)
 
 
 @app.task('compress_report', execution=Execution.SHARED_THREAD, timeout_ms=60_000)
-def compress_report(*, text: str) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=len(zlib.compress(text.encode(), level=6)))
+def compress_report(*, text: str) -> Result[int, TaskError]:
+    return Ok(len(zlib.compress(text.encode(), level=6)))
 
 
 @app.task('render_invoice')
-def render_invoice(*, invoice_id: int) -> TaskResult[str, TaskError]:
-    return TaskResult(ok=f'invoice-{invoice_id}.pdf')
+def render_invoice(*, invoice_id: int) -> Result[str, TaskError]:
+    return Ok(f'invoice-{invoice_id}.pdf')
 ```
 
 ```bash

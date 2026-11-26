@@ -25,14 +25,14 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import CustomQueueConfig, QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     SubWorkflowNode,
     TaskNode,
     WorkflowDefinition,
     WorkflowSpec,
 )
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 
 pytestmark = [pytest.mark.integration]
@@ -71,8 +71,8 @@ class TestSubworkflowPriorityBinding:
         suffix = uuid.uuid4().hex[:8]
 
         @app.task(task_name=f'scrape_{suffix}', queue_name='scraping')
-        def scrape_task(*, run_postproc: bool = False) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=1)  # pragma: no cover - never executed in this test
+        def scrape_task(*, run_postproc: bool = False) -> Result[int, TaskError]:
+            return Ok(1)  # pragma: no cover - never executed in this test
 
         class ClientSync(WorkflowDefinition[int]):
             name = f'client_sync_{suffix}'

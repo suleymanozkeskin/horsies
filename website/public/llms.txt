@@ -130,11 +130,15 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - priority: int (1=highest, 100=lowest, default 1)
 - max_concurrency: int (default 5)
 
-### TaskResult[T, TaskError]
-- TaskResult(ok=value) | TaskResult(err=TaskError(...))
-- .is_ok() -> bool, .is_err() -> bool
-- .ok -> T | None, .err -> E | None
-- .ok_value -> T (raises on err), .err_value -> E (raises on ok)
+### Result[T, TaskError] (task body) and ReadResult[T, TaskError] (reads)
+- A task body returns Result[T, TaskError]: Ok(value) | Err(TaskError(...)); a direct call returns the same Result
+- TaskOutcome[T, E] = Succeeded[T] | Failed[E] (frozen dataclasses; match Succeeded(value) / Failed(error)): how a task ended; the type of an args_from input and of WorkflowContext.result_for
+- ReadResult[T, E] = Ok[Succeeded[T]] | Ok[Failed[E]] | Err[ReadError]: TaskHandle.get/get_async, WorkflowHandle.get/get_async/result_for/result_for_async, app.get_result/get_result_async
+- Read with one match: case Ok(Succeeded(value)) / case Ok(Failed(task_error)) / case Err(read_error)
+- Ok(Failed(task_error)): the task returned the error, or the library recorded it (TASK_CANCELLED, TASK_TIMEOUT, WORKER_CRASHED, TASK_EXPIRED, WORKFLOW_FAILED, WORKFLOW_PAUSED, UPSTREAM_SKIPPED, RETURN_TYPE_MISMATCH, ...)
+- ReadError: a closed union of frozen classes, one per catalog code; each has code (ClassVar, the catalog member) and message: WaitTimeout, TaskNotFound, WorkflowNotFound, ResultNotAvailable, ResultNotReady, WaitInsideTask, AsyncContext, InvalidInput, ResultDeserializationError, BrokerError (adds retryable: bool and exception: BaseException | NoCause), NoTypeAvailable, WorkflowCtxMissingId
+- A later read can give an outcome after WaitTimeout, TaskNotFound or BrokerError; a TaskHandle keeps the final answers (an outcome, ResultNotAvailable, ResultDeserializationError, NoTypeAvailable) and not the others
+- read.unwrap() on a ReadResult gives the TaskOutcome, not the value
 
 ### TaskError
 - error_code: str | BuiltInTaskCode (required, not null)
@@ -147,7 +151,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - OperationalErrorCode: UNHANDLED_EXCEPTION, TASK_EXCEPTION, WORKER_CRASHED, BROKER_ERROR, WORKER_RESOLUTION_ERROR, WORKER_SERIALIZATION_ERROR, RESULT_DESERIALIZATION_ERROR, WORKFLOW_ENQUEUE_FAILED, SUBWORKFLOW_LOAD_FAILED, WORKFLOW_RECOVERY_LIMIT_REACHED, SUBWORKFLOW_DEPTH_LIMIT_REACHED, TASK_BLOCKED_LOOP, NEIGHBOUR_BLOCKED_LOOP, WORKFLOW_START_INCOMPLETE
 - ContractCode: RETURN_TYPE_MISMATCH, WORKFLOW_CTX_MISSING_ID, NO_TYPE_AVAILABLE
 - RetrievalCode: WAIT_TIMEOUT, TASK_NOT_FOUND, WORKFLOW_NOT_FOUND, RESULT_NOT_AVAILABLE, RESULT_NOT_READY, ASYNC_CONTEXT, INVALID_INPUT, WAIT_INSIDE_TASK
-- A result wait inside a worker child (get(), get_async(), app.get_result(), WorkflowHandle.get()) returns WAIT_INSIDE_TASK at once, as its first check; the raw reads (app.get_raw_result(), broker.get_raw_result_record()) return Err(BrokerWaitInsideTask); compose tasks with a workflow instead
+- A read gives a RetrievalCode value as read_error.code of its ReadError class (Err(WaitTimeout(...)) has code WAIT_TIMEOUT), not inside a TaskError
+- A result wait inside a worker child (get(), get_async(), app.get_result(), WorkflowHandle.get()) returns Err(WaitInsideTask(...)) at once, as its first check; the raw reads (app.get_raw_result(), broker.get_raw_result_record()) return Err(BrokerWaitInsideTask); compose tasks with a workflow instead
 - OutcomeCode: TASK_CANCELLED, TASK_EXPIRED, TASK_TIMEOUT, WORKFLOW_PAUSED, WORKFLOW_EXPIRED, WORKFLOW_FAILED, WORKFLOW_CANCELLED, UPSTREAM_SKIPPED, SUBWORKFLOW_FAILED, WORKFLOW_SUCCESS_CASE_NOT_MET, WORKFLOW_OUTPUT_SKIPPED
 - All built-in code string values are globally reserved; user-defined error codes must not collide
 - BUILTIN_CODE_REGISTRY: dict[str, BuiltInTaskCode] maps every reserved string to its enum member
@@ -172,7 +177,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - BrokerEnqueueError = BrokerEnqueueFailed | BrokerPayloadMismatch | BrokerIdempotencyKeyConflict | BrokerInvalidTaskOptions | BrokerInvalidInput (every failure of enqueue_async); BrokerSyncCallError = BrokerAsyncContext (the failure that the sync enqueue adds; nothing ran)
 - enqueue_async and enqueue require sent_at and send_kind (from horsies import SendKind): SendKind.FIRST for the first send of a task id, SendKind.REPEAT for a resend (reads history first, so a finished task does not run again)
 - BrokerErrorCode: SCHEMA_INIT_FAILED, ENQUEUE_FAILED, PAYLOAD_MISMATCH, IDEMPOTENCY_KEY_CONFLICT, TASK_INFO_QUERY_FAILED, MONITORING_QUERY_FAILED, DB_PING_FAILED, WORKER_PING_FAILED, CLEANUP_FAILED, CLOSE_FAILED, LISTENER_START_FAILED, LISTENER_SUBSCRIBE_FAILED, NO_BROKER, NO_TYPE_AVAILABLE, INVALID_JSON_PAYLOAD, INVALID_TASK_OPTIONS, ASYNC_CONTEXT, INVALID_INPUT, LISTENER_DISABLED, WAIT_INSIDE_TASK
-- ASYNC_CONTEXT (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran; call the *_async form (not retryable; RetrievalCode.ASYNC_CONTEXT is not cached)
+- ASYNC_CONTEXT (BrokerErrorCode, TaskSendErrorCode, WorkflowStartErrorCode, HandleErrorCode, RetrievalCode): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell); nothing ran; call the *_async form (not retryable; a read returns Err(AsyncContext(...)), which a TaskHandle does not keep)
 - Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit. A sync call runs the core's blocking form on the calling thread; any exception from a sync call that is not a catalog error propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> Result[str, BrokerEnqueueError], enqueue (sync) -> Result[str, BrokerEnqueueError | BrokerSyncCallError], get_task_info_async -> BrokerResult[TaskInfo | None],
@@ -188,15 +193,16 @@ making web request, local will cost you less tokens and greater knowledgebase at
   get_worker_state_async(worker_id) -> BrokerResult[WorkerStateSnapshot | None],
   get_worker_state_history_async(worker_id, limit=None) -> BrokerResult[list[WorkerStateSnapshot]]
 - get_worker_stats was removed in 0.1.4; use list_worker_states_async (typed, includes idle workers)
-- Note: app.get_result_async / app.get_result return BrokerResult[TaskResult[Any, TaskError]]: unwrap the outer Result first
+- Note: app.get_result_async / app.get_result return ReadResult[Any, TaskError], not a BrokerResult: a database failure is Err(BrokerError(...)), a stored value that does not decode Err(ResultDeserializationError(...)), a task that is not registered in this process Err(NoTypeAvailable(...)), a sync call in a running event loop Err(AsyncContext(...)); the raw reads app.get_raw_result / broker.get_raw_result_record keep BrokerResult
 
 ### Result[T, E] (vendored Ok/Err type)
 - from horsies import Result, Ok, Err, is_ok, is_err
 - .ok_value / .err_value properties, .is_ok() / .is_err() methods
 - is_ok(result) / is_err(result) are TypeIs type guards for narrowing
+- A task read is a ReadResult: read it with match (see "Result[T, TaskError] (task body) and ReadResult[T, TaskError] (reads)")
 
 ### @app.task Decorator
-- Decorated function must return TaskResult[T, TaskError]
+- Decorated function must be annotated -> Result[T, TaskError] (or Ok[T] | Err[TaskError]) and return Ok(value) or Err(TaskError(...)); another annotation raises HRS-101 or HRS-105
 - Decorated function is def or async def; a function that yields raises HRS-101 at definition time
 - In an isolated child (Execution.ISOLATED, the default), an async def task runs on the one event loop that the child keeps; the loop runs only while an async task runs; in an async task, send with send_async (the sync send returns TaskSendAsyncContext in a running loop)
 - An async def task in an isolated child must await the work it starts: when its body returns with asyncio tasks of it still on the loop, the child waits up to 1 s for them, then cancels what is alive in three rounds 0.1 s apart; the worker writes what the task returned (then the retry and the workflow step) only after that work ended, and replaces the child; the return ends the deadline, so the outcome is never TASK_TIMEOUT here; the child marks the row finalizing only after that work ended (never for stuck work), so runner heartbeats cover the row while the work runs; work alive after the rounds, or no report within 26.3 s of the return: the worker kills the child and writes what the task returned after the exit; a client that keeps its own background tasks on the loop delays each outcome by about 1 s and causes a replacement after each async task; an asyncio.to_thread() thread is not a task: it is not waited for and does not cause one; only asyncio tasks are seen: a loop.call_soon()/call_later() callback or loop.run_in_executor() work that the task did not await is not waited for, causes no replacement and can still run during a later task of the same child; a task that cancels a helper task in finally must also await it (helper.cancel(), then await asyncio.gather(helper, return_exceptions=True)); one worker log line per such task names the coroutine of each task left (up to 10) and how that work ended
@@ -209,7 +215,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Returns TaskFunction[P, T] for a def function, AsyncTaskFunction[P, T] for an async def function; with a first parameter runtime: TaskRuntime, RuntimeTaskFunction[P, T] / AsyncRuntimeTaskFunction[P, T] (P = the parameters after the runtime)
 
 ### TaskRuntime (first task parameter) and FencingToken
-- def f(runtime: TaskRuntime, *, x: int) -> TaskResult[T, TaskError]: the worker passes the runtime of each run as the first argument; the runtime gives fencing_token and cancel_state()
+- def f(runtime: TaskRuntime, *, x: int) -> Result[T, TaskError]: the worker passes the runtime of each run as the first argument; the runtime gives fencing_token and cancel_state()
 - Rules: first parameter, before the *; annotation exactly TaskRuntime (not | None); no default; any name; TaskRuntime in any other place raises HRS-105 at definition
 - Not part of the wire contract: .send(), .schedule(), .node()(), schedules and workflow nodes do not supply it; a kwarg with its name is refused
 - runtime.fencing_token -> FencingToken(task_id: uuid.UUID, value: int), frozen; same token for two reads in one attempt; strictly greater value for each later attempt of the task; no clock; today value = attempt number (1 to 21)
@@ -217,8 +223,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Limits: a rerun or a workflow node started again after a pause gets a new task id (value from 1); a stale attempt with no later attempt is not refused
 
 ### TaskFunction[P, T] (decorated task)
-- .__call__(*args, **kwargs) -> TaskResult[T, TaskError] (sync direct call)
-- AsyncTaskFunction[P, T] has the same members; its .__call__ returns a coroutine of TaskResult[T, TaskError]
+- .__call__(*args, **kwargs) -> Result[T, TaskError] (sync direct call)
+- AsyncTaskFunction[P, T] has the same members; its .__call__ returns a coroutine of Result[T, TaskError]
 - .send(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (enqueue for background execution)
 - .send_async(*args, **kwargs) -> TaskSendResult[TaskHandle[T]] (async enqueue)
 - .schedule(delay_seconds, *args, **kwargs) -> TaskSendResult[TaskHandle[T]] (delayed enqueue)
@@ -240,8 +246,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### TaskHandle[T]
 - .task_id -> str
-- .get(timeout_ms=None) -> TaskResult[T, TaskError] (blocking)
-- .get_async(timeout_ms=None) -> TaskResult[T, TaskError] (async blocking)
+- .get(timeout_ms=None) -> ReadResult[T, TaskError] (blocking)
+- .get_async(timeout_ms=None) -> ReadResult[T, TaskError] (async blocking)
 - .info(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
 - .info_async(include_result=False, include_failed_reason=False) -> BrokerResult[TaskInfo | None]
 
@@ -293,7 +299,8 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - .retry_count -> int, .max_retries -> int, .next_retry_at -> datetime | None
 - .sent_at/enqueued_at/claimed_at/started_at/completed_at/failed_at -> datetime | None
 - .worker_hostname/worker_pid/worker_process_name -> str | int | None
-- .result -> TaskResult[Any, TaskError] | None (opt-in via include_result)
+- .raw_result -> dict[str, Any] | None (the stored envelope; opt-in via include_result)
+- .decoded_result -> TaskOutcome[Any, TaskError] | None, .result_decoded -> bool (set by the app-level reads when the task is registered in this process and the decode works; the broker-level reads leave it None)
 - .failed_reason -> str | None (opt-in via include_failed_reason)
 
 ### TaskStatus (enum)
@@ -310,14 +317,14 @@ making web request, local will cost you less tokens and greater knowledgebase at
   allow_failed_deps, join, min_success, good_until, node_id
 
 ### TaskNode[T]
-- T = ok type of the task's TaskResult
+- T = ok type of the task's Result
 - fn: TaskFunction | AsyncTaskFunction, kwargs: dict (args field exists but is init=False — not a construction param)
 - waits_for: list of TaskNode | SubWorkflowNode (wait for terminal)
-- args_from: dict[str, TaskNode | SubWorkflowNode] (inject TaskResult as kwarg)
+- args_from: dict[str, TaskNode | SubWorkflowNode] (inject the upstream TaskOutcome as kwarg; the parameter is typed TaskOutcome[T, TaskError])
 - workflow_ctx_from: list[TaskNode | SubWorkflowNode] | None (subset for WorkflowContext)
 - queue: str | None (override task decorator queue)
 - priority: int | None (override task decorator priority)
-- allow_failed_deps: bool (False=SKIP on dep failure, True=run with failed TaskResult)
+- allow_failed_deps: bool (False=SKIP on dep failure, True=run with Failed(task_error))
 - join: "all" (default) | "any" | "quorum"
 - min_success: int | None (required when join="quorum")
 - good_until: datetime | None (task expiry deadline)
@@ -350,9 +357,10 @@ making web request, local will cost you less tokens and greater knowledgebase at
 ### WorkflowHandle
 - .workflow_id -> str
 - .status() / .status_async() -> HandleResult[WorkflowStatus]
-- .get(timeout_ms=None) / .get_async(...) -> TaskResult[T, TaskError] (blocking)
-- .results() / .results_async() -> HandleResult[dict[str, TaskResult[Any, TaskError]]] (keyed by node_id)
-- .result_for(node) / .result_for_async(node) -> TaskResult[T, TaskError] (non-blocking query)
+- .get(timeout_ms=None) / .get_async(...) -> ReadResult[T, TaskError] (blocking; an outputless workflow gives Ok(Succeeded(terminal_results)), WorkflowTerminalResults = dict[str, TaskOutcome[Any, TaskError] | None])
+- .results() / .results_async() -> HandleResult[dict[str, TaskOutcome[Any, TaskError]]] (keyed by node_id)
+- .result_for(node) / .result_for_async(node) -> ReadResult[T, TaskError] (non-blocking query; Err(ResultNotReady(...)) before the node has a result)
+- get and result_for put a read failure in Err(ReadError) (WaitTimeout, WorkflowNotFound, ResultNotReady, ResultDeserializationError, BrokerError, AsyncContext, ...); the workflow's or the node's error is Ok(Failed(task_error)); the other methods return HandleResult
 - .tasks() / .tasks_async() -> HandleResult[list[WorkflowTaskInfo]]
 - .cancel() / .cancel_async() -> HandleResult[None]
 - .pause() / .pause_async() -> HandleResult[bool]
@@ -372,7 +380,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 
 ### WorkflowTaskInfo
 - .node_id -> str | None, .index -> int, .name -> str, .status -> WorkflowTaskStatus
-- .result -> TaskResult[Any, TaskError] | None (COMPLETED/FAILED; SKIPPED often None)
+- .result -> TaskOutcome[Any, TaskError] | None (COMPLETED/FAILED; SKIPPED often None)
 - .started_at -> datetime | None, .completed_at -> datetime | None
 
 ### OnError (enum)
@@ -384,7 +392,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Injected when task declares workflow_ctx: WorkflowContext | None = None
 - Requires workflow_ctx_from on the TaskNode
 - .workflow_id -> str, .task_index -> int, .task_name -> str
-- .result_for(node: TaskNode[T] | NodeKey[T]) -> TaskResult[T, TaskError]
+- .result_for(node: TaskNode[T] | NodeKey[T]) -> TaskOutcome[T, TaskError] (Succeeded(value) or Failed(error))
 - .has_result(node: TaskNode | SubWorkflowNode) -> bool
 - .summary_for(node: SubWorkflowNode[T]) -> SubWorkflowSummary[T]
 - .has_summary(node: SubWorkflowNode) -> bool
@@ -729,7 +737,7 @@ Registry (HRS-300-HRS-399):
 
 ### Failure Semantics
 - Default (join="all", allow_failed_deps=False): downstream SKIPPED when any dep fails/skips
-- allow_failed_deps=True: downstream runs, receives failed TaskResult
+- allow_failed_deps=True: downstream runs, receives Failed(task_error)
 - join="any"/"quorum": downstream can still run if success threshold met
 - SKIPPED cascades for join="all" with allow_failed_deps=False
 - OnError.FAIL (default): store error, continue DAG, mark FAILED when all terminal
@@ -787,12 +795,12 @@ Each entry: Title -- summary -> URL
 
 ### Tasks
 - Task Lifecycle -- states and transitions -> /horsies/concepts/task-lifecycle/
-- Result Handling -- TaskResult pattern, error types -> /horsies/concepts/result-handling/
+- Result Handling -- the Result of a task body, TaskOutcome (Succeeded, Failed) and ReadResult of a read, the ReadError classes, error types -> /horsies/concepts/result-handling/
 - Defining Tasks -- @app.task decorator -> /horsies/tasks/defining-tasks/
 - Sending Tasks -- enqueue for background execution -> /horsies/tasks/sending-tasks/
-- Error Handling -- TaskResult error patterns -> /horsies/tasks/error-handling/
+- Error Handling -- error patterns of Result, TaskError and ReadResult -> /horsies/tasks/error-handling/
 - Errors Reference -- the error codes for both clients: task codes, send, workflow start and handle codes, HRS config codes -> /horsies/tasks/errors/
-- Error Types -- the Python error types: TaskError, BrokerResult and BrokerOperationError, the calls that run on the core, TaskSendError, WorkflowStartResult, HandleResult, HorsiesError, TaskResult -> /horsies/tasks/error-types/
+- Error Types -- the Python error types: TaskError, BrokerResult and BrokerOperationError, the calls that run on the core, TaskSendError, WorkflowStartResult, HandleResult, HorsiesError, ReadResult and the ReadError classes -> /horsies/tasks/error-types/
 - Task Types -- the Python type surface of task signatures, strict values, shapes refused at definition, JsonValue and JsonInput, StrictJsonError, the codec functions -> /horsies/tasks/task-types/
 - Retrieving Results -- TaskHandle.get() -> /horsies/tasks/retrieving-results/
 - Retry Policy -- policy fields and limits, the retry delay (backoff, floor, jitter, cap), auto-retry triggers, retry vs rerun -> /horsies/tasks/retry-policy/
@@ -858,7 +866,7 @@ Each entry: Title -- summary -> URL
 - Deploying Code Changes -- renamed or removed tasks and parameters, in-flight rows, old and new workers, error codes per change -> /horsies/operations/deploying-code-changes/
 - Code Change Examples -- the Python code of the deploy steps: a parameter with a default, two names for one task, a model field with a default, a renamed field with AliasChoices -> /horsies/operations/code-change-examples/
 - Rerun in Your Transaction -- the Python rerun_task: re-execute a terminal task as a new task in the caller's transaction, RerunTask, RerunEnqueuePolicy, RerunOutcome -> /horsies/operations/rerun-in-your-transaction/
-- Testing -- direct task calls, TaskResult kwargs, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS -> /horsies/operations/testing/
+- Testing -- direct task calls, TaskOutcome kwargs, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS -> /horsies/operations/testing/
 - Autovacuum Tuning -- per-table autovacuum settings for high-churn tables, verification queries -> /horsies/operations/autovacuum-tuning/
 
 ### Troubleshooting
@@ -904,14 +912,14 @@ stale, requeue, crash recovery, recovery fields -> /horsies/configuration/recove
 RecoveryConfig, HRS-204 example, disable recovery -> /horsies/configuration/app-config/#recovery-configuration
 @app.task, decorator, task definition, define task -> /horsies/tasks/defining-tasks/
 send, send_async, enqueue, dispatch, produce, TaskSendResult, TaskSendError, retry_send -> /horsies/tasks/sending-tasks/
-TaskResult, is_ok, is_err, ok_value, err_value -> /horsies/tasks/error-handling/
+Result, Ok, Err, TaskError, Ok(Failed), Err(ReadError), error patterns -> /horsies/tasks/error-handling/
 BuiltInTaskCode, OperationalErrorCode, ContractCode, RetrievalCode, OutcomeCode, TaskError, TaskSendErrorCode, error codes, UNHANDLED_EXCEPTION -> /horsies/tasks/errors/
-TaskHandle, get, get_async, timeout, result -> /horsies/tasks/retrieving-results/
+TaskHandle, get, get_async, timeout, result, ReadResult, WaitTimeout, TaskNotFound -> /horsies/tasks/retrieving-results/
 retry, backoff, exponential, fixed, jitter, max_delay_seconds, auto_retry_for -> /horsies/tasks/retry-policy/
 RetryPolicy, RetryPolicy.fixed, RetryPolicy.exponential, exception_mapper -> /horsies/tasks/defining-tasks/#configure-retries
 PENDING, CLAIMED, RUNNING, COMPLETED, FAILED, task status -> /horsies/concepts/task-lifecycle/
 TaskStatus, is_terminal, TASK_TERMINAL_STATES -> /horsies/tasks/retrieving-results/#terminal-statuses
-TaskResult, Result pattern, error as value -> /horsies/concepts/result-handling/
+Result, ReadResult, TaskOutcome, Succeeded, Failed, ReadError, error as value -> /horsies/concepts/result-handling/
 DEFAULT, CUSTOM, priority, queue mode, max_concurrency per queue -> /horsies/concepts/queue-modes/
 QueueMode, CustomQueueConfig, queue_name, HRS-103 -> /horsies/configuration/app-config/#queue-mode-configuration
 WorkflowSpec, DAG, TaskNode, waits_for, args_from -> /horsies/concepts/workflows/workflow-semantics/
@@ -949,7 +957,7 @@ JsonValue, JsonInput, pydantic, datetime, SignatureValidationError, encode_value
 architecture, LISTEN/NOTIFY, components, data flow -> /horsies/concepts/architecture/
 FAQ, questions, trade-offs, why PostgreSQL, production-ready, compatibility -> /horsies/questions-and-answers/
 ErrorCode, HorsiesError, WorkflowValidationError, validation -> /horsies/tasks/errors/
-TaskError, BrokerOperationError, TaskSendError, NoCause, broker_error_cause, TaskResult -> /horsies/tasks/error-types/
+TaskError, BrokerOperationError, TaskSendError, NoCause, broker_error_cause, ReadError, BrokerError, ResultDeserializationError -> /horsies/tasks/error-types/
 ValidationReport, MultipleValidationErrors, raise_collected, error collection -> /horsies/tasks/errors/
 SourceLocation, Rust-style errors, format_rust_style, error display -> /horsies/tasks/error-types/
 HORSIES_FORCE_COLOR, NO_COLOR -> /horsies/tasks/errors/

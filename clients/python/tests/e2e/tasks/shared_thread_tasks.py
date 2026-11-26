@@ -11,7 +11,8 @@ import os
 import threading
 import time
 
-from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.tasks.instance import app
 
@@ -24,13 +25,13 @@ HANG_TIMEOUT_MS = 2_000
     execution=Execution.SHARED_THREAD,
     timeout_ms=30_000,
 )
-def thread_sleep(*, seconds: float) -> TaskResult[str, TaskError]:
+def thread_sleep(*, seconds: float) -> Result[str, TaskError]:
     """Sleep on the seat thread. Return ``pid:thread:start:end``, the times in
     seconds since the epoch."""
     started = time.time()
     time.sleep(seconds)
     name = threading.current_thread().name
-    return TaskResult(ok=f'{os.getpid()}:{name}:{started}:{time.time()}')
+    return Ok(f'{os.getpid()}:{name}:{started}:{time.time()}')
 
 
 @app.task(
@@ -38,11 +39,11 @@ def thread_sleep(*, seconds: float) -> TaskResult[str, TaskError]:
     execution=Execution.SHARED_THREAD,
     timeout_ms=30_000,
 )
-def thread_task_send_pool() -> TaskResult[str, TaskError]:
+def thread_task_send_pool() -> Result[str, TaskError]:
     """The pool of the app broker that task code in this child opens when it
     sends: ``pool_size:max_overflow``."""
     config = app.get_broker().config
-    return TaskResult(ok=f'{config.pool_size}:{config.max_overflow}')
+    return Ok(f'{config.pool_size}:{config.max_overflow}')
 
 
 @app.task(
@@ -50,8 +51,8 @@ def thread_task_send_pool() -> TaskResult[str, TaskError]:
     execution=Execution.SHARED_THREAD,
     timeout_ms=HANG_TIMEOUT_MS,
 )
-def thread_hang() -> TaskResult[str, TaskError]:
+def thread_hang() -> Result[str, TaskError]:
     """Sleep far past the timeout; a thread cannot be cancelled, so the
     worker kills the child when no task in it has time left."""
     time.sleep(3600)
-    return TaskResult(ok='never')
+    return Ok('never')

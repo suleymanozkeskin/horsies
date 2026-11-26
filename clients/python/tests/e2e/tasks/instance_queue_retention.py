@@ -21,7 +21,8 @@ from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
 from horsies.core.models.retention import RetentionConfig
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
@@ -55,8 +56,8 @@ broker.app = app
 
 
 @app.task(task_name='e2e_queue_retention_task')
-def mapped_task(*, x: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=x * 2)
+def mapped_task(*, x: int) -> Result[int, TaskError]:
+    return Ok(x * 2)
 
 
 app.discover_tasks(

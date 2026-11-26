@@ -10,9 +10,7 @@ from typing import (
     Callable,
     Concatenate,
     Final,
-    get_origin,
     get_type_hints,
-    get_args,
     Literal,
     ParamSpec,
     Sequence,
@@ -56,10 +54,7 @@ from horsies.core.process_role import (
 from horsies.core.codec.typed import (
     Json,
     TypeAnnotation,
-    decode_task_error,
-    decode_task_result,
     lone_surrogate_text,
-    validate_task_result_envelope,
 )
 from horsies.core.codec.signature_check import (
     SignatureValidationError,
@@ -90,7 +85,25 @@ from horsies._core import IdMintRefused, mint_task_id as core_mint_task_id
 from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.result import is_err, Ok, Err, Result
+from horsies.core.types.result import (
+    Err,
+    NotAResultAnnotation,
+    Ok,
+    Result,
+    ResultTypeArguments,
+    is_err,
+    result_type_arguments,
+)
+from horsies.core.models.outcome import (
+    AsyncContext,
+    Failed,
+    InvalidInput,
+    ReadResult,
+    ResultNotAvailable,
+    Succeeded,
+    WaitInsideTask,
+)
+from horsies.core.task_read import is_final_read, read_of_record
 from horsies.core.brokers.enqueue_task import SendKind
 from horsies.core.brokers.result_types import (
     BrokerAsyncContext,
@@ -98,18 +111,11 @@ from horsies.core.brokers.result_types import (
     BrokerEnqueueFailed,
     BrokerIdempotencyKeyConflict,
     BrokerInvalidInput,
-    BrokerInvalidJsonPayload,
     BrokerInvalidTaskOptions,
-    BrokerListenerDisabled,
-    BrokerNoTypeAvailable,
     BrokerNotAttached,
-    BrokerOperationFailed,
     BrokerPayloadMismatch,
     BrokerResult,
     BrokerSyncCallError,
-    BrokerWaitInsideTask,
-    RawResultRecord,
-    broker_error_cause,
 )
 from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
@@ -127,7 +133,7 @@ from horsies.core.models.task_send_types import (
 if TYPE_CHECKING:
     from horsies.core.app import Horsies
     from horsies.core.models.tasks import TaskOptions
-    from horsies.core.models.tasks import TaskError, TaskResult
+    from horsies.core.models.tasks import TaskError
     from horsies.core.models.tasks import TaskInfo
     from horsies.core.models.workflow import (
         TaskNode,
@@ -139,14 +145,10 @@ from horsies.core.models.tasks import (
     MAX_CANCEL_GRACE_MS,
     MIN_CANCEL_GRACE_MS,
     Execution,
-    TaskResult,
     TaskError,
     TaskOptions,
     BuiltInTaskCode,
-    OperationalErrorCode,
     ContractCode,
-    RetrievalCode,
-    OutcomeCode,
 )
 from horsies.core.models.workflow import WorkflowContextMissingIdError
 from horsies.core.telemetry.send_telemetry import (
@@ -439,15 +441,21 @@ def bind_task_node(
 
 class TaskHandle(Generic[T]):
     """
-    Handle for a submitted task, used to retrieve results.
+    Handle for a submitted task, used to read its result.
 
-    The get() and get_async() methods always return TaskResult[T, TaskError]:
-    - On success: TaskResult(ok=value) where value is of type T
-    - On task error: TaskResult(err=TaskError) from task execution
-    - On retrieval error: TaskResult(err=TaskError) with WAIT_TIMEOUT, TASK_NOT_FOUND, etc.
-    - On broker error: TaskResult(err=TaskError) with BROKER_ERROR
+    ``get()`` and ``get_async()`` return ``ReadResult[T, TaskError]``:
 
-    This unified return type enables consistent error handling without try/except.
+    - ``Ok(Succeeded(value))``: the task returned ``value``.
+    - ``Ok(Failed(task_error))``: the task returned this error, or the
+      library recorded it (``TASK_CANCELLED``, ``TASK_TIMEOUT``, ...).
+    - ``Err(read_error)``: the read gave no outcome (``WaitTimeout``,
+      ``TaskNotFound``, ``BrokerError``, ...). A read failure is never a
+      ``TaskError``.
+
+    Neither method raises for a task error or a read failure. The handle
+    keeps the first final read (``is_final_read``): an outcome,
+    ``ResultNotAvailable``, ``ResultDeserializationError`` and
+    ``NoTypeAvailable``.
     """
 
     def __init__(
@@ -460,243 +468,20 @@ class TaskHandle(Generic[T]):
         self.task_id = task_id
         self._app = app
         self._broker_mode = broker_mode
-        # Strict-serde phase 6: declared OkT for typed decode. ``.send()``
-        # / ``.send_async()`` populate this from the wrapper's
-        # ``task_ok_type``. By-id reconstruction without an app or
-        # registered task leaves this ``None``; ``.get()`` then folds
-        # NO_TYPE_AVAILABLE into the err slot when an ok payload is
-        # present.
+        # Declared OkT for typed decode. ``.send()`` / ``.send_async()``
+        # populate this from the wrapper's ``task_ok_type``. By-id
+        # reconstruction without an app or registered task leaves this
+        # ``None``; ``.get()`` then returns ``NoTypeAvailable`` when an ok
+        # payload is present.
         self.ok_type: TypeAnnotation | None = ok_type
-        self._cached_result: Optional[TaskResult[T, TaskError]] = None
-        self._result_fetched = False
+        self._cached_result: Optional[ReadResult[T, TaskError]] = None
 
-    def _error_result(
-        self,
-        *,
-        error_code: BuiltInTaskCode,
-        message: str,
-        data: dict[str, Any],
-        exception: BaseException | None = None,
-        cache: bool = True,
-    ) -> TaskResult[T, TaskError]:
-        """Build an err TaskResult, caching it when the error is final.
-
-        ``cache=False`` is for transient retrieval errors (broker outage,
-        not-found racing the enqueue): caching them would poison the handle
-        — every later ``get()`` would replay the error after the condition
-        cleared. Mirrors the WAIT_TIMEOUT path, which never caches.
-        """
-        error_result: TaskResult[T, TaskError] = TaskResult(
-            err=TaskError(
-                error_code=error_code,
-                message=message,
-                data=data,
-                exception=exception,
-            )
-        )
-        if cache:
-            self._cached_result = error_result
-            self._result_fetched = True
-        return error_result
-
-    def _record_to_task_result(
-        self,
-        broker_result: BrokerResult[RawResultRecord | None],
-        timeout_ms: Optional[int],
-    ) -> TaskResult[T, TaskError]:
-        """Strict-serde phase 6: map a ``BrokerResult[RawResultRecord | None]``
-        to the typed ``TaskResult`` shape ``.get()`` returns.
-
-        Folds:
-        - ``Err(BrokerOperationError)`` → ``TaskResult(err=BROKER_ERROR)``
-          (or NO_TYPE_AVAILABLE / RESULT_DESERIALIZATION_ERROR for the
-          two strict-serde codes when surfaced by the broker layer). A
-          broker ``ASYNC_CONTEXT`` fails an assertion: ``get()``
-          refuses a running event loop before it calls the broker.
-        - ``Ok(None)`` → ``TASK_NOT_FOUND``.
-        - ``Ok(record)`` with cancellation status → ``TASK_CANCELLED``.
-        - ``Ok(record)`` with non-terminal status (timeout fired) →
-          ``WAIT_TIMEOUT``.
-        - ``Ok(record)`` with raw_result populated → decode via
-          ``decode_task_result(record.raw_result, self.ok_type)``.
-          When ``ok_type is None`` and the err slot is populated, the
-          err is decoded directly (fast-path). When ``ok_type is None``
-          and the ok slot is populated, return ``NO_TYPE_AVAILABLE``.
-        """
-        from horsies.core.types.result import is_err as _is_err
-        from horsies.core.models.tasks import ContractCode
-
-        if _is_err(broker_result):
-            broker_err = broker_result.err_value
-            # The strict-serde codes are properties of the stored payload /
-            # handle, so they are cached. A generic broker error is
-            # transient: caching it would replay it after the condition
-            # cleared.
-            err_code: BuiltInTaskCode
-            cache: bool
-            match broker_err:
-                case BrokerNoTypeAvailable():
-                    err_code, cache = ContractCode.NO_TYPE_AVAILABLE, True
-                case BrokerInvalidJsonPayload():
-                    err_code, cache = (
-                        OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, True,
-                    )
-                case BrokerWaitInsideTask():
-                    err_code, cache = RetrievalCode.WAIT_INSIDE_TASK, False
-                case BrokerAsyncContext():
-                    raise AssertionError(
-                        f'TaskHandle result read for task {self.task_id} got '
-                        'ASYNC_CONTEXT; get() refuses a running event loop '
-                        'before the broker call, and get_async() reads through '
-                        'an async call',
-                    )
-                case (
-                    BrokerOperationFailed()
-                    | BrokerEnqueueFailed()
-                    | BrokerPayloadMismatch()
-                    | BrokerIdempotencyKeyConflict()
-                    | BrokerNotAttached()
-                    | BrokerInvalidTaskOptions()
-                    | BrokerInvalidInput()
-                    | BrokerListenerDisabled()
-                ):
-                    err_code, cache = OperationalErrorCode.BROKER_ERROR, False
-                case _ as unreachable:
-                    assert_never(unreachable)
-            cause: BaseException | None
-            match broker_error_cause(broker_err):
-                case NoCause():
-                    cause = None
-                case exception:
-                    cause = exception
-            return self._error_result(
-                error_code=err_code,
-                message=broker_err.message,
-                data={'task_id': str(self.task_id), 'broker_code': broker_err.code.value},
-                exception=cause,
-                cache=cache,
-            )
-        record = broker_result.ok_value
-        if record is None:
-            return self._error_result(
-                error_code=RetrievalCode.TASK_NOT_FOUND,
-                message=f'Task {self.task_id} not found in database',
-                data={'task_id': str(self.task_id)},
-                # Possibly a handle reconstructed by id racing the enqueue
-                # commit; a later get() may find the row.
-                cache=False,
-            )
-        from horsies.core.types.status import TaskStatus as _TaskStatus
-
-        if record.status == _TaskStatus.CANCELLED:
-            return self._error_result(
-                error_code=OutcomeCode.TASK_CANCELLED,
-                message=f'Task {self.task_id} was cancelled before completion',
-                data={'task_id': str(self.task_id)},
-            )
-        if record.raw_result is None:
-            # ``raw_result is None`` covers two distinct cases per the
-            # broker's ``get_raw_result_record`` contract:
-            #   1. Terminal status (COMPLETED / FAILED / EXPIRED) but
-            #      the result column is empty — engine never wrote a
-            #      payload, so map to RESULT_NOT_AVAILABLE (terminal,
-            #      cache the error).
-            #   2. Non-terminal status (PENDING / CLAIMED / RUNNING /
-            #      etc.) and the timeout fired before the row reached
-            #      a terminal state — map to WAIT_TIMEOUT (transient,
-            #      don't cache so a follow-up call can succeed).
-            terminal_statuses = (
-                _TaskStatus.COMPLETED,
-                _TaskStatus.FAILED,
-                _TaskStatus.EXPIRED,
-            )
-            if record.status in terminal_statuses:
-                return self._error_result(
-                    error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
-                    message=(
-                        f'Task {self.task_id} reached terminal status '
-                        f'{record.status.value} but stored no result '
-                        f'payload'
-                    ),
-                    data={
-                        'task_id': str(self.task_id),
-                        'status': record.status.value,
-                    },
-                )
-            tr_timeout: TaskResult[T, TaskError] = TaskResult(
-                err=TaskError(
-                    error_code=RetrievalCode.WAIT_TIMEOUT,
-                    message=(
-                        f'Timed out waiting for task {self.task_id} '
-                        f'after {timeout_ms}ms. Task may still be '
-                        f'running.'
-                    ),
-                    data={
-                        'task_id': str(self.task_id),
-                        'timeout_ms': timeout_ms,
-                        'status': record.status.value,
-                    },
-                ),
-            )
-            return tr_timeout
-
-        # Terminal record with payload. Validate the envelope shape
-        # before any per-slot decoding — both fast-path and full-decode
-        # routes share the same validator so a malformed envelope
-        # (missing marker, both slots populated, extras) fails closed
-        # before we touch the err slot.
-        raw = record.raw_result
-        try:
-            envelope = validate_task_result_envelope(raw)
-        except StrictJsonError as exc:
-            return self._error_result(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                message=f'TaskResult envelope invalid: {exc}',
-                data={'task_id': str(self.task_id)},
-            )
-        err_slot = envelope.get('err')
-        # Err-fast-path: TaskError is fixed-schema; decodable without
-        # ok_type. ``validate_task_result_envelope`` already guarantees
-        # err and ok are not both populated.
-        if err_slot is not None:
-            try:
-                err_value = decode_task_error(err_slot)
-            except (StrictJsonError, ValueValidationError) as exc:
-                return self._error_result(
-                    error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                    message=f'Failed to decode TaskError: {exc}',
-                    data={'task_id': str(self.task_id)},
-                )
-            decoded_err: TaskResult[T, TaskError] = TaskResult(
-                err=cast('TaskError', err_value),
-            )
-            self._cached_result = decoded_err
-            self._result_fetched = True
-            return decoded_err
-
-        # Ok slot path — needs ok_type.
-        if self.ok_type is None:
-            return self._error_result(
-                error_code=ContractCode.NO_TYPE_AVAILABLE,
-                message=(
-                    f'Task {self.task_id} ok-result decode requires '
-                    f'a declared OkT; the handle has none (task not '
-                    f'locally registered). Use raw_result() instead.'
-                ),
-                data={'task_id': str(self.task_id)},
-            )
-        try:
-            decoded = decode_task_result(raw, self.ok_type)
-        except (StrictJsonError, ValueValidationError) as exc:
-            return self._error_result(
-                error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
-                message=f'decode_task_result failed: {exc}',
-                data={'task_id': str(self.task_id)},
-            )
-        decoded_tr = cast('TaskResult[T, TaskError]', decoded)
-        self._cached_result = decoded_tr
-        self._result_fetched = True
-        return decoded_tr
+    def _kept(self, read: ReadResult[Any, TaskError]) -> ReadResult[T, TaskError]:
+        """Keep ``read`` when it is final, and return it as this handle's read."""
+        typed = cast('ReadResult[T, TaskError]', read)
+        if is_final_read(read):
+            self._cached_result = typed
+        return typed
 
     def _waits_are_refused(self) -> bool:
         """Return whether a result wait on this handle is refused here.
@@ -710,150 +495,108 @@ class TaskHandle(Generic[T]):
             and process_role() is ProcessRole.RUNS_TASK_BODIES
         )
 
-    def _wait_inside_task_result(self, operation: str) -> TaskResult[T, TaskError]:
-        """Return ``WAIT_INSIDE_TASK`` for a refused wait. Not cached; nothing ran."""
-        return self._error_result(
-            error_code=RetrievalCode.WAIT_INSIDE_TASK,
-            message=wait_inside_task_message(
-                f'TaskHandle.{operation}() for task {self.task_id}',
-            ),
-            data={'task_id': str(self.task_id)},
-            cache=False,
-        )
+    def _wait_inside_task_result(self, operation: str) -> ReadResult[T, TaskError]:
+        """Return ``WaitInsideTask`` for a refused wait. Not kept; nothing ran."""
+        return Err(WaitInsideTask(message=wait_inside_task_message(
+            f'TaskHandle.{operation}() for task {self.task_id}',
+        )))
+
+    def _before_read(
+        self, operation: str, timeout_ms: Optional[int],
+    ) -> ReadResult[T, TaskError] | None:
+        """The answer that comes before any broker read, or None to read.
+
+        In order: ``InvalidInput`` for a ``timeout_ms`` that no wait can use,
+        ``WaitInsideTask`` in a process that runs task bodies, the kept read,
+        and ``ResultNotAvailable`` (kept) for a handle with no broker. The
+        wait limit is the first check in every client, so one input gives
+        one code.
+        """
+        match wait_timeout_seconds(timeout_ms):
+            case Err(err_value=refused):
+                return Err(InvalidInput(
+                    message=f'TaskHandle.{operation}() for task {self.task_id}: {refused.message}',
+                ))
+            case Ok():
+                pass
+        if self._waits_are_refused():
+            return self._wait_inside_task_result(operation)
+        if self._cached_result is not None:
+            return self._cached_result
+        if self._broker_mode and self._app:
+            return None
+        return self._kept(Err(ResultNotAvailable(
+            message=f'Task {self.task_id}: result not available; the task may not have run',
+        )))
 
     def get(
         self,
         timeout_ms: Optional[int] = None,
-    ) -> TaskResult[T, TaskError]:
+    ) -> ReadResult[T, TaskError]:
         """
-        Get the task result (blocking).
+        Read the task result (blocking).
 
-        A broker-backed handle returns ``RetrievalCode.WAIT_INSIDE_TASK`` (not
-        cached) in a process that runs task bodies, as its first check, before
-        the ``timeout_ms`` check; compose tasks with a workflow there. It
-        returns ``RetrievalCode.ASYNC_CONTEXT`` (not cached) on a thread that
-        runs an event loop; use ``get_async()`` there.
+        The first check is the wait limit: a timeout_ms that is not None or
+        an int from 0 to MAX_TASK_TIMEOUT_MS returns ``Err(InvalidInput)``
+        (not kept) before any other check. Then a broker-backed handle
+        returns ``Err(WaitInsideTask)`` (not kept) in a process that runs
+        task bodies; compose tasks with a workflow there. It returns
+        ``Err(AsyncContext)`` (not kept) on a thread that runs an event loop;
+        use ``get_async()`` there.
 
         Args:
             timeout_ms: Maximum time to wait for result (milliseconds)
 
         Returns:
-            TaskResult[T, TaskError] - always returns TaskResult, never raises for task/retrieval errors.
-            Check result.is_err() and result.err.error_code for error handling.
-            A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
-            returns ``RetrievalCode.INVALID_INPUT`` (not cached) before any read.
+            ReadResult[T, TaskError]: ``Ok(Succeeded(value))``,
+            ``Ok(Failed(task_error))`` or ``Err(read_error)``. Never raises
+            for a task error or a read failure.
         """
-        if self._waits_are_refused():
-            return self._wait_inside_task_result('get')
-        match wait_timeout_seconds(timeout_ms):
-            case Err(err_value=refused):
-                return self._error_result(
-                    error_code=RetrievalCode.INVALID_INPUT,
-                    message=f'TaskHandle.get() for task {self.task_id}: {refused.message}',
-                    data={'task_id': str(self.task_id)},
-                    cache=False,
-                )
-            case Ok():
-                pass
-        if self._result_fetched:
-            match self._cached_result:
-                case None:
-                    return self._error_result(
-                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
-                        message='Result cache is empty after fetch',
-                        data={'task_id': str(self.task_id)},
-                    )
-                case result:
-                    return result
-
-        if self._broker_mode and self._app:
-            if in_running_event_loop():
-                return self._error_result(
-                    error_code=RetrievalCode.ASYNC_CONTEXT,
-                    message=async_context_message(
-                        f'TaskHandle.get() for task {self.task_id}',
-                        'handle.get_async(...)',
-                    ),
-                    data={'task_id': str(self.task_id)},
-                    cache=False,
-                )
-            broker = self._app.get_broker()
-            broker_result = broker.get_raw_result_record(
-                self.task_id, timeout_ms,
-            )
-            return self._record_to_task_result(broker_result, timeout_ms)
-        else:
-            # For synchronous/immediate execution, result should already be set
-            match self._cached_result:
-                case None:
-                    return self._error_result(
-                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
-                        message='Result not available - task may not have been executed',
-                        data={'task_id': str(self.task_id)},
-                    )
-                case result:
-                    return result
+        before = self._before_read('get', timeout_ms)
+        if before is not None:
+            return before
+        assert self._app is not None, 'a broker-backed handle reads through its app'
+        if in_running_event_loop():
+            return Err(AsyncContext(message=async_context_message(
+                f'TaskHandle.get() for task {self.task_id}',
+                'handle.get_async(...)',
+            )))
+        broker_result = self._app.get_broker().get_raw_result_record(
+            self.task_id, timeout_ms,
+        )
+        return self._kept(
+            read_of_record(self.task_id, broker_result, self.ok_type, timeout_ms),
+        )
 
     async def get_async(
         self,
         timeout_ms: Optional[int] = None,
-    ) -> TaskResult[T, TaskError]:
+    ) -> ReadResult[T, TaskError]:
         """
-        Get the task result asynchronously.
+        Read the task result asynchronously.
 
-        A broker-backed handle returns ``RetrievalCode.WAIT_INSIDE_TASK`` (not
-        cached) in a process that runs task bodies, as its first check, before
-        the ``timeout_ms`` check; compose tasks with a workflow there.
+        The first check is the wait limit, as in ``get()``: a timeout_ms
+        that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS returns
+        ``Err(InvalidInput)`` (not kept). Then a broker-backed handle returns
+        ``Err(WaitInsideTask)`` (not kept) in a process that runs task
+        bodies; compose tasks with a workflow there.
 
         Args:
             timeout_ms: Maximum time to wait for result (milliseconds)
 
         Returns:
-            TaskResult[T, TaskError] - always returns TaskResult, never raises for task/retrieval errors.
-            Check result.is_err() and result.err.error_code for error handling.
-            A timeout_ms that is not None or an int from 0 to MAX_TASK_TIMEOUT_MS
-            returns ``RetrievalCode.INVALID_INPUT`` (not cached) before any read.
+            ReadResult[T, TaskError], as ``get()``.
         """
-        if self._waits_are_refused():
-            return self._wait_inside_task_result('get_async')
-        match wait_timeout_seconds(timeout_ms):
-            case Err(err_value=refused):
-                return self._error_result(
-                    error_code=RetrievalCode.INVALID_INPUT,
-                    message=f'TaskHandle.get_async() for task {self.task_id}: {refused.message}',
-                    data={'task_id': str(self.task_id)},
-                    cache=False,
-                )
-            case Ok():
-                pass
-        if self._result_fetched:
-            match self._cached_result:
-                case None:
-                    return self._error_result(
-                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
-                        message='Result cache is empty after fetch',
-                        data={'task_id': str(self.task_id)},
-                    )
-                case result:
-                    return result
-
-        if self._broker_mode and self._app:
-            broker = self._app.get_broker()
-            broker_result = await broker.get_raw_result_record_async(
-                self.task_id, timeout_ms,
-            )
-            return self._record_to_task_result(broker_result, timeout_ms)
-        else:
-            # For synchronous/immediate execution, result should already be set
-            match self._cached_result:
-                case None:
-                    return self._error_result(
-                        error_code=RetrievalCode.RESULT_NOT_AVAILABLE,
-                        message='Result not available - task may not have been executed',
-                        data={'task_id': str(self.task_id)},
-                    )
-                case result:
-                    return result
+        before = self._before_read('get_async', timeout_ms)
+        if before is not None:
+            return before
+        assert self._app is not None, 'a broker-backed handle reads through its app'
+        broker_result = await self._app.get_broker().get_raw_result_record_async(
+            self.task_id, timeout_ms,
+        )
+        return self._kept(
+            read_of_record(self.task_id, broker_result, self.ok_type, timeout_ms),
+        )
 
     def info(
         self,
@@ -925,11 +668,14 @@ class TaskHandle(Generic[T]):
 
     def set_immediate_result(
         self,
-        result: TaskResult[T, TaskError],
+        result: Result[T, TaskError],
     ) -> None:
-        """Internal method to set result for synchronous execution"""
-        self._cached_result = result
-        self._result_fetched = True
+        """Internal method to set the outcome of a synchronous execution."""
+        match result:
+            case Ok(ok_value=value):
+                self._cached_result = Ok(Succeeded(value))
+            case Err(err_value=error):
+                self._cached_result = Ok(Failed(error))
 
 
 class NodeFactory(Generic[P, T]):
@@ -1057,7 +803,7 @@ class _TaskFunctionMembers(Protocol[P, T]):
     """The members that a `def` task and an `async def` task share.
 
     `TaskFunction` and `AsyncTaskFunction` add the direct call. The generic
-    parameter T represents the success type in TaskResult[T, TaskError].
+    parameter T represents the success type in Result[T, TaskError].
 
     The sends, the schedules and the four retry methods raise
     `ForkedAfterCoreStart` (this process was forked without `exec` after
@@ -1159,7 +905,7 @@ class TaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
     Protocol extends the simple function signature to include the send and send_async methods,
     thus being able to be called with or without the @task decorator.
 
-    The generic parameter T represents the success type in TaskResult[T, TaskError].
+    The generic parameter T represents the success type in Result[T, TaskError].
     """
 
     @abstractmethod
@@ -1167,13 +913,13 @@ class TaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskResult[T, TaskError]: ...
+    ) -> Result[T, TaskError]: ...
 
 
 class AsyncTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
     """An `async def` function that gets a @task decorator applied to it.
 
-    A direct call returns a coroutine. Await it to get the `TaskResult`.
+    A direct call returns a coroutine. Await it to get the `Result`.
     The send methods and `node()` are the same as on `TaskFunction`.
     """
 
@@ -1182,7 +928,7 @@ class AsyncTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
         self,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]: ...
+    ) -> Coroutine[Any, Any, Result[T, TaskError]]: ...
 
 
 class RuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
@@ -1201,7 +947,7 @@ class RuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
         /,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> TaskResult[T, TaskError]: ...
+    ) -> Result[T, TaskError]: ...
 
 
 class AsyncRuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
@@ -1218,7 +964,7 @@ class AsyncRuntimeTaskFunction(_TaskFunctionMembers[P, T], Protocol[P, T]):
         /,
         *args: P.args,
         **kwargs: P.kwargs,
-    ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]: ...
+    ) -> Coroutine[Any, Any, Result[T, TaskError]]: ...
 
 
 # The runtime overloads come first. A function whose first parameter takes a
@@ -1239,28 +985,28 @@ class TaskDecorator(Protocol):
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError]]],
         /,
     ) -> AsyncRuntimeTaskFunction[P, T]: ...
 
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], TaskResult[T, TaskError]],
+        fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError]],
         /,
     ) -> RuntimeTaskFunction[P, T]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
         /,
     ) -> AsyncTaskFunction[P, T]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, TaskResult[T, TaskError]],
+        fn: Callable[P, Result[T, TaskError]],
         /,
     ) -> TaskFunction[P, T]: ...
 
@@ -1275,14 +1021,14 @@ class SharedAsyncTaskDecorator(Protocol):
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError]]],
         /,
     ) -> AsyncRuntimeTaskFunction[P, T]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+        fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
         /,
     ) -> AsyncTaskFunction[P, T]: ...
 
@@ -1297,14 +1043,14 @@ class SharedThreadTaskDecorator(Protocol):
     @overload
     def __call__(  # pyright: ignore[reportOverlappingOverload]
         self,
-        fn: Callable[Concatenate[TaskRuntime, P], TaskResult[T, TaskError]],
+        fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError]],
         /,
     ) -> RuntimeTaskFunction[P, T]: ...
 
     @overload
     def __call__(
         self,
-        fn: Callable[P, TaskResult[T, TaskError]],
+        fn: Callable[P, Result[T, TaskError]],
         /,
     ) -> TaskFunction[P, T]: ...
 
@@ -1417,13 +1163,13 @@ def _map_broker_err(
 def _returned_type_name(returned: object) -> str:
     """The type of a wrong return, for the refusal text.
 
-    A copy of `TaskResult` from a second import path gets its module, so that
-    the text does not read 'returned TaskResult, expected TaskResult'.
+    A copy of `Ok` or `Err` from a second import path gets its module, so that
+    the text does not read 'returned Ok, expected Result'.
     """
     if returned is None:
         return 'None'
     returned_type = type(returned)
-    if returned_type.__name__ == TaskResult.__name__:
+    if returned_type.__name__ in (Ok.__name__, Err.__name__):
         return f'{returned_type.__module__}.{returned_type.__qualname__}'
     return returned_type.__name__
 
@@ -1444,19 +1190,19 @@ class TaskBodyKind(Enum):
 class _SyncTaskBody(Generic[P, T]):
     """A task function defined with `def`."""
 
-    fn: Callable[P, TaskResult[T, TaskError]]
+    fn: Callable[P, Result[T, TaskError]]
 
 
 @dataclass(frozen=True, slots=True)
 class _AsyncTaskBody(Generic[P, T]):
     """A task function defined with `async def`."""
 
-    fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]]
+    fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]]
 
 
 def _task_body(
-    fn: Callable[P, TaskResult[T, TaskError]]
-    | Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    fn: Callable[P, Result[T, TaskError]]
+    | Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
 ) -> _SyncTaskBody[P, T] | _AsyncTaskBody[P, T]:
     """Sort a task function by the way it is called.
 
@@ -1466,14 +1212,14 @@ def _task_body(
     """
     if inspect.iscoroutinefunction(fn):
         return _AsyncTaskBody(
-            cast('Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]]', fn),
+            cast('Callable[P, Coroutine[Any, Any, Result[T, TaskError]]]', fn),
         )
-    return _SyncTaskBody(cast('Callable[P, TaskResult[T, TaskError]]', fn))
+    return _SyncTaskBody(cast('Callable[P, Result[T, TaskError]]', fn))
 
 
 def _task_body_kind(
-    fn: Callable[P, TaskResult[T, TaskError]]
-    | Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    fn: Callable[P, Result[T, TaskError]]
+    | Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
 ) -> TaskBodyKind:
     """The kind of a task function, as `_task_body` sorts it."""
     match _task_body(fn):
@@ -1728,17 +1474,17 @@ def _grace_range_help(
 
 
 def _sync_task_call(
-    body: Callable[P, TaskResult[T, TaskError]],
-    checked_result: Callable[[object], TaskResult[T, TaskError]],
-    exception_result: Callable[[BaseException], TaskResult[T, TaskError]],
-) -> Callable[P, TaskResult[T, TaskError]]:
+    body: Callable[P, Result[T, TaskError]],
+    checked_result: Callable[[object], Result[T, TaskError]],
+    exception_result: Callable[[BaseException], Result[T, TaskError]],
+) -> Callable[P, Result[T, TaskError]]:
     """The direct call of a `def` task: run the body, then check its return.
 
     An exception from the body or from the check becomes an error result.
     `KeyboardInterrupt` propagates, for worker shutdown.
     """
 
-    def call(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]:
+    def call(*args: P.args, **kwargs: P.kwargs) -> Result[T, TaskError]:
         try:
             return checked_result(body(*args, **kwargs))
         except KeyboardInterrupt:
@@ -1750,10 +1496,10 @@ def _sync_task_call(
 
 
 def _async_task_call(
-    body: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
-    checked_result: Callable[[object], TaskResult[T, TaskError]],
-    exception_result: Callable[[BaseException], TaskResult[T, TaskError]],
-) -> Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]]:
+    body: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
+    checked_result: Callable[[object], Result[T, TaskError]],
+    exception_result: Callable[[BaseException], Result[T, TaskError]],
+) -> Callable[P, Coroutine[Any, Any, Result[T, TaskError]]]:
     """The direct call of an `async def` task: a coroutine that awaits the
     body, then checks its return.
 
@@ -1765,7 +1511,7 @@ def _async_task_call(
     `GeneratorExit` propagates, so `close()` on a suspended call ends it.
     """
 
-    async def call(*args: P.args, **kwargs: P.kwargs) -> TaskResult[T, TaskError]:
+    async def call(*args: P.args, **kwargs: P.kwargs) -> Result[T, TaskError]:
         try:
             return checked_result(await body(*args, **kwargs))
         except (KeyboardInterrupt, GeneratorExit):
@@ -1781,9 +1527,9 @@ def _async_task_call(
 
 
 async def await_task_call_in_worker(
-    called: Coroutine[Any, Any, TaskResult[T, TaskError]],
-    map_exception: Callable[[BaseException], TaskResult[T, TaskError]],
-) -> TaskResult[T, TaskError]:
+    called: Coroutine[Any, Any, Result[T, TaskError]],
+    map_exception: Callable[[BaseException], Result[T, TaskError]],
+) -> Result[T, TaskError]:
     """Await the direct call of an `async def` task inside a worker child.
 
     `called` is the coroutine of the direct call, and `map_exception` the
@@ -1820,7 +1566,7 @@ def _cancel_requested() -> bool:
 
 @overload
 def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
-    fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    fn: Callable[Concatenate[TaskRuntime, P], Coroutine[Any, Any, Result[T, TaskError]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1833,7 +1579,7 @@ def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
 
 @overload
 def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
-    fn: Callable[Concatenate[TaskRuntime, P], TaskResult[T, TaskError]],
+    fn: Callable[Concatenate[TaskRuntime, P], Result[T, TaskError]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1846,7 +1592,7 @@ def create_task_wrapper(  # pyright: ignore[reportOverlappingOverload]
 
 @overload
 def create_task_wrapper(
-    fn: Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    fn: Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1859,7 +1605,7 @@ def create_task_wrapper(
 
 @overload
 def create_task_wrapper(
-    fn: Callable[P, TaskResult[T, TaskError]],
+    fn: Callable[P, Result[T, TaskError]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1871,8 +1617,8 @@ def create_task_wrapper(
 
 
 def create_task_wrapper(
-    fn: Callable[P, TaskResult[T, TaskError]]
-    | Callable[P, Coroutine[Any, Any, TaskResult[T, TaskError]]],
+    fn: Callable[P, Result[T, TaskError]]
+    | Callable[P, Coroutine[Any, Any, Result[T, TaskError]]],
     app: 'Horsies',
     task_name: str,
     task_options: Optional['TaskOptions'] = None,
@@ -1923,9 +1669,9 @@ def create_task_wrapper(
             location=fn_location,
             notes=[
                 f"function '{fn.__name__}' is defined with `async def` and uses `yield`",
-                'a task returns one TaskResult',
+                'a task returns one Result',
             ],
-            help_text='collect the items and return them in one TaskResult',
+            help_text='collect the items and return them in one Ok(...)',
         )
 
     # A generator function returns a generator, so the body never runs and
@@ -1937,9 +1683,9 @@ def create_task_wrapper(
             location=fn_location,
             notes=[
                 f"function '{fn.__name__}' uses `yield`",
-                'a task returns one TaskResult',
+                'a task returns one Result',
             ],
-            help_text='collect the items and return them in one TaskResult',
+            help_text='collect the items and return them in one Ok(...)',
         )
 
     # The execution class must fit the function kind, which is known only
@@ -1958,7 +1704,7 @@ def create_task_wrapper(
 
     hints = get_type_hints(fn, include_extras=True)
 
-    # Validate that return type is TaskResult[*, TaskError]
+    # Validate that return type is Result[*, TaskError]
     return_hint = hints.get('return')
     if return_hint is None:
         raise TaskDefinitionError(
@@ -1966,36 +1712,27 @@ def create_task_wrapper(
             code=ErrorCode.TASK_NO_RETURN_TYPE,
             location=fn_location,
             notes=[f"function '{fn.__name__}' has no return type annotation"],
-            help_text='add return type annotation: `-> TaskResult[YourType, TaskError]`',
+            help_text='add return type annotation: `-> Result[YourType, TaskError]`',
         )
 
-    if get_origin(return_hint) is not TaskResult:
-        raise TaskDefinitionError(
-            message='task function must return TaskResult',
-            code=ErrorCode.TASK_INVALID_RETURN_TYPE,
-            location=fn_location,
-            notes=[
-                f"function '{fn.__name__}' returns `{return_hint}`",
-                'tasks must return TaskResult[T, TaskError]',
-            ],
-            help_text='change return type to `-> TaskResult[YourType, TaskError]`',
-        )
-
-    # Extract T and E from TaskResult[T, E] for runtime validation
-    type_args = get_args(return_hint)
-    if len(type_args) != 2:
-        raise TaskDefinitionError(
-            message='TaskResult must have exactly 2 type parameters',
-            code=ErrorCode.TASK_INVALID_RETURN_TYPE,
-            location=fn_location,
-            notes=[
-                f"function '{fn.__name__}' returns `{return_hint}`",
-                'expected TaskResult[T, E] with exactly 2 type parameters',
-            ],
-            help_text='use `-> TaskResult[YourType, TaskError]`',
-        )
-
-    ok_type, err_type = type_args
+    # Extract T and E from Result[T, E] (the union Ok[T] | Err[E]) for
+    # runtime validation
+    match result_type_arguments(return_hint):
+        case NotAResultAnnotation():
+            raise TaskDefinitionError(
+                message='task function must return Result',
+                code=ErrorCode.TASK_INVALID_RETURN_TYPE,
+                location=fn_location,
+                notes=[
+                    f"function '{fn.__name__}' returns `{return_hint}`",
+                    'tasks must return Result[T, TaskError]',
+                ],
+                help_text='change return type to `-> Result[YourType, TaskError]`',
+            )
+        case ResultTypeArguments(ok_type=ok_type, err_type=err_type):
+            pass
+        case _ as unreachable:
+            assert_never(unreachable)
 
     # Strict signature validation per design-doc §2: every param / return
     # annotation must use a type from the closed allow list. Runs AFTER the
@@ -2019,41 +1756,41 @@ def create_task_wrapper(
     err_type_adapter: TypeAdapter[Any] = TypeAdapter(err_type)
 
     def return_type_mismatch(
-        result: TaskResult[T, TaskError],
+        variant: Literal['ok', 'err'],
+        returned: object,
         summary: str,
         entries: list[Json],
         entry_count: int,
-    ) -> TaskResult[T, TaskError]:
+    ) -> Result[T, TaskError]:
         """The refusal of a returned value that does not validate.
 
         The text and the data name types and failing fields, never the value.
         """
-        variant = 'ok' if result.is_ok() else 'err'
-        expected_type = ok_type if result.is_ok() else err_type
-        actual_type = type(result.ok if result.is_ok() else result.err).__name__
-        return TaskResult(
-            err=TaskError(
-                error_code=ContractCode.RETURN_TYPE_MISMATCH,
-                message=(
-                    f'Task {fn.__name__} returned TaskResult({variant}=<{actual_type}>) '
-                    f'but expected type {expected_type}: {summary}'
-                ),
-                data={
-                    'variant': variant,
-                    'expected_type': str(expected_type),
-                    'actual_type': actual_type,
-                    'validation_errors': entries,
-                    'validation_error_count': entry_count,
-                },
-            )
-        )
+        expected_type = ok_type if variant == 'ok' else err_type
+        actual_type = type(returned).__name__
+        wrapper = 'Ok' if variant == 'ok' else 'Err'
+        return Err(TaskError(
+            error_code=ContractCode.RETURN_TYPE_MISMATCH,
+            message=(
+                f'Task {fn.__name__} returned {wrapper}(<{actual_type}>) '
+                f'but expected type {expected_type}: {summary}'
+            ),
+            data={
+                'variant': variant,
+                'expected_type': str(expected_type),
+                'actual_type': actual_type,
+                'validation_errors': entries,
+                'validation_error_count': entry_count,
+            },
+        ))
 
-    def not_a_task_result(returned: object) -> TaskResult[T, TaskError]:
-        """The refusal of a return that is not a `TaskResult`.
+    def not_a_result(returned: object) -> Result[T, TaskError]:
+        """The refusal of a return that is not an `Ok` or an `Err`.
 
         The text and the data name types, never the value. A returned
         `TaskError` also names its code, because the reader otherwise sees
-        only the type.
+        only the type. `variant` keeps its stored value `not_a_task_result`,
+        which the other clients write too.
         """
         actual_type = _returned_type_name(returned)
         code_text = (
@@ -2061,56 +1798,51 @@ def create_task_wrapper(
             if isinstance(returned, TaskError)
             else ''
         )
-        return TaskResult(
-            err=TaskError(
-                error_code=ContractCode.RETURN_TYPE_MISMATCH,
-                message=(
-                    f'Task {fn.__name__} returned {actual_type}{code_text} '
-                    f'but must return TaskResult[{ok_type}, {err_type}]'
-                ),
-                data={
-                    'variant': 'not_a_task_result',
-                    'expected_type': f'TaskResult[{ok_type}, {err_type}]',
-                    'actual_type': actual_type,
-                    'validation_errors': [],
-                    'validation_error_count': 0,
-                },
-            )
-        )
+        return Err(TaskError(
+            error_code=ContractCode.RETURN_TYPE_MISMATCH,
+            message=(
+                f'Task {fn.__name__} returned {actual_type}{code_text} '
+                f'but must return Result[{ok_type}, {err_type}]'
+            ),
+            data={
+                'variant': 'not_a_task_result',
+                'expected_type': f'Result[{ok_type}, {err_type}]',
+                'actual_type': actual_type,
+                'validation_errors': [],
+                'validation_error_count': 0,
+            },
+        ))
 
-    def checked_result(returned: object) -> TaskResult[T, TaskError]:
-        """Check one return of the task body against the declared types.
+    def validated_return(
+        variant: Literal['ok', 'err'],
+        value: object,
+        returned: Ok[object] | Err[object],
+    ) -> Result[T, TaskError]:
+        """Validate one returned value against its declared type.
 
-        A return that is not a `TaskResult`, or that does not fit the types,
-        becomes a RETURN_TYPE_MISMATCH result. A `def` task and an
-        `async def` task share this check.
+        The ok value is validated against T. A validator can transform it, so
+        a transformed value is returned in a new `Ok`: an in-process caller
+        then sees the value that a wire consumer decodes. Otherwise, and for
+        an err value validated against E, `returned` comes back as it is.
         """
-        if not isinstance(returned, TaskResult):
-            return not_a_task_result(returned)
-        result = cast('TaskResult[T, TaskError]', returned)
-
-        # Runtime type validation: validate result against declared types
         try:
             try:
-                if result.is_ok():
-                    # Validate the ok value against T. A validator can
-                    # transform it, so return the validated value: an
-                    # in-process caller then sees the value that a wire
-                    # consumer decodes.
-                    validated_ok = ok_type_adapter.validate_python(
-                        result.ok,
-                        strict=True,
-                        extra='forbid',
-                    )
-                    if validated_ok is not result.ok:
-                        result = TaskResult(ok=validated_ok)
-                else:
-                    # Validate err value against E
-                    err_type_adapter.validate_python(result.err)
+                match variant:
+                    case 'ok':
+                        validated_ok = ok_type_adapter.validate_python(
+                            value, strict=True, extra='forbid',
+                        )
+                        if validated_ok is not value:
+                            return Ok(cast('T', validated_ok))
+                        return cast('Result[T, TaskError]', returned)
+                    case 'err':
+                        _ = err_type_adapter.validate_python(value)
+                        return cast('Result[T, TaskError]', returned)
             except ValidationError as ve:
                 # Type validation failed - return error result.
                 return return_type_mismatch(
-                    result,
+                    variant,
+                    value,
                     validation_summary(ve),
                     validation_error_entries(ve),
                     ve.error_count(),
@@ -2124,15 +1856,29 @@ def create_task_wrapper(
             # UnicodeEncodeError is an unhandled exception.
             text = lone_surrogate_text('a validation error', ())
             return return_type_mismatch(
-                result,
+                variant,
+                value,
                 text,
                 [{'loc': [], 'msg': text, 'type': 'lone_surrogate'}],
                 1,
             )
 
-        return result
+    def checked_result(returned: object) -> Result[T, TaskError]:
+        """Check one return of the task body against the declared types.
 
-    def exception_result(exc: BaseException) -> TaskResult[T, TaskError]:
+        A return that is not an `Ok` or an `Err`, or that does not fit the
+        types, becomes a RETURN_TYPE_MISMATCH error. A `def` task and an
+        `async def` task share this check.
+        """
+        match returned:
+            case Ok(ok_value=value):
+                return validated_return('ok', value, cast('Ok[object]', returned))
+            case Err(err_value=error):
+                return validated_return('err', error, cast('Err[object]', returned))
+            case _:
+                return not_a_result(returned)
+
+    def exception_result(exc: BaseException) -> Result[T, TaskError]:
         """The error result of an exception from the task body or its check.
 
         A `def` task and an `async def` task share this mapping: the
@@ -2141,14 +1887,12 @@ def create_task_wrapper(
         """
         match exc:
             case WorkflowContextMissingIdError():
-                return TaskResult(
-                    err=TaskError(
-                        exception=exc,
-                        error_code=ContractCode.WORKFLOW_CTX_MISSING_ID,
-                        message=str(exc),
-                        data={'task_name': task_name},
-                    )
-                )
+                return Err(TaskError(
+                    exception=exc,
+                    error_code=ContractCode.WORKFLOW_CTX_MISSING_ID,
+                    message=str(exc),
+                    data={'task_name': task_name},
+                ))
             case _:
                 error_code = resolve_exception_error_code(
                     exc=exc,
@@ -2162,14 +1906,12 @@ def create_task_wrapper(
                 resolved_code: BuiltInTaskCode | str = BUILTIN_CODE_REGISTRY.get(
                     error_code, error_code,
                 )
-                return TaskResult(
-                    err=TaskError(
-                        exception=exc,
-                        error_code=resolved_code,
-                        message=f'Unhandled exception in task {fn.__name__}: {type(exc).__name__}: {exception_text(exc)}',
-                        data={'exception_type': type(exc).__name__},
-                    )
-                )
+                return Err(TaskError(
+                    exception=exc,
+                    error_code=resolved_code,
+                    message=f'Unhandled exception in task {fn.__name__}: {type(exc).__name__}: {exception_text(exc)}',
+                    data={'exception_type': type(exc).__name__},
+                ))
 
     # Pre-serialize task_options once so the send/send_async/schedule closures
     # below can reuse the JSON string instead of re-serializing on every call.
@@ -3253,7 +2995,7 @@ def create_task_wrapper(
             # instead of TaskFunctionImpl.__call__'s (*args, **kwargs). fn is
             # guaranteed unwrapped (pre-decorated callables are rejected above).
             self.__wrapped__ = fn
-            # Expose declared TaskResult ok-type for workflow args_from type checks.
+            # Expose the declared ok type for workflow args_from type checks.
             self.task_ok_type = ok_type
             # Reuse the value already computed in the outer scope
             self.task_options_json: str | None = _pre_serialized_options
@@ -3388,7 +3130,7 @@ def create_task_wrapper(
                     self,
                     *args: P.args,
                     **kwargs: P.kwargs,
-                ) -> TaskResult[T, TaskError]:
+                ) -> Result[T, TaskError]:
                     return sync_call(*args, **kwargs)
 
             return SyncTaskFunctionImpl(sync_call)
@@ -3402,7 +3144,7 @@ def create_task_wrapper(
                     self,
                     *args: P.args,
                     **kwargs: P.kwargs,
-                ) -> Coroutine[Any, Any, TaskResult[T, TaskError]]:
+                ) -> Coroutine[Any, Any, Result[T, TaskError]]:
                     return async_call(*args, **kwargs)
 
             return AsyncTaskFunctionImpl(async_call)

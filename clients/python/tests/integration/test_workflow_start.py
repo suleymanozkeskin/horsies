@@ -15,7 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     TaskNode,
     WorkflowSpec,
@@ -28,7 +29,7 @@ from horsies.core.workflows.start_types import (
     WorkflowStartErrorCode,
     WorkflowStartIdConflict,
 )
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 
 from .conftest import (
     finish_task,
@@ -325,7 +326,7 @@ class TestWorkflowStart:
         """args_from mapping stored correctly."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'args_from_a')
-        # args_from injects TaskResult[...] so the receiver must accept TaskResult.
+        # args_from injects TaskOutcome[...] so the receiver must accept TaskOutcome.
         task_b = make_args_receiver_task(app, 'args_from_b')
 
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
@@ -494,7 +495,7 @@ class TestWorkflowStart:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
         await session.commit()
 
         # Verify B task row has retry settings
@@ -916,8 +917,8 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='node_builder_task')
-        def compute(*, value: int, multiplier: float = 1.0) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=int(value * multiplier))
+        def compute(*, value: int, multiplier: float = 1.0) -> Result[int, TaskError]:
+            return Ok(int(value * multiplier))
 
         # Use .node() to create TaskNode
         node_a = compute.node(node_id='compute_a')(value=10, multiplier=2.5)
@@ -963,12 +964,12 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='node_builder_root')
-        def root_task(*, x: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=x * 2)
+        def root_task(*, x: int) -> Result[int, TaskError]:
+            return Ok(x * 2)
 
         @app.task(task_name='node_builder_child')
-        def child_task(*, y: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=y + 1)
+        def child_task(*, y: int) -> Result[int, TaskError]:
+            return Ok(y + 1)
 
         # Create nodes using .node() with dependencies
         root = root_task.node(node_id='root')(x=5)
@@ -1016,8 +1017,8 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='node_opts_task')
-        def opts_task(*, val: str) -> TaskResult[str, TaskError]:
-            return TaskResult(ok=val.upper())
+        def opts_task(*, val: str) -> Result[str, TaskError]:
+            return Ok(val.upper())
 
         # Create node with various options
         node_a = opts_task.node(
@@ -1054,14 +1055,18 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='nb_producer')
-        def producer(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def producer(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         @app.task(task_name='nb_consumer')
         def consumer(
-            *, upstream: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=upstream.unwrap() + 1)
+            *, upstream: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            match upstream:
+                case Succeeded(value=value):
+                    return Ok(value + 1)
+                case Failed(error=error):
+                    return Err(error)
 
         root = producer.node(node_id='prod')(value=42)
         # upstream is provided at runtime via args_from, not at build time
@@ -1100,8 +1105,8 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='nb_ctx_src')
-        def ctx_source(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def ctx_source(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         ctx_receiver = make_ctx_receiver_task(app, 'nb_ctx_recv')
 
@@ -1141,8 +1146,8 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='nb_good_until')
-        def timed_task(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def timed_task(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         deadline = datetime(2099, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
         node = timed_task.node(
@@ -1179,14 +1184,18 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='fn_producer')
-        def producer(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def producer(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         @app.task(task_name='fn_consumer')
         def consumer(
-            *, upstream: TaskResult[int, TaskError],
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=upstream.unwrap() + 1)
+            *, upstream: TaskOutcome[int, TaskError],
+        ) -> Result[int, TaskError]:
+            match upstream:
+                case Succeeded(value=value):
+                    return Ok(value + 1)
+                case Failed(error=error):
+                    return Err(error)
 
         prod = producer.node(node_id='fn_prod')(value=42)
         cons = consumer.node(node_id='fn_cons')(upstream=from_node(prod))
@@ -1224,15 +1233,19 @@ class TestNodeBuilder:
         session, broker, app = setup
 
         @app.task(task_name='fn_mix_producer')
-        def producer(*, value: int) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value)
+        def producer(*, value: int) -> Result[int, TaskError]:
+            return Ok(value)
 
         @app.task(task_name='fn_mix_consumer')
         def consumer(
-            *, upstream: TaskResult[int, TaskError],
+            *, upstream: TaskOutcome[int, TaskError],
             multiplier: int = 1,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=upstream.unwrap() * multiplier)
+        ) -> Result[int, TaskError]:
+            match upstream:
+                case Succeeded(value=value):
+                    return Ok(value * multiplier)
+                case Failed(error=error):
+                    return Err(error)
 
         prod = producer.node(node_id='mix_prod')(value=10)
         cons = consumer.node(node_id='mix_cons')(

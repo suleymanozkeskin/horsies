@@ -5,8 +5,8 @@ the `*` of its keyword-only parameters:
 
 ```python
 @app.task('read_token')
-def read_token(runtime: TaskRuntime, *, order_id: str) -> TaskResult[FencingToken, TaskError]:
-    return TaskResult(ok=runtime.fencing_token)
+def read_token(runtime: TaskRuntime, *, order_id: str) -> Result[FencingToken, TaskError]:
+    return Ok(runtime.fencing_token)
 ```
 
 The worker builds one runtime for each run and passes it as the first

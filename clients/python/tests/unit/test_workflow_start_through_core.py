@@ -27,7 +27,7 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import (
     OnError,
     SubWorkflowNode,
@@ -38,7 +38,7 @@ from horsies.core.models.workflow import (
     WorkflowSpec,
 )
 from horsies.core.codec.json_io import SerializationError
-from horsies.core.types.result import Err, Ok, is_err, is_ok
+from horsies.core.types.result import Err, Ok, Result, is_err, is_ok
 from horsies.core.workflows.lifecycle import start_workflow_async
 from horsies.core.workflows.registry import register_workflow_definition
 from horsies.core.workflows.spec_data import workflow_spec_data, workflow_spec_json
@@ -65,8 +65,8 @@ SENT_AT = datetime(2026, 11, 17, 12, 0, tzinfo=timezone.utc)
 
 
 @APP.task(task_name='start_core.value')
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 class StartCoreChild(WorkflowDefinition[int]):

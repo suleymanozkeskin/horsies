@@ -30,7 +30,8 @@ from dataclasses import dataclass
 
 import psutil
 
-from horsies.core.types.result import is_err
+from horsies.core.models.outcome import Succeeded
+from horsies.core.types.result import Ok, is_err
 from tests.spike.mem_accum.repro_app import (
     COUNT_N,
     MEMORY_THRESHOLD_MB,
@@ -58,8 +59,12 @@ class Result:
 def _wait_ready(deadline: float) -> bool:
     while time.monotonic() < deadline:
         r = healthcheck.send()
-        if not is_err(r) and r.ok_value.get(timeout_ms=2000).is_ok():
-            return True
+        if not is_err(r):
+            match r.ok_value.get(timeout_ms=2000):
+                case Ok(Succeeded()):
+                    return True
+                case _:
+                    pass
         time.sleep(0.5)
     return False
 
@@ -116,10 +121,12 @@ def _run_mode(mode: str) -> Result:
         pids: set[int] = set()
         completed = 0
         for handle in handles:
-            result = handle.get(timeout_ms=GET_TIMEOUT_MS)
-            if result.is_ok():
-                pids.add(result.unwrap())
-                completed += 1
+            match handle.get(timeout_ms=GET_TIMEOUT_MS):
+                case Ok(Succeeded(pid)):
+                    pids.add(pid)
+                    completed += 1
+                case _:
+                    pass
         elapsed = time.monotonic() - started
     finally:
         stop.set()

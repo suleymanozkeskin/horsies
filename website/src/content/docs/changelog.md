@@ -57,6 +57,40 @@ there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking (Python): `Result` for task bodies, `ReadResult` for reads,
+  `TaskOutcome` for node inputs.** `TaskResult` is removed, with no alias.
+  - A task body returns `Result[T, TaskError]`: `Ok(value)` or
+    `Err(TaskError(...))`. The decorator reads `T` from the `Ok` member and
+    refuses any other return annotation (`HRS-101`, `HRS-105`). A direct
+    call returns the same `Result`.
+  - `TaskHandle.get`, `WorkflowHandle.get`, `WorkflowHandle.result_for`,
+    `Horsies.get_result` and their `*_async` forms return
+    `ReadResult[T, TaskError]` =
+    `Ok[Succeeded[T]] | Ok[Failed[TaskError]] | Err[ReadError]`. The
+    outcome says how the task ended; `Err` says that the read gave no
+    outcome. Match all three in one `match`.
+  - A read failure is a `ReadError`, apart from the task error: a closed
+    union of one frozen class per code (`WaitTimeout`, `TaskNotFound`,
+    `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`,
+    `WaitInsideTask`, `AsyncContext`, `InvalidInput`,
+    `ResultDeserializationError`, `BrokerError`, `NoTypeAvailable`,
+    `WorkflowCtxMissingId`). Each class has `code` and `message`;
+    `BrokerError` also has `retryable` and `exception`. `RetrievalCode`
+    values no longer arrive inside a `TaskError` from a read.
+    `Horsies.get_result` gives these classes in place of the
+    `BrokerOperationError` variants.
+  - An `args_from` parameter is annotated `TaskOutcome[T, TaskError]` (or
+    `| None`) and gets `Succeeded(value)` or `Failed(task_error)`.
+    `WorkflowContext.result_for` returns a `TaskOutcome`.
+    `WorkflowHandle.results()`, `WorkflowTaskInfo.result`,
+    `WorkflowTerminalResults` and `TaskInfo.decoded_result` hold
+    `TaskOutcome` values.
+  - Every read checks the wait limit first: a `timeout_ms` that is not
+    `None` or an int from 0 to 4,294,967,295 gives `InvalidInput`
+    (`BrokerInvalidInput` for `get_raw_result` and
+    `PostgresBroker.get_raw_result_record`) before `WaitInsideTask` and
+    `AsyncContext`, as in the Rust and TypeScript clients.
+  - The stored result envelope and the stored codes do not change.
 - **Codegen model: the call forms that give a code.**
   `horsies_core::catalog::CatalogMember` has a new field
   `forms: CallForms`, `AnyForm` or `BlockingFormOnly`. The `CodeCatalog`

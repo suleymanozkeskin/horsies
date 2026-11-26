@@ -14,8 +14,8 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.task_send_types import TaskSendSuppressed
-from horsies.core.models.tasks import TaskError, TaskResult
-from horsies.core.types.result import Err, is_err
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Err, Ok, Result, is_err
 from horsies.core.brokers.postgres import PostgresConfig
 
 
@@ -60,8 +60,8 @@ def test_suppressed_send_names_the_variable(
     app = _build_app()
 
     @app.task('suppressed_probe')
-    def suppressed_probe(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def suppressed_probe(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     monkeypatch.setenv('HORSIES_SUPPRESS_SENDS', '1')
     sent = suppressed_probe.send(value=1)

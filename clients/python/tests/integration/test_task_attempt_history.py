@@ -23,9 +23,8 @@ from horsies.core.codec import JsonValue, encode_task_result
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.models.tasks import (
     OperationalErrorCode,
-    TaskResult,
 )
-from horsies.core.types.result import is_err, is_ok
+from horsies.core.types.result import Ok, is_err, is_ok
 from tests.integration.terminal_writes import complete_plain_task
 from tests.integration.conftest import compute_test_command_fingerprint
 from tests.integration.history_seeding import read_attempts
@@ -195,7 +194,7 @@ async def _get_task_error_code(
 
 def _serialize_ok(value: object) -> str:
     """Build the strict ``__h_task_result__`` envelope for a seeded ok value."""
-    envelope = encode_task_result(TaskResult(ok=value), JsonValue)
+    envelope = encode_task_result(Ok(value), JsonValue)
     r = dumps_json(envelope)
     assert not is_err(r)
     return r.ok_value

@@ -19,7 +19,8 @@ from typing import Any, assert_never
 
 from horsies import _core as core
 from horsies.core.logging import get_logger
-from horsies.core.models.tasks import Execution, TaskError, TaskResult
+from horsies.core.models.tasks import Execution, TaskError
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.telemetry.attempt_span import BodyEndOrder, run_in_attempt_span
 from horsies.core.worker.child_frames import ThreadSeatWork, stored_refusal_of
 from horsies.core.worker.run_return import (
@@ -78,14 +79,14 @@ class PostgresThreadSeats:
 
 
 type _TaskCall = (
-    TaskResult[Any, TaskError] | Coroutine[Any, Any, TaskResult[Any, TaskError]]
+    Result[Any, TaskError] | Coroutine[Any, Any, Result[Any, TaskError]]
 )
 """What a call of a task wrapper returns: a result, or a coroutine of one."""
 
 
 def _thread_call_result(
     task_name: str, called: _TaskCall
-) -> TaskResult[Any, TaskError]:
+) -> Result[Any, TaskError]:
     """The result of a call of a ``def`` task wrapper.
 
     A thread seat runs only ``def`` tasks, whose wrapper returns the result;
@@ -93,7 +94,7 @@ def _thread_call_result(
     ``AssertionError``.
     """
     match called:
-        case TaskResult():
+        case Ok() | Err():
             return called
         case _:
             raise AssertionError(

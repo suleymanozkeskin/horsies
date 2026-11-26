@@ -31,7 +31,9 @@ from horsies import (
     AppConfig,
     IsolatedChildren,
     PostgresConfig,
-    TaskResult,
+    Ok,
+    Err,
+    Result,
     TaskError,
     JsonValue,
     WorkerProfile,
@@ -57,17 +59,17 @@ Add task definitions to `instance.py`:
 
 ```python
 @app.task("add_numbers")
-def add_numbers(*, a: int, b: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=a + b)
+def add_numbers(*, a: int, b: int) -> Result[int, TaskError]:
+    return Ok(a + b)
 
 @app.task("process_data")
-def process_data(*, data: dict[str, JsonValue]) -> TaskResult[str, TaskError]:
+def process_data(*, data: dict[str, JsonValue]) -> Result[str, TaskError]:
     if not data:
-        return TaskResult(err=TaskError(
+        return Err(TaskError(
             error_code="EMPTY_DATA",
             message="Data cannot be empty",
         ))
-    return TaskResult(ok=f"Processed {len(data)} items")
+    return Ok(f"Processed {len(data)} items")
 
 # Register task modules for worker discovery
 app.discover_tasks(["instance"])
@@ -75,9 +77,9 @@ app.discover_tasks(["instance"])
 
 Requirements:
 
-- Every task returns `TaskResult[T, TaskError]`
-- `TaskResult(ok=value)` for success
-- `TaskResult(err=TaskError(...))` for domain errors
+- Every task returns `Result[T, TaskError]`
+- `Ok(value)` for success
+- `Err(TaskError(...))` for domain errors
 - `app.discover_tasks([...])` registers modules for workers
 
 ## 3. Send Tasks
@@ -86,17 +88,19 @@ Create `producer.py`:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Ok, Err
+from horsies import Ok, Err, Succeeded, Failed
 from instance import app, add_numbers, process_data
 
 # Send and wait for result
 match add_numbers.send(a=5, b=3):
     case Ok(handle):
-        result = handle.get()
-        if result.is_ok():
-            do_something(result.ok_value)
-        else:
-            handle_error(result.err_value)
+        match handle.get():
+            case Ok(Succeeded(total)):
+                do_something(total)
+            case Ok(Failed(task_error)):
+                handle_error(task_error)
+            case Err(read_error):
+                print(f"Read failed: {read_error.code} - {read_error.message}")
     case Err(send_err):
         print(f"Send failed: {send_err.code} - {send_err.message}")
 
@@ -121,17 +125,24 @@ The worker starts the 8 children of the `default` profile, connects to PostgreSQ
 For async frameworks (FastAPI, etc.):
 
 ```python
-from horsies import Ok, Err
+from horsies import Ok, Err, Succeeded, Failed
 from instance import add_numbers
 
 async def my_endpoint():
     match await add_numbers.send_async(a=10, b=20):
         case Ok(handle):
-            result = await handle.get_async(timeout_ms=10000)
-            return {"result": result.ok_value if result.is_ok() else None}
+            match await handle.get_async(timeout_ms=10000):
+                case Ok(Succeeded(total)):
+                    return {"result": total}
+                case Ok(Failed(task_error)):
+                    return {"error": task_error.message}
+                case Err(read_error):
+                    return {"error": read_error.message}
         case Err(send_err):
             return {"error": send_err.message}
 ```
+
+`get()` and `get_async()` return `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error of the task. `Err(read_error)` means the read gave no outcome, for example `WaitTimeout`.
 
 These async APIs are producer-side I/O helpers; task execution still happens in worker processes.
 

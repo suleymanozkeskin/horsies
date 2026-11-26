@@ -14,7 +14,8 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode, CustomQueueConfig
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import TaskNode
 
 from tests.e2e.helpers.env import e2e_database_url
@@ -64,26 +65,26 @@ def _workflow(*, name: str, tasks: list[TaskNode], **kwargs: object) -> object:
 
 
 @app.task(task_name='e2e_recovery_healthcheck', queue_name='default')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
 @app.task(task_name='e2e_recovery_slow', queue_name='default')
-def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
+def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Long-running task for crash-while-RUNNING tests."""
     import time
 
     time.sleep(duration_ms / 1000)
-    return TaskResult(ok=f'slept_{duration_ms}')
+    return Ok(f'slept_{duration_ms}')
 
 
 @app.task(task_name='e2e_recovery_wf_step', queue_name='default')
-def recovery_wf_step(*, step: str, delay_ms: int) -> TaskResult[str, TaskError]:
+def recovery_wf_step(*, step: str, delay_ms: int) -> Result[str, TaskError]:
     """Workflow step with configurable delay for crash-recovery tests."""
     import time
 
     time.sleep(delay_ms / 1000)
-    return TaskResult(ok=f'step_{step}_done')
+    return Ok(f'step_{step}_done')
 
 
 # ---------------------------------------------------------------------------

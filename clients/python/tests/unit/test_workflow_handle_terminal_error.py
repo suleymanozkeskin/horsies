@@ -19,12 +19,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import horsies._core as core
+from horsies.core.models.outcome import Failed, ReadResult, ResultDeserializationError
 from horsies.core.models.tasks import (
-    OperationalErrorCode,
     OutcomeCode,
+    TaskError,
 )
 from horsies.core.models.workflow.enums import WorkflowStatus
 from horsies.core.models.workflow.handle import WorkflowHandle
+from horsies.core.types.result import Err, Ok
 
 pytestmark = [pytest.mark.unit]
 
@@ -54,6 +56,24 @@ def _handle(status: WorkflowStatus, error_row: Any) -> WorkflowHandle[Any]:
     return WorkflowHandle(workflow_id=uuid.UUID(WORKFLOW_ID), broker=broker)
 
 
+def _failed_error(result: ReadResult[Any, TaskError]) -> TaskError:
+    """The task error of a read that gave a failed outcome."""
+    match result:
+        case Ok(Failed(task_error)):
+            return task_error
+        case _:
+            pytest.fail(f'expected a failed outcome, got {result!r}')
+
+
+def _unreadable_message(result: ReadResult[Any, TaskError]) -> str:
+    """The message of a read that gave ``ResultDeserializationError``."""
+    match result:
+        case Err(ResultDeserializationError(message=message)):
+            return message
+        case _:
+            pytest.fail(f'expected ResultDeserializationError, got {result!r}')
+
+
 class TestNoStoredError:
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -76,7 +96,7 @@ class TestNoStoredError:
 
         result = await handle.get_async(timeout_ms=0)
 
-        error = result.unwrap_err()
+        error = _failed_error(result)
         assert error.error_code is code
         assert error.message == f'Workflow {status.value.lower()}'
 
@@ -92,12 +112,9 @@ class TestCompletedWithoutStoredResult:
 
         result = await handle.get_async(timeout_ms=0)
 
-        error = result.unwrap_err()
-        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert error.message == (
+        assert _unreadable_message(result) == (
             f'Workflow {WORKFLOW_ID} is COMPLETED and its stored result is NULL'
         )
-        assert error.data == {'workflow_id': WORKFLOW_ID}
 
     @pytest.mark.asyncio
     async def test_an_empty_result_is_a_deserialization_error(self) -> None:
@@ -108,9 +125,7 @@ class TestCompletedWithoutStoredResult:
 
         result = await handle.get_async(timeout_ms=0)
 
-        error = result.unwrap_err()
-        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert error.message == (
+        assert _unreadable_message(result) == (
             'Workflow result JSON corrupt: JSON parse failed: the text is empty'
         )
 
@@ -127,12 +142,9 @@ class TestEmptyStoredError:
 
         result = await handle.get_async(timeout_ms=0)
 
-        error = result.unwrap_err()
-        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert error.message == (
+        assert _unreadable_message(result) == (
             'Workflow error payload corrupt: JSON parse failed: the text is empty'
         )
-        assert error.data == {'workflow_id': WORKFLOW_ID}
 
 
 class TestLegacyExpiryText:
@@ -145,7 +157,7 @@ class TestLegacyExpiryText:
 
         result = await handle.get_async(timeout_ms=0)
 
-        error = result.unwrap_err()
+        error = _failed_error(result)
         assert error.error_code is OutcomeCode.WORKFLOW_EXPIRED
         assert error.message == LEGACY_EXPIRY_TEXT
 
@@ -174,12 +186,9 @@ class TestStoredErrorThatIsNotAnObject:
 
         result = await handle.get_async(timeout_ms=0)
 
-        error = result.unwrap_err()
-        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert error.message == (
+        assert _unreadable_message(result) == (
             f'Workflow error payload is not a JSON object: got {type_name}'
         )
-        assert error.data == {'workflow_id': WORKFLOW_ID}
 
 
 class TestStoredErrorObjectThatDoesNotDecode:
@@ -205,12 +214,9 @@ class TestStoredErrorObjectThatDoesNotDecode:
 
         result = await handle.get_async(timeout_ms=0)
 
-        error = result.unwrap_err()
-        assert error.error_code is OperationalErrorCode.RESULT_DESERIALIZATION_ERROR
-        assert (error.message or '').startswith(
+        assert _unreadable_message(result).startswith(
             'Workflow error payload validation failed: ',
         )
-        assert error.data == {'workflow_id': WORKFLOW_ID}
 
     @pytest.mark.asyncio
     async def test_a_defect_in_the_decode_propagates(self) -> None:

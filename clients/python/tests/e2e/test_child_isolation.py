@@ -27,7 +27,7 @@ from horsies.core.types.result import is_err
 from horsies.core.worker.config import ChildPreload
 
 from tests.broker_resources_support import current_resources
-from tests.e2e.helpers.assertions import unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.db import wait_for_status
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import instance_child_isolation as isolation
@@ -94,7 +94,7 @@ def _ready_check(task: Any) -> Callable[[], bool]:
                 return False
             handle = sent.ok_value
         assert handle is not None
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -258,7 +258,7 @@ async def test_a_child_refuses_a_result_wait_on_every_start_path() -> None:
         handle = unwrap_send(await isolation.wait_refused_in_child.send_async())
         result = await handle.get_async(timeout_ms=int(FINISH_TIMEOUT_S * 1000))
 
-        assert result.unwrap() is True
+        assert succeeded_value(result) is True
 
 
 @pytest.mark.e2e
@@ -482,7 +482,7 @@ async def test_multiprocessing_works_inside_a_task(
             await isolation.run_multiprocessing.send_async(start_method=start_method),
         )
         result = await handle.get_async(timeout_ms=int(FINISH_TIMEOUT_S * 1000))
-        assert result.ok_value == '3'
+        assert succeeded_value(result) == '3'
 
 
 @pytest.mark.e2e
@@ -501,7 +501,7 @@ async def test_a_send_from_a_fork_pool_in_a_task_raises_forked_after_core_start(
         handle = unwrap_send(await isolation.send_from_fork_pool.send_async())
         result = await handle.get_async(timeout_ms=int(FINISH_TIMEOUT_S * 1000))
 
-    report = result.unwrap()
+    report = succeeded_value(result)
     assert report['ended'] == 'raised', report
     assert report['class'] == 'ForkedAfterCoreStart', report
     assert report['core_pid'] == report['child_pid'], report

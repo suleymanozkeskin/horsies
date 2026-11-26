@@ -26,9 +26,9 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition, WorkflowSpec
-from horsies.core.types.result import Err, Ok
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.workflows.spec_data import workflow_spec_json
 from horsies.core.workflows.start_tree import top_node_rows
 
@@ -45,8 +45,8 @@ APP: Final = Horsies(
 
 
 @APP.task(task_name='tests.extension.value')
-def value_task(*, value: int) -> TaskResult[int, TaskError]:
-    return TaskResult(ok=value)
+def value_task(*, value: int) -> Result[int, TaskError]:
+    return Ok(value)
 
 
 class ExtensionChild(WorkflowDefinition[int]):

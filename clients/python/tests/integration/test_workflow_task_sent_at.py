@@ -20,9 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import SubWorkflowNode, TaskNode, WorkflowDefinition
-from horsies.core.types.result import is_err
+from horsies.core.types.result import Ok, Result, is_err
 from horsies.core.workflows.lifecycle import start_workflow_async
 
 from tests.integration.conftest import finish_task
@@ -35,8 +35,8 @@ START_CALL_TIME = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
 
 def _task(app: Horsies, prefix: str) -> Any:
     @app.task(task_name=f'{prefix}_{uuid.uuid4().hex[:8]}')
-    def fn(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def fn(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     return fn
 
@@ -92,7 +92,7 @@ class TestEngineTaskSentAt:
         assert await _workflow_sent_at(session, workflow_id) == START_CALL_TIME
         assert await _task_sent_at(session, workflow_id) == {0: START_CALL_TIME}
 
-        await finish_task(session, broker, workflow_id, 0, TaskResult(ok=0))
+        await finish_task(session, broker, workflow_id, 0, Ok(0))
         await session.commit()
 
         # Phase 1 moved the root's task to history; the live table holds the

@@ -46,17 +46,16 @@ from horsies.core.models.task_send_types import (
     TaskSendPayloadMismatch,
     TaskSendValidationFailed,
 )
-from horsies.core.models.tasks import (
-    BuiltInTaskCode,
-    ContractCode,
-    OperationalErrorCode,
-    RetrievalCode,
-    TaskError,
-    TaskResult,
+from horsies.core.models.outcome import (
+    BrokerError,
+    NoTypeAvailable,
+    ResultDeserializationError,
+    WaitInsideTask,
 )
+from horsies.core.models.tasks import TaskError
 from horsies.core.task_decorator import TaskHandle, create_task_wrapper
 from horsies.core.types.error_detail import NoCause
-from horsies.core.types.result import Err, is_err
+from horsies.core.types.result import Err, Ok, Result, is_err
 from tests.union_members import union_members
 
 pytestmark = [pytest.mark.unit]
@@ -214,8 +213,8 @@ def _make_app() -> MagicMock:
 
 
 def _send_with_broker_error(error: BrokerOperationError) -> TaskSendError:
-    def good_fn(*, x: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=x)
+    def good_fn(*, x: int) -> Result[int, TaskError]:
+        return Ok(x)
 
     app = _make_app()
     broker = MagicMock()
@@ -312,10 +311,10 @@ def _handle(broker: MagicMock) -> TaskHandle[int]:
     return TaskHandle(task_id=HANDLE_TASK_ID, app=app, broker_mode=True, ok_type=int)
 
 
-RESULT_CODE_OF: dict[type[Any], tuple[BuiltInTaskCode, bool]] = {
-    BrokerNoTypeAvailable: (ContractCode.NO_TYPE_AVAILABLE, True),
-    BrokerInvalidJsonPayload: (OperationalErrorCode.RESULT_DESERIALIZATION_ERROR, True),
-    BrokerWaitInsideTask: (RetrievalCode.WAIT_INSIDE_TASK, False),
+READ_ERROR_OF: dict[type[Any], tuple[type[Any], bool]] = {
+    BrokerNoTypeAvailable: (NoTypeAvailable, True),
+    BrokerInvalidJsonPayload: (ResultDeserializationError, True),
+    BrokerWaitInsideTask: (WaitInsideTask, False),
 }
 
 
@@ -324,7 +323,7 @@ class TestResultMapping:
     @pytest.mark.parametrize(
         'error', _every_variant(RuntimeError('cause')), ids=_variant_id
     )
-    async def test_each_broker_variant_maps_to_its_task_error_and_cache_rule(
+    async def test_each_broker_variant_maps_to_its_read_error_and_cache_rule(
         self,
         error: BrokerOperationError,
     ) -> None:
@@ -335,24 +334,29 @@ class TestResultMapping:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(return_value=Err(error))
         handle = _handle(broker)
-        expected_code, cached = RESULT_CODE_OF.get(
-            type(error),
-            (OperationalErrorCode.BROKER_ERROR, False),
-        )
+        expected_type, cached = READ_ERROR_OF.get(type(error), (BrokerError, False))
 
         first = await handle.get_async()
         _ = await handle.get_async()
 
-        task_error = first.unwrap_err()
-        assert task_error.error_code == expected_code
-        assert task_error.data == {
-            'task_id': str(HANDLE_TASK_ID), 'broker_code': error.code.value,
-        }
-        match broker_error_cause(error):
-            case NoCause():
-                assert task_error.exception is None
-            case cause:
-                assert task_error.exception is cause
+        match first:
+            case Err(err_value=BrokerError() as read_error):
+                assert expected_type is BrokerError
+                assert read_error.message == (
+                    f'the result read of task {HANDLE_TASK_ID} failed '
+                    f'({error.code.value}): {error.message}'
+                )
+                assert read_error.retryable is error.retryable
+                match broker_error_cause(error):
+                    case NoCause():
+                        assert read_error.exception == NoCause()
+                    case cause:
+                        assert read_error.exception is cause
+            case Err(err_value=read_error):
+                assert type(read_error) is expected_type
+                assert read_error.message == error.message
+            case Ok():
+                pytest.fail(f'expected a read error, got {first!r}')
         assert broker.get_raw_result_record_async.await_count == (1 if cached else 2)
 
     async def test_async_context_fails_an_assertion(self) -> None:

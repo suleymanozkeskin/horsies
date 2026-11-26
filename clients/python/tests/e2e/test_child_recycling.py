@@ -13,7 +13,7 @@ import pytest
 
 from horsies.core.types.result import is_err
 
-from tests.e2e.helpers.assertions import assert_ok, unwrap_send
+from tests.e2e.helpers.assertions import read_succeeded, succeeded_value, unwrap_send
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.tasks import basic as basic_tasks
 from tests.e2e.tasks.profiles import RECYCLE_AFTER_2_TASKS, RECYCLE_OFF
@@ -35,7 +35,7 @@ def _ready_check():
             if is_err(r):
                 return False
             handle = r.ok_value
-        return handle.get(timeout_ms=2000).is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -49,8 +49,7 @@ def _run_burst(timeout_ms: int) -> set[int]:
     pids: set[int] = set()
     for handle in handles:
         result = handle.get(timeout_ms=timeout_ms)
-        assert_ok(result)
-        pids.add(result.unwrap())
+        pids.add(succeeded_value(result))
     return pids
 
 

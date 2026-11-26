@@ -2,33 +2,34 @@
 
 from __future__ import annotations
 
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.tasks.instance_custom import app
 
 
 @app.task(task_name='e2e_high', queue_name='high')
-def high_task() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='high')
+def high_task() -> Result[str, TaskError]:
+    return Ok('high')
 
 
 @app.task(task_name='e2e_normal', queue_name='normal')
-def normal_task() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='normal')
+def normal_task() -> Result[str, TaskError]:
+    return Ok('normal')
 
 
 @app.task(task_name='e2e_low', queue_name='low')
-def low_task() -> TaskResult[str, TaskError]:
+def low_task() -> Result[str, TaskError]:
     import time
 
     time.sleep(0.05)  # Small delay to ensure deterministic ordering in priority tests
-    return TaskResult(ok='low')
+    return Ok('low')
 
 
 @app.task(task_name='e2e_custom_slow', queue_name='high')
-def slow_task(*, duration_ms: int) -> TaskResult[str, TaskError]:
+def slow_task(*, duration_ms: int) -> Result[str, TaskError]:
     """Task that sleeps for specified duration (for custom queue tests)."""
     import time
 
     time.sleep(duration_ms / 1000)
-    return TaskResult(ok=f'slept_{duration_ms}')
+    return Ok(f'slept_{duration_ms}')

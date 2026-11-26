@@ -20,7 +20,8 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.tasks import TaskError
+from horsies.core.types.result import Ok, Result
 
 from tests.e2e.helpers.env import e2e_database_url
 from tests.e2e.tasks.profiles import E2E_WORKER_PROFILES
@@ -59,12 +60,12 @@ app.discover_tasks([
 
 
 @app.task(task_name='e2e_requeue_guard_healthcheck')
-def healthcheck() -> TaskResult[str, TaskError]:
-    return TaskResult(ok='ready')
+def healthcheck() -> Result[str, TaskError]:
+    return Ok('ready')
 
 
 @app.task(task_name='e2e_requeue_guard_task')
-def requeue_guard_task(*, token: str) -> TaskResult[str, TaskError]:
+def requeue_guard_task(*, token: str) -> Result[str, TaskError]:
     """Return the token. Appends a marker line so executions are countable."""
     from pathlib import Path
 
@@ -74,4 +75,4 @@ def requeue_guard_task(*, token: str) -> TaskResult[str, TaskError]:
         marker_path = Path(log_dir) / token
         with marker_path.open('a', encoding='utf-8') as f:
             f.write('executed\n')
-    return TaskResult(ok=f'done:{token}')
+    return Ok(f'done:{token}')

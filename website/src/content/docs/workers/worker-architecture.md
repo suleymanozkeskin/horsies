@@ -144,7 +144,7 @@ The child runs no heartbeat thread. While the child holds the task, a thread of 
 
 Main process receives result from child:
 
-1. Parse TaskResult (ok or err)
+1. Parse the task result (ok or err)
 2. Check for retry eligibility
 3. Update task status (COMPLETED or FAILED)
 4. Send NOTIFY for result waiters
@@ -464,7 +464,7 @@ Workers need to know where tasks are defined: the app lists its task modules, an
 
 | Error Type | Handling |
 | ---------- | -------- |
-| Task exception | Wrapped in TaskResult(err=...) |
+| Task exception | Stored as the error of the task |
 | Serialization error | WORKER_SERIALIZATION_ERROR |
 | Task not found | WORKER_RESOLUTION_ERROR |
 | Child crash | Detected at once, `WORKER_CRASHED` for that task only |

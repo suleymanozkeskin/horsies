@@ -28,8 +28,8 @@ from horsies import (
     Err,
     Horsies,
     Ok,
+    Result,
     TaskError,
-    TaskResult,
     WorkflowDefinition,
     WorkflowSpec,
     WorkflowStartCommandConflict,
@@ -42,8 +42,8 @@ WORKFLOW_ID_NAMESPACE = uuid.UUID("6f1d5c0e-8a54-4c57-9a0e-2b7a4f3c9d10")
 
 
 @app.task("onboard_customer")
-def onboard_customer(*, customer_id: str) -> TaskResult[str, TaskError]:
-    return TaskResult(ok=customer_id)
+def onboard_customer(*, customer_id: str) -> Result[str, TaskError]:
+    return Ok(customer_id)
 
 
 class OnboardingWorkflow(WorkflowDefinition[str]):

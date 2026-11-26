@@ -25,7 +25,8 @@ if TYPE_CHECKING:
         RuntimeTaskFunction,
         TaskFunction,
     )
-    from horsies.core.models.tasks import TaskResult, TaskError
+    from horsies.core.models.outcome import TaskOutcome
+    from horsies.core.models.tasks import TaskError
     from .definition import WorkflowDefinition
 
 
@@ -51,7 +52,7 @@ class TaskNode(Generic[OkT_co]):
     """
     A node in the workflow DAG representing a single task execution.
 
-    Generic parameter OkT represents the success type of the task's TaskResult.
+    Generic parameter OkT represents the success type of the task's Result.
     This enables type-safe access to results via WorkflowContext.result_for(node).
 
     Example:
@@ -60,7 +61,7 @@ class TaskNode(Generic[OkT_co]):
         process = TaskNode(
             fn=process_data,
             waits_for=[fetch],           # wait for fetch to be terminal
-            args_from={"raw": fetch},     # inject fetch's TaskResult as 'raw' kwarg
+            args_from={"raw": fetch},     # inject fetch's TaskOutcome as 'raw' kwarg
             allow_failed_deps=True,       # run even if fetch failed
         )
         ```
@@ -100,9 +101,9 @@ class TaskNode(Generic[OkT_co]):
         default_factory=lambda: {},
     )
     """
-    - Data flow: inject dependency TaskResults as kwargs (keyword-only)
+    - Data flow: inject dependency TaskOutcomes as kwargs (keyword-only)
     - Example: args_from={"validated": validate_node, "transformed": transform_node}
-    - Task receives: def my_task(validated: TaskResult[A, E], transformed: TaskResult[B, E])
+    - Task receives: def my_task(validated: TaskOutcome[A, E], transformed: TaskOutcome[B, E])
     """
 
     workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
@@ -123,7 +124,7 @@ class TaskNode(Generic[OkT_co]):
 
     allow_failed_deps: bool = False
     """
-    - If True, this task runs even if dependencies failed (receives failed TaskResults)
+    - If True, this task runs even if dependencies failed (receives Failed outcomes)
     - If False (default), task is SKIPPED when any dependency fails
     """
 
@@ -232,8 +233,8 @@ class SubWorkflowNode(Generic[OkT_co]):
     derived from WorkflowDefinition[OkT].
 
     When the child workflow completes:
-    - COMPLETED: parent node receives TaskResult[OkT, TaskError] with child's output
-    - FAILED: parent node receives TaskResult with SubWorkflowError containing SubWorkflowSummary
+    - COMPLETED: parent node receives Succeeded(output), a TaskOutcome[OkT, TaskError]
+    - FAILED: parent node receives Failed(SubWorkflowError) with its SubWorkflowSummary
 
     Example:
         class DataPipeline(WorkflowDefinition[ProcessedData]):
@@ -243,7 +244,7 @@ class SubWorkflowNode(Generic[OkT_co]):
             workflow_def=DataPipeline,
             kwargs={"source_url": "https://..."},  # passed to build_with()
         )
-        # Downstream: args_from={"data": pipeline} → TaskResult[ProcessedData, TaskError]
+        # Downstream: args_from={"data": pipeline} → TaskOutcome[ProcessedData, TaskError]
     """
 
     workflow_def: type[WorkflowDefinition[OkT_co]]
@@ -281,8 +282,8 @@ class SubWorkflowNode(Generic[OkT_co]):
     )
     """
     - Maps kwarg names to upstream nodes for data injection
-    - Injected as TaskResult into build_with() kwargs
-    - Example: args_from={"input_data": fetch_node} → kwargs["input_data"] = TaskResult[T, E]
+    - Injected as TaskOutcome into build_with() kwargs
+    - Example: args_from={"input_data": fetch_node} → kwargs["input_data"] = TaskOutcome[T, E]
     """
 
     workflow_ctx_from: Sequence[TaskNode[Any] | SubWorkflowNode[Any]] | None = None
@@ -306,7 +307,7 @@ class SubWorkflowNode(Generic[OkT_co]):
     allow_failed_deps: bool = False
     """
     - False (default): SKIPPED if any dependency failed
-    - True: starts regardless, failed deps passed as TaskResult(err=...) via args_from
+    - True: starts regardless, failed deps passed as Failed(task_error) via args_from
     """
 
     index: int | None = field(default=None, repr=False)
@@ -493,7 +494,7 @@ class SuccessPolicy:
         object.__delattr__(self, name)
 
 
-WorkflowTerminalResults = dict[str, 'TaskResult[Any, TaskError] | None']
+WorkflowTerminalResults = dict[str, 'TaskOutcome[Any, TaskError] | None']
 """
 Aggregated terminal results returned by workflow get()/get_async() when no explicit
 output node is configured.

@@ -17,10 +17,17 @@ from typing import Any, Callable, cast
 import pytest
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.outcome import Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
+from horsies.core.models.workflow import WorkflowTerminalResults
 
-from horsies.core.models.tasks import TaskResult
-
-from tests.e2e.helpers.assertions import assert_err, assert_ok, start_ok_in_thread, unwrap_send
+from tests.e2e.helpers.assertions import (
+    assert_failed,
+    read_succeeded,
+    start_ok_in_thread,
+    succeeded_value,
+    unwrap_send,
+)
 from tests.e2e.helpers.worker import run_worker
 from tests.e2e.helpers.workflow import (
     get_workflow_tasks,
@@ -34,14 +41,13 @@ from tests.broker_resources_support import current_resources
 DEFAULT_INSTANCE = 'tests.e2e.tasks.instance:app'
 
 
-def _unwrap_task_value(value: Any) -> Any:
-    """Unwrap TaskResult value from workflow output."""
-    if isinstance(value, TaskResult):
-        task_result = cast(TaskResult[Any, Any], value)
-        if task_result.is_ok():
-            return task_result.unwrap()
-        return task_result  # Return error result as-is for inspection
-    return value
+def _unwrap_task_value(value: TaskOutcome[Any, TaskError] | None) -> Any:
+    """Unwrap the Succeeded value of a terminal outcome from workflow output."""
+    match value:
+        case Succeeded(succeeded_value_of_node):
+            return succeeded_value_of_node
+        case _:
+            return value  # Return a failed or missing outcome as-is for inspection
 
 
 def _make_ready_check() -> Callable[[], bool]:
@@ -54,8 +60,7 @@ def _make_ready_check() -> Callable[[], bool]:
         nonlocal handle
         if handle is None:
             handle = unwrap_send(healthcheck.send())
-        result = handle.get(timeout_ms=2000)
-        return result.is_ok()
+        return read_succeeded(handle.get(timeout_ms=2000))
 
     return _check
 
@@ -84,10 +89,9 @@ async def test_args_from_single_dependency(broker: PostgresBroker) -> None:
 
         # Get final result
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
         # B should have doubled A's value: 5 * 2 = 10
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         # Terminal task is B at index 1
         for key, value in output.items():
             if 'e2e_wf_double' in key:
@@ -121,10 +125,9 @@ async def test_args_from_multiple_dependencies(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
         # C should have summed A and B: 10 + 20 = 30
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_sum_two' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -157,10 +160,9 @@ async def test_workflow_ctx_single_dependency(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
         # B should have read A's value: 42
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_ctx_reader' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -193,10 +195,9 @@ async def test_workflow_ctx_multiple_dependencies(broker: PostgresBroker) -> Non
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
         # C should have summed A and B via ctx: 100 + 200 = 300
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_ctx_sum' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -244,8 +245,7 @@ async def test_failed_propagation(broker: PostgresBroker) -> None:
 
         # Verify B received A's original error (not UPSTREAM_SKIPPED)
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_check_upstream_skipped' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -301,8 +301,7 @@ async def test_skipped_propagation(broker: PostgresBroker) -> None:
 
         # Verify C's result indicates it received UPSTREAM_SKIPPED
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_check_upstream_skipped' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -357,8 +356,7 @@ async def test_join_ctx_gating(broker: PostgresBroker) -> None:
 
         # Verify C actually received B's result value via ctx
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_ctx_reader_str' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -394,10 +392,9 @@ async def test_mixed_args_from_and_ctx(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
         # D should return {"from_args": 14, "from_ctx": 3}
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_mixed_reader' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -439,10 +436,9 @@ async def test_args_from_transitive_chain(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
         # C should have doubled B's doubled value: 3 * 2 * 2 = 12
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_double_chain' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -488,7 +484,7 @@ async def test_args_from_failed_dep_skips_and_fails_workflow(
 
         # handle.get() should surface the failure error code
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_err(result, 'DATAFLOW_FAIL')
+        assert_failed(result, 'DATAFLOW_FAIL')
 
 
 # =============================================================================
@@ -513,9 +509,8 @@ async def test_args_from_dict_serialization(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_receive_dict' in key:
                 unwrapped = _unwrap_task_value(value)
@@ -559,10 +554,9 @@ async def test_dual_injection_same_node(broker: PostgresBroker) -> None:
         assert status == 'COMPLETED'
 
         result = await asyncio.to_thread(handle.get, timeout_ms=1000)
-        assert_ok(result)
 
         # Both paths should deliver the same value (77)
-        output = cast(dict[str, Any], result.unwrap())
+        output = cast(WorkflowTerminalResults, succeeded_value(result))
         for key, value in output.items():
             if 'e2e_wf_dual_reader' in key:
                 unwrapped = _unwrap_task_value(value)

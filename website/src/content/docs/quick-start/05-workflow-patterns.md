@@ -89,9 +89,9 @@ def start_order_workflow(
     # Wait for workflow completion
     handle.get(timeout_ms=30000)
 
-    # result_for() is non-blocking - returns RESULT_NOT_READY if task hasn't completed
+    # result_for() is non-blocking - returns Err(ResultNotReady(...)) if task hasn't completed
     result = handle.result_for(output_node)
-    reveal_type(result)  # TaskResult[Any, TaskError]
+    reveal_type(result)  # ReadResult[Any, TaskError]
 ```
 
 ## Fan-Out Pattern (Parallel Execution)
@@ -100,7 +100,7 @@ Run many independent tasks in parallel. Queue `max_concurrency` controls paralle
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Ok, TaskResult, TaskError
+from horsies import Err, Ok, Result, TaskError
 from horsies import TaskNode, AnyNode
 
 # List of warehouse sync tasks
@@ -113,7 +113,7 @@ ALL_WAREHOUSE_TASKS = [
 ]
 
 @app.task('sync_all_warehouses', queue_name='low')
-def sync_all_warehouses_task() -> TaskResult[dict[str, int], TaskError]:
+def sync_all_warehouses_task() -> Result[dict[str, int], TaskError]:
     # Create nodes with node_id from task name
     nodes: list[AnyNode] = [
         TaskNode(fn=task, node_id=task.task_name)
@@ -149,9 +149,9 @@ def sync_all_warehouses_task() -> TaskResult[dict[str, int], TaskError]:
     handle.get(timeout_ms=60000)
 
     result = handle.result_for(last_node)
-    reveal_type(result)  # TaskResult[WarehouseSyncResult, TaskError]
+    reveal_type(result)  # ReadResult[WarehouseSyncResult, TaskError]
 
-    return TaskResult(ok={'warehouses_synced': len(ALL_WAREHOUSE_TASKS)})
+    return Ok({'warehouses_synced': len(ALL_WAREHOUSE_TASKS)})
 ```
 
 ## Linear Chain Pattern
@@ -285,10 +285,10 @@ A task that orchestrates a workflow internally. Useful for composing complex ope
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Ok
+from horsies import Err, Ok, Result, TaskError
 
 @app.task('process_returns', queue_name='standard')
-def process_returns_task() -> TaskResult[dict[str, str], TaskError]:
+def process_returns_task() -> Result[dict[str, str], TaskError]:
     # Define parallel nodes - process returns from multiple channels
     node_web: TaskNode[ReturnStats] = TaskNode(
         fn=process_web_returns,
@@ -336,9 +336,9 @@ def process_returns_task() -> TaskResult[dict[str, str], TaskError]:
     handle.get(timeout_ms=60000)
 
     result = handle.result_for(node_aggregate)
-    reveal_type(result)  # TaskResult[AggregatedStats, TaskError]
+    reveal_type(result)  # ReadResult[AggregatedStats, TaskError]
 
-    return TaskResult(ok={'message': 'Returns processed'})
+    return Ok({'message': 'Returns processed'})
 ```
 
 ## Pattern Summary

@@ -15,7 +15,9 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.codec.json_io import dumps_json, loads_json
 from horsies.core.codec.typed import decode_task_result
-from horsies.core.models.tasks import OperationalErrorCode, TaskResult, TaskError
+from horsies.core.models.outcome import Failed, Succeeded, TaskOutcome
+from horsies.core.models.tasks import OperationalErrorCode, TaskError
+from horsies.core.types.result import Err, Ok, Result
 from horsies.core.errors import ErrorCode
 from horsies.core.models.workflow import (
     NodeKey,
@@ -141,13 +143,13 @@ class TestWorkflowCtx:
 
         typed_ctx_data = ctx_data_raw
 
-        results_by_id: dict[str, TaskResult[Any, TaskError]] = {}
+        results_by_id: dict[str, TaskOutcome[Any, TaskError]] = {}
         raw_results = typed_ctx_data.get('results_by_id')
         if isinstance(raw_results, dict):
             for node_id, envelope in raw_results.items():
                 if envelope is None:
-                    results_by_id[node_id] = TaskResult(
-                        err=TaskError(
+                    results_by_id[node_id] = Failed(
+                        TaskError(
                             error_code=OperationalErrorCode.RESULT_DESERIALIZATION_ERROR,
                             message=(
                                 f'workflow_ctx result for node {node_id!r} unavailable '
@@ -177,13 +179,14 @@ class TestWorkflowCtx:
         @app.task(task_name='ctx_inject_b')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
+        ) -> Result[int, TaskError]:
             if workflow_ctx is None:
-                return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
-            result = workflow_ctx.result_for(node_a)
-            if result.is_err():
-                return TaskResult(err=result.err_value)
-            return TaskResult(ok=result.unwrap())
+                return Err(TaskError(error_code='NO_CTX', message='missing'))
+            match workflow_ctx.result_for(node_a):
+                case Succeeded(value=value):
+                    return Ok(value)
+                case Failed(error=error):
+                    return Err(error)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
@@ -199,14 +202,12 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
-        result = ctx.result_for(node_a)
-        assert result.is_ok()
-        assert result.unwrap() == 10
+        assert ctx.result_for(node_a) == Succeeded(10)
 
         # Validate metadata too
         assert ctx.workflow_id == str(handle.workflow_id)
@@ -224,10 +225,10 @@ class TestWorkflowCtx:
         @app.task(task_name='no_ctx_from_b')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
+        ) -> Result[int, TaskError]:
             if workflow_ctx is None:
-                return TaskResult(ok=0)
-            return TaskResult(ok=1)
+                return Ok(0)
+            return Ok(1)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
@@ -240,7 +241,7 @@ class TestWorkflowCtx:
         )
 
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert '__h_workflow_ctx__' not in kwargs
@@ -256,10 +257,10 @@ class TestWorkflowCtx:
         @app.task(task_name='meta_only_b')
         def meta_reader(
             *, workflow_meta: WorkflowMeta | None = None,
-        ) -> TaskResult[int, TaskError]:
+        ) -> Result[int, TaskError]:
             if workflow_meta is None:
-                return TaskResult(ok=-1)
-            return TaskResult(ok=workflow_meta.task_index)
+                return Ok(-1)
+            return Ok(workflow_meta.task_index)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
@@ -271,7 +272,7 @@ class TestWorkflowCtx:
             broker=broker, name='meta_only', tasks=[node_a, node_b]
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         meta_raw = kwargs.get('__h_workflow_meta__')
@@ -292,12 +293,16 @@ class TestWorkflowCtx:
         @app.task(task_name='ctx_multi_c')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
+        ) -> Result[int, TaskError]:
             if workflow_ctx is None:
-                return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
-            first = workflow_ctx.result_for(node_a).unwrap()
-            second = workflow_ctx.result_for(node_b).unwrap()
-            return TaskResult(ok=first + second)
+                return Err(TaskError(error_code='NO_CTX', message='missing'))
+            match (workflow_ctx.result_for(node_a), workflow_ctx.result_for(node_b)):
+                case (Succeeded(value=first), Succeeded(value=second)):
+                    return Ok(first + second)
+                case _:
+                    return Err(
+                        TaskError(error_code='UPSTREAM_FAILED', message='a dependency failed'),
+                    )
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(fn=task_b, kwargs={'value': 2})
@@ -312,14 +317,14 @@ class TestWorkflowCtx:
         )
 
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
-        await finish_task(session, broker, str(handle.workflow_id), 1, TaskResult(ok=20))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
+        await finish_task(session, broker, str(handle.workflow_id), 1, Ok(20))
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
-        assert ctx.result_for(node_a).unwrap() == 10
-        assert ctx.result_for(node_b).unwrap() == 20
+        assert ctx.result_for(node_a) == Succeeded(10)
+        assert ctx.result_for(node_b) == Succeeded(20)
 
     async def test_ctx_skipped_dep_returns_upstream_skipped(
         self,
@@ -329,21 +334,22 @@ class TestWorkflowCtx:
         session, broker, app = setup
 
         @app.task(task_name='ctx_skipped_failing')
-        def failing_task() -> TaskResult[int, TaskError]:
-            return TaskResult(err=TaskError(error_code='FAIL', message='Failed'))
+        def failing_task() -> Result[int, TaskError]:
+            return Err(TaskError(error_code='FAIL', message='Failed'))
 
         task_b = make_simple_task(app, 'ctx_skipped_b')
 
         @app.task(task_name='ctx_skipped_c')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[str, TaskError]:
+        ) -> Result[str, TaskError]:
             if workflow_ctx is None:
-                return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
-            result = workflow_ctx.result_for(node_b)
-            if result.is_err():
-                return TaskResult(err=result.err_value)
-            return TaskResult(ok='unexpected')
+                return Err(TaskError(error_code='NO_CTX', message='missing'))
+            match workflow_ctx.result_for(node_b):
+                case Succeeded():
+                    return Ok('unexpected')
+                case Failed(error=error):
+                    return Err(error)
 
         node_a = TaskNode(fn=failing_task)
         node_b = TaskNode(fn=task_b, kwargs={'value': 1}, waits_for=[node_a])
@@ -366,18 +372,19 @@ class TestWorkflowCtx:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='A_FAILED', message='A failed')),
+            Err(TaskError(error_code='A_FAILED', message='A failed')),
         )
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
-        result = ctx.result_for(node_b)
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == 'UPSTREAM_SKIPPED'
-        assert result.err.data is not None
-        assert 'dependency_index' in result.err.data
+        match ctx.result_for(node_b):
+            case Failed(error=error):
+                assert error.error_code == 'UPSTREAM_SKIPPED'
+                assert error.data is not None
+                assert 'dependency_index' in error.data
+            case outcome:
+                pytest.fail(f'expected a failed outcome, got {outcome!r}')
 
     async def test_ctx_failed_dep_returns_original_error(
         self,
@@ -387,19 +394,20 @@ class TestWorkflowCtx:
         session, broker, app = setup
 
         @app.task(task_name='ctx_failed_failing')
-        def failing_task() -> TaskResult[int, TaskError]:
-            return TaskResult(err=TaskError(error_code='FAIL', message='Failed'))
+        def failing_task() -> Result[int, TaskError]:
+            return Err(TaskError(error_code='FAIL', message='Failed'))
 
         @app.task(task_name='ctx_failed_c')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[str, TaskError]:
+        ) -> Result[str, TaskError]:
             if workflow_ctx is None:
-                return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
-            result = workflow_ctx.result_for(node_a)
-            if result.is_err():
-                return TaskResult(err=result.err_value)
-            return TaskResult(ok='unexpected')
+                return Err(TaskError(error_code='NO_CTX', message='missing'))
+            match workflow_ctx.result_for(node_a):
+                case Succeeded():
+                    return Ok('unexpected')
+                case Failed(error=error):
+                    return Err(error)
 
         node_a = TaskNode(fn=failing_task)
         node_c = TaskNode(
@@ -421,17 +429,18 @@ class TestWorkflowCtx:
             broker,
             str(handle.workflow_id),
             0,
-            TaskResult(err=TaskError(error_code='A_FAILED', message='A failed')),
+            Err(TaskError(error_code='A_FAILED', message='A failed')),
         )
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
 
-        result = ctx.result_for(node_a)
-        assert result.is_err()
-        assert result.err is not None
-        assert result.err.error_code == 'A_FAILED'
-        assert result.err.message == 'A failed'
+        match ctx.result_for(node_a):
+            case Failed(error=error):
+                assert error.error_code == 'A_FAILED'
+                assert error.message == 'A failed'
+            case outcome:
+                pytest.fail(f'expected a failed outcome, got {outcome!r}')
 
     async def test_ctx_not_injected_without_param(
         self,
@@ -469,10 +478,14 @@ class TestWorkflowCtx:
         @app.task(task_name='ctx_worker_b')
         def ctx_worker_b(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
+        ) -> Result[int, TaskError]:
             if workflow_ctx is None:
-                return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
-            return TaskResult(ok=workflow_ctx.result_for(node_a).unwrap())
+                return Err(TaskError(error_code='NO_CTX', message='missing'))
+            match workflow_ctx.result_for(node_a):
+                case Succeeded(value=value):
+                    return Ok(value)
+                case Failed(error=error):
+                    return Err(error)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
@@ -487,7 +500,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         task_row_result = await session.execute(
             text("""
@@ -529,8 +542,7 @@ class TestWorkflowCtx:
         assert worker_failure is None
 
         task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_ok()
-        assert task_result.unwrap() == 10
+        assert task_result == Succeeded(10)
 
     async def test_worker_injects_required_workflow_meta(
         self,
@@ -543,9 +555,9 @@ class TestWorkflowCtx:
         @app.task(task_name='meta_worker_b')
         def meta_worker_b(
             *, workflow_meta: WorkflowMeta,
-        ) -> TaskResult[str, TaskError]:
-            return TaskResult(
-                ok=f'{workflow_meta.workflow_id}:{workflow_meta.task_index}:{workflow_meta.task_name}'
+        ) -> Result[str, TaskError]:
+            return Ok(
+                f'{workflow_meta.workflow_id}:{workflow_meta.task_index}:{workflow_meta.task_name}'
             )
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
@@ -560,7 +572,7 @@ class TestWorkflowCtx:
         handle = await start_ok(spec, broker)
 
         # Complete A to enqueue B
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         task_row_result = await session.execute(
             text("""
@@ -602,8 +614,7 @@ class TestWorkflowCtx:
         assert worker_failure is None
 
         task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_ok()
-        assert task_result.unwrap() == f'{handle.workflow_id}:1:meta_worker_b'
+        assert task_result == Succeeded(f'{handle.workflow_id}:1:meta_worker_b')
 
     async def test_worker_ctx_missing_id_surfaces_error(
         self,
@@ -618,11 +629,15 @@ class TestWorkflowCtx:
         @app.task(task_name='ctx_missing_id_b')
         def ctx_missing_id_b(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
+        ) -> Result[int, TaskError]:
             if workflow_ctx is None:
-                return TaskResult(err=TaskError(error_code='NO_CTX', message='missing'))
+                return Err(TaskError(error_code='NO_CTX', message='missing'))
             # missing_node.node_id is None -> should raise RuntimeError
-            return TaskResult(ok=workflow_ctx.result_for(missing_node).unwrap())
+            match workflow_ctx.result_for(missing_node):
+                case Succeeded(value=value):
+                    return Ok(value)
+                case Failed(error=error):
+                    return Err(error)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 5})
         node_b: TaskNode[int] = TaskNode(
@@ -636,7 +651,7 @@ class TestWorkflowCtx:
         )
         handle = await start_ok(spec, broker)
 
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         task_row_result = await session.execute(
             text("""
@@ -677,9 +692,11 @@ class TestWorkflowCtx:
         assert ok is True
         assert worker_failure is None
 
-        task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_err()
-        assert task_result.unwrap_err().error_code == 'WORKFLOW_CTX_MISSING_ID'
+        match decode_task_result(loads_json(result_json).unwrap(), Any):
+            case Failed(error=error):
+                assert error.error_code == 'WORKFLOW_CTX_MISSING_ID'
+            case outcome:
+                pytest.fail(f'expected a failed outcome, got {outcome!r}')
 
     async def test_ctx_from_not_in_waits_for_raises_e009(
         self,
@@ -692,8 +709,8 @@ class TestWorkflowCtx:
         @app.task(task_name='e009_b')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
+        ) -> Result[int, TaskError]:
+            return Ok(0)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
@@ -722,8 +739,8 @@ class TestWorkflowCtx:
         @app.task(task_name='key_err_b')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
+        ) -> Result[int, TaskError]:
+            return Ok(0)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
@@ -736,7 +753,7 @@ class TestWorkflowCtx:
             broker=broker, name='key_err', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -761,8 +778,8 @@ class TestWorkflowCtx:
         @app.task(task_name='has_res_b')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
+        ) -> Result[int, TaskError]:
+            return Ok(0)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
@@ -775,7 +792,7 @@ class TestWorkflowCtx:
             broker=broker, name='has_res', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=42))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(42))
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -793,8 +810,8 @@ class TestWorkflowCtx:
         @app.task(task_name='has_res_false_b')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
+        ) -> Result[int, TaskError]:
+            return Ok(0)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
@@ -807,7 +824,7 @@ class TestWorkflowCtx:
             broker=broker, name='has_res_false', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=1))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(1))
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -833,8 +850,8 @@ class TestWorkflowCtx:
         @app.task(task_name='nodekey_b')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
+        ) -> Result[int, TaskError]:
+            return Ok(0)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
@@ -847,7 +864,7 @@ class TestWorkflowCtx:
             broker=broker, name='nodekey', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=77))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(77))
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         ctx = self._build_ctx_from_kwargs(kwargs)
@@ -855,9 +872,7 @@ class TestWorkflowCtx:
         # Use NodeKey with the same node_id that WorkflowSpec assigned to node_a
         assert node_a.node_id is not None
         key: NodeKey[int] = NodeKey(node_id=node_a.node_id)
-        result = ctx.result_for(key)
-        assert result.is_ok()
-        assert result.unwrap() == 77
+        assert ctx.result_for(key) == Succeeded(77)
 
     async def test_ctx_empty_ctx_from_no_injection(
         self,
@@ -870,8 +885,8 @@ class TestWorkflowCtx:
         @app.task(task_name='empty_ctx_b')
         def ctx_reader(
             *, workflow_ctx: WorkflowContext | None = None,
-        ) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=0)
+        ) -> Result[int, TaskError]:
+            return Ok(0)
 
         node_a: TaskNode[int] = TaskNode(fn=task_a, kwargs={'value': 1})
         node_b: TaskNode[int] = TaskNode(
@@ -884,7 +899,7 @@ class TestWorkflowCtx:
             broker=broker, name='empty_ctx', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=10))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(10))
 
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 1)
         assert '__h_workflow_ctx__' not in kwargs
@@ -898,8 +913,8 @@ class TestWorkflowCtx:
         task_a = make_simple_task(app, 'skip_ctx_a')
 
         @app.task(task_name='skip_ctx_b')
-        def no_ctx_task(*, value: int = 0) -> TaskResult[int, TaskError]:
-            return TaskResult(ok=value + 100)
+        def no_ctx_task(*, value: int = 0) -> Result[int, TaskError]:
+            return Ok(value + 100)
 
         # Build a workflow where node_b has workflow_ctx_from but the function
         # does NOT declare workflow_ctx. Normally WorkflowSpec validation rejects
@@ -916,7 +931,7 @@ class TestWorkflowCtx:
             broker=broker, name='skip_ctx', tasks=[node_a, node_b],
         )
         handle = await start_ok(spec, broker)
-        await finish_task(session, broker, str(handle.workflow_id), 0, TaskResult(ok=5))
+        await finish_task(session, broker, str(handle.workflow_id), 0, Ok(5))
 
         # Fetch task B's row and manually inject __h_workflow_ctx__ into kwargs
         task_row_result = await session.execute(
@@ -969,6 +984,5 @@ class TestWorkflowCtx:
         assert worker_failure is None
 
         task_result = decode_task_result(loads_json(result_json).unwrap(), Any)
-        assert task_result.is_ok()
         # value=0 (default) + 100 = 100 — ctx was silently skipped
-        assert task_result.unwrap() == 100
+        assert task_result == Succeeded(100)

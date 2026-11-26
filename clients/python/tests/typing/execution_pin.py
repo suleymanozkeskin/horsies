@@ -26,14 +26,14 @@ from __future__ import annotations
 from collections.abc import Coroutine
 from typing import Any, assert_type
 
-from horsies import Execution, Horsies, TaskError, TaskResult
+from horsies import Execution, Horsies, Ok, Result, TaskError
 from horsies.core.task_decorator import AsyncTaskFunction, TaskFunction
 
 
 def register(app: Horsies, chosen: Execution) -> None:
     @app.task('pin_shared_async', execution=Execution.SHARED_ASYNC, timeout_ms=5_000)
-    async def shared_async(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    async def shared_async(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task(
         'pin_shared_async_grace',
@@ -41,32 +41,32 @@ def register(app: Horsies, chosen: Execution) -> None:
         timeout_ms=5_000,
         cancel_grace_ms=1_000,
     )
-    async def shared_async_grace(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    async def shared_async_grace(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task('pin_shared_thread', execution=Execution.SHARED_THREAD, timeout_ms=5_000)
-    def shared_thread(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def shared_thread(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task('pin_isolated', execution=Execution.ISOLATED)
-    async def isolated(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    async def isolated(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task('pin_isolated_grace', cancel_grace_ms=1_000)
-    def isolated_with_grace(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def isolated_with_grace(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task(
         'pin_explicit_isolated_grace',
         execution=Execution.ISOLATED,
         cancel_grace_ms=1_000,
     )
-    async def explicit_isolated_with_grace(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    async def explicit_isolated_with_grace(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task('pin_chosen', execution=chosen, timeout_ms=5_000)
-    def chosen_at_run_time(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def chosen_at_run_time(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task(
         'pin_chosen_grace',
@@ -74,14 +74,14 @@ def register(app: Horsies, chosen: Execution) -> None:
         timeout_ms=5_000,
         cancel_grace_ms=1_000,
     )
-    async def chosen_with_grace(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    async def chosen_with_grace(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     pending = assert_type(
         shared_async(value=1),
-        Coroutine[Any, Any, TaskResult[int, TaskError]],
+        Coroutine[Any, Any, Result[int, TaskError]],
     )
-    assert_type(shared_thread(value=1), TaskResult[int, TaskError])
+    assert_type(shared_thread(value=1), Result[int, TaskError])
     as_async: AsyncTaskFunction[..., int] = shared_async_grace
     as_isolated: AsyncTaskFunction[..., int] = isolated
     as_isolated_grace: TaskFunction[..., int] = isolated_with_grace
@@ -103,18 +103,18 @@ def register(app: Horsies, chosen: Execution) -> None:
     @app.task(
         'pin_bad_async_on_def', execution=Execution.SHARED_ASYNC, timeout_ms=5_000
     )  # pyright: ignore[reportArgumentType, reportCallIssue, reportUntypedFunctionDecorator]
-    def async_class_on_def(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def async_class_on_def(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task(
         'pin_bad_thread_on_async', execution=Execution.SHARED_THREAD, timeout_ms=5_000
     )  # pyright: ignore[reportArgumentType, reportCallIssue, reportUntypedFunctionDecorator]
-    async def thread_class_on_async(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    async def thread_class_on_async(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task('pin_bad_no_timeout', execution=Execution.SHARED_ASYNC)  # pyright: ignore[reportArgumentType]
-    async def shared_without_timeout(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    async def shared_without_timeout(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task(
         'pin_bad_thread_grace',
@@ -122,12 +122,12 @@ def register(app: Horsies, chosen: Execution) -> None:
         timeout_ms=5_000,
         cancel_grace_ms=1_000,
     )  # pyright: ignore[reportArgumentType, reportUntypedFunctionDecorator]
-    def thread_with_grace(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def thread_with_grace(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     @app.task('pin_bad_chosen_no_timeout', execution=chosen)  # pyright: ignore[reportArgumentType]
-    def chosen_without_timeout(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def chosen_without_timeout(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     del (
         async_class_on_def,

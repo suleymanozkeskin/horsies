@@ -9,10 +9,11 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from horsies import JsonValue
-from horsies.core.models.tasks import TaskResult, TaskError
+from horsies.core.models.outcome import Succeeded, TaskOutcome
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.task_send_types import TaskSendError, TaskSendResult
 from horsies.core.task_decorator import TaskHandle, TaskFunction, NodeFactory, TaskSendOptions, from_node
-from horsies.core.types.result import Ok
+from horsies.core.types.result import Ok, Result
 from horsies.core.models.workflow import (
     NODE_ID_PATTERN,
     NodeKey,
@@ -54,27 +55,27 @@ def _open_target(
     *,
     payload: JsonValue = None,
     url: str = '',
-    data: TaskResult[Any, TaskError] | None = None,
-    input: TaskResult[Any, TaskError] | None = None,
-) -> TaskResult[Any, TaskError]:
+    data: TaskOutcome[Any, TaskError] | None = None,
+    input: TaskOutcome[Any, TaskError] | None = None,
+) -> Result[Any, TaskError]:
     """The typed callable behind `MockTaskWrapper`: a node binds to its names."""
-    return TaskResult(ok=None)
+    return Ok(None)
 
 
 def _ctx_target(
     *,
-    input: TaskResult[Any, TaskError] | None = None,
+    input: TaskOutcome[Any, TaskError] | None = None,
     workflow_ctx: WorkflowContext | None = None,
-) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=None)
+) -> Result[Any, TaskError]:
+    return Ok(None)
 
 
 def _params_target(
-    required: TaskResult[int, TaskError],
+    required: TaskOutcome[int, TaskError],
     *,
     flag: bool,
-) -> TaskResult[Any, TaskError]:
-    return TaskResult(ok=None)
+) -> Result[Any, TaskError]:
+    return Ok(None)
 
 
 @dataclass
@@ -88,8 +89,8 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
-    def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    def __call__(self, *args: Any, **kwargs: Any) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -163,8 +164,8 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
         workflow_ctx: WorkflowContext | None = None,
         *args: Any,
         **kwargs: Any,
-    ) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    ) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -235,11 +236,11 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
 
     def __call__(
         self,
-        required: TaskResult[int, TaskError],
+        required: TaskOutcome[int, TaskError],
         *,
         flag: bool,
-    ) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+    ) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -308,9 +309,9 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
 
     def __call__(
         self,
-        maybe_result: TaskResult[int, TaskError] | None = None,
-    ) -> TaskResult[Any, TaskError]:
-        return TaskResult(ok=None)
+        maybe_result: TaskOutcome[int, TaskError] | None = None,
+    ) -> Result[Any, TaskError]:
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -377,9 +378,9 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
     task_options_json: str | None = None
     task_ok_type: Any = Any
 
-    def __call__(self, **kwargs: Any) -> TaskResult[Any, TaskError]:
+    def __call__(self, **kwargs: Any) -> Result[Any, TaskError]:
         _ = kwargs
-        return TaskResult(ok=None)
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -449,9 +450,9 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
     def __call__(
         self,
         workflow_meta: WorkflowMeta,
-    ) -> TaskResult[Any, TaskError]:
+    ) -> Result[Any, TaskError]:
         _ = workflow_meta
-        return TaskResult(ok=None)
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -518,10 +519,10 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
     task_options_json: str | None = None
     task_ok_type: Any = int
 
-    def __call__(self, *args: Any, **kwargs: Any) -> TaskResult[int, TaskError]:
+    def __call__(self, *args: Any, **kwargs: Any) -> Result[int, TaskError]:
         _ = args
         _ = kwargs
-        return TaskResult(ok=1)
+        return Ok(1)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[int]]:
         return Ok(TaskHandle('mock'))
@@ -581,7 +582,7 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
 
 @dataclass
 class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
-    """Mock consumer expecting TaskResult[str, TaskError] for args_from."""
+    """Mock consumer expecting TaskOutcome[str, TaskError] for args_from."""
 
     task_name: str
     task_queue_name: str | None = None
@@ -590,13 +591,13 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
 
     def __call__(
         self,
-        required: TaskResult[str, TaskError],
+        required: TaskOutcome[str, TaskError],
         *,
         flag: bool,
-    ) -> TaskResult[Any, TaskError]:
+    ) -> Result[Any, TaskError]:
         _ = required
         _ = flag
-        return TaskResult(ok=None)
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -656,7 +657,7 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
 
 @dataclass
 class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
-    """Mock consumer with non-TaskResult annotation for args_from validation."""
+    """Mock consumer with non-TaskOutcome annotation for args_from validation."""
 
     task_name: str
     task_queue_name: str | None = None
@@ -668,10 +669,10 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
         required: int,
         *,
         flag: bool,
-    ) -> TaskResult[Any, TaskError]:
+    ) -> Result[Any, TaskError]:
         _ = required
         _ = flag
-        return TaskResult(ok=None)
+        return Ok(None)
 
     def send(self, *args: Any, **kwargs: Any) -> TaskSendResult[TaskHandle[Any]]:
         return Ok(TaskHandle('mock'))
@@ -1355,7 +1356,7 @@ class TestWorkflowSpecValidation:
         assert len(spec.tasks) == 2
 
     def test_args_from_type_mismatch_rejected(self) -> None:
-        """args_from source ok-type must match consumer TaskResult ok-type."""
+        """args_from source ok-type must match consumer TaskOutcome ok-type."""
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithStringResultParam(task_name='task_b_expects_str')
 
@@ -1372,8 +1373,8 @@ class TestWorkflowSpecValidation:
 
         assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
-    def test_args_from_requires_taskresult_param_annotation(self) -> None:
-        """args_from target param must be annotated as TaskResult[OkT, TaskError]."""
+    def test_args_from_requires_outcome_param_annotation(self) -> None:
+        """args_from target param must be annotated as TaskOutcome[OkT, TaskError]."""
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithRawParam(task_name='task_b_raw_param')
 
@@ -1391,7 +1392,7 @@ class TestWorkflowSpecValidation:
         assert exc.value.code == ErrorCode.WORKFLOW_ARGS_FROM_TYPE_MISMATCH
 
     def test_args_from_type_match_accepted(self) -> None:
-        """args_from passes when producer and consumer TaskResult ok-types match."""
+        """args_from passes when producer and consumer TaskOutcome ok-types match."""
         fn_a = MockTaskWrapperInt(task_name='task_a_int')
         fn_b = MockTaskWrapperWithParams(task_name='task_b_expects_int')
 
@@ -1572,7 +1573,7 @@ class TestWorkflowSpecValidation:
         assert exc.value.code == ErrorCode.WORKFLOW_INVALID_KWARG_KEY
 
     def test_subworkflow_args_from_type_mismatch_rejected(self) -> None:
-        """SubWorkflowNode args_from must match build_with TaskResult ok-type annotations."""
+        """SubWorkflowNode args_from must match build_with TaskOutcome ok-type annotations."""
         fn_a = MockTaskWrapper(task_name='task_a')
 
         class ChildWorkflow(WorkflowDefinition[int]):
@@ -1584,7 +1585,7 @@ class TestWorkflowSpecValidation:
 
             @classmethod
             def build_with(
-                cls, app: Any, *, source: TaskResult[str, TaskError]
+                cls, app: Any, *, source: TaskOutcome[str, TaskError]
             ) -> WorkflowSpec:
                 _ = source
                 return cls.build(app)
@@ -2007,8 +2008,8 @@ class TestWorkflowContext:
 
     def test_from_serialized_reconstruction(self) -> None:
         """from_serialized() creates valid WorkflowContext."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
-        results_by_id: dict[str, TaskResult[Any, TaskError]] = {'node-0': result_0}
+        result_0: TaskOutcome[int, TaskError] = Succeeded(42)
+        results_by_id: dict[str, TaskOutcome[Any, TaskError]] = {'node-0': result_0}
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
@@ -2022,9 +2023,9 @@ class TestWorkflowContext:
         assert ctx.task_name == 'my_task'
 
     def test_result_for_returns_correct_result(self) -> None:
-        """result_for(node) returns the correct TaskResult."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
-        results_by_id: dict[str, TaskResult[Any, TaskError]] = {'node-0': result_0}
+        """result_for(node) returns the correct TaskOutcome."""
+        result_0: TaskOutcome[int, TaskError] = Succeeded(42)
+        results_by_id: dict[str, TaskOutcome[Any, TaskError]] = {'node-0': result_0}
 
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
@@ -2039,12 +2040,11 @@ class TestWorkflowContext:
         node.node_id = 'node-0'  # Simulate WorkflowSpec having assigned node_id
 
         result = ctx.result_for(node)
-        assert result.is_ok()
-        assert result.unwrap() == 42
+        assert result == Succeeded(42)
 
     def test_result_for_node_key(self) -> None:
-        """result_for(NodeKey) returns the correct TaskResult."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=7)
+        """result_for(NodeKey) returns the correct TaskOutcome."""
+        result_0: TaskOutcome[int, TaskError] = Succeeded(7)
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
             task_index=1,
@@ -2054,14 +2054,13 @@ class TestWorkflowContext:
 
         key = NodeKey[int]('node-0')
         result = ctx.result_for(key)
-        assert result.is_ok()
-        assert result.unwrap() == 7
+        assert result == Succeeded(7)
 
     def test_result_for_accepts_subworkflow_node(self) -> None:
         """result_for(node) accepts a SubWorkflowNode and returns its terminal
-        TaskResult (the type signature must allow it — pyright previously
+        outcome (the type signature must allow it — pyright previously
         refused what the runtime accepts)."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=99)
+        result_0: TaskOutcome[int, TaskError] = Succeeded(99)
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
             task_index=1,
@@ -2083,12 +2082,11 @@ class TestWorkflowContext:
         )
 
         result = ctx.result_for(node)
-        assert result.is_ok()
-        assert result.unwrap() == 99
+        assert result == Succeeded(99)
 
     def test_model_dump_round_trips_results(self) -> None:
         """model_dump() preserves dependency results through model_validate()."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
+        result_0: TaskOutcome[int, TaskError] = Succeeded(42)
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
             task_index=1,
@@ -2101,22 +2099,21 @@ class TestWorkflowContext:
 
         restored = WorkflowContext.model_validate(dumped)
         restored_result = restored.result_for(NodeKey[int]('node-0'))
-        assert restored_result.is_ok()
-        assert restored_result.unwrap() == 42
+        assert restored_result == Succeeded(42)
 
     def test_model_dump_json_mode_raises_not_implemented(self) -> None:
         """Strict-serde phase 7: model_dump(mode='json') is dropped.
 
         WorkflowContext can't carry a wire form because per-result
         ok_type lives at the engine/worker boundary, not on the model.
-        Reconstruction is via from_serialized with pre-typed TaskResult
-        instances.
+        Reconstruction is via from_serialized with pre-typed TaskOutcome
+        values.
         """
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
             task_index=1,
             task_name='consumer',
-            results_by_id={'node-0': TaskResult(ok=42)},
+            results_by_id={'node-0': Succeeded(42)},
         )
 
         with pytest.raises(NotImplementedError, match='not supported under strict-serde'):
@@ -2159,7 +2156,7 @@ class TestWorkflowContext:
 
     def test_has_result(self) -> None:
         """has_result(node) returns True if result exists."""
-        result_0: TaskResult[int, TaskError] = TaskResult(ok=42)
+        result_0: TaskOutcome[int, TaskError] = Succeeded(42)
         ctx = WorkflowContext.from_serialized(
             workflow_id='wf-123',
             task_index=1,
@@ -2961,7 +2958,7 @@ class TestMultiErrorWorkflowCollection:
             fn=consumer,
             waits_for=[node_a],
             kwargs={'required': 42},  # overlaps with args_from key below
-            # 'required' overlaps; 'flag' is bool (not TaskResult) -> type mismatch
+            # 'required' overlaps; 'flag' is bool (not TaskOutcome) -> type mismatch
             args_from={'required': node_a, 'flag': node_a},
         )
 

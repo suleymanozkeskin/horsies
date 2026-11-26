@@ -25,10 +25,10 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.tasks import TaskError, TaskResult
+from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow.handle import WorkflowHandle
 from horsies.core.task_decorator import TaskFunction
-from horsies.core.types.result import is_ok
+from horsies.core.types.result import Err, Ok, Result, is_ok
 from tests.integration.conftest import DB_URL
 
 pytestmark = [pytest.mark.integration]
@@ -73,8 +73,8 @@ def one_connection_app(schema_ready: None) -> Generator[OneConnectionApp, None, 
     ))
 
     @app.task('sync_bridge_echo')
-    def sync_bridge_echo(*, value: int) -> TaskResult[int, TaskError]:
-        return TaskResult(ok=value)
+    def sync_bridge_echo(*, value: int) -> Result[int, TaskError]:
+        return Ok(value)
 
     yield OneConnectionApp(app=app, echo=sync_bridge_echo)
     closed = app.get_broker().close()
@@ -115,5 +115,5 @@ def test_ping_workers_after_sync_workflow_wait(
         lambda: app.ping_workers(timeout_seconds=PING_WINDOW_SECONDS),
     )
 
-    assert waited.is_err(), waited
+    assert isinstance(waited, Err), waited
     assert is_ok(pinged), pinged
