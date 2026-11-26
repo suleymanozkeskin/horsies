@@ -39,7 +39,7 @@ const SHARED_SEATS = 4n;
 
 /** The snapshots of every worker that wrote one. Fails the test when the read fails. */
 async function workerStates(suite: Suite): Promise<readonly WorkerStateSnapshot[]> {
-  const read = await suite.app.monitoring.workers();
+  const read = await suite.app.monitoring.listWorkerStates();
 
   if (!read.ok) {
     assert.fail(`list the worker states: ${read.error.code}`);
@@ -109,7 +109,7 @@ describe("layer 8: health", () => {
   e2eTest("the worker that replies to a ping has a snapshot that reads by its id; an unknown id reads as not found", "recovery", async (suite) => {
     await suite.worker("isolated-1");
 
-    const [pong] = await pongs(suite, { timeoutMs: PING_WINDOW_MS, minResponses: { kind: "atLeast", count: 1 } });
+    const [pong] = await pongs(suite, { waitMs: PING_WINDOW_MS, minResponses: { kind: "atLeast", count: 1 } });
 
     assert.ok(pong !== undefined, "the worker replied to the ping");
 
@@ -119,13 +119,13 @@ describe("layer 8: health", () => {
       return snapshot === undefined ? NOT_YET : found(snapshot);
     });
 
-    const read = await suite.app.monitoring.worker(listed.workerId);
+    const read = await suite.app.monitoring.getWorkerState(listed.workerId);
 
     assert.ok(read.ok && read.value.kind === "found", `read the worker state: ${read.ok ? read.value.kind : read.error.code}`);
     assert.equal(read.value.snapshot.workerId, listed.workerId);
     assert.ok(atOrAfter(read.value.snapshot.snapshotAt, listed.snapshotAt), "the read is at least as new as the list");
 
-    const unknown = await suite.app.monitoring.worker("does-not-exist");
+    const unknown = await suite.app.monitoring.getWorkerState("does-not-exist");
 
     assert.deepEqual(unknown, { ok: true, value: { kind: "notFound", workerId: "does-not-exist" } });
   });
@@ -136,7 +136,7 @@ describe("layer 8: health", () => {
     const listed = await firstSnapshot(suite);
 
     const history = await pollFor(SNAPSHOT_WAIT_MS, "three snapshots", async () => {
-      const read = await suite.app.monitoring.workerHistory(listed.workerId, { kind: "allRetained" });
+      const read = await suite.app.monitoring.getWorkerStateHistory(listed.workerId, { kind: "allRetained" });
 
       return read.ok && read.value.length >= 3 ? found(read.value) : NOT_YET;
     });
@@ -147,7 +147,7 @@ describe("layer 8: health", () => {
       assert.ok(newer !== undefined && Temporal.Instant.compare(newer.snapshotAt, snapshot.snapshotAt) > 0, "newest first");
     }
 
-    const newest = await suite.app.monitoring.workerHistory(listed.workerId, { kind: "newest", count: 2 });
+    const newest = await suite.app.monitoring.getWorkerStateHistory(listed.workerId, { kind: "newest", count: 2 });
 
     assert.ok(newest.ok, `read the newest two: ${newest.ok ? "" : newest.error.code}`);
     assert.equal(newest.value.length, 2);
@@ -159,7 +159,7 @@ describe("layer 8: health", () => {
   });
 
   e2eTest("a worker ping with a window of 0 ms is refused as INVALID_INPUT, not retryable", "default", async (suite) => {
-    const refused = await suite.app.pingWorkers({ target: { kind: "everyWorker" }, timeoutMs: 0 });
+    const refused = await suite.app.pingWorkers({ target: { kind: "everyWorker" }, waitMs: 0 });
 
     assert.ok(!refused.ok, "a window of 0 ms is refused");
 
@@ -176,7 +176,7 @@ describe("layer 8: health", () => {
     await suite.worker("isolated-1");
 
     const startedAt = performance.now();
-    const early = await pongs(suite, { timeoutMs: PING_WINDOW_MS, minResponses: { kind: "atLeast", count: 1 } });
+    const early = await pongs(suite, { waitMs: PING_WINDOW_MS, minResponses: { kind: "atLeast", count: 1 } });
     const tookMs = performance.now() - startedAt;
 
     assert.equal(early.length, 1, JSON.stringify(early));
@@ -184,7 +184,7 @@ describe("layer 8: health", () => {
 
     await suite.worker("isolated-1");
 
-    const both = await pongs(suite, { timeoutMs: PING_WINDOW_MS, minResponses: { kind: "atLeast", count: 2 } });
+    const both = await pongs(suite, { waitMs: PING_WINDOW_MS, minResponses: { kind: "atLeast", count: 2 } });
 
     assert.equal(both.length, 2, `both workers reply: ${JSON.stringify(both)}`);
     assert.equal(new Set(both.map((pong) => pong.workerId)).size, 2);
@@ -195,7 +195,7 @@ describe("layer 8: health", () => {
     assert.ok(pong.workerId !== "" && pong.hostname !== "", JSON.stringify(pong));
     assert.ok(pong.pid > 0 && pong.roundTripMs >= 0, JSON.stringify(pong));
 
-    const targeted = await pongs(suite, { target: { kind: "worker", workerId: pong.workerId }, timeoutMs: PING_WINDOW_MS });
+    const targeted = await pongs(suite, { target: { kind: "worker", workerId: pong.workerId }, waitMs: PING_WINDOW_MS });
 
     assert.deepEqual(
       targeted.map((reply) => reply.workerId),
@@ -215,7 +215,7 @@ describe("layer 8: health", () => {
     await suite.rows.waitForStatus(running.taskId, "RUNNING", START_WAIT_MS);
 
     const workerId = (await suite.rows.taskRow(running.taskId)).workerId;
-    const report = await suite.app.monitoring.classReport();
+    const report = await suite.app.monitoring.getExecutionClassReport();
 
     assert.ok(report.ok, `read the class report: ${report.ok ? "" : report.error.code}`);
 
@@ -245,7 +245,7 @@ describe("layer 8: health", () => {
     await pendingLater(suite, pending.taskId);
     await suite.worker("shared-only-1x4");
 
-    const coverage = await suite.app.monitoring.classCoverage();
+    const coverage = await suite.app.monitoring.getExecutionClassCoverage();
 
     assert.ok(coverage.ok, `read the class coverage: ${coverage.ok ? "" : coverage.error.code}`);
     assert.equal(await suite.rows.taskStatus(unserved.taskId), "PENDING");

@@ -6,7 +6,7 @@ import { contractRecord } from "../contract/definition.ts";
 import { type ImplementationParts, implementationParts } from "../contract/implementation.ts";
 import type { AppContext } from "./context.ts";
 import { type CoreChecks, refusalOfCore } from "./core-checks.ts";
-import { refusal, type Refusal } from "./refusal.ts";
+import { refusal, type HorsiesError } from "./refusal.ts";
 
 /** Register the parts of an implementation; record a refusal for a contract that the app does not list, or a second implementation. */
 export function registerImplementation(context: AppContext, implementation: object): void {
@@ -45,8 +45,8 @@ export function registerImplementation(context: AppContext, implementation: obje
  * `app.implement` calls no addon function, so the `check` command and the worker start call this, on a main thread,
  * with the core's checks. Refusals in registration order, with the path `implement <task name>`.
  */
-export function exceptionCodeRefusals(context: AppContext, checks: CoreChecks): readonly Refusal[] {
-  const refusals: Refusal[] = [];
+export function exceptionCodeRefusals(context: AppContext, checks: CoreChecks): readonly HorsiesError[] {
+  const refusals: HorsiesError[] = [];
 
   for (const [name, parts] of context.implementations) {
     const record = contractRecord(parts.contract);

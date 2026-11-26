@@ -217,7 +217,7 @@ export const dailyReport = defineWorkflow(
 | Operation | Returns |
 |---|---|
 | Task body | `ok(value)` or `err({ code, message, data })` of its second argument, or a Promise of one |
-| `Horsies.create` | `Result<Horsies, CreateRefused>` |
+| `Horsies.create` | `Result<Horsies, ValidationReport>` |
 | `app.send`, `app.retrySend` | `Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>>` |
 | `handle.get` | `Promise<Result<TaskOutcome<O, E>, ReadError>>` |
 | `handle.info` | `Promise<Result<TaskInfo, ReadError>>` |
@@ -258,10 +258,10 @@ base of the defects.
 ## CLI
 
 ```bash
-node app.ts worker --profile NAME [--loglevel LEVEL] [--metrics-listen HOST:PORT]
-node app.ts check [--live] [--loglevel LEVEL]
-node app.ts web [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]
-node app.ts metrics --listen HOST:PORT [--loglevel LEVEL]
+node app.ts worker --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]
+node app.ts check [--live] [--log-level LEVEL]
+node app.ts web [--host HOST] [--port PORT] [--authorization none|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]
+node app.ts metrics --metrics-listen HOST:PORT [--log-level LEVEL]
 npx horsies get-docs [--output DIR] [--ref main]
 npx horsies skills install --target DIR [--force]
 ```

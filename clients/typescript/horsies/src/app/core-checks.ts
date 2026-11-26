@@ -18,7 +18,7 @@ import type {
   TaskOptionsFacts,
 } from "../native/sends/addon.ts";
 import type { QueueRoute } from "../send/send.ts";
-import { refusal, type Refusal } from "./refusal.ts";
+import { refusal, type HorsiesError } from "./refusal.ts";
 
 /** The core's pure check functions. On a main thread the addon gives them; a test gives a fake. */
 export interface CoreChecks {
@@ -35,7 +35,7 @@ export type AcceptedConfig = {
 };
 
 /** The outcome of a core check: its value, or its refusals. */
-export type CoreChecked<T> = { readonly kind: "accepted"; readonly value: T } | { readonly kind: "refused"; readonly refusals: readonly Refusal[] };
+export type CoreChecked<T> = { readonly kind: "accepted"; readonly value: T } | { readonly kind: "refused"; readonly refusals: readonly HorsiesError[] };
 
 const CATALOG_CODES: ReadonlySet<string> = new Set(Object.values(ErrorCodes));
 
@@ -82,7 +82,7 @@ export function checkTaskWithCore(
   }
 }
 
-function codeRefusals(checks: CoreChecks, record: ContractRecord, path: string): readonly Refusal[] {
+function codeRefusals(checks: CoreChecks, record: ContractRecord, path: string): readonly HorsiesError[] {
   switch (record.codes.kind) {
     case "open":
       return [];
@@ -146,7 +146,7 @@ function retryFacts(retry: RetrySetting): RetryFacts {
 }
 
 /** The refusal of a core refusal at `path`. A code that the catalog does not hold is a defect: `TypeError`. Pure. */
-export function refusalOfCore(path: string, refused: CoreRefusal): Refusal {
+export function refusalOfCore(path: string, refused: CoreRefusal): HorsiesError {
   return refusal(catalogCode(refused.code), path, [refused.message, ...refused.notes].join("; "), helpLines(refused.help));
 }
 

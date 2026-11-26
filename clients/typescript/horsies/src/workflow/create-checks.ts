@@ -4,7 +4,7 @@
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import type { QueueSetup } from "../config/queues.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
 import type { ContractLookup } from "../send/send.ts";
 import { runBuild } from "./builder.ts";
@@ -22,7 +22,7 @@ export type WorkflowsAtCreate = {
 };
 
 /** The registry of every workflow that passed its own checks, and every refusal in list order. */
-export type WorkflowsChecked = { readonly registry: WorkflowRegistry; readonly refusals: readonly Refusal[] };
+export type WorkflowsChecked = { readonly registry: WorkflowRegistry; readonly refusals: readonly HorsiesError[] };
 
 /**
  * The place of a listed workflow in a refusal: `workflows[1] nightly`; only `workflows[1]` when the name breaks a name
@@ -44,7 +44,7 @@ export function workflowPath(index: number, name: string): string {
 }
 
 /** A spec finding as a refusal under the place `path`. Pure. */
-export function findingRefusal(path: string, found: SpecFinding): Refusal {
+export function findingRefusal(path: string, found: SpecFinding): HorsiesError {
   return refusal(found.code, `${path} ${found.place}`, found.detail, found.help);
 }
 
@@ -55,7 +55,7 @@ export function findingRefusal(path: string, found: SpecFinding): Refusal {
  */
 export function checkWorkflowsAtCreate(input: WorkflowsAtCreate): WorkflowsChecked {
   const listed: { readonly index: number; readonly entry: ListedWorkflow }[] = [];
-  const refusals: Refusal[] = [];
+  const refusals: HorsiesError[] = [];
   const keys = new Map<string, object>();
 
   input.workflows.forEach((workflow, index) => {
@@ -142,7 +142,7 @@ function storedTextCheck(text: string, maxChars: number): StoredTextCheck {
 }
 
 /** `HRS-033` for the `subject` text that the core cannot store. The refusal does not carry the text. Pure. */
-function unstorableTextRefusal(path: string, subject: string, check: UnstorableText): Refusal {
+function unstorableTextRefusal(path: string, subject: string, check: UnstorableText): HorsiesError {
   switch (check.kind) {
     case "loneSurrogate":
       return refusal(ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG, path, `the ${subject} holds a lone surrogate`, [
@@ -170,7 +170,7 @@ function nameCheck(name: string): StoredTextCheck {
  * (the spec data text cannot carry it) or with more than `MAX_WORKFLOW_NAME_CHARS` characters (the stored column
  * cannot hold it) is `HRS-033`. Pure.
  */
-function nameRefusals(path: string, name: string): readonly Refusal[] {
+function nameRefusals(path: string, name: string): readonly HorsiesError[] {
   const check = nameCheck(name);
 
   switch (check.kind) {
@@ -191,7 +191,7 @@ function nameRefusals(path: string, name: string): readonly Refusal[] {
  * `MAX_DEFINITION_KEY_CHARS` characters is `HRS-033`; a valid key that an earlier entry has is `HRS-017`. Records a
  * valid new key in `keys`.
  */
-function keyRefusals(path: string, workflow: object, key: string, keys: Map<string, object>): readonly Refusal[] {
+function keyRefusals(path: string, workflow: object, key: string, keys: Map<string, object>): readonly HorsiesError[] {
   const check = storedTextCheck(key, MAX_DEFINITION_KEY_CHARS);
 
   switch (check.kind) {
@@ -208,7 +208,7 @@ function keyRefusals(path: string, workflow: object, key: string, keys: Map<stri
 }
 
 /** `HRS-017` for a key that an earlier entry has (or the same workflow listed twice); else records the key. */
-function uniqueKeyRefusals(path: string, workflow: object, key: string, keys: Map<string, object>): readonly Refusal[] {
+function uniqueKeyRefusals(path: string, workflow: object, key: string, keys: Map<string, object>): readonly HorsiesError[] {
   const first = keys.get(key);
 
   if (first === undefined) {
@@ -224,10 +224,10 @@ function uniqueKeyRefusals(path: string, workflow: object, key: string, keys: Ma
 }
 
 /** The refusals of a record: the name, the key, its uniqueness, the error rule, the check cases rule. */
-function recordRefusals(path: string, workflow: object, keys: Map<string, object>): Refusal[] {
+function recordRefusals(path: string, workflow: object, keys: Map<string, object>): HorsiesError[] {
   const record = workflowRecord(workflow);
 
-  const refusals: Refusal[] = [
+  const refusals: HorsiesError[] = [
     ...nameRefusals(path, record.name),
     ...keyRefusals(path, workflow, record.definitionKey, keys),
   ];
@@ -260,7 +260,7 @@ export function buildRefusals(
   entry: ListedWorkflow,
   registry: WorkflowRegistry,
   params: object = {},
-): readonly Refusal[] {
+): readonly HorsiesError[] {
   const run = runBuild(entry.record.build, params);
 
   switch (run.kind) {

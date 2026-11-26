@@ -1,5 +1,5 @@
 // The fleet metrics server with a built addon and a database: the endpoint answers, a stop request
-// ends the run, a second run and an address in use, the core's check of `--listen`, and the
+// ends the run, a second run and an address in use, the core's check of `--metrics-listen`, and the
 // `metrics` command with its production dependencies.
 
 import assert from "node:assert/strict";
@@ -116,7 +116,7 @@ describe("the fleet metrics server with a built addon and a database", () => {
     }
   });
 
-  test("the core checks a --listen text", () => {
+  test("the core checks a --metrics-listen text", () => {
     assert.deepEqual(envelopeValue(fleetMetricsAddon().parseMetricsListenAddress("[::1]:9100")), {
       kind: "address",
       host: "::1",
@@ -128,9 +128,9 @@ describe("the fleet metrics server with a built addon and a database", () => {
     assert.equal(refused.kind, "refused");
   });
 
-  test("the metrics command exits 2 for a --listen that the core refuses", async () => {
+  test("the metrics command exits 2 for a --metrics-listen that the core refuses", async () => {
     const deps = metricsCommandDeps({ coreHandle: handle, queueNames: ["default"], scheduleNames: [] });
 
-    assert.equal(await runMetricsCommand(["--listen", "no-port"], deps), EXIT_USAGE);
+    assert.equal(await runMetricsCommand(["--metrics-listen", "no-port"], deps), EXIT_USAGE);
   });
 });

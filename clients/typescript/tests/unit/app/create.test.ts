@@ -160,7 +160,7 @@ describe("Horsies.create: the contract list", () => {
     const refused = created.ok ? [] : created.error.refusals;
 
     assert.deepEqual(
-      refused.map((each) => [each.code, each.message, each.help]),
+      refused.map((each) => [each.code, each.message, each.helpText]),
       [["HRS-102", "tasks[0] : name: the task name is empty [TaskName]", ["give a task name that is not empty"]]],
     );
   });
@@ -171,7 +171,7 @@ describe("Horsies.create: the contract list", () => {
     const refused = created.ok ? [] : created.error.refusals;
 
     assert.deepEqual(
-      refused.map((each) => [each.code, each.message, each.help]),
+      refused.map((each) => [each.code, each.message, each.helpText]),
       [["HRS-105", "tasks[0] dated: input.at: zod type date is refused [DATE] [ZodSchema]", ["use hz.instant(): a Date holds milliseconds only"]]],
     );
   });
@@ -191,7 +191,7 @@ describe("Horsies.create: the core's checks of a contract", () => {
     const coded = defineTask({ name: "coded", input: {}, output: h.null(), errorCodes: ["BAD"] });
     const created = createHorsies(config([coded]), environment);
 
-    assert.deepEqual(created.ok ? [] : created.error.refusals.map((refused) => [refused.code, refused.help]), [
+    assert.deepEqual(created.ok ? [] : created.error.refusals.map((refused) => [refused.code, refused.helpText]), [
       ["HRS-112", []],
       ["HRS-109", ["set timeoutMs"]],
     ]);

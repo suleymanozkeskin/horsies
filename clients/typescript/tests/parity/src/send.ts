@@ -496,7 +496,7 @@ async function ping(app: Horsies, expected: number): Promise<Result<string, stri
     return err("no worker answered");
   }
 
-  const targeted = await app.pingWorkers({ target: { kind: "worker", workerId: first.workerId }, timeoutMs: PING_WINDOW_MS });
+  const targeted = await app.pingWorkers({ target: { kind: "worker", workerId: first.workerId }, waitMs: PING_WINDOW_MS });
 
   if (!targeted.ok) {
     return err(`the ping of worker ${first.workerId} was refused: ${pingWorkersErrorText(targeted.error)}`);
@@ -516,7 +516,7 @@ async function everyWorker(app: Horsies, expected: number): Promise<Result<reado
 
   for (let attempt = 0; attempt < PING_ATTEMPTS; attempt += 1) {
     const pinged = await app.pingWorkers({
-      timeoutMs: PING_WINDOW_MS,
+      waitMs: PING_WINDOW_MS,
       minResponses: { kind: "atLeast", count: expected },
     });
 

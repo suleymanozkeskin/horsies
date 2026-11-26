@@ -23,7 +23,7 @@ export class AddonOutsideMainThread extends CoreDefect {
 }
 
 // @public
-export function allowAll(): MonitoringAuthPolicy;
+export function allowAll(): MonitoringAuthorizationPolicy;
 
 // @public
 export type AnyEvent = TaskClaimed | ClaimReleased | AttemptPlaced | AttemptNotStarted | AttemptEnded | AttemptRecorded | TaskRecovered | ChildStarted | ChildReplaced | SlotDown | SlotRecovered;
@@ -1084,11 +1084,6 @@ export class CoreStopped extends CoreError {
 export function createMonitoringHandler(app: Horsies, options: MonitoringHandlerOptions): MonitoringHandler;
 
 // @public
-export type CreateRefused = {
-    readonly refusals: NonEmpty<Refusal>;
-};
-
-// @public
 export type CronEnumTerm<T extends Month | Weekday> = {
     readonly kind: "every";
 } | {
@@ -1251,7 +1246,7 @@ export type DecodeRefusalKind =
 export type DecodeRefused = ValueRefused | EnvelopeRefused;
 
 // @public
-export const DEFAULT_PING_TIMEOUT_MS = 2000;
+export const DEFAULT_PING_WAIT_MS = 2000;
 
 // @public (undocumented)
 export const DEFAULT_RETENTION_CLASS_KEY = "standard_30d";
@@ -1758,7 +1753,7 @@ export interface HistoryContractError {
 
 // @public
 export class Horsies {
-    static create(config: HorsiesConfig): Result<Horsies, CreateRefused>;
+    static create(config: HorsiesConfig): Result<Horsies, ValidationReport>;
     implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution, C extends ContextUse>(contract: TaskContract<P, O, E, X, C>, body: NoInfer<BodyFor<P, O, E, X, C>>, options?: ImplementOptions<NoInfer<E>>): Implementation<P, O, E, X, C>;
     readonly monitoring: Monitoring;
     onChildStart(hook: ChildStartHook): void;
@@ -1782,6 +1777,14 @@ export class Horsies {
 export type HorsiesConfig = AppConfigInput & {
     readonly tasks: readonly AnyTaskContract[];
     readonly workflows?: readonly AnyWorkflowContract[];
+};
+
+// @public
+export type HorsiesError = {
+    readonly code: RefusalCode;
+    readonly path: string;
+    readonly message: string;
+    readonly helpText: readonly string[];
 };
 
 // @public
@@ -1822,6 +1825,12 @@ export interface ImplementOptions<E extends string> {
 }
 
 // @public
+export const INTENT_HEADER = "X-Horsies-Intent";
+
+// @public
+export const INTENT_VALUE = "action";
+
+// @public
 export interface IntervalSchedule {
     readonly every: Temporal.Duration;
     // (undocumented)
@@ -1844,11 +1853,10 @@ export interface IsolatedChildren {
 // @public
 export interface IsolatedPoolInput {
     // (undocumented)
-    readonly check?: boolean;
-    // (undocumented)
     readonly maxSize?: PoolSize;
     // (undocumented)
     readonly minSize?: number;
+    readonly prePing?: boolean;
 }
 
 // @public
@@ -2076,10 +2084,10 @@ export type Measure = {
 
 // @public
 export type MemoryLimit = {
-    readonly kind: "mb";
+    readonly kind: "memoryLimit";
     readonly mb: number;
 } | {
-    readonly kind: "noLimit";
+    readonly kind: "noMemoryLimit";
 };
 
 // @public
@@ -2098,46 +2106,46 @@ export interface Monitoring {
     // (undocumented)
     cancelTask(taskId: TaskId, options: CancelTaskOptions): Promise<Result<TaskCancelled, CancelTaskError>>;
     // (undocumented)
-    classCoverage(): Promise<Result<ClassCoverage, HealthReadError>>;
+    getExecutionClassCoverage(): Promise<Result<ClassCoverage, HealthReadError>>;
     // (undocumented)
-    classReport(): Promise<Result<ClassReport, HealthReadError>>;
+    getExecutionClassReport(): Promise<Result<ClassReport, HealthReadError>>;
     // (undocumented)
-    expiredTasks(): Promise<Result<BoundedTaskList<ExpiredTaskRow>, HealthReadError>>;
+    getExpiredTasks(): Promise<Result<BoundedTaskList<ExpiredTaskRow>, HealthReadError>>;
+    // (undocumented)
+    getStaleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthInputError>>;
+    // (undocumented)
+    getTaskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringCoreReadError>>;
+    // (undocumented)
+    getWorkerState(workerId: string): Promise<Result<WorkerStateRead, WorkerReadError>>;
+    // (undocumented)
+    getWorkerStateHistory(workerId: string, limit?: WorkerHistoryLimit): Promise<Result<readonly WorkerStateSnapshot[], WorkerHistoryError>>;
+    // (undocumented)
+    getWorkflowNode(workflowId: WorkflowId, nodeIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
+    // (undocumented)
+    getWorkflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringCoreReadError>>;
+    // (undocumented)
+    listSchedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringCoreReadError>>;
     // (undocumented)
     listTasks(query?: TaskListQuery): Promise<Result<TaskListPage, MonitoringReadError>>;
     // (undocumented)
-    schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringCoreReadError>>;
+    listWorkerStates(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
     // (undocumented)
-    staleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthInputError>>;
+    listWorkflowNames(): Promise<Result<readonly string[], MonitoringCoreReadError>>;
+    // (undocumented)
+    listWorkflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
     // (undocumented)
     taskBreakdown(query: TaskBreakdownQuery): Promise<Result<Breakdown, MonitoringReadError>>;
-    // (undocumented)
-    taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringCoreReadError>>;
     // (undocumented)
     taskFacets(query?: TaskFacetsQuery): Promise<Result<Facets, MonitoringReadError>>;
     // (undocumented)
     taskStats(query?: TaskStatsQuery): Promise<Result<readonly StatusCount[], MonitoringReadError>>;
-    // (undocumented)
-    worker(workerId: string): Promise<Result<WorkerStateRead, WorkerReadError>>;
-    // (undocumented)
-    workerHistory(workerId: string, limit?: WorkerHistoryLimit): Promise<Result<readonly WorkerStateSnapshot[], WorkerHistoryError>>;
-    // (undocumented)
-    workers(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
-    // (undocumented)
-    workflowNames(): Promise<Result<readonly string[], MonitoringCoreReadError>>;
-    // (undocumented)
-    workflowNode(workflowId: WorkflowId, taskIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
-    // (undocumented)
-    workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringCoreReadError>>;
-    // (undocumented)
-    workflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
 }
 
 // @public
 export const MONITORING_WINDOW_DEFAULT: Temporal.Duration;
 
 // @public
-export interface MonitoringAuthPolicy {
+export interface MonitoringAuthorizationPolicy {
     canAct(request: Request): boolean | Promise<boolean>;
     canView(request: Request): boolean | Promise<boolean>;
 }
@@ -2154,7 +2162,7 @@ export interface MonitoringHandler {
 // @public
 export interface MonitoringHandlerOptions {
     readonly actions?: ActionsSwitch;
-    readonly auth: MonitoringAuthPolicy;
+    readonly authorizationPolicy: MonitoringAuthorizationPolicy;
     readonly basePath?: MountPathText;
     // (undocumented)
     readonly ui?: MonitoringUiOptions;
@@ -2664,7 +2672,7 @@ export interface PingWorkersOptions {
     readonly minResponses?: MinResponses;
     // (undocumented)
     readonly target?: PingTarget;
-    readonly timeoutMs?: number;
+    readonly waitMs?: number;
 }
 
 // @public (undocumented)
@@ -2727,7 +2735,7 @@ export interface QueryRefused {
 }
 
 // @public
-export type QueryRefusedField = "window" | "page" | "limit" | "taskNames" | "queues" | "workers" | "errorCodes" | "workflowName" | "taskIndex" | "workerId";
+export type QueryRefusedField = "window" | "page" | "limit" | "taskNames" | "queues" | "workers" | "errorCodes" | "workflowName" | "nodeIndex" | "workerId";
 
 // @public
 export type QueueConfigInput = {
@@ -2859,12 +2867,6 @@ export type RecoveryAction = "RUNNING_FAILED" | "RUNNING_RETRIED" | "CLAIM_REQUE
 // @public
 export interface RecoveryConfigInput {
     // (undocumented)
-    readonly autoFailStaleRunning?: boolean;
-    // (undocumented)
-    readonly autoRequeueStaleClaimed?: boolean;
-    // (undocumented)
-    readonly autoTerminateOrphanedWorkflowTasks?: boolean;
-    // (undocumented)
     readonly checkIntervalMs?: number;
     // (undocumented)
     readonly claimedStaleThresholdMs?: number;
@@ -2873,15 +2875,21 @@ export interface RecoveryConfigInput {
     // (undocumented)
     readonly crashedWorkerRecoveryGraceMs?: number;
     // (undocumented)
+    readonly failStaleRunning?: boolean;
+    // (undocumented)
+    readonly finalizationQuarantineAfterAttempts?: number;
+    // (undocumented)
     readonly finalizingStaleThresholdMs?: number;
     // (undocumented)
     readonly orphanTaskAuditIntervalMs?: number;
     // (undocumented)
-    readonly phase2QuarantineAfterAttempts?: number;
+    readonly requeueStaleClaimed?: boolean;
     // (undocumented)
     readonly runnerHeartbeatIntervalMs?: number;
     // (undocumented)
     readonly runningStaleThresholdMs?: number;
+    // (undocumented)
+    readonly terminateOrphanedWorkflowTasks?: boolean;
     // (undocumented)
     readonly workerStateSnapshotIntervalMs?: number;
     // (undocumented)
@@ -2891,14 +2899,6 @@ export interface RecoveryConfigInput {
 // @public
 export type RecoveryConfigSnapshot = {
     readonly [key: string]: JsonValue;
-};
-
-// @public
-export type Refusal = {
-    readonly code: RefusalCode;
-    readonly path: string;
-    readonly message: string;
-    readonly help: readonly string[];
 };
 
 // @public
@@ -3298,7 +3298,7 @@ export interface RetentionConfigInput {
     // (undocumented)
     readonly partitionMaintenanceIntervalSeconds?: number;
     // (undocumented)
-    readonly pausedWorkflowAutoCancelAfter?: PausedWorkflowExpiry;
+    readonly pausedWorkflowCancelAfter?: PausedWorkflowExpiry;
     readonly queueRetention?: Readonly<Record<string, QueueRetention>>;
     // (undocumented)
     readonly retentionDeleteBatchSize?: number;
@@ -3313,9 +3313,6 @@ export interface RetentionConfigInput {
 export type RetentionPeriod = {
     readonly days: number;
 };
-
-// @public
-export type RetriedFilter = "any" | "retriedOnly";
 
 // @public (undocumented)
 export const RetrievalCode: {
@@ -3658,11 +3655,10 @@ export type SharedAsyncSetting = SharedAsyncChildren | NoSharedAsyncChildren;
 // @public
 export interface SharedPoolInput {
     // (undocumented)
-    readonly check?: boolean;
-    // (undocumented)
     readonly maxSize?: SharedPoolSize;
     // (undocumented)
     readonly minSize?: number;
+    readonly prePing?: boolean;
 }
 
 // @public
@@ -4195,7 +4191,7 @@ export interface TaskDetail {
 // @public
 export type TaskDetailRead = {
     readonly kind: "found";
-    readonly detail: TaskDetail;
+    readonly taskDetail: TaskDetail;
 } | {
     readonly kind: "notFound";
     readonly taskId: TaskId;
@@ -4220,7 +4216,7 @@ export type TaskError<E extends string = string> = {
 };
 
 // @public
-export type TaskFacetsQuery = Pick<TaskFilters, "window" | "statuses" | "errorCategories" | "retried">;
+export type TaskFacetsQuery = Pick<TaskFilters, "window" | "statuses" | "errorCategories" | "retriedOnly">;
 
 // @public
 export interface TaskFilters {
@@ -4230,8 +4226,7 @@ export interface TaskFilters {
     readonly errorCodes?: readonly string[];
     // (undocumented)
     readonly queues?: readonly string[];
-    // (undocumented)
-    readonly retried?: RetriedFilter;
+    readonly retriedOnly?: boolean;
     // (undocumented)
     readonly statuses?: readonly TaskStatus[];
     // (undocumented)
@@ -4310,10 +4305,10 @@ export interface TaskInfo {
 
 // @public
 export type TaskLimit = {
-    readonly kind: "tasks";
+    readonly kind: "taskLimit";
     readonly tasks: number;
 } | {
-    readonly kind: "noLimit";
+    readonly kind: "noTaskLimit";
 };
 
 // @public (undocumented)
@@ -4688,15 +4683,15 @@ export const TraceLinkTemplate: {
 
 // @public
 export type TracingConfigInput = {
-    readonly kind: "none";
+    readonly kind: "noTracing";
 } | {
-    readonly kind: "otel";
+    readonly kind: "otelTracing";
     readonly parentage?: AttemptParentage;
     readonly workerEndedSpans?: WorkerEndedSpans;
 };
 
 // @public
-export function trustedHeader(headerName: string, options: TrustedHeaderOptions): Result<MonitoringAuthPolicy, TrustedHeaderRefused>;
+export function trustedHeader(headerName: string, options: TrustedHeaderOptions): Result<MonitoringAuthorizationPolicy, TrustedHeaderRefused>;
 
 // @public
 export interface TrustedHeaderOptions {
@@ -4746,6 +4741,11 @@ export type UpstreamValue<S> = S extends AnyWire ? Extract<ValueOf<S>, {
 } ? T : never : never;
 
 // @public
+export type ValidationReport = {
+    readonly refusals: NonEmpty<HorsiesError>;
+};
+
+// @public
 export type ValueOf<W extends AnyWire> = W[typeof wireValue];
 
 // @public
@@ -4760,7 +4760,7 @@ export type ValueRefused = {
 export type ValueWire = Wire<unknown, unknown, Presence, "value">;
 
 // @public
-export function viewOnly(): MonitoringAuthPolicy;
+export function viewOnly(): MonitoringAuthorizationPolicy;
 
 // @public (undocumented)
 export type Weekday = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
@@ -5080,7 +5080,7 @@ export type WorkflowNodeRead = {
 } | {
     readonly kind: "notFound";
     readonly workflowId: WorkflowId;
-    readonly taskIndex: number;
+    readonly nodeIndex: number;
 };
 
 // @public
@@ -5181,9 +5181,9 @@ export interface WorkflowRunsQuery {
     // (undocumented)
     readonly limit?: number;
     // (undocumented)
-    readonly name?: string;
-    // (undocumented)
     readonly status?: WorkflowStatus;
+    // (undocumented)
+    readonly workflowName?: string;
 }
 
 // @public (undocumented)

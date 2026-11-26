@@ -123,14 +123,14 @@ describe("the flags of web", () => {
       "0.0.0.0",
       "--port",
       "9000",
-      "--auth",
+      "--authorization",
       "trusted-header",
       "--trusted-header",
       "X-User",
       "--enable-actions",
       "--trace-link",
       "https://grafana.test/{trace_id}",
-      "--loglevel",
+      "--log-level",
       "debug",
     ]);
 
@@ -159,8 +159,8 @@ describe("the flags of web", () => {
     ["a flag with no value", ["--port"], "--port"],
     ["a port past 65535", ["--port", "65536"], "--port must be a whole number from 0 to 65535"],
     ["a port that is not a number", ["--port", "80a"], "--port must be"],
-    ["an unknown auth mode", ["--auth", "basic"], "--auth must be none or trusted-header"],
-    ["an unknown log level", ["--loglevel", "verbose"], "--loglevel must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"],
+    ["an unknown auth mode", ["--authorization", "basic"], "--authorization must be none or trusted-header"],
+    ["an unknown log level", ["--log-level", "verbose"], "--log-level must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"],
   ] as const) {
     test(`${name} exits 2 and names the cause`, async () => {
       const run = fakeWeb();
@@ -177,42 +177,42 @@ describe("the flags of web", () => {
 });
 
 describe("the access rules", () => {
-  test("--auth none on 0.0.0.0 exits 2 with the cause; nothing is checked or served", async () => {
+  test("--authorization none on 0.0.0.0 exits 2 with the cause; nothing is checked or served", async () => {
     const run = fakeWeb();
-    const code = await runWebCommand(["--auth", "none", "--host", "0.0.0.0"], run.deps);
+    const code = await runWebCommand(["--authorization", "none", "--host", "0.0.0.0"], run.deps);
 
     assert.equal(code, EXIT_USAGE);
-    assert.match(run.errors[1] ?? "", /--auth none is only allowed on a loopback host; "0\.0\.0\.0" is reachable/u);
+    assert.match(run.errors[1] ?? "", /--authorization none is only allowed on a loopback host; "0\.0\.0\.0" is reachable/u);
     assert.deepEqual(run.events, []);
     assert.deepEqual(run.served, []);
   });
 
-  test("--auth none serves viewOnly, and allowAll with --enable-actions", async () => {
+  test("--authorization none serves viewOnly, and allowAll with --enable-actions", async () => {
     const viewing = fakeWeb();
 
     assert.equal(await runToStop(viewing, []), EXIT_PASSED);
 
     const request = new Request("http://127.0.0.1/");
 
-    assert.equal(await viewing.options[0]?.auth.canAct(request), false);
+    assert.equal(await viewing.options[0]?.authorizationPolicy.canAct(request), false);
     assert.equal(viewing.options[0]?.actions, "disabled");
 
     const acting = fakeWeb();
 
     assert.equal(await runToStop(acting, ["--enable-actions"]), EXIT_PASSED);
-    assert.equal(await acting.options[0]?.auth.canAct(request), true);
+    assert.equal(await acting.options[0]?.authorizationPolicy.canAct(request), true);
     assert.equal(acting.options[0]?.actions, "enabled");
   });
 
-  test("--auth trusted-header prints the security warning and trusts the header", async () => {
+  test("--authorization trusted-header prints the security warning and trusts the header", async () => {
     const run = fakeWeb();
-    const code = await runToStop(run, ["--host", "0.0.0.0", "--auth", "trusted-header", "--trusted-header", "X-User"]);
+    const code = await runToStop(run, ["--host", "0.0.0.0", "--authorization", "trusted-header", "--trusted-header", "X-User"]);
 
     assert.equal(code, EXIT_PASSED);
     assert.equal(run.errors[0], trustedHeaderWarning("X-User"));
     assert.match(run.errors[0] ?? "", /^SECURITY: the reverse proxy in front of this server MUST strip or overwrite the X-User header/u);
 
-    const policy = run.options[0]?.auth;
+    const policy = run.options[0]?.authorizationPolicy;
 
     assert.equal(await policy?.canView(new Request("http://x/", { headers: { "X-User": "ops" } })), true);
     assert.equal(await policy?.canView(new Request("http://x/")), false);
@@ -220,7 +220,7 @@ describe("the access rules", () => {
 
   test("a trusted header name that is not valid exits 2", async () => {
     const run = fakeWeb();
-    const code = await runWebCommand(["--auth", "trusted-header", "--trusted-header", "X User"], run.deps);
+    const code = await runWebCommand(["--authorization", "trusted-header", "--trusted-header", "X User"], run.deps);
 
     assert.equal(code, EXIT_USAGE);
     assert.match(run.errors[1] ?? "", /--trusted-header: the trusted header name "X User" is not valid/u);
@@ -228,7 +228,7 @@ describe("the access rules", () => {
 
   test("a blank trusted header name exits 2", async () => {
     const run = fakeWeb();
-    const code = await runWebCommand(["--auth", "trusted-header", "--trusted-header", " "], run.deps);
+    const code = await runWebCommand(["--authorization", "trusted-header", "--trusted-header", " "], run.deps);
 
     assert.equal(code, EXIT_USAGE);
     assert.match(run.errors[1] ?? "", /--trusted-header: the trusted header needs a header name/u);
@@ -276,7 +276,7 @@ describe("the check, the serve and the stop", () => {
   test("the log level is set before the check", async () => {
     const run = fakeWeb({ kind: "refused", report: "refused" });
 
-    await runWebCommand(["--loglevel", "warning"], run.deps);
+    await runWebCommand(["--log-level", "warning"], run.deps);
 
     assert.deepEqual(run.events, ["log level WARNING", "check"]);
   });

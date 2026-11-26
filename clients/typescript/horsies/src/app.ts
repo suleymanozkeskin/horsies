@@ -15,7 +15,7 @@ import type { AppContext } from "./app/context.ts";
 import {
   createApp,
   type CreateEnvironment,
-  type CreateRefused,
+  type ValidationReport,
   type HorsiesConfig,
   processEnvironment,
 } from "./app/create.ts";
@@ -81,7 +81,7 @@ export class Horsies {
    * core checks the config and each contract (the addon loads; the core does not start); on a worker thread only the
    * checks that are TypeScript code run.
    */
-  static create(config: HorsiesConfig): Result<Horsies, CreateRefused> {
+  static create(config: HorsiesConfig): Result<Horsies, ValidationReport> {
     return createHorsies(config, processEnvironment());
   }
 
@@ -221,7 +221,7 @@ export class Horsies {
 
   /**
    * Ping the workers and collect the distinct replies by worker id. The defaults: every worker, a window of 2,000 ms,
-   * the full window. A worker in `monitoring.workers()` that is not in the answer did not reply.
+   * the full window. A worker in `monitoring.listWorkerStates()` that is not in the answer did not reply.
    */
   async pingWorkers(options: PingWorkersOptions = {}): Promise<Result<readonly WorkerPong[], PingWorkersError>> {
     return this.#monitoringArea.pingWorkers(options);
@@ -250,7 +250,7 @@ export class Horsies {
 }
 
 /** The app of `config` in the process facts `environment` (a test gives its own). Not exported from an entry point. */
-export function createHorsies(config: HorsiesConfig, environment: CreateEnvironment): Result<Horsies, CreateRefused> {
+export function createHorsies(config: HorsiesConfig, environment: CreateEnvironment): Result<Horsies, ValidationReport> {
   const created = createApp(config, environment);
 
   return created.ok ? ok(constructApp(created.value)) : err(created.error);

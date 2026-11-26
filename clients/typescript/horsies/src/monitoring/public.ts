@@ -54,7 +54,7 @@ export type {
   WorkerStateSnapshot,
 } from "./health-types.ts";
 
-export { DEFAULT_PING_TIMEOUT_MS } from "./health.ts";
+export { DEFAULT_PING_WAIT_MS } from "./health.ts";
 
 export {
   MAX_BREAKDOWN_LIMIT,
@@ -68,7 +68,6 @@ export { MONITORING_WINDOW_DEFAULT } from "./bounds.ts";
 export {
   type ErrorCategory,
   type MonitoringWindow,
-  type RetriedFilter,
   type SortDirection,
   type TaskBreakdownQuery,
   type TaskFacetsQuery,

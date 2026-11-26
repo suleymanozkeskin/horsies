@@ -30,7 +30,7 @@ acme worker                 # in another terminal; SIGTERM or SIGINT stops it af
 acme scheduler              # in another terminal: the schedule table
 acme steady --orders 10 --cover-errors
 acme report
-acme web --auth none        # the monitoring page at http://127.0.0.1:8600
+acme web --authorization none        # the monitoring page at http://127.0.0.1:8600
 ```
 
 `scripts/run.sh <node|bun>` runs `seed`, a worker and a scheduler, every scenario, the stop of the scheduler, the wait

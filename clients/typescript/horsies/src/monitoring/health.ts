@@ -44,8 +44,8 @@ import type {
 import { classCoverage, classReport, expiredTaskList, staleTaskList, workerStateSnapshot } from "./health-values.ts";
 import type { RelayedAddon, RelayedPing } from "./seat-calls.ts";
 
-/** The window of a worker ping when the options name none: the default of the Python client. */
-export const DEFAULT_PING_TIMEOUT_MS = 2_000;
+/** The wait of a worker ping when the options name none: the default of the Python client. */
+export const DEFAULT_PING_WAIT_MS = 2_000;
 
 /** The addon and the handle that the health reads call. */
 export interface HealthTarget {
@@ -74,12 +74,12 @@ export async function pingWorkers(
     return pingTarget;
   }
 
-  const timeoutMs = options.timeoutMs ?? DEFAULT_PING_TIMEOUT_MS;
+  const waitMs = options.waitMs ?? DEFAULT_PING_WAIT_MS;
   const minResponses = options.minResponses ?? { kind: "fullWindow" };
 
   return healthCall(
     "pingWorkers",
-    () => target.addon.pingWorkers(target.handle, pingTarget.value, timeoutMs, minResponses),
+    () => target.addon.pingWorkers(target.handle, pingTarget.value, waitMs, minResponses),
     (records) => Object.freeze(records.map((record) => Object.freeze({ ...record }))),
     pingWorkersError,
   );

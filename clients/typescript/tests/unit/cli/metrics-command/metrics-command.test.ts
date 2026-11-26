@@ -1,4 +1,4 @@
-// The `metrics` command with fake I/O: the flags, the core's check of `--listen`, the run and the
+// The `metrics` command with fake I/O: the flags, the core's check of `--metrics-listen`, the run and the
 // stop.
 
 import assert from "node:assert/strict";
@@ -61,19 +61,19 @@ function fakeMetrics(): MetricsRun {
 }
 
 describe("the flags of metrics", () => {
-  test("--listen and the default log level", () => {
-    assert.deepEqual(parseMetricsFlags(["--listen", "127.0.0.1:9100"]), {
+  test("--metrics-listen and the default log level", () => {
+    assert.deepEqual(parseMetricsFlags(["--metrics-listen", "127.0.0.1:9100"]), {
       ok: true,
       value: { listen: "127.0.0.1:9100", logLevel: "INFO" },
     });
   });
 
   for (const [name, args, text] of [
-    ["no --listen", [], "--listen HOST:PORT is required"],
-    ["an unknown flag", ["--listen", "127.0.0.1:9100", "--port", "1"], "--port"],
+    ["no --metrics-listen", [], "--metrics-listen HOST:PORT is required"],
+    ["an unknown flag", ["--metrics-listen", "127.0.0.1:9100", "--port", "1"], "--port"],
     ["a positional argument", ["127.0.0.1:9100"], "127.0.0.1:9100"],
-    ["an unknown log level", ["--listen", "127.0.0.1:9100", "--loglevel", "loud"], "--loglevel must be one of"],
-    ["a --listen that the core refuses", ["--listen", "127.0.0.1"], "invalid --listen: \"127.0.0.1\" is not HOST:PORT"],
+    ["an unknown log level", ["--metrics-listen", "127.0.0.1:9100", "--log-level", "loud"], "--log-level must be one of"],
+    ["a --metrics-listen that the core refuses", ["--metrics-listen", "127.0.0.1"], "invalid --metrics-listen: \"127.0.0.1\" is not HOST:PORT"],
   ] as const) {
     test(`${name} exits 2 and names the cause; nothing starts`, async () => {
       const run = fakeMetrics();
@@ -92,7 +92,7 @@ describe("the flags of metrics", () => {
 describe("the run of metrics", () => {
   test("a stop signal asks the run to stop; the stopped run exits 0", async () => {
     const run = fakeMetrics();
-    const running = runMetricsCommand(["--listen", "127.0.0.1:9100", "--loglevel", "error"], run.deps);
+    const running = runMetricsCommand(["--metrics-listen", "127.0.0.1:9100", "--log-level", "error"], run.deps);
 
     run.signals.send("SIGINT");
 
@@ -104,7 +104,7 @@ describe("the run of metrics", () => {
 
   test("an address that does not bind exits 1 with the cause", async () => {
     const run = fakeMetrics();
-    const running = runMetricsCommand(["--listen", "127.0.0.1:9100"], run.deps);
+    const running = runMetricsCommand(["--metrics-listen", "127.0.0.1:9100"], run.deps);
 
     run.end({ kind: "failed", message: "could not bind the metrics endpoint to 127.0.0.1:9100: address in use" });
 

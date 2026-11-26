@@ -135,8 +135,8 @@ function relayedHealth(relay: SeatRelay): RelayedAddon<HealthAddon> {
     relayed<V>(relay, { part: "health", call });
 
   return Object.freeze({
-    pingWorkers: async (_handle, target, timeoutMs, minResponses) =>
-      health({ method: "pingWorkers", args: [target, timeoutMs, minResponses] }),
+    pingWorkers: async (_handle, target, waitMs, minResponses) =>
+      health({ method: "pingWorkers", args: [target, waitMs, minResponses] }),
     listWorkerStates: async () => health({ method: "listWorkerStates", args: [] }),
     getWorkerState: async (_handle, workerId) => health({ method: "getWorkerState", args: [workerId] }),
     getWorkerStateHistory: async (_handle, workerId, limit) => health({ method: "getWorkerStateHistory", args: [workerId, limit] }),

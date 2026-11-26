@@ -503,7 +503,7 @@ its `HRS-nnn` code; the check fails.
 
 ## Validation Codes
 
-| Code | Refusal |
+| Code | HorsiesError |
 |---|---|
 | `HRS-001` | An empty workflow name |
 | `HRS-002` | A build with no node |

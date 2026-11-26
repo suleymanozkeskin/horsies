@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { Refusal } from "../../../horsies/src/app/refusal.ts";
+import type { HorsiesError } from "../../../horsies/src/app/refusal.ts";
 import { type AppConfigInput, parseAppConfig } from "../../../horsies/src/config/app-config.ts";
 import type { EnvironmentRead } from "../../../horsies/src/config/secret.ts";
 
@@ -17,7 +17,7 @@ function configWith(fields: Partial<AppConfigInput>): AppConfigInput {
 }
 
 /** The refusals of a config that the parse must refuse. */
-function refusalsOf(input: AppConfigInput, environment: EnvironmentRead = NO_ENVIRONMENT): readonly Refusal[] {
+function refusalsOf(input: AppConfigInput, environment: EnvironmentRead = NO_ENVIRONMENT): readonly HorsiesError[] {
   const parsed = parseAppConfig(input, environment);
 
   assert.equal(parsed.ok, false, "the config must be refused");
@@ -184,11 +184,11 @@ describe("parseAppConfig", () => {
     ];
 
     for (const age of ages) {
-      const refusals = refusalsOf(configWith({ retention: { pausedWorkflowAutoCancelAfter: { kind: "after", age } } }));
+      const refusals = refusalsOf(configWith({ retention: { pausedWorkflowCancelAfter: { kind: "after", age } } }));
 
       assert.deepEqual(
         refusals.map((one) => [one.code, one.path]),
-        [["HRS-216", "retention.pausedWorkflowAutoCancelAfter.age"]],
+        [["HRS-216", "retention.pausedWorkflowCancelAfter.age"]],
         age.toString(),
       );
     }

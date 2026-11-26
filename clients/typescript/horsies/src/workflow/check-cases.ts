@@ -4,7 +4,7 @@
 // past depth 32 with no wait on the path (`HRS-036`). The checks of the Rust client's `check_findings`.
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { decodeParameters } from "../codec/reader.ts";
 import { refusalText } from "../codec/refusal.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
@@ -25,11 +25,11 @@ type ChildStart = "withItsWorkflow" | "afterDependencies";
 type NestingStep = { readonly definitionKey: string; readonly paramsText: string; readonly start: ChildStart };
 
 /** The refusals of every listed workflow, in list order. Effects: the builds of the workflows and their children. */
-export function checkWorkflows(registry: WorkflowRegistry): readonly Refusal[] {
+export function checkWorkflows(registry: WorkflowRegistry): readonly HorsiesError[] {
   return registry.workflows.flatMap((entry) => workflowRefusals(registry, entry));
 }
 
-function workflowRefusals(registry: WorkflowRegistry, entry: ListedWorkflow): readonly Refusal[] {
+function workflowRefusals(registry: WorkflowRegistry, entry: ListedWorkflow): readonly HorsiesError[] {
   const path = `workflow ${entry.record.name}`;
 
   if (entry.record.paramNames.length === 0) {
@@ -56,7 +56,7 @@ function rootRefusals(
   entry: ListedWorkflow,
   params: object,
   path: string,
-): readonly Refusal[] {
+): readonly HorsiesError[] {
   const built = checkedSpec(registry, entry.record, params, path);
 
   return built.ok ? walk(registry, built.value, [], path) : built.error;
@@ -68,7 +68,7 @@ function checkedSpec(
   record: WorkflowRecord,
   params: object,
   path: string,
-): Result<CheckedSpec, readonly Refusal[]> {
+): Result<CheckedSpec, readonly HorsiesError[]> {
   const run = runBuild(record.build, params);
 
   switch (run.kind) {
@@ -106,8 +106,8 @@ function walk(
   spec: CheckedSpec,
   steps: readonly NestingStep[],
   path: string,
-): readonly Refusal[] {
-  const refusals: Refusal[] = [];
+): readonly HorsiesError[] {
+  const refusals: HorsiesError[] = [];
 
   for (const node of spec.nodes) {
     // A node with args_from takes params from results at run time: its child is not built.
@@ -169,7 +169,7 @@ function walk(
 
 type NestingDecision =
   | { readonly kind: "walk"; readonly steps: readonly NestingStep[] }
-  | { readonly kind: "stop"; readonly refusals: readonly Refusal[] };
+  | { readonly kind: "stop"; readonly refusals: readonly HorsiesError[] };
 
 /**
  * The decision for the child of one node (the Rust client's `decide_nesting`): the same definition with the same

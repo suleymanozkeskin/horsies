@@ -213,7 +213,7 @@ export interface HealthAddon {
   pingWorkers(
     handle: NativeCoreHandle,
     target: PingTargetArg,
-    timeoutMs: number,
+    waitMs: number,
     minResponses: MinResponsesArg,
   ): HealthAnswer<WorkerPongRecord[]>;
   listWorkerStates(handle: NativeCoreHandle): HealthAnswer<WorkerStateRecord[]>;
