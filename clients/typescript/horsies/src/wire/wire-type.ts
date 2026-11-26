@@ -20,8 +20,8 @@ export declare const wireRole: unique symbol;
 /** How an object member is present: always, `.optional()` (it may be left out), or `.default(v)`. */
 export type Presence = "required" | "optional" | "defaulted";
 
-/** A plain value, or an upstream outcome that only a workflow node gives (`h.resultOf`), as a whole parameter. */
-export type Role = "value" | "resultOf";
+/** A plain value, or an upstream outcome that only a workflow node gives (`h.taskOutcome`), as a whole parameter. */
+export type Role = "value" | "taskOutcome";
 
 /** A wire type: `V` is the value that a reader gives, `S` the value that a sender gives. */
 export interface Wire<V, S = V, P extends Presence = "required", R extends Role = "value"> {

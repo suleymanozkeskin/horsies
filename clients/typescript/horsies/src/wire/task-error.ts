@@ -1,4 +1,4 @@
-// The outcome of a task and its stored error: what a task read, an `h.resultOf` parameter and a workflow read give.
+// The outcome of a task and its stored error: what a task read, an `h.taskOutcome` parameter and a workflow read give.
 
 import type { BuiltInTaskCode as LibraryTaskCode } from "../_catalog/task_code.ts";
 import type { WORKFLOW_STATUSES } from "../codec/bounds.ts";

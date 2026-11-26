@@ -2,8 +2,10 @@
 
 import { defineTask, h } from "horsies";
 
-import { AbandonedCartSweep, EmailReceipt, MarketingBlast, PaymentCapture, ShippingNotice } from "../domain.ts";
+import { EmailReceipt, MarketingBlast, ShippingNotice } from "../domain.ts";
 import { SHARED_TASK_TIMEOUT_MS } from "../tuning.ts";
+import { abandonedCartSweep } from "./analytics.ts";
+import { capturePayment } from "./payments.ts";
 import { CRASH_RETRY, QUEUE_NOTIFICATIONS } from "./policies.ts";
 
 /**
@@ -15,7 +17,7 @@ export const sendOrderEmail = defineTask({
   queue: QUEUE_NOTIFICATIONS,
   execution: "SHARED_ASYNC",
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
-  input: { orderId: h.string(), capture: h.resultOf(PaymentCapture) },
+  input: { orderId: h.string(), capture: h.taskOutcome(capturePayment) },
   output: EmailReceipt,
   errors: [],
   retry: CRASH_RETRY,
@@ -51,7 +53,7 @@ export const winbackBlast = defineTask({
   queue: QUEUE_NOTIFICATIONS,
   execution: "SHARED_ASYNC",
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
-  input: { segment: h.string(), sweep: h.resultOf(AbandonedCartSweep) },
+  input: { segment: h.string(), sweep: h.taskOutcome(abandonedCartSweep) },
   output: MarketingBlast,
   errors: ["UPSTREAM_FAILED"],
   retry: CRASH_RETRY,

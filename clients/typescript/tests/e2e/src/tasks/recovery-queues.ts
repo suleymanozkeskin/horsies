@@ -84,25 +84,25 @@ export const RECOVERY_QUEUE_WORKFLOWS = [recoveryCrash, serialChild, serialParen
 
 /** The implementations of the instance's tasks on `app`. */
 export function implementRecoveryQueues(app: Horsies): void {
-  app.implement(recoveryHealthcheck, () => recoveryHealthcheck.ok("ready"));
-  app.implement(recoveryStep, ({ step, delayMs }) => {
+  app.implement(recoveryHealthcheck, (_input, { ok }) => ok("ready"));
+  app.implement(recoveryStep, ({ step, delayMs }, { ok }) => {
     holdThread(delayMs);
 
-    return recoveryStep.ok(`step_${step}_done`);
+    return ok(`step_${step}_done`);
   });
-  app.implement(serialBlocker, ({ durationMs }) => {
+  app.implement(serialBlocker, ({ durationMs }, { ok }) => {
     holdThread(durationMs);
 
-    return serialBlocker.ok(`blocked_${String(durationMs)}`);
+    return ok(`blocked_${String(durationMs)}`);
   });
-  app.implement(serialChildTask, () => {
+  app.implement(serialChildTask, (_input, { ok }) => {
     holdThread(SHORT_NODE_MS);
 
-    return serialChildTask.ok(1);
+    return ok(1);
   });
-  app.implement(serialDirectTask, () => {
+  app.implement(serialDirectTask, (_input, { ok }) => {
     holdThread(SHORT_NODE_MS);
 
-    return serialDirectTask.ok(2);
+    return ok(2);
   });
 }

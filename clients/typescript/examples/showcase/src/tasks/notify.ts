@@ -8,6 +8,7 @@ import { type AbandonedCartSweep, type EmailReceipt, MarketingBlast, type Paymen
 import { upstreamFailure } from "../outcome.ts";
 import { integer } from "../simulate.ts";
 import { MARKETING_SEGMENT_SIZE } from "../tuning.ts";
+import type { ResultsOf } from "./support.ts";
 
 /** The recipient of every message of the demo. */
 export const DEMO_RECIPIENT = "customer@example.invalid";
@@ -55,12 +56,16 @@ export function segmentBlast(segment: string): MarketingBlast {
  * The win-back message of `segment` to the customers of `sweep`: at most the segment's size. A failed sweep is
  * `UPSTREAM_FAILED`. Pure.
  */
-export function winbackMessage(segment: string, sweep: TaskOutcome<AbandonedCartSweep>): WinbackResult {
+export function winbackMessage(
+  segment: string,
+  sweep: TaskOutcome<AbandonedCartSweep>,
+  { ok, err }: ResultsOf<typeof winbackBlast>,
+): WinbackResult {
   switch (sweep.kind) {
     case "succeeded":
-      return winbackBlast.ok({ segment, recipients: Math.min(sweep.value.swept, segmentSize(segment)) });
+      return ok({ segment, recipients: Math.min(sweep.value.swept, segmentSize(segment)) });
     case "failed":
-      return winbackBlast.err({ code: "UPSTREAM_FAILED", ...upstreamFailure(sweep.error) });
+      return err({ code: "UPSTREAM_FAILED", ...upstreamFailure(sweep.error) });
     default: {
       const unexpected: never = sweep;
 
@@ -71,8 +76,8 @@ export function winbackMessage(segment: string, sweep: TaskOutcome<AbandonedCart
 
 /** Implement the notification tasks on `app`. */
 export function implementNotifyTasks(app: Horsies): void {
-  app.implement(sendOrderEmail, async ({ orderId, capture }) => sendOrderEmail.ok(orderEmail(orderId, capture)));
-  app.implement(sendShippingSms, async ({ orderId, trackingCode }) => sendShippingSms.ok(shippingNotice(orderId, trackingCode)));
-  app.implement(marketingBlast, async ({ segment }) => marketingBlast.ok(segmentBlast(segment)));
-  app.implement(winbackBlast, async ({ segment, sweep }) => winbackMessage(segment, sweep));
+  app.implement(sendOrderEmail, async ({ orderId, capture }, { ok }) => ok(orderEmail(orderId, capture)));
+  app.implement(sendShippingSms, async ({ orderId, trackingCode }, { ok }) => ok(shippingNotice(orderId, trackingCode)));
+  app.implement(marketingBlast, async ({ segment }, { ok }) => ok(segmentBlast(segment)));
+  app.implement(winbackBlast, async ({ segment, sweep }, results) => winbackMessage(segment, sweep, results));
 }

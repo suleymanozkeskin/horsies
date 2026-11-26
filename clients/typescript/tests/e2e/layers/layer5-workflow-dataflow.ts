@@ -1,8 +1,9 @@
 // Layer 5: workflow data flow (Rust `clients/rust/tests/worker/tests/layer5_workflow_dataflow.rs`, Python
 // `clients/python/tests/e2e/test_layer5_workflow_dataflow.py`), and the workflow context of a task run (#2342).
 //
-// A node gets the result of a dependency as a parameter declared `h.resultOf(T)`, or through its workflow context from
-// its context sources (`contextNode` of `src/workflows/node-options.ts`). The workflows are the ones of `src/workflows/dataflow.ts`.
+// A node gets the result of a dependency as a parameter declared `h.taskOutcome(contract)`, or through its workflow
+// context from its context sources (`contextNode` of `src/workflows/node-options.ts`). The workflows are the ones of
+// `src/workflows/dataflow.ts`.
 
 import assert from "node:assert/strict";
 import { describe } from "node:test";

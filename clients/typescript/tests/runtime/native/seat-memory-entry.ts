@@ -28,14 +28,14 @@ if (!created.ok) {
 const app = created.value;
 const kept: number[][] = [];
 
-app.implement(allocate, () => {
+app.implement(allocate, (_input, { ok }) => {
   for (let chunk = 0; chunk < MAX_CHUNKS; chunk += 1) {
     kept.push(Array.from({ length: CHUNK_NUMBERS }, (_, index) => index + 0.5));
   }
 
-  return allocate.ok(kept.length);
+  return ok(kept.length);
 });
 
-app.implement(probe, () => probe.ok(1));
+app.implement(probe, (_input, { ok }) => ok(1));
 
 await cli.run(app);

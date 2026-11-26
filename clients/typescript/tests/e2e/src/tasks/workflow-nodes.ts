@@ -122,7 +122,7 @@ export const produceInt = defineTask({ name: "e2e_wf_produce_int", input: { valu
 /** Python `e2e_wf_double`: twice its upstream value, or the upstream error. */
 export const double = defineTask({
   name: "e2e_wf_double",
-  input: { inputResult: h.resultOf(h.int()) },
+  input: { inputResult: h.taskOutcome(produceInt) },
   output: h.int(),
   errors: WF_CODES,
 });
@@ -130,7 +130,7 @@ export const double = defineTask({
 /** Python `e2e_wf_sum_two`: the sum of two upstream values, or the first upstream error. */
 export const sumTwo = defineTask({
   name: "e2e_wf_sum_two",
-  input: { first: h.resultOf(h.int()), second: h.resultOf(h.int()) },
+  input: { first: h.taskOutcome(produceInt), second: h.taskOutcome(produceInt) },
   output: h.int(),
   errors: WF_CODES,
 });
@@ -138,7 +138,7 @@ export const sumTwo = defineTask({
 /** Python `e2e_wf_check_upstream_skipped`: which outcome reached it, as a text. */
 export const checkUpstream = defineTask({
   name: "e2e_wf_check_upstream_skipped",
-  input: { inputResult: h.resultOf(h.int()) },
+  input: { inputResult: h.taskOutcome(fail) },
   output: h.string(),
   errors: WF_CODES,
 });
@@ -148,7 +148,7 @@ export const produceDict = defineTask({ name: "e2e_wf_produce_dict", input: { va
 /** Python `e2e_wf_receive_dict`: the upstream object as it arrived. */
 export const receiveDict = defineTask({
   name: "e2e_wf_receive_dict",
-  input: { inputResult: h.resultOf(DictResult) },
+  input: { inputResult: h.taskOutcome(produceDict) },
   output: DictResult,
   errors: WF_CODES,
 });
@@ -183,7 +183,7 @@ export const ctxSum = defineTask({
 /** Python `e2e_wf_mixed_reader` and `e2e_wf_dual_reader`: one value as a parameter, one from the context node `ctxSource`. */
 export const mixedReader = defineTask({
   name: "e2e_wf_mixed_reader",
-  input: { fromArgs: h.resultOf(h.int()), ctxSource: h.string() },
+  input: { fromArgs: h.taskOutcome(produceInt), ctxSource: h.string() },
   output: h.object({ fromArgs: h.int(), fromCtx: h.int() }),
   errors: WF_CODES,
   workflowContext: true,
@@ -291,132 +291,132 @@ export function implementWorkflowNodes(app: Horsies): void {
 }
 
 function implementSteps(app: Horsies): void {
-  app.implement(step, ({ step: name }) => {
+  app.implement(step, ({ step: name }, { ok }) => {
     holdThread(NODE_RUN_MS);
 
-    return step.ok(`completed_${name}`);
+    return ok(`completed_${name}`);
   });
-  app.implement(slowStep, ({ step: name, delayMs }) => {
+  app.implement(slowStep, ({ step: name, delayMs }, { ok }) => {
     holdThread(delayMs);
 
-    return slowStep.ok(`completed_${name}`);
+    return ok(`completed_${name}`);
   });
-  app.implement(finalResult, () => {
+  app.implement(finalResult, (_input, { ok }) => {
     holdThread(NODE_RUN_MS);
 
-    return finalResult.ok({ final: "result", count: 42 });
+    return ok({ final: "result", count: 42 });
   });
-  app.implement(fail, () => {
+  app.implement(fail, (_input, { err }) => {
     holdThread(NODE_RUN_MS);
 
-    return fail.err({ code: "DELIBERATE_FAILURE", message: "Failed: DELIBERATE_FAILURE" });
+    return err({ code: "DELIBERATE_FAILURE", message: "Failed: DELIBERATE_FAILURE" });
   });
-  app.implement(failWith, ({ errorCode: code }) => {
+  app.implement(failWith, ({ errorCode: code }, { err }) => {
     holdThread(NODE_RUN_MS);
 
-    return failWith.err({ code, message: `Failed with ${code}` });
+    return err({ code, message: `Failed with ${code}` });
   });
-  app.implement(mark, ({ value }) => {
+  app.implement(mark, ({ value }, { ok }) => {
     holdThread(NODE_RUN_MS);
 
-    return mark.ok(value);
+    return ok(value);
   });
-  app.implement(slowMark, ({ value, delayMs }) => {
+  app.implement(slowMark, ({ value, delayMs }, { ok }) => {
     holdThread(delayMs);
 
-    return slowMark.ok(value);
+    return ok(value);
   });
-  app.implement(retryThenOk, ({ token, succeedOnAttempt }) => {
+  app.implement(retryThenOk, ({ token, succeedOnAttempt }, { ok, err }) => {
     holdThread(NODE_RUN_MS);
 
     const attempt = nextAttempt(token);
 
     if (!attempt.ok) {
-      return retryThenOk.err({ code: "MARKER_FAILED", message: markerErrorText(attempt.error) });
+      return err({ code: "MARKER_FAILED", message: markerErrorText(attempt.error) });
     }
 
     return attempt.value < succeedOnAttempt
-      ? retryThenOk.err({ code: "RETRY_NEEDED", message: `attempt ${String(attempt.value)} of ${String(succeedOnAttempt)}` })
-      : retryThenOk.ok(`succeeded_on_attempt_${String(attempt.value)}`);
+      ? err({ code: "RETRY_NEEDED", message: `attempt ${String(attempt.value)} of ${String(succeedOnAttempt)}` })
+      : ok(`succeeded_on_attempt_${String(attempt.value)}`);
   });
 }
 
 function implementDataNodes(app: Horsies): void {
-  app.implement(produceInt, ({ value }) => {
+  app.implement(produceInt, ({ value }, { ok }) => {
     holdThread(NODE_RUN_MS);
 
-    return produceInt.ok(value);
+    return ok(value);
   });
-  app.implement(double, ({ inputResult }) => {
+  app.implement(double, ({ inputResult }, { ok, err }) => {
     const value = outcomeValue(inputResult);
 
-    return value.ok ? double.ok(value.value * 2) : double.err(value.error);
+    return value.ok ? ok(value.value * 2) : err(value.error);
   });
-  app.implement(sumTwo, ({ first, second }) => {
+  app.implement(sumTwo, ({ first, second }, { ok, err }) => {
     const firstValue = outcomeValue(first);
     const secondValue = outcomeValue(second);
 
     if (!firstValue.ok) {
-      return sumTwo.err(firstValue.error);
+      return err(firstValue.error);
     }
 
-    return secondValue.ok ? sumTwo.ok(firstValue.value + secondValue.value) : sumTwo.err(secondValue.error);
+    return secondValue.ok ? ok(firstValue.value + secondValue.value) : err(secondValue.error);
   });
-  app.implement(checkUpstream, ({ inputResult }) => checkUpstream.ok(upstreamText(inputResult)));
-  app.implement(produceDict, ({ value }) => produceDict.ok({ key: value, count: 42, nested: { inner: true } }));
-  app.implement(receiveDict, ({ inputResult }) => {
+  app.implement(checkUpstream, ({ inputResult }, { ok }) => ok(upstreamText(inputResult)));
+  app.implement(produceDict, ({ value }, { ok }) => ok({ key: value, count: 42, nested: { inner: true } }));
+  app.implement(receiveDict, ({ inputResult }, { ok, err }) => {
     const value = outcomeValue(inputResult);
 
-    return value.ok ? receiveDict.ok(value.value) : receiveDict.err(value.error);
+    return value.ok ? ok(value.value) : err(value.error);
   });
 }
 
 function implementContextNodes(app: Horsies): void {
-  app.implement(ctxReader, ({ source }, runtime) => {
-    const value = contextInt(runtime.workflowContext, source);
+  app.implement(ctxReader, ({ source }, { ok, err, workflowContext }) => {
+    const value = contextInt(workflowContext, source);
 
-    return value.ok ? ctxReader.ok(value.value) : ctxReader.err(value.error);
+    return value.ok ? ok(value.value) : err(value.error);
   });
-  app.implement(ctxReaderStr, ({ source }, runtime) => {
-    const value = contextText(runtime.workflowContext, source);
+  app.implement(ctxReaderStr, ({ source }, { ok, err, workflowContext }) => {
+    const value = contextText(workflowContext, source);
 
-    return value.ok ? ctxReaderStr.ok(value.value) : ctxReaderStr.err(value.error);
+    return value.ok ? ok(value.value) : err(value.error);
   });
-  app.implement(ctxSum, ({ first, second }, runtime) => {
-    const firstValue = contextInt(runtime.workflowContext, first);
-    const secondValue = contextInt(runtime.workflowContext, second);
+  app.implement(ctxSum, ({ first, second }, { ok, err, workflowContext }) => {
+    const firstValue = contextInt(workflowContext, first);
+    const secondValue = contextInt(workflowContext, second);
 
     if (!firstValue.ok) {
-      return ctxSum.err(firstValue.error);
+      return err(firstValue.error);
     }
 
-    return secondValue.ok ? ctxSum.ok(firstValue.value + secondValue.value) : ctxSum.err(secondValue.error);
+    return secondValue.ok ? ok(firstValue.value + secondValue.value) : err(secondValue.error);
   });
-  app.implement(mixedReader, ({ fromArgs, ctxSource }, runtime) => {
+  app.implement(mixedReader, ({ fromArgs, ctxSource }, { ok, err, workflowContext }) => {
     holdThread(NODE_RUN_MS);
 
     const argsValue = outcomeValue(fromArgs);
-    const ctxValue = contextInt(runtime.workflowContext, ctxSource);
+    const ctxValue = contextInt(workflowContext, ctxSource);
 
     if (!argsValue.ok) {
-      return mixedReader.err(argsValue.error);
+      return err(argsValue.error);
     }
 
-    return ctxValue.ok ? mixedReader.ok({ fromArgs: argsValue.value, fromCtx: ctxValue.value }) : mixedReader.err(ctxValue.error);
+    return ctxValue.ok ? ok({ fromArgs: argsValue.value, fromCtx: ctxValue.value }) : err(ctxValue.error);
   });
-  app.implement(contextReport, ({ source }, runtime) => {
-    const seen = runtime.workflowContext;
+  app.implement(contextReport, ({ source }, { ok, err, workflowContext }) => {
+    const seen = workflowContext;
 
     switch (seen.kind) {
       case "noContext":
-        return contextReport.ok({ kind: "noContext" });
+        return ok({ kind: "noContext" });
       case "context": {
         const value = contextInt(seen, source);
         const { workflowId, taskIndex, taskName } = seen.context;
 
         return value.ok
-          ? contextReport.ok({ kind: "context", workflowId, taskIndex, taskName, sourceValue: value.value })
-          : contextReport.err(value.error);
+          ? ok({ kind: "context", workflowId, taskIndex, taskName, sourceValue: value.value })
+          : err(value.error);
       }
     }
   });

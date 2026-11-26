@@ -50,14 +50,14 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(add, async ({ a, b }) => add.ok(a + b));
+app.implement(add, async ({ a, b }, { ok }) => ok(a + b));
 
-app.implement(wordCount, ({ text }) => wordCount.ok(text.split(/\s+/u).filter((word) => word !== "").length));
+app.implement(wordCount, ({ text }, { ok }) => ok(text.split(/\s+/u).filter((word) => word !== "").length));
 
-app.implement(charge, async ({ amountCents }) =>
+app.implement(charge, async ({ amountCents }, { ok, err }) =>
   amountCents > CHARGE_LIMIT_CENTS
-    ? charge.err({ code: "OVER_LIMIT", message: "the amount is over the limit", data: { limitCents: CHARGE_LIMIT_CENTS } })
-    : charge.ok(`charged ${String(amountCents)} cents`),
+    ? err({ code: "OVER_LIMIT", message: "the amount is over the limit", data: { limitCents: CHARGE_LIMIT_CENTS } })
+    : ok(`charged ${String(amountCents)} cents`),
 );
 
 /** The value of a read as JSON text, as the Rust example prints it. Pure. */

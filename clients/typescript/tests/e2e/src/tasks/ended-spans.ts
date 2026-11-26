@@ -75,17 +75,17 @@ export const ENDED_SPANS_CONTRACTS = [
 
 /** The implementations of this module on `app`. */
 export function implementEndedSpans(app: Horsies): void {
-  app.implement(endedSpansSleeper, () => {
+  app.implement(endedSpansSleeper, (_input, { ok }) => {
     holdThread(SLEEP_MS);
 
-    return endedSpansSleeper.ok("woke");
+    return ok("woke");
   });
-  app.implement(endedSpansSharedSleeper, async (_input, runtime) => {
-    await sleepFor(SLEEP_MS, runtime.signal);
+  app.implement(endedSpansSharedSleeper, async (_input, { ok, signal }) => {
+    await sleepFor(SLEEP_MS, signal);
 
-    return endedSpansSharedSleeper.ok("woke");
+    return ok("woke");
   });
-  app.implement(endedSpansThreadHold, ({ token, holdMs }) => {
+  app.implement(endedSpansThreadHold, ({ token, holdMs }, { ok }) => {
     const created = createOnce(`${token}-started`, "started");
 
     if (!created.ok) {
@@ -94,11 +94,11 @@ export function implementEndedSpans(app: Horsies): void {
 
     holdThread(holdMs);
 
-    return endedSpansThreadHold.ok("held");
+    return ok("held");
   });
-  app.implement(endedSpansThreadOverrun, () => {
+  app.implement(endedSpansThreadOverrun, (_input, { ok }) => {
     holdThread(THREAD_OVERRUN_HOLD_MS);
 
-    return endedSpansThreadOverrun.ok("late");
+    return ok("late");
   });
 }

@@ -32,7 +32,7 @@ import {
 import { passedSpec } from "./support.ts";
 
 const count = defineTask({ name: "count", input: {}, output: h.int(), errors: ["TOO_MANY"] });
-const name = defineTask({ name: "name", input: { n: h.resultOf(h.int()) }, output: h.string() });
+const name = defineTask({ name: "name", input: { n: h.taskOutcome(count) }, output: h.string() });
 
 const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.string(), params: {} }, (w) => {
   const counted = w.task(count, {}, { id: "count" });

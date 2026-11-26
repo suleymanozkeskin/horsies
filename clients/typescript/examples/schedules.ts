@@ -29,9 +29,9 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(recordHeartbeat, ({ source }) => recordHeartbeat.ok(`heartbeat from ${source}`));
+app.implement(recordHeartbeat, ({ source }, { ok }) => ok(`heartbeat from ${source}`));
 
-app.implement(compactLogs, ({ keepDays }) => compactLogs.ok(keepDays));
+app.implement(compactLogs, ({ keepDays }, { ok }) => ok(keepDays));
 
 /** The schedules: a 10 s interval, and the fifth minute of each hour. A wrong input fails typecheck at its entry. */
 const SCHEDULES = [

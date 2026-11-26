@@ -9,7 +9,14 @@ import type {
 } from "../child/runtime.ts";
 import { runImplementation } from "../testing/run.ts";
 import type { TaskOutcome } from "../wire/task-error.ts";
-import type { BodyResult, ContextUse, ExecutionClass, TaskContract } from "./define-task.ts";
+import {
+  type BodyResult,
+  type ContextUse,
+  type ExecutionClass,
+  type ResultConstructors,
+  resultConstructorsOf,
+  type TaskContract,
+} from "./define-task.ts";
 import type { BodyInput, ParameterSchemas, OutputSchema, SchemaValue } from "./schema.ts";
 
 /**
@@ -42,7 +49,9 @@ export type RuntimeOf<X extends ExecutionClass, C extends ContextUse = "noContex
 
 /**
  * The body of a task. `SHARED_ASYNC` takes an async body only: its runs share one event loop. `ISOLATED` and
- * `SHARED_THREAD` take a sync or an async body.
+ * `SHARED_THREAD` take a sync or an async body. The second argument is one frozen object per run: the members of the
+ * runtime of the class, and the result constructors `ok` and `err` of the contract. Each member is an own property and
+ * each function member is bound to its run, so a body may destructure it (`{ ok, err, signal }`).
  */
 export type BodyFor<
   P extends ParameterSchemas,
@@ -51,8 +60,11 @@ export type BodyFor<
   X extends ExecutionClass,
   C extends ContextUse = "noContext",
 > = [X] extends ["SHARED_ASYNC"]
-  ? (input: BodyInput<P>, runtime: RuntimeOf<X, C>) => Promise<BodyResult<O, E>>
-  : (input: BodyInput<P>, runtime: RuntimeOf<X, C>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
+  ? (input: BodyInput<P>, runtime: RuntimeOf<X, C> & ResultConstructors<O, E>) => Promise<BodyResult<O, E>>
+  : (
+      input: BodyInput<P>,
+      runtime: RuntimeOf<X, C> & ResultConstructors<O, E>,
+    ) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
 
 /** A class of thrown errors. */
 export type ErrorClass = abstract new (...parameters: never[]) => Error;
@@ -82,7 +94,8 @@ export interface Implementation<
   /**
    * Run the body with `input` and `runtime` (`TaskRuntime.forTest`), with no worker and no database: the input and
    * the output are checked with the contract's types, as a worker checks them, and a thrown error goes through the
-   * exception map. Gives the outcome as a task read gives it. The body gets the workflow context of `runtime`.
+   * exception map. Gives the outcome as a task read gives it. The body gets the own members of `runtime` (its
+   * workflow context too) and the contract's `ok` and `err`.
    */
   run(input: BodyInput<P>, runtime: RuntimeOf<X, C>): Promise<TaskOutcome<SchemaValue<O>, E>>;
 }
@@ -98,6 +111,8 @@ export type ImplementationParts = {
   readonly contract: object;
   readonly body: (input: never, runtime: never) => unknown;
   readonly exceptions: readonly (readonly [ErrorClass, string])[];
+  /** The `ok` and `err` of the contract, which the body adapter gives the body with the members of its runtime. */
+  readonly resultConstructors: ResultConstructors<OutputSchema, string>;
 };
 
 const parts = new WeakMap<object, ImplementationParts>();
@@ -114,7 +129,12 @@ export function implementationOf<
   body: BodyFor<P, O, E, X, C>,
   exceptions: readonly ExceptionMapping<E>[],
 ): Implementation<P, O, E, X, C> {
-  const kept: ImplementationParts = Object.freeze({ contract, body, exceptions: Object.freeze([...exceptions]) });
+  const kept: ImplementationParts = Object.freeze({
+    contract,
+    body,
+    exceptions: Object.freeze([...exceptions]),
+    resultConstructors: resultConstructorsOf<OutputSchema, string>(contract.name),
+  });
 
   const implementation: Implementation<P, O, E, X, C> = Object.freeze({
     kind: "implementation",

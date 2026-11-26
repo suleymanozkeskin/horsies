@@ -23,6 +23,7 @@ import type {
 } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import type { TaskOutcome } from "../wire/task-error.ts";
+import { outcomeValueKind } from "../wire/task-outcome.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { MAX_VALUE_JSON_DEPTH } from "./bounds.ts";
 import { isEngineKey } from "./engine-keys.ts";
@@ -88,6 +89,19 @@ export function decodeEnvelope(
   return decodeOutcome(okKind, readTree(text), ROOT_PATH, form);
 }
 
+/**
+ * The outcome of the stored result envelope `node` at `path` whose `ok` value has the kind `okKind` (a node of the
+ * workflow context). Pure; see `decodeValue`.
+ */
+export function decodeEnvelopeNode(
+  okKind: Kind,
+  node: TreeValue,
+  path: string,
+  form: DecodeForm,
+): Result<TaskOutcome<unknown>, DecodeRefused> {
+  return decodeOutcome(okKind, node, path, form);
+}
+
 /** The parameters of a stored task input. Pure; see `decodeValue`. */
 export function decodeParameters(parameters: ObjectKind, text: JsonText, form: DecodeForm): Decoded {
   return decodeParameterTree(parameters, readTree(text), form);
@@ -149,8 +163,11 @@ export function decodeNode(kind: Kind, node: TreeValue, path: string, depth: num
       return decodeObject(kind, node, path, depth, form);
     case "json":
       return decodeJsonNode(node, path, depth, MAX_VALUE_JSON_DEPTH);
-    case "resultOf":
-      return decodeOutcome(kind.inner, node, path, form);
+    case "taskOutcome":
+      // A stored error whose custom code the upstream contract does not list (for example from an older deployment
+      // of the upstream task) decodes as any other custom code, so the parameter's code type does not hold for it.
+      // Whether the input decode refuses such an error instead is open (#2557).
+      return decodeOutcome(outcomeValueKind(kind, path), node, path, form);
     case "conversion":
       return decodeConverted(kind, node, path, depth, form);
     case "checked":

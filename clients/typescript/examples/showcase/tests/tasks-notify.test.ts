@@ -5,6 +5,7 @@ import { describe, test } from "node:test";
 
 import type { TaskOutcome } from "horsies";
 
+import { winbackBlast } from "../src/contracts/notify.ts";
 import type { AbandonedCartSweep, PaymentCapture } from "../src/domain.ts";
 import {
   CONFIRMATION_TEMPLATE,
@@ -17,6 +18,9 @@ import {
   winbackMessage,
 } from "../src/tasks/notify.ts";
 import { MARKETING_SEGMENT_SIZE } from "../src/tuning.ts";
+import { resultsOf } from "./fixtures.ts";
+
+const winbackBlastResults = resultsOf(winbackBlast);
 
 /**
  * A failed upstream outcome with the user code `code`, as a worker gives it to a node. This is the one place in these
@@ -71,14 +75,14 @@ describe("shippingNotice and segmentBlast", () => {
 describe("winbackMessage", () => {
   test("a sweep sends to its stranded customers, at most the segment's size", () => {
     const sweep: AbandonedCartSweep = { swept: 7, oldest: { kind: "found", orderId: "ACME-00003" } };
-    const result = winbackMessage("winback", { kind: "succeeded", value: sweep });
+    const result = winbackMessage("winback", { kind: "succeeded", value: sweep }, winbackBlastResults);
 
     assert.ok(result.ok);
     assert.equal(result.value.recipients, Math.min(7, segmentSize("winback")));
   });
 
   test("a failed sweep is UPSTREAM_FAILED with the code of the sweep", () => {
-    const result = winbackMessage("winback", failedOutcome("BOOM"));
+    const result = winbackMessage("winback", failedOutcome("BOOM"), winbackBlastResults);
 
     assert.ok(!result.ok);
     assert.equal(result.error.code, "UPSTREAM_FAILED");

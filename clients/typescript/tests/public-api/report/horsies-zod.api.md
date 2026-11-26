@@ -59,7 +59,7 @@ export type RequiredWire = Wire<unknown, unknown, "required", "value">;
 export type Result<T, E> = Ok<T> | Err<E>;
 
 // @public
-export type Role = "value" | "resultOf";
+export type Role = "value" | "taskOutcome";
 
 // @public
 export type SentOf<W extends AnyWire> = W[typeof wireSent];

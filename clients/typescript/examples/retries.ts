@@ -50,10 +50,10 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(callPartner, async ({ request }) =>
+app.implement(callPartner, async ({ request }, { err }) =>
   request === ""
-    ? callPartner.err({ code: "REJECTED", message: "an empty request" })
-    : callPartner.err({ code: "RATE_LIMITED", message: `the partner is busy: ${request}` }),
+    ? err({ code: "REJECTED", message: "an empty request" })
+    : err({ code: "RATE_LIMITED", message: `the partner is busy: ${request}` }),
 );
 
 /** Send `request`, read its outcome, then read how many retries ran. */

@@ -63,7 +63,7 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(ping, async () => ping.ok("pong"));
+app.implement(ping, async (_input, { ok }) => ok("pong"));
 
 /** Where a request path goes in the app's server. */
 type Route = "home" | "monitoring" | "notFound";

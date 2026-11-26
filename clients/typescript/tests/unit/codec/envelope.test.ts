@@ -9,6 +9,7 @@ import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { decodeEnvelope, decodeParameters } from "../../../horsies/src/codec/reader.ts";
 import type { DecodeRefused, EnvelopeRule } from "../../../horsies/src/codec/refusal.ts";
 import { encodeParameters } from "../../../horsies/src/codec/writer.ts";
+import { defineTask } from "../../../horsies/src/contract/define-task.ts";
 import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
 import type { Kind } from "../../../horsies/src/wire/kinds.ts";
 import type { TaskOutcome } from "../../../horsies/src/wire/task-error.ts";
@@ -136,8 +137,9 @@ describe("stored task error rules", () => {
   });
 });
 
-describe("h.resultOf parameters", () => {
-  const parameters = parametersKind({ order: h.resultOf(h.object({ id: h.int() })), note: h.string() });
+describe("h.taskOutcome parameters", () => {
+  const upstream = defineTask({ name: "upstream", input: {}, output: h.object({ id: h.int() }) });
+  const parameters = parametersKind({ order: h.taskOutcome(upstream), note: h.string() });
 
   test("a workflow node's input: the upstream outcome, succeeded or failed", () => {
     const succeeded = decodeParameters(

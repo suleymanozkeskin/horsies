@@ -410,7 +410,7 @@ if (!created.ok) {
 
 const app = created.value;
 
-app.implement(greet, ({ name }) => greet.ok(`hello, ${name}`));
+app.implement(greet, ({ name }, { ok }) => ok(`hello, ${name}`));
 
 process.exitCode = await cli.run(app);
 ```

@@ -27,7 +27,7 @@ const chargeOrder = defineTask({
 
 const sendReceipt = defineTask({
   name: "send_receipt",
-  input: { orderId: h.uuid(), charged: h.resultOf(h.int()) },
+  input: { orderId: h.uuid(), charged: h.taskOutcome(chargeOrder) },
   output: Receipt,
 });
 
@@ -85,12 +85,16 @@ The build function `(w, params) => ({ output, successPolicy })`:
 The input of a node has one member per parameter:
 
 - A plain parameter takes a value of its type.
-- A parameter declared `h.resultOf(T)` takes a node whose output is a `T`.
-  The node waits for that source, and the body gets the source's outcome.
+- A parameter declared `h.taskOutcome(contract)` takes a node whose output
+  and codes fit those of the contract: a node of the contract, or of another
+  task with the same output type and the same or fewer codes. For a workflow
+  contract it takes a sub-workflow node of that workflow. The node waits for
+  that source, and the body gets the source's outcome, typed by the
+  contract (`outcome.value`, `outcome.error.code`).
 - An `.optional()` or defaulted parameter may be left out.
-- A node for a plain parameter, a value for an `h.resultOf` parameter, a
-  missing parameter, an unknown parameter and a source of another output
-  type fail typecheck. Untyped code gets `HRS-024`, `HRS-020`, `HRS-019` or
+- A node for a plain parameter, a value for an `h.taskOutcome` parameter, a
+  missing parameter, an unknown parameter, a source of another output type
+  and a source with codes that the contract does not list fail typecheck. Untyped code gets `HRS-024`, `HRS-020`, `HRS-019` or
   `HRS-031`.
 
 | Option | Rule |
@@ -152,24 +156,22 @@ export const checkout = defineWorkflow(
 );
 
 export function implementAudit(app: Horsies) {
-  return app.implement(audit, (_input, runtime) => {
-    const context = runtime.workflowContext;
-
-    switch (context.kind) {
+  return app.implement(audit, (_input, { ok, workflowContext }) => {
+    switch (workflowContext.kind) {
       case "context": {
-        const charged = context.context.resultFor("charge", charge);
+        const charged = workflowContext.context.resultFor("charge", charge);
 
-        return audit.ok(charged.ok && charged.value.kind === "succeeded");
+        return ok(charged.ok && charged.value.kind === "succeeded");
       }
 
       case "noContext":
-        return audit.ok(false);
+        return ok(false);
     }
   });
 }
 ```
 
-Data flow of an `h.resultOf` parameter:
+Data flow of an `h.taskOutcome` parameter:
 
 | Source | Default | `allowFailedDeps: true` |
 |---|---|---|
@@ -178,20 +180,20 @@ Data flow of an `h.resultOf` parameter:
 | SKIPPED | The node is SKIPPED | Runs with `failed` and the code `UPSTREAM_SKIPPED` |
 
 Under an `any` or `quorum` join a source may not have ended when the node
-runs, so an `h.resultOf` parameter fed by a node under such a join must be
+runs, so an `h.taskOutcome` parameter fed by a node under such a join must be
 declared `.optional()` (typecheck; `HRS-013`). It is absent when its source
 did not end.
 
 ```ts
-const pickCarrier = defineTask({
-  name: "pick_carrier",
-  input: { first: h.resultOf(h.string()).optional() },
-  output: h.string(),
-});
-
 const quoteShipping = defineTask({
   name: "quote_shipping",
   input: { carrier: h.string() },
+  output: h.string(),
+});
+
+const pickCarrier = defineTask({
+  name: "pick_carrier",
+  input: { first: h.taskOutcome(quoteShipping).optional() },
   output: h.string(),
 });
 
@@ -233,12 +235,6 @@ const fetchRegion = defineTask({
   output: h.int(),
 });
 
-const addTotals = defineTask({
-  name: "add_totals",
-  input: { eu: h.resultOf(h.int()), us: h.resultOf(h.int()) },
-  output: h.int(),
-});
-
 export const regionReport = defineWorkflow(
   {
     name: "region_report",
@@ -249,6 +245,12 @@ export const regionReport = defineWorkflow(
   },
   (w, { region }) => ({ output: w.task(fetchRegion, { region }, { id: "fetch" }) }),
 );
+
+const addTotals = defineTask({
+  name: "add_totals",
+  input: { eu: h.taskOutcome(regionReport), us: h.taskOutcome(regionReport) },
+  output: h.int(),
+});
 
 export const allRegions = defineWorkflow(
   { name: "all_regions", definitionKey: "reports.all_regions.v1", params: {}, output: h.int() },
@@ -265,8 +267,9 @@ export const allRegions = defineWorkflow(
   Its params follow the input rules of a node; a child with `params: {}`
   takes `{}` (`HRS-022`). Its options are `id`, `waitsFor`, `join` and
   `allowFailedDeps`.
-- The node's output type is the child's declared `output`, so the node
-  feeds an `h.resultOf` parameter of that type.
+- The node's output type is the child's declared `output` and its code type
+  is `string` (a workflow holds the codes of many tasks), so the node feeds
+  an `h.taskOutcome(workflow)` parameter of that child.
 - List the child in `Horsies.create({ workflows })`. A start of a parent
   whose child is not listed is `VALIDATION_FAILED` (`HRS-020`). A child
   whose definition key the app of the worker does not list fails its node
@@ -365,7 +368,7 @@ the first refusal. Every refusal before the core's write writes nothing.
   clock, a deploy) is a conflict.
 - A task body may start a workflow. It does not wait for it: a wait in a
   worker child is `waitInsideTask`.
-- A workflow with a required `h.resultOf` param cannot be started with
+- A workflow with a required `h.taskOutcome` param cannot be started with
   `app.start` (typecheck); only a sub-workflow node runs it.
 
 `WorkflowStartError<R>`, told apart by `code`. Every variant has `message`,
@@ -487,8 +490,12 @@ params once per check case, runs every spec check on each spec, and walks
 the sub-workflow nodes down to the depth limit. A finding is a refusal with
 its `HRS-nnn` code; the check fails.
 
-- A build that runs from a check case uses the case as the params, read back
-  as a start reads them.
+- A check case gives every param of the build. A plain param takes the
+  value that a start gives; it is read back as a start reads it. An
+  `h.taskOutcome` param takes the outcome that its upstream node would give:
+  `{ kind: "succeeded", value }` (the value is read back with the contract's
+  output type) or `{ kind: "failed", error }` (given to the build as it is).
+  So a workflow that only a sub-workflow node starts has check cases too.
 - Give the cases that reach each branch of the build: `check` sees only the
   specs that the cases build.
 
@@ -501,7 +508,7 @@ its `HRS-nnn` code; the check fails.
 | `HRS-003`, `HRS-004` | A node id outside the pattern or the length; two nodes with one id |
 | `HRS-006`, `HRS-011`, `HRS-012` | A node of another build (dependency, output, success policy) |
 | `HRS-009`, `HRS-010` | A `ctxFrom` node that is not a dependency; `ctxFrom` on a task without `workflowContext: true` |
-| `HRS-013` | A quorum outside 1 to the node's dependencies, or a required `h.resultOf` parameter under an `any` or quorum join |
+| `HRS-013` | A quorum outside 1 to the node's dependencies, or a required `h.taskOutcome` parameter under an `any` or quorum join |
 | `HRS-014`, `HRS-034` | A node queue that the app does not admit; a priority outside 1 to 100 |
 | `HRS-016`, `HRS-017` | An empty definition key; a key that another listed workflow has |
 | `HRS-019` | An input key that binds to no parameter, or an input that is not a plain object |
@@ -528,7 +535,7 @@ each check case and for each sub-workflow node. A value from the clock
 changes the start command, so a second start with the same id is a
 `WORKFLOW_COMMAND_CONFLICT`.
 
-**Declare `h.resultOf(T)` for a parameter that a node feeds.** A plain
+**Declare `h.taskOutcome(contract)` for a parameter that a node feeds.** A plain
 parameter takes a value only.
 
 **Declare a node-fed parameter `.optional()` under an `any` or quorum
@@ -547,9 +554,10 @@ what the cases reach.
 import {
   // Definitions and builds
   defineWorkflow, type WorkflowContract, type WorkflowDefinition, type WorkflowBuilder,
-  type WorkflowBuild, type OnError, type CheckCases, type BuildReturn,
+  type WorkflowBuild, type OnError, type CheckCase, type CheckCases, type BuildReturn,
   // Nodes
   type NodeRef, type AnyNode, type Join, type TaskNodeOptions, type SubWorkflowNodeOptions,
+  type TaskOutcomeWire, type UpstreamValue, type UpstreamCode,
   type SuccessPolicy, type SuccessCase, type WorkflowOutput,
   // Starts
   WorkflowId, type StartOptions, type WorkflowStartError, type StartEnqueueFailed,
