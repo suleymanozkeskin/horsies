@@ -4,7 +4,8 @@
 // - The stored text is the core's pattern text, the form of Python's `pattern.model_dump(mode="json")`. The generated
 //   `schedulePatternToWire` gives the wire value and the manifest text writer writes it.
 // - This module refuses only what the stored form cannot hold: a duration part with no fixed length (years, months,
-//   weeks), a duration part below a second, and a number that is not a whole number. Every other rule of a pattern
+//   weeks), a duration part below a second, and a number that is not a safe integer (a whole number from
+//   -(2^53 - 1) to 2^53 - 1, the integers that a JavaScript number holds exactly). Every other rule of a pattern
 //   (the bounds, a repeated day, the cron domains, a cron pattern that never fires, a time of day with a fraction of
 //   a second) is the core's rule (`SchedulePattern::validate`): `app.schedules` asks the core on a main thread, and the
 //   core's manifest parser applies it again at the scheduler start.
@@ -142,12 +143,12 @@ const UNITS_BELOW_SECOND: readonly UnitBelowSecond[] = ["milliseconds", "microse
  * Why a pattern has no stored form. `field` is the place in the pattern (`minute[0].values[1]`).
  * - `unitWithoutFixedLength`: the interval has years, months or weeks.
  * - `unitBelowSecond`: the interval has a part below a second; slots are whole seconds.
- * - `notAWholeNumber`: a number field holds a value that is not a safe integer.
+ * - `notASafeInteger`: a number field holds a value that is not a whole number from -(2^53 - 1) to 2^53 - 1.
  */
 export type PatternRefusal =
   | { readonly kind: "unitWithoutFixedLength"; readonly unit: UnitWithoutFixedLength }
   | { readonly kind: "unitBelowSecond"; readonly unit: UnitBelowSecond }
-  | { readonly kind: "notAWholeNumber"; readonly field: string; readonly value: number };
+  | { readonly kind: "notASafeInteger"; readonly field: string; readonly value: number };
 
 type Stored<T> = Result<T, PatternRefusal>;
 
@@ -165,8 +166,8 @@ export function patternRefusalText(refused: PatternRefusal): string {
       return `pattern.every: the duration has ${refused.unit}, which have no fixed length; give the interval in days, hours, minutes and seconds`;
     case "unitBelowSecond":
       return `pattern.every: the duration has ${refused.unit}; schedules fire at whole seconds`;
-    case "notAWholeNumber":
-      return `pattern.${refused.field}: ${String(refused.value)} is not a whole number`;
+    case "notASafeInteger":
+      return `pattern.${refused.field}: ${safeIntegerRule(refused.value)}`;
     default:
       return unreachable(refused, "patternRefusalText");
   }
@@ -382,7 +383,12 @@ function enumTerm<T extends Month | Weekday>(term: CronEnumTerm<T>, field: strin
 
 /** `value` when it is a safe integer, else the refusal of `field`. Pure. */
 function wholeNumber(value: number, field: string): Stored<number> {
-  return Number.isSafeInteger(value) ? ok(value) : err({ kind: "notAWholeNumber", field, value });
+  return Number.isSafeInteger(value) ? ok(value) : err({ kind: "notASafeInteger", field, value });
+}
+
+/** The rule that `value` breaks: a whole number from `Number.MIN_SAFE_INTEGER` to `Number.MAX_SAFE_INTEGER`. Pure. */
+export function safeIntegerRule(value: number): string {
+  return `${String(value)} is not a whole number from ${String(Number.MIN_SAFE_INTEGER)} to ${String(Number.MAX_SAFE_INTEGER)}`;
 }
 
 /** The stored form of each item, in order, or the refusal of the first item that has none. Pure. */

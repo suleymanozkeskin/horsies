@@ -210,18 +210,27 @@ describe("patternText: each form that the stored text cannot hold is refused", (
   ];
 
   for (const [field, pattern] of notWhole) {
-    test(`a number that is not a whole number at ${field}`, () => {
+    test(`a number that is not a safe integer at ${field}`, () => {
       const refused = refusalOf(pattern);
 
-      assert.equal(refused.kind, "notAWholeNumber");
-      assert.ok(refused.kind === "notAWholeNumber" && refused.field === field, `the refusal names ${field}`);
-      assert.match(patternRefusalText(refused), new RegExp(`^pattern\\.${field.replaceAll(/[.[\]]/g, "\\$&")}: .+ is not a whole number$`));
+      assert.equal(refused.kind, "notASafeInteger");
+      assert.ok(refused.kind === "notASafeInteger" && refused.field === field, `the refusal names ${field}`);
+      assert.match(
+        patternRefusalText(refused),
+        new RegExp(`^pattern\\.${field.replaceAll(/[.[\]]/g, "\\$&")}: .+ is not a whole number from -9007199254740991 to 9007199254740991$`),
+      );
     });
   }
+
+  test("a whole number above 2^53 - 1 names the safe integer bound", () => {
+    const refused = refusalOf({ kind: "monthly", day: 2 ** 53, at: Temporal.PlainTime.from("08:00") });
+
+    assert.equal(patternRefusalText(refused), "pattern.day: 9007199254740992 is not a whole number from -9007199254740991 to 9007199254740991");
+  });
 
   test("the first field that is not a whole number wins", () => {
     const refused = refusalOf(cronWithMinute([{ kind: "values", values: [0.5] }, { kind: "step", step: 1.5 }]));
 
-    assert.deepEqual(refused, { kind: "notAWholeNumber", field: "minute[0].values[0]", value: 0.5 });
+    assert.deepEqual(refused, { kind: "notASafeInteger", field: "minute[0].values[0]", value: 0.5 });
   });
 });
