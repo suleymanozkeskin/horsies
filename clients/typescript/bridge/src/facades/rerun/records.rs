@@ -291,13 +291,14 @@ pub fn app_failure(error: RerunError) -> AppRerunFailure {
             stored: unknown.stored,
         },
         RerunError::FamilyCheckFailed(failure) => family_check_failed(message, failure),
-        RerunError::RetryCodeNotDeclared { task_name, code } => {
-            AppRerunFailure::RetryCodeNotDeclared {
-                message,
-                task_name,
-                retry_code: code,
-            }
-        }
+        RerunError::RetryCodeNotDeclared {
+            task_name,
+            retry_code,
+        } => AppRerunFailure::RetryCodeNotDeclared {
+            message,
+            task_name,
+            retry_code,
+        },
         RerunError::TaskNotRegistered { task_name } => {
             AppRerunFailure::TaskNotRegistered { message, task_name }
         }
@@ -738,7 +739,7 @@ mod tests {
     fn an_undeclared_retry_code_names_the_task_and_the_code() {
         let error = RerunError::RetryCodeNotDeclared {
             task_name: "charge".to_owned(),
-            code: "CARD_DECLINED".to_owned(),
+            retry_code: "CARD_DECLINED".to_owned(),
         };
         let text = error.to_string();
         assert_eq!(

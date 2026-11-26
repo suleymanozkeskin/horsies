@@ -249,17 +249,18 @@ fn preparation_record(preparation: RerunPreparation) -> RerunPreparationRecord {
         RerunPreparation::CallerKeyRefused(refused) => CallerStepRefusal::CallerKeyRefused {
             message: RerunError::Idempotency(refused).to_string(),
         },
-        RerunPreparation::RetryCodeNotDeclared { task_name, code } => {
-            CallerStepRefusal::RetryCodeNotDeclared {
-                message: RerunError::RetryCodeNotDeclared {
-                    task_name: task_name.clone(),
-                    code: code.clone(),
-                }
-                .to_string(),
-                task_name,
-                retry_code: code,
+        RerunPreparation::RetryCodeNotDeclared {
+            task_name,
+            retry_code,
+        } => CallerStepRefusal::RetryCodeNotDeclared {
+            message: RerunError::RetryCodeNotDeclared {
+                task_name: task_name.clone(),
+                retry_code: retry_code.clone(),
             }
-        }
+            .to_string(),
+            task_name,
+            retry_code,
+        },
         RerunPreparation::TaskNotRegistered { task_name } => CallerStepRefusal::TaskNotRegistered {
             message: RerunError::TaskNotRegistered {
                 task_name: task_name.clone(),
