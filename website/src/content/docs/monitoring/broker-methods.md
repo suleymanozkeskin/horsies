@@ -32,7 +32,7 @@ Every task id parameter and field of these methods is a `uuid.UUID`.
 
 ## Methods
 
-### `get_raw_result_record_async(task_id: UUID, timeout_ms: int | None = None) -> BrokerResult[RawResultRecord | None]`
+### `get_raw_result_record_async(task_id: UUID, timeout_ms: int | None = None) -> BrokerResult[StoredResult | None]`
 
 Fetch the raw stored result envelope for a task by ID, waiting if necessary. This is the broker's infrastructure-level result-fetch surface: it does no typed decoding and imports no user code. Callers that want a typed `ReadResult[T, TaskError]` should use [`app.get_result_async`](#app-level-typed-result-apis) instead — it composes a typed decode on top of this call.
 
@@ -45,7 +45,7 @@ Waits on PostgreSQL `LISTEN/NOTIFY`, and reads the row again at least every 5 se
 
 In a worker child, where task bodies run, it returns `Err(BrokerWaitInsideTask)` (`WAIT_INSIDE_TASK`) at once, as its first check, and waits for nothing. See [Waiting for a Result Inside a Task](/horsies/concepts/result-handling/#waiting-for-a-result-inside-a-task).
 
-**Returns:** `BrokerResult[RawResultRecord | None]` — `Ok(None)` if no task row exists for that ID; `Err(BrokerOperationError)` on infrastructure failure. The `RawResultRecord` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
+**Returns:** `BrokerResult[StoredResult | None]` — `Ok(None)` if no task row exists for that ID; `Err(BrokerOperationError)` on infrastructure failure. The `StoredResult` carries `task_id`, `task_name`, `status`, and `raw_result` (the decoded JSON envelope, or `None` for cancelled tasks, non-terminal timeout snapshots, or terminal rows with no payload).
 
 Sync variant: `get_raw_result_record(task_id, timeout_ms)`. It runs on the calling thread, with the GIL released. On a thread that runs an event loop it returns `Err(BrokerAsyncContext)` (`ASYNC_CONTEXT`) and does no I/O.
 
@@ -67,13 +67,13 @@ elif is_err(result):
 
 ### App-level typed result APIs
 
-For most callers, prefer `app.get_result_async(task_id, timeout_ms)` over the raw record. It returns `ReadResult[Any, TaskError]`. The outcome is decoded with the `task_ok_type` of the local task catalog. A read failure is `Err(read_error)`: for example `ResultDeserializationError` for a stored value that does not decode, `NoTypeAvailable` for a task that is not registered in this process, or `BrokerError` for a database failure. See [Read Errors](/horsies/tasks/error-types/#read-errors-readresult).
+For most callers, prefer `app.get_result_async(task_id, wait_ms)` over the raw record. It returns `ReadResult[Any, TaskError]`. The outcome is decoded with the `task_ok_type` of the local task catalog. A read failure is `Err(read_error)`: for example `ReadResultDeserializationError` for a stored value that does not decode, `ReadNoTypeAvailable` for a task that is not registered in this process, or `ReadDatabaseError` for a database failure. See [Read Errors](/horsies/tasks/error-types/#read-errors-readresult).
 
 ```python
 from horsies import Err, Failed, Ok, Succeeded
 
 # Async — typed decode at the app layer
-match await app.get_result_async(task_id, timeout_ms=5000):
+match await app.get_result_async(task_id, wait_ms=5000):
     case Ok(Succeeded(value)):
         print(f"Result: {value}")
     case Ok(Failed(task_error)):
@@ -82,7 +82,7 @@ match await app.get_result_async(task_id, timeout_ms=5000):
         print(f"Read error: {read_error.code} - {read_error.message}")
 
 # Sync
-read = app.get_result(task_id, timeout_ms=5000)
+read = app.get_result(task_id, wait_ms=5000)
 ```
 
 ### `get_stale_tasks(stale_threshold_minutes: int = 2) -> BrokerResult[list[dict[str, Any]]]`

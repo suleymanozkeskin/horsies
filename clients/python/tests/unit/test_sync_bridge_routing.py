@@ -21,7 +21,7 @@ from horsies.core.app import Horsies
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
-from horsies.core.models.outcome import WaitTimeout
+from horsies.core.models.outcome import ReadWaitTimeout
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import TaskNode
 from horsies.core.models.workflow.handle import WorkflowHandle
@@ -143,10 +143,10 @@ class TestSyncWorkflowFacadesCallTheBlockingForms:
             workflow_id=WORKFLOW_KEY, broker=broker,
         )
 
-        result = handle.get(timeout_ms=5)
+        result = handle.get(wait_ms=5)
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, WaitTimeout)
+        assert isinstance(result.err_value, ReadWaitTimeout)
         broker._core_handle.wait_workflow_result.assert_called_once_with(
             WORKFLOW_KEY, timeout_ms=5,
         )

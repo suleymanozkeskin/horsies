@@ -12,7 +12,7 @@ mod runtime;
 mod stored_datetime;
 
 pub use custom_code::CustomErrorCode;
-pub use error::{TaskError, TaskErrorCode, UnknownUserCode};
+pub use error::{TaskError, TaskErrorCode, UnknownCustomCode};
 pub use runtime::TaskRuntime;
 pub use stored_datetime::StoredDateTime;
 

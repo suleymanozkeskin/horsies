@@ -560,7 +560,7 @@ async fn blocking_reads_of_a_completed_task_answer_its_result() {
 
     off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
-        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let handle = app.task_handle::<u32, Infallible>(task_id);
         let with_result = TaskInfoParts {
             result: true,
             ..TaskInfoParts::default()
@@ -621,7 +621,7 @@ async fn blocking_reads_of_a_pending_task_time_out_and_report_it_pending() {
             .expect("the blocking send");
         let task_id = handle.task_id();
         let timed_out = |read: Result<(), ReadError>| match read {
-            Err(ReadError::WaitTimedOut {
+            Err(ReadError::WaitTimeout {
                 task_id: waited,
                 status: TaskStatus::Pending,
             }) => assert_eq!(waited, task_id),
@@ -658,7 +658,7 @@ async fn blocking_reads_of_a_pending_task_time_out_and_report_it_pending() {
         assert_eq!(coverage.live_workers, 0);
         match coverage.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
+                assert_eq!(stream.queue_name, info.queue);
                 assert_eq!(stream.state, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
@@ -667,7 +667,7 @@ async fn blocking_reads_of_a_pending_task_time_out_and_report_it_pending() {
         assert!(report.workers.is_empty(), "{report:?}");
         match report.streams.as_slice() {
             [stream] => {
-                assert_eq!(stream.queue_name, info.queue_name);
+                assert_eq!(stream.queue_name, info.queue);
                 assert_eq!(stream.state, StreamCoverageState::Unserved);
             }
             other => panic!("expected the one pending stream, got {other:?}"),
@@ -686,7 +686,7 @@ async fn blocking_reads_of_an_unknown_task_are_task_not_found() {
     off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
         let task_id = Uuid::new_v4();
-        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let handle = app.task_handle::<u32, Infallible>(task_id);
 
         assert_task_not_found(handle.blocking().get(wait_of(SHORT_WAIT)), task_id);
         assert_task_not_found(handle.blocking().info(TaskInfoParts::default()), task_id);
@@ -739,7 +739,7 @@ async fn blocking_reads_of_a_cancelled_task_answer_task_cancelled() {
     off_the_runtime(move || {
         let (app, _echo_function) = app_on(&url);
         match app
-            .task_handle_of::<u32, Infallible>(task_id)
+            .task_handle::<u32, Infallible>(task_id)
             .blocking()
             .get(wait_of(ENDED_WAIT))
         {
@@ -1135,7 +1135,7 @@ async fn blocking_handle_reads_of_a_running_workflow() {
             other => panic!("expected RESULT_NOT_READY, got {other:?}"),
         }
         match view.get(wait_of(SHORT_WAIT)) {
-            Err(WorkflowReadError::WaitTimedOut {
+            Err(WorkflowReadError::WaitTimeout {
                 workflow_id: waited,
             }) => assert_eq!(waited, workflow_id),
             other => panic!("expected WAIT_TIMEOUT, got {other:?}"),

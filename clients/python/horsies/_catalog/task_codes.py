@@ -112,6 +112,12 @@ class RetrievalCode(str, Enum):
     wait.
     """
 
+    UNKNOWN_CUSTOM_CODE = 'UNKNOWN_CUSTOM_CODE'
+    """The stored error has a custom code that the code type of the read does not name: a row of
+    another version of the task, or of a task with another code type. Cached: the same read gives
+    the same code until the stored value or the code type changes.
+    """
+
 
 class OutcomeCode(str, Enum):
     """A non-bug execution outcome or control-flow result.

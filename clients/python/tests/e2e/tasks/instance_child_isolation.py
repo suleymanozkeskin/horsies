@@ -19,7 +19,7 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.recovery import RecoveryConfig
-from horsies.core.models.outcome import WaitInsideTask
+from horsies.core.models.outcome import ReadWaitInsideTask
 from horsies.core.models.tasks import TaskError
 from horsies.core.types.result import Err, Ok, Result, is_err
 
@@ -62,8 +62,8 @@ def wait_refused_in_child() -> Result[bool, TaskError]:
         return Err(
             TaskError(code='E2E_SEND_FAILED', message=str(sent.err_value)),
         )
-    match sent.ok_value.get(timeout_ms=1000):
-        case Err(err_value=WaitInsideTask()):
+    match sent.ok_value.get(wait_ms=1000):
+        case Err(err_value=ReadWaitInsideTask()):
             return Ok(True)
         case _:
             return Ok(False)

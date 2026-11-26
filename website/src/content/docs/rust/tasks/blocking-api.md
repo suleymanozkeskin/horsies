@@ -114,12 +114,12 @@ When the operating system refused the threads of the core's process runtime, the
 | Call | Error |
 |------|-------|
 | A send or a resend | `TaskSendError::EnqueueFailed` with the task id and payload |
-| A read | `ReadError::Database` |
+| A read | `ReadError::DatabaseError` |
 | A health read | `BrokerOperationError::OperationFailed` with the code of the read |
 | `check_live` | `CheckReport` with the connectivity refusal |
 | A workflow start | `WorkflowStartError::EnqueueFailed` with the `workflow_id` of the start |
 | `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError::DbOperationFailed` |
-| `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::Database` with `DbOperationFailed` |
+| `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::DatabaseError` with `DbOperationFailed` |
 
 In a process that was forked without `exec` after the process runtime started, every call panics: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals).
 

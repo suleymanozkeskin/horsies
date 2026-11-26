@@ -264,7 +264,7 @@ async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError
 | Method | Returns |
 |--------|---------|
 | `workflow_id()` | `Uuid` |
-| `get(limit)` | `Result<TaskOutcome<T, CustomCode>, WorkflowReadError>`: waits while the workflow runs, up to `limit: WaitLimit` |
+| `get(wait)` | `Result<TaskOutcome<T, CustomCode>, WorkflowReadError>`: waits while the workflow runs, up to `wait: WaitLimit` |
 | `result_for::<V, E>(&key)` | `Result<TaskOutcome<V, E>, WorkflowReadError>`: the outcome of one node, read with its types. Not a wait |
 | `status()` | `HandleResult<WorkflowStatus>` |
 | `results()` | `HandleResult<BTreeMap<String, NodeResult>>`: the stored result of each node that has one, by node id. A node stored without a node id is left out |
@@ -304,15 +304,15 @@ A workflow with no output node is read as `OutputlessResults`: the outcome of ea
 
 | Variant | Code | When |
 |---------|------|------|
-| `WaitTimedOut { workflow_id }` | `WAIT_TIMEOUT` | The workflow had not ended when the limit passed. A later read may find it ended |
+| `WaitTimeout { workflow_id }` | `WAIT_TIMEOUT` | The workflow had not ended when the limit passed. A later read may find it ended |
 | `WorkflowNotFound { workflow_id }` | `WORKFLOW_NOT_FOUND` | No workflow has the id |
 | `ResultNotReady { workflow_id, node_id }` | `RESULT_NOT_READY` | `result_for`: the node stores no result yet, or no node has the id |
-| `StoredResultUnreadable { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types; `cause` names no value |
-| `UnknownUserCode { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored user code is not a code of `E` |
+| `ResultDeserializationError { workflow_id, cause }` | `RESULT_DESERIALIZATION_ERROR` | The stored value does not read with the handle's types; `cause` names no value |
+| `UnknownCustomCode { workflow_id, cause }` | `UNKNOWN_CUSTOM_CODE` | The stored custom code is not a code of `E` |
 | `InvalidInput { workflow_id, cause }` | `INVALID_INPUT` | `get`: the `Within` limit is above `MAX_WAIT_LIMIT_MS`; `cause` is `WaitLimitRefused`. Nothing was read |
 | `WaitInsideTask { message }` | `WAIT_INSIDE_TASK` | A wait in a worker child. Nothing was read |
 | `AsyncContext { message }` | `ASYNC_CONTEXT` | A blocking `get` or `result_for` (`handle.blocking()`) on a thread that runs a tokio runtime. Nothing was read |
-| `Database { code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `code` is the `HandleErrorCode`. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
+| `DatabaseError { database_code, message, retryable }` | `BROKER_ERROR` | The database or the connection failed; `database_code` is the `HandleErrorCode` of the failed operation. From `result_for`, the message names the node: `DB query failed for result_for node <node_id> in workflow <id>: <cause>` |
 
 `WorkflowReadError::code()` returns the built-in code of the failure.
 

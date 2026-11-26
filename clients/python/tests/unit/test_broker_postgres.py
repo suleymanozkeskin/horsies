@@ -66,7 +66,7 @@ from horsies.core.brokers.result_types import (
     BrokerListenerDisabled,
     BrokerOperationFailed,
     BrokerPayloadMismatch,
-    RawResultRecord,
+    StoredResult,
 )
 from horsies.core.codec.json_io import EmptyJsonTextError, SerializationError
 from horsies.core.models.health import (
@@ -763,7 +763,7 @@ class TestGetRawResultRecordAsync:
 
         result = await broker.get_raw_result_record_async(RESULT_TASK_ID, timeout_ms=5_000)
 
-        assert result == Ok(RawResultRecord(
+        assert result == Ok(StoredResult(
             task_id=RESULT_TASK_ID,
             task_name='my_task',
             status=TaskStatus.COMPLETED,
@@ -1532,13 +1532,13 @@ def _task_info_record(**changes: Any) -> MagicMock:
         'task_id': TASK_INFO_ID,
         'task_name': 'compute',
         'status': 'RUNNING',
-        'queue_name': 'default',
+        'queue': 'default',
         'priority': 100,
         'retry_count': 1,
         'max_retries': 3,
         'next_retry_at': None,
         'sent_at': now,
-        'enqueued_at': now,
+        'due_at': now,
         'claimed_at': now,
         'started_at': now,
         'completed_at': None,

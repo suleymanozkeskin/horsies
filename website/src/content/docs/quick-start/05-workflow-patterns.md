@@ -87,9 +87,9 @@ def start_order_workflow(
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion
-    handle.get(timeout_ms=30000)
+    handle.get(wait_ms=30000)
 
-    # result_for() is non-blocking - returns Err(ResultNotReady(...)) if task hasn't completed
+    # result_for() is non-blocking - returns Err(ReadResultNotReady(...)) if task hasn't completed
     result = handle.result_for(output_node)
     reveal_type(result)  # ReadResult[Any, TaskError]
 ```
@@ -146,7 +146,7 @@ def sync_all_warehouses_task() -> Result[dict[str, int], TaskError]:
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion before accessing result_for()
-    handle.get(timeout_ms=60000)
+    handle.get(wait_ms=60000)
 
     result = handle.result_for(last_node)
     reveal_type(result)  # ReadResult[WarehouseSyncResult, TaskError]
@@ -333,7 +333,7 @@ def process_returns_task() -> Result[dict[str, str], TaskError]:
     reveal_type(handle)  # WorkflowHandle
 
     # Wait for workflow completion before accessing result_for()
-    handle.get(timeout_ms=60000)
+    handle.get(wait_ms=60000)
 
     result = handle.result_for(node_aggregate)
     reveal_type(result)  # ReadResult[AggregatedStats, TaskError]

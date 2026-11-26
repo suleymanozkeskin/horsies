@@ -57,7 +57,7 @@ def _ready_check():
             if is_err(result):
                 return False
             handle = result.ok_value
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 

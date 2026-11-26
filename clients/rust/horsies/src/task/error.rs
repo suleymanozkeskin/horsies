@@ -60,14 +60,14 @@ pub struct TaskError<E> {
     kind: TaskErrorKind,
 }
 
-/// A stored error whose custom code the code type `E` does not name: the task
-/// that stored it has another code type, or a version of the code enum
+/// A stored error whose custom code the code type `E` does not name: the
+/// task that stored it has another code type, or a version of the code enum
 /// without this code.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("stored custom error code {code:?} is not a code of {code_type}")]
-pub struct UnknownUserCode {
+#[error("stored custom error code {stored_code:?} is not a code of {code_type}")]
+pub struct UnknownCustomCode {
     /// The stored code text.
-    pub code: String,
+    pub stored_code: String,
     /// The code type that the read asked for.
     pub code_type: &'static str,
 }
@@ -168,14 +168,14 @@ impl<E: CustomErrorCode> TaskError<E> {
 
     /// The error of a stored error. Refuses a custom code that `E` does not
     /// name.
-    pub(crate) fn from_stored(stored: horsies_core::TaskError) -> Result<Self, UnknownUserCode> {
+    pub(crate) fn from_stored(stored: horsies_core::TaskError) -> Result<Self, UnknownCustomCode> {
         let code = match stored.error_code {
             horsies_core::TaskErrorCode::BuiltIn(code) => TaskErrorCode::BuiltIn(code),
             horsies_core::TaskErrorCode::Custom(code) => match E::from_code(code.as_str()) {
                 Some(custom) => TaskErrorCode::Custom(custom),
                 None => {
-                    return Err(UnknownUserCode {
-                        code: code.as_str().to_owned(),
+                    return Err(UnknownCustomCode {
+                        stored_code: code.as_str().to_owned(),
                         code_type: std::any::type_name::<E>(),
                     })
                 }
@@ -409,7 +409,7 @@ mod tests {
     fn a_custom_code_that_the_type_does_not_name_is_refused() {
         let stored = horsies_core::TaskError::custom("OUT_OF_STOCK", "no stock").unwrap();
         let refused = TaskError::<ChargeCode>::from_stored(stored).unwrap_err();
-        assert_eq!(refused.code, "OUT_OF_STOCK");
+        assert_eq!(refused.stored_code, "OUT_OF_STOCK");
         assert!(refused.code_type.contains("ChargeCode"));
     }
 

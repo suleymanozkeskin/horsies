@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from horsies.core.brokers.result_types import BrokerWaitInsideTask
 from horsies.core.codec.json_value import JsonValue
-from horsies.core.models.outcome import ReadResult, WaitInsideTask
+from horsies.core.models.outcome import ReadResult, ReadWaitInsideTask
 from horsies.core.models.tasks import (
     OperationalErrorCode,
     TaskError,
@@ -259,7 +259,7 @@ WAIT_PROBE_JOIN_TIMEOUT_S = 10.0
 
 def _refused(read: ReadResult[Any, TaskError]) -> bool:
     match read:
-        case Err(err_value=WaitInsideTask()):
+        case Err(err_value=ReadWaitInsideTask()):
             return True
         case _:
             return False
@@ -283,7 +283,7 @@ def wait_inside_task() -> Result[dict[str, bool], TaskError]:
     thread_refusals: list[bool] = []
 
     def wait_on_a_thread() -> None:
-        thread_refusals.append(_refused(handle.get(timeout_ms=1000)))
+        thread_refusals.append(_refused(handle.get(wait_ms=1000)))
 
     thread = threading.Thread(target=wait_on_a_thread, name='e2e-wait-on-a-thread')
     thread.start()
@@ -293,14 +293,14 @@ def wait_inside_task() -> Result[dict[str, bool], TaskError]:
     started = spec_single_node.start()
     return Ok(
         {
-            'get_refused': _refused(handle.get(timeout_ms=1000)),
+            'get_refused': _refused(handle.get(wait_ms=1000)),
             'thread_get_refused': thread_refusals == [True],
             'app_get_result_refused': _refused(read),
             'raw_refused': is_err(raw)
             and isinstance(raw.err_value, BrokerWaitInsideTask),
             'workflow_started': is_ok(started),
             'workflow_get_refused': is_ok(started)
-            and _refused(started.ok_value.get(timeout_ms=1000)),
+            and _refused(started.ok_value.get(wait_ms=1000)),
             'info_read': is_ok(handle.info()),
         },
     )

@@ -161,7 +161,7 @@ if TYPE_CHECKING:
     from horsies.core.task_runtime import TaskRuntime
     from horsies.core.models.tasks import TaskInfo, TaskError
     from horsies.core.models.outcome import ReadResult
-    from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
+    from horsies.core.brokers.result_types import BrokerResult, StoredResult
     from horsies.core.models.class_coverage import ClassCoverage, ClassReport
     from horsies.core.models.health import (
         DatabasePing,
@@ -1897,7 +1897,7 @@ class Horsies:
     async def get_raw_result_async(
         self,
         task_id: UUID,
-        timeout_ms: int | None = None,
+        wait_ms: int | None = None,
     ) -> 'BrokerResult[dict[str, Any] | None]':
         """Fetch the raw stored result envelope without typed decode.
 
@@ -1907,21 +1907,21 @@ class Horsies:
         use this to inspect payloads without importing user task
         modules.
 
-        The first check is the wait limit: a timeout_ms that is not None or
+        The first check is the wait limit: a wait_ms that is not None or
         an int from 0 to MAX_TASK_TIMEOUT_MS returns
         ``Err(BrokerInvalidInput)``. Then, in a process that runs task
         bodies, it returns ``Err(BrokerWaitInsideTask)``. Neither does I/O.
         """
         from horsies.core.types.result import Err, Ok, is_err
 
-        refused_wait = self._raw_wait_refused('get_raw_result_async', task_id, timeout_ms)
+        refused_wait = self._raw_wait_refused('get_raw_result_async', task_id, wait_ms)
         if refused_wait is not None:
             return refused_wait
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return self._wait_inside_task_err('get_raw_result_async', task_id)
         broker = self.get_broker()
         record_result = await broker.get_raw_result_record_async(
-            task_id, timeout_ms,
+            task_id, wait_ms,
         )
         if is_err(record_result):
             return Err(record_result.err_value)
@@ -1933,7 +1933,7 @@ class Horsies:
     def get_raw_result(
         self,
         task_id: UUID,
-        timeout_ms: int | None = None,
+        wait_ms: int | None = None,
     ) -> 'BrokerResult[dict[str, Any] | None]':
         """Synchronous version of ``get_raw_result_async``.
 
@@ -1944,7 +1944,7 @@ class Horsies:
         """
         from horsies.core.types.result import Err, Ok, is_err
 
-        refused_wait = self._raw_wait_refused('get_raw_result', task_id, timeout_ms)
+        refused_wait = self._raw_wait_refused('get_raw_result', task_id, wait_ms)
         if refused_wait is not None:
             return refused_wait
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
@@ -1952,7 +1952,7 @@ class Horsies:
         if in_running_event_loop():
             return self._async_context_err('get_raw_result')
         broker = self.get_broker()
-        record_result = broker.get_raw_result_record(task_id, timeout_ms)
+        record_result = broker.get_raw_result_record(task_id, wait_ms)
         if is_err(record_result):
             return Err(record_result.err_value)
         record = record_result.ok_value
@@ -1963,7 +1963,7 @@ class Horsies:
     async def get_result_async(
         self,
         task_id: UUID,
-        timeout_ms: int | None = None,
+        wait_ms: int | None = None,
     ) -> 'ReadResult[Any, TaskError[Any]]':
         """Fetch and typed-decode a task's stored result.
 
@@ -1974,31 +1974,31 @@ class Horsies:
         inspecting failed tasks can decode without importing user code.
 
         Returns ``Err(read_error)`` when the read gives no outcome:
-        ``NoTypeAvailable`` when the ok slot is populated and ``task_name``
-        isn't in the local registry; ``TaskNotFound``, ``WaitTimeout``,
-        ``ResultNotAvailable``, ``ResultDeserializationError`` and
-        ``BrokerError`` as ``TaskHandle.get``.
+        ``ReadNoTypeAvailable`` when the ok slot is populated and ``task_name``
+        isn't in the local registry; ``ReadTaskNotFound``, ``ReadWaitTimeout``,
+        ``ReadResultNotAvailable``, ``ReadResultDeserializationError`` and
+        ``ReadDatabaseError`` as ``TaskHandle.get``.
 
-        The first check is the wait limit: a timeout_ms that is not None or
-        an int from 0 to MAX_TASK_TIMEOUT_MS returns ``Err(InvalidInput)``.
+        The first check is the wait limit: a wait_ms that is not None or
+        an int from 0 to MAX_TASK_TIMEOUT_MS returns ``Err(ReadInvalidInput)``.
         Then, in a process that runs task bodies, it returns
-        ``Err(WaitInsideTask)``. Neither does I/O.
+        ``Err(ReadWaitInsideTask)``. Neither does I/O.
         """
-        refused_wait = self._read_wait_refused('get_result_async', task_id, timeout_ms)
+        refused_wait = self._read_wait_refused('get_result_async', task_id, wait_ms)
         if refused_wait is not None:
             return refused_wait
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return self._wait_inside_task_read('get_result_async', task_id)
         record_result = await self.get_broker().get_raw_result_record_async(
-            task_id, timeout_ms,
+            task_id, wait_ms,
         )
-        return self._task_result_of_record(task_id, timeout_ms, record_result)
+        return self._task_result_of_record(task_id, wait_ms, record_result)
 
     def _task_result_of_record(
         self,
         task_id: UUID,
-        timeout_ms: int | None,
-        record_result: 'BrokerResult[RawResultRecord | None]',
+        wait_ms: int | None,
+        record_result: 'BrokerResult[StoredResult | None]',
     ) -> 'ReadResult[Any, TaskError[Any]]':
         """The answer of ``get_result`` and ``get_result_async`` for the
         broker's result read (``read_of_record``). Pure apart from the lookup
@@ -2017,36 +2017,36 @@ class Horsies:
                     code_type = task.task_code_type
             case _:
                 pass
-        return read_of_record(task_id, record_result, ok_type, timeout_ms, code_type)
+        return read_of_record(task_id, record_result, ok_type, wait_ms, code_type)
 
     def get_result(
         self,
         task_id: UUID,
-        timeout_ms: int | None = None,
+        wait_ms: int | None = None,
     ) -> 'ReadResult[Any, TaskError[Any]]':
         """Synchronous version of ``get_result_async``: the broker's blocking
         result read (``PostgresBroker.get_raw_result_record``) on the calling
         thread, with the GIL released and signals checked every 100 ms.
 
         The checks before any I/O come in this order: the wait limit
-        (``Err(InvalidInput)``), a process that runs task bodies
-        (``Err(WaitInsideTask)``), and a thread that runs an event loop
-        (``Err(AsyncContext)``). A raised signal handler (Ctrl+C) ends the
+        (``Err(ReadInvalidInput)``), a process that runs task bodies
+        (``Err(ReadWaitInsideTask)``), and a thread that runs an event loop
+        (``Err(ReadAsyncContext)``). A raised signal handler (Ctrl+C) ends the
         wait with its exception; nothing changed.
         """
-        from horsies.core.models.outcome import AsyncContext
+        from horsies.core.models.outcome import ReadAsyncContext
 
-        refused_wait = self._read_wait_refused('get_result', task_id, timeout_ms)
+        refused_wait = self._read_wait_refused('get_result', task_id, wait_ms)
         if refused_wait is not None:
             return refused_wait
         if process_role() is ProcessRole.RUNS_TASK_BODIES:
             return self._wait_inside_task_read('get_result', task_id)
         if in_running_event_loop():
-            return Err(AsyncContext(message=async_context_message(
+            return Err(ReadAsyncContext(message=async_context_message(
                 'app.get_result()', 'app.get_result_async(...)',
             )))
-        record_result = self.get_broker().get_raw_result_record(task_id, timeout_ms)
-        return self._task_result_of_record(task_id, timeout_ms, record_result)
+        record_result = self.get_broker().get_raw_result_record(task_id, wait_ms)
+        return self._task_result_of_record(task_id, wait_ms, record_result)
 
     async def get_task_info_async(
         self,
@@ -2182,23 +2182,23 @@ class Horsies:
     # ------------- Health / liveness API -------------
 
     def _read_wait_refused(
-        self, label: str, task_id: UUID, timeout_ms: object,
+        self, label: str, task_id: UUID, wait_ms: object,
     ) -> 'ReadResult[Any, TaskError[Any]] | None':
-        """``Err(InvalidInput)`` for a wait limit that no wait can use, or
+        """``Err(ReadInvalidInput)`` for a wait limit that no wait can use, or
         None to go on. The first check of a typed result read. Pure."""
-        from horsies.core.models.outcome import InvalidInput
+        from horsies.core.models.outcome import ReadInvalidInput
         from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
-        match wait_timeout_seconds(timeout_ms):
+        match wait_timeout_seconds(wait_ms):
             case Err(err_value=refused):
-                return Err(InvalidInput(
+                return Err(ReadInvalidInput(
                     message=f'app.{label}() for task {task_id}: {refused.message}',
                 ))
             case Ok():
                 return None
 
     def _raw_wait_refused(
-        self, label: str, task_id: UUID, timeout_ms: object,
+        self, label: str, task_id: UUID, wait_ms: object,
     ) -> 'BrokerResult[Any] | None':
         """``Err(BrokerInvalidInput)`` for a wait limit that no wait can use,
         or None to go on. The first check of a raw result read. Pure."""
@@ -2206,7 +2206,7 @@ class Horsies:
         from horsies.core.types.error_detail import NoCause
         from horsies.core.utils.wait_timeout import wait_timeout_seconds
 
-        match wait_timeout_seconds(timeout_ms):
+        match wait_timeout_seconds(wait_ms):
             case Err(err_value=refused):
                 return Err(BrokerInvalidInput(
                     message=f'app.{label}() for task {task_id}: {refused.message}',
@@ -2219,9 +2219,9 @@ class Horsies:
         self, label: str, task_id: UUID,
     ) -> 'ReadResult[Any, TaskError[Any]]':
         """Refuse a result wait in a process that runs task bodies. Nothing ran."""
-        from horsies.core.models.outcome import WaitInsideTask
+        from horsies.core.models.outcome import ReadWaitInsideTask
 
-        return Err(WaitInsideTask(
+        return Err(ReadWaitInsideTask(
             message=wait_inside_task_message(f'app.{label}() for task {task_id}'),
         ))
 

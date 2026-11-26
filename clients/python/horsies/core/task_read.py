@@ -26,7 +26,7 @@ from horsies.core.brokers.result_types import (
     BrokerPayloadMismatch,
     BrokerResult,
     BrokerWaitInsideTask,
-    RawResultRecord,
+    StoredResult,
     broker_error_cause,
 )
 from horsies.core.codec.json_value import StrictJsonError
@@ -39,24 +39,24 @@ from horsies.core.codec.typed import (
 )
 from horsies.core.codec.validation_errors import ValueValidationError
 from horsies.core.models.outcome import (
-    AsyncContext,
-    BrokerError,
     Failed,
-    InvalidInput,
-    NoTypeAvailable,
+    ReadAsyncContext,
+    ReadDatabaseError,
     ReadError,
+    ReadInvalidInput,
+    ReadNoTypeAvailable,
     ReadResult,
-    ResultDeserializationError,
-    ResultNotAvailable,
-    ResultNotReady,
+    ReadResultDeserializationError,
+    ReadResultNotAvailable,
+    ReadResultNotReady,
+    ReadTaskNotFound,
+    ReadUnknownCustomCode,
+    ReadWaitInsideTask,
+    ReadWaitTimeout,
+    ReadWorkflowContextMissingId,
+    ReadWorkflowNotFound,
     Succeeded,
-    TaskNotFound,
     TaskOutcome,
-    UnknownCustomCode,
-    WaitInsideTask,
-    WaitTimeout,
-    WorkflowCtxMissingId,
-    WorkflowNotFound,
 )
 from horsies.core.models.tasks import (
     BUILTIN_FAMILIES,
@@ -89,8 +89,8 @@ def is_final_read(read: ReadResult[Any, TaskError]) -> bool:
     """Whether a handle keeps ``read``: a fact of the stored data, not of the
     moment of the read. Pure.
 
-    An outcome, ``ResultNotAvailable``, ``ResultDeserializationError`` and
-    ``NoTypeAvailable`` are final. A wait that ran out, a task not found, a
+    An outcome, ``ReadResultNotAvailable``, ``ReadResultDeserializationError`` and
+    ``ReadNoTypeAvailable`` are final. A wait that ran out, a task not found, a
     refused wait and a broker failure are not: a later read may succeed.
     """
     match read:
@@ -104,22 +104,22 @@ def _is_final_error(error: ReadError) -> bool:
     """``is_final_read`` for a read failure. Pure."""
     match error:
         case (
-            ResultNotAvailable()
-            | ResultDeserializationError()
-            | UnknownCustomCode()
-            | NoTypeAvailable()
+            ReadResultNotAvailable()
+            | ReadResultDeserializationError()
+            | ReadUnknownCustomCode()
+            | ReadNoTypeAvailable()
         ):
             return True
         case (
-            WaitTimeout()
-            | TaskNotFound()
-            | WorkflowNotFound()
-            | ResultNotReady()
-            | WaitInsideTask()
-            | AsyncContext()
-            | InvalidInput()
-            | BrokerError()
-            | WorkflowCtxMissingId()
+            ReadWaitTimeout()
+            | ReadTaskNotFound()
+            | ReadWorkflowNotFound()
+            | ReadResultNotReady()
+            | ReadWaitInsideTask()
+            | ReadAsyncContext()
+            | ReadInvalidInput()
+            | ReadDatabaseError()
+            | ReadWorkflowContextMissingId()
         ):
             return False
         case _ as unreachable:
@@ -136,11 +136,11 @@ def _read_error_of_broker(task_id: UUID, error: BrokerOperationError) -> ReadErr
     """
     match error:
         case BrokerNoTypeAvailable(message=message):
-            return NoTypeAvailable(message=message)
+            return ReadNoTypeAvailable(message=message)
         case BrokerInvalidJsonPayload(message=message):
-            return ResultDeserializationError(message=message)
+            return ReadResultDeserializationError(message=message)
         case BrokerWaitInsideTask(message=message):
-            return WaitInsideTask(message=message)
+            return ReadWaitInsideTask(message=message)
         case BrokerAsyncContext():
             raise AssertionError(
                 f'the result read of task {task_id} got ASYNC_CONTEXT; the '
@@ -156,7 +156,7 @@ def _read_error_of_broker(task_id: UUID, error: BrokerOperationError) -> ReadErr
             | BrokerInvalidInput()
             | BrokerListenerDisabled()
         ):
-            return BrokerError(
+            return ReadDatabaseError(
                 message=(
                     f'the result read of task {task_id} failed '
                     f'({error.code.value}): {error.message}'
@@ -170,25 +170,25 @@ def _read_error_of_broker(task_id: UUID, error: BrokerOperationError) -> ReadErr
 
 def read_of_record(
     task_id: UUID,
-    broker_result: BrokerResult[RawResultRecord | None],
+    broker_result: BrokerResult[StoredResult | None],
     ok_type: TypeAnnotation | None,
-    timeout_ms: int | None,
+    wait_ms: int | None,
     code_type: CustomCodeType,
 ) -> ReadResult[Any, TaskError[Any]]:
     """The read of a task from the broker's raw result record. Pure.
 
     Outcomes:
         - A failed broker read: its read failure (``_read_error_of_broker``).
-        - No row: ``TaskNotFound``.
+        - No row: ``ReadTaskNotFound``.
         - A ``CANCELLED`` row: ``Ok(Failed(TASK_CANCELLED))``.
-        - No stored result: ``ResultNotAvailable`` for a terminal status,
-          ``WaitTimeout`` for any other (the wait ran out first).
+        - No stored result: ``ReadResultNotAvailable`` for a terminal status,
+          ``ReadWaitTimeout`` for any other (the wait ran out first).
         - A stored result: the outcome of ``_read_of_envelope``.
 
     ``ok_type`` is the declared value type of the task, or ``None`` when the
     reader has none. ``code_type`` is the type of its custom codes: with
     ``EnumCodes(E)``, a stored custom code reads as the member of ``E``, and
-    a code that ``E`` does not name is ``UnknownCustomCode``.
+    a code that ``E`` does not name is ``ReadUnknownCustomCode``.
     """
     match broker_result:
         case Err(err_value=broker_error):
@@ -196,18 +196,18 @@ def read_of_record(
         case Ok(ok_value=found):
             match found:
                 case None:
-                    return Err(TaskNotFound(
+                    return Err(ReadTaskNotFound(
                         message=f'Task {task_id} not found in database',
                     ))
-                case RawResultRecord():
-                    return _read_of_row(task_id, found, ok_type, timeout_ms, code_type)
+                case StoredResult():
+                    return _read_of_row(task_id, found, ok_type, wait_ms, code_type)
 
 
 def _read_of_row(
     task_id: UUID,
-    record: RawResultRecord,
+    record: StoredResult,
     ok_type: TypeAnnotation | None,
-    timeout_ms: int | None,
+    wait_ms: int | None,
     code_type: CustomCodeType,
 ) -> ReadResult[Any, TaskError[Any]]:
     """``read_of_record`` for a row that the broker found. Pure."""
@@ -219,13 +219,13 @@ def _read_of_row(
         )))
     match record.raw_result:
         case None if record.status in _TERMINAL_WITH_RESULT:
-            return Err(ResultNotAvailable(message=(
+            return Err(ReadResultNotAvailable(message=(
                 f'Task {task_id} reached terminal status '
                 f'{record.status.value} but stored no result payload'
             )))
         case None:
-            return Err(WaitTimeout(message=(
-                f'Timed out waiting for task {task_id} after {timeout_ms}ms; '
+            return Err(ReadWaitTimeout(message=(
+                f'Timed out waiting for task {task_id} after {wait_ms}ms; '
                 f'its status is {record.status.value} and it may still run'
             )))
         case raw:
@@ -246,12 +246,12 @@ def _read_of_envelope(
     The envelope shape is checked before either slot is read, so a malformed
     envelope (no marker, both slots set, other keys) fails closed. The err
     slot reads without ``ok_type``: ``TaskError`` has a fixed schema. The ok
-    slot needs ``ok_type``: ``NoTypeAvailable`` without it.
+    slot needs ``ok_type``: ``ReadNoTypeAvailable`` without it.
     """
     try:
         envelope = validate_task_result_envelope(raw)
     except StrictJsonError as exc:
-        return Err(ResultDeserializationError(
+        return Err(ReadResultDeserializationError(
             message=f'TaskResult envelope invalid for task {task_id}: {exc}',
         ))
     err_slot = envelope.get('err')
@@ -259,12 +259,12 @@ def _read_of_envelope(
         try:
             return Ok(Failed(decode_task_error(err_slot)))
         except (StrictJsonError, ValueValidationError) as exc:
-            return Err(ResultDeserializationError(
+            return Err(ReadResultDeserializationError(
                 message=f'TaskError decode failed for task {task_id}: {exc}',
             ))
     match ok_type:
         case None:
-            return Err(NoTypeAvailable(message=(
+            return Err(ReadNoTypeAvailable(message=(
                 f'Task {task_id} ok-result decode requires a declared ok type; '
                 'the reader has none (task not registered in this process). '
                 'Read the raw result instead.'
@@ -273,7 +273,7 @@ def _read_of_envelope(
             try:
                 return ok_of_outcome(decode_task_result(raw, declared))
             except (StrictJsonError, ValueValidationError) as exc:
-                return Err(ResultDeserializationError(
+                return Err(ReadResultDeserializationError(
                     message=f'decode_task_result failed for task {task_id}: {exc}',
                 ))
 
@@ -288,7 +288,7 @@ def _typed_read(
         case Ok(ok_value=typed):
             return ok_of_outcome(typed)
         case Err(err_value=unknown):
-            return Err(UnknownCustomCode(
+            return Err(ReadUnknownCustomCode(
                 message=f'the stored error of task {task_id}: {unknown.message}',
                 custom_code=unknown.custom_code,
             ))
@@ -297,13 +297,13 @@ def _typed_read(
 def typed_outcome(
     outcome: TaskOutcome[Any, TaskError],
     code_type: CustomCodeType,
-) -> Result[TaskOutcome[Any, TaskError[Any]], UnknownCustomCode]:
+) -> Result[TaskOutcome[Any, TaskError[Any]], ReadUnknownCustomCode]:
     """``outcome`` with its custom code as a member of the declared ``Enum``. Pure.
 
     A decode gives a custom code as its stored text. With ``TextCodes`` the
     outcome stays as it is. With ``EnumCodes(E)``, the text of a failed
     outcome becomes the member of ``E`` that has it as its value; a text
-    that no member has is ``UnknownCustomCode``. A built-in code and a
+    that no member has is ``ReadUnknownCustomCode``. A built-in code and a
     succeeded outcome stay as they are.
     """
     match outcome:
@@ -319,7 +319,7 @@ def typed_outcome(
 
 def _typed_failed(
     error: TaskError, enum_class: type[Enum],
-) -> Result[TaskOutcome[Any, TaskError[Any]], UnknownCustomCode]:
+) -> Result[TaskOutcome[Any, TaskError[Any]], ReadUnknownCustomCode]:
     """``typed_outcome`` of a failed outcome with the codes of ``enum_class``. Pure."""
     match error.code:
         case code if isinstance(code, BUILTIN_FAMILIES) or isinstance(code, enum_class):
@@ -331,7 +331,7 @@ def _typed_failed(
     members = {member.value: member for member in enum_class}
     match members.get(text):
         case None:
-            return Err(UnknownCustomCode(
+            return Err(ReadUnknownCustomCode(
                 message=f'custom code {text!r} is not a member of {enum_class.__name__}',
                 custom_code=text,
             ))

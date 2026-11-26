@@ -42,11 +42,11 @@ from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.payload import PayloadPolicy
 from horsies.core.models.outcome import (
-    AsyncContext,
-    BrokerError,
+    ReadAsyncContext,
+    ReadDatabaseError,
     ReadResult,
+    ReadTaskNotFound,
     Succeeded,
-    TaskNotFound,
 )
 from horsies.core.models.task_send_types import TaskSendAsyncContext
 from horsies.core.models.tasks import (
@@ -186,14 +186,14 @@ def test_app_facade_returns_async_context(app: Horsies, name: str) -> None:
 
 
 def test_app_get_result_returns_async_context(app: Horsies) -> None:
-    """The typed result read returns the read failure ``AsyncContext``."""
+    """The typed result read returns the read failure ``ReadAsyncContext``."""
     result = _inside_loop(lambda: app.get_result(UUID(TASK_ID), 0))
 
     match result:
-        case Err(AsyncContext() as read_error):
+        case Err(ReadAsyncContext() as read_error):
             assert 'app.get_result_async(' in read_error.message
         case _:
-            pytest.fail(f'expected Err(AsyncContext), got {result!r}')
+            pytest.fail(f'expected Err(ReadAsyncContext), got {result!r}')
     _assert_nothing_ran(app.get_broker())
 
 
@@ -226,10 +226,10 @@ def test_task_handle_get_returns_async_context_and_does_not_cache_it(
     inside = _inside_loop(handle.get)
 
     match inside:
-        case Err(AsyncContext() as read_error):
+        case Err(ReadAsyncContext() as read_error):
             assert 'await handle.get_async(' in read_error.message
         case _:
-            pytest.fail(f'expected Err(AsyncContext), got {inside!r}')
+            pytest.fail(f'expected Err(ReadAsyncContext), got {inside!r}')
     _assert_nothing_ran(broker)
     # A later sync get() outside the loop reads the broker again.
     with patch.object(
@@ -238,7 +238,7 @@ def test_task_handle_get_returns_async_context_and_does_not_cache_it(
         outside = handle.get()
     read.assert_called_once()
     assert isinstance(outside, Err)
-    assert isinstance(outside.err_value, TaskNotFound)
+    assert isinstance(outside.err_value, ReadTaskNotFound)
 
 
 def test_task_handle_get_returns_cached_result_inside_loop(app: Horsies) -> None:
@@ -289,7 +289,7 @@ def test_send_maps_broker_async_context_to_send_async_context() -> None:
 
 
 # =============================================================================
-# HandleErrorCode.ASYNC_CONTEXT and the read failure AsyncContext
+# HandleErrorCode.ASYNC_CONTEXT and the read failure ReadAsyncContext
 # =============================================================================
 
 
@@ -315,7 +315,7 @@ def test_workflow_handle_wrap_method_returns_async_context(
 
 
 READ_CALLS: dict[str, Callable[[WorkflowHandle[Any]], ReadResult[Any, TaskError]]] = {
-    'get': lambda handle: handle.get(timeout_ms=0),
+    'get': lambda handle: handle.get(wait_ms=0),
     'result_for': lambda handle: handle.result_for(NodeKey('node-1')),
 }
 
@@ -332,10 +332,10 @@ def test_workflow_handle_read_method_returns_async_context(
     result = _inside_loop(lambda: READ_CALLS[name](handle))
 
     match result:
-        case Err(AsyncContext() as read_error):
+        case Err(ReadAsyncContext() as read_error):
             assert f'{name}_async' in read_error.message
         case _:
-            pytest.fail(f'expected Err(AsyncContext), got {result!r}')
+            pytest.fail(f'expected Err(ReadAsyncContext), got {result!r}')
     _assert_nothing_ran(broker)
 
 
@@ -556,7 +556,7 @@ BLOCKING_SITES: dict[str, BlockingSite] = {
         HandleErrorCode.DB_OPERATION_FAILED,
     ),
     'WorkflowHandle.get': BlockingSite(
-        lambda app, broker: _workflow_handle(broker).get(timeout_ms=0),
+        lambda app, broker: _workflow_handle(broker).get(wait_ms=0),
         'wait_workflow_result',
         OperationalErrorCode.BROKER_ERROR,
     ),
@@ -597,7 +597,7 @@ def _core_error_failure(result: object) -> tuple[object, BaseException | NoCause
             BrokerOperationFailed(code=code, exception=exception)
             | HandleDbOperationFailed(code=code, exception=exception)
             | WorkflowStartEnqueueFailed(code=code, exception=exception)
-            | BrokerError(code=code, exception=exception)
+            | ReadDatabaseError(code=code, exception=exception)
         )):
             return code, exception
         case _:
@@ -704,7 +704,7 @@ ASYNC_TWINS: dict[str, tuple[Callable[[Horsies], Any], str]] = {
         for name in ('status', 'results', 'tasks', 'cancel', 'pause', 'resume')
     },
     'WorkflowHandle.get': (
-        lambda app: _workflow_handle(app.get_broker()).get(timeout_ms=0),
+        lambda app: _workflow_handle(app.get_broker()).get(wait_ms=0),
         'handle.get_async(',
     ),
     'WorkflowHandle.result_for': (_workflow_result_for, 'handle.result_for_async('),
@@ -735,7 +735,7 @@ def _refusal_message(result: object) -> str:
             BrokerAsyncContext()
             | HandleAsyncContext()
             | WorkflowStartAsyncContext()
-            | AsyncContext() as error
+            | ReadAsyncContext() as error
         ):
             assert error.code.value == 'ASYNC_CONTEXT'
             return error.message

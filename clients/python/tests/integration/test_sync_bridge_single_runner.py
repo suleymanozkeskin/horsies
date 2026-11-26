@@ -110,7 +110,7 @@ def test_ping_workers_after_sync_workflow_wait(
         workflow_id=uuid.uuid4(), broker=broker,
     )
 
-    waited, _ = _timed_call(lambda: handle.get(timeout_ms=RESULT_WAIT_MS))
+    waited, _ = _timed_call(lambda: handle.get(wait_ms=RESULT_WAIT_MS))
     pinged, _ = _timed_call(
         lambda: app.ping_workers(timeout_seconds=PING_WINDOW_SECONDS),
     )

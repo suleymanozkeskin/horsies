@@ -41,7 +41,7 @@ def _ready_check():
             if is_err(r):
                 return False
             handle = r.ok_value
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return _check
 
@@ -60,7 +60,7 @@ def test_max_memory_per_child_rotates_pids() -> None:
         ]
         pids: set[int] = set()
         for handle in handles:
-            result = handle.get(timeout_ms=30_000)
+            result = handle.get(wait_ms=30_000)
             pids.add(succeeded_value(result))
         assert len(pids) > PROCESSES, (
             f'expected > {PROCESSES} distinct child PIDs with memory recycling, '
@@ -90,10 +90,10 @@ def test_memory_recycle_survives_task_exceptions() -> None:
             for _ in range(BURST)
         ]
         for handle in raise_handles:
-            assert_failed(handle.get(timeout_ms=30_000))
+            assert_failed(handle.get(wait_ms=30_000))
         pids: set[int] = set()
         for handle in ok_handles:
-            result = handle.get(timeout_ms=30_000)
+            result = handle.get(wait_ms=30_000)
             pids.add(succeeded_value(result))
         assert len(pids) > PROCESSES, (
             f'worker stalled or pool broke: only {len(pids)} distinct PIDs '

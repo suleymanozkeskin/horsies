@@ -35,11 +35,11 @@ from horsies.core.exception_mapper import ExceptionMapper
 from horsies.core.models.outcome import (
     Failed,
     ReadResult,
-    ResultDeserializationError,
-    ResultNotAvailable,
+    ReadResultDeserializationError,
+    ReadResultNotAvailable,
+    ReadWaitTimeout,
     Succeeded,
     TaskOutcome,
-    WaitTimeout,
 )
 from horsies.core.models.tasks import (
     ContractCode,
@@ -399,14 +399,14 @@ class TestTaskHandleGet:
         assert result == Ok(Succeeded(42))
 
     def test_kept_result_not_available_returned_without_a_read(self) -> None:
-        """A kept ResultNotAvailable is final: get() returns it and reads nothing."""
+        """A kept ReadResultNotAvailable is final: get() returns it and reads nothing."""
         app = _make_app()
         broker = MagicMock()
         app.get_broker.return_value = broker
         handle: TaskHandle[int] = TaskHandle(
             't-2', app=app, broker_mode=True, ok_type=int,
         )
-        kept: ReadResult[int, TaskError] = Err(ResultNotAvailable(message='kept'))
+        kept: ReadResult[int, TaskError] = Err(ReadResultNotAvailable(message='kept'))
         handle._cached_result = kept
 
         result = handle.get()
@@ -415,26 +415,26 @@ class TestTaskHandleGet:
         broker.get_raw_result_record.assert_not_called()
 
     def test_no_broker_mode_no_cache_returns_result_not_available(self) -> None:
-        """Without broker mode and no cached result, returns ResultNotAvailable."""
+        """Without broker mode and no cached result, returns ReadResultNotAvailable."""
         handle: TaskHandle[int] = TaskHandle('t-3', broker_mode=False)
 
         result = handle.get()
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultNotAvailable)
+        assert isinstance(result.err_value, ReadResultNotAvailable)
 
     def test_broker_mode_success(self) -> None:
         """Broker mode: terminal envelope decodes via ok_type and caches.
 
-        Strict-serde phase 6: TaskHandle.get pulls a RawResultRecord from
+        Strict-serde phase 6: TaskHandle.get pulls a StoredResult from
         ``broker.get_raw_result_record`` and runs the typed decode itself.
         """
-        from horsies.core.brokers.result_types import RawResultRecord
+        from horsies.core.brokers.result_types import StoredResult
         from horsies.core.types.status import TaskStatus
 
         app = _make_app()
         broker = MagicMock()
-        broker.get_raw_result_record.return_value = Ok(RawResultRecord(
+        broker.get_raw_result_record.return_value = Ok(StoredResult(
             task_id='t-4',
             task_name='my_task',
             status=TaskStatus.COMPLETED,
@@ -450,7 +450,7 @@ class TestTaskHandleGet:
             't-4', app=app, broker_mode=True, ok_type=int,
         )
 
-        result = handle.get(timeout_ms=5000)
+        result = handle.get(wait_ms=5000)
 
         assert result == Ok(Succeeded(99))
         assert handle._cached_result is result
@@ -480,19 +480,19 @@ class TestTaskHandleGet:
         handle layer; the cache stays empty so the next get() call
         revisits the broker.
         """
-        from horsies.core.brokers.result_types import RawResultRecord
+        from horsies.core.brokers.result_types import StoredResult
         from horsies.core.types.status import TaskStatus
 
         app = _make_app()
         broker = MagicMock()
         broker.get_raw_result_record.side_effect = [
-            Ok(RawResultRecord(
+            Ok(StoredResult(
                 task_id='t-6',
                 task_name='my_task',
                 status=TaskStatus.RUNNING,
                 raw_result=None,
             )),
-            Ok(RawResultRecord(
+            Ok(StoredResult(
                 task_id='t-6',
                 task_name='my_task',
                 status=TaskStatus.COMPLETED,
@@ -509,12 +509,12 @@ class TestTaskHandleGet:
             't-6', app=app, broker_mode=True, ok_type=int,
         )
 
-        first = handle.get(timeout_ms=1000)
+        first = handle.get(wait_ms=1000)
         assert isinstance(first, Err)
-        assert isinstance(first.err_value, WaitTimeout)
+        assert isinstance(first.err_value, ReadWaitTimeout)
         assert handle._cached_result is None
 
-        second = handle.get(timeout_ms=5000)
+        second = handle.get(wait_ms=5000)
         assert second == Ok(Succeeded(42))
         assert handle._cached_result is second
 
@@ -542,7 +542,7 @@ class TestTaskHandleGetAsync:
 
     @pytest.mark.asyncio
     async def test_kept_result_not_available_returned_without_a_read(self) -> None:
-        """A kept ResultNotAvailable is final: get_async() returns it and reads nothing."""
+        """A kept ReadResultNotAvailable is final: get_async() returns it and reads nothing."""
         app = _make_app()
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock()
@@ -550,7 +550,7 @@ class TestTaskHandleGetAsync:
         handle: TaskHandle[str] = TaskHandle(
             't-2', app=app, broker_mode=True, ok_type=str,
         )
-        kept: ReadResult[str, TaskError] = Err(ResultNotAvailable(message='kept'))
+        kept: ReadResult[str, TaskError] = Err(ReadResultNotAvailable(message='kept'))
         handle._cached_result = kept
 
         result = await handle.get_async()
@@ -560,24 +560,24 @@ class TestTaskHandleGetAsync:
 
     @pytest.mark.asyncio
     async def test_no_broker_mode_returns_result_not_available(self) -> None:
-        """Without broker mode, returns ResultNotAvailable."""
+        """Without broker mode, returns ReadResultNotAvailable."""
         handle: TaskHandle[str] = TaskHandle('t-3', broker_mode=False)
 
         result = await handle.get_async()
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultNotAvailable)
+        assert isinstance(result.err_value, ReadResultNotAvailable)
 
     @pytest.mark.asyncio
     async def test_broker_mode_success(self) -> None:
         """Broker mode: terminal envelope decodes via ok_type and caches."""
-        from horsies.core.brokers.result_types import RawResultRecord
+        from horsies.core.brokers.result_types import StoredResult
         from horsies.core.types.status import TaskStatus
 
         app = _make_app()
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(return_value=Ok(
-            RawResultRecord(
+            StoredResult(
                 task_id='t-4',
                 task_name='my_task',
                 status=TaskStatus.COMPLETED,
@@ -646,19 +646,19 @@ class TestTaskHandleGetAsync:
         handle layer; the cache stays empty so the next call revisits
         the broker.
         """
-        from horsies.core.brokers.result_types import RawResultRecord
+        from horsies.core.brokers.result_types import StoredResult
         from horsies.core.types.status import TaskStatus
 
         app = _make_app()
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(side_effect=[
-            Ok(RawResultRecord(
+            Ok(StoredResult(
                 task_id='t-7',
                 task_name='my_task',
                 status=TaskStatus.RUNNING,
                 raw_result=None,
             )),
-            Ok(RawResultRecord(
+            Ok(StoredResult(
                 task_id='t-7',
                 task_name='my_task',
                 status=TaskStatus.COMPLETED,
@@ -675,12 +675,12 @@ class TestTaskHandleGetAsync:
             't-7', app=app, broker_mode=True, ok_type=str,
         )
 
-        first = await handle.get_async(timeout_ms=1000)
+        first = await handle.get_async(wait_ms=1000)
         assert isinstance(first, Err)
-        assert isinstance(first.err_value, WaitTimeout)
+        assert isinstance(first.err_value, ReadWaitTimeout)
         assert handle._cached_result is None
 
-        second = await handle.get_async(timeout_ms=5000)
+        second = await handle.get_async(wait_ms=5000)
         assert second == Ok(Succeeded('done'))
         assert handle._cached_result is second
 
@@ -695,7 +695,7 @@ class TestTaskHandleGetAsync:
 @pytest.mark.unit
 class TestReadOfRecord:
     """Direct unit tests for ``read_of_record``, the envelope decode of
-    ``TaskHandle.get``. Constructs ``BrokerResult[RawResultRecord]`` fixtures
+    ``TaskHandle.get``. Constructs ``BrokerResult[StoredResult]`` fixtures
     rather than mocking the broker, so the envelope-shape contract is
     exercised independently of the broker layer.
 
@@ -710,7 +710,7 @@ class TestReadOfRecord:
        on the ok slot for typed handles too.
 
     3. A terminal record with ``raw_result=None`` must map to
-       ``ResultNotAvailable`` (final, kept) — not ``WaitTimeout``, which
+       ``ReadResultNotAvailable`` (final, kept) — not ``ReadWaitTimeout``, which
        is transient.
     """
 
@@ -724,9 +724,9 @@ class TestReadOfRecord:
         task_name: str = 'my_task',
         task_id: str = 'task-x',
     ) -> Any:
-        from horsies.core.brokers.result_types import RawResultRecord
+        from horsies.core.brokers.result_types import StoredResult
 
-        return RawResultRecord(
+        return StoredResult(
             task_id=task_id,
             task_name=task_name,
             status=status,
@@ -774,7 +774,7 @@ class TestReadOfRecord:
         result = await handle.get_async()
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
         assert 'nested deeper than' in result.err_value.message
 
     def test_malformed_envelope_err_fast_rejected(self) -> None:
@@ -805,7 +805,7 @@ class TestReadOfRecord:
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     def test_envelope_with_both_slots_populated_rejected(self) -> None:
         """Both ``ok`` and ``err`` populated → invalid envelope; can't
@@ -830,7 +830,7 @@ class TestReadOfRecord:
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     def test_envelope_missing_marker_rejected(self) -> None:
         """Plain dict without the marker isn't a stored result envelope."""
@@ -845,7 +845,7 @@ class TestReadOfRecord:
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
 
     def test_removed_builtin_code_in_err_slot_rejected(self) -> None:
         """A stored err slot tagged with the removed code
@@ -871,7 +871,7 @@ class TestReadOfRecord:
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultDeserializationError)
+        assert isinstance(result.err_value, ReadResultDeserializationError)
         assert (
             "Unknown built-in task code: 'PYDANTIC_HYDRATION_ERROR'"
             in result.err_value.message
@@ -898,7 +898,7 @@ class TestReadOfRecord:
         result = read_of_record(self._TASK_ID, broker_result, int, None, TextCodes())
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, ResultNotAvailable)
+        assert isinstance(result.err_value, ReadResultNotAvailable)
 
     def test_non_terminal_status_with_none_payload_is_wait_timeout(self) -> None:
         """Non-terminal row + raw_result=None → ``WAIT_TIMEOUT``
@@ -913,7 +913,7 @@ class TestReadOfRecord:
         result = read_of_record(self._TASK_ID, broker_result, int, 100, TextCodes())
 
         assert isinstance(result, Err)
-        assert isinstance(result.err_value, WaitTimeout)
+        assert isinstance(result.err_value, ReadWaitTimeout)
 
     def test_err_fast_path_polymorphic_sub_workflow_error(self) -> None:
         """End-to-end: a parent task's err slot carrying a

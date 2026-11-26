@@ -68,7 +68,7 @@ def _ready_check(healthcheck: TaskFunction[[], str]) -> Callable[[], bool]:
             if is_err(sent):
                 return False
             handle = sent.ok_value
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return check
 
@@ -152,7 +152,7 @@ async def test_a_task_loop_failure_at_boot_costs_one_attempt(
         ready_check=_ready_check(boot.healthcheck),
     ) as worker:
         handle = unwrap_send(await boot.async_pid.send_async())
-        result = await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
+        result = await handle.get_async(wait_ms=RESULT_TIMEOUT_MS)
 
         assert_succeeded(result)
         assert loop_failures.read_text(encoding='ascii') == '0'
@@ -180,7 +180,7 @@ async def test_an_app_with_no_async_task_creates_no_task_loop(
         ready_check=_ready_check(sync_only.healthcheck),
     ) as worker:
         handle = unwrap_send(await sync_only.healthcheck.send_async())
-        result = await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS)
+        result = await handle.get_async(wait_ms=RESULT_TIMEOUT_MS)
 
         assert_succeeded(result)
         assert worker.poll() is None
@@ -225,7 +225,7 @@ async def test_a_slot_that_cannot_create_its_task_loop_leaves_the_worker_degrade
         ready_check=_ready_check(boot.healthcheck),
     ) as worker:
         handle = unwrap_send(await boot.async_pid.send_async())
-        assert_succeeded(await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS))
+        assert_succeeded(await handle.get_async(wait_ms=RESULT_TIMEOUT_MS))
         snapshot = await _degraded_snapshot(broker, started_after)
         assert worker.poll() is None
 

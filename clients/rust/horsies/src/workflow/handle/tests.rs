@@ -72,7 +72,7 @@ fn a_completed_workflow_without_a_result_is_unreadable() {
     ] {
         assert!(matches!(
             end_outcome::<u32>(workflow(), end),
-            Err(WorkflowReadError::StoredResultUnreadable { .. })
+            Err(WorkflowReadError::ResultDeserializationError { .. })
         ));
     }
 }
@@ -125,7 +125,7 @@ fn a_stored_error_that_does_not_read_is_unreadable() {
         assert!(
             matches!(
                 end_outcome::<u32>(workflow(), end),
-                Err(WorkflowReadError::StoredResultUnreadable { .. })
+                Err(WorkflowReadError::ResultDeserializationError { .. })
             ),
             "{error:?}"
         );
@@ -207,14 +207,14 @@ fn an_untyped_value_keeps_its_stored_text() {
 fn an_outputless_result_read_as_a_type_and_the_reverse_are_unreadable() {
     assert!(matches!(
         end_outcome::<u32>(workflow(), completed(Some(outputless()))),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
+        Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
     let typed = completed(Some(
         json!({"__h_task_result__": true, "ok": 1, "err": null}),
     ));
     assert!(matches!(
         end_outcome::<OutputlessResults>(workflow(), typed),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
+        Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
 }
 
@@ -233,7 +233,7 @@ fn a_node_result_reads_with_the_node_types() {
     .to_string();
     assert!(matches!(
         envelope_outcome::<u32, Infallible>(workflow(), &declined),
-        Err(WorkflowReadError::UnknownUserCode { .. })
+        Err(WorkflowReadError::UnknownCustomCode { .. })
     ));
     let TaskOutcome::Failed(error) =
         envelope_outcome::<u32, CustomCode>(workflow(), &declined).unwrap()
@@ -256,7 +256,7 @@ fn an_untyped_node_result_keeps_what_does_not_read() {
 fn each_read_failure_has_python_s_code() {
     let cases = [
         (
-            WorkflowReadError::WaitTimedOut {
+            WorkflowReadError::WaitTimeout {
                 workflow_id: workflow(),
             },
             BuiltInTaskCode::from(RetrievalCode::WaitTimeout),
@@ -273,6 +273,23 @@ fn each_read_failure_has_python_s_code() {
                 node_id: "n".to_owned(),
             },
             RetrievalCode::ResultNotReady.into(),
+        ),
+        (
+            WorkflowReadError::ResultDeserializationError {
+                workflow_id: workflow(),
+                cause: "x".to_owned(),
+            },
+            OperationalErrorCode::ResultDeserializationError.into(),
+        ),
+        (
+            WorkflowReadError::UnknownCustomCode {
+                workflow_id: workflow(),
+                cause: UnknownCustomCode {
+                    stored_code: "X".to_owned(),
+                    code_type: "T",
+                },
+            },
+            RetrievalCode::UnknownCustomCode.into(),
         ),
         (
             WorkflowReadError::InvalidInput {
@@ -294,8 +311,8 @@ fn each_read_failure_has_python_s_code() {
             RetrievalCode::AsyncContext.into(),
         ),
         (
-            WorkflowReadError::Database {
-                code: HandleErrorCode::DbOperationFailed,
+            WorkflowReadError::DatabaseError {
+                database_code: HandleErrorCode::DbOperationFailed,
                 message: "m".to_owned(),
                 retryable: true,
             },
@@ -308,7 +325,7 @@ fn each_read_failure_has_python_s_code() {
 }
 
 /// The limit is the first check of `get`, before any statement: the app's
-/// address has no database, so a wait that ran would fail as `Database`.
+/// address has no database, so a wait that ran would fail as `DatabaseError`.
 /// The limit at the bound passes the check.
 #[tokio::test]
 async fn a_get_above_the_bound_is_invalid_input_before_any_statement() {
@@ -359,7 +376,7 @@ fn a_handle_error_maps_to_its_read_failure() {
             workflow_id: workflow(),
             cause: cause(),
         }),
-        WorkflowReadError::StoredResultUnreadable { .. }
+        WorkflowReadError::ResultDeserializationError { .. }
     ));
     assert!(matches!(
         WorkflowReadError::of_handle_error(HandleOperationError::DbOperationFailed {
@@ -368,7 +385,7 @@ fn a_handle_error_maps_to_its_read_failure() {
             workflow_id: workflow(),
             cause: cause(),
         }),
-        WorkflowReadError::Database { .. }
+        WorkflowReadError::DatabaseError { .. }
     ));
     assert!(matches!(
         WorkflowReadError::of_handle_error(HandleOperationError::ResumeRecoveryFailed {
@@ -376,7 +393,7 @@ fn a_handle_error_maps_to_its_read_failure() {
             workflow_id: workflow(),
             cause: cause(),
         }),
-        WorkflowReadError::Database { .. }
+        WorkflowReadError::DatabaseError { .. }
     ));
     assert!(matches!(
         WorkflowReadError::of_handle_error(HandleOperationError::AsyncContext {
@@ -462,7 +479,10 @@ fn a_malformed_outputless_envelope_is_unreadable_and_a_missing_map_is_empty() {
         let read =
             end_outcome::<OutputlessResults>(workflow(), completed(Some(envelope(ok.clone()))));
         assert!(
-            matches!(read, Err(WorkflowReadError::StoredResultUnreadable { .. })),
+            matches!(
+                read,
+                Err(WorkflowReadError::ResultDeserializationError { .. })
+            ),
             "{ok}"
         );
     }
@@ -482,7 +502,7 @@ fn a_completed_result_that_is_not_json_is_unreadable() {
     };
     assert!(matches!(
         end_outcome::<u32>(workflow(), end),
-        Err(WorkflowReadError::StoredResultUnreadable { .. })
+        Err(WorkflowReadError::ResultDeserializationError { .. })
     ));
 }
 
@@ -509,7 +529,7 @@ fn every_ended_status_reads_its_stored_error_and_refuses_an_empty_one() {
         assert!(
             matches!(
                 end_outcome::<u32>(workflow(), empty),
-                Err(WorkflowReadError::StoredResultUnreadable { .. })
+                Err(WorkflowReadError::ResultDeserializationError { .. })
             ),
             "{status:?}"
         );

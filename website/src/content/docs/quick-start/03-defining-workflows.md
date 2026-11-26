@@ -178,7 +178,7 @@ match spec.start():
     case Ok(handle):
         reveal_type(handle)  # WorkflowHandle[NotificationResult]
 
-        handle.get(timeout_ms=30000)  # Wait for completion
+        handle.get(wait_ms=30000)  # Wait for completion
 
         # Type-safe result: ReadResult[NotificationResult, TaskError]
         result = handle.result_for(OrderProcessingWorkflow.notify)
@@ -283,7 +283,7 @@ def start_order_processing(order: Order) -> None:
             pass
     reveal_type(handle)  # WorkflowHandle[NotificationResult]
 
-    handle.get(timeout_ms=30000)
+    handle.get(wait_ms=30000)
 
     # Type-safe result access
     result = handle.result_for(notify_node)
@@ -377,4 +377,4 @@ The kwarg names must match the keys defined in `args_from`. For example, the `re
 | `args_from` | Inject the upstream `TaskOutcome` as kwargs |
 | `output` | Node whose result becomes the workflow result |
 | `on_error` | `FAIL` continues DAG, `PAUSE` stops immediately |
-| `result_for(node)` | Non-blocking type-safe result access. Returns `Err(ResultNotReady(...))` if task hasn't completed |
+| `result_for(node)` | Non-blocking type-safe result access. Returns `Err(ReadResultNotReady(...))` if task hasn't completed |

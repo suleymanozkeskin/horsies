@@ -188,8 +188,8 @@ FACADES: Final[dict[str, Facade]] = {
         },
     ),
     'WorkflowHandle.get': Facade(
-        blocking=lambda handle: handle.get(timeout_ms=250),
-        awaited=lambda handle: handle.get_async(timeout_ms=250),
+        blocking=lambda handle: handle.get(wait_ms=250),
+        awaited=lambda handle: handle.get_async(wait_ms=250),
         blocking_form='wait_workflow_result',
         arguments=(WORKFLOW_KEY,),
         keywords={'timeout_ms': 250},
@@ -430,8 +430,8 @@ def test_get_refuses_a_timeout_as_get_async_refuses_it() -> None:
     """A refused timeout is INVALID_INPUT before any core call, in both forms."""
     answers = _answering('wait_workflow_result', _record(core.WaitTimedOut))
 
-    blocking = _workflow_handle().get(timeout_ms=-1)
-    awaited = asyncio.run(_workflow_handle().get_async(timeout_ms=-1))
+    blocking = _workflow_handle().get(wait_ms=-1)
+    awaited = asyncio.run(_workflow_handle().get_async(wait_ms=-1))
 
     assert outcome_shape(blocking) == outcome_shape(awaited)
     answers.handle.wait_workflow_result.assert_not_called()

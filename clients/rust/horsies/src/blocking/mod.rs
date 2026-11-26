@@ -274,8 +274,8 @@ where
     /// `InvalidInput`. Then, in Python's order: a process that runs task
     /// bodies refuses the wait; a kept read is returned; a runtime thread
     /// answers `AsyncContext`, which is not kept.
-    pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
-        let _wait = checked_task_wait(self.handle.task_id(), limit)?;
+    pub fn get(&self, wait: WaitLimit) -> Result<TaskOutcome<T, E>, ReadError> {
+        let _checked = checked_task_wait(self.handle.task_id(), wait)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "TaskHandle.get() for task {}",
@@ -286,9 +286,9 @@ where
             return kept;
         }
         block_read(
-            self.handle.get(limit),
+            self.handle.get(wait),
             &format!("TaskHandle::get() for task {}", self.handle.task_id()),
-            "handle.get(limit)",
+            "handle.get(wait)",
         )
     }
 
@@ -317,8 +317,8 @@ fn block_read<V>(
         Place::AsyncContext => Err(ReadError::AsyncContext {
             message: async_context_message(blocking_call, async_call),
         }),
-        Place::RuntimeStartFailed(failed) => Err(ReadError::Database {
-            code: BrokerErrorCode::TaskInfoQueryFailed,
+        Place::RuntimeStartFailed(failed) => Err(ReadError::DatabaseError {
+            database_code: BrokerErrorCode::TaskInfoQueryFailed,
             message: format!("the read did not start: {failed}"),
             retryable: true,
         }),
@@ -373,16 +373,13 @@ impl HorsiesView<'_> {
     pub fn get_result<T, E>(
         &self,
         task_id: Uuid,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<TaskOutcome<T, E>, ReadError>
     where
         T: DeserializeOwned + Clone,
         E: CustomErrorCode,
     {
-        self.app
-            .task_handle_of::<T, E>(task_id)
-            .blocking()
-            .get(limit)
+        self.app.task_handle::<T, E>(task_id).blocking().get(wait)
     }
 
     /// `Horsies::get_raw_result`, blocking. The limit is the first check,
@@ -390,18 +387,18 @@ impl HorsiesView<'_> {
     pub fn get_raw_result(
         &self,
         task_id: Uuid,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<StoredResult, ReadError> {
-        let _wait = checked_task_wait(task_id, limit)?;
+        let _checked = checked_task_wait(task_id, wait)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(ReadError::wait_inside_task(&format!(
                 "Horsies.get_raw_result() for task {task_id}"
             )));
         }
         block_read(
-            self.app.get_raw_result(task_id, limit),
+            self.app.get_raw_result(task_id, wait),
             &format!("Horsies::get_raw_result() for task {task_id}"),
-            "app.get_raw_result(task_id, limit)",
+            "app.get_raw_result(task_id, wait)",
         )
     }
 
@@ -611,7 +608,7 @@ mod tests {
     #[tokio::test]
     async fn a_blocking_read_on_a_runtime_thread_is_async_context_and_not_kept() {
         let app = app();
-        let handle = app.task_handle_of::<u32, Infallible>(Uuid::from_u128(5));
+        let handle = app.task_handle::<u32, Infallible>(Uuid::from_u128(5));
         let refused = handle.blocking().get(WaitLimit::NoLimit).unwrap_err();
         assert!(matches!(refused, ReadError::AsyncContext { .. }));
         assert_eq!(refused.code().as_str(), "ASYNC_CONTEXT");
@@ -633,7 +630,7 @@ mod tests {
         let app = app();
         let task_id = Uuid::from_u128(6);
         let above = WaitLimit::Within(Duration::from_millis(crate::MAX_WAIT_LIMIT_MS + 1));
-        let handle = app.task_handle_of::<u32, Infallible>(task_id);
+        let handle = app.task_handle::<u32, Infallible>(task_id);
         let refused = handle.blocking().get(above).unwrap_err();
         assert_eq!(
             refused,
@@ -707,9 +704,9 @@ mod tests {
     #[test]
     fn the_message_names_the_call_and_the_async_form() {
         assert_eq!(
-            async_context_message("TaskHandle::get()", "handle.get(limit)"),
+            async_context_message("TaskHandle::get()", "handle.get(wait)"),
             "blocking TaskHandle::get() was called on a thread that runs a tokio runtime; its \
-             wait would stall the runtime, so nothing ran. Use `handle.get(limit).await` \
+             wait would stall the runtime, so nothing ran. Use `handle.get(wait).await` \
              instead."
         );
     }

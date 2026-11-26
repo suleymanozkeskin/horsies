@@ -157,7 +157,7 @@ def broker_error_cause(error: BrokerOperationError) -> BaseException | NoCause:
 
 
 @dataclass(slots=True, frozen=True)
-class RawResultRecord:
+class StoredResult:
     """Raw broker-level fetch of a task's stored result.
 
     Returned by ``PostgresBroker.get_raw_result_record_async`` and its

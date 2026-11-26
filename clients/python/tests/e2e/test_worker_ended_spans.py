@@ -57,7 +57,7 @@ def _ready_check(healthcheck: TaskFunction[[], str]) -> Callable[[], bool]:
             if is_err(sent):
                 return False
             handle = sent.ok_value
-        return read_succeeded(handle.get(timeout_ms=2000))
+        return read_succeeded(handle.get(wait_ms=2000))
 
     return check
 
@@ -112,7 +112,7 @@ async def test_an_isolated_task_killed_at_its_timeout_gets_a_worker_made_span(
             handle = unwrap_send(await instance.sleeper.send_async())
         finally:
             otel_context.detach(token)
-        assert_failed(await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS), 'TASK_TIMEOUT')
+        assert_failed(await handle.get_async(wait_ms=RESULT_TIMEOUT_MS), 'TASK_TIMEOUT')
         spans = await _wait_for_span(out, 'horsies.task.id', str(handle.task_id))
     parent.end()
     test_provider.shutdown()
@@ -202,7 +202,7 @@ async def test_a_shared_task_that_its_child_ended_at_its_deadline_has_one_span(
             handle = unwrap_send(await instance.shared_sleeper.send_async())
         finally:
             otel_context.detach(token)
-        assert_failed(await handle.get_async(timeout_ms=RESULT_TIMEOUT_MS), 'TASK_TIMEOUT')
+        assert_failed(await handle.get_async(wait_ms=RESULT_TIMEOUT_MS), 'TASK_TIMEOUT')
         _ = await _wait_for_span(out, 'horsies.task.id', str(handle.task_id))
         await asyncio.sleep(SECOND_SPAN_WAIT_S)
         spans = [

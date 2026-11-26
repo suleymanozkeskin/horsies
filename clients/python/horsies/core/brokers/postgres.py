@@ -78,7 +78,7 @@ from horsies.core.brokers.result_types import (
     BrokerResult,
     BrokerSyncCallError,
     BrokerWaitInsideTask,
-    RawResultRecord,
+    StoredResult,
 )
 from horsies.core.manifest import (
     install_coverage_of,
@@ -567,13 +567,13 @@ def _task_info_of_record(record: TaskInfoRecord) -> BrokerResult[TaskInfo]:
         task_id=record.task_id,
         task_name=record.task_name,
         status=TaskStatus(record.status),
-        queue_name=record.queue_name,
+        queue=record.queue,
         priority=record.priority,
         retry_count=record.retry_count,
         max_retries=record.max_retries,
         next_retry_at=record.next_retry_at,
         sent_at=record.sent_at,
-        enqueued_at=record.enqueued_at,
+        due_at=record.due_at,
         claimed_at=record.claimed_at,
         started_at=record.started_at,
         completed_at=record.completed_at,
@@ -1183,7 +1183,7 @@ class PostgresBroker:
         self,
         task_id: UUID,
         timeout_ms: Optional[int] = None,
-    ) -> BrokerResult[RawResultRecord | None]:
+    ) -> BrokerResult[StoredResult | None]:
         """Raw broker fetch of a task's stored result envelope, through
         ``CoreHandle.raw_result_record_async``.
 
@@ -1203,11 +1203,11 @@ class PostgresBroker:
         Semantics:
 
         - ``Ok(None)``: neither the live table nor the history holds the task.
-        - ``Ok(RawResultRecord(status=COMPLETED|FAILED|EXPIRED, raw_result=<dict>))``:
+        - ``Ok(StoredResult(status=COMPLETED|FAILED|EXPIRED, raw_result=<dict>))``:
           terminal task with a stored payload.
-        - ``Ok(RawResultRecord(status=CANCELLED, raw_result=None))``:
+        - ``Ok(StoredResult(status=CANCELLED, raw_result=None))``:
           task was cancelled before completion.
-        - ``Ok(RawResultRecord(status=<non-terminal>, raw_result=None))``:
+        - ``Ok(StoredResult(status=<non-terminal>, raw_result=None))``:
           the limit passed before the task reached a terminal state.
         - ``Err(BrokerInvalidJsonPayload)``: the stored result does not read
           (malformed, non-finite number, not an object, a history digest
@@ -1247,7 +1247,7 @@ class PostgresBroker:
         self,
         task_id: UUID,
         timeout_ms: Optional[int] = None,
-    ) -> BrokerResult[RawResultRecord | None]:
+    ) -> BrokerResult[StoredResult | None]:
         """The blocking form of ``get_raw_result_record_async``:
         ``CoreHandle.raw_result_record`` on the calling thread, with the GIL
         released and signals checked every 100 ms.
@@ -1312,10 +1312,10 @@ class PostgresBroker:
             | BrokerInvalidJsonPayload
             | BrokerInvalidInput
         ),
-    ) -> BrokerResult[RawResultRecord | None]:
+    ) -> BrokerResult[StoredResult | None]:
         """The result of one core result read.
 
-        - ``RawResultRecordRecord``: ``Ok(RawResultRecord)``; ``result_json``
+        - ``RawResultRecordRecord``: ``Ok(StoredResult)``; ``result_json``
           is read with the strict JSON reader (``INVALID_JSON_PAYLOAD`` when
           it does not read as an object or null).
         - ``RawResultAbsent``: ``Ok(None)``.
@@ -1343,7 +1343,7 @@ class PostgresBroker:
                                 raw_result = envelope
                             case Err() as refused:
                                 return refused
-                return Ok(RawResultRecord(
+                return Ok(StoredResult(
                     task_id=task_id,
                     task_name=task_name,
                     status=TaskStatus(status),

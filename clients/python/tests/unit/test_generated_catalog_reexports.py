@@ -151,6 +151,7 @@ REEXPORTS: Final[tuple[tuple[type[enum.Enum], type[enum.Enum], tuple[str, ...]],
             'ASYNC_CONTEXT',
             'INVALID_INPUT',
             'WAIT_INSIDE_TASK',
+            'UNKNOWN_CUSTOM_CODE',
         ),
     ),
     (

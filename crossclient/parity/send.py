@@ -182,7 +182,7 @@ async def _rerun_one(rerun: Rerun, sent: list[str]) -> str:
     if not 0 <= rerun.source < len(sent):
         raise SendRefused(f'{rerun} names no earlier task line')
     source = UUID(sent[rerun.source])
-    match await parity.app.get_result_async(source, timeout_ms=RESULT_WAIT_MS):
+    match await parity.app.get_result_async(source, wait_ms=RESULT_WAIT_MS):
         case Ok(Failed(TaskError(code='REFUSED'))):
             pass
         case other:

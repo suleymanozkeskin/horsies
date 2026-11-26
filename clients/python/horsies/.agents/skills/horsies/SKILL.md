@@ -78,7 +78,7 @@ from horsies import Err, Failed, Ok, Succeeded
 
 match add_numbers.send(a=5, b=3):
     case Ok(handle):
-        match handle.get(timeout_ms=5000):
+        match handle.get(wait_ms=5000):
             case Ok(Succeeded(total)):
                 print(f"Sum: {total}")
             case Ok(Failed(task_error)):
@@ -89,7 +89,7 @@ match add_numbers.send(a=5, b=3):
         print(f"Send failed: {send_err.code} - {send_err.message}")
 ```
 
-`handle.get()` returns `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error that the task returned or that the library recorded (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...). `Err(read_error)` means the read gave no outcome: `read_error` is one class of the `ReadError` union, for example `WaitTimeout`.
+`handle.get()` returns `ReadResult[T, TaskError]`. `Ok(Succeeded(value))` holds the value of the task. `Ok(Failed(task_error))` holds the error that the task returned or that the library recorded (`TASK_TIMEOUT`, `WORKER_CRASHED`, ...). `Err(read_error)` means the read gave no outcome: `read_error` is one class of the `ReadError` union, for example `ReadWaitTimeout`.
 
 Async: `send_async()` / `handle.get_async()`. Inside a coroutine or a Jupyter cell, use only the `*_async` forms: every sync call there returns `ASYNC_CONTEXT` and runs nothing.
 Delayed: `add_numbers.with_options(delay_seconds=60).send(a=5, b=3)` dispatches after 60 seconds.
@@ -189,7 +189,7 @@ from horsies import Ok, Err
 match spec.start():
     case Ok(handle):
         status = handle.status()
-        result = handle.get(timeout_ms=30000)
+        result = handle.get(wait_ms=30000)
     case Err(start_err):
         print(f"Start failed: {start_err.code}")
 ```
@@ -227,7 +227,7 @@ task sends and workflow starts.
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
 handle.status()          # HandleResult[WorkflowStatus] — unwrap before use
-handle.get(timeout_ms=N) # ReadResult[T, TaskError] (blocks for output node)
+handle.get(wait_ms=N) # ReadResult[T, TaskError] (blocks for output node)
 handle.results()         # HandleResult[dict[str, TaskOutcome[Any, TaskError]]] — unwrap before use
 handle.tasks()           # HandleResult[list[WorkflowTaskInfo]] — unwrap before use
 handle.cancel()          # cancel workflow
@@ -248,7 +248,7 @@ from horsies import Err, Ok, WorkflowHandle
 
 match WorkflowHandle.for_id("3c9e1f4a-6b2d-4c58-8e71-0a1b2c3d4e5f", app.get_broker()):
     case Ok(ok_value=handle):
-        result = handle.get(timeout_ms=30_000)
+        result = handle.get(wait_ms=30_000)
     case Err(err_value=invalid):
         print(invalid.message)  # the text is not a UUID
 ```
@@ -263,13 +263,13 @@ the app-level typed API — `broker.get_result(_async)` was removed in 0.1.2.
 from horsies import Err, Failed, Ok, Succeeded
 
 # Returns ReadResult[Any, TaskError]: one match reads it.
-match await app.get_result_async(task_id, timeout_ms=5000):
+match await app.get_result_async(task_id, wait_ms=5000):
     case Ok(Succeeded(value)):
         ...  # the task returned this value
     case Ok(Failed(task_error)):
         ...  # the task failed: task_error.code
     case Err(read_error):
-        ...  # no outcome: WaitTimeout, NoTypeAvailable, ResultDeserializationError, BrokerError, ...
+        ...  # no outcome: ReadWaitTimeout, ReadNoTypeAvailable, ReadResultDeserializationError, ReadDatabaseError, ...
 
 # Task metadata with typed-decoded result: the app-level wrapper decodes
 # when the task is registered locally (decoded_result / result_decoded set).
@@ -361,7 +361,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a 
 - `TaskSendErrorCode`: `SEND_SUPPRESSED`, `ASYNC_CONTEXT`, `VALIDATION_FAILED`, `ENQUEUE_FAILED`, `PAYLOAD_MISMATCH`, `IDEMPOTENCY_KEY_CONFLICT`, `PAYLOAD_TOO_LARGE`
 - `WorkflowStartErrorCode`: `BROKER_NOT_CONFIGURED`, `VALIDATION_FAILED`, `WORKFLOW_ID_CONFLICT`, `WORKFLOW_COMMAND_CONFLICT`, `ENQUEUE_FAILED`, `ASYNC_CONTEXT`
 - `HandleErrorCode`: `WORKFLOW_NOT_FOUND`, `DB_OPERATION_FAILED`, `STORED_DATA_INVALID`, `RESUME_RECOVERY_FAILED`, `ASYNC_CONTEXT`
-- `ReadError` (a union, one class per read failure; each has `code` and `message`): `WaitTimeout`, `TaskNotFound`, `WorkflowNotFound`, `ResultNotAvailable`, `ResultNotReady`, `WaitInsideTask`, `AsyncContext`, `InvalidInput`, `ResultDeserializationError`, `UnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `BrokerError` (adds `retryable` and `exception`), `NoTypeAvailable`, `WorkflowCtxMissingId`
+- `ReadError` (a union, one class per read failure; each has `code` and `message`): `ReadWaitTimeout`, `ReadTaskNotFound`, `ReadWorkflowNotFound`, `ReadResultNotAvailable`, `ReadResultNotReady`, `ReadWaitInsideTask`, `ReadAsyncContext`, `ReadInvalidInput`, `ReadResultDeserializationError`, `ReadUnknownCustomCode` (a stored custom code that the declared `Enum` does not name; adds `custom_code`), `ReadDatabaseError` (adds `retryable` and `exception`), `ReadNoTypeAvailable`, `ReadWorkflowContextMissingId`
 
 `retryable=True` means transient (DB connection blip). `retryable=False` means permanent. On send errors, `TaskSendEnqueueFailed` has the field `retryable` and `TaskSendIdempotencyKeyConflict` the class value `retryable = True`; the other send errors have no `retryable`.
 
@@ -369,7 +369,7 @@ Use `is_ok(result)` / `is_err(result)` type guards, or `match Ok / Err`. Read a 
 
 Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit.
 
-`ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, and the read error `AsyncContext`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; a handle does not keep an `AsyncContext` read error; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
+`ASYNC_CONTEXT` (every catalog above, `BrokerErrorCode`, and the read error `ReadAsyncContext`): a sync call was made on a thread that runs an event loop (a coroutine, a Jupyter cell). Its wait would stall that loop, so nothing ran. Call the `*_async` form. `retryable=False` where the error has the field; a handle does not keep an `ReadAsyncContext` read error; `await spec.retry_start_async(err)` completes a start that returned it. `app.check(live=True)` there reports `HRS-217` (`CHECK_LIVE_ASYNC_CONTEXT`).
 
 ### Raised, never returned: `ForkedAfterCoreStart`, `CoreStopped`
 

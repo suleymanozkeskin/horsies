@@ -22,13 +22,13 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.outcome import (
-    BrokerError,
     Failed,
-    ResultNotReady,
+    ReadDatabaseError,
+    ReadResultNotReady,
+    ReadWaitTimeout,
+    ReadWorkflowContextMissingId,
+    ReadWorkflowNotFound,
     Succeeded,
-    WaitTimeout,
-    WorkflowCtxMissingId,
-    WorkflowNotFound,
 )
 from horsies.core.models.tasks import TaskError, OutcomeCode
 from horsies.core.models.workflow import (
@@ -226,7 +226,7 @@ class TestWorkflowHandleGet:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """Returns timeout error after timeout_ms."""
+        """Returns timeout error after wait_ms."""
         task_a = make_simple_task(app, 'get_timeout_a')
         task_b = make_simple_task(app, 'get_timeout_b')
 
@@ -246,8 +246,8 @@ class TestWorkflowHandleGet:
         handle = await start_ok(spec, broker)
 
         # Don't complete any tasks - workflow stays RUNNING
-        result = await handle.get_async(timeout_ms=500)  # Short timeout
-        assert isinstance(result, Err) and isinstance(result.err_value, WaitTimeout), result
+        result = await handle.get_async(wait_ms=500)  # Short timeout
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadWaitTimeout), result
 
     async def test_get_cancelled_returns_cancelled_error(
         self,
@@ -272,7 +272,7 @@ class TestWorkflowHandleGet:
         cancel_r = await handle.cancel_async()
         assert is_ok(cancel_r)
 
-        result = await handle.get_async(timeout_ms=1000)
+        result = await handle.get_async(wait_ms=1000)
         match result:
             case Ok(Failed(error=error)):
                 assert error.code is OutcomeCode.WORKFLOW_CANCELLED
@@ -284,14 +284,14 @@ class TestWorkflowHandleGet:
         clean_workflow_tables: None,
         broker: PostgresBroker,
     ) -> None:
-        """get_async() returns Err(WorkflowNotFound) for nonexistent workflow."""
+        """get_async() returns Err(ReadWorkflowNotFound) for nonexistent workflow."""
         handle = WorkflowHandle(
             workflow_id=uuid.uuid4(),
             broker=broker,
         )
 
-        result = await handle.get_async(timeout_ms=500)
-        assert isinstance(result, Err) and isinstance(result.err_value, WorkflowNotFound), result
+        result = await handle.get_async(wait_ms=500)
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadWorkflowNotFound), result
 
 
 # =============================================================================
@@ -311,7 +311,7 @@ class TestWorkflowHandleResults:
         broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """result_for() returns Err(ResultNotReady) if task not completed."""
+        """result_for() returns Err(ReadResultNotReady) if task not completed."""
         task_a = make_simple_task(app, 'result_for_not_ready_a')
 
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
@@ -325,7 +325,7 @@ class TestWorkflowHandleResults:
         # Call result_for without completing the task
         result = await handle.result_for_async(node_a)
 
-        assert isinstance(result, Err) and isinstance(result.err_value, ResultNotReady), result
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadResultNotReady), result
 
     async def test_result_for_missing_node_id_returns_error(
         self,
@@ -350,10 +350,10 @@ class TestWorkflowHandleResults:
 
         result = await handle.result_for_async(orphan_node)
         match result:
-            case Err(WorkflowCtxMissingId(message=message)):
+            case Err(ReadWorkflowContextMissingId(message=message)):
                 assert 'node_id is not set' in message
             case _:
-                pytest.fail(f'expected Err(WorkflowCtxMissingId), got {result!r}')
+                pytest.fail(f'expected Err(ReadWorkflowContextMissingId), got {result!r}')
 
     async def test_results_empty_when_no_tasks_completed(
         self,
@@ -1490,20 +1490,20 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """get_async() returns Err(BrokerError) when the read of the wait
+        """get_async() returns Err(ReadDatabaseError) when the read of the wait
         fails."""
         handle = await self._started_on_an_unreachable_database(
             broker, unreachable_broker, app, 'get_db_err',
         )
 
-        result = await handle.get_async(timeout_ms=500)
+        result = await handle.get_async(wait_ms=500)
 
         match result:
-            case Err(BrokerError(message=message)):
+            case Err(ReadDatabaseError(message=message)):
                 # The core's message of the failed wait, as the handle built it.
                 assert message.startswith(f'Get failed for workflow {handle.workflow_id}: ')
             case _:
-                pytest.fail(f'expected Err(BrokerError), got {result!r}')
+                pytest.fail(f'expected Err(ReadDatabaseError), got {result!r}')
 
     async def test_result_for_db_error_names_the_node(
         self,
@@ -1512,7 +1512,7 @@ class TestWorkflowHandleInfraErrors:
         unreachable_broker: PostgresBroker,
         app: Horsies,
     ) -> None:
-        """result_for_async() and result_for() return Err(BrokerError) when
+        """result_for_async() and result_for() return Err(ReadDatabaseError) when
         the read fails, with Python 0.7's message, which names the node."""
         task_a = make_simple_task(app, 'result_for_db_err_a')
         node_a = TaskNode(fn=task_a, kwargs={'value': 1})
@@ -1534,11 +1534,11 @@ class TestWorkflowHandleInfraErrors:
 
         for result in (async_result, sync_result):
             match result:
-                case Err(BrokerError(message=message)):
+                case Err(ReadDatabaseError(message=message)):
                     assert message.startswith(prefix)
                     assert message.removeprefix(prefix) != ''
                 case _:
-                    pytest.fail(f'expected Err(BrokerError), got {result!r}')
+                    pytest.fail(f'expected Err(ReadDatabaseError), got {result!r}')
 
     async def test_cancel_db_error_returns_err_db_operation_failed(
         self,
@@ -1628,8 +1628,8 @@ class TestWorkflowHandleInfraErrors:
         assert tasks_r.err_value.code == HandleErrorCode.WORKFLOW_NOT_FOUND
 
         # Fold-strategy: get returns typed error
-        get_r = await handle.get_async(timeout_ms=500)
-        assert isinstance(get_r, Err) and isinstance(get_r.err_value, WorkflowNotFound), get_r
+        get_r = await handle.get_async(wait_ms=500)
+        assert isinstance(get_r, Err) and isinstance(get_r.err_value, ReadWorkflowNotFound), get_r
 
 
 # =============================================================================
@@ -1707,7 +1707,7 @@ class TestListenerFallbackContract:
             broker, listener_refused_broker, app, 'listen_refused_poll',
         )
 
-        wait = asyncio.create_task(handle.get_async(timeout_ms=POLLED_WAIT_LIMIT_MS))
+        wait = asyncio.create_task(handle.get_async(wait_ms=POLLED_WAIT_LIMIT_MS))
         await asyncio.sleep(END_DURING_THE_WAIT_AFTER_S)
         assert not wait.done(), (
             f'the wait answered before the workflow ended: {wait.result()!r}'
@@ -1734,13 +1734,13 @@ class TestListenerFallbackContract:
 
         started_at = time.monotonic()
         result = await asyncio.wait_for(
-            handle.get_async(timeout_ms=SHORT_WAIT_LIMIT_MS),
+            handle.get_async(wait_ms=SHORT_WAIT_LIMIT_MS),
             timeout=WAIT_ANSWER_BOUND_S,
         )
         waited_s = time.monotonic() - started_at
 
-        assert isinstance(result, Err) and isinstance(result.err_value, WaitTimeout), (
-            f'Expected Err(WaitTimeout), got {result}'
+        assert isinstance(result, Err) and isinstance(result.err_value, ReadWaitTimeout), (
+            f'Expected Err(ReadWaitTimeout), got {result}'
         )
         assert waited_s >= SHORT_WAIT_LIMIT_MS / 1000, (
             f'the wait answered after {waited_s:.3f} s, '

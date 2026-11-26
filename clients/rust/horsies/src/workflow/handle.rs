@@ -40,7 +40,7 @@ use super::registry::WorkflowRegistry;
 use crate::handle::{checked_wait, read_stored_result};
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::value_free_decode_text;
-use crate::{CustomErrorCode, TaskError, TaskOutcome, UnknownUserCode, WaitLimitRefused};
+use crate::{CustomErrorCode, TaskError, TaskOutcome, UnknownCustomCode, WaitLimitRefused};
 
 /// The marker key of the result of a workflow with no output node.
 const OUTPUTLESS_TERMINALS_KEY: &str = "__h_outputless_terminals__";
@@ -51,7 +51,7 @@ pub enum WorkflowReadError {
     /// `WAIT_TIMEOUT`: the workflow had not ended when the wait limit
     /// passed. A later read may find it ended.
     #[error("timed out waiting for workflow {workflow_id}; it may still run")]
-    WaitTimedOut { workflow_id: Uuid },
+    WaitTimeout { workflow_id: Uuid },
     /// `WORKFLOW_NOT_FOUND`: no workflow has the id.
     #[error("workflow {workflow_id} not found")]
     WorkflowNotFound { workflow_id: Uuid },
@@ -62,13 +62,13 @@ pub enum WorkflowReadError {
     /// `RESULT_DESERIALIZATION_ERROR`: the stored value does not read with
     /// the handle's types. `cause` names no value.
     #[error("the stored value of workflow {workflow_id} does not read: {cause}")]
-    StoredResultUnreadable { workflow_id: Uuid, cause: String },
-    /// The stored error has a custom code that the asked code type does not
-    /// name.
+    ResultDeserializationError { workflow_id: Uuid, cause: String },
+    /// `UNKNOWN_CUSTOM_CODE`: the stored error has a custom code that the
+    /// asked code type does not name.
     #[error("the stored error of workflow {workflow_id}: {cause}")]
-    UnknownUserCode {
+    UnknownCustomCode {
         workflow_id: Uuid,
-        cause: UnknownUserCode,
+        cause: UnknownCustomCode,
     },
     /// `INVALID_INPUT`: the `WaitLimit::Within` limit is above
     /// `MAX_WAIT_LIMIT_MS`. It is the first check of `get`: nothing was
@@ -87,11 +87,12 @@ pub enum WorkflowReadError {
     /// async form reads.
     #[error("{message}")]
     AsyncContext { message: String },
-    /// `BROKER_ERROR`: the database or the connection failed, with the
-    /// handle code; `retryable` is the classification of the cause.
-    #[error("the read failed ({code}): {message}")]
-    Database {
-        code: HandleErrorCode,
+    /// `BROKER_ERROR`: the database or the connection failed.
+    /// `database_code` is the handle code of the failed operation;
+    /// `retryable` is the classification of the cause.
+    #[error("the read failed ({database_code}): {message}")]
+    DatabaseError {
+        database_code: HandleErrorCode,
         message: String,
         retryable: bool,
     },
@@ -101,16 +102,17 @@ impl WorkflowReadError {
     /// The built-in code of this failure, as Python's handle stores it.
     pub fn code(&self) -> BuiltInTaskCode {
         match self {
-            Self::WaitTimedOut { .. } => RetrievalCode::WaitTimeout.into(),
+            Self::WaitTimeout { .. } => RetrievalCode::WaitTimeout.into(),
             Self::WorkflowNotFound { .. } => RetrievalCode::WorkflowNotFound.into(),
             Self::ResultNotReady { .. } => RetrievalCode::ResultNotReady.into(),
-            Self::StoredResultUnreadable { .. } | Self::UnknownUserCode { .. } => {
+            Self::ResultDeserializationError { .. } => {
                 OperationalErrorCode::ResultDeserializationError.into()
             }
+            Self::UnknownCustomCode { .. } => RetrievalCode::UnknownCustomCode.into(),
             Self::InvalidInput { .. } => RetrievalCode::InvalidInput.into(),
             Self::WaitInsideTask { .. } => RetrievalCode::WaitInsideTask.into(),
             Self::AsyncContext { .. } => RetrievalCode::AsyncContext.into(),
-            Self::Database { .. } => OperationalErrorCode::BrokerError.into(),
+            Self::DatabaseError { .. } => OperationalErrorCode::BrokerError.into(),
         }
     }
 
@@ -123,14 +125,14 @@ impl WorkflowReadError {
                 workflow_id,
                 message,
                 ..
-            } => Self::StoredResultUnreadable {
+            } => Self::ResultDeserializationError {
                 workflow_id,
                 cause: message,
             },
             HandleOperationError::AsyncContext { message, .. } => Self::AsyncContext { message },
             failed @ (HandleOperationError::DbOperationFailed { .. }
-            | HandleOperationError::ResumeRecoveryFailed { .. }) => Self::Database {
-                code: failed.code(),
+            | HandleOperationError::ResumeRecoveryFailed { .. }) => Self::DatabaseError {
+                database_code: failed.code(),
                 message: failed.message().to_owned(),
                 retryable: failed.retryable(),
             },
@@ -341,7 +343,7 @@ impl<T> WorkflowHandle<T> {
     /// code type `E` (Python `result_for`). Not a wait.
     ///
     /// Errors: `ResultNotReady` while the node stores no result;
-    /// `StoredResultUnreadable`; `UnknownUserCode`; `Database`.
+    /// `ResultDeserializationError`; `UnknownCustomCode`; `DatabaseError`.
     pub async fn result_for<V, E>(
         &self,
         key: &NodeKey<V>,
@@ -442,7 +444,7 @@ impl<T> WorkflowHandle<T>
 where
     T: DeserializeOwned + 'static,
 {
-    /// The result of the workflow, waiting while it runs, up to `limit`
+    /// The result of the workflow, waiting while it runs, up to `wait`
     /// (`WaitLimit::NoLimit` waits until it ends) (Python `get`).
     ///
     /// The inner value is the workflow's outcome: its output read as `T`
@@ -459,9 +461,9 @@ where
     /// Errors: [`WorkflowReadError`].
     pub async fn get(
         &self,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError> {
-        let checked = self.checked_wait(limit)?;
+        let checked = self.checked_wait(wait)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(WorkflowReadError::WaitInsideTask {
                 message: wait_inside_task_message(&format!(
@@ -474,12 +476,12 @@ where
             .broker("get", HandleOperation::Get)
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
-        let wait = broker
+        let waited = broker
             .wait_workflow_end(self.workflow_id, checked)
             .await
             .map_err(WorkflowReadError::of_handle_error)?;
-        match wait {
-            WorkflowWait::TimedOut => Err(WorkflowReadError::WaitTimedOut {
+        match waited {
+            WorkflowWait::TimedOut => Err(WorkflowReadError::WaitTimeout {
                 workflow_id: self.workflow_id,
             }),
             WorkflowWait::NotFound => Err(WorkflowReadError::WorkflowNotFound {
@@ -495,9 +497,9 @@ where
     /// Errors: `InvalidInput` with the workflow id and the refusal.
     pub(crate) fn checked_wait(
         &self,
-        limit: WaitLimit,
+        wait: WaitLimit,
     ) -> Result<Option<std::time::Duration>, WorkflowReadError> {
-        checked_wait(limit).map_err(|cause| WorkflowReadError::InvalidInput {
+        checked_wait(wait).map_err(|cause| WorkflowReadError::InvalidInput {
             workflow_id: self.workflow_id,
             cause,
         })
@@ -513,7 +515,7 @@ where
     T: DeserializeOwned + 'static,
 {
     let unreadable =
-        |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
+        |cause: String| WorkflowReadError::ResultDeserializationError { workflow_id, cause };
     match end {
         WorkflowEnd::Paused => Ok(TaskOutcome::Failed(TaskError::built_in(
             OutcomeCode::WorkflowPaused,
@@ -551,7 +553,7 @@ where
     T: DeserializeOwned + 'static,
 {
     let unreadable =
-        |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
+        |cause: String| WorkflowReadError::ResultDeserializationError { workflow_id, cause };
     check_json_text(text)
         .map_err(|error| unreadable(format!("the result is not JSON: {error}")))?;
     // The text is strict JSON: it reads as members only when it is an object.
@@ -584,7 +586,7 @@ where
     E: CustomErrorCode,
 {
     let stored = read_stored_result::<V>(text).map_err(|refused| {
-        WorkflowReadError::StoredResultUnreadable {
+        WorkflowReadError::ResultDeserializationError {
             workflow_id,
             cause: refused.cause,
         }
@@ -593,7 +595,7 @@ where
         TaskResult::Ok(value) => Ok(TaskOutcome::Succeeded(value)),
         TaskResult::Err(error) => TaskError::<E>::from_stored(error)
             .map(TaskOutcome::Failed)
-            .map_err(|cause| WorkflowReadError::UnknownUserCode { workflow_id, cause }),
+            .map_err(|cause| WorkflowReadError::UnknownCustomCode { workflow_id, cause }),
     }
 }
 
@@ -613,7 +615,7 @@ where
     T: 'static,
 {
     let unreadable =
-        |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
+        |cause: String| WorkflowReadError::ResultDeserializationError { workflow_id, cause };
     if member(envelope, "__h_task_result__").map(RawValue::get) != Some("true") {
         return Err(unreadable(format!(
             "Workflow {workflow_id} result missing __h_task_result__ envelope marker"
@@ -706,7 +708,7 @@ fn outputless_entry(
 /// `_decode_stored_workflow_error`). Its `data` keeps the stored text. Pure.
 fn stored_error(workflow_id: Uuid, text: &str) -> Result<TaskError<CustomCode>, WorkflowReadError> {
     let unreadable =
-        |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
+        |cause: String| WorkflowReadError::ResultDeserializationError { workflow_id, cause };
     let stored =
         horsies_core::TaskError::from_stored_text(text).map_err(|refused| match refused {
             StoredErrorRefused::NotJson(error) => {
@@ -723,7 +725,7 @@ fn stored_error(workflow_id: Uuid, text: &str) -> Result<TaskError<CustomCode>, 
             )),
         })?;
     TaskError::<CustomCode>::from_stored(stored)
-        .map_err(|cause| WorkflowReadError::UnknownUserCode { workflow_id, cause })
+        .map_err(|cause| WorkflowReadError::UnknownCustomCode { workflow_id, cause })
 }
 
 /// The stored result of a node, read with no type: the value keeps its

@@ -21,7 +21,7 @@ Adjust to your needs.
 
 | Category | Source | Examples | Auto-Retry? |
 | -------- | ------ | -------- | ----------- |
-| Read errors | `handle.get()` gave no outcome | `WaitTimeout`, `BrokerError` | No |
+| Read errors | `handle.get()` gave no outcome | `ReadWaitTimeout`, `ReadDatabaseError` | No |
 | Execution errors | Task raised an exception, or its worker process died | `UNHANDLED_EXCEPTION`, `TASK_EXCEPTION`, `WORKER_CRASHED` | If in `auto_retry_for` |
 | Domain errors | User returned error | `"RATE_LIMITED"`, `"VALIDATION_FAILED"` | If in `auto_retry_for` |
 
@@ -199,7 +199,7 @@ spec = app.workflow(
 )
 match spec.start():
     case Ok(handle):
-        handle.get(timeout_ms=30000)
+        handle.get(wait_ms=30000)
     case Err(start_err):
         raise RuntimeError(f"Start failed: {start_err.code}")
 ```
@@ -212,7 +212,7 @@ Prefer explicit returns over raising exceptions:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
-from horsies import Err, Failed, Ok, Succeeded, TaskNotFound, WaitTimeout
+from horsies import Err, Failed, Ok, ReadTaskNotFound, ReadWaitTimeout, Succeeded
 from instance import my_task
 
 def process_task() -> str | None:
@@ -223,18 +223,18 @@ def process_task() -> str | None:
         case Ok(handle):
             pass
 
-    match handle.get(timeout_ms=5000):
+    match handle.get(wait_ms=5000):
         case Ok(Succeeded(value)):
             return value
         case Ok(Failed(task_error)):
             # Pass to centralized handler
             handle_error(task_error)
             return None
-        case Err(WaitTimeout()):
+        case Err(ReadWaitTimeout()):
             # Task may still be running
             # check status again using task id if you need absolute decisions
             return None
-        case Err(TaskNotFound()):
+        case Err(ReadTaskNotFound()):
             return None
         case Err(read_error):
             # Pass to centralized handler

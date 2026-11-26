@@ -15,13 +15,13 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed, RawResultRecord
+from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed, StoredResult
 from horsies.core.models.outcome import (
-    BrokerError,
     Failed,
+    ReadDatabaseError,
     ReadResult,
+    ReadTaskNotFound,
     Succeeded,
-    TaskNotFound,
 )
 from horsies.core.models.tasks import (
     OutcomeCode,
@@ -45,14 +45,14 @@ def _make_handle(broker: MagicMock) -> TaskHandle[int]:
     )
 
 
-def _ok_record(value: int) -> Ok[RawResultRecord]:
+def _ok_record(value: int) -> Ok[StoredResult]:
     envelope: dict[str, Any] = {
         '__h_task_result__': True,
         'ok': value,
         'err': None,
     }
     return Ok(
-        RawResultRecord(
+        StoredResult(
             task_id='task-1',
             task_name='t',
             status=TaskStatus.COMPLETED,
@@ -108,7 +108,7 @@ class TestTransientErrorsNotCached:
         handle = _make_handle(broker)
 
         first = await handle.get_async()
-        assert isinstance(first, Err) and isinstance(first.err_value, BrokerError), first
+        assert isinstance(first, Err) and isinstance(first.err_value, ReadDatabaseError), first
 
         second = await handle.get_async()
         assert second == Ok(Succeeded(7))
@@ -122,7 +122,7 @@ class TestTransientErrorsNotCached:
         handle = _make_handle(broker)
 
         first = await handle.get_async()
-        assert isinstance(first, Err) and isinstance(first.err_value, TaskNotFound), first
+        assert isinstance(first, Err) and isinstance(first.err_value, ReadTaskNotFound), first
 
         second = await handle.get_async()
         assert second == Ok(Succeeded(3))
@@ -135,7 +135,7 @@ class TestTerminalErrorsStillCached:
         broker = MagicMock()
         broker.get_raw_result_record_async = AsyncMock(
             return_value=Ok(
-                RawResultRecord(
+                StoredResult(
                     task_id='task-1',
                     task_name='t',
                     status=TaskStatus.CANCELLED,

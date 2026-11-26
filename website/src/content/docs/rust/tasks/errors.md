@@ -97,4 +97,4 @@ The other built-in codes (timeouts, crashes, cancels, expiry) are on the [Errors
 
 ## Reading a Stored Error
 
-A read returns the task's error inside `TaskOutcome::Failed`; see [Retrieving Results](/horsies/rust/tasks/retrieving-results/). A stored error whose user code `E` does not name is the read error `ReadError::UnknownUserCode`, with the code text and the code type that the read asked for: the task that stored it has another code type, or a version of the enum without that code.
+A read returns the task's error inside `TaskOutcome::Failed`; see [Retrieving Results](/horsies/rust/tasks/retrieving-results/). A stored error whose custom code `E` does not name is the read error `ReadError::UnknownCustomCode` (`UNKNOWN_CUSTOM_CODE`), with the stored code text (`stored_code`) and the code type that the read asked for: the task that stored it has another code type, or a version of the enum without that code.

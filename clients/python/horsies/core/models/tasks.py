@@ -439,13 +439,13 @@ class TaskInfo:
     task_id: UUID
     task_name: str
     status: TaskStatus
-    queue_name: str
+    queue: str
     priority: int
     retry_count: int
     max_retries: int
     next_retry_at: datetime.datetime | None
     sent_at: datetime.datetime | None
-    enqueued_at: datetime.datetime
+    due_at: datetime.datetime
     claimed_at: datetime.datetime | None
     started_at: datetime.datetime | None
     completed_at: datetime.datetime | None
