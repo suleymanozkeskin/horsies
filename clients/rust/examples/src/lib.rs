@@ -16,9 +16,7 @@ use std::error::Error;
 use std::future::Future;
 use std::process::ExitCode;
 
-use horsies::{
-    ChildPreload, Horsies, IsolatedChildCount, IsolatedChildren, IsolatedSetting, WorkerProfile,
-};
+use horsies::{ChildPreload, Horsies, IsolatedChildren, WorkerProfile};
 
 /// The database when `DATABASE_URL` is not set.
 pub const LOCAL_DATABASE_URL: &str =
@@ -28,7 +26,7 @@ pub const LOCAL_DATABASE_URL: &str =
 pub const DEFAULT_PROFILE: &str = "default";
 
 /// The isolated children of [`isolated_profile`].
-const ISOLATED_CHILDREN: IsolatedChildCount = IsolatedChildCount::from_constant(2);
+const ISOLATED_CHILDREN: u32 = 2;
 
 /// The result of an example's demo.
 pub type DemoResult = Result<(), Box<dyn Error>>;
@@ -43,7 +41,7 @@ pub fn database_url() -> String {
 /// own binary, so the profile has no preload process.
 pub fn isolated_profile() -> WorkerProfile {
     WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(ISOLATED_CHILDREN)),
+        isolated: IsolatedChildren::new(ISOLATED_CHILDREN).into(),
         preload: ChildPreload::NoPreload,
         ..WorkerProfile::default()
     }

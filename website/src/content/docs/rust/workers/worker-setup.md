@@ -1,6 +1,6 @@
 ---
 title: Worker Setup
-summary: Define the worker profiles of a Rust app with WorkerProfile and its bounded types, add child start hooks, and run a worker with run_worker.
+summary: Define the worker profiles of a Rust app with WorkerProfile and plain numbers, add child start hooks, and run a worker with run_worker.
 related: [../cli, ../configuration/app-config, ../../workers/execution-modes, ../../workers/concurrency, ../../workers/worker-architecture]
 tags: [rust, worker, WorkerProfile, on_child_start, run_worker, WorkerRunError]
 ---
@@ -16,32 +16,28 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use horsies::{
-    AppConfig, DrainTimeout, IsolatedChildCount, IsolatedChildren, IsolatedRecycle,
-    IsolatedSetting, MemoryLimitSetting, MemoryMb, SharedAsyncChildCount, SharedAsyncChildren,
-    SharedAsyncSeats, SharedAsyncSetting, TaskCount, TaskLimitSetting, WorkerProfile,
+    AppConfig, IsolatedChildren, IsolatedRecycle, MemoryLimitSetting, SharedAsyncChildren,
+    TaskLimitSetting, WorkerProfile,
 };
 
-fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Error>> {
+fn with_profiles(config: AppConfig) -> AppConfig {
     let isolated = IsolatedChildren {
         recycle: IsolatedRecycle {
-            after: TaskLimitSetting::TaskLimit { tasks: TaskCount::try_from(500)? },
-            above: MemoryLimitSetting::MemoryLimit { mb: MemoryMb::try_from(1024)? },
+            after: TaskLimitSetting::TaskLimit { tasks: 500 },
+            above: MemoryLimitSetting::MemoryLimit { mb: 1024 },
         },
-        ..IsolatedChildren::new(IsolatedChildCount::try_from(2)?)
+        ..IsolatedChildren::new(2)
     };
     let default_profile = WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(isolated),
-        shared_async: SharedAsyncSetting::SharedAsyncChildren(SharedAsyncChildren::new(
-            SharedAsyncChildCount::try_from(4)?,
-            SharedAsyncSeats::try_from(25)?,
-        )),
-        drain_timeout: DrainTimeout::try_from(Duration::from_secs(120))?,
+        isolated: isolated.into(),
+        shared_async: SharedAsyncChildren::new(4, 25).into(),
+        drain_timeout: Duration::from_secs(120),
         ..WorkerProfile::default()
     };
-    Ok(AppConfig {
+    AppConfig {
         worker_profiles: BTreeMap::from([("default".to_owned(), default_profile)]),
         ..config
-    })
+    }
 }
 ```
 
@@ -49,6 +45,7 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 ./myapp worker --profile default
 ```
 
+- Each count, size and task limit is a plain number. `Horsies::new` checks each value against its [bounds](#bounds). It refuses the config with every refusal in one error, `HRS-218`, and each refusal names the field path of its value.
 - `WorkerProfile::default()` has no children. `Horsies::new` refuses a profile with no child.
 - Do not set `preload`. Its default, `ChildPreload::NoPreload`, is the only value that a Rust worker takes: a Rust worker starts each child with `exec` of its own binary. `Horsies::new` refuses `ChildPreload::Library` and `ChildPreload::App` with `HRS-218`. See [App Config](/horsies/rust/configuration/app-config/#rules-that-only-a-rust-app-has).
 - A task runs on the children of its execution class. The routing of each class, and the classes to choose by the work of a task, are on [Choosing an Execution Mode](/horsies/workers/execution-modes/).
@@ -62,11 +59,13 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 | `shared_thread` | `SharedThreadSetting`: `SharedThreadChildren(SharedThreadChildren)` or `NoSharedThreadChildren {}` | `NoSharedThreadChildren {}` |
 | `pool` | `ParentPool`: the connection pool of the worker process | Its size follows the seats |
 | `claim` | `ClaimLimits` | No limits |
-| `drain_timeout` | `DrainTimeout`: how long a stopping worker waits for running tasks | 300 s |
+| `drain_timeout` | `Duration`: how long a stopping worker waits for running tasks | 300 s |
 | `preload` | `ChildPreload`: `Library`, `App` or `NoPreload`. A Rust app takes only `NoPreload` | `NoPreload` |
 | `parent_cpu` | `ParentCpu`: `Shared` or `OwnCore` | `Shared` |
 
-`child_count()` and `seat_count()` return the children and the seats of the profile.
+`From` builds each setting from its children: `IsolatedChildren::new(2).into()` is `IsolatedSetting::IsolatedChildren(IsolatedChildren::new(2))`.
+
+`profile.checked(name)` returns the checked profile, with `child_count()` and `seat_count()`, or one `ProfileValueRefused` for each value outside its bounds. `Horsies::new` does this check for each profile.
 
 ### Children
 
@@ -85,8 +84,8 @@ The constructors take the default recycle, pools and executor. An isolated child
 | `IsolatedRecycle` | `after: TaskLimitSetting`: replace a child after it completes this many tasks; `above: MemoryLimitSetting`: replace a child when its RSS reaches this limit | `after` 100 tasks, `above` no limit |
 | `SharedRecycle` | `after_per_seat: TaskLimitSetting`: replace a child after `tasks × seats` tasks; `above: MemoryLimitSetting` | `after_per_seat` 100 tasks, `above` no limit |
 
-- `TaskLimitSetting` is `TaskLimit { tasks: TaskCount }` or `NoTaskLimit {}`.
-- `MemoryLimitSetting` is `MemoryLimit { mb: MemoryMb }` or `NoMemoryLimit {}`.
+- `TaskLimitSetting` is `TaskLimit { tasks }` or `NoTaskLimit {}`.
+- `MemoryLimitSetting` is `MemoryLimit { mb }` or `NoMemoryLimit {}`.
 - A child is recycled when either limit is reached. The worker start fails when a memory limit is at or below the measured child baseline.
 
 The rules are on [Concurrency](/horsies/workers/concurrency/#process-recycling).
@@ -95,10 +94,10 @@ The rules are on [Concurrency](/horsies/workers/concurrency/#process-recycling).
 
 | Type | Fields | Default |
 |------|--------|---------|
-| `IsolatedPool` | `min_size: PoolMinSize`, `max_size: PoolSize`, `check: bool` | 0 open, at most 1 connection, no check |
-| `SharedPool` | `min_size: PoolMinSize`, `max_size: PoolSizeSetting`, `check: bool` | 0 open, a size from the seats, no check |
+| `IsolatedPool` | `min_size`, `max_size: PoolSize`, `check: bool` | 0 open, at most 1 connection, no check |
+| `SharedPool` | `min_size`, `max_size: PoolSizeSetting`, `check: bool` | 0 open, a size from the seats, no check |
 | `ParentPool` | `max_size: PoolSizeSetting` | A size from the seats |
-| `PoolSize` | `connections: PoolConnectionCount`. `PoolSize::new(connections)` | `task_send_pool`: 2 connections |
+| `PoolSize` | `connections`. `PoolSize::new(connections)` | `task_send_pool`: 2 connections |
 
 - `PoolSizeSetting` is `PoolSize { connections }` or `PoolSizeFromSeats {}`.
 - `ExecutorThreadsSetting` is `ExecutorThreads { threads }` or `ExecutorThreadsFromSeats {}` (the default): the threads of the default executor of a shared async child.
@@ -111,32 +110,26 @@ The rules are on [Concurrency](/horsies/workers/concurrency/#process-recycling).
 |------|------|
 | `ClaimLimits.per_queue_per_pass` | `TaskLimitSetting`: the most tasks that one claim pass takes from one queue |
 | `ClaimLimits.claimed_per_worker` | `TaskLimitSetting`: the most CLAIMED tasks that the worker holds |
-| `DrainTimeout::try_from(duration)` | Above 0 and at most 24 hours; `DrainTimeoutRefused` (`Zero`, `AboveMaximum`) otherwise. At the deadline the worker kills the children that still run a task |
+| `drain_timeout` | Above 0 and at most 24 hours. At the deadline the worker kills the children that still run a task |
 | `ParentCpu::OwnCore` | The worker process runs on one physical core and the children on the other CPUs. Linux only: the start fails on another platform or with fewer than 2 physical cores |
 
 The claim limits are on [Concurrency](/horsies/workers/concurrency/#claiming-controls). Set the drain timeout below the stop window of the supervisor.
 
-### Bounded Counts
+### Bounds
 
-Each count is a `BoundedU32<MIN, MAX>`. `try_from(u32)` returns `OutOfBounds` (`value`, `min`, `max`) for a value outside the bounds; `from_constant(value)` builds one in a `const` item, where a value outside fails the build. `get()` returns the number.
+`Horsies::new` refuses each value outside its bounds. The refusal names the field path and the bounds, for example `worker_profiles['default'].isolated.count: 0 is outside the bounds 1 to 1024`.
 
-| Type | Bounds |
-|------|--------|
-| `IsolatedChildCount`, `SharedAsyncChildCount`, `SharedThreadChildCount` | 1 to 1,024 |
-| `SharedAsyncSeats` | 1 to 1,000 |
-| `SharedThreadSeats` | 1 to 256 |
-| `TaskCount` | 1 to 2,147,483,647 |
-| `MemoryMb` | 1 to 16,777,216 |
-| `PoolConnectionCount` | 1 to 1,000 |
-| `PoolMinSize` | 0 to 1,000 |
-| `ExecutorThreadCount` | 1 to 256 |
-
-```rust
-use horsies::{SharedAsyncChildCount, SharedAsyncSeats};
-
-const ASYNC_CHILDREN: SharedAsyncChildCount = SharedAsyncChildCount::from_constant(2);
-const ASYNC_SEATS: SharedAsyncSeats = SharedAsyncSeats::from_constant(20);
-```
+| Field | Bounds |
+|-------|--------|
+| `count` of `IsolatedChildren`, `SharedAsyncChildren` and `SharedThreadChildren` | 1 to 1,024 |
+| `SharedAsyncChildren.seats` | 1 to 1,000 |
+| `SharedThreadChildren.seats` | 1 to 256 |
+| `TaskLimit { tasks }` | 1 to 2,147,483,647 |
+| `MemoryLimit { mb }` | 1 to 16,777,216 |
+| `connections` of `PoolSize` and of `PoolSizeSetting::PoolSize` | 1 to 1,000 |
+| `min_size` of `IsolatedPool` and `SharedPool` | 0 to 1,000 |
+| `ExecutorThreads { threads }` | 1 to 256 |
+| `drain_timeout` | Above 0, at most 24 hours |
 
 ## Child Start Hooks
 

@@ -97,10 +97,7 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::process::ExitCode;
 
-use horsies::{
-    task, AppConfig, Horsies, IsolatedChildCount, IsolatedChildren,
-    IsolatedSetting, TaskError, WorkerProfile,
-};
+use horsies::{task, AppConfig, Horsies, IsolatedChildren, TaskError, WorkerProfile};
 
 #[task("add_numbers")]
 async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
@@ -109,9 +106,7 @@ async fn add_numbers(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 fn build_app() -> Result<Horsies, Box<dyn std::error::Error>> {
     let profile = WorkerProfile {
-        isolated: IsolatedSetting::IsolatedChildren(IsolatedChildren::new(
-            IsolatedChildCount::try_from(4)?,
-        )),
+        isolated: IsolatedChildren::new(4).into(),
         ..WorkerProfile::default()
     };
     let config = AppConfig {
