@@ -104,8 +104,8 @@ describe("the builder", () => {
     const custom = viewOf([urgentPing, urgentAudit], [], {
       kind: "custom",
       queues: new Map([
-        ["urgent", { name: "urgent", priority: 3, maxConcurrency: { kind: "coreDefault" } }],
-        ["slow", { name: "slow", priority: 9, maxConcurrency: { kind: "coreDefault" } }],
+        ["urgent", { name: "urgent", maxConcurrency: { kind: "coreDefault" } }],
+        ["slow", { name: "slow", maxConcurrency: { kind: "coreDefault" } }],
       ]),
     });
 
@@ -137,13 +137,13 @@ describe("the builder", () => {
     assert.deepEqual(spec.nodes[0]?.body, {
       kind: "task",
       queue: "urgent",
-      priority: 3,
+      priority: { kind: "queue" },
       deadline: { kind: "noDeadline" },
     });
     assert.deepEqual(spec.nodes[1]?.body, {
       kind: "task",
       queue: "slow",
-      priority: 7,
+      priority: { kind: "given", priority: 7 },
       deadline: { kind: "until", epochMicros: 1_786_525_812_654_321n },
     });
     assert.deepEqual(spec.nodes[2]?.join, { kind: "quorum", minSuccess: 2 });
@@ -179,7 +179,7 @@ describe("refused node options", () => {
     ["a priority of 101", { priority: 101 }, ["HRS-034"]],
     ["a priority that is no integer", { priority: 1.5 }, ["HRS-034"]],
     ["a queue that the app does not admit", { queue: "urgent" }, ["HRS-014"]],
-    ["a deadline in the year 10000", { goodUntil: Temporal.Instant.from("+010000-01-01T00:00:00Z") }, ["FIELD_BOUND"]],
+    ["a deadline in the year 10000", { goodUntil: Temporal.Instant.from("+010000-01-01T00:00:00Z") }, ["HRS-033"]],
   ];
 
   for (const [name, options, codes] of cases) {

@@ -14,6 +14,8 @@ import {
   ONE_WAY_ISSUE_CODE,
   parseRun,
   recordKeysRun,
+  ZOD_ASYNC_MESSAGE,
+  ZOD_ENCODE_ERROR_NAME,
 } from "../../../horsies/src/zod/runs.ts";
 import { acceptedKind, runsOfCodec } from "./support.ts";
 
@@ -43,6 +45,46 @@ describe("checksRun", () => {
       ok: false,
       error: { issues: [{ path: "$", code: ASYNC_ISSUE_CODE }] },
     });
+  });
+
+  test("after an issue that does not continue, a check without a when rule does not run, a length check runs", () => {
+    const schema = z
+      .string()
+      .superRefine((value, context) => {
+        context.issues.push({ code: "custom", input: value, message: "an issue without continue" });
+      })
+      .refine(() => false)
+      .max(1);
+
+    assert.deepEqual(checksRun(schema._zod.def.checks ?? [])("ab"), {
+      ok: false,
+      error: {
+        issues: [
+          { path: "$", code: "custom" },
+          { path: "$", code: "too_big" },
+        ],
+      },
+    });
+  });
+
+  test("after an issue of a check with abort, no check runs, also a length check", () => {
+    const schema = z
+      .string()
+      .refine(() => false, { abort: true })
+      .max(1)
+      .refine(() => false);
+
+    assert.deepEqual(checksRun(schema._zod.def.checks ?? [])("ab"), {
+      ok: false,
+      error: { issues: [{ path: "$", code: "custom" }] },
+    });
+  });
+});
+
+describe("the marks of zod's errors", () => {
+  test("the installed zod throws its async error with ZOD_ASYNC_MESSAGE and its encode error with its name", () => {
+    assert.throws(() => z.string().refine(async () => true).parse("x"), { message: ZOD_ASYNC_MESSAGE });
+    assert.throws(() => z.encode(z.string().transform((text) => text), "x"), { name: ZOD_ENCODE_ERROR_NAME });
   });
 });
 
@@ -80,6 +122,31 @@ describe("codecRuns", () => {
   test("encode runs the output schema backward, then the codec's encode", () => {
     assert.deepEqual(runs.encode(0.5), { ok: true, value: 50 });
     assert.deepEqual(runs.encode(2), { ok: false, error: { issues: [{ path: "$", code: "too_big" }] } });
+  });
+
+  test("encode gives the issues that the codec's encode adds", () => {
+    const signed = z.codec(z.int(), z.number(), {
+      decode: (stored) => stored,
+      encode: (value, payload) => {
+        if (value < 0) {
+          payload.issues.push({ code: "custom", message: "below 0", input: value });
+        }
+
+        return value;
+      },
+    });
+
+    assert.deepEqual(runsOfCodec(signed).encode(-1), { ok: false, error: { issues: [{ path: "$", code: "custom" }] } });
+  });
+
+  test("a codec decode or encode that returns a promise is the issue async_check", () => {
+    const later = runsOfCodec(
+      z.codec(z.string(), z.string(), { decode: async (text) => text, encode: async (text) => text }),
+    );
+
+    const asyncIssue = { ok: false, error: { issues: [{ path: "$", code: ASYNC_ISSUE_CODE }] } };
+
+    assert.deepEqual([later.decode("x"), later.encode("x")], [asyncIssue, asyncIssue]);
   });
 
   test("a one-way transform in the output schema is the issue one_way_transform at encode", () => {

@@ -9,11 +9,11 @@ import { z } from "zod";
 import { compileMember, compileValue } from "../../../horsies/src/zod/adapter.ts";
 import type { ZodSchema } from "../../../horsies/src/zod/definition.ts";
 import { isSupported, SUPPORTED_ZOD, zodSchemaOf } from "../../../horsies/src/zod/version.ts";
-import { passedSelfCheck, withDefinition } from "./support.ts";
+import { withDefinition } from "./support.ts";
 
 /** The rule, path, zod type and name of each refusal of a schema as a whole value. */
 function refusals(schema: ZodSchema): readonly (readonly string[])[] {
-  const compiled = compileValue(passedSelfCheck(), schema);
+  const compiled = compileValue(schema);
 
   assert.ok(!compiled.ok, "expected a refusal");
 
@@ -66,7 +66,7 @@ describe("fail closed: unknown definition parts", () => {
 
   test("a custom string format has its own name and its own test: it maps to a checked string", () => {
     const sku = z.stringFormat("sku", /^[A-Z]{3}-\d+$/);
-    const compiled = compileValue(passedSelfCheck(), z.object({ sku, digest: z.hex() }));
+    const compiled = compileValue(z.object({ sku, digest: z.hex() }));
 
     assert.equal(compiled.ok, true);
   });
@@ -95,7 +95,7 @@ describe("fail closed: unknown definition parts", () => {
   test("a .prefault() value that zod does not decode is a refused default", () => {
     const prefault = z.int().prefault(7);
     const notDecoded = withDefinition(prefault, { ...prefault._zod.def, defaultValue: "seven" });
-    const member = compileMember(passedSelfCheck(), notDecoded);
+    const member = compileMember(notDecoded);
 
     assert.ok(member.ok);
     assert.equal(member.value.presence.mode === "defaulted" && member.value.presence.fallback.state, "refused");
@@ -132,13 +132,12 @@ describe("the supported zod releases", () => {
     });
   });
 
-  test("OtherZodCopy: a release inside the range from another copy of zod", () => {
+  test("a release inside the range from another copy of zod passes: the check reads the schema's own release", () => {
     const string = z.string();
     // SAFETY: a stub of a schema of another zod copy: an equal release number in another version object.
     const other = { ...string, _zod: { ...string._zod, version: { ...string._zod.version } } } as typeof string;
-    const outcome = zodSchemaOf(other);
 
-    assert.equal(outcome.ok ? "" : outcome.error.kind, "OtherZodCopy");
+    assert.deepEqual(zodSchemaOf(other), { ok: true, value: other });
   });
 
   test("Zod3Schema: a value with the zod marker and no zod 4 internals", () => {

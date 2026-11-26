@@ -10,8 +10,11 @@ import type { LibraryTaskCode } from "../wire/task-error.ts";
 /** The status of a task that has not finished. */
 export type UnfinishedStatus = "PENDING" | "CLAIMED" | "RUNNING";
 
-/** The status of a finished task. */
-export type FinishedStatus = "COMPLETED" | "FAILED" | "CANCELLED" | "EXPIRED";
+/**
+ * The status of a finished task that can store no result. A `CANCELLED` task reads as its outcome (`TASK_CANCELLED`),
+ * never as a read error.
+ */
+export type FinishedStatus = "COMPLETED" | "FAILED" | "EXPIRED";
 
 /** Why neither the live table nor the task history holds a task. */
 export type TaskAbsence =
@@ -88,12 +91,20 @@ export function taskAbsence(reason: AbsenceReason): TaskAbsence {
   }
 }
 
-/** The `database` read error of a raw record of the broker catalog. An unknown class throws (a build defect). */
-export function databaseError(raw: RawCatalogError): ReadError {
+/**
+ * The read error of a raw record of the broker catalog: `storedResultUnreadable` for a stored text that the core's
+ * strict read rule refuses (`INVALID_JSON_PAYLOAD`, a fact of the stored data, as the Python and Rust clients read it),
+ * else `database`. An unknown class throws (a build defect).
+ */
+export function brokerReadError(raw: RawCatalogError): ReadError {
   // SAFETY: the bridge builds the slots of a broker class from the core's slot list of that class
   // (`ErrorClassValues`), the list from which the codegen renders `NativeBrokerCoreError`; the generated converter
   // throws for a class name that it does not know.
   const error = brokerCoreErrorFromNative(nativeCatalogValue(raw) as unknown as NativeBrokerCoreError);
+
+  if (error.code === "INVALID_JSON_PAYLOAD") {
+    return Object.freeze({ kind: "storedResultUnreadable", cause: error.message });
+  }
 
   return Object.freeze({ kind: "database", code: error.code, retryable: error.retryable, message: error.message });
 }

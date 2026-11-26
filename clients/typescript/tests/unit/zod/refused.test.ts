@@ -11,13 +11,11 @@ import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 import { MAX_SCHEMA_DEPTH, compileMember, compileValue } from "../../../horsies/src/zod/adapter.ts";
 import type { ZodSchema } from "../../../horsies/src/zod/definition.ts";
 import { type ZodSchemaRefused, zodRefusalText } from "../../../horsies/src/zod/rules.ts";
-import { acceptedKind, passedSelfCheck, withDefinition } from "./support.ts";
-
-const passed = passedSelfCheck();
+import { acceptedKind, withDefinition } from "./support.ts";
 
 /** The rule, path and zod type of each refusal of a schema as a whole value. */
 function refusals(schema: ZodSchema): readonly (readonly [string, string, string])[] {
-  const compiled = compileValue(passed, schema);
+  const compiled = compileValue(schema);
 
   assert.ok(!compiled.ok, "expected a refusal");
 
@@ -129,18 +127,18 @@ describe("zod adapter: refusal rules", () => {
       ["OPTIONAL_NOT_A_MEMBER", "$[0]", "optional"],
     ]);
     assert.deepEqual(refusals(z.string().optional()), [["OPTIONAL_NOT_A_MEMBER", "$", "optional"]]);
-    assert.equal(compileMember(passed, z.string().optional()).ok, true);
+    assert.equal(compileMember(z.string().optional()).ok, true);
   });
 
   test("CHANGING_DEFAULT: a function default whose value changes at each read", () => {
     assert.deepEqual(refusals(z.object({ id: z.uuid().default(() => crypto.randomUUID()) })), [
       ["CHANGING_DEFAULT", "$.id", "default"],
     ]);
-    assert.equal(compileValue(passed, z.object({ tags: z.array(z.string()).default(() => []) })).ok, true);
+    assert.equal(compileValue(z.object({ tags: z.array(z.string()).default(() => []) })).ok, true);
   });
 
   test("RECURSIVE: a schema that contains itself, through z.lazy() and through a getter", () => {
-    const tree: ZodSchema = z.lazy(() => z.object({ children: z.array(tree) }));
+    const tree: z.ZodType = z.lazy(() => z.object({ children: z.array(tree) }));
 
     const category = z.object({
       name: z.string(),
@@ -174,7 +172,7 @@ describe("zod adapter: refusal rules", () => {
   });
 
   test("TOO_DEEP: a schema nested deeper than the adapter walks", () => {
-    let schema: ZodSchema = z.string();
+    let schema: z.ZodType = z.string();
 
     for (let level = 0; level < MAX_SCHEMA_DEPTH; level += 1) {
       schema = z.nullable(schema);
@@ -184,7 +182,7 @@ describe("zod adapter: refusal rules", () => {
   });
 
   test("every refusal of a schema is reported, in walk order, with its fix", () => {
-    const compiled = compileValue(passed, z.looseObject({ at: z.date(), any: z.any() }));
+    const compiled = compileValue(z.looseObject({ at: z.date(), any: z.any() }));
 
     assert.ok(!compiled.ok);
     assert.deepEqual(compiled.error.map(zodRefusalText), [

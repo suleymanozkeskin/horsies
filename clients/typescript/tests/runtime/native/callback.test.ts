@@ -6,8 +6,12 @@ import { describe, test } from "node:test";
 
 import { addonSettlement, settlingCallback, takeThrown } from "../../../horsies/src/native/call/callback.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { probeAddon } from "./callback-probe.ts";
 import type { CallbackProbe } from "./callback-probe.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** Call `callback` once from a core thread through the probe of the addon. */
 async function probe(callback: (argument: string) => unknown, argument: string): Promise<CallbackProbe> {

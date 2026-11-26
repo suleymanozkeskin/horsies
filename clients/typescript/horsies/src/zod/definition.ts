@@ -2,12 +2,27 @@
 //
 // zod gives no stability statement for the fields of a definition. This module is the one place that reads them
 // (and `_zod.traits`, `_zod.values`). It fails closed: a field, a check or a format outside the lists of
-// `known-fields.ts` is read as an unknown part, which the adapter refuses. The self-check (`self-check.ts`) runs each
-// rule of the adapter once on a known schema, so a renamed field fails loud instead of switching a rule off.
+// `known-fields.ts` is read as an unknown part, which the adapter refuses. The self-check of the zod test lanes
+// (`tests/unit/zod/self-check-cases.ts`) runs each rule of the adapter on a known schema of each supported zod release.
+//
+// The reader takes a schema of each zod copy (the ES module or the CommonJS build, a bundled copy): it reads the
+// schema's own fields and builds a schema only with the schema's own constructor. It imports no zod module; the types
+// of the internals are in `internals.ts`.
 
-import * as core from "zod/v4/core";
-
-import { isString } from "../codec/values.ts";
+import { isNumber, isString } from "../codec/values.ts";
+import type {
+  ZodCheck,
+  ZodCheckDefinition,
+  ZodCodecFunction,
+  ZodCustomTest,
+  ZodDefinitionBase,
+  ZodDefinitionData,
+  ZodEnumEntries,
+  ZodLiteralValue,
+  ZodMembers,
+  ZodPipeDefinition,
+  ZodSchema,
+} from "./internals.ts";
 import {
   BIGINT_FORMATS,
   FLOAT_FORMATS,
@@ -17,17 +32,7 @@ import {
   KNOWN_STRING_FORMATS,
 } from "./known-fields.ts";
 
-/** A zod 4 schema. */
-export type ZodSchema = core.$ZodType;
-
-/** A check that zod runs on a value: a refinement, a length or range check, a string or number format. */
-export type ZodCheck = core.$ZodCheck<never>;
-
-/** A zod codec function: the decode (`transform`) or the encode (`reverseTransform`) of `z.codec()`. */
-export type ZodCodecFunction = NonNullable<core.$ZodPipeDef["transform"]>;
-
-/** The test function of `z.custom()`. */
-export type ZodCustomTest = core.$ZodCustomDef["fn"];
+export type { ZodCheck, ZodCodecFunction, ZodCustomTest, ZodLiteralValue, ZodSchema };
 
 /** A check of a schema, by what it does to a value. */
 export type CheckRead =
@@ -39,9 +44,6 @@ export type CheckRead =
   | { readonly effect: "unknownCheck"; readonly name: string }
   /** A string, number or bigint format that the known formats do not list (a newer zod). */
   | { readonly effect: "unknownFormat"; readonly name: string };
-
-/** A member of a literal or an enum, as zod holds it. */
-export type ZodLiteralValue = core.util.Primitive;
 
 /**
  * How an object or a record treats a key that it does not declare: refused (`z.strictObject()`, and `z.object()`,
@@ -136,10 +138,11 @@ const CUSTOM_STRING_FORMAT_TRAIT = "$ZodCustomStringFormat";
  * definition, and calls the getter of `z.lazy()` once.
  */
 export function readDefinition(schema: ZodSchema): ZodDefinition {
-  // SAFETY: every zod 4 schema is a member of `$ZodTypes`; a newer type reaches the `default` arm of `readRefusedForm`.
-  const typed = schema as core.$ZodTypes;
-  const def = typed._zod.def;
-  const own = def.type === "custom" ? [] : selfChecks(typed);
+  // SAFETY: the definition of each schema of a supported zod release is a member of `ZodDefinitionData`
+  // (`tests/unit/zod/internals.test.ts` checks the declarations of the installed zod); a newer definition type reaches
+  // the `default` arm of `readRefusedForm`.
+  const def = schema._zod.def as DefinitionData;
+  const own = def.type === "custom" ? [] : selfChecks(schema);
   const checks = [...own, ...(def.checks ?? []).map(checkReadOf)];
 
   return { zodType: String(def.type), checks, ...knownForm(def, schema) };
@@ -164,9 +167,17 @@ function selfChecks(schema: ZodSchema): readonly CheckRead[] {
   return schema._zod.traits.has(CHECK_TRAIT) ? [checkReadOf(schema as unknown as ZodCheck)] : [];
 }
 
-/** The values of an enum, as zod checks them (zod's own function): a numeric enum without its reverse keys. */
-function enumValues(def: core.$ZodEnumDef): readonly ZodLiteralValue[] {
-  return core.util.getEnumValues(def.entries);
+/**
+ * The values of an enum's entries, in their order, by the rule of zod's `util.getEnumValues`: a key that is the text
+ * of a number value is the reverse key of a numeric TypeScript enum, not a value. The schema's own value set is not
+ * read: `z.partialRecord()` clears it on its key (zod 4.1). Pure.
+ */
+function enumValues(entries: ZodEnumEntries): readonly ZodLiteralValue[] {
+  const numbers = Object.values(entries).filter(isNumber);
+
+  return Object.entries(entries)
+    .filter(([key]) => !numbers.some((number) => number === Number(key)))
+    .map(([, value]) => value);
 }
 
 /** What a check does, by its closed name and format. Pure. */
@@ -205,12 +216,12 @@ function formatRead(check: ZodCheck, known: ReadonlySet<string>): CheckRead {
   return known.has(format) ? { effect: "check", check } : { effect: "unknownFormat", name: format };
 }
 
-function formatOf(def: core.$ZodTypeDef | core.$ZodCheckDef): string {
+function formatOf(def: ZodDefinitionBase | ZodCheckDefinition): string {
   return "format" in def && isString(def.format) ? def.format : "";
 }
 
-/** The definition data of a zod schema: one member per definition type of zod's `$ZodTypes`. */
-type DefinitionData = core.$ZodTypes["_zod"]["def"];
+/** The definition data of a zod schema: one member per definition type that the reader tells apart. */
+type DefinitionData = ZodDefinitionData;
 
 /** Definition data without the types that an earlier reader took. */
 type Without<D extends DefinitionData, T extends DefinitionData["type"]> = Exclude<D, { readonly type: T }>;
@@ -230,9 +241,9 @@ function readForm(def: DefinitionData, schema: ZodSchema): DefinitionForm {
     case "literal":
       return { form: "literal", members: [...def.values] };
     case "enum":
-      return { form: "literal", members: enumValues(def) };
+      return { form: "literal", members: enumValues(def.entries) };
     case "template_literal":
-      return { form: "templateLiteral", pattern: core.clone(schema, { ...def, checks: [] }) };
+      return { form: "templateLiteral", pattern: withoutChecks(schema, def) };
     case "object":
       return readObject(def);
     case "array":
@@ -335,13 +346,20 @@ function unlistedForm(_unlisted: never): DefinitionForm {
 
 const UNKNOWN_DEFINITION: DefinitionForm = Object.freeze({ form: "unknownDefinition" });
 
-function restOf(rest: core.SomeType): TupleRest {
-  // SAFETY: a tuple's rest item is a zod schema (`$ZodTupleDef.rest` is a `SomeType` or `null`).
-  return { state: "items", item: rest as ZodSchema };
+/**
+ * A template literal without its checks, built with the schema's own constructor (as zod's `clone` does): a schema of
+ * the same zod copy, whose parse is the pattern test.
+ */
+function withoutChecks(schema: ZodSchema, def: Extract<DefinitionData, { readonly type: "template_literal" }>): ZodSchema {
+  return new schema._zod.constr({ ...def, checks: [] });
+}
+
+function restOf(rest: ZodSchema): TupleRest {
+  return { state: "items", item: rest };
 }
 
 /** Whether a definition converts its input first (`z.coerce.*()`). */
-function coerced(def: core.$ZodTypeDef): boolean {
+function coerced(def: ZodDefinitionBase): boolean {
   return "coerce" in def && def.coerce === true;
 }
 
@@ -349,19 +367,19 @@ function coerced(def: core.$ZodTypeDef): boolean {
  * `z.int()`, `z.int32()`, `z.uint32()` and `.int()` hold an integer; `z.float32()`, `z.float64()` and no format hold a
  * float. A number format outside both lists is an unknown format of the node's checks, which the adapter refuses.
  */
-function numberKindOf(def: core.$ZodNumberDef): "int" | "float" {
+function numberKindOf(def: Extract<DefinitionData, { readonly type: "number" }>): "int" | "float" {
   const formats = [def, ...(def.checks ?? []).map((check) => check._zod.def)].map(formatOf);
 
   return formats.some((format) => INTEGER_FORMATS.has(format)) ? "int" : "float";
 }
 
-function readObject(def: core.$ZodObjectDef): DefinitionForm {
+function readObject(def: Extract<DefinitionData, { readonly type: "object" }>): DefinitionForm {
   const members = Object.keys(def.shape).map((name) => ({ name, schema: memberSchema(def.shape, name) }));
 
   return { form: "object", members, otherKeys: otherKeysOf(def.catchall) };
 }
 
-function memberSchema(members: core.$ZodObjectDef["shape"], name: string): ZodSchema {
+function memberSchema(members: ZodMembers, name: string): ZodSchema {
   const schema = members[name];
 
   if (schema === undefined) {
@@ -377,12 +395,11 @@ function otherKeysOf(catchall: ZodSchema | undefined): OtherKeys {
     return "refused";
   }
 
-  // SAFETY: a catchall is a zod schema, a member of `$ZodTypes`.
-  return (catchall as core.$ZodTypes)._zod.def.type === "never" ? "refused" : "kept";
+  return catchall._zod.def.type === "never" ? "refused" : "kept";
 }
 
 /** The values of the record fields that zod 4.1 to 4.6 write: `partial` (a boolean), `mode` (`strict`, `loose`). */
-function readRecord(def: core.$ZodRecordDef): DefinitionForm {
+function readRecord(def: Extract<DefinitionData, { readonly type: "record" }>): DefinitionForm {
   const partial = "partial" in def ? def.partial : undefined;
   const mode = "mode" in def ? def.mode : undefined;
 
@@ -394,8 +411,7 @@ function readRecord(def: core.$ZodRecordDef): DefinitionForm {
     return { form: "unknownField", field: "mode" };
   }
 
-  // SAFETY: a record key schema is a zod schema (`$ZodRecordKey` is a `$ZodType`).
-  const key = def.keyType as ZodSchema;
+  const key = def.keyType;
 
   return {
     form: "record",
@@ -410,7 +426,7 @@ function readRecord(def: core.$ZodRecordDef): DefinitionForm {
  * A union: tagged when it has a discriminator. Without one, `inclusive: false` is `z.xor()` (zod 4.2 and later), which
  * refuses a value that two options take; a discriminated union is exclusive by its tag, so the field is not read there.
  */
-function readUnion(def: core.$ZodUnionDef): DefinitionForm {
+function readUnion(def: Extract<DefinitionData, { readonly type: "union" }>): DefinitionForm {
   const options = [...def.options];
   const inclusive = "inclusive" in def ? def.inclusive : true;
 
@@ -433,7 +449,7 @@ function readUnion(def: core.$ZodUnionDef): DefinitionForm {
 }
 
 /** A pipe with both codec functions is `z.codec()`; any other pipe transforms one way. */
-function readPipe(def: core.$ZodPipeDef): DefinitionForm {
+function readPipe(def: ZodPipeDefinition): DefinitionForm {
   const { transform, reverseTransform } = def;
 
   return transform === undefined || reverseTransform === undefined

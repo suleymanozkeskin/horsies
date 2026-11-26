@@ -25,6 +25,14 @@ describe("checkSendOptions: refusals", () => {
     assert.deepEqual(refusalOf({ idempotencyKey: "key-\uD800" }), ["idempotencyKey", "the key holds a lone surrogate"]);
   });
 
+  test("a goodUntil outside the years 1 to 9999 is a refusal, not a defect of the bridge", () => {
+    for (const text of ["+275000-01-01T00:00:00Z", "0000-12-31T23:59:59Z", "+010000-01-01T00:00:00Z"]) {
+      assert.equal(refusalOf({ goodUntil: Temporal.Instant.from(text) })[0], "goodUntil");
+    }
+
+    assert.equal(checkSendOptions({ goodUntil: Temporal.Instant.from("9999-12-31T23:59:59Z") }).ok, true);
+  });
+
   test("a goodUntil that is not a Temporal.Instant", () => {
     // SAFETY: a JavaScript caller can pass a value that the static type refuses.
     const goodUntil = new Date() as unknown as Temporal.Instant;

@@ -3,13 +3,15 @@
 // The main entry recognises a zod schema by its Standard Schema marker (`~standard.vendor === "zod"`). zod 3 has the
 // same marker, and a zod 4 release outside the supported range may hold definition parts that this adapter does not
 // know. So the adapter checks the release first, from `schema._zod.version`, and refuses a schema that it cannot read.
-
-import * as core from "zod/v4/core";
+//
+// The schema can come from any copy of zod: the ES module or the CommonJS build of an install, a copy in a bundle, or
+// another install. The check reads the schema's own version object, and the adapter reads and runs the schema through
+// its own internals only (`definition.ts`, `runs.ts`). The adapter imports no zod module.
 
 import { isNumber, isObjectLike } from "../codec/values.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import type { ZodSchema } from "./definition.ts";
+import type { ZodSchema } from "./internals.ts";
 
 /** A zod release number. */
 export type ZodVersion = { readonly major: number; readonly minor: number; readonly patch: number };
@@ -37,25 +39,17 @@ export type ZodReleaseRefused =
   /** The schema has no zod 4 internals: a zod 3 schema (zod 3.24 and later, or the `zod/v3` export of zod 4). */
   | { readonly kind: "Zod3Schema"; readonly fix: string }
   /** A zod 4 release outside `SUPPORTED_ZOD`. */
-  | { readonly kind: "ZodVersionNotSupported"; readonly found: ZodVersion; readonly supported: string }
-  /**
-   * A zod release inside the range, but another copy of zod than the one that horsies loads (two installs, or the
-   * CommonJS and the ES module copy of one install): the self-check ran on the other copy.
-   */
-  | { readonly kind: "OtherZodCopy"; readonly found: ZodVersion; readonly loaded: ZodVersion };
+  | { readonly kind: "ZodVersionNotSupported"; readonly found: ZodVersion; readonly supported: string };
 
 const ZOD_3: ZodReleaseRefused = Object.freeze({
   kind: "Zod3Schema",
   fix: 'build the schema with zod 4: import { z } from "zod", not from "zod/v3" or a zod 3 install',
 });
 
-/** The zod copy that horsies loads: its version object is the one that each of its schemas holds. */
-const LOADED: ZodVersion = Object.freeze({ ...core.version });
-
 /**
- * The zod 4 schema of a marked value, when the release that built it is the zod copy that horsies loads and is inside
- * `SUPPORTED_ZOD`. Fails with `Zod3Schema`, `ZodVersionNotSupported` or `OtherZodCopy`. Pure: it reads
- * `_zod.version` and the presence of `_zod.def` only.
+ * The zod 4 schema of a marked value, when the release that built it is inside `SUPPORTED_ZOD`. The release is read
+ * from the schema itself, so a schema of each zod copy passes. Fails with `Zod3Schema` or `ZodVersionNotSupported`.
+ * Pure: it reads `_zod.version` and the presence of `_zod.def` only.
  */
 export function zodSchemaOf(marked: StandardSchemaMarked): Result<ZodSchema, ZodReleaseRefused> {
   const read = releaseOf(marked);
@@ -70,21 +64,16 @@ export function zodSchemaOf(marked: StandardSchemaMarked): Result<ZodSchema, Zod
         );
       }
 
-      if (read.versionObject !== core.version) {
-        return err(Object.freeze({ kind: "OtherZodCopy", found: read.version, loaded: LOADED }));
-      }
-
-      // SAFETY: the value has zod 4 internals (`_zod.def`, `_zod.version`) of the zod copy that horsies loads.
+      // SAFETY: the value has zod 4 internals (`_zod.def`, `_zod.version`) of a release inside `SUPPORTED_ZOD`. Each
+      // schema of these releases, from each zod copy, has the internals that `ZodSchema` names.
       return ok(marked as unknown as ZodSchema);
     default:
       return unreachable(read, "zodSchemaOf");
   }
 }
 
-/** The release of a marked value: zod 4 internals with a version object, or none (zod 3). */
-type ReleaseRead =
-  | { readonly state: "zod3" }
-  | { readonly state: "zod4"; readonly version: ZodVersion; readonly versionObject: object };
+/** The release of a marked value: zod 4 internals with a release number, or none (zod 3). */
+type ReleaseRead = { readonly state: "zod3" } | { readonly state: "zod4"; readonly version: ZodVersion };
 
 const ZOD_3_READ: ReleaseRead = Object.freeze({ state: "zod3" });
 
@@ -108,7 +97,7 @@ function releaseOf(marked: StandardSchemaMarked): ReleaseRead {
   const { major, minor, patch } = versionObject;
 
   return isNumber(major) && isNumber(minor) && isNumber(patch)
-    ? { state: "zod4", version: Object.freeze({ major, minor, patch }), versionObject }
+    ? { state: "zod4", version: Object.freeze({ major, minor, patch }) }
     : ZOD_3_READ;
 }
 
