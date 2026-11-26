@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { before, describe, test } from "node:test";
 
-import { EXIT_USAGE } from "../../../horsies/src/cli/command-parts.ts";
+import { EXIT_USAGE } from "../../../horsies/src/cli/usage.ts";
 import { metricsCommandDeps, runMetricsCommand } from "../../../horsies/src/cli/metrics-command.ts";
 import { envelopeValue, nativeValueAsync } from "../../../horsies/src/native/call/envelope.ts";
 import { fleetMetricsAddon } from "../../../horsies/src/native/facades/fleet-metrics.ts";

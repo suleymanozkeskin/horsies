@@ -14,8 +14,8 @@
 // Exit codes: 0 after an operator stop; 1 when the address does not bind; 2 for arguments that do
 // not parse, `--listen` included.
 
-import { parseArgs } from "node:util";
-
+import type { AppContext } from "../app/context.ts";
+import type { WorkerLogLevel } from "../_catalog/worker_manifest.ts";
 import { configureLogging } from "../logging.ts";
 import { nativeValue, nativeValueAsync } from "../native/call/envelope.ts";
 import { unreachable } from "../native/call/never.ts";
@@ -24,19 +24,28 @@ import type { FleetMetricsRunEnd, MetricsListenAddressCheck } from "../native/fa
 import type { MonitoringHandlerApp } from "../web/handler.ts";
 import { err, ok } from "../wire/result.ts";
 import type { Result } from "../wire/result.ts";
+import { processSignals, type SignalSource, stopOnSignals } from "./signals.ts";
 import {
-  DEFAULT_LOG_LEVEL,
+  type CommandExitCode,
+  type CommandOutput,
   EXIT_FAILED,
-  EXIT_STOPPED,
+  EXIT_PASSED,
   EXIT_USAGE,
-  listenForStopSignals,
-  parseArgsUsageError,
+  parseFlags,
   parseLogLevel,
   processOutput,
+  textFlag,
   usageError,
-  usageErrorLine,
-} from "./command-parts.ts";
-import type { CliLogLevel, CommandExitCode, CommandOutput, StopSignals, UsageError } from "./command-parts.ts";
+  type UsageError,
+  usageErrorLines,
+} from "./usage.ts";
+import { monitoringAppOf } from "./web-command.ts";
+
+/** The usage line of `metrics`. */
+export const METRICS_USAGE = "<entry> metrics --listen HOST:PORT [--loglevel LEVEL]";
+
+/** The default `--loglevel` of `metrics`, as in the Python and Rust clients. */
+export const METRICS_DEFAULT_LOG_LEVEL: WorkerLogLevel = "INFO";
 
 /** The flags of `metrics`, as `node:util` `parseArgs` reads them. */
 const METRICS_FLAG_OPTIONS = {
@@ -48,7 +57,7 @@ const METRICS_FLAG_OPTIONS = {
 export interface MetricsFlags {
   /** The `HOST:PORT` text, which the core checks. */
   readonly listen: string;
-  readonly logLevel: CliLogLevel;
+  readonly logLevel: WorkerLogLevel;
 }
 
 /** The facts of an app that the `metrics` command reads. */
@@ -65,10 +74,16 @@ export interface FleetMetricsRun {
 /** What `metrics` calls that does I/O or calls the addon. */
 export interface MetricsCommandDeps {
   readonly output: CommandOutput;
-  readonly setLogLevel: (level: CliLogLevel) => undefined;
+  readonly setLogLevel: (level: WorkerLogLevel) => void;
   readonly checkListenAddress: (text: string) => MetricsListenAddressCheck;
   readonly startFleetMetrics: (listen: string) => FleetMetricsRun;
-  readonly stopSignals: () => StopSignals;
+  /** The source of the stop signals: the process, or a fake in a test. */
+  readonly signals: SignalSource;
+}
+
+/** The dependencies of `metrics` for the app of `context` in this process. */
+export function processMetricsCommandDeps(context: AppContext): MetricsCommandDeps {
+  return metricsCommandDeps(monitoringAppOf(context));
 }
 
 /** The production dependencies of `metrics` for `app`. */
@@ -77,13 +92,11 @@ export function metricsCommandDeps(app: FleetMetricsApp): MetricsCommandDeps {
     output: processOutput(),
     setLogLevel: (level) => {
       configureLogging({ levels: { default: level } });
-
-      return undefined;
     },
     checkListenAddress: (text) =>
       nativeValue("parseMetricsListenAddress", () => fleetMetricsAddon().parseMetricsListenAddress(text)),
     startFleetMetrics: (listen) => startFleetMetrics(app, listen),
-    stopSignals: listenForStopSignals,
+    signals: processSignals(),
   };
 }
 
@@ -108,7 +121,9 @@ export async function runMetricsCommand(args: readonly string[], deps: MetricsCo
   const flags = preparedMetrics(args, deps.checkListenAddress);
 
   if (!flags.ok) {
-    deps.output.writeError(usageErrorLine("metrics", flags.error));
+    for (const line of usageErrorLines("metrics", METRICS_USAGE, flags.error)) {
+      deps.output.writeError(line);
+    }
 
     return EXIT_USAGE;
   }
@@ -119,7 +134,7 @@ export async function runMetricsCommand(args: readonly string[], deps: MetricsCo
 
   switch (end.kind) {
     case "stopped":
-      return EXIT_STOPPED;
+      return EXIT_PASSED;
     case "failed":
       deps.output.writeError(end.message);
 
@@ -145,63 +160,35 @@ function preparedMetrics(
   return listen.ok ? flags : listen;
 }
 
-/** Run the server on `listen` until it ends or a stop signal asks it to stop; then its end. */
+/**
+ * Run the server on `listen` until it ends; the first stop signal asks it to stop. The handlers stay until the process
+ * ends (`cli.run` ends it), and each signal writes its line.
+ */
 async function runUntilStop(listen: string, deps: MetricsCommandDeps): Promise<FleetMetricsRunEnd> {
-  const signals = deps.stopSignals();
+  const run = deps.startFleetMetrics(listen);
 
-  try {
-    const run = deps.startFleetMetrics(listen);
-    const first = await Promise.race([run.ended.then(endedFirst), signals.received.then(signalledFirst)]);
+  stopOnSignals(deps.signals, "metrics", () => run.requestStop(), (line) => deps.output.writeError(line));
 
-    switch (first.kind) {
-      case "signalled":
-        run.requestStop();
-        break;
-      case "ended":
-        break;
-      default:
-        return unreachable(first);
-    }
-
-    return await run.ended;
-  } finally {
-    signals.remove();
-  }
-}
-
-/** Which came first: the end of the run or a stop signal. */
-type FirstEvent = { readonly kind: "ended" } | { readonly kind: "signalled" };
-
-function endedFirst(): FirstEvent {
-  return { kind: "ended" };
-}
-
-function signalledFirst(): FirstEvent {
-  return { kind: "signalled" };
+  return run.ended;
 }
 
 /** The flags of `metrics`: `--listen` is required. Pure. */
 export function parseMetricsFlags(args: readonly string[]): Result<MetricsFlags, UsageError> {
-  let values: ReturnType<typeof parseMetricsArgs>["values"];
+  const parsed = parseFlags(args, METRICS_FLAG_OPTIONS);
 
-  try {
-    values = parseMetricsArgs(args).values;
-  } catch (cause) {
-    return err(parseArgsUsageError(cause));
+  if (!parsed.ok) {
+    return parsed;
   }
 
-  if (values.listen === undefined) {
+  const listen = textFlag(parsed.value, "listen");
+
+  if (listen === undefined) {
     return err(usageError("--listen HOST:PORT is required; there is no default"));
   }
 
-  const logLevel = parseLogLevel(values.loglevel ?? DEFAULT_LOG_LEVEL);
+  const logLevel = parseLogLevel(textFlag(parsed.value, "loglevel") ?? METRICS_DEFAULT_LOG_LEVEL);
 
-  return logLevel.ok ? ok({ listen: values.listen, logLevel: logLevel.value }) : logLevel;
-}
-
-/** `parseArgs` over the flags of `metrics`: strict, no positional argument. Throws its usage error. */
-function parseMetricsArgs(args: readonly string[]) {
-  return parseArgs({ args: [...args], options: METRICS_FLAG_OPTIONS, strict: true, allowPositionals: false });
+  return logLevel.ok ? ok({ listen, logLevel: logLevel.value }) : logLevel;
 }
 
 /** The core's check of `--listen`; a refusal is a usage error with the core's rule. */

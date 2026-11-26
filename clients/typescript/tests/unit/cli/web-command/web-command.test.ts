@@ -3,8 +3,8 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { EXIT_FAILED, EXIT_STOPPED, EXIT_USAGE } from "../../../../horsies/src/cli/command-parts.ts";
-import type { CliLogLevel } from "../../../../horsies/src/cli/command-parts.ts";
+import type { WorkerLogLevel } from "../../../../horsies/src/_catalog/worker_manifest.ts";
+import { EXIT_FAILED, EXIT_PASSED, EXIT_USAGE } from "../../../../horsies/src/cli/usage.ts";
 import {
   isLoopbackHost,
   parseWebFlags,
@@ -58,10 +58,8 @@ function fakeWeb(check: CheckStepOutcome = { kind: "passed" }, bind: FakeBind = 
 
   const deps: WebCommandDeps = {
     output,
-    setLogLevel: (level: CliLogLevel) => {
+    setLogLevel: (level: WorkerLogLevel) => {
       events.push(`log level ${level}`);
-
-      return undefined;
     },
     checkStatic: async () => {
       events.push("check");
@@ -81,7 +79,7 @@ function fakeWeb(check: CheckStepOutcome = { kind: "passed" }, bind: FakeBind = 
 
       return serveOutcome(address, bind, recordClose);
     },
-    stopSignals: signals.listen,
+    signals: signals.source,
   };
 
   return { deps, errors, events, options, served, signals };
@@ -98,7 +96,7 @@ function serveOutcome(address: ServeAddress, bind: FakeBind, recordClose: () => 
 async function runToStop(run: WebRun, args: string[]): Promise<number> {
   const running = runWebCommand(args, run.deps);
 
-  await Promise.resolve();
+  await run.signals.installedOnce;
   run.signals.send("SIGTERM");
 
   return running;
@@ -169,9 +167,10 @@ describe("the flags of web", () => {
       const code = await runWebCommand([...args], run.deps);
 
       assert.equal(code, EXIT_USAGE);
-      assert.equal(run.errors.length, 1);
-      assert.ok(run.errors[0]?.startsWith("horsies web: error: "), run.errors.join("\n"));
-      assert.ok(run.errors[0]?.includes(text), run.errors.join("\n"));
+      assert.equal(run.errors.length, 2);
+      assert.ok(run.errors[0]?.startsWith("usage: <entry> web "), run.errors.join("\n"));
+      assert.ok(run.errors[1]?.startsWith("horsies web: error: "), run.errors.join("\n"));
+      assert.ok(run.errors[1]?.includes(text), run.errors.join("\n"));
       assert.deepEqual(run.events, []);
     });
   }
@@ -183,7 +182,7 @@ describe("the access rules", () => {
     const code = await runWebCommand(["--auth", "none", "--host", "0.0.0.0"], run.deps);
 
     assert.equal(code, EXIT_USAGE);
-    assert.match(run.errors[0] ?? "", /--auth none is only allowed on a loopback host; "0\.0\.0\.0" is reachable/u);
+    assert.match(run.errors[1] ?? "", /--auth none is only allowed on a loopback host; "0\.0\.0\.0" is reachable/u);
     assert.deepEqual(run.events, []);
     assert.deepEqual(run.served, []);
   });
@@ -191,7 +190,7 @@ describe("the access rules", () => {
   test("--auth none serves viewOnly, and allowAll with --enable-actions", async () => {
     const viewing = fakeWeb();
 
-    assert.equal(await runToStop(viewing, []), EXIT_STOPPED);
+    assert.equal(await runToStop(viewing, []), EXIT_PASSED);
 
     const request = new Request("http://127.0.0.1/");
 
@@ -200,7 +199,7 @@ describe("the access rules", () => {
 
     const acting = fakeWeb();
 
-    assert.equal(await runToStop(acting, ["--enable-actions"]), EXIT_STOPPED);
+    assert.equal(await runToStop(acting, ["--enable-actions"]), EXIT_PASSED);
     assert.equal(await acting.options[0]?.auth.canAct(request), true);
     assert.equal(acting.options[0]?.actions, "enabled");
   });
@@ -209,7 +208,7 @@ describe("the access rules", () => {
     const run = fakeWeb();
     const code = await runToStop(run, ["--host", "0.0.0.0", "--auth", "trusted-header", "--trusted-header", "X-User"]);
 
-    assert.equal(code, EXIT_STOPPED);
+    assert.equal(code, EXIT_PASSED);
     assert.equal(run.errors[0], trustedHeaderWarning("X-User"));
     assert.match(run.errors[0] ?? "", /^SECURITY: the reverse proxy in front of this server MUST strip or overwrite the X-User header/u);
 
@@ -224,7 +223,7 @@ describe("the access rules", () => {
     const code = await runWebCommand(["--auth", "trusted-header", "--trusted-header", "X User"], run.deps);
 
     assert.equal(code, EXIT_USAGE);
-    assert.match(run.errors[0] ?? "", /--trusted-header: the trusted header name "X User" is not valid/u);
+    assert.match(run.errors[1] ?? "", /--trusted-header: the trusted header name "X User" is not valid/u);
   });
 
   test("a blank trusted header name exits 2", async () => {
@@ -232,7 +231,7 @@ describe("the access rules", () => {
     const code = await runWebCommand(["--auth", "trusted-header", "--trusted-header", " "], run.deps);
 
     assert.equal(code, EXIT_USAGE);
-    assert.match(run.errors[0] ?? "", /--trusted-header: the trusted header needs a header name/u);
+    assert.match(run.errors[1] ?? "", /--trusted-header: the trusted header needs a header name/u);
   });
 
   test("loopback hosts", () => {
@@ -252,14 +251,14 @@ describe("the trace link", () => {
     const code = await runWebCommand(["--trace-link", "bad"], run.deps);
 
     assert.equal(code, EXIT_USAGE);
-    assert.equal(run.errors[0], "horsies web: error: invalid --trace-link: the template has no host after its scheme");
+    assert.equal(run.errors[1], "horsies web: error: invalid --trace-link: the template has no host after its scheme");
     assert.deepEqual(run.events, []);
   });
 
   test("an accepted --trace-link reaches the handler", async () => {
     const run = fakeWeb();
 
-    assert.equal(await runToStop(run, ["--trace-link", "https://grafana.test/{trace_id}"]), EXIT_STOPPED);
+    assert.equal(await runToStop(run, ["--trace-link", "https://grafana.test/{trace_id}"]), EXIT_PASSED);
     assert.equal(run.options[0]?.ui?.traceLink?.text, "https://grafana.test/{trace_id}");
   });
 });
@@ -286,11 +285,12 @@ describe("the check, the serve and the stop", () => {
     const run = fakeWeb();
     const code = await runToStop(run, ["--port", "9100"]);
 
-    assert.equal(code, EXIT_STOPPED);
+    assert.equal(code, EXIT_PASSED);
     assert.deepEqual(run.served, [{ host: "127.0.0.1", port: 9100 }]);
     assert.deepEqual(run.events, ["log level INFO", "check", "handler closed", "server closed"]);
     assert.ok(run.errors.includes("Serving horsies monitoring UI on http://127.0.0.1:8600"), run.errors.join("\n"));
-    assert.equal(run.signals.removed, 1);
+    assert.ok(run.errors.includes("horsies web: SIGTERM received; stopping after the drain"), run.errors.join("\n"));
+    assert.equal(run.signals.installed, 2);
   });
 
   test("an address that does not bind exits 1 and closes the handler", async () => {
@@ -303,6 +303,6 @@ describe("the check, the serve and the stop", () => {
       run.errors.join("\n"),
     );
     assert.deepEqual(run.events, ["log level INFO", "check", "handler closed"]);
-    assert.equal(run.signals.removed, 1);
+    assert.equal(run.signals.installed, 2);
   });
 });

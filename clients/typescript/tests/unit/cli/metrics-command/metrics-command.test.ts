@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { EXIT_FAILED, EXIT_STOPPED, EXIT_USAGE } from "../../../../horsies/src/cli/command-parts.ts";
+import { EXIT_FAILED, EXIT_PASSED, EXIT_USAGE } from "../../../../horsies/src/cli/usage.ts";
 import { parseMetricsFlags, runMetricsCommand } from "../../../../horsies/src/cli/metrics-command.ts";
 import type { FleetMetricsRun, MetricsCommandDeps } from "../../../../horsies/src/cli/metrics-command.ts";
 import type { FleetMetricsRunEnd, MetricsListenAddressCheck } from "../../../../horsies/src/native/facades/fleet-metrics.ts";
@@ -47,8 +47,6 @@ function fakeMetrics(): MetricsRun {
     output,
     setLogLevel: (level) => {
       events.push(`log level ${level}`);
-
-      return undefined;
     },
     checkListenAddress: coreCheck,
     startFleetMetrics: (listen) => {
@@ -56,7 +54,7 @@ function fakeMetrics(): MetricsRun {
 
       return run;
     },
-    stopSignals: signals.listen,
+    signals: signals.source,
   };
 
   return { deps, errors, events, signals, end: (end) => ended.resolve(end) };
@@ -82,8 +80,9 @@ describe("the flags of metrics", () => {
       const code = await runMetricsCommand([...args], run.deps);
 
       assert.equal(code, EXIT_USAGE);
-      assert.ok(run.errors[0]?.startsWith("horsies metrics: error: "), run.errors.join("\n"));
-      assert.ok(run.errors[0]?.includes(text), run.errors.join("\n"));
+      assert.ok(run.errors[0]?.startsWith("usage: <entry> metrics "), run.errors.join("\n"));
+      assert.ok(run.errors[1]?.startsWith("horsies metrics: error: "), run.errors.join("\n"));
+      assert.ok(run.errors[1]?.includes(text), run.errors.join("\n"));
       assert.deepEqual(run.events, []);
       assert.equal(run.signals.installed, 0);
     });
@@ -97,9 +96,10 @@ describe("the run of metrics", () => {
 
     run.signals.send("SIGINT");
 
-    assert.equal(await running, EXIT_STOPPED);
+    assert.equal(await running, EXIT_PASSED);
     assert.deepEqual(run.events, ["log level ERROR", "started on 127.0.0.1:9100", "stop requested"]);
-    assert.equal(run.signals.removed, 1);
+    assert.deepEqual(run.errors, ["horsies metrics: SIGINT received; stopping after the drain"]);
+    assert.equal(run.signals.installed, 2);
   });
 
   test("an address that does not bind exits 1 with the cause", async () => {
@@ -111,6 +111,6 @@ describe("the run of metrics", () => {
     assert.equal(await running, EXIT_FAILED);
     assert.deepEqual(run.errors, ["could not bind the metrics endpoint to 127.0.0.1:9100: address in use"]);
     assert.ok(!run.events.includes("stop requested"));
-    assert.equal(run.signals.removed, 1);
+    assert.equal(run.signals.installed, 2);
   });
 });

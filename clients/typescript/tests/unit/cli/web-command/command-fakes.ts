@@ -1,6 +1,7 @@
 // Fakes of the I/O of the `web` and `metrics` commands: the output lines and the stop signals.
 
-import type { CommandOutput, StopSignalName, StopSignals } from "../../../../horsies/src/cli/command-parts.ts";
+import type { SignalSource, StopSignalName } from "../../../../horsies/src/cli/signals.ts";
+import type { CommandOutput } from "../../../../horsies/src/cli/usage.ts";
 
 /** An output that keeps its lines. */
 export function recordedOutput(): { readonly output: CommandOutput; readonly out: string[]; readonly errors: string[] } {
@@ -13,40 +14,39 @@ export function recordedOutput(): { readonly output: CommandOutput; readonly out
     output: {
       writeOut: (line) => {
         out.push(line);
-
-        return undefined;
       },
       writeError: (line) => {
         errors.push(line);
-
-        return undefined;
       },
     },
   };
 }
 
-/** Stop signals that the test sends, and the count of removals. */
+/** A signal source that the test drives: it keeps each handler and sends a signal to its handlers. */
 export class FakeStopSignals {
-  readonly #received = Promise.withResolvers<StopSignalName>();
-  installed = 0;
-  removed = 0;
+  readonly #listeners = new Map<StopSignalName, (() => void)[]>();
+  readonly #firstHandler = Promise.withResolvers<void>();
 
-  /** The factory that a command calls. */
-  readonly listen = (): StopSignals => {
-    this.installed += 1;
+  /** Settles when a command installs its first handler. */
+  readonly installedOnce: Promise<void> = this.#firstHandler.promise;
 
-    return {
-      received: this.#received.promise,
-      remove: () => {
-        this.removed += 1;
-
-        return undefined;
-      },
-    };
+  /** The source that a command takes. */
+  readonly source: SignalSource = {
+    on: (signal, listener) => {
+      this.#listeners.set(signal, [...(this.#listeners.get(signal) ?? []), listener]);
+      this.#firstHandler.resolve();
+    },
   };
 
-  /** Send `signal`. */
+  /** How many handlers a command installed. */
+  get installed(): number {
+    return [...this.#listeners.values()].reduce((count, listeners) => count + listeners.length, 0);
+  }
+
+  /** Send `signal` to its handlers. */
   send(signal: StopSignalName): void {
-    this.#received.resolve(signal);
+    for (const listener of this.#listeners.get(signal) ?? []) {
+      listener();
+    }
   }
 }

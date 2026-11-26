@@ -9,9 +9,16 @@
 // trusted header name that is not valid, and a trace link template that the core refuses.
 
 import { isIPv4, isIPv6 } from "node:net";
-import { parseArgs } from "node:util";
 
+import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
+import type { AppContext } from "../app/context.ts";
+import type { WorkerLogLevel } from "../_catalog/worker_manifest.ts";
+import { reportText } from "../check/report.ts";
+import { staticCheck } from "../check/static-check.ts";
 import { configureLogging } from "../logging.ts";
+import { checkAppConfig, checkTaskOptions, parseDeclaredErrorCodes } from "../native/sends/sends.ts";
+import { clientVersion } from "../web/client-version.ts";
+import { appHandle } from "../worker/run.ts";
 import { unreachable } from "../native/call/never.ts";
 import { allowAll, trustedHeader, trustedHeaderRefusalText, viewOnly } from "../web/auth.ts";
 import type { ActionsSwitch, MonitoringAuthPolicy } from "../web/auth.ts";
@@ -24,19 +31,30 @@ import { parseTraceLink } from "../web/trace-link.ts";
 import type { TraceLinkRefusal, TraceLinkTemplate } from "../web/trace-link.ts";
 import { err, ok } from "../wire/result.ts";
 import type { Result } from "../wire/result.ts";
+import { processSignals, type SignalSource, stopOnSignals } from "./signals.ts";
 import {
-  DEFAULT_LOG_LEVEL,
+  type CommandExitCode,
+  type CommandOutput,
   EXIT_FAILED,
-  EXIT_STOPPED,
+  EXIT_PASSED,
   EXIT_USAGE,
-  listenForStopSignals,
-  parseArgsUsageError,
+  parseFlags,
   parseLogLevel,
   processOutput,
+  switchFlag,
+  textFlag,
   usageError,
-  usageErrorLine,
-} from "./command-parts.ts";
-import type { CliLogLevel, CommandExitCode, CommandOutput, StopSignals, UsageError } from "./command-parts.ts";
+  type UsageError,
+  usageErrorLines,
+} from "./usage.ts";
+
+/** The usage line of `web`. */
+export const WEB_USAGE: string =
+  "<entry> web [--host HOST] [--port PORT] [--auth none|trusted-header] [--trusted-header NAME] " +
+  "[--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]";
+
+/** The default `--loglevel` of `web`, as in the Python and Rust clients. */
+export const WEB_DEFAULT_LOG_LEVEL: WorkerLogLevel = "INFO";
 
 /** The default `--host`: this machine only. */
 export const WEB_DEFAULT_HOST = "127.0.0.1";
@@ -74,7 +92,7 @@ export interface WebFlags {
   readonly trustedHeaderName: string;
   readonly actions: ActionsSwitch;
   readonly traceLink: TraceLinkFlag;
-  readonly logLevel: CliLogLevel;
+  readonly logLevel: WorkerLogLevel;
 }
 
 /** The access of the served handler. */
@@ -88,12 +106,59 @@ export type CheckStepOutcome = { readonly kind: "passed" } | { readonly kind: "r
 /** What `web` calls that does I/O or calls the addon. */
 export interface WebCommandDeps {
   readonly output: CommandOutput;
-  readonly setLogLevel: (level: CliLogLevel) => undefined;
+  readonly setLogLevel: (level: WorkerLogLevel) => void;
   readonly checkStatic: () => Promise<CheckStepOutcome>;
   readonly parseTraceLink: (text: string) => Result<TraceLinkTemplate, TraceLinkRefusal>;
   readonly createHandler: (options: MonitoringHandlerOptions) => MonitoringHandler;
   readonly serve: (handler: FetchHandler, address: ServeAddress) => Promise<ServeOutcome>;
-  readonly stopSignals: () => StopSignals;
+  /** The source of the stop signals: the process, or a fake in a test. */
+  readonly signals: SignalSource;
+}
+
+/**
+ * The facts of the app of `context` that the monitoring handler and the fleet metrics read, on a main thread: the
+ * app's core handle, the queue names of its config, its schedule names (none: the config holds no schedules yet) and
+ * the package version.
+ */
+export function monitoringAppOf(context: AppContext): MonitoringHandlerApp {
+  return {
+    coreHandle: appHandle(context),
+    queueNames: queueNamesOf(context),
+    scheduleNames: [],
+    clientVersion: clientVersion(),
+  };
+}
+
+/** The queue names of the config of `context`: the default queue, or the custom queues. Pure. */
+function queueNamesOf(context: AppContext): readonly string[] {
+  const queues = context.config.queues;
+
+  switch (queues.kind) {
+    case "default":
+      return [DEFAULT_QUEUE_ROUTE.queueName];
+    case "custom":
+      return [...queues.queues.keys()];
+    default:
+      return unreachable(queues);
+  }
+}
+
+/** The dependencies of `web` for the app of `context` in this process, with the check without the live step. */
+export function processWebCommandDeps(context: AppContext): WebCommandDeps {
+  const checks = { checkAppConfig, parseDeclaredErrorCodes, checkTaskOptions };
+
+  return webCommandDeps(monitoringAppOf(context), async () => {
+    const checked = staticCheck(context, checks, "withSchedules", "check");
+
+    switch (checked.kind) {
+      case "passed":
+        return { kind: "passed" };
+      case "refused":
+        return { kind: "refused", report: reportText(checked.report) };
+      default:
+        return unreachable(checked);
+    }
+  });
 }
 
 /** The production dependencies of `web` for `app`, with the check step of the CLI runner. */
@@ -104,17 +169,17 @@ export function webCommandDeps(app: MonitoringHandlerApp, checkStatic: () => Pro
     output,
     setLogLevel: (level) => {
       configureLogging({ levels: { default: level } });
-
-      return undefined;
     },
     checkStatic,
     parseTraceLink,
     createHandler: (options) => createMonitoringHandler(app, options),
     serve: async (handler, address) =>
-      serveHandler(serverRuntime(), handler, address, (failure) =>
-        output.writeError(`horsies web: ${failure.method} ${failure.path} failed: ${failure.name}: ${failure.message}`),
-      ),
-    stopSignals: listenForStopSignals,
+      serveHandler(serverRuntime(), handler, address, (failure) => {
+        output.writeError(`horsies web: ${failure.method} ${failure.path} failed: ${failure.name}: ${failure.message}`);
+
+        return undefined;
+      }),
+    signals: processSignals(),
   };
 }
 
@@ -123,7 +188,9 @@ export async function runWebCommand(args: readonly string[], deps: WebCommandDep
   const prepared = prepareWeb(args, deps.parseTraceLink);
 
   if (!prepared.ok) {
-    deps.output.writeError(usageErrorLine("web", prepared.error));
+    for (const line of usageErrorLines("web", WEB_USAGE, prepared.error)) {
+      deps.output.writeError(line);
+    }
 
     return EXIT_USAGE;
   }
@@ -193,12 +260,11 @@ async function serveUntilStop(
   address: ServeAddress,
   deps: WebCommandDeps,
 ): Promise<CommandExitCode> {
-  const signals = deps.stopSignals();
+  const stop = firstStopSignal(deps.signals, (line) => deps.output.writeError(line));
   const outcome = await deps.serve(handler, address);
 
   switch (outcome.kind) {
     case "bindFailed":
-      signals.remove();
       deps.output.writeError(`could not bind the monitoring server to ${addressText(address)}: ${outcome.cause}`);
       await handler.close();
 
@@ -211,64 +277,67 @@ async function serveUntilStop(
 
   deps.output.writeError(`Serving horsies monitoring UI on http://${addressText(outcome.server.address)}`);
 
-  const signal = await signals.received;
-
-  deps.output.writeError(`horsies web: ${signal} received; closing the event streams, then the server`);
+  await stop;
 
   try {
     await handler.close();
   } finally {
     // A close of the handler that throws (a stopped core) still closes the server.
     await outcome.server.close();
-    signals.remove();
   }
 
-  return EXIT_STOPPED;
+  return EXIT_PASSED;
+}
+
+/**
+ * A Promise that settles at the first stop signal of `source`: the callback form of `stopOnSignals` as a Promise. The
+ * handlers stay until the process ends (`cli.run` ends it), and each signal writes its line to `writeLine`.
+ */
+function firstStopSignal(source: SignalSource, writeLine: (line: string) => void): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>();
+
+  stopOnSignals(source, "web", () => resolve(), writeLine);
+
+  return promise;
 }
 
 /** The flags of `web`. Pure. */
 export function parseWebFlags(args: readonly string[]): Result<WebFlags, UsageError> {
-  let values: ReturnType<typeof parseWebArgs>["values"];
+  const parsed = parseFlags(args, WEB_FLAG_OPTIONS);
 
-  try {
-    values = parseWebArgs(args).values;
-  } catch (cause) {
-    return err(parseArgsUsageError(cause));
+  if (!parsed.ok) {
+    return parsed;
   }
 
-  const port = parsePort(values.port ?? String(WEB_DEFAULT_PORT));
+  const values = parsed.value;
+  const port = parsePort(textFlag(values, "port") ?? String(WEB_DEFAULT_PORT));
 
   if (!port.ok) {
     return port;
   }
 
-  const auth = parseAuthMode(values.auth ?? "none");
+  const auth = parseAuthMode(textFlag(values, "auth") ?? "none");
 
   if (!auth.ok) {
     return auth;
   }
 
-  const logLevel = parseLogLevel(values.loglevel ?? DEFAULT_LOG_LEVEL);
+  const logLevel = parseLogLevel(textFlag(values, "loglevel") ?? WEB_DEFAULT_LOG_LEVEL);
 
   if (!logLevel.ok) {
     return logLevel;
   }
 
-  const traceLink = values["trace-link"];
+  const traceLink = textFlag(values, "trace-link");
 
   return ok({
-    address: { host: values.host ?? WEB_DEFAULT_HOST, port: port.value },
+    address: { host: textFlag(values, "host") ?? WEB_DEFAULT_HOST, port: port.value },
     auth: auth.value,
-    trustedHeaderName: values["trusted-header"] ?? WEB_DEFAULT_TRUSTED_HEADER,
-    actions: values["enable-actions"] === true ? "enabled" : "disabled",
+    trustedHeaderName: textFlag(values, "trusted-header") ?? WEB_DEFAULT_TRUSTED_HEADER,
+    actions: switchFlag(values, "enable-actions") ? "enabled" : "disabled",
     traceLink: traceLink === undefined ? { kind: "noTraceLink" } : { kind: "template", text: traceLink },
     logLevel: logLevel.value,
   });
-}
-
-/** `parseArgs` over the flags of `web`: strict, no positional argument. Throws its usage error. */
-function parseWebArgs(args: readonly string[]) {
-  return parseArgs({ args: [...args], options: WEB_FLAG_OPTIONS, strict: true, allowPositionals: false });
 }
 
 /** A `--port` value: a whole number from 0 to 65535 (0: a free port). Pure. */
