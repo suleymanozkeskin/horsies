@@ -74,6 +74,19 @@ describe("the worker area of the addon", () => {
     // The config check runs the broker check of the plan's connection step, so it refuses this text first.
     assert.throws(() => prepareWorker(pooled, startText({ kind: "NAMED", name: "io" })), ClientDefect);
 
+    // The config check compares the URL texts as written; the manifest writes `postgres://` as `postgresql://`, so
+    // the plan's connection step sees one URL twice.
+    const sameSession = JSON.stringify({
+      broker: {
+        database_url: "postgres://127.0.0.1:6432/horsies",
+        session_database_url: "postgresql://127.0.0.1:6432/horsies",
+        pgbouncer_transaction_mode: true,
+      },
+      worker_profiles: { io: { isolated: { kind: "isolated_children", count: 1 } } },
+    });
+
+    assert.equal(prepareWorker(sameSession, startText({ kind: "NAMED", name: "io" })).kind, "connectionSettingsRefused");
+
     const capped = JSON.stringify({
       broker: { database_url: "postgresql://127.0.0.1:55432/horsies" },
       cluster_wide_cap: 4_294_967_295,

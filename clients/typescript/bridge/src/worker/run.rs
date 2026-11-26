@@ -647,6 +647,19 @@ mod tests {
     }
 
     #[test]
+    fn a_session_url_equal_to_the_main_url_after_the_scheme_rewrite_is_a_connection_settings_refusal(
+    ) {
+        // The config check compares the texts as written; the producer
+        // manifest writes `postgres://` as `postgresql://`, so the plan's
+        // connection step sees one URL twice.
+        let config = r#"{"broker": {"database_url": "postgres://127.0.0.1:6432/horsies", "session_database_url": "postgresql://127.0.0.1:6432/horsies", "pgbouncer_transaction_mode": true}, "worker_profiles": {"io": {"isolated": {"kind": "isolated_children", "count": 1}}}}"#;
+        assert!(matches!(
+            preparation(config, &start(NAMED_IO)),
+            Ok(WorkerPreparation::ConnectionSettingsRefused { .. })
+        ));
+    }
+
+    #[test]
     fn a_start_member_that_the_parser_refuses_is_manifest_refused_with_its_path() {
         let text =
             start(NAMED_IO).replace(r#""execution": "ISOLATED""#, r#""execution": "FORKED""#);
