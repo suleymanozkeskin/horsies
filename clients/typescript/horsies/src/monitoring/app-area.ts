@@ -24,13 +24,15 @@ import type {
   WorkflowRunSummary,
 } from "../_catalog/monitoring_models.ts";
 import { cancelTask, type CancelTaskOptions } from "./cancel.ts";
+import type { MonitoringQueryCoreError } from "../_catalog/monitoring_errors.ts";
 import type {
   CancelTaskError,
-  HealthQueryError,
+  HealthInputError,
   HealthReadError,
   MonitoringReadError,
   PingDatabaseError,
   PingWorkersError,
+  WorkerHistoryError,
   WorkerReadError,
 } from "./errors.ts";
 import {
@@ -100,19 +102,19 @@ export interface Monitoring {
   taskFacets(query?: TaskFacetsQuery): Promise<Result<Facets, MonitoringReadError>>;
   taskBreakdown(query: TaskBreakdownQuery): Promise<Result<Breakdown, MonitoringReadError>>;
   listTasks(query?: TaskListQuery): Promise<Result<TaskListPage, MonitoringReadError>>;
-  taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringReadError>>;
-  workflowNames(): Promise<Result<readonly string[], MonitoringReadError>>;
+  taskDetail(taskId: TaskId): Promise<Result<TaskDetailRead, MonitoringQueryCoreError>>;
+  workflowNames(): Promise<Result<readonly string[], MonitoringQueryCoreError>>;
   workflowRuns(query?: WorkflowRunsQuery): Promise<Result<readonly WorkflowRunSummary[], MonitoringReadError>>;
-  workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringReadError>>;
+  workflowRun(workflowId: WorkflowId): Promise<Result<WorkflowRunRead, MonitoringQueryCoreError>>;
   workflowNode(workflowId: WorkflowId, taskIndex: number): Promise<Result<WorkflowNodeRead, MonitoringReadError>>;
-  schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringReadError>>;
+  schedules(): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryCoreError>>;
   workers(): Promise<Result<readonly WorkerStateSnapshot[], HealthReadError>>;
   worker(workerId: string): Promise<Result<WorkerStateRead, WorkerReadError>>;
   workerHistory(
     workerId: string,
     limit?: WorkerHistoryLimit,
-  ): Promise<Result<readonly WorkerStateSnapshot[], HealthQueryError>>;
-  staleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthQueryError>>;
+  ): Promise<Result<readonly WorkerStateSnapshot[], WorkerHistoryError>>;
+  staleTasks(query: StaleTasksQuery): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthInputError>>;
   expiredTasks(): Promise<Result<BoundedTaskList<ExpiredTaskRow>, HealthReadError>>;
   classCoverage(): Promise<Result<ClassCoverage, HealthReadError>>;
   classReport(): Promise<Result<ClassReport, HealthReadError>>;

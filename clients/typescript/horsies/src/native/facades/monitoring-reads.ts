@@ -23,6 +23,14 @@ export type RetriedArg = "any" | "retriedOnly";
 /** An error category, by its wire value. */
 export type ErrorCategoryArg = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "DOMAIN";
 
+/** A count of a query: the core's default (of the core's query `new`), or a value. */
+export type CountArg = { readonly kind: "coreDefault" } | { readonly kind: "set"; readonly value: number };
+
+/** The sort of the task list: the core's default, or a field and a direction. */
+export type SortArg =
+  | { readonly kind: "coreDefault" }
+  | { readonly kind: "set"; readonly field: SortFieldArg; readonly direction: SortDirectionArg };
+
 /** The sort field of the task list. */
 export type SortFieldArg =
   | "enqueuedAt"
@@ -78,17 +86,16 @@ export interface TaskBreakdownArg {
   readonly window: WindowArg;
   readonly groupBy: GroupByArg;
   readonly filters: FiltersArg;
-  readonly limit: number;
+  readonly limit: CountArg;
 }
 
 /** The task list read. */
 export interface TaskListArg {
   readonly window: WindowArg;
   readonly filters: FiltersArg;
-  readonly sortField: SortFieldArg;
-  readonly sortDirection: SortDirectionArg;
-  readonly offset: number;
-  readonly limit: number;
+  readonly sort: SortArg;
+  readonly offset: CountArg;
+  readonly limit: CountArg;
 }
 
 /** The workflow name filter of the workflow runs read. */
@@ -101,7 +108,7 @@ export type RunStatusArg = { readonly kind: "anyStatus" } | { readonly kind: "st
 export interface WorkflowRunsArg {
   readonly name: RunNameArg;
   readonly status: RunStatusArg;
-  readonly limit: number;
+  readonly limit: CountArg;
 }
 
 /** The outcome of one list, aggregate or workflow read. A run or node that no row holds is the text `null`. */

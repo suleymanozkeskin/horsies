@@ -17,7 +17,7 @@ import {
 const LONE_SURROGATE = "a\uD800";
 
 describe("taskListArg", () => {
-  test("a query with no field takes the core's defaults", () => {
+  test("a query with no field leaves each count and the sort at the core's default", () => {
     assert.deepEqual(taskListArg({}), {
       ok: true,
       value: {
@@ -31,10 +31,9 @@ describe("taskListArg", () => {
           errorCategories: [],
           retried: "any",
         },
-        sortField: "enqueuedAt",
-        sortDirection: "descending",
-        offset: 0,
-        limit: 50,
+        sort: { kind: "coreDefault" },
+        offset: { kind: "coreDefault" },
+        limit: { kind: "coreDefault" },
       },
     });
   });
@@ -53,8 +52,9 @@ describe("taskListArg", () => {
     assert.ok(arg.ok);
     assert.deepEqual(arg.value.filters.statuses, ["FAILED"]);
     assert.equal(arg.value.filters.retried, "retriedOnly");
-    assert.equal(arg.value.sortField, "queueSeconds");
-    assert.equal(arg.value.offset, 10);
+    assert.deepEqual(arg.value.sort, { kind: "set", field: "queueSeconds", direction: "ascending" });
+    assert.deepEqual(arg.value.offset, { kind: "set", value: 10 });
+    assert.deepEqual(arg.value.limit, { kind: "set", value: 20 });
   });
 
   test("an offset or a limit that is not a whole number is QUERY_REFUSED for the page", () => {
@@ -95,11 +95,11 @@ describe("the other queries", () => {
     });
   });
 
-  test("the breakdown limit defaults to 50 and a fraction is QUERY_REFUSED for the limit", () => {
+  test("the breakdown limit is left at the core's default, and a fraction is QUERY_REFUSED for the limit", () => {
     const arg = taskBreakdownArg({ groupBy: "worker" });
 
     assert.ok(arg.ok);
-    assert.equal(arg.value.limit, 50);
+    assert.deepEqual(arg.value.limit, { kind: "coreDefault" });
 
     const refused = taskBreakdownArg({ groupBy: "worker", limit: 0.5 });
 
@@ -107,14 +107,18 @@ describe("the other queries", () => {
     assert.equal(refused.error.field, "limit");
   });
 
-  test("the runs read has no name and no status by default and a limit of 30", () => {
+  test("the runs read has no name, no status and the core's default limit when the query names none", () => {
     assert.deepEqual(workflowRunsArg({}), {
       ok: true,
-      value: { name: { kind: "anyName" }, status: { kind: "anyStatus" }, limit: 30 },
+      value: { name: { kind: "anyName" }, status: { kind: "anyStatus" }, limit: { kind: "coreDefault" } },
     });
     assert.deepEqual(workflowRunsArg({ name: "nightly", status: "FAILED", limit: 5 }), {
       ok: true,
-      value: { name: { kind: "named", name: "nightly" }, status: { kind: "status", status: "FAILED" }, limit: 5 },
+      value: {
+        name: { kind: "named", name: "nightly" },
+        status: { kind: "status", status: "FAILED" },
+        limit: { kind: "set", value: 5 },
+      },
     });
   });
 

@@ -4,11 +4,14 @@
 //   addon answers a refused value at once as `QUERY_REFUSED` (field `window`, `page` or `limit`).
 // - This module refuses what the addon cannot take: a count that is not a whole number, and text that is not
 //   well-formed (a lone surrogate). Both are `QUERY_REFUSED` before any call.
-// - A field that a query leaves out takes the core's default, as the Python and Rust clients do.
+// - A field that a query leaves out takes the core's default: the addon argument says `coreDefault`, and the core's
+//   query keeps the value of its `new`. The package holds no copy of a default.
 
 import type { TaskStatus } from "../_catalog/status.ts";
 import type {
+  CountArg,
   FiltersArg,
+  SortArg,
   TaskBreakdownArg,
   TaskFacetsArg,
   TaskListArg,
@@ -20,18 +23,6 @@ import type {
 import { err, ok, type Result } from "../wire/result.ts";
 import type { WorkflowStatus } from "../wire/task-error.ts";
 import { queryRefused, type QueryRefused, type QueryRefusedField } from "./errors.ts";
-
-/** The first row of a task list page when the query names none (the core's `TaskListQuery::new`). */
-export const DEFAULT_TASK_PAGE_OFFSET = 0;
-
-/** The rows of a task list page when the query names none (the core's `TaskListQuery::new`). */
-export const DEFAULT_TASK_PAGE_LIMIT = 50;
-
-/** The groups of a breakdown when the query names none (the core's `TaskBreakdownQuery::new`). */
-export const DEFAULT_BREAKDOWN_LIMIT = 50;
-
-/** The runs of a workflow runs list when the query names none (the core's `WorkflowRunsQuery::new`). */
-export const DEFAULT_WORKFLOW_RUNS_LIMIT = 30;
 
 /** Nanoseconds per microsecond: the core stores instants in microseconds. */
 const NANOSECONDS_PER_MICROSECOND = 1000n;
@@ -68,7 +59,7 @@ export type TaskSortField =
 /** The order of the task list. */
 export type SortDirection = "ascending" | "descending";
 
-/** The sort of the task list. The default is `enqueuedAt`, `descending`. */
+/** The sort of the task list. Left out: the core's default. */
 export interface TaskSort {
   readonly field: TaskSortField;
   readonly direction: SortDirection;
@@ -95,20 +86,23 @@ export type TaskStatsQuery = Omit<TaskFilters, "statuses">;
 /** The task facets read: only the coarse filters, so one selection never empties the option lists of the others. */
 export type TaskFacetsQuery = Pick<TaskFilters, "window" | "statuses" | "errorCategories" | "retried">;
 
-/** The task breakdown read. `limit`: the most groups, 1 to 500. */
+/** The task breakdown read. `limit`: the most groups, 1 to `MAX_BREAKDOWN_LIMIT`; left out, the core's default. */
 export interface TaskBreakdownQuery extends TaskFilters {
   readonly groupBy: TaskGroupBy;
   readonly limit?: number;
 }
 
-/** The task list read. `limit`: 1 to 200; `offset` 0 or more; `offset + limit` at most 500. */
+/**
+ * The task list read. `limit`: 1 to `MAX_TASK_PAGE_LIMIT`; `offset` 0 or more; `offset + limit` at most
+ * `MAX_TASK_PAGE_REACH`. A count or the sort that the query leaves out takes the core's default.
+ */
 export interface TaskListQuery extends TaskFilters {
   readonly sort?: TaskSort;
   readonly offset?: number;
   readonly limit?: number;
 }
 
-/** The workflow runs read. `limit`: 1 to 200. */
+/** The workflow runs read. `limit`: 1 to `MAX_WORKFLOW_RUNS_LIMIT`; left out, the core's default. */
 export interface WorkflowRunsQuery {
   readonly name?: string;
   readonly status?: WorkflowStatus;
@@ -146,7 +140,7 @@ export function taskBreakdownArg(query: TaskBreakdownQuery): Result<TaskBreakdow
     return filters;
   }
 
-  const limit = wholeNumber("limit", query.limit ?? DEFAULT_BREAKDOWN_LIMIT);
+  const limit = countArg("limit", query.limit);
 
   if (!limit.ok) {
     return limit;
@@ -163,8 +157,8 @@ export function taskListArg(query: TaskListQuery): Result<TaskListArg, QueryRefu
     return filters;
   }
 
-  const offset = wholeNumber("page", query.offset ?? DEFAULT_TASK_PAGE_OFFSET);
-  const limit = wholeNumber("page", query.limit ?? DEFAULT_TASK_PAGE_LIMIT);
+  const offset = countArg("page", query.offset);
+  const limit = countArg("page", query.limit);
 
   if (!offset.ok) {
     return offset;
@@ -177,8 +171,7 @@ export function taskListArg(query: TaskListQuery): Result<TaskListArg, QueryRefu
   return ok({
     window: windowArg(query.window),
     filters: filters.value,
-    sortField: query.sort?.field ?? "enqueuedAt",
-    sortDirection: query.sort?.direction ?? "descending",
+    sort: sortArg(query.sort),
     offset: offset.value,
     limit: limit.value,
   });
@@ -186,7 +179,7 @@ export function taskListArg(query: TaskListQuery): Result<TaskListArg, QueryRefu
 
 /** The addon argument of a workflow runs query. Pure. */
 export function workflowRunsArg(query: WorkflowRunsQuery): Result<WorkflowRunsArg, QueryRefused> {
-  const limit = wholeNumber("limit", query.limit ?? DEFAULT_WORKFLOW_RUNS_LIMIT);
+  const limit = countArg("limit", query.limit);
 
   if (!limit.ok) {
     return limit;
@@ -201,6 +194,22 @@ export function workflowRunsArg(query: WorkflowRunsQuery): Result<WorkflowRunsAr
     status: query.status === undefined ? { kind: "anyStatus" } : { kind: "status", status: query.status },
     limit: limit.value,
   });
+}
+
+/** The addon argument of a count: the core's default when the query leaves it out. Pure. */
+function countArg(field: QueryRefusedField, value: number | undefined): Result<CountArg, QueryRefused> {
+  if (value === undefined) {
+    return ok({ kind: "coreDefault" });
+  }
+
+  const whole = wholeNumber(field, value);
+
+  return whole.ok ? ok({ kind: "set", value: whole.value }) : whole;
+}
+
+/** The addon argument of a sort: the core's default when the query leaves it out. Pure. */
+function sortArg(sort: TaskSort | undefined): SortArg {
+  return sort === undefined ? { kind: "coreDefault" } : { kind: "set", field: sort.field, direction: sort.direction };
 }
 
 /** The addon argument of a window. Pure. */

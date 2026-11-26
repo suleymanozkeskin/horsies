@@ -14,8 +14,8 @@ import type { NativeCoreHandle } from "../native/handle/addon.ts";
 import type { NativeOutcome, RawCatalogError } from "../native/values/records.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import {
-  type HealthQueryError,
-  healthQueryError,
+  type HealthInputError,
+  healthInputError,
   type HealthReadError,
   healthReadError,
   type PingDatabaseError,
@@ -24,6 +24,7 @@ import {
   pingWorkersError,
   queryRefused,
   type QueryRefused,
+  type WorkerHistoryError,
   type WorkerReadError,
 } from "./errors.ts";
 import type {
@@ -125,7 +126,7 @@ export async function workerHistory(
   target: HealthTarget,
   workerId: string,
   limit: WorkerHistoryLimit,
-): Promise<Result<readonly WorkerStateSnapshot[], HealthQueryError>> {
+): Promise<Result<readonly WorkerStateSnapshot[], WorkerHistoryError>> {
   const id = workerIdText(workerId);
 
   if (!id.ok) {
@@ -136,7 +137,7 @@ export async function workerHistory(
     "workerHistory",
     () => target.addon.getWorkerStateHistory(target.handle, id.value, limit),
     (records) => Object.freeze(records.map(workerStateSnapshot)),
-    (raw) => healthQueryError("workerHistory", raw),
+    (raw) => healthInputError("workerHistory", raw),
   );
 }
 
@@ -147,12 +148,12 @@ export async function workerHistory(
 export async function staleTasks(
   target: HealthTarget,
   thresholdMinutes: number,
-): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthQueryError>> {
+): Promise<Result<BoundedTaskList<StaleTaskRow>, HealthInputError>> {
   return healthCall(
     "staleTasks",
     () => target.addon.getStaleTasks(target.handle, thresholdMinutes),
     staleTaskList,
-    (raw) => healthQueryError("staleTasks", raw),
+    (raw) => healthInputError("staleTasks", raw),
   );
 }
 

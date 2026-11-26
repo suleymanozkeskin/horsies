@@ -34,6 +34,9 @@ import { unreachable } from "../native/call/never.ts";
 import type { MonitoringReadOutcome, MonitoringReadsAddon } from "../native/facades/monitoring-reads.ts";
 import type { NativeCoreHandle } from "../native/handle/addon.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import type { MonitoringQueryCoreError } from "../_catalog/monitoring_errors.ts";
+import { raiseDefect } from "../native/call/defect.ts";
+import { ClientDefect } from "../thrown-errors.ts";
 import { type MonitoringReadError, monitoringQueryError, queryRefused, type QueryRefused } from "./errors.ts";
 import {
   decodeCoreModel,
@@ -145,8 +148,8 @@ export async function listTasks(
 }
 
 /** The names of the workflows that have runs, at most 10,000. */
-export async function workflowNames(target: ReadTarget): Promise<Result<readonly string[], MonitoringReadError>> {
-  return readModel("workflowNames", () => target.addon.readWorkflowNames(target.handle), (text) => {
+export async function workflowNames(target: ReadTarget): Promise<Result<readonly string[], MonitoringQueryCoreError>> {
+  return readCoreModel("workflowNames", () => target.addon.readWorkflowNames(target.handle), (text) => {
     const items = listItems("workflowNames", wireJsonOfCoreText("workflowNames", text));
 
     return Object.freeze(items.map((item) => textItem("workflowNames", item)));
@@ -172,8 +175,8 @@ export async function workflowRuns(
 /** The state of every schedule, at most 10,000. */
 export async function schedules(
   target: ReadTarget,
-): Promise<Result<readonly ScheduleStateInfo[], MonitoringReadError>> {
-  return readModel("schedules", () => target.addon.readSchedules(target.handle), (text) =>
+): Promise<Result<readonly ScheduleStateInfo[], MonitoringQueryCoreError>> {
+  return readCoreModel("schedules", () => target.addon.readSchedules(target.handle), (text) =>
     modelList("schedules", text, decodeScheduleStateInfo),
   );
 }
@@ -182,8 +185,8 @@ export async function schedules(
 export async function workflowRun(
   target: ReadTarget,
   workflowId: WorkflowId,
-): Promise<Result<WorkflowRunRead, MonitoringReadError>> {
-  return readModel("workflowRun", () => target.addon.readWorkflowRun(target.handle, workflowId), (text) => {
+): Promise<Result<WorkflowRunRead, MonitoringQueryCoreError>> {
+  return readCoreModel("workflowRun", () => target.addon.readWorkflowRun(target.handle, workflowId), (text) => {
     const value = wireJsonOfCoreText("workflowRun", text);
 
     return value === null
@@ -219,7 +222,7 @@ export async function workflowNode(
 export async function taskDetail(
   target: ReadTarget,
   taskId: TaskId,
-): Promise<Result<TaskDetailRead, MonitoringReadError>> {
+): Promise<Result<TaskDetailRead, MonitoringQueryCoreError>> {
   const outcome = await nativeValueAsync("readTaskDetail", () => target.addon.readTaskDetail(target.handle, taskId));
 
   switch (outcome.kind) {
@@ -262,6 +265,31 @@ async function readModel<T>(
       return ok(decode(outcome.text));
     case "refused":
       return err(queryRefused(outcome.field, outcome.reason));
+    case "failed":
+      return err(monitoringQueryError(outcome.error));
+    default:
+      return unreachable(outcome);
+  }
+}
+
+/**
+ * Call the addon for a read that has no query to refuse, and give the decoded model or the core's error. A refusal is
+ * a defect of the bridge: the read gives it no value to refuse.
+ */
+async function readCoreModel<T>(
+  read: string,
+  answer: () => Promise<NativeEnvelope<MonitoringReadOutcome>>,
+  decode: (text: string) => T,
+): Promise<Result<T, MonitoringQueryCoreError>> {
+  const outcome = await nativeValueAsync(read, answer);
+
+  switch (outcome.kind) {
+    case "json":
+      return ok(decode(outcome.text));
+    case "refused":
+      return raiseDefect(
+        new ClientDefect({ subject: read, rule: `the bridge refused the ${outcome.field} of a read that has none` }),
+      );
     case "failed":
       return err(monitoringQueryError(outcome.error));
     default:

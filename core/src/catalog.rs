@@ -17,7 +17,9 @@
 //! An error class reads the mark through the member of its `code` slot
 //! ([`CodeCatalog::member_named`]); the class holds no copy of it.
 
-use crate::monitoring::{MonitoringQueryErrorCode, TaskActionErrorCode};
+use crate::monitoring::{
+    MonitoringQueryErrorCode, MonitoringQueryRefusalCode, TaskActionErrorCode,
+};
 use crate::{
     BrokerErrorCode, ContractCode, ErrorCode, HandleErrorCode, OperationalErrorCode, OutcomeCode,
     RetrievalCode, TaskAbsenceReason, TaskAttemptOutcome, TaskSendErrorCode, TaskStatus,
@@ -126,6 +128,7 @@ pub const CODE_CATALOGS: &[CodeCatalog] = &[
     <WorkflowTaskStatus as CodeEnum>::CATALOG,
     <MonitoringQueryErrorCode as CodeEnum>::CATALOG,
     <TaskActionErrorCode as CodeEnum>::CATALOG,
+    <MonitoringQueryRefusalCode as CodeEnum>::CATALOG,
     <TaskAbsenceReason as CodeEnum>::CATALOG,
     <ErrorCode as CodeEnum>::CATALOG,
 ];
@@ -189,6 +192,13 @@ mod tests {
         assert_wire_values::<TaskActionErrorCode>(|code| {
             serde_plain::to_string(code).expect("a unit variant serializes")
         });
+        assert_wire_values::<MonitoringQueryRefusalCode>(|code| {
+            serde_plain::to_string(code).expect("a unit variant serializes")
+        });
+        assert_eq!(
+            MonitoringQueryRefusalCode::QueryRefused.wire_value(),
+            "QUERY_REFUSED"
+        );
     }
 
     #[test]
