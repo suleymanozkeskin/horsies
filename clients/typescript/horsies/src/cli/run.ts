@@ -10,8 +10,10 @@
 // The command table is a closed record: one runner per command name. A command module parses its own flags.
 //
 // The exit rule: `cli.run` ends the process itself in every mode, so an open handle of user code (a pool, a timer)
-// does not keep a stopped service alive. Before the end it waits, at most `EXIT_LOG_WAIT_MS`, for the core log records
-// that still wait in the channel to reach the log sink.
+// does not keep a stopped service alive. Before the end it waits, at most `EXIT_LOG_WAIT_MS` by the clock, for the core
+// log records that still wait in the channel to reach the log sink. A command that throws ends the process with 1
+// through the same rule: a defect of the package first follows the defect rule (in a worker process it aborts), and
+// the throw is written to stderr.
 
 import { isMainThread } from "node:worker_threads";
 
@@ -20,11 +22,21 @@ import { appInternals } from "../app/internals.ts";
 import { CHILD_MODE_FLAG } from "../app/suppression.ts";
 import { processChildModeDeps, runChildMode } from "../child/host.ts";
 import { workerLogBacklog } from "../native/worker/worker.ts";
-import { ClientDefect } from "../thrown-errors.ts";
-import { unreachable } from "../wire/unreachable.ts";
+import { raiseDefect, reportDefect } from "../native/call/defect.ts";
+import { thrownFacts } from "../native/call/thrown-facts.ts";
+import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
+import { unreachable } from "../native/call/never.ts";
 import { processCheckCommandDeps, runCheckCommand } from "./check-command.ts";
 import type { LogBacklog } from "../native/worker/addon.ts";
-import { type CommandExitCode, type CommandOutput, EXIT_USAGE, processOutput, usageError, type UsageError } from "./usage.ts";
+import {
+  type CommandExitCode,
+  type CommandOutput,
+  EXIT_FAILED,
+  EXIT_USAGE,
+  processOutput,
+  usageError,
+  type UsageError,
+} from "./usage.ts";
 import { processWorkerCommandDeps, runWorkerCommand } from "./worker-command.ts";
 
 /** The commands of `cli.run`. */
@@ -56,6 +68,9 @@ export const EXIT_LOG_WAIT_MS = 2000;
 
 /** The pause between two reads of the log backlog, in milliseconds. */
 export const EXIT_LOG_POLL_MS = 10;
+
+/** The most reads of the log backlog in one wait: the wait ends at this count or at `EXIT_LOG_WAIT_MS`, the first. */
+export const MAX_EXIT_LOG_POLLS: number = EXIT_LOG_WAIT_MS / EXIT_LOG_POLL_MS;
 
 /** The mode of this process. `child`: the arguments after the entry script, the child flag first. */
 export type ProcessMode =
@@ -109,52 +124,91 @@ export interface CliDeps {
   readonly table: CommandTable;
   readonly child: ChildRunner;
   readonly output: CommandOutput;
-  /** Whether core log records wait in the channel. */
+  /** Whether core log records wait in the channel. Does not wait. */
   logBacklog(): LogBacklog;
   /** Wait `milliseconds`, letting the event loop run. */
   pause(milliseconds: number): Promise<void>;
+  /** A monotonic clock, in milliseconds. */
+  now(): number;
+  /** The defect rule of the process (`reportDefect`): in a worker process it aborts. */
+  reportDefect(defect: CoreDefect): void;
   /** End the process with `code`. */
   exit(code: number): never;
 }
 
-/**
- * The exit code of the command of this process. A worker thread is a defect: `ClientDefect`. Child mode never
- * resolves: the child ends its process.
- */
-export async function commandExitCode(app: Horsies, deps: CliDeps): Promise<CommandExitCode> {
+/** Run the command of this process, wait for the core log records, and end the process with the exit code. */
+export async function runCli(app: Horsies, deps: CliDeps): Promise<number> {
   const mode = processMode(deps.facts);
 
   switch (mode.kind) {
     case "workerThread":
-      throw new ClientDefect({ subject: "cli.run", rule: "cli.run runs on the main thread of a process" });
+      // A worker thread has no process to end: the defect is thrown.
+      return raiseDefect(new ClientDefect({ subject: "cli.run", rule: "cli.run runs on the main thread of a process" }));
     case "child":
       return deps.child(app, mode.args);
+    case "usageError":
+    case "command":
+      return endProcess(await commandExitCode(app, mode, deps), deps);
+    default:
+      return unreachable(mode);
+  }
+}
+
+/** The exit code of a usage error or a command. A command that throws gives 1 (`failedCommand`). */
+export async function commandExitCode(
+  app: Horsies,
+  mode: Extract<ProcessMode, { readonly kind: "usageError" | "command" }>,
+  deps: CliDeps,
+): Promise<CommandExitCode> {
+  switch (mode.kind) {
     case "usageError":
       deps.output.writeError(`usage: ${CLI_USAGE}`);
       deps.output.writeError(`horsies: error: ${mode.error.message}`);
 
       return EXIT_USAGE;
     case "command":
-      return deps.table[mode.command](app, mode.args);
+      try {
+        return await deps.table[mode.command](app, mode.args);
+      } catch (cause) {
+        return failedCommand(mode.command, cause, deps);
+      }
+
     default:
-      return unreachable(mode, "commandExitCode");
+      return unreachable(mode);
   }
 }
 
-/** Run the command of this process, wait for the core log records, and end the process with the exit code. */
-export async function runCli(app: Horsies, deps: CliDeps): Promise<number> {
-  const code = await commandExitCode(app, deps);
+/**
+ * The exit code of a command that threw `cause`: a defect of the package follows the defect rule first (in a worker
+ * process the process aborts there); then the throw is written to stderr with its name and message. Never throws.
+ */
+function failedCommand(command: CommandName, cause: unknown, deps: Pick<CliDeps, "output" | "reportDefect">): CommandExitCode {
+  if (cause instanceof CoreDefect) {
+    deps.reportDefect(cause);
+  }
 
+  const facts = thrownFacts(cause);
+
+  deps.output.writeError(`horsies ${command}: the command failed: ${facts.name}: ${facts.message}`);
+
+  return EXIT_FAILED;
+}
+
+/** Wait for the core log records, then end the process with `code`. */
+async function endProcess(code: CommandExitCode, deps: CliDeps): Promise<never> {
   await waitForLogRecords(deps);
 
   return deps.exit(code);
 }
 
-/** Wait while core log records wait in the channel and the forwarder hands them on, at most `EXIT_LOG_WAIT_MS`. */
-export async function waitForLogRecords(deps: Pick<CliDeps, "logBacklog" | "pause">): Promise<void> {
-  const polls = EXIT_LOG_WAIT_MS / EXIT_LOG_POLL_MS;
+/**
+ * Wait while core log records wait in the channel and the forwarder hands them on: until `EXIT_LOG_WAIT_MS` passed by
+ * the clock, or `MAX_EXIT_LOG_POLLS` reads, the first.
+ */
+export async function waitForLogRecords(deps: Pick<CliDeps, "logBacklog" | "pause" | "now">): Promise<void> {
+  const deadline = deps.now() + EXIT_LOG_WAIT_MS;
 
-  for (let poll = 0; poll < polls && deps.logBacklog() === "waiting"; poll += 1) {
+  for (let poll = 0; poll < MAX_EXIT_LOG_POLLS && deps.now() < deadline && deps.logBacklog() === "waiting"; poll += 1) {
     await deps.pause(EXIT_LOG_POLL_MS);
   }
 }
@@ -168,6 +222,8 @@ export function processCliDeps(): CliDeps {
     output: processOutput(),
     logBacklog: workerLogBacklog,
     pause: async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+    now: () => performance.now(),
+    reportDefect,
     exit: (code) => process.exit(code),
   };
 }

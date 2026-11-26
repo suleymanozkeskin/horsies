@@ -10,6 +10,7 @@ import {
   type CommandTable,
   EXIT_LOG_POLL_MS,
   EXIT_LOG_WAIT_MS,
+  MAX_EXIT_LOG_POLLS,
   processMode,
   type ProcessFacts,
   runCli,
@@ -17,7 +18,7 @@ import {
 } from "../../../horsies/src/cli/run.ts";
 import type { CommandExitCode } from "../../../horsies/src/cli/usage.ts";
 import type { LogBacklog } from "../../../horsies/src/native/worker/addon.ts";
-import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
+import { ClientDefect, type CoreDefect, ManifestRefused } from "../../../horsies/src/thrown-errors.ts";
 import { testApp } from "../worker/support.ts";
 
 const ENTRY: readonly string[] = ["/usr/local/bin/node", "/srv/app/main.js"];
@@ -59,16 +60,19 @@ function fakeDeps(facts: ProcessFacts, table: CommandTable, backlog: readonly Lo
   readonly errors: string[];
   readonly pauses: number[];
   readonly children: (readonly string[])[];
+  readonly defects: CoreDefect[];
 } {
   const errors: string[] = [];
   const pauses: number[] = [];
   const children: (readonly string[])[] = [];
+  const defects: CoreDefect[] = [];
   let reads = 0;
 
   return {
     errors,
     pauses,
     children,
+    defects,
     facts,
     table,
     child: async (_app, args) => {
@@ -85,8 +89,24 @@ function fakeDeps(facts: ProcessFacts, table: CommandTable, backlog: readonly Lo
     pause: async (milliseconds) => {
       pauses.push(milliseconds);
     },
+    now: () => 0,
+    reportDefect: (defect) => {
+      defects.push(defect);
+    },
     exit: (code) => {
       throw new Ended(code);
+    },
+  };
+}
+
+/** A table whose commands throw `cause`. */
+function throwingTable(cause: Error): CommandTable {
+  return {
+    worker: async () => {
+      throw cause;
+    },
+    check: async () => {
+      throw cause;
     },
   };
 }
@@ -181,17 +201,52 @@ describe("cli.run", () => {
     assert.deepEqual(deps.pauses, [EXIT_LOG_POLL_MS, EXIT_LOG_POLL_MS]);
   });
 
-  test("the wait for the log records ends at its bound", async () => {
+  test("a command that throws a defect: the defect rule runs, the throw is written, and the process ends with 1", async () => {
+    const defect = new ManifestRefused({ fieldPath: "tasks", cause: "unknown variant" });
+    const deps = fakeDeps(main("worker"), throwingTable(defect), ["waiting", "empty"]);
+
+    assert.equal(await endedCode(runCli(testApp(), deps)), 1);
+    assert.deepEqual(deps.defects, [defect]);
+    assert.ok(deps.errors[0]?.startsWith("horsies worker: the command failed: ManifestRefused: "));
+    assert.deepEqual(deps.pauses, [EXIT_LOG_POLL_MS]);
+  });
+
+  test("a command that throws another value is written, and the process ends with 1", async () => {
+    const deps = fakeDeps(main("check"), throwingTable(new RangeError("out of range")));
+
+    assert.equal(await endedCode(runCli(testApp(), deps)), 1);
+    assert.deepEqual(deps.defects, []);
+    assert.deepEqual(deps.errors, ["horsies check: the command failed: RangeError: out of range"]);
+  });
+
+  test("the wait for the log records ends at its poll bound", async () => {
     const pauses: number[] = [];
 
     await waitForLogRecords({
       logBacklog: () => "waiting",
+      now: () => 0,
       pause: async (milliseconds) => {
         pauses.push(milliseconds);
       },
     });
 
-    assert.equal(pauses.length, EXIT_LOG_WAIT_MS / EXIT_LOG_POLL_MS);
+    assert.equal(pauses.length, MAX_EXIT_LOG_POLLS);
+  });
+
+  test("the wait for the log records ends at its deadline by the clock", async () => {
+    const pauses: number[] = [];
+    let clock = 0;
+
+    await waitForLogRecords({
+      logBacklog: () => "waiting",
+      now: () => clock,
+      pause: async (milliseconds) => {
+        pauses.push(milliseconds);
+        clock += 600;
+      },
+    });
+
+    assert.equal(pauses.length, Math.ceil(EXIT_LOG_WAIT_MS / 600));
   });
 
   test("records that stay with no forwarder end the wait at once", async () => {
@@ -199,6 +254,7 @@ describe("cli.run", () => {
 
     await waitForLogRecords({
       logBacklog: () => "noForwarder",
+      now: () => 0,
       pause: async (milliseconds) => {
         pauses.push(milliseconds);
       },

@@ -14,9 +14,6 @@ function fakeSource(): SignalSource & { send(signal: StopSignalName): void; list
     on: (signal, listener) => {
       emitter.on(signal, listener);
     },
-    off: (signal, listener) => {
-      emitter.off(signal, listener);
-    },
     send: (signal) => {
       emitter.emit(signal);
     },
@@ -66,12 +63,14 @@ describe("the stop signals", () => {
     ]);
   });
 
-  test("remove takes the handlers off", () => {
-    const source = fakeSource();
-    const handlers = stopOnSignals(source, "worker", () => undefined, () => undefined);
+  test("the handlers stay installed: one per signal, for the life of the process", () => {
+    const { source, stops, lines } = watched();
 
     assert.equal(source.listeners(), 2);
-    handlers.remove();
-    assert.equal(source.listeners(), 0);
+    source.send("SIGTERM");
+    assert.equal(source.listeners(), 2);
+    source.send("SIGTERM");
+    assert.equal(stops.length, 1);
+    assert.equal(lines.length, 2);
   });
 });
