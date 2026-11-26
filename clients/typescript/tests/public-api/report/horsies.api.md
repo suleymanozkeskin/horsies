@@ -2198,6 +2198,11 @@ export type WorkflowReadError =
 | {
     readonly kind: "waitInsideTask";
 }
+/** The app does not list the workflow, so its output has no read form; nothing was read. */
+| {
+    readonly kind: "workflowNotListed";
+    readonly workflowName: string;
+}
 /** The database or the connection failed. */
 | {
     readonly kind: "database";

@@ -222,6 +222,49 @@ describe("the read form of a sub-workflow output", () => {
   });
 });
 
+describe("a workflow that the app does not list", () => {
+  const other = defineWorkflow(
+    { name: "other", definitionKey: "tests.other.v1", output: h.int(), params: {} },
+    (w) => ({ output: w.task(count, {}, { id: "count" }) }),
+  );
+
+  test("get answers workflowNotListed with the name at once: no wait, no read", async () => {
+    const core = fakeCore({ wait: { kind: "completed", result: { kind: "checked", text: okEnvelope("7") } } });
+
+    const wf = workflowHandleOf<BuildReturn>({
+      core,
+      registry: registry(),
+      workflow: other,
+      workflowId: workflowId(),
+      targets: new Map(),
+    });
+
+    assert.deepEqual(await wf.get({ timeoutMs: 60_000 }), {
+      ok: false,
+      error: { kind: "workflowNotListed", workflowName: "other" },
+    });
+    assert.deepEqual(core.calls, []);
+  });
+
+  test("resultFor of a sub-workflow node of that child answers workflowNotListed at once: no read", async () => {
+    const core = fakeCore({ nodeResult: { kind: "stored", result: { kind: "checked", text: okEnvelope("7") } } });
+
+    const wf = workflowHandleOf<BuildReturn>({
+      core,
+      registry: registry(),
+      workflow: flow,
+      workflowId: workflowId(),
+      targets: new Map([["child", { kind: "subWorkflow", workflow: other } as const]]),
+    });
+
+    assert.deepEqual(await wf.resultFor("child"), {
+      ok: false,
+      error: { kind: "workflowNotListed", workflowName: "other" },
+    });
+    assert.deepEqual(core.calls, []);
+  });
+});
+
 describe("WorkflowHandle.resultFor", () => {
   test("a stored result is read with the node's contract", async () => {
     const read = await handle({

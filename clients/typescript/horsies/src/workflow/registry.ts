@@ -102,31 +102,40 @@ export function buildParams(params: ObjectKind, given: object): Result<object, C
   return decoded.ok ? ok(Object(decoded.value)) : decoded;
 }
 
+/** The read form of a stored output, or the name of a workflow that the app does not list (it has no form). */
+export type OutputReadForm =
+  | { readonly kind: "form"; readonly form: ReadForm }
+  | { readonly kind: "workflowNotListed"; readonly workflowName: string };
+
 /**
  * The read form of a workflow's output: the output kind that the workflow declares (`defineWorkflow({ output })`),
- * with open user codes. The checks refuse every build whose output node has another type (`HRS-025`), so the declared
- * kind is the one fact; no build runs. A workflow that the app does not list has no form here. Pure.
+ * with open user codes. The checks refuse every build whose output node does not fit it (`HRS-025`), so the declared
+ * kind is the one fact; no build runs. A workflow that the app does not list is `workflowNotListed`. Pure.
  */
-export function workflowOutputForm(workflow: object, registry: WorkflowRegistry): ReadForm {
+export function workflowOutputForm(workflow: object, registry: WorkflowRegistry): OutputReadForm {
   const listed = registry.byContract(workflow);
 
-  return listed.kind === "listed"
-    ? Object.freeze({ kind: "readable", output: listed.output, codes: OPEN_CODES })
-    : unreadable("the workflow is not in the workflows list of the app");
+  switch (listed.kind) {
+    case "listed":
+      return Object.freeze({
+        kind: "form",
+        form: Object.freeze({ kind: "readable", output: listed.output, codes: OPEN_CODES }),
+      });
+    case "notListed":
+      return Object.freeze({ kind: "workflowNotListed", workflowName: workflowRecord(workflow).name });
+    default:
+      return unreachable(listed, "workflowOutputForm");
+  }
 }
 
 /** The read form of what a node runs: its task's contract, or its child's declared output with open codes. */
-export function nodeTargetForm(target: NodeTarget, registry: WorkflowRegistry): ReadForm {
+export function nodeTargetForm(target: NodeTarget, registry: WorkflowRegistry): OutputReadForm {
   switch (target.kind) {
     case "task":
-      return readFormOf(target.contract);
+      return Object.freeze({ kind: "form", form: readFormOf(target.contract) });
     case "subWorkflow":
       return workflowOutputForm(target.workflow, registry);
     default:
       return unreachable(target, "nodeTargetForm");
   }
-}
-
-function unreadable(cause: string): ReadForm {
-  return Object.freeze({ kind: "unreadable", cause });
 }

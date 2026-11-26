@@ -130,9 +130,7 @@ export function workflowHandleOf<R extends BuildReturn>(facts: HandleFacts): Wor
 
       // SAFETY: the reader decodes with the node's contract: its output type and its codes are the node's types.
       return (
-        target === undefined
-          ? err(Object.freeze({ kind: "resultNotReady" }))
-          : nodeOutcome(facts, id, nodeTargetForm(target, facts.registry))
+        target === undefined ? err(Object.freeze({ kind: "resultNotReady" })) : targetOutcome(facts, id, target)
       ) as never;
     },
   });
@@ -176,12 +174,26 @@ function changed(read: Awaited<ReturnType<WorkflowCore["pause"]>>): Result<boole
   return read.kind === "changed" ? ok(read.changed) : err(handleErrorOfRaw(read.error));
 }
 
-/** `get`: the wait, then the outcome of the ended workflow. `waitInsideTask` is decided before any statement. */
+/**
+ * `get`: the wait, then the outcome of the ended workflow. `invalidWait`, `workflowNotListed` and `waitInsideTask`
+ * are decided before any statement.
+ */
 async function workflowOutcome(facts: HandleFacts, options: GetOptions): Promise<ReadOutcome> {
   const wait = workflowWait(options.timeoutMs);
 
   if (!wait.ok) {
     return wait;
+  }
+
+  const output = workflowOutputForm(facts.workflow, facts.registry);
+
+  switch (output.kind) {
+    case "workflowNotListed":
+      return err(notListedError(output.workflowName));
+    case "form":
+      break;
+    default:
+      return unreachable(output, "workflowOutcome");
   }
 
   if ((await facts.core.processRole()) === "RUNS_TASK_BODIES") {
@@ -190,14 +202,33 @@ async function workflowOutcome(facts: HandleFacts, options: GetOptions): Promise
 
   const read = await facts.core.waitEnd(facts.workflowId, wait.value);
 
-  return endOutcome(read, () => workflowOutputForm(facts.workflow, facts.registry));
+  return endOutcome(read, output.form);
 }
 
-/** The outcome of what a wait found. Pure apart from the output form, which may run the build once. */
-export function endOutcome(read: WorkflowWaitRead, outputForm: () => ReadForm): ReadOutcome {
+/** The outcome of one node of the build: the read with its form, or `workflowNotListed` at once, with no read. */
+async function targetOutcome(facts: HandleFacts, nodeId: string, target: NodeTarget): Promise<ReadOutcome> {
+  const output = nodeTargetForm(target, facts.registry);
+
+  switch (output.kind) {
+    case "form":
+      return nodeOutcome(facts, nodeId, output.form);
+    case "workflowNotListed":
+      return err(notListedError(output.workflowName));
+    default:
+      return unreachable(output, "targetOutcome");
+  }
+}
+
+/** The read error of a workflow that the app does not list. Pure. */
+function notListedError(workflowName: string): WorkflowReadError {
+  return Object.freeze({ kind: "workflowNotListed", workflowName });
+}
+
+/** The outcome of what a wait found, read with the output form `form`. Pure. */
+export function endOutcome(read: WorkflowWaitRead, form: ReadForm): ReadOutcome {
   switch (read.kind) {
     case "completed":
-      return completedOutcome(read.result, outputForm);
+      return completedOutcome(read.result, form);
     case "endedWithError":
       return erroredOutcome(read.status, read.error);
     case "paused":
@@ -213,14 +244,14 @@ export function endOutcome(read: WorkflowWaitRead, outputForm: () => ReadForm): 
   }
 }
 
-function completedOutcome(result: StoredTextFact, outputForm: () => ReadForm): ReadOutcome {
+function completedOutcome(result: StoredTextFact, form: ReadForm): ReadOutcome {
   switch (result.kind) {
     case "none":
       return unreadable("the workflow is COMPLETED and its stored result is NULL");
     case "refused":
       return unreadable(result.cause);
     case "checked":
-      return envelopeOutcome(result.text, outputForm(), "open");
+      return envelopeOutcome(result.text, form, "open");
     default:
       return unreachable(result, "completedOutcome");
   }
