@@ -1173,7 +1173,7 @@ class TaskManifest:
     """How a worker runs the task."""
 
     error_codes: tuple[str, ...]
-    """The user error codes that the task declares, each once: the values
+    """The custom error codes that the task declares, each once: the values
     of its `error_code` metric label besides the built-in codes and
     `undeclared` (`error_code_label`). Empty when it declares none. The
     parser refuses a code that fails the code-text rule, the name of a

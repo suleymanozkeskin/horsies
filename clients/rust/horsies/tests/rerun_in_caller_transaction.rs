@@ -89,7 +89,7 @@ async fn seed_failed_source(pool: &PgPool) -> Uuid {
     .await
     .unwrap();
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
-        TaskError::builtin(OperationalErrorCode::TaskException, "adapter source"),
+        TaskError::built_in(OperationalErrorCode::TaskException, "adapter source"),
     ))
     .unwrap();
     let finished: i64 = sqlx::query_scalar(

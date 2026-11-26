@@ -7,8 +7,8 @@
 
 use chrono::{DateTime, Utc};
 use horsies_core::{
-    BackoffStrategy, BuiltInTaskCode, CancelGraceMs, Execution, RetryPolicy, TaskErrorCode,
-    TaskOptions, UserCode,
+    BackoffStrategy, BuiltInTaskCode, CancelGraceMs, CustomCode, Execution, RetryPolicy,
+    TaskErrorCode, TaskOptions,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -69,7 +69,9 @@ fn task_options(vector: &OptionsVector) -> TaskOptions {
                     let text = entry.as_str().expect("a code text");
                     match BuiltInTaskCode::parse(text) {
                         Some(built_in) => TaskErrorCode::BuiltIn(built_in),
-                        None => TaskErrorCode::User(UserCode::parse(text).expect("a user code")),
+                        None => {
+                            TaskErrorCode::Custom(CustomCode::parse(text).expect("a custom code"))
+                        }
                     }
                 })
                 .collect();

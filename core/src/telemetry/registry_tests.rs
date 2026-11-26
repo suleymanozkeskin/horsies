@@ -19,8 +19,9 @@ use crate::telemetry::registry::{
 };
 use crate::test_support::LogCapture;
 use crate::{
-    error_code_label, BuiltInTaskCode, ContractCode, DeclaredErrorCodes, ErrorCodeLabel, Execution,
-    OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode, UserCode, UNDECLARED_LABEL,
+    error_code_label, BuiltInTaskCode, ContractCode, CustomCode, DeclaredErrorCodes,
+    ErrorCodeLabel, Execution, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
+    UNDECLARED_LABEL,
 };
 
 /// The labels of `horsies.task.retries`.
@@ -183,7 +184,7 @@ fn a_name_past_the_bound_is_folded_into_the_fallback() {
     assert_eq!(queues.value_of("queue_0").position(), 0);
 }
 
-/// The user codes after the first [`MAX_DECLARED_NAMES`] (by text) are not
+/// The custom codes after the first [`MAX_DECLARED_NAMES`] (by text) are not
 /// declared: no refusal, each is named, and its value is `undeclared`.
 #[test]
 fn error_codes_past_the_bound_are_undeclared() {
@@ -199,15 +200,15 @@ fn error_codes_past_the_bound_are_undeclared() {
     assert_eq!(
         folded.names().to_vec(),
         vec![folded_name(
-            DeclaredSource::UserErrorCodes,
+            DeclaredSource::CustomErrorCodes,
             &last,
             FoldReason::PastBound
         )]
     );
     let undeclared = values.value_of(ErrorCodeLabel::Undeclared);
-    let past = TaskErrorCode::User(UserCode::parse(last).expect("a user code"));
+    let past = TaskErrorCode::Custom(CustomCode::parse(last).expect("a custom code"));
     assert_eq!(values.value_of(error_code_label(&codes, &past)), undeclared);
-    let first = TaskErrorCode::User(UserCode::parse("CODE_000000").expect("a user code"));
+    let first = TaskErrorCode::Custom(CustomCode::parse("CODE_000000").expect("a custom code"));
     assert_ne!(
         values.value_of(error_code_label(&codes, &first)),
         undeclared
@@ -284,10 +285,10 @@ fn error_code_values_hold_no_code_the_built_in_the_declared_and_undeclared() {
     for code in every_built_in_code() {
         assert_eq!(
             text_of(values.value_of(ErrorCodeLabel::BuiltIn(&code))),
-            code.value()
+            code.as_str()
         );
     }
-    let declared = TaskErrorCode::User(UserCode::parse("HTTP2_FAILED").expect("a user code"));
+    let declared = TaskErrorCode::Custom(CustomCode::parse("HTTP2_FAILED").expect("a custom code"));
     assert_eq!(
         text_of(values.value_of(error_code_label(&second, &declared))),
         "HTTP2_FAILED"
@@ -298,7 +299,7 @@ fn error_code_values_hold_no_code_the_built_in_the_declared_and_undeclared() {
     );
     // A task set that these values were not given: its code is undeclared.
     let not_given = DeclaredErrorCodes::parse(["NOT_GIVEN"]).expect("a valid set");
-    let code = TaskErrorCode::User(UserCode::parse("NOT_GIVEN").expect("a user code"));
+    let code = TaskErrorCode::Custom(CustomCode::parse("NOT_GIVEN").expect("a custom code"));
     assert_eq!(
         text_of(values.value_of(error_code_label(&not_given, &code))),
         UNDECLARED_LABEL
@@ -719,7 +720,8 @@ fn golden_registry() -> Registry {
         .expect("the handle of the metric");
     let labels = registry.labels();
     let default = labels.queues.value_of("default");
-    let card_code = TaskErrorCode::User(UserCode::parse("CARD_DECLINED").expect("a user code"));
+    let card_code =
+        TaskErrorCode::Custom(CustomCode::parse("CARD_DECLINED").expect("a custom code"));
     let card = labels
         .error_codes
         .value_of(error_code_label(&declared, &card_code));

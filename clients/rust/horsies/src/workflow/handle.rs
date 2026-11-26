@@ -8,7 +8,7 @@
 //!   the outer error is the read failing (the wait limit passed, the
 //!   workflow is not found, the stored value does not read, the database
 //!   failed); the inner value is the outcome. A workflow holds the codes of
-//!   many tasks, so `get` reads user codes as checked text (`UserCode`);
+//!   many tasks, so `get` reads custom codes as checked text (`CustomCode`);
 //!   `result_for` reads one node with that node's types.
 //! - `status`, `results`, `tasks`, `cancel`, `pause` and `resume` return
 //!   `HandleResult`, with Python's handle codes.
@@ -24,10 +24,10 @@ use horsies_core::core::task::StoredErrorRefused;
 use horsies_core::handle::CoreHandle;
 use horsies_core::JsonText;
 use horsies_core::{
-    process_role, wait_inside_task_message, BuiltInTaskCode, HandleErrorCode, HandleOperation,
-    HandleOperationError, HandleResult, NodeResultsRead, NodesRead, OperationalErrorCode,
-    OutcomeCode, PostgresBroker, ProcessRole, RetrievalCode, StoredNode, SubWorkflowSummary,
-    TaskResult, TerminalErrorStatus, UserCode, WaitLimit, WorkflowEnd, WorkflowError,
+    process_role, wait_inside_task_message, BuiltInTaskCode, CustomCode, HandleErrorCode,
+    HandleOperation, HandleOperationError, HandleResult, NodeResultsRead, NodesRead,
+    OperationalErrorCode, OutcomeCode, PostgresBroker, ProcessRole, RetrievalCode, StoredNode,
+    SubWorkflowSummary, TaskResult, TerminalErrorStatus, WaitLimit, WorkflowEnd, WorkflowError,
     WorkflowStatus, WorkflowTaskStatus, WorkflowWait,
 };
 use serde::de::DeserializeOwned;
@@ -40,7 +40,7 @@ use super::registry::WorkflowRegistry;
 use crate::handle::{checked_wait, read_stored_result};
 use crate::process_state::refuse_in_a_fork;
 use crate::task::body::value_free_decode_text;
-use crate::{TaskError, TaskOutcome, UnknownUserCode, UserErrorCode, WaitLimitRefused};
+use crate::{CustomErrorCode, TaskError, TaskOutcome, UnknownUserCode, WaitLimitRefused};
 
 /// The marker key of the result of a workflow with no output node.
 const OUTPUTLESS_TERMINALS_KEY: &str = "__h_outputless_terminals__";
@@ -63,7 +63,7 @@ pub enum WorkflowReadError {
     /// the handle's types. `cause` names no value.
     #[error("the stored value of workflow {workflow_id} does not read: {cause}")]
     StoredResultUnreadable { workflow_id: Uuid, cause: String },
-    /// The stored error has a user code that the asked code type does not
+    /// The stored error has a custom code that the asked code type does not
     /// name.
     #[error("the stored error of workflow {workflow_id}: {cause}")]
     UnknownUserCode {
@@ -98,7 +98,7 @@ pub enum WorkflowReadError {
 }
 
 impl WorkflowReadError {
-    /// The library code of this failure, as Python's handle stores it.
+    /// The built-in code of this failure, as Python's handle stores it.
     pub fn code(&self) -> BuiltInTaskCode {
         match self {
             Self::WaitTimedOut { .. } => RetrievalCode::WaitTimeout.into(),
@@ -139,11 +139,11 @@ impl WorkflowReadError {
 }
 
 /// The stored result of one node, read with no type: its outcome with the
-/// value as its stored text and the user codes as text, or why it does not
+/// value as its stored text and the custom codes as text, or why it does not
 /// read.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NodeResult {
-    Outcome(TaskOutcome<JsonText, UserCode>),
+    Outcome(TaskOutcome<JsonText, CustomCode>),
     /// The stored text does not read as a result envelope.
     Unreadable {
         cause: String,
@@ -348,7 +348,7 @@ impl<T> WorkflowHandle<T> {
     ) -> Result<TaskOutcome<V, E>, WorkflowReadError>
     where
         V: DeserializeOwned,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         let operation = HandleOperation::ResultFor {
             node_id: key.node_id().to_owned(),
@@ -460,7 +460,7 @@ where
     pub async fn get(
         &self,
         limit: WaitLimit,
-    ) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError> {
+    ) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError> {
         let checked = self.checked_wait(limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(WorkflowReadError::WaitInsideTask {
@@ -508,19 +508,19 @@ where
 fn end_outcome<T>(
     workflow_id: Uuid,
     end: WorkflowEnd,
-) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError>
+) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError>
 where
     T: DeserializeOwned + 'static,
 {
     let unreadable =
         |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
     match end {
-        WorkflowEnd::Paused => Ok(TaskOutcome::Failed(TaskError::library(
+        WorkflowEnd::Paused => Ok(TaskOutcome::Failed(TaskError::built_in(
             OutcomeCode::WorkflowPaused,
             "workflow is paused awaiting intervention",
         ))),
         WorkflowEnd::Ended { status, error } => match error.as_deref() {
-            None => Ok(TaskOutcome::Failed(TaskError::library(
+            None => Ok(TaskOutcome::Failed(TaskError::built_in(
                 status_code(status),
                 status_message(status),
             ))),
@@ -546,7 +546,7 @@ where
 fn completed_outcome<T>(
     workflow_id: Uuid,
     text: &str,
-) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError>
+) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError>
 where
     T: DeserializeOwned + 'static,
 {
@@ -581,7 +581,7 @@ fn envelope_outcome<V, E>(
 ) -> Result<TaskOutcome<V, E>, WorkflowReadError>
 where
     V: DeserializeOwned,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     let stored = read_stored_result::<V>(text).map_err(|refused| {
         WorkflowReadError::StoredResultUnreadable {
@@ -608,7 +608,7 @@ where
 fn outputless_outcome<T>(
     workflow_id: Uuid,
     envelope: &[(String, &RawValue)],
-) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError>
+) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError>
 where
     T: 'static,
 {
@@ -683,10 +683,10 @@ fn outputless_entry(
     node_id: &str,
     entry: &RawValue,
     named: bool,
-) -> TaskOutcome<JsonText, UserCode> {
+) -> TaskOutcome<JsonText, CustomCode> {
     let missing = |cause: String| {
         TaskOutcome::Failed(
-            TaskError::library(
+            TaskError::built_in(
                 OperationalErrorCode::ResultDeserializationError,
                 format!("Outputless workflow {workflow_id} node {node_id:?} {cause}"),
             )
@@ -695,16 +695,16 @@ fn outputless_entry(
     };
     match (entry.get(), named) {
         ("null", _) | (_, false) => missing("missing payload or task name".to_owned()),
-        (entry, true) => serde_json::from_str::<TaskOutcome<JsonText, UserCode>>(entry)
+        (entry, true) => serde_json::from_str::<TaskOutcome<JsonText, CustomCode>>(entry)
             .unwrap_or_else(|error| {
                 missing(format!("does not read: {}", value_free_decode_text(&error)))
             }),
     }
 }
 
-/// The stored error of a workflow, read with user codes as text (Python
+/// The stored error of a workflow, read with custom codes as text (Python
 /// `_decode_stored_workflow_error`). Its `data` keeps the stored text. Pure.
-fn stored_error(workflow_id: Uuid, text: &str) -> Result<TaskError<UserCode>, WorkflowReadError> {
+fn stored_error(workflow_id: Uuid, text: &str) -> Result<TaskError<CustomCode>, WorkflowReadError> {
     let unreadable =
         |cause: String| WorkflowReadError::StoredResultUnreadable { workflow_id, cause };
     let stored =
@@ -722,7 +722,7 @@ fn stored_error(workflow_id: Uuid, text: &str) -> Result<TaskError<UserCode>, Wo
                 "Workflow error payload validation failed: {refused}"
             )),
         })?;
-    TaskError::<UserCode>::from_stored(stored)
+    TaskError::<CustomCode>::from_stored(stored)
         .map_err(|cause| WorkflowReadError::UnknownUserCode { workflow_id, cause })
 }
 
@@ -734,7 +734,7 @@ fn node_result(text: &str) -> NodeResult {
             cause: error.to_string(),
         },
         Ok(TaskResult::Ok(value)) => NodeResult::Outcome(TaskOutcome::Succeeded(value)),
-        Ok(TaskResult::Err(error)) => match TaskError::<UserCode>::from_stored(error) {
+        Ok(TaskResult::Err(error)) => match TaskError::<CustomCode>::from_stored(error) {
             Ok(error) => NodeResult::Outcome(TaskOutcome::Failed(error)),
             Err(cause) => NodeResult::Unreadable {
                 cause: cause.to_string(),

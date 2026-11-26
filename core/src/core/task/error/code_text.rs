@@ -6,7 +6,7 @@
 //! codes of an exception mapper and to `default_unhandled_error_code`. It
 //! does not apply it to the code of a `TaskError`, which may be any text that
 //! is not a built-in or reserved name, such as `my_user_code`. So
-//! [`super::UserCode::parse`] does not apply it either: that parse also reads
+//! [`super::CustomCode::parse`] does not apply it either: that parse also reads
 //! the stored errors that Python tasks write.
 //!
 //! Callers: the stored retry policy reader of the worker
@@ -85,7 +85,7 @@ fn is_upper_snake_case(code: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        ContractCode, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode, UserCode,
+        ContractCode, CustomCode, OperationalErrorCode, OutcomeCode, RetrievalCode, TaskErrorCode,
     };
     use super::*;
     use crate::catalog::CodeEnum;
@@ -182,15 +182,15 @@ mod tests {
     }
 
     /// The two rules differ, as in Python: a task error may carry
-    /// `my_user_code` (Python `clients/python/tests/unit/test_typed_codec.py:528`), and a
+    /// `my_user_code` (Python `clients/python/tests/unit/test_typed_codec.py:529`), and a
     /// stored error with that code reads, while `auto_retry_for` refuses it.
     #[test]
     fn a_task_error_code_is_not_held_to_the_retry_code_rule() {
-        let code = UserCode::parse("my_user_code").expect("a task error accepts any free text");
+        let code = CustomCode::parse("my_user_code").expect("a task error accepts any free text");
         assert_eq!(code.as_str(), "my_user_code");
         assert_eq!(
             serde_json::from_str::<TaskErrorCode>(r#""my_user_code""#).ok(),
-            Some(TaskErrorCode::User(code))
+            Some(TaskErrorCode::Custom(code))
         );
         assert_eq!(
             check_error_code_text("my_user_code"),

@@ -676,7 +676,7 @@ async fn the_limit_bounds_case_1_6_and_fails_the_parent_workflow() {
 async fn the_limit_bounds_case_2_3_and_keeps_a_stored_first_failure() {
     let db = IsolatedDatabase::create().await;
     let first_failure = serde_json::to_string(
-        &TaskError::new("FIRST", "first failure").expect("a user error code"),
+        &TaskError::custom("FIRST", "first failure").expect("a custom error code"),
     )
     .expect("encode the first failure");
     let workflow_id = seed_workflow(

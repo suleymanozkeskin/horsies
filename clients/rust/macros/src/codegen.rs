@@ -320,7 +320,7 @@ fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -
             const _: () = ::core::assert!(
                 ::horsies::__private::is_retry_code(
                     #literal,
-                    <#code as ::horsies::UserErrorCode>::CODES,
+                    <#code as ::horsies::CustomErrorCode>::CODES,
                 ),
                 #message
             );
@@ -331,7 +331,7 @@ fn retry_code_checks(attrs: &TaskAttrs, code: &Type, cfg_attrs: &[&Attribute]) -
 
 /// The `RegisteredTask` of the function: a body struct that decodes the
 /// input, calls the function and stores what it returned. Its meta declares
-/// the codes of the code type `code` (`UserErrorCode::CODES`); the
+/// the codes of the code type `code` (`CustomErrorCode::CODES`); the
 /// registration checks them.
 fn registered_task(
     signature: &Signature,
@@ -353,7 +353,7 @@ fn registered_task(
     let meta = quote! {
         ::horsies::__private::TaskMeta::for_input::<#input>()
             .in_module(::horsies::__private::parent_module(::std::module_path!()))
-            .with_error_codes(<#code as ::horsies::UserErrorCode>::CODES)
+            .with_error_codes(<#code as ::horsies::CustomErrorCode>::CODES)
     };
     let validate_call = match &signature.input {
         InputShape::Unit(_) => quote! { ::horsies::__private::decode_unit_input(input) },

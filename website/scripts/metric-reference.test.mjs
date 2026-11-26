@@ -18,7 +18,7 @@ const TWO_METRICS = `horsies.task.attempts
   help: Attempts.
   label task (horsies.task.name): declared task names, fallback "(unregistered)"
   label outcome (horsies.task.outcome): "COMPLETED" "FAILED" "WORKER_FAILURE"
-  label error_code (error.type): "" "TASK_TIMEOUT" then declared user error codes, fallback "undeclared"
+  label error_code (error.type): "" "TASK_TIMEOUT" then declared custom error codes, fallback "undeclared"
 horsies.task.run.duration
   prometheus: horsies_task_run_duration_seconds
   kind: histogram
@@ -72,10 +72,10 @@ describe('parseSnapshot', () => {
 			names: 'task names',
 			fallback: '(unregistered)',
 		});
-		expect(labelValues('"" "TASK_TIMEOUT" then declared user error codes, fallback "undeclared"')).toEqual({
+		expect(labelValues('"" "TASK_TIMEOUT" then declared custom error codes, fallback "undeclared"')).toEqual({
 			kind: 'declared',
 			fixed: ['', 'TASK_TIMEOUT'],
-			names: 'user error codes',
+			names: 'custom error codes',
 			fallback: 'undeclared',
 		});
 		expect(labelValues('the version of the process')).toEqual({ kind: 'process-fact', fact: 'version' });
@@ -115,7 +115,7 @@ describe('seriesBound', () => {
 		expect(seriesBound(attempts)).toBeUndefined();
 		expect(seriesBound(duration)).toBe(1);
 		const closed = parsed(TWO_METRICS.replace('  label task (horsies.task.name): declared task names, fallback "(unregistered)"\n', '').replace(
-			'  label error_code (error.type): "" "TASK_TIMEOUT" then declared user error codes, fallback "undeclared"\n',
+			'  label error_code (error.type): "" "TASK_TIMEOUT" then declared custom error codes, fallback "undeclared"\n',
 			'  label kind (horsies.child.kind): "ISOLATED" "SHARED_ASYNC"\n',
 		));
 		expect(seriesBound(closed[0])).toBe(6);
@@ -128,7 +128,7 @@ describe('renderPage', () => {
 		expect(page).toContain('### horsies.task.attempts');
 		expect(page).toContain('| Prometheus name | `horsies_task_attempts_total` |');
 		expect(page).toContain('| `outcome` / `horsies.task.outcome` | `COMPLETED`, `FAILED`, `WORKER_FAILURE` |');
-		expect(page).toContain('`""`, `TASK_TIMEOUT`, then the declared user error codes; any other value is `undeclared`');
+		expect(page).toContain('`""`, `TASK_TIMEOUT`, then the declared custom error codes; any other value is `undeclared`');
 		expect(page).toContain('| Lines per series | 5: 2 buckets, `+Inf`, `_sum`, `_count` |');
 		expect(page.endsWith('\n')).toBe(true);
 	});

@@ -1085,7 +1085,7 @@ mod tests {
         let pool = crate::test_support::migrated_pool().await;
         let workflow_id = Uuid::new_v4();
         let first_error =
-            serde_json::to_string(&TaskError::new("FIRST", "first failure").unwrap()).unwrap();
+            serde_json::to_string(&TaskError::custom("FIRST", "first failure").unwrap()).unwrap();
         seed_workflow(&pool, workflow_id, "RUNNING", Some(&first_error)).await;
         seed_node(&pool, workflow_id, 0, "RUNNING").await;
         seed_node(&pool, workflow_id, 1, "PENDING").await;

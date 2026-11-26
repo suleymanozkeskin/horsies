@@ -1860,7 +1860,7 @@ mod tests {
     #[test]
     fn a_failed_node_shows_the_message_of_its_stored_error() {
         let failed = stored(&TaskResult::Err(
-            crate::core::task::error::TaskError::builtin(
+            crate::core::task::error::TaskError::built_in(
                 OutcomeCode::UpstreamSkipped,
                 "node blew up",
             ),
@@ -1876,7 +1876,7 @@ mod tests {
     fn no_result_a_value_and_a_blank_message_show_no_error() {
         let value = stored(&TaskResult::Ok(serde_json::json!({"rows": 3})));
         let blank = stored(&TaskResult::Err(
-            crate::core::task::error::TaskError::builtin(OutcomeCode::UpstreamSkipped, "  "),
+            crate::core::task::error::TaskError::built_in(OutcomeCode::UpstreamSkipped, "  "),
         ));
 
         assert_eq!(node_error_from_result(0, None).expect("decodes"), None);

@@ -5,12 +5,12 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use horsies::{blocking_task, task, RetryPolicy, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{blocking_task, task, CustomErrorCode, RetryPolicy, TaskError, TaskRuntime};
 
 use crate::markers;
 
 /// The codes of these tasks' own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 pub enum ClassCode {
     /// The body saw the cancel signal at its deadline and returned.
     Interrupted,
@@ -91,7 +91,7 @@ pub async fn shared_hang() -> Result<String, TaskError<Infallible>> {
 pub async fn shared_cooperative(rt: TaskRuntime) -> Result<String, TaskError<ClassCode>> {
     tokio::select! {
         () = tokio::time::sleep(PAST_THE_DEADLINE) => Ok("never".to_owned()),
-        () = rt.cancelled() => Err(TaskError::user(ClassCode::Interrupted, "cancelled at the deadline")),
+        () = rt.cancelled() => Err(TaskError::custom(ClassCode::Interrupted, "cancelled at the deadline")),
     }
 }
 
@@ -107,7 +107,7 @@ pub async fn shared_cooperative(rt: TaskRuntime) -> Result<String, TaskError<Cla
 )]
 pub async fn shared_blocks_once(token: String) -> Result<u32, TaskError<ClassCode>> {
     let first = markers::create_once(&format!("{token}-blocked"), &std::process::id().to_string())
-        .map_err(|cause| TaskError::user(ClassCode::MarkerFailed, cause.to_string()))?;
+        .map_err(|cause| TaskError::custom(ClassCode::MarkerFailed, cause.to_string()))?;
     if first {
         // Holds the runtime thread: no await point until it returns.
         std::thread::sleep(BLOCK_DURATION);
@@ -127,7 +127,7 @@ pub async fn shared_blocks_once(token: String) -> Result<u32, TaskError<ClassCod
 )]
 pub async fn shared_stuck_once(token: String) -> Result<u32, TaskError<ClassCode>> {
     let first = markers::create_once(&format!("{token}-stuck"), &std::process::id().to_string())
-        .map_err(|cause| TaskError::user(ClassCode::MarkerFailed, cause.to_string()))?;
+        .map_err(|cause| TaskError::custom(ClassCode::MarkerFailed, cause.to_string()))?;
     if first {
         tokio::time::sleep(PAST_THE_DEADLINE).await;
     }
@@ -169,7 +169,7 @@ pub fn thread_hang() -> Result<String, TaskError<Infallible>> {
 )]
 pub fn thread_overrun(token: String) -> Result<String, TaskError<ClassCode>> {
     let marker_failed =
-        |cause: markers::MarkerError| TaskError::user(ClassCode::MarkerFailed, cause.to_string());
+        |cause: markers::MarkerError| TaskError::custom(ClassCode::MarkerFailed, cause.to_string());
     let attempt = markers::next_attempt(&token).map_err(marker_failed)?;
     let runs = format!("{token}-runs");
     markers::append_line(

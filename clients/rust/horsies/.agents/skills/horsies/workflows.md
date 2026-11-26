@@ -46,7 +46,7 @@ async fn send_receipt(
 ) -> Result<String, TaskError<Infallible>> {
     match charged {
         TaskOutcome::Succeeded(cents) => Ok(format!("{order_id}: charged {cents}")),
-        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().text())),
+        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().as_str())),
     }
 }
 
@@ -169,8 +169,8 @@ the task's registration on the builder's app.
 - `set` and `arg_from` take the field tokens of the task's own module:
   `task_name::params::<name>()`. A token of another task, or a source of
   another output type, is a compile error.
-- `E` in `TaskOutcome<S, E>` reads the source's user codes. `UserCode`
-  reads any user code as checked text.
+- `E` in `TaskOutcome<S, E>` reads the source's custom codes. `CustomCode`
+  reads any custom code as checked text.
 - The field `S` of `arg_from` must be the source's output type.
 
 Data flow rules:
@@ -347,7 +347,7 @@ async fn run_checkout(
     let handle = checkout.start(CheckoutParams { order }).await?;
     match handle.get(WaitLimit::Within(Duration::from_secs(60))).await? {
         TaskOutcome::Succeeded(receipt) => println!("{receipt}"),
-        TaskOutcome::Failed(error) => println!("checkout ended with {}", error.code().text()),
+        TaskOutcome::Failed(error) => println!("checkout ended with {}", error.code().as_str()),
     }
     Ok(())
 }
@@ -418,7 +418,7 @@ with the error's id.
 | Method | Returns |
 |---|---|
 | `workflow_id()` | `Uuid` |
-| `get(limit)` | `Result<TaskOutcome<T, UserCode>, WorkflowReadError>`: waits while the workflow runs, up to `limit`. A `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` is `InvalidInput`, as the first check |
+| `get(limit)` | `Result<TaskOutcome<T, CustomCode>, WorkflowReadError>`: waits while the workflow runs, up to `limit`. A `WaitLimit::Within` limit above `MAX_WAIT_LIMIT_MS` is `InvalidInput`, as the first check |
 | `result_for::<V, E>(&key)` | `Result<TaskOutcome<V, E>, WorkflowReadError>`: one node, read with its types. Not a wait |
 | `status()` | `HandleResult<WorkflowStatus>` |
 | `results()` | `HandleResult<BTreeMap<String, NodeResult>>`: the stored result of each node with a node id |
@@ -427,15 +427,15 @@ with the error's id.
 | `pause()` | `HandleResult<bool>`: `true` when a RUNNING workflow paused |
 | `resume()` | `HandleResult<bool>`: `true` when a PAUSED workflow resumed. The owed children build from the app's registered definitions |
 
-- `get` reads user codes as checked text (`UserCode`), because a workflow
+- `get` reads custom codes as checked text (`CustomCode`), because a workflow
   holds the codes of many tasks. A FAILED, CANCELLED or EXPIRED workflow
   is `Failed` with its stored error, or the code of its status. A PAUSED
   workflow is `Failed` with `WORKFLOW_PAUSED`; a resume can continue it.
 - A workflow with no output node is read as `OutputlessResults`: `get(id)`,
   `iter()`, `len()`, `is_empty()`, each outcome as
-  `TaskOutcome<JsonText, UserCode>`: the value as its stored text, read with
+  `TaskOutcome<JsonText, CustomCode>`: the value as its stored text, read with
   `decode::<T>()`.
-- `NodeResult` is `Outcome(TaskOutcome<JsonText, UserCode>)` or
+- `NodeResult` is `Outcome(TaskOutcome<JsonText, CustomCode>)` or
   `Unreadable { cause }`.
 - `WorkflowNodeInfo` has `node_id`, `index`, `name`, `status`
   (`WorkflowTaskStatus`), `result`, `started_at`, `completed_at`,
@@ -599,6 +599,6 @@ use horsies::{
     // Handle
     WorkflowHandle, WorkflowReadError, NodeResult, WorkflowNodeInfo, WorkflowStatus,
     WorkflowTaskStatus, HandleOperationError, HandleErrorCode, HandleResult,
-    TaskOutcome, UserCode, WaitLimit,
+    TaskOutcome, CustomCode, WaitLimit,
 };
 ```

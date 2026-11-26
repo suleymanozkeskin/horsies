@@ -734,7 +734,8 @@ async fn the_runs_of_a_child_killed_for_a_blocked_loop_retry_by_their_own_code()
 #[tokio::test]
 async fn a_run_that_returned_before_the_kill_writes_what_it_returned() {
     let pool = crate::test_support::migrated_pool().await;
-    let error = TaskError::new("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
+    let error =
+        TaskError::custom("UPSTREAM_DOWN", "upstream down").expect("a code of the task's own");
     let returned = || {
         reported_result(ResultEnvelopeText::new(
             serde_json::to_string(&TaskResult::<serde_json::Value>::Err(error.clone()))

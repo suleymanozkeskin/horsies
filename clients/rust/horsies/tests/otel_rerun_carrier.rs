@@ -106,7 +106,7 @@ async fn seed_failed_source(database: &TestDatabase) -> Uuid {
         .unwrap();
     assert_eq!(inserted, 1);
     let result_json = serde_json::to_string(&TaskResult::<serde_json::Value>::Err(
-        TaskError::builtin(OperationalErrorCode::TaskException, "carrier source"),
+        TaskError::built_in(OperationalErrorCode::TaskException, "carrier source"),
     ))
     .unwrap();
     let finished: i64 = client

@@ -262,7 +262,8 @@ async fn finalize_with(
 
 fn error_result(code: &str) -> TaskResult<Vec<u8>> {
     TaskResult::Err(
-        TaskError::new(code, format!("{code} happened")).expect("the test codes are user codes"),
+        TaskError::custom(code, format!("{code} happened"))
+            .expect("the test codes are custom codes"),
     )
 }
 
@@ -646,12 +647,12 @@ async fn a_plain_task_owes_no_phase_two() {
 /// `WORKFLOW_STOPPED` is a reserved code and the branch
 /// that left the row RUNNING is removed (decisions, "Task returns: one rule
 /// in the core"). No task result can carry the code: it is not a built-in
-/// code and `TaskError::new` refuses it, so no result that reaches
+/// code and `TaskError::custom` refuses it, so no result that reaches
 /// `persist_terminal_state` holds it.
 #[test]
 fn a_task_result_cannot_carry_the_workflow_stopped_code() {
     assert_eq!(BuiltInTaskCode::parse("WORKFLOW_STOPPED"), None);
-    assert!(TaskError::new("WORKFLOW_STOPPED", "workflow was stopped").is_err());
+    assert!(TaskError::custom("WORKFLOW_STOPPED", "workflow was stopped").is_err());
 }
 
 /// Python `test_layer1_tasks.py::test_exponential_backoff_intervals`: two

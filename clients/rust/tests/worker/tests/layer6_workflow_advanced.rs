@@ -217,7 +217,7 @@ async fn failed_code<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
         .await
         .expect("read the workflow")
     {
-        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Failed(error) => error.code().as_str().to_owned(),
         TaskOutcome::Succeeded(value) => panic!("the workflow succeeded with {value:?}"),
     }
 }
@@ -778,7 +778,7 @@ async fn test_workflow_recovers_after_worker_crash() {
             .unwrap_or_else(|error| panic!("read node {node_id}: {error}"));
         match read {
             TaskOutcome::Failed(error) => {
-                assert_eq!(error.code().text(), "WORKER_CRASHED", "node {node_id}");
+                assert_eq!(error.code().as_str(), "WORKER_CRASHED", "node {node_id}");
             }
             TaskOutcome::Succeeded(value) => panic!("node {node_id} succeeded with {value}"),
         }

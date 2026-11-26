@@ -26,8 +26,8 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+use super::custom_code::CustomErrorCode;
 use super::error::TaskError;
-use super::user_code::UserErrorCode;
 
 /// Written in place of a part of a decode message that comes from the input
 /// (Python `INPUT_PLACEHOLDER`).
@@ -374,7 +374,7 @@ pub(crate) fn decode_unit(input: &[u8]) -> Result<(), DecodeFailure> {
 pub fn body_result<T, E>(returned: Result<T, TaskError<E>>) -> RawTaskResult
 where
     T: Serialize + DeserializeOwned,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     match returned {
         Ok(value) => encode_output(&value),
@@ -632,10 +632,10 @@ mod tests {
         Declined,
     }
 
-    impl UserErrorCode for ChargeCode {
+    impl CustomErrorCode for ChargeCode {
         const CODES: &'static [&'static str] = &["DECLINED"];
 
-        fn code(&self) -> &'static str {
+        fn as_str(&self) -> &'static str {
             match self {
                 Self::Declined => "DECLINED",
             }
@@ -1138,9 +1138,9 @@ mod tests {
     }
 
     #[test]
-    fn a_returned_error_is_stored_with_its_user_code() {
+    fn a_returned_error_is_stored_with_its_custom_code() {
         let returned: Result<u32, TaskError<ChargeCode>> =
-            Err(TaskError::user(ChargeCode::Declined, "card declined"));
+            Err(TaskError::custom(ChargeCode::Declined, "card declined"));
         match body_result(returned) {
             TaskResult::Ok(_) => panic!("an error was encoded as a value"),
             TaskResult::Err(error) => {

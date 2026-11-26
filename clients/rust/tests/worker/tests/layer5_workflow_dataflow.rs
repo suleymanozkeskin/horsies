@@ -169,7 +169,7 @@ async fn test_failed_propagation_via_args_from() {
         .await
         .expect("read node b");
     match read {
-        TaskOutcome::Failed(error) => assert_eq!(error.code().text(), "DELIBERATE_FAILURE"),
+        TaskOutcome::Failed(error) => assert_eq!(error.code().as_str(), "DELIBERATE_FAILURE"),
         TaskOutcome::Succeeded(value) => panic!("node b succeeded with {value}"),
     }
 }

@@ -26,7 +26,7 @@ use crate::task::body::{
     decode_checked, decode_unit, encode_read_back, raw_value_of, unread_member,
     value_free_encode_text, value_parts, DecodeFailure, ValueParts,
 };
-use crate::{ErrorCode, HorsiesError, TaskFunction, TaskOutcome, UserErrorCode};
+use crate::{CustomErrorCode, ErrorCode, HorsiesError, TaskFunction, TaskOutcome};
 
 // ---------------------------------------------------------------------------
 // Types and references
@@ -617,7 +617,7 @@ impl<T, I> TaskNode<T, I> {
     /// Take the result of `source` as the field `field` (Python
     /// `args_from`). The field's type is the receiving type
     /// `TaskOutcome<S, E>`, with `S` the source's output type; `E` reads the
-    /// source's user codes (`UserCode` takes any). The node waits for
+    /// source's custom codes (`CustomCode` takes any). The node waits for
     /// `source`.
     pub fn arg_from<S, E>(
         mut self,
@@ -734,7 +734,7 @@ impl<A, T, E> TaskFunction<A, T, E>
 where
     A: Serialize + DeserializeOwned + 'static,
     T: Serialize + DeserializeOwned + 'static,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     /// A workflow node of the task with an empty input `{}` (Python
     /// `TaskNode(fn=task)`), as the generated `name::node()` makes it. The

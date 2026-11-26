@@ -1,7 +1,7 @@
 // A retry policy with built-in codes and codes of the task's own code type.
-use horsies::{task, RetryPolicy, TaskError, UserErrorCode};
+use horsies::{task, CustomErrorCode, RetryPolicy, TaskError};
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum FetchCode {
     RateLimited,
     UpstreamDown,
@@ -14,7 +14,7 @@ enum FetchCode {
     timeout_ms = 5_000
 )]
 async fn retryable(_: ()) -> Result<String, TaskError<FetchCode>> {
-    Err(TaskError::user(FetchCode::UpstreamDown, "upstream down"))
+    Err(TaskError::custom(FetchCode::UpstreamDown, "upstream down"))
 }
 
 fn main() {

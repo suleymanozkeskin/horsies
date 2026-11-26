@@ -37,7 +37,7 @@ const SEEDED_TASK_NAME: &str = "app.tasks.start";
 const CARRIER_TEXT: &str =
     r#"{"traceparent":"00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01","tracestate":""}"#;
 
-/// The user code of a body that fails.
+/// The custom code of a body that fails.
 const DECLINED: &str = "DECLINED";
 
 thread_local! {
@@ -233,7 +233,9 @@ fn returns_one() -> RawTaskResult {
 }
 
 fn declines() -> RawTaskResult {
-    TaskResult::Err(TaskError::new(DECLINED, "the card was declined").expect("a free user code"))
+    TaskResult::Err(
+        TaskError::custom(DECLINED, "the card was declined").expect("a free custom code"),
+    )
 }
 
 fn panics() -> RawTaskResult {

@@ -5228,8 +5228,8 @@ mod enqueue_task_options_tests {
             task_name: "t".to_owned(),
             queue_name: None,
             good_until: None,
-            auto_retry_for: Some(vec![crate::core::TaskErrorCode::User(
-                crate::core::UserCode::parse("X").expect("X is a user code"),
+            auto_retry_for: Some(vec![crate::core::TaskErrorCode::Custom(
+                crate::core::CustomCode::parse("X").expect("X is a custom code"),
             )]),
             retry_policy: Some(crate::core::RetryPolicy::exponential(30, 4, true).unwrap()),
             timeout_ms: Some(1_000),

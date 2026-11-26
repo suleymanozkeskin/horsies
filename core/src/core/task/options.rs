@@ -434,14 +434,14 @@ mod tests {
 
     #[test]
     fn stored_options_text_with_both_fields() {
-        use super::super::error::{TaskErrorCode, UserCode};
+        use super::super::error::{CustomCode, TaskErrorCode};
 
         let opts = TaskOptions {
             task_name: "my_task".to_owned(),
             queue_name: Some("high".to_owned()),
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User(
-                UserCode::parse("STORAGE_ERROR").unwrap(),
+            auto_retry_for: Some(vec![TaskErrorCode::Custom(
+                CustomCode::parse("STORAGE_ERROR").unwrap(),
             )]),
             retry_policy: Some(RetryPolicy::fixed(vec![60, 300, 900], true).unwrap()),
             timeout_ms: None,
@@ -503,7 +503,7 @@ mod tests {
     /// `ISOLATED` task with no grace stores none.
     #[test]
     fn the_stored_text_is_what_the_dispatch_reader_accepts() {
-        use super::super::error::{TaskErrorCode, UserCode};
+        use super::super::error::{CustomCode, TaskErrorCode};
         use crate::worker::retry::{
             read_stored_options, StoredCancelGrace, StoredOptions, StoredRetry, StoredTimeout,
         };
@@ -512,8 +512,8 @@ mod tests {
             task_name: "my_task".to_owned(),
             queue_name: None,
             good_until: None,
-            auto_retry_for: Some(vec![TaskErrorCode::User(
-                UserCode::parse("STORAGE_ERROR").unwrap(),
+            auto_retry_for: Some(vec![TaskErrorCode::Custom(
+                CustomCode::parse("STORAGE_ERROR").unwrap(),
             )]),
             retry_policy: Some(
                 RetryPolicy::fixed(vec![60, 300], true)

@@ -18,8 +18,8 @@
 //! - Pure: does no I/O and logs nothing.
 
 use super::error::{
-    check_error_code_text, BuiltInTaskCode, CodeTextRefusal, TaskErrorCode, UserCode,
-    UserCodeRefused,
+    check_error_code_text, BuiltInTaskCode, CodeTextRefusal, CustomCode, CustomCodeRefused,
+    TaskErrorCode,
 };
 use super::execution::{Execution, GraceUse, TimeoutUse};
 use super::options::{CancelGraceMs, RetryPolicy, RetryPolicyError, TaskOptions};
@@ -66,11 +66,11 @@ pub enum DeclaredRetry {
     },
 }
 
-/// The user codes that may retry a task.
+/// The custom codes that may retry a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RetryCodeScope {
-    /// Any user code: the task declares no list of its codes.
-    AnyUserCode,
+    /// Any custom code: the task declares no list of its codes.
+    AnyCustomCode,
     /// Only a code of the task's declared list.
     Declared(Vec<String>),
 }
@@ -100,9 +100,9 @@ pub enum DeclaredOptionRefusal {
         code: String,
         refusal: CodeTextRefusal,
     },
-    /// A retry code is neither a built-in code nor a user code (`HRS-102`).
-    RetryCodeNotUserCode { refused: UserCodeRefused },
-    /// A user retry code that the task's declared list does not hold
+    /// A retry code is neither a built-in code nor a custom code (`HRS-102`).
+    RetryCodeNotCustomCode { refused: CustomCodeRefused },
+    /// A custom retry code that the task's declared list does not hold
     /// (`HRS-102`).
     RetryCodeNotDeclared { code: String },
     /// A timeout below [`MIN_TASK_TIMEOUT_MS`] (`HRS-102`).
@@ -122,7 +122,7 @@ impl DeclaredOptionRefusal {
             Self::RetryPolicy(_)
             | Self::NoRetryCode
             | Self::RetryCodeText { .. }
-            | Self::RetryCodeNotUserCode { .. }
+            | Self::RetryCodeNotCustomCode { .. }
             | Self::RetryCodeNotDeclared { .. }
             | Self::TimeoutBelowMinimum => ErrorCode::TaskInvalidOptions,
             Self::SharedClassWithoutTimeout { .. } => ErrorCode::TaskSharedExecutionRequiresTimeout,
@@ -238,7 +238,7 @@ fn exponential_policy(
 
 /// The codes that retry a task, or the refusal of each code that breaks a
 /// rule: at least one code; the text rule of retry matching; a code that is
-/// not built in is a user code; with a declared list, a user code is one of
+/// not built in is a custom code; with a declared list, a custom code is one of
 /// the list. Pure.
 fn retry_codes(
     codes: &[String],
@@ -265,13 +265,13 @@ fn retry_code(code: &str, scope: &RetryCodeScope) -> Result<TaskErrorCode, Decla
     })?;
     let user = match BuiltInTaskCode::parse(code) {
         Some(built_in) => return Ok(TaskErrorCode::BuiltIn(built_in)),
-        None => UserCode::parse(code)
-            .map_err(|refused| DeclaredOptionRefusal::RetryCodeNotUserCode { refused })?,
+        None => CustomCode::parse(code)
+            .map_err(|refused| DeclaredOptionRefusal::RetryCodeNotCustomCode { refused })?,
     };
     match scope {
-        RetryCodeScope::AnyUserCode => Ok(TaskErrorCode::User(user)),
+        RetryCodeScope::AnyCustomCode => Ok(TaskErrorCode::Custom(user)),
         RetryCodeScope::Declared(declared) => match declared.iter().any(|known| known == code) {
-            true => Ok(TaskErrorCode::User(user)),
+            true => Ok(TaskErrorCode::Custom(user)),
             false => Err(DeclaredOptionRefusal::RetryCodeNotDeclared {
                 code: code.to_owned(),
             }),
@@ -334,7 +334,7 @@ mod tests {
             timeout_ms: DeclaredMilliseconds::NotSet,
             cancel_grace_ms: DeclaredMilliseconds::NotSet,
             retry: DeclaredRetry::NoRetry,
-            retry_codes: RetryCodeScope::AnyUserCode,
+            retry_codes: RetryCodeScope::AnyCustomCode,
         }
     }
 

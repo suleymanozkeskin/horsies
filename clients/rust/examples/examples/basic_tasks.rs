@@ -13,15 +13,15 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    blocking_task, task, AppConfig, Horsies, HorsiesError, ReadError, TaskError, TaskOutcome,
-    UserErrorCode, WaitLimit,
+    blocking_task, task, AppConfig, CustomErrorCode, Horsies, HorsiesError, ReadError, TaskError,
+    TaskOutcome, WaitLimit,
 };
 use horsies_examples::{
     app_refused, database_url, isolated_profile, main_of, DemoResult, DEFAULT_PROFILE,
 };
 
 /// The codes of `charge`'s own errors: `OVER_LIMIT`.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum ChargeCode {
     OverLimit,
 }
@@ -51,7 +51,7 @@ fn word_count(text: String) -> Result<usize, TaskError<Infallible>> {
 async fn charge(amount_cents: u64) -> Result<String, TaskError<ChargeCode>> {
     match amount_cents > CHARGE_LIMIT_CENTS {
         true => Err(
-            TaskError::user(ChargeCode::OverLimit, "the amount is over the limit")
+            TaskError::custom(ChargeCode::OverLimit, "the amount is over the limit")
                 .with_data(serde_json::json!({ "limit_cents": CHARGE_LIMIT_CENTS })),
         ),
         false => Ok(format!("charged {amount_cents} cents")),
@@ -70,7 +70,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 
 /// Print the outcome of a read: the value, the task's error, or why the
 /// read gave no outcome.
-fn report<T: Debug, E: UserErrorCode>(label: &str, read: Result<TaskOutcome<T, E>, ReadError>) {
+fn report<T: Debug, E: CustomErrorCode>(label: &str, read: Result<TaskOutcome<T, E>, ReadError>) {
     match read {
         Ok(TaskOutcome::Succeeded(value)) => println!("{label}: {value:?}"),
         Ok(TaskOutcome::Failed(error)) => println!("{label}: failed: {error}"),

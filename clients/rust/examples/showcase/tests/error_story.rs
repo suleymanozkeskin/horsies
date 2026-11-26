@@ -6,7 +6,7 @@ mod support;
 use acme_showcase::app::build_app_for_url;
 use acme_showcase::tasks::promotions::{apply_promotions, compute_loyalty_points};
 use acme_showcase::{simulate, tuning};
-use horsies::{ReadError, SchemaMode, TaskOutcome, UserErrorCode, WaitLimit};
+use horsies::{CustomErrorCode, ReadError, SchemaMode, TaskOutcome, WaitLimit};
 use serial_test::serial;
 
 fn id_for(rate: f64, label: &str, avoid: Option<(&str, f64)>) -> String {
@@ -25,10 +25,10 @@ fn id_for(rate: f64, label: &str, avoid: Option<(&str, f64)>) -> String {
 fn failed_code<T, E>(read: Result<TaskOutcome<T, E>, ReadError>) -> String
 where
     T: std::fmt::Debug,
-    E: UserErrorCode,
+    E: CustomErrorCode,
 {
     match read {
-        Ok(TaskOutcome::Failed(error)) => error.code().text(),
+        Ok(TaskOutcome::Failed(error)) => error.code().as_str().to_owned(),
         other => panic!("expected a task error, got {other:?}"),
     }
 }

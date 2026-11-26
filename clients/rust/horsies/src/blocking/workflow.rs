@@ -33,9 +33,9 @@ use std::future::Future;
 use horsies_core::core::workflow::validate_start_retry;
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
 use horsies_core::{
-    process_role, wait_inside_task_message, BrokerError, HandleErrorCode, HandleOperation,
-    HandleOperationError, HandleResult, ProcessRole, UserCode, WorkflowError, WorkflowStartError,
-    WorkflowStatus,
+    process_role, wait_inside_task_message, BrokerError, CustomCode, HandleErrorCode,
+    HandleOperation, HandleOperationError, HandleResult, ProcessRole, WorkflowError,
+    WorkflowStartError, WorkflowStatus,
 };
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -44,7 +44,7 @@ use uuid::Uuid;
 use super::{async_context_message, place, HorsiesView, Place};
 use crate::workflow::new_workflow_id;
 use crate::{
-    NodeKey, NodeResult, TaskOutcome, UserErrorCode, WaitLimit, WorkflowDefinition,
+    CustomErrorCode, NodeKey, NodeResult, TaskOutcome, WaitLimit, WorkflowDefinition,
     WorkflowFunction, WorkflowHandle, WorkflowNodeInfo, WorkflowReadError, WorkflowSpec,
     WorkflowTemplate,
 };
@@ -363,7 +363,7 @@ impl<T> WorkflowHandleView<'_, T> {
     pub fn result_for<V, E>(&self, key: &NodeKey<V>) -> Result<TaskOutcome<V, E>, WorkflowReadError>
     where
         V: DeserializeOwned,
-        E: UserErrorCode,
+        E: CustomErrorCode,
     {
         self.block_read(
             self.handle.result_for::<V, E>(key),
@@ -456,7 +456,7 @@ where
     /// `InvalidInput`. Then, in Python's order: a process that runs task
     /// bodies refuses the wait (`WaitInsideTask`), then a runtime thread
     /// answers `AsyncContext`.
-    pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, UserCode>, WorkflowReadError> {
+    pub fn get(&self, limit: WaitLimit) -> Result<TaskOutcome<T, CustomCode>, WorkflowReadError> {
         let _wait = self.handle.checked_wait(limit)?;
         if process_role() == ProcessRole::RunsTaskBodies {
             return Err(WorkflowReadError::WaitInsideTask {

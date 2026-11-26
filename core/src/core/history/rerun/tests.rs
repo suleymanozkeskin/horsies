@@ -130,7 +130,7 @@ fn terminal_result(kind: TerminalSource) -> String {
             serde_json::to_string(&TaskResult::Ok(serde_json::json!({"value": 7}))).unwrap()
         }
         TerminalSource::Failed | TerminalSource::Expired | TerminalSource::Cancelled => {
-            serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::builtin(
+            serde_json::to_string(&TaskResult::<serde_json::Value>::Err(TaskError::built_in(
                 OperationalErrorCode::TaskException,
                 "p8 terminal source",
             )))
@@ -1323,7 +1323,7 @@ async fn public_history_reads_verify_result_and_use_attempt_snapshot() {
         .expect_found();
     assert_eq!(failed_raw.status, TaskStatus::Failed);
     let expected_error =
-        TaskError::builtin(OperationalErrorCode::TaskException, "p8 terminal source");
+        TaskError::built_in(OperationalErrorCode::TaskException, "p8 terminal source");
     let expected_error_envelope =
         serde_json::to_value(TaskResult::<serde_json::Value>::Err(expected_error.clone())).unwrap();
     assert_eq!(

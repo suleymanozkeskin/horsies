@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn encode_decode_task_result_err() {
         use crate::core::task::error::{OperationalErrorCode, TaskError};
-        let result: TaskResult<i32> = TaskResult::Err(TaskError::builtin(
+        let result: TaskResult<i32> = TaskResult::Err(TaskError::built_in(
             OperationalErrorCode::TaskException,
             "fail",
         ));
@@ -276,8 +276,10 @@ mod tests {
     #[test]
     fn task_result_err_round_trip() {
         use crate::core::task::error::{RetrievalCode, TaskError};
-        let result: TaskResult<String> =
-            TaskResult::Err(TaskError::builtin(RetrievalCode::TaskNotFound, "not found"));
+        let result: TaskResult<String> = TaskResult::Err(TaskError::built_in(
+            RetrievalCode::TaskNotFound,
+            "not found",
+        ));
         let json = task_result_to_json_string(&result).unwrap();
         let back: TaskResult<String> = task_result_from_json_str(&json).unwrap();
         assert!(back.is_err());

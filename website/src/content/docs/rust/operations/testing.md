@@ -19,9 +19,9 @@ tags: [rust, testing, unit test, TaskRuntime, WorkflowContext, suppress_sends, c
 ## Call a Task Directly
 
 ```rust
-use horsies::{task, TaskError, TaskErrorCode, UserErrorCode};
+use horsies::{task, CustomErrorCode, TaskError, TaskErrorCode};
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum OrderCode {
     LimitExceeded,
 }
@@ -29,7 +29,7 @@ enum OrderCode {
 #[task("validate_order")]
 async fn validate_order(total_cents: u64) -> Result<u64, TaskError<OrderCode>> {
     match total_cents > 1_000_000 {
-        true => Err(TaskError::user(OrderCode::LimitExceeded, "order over the limit")),
+        true => Err(TaskError::custom(OrderCode::LimitExceeded, "order over the limit")),
         false => Ok(total_cents),
     }
 }
@@ -37,7 +37,7 @@ async fn validate_order(total_cents: u64) -> Result<u64, TaskError<OrderCode>> {
 #[tokio::test]
 async fn an_order_over_the_limit_is_refused() {
     let refused = validate_order(2_000_000).await.unwrap_err();
-    assert_eq!(refused.code(), &TaskErrorCode::User(OrderCode::LimitExceeded));
+    assert_eq!(refused.code(), &TaskErrorCode::Custom(OrderCode::LimitExceeded));
 }
 ```
 
@@ -48,13 +48,13 @@ A `#[horsies::blocking_task]` function is a plain `fn`: call it with no `.await`
 A body whose first parameter is `TaskRuntime` takes the runtime of an app built in the test: `app.task_runtime()`.
 
 ```rust
-use horsies::{task, AppConfig, Horsies, TaskError, TaskRuntime, UserErrorCode};
+use horsies::{task, AppConfig, CustomErrorCode, Horsies, TaskError, TaskRuntime};
 
 struct Greeter {
     greeting: String,
 }
 
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum WelcomeCode {
     NotConfigured,
 }
@@ -63,7 +63,7 @@ enum WelcomeCode {
 async fn welcome(rt: TaskRuntime, user: String) -> Result<String, TaskError<WelcomeCode>> {
     let greeter = rt
         .state::<Greeter>()
-        .map_err(|missing| TaskError::user(WelcomeCode::NotConfigured, missing.to_string()))?;
+        .map_err(|missing| TaskError::custom(WelcomeCode::NotConfigured, missing.to_string()))?;
     Ok(format!("{}, {user}", greeter.greeting))
 }
 
@@ -96,13 +96,13 @@ async fn send_receipt(
 ) -> Result<String, TaskError<Infallible>> {
     match charged {
         TaskOutcome::Succeeded(cents) => Ok(format!("{order_id}: charged {cents}")),
-        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().text())),
+        TaskOutcome::Failed(error) => Ok(format!("{order_id}: {}", error.code().as_str())),
     }
 }
 
 #[tokio::test]
 async fn a_skipped_charge_is_reported() {
-    let skipped = TaskOutcome::Failed(TaskError::library(OutcomeCode::UpstreamSkipped, "skipped"));
+    let skipped = TaskOutcome::Failed(TaskError::built_in(OutcomeCode::UpstreamSkipped, "skipped"));
     let receipt = send_receipt("order-1".to_owned(), skipped).await.unwrap();
     assert_eq!(receipt, "order-1: UPSTREAM_SKIPPED");
 }

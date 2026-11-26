@@ -15,7 +15,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use horsies::{
-    task, AppConfig, Horsies, HorsiesError, TaskError, TaskOutcome, UserErrorCode, WaitLimit,
+    task, AppConfig, CustomErrorCode, Horsies, HorsiesError, TaskError, TaskOutcome, WaitLimit,
     WorkflowDefConfig, WorkflowDefinition, WorkflowSpecBuilder,
 };
 use horsies_examples::{
@@ -23,7 +23,7 @@ use horsies_examples::{
 };
 
 /// The codes of the pipeline's own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 enum PipelineCode {
     /// A dependency did not succeed.
     UpstreamFailed,
@@ -74,8 +74,8 @@ async fn summarize(
     }
 }
 
-fn upstream_failed<E: UserErrorCode>(error: &TaskError<E>) -> TaskError<PipelineCode> {
-    TaskError::user(PipelineCode::UpstreamFailed, error.to_string())
+fn upstream_failed<E: CustomErrorCode>(error: &TaskError<E>) -> TaskError<PipelineCode> {
+    TaskError::custom(PipelineCode::UpstreamFailed, error.to_string())
 }
 
 /// The definition: its nodes, and the node whose result is the workflow's.

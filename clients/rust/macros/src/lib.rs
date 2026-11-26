@@ -2,8 +2,8 @@ use proc_macro::TokenStream;
 use syn::{parse_macro_input, DeriveInput, ItemFn};
 
 mod codegen;
+mod custom_error_code;
 mod parse;
-mod user_error_code;
 mod workflow_input;
 
 /// Define an async task.
@@ -17,7 +17,7 @@ mod workflow_input;
 ///
 /// The function returns `Result<T, TaskError<E>>`: `T` is the output type
 /// and `E` the code type of the task's own errors
-/// (`#[derive(horsies::UserErrorCode)]`, or `std::convert::Infallible`).
+/// (`#[derive(horsies::CustomErrorCode)]`, or `std::convert::Infallible`).
 /// Its parameters form the input, stored as Python stores keyword
 /// arguments: no parameter, or one parameter written `()`, is `()` (a send
 /// stores `{}`); any other parameters are a generated `Input` struct with
@@ -127,23 +127,23 @@ pub fn derive_workflow_input(item: TokenStream) -> TokenStream {
     }
 }
 
-/// Derive the code type of a task's own errors: `horsies::UserErrorCode`.
+/// Derive the code type of a task's own errors: `horsies::CustomErrorCode`.
 ///
 /// The enum has unit variants only. Each variant's code is its name in
 /// UPPER_SNAKE_CASE. A code with the name of a built-in or reserved code
 /// (`TASK_TIMEOUT`, `WORKFLOW_STOPPED`, ...) is a compile error.
 ///
 /// ```ignore
-/// #[derive(Debug, Clone, PartialEq, horsies::UserErrorCode)]
+/// #[derive(Debug, Clone, PartialEq, horsies::CustomErrorCode)]
 /// enum ChargeCode {
 ///     CardDeclined, // CARD_DECLINED
 ///     RateLimited,  // RATE_LIMITED
 /// }
 /// ```
-#[proc_macro_derive(UserErrorCode)]
-pub fn derive_user_error_code(item: TokenStream) -> TokenStream {
+#[proc_macro_derive(CustomErrorCode)]
+pub fn derive_custom_error_code(item: TokenStream) -> TokenStream {
     let input = parse_macro_input!(item as DeriveInput);
-    match user_error_code::derive_user_error_code(input) {
+    match custom_error_code::derive_custom_error_code(input) {
         Ok(tokens) => tokens.into(),
         Err(err) => err.to_compile_error().into(),
     }

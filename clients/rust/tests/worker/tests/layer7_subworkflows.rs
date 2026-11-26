@@ -8,9 +8,9 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use horsies::{
-    HorsiesError, NodeKey, NodeResult, OnError, OutputlessResults, SubWorkflowFailure,
-    SubWorkflowNode, SubWorkflowParams, SuccessCase, SuccessPolicy, TaskNode, TaskOutcome,
-    TypedNodeRef, UserCode, UserErrorCode, WorkflowDefinition, WorkflowHandle, WorkflowSpecBuilder,
+    CustomCode, CustomErrorCode, HorsiesError, NodeKey, NodeResult, OnError, OutputlessResults,
+    SubWorkflowFailure, SubWorkflowNode, SubWorkflowParams, SuccessCase, SuccessPolicy, TaskNode,
+    TaskOutcome, TypedNodeRef, WorkflowDefinition, WorkflowHandle, WorkflowSpecBuilder,
     WorkflowStatus, WorkflowTaskStatus,
 };
 use horsies_test_support::rows::{self, NodeRow};
@@ -85,7 +85,7 @@ async fn ended_nodes<T>(suite: &Suite, handle: &WorkflowHandle<T>, status: &str)
 /// The outcome of a workflow that ended.
 async fn outcome<T: DeserializeOwned + 'static>(
     handle: &WorkflowHandle<T>,
-) -> TaskOutcome<T, UserCode> {
+) -> TaskOutcome<T, CustomCode> {
     handle
         .get(within(WORKFLOW_WAIT))
         .await
@@ -109,14 +109,14 @@ fn child_of(node: &NodeRow) -> Uuid {
 /// The sub-workflow failure of `outcome` (Python `_assert_subworkflow_error`):
 /// the code `SUBWORKFLOW_FAILED`, the child `child_id`, which FAILED with at
 /// least one failed task.
-fn subworkflow_failure<T: Debug, E: UserErrorCode + Debug>(
+fn subworkflow_failure<T: Debug, E: CustomErrorCode + Debug>(
     outcome: &TaskOutcome<T, E>,
     child_id: Uuid,
 ) -> &SubWorkflowFailure {
     let TaskOutcome::Failed(error) = outcome else {
         panic!("expected a sub-workflow failure, got {outcome:?}");
     };
-    assert_eq!(error.code().text(), "SUBWORKFLOW_FAILED");
+    assert_eq!(error.code().as_str(), "SUBWORKFLOW_FAILED");
     let failure = error
         .sub_workflow()
         .unwrap_or_else(|| panic!("the error {error:?} is not a sub-workflow failure"));
@@ -303,7 +303,7 @@ async fn test_subworkflow_failure_pause_policy_preserves_error_after_resume() {
     rows::wait_for_workflow_status(&client, handle.workflow_id(), "PAUSED", WORKFLOW_WAIT).await;
 
     match outcome(&handle).await {
-        TaskOutcome::Failed(error) => assert_eq!(error.code().text(), "WORKFLOW_PAUSED"),
+        TaskOutcome::Failed(error) => assert_eq!(error.code().as_str(), "WORKFLOW_PAUSED"),
         TaskOutcome::Succeeded(value) => panic!("the paused workflow read {value}"),
     }
     let parent = rows::workflow_node(&client, handle.workflow_id(), 0).await;

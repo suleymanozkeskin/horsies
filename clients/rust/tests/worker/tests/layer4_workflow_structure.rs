@@ -105,7 +105,7 @@ async fn failed_code<T: DeserializeOwned + Clone + std::fmt::Debug + 'static>(
         .await
         .expect("read the workflow")
     {
-        TaskOutcome::Failed(error) => error.code().text(),
+        TaskOutcome::Failed(error) => error.code().as_str().to_owned(),
         TaskOutcome::Succeeded(value) => panic!("the workflow succeeded with {value:?}"),
     }
 }

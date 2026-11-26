@@ -13,11 +13,11 @@ use std::time::Duration;
 
 use horsies::rerun::{RerunEnqueuePolicy, RerunOutcome, RerunTask};
 use horsies::{
-    blocking_task, task, AppConfig, ChildPreload, Horsies, HorsiesError, IntervalSchedule,
-    IsolatedChildren, IsolatedSetting, PingTarget, RetryPolicy, ScheduleConfig, SchedulePattern,
-    SharedAsyncChildren, SharedAsyncSetting, SharedThreadChildren, SharedThreadSetting,
-    SubWorkflowParams, TaskError, TaskErrorCode, TaskOutcome, TaskRuntime, TaskSchedule,
-    TaskSendError, TaskSendOptions, UserErrorCode, WaitLimit, WorkerPong, WorkerProfile,
+    blocking_task, task, AppConfig, ChildPreload, CustomErrorCode, Horsies, HorsiesError,
+    IntervalSchedule, IsolatedChildren, IsolatedSetting, PingTarget, RetryPolicy, ScheduleConfig,
+    SchedulePattern, SharedAsyncChildren, SharedAsyncSetting, SharedThreadChildren,
+    SharedThreadSetting, SubWorkflowParams, TaskError, TaskErrorCode, TaskOutcome, TaskRuntime,
+    TaskSchedule, TaskSendError, TaskSendOptions, WaitLimit, WorkerPong, WorkerProfile,
     WorkflowDefConfig, WorkflowDefinition, WorkflowFunction, WorkflowHandle, WorkflowSpecBuilder,
 };
 use uuid::Uuid;
@@ -65,7 +65,7 @@ const PING_WINDOW: Duration = Duration::from_secs(2);
 const PING_ATTEMPTS: usize = 10;
 
 /// The codes of the parity tasks' own errors.
-#[derive(Debug, Clone, PartialEq, UserErrorCode)]
+#[derive(Debug, Clone, PartialEq, CustomErrorCode)]
 pub enum ParityCode {
     Refused,
     Transient,
@@ -89,7 +89,7 @@ pub async fn add(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 /// A task error with no retry.
 #[task("parity.refuse")]
 pub async fn refuse(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Refused,
         format!("refused {value}"),
     ))
@@ -98,7 +98,7 @@ pub async fn refuse(value: i64) -> Result<i64, TaskError<ParityCode>> {
 /// A task error that the policy retries until the retries run out.
 #[task("parity.transient", retry_policy = retry_policy(), auto_retry_for = ["TRANSIENT"])]
 pub async fn transient(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Transient,
         format!("transient {value}"),
     ))
@@ -116,7 +116,7 @@ pub fn sleep_past_deadline() -> Result<String, TaskError<Infallible>> {
 pub async fn double(upstream: TaskOutcome<i64, Infallible>) -> Result<i64, TaskError<ParityCode>> {
     match upstream {
         TaskOutcome::Succeeded(value) => Ok(value * 2),
-        TaskOutcome::Failed(_) => Err(TaskError::user(
+        TaskOutcome::Failed(_) => Err(TaskError::custom(
             ParityCode::UpstreamFailed,
             "the upstream failed",
         )),
@@ -132,7 +132,7 @@ pub async fn add_async(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 #[task("parity.refuse_async", execution = shared_async, timeout_ms = 30_000)]
 pub async fn refuse_async(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Refused,
         format!("refused {value}"),
     ))
@@ -146,7 +146,7 @@ pub async fn refuse_async(value: i64) -> Result<i64, TaskError<ParityCode>> {
     auto_retry_for = ["TRANSIENT"]
 )]
 pub async fn transient_async(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Transient,
         format!("transient {value}"),
     ))
@@ -172,7 +172,7 @@ pub fn add_thread(a: i64, b: i64) -> Result<i64, TaskError<Infallible>> {
 
 #[blocking_task("parity.refuse_thread", execution = shared_thread, timeout_ms = 30_000)]
 pub fn refuse_thread(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Refused,
         format!("refused {value}"),
     ))
@@ -186,7 +186,7 @@ pub fn refuse_thread(value: i64) -> Result<i64, TaskError<ParityCode>> {
     auto_retry_for = ["TRANSIENT"]
 )]
 pub fn transient_thread(value: i64) -> Result<i64, TaskError<ParityCode>> {
-    Err(TaskError::user(
+    Err(TaskError::custom(
         ParityCode::Transient,
         format!("transient {value}"),
     ))
@@ -903,7 +903,7 @@ async fn rerun_one(app: &Horsies, rerun: &Rerun, sent: &[Uuid]) -> Result<Uuid, 
     let limit = WaitLimit::Within(RESULT_WAIT);
     match app.get_result::<i64, ParityCode>(source, limit).await {
         Ok(TaskOutcome::Failed(error))
-            if *error.code() == TaskErrorCode::User(ParityCode::Refused) => {}
+            if *error.code() == TaskErrorCode::Custom(ParityCode::Refused) => {}
         other => {
             return Err(SendRefused(format!(
                 "the rerun source {source} did not end with REFUSED: {other:?}"

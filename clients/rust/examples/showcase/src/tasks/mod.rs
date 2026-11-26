@@ -168,7 +168,7 @@ pub async fn task_store(runtime: &TaskRuntime) -> Result<Store, TaskError<AcmeCo
 
 /// The task error of a failed store `operation`.
 pub fn store_failure(operation: &str, message: impl std::fmt::Display) -> TaskError<AcmeCode> {
-    TaskError::user(
+    TaskError::custom(
         AcmeCode::StoreUnavailable,
         format!("{operation} failed: {message}"),
     )

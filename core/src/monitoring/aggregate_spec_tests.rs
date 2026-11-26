@@ -39,7 +39,7 @@ const STATUS_ORDER: [&str; 7] = [
 /// The cap of the error-code facet list (Python `_ERROR_FACET_CAP`).
 const ERROR_FACET_CAP: usize = 30;
 
-/// One sample code per family, and a user code for DOMAIN (Python
+/// One sample code per family, and a custom code for DOMAIN (Python
 /// `_FAMILY_SAMPLES`).
 const FAMILY_SAMPLES: [(ErrorCategory, &str); 5] = [
     (ErrorCategory::Operational, "TASK_EXCEPTION"),
@@ -663,7 +663,7 @@ async fn each_family_selects_exactly_its_own_codes() {
 
 /// Python `TestErrorCategoryFilter::test_a_user_defined_code_is_domain_and_no_family_claims_it`.
 #[tokio::test]
-async fn a_user_code_is_domain_and_no_built_in_family_selects_it() {
+async fn a_custom_code_is_domain_and_no_built_in_family_selects_it() {
     let database = SpecDatabase::create().await;
     seed_terminal(
         &database.pool,
