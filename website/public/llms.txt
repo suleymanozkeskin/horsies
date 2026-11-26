@@ -868,7 +868,7 @@ Each entry: Title -- summary -> URL
 - Atomic Enqueue and Topology -- send after commit, resend_on_transient_err, idempotency_key window and limits, no send API joins a caller transaction -> /horsies/operations/atomic-enqueue-and-topology/
 - Deploying Code Changes -- renamed or removed tasks and parameters, in-flight rows, old and new workers, error codes per change -> /horsies/operations/deploying-code-changes/
 - Code Change Examples -- the Python code of the deploy steps: a parameter with a default, two names for one task, a model field with a default, a renamed field with AliasChoices -> /horsies/operations/code-change-examples/
-- Rerun in Your Transaction -- the Python rerun_task: re-execute a terminal task as a new task in the caller's transaction, RerunTask, RerunEnqueuePolicy, RerunOutcome -> /horsies/operations/rerun-in-your-transaction/
+- Rerun in Your Transaction -- the Python rerun_task: re-execute a terminal task as a new task in the caller's transaction, RerunTask, RerunEnqueuePolicy, RerunOutcome, registered_task_codes (the stored retry list is checked against the app's declared codes: RETRY_CODE_NOT_DECLARED, TASK_NOT_REGISTERED) -> /horsies/operations/rerun-in-your-transaction/
 - Testing -- direct task calls, TaskOutcome kwargs, WorkflowContext.from_serialized, HORSIES_SUPPRESS_SENDS -> /horsies/operations/testing/
 - Autovacuum Tuning -- per-table autovacuum settings for high-churn tables, verification queries -> /horsies/operations/autovacuum-tuning/
 

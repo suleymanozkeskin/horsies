@@ -1885,6 +1885,16 @@ class Horsies:
         """List tasks registered with this app"""
         return list(self.tasks.keys_list())
 
+    def registered_task_codes(self) -> dict[str, tuple[str, ...]]:
+        """The error codes that each registered task declares
+        (`task_error_codes`), by task name, for every task of the app: `()`
+        for a task that declares none. A rerun checks the stored retry list
+        of its source against them (`horsies.rerun_task`). Pure."""
+        return {
+            name: self.tasks[name].task_error_codes
+            for name in self.tasks.keys_list()
+        }
+
     def declared_error_codes(self) -> dict[str, tuple[str, ...]]:
         """The error codes that each task declares (`error_codes=`), by task
         name in name order, for each task that declares at least one. Pure."""
@@ -1909,7 +1919,8 @@ class Horsies:
     ) -> RerunOutcome:
         """``horsies.rerun_task`` with the tracing setting of this app: the
         same statements on ``connection``, in its transaction, with the same
-        outcomes and errors. It does not commit.
+        outcomes and errors. It does not commit. The stored retry list of the
+        source is checked against ``registered_task_codes()``.
 
         With ``OtelTracing`` the new task stores the carrier that the
         configured propagator injects for the caller's current context, with
@@ -1925,6 +1936,7 @@ class Horsies:
             command,
             policy,
             current_context_trace(self._send_telemetry),
+            registered_task_codes=self.registered_task_codes(),
         )
 
     def rerun_task(
@@ -1941,6 +1953,7 @@ class Horsies:
             command,
             policy,
             current_context_trace(self._send_telemetry),
+            registered_task_codes=self.registered_task_codes(),
         )
 
     def get_broker(self) -> 'PostgresBroker':

@@ -5,6 +5,8 @@
 //! (`clients/python/horsies/core/history/rerun/operations.py`) and
 //! `_rerun_write_outcome`.
 
+use std::collections::BTreeMap;
+
 use chrono::Duration;
 use sha2::{Digest, Sha256};
 
@@ -14,12 +16,15 @@ use crate::core::history::archive::attempts::{
     OpenClaims,
 };
 use crate::core::history::identity::keys::IDEMPOTENCY_SCOPE_VERSION;
+use crate::core::task::DeclaredErrorCodes;
 
 const SOURCE: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00e0);
 const ROOT: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00d0);
 const HOLDER: Uuid = Uuid::from_u128(0x0190_f0f0_0000_7000_8000_0000_0000_00f0);
 const CLASS: &str = "standard_14d";
 const INPUT: &str = "{\"k\":\"v\"}";
+/// The task name of the source of [`history_values`].
+const TASK_NAME: &str = "p8.rerun";
 
 fn command(caller_key: Option<&str>) -> RerunTask {
     RerunTask::new(SOURCE, None, caller_key.map(str::to_owned))
@@ -52,7 +57,7 @@ fn history_values() -> Vec<StatementValue> {
         StatementValue::Text("HISTORY".to_owned()),
         StatementValue::Null(CallerType::Text),
         StatementValue::Uuid(SOURCE),
-        StatementValue::Text("p8.rerun".to_owned()),
+        StatementValue::Text(TASK_NAME.to_owned()),
         StatementValue::Text("default".to_owned()),
         StatementValue::Int4(50),
         StatementValue::Int4(3),
@@ -91,6 +96,7 @@ fn prepare_values(values: Vec<StatementValue>, caller_key: Option<&str>) -> Reru
         &CallerRow::new(values),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         ClientFamily::Rust,
         sent_at(),
     )
@@ -186,6 +192,7 @@ fn a_typescript_rerun_refuses_a_database_of_another_family() {
         &CallerRow::new(history_values()),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         ClientFamily::TypeScript,
         sent_at(),
     )
@@ -517,6 +524,7 @@ fn a_write_of_a_traced_rerun_carries_the_carrier_text_and_the_trace_id() {
         &CallerRow::new(history_values()),
         &command,
         &policy(),
+        &RegisteredTaskCodes::NONE,
         ClientFamily::Rust,
         sent_at(),
     )
@@ -575,8 +583,9 @@ fn a_row_that_does_not_fit_the_read_is_a_row_error() {
             &null_location,
             &command,
             &policy(),
+            &RegisteredTaskCodes::NONE,
             ClientFamily::Rust,
-            sent_at()
+            sent_at(),
         ),
         Err(RerunRowError::NullColumn {
             statement: "rerun_source_read",
@@ -590,8 +599,9 @@ fn a_row_that_does_not_fit_the_read_is_a_row_error() {
             &wrong_type,
             &command,
             &policy(),
+            &RegisteredTaskCodes::NONE,
             ClientFamily::Rust,
-            sent_at()
+            sent_at(),
         ),
         Err(RerunRowError::Row(CallerRowRefused::TypeMismatch {
             column: "priority",
@@ -669,4 +679,100 @@ fn a_conflict_that_cannot_be_verified_on_a_minted_id_panics() {
 fn an_outcome_outside_the_function_set_panics() {
     let write = write(None);
     let _outcome = decode_rerun_write(&write, &written("RETRIED", write.new_task_id()));
+}
+
+/// The read row of [`history_values`] whose stored options hold a fixed
+/// retry policy of one retry on the code texts `codes`.
+fn values_retrying_on(codes: &[&str]) -> Vec<StatementValue> {
+    let list = codes
+        .iter()
+        .map(|code| format!("\"{code}\""))
+        .collect::<Vec<String>>()
+        .join(",");
+    let options = format!(
+        "{{\"retry_policy\":{{\"max_retries\":1,\"intervals\":[1],\"backoff_strategy\":\"fixed\",\
+         \"jitter\":true,\"auto_retry_for\":[{list}]}}}}"
+    );
+    let payload = format!("{{\"input\":{INPUT},\"options\":{options}}}").into_bytes();
+    let digest = Sha256::digest(&payload).to_vec();
+    let values = with(history_values(), "rerun_input_digest", StatementValue::Bytea(digest));
+    with(values, "rerun_input_inline", StatementValue::Bytea(payload))
+}
+
+/// The codes of an app that registers the task of [`history_values`] with
+/// the custom codes `custom`.
+fn app_codes(custom: &[&str]) -> RegisteredTaskCodes {
+    let declared = DeclaredErrorCodes::parse(custom).expect("a valid declared set");
+    RegisteredTaskCodes::new(BTreeMap::from([(TASK_NAME.to_owned(), declared)]))
+}
+
+/// What the read's row `values` decides for a calling app with `codes`.
+fn prepare_with_codes(
+    values: Vec<StatementValue>,
+    codes: &RegisteredTaskCodes,
+) -> RerunPreparation {
+    let command = command(None);
+    let read = rerun_read(&command, &policy());
+    prepare_rerun_write(
+        &read,
+        &CallerRow::new(values),
+        &command,
+        &policy(),
+        codes,
+        ClientFamily::Rust,
+        sent_at(),
+    )
+    .expect("a row of the read's columns")
+}
+
+#[test]
+fn a_stored_custom_retry_code_that_the_task_declares_passes() {
+    let prepared = prepare_with_codes(
+        values_retrying_on(&["TRANSIENT"]),
+        &app_codes(&["TRANSIENT"]),
+    );
+    assert!(matches!(prepared, RerunPreparation::Write(_)), "{prepared:?}");
+}
+
+#[test]
+fn a_stored_custom_retry_code_that_the_task_does_not_declare_is_refused() {
+    let prepared = prepare_with_codes(
+        values_retrying_on(&["WORKER_CRASHED", "TRANSIENT"]),
+        &app_codes(&["RATE_LIMITED"]),
+    );
+    assert_eq!(
+        prepared,
+        RerunPreparation::RetryCodeNotDeclared {
+            task_name: TASK_NAME.to_owned(),
+            code: "TRANSIENT".to_owned(),
+        }
+    );
+}
+
+#[test]
+fn a_stored_custom_retry_code_of_a_task_that_the_app_does_not_register_is_refused() {
+    let prepared = prepare_with_codes(
+        values_retrying_on(&["TRANSIENT"]),
+        &RegisteredTaskCodes::NONE,
+    );
+    assert_eq!(
+        prepared,
+        RerunPreparation::TaskNotRegistered {
+            task_name: TASK_NAME.to_owned(),
+        }
+    );
+}
+
+/// The core knows every built-in code: a list of built-in codes passes for
+/// a task that declares no code and for a task that the app does not
+/// register.
+#[test]
+fn stored_built_in_retry_codes_pass_for_every_task() {
+    for codes in [app_codes(&[]), RegisteredTaskCodes::NONE] {
+        let prepared = prepare_with_codes(
+            values_retrying_on(&["WORKER_CRASHED", "TASK_TIMEOUT"]),
+            &codes,
+        );
+        assert!(matches!(prepared, RerunPreparation::Write(_)), "{prepared:?}");
+    }
 }

@@ -27,6 +27,14 @@ and decides the outcome (``horsies._core.rerun_read``,
 ``prepare_rerun_write``, ``decode_rerun_write``), and the caller's
 connection runs both statements.
 
+The rerun checks the stored retry list of the source against the declared
+custom codes of the calling app (``registered_task_codes``: each registered
+task by name, with its ``task_error_codes``). A built-in code passes. A
+custom code passes when the app registers the task and the task declares
+the code. Otherwise the rerun raises ``CorePreconditionFailed`` and writes
+nothing: ``RETRY_CODE_NOT_DECLARED`` for a code that the task does not
+declare, ``TASK_NOT_REGISTERED`` for a task that the app does not register.
+
 The new task stores the trace that the request carries. ``rerun_task``
 passes none. ``Horsies.rerun_task`` and ``Horsies.rerun_task_async`` pass
 the carrier of the caller's current context when the app traces
@@ -35,6 +43,7 @@ the carrier of the caller's current context when the app traces
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -59,9 +68,11 @@ from horsies._core import (
     RerunKeyReplayRecord,
     RerunNotEligibleRecord,
     RerunPolicyRecord,
+    RerunRetryCodeNotDeclared,
     RerunSourceAbsentRecord,
     RerunSourceCorruptRecord,
     RerunSourceLiveRecord,
+    RerunTaskNotRegistered,
     RerunUnknownStoredFamily,
     RerunWriteRecord,
     decode_rerun_write,
@@ -283,19 +294,24 @@ def _class_not_registered(class_key: str) -> ValueError:
 
 @dataclass(frozen=True, slots=True)
 class _CoreRequest:
-    """The request and the policy of one rerun, as the core takes them."""
+    """The request, the policy and the declared custom codes of the calling
+    app's tasks of one rerun, as the core takes them."""
 
     command: RerunCommandRecord
     policy: RerunPolicyRecord
+    registered_task_codes: dict[str, tuple[str, ...]]
 
 
 def _core_request(
     command: RerunTask,
     policy: RerunEnqueuePolicy,
     trace: TraceArgument,
+    registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> _CoreRequest:
-    """The core's records of ``command``, ``policy`` and ``trace``. Pure."""
+    """The core's records of ``command``, ``policy``, ``trace`` and
+    ``registered_task_codes``. Pure."""
     return _CoreRequest(
+        registered_task_codes=dict(registered_task_codes),
         command=RerunCommandRecord(
             source_task_id=command.source_task_id,
             deadline=command.deadline,
@@ -327,6 +343,7 @@ def _write_or_outcome(
         read_row,
         request.command,
         request.policy,
+        registered_task_codes=request.registered_task_codes,
         sent_at=datetime.now(timezone.utc),
     )
     match prepared:
@@ -352,6 +369,10 @@ def _write_or_outcome(
             raise exception
         case RerunCallerKeyRefused(cause=cause):
             raise ValueError(cause)
+        case RerunRetryCodeNotDeclared(exception=exception):
+            raise exception
+        case RerunTaskNotRegistered(exception=exception):
+            raise exception
         case IdMintRefused(cause=cause):
             raise ValueError(cause)
         case _ as unreachable:
@@ -362,6 +383,8 @@ async def rerun_task(
     connection: AsyncConnection,
     command: RerunTask,
     policy: RerunEnqueuePolicy,
+    *,
+    registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> RerunOutcome:
     """Execute one rerun inside the caller-owned transaction.
 
@@ -373,6 +396,11 @@ async def rerun_task(
     commits or rolls back with the caller's own writes. Every outcome but
     ``RerunEnqueued`` writes nothing.
 
+    ``registered_task_codes`` maps the name of each task that the calling
+    app registers to the custom codes that it declares
+    (``Horsies.registered_task_codes()``). The stored retry list of the
+    source is checked against it before the write.
+
     The new task stores no trace carrier, so each of its attempts is the
     root of a new trace. ``Horsies.rerun_task_async`` (and the blocking
     ``Horsies.rerun_task``) is the same rerun with the tracing setting of
@@ -381,11 +409,17 @@ async def rerun_task(
 
     Raises:
         ValueError: the new request's retention class is not registered, the
-            caller key is not a valid idempotency key, or the task id source
-            refused to mint. Nothing is written.
+            caller key is not a valid idempotency key, the task id source
+            refused to mint, or a code set of ``registered_task_codes`` is
+            not a declared code set (a code text outside the rule, the name
+            of a built-in code, or a repeated code). Nothing is written.
         CorePreconditionFailed: the database was installed by the other
-            client family, or records none (subject ``rerun_task``, not
-            retryable). Nothing is written.
+            client family, or records none; or the stored retry list of the
+            source names a custom code that the task does not declare
+            (``RETRY_CODE_NOT_DECLARED``), or of a task that the app does
+            not register (``TASK_NOT_REGISTERED``). The subject is
+            ``rerun_task``, not retryable; the message names the task and
+            the code. Nothing is written.
         CoreContractViolation: the family row of the database holds a value
             that is not a client family: corrupt stored data (subject
             ``rerun_task``; the message names the stored value). Nothing is
@@ -394,7 +428,13 @@ async def rerun_task(
             core started, or stopped).
         A database error of a statement raises from the caller's driver.
     """
-    return await rerun_with_trace_async(connection, command, policy, NO_TRACE_CARRIER)
+    return await rerun_with_trace_async(
+        connection,
+        command,
+        policy,
+        NO_TRACE_CARRIER,
+        registered_task_codes=registered_task_codes,
+    )
 
 
 async def rerun_with_trace_async(
@@ -402,12 +442,14 @@ async def rerun_with_trace_async(
     command: RerunTask,
     policy: RerunEnqueuePolicy,
     trace: TraceArgument,
+    *,
+    registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> RerunOutcome:
     """``rerun_task`` whose new task stores ``trace``: ``NO_TRACE_CARRIER``,
     or the ``TraceCarrier`` of the caller's current context. The core checks
     the bounds of the carrier: a carrier that breaks one is not stored and
     never refuses the rerun. Raises as ``rerun_task``."""
-    request = _core_request(command, policy, trace)
+    request = _core_request(command, policy, trace, registered_task_codes)
     read = core_rerun_read(request.command, request.policy)
     read_row = await _run_prepared(connection, read)
     match _write_or_outcome(request, read, read_row):
@@ -423,10 +465,12 @@ def rerun_with_trace(
     command: RerunTask,
     policy: RerunEnqueuePolicy,
     trace: TraceArgument,
+    *,
+    registered_task_codes: Mapping[str, tuple[str, ...]],
 ) -> RerunOutcome:
     """``rerun_with_trace_async`` on a blocking connection of the caller:
     the same statements, outcomes and errors."""
-    request = _core_request(command, policy, trace)
+    request = _core_request(command, policy, trace, registered_task_codes)
     read = core_rerun_read(request.command, request.policy)
     read_row = _run_prepared_blocking(connection, read)
     match _write_or_outcome(request, read, read_row):
