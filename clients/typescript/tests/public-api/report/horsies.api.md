@@ -2618,6 +2618,14 @@ export type SchemaSent<S> = S extends AnyWire ? SentOf<S> : ZodSentOf<S>;
 export type SchemaValue<S> = S extends AnyWire ? ValueOf<S> : ZodValueOf<S>;
 
 // @public
+export const SeatRelayCode: {
+    readonly SEAT_RELAY_FULL: "SEAT_RELAY_FULL";
+};
+
+// @public
+export type SeatRelayCode = (typeof SeatRelayCode)[keyof typeof SeatRelayCode];
+
+// @public
 export type Secret = {
     readonly kind: "fromEnv";
     readonly name: string;
@@ -2659,7 +2667,7 @@ export type SendableInput<P extends ParameterSchemas> = HasRequiredUpstreamOutco
 export type SenderMayLeaveOut<P> = P extends AnyWire ? PresenceOf<P> extends "required" ? false : true : P extends ZodOptionalIn ? true : false;
 
 // @public
-export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict;
+export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | TaskSendSeatRelayFull;
 
 // @public
 export type SendInput<P extends ParameterSchemas> = keyof PlainParameters<P> extends never ? EmptyObject : ParametersSent<PlainParameters<P>>;
@@ -3311,7 +3319,7 @@ export interface TaskSendEnqueueFailed {
 }
 
 // @public
-export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | RetryableSendError<O, E>;
+export type TaskSendError<O, E extends string> = TaskSendSuppressed | TaskSendValidationFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendKeyConflict | TaskSendSeatRelayFull | RetryableSendError<O, E>;
 
 // @public (undocumented)
 export interface TaskSendIdempotencyKeyConflict {
@@ -3379,6 +3387,14 @@ export interface TaskSendPayloadTooLarge {
     // (undocumented)
     readonly sizeBytes: bigint;
 }
+
+// @public
+export type TaskSendSeatRelayFull = {
+    readonly code: typeof SeatRelayCode.SEAT_RELAY_FULL;
+    readonly retryable: true;
+    readonly message: string;
+    readonly exception: CoreCause;
+};
 
 // @public (undocumented)
 export interface TaskSendSuppressed {

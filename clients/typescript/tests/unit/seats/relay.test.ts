@@ -1,6 +1,6 @@
 // The relay of a seat isolate: the operation relay, the in-flight bound, each relayed call kind at the bound of the
-// waiting operations (its retryable failure, with a cause that names the bound), a prepare at its own bound, a send
-// at the bound, a post that throws takes no place, a refused core call, and an answer to an operation that does not
+// waiting operations (its retryable failure, with a cause that names the bound), a prepare at its own bound (the send
+// fails with SEAT_RELAY_FULL), a send at the bound, a post that throws takes no place, a refused core call, and an answer to an operation that does not
 // wait. The cancel cells.
 
 import assert from "node:assert/strict";
@@ -18,7 +18,7 @@ import {
 } from "../../../horsies/src/seats/cancel-cells.ts";
 import { IsolateRelay } from "../../../horsies/src/seats/relay.ts";
 import type { SeatAnswer, SeatToMain } from "../../../horsies/src/seats/protocol.ts";
-import { sendErrorOfRaw } from "../../../horsies/src/send/errors.ts";
+import { SeatRelayCode, sendErrorOfRaw } from "../../../horsies/src/send/errors.ts";
 import { sendTask } from "../../../horsies/src/send/send.ts";
 import { ClientDefect, CoreStopped } from "../../../horsies/src/thrown-errors.ts";
 import { PREPARED, SENT_AT_MICROS, TASK_ID } from "../app/support.ts";
@@ -175,28 +175,41 @@ describe("each relayed call kind at the bound of the waiting operations", () => 
     assert.deepEqual(await replied, { kind: "prepareSend", prepared: PREPARED });
   });
 
-  test("a prepare past the bound of the waiting prepares is refused, retryable, with the bound in its text; nothing is sent", async () => {
+  test("a prepare past the bound of the waiting prepares gets seatRelayFull with the bound in its text; nothing is sent", async () => {
     const { relay, posts } = relayOnPosts();
 
     for (let index = 0; index < WAITING; index += 1) {
       void relay.request("sends", PREPARE);
     }
 
-    const refused = await relay.request("sends", PREPARE);
+    const full = await relay.request("sends", PREPARE);
 
-    const error =
-      refused.kind === "prepareSend" && refused.prepared.kind === "refused" ? sendErrorOfRaw(refused.prepared.error) : assert.fail("not refused");
+    assert.equal(full.kind, "seatRelayFull");
+    assert.ok(full.kind === "seatRelayFull" && full.message.includes(`${String(WAITING)} prepares that wait`) && full.message.includes(BOUND_TEXT));
+    assert.deepEqual(operationKinds(posts), Array.from({ length: WAITING }, () => "prepareSend"));
+  });
 
-    assert.equal(error.code, "VALIDATION_FAILED");
-    assert.ok(error.message.includes(`${String(WAITING)} prepares that wait`) && error.message.includes(BOUND_TEXT), error.message);
-    assert.deepEqual(error.code === "VALIDATION_FAILED" ? error.exception : undefined, {
+  test("a send whose prepare is past the bound fails with SEAT_RELAY_FULL, retryable, with the bound in its cause", async () => {
+    const { relay } = relayOnPosts();
+
+    for (let index = 0; index < WAITING; index += 1) {
+      void relay.request("sends", PREPARE);
+    }
+
+    const context = contextOf(seatApp());
+    const sent = await sendTask({ ...context.send, core: { kind: "seatRelay", relay } }, crunch, { n: 1 }, {});
+    const error = sent.ok ? assert.fail("the send past the bound was sent") : sent.error;
+
+    assert.equal(error.code, SeatRelayCode.SEAT_RELAY_FULL);
+    assert.equal(error.code === SeatRelayCode.SEAT_RELAY_FULL && error.retryable, true);
+    assert.deepEqual(error.code === SeatRelayCode.SEAT_RELAY_FULL ? error.exception : undefined, {
       kind: "coreFailure",
       failure: "preconditionFailed",
       subject: "seat relay",
       message: error.message,
       retryable: true,
     });
-    assert.deepEqual(operationKinds(posts), Array.from({ length: WAITING }, () => "prepareSend"));
+    assert.ok(error.message.includes(BOUND_TEXT), error.message);
   });
 
   test("a send at the bound returns ENQUEUE_FAILED with the task id of its prepare, through the send's own error", async () => {

@@ -25,6 +25,7 @@ import {
   preconditionFailed,
   type RetryableSendError,
   ruleRefused,
+  seatRelayFull,
   type SendFailure,
   sendErrorOfRaw,
   suppressedError,
@@ -180,8 +181,18 @@ async function preparedRequest(
     inputBytes: Buffer.byteLength(text.value, "utf8"),
   });
 
-  if (prepared.kind === "refused") {
-    return err(sendErrorOfRaw(prepared.error));
+  switch (prepared.kind) {
+    case "refused":
+      return err(sendErrorOfRaw(prepared.error));
+    case "seatRelayFull":
+      return err(seatRelayFull(prepared.message));
+    case "prepared":
+      break;
+    default: {
+      const unexpected: never = prepared;
+
+      throw new TypeError(`send: a prepare outside its type: ${String(unexpected)}`);
+    }
   }
 
   const request: EnqueueRequest = {

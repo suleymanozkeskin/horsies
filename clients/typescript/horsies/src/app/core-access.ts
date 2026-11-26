@@ -56,9 +56,13 @@ export type SendsSeatOperation =
     }
   | { readonly kind: "taskInfo"; readonly taskId: string };
 
-/** The answer to a `SendsSeatOperation`, of the same `kind`. */
+/**
+ * The answer to a `SendsSeatOperation`, of the same `kind`; or, to a prepare past the bound of the seat relay,
+ * `seatRelayFull` with the text that names the bound (nothing was sent).
+ */
 export type SendsSeatReply =
   | { readonly kind: "prepareSend"; readonly prepared: PreparedSend }
+  | { readonly kind: "seatRelayFull"; readonly message: string }
   | { readonly kind: "enqueue"; readonly outcome: EnqueueOutcome }
   | { readonly kind: "taskInfo"; readonly read: TaskInfoRead };
 

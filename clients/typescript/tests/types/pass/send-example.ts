@@ -32,6 +32,10 @@ export async function sendAndRead(): Promise<void> {
         }
 
         break;
+      case "SEAT_RELAY_FULL":
+        // Only a send from a SHARED_THREAD body gives it; nothing was sent, so a new send is the retry.
+        void (await app.send(validateOrder, { orderId: crypto.randomUUID(), lines: [{ sku: "a", quantity: 1 }] }));
+        break;
       case "VALIDATION_FAILED":
       case "PAYLOAD_TOO_LARGE":
       case "PAYLOAD_MISMATCH":

@@ -10,9 +10,9 @@
 //   - a facade call: the retryable database failure of its own type (`monitoring/seat-calls.ts`).
 // - The prepare of a send does no I/O: the main thread computes the facts of a send at once. It goes at once and takes
 //   no place of the in-flight bound, but the prepares that wait for their answer have their own bound of the same value
-//   (`opsWaiting`). A prepare past it is refused with `VALIDATION_FAILED`, whose cause (`preconditionFailed`) is
-//   retryable: the send failure `ENQUEUE_FAILED` needs the task id and the payload that the prepare makes, and the task
-//   send catalog has no other retryable failure. Nothing is written.
+//   (`opsWaiting`). A prepare past it gets `seatRelayFull`, and the send fails with `SEAT_RELAY_FULL`, retryable: the
+//   seat relay's own code of the core catalog (`SeatRelayCode`). `ENQUEUE_FAILED` needs the task id and the payload
+//   that the prepare makes. Nothing is sent.
 //
 // The records have the forms that the addon gives (`RawCatalogError`), so the area's own converters read them.
 
@@ -72,11 +72,7 @@ function sendsLane(operation: SendsSeatOperation): OperationLane {
     case "prepareSend":
       return {
         kind: "answeredAtOnce",
-        boundAnswer: (bound) =>
-          sendsReply({
-            kind: "prepareSend",
-            prepared: { kind: "refused", error: prepareRefused(`${boundMessage("prepares", bound)}; nothing was written`) },
-          }),
+        boundAnswer: (bound) => sendsReply({ kind: "seatRelayFull", message: `${boundMessage("prepares", bound)}; nothing was sent` }),
       };
     case "enqueue":
       return {
@@ -115,17 +111,6 @@ export function enqueueFailed(request: EnqueueRequest, message: string): RawCata
       { name: "payload", value: { kind: "sendPayload", fields: payloadFields(request) } },
       { name: "message", value: { kind: "text", text: message } },
       { name: "retryable", value: { kind: "flag", value: true } },
-      { name: "exception", value: { kind: "exception", exception: boundCause(message) } },
-    ],
-  };
-}
-
-/** `VALIDATION_FAILED` with a retryable precondition cause, in the form of the task send catalog. Pure. */
-export function prepareRefused(message: string): RawCatalogError {
-  return {
-    class: "TaskSendValidationFailed",
-    slots: [
-      { name: "message", value: { kind: "text", text: message } },
       { name: "exception", value: { kind: "exception", exception: boundCause(message) } },
     ],
   };

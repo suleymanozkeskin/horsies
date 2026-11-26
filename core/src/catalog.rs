@@ -17,6 +17,7 @@
 //! An error class reads the mark through the member of its `code` slot
 //! ([`CodeCatalog::member_named`]); the class holds no copy of it.
 
+use crate::core::task::SeatRelayCode;
 use crate::monitoring::{
     MonitoringQueryErrorCode, MonitoringQueryRefusalCode, TaskActionErrorCode,
 };
@@ -116,6 +117,7 @@ pub trait CodeEnum: Sized + 'static {
 pub const CODE_CATALOGS: &[CodeCatalog] = &[
     <BrokerErrorCode as CodeEnum>::CATALOG,
     <TaskSendErrorCode as CodeEnum>::CATALOG,
+    <SeatRelayCode as CodeEnum>::CATALOG,
     <WorkflowStartErrorCode as CodeEnum>::CATALOG,
     <HandleErrorCode as CodeEnum>::CATALOG,
     <OperationalErrorCode as CodeEnum>::CATALOG,
@@ -199,6 +201,20 @@ mod tests {
         assert_eq!(
             MonitoringQueryRefusalCode::QueryRefused.wire_value(),
             "QUERY_REFUSED"
+        );
+    }
+
+    #[test]
+    fn seat_relay_codes_match_their_serde_form() {
+        assert_wire_values::<SeatRelayCode>(|code| {
+            serde_plain::to_string(code).expect("a unit variant serializes")
+        });
+        // clients/typescript/horsies/src/send/errors.ts. The Python and Rust
+        // clients have no seat relay.
+        assert_eq!(SeatRelayCode::SeatRelayFull.wire_value(), "SEAT_RELAY_FULL");
+        assert_eq!(
+            <SeatRelayCode as CodeEnum>::CATALOG.python_module,
+            "task_send"
         );
     }
 

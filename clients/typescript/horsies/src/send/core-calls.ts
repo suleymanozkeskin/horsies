@@ -15,15 +15,28 @@ import type {
 import type { TraceArgument } from "../native/values/records.ts";
 import { AddonOutsideMainThread, ClientDefect } from "../thrown-errors.ts";
 
+/** The answer to a prepare: the core's prepared facts, or the seat relay at its bound (nothing was sent). */
+export type PrepareAnswer = PreparedSend | { readonly kind: "seatRelayFull"; readonly message: string };
+
 /** The prepared facts of one send of `taskName`. Throws `AddonOutsideMainThread` in a worker thread with no core. */
-export async function prepareSend(core: CoreAccess, taskName: string, facts: SendFacts): Promise<PreparedSend> {
+export async function prepareSend(core: CoreAccess, taskName: string, facts: SendFacts): Promise<PrepareAnswer> {
   switch (core.kind) {
     case "addon":
       return core.producer.prepareSend(taskName, facts);
     case "seatRelay": {
       const reply = await relayed(core.relay, { kind: "prepareSend", taskName, facts });
 
-      return reply.kind === "prepareSend" ? reply.prepared : wrongReply("prepareSend", reply);
+      switch (reply.kind) {
+        case "prepareSend":
+          return reply.prepared;
+        case "seatRelayFull":
+          return reply;
+        case "enqueue":
+        case "taskInfo":
+          return wrongReply("prepareSend", reply);
+        default:
+          return unexpectedAccess(reply);
+      }
     }
 
     case "noCore":
