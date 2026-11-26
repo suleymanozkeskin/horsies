@@ -193,15 +193,6 @@ export type ZodReleaseRefused =
     readonly kind: "ZodVersionNotSupported";
     readonly found: ZodVersion;
     readonly supported: string;
-}
-/**
-* A zod release inside the range, but another copy of zod than the one that horsies loads (two installs, or the
-* CommonJS and the ES module copy of one install): the self-check ran on the other copy.
-*/
-| {
-    readonly kind: "OtherZodCopy";
-    readonly found: ZodVersion;
-    readonly loaded: ZodVersion;
 };
 
 // @public

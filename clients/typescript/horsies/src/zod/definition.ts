@@ -4,6 +4,10 @@
 // (and `_zod.traits`, `_zod.values`). It fails closed: a field, a check or a format outside the lists of
 // `known-fields.ts` is read as an unknown part, which the adapter refuses. The self-check (`self-check.ts`) runs each
 // rule of the adapter once on a known schema, so a renamed field fails loud instead of switching a rule off.
+//
+// The reader takes a schema of each zod copy (the ES module or the CommonJS build, a bundled copy): it reads the
+// schema's own fields and builds a schema only with the schema's own constructor. From `zod/v4/core` it uses the types
+// and one pure function of definition data (`util.getEnumValues`).
 
 import * as core from "zod/v4/core";
 
@@ -232,7 +236,7 @@ function readForm(def: DefinitionData, schema: ZodSchema): DefinitionForm {
     case "enum":
       return { form: "literal", members: enumValues(def) };
     case "template_literal":
-      return { form: "templateLiteral", pattern: core.clone(schema, { ...def, checks: [] }) };
+      return { form: "templateLiteral", pattern: withoutChecks(schema, def) };
     case "object":
       return readObject(def);
     case "array":
@@ -334,6 +338,14 @@ function unlistedForm(_unlisted: never): DefinitionForm {
 }
 
 const UNKNOWN_DEFINITION: DefinitionForm = Object.freeze({ form: "unknownDefinition" });
+
+/**
+ * A template literal without its checks, built with the schema's own constructor (as zod's `clone` does): a schema of
+ * the same zod copy, whose parse is the pattern test.
+ */
+function withoutChecks(schema: ZodSchema, def: core.$ZodTemplateLiteralDef): ZodSchema {
+  return new schema._zod.constr({ ...def, checks: [] });
+}
 
 function restOf(rest: core.SomeType): TupleRest {
   // SAFETY: a tuple's rest item is a zod schema (`$ZodTupleDef.rest` is a `SomeType` or `null`).
