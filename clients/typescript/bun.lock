@@ -35,6 +35,13 @@
         "typescript": ">=6.0.0 <6.1.0",
       },
     },
+    "examples": {
+      "name": "horsies-examples",
+      "dependencies": {
+        "horsies": "workspace:*",
+        "zod": "4.1.13",
+      },
+    },
     "horsies": {
       "name": "horsies",
       "version": "0.8.1",
@@ -513,6 +520,8 @@
     "hookified": ["hookified@1.15.1", "", {}, "sha512-MvG/clsADq1GPM2KGo2nyfaWVyn9naPiXrqIe4jYjXNZQt238kWyOGrsyc/DmRAQ+Re6yeo6yX/yoNCG5KAEVg=="],
 
     "horsies": ["horsies@workspace:horsies"],
+
+    "horsies-examples": ["horsies-examples@workspace:examples"],
 
     "horsies-native-bridge": ["horsies-native-bridge@workspace:bridge"],
 
