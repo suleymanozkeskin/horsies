@@ -347,9 +347,8 @@ mod tests {
             },
         );
 
-        let refused = crate::Horsies::new(config)
-            .err()
-            .expect("two values are outside their bounds");
+        let refused =
+            crate::Horsies::new(config).expect_err("two values are outside their bounds");
 
         assert_eq!(refused.code, Some(ErrorCode::ConfigInvalidWorkerProfile));
         assert_eq!(refused.notes.len(), 2, "{refused}");
