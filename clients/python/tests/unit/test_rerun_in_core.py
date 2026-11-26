@@ -1,4 +1,4 @@
-"""``rerun_task`` through the core's rerun steps: the read it sends on the
+"""``rerun_task_in_async`` through the core's rerun steps: the read it sends on the
 caller's connection, and the preconditions it raises for.
 
 The connection is a mock whose source read returns a row in the core's
@@ -15,10 +15,10 @@ from uuid import UUID
 import pytest
 
 from horsies.core.history.rerun.operations import (
+    RerunCommand,
     RerunEnqueuePolicy,
     RerunSourceLive,
-    RerunTask,
-    rerun_task,
+    rerun_task_in_async,
 )
 from horsies._core import CorePreconditionFailed
 
@@ -54,8 +54,8 @@ def _policy() -> RerunEnqueuePolicy:
 
 
 async def _rerun(connection: AsyncMock) -> object:
-    return await rerun_task(
-        connection, RerunTask(source_task_id=SOURCE_ID, deadline=None), _policy()
+    return await rerun_task_in_async(
+        connection, RerunCommand(source_task_id=SOURCE_ID, good_until=None), _policy()
     )
 
 
@@ -90,7 +90,7 @@ async def test_a_database_of_another_family_raises_before_any_write(stored: str 
     with pytest.raises(CorePreconditionFailed) as raised:
         _ = await _rerun(connection)
 
-    assert raised.value.subject == 'rerun_task'
+    assert raised.value.subject == 'rerun_task_in'
     assert raised.value.retryable is False
     assert 'PYTHON' in raised.value.message
     assert connection.execute.await_count == 1

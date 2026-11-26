@@ -268,6 +268,7 @@ from .core.models.boot_failure import (
 from ._catalog.history import TaskAbsenceReason
 from .core.history.rerun.operations import (
     NotEligibleReason,
+    RerunCommand,
     RerunEnqueued,
     RerunEnqueuePolicy,
     RerunInputCorrupt,
@@ -279,8 +280,7 @@ from .core.history.rerun.operations import (
     RerunSourceAbsent,
     RerunSourceCorrupt,
     RerunSourceLive,
-    RerunTask,
-    rerun_task,
+    rerun_task_in_async,
 )
 from .core.types.result import Result, Ok, Err, is_ok, is_err
 from .core.codec import JsonValue, StrictJsonError
@@ -545,8 +545,8 @@ __all__ = [
     'TaskLoopCreateFailed',
     'ThreadStartRefused',
     # Rerun
-    'rerun_task',
-    'RerunTask',
+    'rerun_task_in_async',
+    'RerunCommand',
     'RerunEnqueuePolicy',
     'RerunOutcome',
     'RerunEnqueued',

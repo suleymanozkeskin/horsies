@@ -1,6 +1,6 @@
 //! The rerun in the caller's transaction through both adapters, against
 //! PostgreSQL: a rerun commits or rolls back with the caller's transaction
-//! (Python `rerun_task(connection, ...)`), and each adapter encodes the
+//! (Python `rerun_task_in_async(connection, ...)`), and each adapter encodes the
 //! parameters and decodes every column of the source read, its NULLs
 //! included.
 //!
@@ -13,8 +13,9 @@
 
 use chrono::Utc;
 use horsies::rerun::{
-    rerun_task_in, AppRerunError, CallerRerunError, RerunEnqueuePolicy, RerunOutcome, RerunTask,
-    SqlxCaller, TaskAbsenceReason, TokioPostgresCaller, UnknownStoredFamily,
+    rerun_task_in, AppRerunError, CallerRerunError, EnqueueRetention, RerunCommand,
+    RerunEnqueuePolicy, RerunOutcome, SqlxCaller, TaskAbsenceReason, TokioPostgresCaller,
+    UnknownStoredFamily,
 };
 use horsies::{AppConfig, Horsies};
 use horsies_core::{BrokerError, OperationalErrorCode, TaskError, TaskResult};
@@ -56,7 +57,8 @@ async fn pool_of(database: &TestDatabase) -> PgPool {
 }
 
 fn policy() -> RerunEnqueuePolicy {
-    RerunEnqueuePolicy::new(CLASS, true, chrono::Duration::hours(24)).unwrap()
+    let retention = EnqueueRetention::from_class_key(CLASS).unwrap();
+    RerunEnqueuePolicy::new(retention, true, chrono::Duration::hours(24)).unwrap()
 }
 
 /// A FAILED plain task with a retained input, moved to history by the
@@ -141,7 +143,7 @@ async fn a_tokio_postgres_rerun_commits_or_rolls_back_with_the_caller() {
     let database = TestDatabase::create().await;
     let pool = pool_of(&database).await;
     let source = seed_failed_source(&pool).await;
-    let command = RerunTask::new(source, None, None);
+    let command = RerunCommand::new(source, None, None);
     let mut client = database.connect().await;
 
     let mut transaction = client.transaction().await.unwrap();
@@ -181,7 +183,7 @@ async fn a_sqlx_rerun_commits_or_rolls_back_with_the_caller() {
     let database = TestDatabase::create().await;
     let pool = pool_of(&database).await;
     let source = seed_failed_source(&pool).await;
-    let command = RerunTask::new(source, None, None);
+    let command = RerunCommand::new(source, None, None);
 
     let mut transaction = pool.begin().await.unwrap();
     let rolled_back = rerun_task_in(
@@ -219,7 +221,7 @@ async fn a_sqlx_rerun_commits_or_rolls_back_with_the_caller() {
 async fn an_absent_source_reads_through_both_adapters() {
     let database = TestDatabase::create().await;
     let pool = pool_of(&database).await;
-    let command = RerunTask::new(Uuid::new_v4(), None, None);
+    let command = RerunCommand::new(Uuid::new_v4(), None, None);
 
     let mut client = database.connect().await;
     let mut transaction = client.transaction().await.unwrap();
@@ -286,7 +288,7 @@ async fn a_family_row_that_holds_no_client_family_is_refused_with_its_value() {
     let pool = pool_of(&database).await;
     let source = seed_failed_source(&pool).await;
     corrupt_family_row(&pool, "GO").await;
-    let command = RerunTask::new(source, None, None);
+    let command = RerunCommand::new(source, None, None);
     let tasks_before: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")
         .fetch_one(&pool)
         .await
@@ -313,9 +315,9 @@ async fn a_family_row_that_holds_no_client_family_is_refused_with_its_value() {
 
     let app = Horsies::new(AppConfig::for_database_url(database.url())).unwrap();
     match app.rerun_task(command, policy()).await {
-        Err(AppRerunError::Connect(BrokerError::UnknownStoredFamily(UnknownStoredFamily {
-            stored,
-        }))) => assert_eq!(stored, "GO"),
+        Err(AppRerunError::ConnectFailed(BrokerError::UnknownStoredFamily(
+            UnknownStoredFamily { stored },
+        ))) => assert_eq!(stored, "GO"),
         other => panic!("expected the unknown stored family at the install, got {other:?}"),
     }
     let tasks_after: i64 = sqlx::query_scalar("SELECT count(*) FROM horsies_tasks")

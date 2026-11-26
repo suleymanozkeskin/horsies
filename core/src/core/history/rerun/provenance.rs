@@ -39,7 +39,7 @@ pub const RERUN_FIELD_PROVENANCE: &[(&str, FieldProvenance)] = &[
     ),
     ("command_fingerprint", FieldProvenance::ResolvedAtEnqueue),
     // The carrier of the rerun call's span after the core's check
-    // (`RerunTask::with_trace`), or NULL; never the source's pair.
+    // (`RerunCommand::with_trace`), or NULL; never the source's pair.
     ("trace_carrier", FieldProvenance::ResolvedAtEnqueue),
     ("trace_id", FieldProvenance::ResolvedAtEnqueue),
     ("status", FieldProvenance::FreshRuntimeState),

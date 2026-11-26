@@ -31,12 +31,12 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies import (
+    RerunCommand,
     RerunEnqueued,
     RerunEnqueuePolicy,
-    RerunTask,
     TaskSendAsyncContext,
     WorkerPong,
-    rerun_task,
+    rerun_task_in_async,
 )
 from horsies.core.models.outcome import Failed
 from horsies.core.models.tasks import TaskError
@@ -191,9 +191,9 @@ async def _rerun_one(rerun: Rerun, sent: list[str]) -> str:
     engine = create_async_engine(sqlalchemy_url(database_url))
     try:
         async with engine.begin() as connection:
-            outcome = await rerun_task(
+            outcome = await rerun_task_in_async(
                 connection,
-                RerunTask(source_task_id=source, deadline=None),
+                RerunCommand(source_task_id=source, good_until=None),
                 RERUN_POLICY,
             )
     finally:

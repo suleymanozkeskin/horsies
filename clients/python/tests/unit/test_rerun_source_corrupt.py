@@ -1,7 +1,8 @@
-"""``rerun_task`` returns ``RerunSourceCorrupt`` for a source row that does not decode.
+"""``rerun_task_in_async`` returns ``RerunSourceCorrupt`` for a source row that
+does not decode.
 
 The source read (``horsies_rerun_source_read``) gives ``RerunSourceCorrupt``
-with a ``HistoryContractError`` for a stored status that is not a
+with a ``detail`` text for a stored status that is not a
 ``TaskStatus`` member, an attempt snapshot that does not decode, or an
 unknown location. Stored data that does not parse is an outcome with its
 cause, so the rerun returns it and writes nothing.
@@ -16,13 +17,12 @@ from uuid import UUID
 
 import pytest
 
-from horsies.core.history.errors import HistoryContractError
 from horsies.core.history.rerun.operations import (
+    RerunCommand,
     RerunEnqueuePolicy,
     RerunOutcome,
     RerunSourceCorrupt,
-    RerunTask,
-    rerun_task,
+    rerun_task_in_async,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -66,9 +66,9 @@ def _policy() -> RerunEnqueuePolicy:
 
 def _cause_of(outcome: RerunOutcome) -> str:
     match outcome:
-        case RerunSourceCorrupt(task_id=task_id, exception=HistoryContractError() as exc):
+        case RerunSourceCorrupt(task_id=task_id, detail=detail):
             assert task_id == SOURCE_TASK_ID
-            return str(exc)
+            return detail
         case other:
             pytest.fail(f'expected RerunSourceCorrupt, got {other!r}')
 
@@ -85,9 +85,9 @@ class TestSourceRowDoesNotDecode:
             )
         )
 
-        outcome = await rerun_task(
+        outcome = await rerun_task_in_async(
             connection,
-            RerunTask(source_task_id=SOURCE_TASK_ID, deadline=None),
+            RerunCommand(source_task_id=SOURCE_TASK_ID, good_until=None),
             _policy(),
         )
 
@@ -106,9 +106,9 @@ class TestUnknownLocation:
             _read_row(class_registered=True, location='ELSEWHERE')
         )
 
-        outcome = await rerun_task(
+        outcome = await rerun_task_in_async(
             connection,
-            RerunTask(source_task_id=SOURCE_TASK_ID, deadline=None),
+            RerunCommand(source_task_id=SOURCE_TASK_ID, good_until=None),
             _policy(),
         )
 

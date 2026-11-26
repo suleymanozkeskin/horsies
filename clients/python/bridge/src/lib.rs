@@ -249,7 +249,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::rerun::RerunClassNotRegistered>()?;
     module.add_class::<operations::rerun::RerunClientFamilyMismatch>()?;
     module.add_class::<operations::rerun::RerunUnknownStoredFamily>()?;
-    module.add_class::<operations::rerun::RerunCallerKeyRefused>()?;
+    module.add_class::<operations::rerun::RerunIdempotencyKeyRefused>()?;
     module.add_class::<operations::rerun::RerunEnqueuedRecord>()?;
     module.add_class::<operations::rerun::RerunKeyReplayRecord>()?;
     module.add_class::<operations::rerun::RerunKeyConflictRecord>()?;

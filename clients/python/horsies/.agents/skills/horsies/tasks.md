@@ -942,7 +942,7 @@ from horsies import (
     # Node data flow helper
     from_node,
     # Rerun (re-execute a terminal task as a new request)
-    rerun_task, RerunTask, RerunEnqueuePolicy, RerunOutcome,
+    rerun_task_in_async, RerunCommand, RerunEnqueuePolicy, RerunOutcome,
     RerunEnqueued, RerunSourceLive, RerunSourceAbsent, RerunSourceCorrupt,
     RerunNotEligible, RerunInputUnavailable, RerunInputCorrupt,
     RerunKeyConflict, RerunKeyReplay, NotEligibleReason,
@@ -959,7 +959,7 @@ code and callers:
 
 - **Manual in-place retry is removed.** `RetryPolicy` still governs automatic
   retry of a live task; re-executing a *terminal* task is a new request via
-  `rerun_task`, with a new task id and recorded lineage.
+  `rerun_task_in_async`, with a new task id and recorded lineage.
 - Result and info reads still work after the move — they resolve across live
   and history.
 - Rerun eligibility is decided **at enqueue**: `retain_rerun_input_default`
