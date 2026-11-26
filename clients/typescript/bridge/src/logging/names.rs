@@ -46,6 +46,10 @@ pub enum LoggerName {
     SchedulerState,
     #[napi(value = "horsies.sql")]
     Sql,
+    /// The faults of the telemetry of the package: a span that it did not
+    /// make (the logger of the Python client for them).
+    #[napi(value = "horsies.telemetry")]
+    Telemetry,
     #[napi(value = "horsies.web")]
     Web,
     #[napi(value = "horsies.worker")]
@@ -60,7 +64,7 @@ pub enum LoggerName {
 
 impl LoggerName {
     /// The number of loggers.
-    pub const COUNT: usize = 18;
+    pub const COUNT: usize = 19;
 
     /// Every logger, in declaration order.
     pub const ALL: [LoggerName; Self::COUNT] = [
@@ -77,6 +81,7 @@ impl LoggerName {
         Self::Scheduler,
         Self::SchedulerState,
         Self::Sql,
+        Self::Telemetry,
         Self::Web,
         Self::Worker,
         Self::WorkflowEngine,
@@ -101,6 +106,7 @@ impl LoggerName {
             Self::Scheduler => "horsies.scheduler",
             Self::SchedulerState => "horsies.scheduler.state",
             Self::Sql => "horsies.sql",
+            Self::Telemetry => "horsies.telemetry",
             Self::Web => "horsies.web",
             Self::Worker => "horsies.worker",
             Self::WorkflowEngine => "horsies.workflow.engine",

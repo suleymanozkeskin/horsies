@@ -6,7 +6,8 @@
 // - Every other kind runs them on the main thread: the child's own post dispatcher takes each post.
 //
 // The core posts no run before its start hooks ended, so a post before hook 0 is a defect of the core or the package.
-// A thread child has no spawned work: a `stopWork` post there is a defect.
+// A thread child has no spawned work: a `stopWork` post there is a defect. At the child's stop the exit rule flushes
+// the seat isolates through the router (`flush`); a child that runs its bodies on the main thread has none.
 
 import type { ChildPost, StartFactsRecord } from "../native/child/addon.ts";
 import { ClientDefect, CoreDefect } from "../thrown-errors.ts";
@@ -56,6 +57,21 @@ export class SeatRouter {
         return;
       default:
         unreachable(facts, "SeatRouter.start");
+    }
+  }
+
+  /** Flush the seat isolates of a thread child (`SeatPool.flush`); resolve at once for a child with none. */
+  async flush(): Promise<void> {
+    const place = this.#place;
+
+    switch (place.kind) {
+      case "notStarted":
+      case "mainThread":
+        return;
+      case "seats":
+        return place.pool.flush();
+      default:
+        unreachable(place, "SeatRouter.flush");
     }
   }
 
