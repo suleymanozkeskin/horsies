@@ -354,11 +354,11 @@ class TestWorkflowStart:
         args_from = row[0]
         assert args_from == {'input_result': 0}  # Maps to task_index 0
 
-    async def test_workflow_ctx_from_stored(
+    async def test_workflow_context_from_stored(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """workflow_ctx_from node_ids stored correctly."""
+        """workflow_context_from node_ids stored correctly."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'ctx_a')
         task_b = make_ctx_receiver_task(app, 'ctx_b')
@@ -367,7 +367,7 @@ class TestWorkflowStart:
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         spec = make_workflow_spec(
@@ -388,11 +388,11 @@ class TestWorkflowStart:
         ctx_from = row[0]
         assert ctx_from == [f'{spec.name}:0']
 
-    async def test_allow_failed_deps_stored(
+    async def test_allow_failed_dependencies_stored(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """allow_failed_deps flag stored per task."""
+        """allow_failed_dependencies flag stored per task."""
         session, broker, app = setup
         task_a = make_simple_task(app, 'afd_a')
         task_b = make_identity_task(app, 'afd_b')
@@ -401,7 +401,7 @@ class TestWorkflowStart:
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -1013,7 +1013,7 @@ class TestNodeBuilder:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """The .node() method preserves all node options like allow_failed_deps."""
+        """The .node() method preserves all node options like allow_failed_dependencies."""
         session, broker, app = setup
 
         @app.task(task_name='node_opts_task')
@@ -1023,7 +1023,7 @@ class TestNodeBuilder:
         # Create node with various options
         node_a = opts_task.node(
             node_id='opts_node',
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
             join='all',
         )(val='hello')
 
@@ -1035,7 +1035,7 @@ class TestNodeBuilder:
 
         handle = await start_ok(spec, broker)
 
-        # Verify allow_failed_deps was persisted
+        # Verify allow_failed_dependencies was persisted
         result = await session.execute(
             text("""
                 SELECT allow_failed_deps FROM horsies_workflow_tasks
@@ -1097,11 +1097,11 @@ class TestNodeBuilder:
         # Maps kwarg name → task_index of producer
         assert args_from == {'upstream': 0}
 
-    async def test_node_builder_with_workflow_ctx_from(
+    async def test_node_builder_with_workflow_context_from(
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """.node(workflow_ctx_from=...) stores ctx_from node references."""
+        """.node(workflow_context_from=...) stores ctx_from node references."""
         session, broker, app = setup
 
         @app.task(task_name='nb_ctx_src')
@@ -1114,7 +1114,7 @@ class TestNodeBuilder:
         recv = ctx_receiver.node(
             node_id='ctx_recv',
             waits_for=[src],
-            workflow_ctx_from=[src],
+            workflow_context_from=[src],
         )()
 
         spec = make_workflow_spec(

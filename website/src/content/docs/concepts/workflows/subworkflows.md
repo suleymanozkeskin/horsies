@@ -16,7 +16,7 @@ A **workflow** is a directed acyclic graph (DAG) of tasks. Each node in the DAG 
 Workflows provide:
 - Dependency ordering (`waits_for`)
 - Data flow between tasks (`args_from`)
-- Error handling policies (`on_error`, `allow_failed_deps`)
+- Error handling policies (`on_error`, `allow_failed_dependencies`)
 - Success criteria (`SuccessPolicy`)
 
 ---
@@ -43,7 +43,7 @@ def fetch_data(*, url: str) -> Result[dict[str, JsonValue], TaskError]:
 def transform(*, raw: TaskOutcome[dict[str, JsonValue], TaskError]) -> Result[str, TaskError]:
     # With the defaults, a failed `fetch` makes this node SKIPPED, so the Failed
     # arm runs only on a decode failure. A failed upstream also arrives with
-    # allow_failed_deps=True, join="any", or join="quorum".
+    # allow_failed_dependencies=True, join="any", or join="quorum".
     match raw:
         case Failed(error):
             return Err(error)
@@ -168,7 +168,7 @@ class DiamondDAG(WorkflowDefinition[str]):
 
 **Important**: `waits_for` means "wait for completion", not "require success".
 By default, if a dependency fails, the downstream task is SKIPPED.
-Use `allow_failed_deps=True` to run anyway (see Section 6).
+Use `allow_failed_dependencies=True` to run anyway (see Section 6).
 
 ---
 
@@ -215,10 +215,10 @@ This lets you handle upstream failures explicitly.
 
 ---
 
-## 5. Workflow Context: `workflow_ctx_from`
+## 5. Workflow Context: `workflow_context_from`
 
 When a task needs access to multiple upstream results or subworkflow summaries,
-use `workflow_ctx_from` instead of multiple `args_from` entries.
+use `workflow_context_from` instead of multiple `args_from` entries.
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -252,14 +252,14 @@ class AggregationWorkflow(WorkflowDefinition[Summary]):
     agg = TaskNode(
         fn=aggregate,
         waits_for=[node_a, node_b],
-        workflow_ctx_from=[node_a, node_b],  # Both results available in context
+        workflow_context_from=[node_a, node_b],  # Both results available in context
     )
 
     config = WorkflowDefinitionConfig(output=agg)
 ```
 
 **Rules:**
-- Every node in `workflow_ctx_from` must also be in `waits_for`
+- Every node in `workflow_context_from` must also be in `waits_for`
 - The task function must have `workflow_ctx: WorkflowContext | None` parameter
 - Context is built fresh per task; it does not propagate downstream
 - `result_for()` and `summary_for()` raise `WorkflowContextMissingIdError` if the node has no `node_id`. Always assign `node_id` to nodes used with context
@@ -506,7 +506,7 @@ class ShardReport(WorkflowDefinition[int]):
         ]
         total = sum_shard_rows.node(
             waits_for=list(count_nodes),
-            workflow_ctx_from=list(count_nodes),
+            workflow_context_from=list(count_nodes),
             node_id="total",
         )(shard_count=len(count_nodes))
         return app.workflow(
@@ -535,8 +535,8 @@ Rules for this pattern:
 
 - Define the tasks at module level. A worker resolves a task by name from the modules it imported.
 - Import the child module in the worker (`app.discover_tasks`). See [Subworkflow Not Found in Worker](#subworkflow-not-found-in-worker).
-- With the default `allow_failed_deps=False`, a failed upstream node SKIPS the `SubWorkflowNode` and `build_with()` does not run.
-  With `allow_failed_deps=True`, `build_with()` receives `Failed(task_error)` and must handle it.
+- With the default `allow_failed_dependencies=False`, a failed upstream node SKIPS the `SubWorkflowNode` and `build_with()` does not run.
+  With `allow_failed_dependencies=True`, `build_with()` receives `Failed(task_error)` and must handle it.
 - An exception in `build_with()` fails the `SubWorkflowNode` with `WORKFLOW_ENQUEUE_FAILED`. The message starts with `Subworkflow build failed`.
 - The child start parses the task options of each child root and of each child task with `good_until`. Options that do not parse are a defect, not a node failure. They occur only when the `task_options_json` of a task function changed after registration. The child start raises `SerializationError`, and its transaction rolls back, as in the workflow start transaction.
 - The child start also encodes and serializes the kwargs of each child node. Spec construction in `build_with()` already encoded and decoded them, and refuses a value that does not fit with `WORKFLOW_KWARGS_NOT_SERIALIZABLE` (the node fails with `WORKFLOW_ENQUEUE_FAILED`). So a refusal at the child start is a defect: the child start raises `SerializationError` and its transaction rolls back.
@@ -582,8 +582,8 @@ class MonitoredPipeline(WorkflowDefinition[HealthReport]):
     reporter = TaskNode(
         fn=report_health,
         waits_for=[child],
-        workflow_ctx_from=[child],  # Required for summary_for()
-        allow_failed_deps=True,     # Run even if child fails
+        workflow_context_from=[child],   # Required for summary_for()
+        allow_failed_dependencies=True,  # Run even if child fails
     )
 
     config = WorkflowDefinitionConfig(output=reporter)
@@ -664,7 +664,7 @@ A (fails) → B (SKIPPED) → C (SKIPPED)
 
 This prevents cascading execution of tasks that depend on failed data.
 
-### 7.2 `allow_failed_deps=True`: Run Anyway
+### 7.2 `allow_failed_dependencies=True`: Run Anyway
 
 Use this for recovery tasks or aggregators that handle failures:
 
@@ -692,7 +692,7 @@ class RecoveryWorkflow(WorkflowDefinition[Data]):
         fn=recovery_handler,
         waits_for=[primary],
         args_from={"primary_result": primary},
-        allow_failed_deps=True,  # Run even if primary fails
+        allow_failed_dependencies=True,  # Run even if primary fails
     )
 
     config = WorkflowDefinitionConfig(output=recovery)
@@ -731,7 +731,7 @@ With `OnError.PAUSE`:
 
 ### 7.4 Handling SKIPPED Dependencies
 
-When a task runs with `allow_failed_deps=True` and its dependency was SKIPPED
+When a task runs with `allow_failed_dependencies=True` and its dependency was SKIPPED
 (not just FAILED), the injected outcome is `Failed(task_error)` with error code `UPSTREAM_SKIPPED`:
 
 <!-- check: skip partial -- uses names that the page does not define -->
@@ -771,7 +771,7 @@ aggregate = TaskNode(
 )
 ```
 
-- If ANY dependency fails/skips → task is SKIPPED (unless `allow_failed_deps=True`)
+- If ANY dependency fails/skips → task is SKIPPED (unless `allow_failed_dependencies=True`)
 
 ### 8.2 `join="any"`
 
@@ -897,8 +897,8 @@ At `WorkflowSpec` creation, these are validated:
 | No root tasks (all have dependencies) | `WORKFLOW_NO_ROOT_TASKS` |
 | Cycle detected | `WORKFLOW_CYCLE_DETECTED` |
 | `args_from` references task not in `waits_for` | `WORKFLOW_INVALID_ARGS_FROM` |
-| `workflow_ctx_from` references task not in `waits_for` | `WORKFLOW_INVALID_CTX_FROM` |
-| `workflow_ctx_from` set but function lacks param | `WORKFLOW_CTX_PARAM_MISSING` |
+| `workflow_context_from` references task not in `waits_for` | `WORKFLOW_INVALID_CTX_FROM` |
+| `workflow_context_from` set but function lacks param | `WORKFLOW_CTX_PARAM_MISSING` |
 | Workflow spec or definition missing `definition_key` | `WORKFLOW_NO_DEFINITION_KEY` |
 | Two workflow definitions share the same `definition_key` | `WORKFLOW_DUPLICATE_DEFINITION_KEY` |
 
@@ -919,11 +919,11 @@ class MyWorkflow(WorkflowDefinition[Output]):
 # Use args_from for direct data flow
 node_b = TaskNode(fn=task_b, waits_for=[node_a], args_from={"data": node_a})
 
-# Use workflow_ctx_from when accessing multiple results
-node_c = TaskNode(fn=aggregate, waits_for=[a, b], workflow_ctx_from=[a, b])
+# Use workflow_context_from when accessing multiple results
+node_c = TaskNode(fn=aggregate, waits_for=[a, b], workflow_context_from=[a, b])
 
-# Use allow_failed_deps for recovery tasks
-recovery = TaskNode(fn=recover, waits_for=[primary], allow_failed_deps=True)
+# Use allow_failed_dependencies for recovery tasks
+recovery = TaskNode(fn=recover, waits_for=[primary], allow_failed_dependencies=True)
 
 # Use SubWorkflowNode for reusable workflow modules
 child = SubWorkflowNode(workflow_def=ReusablePipeline)
@@ -939,11 +939,11 @@ def build_with(cls, app, param, *_args, **_kwargs):
 
 <!-- check: skip elided -- shows a wrong form next to the right one -->
 ```python
-# Don't access results not in workflow_ctx_from
+# Don't access results not in workflow_context_from
 node = TaskNode(
     fn=task,
     waits_for=[a, b, c],
-    workflow_ctx_from=[a],  # Only 'a' is available
+    workflow_context_from=[a],  # Only 'a' is available
 )
 # Inside task: ctx.result_for(b)  # Error! 'b' not in context
 
@@ -980,7 +980,7 @@ workflow can continue deterministic failure propagation without leaving the node
 
 ### Error: `WORKFLOW_CTX_PARAM_MISSING`
 
-**Cause**: `workflow_ctx_from` is set but task function lacks the parameter.
+**Cause**: `workflow_context_from` is set but task function lacks the parameter.
 
 **Fix**: Add the parameter:
 <!-- check: skip partial -- uses names that the page does not define -->
@@ -1172,7 +1172,7 @@ class DataSourcePipeline(WorkflowDefinition[ProcessedData]):
 
 # --- Parent Workflow: Multi-Source Aggregation ---
 
-# Define nodes at module level for workflow_ctx_from reference
+# Define nodes at module level for workflow_context_from reference
 source1_node = SubWorkflowNode(
     workflow_def=DataSourcePipeline,
     kwargs={"source_url": "https://api1.example.com/data"},
@@ -1184,8 +1184,8 @@ source2_node = SubWorkflowNode(
 aggregate_node = TaskNode(
     fn=aggregate_sources,
     waits_for=[source1_node, source2_node],
-    workflow_ctx_from=[source1_node, source2_node],
-    allow_failed_deps=True,  # Aggregate even if some sources fail
+    workflow_context_from=[source1_node, source2_node],
+    allow_failed_dependencies=True,  # Aggregate even if some sources fail
 )
 
 
@@ -1194,7 +1194,7 @@ class MultiSourcePipeline(WorkflowDefinition[AggregatedReport]):
     Orchestrates multiple data source pipelines and aggregates results.
 
     - Runs source pipelines in parallel (no waits_for between them)
-    - Aggregates results even if some sources fail (allow_failed_deps)
+    - Aggregates results even if some sources fail (allow_failed_dependencies)
     - Uses SubWorkflowSummary for partial success visibility
     """
     name = "multi_source_pipeline"
@@ -1239,6 +1239,6 @@ This example demonstrates:
 - Parameterized subworkflows with `build_with()`
 - Parallel subworkflow execution
 - `SubWorkflowSummary` for partial success visibility
-- `allow_failed_deps` for graceful degradation
+- `allow_failed_dependencies` for graceful degradation
 - `SuccessPolicy` for custom success criteria
 - Proper typing throughout

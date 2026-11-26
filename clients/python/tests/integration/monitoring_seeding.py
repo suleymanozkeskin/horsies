@@ -181,7 +181,7 @@ class NodeRow:
     task_name: str
     status: str
     dependencies: tuple[int, ...]
-    allow_failed_deps: bool
+    allow_failed_dependencies: bool
     kind: TaskNode | SubworkflowNode
     result: str | None
     """The stored result text; a failed node's error is in it."""
@@ -610,7 +610,8 @@ def _node_params(row: NodeRow) -> dict[str, object]:
         'task_name': row.task_name,
         'input': FIXTURE_INPUT,
         'dependencies': list(row.dependencies),
-        'allow_failed_deps': row.allow_failed_deps,
+        # The stored column name differs from the public name on purpose.
+        'allow_failed_deps': row.allow_failed_dependencies,
         'status': row.status,
         'result': row.result,
         'created_at': row.created_at,

@@ -299,7 +299,7 @@ pub struct WorkflowNodeInfo {
     pub node_status: String,
     pub is_subworkflow: bool,
     pub sub_workflow_id: Option<Uuid>,
-    pub allow_failed_deps: bool,
+    pub allow_failed_dependencies: bool,
     #[serde(serialize_with = "time_text::optional_utc")]
     pub started_at: Option<DateTime<Utc>>,
     #[serde(serialize_with = "time_text::optional_utc")]

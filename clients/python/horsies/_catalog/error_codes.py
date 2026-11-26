@@ -52,7 +52,7 @@ class ErrorCode(str, Enum):
     """An `args_from` reference is not valid."""
 
     WORKFLOW_INVALID_CTX_FROM = 'HRS-009'
-    """A `workflow_ctx_from` reference is not valid."""
+    """A `workflow_context_from` reference is not valid."""
 
     WORKFLOW_CTX_PARAM_MISSING = 'HRS-010'
     """The workflow context parameter is missing."""
@@ -111,7 +111,7 @@ class ErrorCode(str, Enum):
 
     WORKFLOW_POSITIONAL_ARGS_NOT_SUPPORTED = 'HRS-026'
     """A node's input is positional (not a JSON object) while the node takes
-    `args_from` or `workflow_ctx_from` members, which merge only into an
+    `args_from` or `workflow_context_from` members, which merge only into an
     object.
     """
 

@@ -191,7 +191,7 @@ class TestArgsFromInjection:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Failed outcome injected (with allow_failed_deps=True)."""
+        """Failed outcome injected (with allow_failed_dependencies=True)."""
         session, broker, app = setup
         task_a = make_failing_task(app, 'err_result_a')
         task_b = make_recovery_task(app, 'err_result_b')
@@ -201,7 +201,7 @@ class TestArgsFromInjection:
             fn=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            allow_failed_deps=True,  # Required to receive failed result
+            allow_failed_dependencies=True,  # Required to receive failed result
         )
 
         spec = make_workflow_spec(
@@ -219,7 +219,7 @@ class TestArgsFromInjection:
             Err(TaskError(error_code='TEST_FAIL', message='Test failure')),
         )
 
-        # B should be enqueued (allow_failed_deps=True)
+        # B should be enqueued (allow_failed_dependencies=True)
         status_result = await session.execute(
             text("""
                 SELECT status FROM horsies_workflow_tasks
@@ -337,7 +337,7 @@ class TestArgsFromInjection:
         task_b = make_simple_task(app, 'skipped_sentinel_b')
         task_c = make_recovery_task(app, 'skipped_sentinel_c')
 
-        # A -> B -> C (with allow_failed_deps=True and args_from)
+        # A -> B -> C (with allow_failed_dependencies=True and args_from)
         # When A fails, B is SKIPPED
         # C should receive UPSTREAM_SKIPPED for B (which is SKIPPED)
         node_a = TaskNode(fn=task_a)
@@ -346,7 +346,7 @@ class TestArgsFromInjection:
             fn=task_c,
             waits_for=[node_b],
             args_from={'input_result': node_b},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -364,8 +364,8 @@ class TestArgsFromInjection:
             Err(TaskError(error_code='A_FAILED', message='A failed')),
         )
 
-        # B should be SKIPPED now (not allow_failed_deps)
-        # This triggers C to become READY (allow_failed_deps=True)
+        # B should be SKIPPED now (not allow_failed_dependencies)
+        # This triggers C to become READY (allow_failed_dependencies=True)
 
         # Check C's kwargs contain UPSTREAM_SKIPPED sentinel for B
         kwargs = await self._get_task_kwargs(session, str(handle.workflow_id), 2)
@@ -388,14 +388,14 @@ class TestArgsFromInjection:
         task_a = make_failing_task(app, 'failed_error_a')
         task_b = make_recovery_task(app, 'failed_error_b')
 
-        # A -> B (with allow_failed_deps=True and args_from)
+        # A -> B (with allow_failed_dependencies=True and args_from)
         # A fails, B should receive A's actual error
         node_a = TaskNode(fn=task_a)
         node_b = TaskNode(
             fn=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -602,7 +602,7 @@ class TestArgsFromInjection:
         self,
         setup: tuple[AsyncSession, PostgresBroker, Horsies],
     ) -> None:
-        """Default allow_failed_deps=False: failed dep skips downstream, no injection."""
+        """Default allow_failed_dependencies=False: failed dep skips downstream, no injection."""
         session, broker, app = setup
         task_a = make_failing_task(app, 'skip_no_inject_a')
         task_b = make_args_receiver_task(app, 'skip_no_inject_b')
@@ -612,7 +612,7 @@ class TestArgsFromInjection:
             fn=task_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            # allow_failed_deps defaults to False
+            # allow_failed_dependencies defaults to False
         )
 
         spec = make_workflow_spec(
@@ -707,7 +707,7 @@ class TestArgsFromInjection:
             fn=worker_err_args_b,
             waits_for=[node_a],
             args_from={'input_result': node_a},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(
@@ -793,7 +793,7 @@ class TestArgsFromInjection:
             fn=worker_skipped_c,
             waits_for=[node_b],
             args_from={'input_result': node_b},
-            allow_failed_deps=True,
+            allow_failed_dependencies=True,
         )
 
         spec = make_workflow_spec(

@@ -212,7 +212,7 @@ def _make_spec(
         fn=b_fn,
         waits_for=deps,
         args_from=args_from_map,
-        workflow_ctx_from=ctx_from,
+        workflow_context_from=ctx_from,
     )
 
     tasks: list[TaskNode[Any] | SubWorkflowNode[Any]] = [a, b]
@@ -330,10 +330,10 @@ class TestFrozenContainers:
         with pytest.raises(TypeError):
             spec.tasks[1].args_from['new'] = spec.tasks[0]  # type: ignore[index]
 
-    def test_workflow_ctx_from_is_tuple(self) -> None:
+    def test_workflow_context_from_is_tuple(self) -> None:
         spec = _make_spec(with_deps=True, with_workflow_ctx=True)
-        assert spec.tasks[1].workflow_ctx_from is not None
-        assert isinstance(spec.tasks[1].workflow_ctx_from, tuple)
+        assert spec.tasks[1].workflow_context_from is not None
+        assert isinstance(spec.tasks[1].workflow_context_from, tuple)
 
     def test_tasks_is_tuple(self) -> None:
         spec = _make_spec()
@@ -397,10 +397,10 @@ class TestCrossRefRemapping:
         assert spec.success_policy is not None
         assert spec.success_policy.cases[0].required[0] is spec.tasks[0]
 
-    def test_workflow_ctx_from_points_to_spec_copy(self) -> None:
+    def test_workflow_context_from_points_to_spec_copy(self) -> None:
         spec = _make_spec(with_deps=True, with_workflow_ctx=True)
-        assert spec.tasks[1].workflow_ctx_from is not None
-        assert spec.tasks[1].workflow_ctx_from[0] is spec.tasks[0]
+        assert spec.tasks[1].workflow_context_from is not None
+        assert spec.tasks[1].workflow_context_from[0] is spec.tasks[0]
 
 
 # ===========================================================================
