@@ -1,12 +1,13 @@
 // The entries and the section of `app.schedules`, with the defaults of the fields that they leave out. A schedule
 // refers to a task contract, so its input has the contract's input type at typecheck.
 
-import type { AnyTaskContract, ExecutionClass, TaskContract } from "../contract/define-task.ts";
+import type { Execution } from "../_catalog/monitoring_models.ts";
+import type { AnyTaskContract, TaskContract } from "../contract/define-task.ts";
 import type { OutputSchema, SendableInput } from "../contract/schema.ts";
 import type { SchedulePattern } from "./pattern.ts";
 
 /** The input of each slot of a schedule of the contract `C`: the input that `app.send` of `C` takes. */
-export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, ExecutionClass> ? SendableInput<P> : never;
+export type ScheduleInput<C> = C extends TaskContract<infer P, OutputSchema, string, Execution> ? SendableInput<P> : never;
 
 /** One schedule: each slot of `pattern` sends `task` with `input`. */
 export interface ScheduleEntry<C> {

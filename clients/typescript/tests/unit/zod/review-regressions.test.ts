@@ -26,7 +26,7 @@ describe("Z1: the writer checks the structure before a refine runs", () => {
 
     assert.equal(schema.safeParse(5).success, true);
     assert.equal(storedText(acceptedKind(schema), 5), "5");
-    assert.equal(encodeRefusal(acceptedKind(schema), " ").kind, "CheckFailed");
+    assert.equal(encodeRefusal(acceptedKind(schema), " ").refusal, "CheckFailed");
   });
 
   test("an object refine does not run on a value that is not of the object's structure", () => {
@@ -34,15 +34,16 @@ describe("Z1: the writer checks the structure before a refine runs", () => {
     const kind = acceptedKind(schema);
 
     assert.equal(schema.safeParse(null).success, false);
-    assert.equal(encodeRefusal(kind, null).kind, "WrongType");
+    assert.equal(encodeRefusal(kind, null).refusal, "WrongType");
     assert.deepEqual(
-      [encodeRefusal(kind, { name: 1 }).kind, encodeRefusal(kind, { name: 1 }).path],
+      [encodeRefusal(kind, { name: 1 }).refusal, encodeRefusal(kind, { name: 1 }).path],
       ["WrongType", "$.name"],
     );
 
     const written = encodeWithReadBack(kind, null);
 
-    assert.equal(written.ok ? "" : written.error.kind, "WrongType");
+    assert(!written.ok && written.error.kind === "encodeRefused");
+    assert.equal(written.error.refusal, "WrongType");
   });
 
   test("a refine of a discriminated-union option runs after its members are written", () => {
@@ -53,7 +54,7 @@ describe("Z1: the writer checks the structure before a refine runs", () => {
 
     const missing = encodeRefusal(acceptedKind(schema), { kind: "a" });
 
-    assert.deepEqual([missing.kind, missing.path], ["MissingMember", "$.name"]);
+    assert.deepEqual([missing.refusal, missing.path], ["MissingMember", "$.name"]);
   });
 });
 
@@ -66,7 +67,7 @@ describe("Z2: at encode a refine sees the defaults filled; the sender stores onl
     const kind = acceptedKind(schema);
 
     assert.equal(storedText(kind, { start: Temporal.PlainDate.from("2026-08-12") }), '{"start":"2026-08-12"}');
-    assert.equal(encodeRefusal(kind, { start: Temporal.PlainDate.from("1999-01-01") }).kind, "CheckFailed");
+    assert.equal(encodeRefusal(kind, { start: Temporal.PlainDate.from("1999-01-01") }).refusal, "CheckFailed");
   });
 
   test("an object refine that reads a defaulted array, and the read-back of that send", () => {

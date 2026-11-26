@@ -29,7 +29,7 @@ const declared = defineTask({
   name: "validate_order",
   input: {},
   output: h.object({ id: h.int() }),
-  errors: ["EMPTY_ORDER"],
+  errorCodes: ["EMPTY_ORDER"],
 });
 
 const open = defineTask({ name: "validate_order", input: {}, output: h.object({ id: h.int() }) });

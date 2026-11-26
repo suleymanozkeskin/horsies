@@ -19,6 +19,7 @@ describe("workerProfilesJson", () => {
     assert.deepEqual(
       profileObject({
         isolated: {
+          kind: "isolatedChildren",
           count: 4,
           recycle: { after: { kind: "tasks", tasks: 50 }, above: { kind: "mb", mb: 512 } },
           pool: { minSize: 1, maxSize: { kind: "connections", connections: 3 }, check: true },
@@ -41,6 +42,7 @@ describe("workerProfilesJson", () => {
     assert.deepEqual(
       profileObject({
         sharedAsync: {
+          kind: "sharedAsyncChildren",
           count: 2,
           seats: 50,
           recycle: { afterPerSeat: { kind: "noLimit" }, above: { kind: "noLimit" } },
@@ -63,6 +65,7 @@ describe("workerProfilesJson", () => {
     assert.deepEqual(
       profileObject({
         sharedAsync: {
+          kind: "sharedAsyncChildren",
           count: 1,
           seats: 8,
           pool: { minSize: 0, maxSize: { kind: "connections", connections: 4 }, check: false },
@@ -84,7 +87,12 @@ describe("workerProfilesJson", () => {
   test("shared thread children", () => {
     assert.deepEqual(
       profileObject({
-        sharedThread: { count: 1, seats: 4, recycle: { afterPerSeat: { kind: "tasks", tasks: 10 } } },
+        sharedThread: {
+          kind: "sharedThreadChildren",
+          count: 1,
+          seats: 4,
+          recycle: { afterPerSeat: { kind: "tasks", tasks: 10 } },
+        },
       }),
       {
         shared_thread: {
@@ -100,7 +108,7 @@ describe("workerProfilesJson", () => {
   test("the pool of the worker process, the claim limits, the drain timeout and the parent CPU", () => {
     assert.deepEqual(
       profileObject({
-        isolated: { count: 1 },
+        isolated: { kind: "isolatedChildren", count: 1 },
         pool: { maxSize: { kind: "connections", connections: 6 } },
         claim: { perQueuePerPass: { kind: "tasks", tasks: 5 }, claimedPerWorker: { kind: "noLimit" } },
         drainTimeoutMs: 90_500,
@@ -120,8 +128,23 @@ describe("workerProfilesJson", () => {
     assert.deepEqual(profileObject({}), {});
   });
 
+  test("no children of each class: the core's no-children settings", () => {
+    assert.deepEqual(
+      profileObject({
+        isolated: { kind: "noIsolatedChildren" },
+        sharedAsync: { kind: "noSharedAsyncChildren" },
+        sharedThread: { kind: "noSharedThreadChildren" },
+      }),
+      {
+        isolated: { kind: "no_isolated_children" },
+        shared_async: { kind: "no_shared_async_children" },
+        shared_thread: { kind: "no_shared_thread_children" },
+      },
+    );
+  });
+
   test("a profile name with a lone surrogate is refused at its key with HRS-218", () => {
-    const written = workerProfilesJson({ "io\uD800": { isolated: { count: 1 } } }, "workerProfiles");
+    const written = workerProfilesJson({ "io\uD800": { isolated: { kind: "isolatedChildren", count: 1 } } }, "workerProfiles");
 
     assert.equal(written.kind, "refused");
     assert.deepEqual(

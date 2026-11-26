@@ -13,8 +13,8 @@ export const validateOrder = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { orderId: h.string() },
   output: OrderValidation,
-  errors: ["ORDER_NOT_FOUND", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["ORDER_NOT_FOUND", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Take the reserved units of each line of the order off the shelf, and mark it packed. */
@@ -23,8 +23,8 @@ export const pickPack = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { orderId: h.string() },
   output: PickPack,
-  errors: ["ORDER_NOT_FOUND", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["ORDER_NOT_FOUND", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Choose the warehouse that a stock transfer takes its units from. */
@@ -35,8 +35,8 @@ export const allocateWarehouse = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { sku: h.string(), quantity: h.int() },
   output: WarehouseAllocation,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Render the invoice of the order. A run past the deadline ends as `TASK_TIMEOUT`. */
@@ -46,8 +46,8 @@ export const generateInvoice = defineTask({
   timeoutMs: INVOICE_TIMEOUT_MS,
   input: { orderId: h.string() },
   output: Invoice,
-  errors: ["ORDER_NOT_FOUND", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["ORDER_NOT_FOUND", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 export const ORDER_TASKS = [validateOrder, pickPack, allocateWarehouse, generateInvoice] as const;

@@ -168,9 +168,9 @@ describe("the configs", () => {
   });
 
   test("each profile has one child of its class and the 5 s drain", () => {
-    assert.deepEqual(PROFILES[ISOLATED], { isolated: { count: 1 }, drainTimeoutMs: 5_000 });
-    assert.deepEqual(PROFILES[SHARED_ASYNC], { sharedAsync: { count: 1, seats: 4 }, drainTimeoutMs: 5_000 });
-    assert.deepEqual(PROFILES[SHARED_THREAD], { sharedThread: { count: 1, seats: 4 }, drainTimeoutMs: 5_000 });
+    assert.deepEqual(PROFILES[ISOLATED], { isolated: { kind: "isolatedChildren", count: 1 }, drainTimeoutMs: 5_000 });
+    assert.deepEqual(PROFILES[SHARED_ASYNC], { sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 4 }, drainTimeoutMs: 5_000 });
+    assert.deepEqual(PROFILES[SHARED_THREAD], { sharedThread: { kind: "sharedThreadChildren", count: 1, seats: 4 }, drainTimeoutMs: 5_000 });
   });
 
   test("the schedule sends parity.add with 2 and 3 every hour in UTC, two catch-up slots per check of 1 s", () => {

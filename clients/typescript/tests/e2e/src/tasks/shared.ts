@@ -60,7 +60,7 @@ export const sharedCooperative = defineTask({
   name: "e2e_shared_cooperative",
   input: { token: h.string() },
   output: h.string(),
-  errors: SHARED_CODES,
+  errorCodes: SHARED_CODES,
   execution: "SHARED_ASYNC",
   timeoutMs: STOP_TIMEOUT_MS,
   cancelGraceMs: 2_000,
@@ -71,10 +71,10 @@ export const sharedBlocksOnce = defineTask({
   name: "e2e_shared_blocks_once",
   input: { token: h.string() },
   output: h.int(),
-  errors: SHARED_CODES,
+  errorCodes: SHARED_CODES,
   execution: "SHARED_ASYNC",
   timeoutMs: 30_000,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_BLOCKED_LOOP"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_BLOCKED_LOOP"] },
 });
 
 /**
@@ -85,10 +85,10 @@ export const sharedBlocksAfterAwait = defineTask({
   name: "e2e_shared_blocks_after_await",
   input: { token: h.string() },
   output: h.int(),
-  errors: SHARED_CODES,
+  errorCodes: SHARED_CODES,
   execution: "SHARED_ASYNC",
   timeoutMs: 30_000,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_BLOCKED_LOOP", "WORKER_CRASHED"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_BLOCKED_LOOP", "WORKER_CRASHED"] },
 });
 
 /** Waits `milliseconds` on the event loop, with one retry on `WORKER_CRASHED`: the neighbour of a block on Bun. */
@@ -98,7 +98,7 @@ export const sharedSleepRetried = defineTask({
   output: h.string(),
   execution: "SHARED_ASYNC",
   timeoutMs: 30_000,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
 });
 
 /** The first attempt of `token` ignores its deadline and every cancel; the retry returns its process id. */
@@ -106,11 +106,11 @@ export const sharedStuckOnce = defineTask({
   name: "e2e_shared_stuck_once",
   input: { token: h.string() },
   output: h.int(),
-  errors: SHARED_CODES,
+  errorCodes: SHARED_CODES,
   execution: "SHARED_ASYNC",
   timeoutMs: STOP_TIMEOUT_MS,
   cancelGraceMs: 100,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_TIMEOUT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_TIMEOUT"] },
 });
 
 /** Sends `e2e_simple` from a shared async body; the output is the sent task id. */
@@ -118,7 +118,7 @@ export const sharedSends = defineTask({
   name: "e2e_shared_sends",
   input: { x: h.int() },
   output: h.string(),
-  errors: SHARED_CODES,
+  errorCodes: SHARED_CODES,
   execution: "SHARED_ASYNC",
   timeoutMs: 30_000,
 });
@@ -149,7 +149,7 @@ export const sharedSpawnAtDeadline = defineTask({
   name: "e2e_shared_spawn_at_deadline",
   input: { token: h.string() },
   output: h.string(),
-  errors: SHARED_CODES,
+  errorCodes: SHARED_CODES,
   execution: "SHARED_ASYNC",
   timeoutMs: STOP_TIMEOUT_MS,
   cancelGraceMs: 2_000,

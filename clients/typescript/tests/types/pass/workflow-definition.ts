@@ -1,6 +1,6 @@
 // Compile-pass cases of the sketch's workflow definitions (sections 5.1 and 5.2): a parameter takes a value or, when
 // declared h.taskOutcome(contract), an upstream node; joins; a success policy; sub-workflows with and without params; a
-// task that takes the workflow context names ctxFrom.
+// task that takes the workflow context names workflowContextFrom.
 
 import { defineTask, h, type ParameterSchemas } from "../../../horsies/src/index.ts";
 import {
@@ -33,7 +33,7 @@ const chargePayment = defineTask({
   name: "charge_payment",
   input: { order: h.taskOutcome(validateOrder) },
   output: Receipt,
-  errors: ["PAYMENT_DECLINED"],
+  errorCodes: ["PAYMENT_DECLINED"],
 });
 
 const sendReceipt = defineTask({ name: "send_receipt", input: { receipt: h.taskOutcome(chargePayment) }, output: h.null() });
@@ -59,12 +59,12 @@ export const fulfilOrder = defineWorkflow(
     checkCases: [{ order: sampleOrder }],
   },
   (w, { order }) => {
-    const validated = w.task(validateOrder, { order }, { id: "validate" });
-    const reserved = w.task(reserveStock, { order: validated, warehouse: "eu-1" }, { id: "reserve" });
-    const charged = w.task(chargePayment, { order: validated }, { id: "charge", waitsFor: [reserved] });
+    const validated = w.task(validateOrder, { order }, { nodeId: "validate" });
+    const reserved = w.task(reserveStock, { order: validated, warehouse: "eu-1" }, { nodeId: "reserve" });
+    const charged = w.task(chargePayment, { order: validated }, { nodeId: "charge", waitsFor: [reserved] });
 
-    w.task(sendReceipt, { receipt: charged }, { id: "notify", allowFailedDeps: true });
-    w.task(audit, {}, { id: "audit", waitsFor: [charged], ctxFrom: [charged] });
+    w.task(sendReceipt, { receipt: charged }, { nodeId: "notify", allowFailedDependencies: true });
+    w.task(audit, {}, { nodeId: "audit", waitsFor: [charged], workflowContextFrom: [charged] });
 
     return { output: charged };
   },
@@ -85,10 +85,10 @@ export const shipping = defineWorkflow(
   },
   (w, { order }) => {
     const quotes = ["dhl", "ups", "fedex"].map((carrier) =>
-      w.task(quoteShipping, { carrier, order }, { id: `quote-${carrier}` }),
+      w.task(quoteShipping, { carrier, order }, { nodeId: `quote-${carrier}` }),
     );
 
-    const pick = w.task(pickCarrier, {}, { id: "pick", waitsFor: quotes, join: { kind: "quorum", minSuccess: 2 } });
+    const pick = w.task(pickCarrier, {}, { nodeId: "pick", waitsFor: quotes, join: { kind: "quorum", minSuccess: 2 } });
 
     return { output: pick, successPolicy: { cases: [{ required: [pick] }], optional: quotes } };
   },
@@ -102,7 +102,7 @@ const syncRegion = defineWorkflow(
     params: { region: h.string() },
     checkCases: [{ region: "eu" }],
   },
-  (w, { region }) => ({ output: w.task(quoteShipping, { carrier: region, order: sampleOrder }, { id: "last" }) }),
+  (w, { region }) => ({ output: w.task(quoteShipping, { carrier: region, order: sampleOrder }, { nodeId: "last" }) }),
 );
 
 const buildReport = defineTask({ name: "build_report", input: {}, output: h.string() });
@@ -111,10 +111,10 @@ export const nightly = defineWorkflow(
   { name: "nightly", definitionKey: "shop.nightly.v1", output: h.string(), params: {} },
   (w) => {
     const regions = ["eu", "us", "apac"].map((region) =>
-      w.subWorkflow(syncRegion, { region }, { id: `sync-${region}` }),
+      w.subWorkflow(syncRegion, { region }, { nodeId: `sync-${region}` }),
     );
 
-    const report = w.task(buildReport, {}, { id: "report", waitsFor: regions, allowFailedDeps: true });
+    const report = w.task(buildReport, {}, { nodeId: "report", waitsFor: regions, allowFailedDependencies: true });
 
     expectType<Equal<(typeof regions)[number], NodeRef<number, string, `sync-${string}`>>>();
 
@@ -128,15 +128,15 @@ const tally = defineTask({ name: "tally", input: { first: h.taskOutcome(quoteShi
 export const anyJoin = defineWorkflow(
   { name: "any_join", definitionKey: "shop.any_join.v1", output: h.int(), params: {} },
   (w) => {
-    const one = w.task(pickCarrier, {}, { id: "one" });
-    const count = w.task(quoteShipping, { carrier: "x", order: sampleOrder }, { id: "count" });
-    const summed = w.task(tally, { first: count }, { id: "sum", waitsFor: [one], join: { kind: "any" } });
+    const one = w.task(pickCarrier, {}, { nodeId: "one" });
+    const count = w.task(quoteShipping, { carrier: "x", order: sampleOrder }, { nodeId: "count" });
+    const summed = w.task(tally, { first: count }, { nodeId: "sum", waitsFor: [one], join: { kind: "any" } });
 
     return { output: summed };
   },
 );
 
 /** The typed set of resultFor: the nodes of the returned object. */
-type NodesOf<W> = W extends WorkflowContract<ParameterSchemas, infer R> ? ReturnedNodes<R>["id"] : never;
+type NodesOf<W> = W extends WorkflowContract<ParameterSchemas, infer R> ? ReturnedNodes<R>["nodeId"] : never;
 
 expectType<Equal<NodesOf<typeof shipping>, "pick" | `quote-${string}`>>();

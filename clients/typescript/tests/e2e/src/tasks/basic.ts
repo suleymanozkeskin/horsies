@@ -25,10 +25,10 @@ export const kwargs = defineTask({
 });
 
 /** A returned error with a code, a message and data. */
-export const deliberateError = defineTask({ name: "e2e_error", input: {}, output: h.int(), errors: ["DELIBERATE_ERROR"] });
+export const deliberateError = defineTask({ name: "e2e_error", input: {}, output: h.int(), errorCodes: ["DELIBERATE_ERROR"] });
 
 /** A code that no retry policy names. */
-export const noRetry = defineTask({ name: "e2e_no_retry", input: {}, output: h.string(), errors: ["PERMANENT"] });
+export const noRetry = defineTask({ name: "e2e_no_retry", input: {}, output: h.string(), errorCodes: ["PERMANENT"] });
 
 /**
  * A body that returns a built-in code. The static types refuse the literal, so the code is a `string`; `err` throws
@@ -67,7 +67,7 @@ export const timeoutRetrySleeper = defineTask({
   input: { durationMs: h.int() },
   output: h.string(),
   timeoutMs: 1_000,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_TIMEOUT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_TIMEOUT"] },
 });
 
 /** The process id of the child that runs it, after `sleepMs`. */
@@ -87,7 +87,7 @@ export const idempotent = defineTask({
   name: "e2e_idempotent",
   input: { token: h.string() },
   output: h.string(),
-  errors: ["DOUBLE_EXECUTION", "MARKER_FAILED"],
+  errorCodes: ["DOUBLE_EXECUTION", "MARKER_FAILED"],
 });
 
 /** Runs once per token, then waits `durationMs`. */
@@ -95,14 +95,14 @@ export const slowIdempotent = defineTask({
   name: "e2e_slow_idempotent",
   input: { token: h.string(), durationMs: h.int() },
   output: h.string(),
-  errors: ["DOUBLE_EXECUTION", "MARKER_FAILED"],
+  errorCodes: ["DOUBLE_EXECUTION", "MARKER_FAILED"],
 });
 
 /** Sends a task, then waits for it: whether the wait is refused with `waitInsideTask`. */
-export const waitInsideTask = defineTask({ name: "e2e_wait_inside_task", input: {}, output: h.boolean(), errors: ["SEND_FAILED"] });
+export const waitInsideTask = defineTask({ name: "e2e_wait_inside_task", input: {}, output: h.boolean(), errorCodes: ["SEND_FAILED"] });
 
 /** Sends `e2e_simple` from its body; the output is the sent task id. */
-export const asyncSends = defineTask({ name: "e2e_async_sends", input: { x: h.int() }, output: h.string(), errors: ["SEND_FAILED"] });
+export const asyncSends = defineTask({ name: "e2e_async_sends", input: { x: h.int() }, output: h.string(), errorCodes: ["SEND_FAILED"] });
 
 /** Holds its thread for `durationMs` and reports when it ran: `<pid>:<start ms>:<end ms>`. */
 export const stamp = defineTask({ name: "e2e_stamp", input: { durationMs: h.int() }, output: h.string() });
@@ -119,7 +119,7 @@ export const pidThenHold = defineTask({
   name: "e2e_pid_then_hold",
   input: { token: h.string(), durationMs: h.int() },
   output: h.string(),
-  errors: ["MARKER_FAILED"],
+  errorCodes: ["MARKER_FAILED"],
 });
 
 /** Holds its thread for `seconds`: longer than the drain timeout of every test profile. */

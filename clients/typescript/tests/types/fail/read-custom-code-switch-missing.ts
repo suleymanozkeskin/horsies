@@ -7,7 +7,7 @@ function assertNever(value: never): never {
   throw new TypeError(String(value));
 }
 
-const validateOrder = defineTask({ name: "v", input: {}, output: h.null(), errors: ["EMPTY_ORDER", "INVALID_EMAIL"] });
+const validateOrder = defineTask({ name: "v", input: {}, output: h.null(), errorCodes: ["EMPTY_ORDER", "INVALID_EMAIL"] });
 
 export async function codeOf(app: Horsies, taskId: TaskId): Promise<string> {
   const read = await app.taskHandle(validateOrder, taskId).get();

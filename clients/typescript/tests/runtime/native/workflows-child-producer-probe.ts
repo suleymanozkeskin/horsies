@@ -23,7 +23,7 @@ export interface WorkflowsChildProducerProbeAddon {
     workflowId: string,
     sentAtMicros: bigint,
     trace: TraceArgument,
-    resendOnTransientErr: boolean,
+    resendOnTransientError: boolean,
   ): Promise<NativeEnvelope<WorkflowStartOutcome>>;
   probeResumeWorkflowInChild(
     handle: NativeCoreHandle,

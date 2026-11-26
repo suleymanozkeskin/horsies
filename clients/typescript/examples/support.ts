@@ -28,7 +28,7 @@ export const DATABASE_URL: Secret = { kind: "fromEnv", name: "DATABASE_URL" };
 export const DEFAULT_PROFILE = "default";
 
 /** A worker profile of two isolated children: each runs one task at a time in its own process. */
-export const ISOLATED_PROFILE: WorkerProfileInput = { isolated: { count: 2 } };
+export const ISOLATED_PROFILE: WorkerProfileInput = { isolated: { kind: "isolatedChildren", count: 2 } };
 
 /** The longest wait of a demo for one result, in milliseconds: the worker starts its children first. */
 export const RESULT_WAIT_MS = 30_000;

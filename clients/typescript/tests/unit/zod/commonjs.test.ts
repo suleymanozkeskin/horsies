@@ -91,14 +91,14 @@ describe("a schema of zod's CommonJS build", () => {
 
   test("the object refine refuses a value at encode and a stored text at decode: the check's own _zod.check", () => {
     assert.deepEqual(encodeRefusal(orderKind(), { at: Temporal.Instant.from(AT_TEXT), count: 9, code: 7 }), {
-      side: "encode",
-      kind: "CheckFailed",
+      kind: "encodeRefused",
+      refusal: "CheckFailed",
       path: "$",
       detail: "the check refused the value: $ custom",
     });
     assert.deepEqual(decodeRefusal(orderKind(), `{"at":"${AT_TEXT}","count":9,"code":"7"}`, "worker"), {
-      side: "decode",
-      kind: "CheckFailed",
+      kind: "decodeRefused",
+      refusal: "CheckFailed",
       path: "$",
       detail: "the check refused the read value: $ custom",
     });
@@ -106,8 +106,8 @@ describe("a schema of zod's CommonJS build", () => {
 
   test("the codec's output schema refuses a value at encode: the output's own _zod.run, backward", () => {
     assert.deepEqual(encodeRefusal(orderKind(), { at: Temporal.Instant.from(AT_TEXT), count: 2, code: 500 }), {
-      side: "encode",
-      kind: "CheckFailed",
+      kind: "encodeRefused",
+      refusal: "CheckFailed",
       path: "$.code",
       detail: "the conversion refused the value: $ too_big",
     });

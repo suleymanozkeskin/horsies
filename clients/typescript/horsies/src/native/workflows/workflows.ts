@@ -68,10 +68,10 @@ export async function startWorkflow(
   workflowId: string,
   sentAtMicros: bigint,
   trace: TraceArgument,
-  resendOnTransientErr: boolean,
+  resendOnTransientError: boolean,
 ): Promise<WorkflowStartOutcome> {
   return nativeValueAsync("startWorkflow", () =>
-    workflowsAddon().startWorkflow(handle.native, spec, workflowId, sentAtMicros, trace, resendOnTransientErr),
+    workflowsAddon().startWorkflow(handle.native, spec, workflowId, sentAtMicros, trace, resendOnTransientError),
   );
 }
 

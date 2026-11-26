@@ -10,7 +10,7 @@ const charge = defineTask({ name: "charge", input: { order: h.taskOutcome(count)
 export const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.int(), params: {} }, (w) => {
   const charged = w.task(charge,
     { order: 7 },
-    { id: "charge" });
+    { nodeId: "charge" });
 
   return { output: charged };
 });

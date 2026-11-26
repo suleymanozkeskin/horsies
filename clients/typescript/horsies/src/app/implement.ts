@@ -39,8 +39,9 @@ export function registerImplementation(context: AppContext, implementation: obje
 }
 
 /**
- * The refusals of the exception codes of each implementation whose contract declares no `errors`: each code must pass
- * the core's code rules (`parseDeclaredErrorCodes`). With `errors`, the static type allows only a declared code.
+ * The refusals of the exception codes of each implementation whose contract declares no `errorCodes`: each code must
+ * pass the core's code rules (`parseDeclaredErrorCodes`). With `errorCodes`, the static type allows only a declared
+ * code.
  * `app.implement` calls no addon function, so the `check` command and the worker start call this, on a main thread,
  * with the core's checks. Refusals in registration order, with the path `implement <task name>`.
  */
@@ -49,7 +50,7 @@ export function exceptionCodeRefusals(context: AppContext, checks: CoreChecks): 
 
   for (const [name, parts] of context.implementations) {
     const record = contractRecord(parts.contract);
-    const codes = [...new Set(parts.exceptions.map(([, code]) => code))];
+    const codes = [...new Set(parts.exceptionMapper.map(([, code]) => code))];
 
     if (record.codes.kind === "open" && codes.length > 0) {
       const checked = checks.parseDeclaredErrorCodes(codes);

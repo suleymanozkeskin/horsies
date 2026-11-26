@@ -48,8 +48,11 @@ describe("the JavaScript log sink", () => {
 
     configureLogging({
       levels: { default: "WARNING", loggers: { "horsies.sql": "INFO" } },
-      sink: (batch) => {
-        records.push(...batch);
+      sink: {
+        kind: "function",
+        sink: (batch) => {
+          records.push(...batch);
+        },
       },
     });
 
@@ -69,7 +72,7 @@ describe("the JavaScript log sink", () => {
       records.map((record) => `${record.level} ${record.logger}`).join(", "),
     );
     await handle.close();
-    configureLogging({ sink: "stderr" });
+    configureLogging({ sink: { kind: "stderr" } });
   });
 
   test("a sink that throws sends the batch to stderr and the process goes on", () => {

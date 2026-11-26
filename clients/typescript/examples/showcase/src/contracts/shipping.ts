@@ -11,8 +11,8 @@ export const bookCourier = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { orderId: h.string(), courier: h.string(), express: h.boolean() },
   output: CourierBooking,
-  errors: ["COURIER_UNAVAILABLE", "SHIPMENT_NOT_FOUND", "STORE_UNAVAILABLE"],
-  retry: COURIER_RETRY,
+  errorCodes: ["COURIER_UNAVAILABLE", "SHIPMENT_NOT_FOUND", "STORE_UNAVAILABLE"],
+  retryPolicy: COURIER_RETRY,
 });
 
 /** Print the label of the booked shipment. */
@@ -21,8 +21,8 @@ export const printLabel = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { orderId: h.string(), booking: h.taskOutcome(bookCourier) },
   output: ShippingLabel,
-  errors: ["UPSTREAM_FAILED", "SHIPMENT_NOT_FOUND", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["UPSTREAM_FAILED", "SHIPMENT_NOT_FOUND", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Seed the tracking code of the shipment and mark the order shipped. */
@@ -31,8 +31,8 @@ export const trackingSeed = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { orderId: h.string(), label: h.taskOutcome(printLabel) },
   output: TrackingSeed,
-  errors: ["UPSTREAM_FAILED", "SHIPMENT_NOT_FOUND", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["UPSTREAM_FAILED", "SHIPMENT_NOT_FOUND", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 export const SHIPPING_TASKS = [bookCourier, printLabel, trackingSeed] as const;

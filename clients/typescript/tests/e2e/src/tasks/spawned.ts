@@ -16,7 +16,7 @@ export const isolatedLeftWork = defineTask({
   name: "e2e_isolated_left_work",
   input: { token: h.string(), workMs: h.int() },
   output: h.string(),
-  errors: SPAWN_CODES,
+  errorCodes: SPAWN_CODES,
 });
 
 /**
@@ -27,7 +27,7 @@ export const isolatedLeftWorkSignal = defineTask({
   name: "e2e_isolated_left_work_signal",
   input: { token: h.string() },
   output: h.string(),
-  errors: SPAWN_CODES,
+  errorCodes: SPAWN_CODES,
 });
 
 /**

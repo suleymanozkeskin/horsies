@@ -26,6 +26,7 @@ import {
   envelopeRefused,
   type EnvelopeRule,
   memberPath,
+  refusalName,
   ROOT_PATH,
 } from "./refusal.ts";
 import { readSubWorkflow } from "./sub-workflow.ts";
@@ -272,5 +273,5 @@ function readData(node: TreeValue, path: string): Result<JsonValue, DecodeRefuse
 
   return data.ok
     ? data
-    : refuse("ErrorDataRefused", path, `the data breaks a rule of a user value: ${data.error.kind}`);
+    : refuse("ErrorDataRefused", path, `the data breaks a rule of a user value: ${refusalName(data.error)}`);
 }

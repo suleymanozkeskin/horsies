@@ -1,5 +1,5 @@
 // expect: TS2345 at 10
-// A node with no id: every node names its id.
+// A node with no node id: every node names its `nodeId`.
 
 import { defineTask, h } from "../../../horsies/src/index.ts";
 import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";

@@ -22,7 +22,7 @@ const chargeOrder = defineTask({
   name: "charge_order",
   input: { order: Order },
   output: h.int(),
-  errors: ["CARD_DECLINED"],
+  errorCodes: ["CARD_DECLINED"],
 });
 
 const sendReceipt = defineTask({
@@ -41,8 +41,8 @@ export const checkout = defineWorkflow(
     checkCases: [{ order: { orderId: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b", totalCents: 900 } }],
   },
   (w, { order }) => {
-    const charged = w.task(chargeOrder, { order }, { id: "charge" });
-    const receipt = w.task(sendReceipt, { orderId: order.orderId, charged }, { id: "receipt" });
+    const charged = w.task(chargeOrder, { order }, { nodeId: "charge" });
+    const receipt = w.task(sendReceipt, { orderId: order.orderId, charged }, { nodeId: "receipt" });
 
     return { output: receipt, successPolicy: { cases: [{ required: [charged, receipt] }] } };
   },
@@ -99,14 +99,14 @@ The input of a node has one member per parameter:
 
 | Option | Rule |
 |---|---|
-| `id` | Required. `[A-Za-z0-9_\-:.]+`, at most 128 characters (`HRS-003`), unique in the build (`HRS-004`). The key of the node in the stored workflow and in `resultFor` |
+| `nodeId` | Required. `[A-Za-z0-9_\-:.]+`, at most 128 characters (`HRS-003`), unique in the build (`HRS-004`). The key of the node in the stored workflow and in `resultFor` |
 | `waitsFor` | Nodes of this build to wait for, with no data |
 | `join` | `{ kind: "all" }` (default), `{ kind: "any" }`, `{ kind: "quorum", minSuccess }` (1 to the node's dependencies; `HRS-013`) |
-| `allowFailedDeps` | `true`: the node runs when a dependency failed |
+| `allowFailedDependencies` | `true`: the node runs when a dependency failed |
 | `queue` | Task node: a queue that the app admits, in place of the task's queue (`HRS-014`) |
 | `priority` | Task node: an integer 1 (first) to 100 (last) (`HRS-034`) |
 | `goodUntil` | Task node: a `Temporal.Instant`; the node's task expires if no worker starts it by then |
-| `ctxFrom` | Task node of a task with `workflowContext: true`: dependencies whose results the core puts in the task's workflow context |
+| `workflowContextFrom` | Task node of a task with `workflowContext: true`: dependencies whose results the core puts in the task's workflow context |
 
 - A node can name only nodes that the build made before it, so a spec has
   no cycle. A node of another build is refused (`HRS-006`, `HRS-011`,
@@ -115,9 +115,10 @@ The input of a node has one member per parameter:
 - The return object holds `output`, a node of this build whose type is the
   declared `output` (`HRS-011`, `HRS-025`), and an optional
   `successPolicy`.
-- `ctxFrom` on a task without `workflowContext: true` fails typecheck
-  (untyped code: `HRS-010`). Each `ctxFrom` node is a dependency of the node
-  (`HRS-009`): name it in `waitsFor` or as a parameter source.
+- `workflowContextFrom` on a task without `workflowContext: true` fails
+  typecheck (untyped code: `HRS-010`). Each `workflowContextFrom` node is a
+  dependency of the node (`HRS-009`): name it in `waitsFor` or as a
+  parameter source.
 
 ### The Workflow Context
 
@@ -126,18 +127,18 @@ without it has no such member (typecheck).
 
 | Value | When |
 |---|---|
-| `{ kind: "context", context }` | The run is a workflow node that names `ctxFrom` |
-| `{ kind: "noContext" }` | A direct send, or a node with no `ctxFrom` |
+| `{ kind: "context", context }` | The run is a workflow node that names `workflowContextFrom` |
+| `{ kind: "noContext" }` | A direct send, or a node with no `workflowContextFrom` |
 
 - `context` holds `workflowId`, `taskIndex` and `taskName`, and reads the
-  nodes of `ctxFrom`: `resultFor(nodeId, contract)` (the node's
+  nodes of `workflowContextFrom`: `resultFor(nodeId, contract)` (the node's
   `TaskOutcome`, read with the contract's output type and codes),
   `hasResult(nodeId)`, and for a sub-workflow node `summaryFor(nodeId)`,
   `outputFor(nodeId, workflow)` and `hasSummary(nodeId)`.
-- A read gives `notInContext` for a node that is not in `ctxFrom` or that
-  did not end, `unreadable` for a value that does not read with the
-  contract, and `unknownUserCode` for a code that the contract does not
-  list.
+- A read gives `notInContext` for a node that is not in
+  `workflowContextFrom` or that did not end, `unreadable` for a value that
+  does not read with the contract, and `unknownUserCode` for a code that the
+  contract does not list.
 
 <!-- ts-check: alone -->
 ```ts
@@ -149,9 +150,9 @@ const audit = defineTask({ name: "audit", input: {}, output: h.boolean(), workfl
 export const checkout = defineWorkflow(
   { name: "checkout", definitionKey: "shop.checkout.v1", params: {}, output: h.boolean() },
   (w) => {
-    const charged = w.task(charge, { amount: 10 }, { id: "charge" });
+    const charged = w.task(charge, { amount: 10 }, { nodeId: "charge" });
 
-    return { output: w.task(audit, {}, { id: "audit", waitsFor: [charged], ctxFrom: [charged] }) };
+    return { output: w.task(audit, {}, { nodeId: "audit", waitsFor: [charged], workflowContextFrom: [charged] }) };
   },
 );
 
@@ -173,7 +174,7 @@ export function implementAudit(app: Horsies) {
 
 Data flow of an `h.taskOutcome` parameter:
 
-| Source | Default | `allowFailedDeps: true` |
+| Source | Default | `allowFailedDependencies: true` |
 |---|---|---|
 | COMPLETED | Runs with `{ kind: "succeeded", value }` | Same |
 | FAILED | The node is SKIPPED | Runs with `{ kind: "failed", error }` |
@@ -201,13 +202,13 @@ export const shipping = defineWorkflow(
   { name: "shipping", definitionKey: "shop.shipping.v1", params: {}, output: h.string() },
   (w) => {
     const quotes = ["dhl", "ups", "fedex"].map((carrier) =>
-      w.task(quoteShipping, { carrier }, { id: `quote-${carrier}` }),
+      w.task(quoteShipping, { carrier }, { nodeId: `quote-${carrier}` }),
     );
     const [first] = quotes;
     const picked = w.task(
       pickCarrier,
       first === undefined ? {} : { first },
-      { id: "pick", waitsFor: quotes, join: { kind: "quorum", minSuccess: 2 } },
+      { nodeId: "pick", waitsFor: quotes, join: { kind: "quorum", minSuccess: 2 } },
     );
 
     return { output: picked, successPolicy: { cases: [{ required: [picked] }], optional: quotes } };
@@ -243,7 +244,7 @@ export const regionReport = defineWorkflow(
     output: h.int(),
     checkCases: [{ region: "eu" }],
   },
-  (w, { region }) => ({ output: w.task(fetchRegion, { region }, { id: "fetch" }) }),
+  (w, { region }) => ({ output: w.task(fetchRegion, { region }, { nodeId: "fetch" }) }),
 );
 
 const addTotals = defineTask({
@@ -255,18 +256,18 @@ const addTotals = defineTask({
 export const allRegions = defineWorkflow(
   { name: "all_regions", definitionKey: "reports.all_regions.v1", params: {}, output: h.int() },
   (w) => {
-    const eu = w.subWorkflow(regionReport, { region: "eu" }, { id: "eu" });
-    const us = w.subWorkflow(regionReport, { region: "us" }, { id: "us" });
+    const eu = w.subWorkflow(regionReport, { region: "eu" }, { nodeId: "eu" });
+    const us = w.subWorkflow(regionReport, { region: "us" }, { nodeId: "us" });
 
-    return { output: w.task(addTotals, { eu, us }, { id: "total", allowFailedDeps: true }) };
+    return { output: w.task(addTotals, { eu, us }, { nodeId: "total", allowFailedDependencies: true }) };
   },
 );
 ```
 
 - `w.subWorkflow(workflow, params, options)` runs the workflow as a child.
   Its params follow the input rules of a node; a child with `params: {}`
-  takes `{}` (`HRS-022`). Its options are `id`, `waitsFor`, `join` and
-  `allowFailedDeps`.
+  takes `{}` (`HRS-022`). Its options are `nodeId`, `waitsFor`, `join` and
+  `allowFailedDependencies`.
 - The node's output type is the child's declared `output` and its code type
   is `string` (a workflow holds the codes of many tasks), so the node feeds
   an `h.taskOutcome(workflow)` parameter of that child.
@@ -392,7 +393,7 @@ process gave; another error is `VALIDATION_FAILED`.
 |---|---|
 | `workflowId` | The `WorkflowId` |
 | `get({ waitMs })` | `Result<TaskOutcome<O, string>, WorkflowReadError>`: waits while the workflow runs, at most `waitMs` (0 to 4,294,967,295; left out: no bound) |
-| `resultFor(id)` | `Result<TaskOutcome<O, E>, WorkflowReadError>`: one node of the returned object (the output and the success policy nodes), typed by its contract. Not a wait |
+| `resultFor(nodeId)` | `Result<TaskOutcome<O, E>, WorkflowReadError>`: one node of the returned object (the output and the success policy nodes), typed by its contract. Not a wait |
 | `status()` | `Result<WorkflowStatus, HandleCoreError>` |
 | `results()` | `Result<ReadonlyMap<string, NodeResult>, HandleCoreError>`: the stored result of each node that has one, by node id |
 | `tasks()` | `Result<readonly WorkflowTaskInfo[], HandleCoreError>`: every node in index order |
@@ -448,7 +449,7 @@ export async function checkoutState(app: Horsies, text: string): Promise<void> {
 ```
 
 - `app.workflowHandle(workflow, workflowId)` does no I/O. It has no build,
-  so `resultFor(id, contract)` takes what the node runs: the task contract
+  so `resultFor(nodeId, contract)` takes what the node runs: the task contract
   of a task node, or the workflow contract of a sub-workflow node (read
   with the child's declared output and open custom codes).
 - A read of a workflow that the app does not list is `noTypeAvailable`,
@@ -460,7 +461,7 @@ export async function checkoutState(app: Horsies, text: string): Promise<void> {
 | `workflowNotFound` | `WORKFLOW_NOT_FOUND` | - | No workflow has the id |
 | `resultNotReady` | `RESULT_NOT_READY` | - | `resultFor`: the node stores no result yet, or the workflow has no node of the id |
 | `storedResultUnreadable` | - | `cause` | The stored value does not read with the handle's types |
-| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the node contract's `errors` |
+| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the node contract's `errorCodes` |
 | `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A wait in a worker child. Nothing was read |
 | `noTypeAvailable` | `NO_TYPE_AVAILABLE` | `workflowName` | The app does not list the workflow, so its output has no type to read with. Nothing was read |
 | `database` | the handle code | `retryable`, `message` | The database or the connection failed |
@@ -508,7 +509,7 @@ its `HRS-nnn` code; the check fails.
 | `HRS-002` | A build with no node |
 | `HRS-003`, `HRS-004` | A node id outside the pattern or the length; two nodes with one id |
 | `HRS-006`, `HRS-011`, `HRS-012` | A node of another build (dependency, output, success policy) |
-| `HRS-009`, `HRS-010` | A `ctxFrom` node that is not a dependency; `ctxFrom` on a task without `workflowContext: true` |
+| `HRS-009`, `HRS-010` | A `workflowContextFrom` node that is not a dependency; `workflowContextFrom` on a task without `workflowContext: true` |
 | `HRS-013` | A quorum outside 1 to the node's dependencies, or a required `h.taskOutcome` parameter under an `any` or quorum join |
 | `HRS-014`, `HRS-034` | A node queue that the app does not admit; a priority outside 1 to 100 |
 | `HRS-016`, `HRS-017` | An empty definition key; a key that another listed workflow has |

@@ -67,7 +67,7 @@ function storedText(data: unknown): StoredErrorData {
   const written = engineKeysKeptText(data, ROOT_PATH, MAX_JSON_DEPTH);
 
   if (!written.ok) {
-    throw new TypeError(`errorDataText: the writer refused data that the fault walk took (${written.error.kind})`);
+    throw new TypeError(`errorDataText: the writer refused data that the fault walk took (${written.error.refusal})`);
   }
 
   return Object.freeze({ state: "stored", text: writtenJsonText(written.value) });

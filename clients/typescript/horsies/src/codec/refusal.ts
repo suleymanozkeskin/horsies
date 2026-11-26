@@ -1,5 +1,8 @@
-// The refusal catalog of the codec: a closed union by `kind`. `path` names the place in the value (`$` is the whole
-// value). `detail` names the rule, never a value.
+// The refusal catalog of the codec: a closed union by `kind`, one `kind` per member; the refusal of the writer or the
+// reader is in `refusal`, the rule of a stored envelope in `rule`. `path` names the place in the value (`$` is the
+// whole value). `detail` names the rule, never a value.
+
+import { unreachable } from "../wire/unreachable.ts";
 
 /** Why the writer refuses a value. */
 export type EncodeRefusalKind =
@@ -67,16 +70,16 @@ export type DecodeRefusalKind =
 
 /** The writer refuses a value. */
 export type EncodeRefused = {
-  readonly side: "encode";
-  readonly kind: EncodeRefusalKind;
+  readonly kind: "encodeRefused";
+  readonly refusal: EncodeRefusalKind;
   readonly path: string;
   readonly detail: string;
 };
 
 /** The reader refuses a stored value under its declared kind. */
 export type ValueRefused = {
-  readonly side: "decode";
-  readonly kind: DecodeRefusalKind;
+  readonly kind: "decodeRefused";
+  readonly refusal: DecodeRefusalKind;
   readonly path: string;
   readonly detail: string;
 };
@@ -111,8 +114,7 @@ export type EnvelopeRule =
 
 /** A stored result envelope or task error breaks a rule of its form. */
 export type EnvelopeRefused = {
-  readonly side: "decode";
-  readonly kind: "EnvelopeRefused";
+  readonly kind: "envelopeRefused";
   readonly rule: EnvelopeRule;
   readonly path: string;
   readonly detail: string;
@@ -123,8 +125,7 @@ export type DecodeRefused = ValueRefused | EnvelopeRefused;
 
 /** The worker could not read the text that the sender wrote: `cause` is the reader's refusal. */
 export type ReadBackRefused = {
-  readonly side: "readBack";
-  readonly kind: "ReadBackRefused";
+  readonly kind: "readBackRefused";
   readonly path: string;
   readonly detail: string;
   readonly cause: DecodeRefused;
@@ -135,8 +136,7 @@ export type ReadBackRefused = {
  * invert). `detail` names the offset of the first difference; it holds no value.
  */
 export type ReadBackChanged = {
-  readonly side: "readBack";
-  readonly kind: "ReadBackChanged";
+  readonly kind: "readBackChanged";
   readonly path: string;
   readonly detail: string;
 };
@@ -145,11 +145,31 @@ export type ReadBackChanged = {
 export type CodecRefused = EncodeRefused | DecodeRefused | ReadBackRefused | ReadBackChanged;
 
 /**
- * The text of a refusal, as the Python client writes a validation summary: `<path>: <detail> [<kind>]`. A part of
- * the path that comes from the value is `<input>`; the text holds no value. Pure.
+ * The text of a refusal, as the Python client writes a validation summary: `<path>: <detail> [<name>]`, with the name
+ * of `refusalName`. A part of the path that comes from the value is `<input>`; the text holds no value. Pure.
  */
 export function refusalText(refused: CodecRefused): string {
-  return `${refused.path}: ${refused.detail} [${refused.kind}]`;
+  return `${refused.path}: ${refused.detail} [${refusalName(refused)}]`;
+}
+
+/**
+ * The name of a refusal in its text: the refusal of the writer or the reader, or `EnvelopeRefused`, `ReadBackRefused`
+ * or `ReadBackChanged`. Pure.
+ */
+export function refusalName(refused: CodecRefused): string {
+  switch (refused.kind) {
+    case "encodeRefused":
+    case "decodeRefused":
+      return refused.refusal;
+    case "envelopeRefused":
+      return "EnvelopeRefused";
+    case "readBackRefused":
+      return "ReadBackRefused";
+    case "readBackChanged":
+      return "ReadBackChanged";
+    default:
+      return unreachable(refused, "refusalName");
+  }
 }
 
 /** The path of a whole value. */
@@ -174,16 +194,16 @@ export function entryPath(path: string): string {
 }
 
 /** A refusal of the writer. Pure. */
-export function encodeRefused(kind: EncodeRefusalKind, path: string, detail: string): EncodeRefused {
-  return Object.freeze({ side: "encode", kind, path, detail });
+export function encodeRefused(refusal: EncodeRefusalKind, path: string, detail: string): EncodeRefused {
+  return Object.freeze({ kind: "encodeRefused", refusal, path, detail });
 }
 
 /** A refusal of the reader. Pure. */
-export function decodeRefused(kind: DecodeRefusalKind, path: string, detail: string): ValueRefused {
-  return Object.freeze({ side: "decode", kind, path, detail });
+export function decodeRefused(refusal: DecodeRefusalKind, path: string, detail: string): ValueRefused {
+  return Object.freeze({ kind: "decodeRefused", refusal, path, detail });
 }
 
 /** A refusal of the form of a result envelope or a stored task error. Pure. */
 export function envelopeRefused(rule: EnvelopeRule, path: string, detail: string): EnvelopeRefused {
-  return Object.freeze({ side: "decode", kind: "EnvelopeRefused", rule, path, detail });
+  return Object.freeze({ kind: "envelopeRefused", rule, path, detail });
 }

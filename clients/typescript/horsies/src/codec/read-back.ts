@@ -79,8 +79,7 @@ function readBack(
 
 function refused(cause: DecodeRefused): ReadBackRefused {
   return Object.freeze({
-    side: "readBack",
-    kind: "ReadBackRefused",
+    kind: "readBackRefused",
     path: ROOT_PATH,
     detail: `the worker cannot read what the sender wrote: ${refusalText(cause)}`,
     cause,
@@ -88,7 +87,7 @@ function refused(cause: DecodeRefused): ReadBackRefused {
 }
 
 function changed(detail: string): ReadBackChanged {
-  return Object.freeze({ side: "readBack", kind: "ReadBackChanged", path: ROOT_PATH, detail });
+  return Object.freeze({ kind: "readBackChanged", path: ROOT_PATH, detail });
 }
 
 /** The offset of the first character that differs between two texts. Pure. */

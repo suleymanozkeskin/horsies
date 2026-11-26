@@ -75,7 +75,7 @@ pub enum BodyForm {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskContextUse {
     /// A task with `workflowContext: true`: the core writes the
-    /// `workflow_ctx` member for a node that names `ctxFrom`.
+    /// `workflow_ctx` member for a node that names `workflowContextFrom`.
     TakesContext,
     /// Any other task: the core removes the member.
     NoContext,

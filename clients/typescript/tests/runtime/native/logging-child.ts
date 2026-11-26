@@ -67,7 +67,7 @@ async function runCase(name: string | undefined): Promise<string> {
  * must still exit when its loop is empty.
  */
 async function idleExitWithSink(): Promise<string> {
-  configureLogging({ levels: { default: "WARNING" }, sink: () => undefined });
+  configureLogging({ levels: { default: "WARNING" }, sink: { kind: "function", sink: () => undefined } });
 
   const probe = envelopeValue(
     await probeAddon().probeCallback(settlingCallback((argument: string) => argument, addonSettlement), "ping"),
@@ -82,10 +82,13 @@ async function throwingSink(): Promise<string> {
 
   configureLogging({
     levels: { default: "WARNING", loggers: { "horsies.sql": "INFO" } },
-    sink: () => {
-      calls += 1;
+    sink: {
+      kind: "function",
+      sink: () => {
+        calls += 1;
 
-      throw new Error("planned sink failure");
+        throw new Error("planned sink failure");
+      },
     },
   });
 
@@ -105,10 +108,13 @@ async function throwingSink(): Promise<string> {
 /** A defect under ABORT_PROCESS: the record reaches the sink (written with a sync write), then the abort. */
 function defectRecordToSink(): string {
   configureLogging({
-    sink: (records) => {
-      for (const record of records) {
-        writeSync(1, `SINK ${record.level} ${record.logger} ${record.message}\n`);
-      }
+    sink: {
+      kind: "function",
+      sink: (records) => {
+        for (const record of records) {
+          writeSync(1, `SINK ${record.level} ${record.logger} ${record.message}\n`);
+        }
+      },
     },
   });
   setPanicRule("ABORT_PROCESS");
@@ -126,10 +132,13 @@ async function firstPayloadWarning(): Promise<string> {
 
   configureLogging({
     levels: { default: "WARNING" },
-    sink: (records) => {
-      for (const record of records) {
-        lines.push(`${record.level} ${record.logger} ${record.message}`);
-      }
+    sink: {
+      kind: "function",
+      sink: (records) => {
+        for (const record of records) {
+          lines.push(`${record.level} ${record.logger} ${record.message}`);
+        }
+      },
     },
   });
 

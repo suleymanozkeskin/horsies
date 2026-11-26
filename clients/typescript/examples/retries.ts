@@ -1,4 +1,4 @@
-// Automatic retries: a `retry` policy with `autoRetryFor`. A retry starts when the task ends with one of the listed
+// Automatic retries: a `retryPolicy` with `autoRetryFor`. A retry starts when the task ends with one of the listed
 // codes: a custom code that the task declares, or a built-in code such as `TASK_TIMEOUT`.
 //
 //   node examples/retries.ts worker --profile default
@@ -32,9 +32,14 @@ const callPartner = defineTask({
   name: "call_partner",
   input: { request: h.string() },
   output: h.string(),
-  errors: ["RATE_LIMITED", "REJECTED"],
+  errorCodes: ["RATE_LIMITED", "REJECTED"],
   timeoutMs: 5_000,
-  retry: { kind: "fixed", intervalsSeconds: [1, 2], jitter: false, autoRetryFor: ["RATE_LIMITED", "TASK_TIMEOUT"] },
+  retryPolicy: {
+    kind: "fixed",
+    intervalsSeconds: [1, 2],
+    jitter: false,
+    autoRetryFor: ["RATE_LIMITED", "TASK_TIMEOUT"],
+  },
 });
 
 const created = Horsies.create({

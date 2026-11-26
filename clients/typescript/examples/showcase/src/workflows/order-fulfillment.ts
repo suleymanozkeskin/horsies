@@ -54,24 +54,24 @@ export const orderFulfillment = defineWorkflow(
   },
   (w, { order }) => {
     const orderId = order.orderId;
-    const validate = w.task(validateOrder, { orderId }, { id: "validate_order" });
+    const validate = w.task(validateOrder, { orderId }, { nodeId: "validate_order" });
 
     const reservations = order.lines.map((line) =>
       w.task(
         reserveStock,
         { orderId, lineNo: line.lineNo, sku: line.sku, quantity: line.quantity },
-        { id: reservationNodeId(line.lineNo), waitsFor: [validate] },
+        { nodeId: reservationNodeId(line.lineNo), waitsFor: [validate] },
       ),
     );
 
     const authorize = w.task(
       authorizePayment,
       { orderId, amountCents: order.totalCents },
-      { id: "authorize_payment", waitsFor: reservations },
+      { nodeId: "authorize_payment", waitsFor: reservations },
     );
 
-    const pick = w.task(pickPack, { orderId }, { id: "pick_pack", waitsFor: [authorize] });
-    const invoice = w.task(generateInvoice, { orderId }, { id: "generate_invoice", waitsFor: [authorize] });
+    const pick = w.task(pickPack, { orderId }, { nodeId: "pick_pack", waitsFor: [authorize] });
+    const invoice = w.task(generateInvoice, { orderId }, { nodeId: "generate_invoice", waitsFor: [authorize] });
 
     const shipment = w.subWorkflow(
       shipping,
@@ -80,16 +80,16 @@ export const orderFulfillment = defineWorkflow(
         courier: choice(COURIERS, [orderId, "courier"]),
         express: draw(EXPRESS_RATE, [orderId, "express"]),
       },
-      { id: "shipping", waitsFor: [pick, invoice] },
+      { nodeId: "shipping", waitsFor: [pick, invoice] },
     );
 
     const capture = w.task(
       capturePayment,
       { orderId, authorization: authorize },
-      { id: "capture_payment", waitsFor: [shipment] },
+      { nodeId: "capture_payment", waitsFor: [shipment] },
     );
 
-    w.task(sendOrderEmail, { orderId, capture }, { id: "send_order_email", allowFailedDeps: true });
+    w.task(sendOrderEmail, { orderId, capture }, { nodeId: "send_order_email", allowFailedDependencies: true });
 
     return { output: capture };
   },

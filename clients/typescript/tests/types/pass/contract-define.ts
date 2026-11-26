@@ -81,7 +81,7 @@ const validateOrder = defineTask({
   queue: "standard",
   input: parameters,
   output: h.object({ orderId: h.uuid(), total: h.decimal() }),
-  errors: ["EMPTY_ORDER", "INVALID_EMAIL"],
+  errorCodes: ["EMPTY_ORDER", "INVALID_EMAIL"],
 });
 
 // A body gets the result constructors of its contract in its second argument.
@@ -99,7 +99,7 @@ app.implement(validateOrder, (_input, { ok, err }) => {
   return okValue;
 });
 
-// Without `errors`, any code that is not built in.
+// Without `errorCodes`, any code that is not built in.
 const ping = defineTask({ name: "ping", input: {}, output: h.string() });
 
 app.implement(ping, (_input, { err }) => {
@@ -125,8 +125,8 @@ defineTask({
   name: "charge",
   input: {},
   output: h.null(),
-  errors: ["PROVIDER_DOWN"],
-  retry: { kind: "exponential", baseSeconds: 30, maxRetries: 5, autoRetryFor: ["PROVIDER_DOWN", "TASK_TIMEOUT"] },
+  errorCodes: ["PROVIDER_DOWN"],
+  retryPolicy: { kind: "exponential", baseSeconds: 30, maxRetries: 5, autoRetryFor: ["PROVIDER_DOWN", "TASK_TIMEOUT"] },
 });
 
 // A zod output.

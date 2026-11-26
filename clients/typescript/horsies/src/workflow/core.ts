@@ -104,7 +104,7 @@ export type MainThreadFacts = {
   readonly options: ReadonlyMap<string, NativeTaskOptions>;
   /** The queues that the app admits: the class of each is read once. */
   readonly queueNames: readonly string[];
-  readonly resendOnTransientErr: boolean;
+  readonly resendOnTransientError: boolean;
 };
 
 /** The conversion facts of a main thread, from the core. Reads the queue classes and priorities once. */
@@ -164,7 +164,7 @@ export function addonWorkflowCore(facts: MainThreadFacts, conversion: Conversion
           request.workflowId,
           request.sentAtMicros,
           request.trace,
-          facts.resendOnTransientErr,
+          facts.resendOnTransientError,
         );
 
         return { kind: "outcome", specData: request.specData, outcome };

@@ -5,7 +5,7 @@ import { describe, test } from "node:test";
 
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { decodeValue } from "../../../horsies/src/codec/reader.ts";
-import type { DecodeRefused, EncodeRefused } from "../../../horsies/src/codec/refusal.ts";
+import type { EncodeRefused, ValueRefused } from "../../../horsies/src/codec/refusal.ts";
 import { encodeValue } from "../../../horsies/src/codec/writer.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";
 import type { AnyWire } from "../../../horsies/src/wire/infer.ts";
@@ -14,7 +14,7 @@ import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
 function written<V>(wire: AnyWire, value: V): string {
   const result = encodeValue(kindOf(wire), value);
 
-  assert(result.ok, result.ok ? "" : `refused ${result.error.kind} at ${result.error.path}`);
+  assert(result.ok, result.ok ? "" : `refused ${JSON.stringify(result.error)}`);
 
   return result.value;
 }
@@ -30,15 +30,16 @@ function writeRefused<V>(wire: AnyWire, value: V): EncodeRefused {
 function read(wire: AnyWire, text: string): unknown {
   const result = decodeValue(kindOf(wire), jsonTextCheckedByCore(text), "worker");
 
-  assert(result.ok, result.ok ? "" : `refused ${result.error.kind} at ${result.error.path}`);
+  assert(result.ok, result.ok ? "" : `refused ${JSON.stringify(result.error)}`);
 
   return result.value;
 }
 
-function readRefused(wire: AnyWire, text: string): DecodeRefused {
+function readRefused(wire: AnyWire, text: string): ValueRefused {
   const result = decodeValue(kindOf(wire), jsonTextCheckedByCore(text), "worker");
 
   assert(!result.ok, "decoded a refused text");
+  assert(result.error.kind === "decodeRefused", `a value refusal: ${JSON.stringify(result.error)}`);
 
   return result.error;
 }
@@ -61,19 +62,19 @@ describe("literals and enums", () => {
   });
 
   test("NotAMember: a value outside the members, at encode and at decode", () => {
-    assert.equal(writeRefused(h.enum(["red", "green"]), "blue").kind, "NotAMember");
-    assert.equal(writeRefused(h.literal(1, 3), 2).kind, "NotAMember");
-    assert.equal(readRefused(h.enum(["red", "green"]), '"blue"').kind, "NotAMember");
-    assert.equal(readRefused(h.literal(1, 3), "12345678901234567890").kind, "NotAMember");
+    assert.equal(writeRefused(h.enum(["red", "green"]), "blue").refusal, "NotAMember");
+    assert.equal(writeRefused(h.literal(1, 3), 2).refusal, "NotAMember");
+    assert.equal(readRefused(h.enum(["red", "green"]), '"blue"').refusal, "NotAMember");
+    assert.equal(readRefused(h.literal(1, 3), "12345678901234567890").refusal, "NotAMember");
   });
 
   test("WrongType: a value that no literal can be", () => {
-    assert.equal(writeRefused(h.literal(1), [1]).kind, "WrongType");
-    assert.equal(readRefused(h.literal(1), "[1]").kind, "WrongType");
+    assert.equal(writeRefused(h.literal(1), [1]).refusal, "WrongType");
+    assert.equal(readRefused(h.literal(1), "[1]").refusal, "WrongType");
   });
 
   test("FloatForInteger: a float text for a number member", () => {
-    assert.equal(readRefused(h.literal(1, 3), "1.0").kind, "FloatForInteger");
+    assert.equal(readRefused(h.literal(1, 3), "1.0").refusal, "FloatForInteger");
   });
 });
 
@@ -89,14 +90,14 @@ describe("primitive unions", () => {
   });
 
   test("NotAMember: a value of a type that no member has", () => {
-    assert.equal(writeRefused(amount, true).kind, "NotAMember");
-    assert.equal(readRefused(amount, "true").kind, "NotAMember");
+    assert.equal(writeRefused(amount, true).refusal, "NotAMember");
+    assert.equal(readRefused(amount, "true").refusal, "NotAMember");
   });
 
   test("a member of the value's type that refuses it gives its own refusal", () => {
-    assert.equal(writeRefused(amount, "\ud800").kind, "LoneSurrogate");
-    assert.equal(writeRefused(amount, 1.5).kind, "NotSafeInteger");
-    assert.equal(readRefused(amount, "7.0").kind, "FloatForInteger");
+    assert.equal(writeRefused(amount, "\ud800").refusal, "LoneSurrogate");
+    assert.equal(writeRefused(amount, 1.5).refusal, "NotSafeInteger");
+    assert.equal(readRefused(amount, "7.0").refusal, "FloatForInteger");
   });
 });
 
@@ -110,16 +111,16 @@ describe("tagged unions", () => {
   test("NotAMember: a tag that names no member, and a missing tag", () => {
     const unknown = writeRefused(payment, { method: "cash" });
 
-    assert.deepEqual([unknown.kind, unknown.path], ["NotAMember", "$.method"]);
-    assert.equal(writeRefused(payment, { last4: "4242" }).kind, "NotAMember");
-    assert.equal(readRefused(payment, '{"method":"cash"}').kind, "NotAMember");
-    assert.equal(readRefused(payment, '{"method":1}').kind, "NotAMember");
+    assert.deepEqual([unknown.refusal, unknown.path], ["NotAMember", "$.method"]);
+    assert.equal(writeRefused(payment, { last4: "4242" }).refusal, "NotAMember");
+    assert.equal(readRefused(payment, '{"method":"cash"}').refusal, "NotAMember");
+    assert.equal(readRefused(payment, '{"method":1}').refusal, "NotAMember");
   });
 
   test("the member's own rules: an undeclared key, and a value that is not an object", () => {
-    assert.equal(writeRefused(payment, { method: "card", last4: "1", extra: 1 }).kind, "UnknownMember");
-    assert.equal(readRefused(payment, '{"method":"card","last4":"1","extra":1}').kind, "UnknownMember");
-    assert.equal(writeRefused(payment, "card").kind, "WrongType");
-    assert.equal(readRefused(payment, '"card"').kind, "WrongType");
+    assert.equal(writeRefused(payment, { method: "card", last4: "1", extra: 1 }).refusal, "UnknownMember");
+    assert.equal(readRefused(payment, '{"method":"card","last4":"1","extra":1}').refusal, "UnknownMember");
+    assert.equal(writeRefused(payment, "card").refusal, "WrongType");
+    assert.equal(readRefused(payment, '"card"').refusal, "WrongType");
   });
 });

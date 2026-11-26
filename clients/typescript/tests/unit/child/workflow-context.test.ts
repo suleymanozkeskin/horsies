@@ -1,6 +1,6 @@
 // The workflow context in a child: the `workflow_ctx` member that the core writes into the input of a task with
-// `workflowContext: true` (a node with `ctxFrom`) is the runtime's `context`; an input with no member (a direct send, a
-// node with no `ctxFrom`) gives `noContext`; a member that does not read is `WORKER_SERIALIZATION_ERROR`; the input of
+// `workflowContext: true` (a node with `workflowContextFrom`) is the runtime's `context`; an input with no member (a direct send, a
+// node with no `workflowContextFrom`) gives `noContext`; a member that does not read is `WORKER_SERIALIZATION_ERROR`; the input of
 // a task that takes no context decodes as it is; the plan gives the context use of each task to the child host.
 
 import assert from "node:assert/strict";
@@ -30,7 +30,7 @@ const audit = defineTask({ name: "audit", input: { n: h.int() }, output: h.null(
 /** A task that takes no context. */
 const plain = defineTask({ name: "plain", input: { n: h.int() }, output: h.null() });
 
-/** The `workflow_ctx` member that the core writes for a node whose `ctxFrom` names the node `produce`. */
+/** The `workflow_ctx` member that the core writes for a node whose `workflowContextFrom` names the node `produce`. */
 const CONTEXT_MEMBER =
   `{"workflow_id":"${WORKFLOW_ID}","task_index":2,"task_name":"audit",` +
   `"results_by_id":{"produce":{"__h_task_result__":true,"ok":10,"err":null}},"summaries_by_id":{}}`;
@@ -81,7 +81,7 @@ function auditChild(seen: Seen[]): ReturnType<typeof served> {
 }
 
 describe("the workflow context in a child", () => {
-  test("a node with ctxFrom: the workflow_ctx member is the runtime's context, and the parameters decode without it", async () => {
+  test("a node with workflowContextFrom: the workflow_ctx member is the runtime's context, and the parameters decode without it", async () => {
     const seen: Seen[] = [];
     const child = auditChild(seen);
 
@@ -99,7 +99,7 @@ describe("the workflow context in a child", () => {
     assert.deepEqual(child.native.values, [[3n, "null"]]);
   });
 
-  test("a direct send and a node with no ctxFrom: an input with no workflow_ctx member gives noContext", async () => {
+  test("a direct send and a node with no workflowContextFrom: an input with no workflow_ctx member gives noContext", async () => {
     const seen: Seen[] = [];
     const child = auditChild(seen);
 

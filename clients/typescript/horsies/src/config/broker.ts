@@ -48,7 +48,7 @@ export type BrokerConnection =
   | { readonly kind: "pgbouncerTransaction"; readonly sessionDatabaseUrl: Secret };
 
 /** When the pool replaces a connection by its age: never, or after a number of seconds (0: at every checkout). */
-export type PoolRecycle = { readonly kind: "never" } | { readonly kind: "afterSeconds"; readonly seconds: number };
+export type PoolRecycle = { readonly kind: "never" } | { readonly kind: "after"; readonly seconds: number };
 
 /** TCP keepalives of every core connection. */
 export type TcpKeepalives =
@@ -211,7 +211,7 @@ function poolRecycleJson(recycle: PoolRecycle, path: string): Checked<ConfigJson
   switch (recycle.kind) {
     case "never":
       return accepted({ kind: "NEVER" });
-    case "afterSeconds":
+    case "after":
       return checkedObject([
         accepted([["kind", "AFTER_SECONDS"]]),
         entry("seconds", checkedInteger(recycle.seconds, POOL_U32, memberPath(path, "seconds"))),

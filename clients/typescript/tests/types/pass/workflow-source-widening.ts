@@ -28,14 +28,14 @@ const takesFloat = defineTask({ name: "takes_float", input: { value: h.taskOutco
 export const widenedSources = defineWorkflow(
   { name: "widened_sources", definitionKey: "tests.widened_sources.v1", output: h.int(), params: {} },
   (w) => {
-    const maybe = w.task(takesMaybeText, { value: w.task(text, {}, { id: "text" }) }, { id: "maybe" });
-    const base = w.task(takesText, { value: w.task(letter, {}, { id: "letter" }) }, { id: "base" });
+    const maybe = w.task(takesMaybeText, { value: w.task(text, {}, { nodeId: "text" }) }, { nodeId: "maybe" });
+    const base = w.task(takesText, { value: w.task(letter, {}, { nodeId: "letter" }) }, { nodeId: "base" });
 
     return {
       output: w.task(
         takesFloat,
-        { value: w.task(count, {}, { id: "count" }) },
-        { id: "float", waitsFor: [maybe, base] },
+        { value: w.task(count, {}, { nodeId: "count" }) },
+        { nodeId: "float", waitsFor: [maybe, base] },
       ),
     };
   },
@@ -44,5 +44,5 @@ export const widenedSources = defineWorkflow(
 /** A string output node for a declared nullable string output. */
 export const widenedOutput = defineWorkflow(
   { name: "widened_output", definitionKey: "tests.widened_output.v1", output: h.string().nullable(), params: {} },
-  (w) => ({ output: w.task(text, {}, { id: "text" }) }),
+  (w) => ({ output: w.task(text, {}, { nodeId: "text" }) }),
 );

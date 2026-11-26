@@ -19,9 +19,9 @@ export const shipping = defineWorkflow(
     checkCases: [SHIPPING_CHECK_PARAMS],
   },
   (w, { orderId, courier, express }) => {
-    const booking = w.task(bookCourier, { orderId, courier, express }, { id: "book_courier" });
-    const label = w.task(printLabel, { orderId, booking }, { id: "print_label" });
-    const tracking = w.task(trackingSeed, { orderId, label }, { id: "tracking_seed" });
+    const booking = w.task(bookCourier, { orderId, courier, express }, { nodeId: "book_courier" });
+    const label = w.task(printLabel, { orderId, booking }, { nodeId: "print_label" });
+    const tracking = w.task(trackingSeed, { orderId, label }, { nodeId: "tracking_seed" });
 
     return { output: tracking };
   },

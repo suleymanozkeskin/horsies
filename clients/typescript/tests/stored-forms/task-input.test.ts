@@ -130,7 +130,7 @@ describe("task_input.json refused values", () => {
         const written = encodeParameters(kindOfCase(parameterCase), parameterCase.value);
 
         assert(!written.ok, "encoded a refused value");
-        assert.equal(written.error.kind, expected);
+        assert.equal(written.error.refusal, expected);
       });
     }
   }
@@ -153,8 +153,8 @@ describe("task_input.json typed refused texts", () => {
 
         const decoded = decodeParameters(kindOfCase(parameterCase), jsonTextCheckedByCore(row.text), "worker");
 
-        assert(!decoded.ok, "decoded a refused text");
-        assert.equal(decoded.error.kind, expected);
+        assert(!decoded.ok && decoded.error.kind === "decodeRefused", "decoded a refused text");
+        assert.equal(decoded.error.refusal, expected);
       });
     }
   }

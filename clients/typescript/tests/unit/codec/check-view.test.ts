@@ -89,7 +89,7 @@ describe("checkView", () => {
 
     const viewed = checkView(kind, {}, "$", 0);
 
-    assert.deepEqual(viewed.ok ? "" : [viewed.error.kind, viewed.error.path], ["CheckFailed", "$.n"]);
+    assert.deepEqual(viewed.ok ? "" : [viewed.error.refusal, viewed.error.path], ["CheckFailed", "$.n"]);
   });
 
   test("a default that the writer refused is a defect: checkKind refuses that kind", () => {

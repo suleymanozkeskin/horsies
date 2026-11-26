@@ -69,38 +69,38 @@ export const ContextReport = h.union("kind", [
 ]);
 
 /** Python `e2e_wf_step`: `completed_<step>`. */
-export const step = defineTask({ name: "e2e_wf_step", input: { step: h.string() }, output: h.string(), errors: WF_CODES });
+export const step = defineTask({ name: "e2e_wf_step", input: { step: h.string() }, output: h.string(), errorCodes: WF_CODES });
 
 /** Python `e2e_wf_slow_step`: `completed_<step>` after `delayMs`. */
 export const slowStep = defineTask({
   name: "e2e_wf_slow_step",
   input: { step: h.string(), delayMs: h.int() },
   output: h.string(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
-export const finalResult = defineTask({ name: "e2e_wf_final_result", input: {}, output: FinalResult, errors: WF_CODES });
+export const finalResult = defineTask({ name: "e2e_wf_final_result", input: {}, output: FinalResult, errorCodes: WF_CODES });
 
 /** Python `e2e_wf_fail`: always `DELIBERATE_FAILURE`. */
-export const fail = defineTask({ name: "e2e_wf_fail", input: {}, output: h.int(), errors: WF_CODES });
+export const fail = defineTask({ name: "e2e_wf_fail", input: {}, output: h.int(), errorCodes: WF_CODES });
 
 /** Python `e2e_wf_fail_with`: always the code `errorCode`. */
 export const failWith = defineTask({
   name: "e2e_wf_fail_with",
   input: { errorCode: h.enum(WF_CODES) },
   output: h.int(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
 /** Python `e2e_wf_mark`: returns `value`. */
-export const mark = defineTask({ name: "e2e_wf_mark", input: { value: h.string() }, output: h.string(), errors: WF_CODES });
+export const mark = defineTask({ name: "e2e_wf_mark", input: { value: h.string() }, output: h.string(), errorCodes: WF_CODES });
 
 /** Python `e2e_wf_slow_mark`: returns `value` after `delayMs`. */
 export const slowMark = defineTask({
   name: "e2e_wf_slow_mark",
   input: { value: h.string(), delayMs: h.int() },
   output: h.string(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
 /**
@@ -112,19 +112,19 @@ export const retryThenOk = defineTask({
   name: "e2e_wf_retry_then_ok",
   input: { token: h.string(), succeedOnAttempt: h.int() },
   output: h.string(),
-  errors: WF_CODES,
-  retry: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, autoRetryFor: ["RETRY_NEEDED"] },
+  errorCodes: WF_CODES,
+  retryPolicy: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, autoRetryFor: ["RETRY_NEEDED"] },
 });
 
 /** Python `e2e_wf_produce_int`: returns `value`. */
-export const produceInt = defineTask({ name: "e2e_wf_produce_int", input: { value: h.int() }, output: h.int(), errors: WF_CODES });
+export const produceInt = defineTask({ name: "e2e_wf_produce_int", input: { value: h.int() }, output: h.int(), errorCodes: WF_CODES });
 
 /** Python `e2e_wf_double`: twice its upstream value, or the upstream error. */
 export const double = defineTask({
   name: "e2e_wf_double",
   input: { inputResult: h.taskOutcome(produceInt) },
   output: h.int(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
 /** Python `e2e_wf_sum_two`: the sum of two upstream values, or the first upstream error. */
@@ -132,7 +132,7 @@ export const sumTwo = defineTask({
   name: "e2e_wf_sum_two",
   input: { first: h.taskOutcome(produceInt), second: h.taskOutcome(produceInt) },
   output: h.int(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
 /** Python `e2e_wf_check_upstream_skipped`: which outcome reached it, as a text. */
@@ -140,17 +140,17 @@ export const checkUpstream = defineTask({
   name: "e2e_wf_check_upstream_skipped",
   input: { inputResult: h.taskOutcome(fail) },
   output: h.string(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
-export const produceDict = defineTask({ name: "e2e_wf_produce_dict", input: { value: h.string() }, output: DictResult, errors: WF_CODES });
+export const produceDict = defineTask({ name: "e2e_wf_produce_dict", input: { value: h.string() }, output: DictResult, errorCodes: WF_CODES });
 
 /** Python `e2e_wf_receive_dict`: the upstream object as it arrived. */
 export const receiveDict = defineTask({
   name: "e2e_wf_receive_dict",
   input: { inputResult: h.taskOutcome(produceDict) },
   output: DictResult,
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
 });
 
 /** Python `e2e_wf_ctx_reader`: the integer result of the node `source`, read from the workflow context. */
@@ -158,7 +158,7 @@ export const ctxReader = defineTask({
   name: "e2e_wf_ctx_reader",
   input: { source: h.string() },
   output: h.int(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
   workflowContext: true,
 });
 
@@ -167,7 +167,7 @@ export const ctxReaderStr = defineTask({
   name: "e2e_wf_ctx_reader_str",
   input: { source: h.string() },
   output: h.string(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
   workflowContext: true,
 });
 
@@ -176,7 +176,7 @@ export const ctxSum = defineTask({
   name: "e2e_wf_ctx_sum",
   input: { first: h.string(), second: h.string() },
   output: h.int(),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
   workflowContext: true,
 });
 
@@ -185,7 +185,7 @@ export const mixedReader = defineTask({
   name: "e2e_wf_mixed_reader",
   input: { fromArgs: h.taskOutcome(produceInt), ctxSource: h.string() },
   output: h.object({ fromArgs: h.int(), fromCtx: h.int() }),
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
   workflowContext: true,
 });
 
@@ -194,7 +194,7 @@ export const contextReport = defineTask({
   name: "e2e_wf_context_report",
   input: { source: h.string() },
   output: ContextReport,
-  errors: WF_CODES,
+  errorCodes: WF_CODES,
   workflowContext: true,
 });
 

@@ -15,8 +15,8 @@ export const salesRollup = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { window: h.string() },
   output: SalesRollup,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Find the carts that no order completed in the window. */
@@ -27,8 +27,8 @@ export const abandonedCartSweep = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { olderThanMinutes: h.int() },
   output: AbandonedCartSweep,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** The sales figures of one region. */
@@ -39,8 +39,8 @@ export const regionalRollup = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { region: h.string() },
   output: RegionalRollup,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Count the rows that are older than the retention window. */
@@ -51,8 +51,8 @@ export const retentionAudit = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { olderThanDays: h.int() },
   output: RetentionAudit,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Import one chunk of a supplier catalog. */
@@ -63,8 +63,8 @@ export const catalogImportChunk = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { importId: h.string(), chunkIndex: h.int() },
   output: CatalogChunk,
-  errors: [],
-  retry: CRASH_RETRY,
+  errorCodes: [],
+  retryPolicy: CRASH_RETRY,
 });
 
 /**
@@ -77,8 +77,8 @@ export const flakyExport = defineTask({
   queue: QUEUE_ANALYTICS,
   input: { exportId: h.string() },
   output: ExportManifest,
-  errors: [],
-  retry: EXPORT_RETRY,
+  errorCodes: [],
+  retryPolicy: EXPORT_RETRY,
 });
 
 export const ANALYTICS_TASKS = [

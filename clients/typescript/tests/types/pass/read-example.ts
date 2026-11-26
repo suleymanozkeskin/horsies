@@ -12,7 +12,7 @@ const validateOrder = defineTask({
   name: "validate_order",
   input: { orderId: h.uuid() },
   output: h.object({ orderId: h.uuid(), total: h.decimal() }),
-  errors: ["EMPTY_ORDER", "INVALID_EMAIL"],
+  errorCodes: ["EMPTY_ORDER", "INVALID_EMAIL"],
 });
 
 function describeReadError(error: ReadError): string {
