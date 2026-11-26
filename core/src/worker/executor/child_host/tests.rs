@@ -141,9 +141,12 @@ fn a_task_error_becomes_the_error_envelope() {
 
 #[test]
 fn a_refusal_fails_the_task_with_its_reason() {
-    let envelope = envelope_of(refusal_end(&StoredOptionsRefusal::TimeoutValueInvalid(
-        RefusalReason::cut("stored timeout_ms is below 1000 ms"),
-    )));
+    let envelope = envelope_of(refusal_end(
+        "app.tasks.work",
+        &StoredOptionsRefusal::TimeoutValueInvalid(RefusalReason::cut(
+            "stored timeout_ms is below 1000 ms",
+        )),
+    ));
     assert!(
         envelope.contains("WORKER_SERIALIZATION_ERROR"),
         "{envelope}"
