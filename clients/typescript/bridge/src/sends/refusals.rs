@@ -7,6 +7,29 @@
 use horsies_core::{AppConfigError, ErrorCode};
 use napi_derive::napi;
 
+/// How to fix a refused value: no line, or one line, as the core's error
+/// holds it (`HorsiesError::help_text`).
+#[napi(
+    discriminant = "kind",
+    discriminant_case = "camelCase",
+    object_from_js = false
+)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefusalHelp {
+    NoHelp,
+    Help { line: String },
+}
+
+impl RefusalHelp {
+    /// The help of the core's optional help line. Pure.
+    pub fn of(help_text: Option<String>) -> Self {
+        match help_text {
+            None => Self::NoHelp,
+            Some(line) => Self::Help { line },
+        }
+    }
+}
+
 /// One refusal of a core check.
 #[napi(object, object_from_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -15,8 +38,7 @@ pub struct CoreRefusal {
     pub code: String,
     pub message: String,
     pub notes: Vec<String>,
-    /// Zero or one line: how to fix the value.
-    pub help: Vec<String>,
+    pub help: RefusalHelp,
 }
 
 impl CoreRefusal {
@@ -36,13 +58,13 @@ impl CoreRefusal {
             code,
             converted.message,
             converted.notes,
-            converted.help_text.into_iter().collect(),
+            RefusalHelp::of(converted.help_text),
         )
     }
 
-    /// A refusal with the catalog code `code`, its notes and its help
-    /// lines. Pure.
-    pub fn coded(code: ErrorCode, message: String, notes: Vec<String>, help: Vec<String>) -> Self {
+    /// A refusal with the catalog code `code`, its notes and its help.
+    /// Pure.
+    pub fn coded(code: ErrorCode, message: String, notes: Vec<String>, help: RefusalHelp) -> Self {
         Self {
             code: code.as_code_str().to_owned(),
             message,
@@ -71,7 +93,9 @@ mod tests {
                 code: "HRS-218".to_owned(),
                 message: "worker_profiles['empty']: the profile starts no children".to_owned(),
                 notes: vec!["a worker of the profile runs no task".to_owned()],
-                help: vec!["give the profile at least one child kind".to_owned()],
+                help: RefusalHelp::Help {
+                    line: "give the profile at least one child kind".to_owned()
+                },
             }
         );
     }
@@ -87,7 +111,7 @@ mod tests {
                 code: "HRS-227".to_owned(),
                 message: "payload.warn_bytes must be >= 1 (use None to disable)".to_owned(),
                 notes: Vec::new(),
-                help: Vec::new(),
+                help: RefusalHelp::NoHelp,
             }
         );
     }
