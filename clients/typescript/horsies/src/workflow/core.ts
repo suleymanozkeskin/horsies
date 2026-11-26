@@ -13,6 +13,7 @@ import { addonSettlement, settlingCallback } from "../native/call/callback.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { NativeSendRules, NativeTaskOptions, ProcessRoleName, WaitBound } from "../native/sends/addon.ts";
 import { processRole, storedOptionsText } from "../native/sends/sends.ts";
+import { sendPriority } from "../send/send.ts";
 import type { TraceArgument } from "../native/values/records.ts";
 import type {
   ChildSpecCall,
@@ -93,10 +94,12 @@ export type MainThreadFacts = {
   readonly resendOnTransientErr: boolean;
 };
 
-/** The conversion facts of a main thread, from the core. Reads the queue classes once. */
+/** The conversion facts of a main thread, from the core. Reads the queue classes and priorities once. */
 export function addonConversionFacts(facts: MainThreadFacts): ConversionFacts {
   const classes = native.queueRetentionClasses(facts.rules, facts.queueNames);
   const byQueue = new Map(facts.queueNames.map((name, index) => [name, classes[index]]));
+  const priorities = native.queuePriorities(facts.rules, facts.queueNames);
+  const priorityByQueue = new Map(facts.queueNames.map((name, index) => [name, priorities[index]]));
 
   return Object.freeze({
     taskOptionsText: (taskName: string, deadline: NodeDeadline): string => {
@@ -118,6 +121,15 @@ export function addonConversionFacts(facts: MainThreadFacts): ConversionFacts {
       }
 
       return found;
+    },
+    queuePriority: (queueName: string): number => {
+      const found = priorityByQueue.get(queueName);
+
+      if (found === undefined) {
+        throw new ClientDefect({ subject: "queuePriority", rule: `the queue ${queueName} is not a queue of the app` });
+      }
+
+      return sendPriority(found);
     },
   });
 }

@@ -43,6 +43,20 @@ describe("checkWorkflowsAtCreate", () => {
     assert.deepEqual(createCodes([noKey]), ["HRS-016"]);
   });
 
+  test("a workflow name with a lone surrogate: HRS-105 of the params contract, which carries the name", () => {
+    const loneSurrogate = defineWorkflow({ name: "a\uD800", definitionKey: "tests.a.v1", params: {} }, (w) => ({
+      output: w.task(ping, {}, { id: "a" }),
+    }));
+
+    const refused = checkedAtCreate([loneSurrogate]).refusals;
+
+    assert.deepEqual(
+      refused.map((one) => one.code),
+      ["HRS-105"],
+    );
+    assert.match(refused[0]?.message ?? "", /\[TaskName\]$/);
+  });
+
   test("a key of another workflow, and a workflow listed twice: HRS-017", () => {
     const sameKey = defineWorkflow({ name: "other", definitionKey: "tests.plain.v1", params: {} }, (w) => ({
       output: w.task(ping, {}, { id: "a" }),

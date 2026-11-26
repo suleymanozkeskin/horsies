@@ -1,8 +1,8 @@
 //! The pure facts of the conversion of a built workflow to spec data: the
-//! retention class key of each task queue, and the stored options text of a
-//! task node with a deadline.
+//! retention class key and the priority of each task queue, and the stored
+//! options text of a task node with a deadline.
 //!
-//! - Both functions are pure: they start no core and open no connection.
+//! - Each function is pure: they start no core and open no connection.
 //!   The fork and stop rules apply, as for every core call.
 //! - The core reads each fact again when it parses the spec data
 //!   (`parse_workflow_spec_data`), so a fact that the package changes is a
@@ -15,7 +15,7 @@ use napi_derive::napi;
 use crate::call::guard::sync_call;
 use crate::call::thrown::Envelope;
 use crate::process_core::runtime::pure_call_refusal;
-use crate::sends::send::SendRules;
+use crate::sends::send::{SendPriority, SendRules};
 use crate::sends::task_options::TaskOptionsRecord;
 use crate::values::boundary::{instant_of_epoch_micros, BoundaryRefusal};
 
@@ -45,6 +45,42 @@ fn queue_classes(retention: &RetentionConfig, queue_names: &[String]) -> Vec<Str
     queue_names
         .iter()
         .map(|queue| retention.resolve_queue_retention(queue).class_key())
+        .collect()
+}
+
+/// The priority of each queue in `queue_names`, in that order: the one queue
+/// of the default queue mode (the package holds its priority), or a custom
+/// queue with its priority in the accepted config. A queue that the custom
+/// mode does not hold is `CLIENT_DEFECT`: the package asks only for the
+/// queues that the app admits. Pure.
+#[napi(ts_return_type = "NativeEnvelope<SendPriority[]>")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
+pub fn queue_priorities(
+    rules: &SendRules,
+    queue_names: Vec<String>,
+) -> Envelope<Vec<SendPriority>> {
+    sync_call("queue_priorities", || {
+        if let Some(refusal) = pure_call_refusal() {
+            return Envelope::Thrown(refusal.thrown());
+        }
+        match priorities_of(rules, &queue_names) {
+            Ok(priorities) => Envelope::Value(priorities),
+            Err(refusal) => Envelope::Thrown(refusal.into()),
+        }
+    })
+}
+
+/// The priority of each queue, in the order of `queue_names`. Pure.
+fn priorities_of(
+    rules: &SendRules,
+    queue_names: &[String],
+) -> Result<Vec<SendPriority>, BoundaryRefusal> {
+    queue_names
+        .iter()
+        .map(|queue| rules.queue_priority(queue))
         .collect()
 }
 
@@ -84,9 +120,10 @@ fn node_options_text(
 
 #[cfg(test)]
 mod tests {
-    use horsies_core::Execution;
+    use horsies_core::{CustomQueueConfig, Execution, PayloadPolicy};
 
     use super::*;
+    use crate::sends::send::QueuePriorities;
     use crate::values::boundary::bigint_of_i64;
 
     /// The text of the vector `name` of the core's task options vectors.
@@ -107,6 +144,40 @@ mod tests {
             .as_str()
             .expect("a vector has a text")
             .to_owned()
+    }
+
+    #[test]
+    fn a_queue_priority_is_the_default_queue_or_its_configured_value_and_an_unknown_queue_is_refused(
+    ) {
+        let default_mode = SendRules::new(
+            RetentionConfig::default(),
+            PayloadPolicy {
+                warn_bytes: None,
+                reject_bytes: None,
+            },
+            QueuePriorities::DefaultMode,
+        );
+        assert_eq!(
+            priorities_of(&default_mode, &["default".to_owned()]),
+            Ok(vec![SendPriority::DefaultQueue])
+        );
+        let custom = SendRules::new(
+            RetentionConfig::default(),
+            PayloadPolicy {
+                warn_bytes: None,
+                reject_bytes: None,
+            },
+            QueuePriorities::Custom(vec![CustomQueueConfig {
+                name: "urgent".to_owned(),
+                priority: 3,
+                max_concurrency: None,
+            }]),
+        );
+        assert_eq!(
+            priorities_of(&custom, &["urgent".to_owned()]),
+            Ok(vec![SendPriority::Configured { priority: 3 }])
+        );
+        assert!(priorities_of(&custom, &["other".to_owned()]).is_err());
     }
 
     #[test]

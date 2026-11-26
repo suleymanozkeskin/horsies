@@ -10,9 +10,16 @@ import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { parseAppConfig } from "../../../horsies/src/config/app-config.ts";
+import type { QueueConfigInput } from "../../../horsies/src/config/queues.ts";
 import { envelopeValue } from "../../../horsies/src/native/call/envelope.ts";
 import { buildCoreHandle, type CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
+import type { NativeSendRules } from "../../../horsies/src/native/sends/addon.ts";
+import { checkAppConfig } from "../../../horsies/src/native/sends/sends.ts";
 import { type ChildSpecSourceFunction, workflowsAddon } from "../../../horsies/src/native/workflows/addon.ts";
+import { DEFAULT_QUEUE_PRIORITY } from "../../../horsies/src/send/bounds.ts";
+import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
+import { addonConversionFacts } from "../../../horsies/src/workflow/core.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
 
 /** The workflow spec data vectors of the core. */
@@ -79,6 +86,56 @@ describe("the spec data parse of the addon", () => {
       assert.equal(prepared.fieldPath, refused.core_field_path, refused.name);
       assert.ok(prepared.cause.length > 0, refused.name);
     }
+  });
+});
+
+/** The send rules of the accepted config of `queues` with a database URL. */
+function sendRulesOf(queues: QueueConfigInput): NativeSendRules {
+  const broker = { databaseUrl: { kind: "value", value: UNUSED_DATABASE_URL } } as const;
+  const config = parseAppConfig({ ...queues, broker }, () => undefined);
+
+  if (!config.ok) {
+    assert.fail(`the config is refused: ${JSON.stringify(config.error)}`);
+  }
+
+  const checked = checkAppConfig(config.value.coreConfigJson);
+
+  if (checked.kind !== "accepted") {
+    assert.fail(`the core refuses the config: ${JSON.stringify(checked.refusals)}`);
+  }
+
+  return checked.rules;
+}
+
+/** The conversion facts of a main thread with the rules `rules` and the queues `queueNames`, no task options. */
+function conversionFactsOf(
+  rules: NativeSendRules,
+  queueNames: readonly string[],
+): ReturnType<typeof addonConversionFacts> {
+  const handle = buildCoreHandle(manifestJson(UNUSED_DATABASE_URL, false), "PRODUCER");
+
+  return addonConversionFacts({ handle, rules, options: new Map(), queueNames, resendOnTransientErr: false });
+}
+
+describe("the conversion facts of a main thread, from the core", () => {
+  test("the default queue has the package's priority; a custom queue has its configured one", () => {
+    const defaultMode = conversionFactsOf(sendRulesOf({}), ["default"]);
+
+    assert.equal(defaultMode.queuePriority("default"), DEFAULT_QUEUE_PRIORITY);
+
+    const queues = [{ name: "urgent", priority: 3 }, { name: "plain" }] as const;
+    const custom = conversionFactsOf(sendRulesOf({ queueMode: "custom", customQueues: queues }), ["urgent", "plain"]);
+
+    assert.equal(custom.queuePriority("urgent"), 3);
+    assert.equal(custom.queuePriority("plain"), 1);
+    assert.throws(() => custom.queuePriority("other"), ClientDefect);
+  });
+
+  test("each queue has the retention class of the core", () => {
+    const facts = conversionFactsOf(sendRulesOf({}), ["default"]);
+
+    assert.equal(facts.queueClass("default"), "standard_30d");
+    assert.throws(() => facts.queueClass("other"), ClientDefect);
   });
 });
 

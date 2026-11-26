@@ -8,7 +8,11 @@
 //!   the check of each stored text.
 //! - `child_spec_source`: the source that calls the package's build function
 //!   on the JavaScript thread.
+//! - `child_producer_probe`: the test exports of a start and a handle read
+//!   in a task child (only with the cargo feature `test-probes`).
 
+#[cfg(feature = "test-probes")]
+pub mod child_producer_probe;
 pub mod child_spec_source;
 pub mod handle_ops;
 pub mod spec_facts;

@@ -32,8 +32,9 @@ use uuid::Uuid;
 
 use crate::call::guard::{sync_call, CallKind};
 use crate::call::thrown::{Envelope, NativeThrown};
-use crate::handle::core_handle::{BrokerConnection, CoreHandle};
+use crate::handle::core_handle::CoreHandle;
 use crate::process_core::runtime::pure_call_refusal;
+use crate::sends::producer_handle::ProducerHandle;
 use crate::values::boundary::instant_of_epoch_micros;
 use crate::values::catalog_values::RawCatalogError;
 use crate::values::trace_carrier::TraceArgument;
@@ -182,11 +183,45 @@ pub fn start_workflow<'env>(
     trace: TraceArgument,
     resend_on_transient_err: bool,
 ) -> napi::Result<Object<'env>> {
+    let start = StartCall {
+        spec,
+        workflow_id,
+        sent_at_micros,
+        trace,
+        resend_on_transient_err,
+    };
+    start_workflow_on(env, ProducerHandle::of_process(handle), handle, start)
+}
+
+/// The values of one `startWorkflow` call.
+pub struct StartCall<'call> {
+    pub spec: &'call NativeClientSpec,
+    pub workflow_id: String,
+    pub sent_at_micros: BigInt,
+    pub trace: TraceArgument,
+    pub resend_on_transient_err: bool,
+}
+
+/// `startWorkflow` through `producer`, with the child spec source of
+/// `handle`.
+pub fn start_workflow_on<'env>(
+    env: &'env Env,
+    producer: ProducerHandle,
+    handle: &CoreHandle,
+    call: StartCall<'_>,
+) -> napi::Result<Object<'env>> {
+    let StartCall {
+        spec,
+        workflow_id,
+        sent_at_micros,
+        trace,
+        resend_on_transient_err,
+    } = call;
     spawn_checked(
         env,
         START_SUBJECT,
         CallKind::Write,
-        handle.connection(),
+        producer,
         || -> Result<StartRequest, NativeThrown> {
             Ok(StartRequest {
                 spec: Arc::clone(&spec.spec),
@@ -215,11 +250,10 @@ fn registered_source(
         })
 }
 
-/// One start: the schema install of the handle, then the core's start.
-async fn start_operation(
-    connection: BrokerConnection,
-    request: StartRequest,
-) -> WorkflowStartOutcome {
+/// One start through the handle of this process (in a task child, the child
+/// host's producer handle), with the child spec source of the given handle:
+/// the schema install of the handle, then the core's start.
+async fn start_operation(producer: ProducerHandle, request: StartRequest) -> WorkflowStartOutcome {
     let StartRequest {
         spec,
         workflow_id,
@@ -229,7 +263,7 @@ async fn start_operation(
         source,
     } = request;
     let workflow_name = spec.name();
-    let broker = match connection.lazy_handle().initialized_broker().await {
+    let broker = match producer.lazy_handle().initialized_broker().await {
         Ok(broker) => broker,
         Err(error) => {
             return failed(&WorkflowStartError::start_failed(
@@ -346,7 +380,7 @@ pub fn resume_workflow<'env>(
         env,
         HandleOperation::Resume.subject(),
         CallKind::Write,
-        handle.connection(),
+        ProducerHandle::of_process(handle),
         || -> Result<ResumeRequest, NativeThrown> {
             Ok(ResumeRequest {
                 workflow_id: workflow_id_of(&workflow_id)?,
@@ -358,9 +392,9 @@ pub fn resume_workflow<'env>(
 }
 
 /// One resume: the schema install of the handle, then the core's resume.
-async fn resume_operation(connection: BrokerConnection, request: ResumeRequest) -> HandleChange {
+async fn resume_operation(producer: ProducerHandle, request: ResumeRequest) -> HandleChange {
     let operation = HandleOperation::Resume;
-    let resumed = match broker_for(&connection, &operation, request.workflow_id).await {
+    let resumed = match broker_for(&producer, &operation, request.workflow_id).await {
         Ok(broker) => {
             broker
                 .resume_client_workflow(request.workflow_id, &*request.source)

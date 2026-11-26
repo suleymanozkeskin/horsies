@@ -1,5 +1,5 @@
 // The facts of a contract that `defineTask` keeps, out of the contract's public members, and the refusals that the
-// definition alone shows (no schema is compiled here, so no zod module is loaded).
+// definition alone shows (no schema is compiled here).
 
 import { isEngineKey } from "../codec/engine-keys.ts";
 import { memberPath } from "../codec/refusal.ts";
@@ -16,10 +16,14 @@ const ENGINE_PARAMETER_NAMES: ReadonlySet<string> = new Set(["workflow_ctx", "wo
 /** A parameter name: a letter or `_`, then letters, digits and `_` (an identifier of every client). */
 const PARAMETER_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** A schema of the definition: an `h.*` wire type, or a zod schema. */
+/**
+ * A schema of the definition: an `h.*` wire type, a zod schema, or a Standard Schema of another vendor (only `h.*`
+ * wire types and zod 4 schemas have a stored form, so the compile refuses it).
+ */
 export type SchemaSource =
   | { readonly kind: "wire"; readonly wire: AnyWire }
-  | { readonly kind: "zod"; readonly schema: StandardSchemaMarker };
+  | { readonly kind: "zod"; readonly schema: StandardSchemaMarker }
+  | { readonly kind: "otherVendor"; readonly vendor: string };
 
 /** One input parameter, in declaration order. */
 export type ParameterSource = { readonly name: string; readonly schema: SchemaSource };
@@ -54,10 +58,13 @@ export type RetrySetting =
 /** The longest wait between two retries of an exponential policy: no cap, or a number of seconds. */
 export type MaxDelaySetting = { readonly kind: "noCap" } | { readonly kind: "seconds"; readonly seconds: number };
 
-/** Why the definition of a contract cannot be a task. `path` names the place: `input.<name>` or `output`. */
+/** Why a task name cannot be stored: it is empty, or it holds a lone surrogate (text that is not well formed). */
+export type TaskNameFault = "empty" | "loneSurrogate";
+
+/** Why the definition of a contract cannot be a task. `path` names the place: `name`, `input.<name>` or `output`. */
 export type DefinitionRefused =
-  /** A Standard Schema that is not a zod schema: only `h.*` wire types and zod 4 schemas have a stored form. */
-  | { readonly rule: "SchemaVendor"; readonly path: string; readonly vendor: string }
+  /** A task name that cannot be stored. */
+  | { readonly rule: "TaskName"; readonly path: "name"; readonly fault: TaskNameFault }
   /** A parameter name that is not an identifier, that the engine fills, or that only the engine writes. */
   | { readonly rule: "ParameterName"; readonly path: string; readonly detail: string };
 
@@ -139,8 +146,8 @@ function recordOf(fields: DefinitionFields): ContractRecord {
   const output = schemaSource(fields.output);
 
   const refusals = [
-    ...parameters.flatMap((parameter) => parameterRefusals(parameter, fields.input)),
-    ...schemaRefusals(fields.output, "output"),
+    ...taskNameRefusals(fields.name),
+    ...parameters.flatMap((parameter) => parameterNameRefusals(parameter.name, memberPath("input", parameter.name))),
   ];
 
   const record: ContractRecord = {
@@ -170,10 +177,17 @@ function parameterSource(input: DefinitionFields["input"], name: string): Parame
   return Object.freeze({ name, schema: schemaSource(schema) });
 }
 
-/** The source of a schema: a zod schema by its Standard Schema marker, else an `h.*` wire type. */
+/**
+ * The source of a schema: by its Standard Schema marker a zod schema (the vendor `zod`) or a schema of another vendor,
+ * else an `h.*` wire type. The zod adapter checks the release of a zod schema (a zod 3 schema has the same marker)
+ * when the contract compiles.
+ */
 function schemaSource(schema: ParameterSchema): SchemaSource {
   if (isStandardSchema(schema)) {
-    return Object.freeze({ kind: "zod", schema });
+    const vendor = schema["~standard"].vendor;
+    const source: SchemaSource = vendor === ZOD_VENDOR ? { kind: "zod", schema } : { kind: "otherVendor", vendor };
+
+    return Object.freeze(source);
   }
 
   // SAFETY: a schema without the Standard Schema marker is an `h.*` wire type: the static type allows only the two, and
@@ -185,12 +199,16 @@ function isStandardSchema(schema: ParameterSchema): schema is ZodSchemaLike & St
   return "~standard" in schema;
 }
 
-function parameterRefusals(parameter: ParameterSource, input: DefinitionFields["input"]): readonly DefinitionRefused[] {
-  const path = memberPath("input", parameter.name);
-  const schema = input[parameter.name];
-  const schemaRefused = schema === undefined ? [] : schemaRefusals(schema, path);
+/**
+ * The refusal of a task name, or none. The core stores the name with each send and finds the implementation by it:
+ * an empty name has no fingerprint, and a lone surrogate does not cross the addon boundary unchanged. Pure.
+ */
+function taskNameRefusals(name: string): readonly DefinitionRefused[] {
+  if (name === "") {
+    return [{ rule: "TaskName", path: "name", fault: "empty" }];
+  }
 
-  return [...parameterNameRefusals(parameter.name, path), ...schemaRefused];
+  return name.isWellFormed() ? [] : [{ rule: "TaskName", path: "name", fault: "loneSurrogate" }];
 }
 
 /** The refusal of a parameter name, or none. Pure. */
@@ -208,20 +226,6 @@ function parameterNameRefusals(name: string, path: string): readonly DefinitionR
   }
 
   return [];
-}
-
-/**
- * The refusal of one schema: a Standard Schema of another vendor. The zod adapter checks the release of a zod schema
- * (a zod 3 schema has the same marker) when the contract compiles. Pure.
- */
-function schemaRefusals(schema: ParameterSchema, path: string): readonly DefinitionRefused[] {
-  if (!isStandardSchema(schema)) {
-    return [];
-  }
-
-  const vendor = schema["~standard"].vendor;
-
-  return vendor === ZOD_VENDOR ? [] : [{ rule: "SchemaVendor", path, vendor }];
 }
 
 function millisecondsSetting(value: number | undefined): MillisecondsSetting {

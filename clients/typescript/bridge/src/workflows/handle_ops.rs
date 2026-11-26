@@ -3,6 +3,12 @@
 //! the cancel and the pause. The resume is in `start_resume`: it needs the
 //! child spec source.
 //!
+//! - Each operation goes through the handle of this process
+//!   (`ProducerHandle::of_process`): in a task child the producer handle
+//!   that the child host published, with the child's `task_send_pool`
+//!   connections; else the given core handle. The Rust client's workflow
+//!   handle chooses the same way. The child spec source of a resume is the
+//!   given handle's.
 //! - Each operation installs the schema once per handle first, as the Rust
 //!   client's handle does; a failed connect or install is
 //!   `DB_OPERATION_FAILED` (`HandleOperationError::connect_failed`).
@@ -40,8 +46,9 @@ use uuid::Uuid;
 use crate::call::guard::CallKind;
 use crate::call::operation::{guarded_start, spawn_operation};
 use crate::call::thrown::NativeThrown;
-use crate::handle::core_handle::{BrokerConnection, CoreHandle};
+use crate::handle::core_handle::CoreHandle;
 use crate::sends::early_end::thrown_now;
+use crate::sends::producer_handle::ProducerHandle;
 use crate::sends::task_reads::{RecordedInstant, RecordedText, WaitBound};
 use crate::values::boundary::{text_of_uuid, u32_of_number, uuid_of_text, BoundaryRefusal};
 use crate::values::catalog_values::RawCatalogError;
@@ -308,7 +315,7 @@ pub enum NodeResultRead {
     },
 }
 
-/// Run the operation that `run` makes of `connection` and the request that
+/// Run the operation that `run` makes of `producer` and the request that
 /// `check` gives, and give a Promise of its envelope. A request that `check`
 /// refuses resolves with its thrown code at once, and nothing starts.
 ///
@@ -318,9 +325,9 @@ pub fn spawn_checked<'env, Request, T, Operation>(
     env: &'env Env,
     subject: &'static str,
     kind: CallKind,
-    connection: BrokerConnection,
+    producer: ProducerHandle,
     check: impl FnOnce() -> Result<Request, NativeThrown>,
-    run: impl FnOnce(BrokerConnection, Request) -> Operation,
+    run: impl FnOnce(ProducerHandle, Request) -> Operation,
 ) -> napi::Result<Object<'env>>
 where
     T: ToNapiValue + Send + 'static,
@@ -328,7 +335,7 @@ where
 {
     match guarded_start(subject, check) {
         Err(thrown) => thrown_now::<T>(env, thrown),
-        Ok(request) => spawn_operation(env, subject, kind, move |_core| run(connection, request)),
+        Ok(request) => spawn_operation(env, subject, kind, move |_core| run(producer, request)),
     }
 }
 
@@ -338,15 +345,15 @@ pub fn workflow_id_of(text: &str) -> Result<Uuid, BoundaryRefusal> {
     uuid_of_text("workflowId", text)
 }
 
-/// The connected broker of `connection`, with the schema installed once per
+/// The connected broker of `producer`, with the schema installed once per
 /// handle, or `DB_OPERATION_FAILED` of `operation` on `workflow_id` with
 /// the broker error as its cause.
 pub async fn broker_for(
-    connection: &BrokerConnection,
+    producer: &ProducerHandle,
     operation: &HandleOperation,
     workflow_id: Uuid,
 ) -> HandleResult<Arc<PostgresBroker>> {
-    connection
+    producer
         .lazy_handle()
         .initialized_broker()
         .await
@@ -390,15 +397,18 @@ pub fn workflow_status<'env>(
         env,
         HandleOperation::Status.subject(),
         CallKind::Read,
-        handle.connection(),
+        ProducerHandle::of_process(handle),
         || workflow_id_of(&workflow_id).map_err(NativeThrown::from),
         status_operation,
     )
 }
 
 /// One status read.
-async fn status_operation(connection: BrokerConnection, workflow_id: Uuid) -> WorkflowStatusRead {
-    let read = match broker_for(&connection, &HandleOperation::Status, workflow_id).await {
+pub(crate) async fn status_operation(
+    producer: ProducerHandle,
+    workflow_id: Uuid,
+) -> WorkflowStatusRead {
+    let read = match broker_for(&producer, &HandleOperation::Status, workflow_id).await {
         Ok(broker) => broker.workflow_status(workflow_id).await,
         Err(error) => Err(error),
     };
@@ -514,18 +524,15 @@ pub fn workflow_node_results<'env>(
         env,
         HandleOperation::Results.subject(),
         CallKind::Read,
-        handle.connection(),
+        ProducerHandle::of_process(handle),
         || workflow_id_of(&workflow_id).map_err(NativeThrown::from),
         node_results_operation,
     )
 }
 
 /// One read of the node results.
-async fn node_results_operation(
-    connection: BrokerConnection,
-    workflow_id: Uuid,
-) -> NodeResultsRead {
-    let read = match broker_for(&connection, &HandleOperation::Results, workflow_id).await {
+async fn node_results_operation(producer: ProducerHandle, workflow_id: Uuid) -> NodeResultsRead {
+    let read = match broker_for(&producer, &HandleOperation::Results, workflow_id).await {
         Ok(broker) => broker.workflow_node_results(workflow_id).await,
         Err(error) => Err(error),
     };
@@ -560,15 +567,15 @@ pub fn workflow_nodes<'env>(
         env,
         HandleOperation::Tasks.subject(),
         CallKind::Read,
-        handle.connection(),
+        ProducerHandle::of_process(handle),
         || workflow_id_of(&workflow_id).map_err(NativeThrown::from),
         nodes_operation,
     )
 }
 
 /// One read of the nodes.
-async fn nodes_operation(connection: BrokerConnection, workflow_id: Uuid) -> NodesRead {
-    let read = match broker_for(&connection, &HandleOperation::Tasks, workflow_id).await {
+async fn nodes_operation(producer: ProducerHandle, workflow_id: Uuid) -> NodesRead {
+    let read = match broker_for(&producer, &HandleOperation::Tasks, workflow_id).await {
         Ok(broker) => broker.workflow_nodes(workflow_id).await,
         Err(error) => Err(error),
     };
@@ -604,15 +611,15 @@ pub fn cancel_workflow<'env>(
         env,
         HandleOperation::Cancel.subject(),
         CallKind::Write,
-        handle.connection(),
+        ProducerHandle::of_process(handle),
         || workflow_id_of(&workflow_id).map_err(NativeThrown::from),
         cancel_operation,
     )
 }
 
 /// One cancel.
-async fn cancel_operation(connection: BrokerConnection, workflow_id: Uuid) -> HandleDone {
-    let cancelled = match broker_for(&connection, &HandleOperation::Cancel, workflow_id).await {
+async fn cancel_operation(producer: ProducerHandle, workflow_id: Uuid) -> HandleDone {
+    let cancelled = match broker_for(&producer, &HandleOperation::Cancel, workflow_id).await {
         Ok(broker) => broker.cancel_workflow(workflow_id).await,
         Err(error) => Err(error),
     };
@@ -646,15 +653,15 @@ pub fn pause_workflow<'env>(
         env,
         HandleOperation::Pause.subject(),
         CallKind::Write,
-        handle.connection(),
+        ProducerHandle::of_process(handle),
         || workflow_id_of(&workflow_id).map_err(NativeThrown::from),
         pause_operation,
     )
 }
 
 /// One pause.
-async fn pause_operation(connection: BrokerConnection, workflow_id: Uuid) -> HandleChange {
-    let paused = match broker_for(&connection, &HandleOperation::Pause, workflow_id).await {
+async fn pause_operation(producer: ProducerHandle, workflow_id: Uuid) -> HandleChange {
+    let paused = match broker_for(&producer, &HandleOperation::Pause, workflow_id).await {
         Ok(broker) => broker.pause_workflow(workflow_id).await,
         Err(error) => Err(error),
     };
@@ -685,7 +692,7 @@ pub fn wait_workflow_end<'env>(
         env,
         HandleOperation::Get.subject(),
         CallKind::Read,
-        handle.connection(),
+        ProducerHandle::of_process(handle),
         || -> Result<WaitRequest, NativeThrown> {
             Ok(WaitRequest {
                 workflow_id: workflow_id_of(&workflow_id)?,
@@ -697,9 +704,9 @@ pub fn wait_workflow_end<'env>(
 }
 
 /// One wait for the end.
-async fn wait_operation(connection: BrokerConnection, request: WaitRequest) -> WorkflowWaitRead {
+async fn wait_operation(producer: ProducerHandle, request: WaitRequest) -> WorkflowWaitRead {
     let workflow_id = request.workflow_id;
-    let read = match broker_for(&connection, &HandleOperation::Get, workflow_id).await {
+    let read = match broker_for(&producer, &HandleOperation::Get, workflow_id).await {
         Ok(broker) => broker.wait_workflow_end(workflow_id, request.limit).await,
         Err(error) => Err(error),
     };
@@ -751,7 +758,7 @@ pub fn node_result<'env>(
         env,
         subject,
         CallKind::Read,
-        handle.connection(),
+        ProducerHandle::of_process(handle),
         || -> Result<NodeRequest, NativeThrown> {
             Ok(NodeRequest {
                 workflow_id: workflow_id_of(&workflow_id)?,
@@ -770,16 +777,13 @@ fn node_operation(node_id: &str) -> HandleOperation {
 }
 
 /// One node result read.
-async fn node_result_operation(
-    connection: BrokerConnection,
-    request: NodeRequest,
-) -> NodeResultRead {
+async fn node_result_operation(producer: ProducerHandle, request: NodeRequest) -> NodeResultRead {
     let NodeRequest {
         workflow_id,
         node_id,
     } = request;
     let operation = node_operation(&node_id);
-    let read = match broker_for(&connection, &operation, workflow_id).await {
+    let read = match broker_for(&producer, &operation, workflow_id).await {
         Ok(broker) => broker.workflow_node_result(workflow_id, &node_id).await,
         Err(error) => Err(error),
     };

@@ -6,7 +6,7 @@
 
 import { nativeValue, nativeValueAsync } from "../call/envelope.ts";
 import type { CoreHandle } from "../handle/core-handle.ts";
-import type { NativeSendRules, NativeTaskOptions, WaitBound } from "../sends/addon.ts";
+import type { NativeSendRules, NativeTaskOptions, SendPriority, WaitBound } from "../sends/addon.ts";
 import type { TraceArgument } from "../values/records.ts";
 import {
   type ChildSpecSourceFunction,
@@ -28,6 +28,11 @@ import {
 /** The retention class key of each queue of `queueNames`, in order. Pure. */
 export function queueRetentionClasses(rules: NativeSendRules, queueNames: readonly string[]): readonly string[] {
   return nativeValue("queueRetentionClasses", () => workflowsAddon().queueRetentionClasses(rules, [...queueNames]));
+}
+
+/** The priority of each queue of `queueNames`, in order. Pure. */
+export function queuePriorities(rules: NativeSendRules, queueNames: readonly string[]): readonly SendPriority[] {
+  return nativeValue("queuePriorities", () => workflowsAddon().queuePriorities(rules, [...queueNames]));
 }
 
 /** The stored options text of a node of a task with the checked `options` and a deadline. Pure. */

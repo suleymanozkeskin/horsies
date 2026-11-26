@@ -86,7 +86,7 @@ function checksFailed(findings: readonly [SpecFinding, ...SpecFinding[]]): Child
 
   return {
     kind: "buildFailed",
-    code: first.code === "FIELD_BOUND" ? { kind: "noCode" } : { kind: "catalog", code: first.code },
+    code: { kind: "catalog", code: first.code },
     message,
   };
 }

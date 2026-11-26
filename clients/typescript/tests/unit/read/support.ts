@@ -5,6 +5,8 @@
 import type { CoreAccess, ProducerCore, SeatRelay, SendsSeatReply } from "../../../horsies/src/app/core-access.ts";
 import { type TaskId, TaskId as TaskIdParser } from "../../../horsies/src/contract/ids.ts";
 import type {
+  FinishedStatusName,
+  LiveStatusName,
   ProcessRoleName,
   ResultRead,
   TaskInfoRead,
@@ -120,12 +122,20 @@ export function countingRelay(read: TaskInfoRead): { readonly access: CoreAccess
 
 /** A read that found the task with a stored envelope text. */
 export function storedRead(status: TaskStatusName, text: string): ResultRead {
-  return { kind: "found", record: { taskId: TASK_ID, taskName: "validate_order", status, envelope: { kind: "stored", text } } };
+  return { kind: "found", record: { taskId: TASK_ID, taskName: "validate_order", envelope: { kind: "stored", status, text } } };
 }
 
-/** A read that found the task with no stored envelope. */
-export function unfinishedRead(status: TaskStatusName): ResultRead {
-  return { kind: "found", record: { taskId: TASK_ID, taskName: "validate_order", status, envelope: { kind: "notFinished" } } };
+/** A read whose wait ended before the task finished: no stored envelope yet. */
+export function waitEndedRead(status: LiveStatusName): ResultRead {
+  return { kind: "found", record: { taskId: TASK_ID, taskName: "validate_order", envelope: { kind: "waitEnded", status } } };
+}
+
+/** A read that found a finished task that stores no result. */
+export function finishedWithoutResultRead(status: FinishedStatusName): ResultRead {
+  return {
+    kind: "found",
+    record: { taskId: TASK_ID, taskName: "validate_order", envelope: { kind: "finishedWithoutResult", status } },
+  };
 }
 
 /** The stored envelope of an `ok` value text. */

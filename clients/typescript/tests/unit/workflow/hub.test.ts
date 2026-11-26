@@ -40,13 +40,14 @@ function appWith(core: FakeCore): Horsies {
 
 describe("Horsies.create with workflows", () => {
   test("the workflow refusals follow the contract refusals", () => {
+    // The task has an empty name (HRS-102) and a queue that the default mode does not admit (HRS-200).
     const refusedTask = defineTask({ name: "", queue: "x", input: {}, output: h.null() });
     const created = createHorsies(config([broken], [greet, refusedTask]), fakeEnvironment());
 
     assert(!created.ok);
     assert.deepEqual(
       created.error.refusals.map((refused) => refused.code),
-      ["HRS-200", "HRS-004"],
+      ["HRS-200", "HRS-102", "HRS-004"],
     );
   });
 

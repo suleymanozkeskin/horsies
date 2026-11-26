@@ -6,7 +6,7 @@ import { describe, test } from "node:test";
 
 import { z } from "zod";
 
-import { defineTask } from "../../../horsies/src/contract/public.ts";
+import { defineTask, type UserFailure } from "../../../horsies/src/contract/public.ts";
 import { contractRecord } from "../../../horsies/src/contract/definition.ts";
 import { h } from "../../../horsies/src/wire/public.ts";
 
@@ -99,6 +99,16 @@ describe("result constructors", () => {
     assert.equal(Object.isFrozen(value.error), true);
   });
 
+  test("err with data: undefined gives an error with no data member, as a left-out data does", () => {
+    // SAFETY: a project without exactOptionalPropertyTypes, or a JavaScript caller, can pass `data: undefined`.
+    const failure = { code: "EMPTY_ORDER", message: "no lines", data: undefined } as unknown as UserFailure<"EMPTY_ORDER">;
+    const value = contract.err(failure);
+
+    assert.deepEqual(value, { ok: false, error: { code: "EMPTY_ORDER", message: "no lines" } });
+    assert.equal(value.ok ? true : Object.hasOwn(value.error, "data"), false);
+    assert.equal(Object.isFrozen(value.ok ? value : value.error), true);
+  });
+
   test("err with a built-in name throws TypeError", () => {
     const open = defineTask({ name: "ping", input: {}, output: h.null() });
     // SAFETY: a JavaScript caller, or a code read at run time, can pass a built-in name that the type refuses.
@@ -117,10 +127,29 @@ describe("result constructors", () => {
 });
 
 describe("definition refusals", () => {
-  test("a Standard Schema of another vendor names the vendor", () => {
+  test("a Standard Schema of another vendor is kept with its vendor; the compile refuses it", () => {
     const record = contractRecord(defineTask({ name: "t", input: { value: otherVendorSchema }, output: h.null() }));
 
-    assert.deepEqual(record.refusals, [{ rule: "SchemaVendor", path: "input.value", vendor: "valibot" }]);
+    assert.deepEqual(record.parameters[0]?.schema, { kind: "otherVendor", vendor: "valibot" });
+    assert.deepEqual(record.refusals, []);
+  });
+
+  test("an empty task name is a TaskName refusal (empty)", () => {
+    const record = contractRecord(defineTask({ name: "", input: {}, output: h.null() }));
+
+    assert.deepEqual(record.refusals, [{ rule: "TaskName", path: "name", fault: "empty" }]);
+  });
+
+  test("a task name with a lone surrogate is a TaskName refusal (loneSurrogate)", () => {
+    const record = contractRecord(defineTask({ name: "send\uD800", input: {}, output: h.null() }));
+
+    assert.deepEqual(record.refusals, [{ rule: "TaskName", path: "name", fault: "loneSurrogate" }]);
+  });
+
+  test("a well-formed task name outside ASCII is no refusal", () => {
+    const record = contractRecord(defineTask({ name: "sipariş_gönder_📦", input: {}, output: h.null() }));
+
+    assert.deepEqual(record.refusals, []);
   });
 
   test("a parameter name that is not an identifier, that the engine fills, or that only the engine writes", () => {
@@ -142,9 +171,9 @@ describe("definition refusals", () => {
     );
   });
 
-  test("an output of another vendor is refused at output", () => {
+  test("an output of another vendor is kept with its vendor", () => {
     const record = contractRecord(defineTask({ name: "t", input: {}, output: otherVendorSchema }));
 
-    assert.deepEqual(record.refusals, [{ rule: "SchemaVendor", path: "output", vendor: "valibot" }]);
+    assert.deepEqual(record.output, { kind: "otherVendor", vendor: "valibot" });
   });
 });

@@ -1,0 +1,2 @@
+# The output of `tsc --project tsconfig.build.json`.
+/dist/

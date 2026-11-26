@@ -27,6 +27,7 @@ import type {
   WorkflowWaitRead,
   WorkflowsAddon,
 } from "../../horsies/src/native/workflows/addon.ts";
+import type { WorkflowsChildProducerProbeAddon } from "../runtime/native/workflows-child-producer-probe.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const queueRetentionClassesMatches: SameFunction<
@@ -72,6 +73,9 @@ export const resumeWorkflowMatches: SameFunction<typeof Generated.resumeWorkflow
 export const waitWorkflowEndMatches: SameFunction<typeof Generated.waitWorkflowEnd, WorkflowsAddon["waitWorkflowEnd"]> =
   true;
 
+export const queuePrioritiesMatches: SameFunction<typeof Generated.queuePriorities, WorkflowsAddon["queuePriorities"]> =
+  true;
+
 export const nodeResultMatches: SameFunction<typeof Generated.nodeResult, WorkflowsAddon["nodeResult"]> = true;
 
 export const workflowOutputNodeMatches: SameFunction<
@@ -108,3 +112,14 @@ export const handleChangeMatches: Mutual<Generated.HandleChange, HandleChange> =
 export const waitReadMatches: Mutual<Generated.WorkflowWaitRead, WorkflowWaitRead> = true;
 export const nodeResultReadMatches: Mutual<Generated.NodeResultRead, NodeResultRead> = true;
 export const outputNodeFactMatches: Mutual<Generated.OutputNodeFact, OutputNodeFact> = true;
+
+// The test exports of a build with the cargo feature `test-probes` (`build:dev`).
+export const probeStartWorkflowInChildMatches: SameFunction<
+  typeof Generated.probeStartWorkflowInChild,
+  WorkflowsChildProducerProbeAddon["probeStartWorkflowInChild"]
+> = true;
+
+export const probeWorkflowStatusInChildMatches: SameFunction<
+  typeof Generated.probeWorkflowStatusInChild,
+  WorkflowsChildProducerProbeAddon["probeWorkflowStatusInChild"]
+> = true;
