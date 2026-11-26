@@ -16,7 +16,7 @@ export const retryExhausted = defineTask({
   input: {},
   output: h.string(),
   errorCodes: RETRY_CODES,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, retryFor: ["TRANSIENT"] },
 });
 
 /** `TRANSIENT` on the first two attempts of `token`, then `succeeded_on_attempt_3`. */
@@ -25,7 +25,7 @@ export const retrySuccess = defineTask({
   input: { token: h.string() },
   output: h.string(),
   errorCodes: RETRY_CODES,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, retryFor: ["TRANSIENT"] },
 });
 
 /** Always `TRANSIENT`; three retries 1 s, 2 s and 4 s apart. */
@@ -34,7 +34,7 @@ export const exponential = defineTask({
   input: {},
   output: h.string(),
   errorCodes: RETRY_CODES,
-  retryPolicy: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, retryFor: ["TRANSIENT"] },
 });
 
 /** Always `RETRYABLE_ERROR`; one retry. */
@@ -43,7 +43,7 @@ export const retryErrorCode = defineTask({
   input: {},
   output: h.string(),
   errorCodes: RETRY_CODES,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["RETRYABLE_ERROR"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["RETRYABLE_ERROR"] },
 });
 
 /** A policy that names `TRANSIENT`, and an error with another code: no retry. */
@@ -52,7 +52,7 @@ export const retryOtherCode = defineTask({
   input: {},
   output: h.string(),
   errorCodes: RETRY_CODES,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], jitter: false, retryFor: ["TRANSIENT"] },
 });
 
 /** Always `TRANSIENT`, with 60 s between retries: a retry would start after a near `goodUntil`. */
@@ -61,7 +61,7 @@ export const retryLongInterval = defineTask({
   input: {},
   output: h.string(),
   errorCodes: RETRY_CODES,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [60, 60, 60], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [60, 60, 60], jitter: false, retryFor: ["TRANSIENT"] },
 });
 
 /** Every contract of this module. */
@@ -83,6 +83,6 @@ export function implementRetry(app: Horsies): void {
   });
   app.implement(exponential, (_input, { err }) => err({ code: "TRANSIENT", message: "fail" }));
   app.implement(retryErrorCode, (_input, { err }) => err({ code: "RETRYABLE_ERROR", message: "Retryable error" }));
-  app.implement(retryOtherCode, (_input, { err }) => err({ code: "RETRYABLE_ERROR", message: "not in autoRetryFor" }));
+  app.implement(retryOtherCode, (_input, { err }) => err({ code: "RETRYABLE_ERROR", message: "not in retryFor" }));
   app.implement(retryLongInterval, (_input, { err }) => err({ code: "TRANSIENT", message: "always fails" }));
 }

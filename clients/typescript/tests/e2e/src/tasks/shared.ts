@@ -74,7 +74,7 @@ export const sharedBlocksOnce = defineTask({
   errorCodes: SHARED_CODES,
   execution: "SHARED_ASYNC",
   timeoutMs: 30_000,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_BLOCKED_LOOP"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["TASK_BLOCKED_LOOP"] },
 });
 
 /**
@@ -88,7 +88,7 @@ export const sharedBlocksAfterAwait = defineTask({
   errorCodes: SHARED_CODES,
   execution: "SHARED_ASYNC",
   timeoutMs: 30_000,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_BLOCKED_LOOP", "WORKER_CRASHED"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["TASK_BLOCKED_LOOP", "WORKER_CRASHED"] },
 });
 
 /** Waits `milliseconds` on the event loop, with one retry on `WORKER_CRASHED`: the neighbour of a block on Bun. */
@@ -98,7 +98,7 @@ export const sharedSleepRetried = defineTask({
   output: h.string(),
   execution: "SHARED_ASYNC",
   timeoutMs: 30_000,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["WORKER_CRASHED"] },
 });
 
 /** The first attempt of `token` ignores its deadline and every cancel; the retry returns its process id. */
@@ -110,7 +110,7 @@ export const sharedStuckOnce = defineTask({
   execution: "SHARED_ASYNC",
   timeoutMs: STOP_TIMEOUT_MS,
   cancelGraceMs: 100,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_TIMEOUT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["TASK_TIMEOUT"] },
 });
 
 /** Sends `e2e_simple` from a shared async body; the output is the sent task id. */

@@ -12,7 +12,7 @@
 import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
 import type { AppContext } from "../app/context.ts";
 import { taskOptionsFacts } from "../app/core-checks.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import { CHECK_INTERVAL_SECONDS_MAX, CHECK_INTERVAL_SECONDS_MIN } from "../_catalog/scheduler_manifest.ts";
 import type { QueueSetup } from "../config/queues.ts";
@@ -125,7 +125,7 @@ export function declareSchedules(
 }
 
 /** A declaration and its refusals, in order: the section, then each schedule, then the manifest. */
-type Declared = { readonly section: SectionSettings; readonly scheduler: DeclaredScheduler; readonly refusals: readonly Refusal[] };
+type Declared = { readonly section: SectionSettings; readonly scheduler: DeclaredScheduler; readonly refusals: readonly HorsiesError[] };
 
 function declarationOf(
   context: AppContext,
@@ -221,7 +221,7 @@ function preparedDeclaration(section: SectionSettings, preparation: SchedulerPre
 }
 
 /** The section with its defaults, or the refusal of a check interval outside its bound. Pure. */
-function sectionSettings(section: ScheduleSection): Result<SectionSettings, Refusal> {
+function sectionSettings(section: ScheduleSection): Result<SectionSettings, HorsiesError> {
   const settings = defaultSettings(section);
   const interval = boundedCount(settings.checkIntervalSeconds, CHECK_INTERVAL_SECONDS_MIN, CHECK_INTERVAL_SECONDS_MAX);
 

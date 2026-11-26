@@ -82,24 +82,24 @@ describe("the reads of an installed database", () => {
     const page = await monitoring.listTasks({ statuses: ["FAILED"], limit: 50 });
 
     assert.ok(page.ok && page.value.total === 0);
-    assert.deepEqual(await monitoring.workflowNames(), { ok: true, value: [] });
-    assert.deepEqual(await monitoring.workflowRuns(), { ok: true, value: [] });
-    assert.deepEqual(await monitoring.schedules(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.listWorkflowNames(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.listWorkflowRuns(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.listSchedules(), { ok: true, value: [] });
   });
 
   test("each health read answers its value", async () => {
     const { monitoring } = await installedArea();
 
-    assert.deepEqual(await monitoring.workers(), { ok: true, value: [] });
-    assert.deepEqual(await monitoring.worker("no-such-worker"), {
+    assert.deepEqual(await monitoring.listWorkerStates(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.getWorkerState("no-such-worker"), {
       ok: true,
       value: { kind: "notFound", workerId: "no-such-worker" },
     });
-    assert.deepEqual(await monitoring.workerHistory("no-such-worker"), { ok: true, value: [] });
-    assert.deepEqual(await monitoring.staleTasks({ thresholdMinutes: 5 }), { ok: true, value: { kind: "complete", rows: [] } });
-    assert.deepEqual(await monitoring.expiredTasks(), { ok: true, value: { kind: "complete", rows: [] } });
-    assert.ok((await monitoring.classCoverage()).ok);
-    assert.ok((await monitoring.classReport()).ok);
+    assert.deepEqual(await monitoring.getWorkerStateHistory("no-such-worker"), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.getStaleTasks({ thresholdMinutes: 5 }), { ok: true, value: { kind: "complete", rows: [] } });
+    assert.deepEqual(await monitoring.getExpiredTasks(), { ok: true, value: { kind: "complete", rows: [] } });
+    assert.ok((await monitoring.getExecutionClassCoverage()).ok);
+    assert.ok((await monitoring.getExecutionClassReport()).ok);
   });
 
   test("taskDetail of an absent task names why: NOT_CLASSIFIED for a UUIDv4, WITHIN_RETAINED_HISTORY for a UUIDv7", async () => {
@@ -107,12 +107,12 @@ describe("the reads of an installed database", () => {
     const minted = nativeValue("mintTaskId", () => processCoreAddon().mintTaskId());
 
     assert.ok(minted.kind === "minted");
-    assert.deepEqual(await monitoring.taskDetail(UUID_V4), {
+    assert.deepEqual(await monitoring.getTaskDetail(UUID_V4), {
       ok: true,
       value: { kind: "notFound", taskId: UUID_V4, reason: "NOT_CLASSIFIED" },
     });
 
-    const read = await monitoring.taskDetail(parsed(TaskId.parse(minted.taskId)));
+    const read = await monitoring.getTaskDetail(parsed(TaskId.parse(minted.taskId)));
 
     assert.ok(read.ok && read.value.kind === "notFound" && read.value.reason === "WITHIN_RETAINED_HISTORY");
   });
@@ -120,11 +120,11 @@ describe("the reads of an installed database", () => {
   test("an unknown workflow run and node are notFound", async () => {
     const { monitoring } = await installedArea();
 
-    assert.deepEqual(await monitoring.workflowRun(WORKFLOW_V4), {
+    assert.deepEqual(await monitoring.getWorkflowRun(WORKFLOW_V4), {
       ok: true,
       value: { kind: "notFound", workflowId: WORKFLOW_V4 },
     });
-    assert.deepEqual(await monitoring.workflowNode(WORKFLOW_V4, 0), {
+    assert.deepEqual(await monitoring.getWorkflowNode(WORKFLOW_V4, 0), {
       ok: true,
       value: { kind: "notFound", workflowId: WORKFLOW_V4, taskIndex: 0 },
     });
@@ -142,7 +142,7 @@ describe("the reads of an installed database", () => {
     const ping = await answered.pingDatabase();
 
     assert.ok(ping.ok && ping.value.latencyMs >= 0);
-    assert.deepEqual(await answered.pingWorkers({ timeoutMs: PING_WINDOW_MS }), { ok: true, value: [] });
+    assert.deepEqual(await answered.pingWorkers({ waitMs: PING_WINDOW_MS }), { ok: true, value: [] });
   });
 });
 
@@ -153,9 +153,9 @@ describe("an unreachable database", () => {
     const reads = [
       ["task stats query", await monitoring.taskStats()],
       ["task list query", await monitoring.listTasks()],
-      ["task detail query", await monitoring.taskDetail(UUID_V4)],
-      ["workflow names query", await monitoring.workflowNames()],
-      ["schedule state query", await monitoring.schedules()],
+      ["task detail query", await monitoring.getTaskDetail(UUID_V4)],
+      ["workflow names query", await monitoring.listWorkflowNames()],
+      ["schedule state query", await monitoring.listSchedules()],
     ] as const;
 
     for (const [subject, read] of reads) {
@@ -167,10 +167,10 @@ describe("an unreachable database", () => {
 
   test("each health read, each ping and the cancel give their failure codes", async () => {
     const unreachable = area(REFUSED_DATABASE_URL);
-    const workers = await unreachable.monitoring.workers();
-    const coverage = await unreachable.monitoring.classCoverage();
+    const workers = await unreachable.monitoring.listWorkerStates();
+    const coverage = await unreachable.monitoring.getExecutionClassCoverage();
     const ping = await unreachable.pingDatabase();
-    const pongs = await unreachable.pingWorkers({ timeoutMs: PING_WINDOW_MS });
+    const pongs = await unreachable.pingWorkers({ waitMs: PING_WINDOW_MS });
     const cancel = await unreachable.monitoring.cancelTask(UUID_V4, { policy: "includeRunning" });
 
     assert.ok(!workers.ok && workers.error.code === "MONITORING_QUERY_FAILED");
@@ -193,9 +193,9 @@ describe("an unreachable database", () => {
       ["page", await monitoring.listTasks({ offset: 400, limit: 101 })],
       ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 0 })],
       ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 501 })],
-      ["limit", await monitoring.workflowRuns({ limit: 0 })],
-      ["limit", await monitoring.workflowRuns({ limit: 201 })],
-      ["taskIndex", await monitoring.workflowNode(WORKFLOW_V4, 2 ** 31)],
+      ["limit", await monitoring.listWorkflowRuns({ limit: 0 })],
+      ["limit", await monitoring.listWorkflowRuns({ limit: 201 })],
+      ["taskIndex", await monitoring.getWorkflowNode(WORKFLOW_V4, 2 ** 31)],
     ] as const;
 
     for (const [field, read] of refusals) {
@@ -207,10 +207,10 @@ describe("an unreachable database", () => {
     const unreachable = area(REFUSED_DATABASE_URL);
 
     const answers = [
-      await unreachable.pingWorkers({ timeoutMs: 0 }),
-      await unreachable.monitoring.staleTasks({ thresholdMinutes: -1 }),
-      await unreachable.monitoring.staleTasks({ thresholdMinutes: 525_601 }),
-      await unreachable.monitoring.workerHistory("w1", { kind: "newest", count: 0 }),
+      await unreachable.pingWorkers({ waitMs: 0 }),
+      await unreachable.monitoring.getStaleTasks({ thresholdMinutes: -1 }),
+      await unreachable.monitoring.getStaleTasks({ thresholdMinutes: 525_601 }),
+      await unreachable.monitoring.getWorkerStateHistory("w1", { kind: "newest", count: 0 }),
     ];
 
     for (const answer of answers) {
@@ -220,7 +220,7 @@ describe("an unreachable database", () => {
 
   test("a ping on a handle with no listener is LISTENER_DISABLED before the connect", async () => {
     const handle = buildCoreHandle(manifestJsonWithSchema(REFUSED_DATABASE_URL, false, "ASSUME_INITIALIZED"), "PRODUCER");
-    const answer = await createMonitoringArea(access(handle)).pingWorkers({ timeoutMs: PING_WINDOW_MS });
+    const answer = await createMonitoringArea(access(handle)).pingWorkers({ waitMs: PING_WINDOW_MS });
 
     assert.ok(!answer.ok && answer.error.code === "LISTENER_DISABLED");
   });

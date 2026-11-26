@@ -114,7 +114,7 @@ export const threadOverrun = defineTask({
   errorCodes: THREAD_CODES,
   execution: "SHARED_THREAD",
   timeoutMs: OVERRUN_TIMEOUT_MS,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, autoRetryFor: ["TASK_TIMEOUT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, retryFor: ["TASK_TIMEOUT"] },
 });
 
 /** A sync body: where it ran. */
@@ -188,7 +188,7 @@ export const threadBlocksMain = defineTask({
   errorCodes: THREAD_CODES,
   execution: "SHARED_THREAD",
   timeoutMs: THREAD_TIMEOUT_MS,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["WORKER_CRASHED"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["WORKER_CRASHED"] },
 });
 
 /** Every contract of this module. */

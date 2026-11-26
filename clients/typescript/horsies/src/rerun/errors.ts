@@ -18,7 +18,7 @@ export interface RerunConnectFailed {
 export type RerunStatementOutcome = "notCommitted" | "unknown";
 
 /**
- * A statement of the app's transaction failed. `outcome` is `notCommitted`, or `unknown` when the
+ * A statement of the app's transaction failed. `stateAfter` is `notCommitted`, or `unknown` when the
  * reply to `COMMIT` was lost: then a keyed rerun sent again answers `keyReplay` if the first one
  * committed.
  */
@@ -26,7 +26,7 @@ export interface RerunStatementFailed {
   readonly code: typeof RerunErrorCode.STATEMENT_FAILED;
   readonly retryable: boolean;
   readonly message: string;
-  readonly outcome: RerunStatementOutcome;
+  readonly stateAfter: RerunStatementOutcome;
   readonly exception: CoreFailure;
 }
 

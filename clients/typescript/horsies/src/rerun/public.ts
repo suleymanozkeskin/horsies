@@ -14,7 +14,7 @@ export type {
   RerunNotEligible,
   RerunNotEligibleReason,
   RerunOutcome,
-  RerunPolicy,
+  RerunEnqueuePolicy,
   RerunRetention,
   RerunSourceAbsent,
   RerunSourceCorrupt,

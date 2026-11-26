@@ -403,6 +403,12 @@ there is no migration contract between pre-1.0 versions.
   now has no status, as the Python and TypeScript clients write it and as
   the OpenTelemetry specification asks of instrumentation libraries. The
   status ERROR with `error.type` for a failure is unchanged.
+- **The Python and Rust web handlers refuse a trusted identity header with a
+  blank comma-separated member.** A request with two copies of the header,
+  one blank, reaches the handler as `alice, `. `TrustedHeader` now refuses
+  it for reads and for actions, as the TypeScript client does. Every value
+  of a repeated header is checked. A value with all members present, such as
+  `alice, bob`, is still allowed.
 
 ## 0.8.1 — 2026-11-25
 

@@ -155,7 +155,7 @@ function startsAMinute(epochMicros: bigint): boolean {
 
 /** Start the scheduler and wait until it wrote a schedule state row (Rust `Suite::scheduler`). */
 async function startScheduler(suite: Suite): Promise<TestProcess> {
-  const scheduler = suite.spawnEntry("scheduler", ["scheduler", "--loglevel", "INFO"]);
+  const scheduler = suite.spawnEntry("scheduler", ["scheduler", "--log-level", "INFO"]);
 
   await scheduler.waitUntil(SCHEDULER_READY_LIMIT_MS, "the scheduler writes its state", async () => (await stateRows(suite)) > 0);
 
@@ -176,7 +176,7 @@ async function stateRows(suite: Suite): Promise<number> {
 
 /** Start the scheduler of an instance that the scheduler start refuses; its output after the exit with 1. */
 async function refusedSchedulerOutput(suite: Suite): Promise<string> {
-  const scheduler = suite.spawnEntry("scheduler", ["scheduler", "--loglevel", "INFO"]);
+  const scheduler = suite.spawnEntry("scheduler", ["scheduler", "--log-level", "INFO"]);
   const exit = await scheduler.waitExit(REFUSED_START_WAIT_MS);
 
   assert.deepEqual(exit, { kind: "exitedWithCode", code: EXIT_FAILED }, `${exitText(exit)}\n${scheduler.report()}`);

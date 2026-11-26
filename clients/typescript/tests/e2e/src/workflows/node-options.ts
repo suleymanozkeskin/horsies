@@ -1,10 +1,10 @@
 // The options of the nodes of the end-to-end workflows. The builds name what a node does in the words of `NodePlan`;
 // only this module names the option fields of the workflow API.
 
-import type { AnyNode, DefaultJoin, Join } from "../../../../horsies/src/index.ts";
+import type { AnyNode, DefaultJoin, JoinType } from "../../../../horsies/src/index.ts";
 
 /** What a node does besides its input. Each field left out takes the API's default. */
-export type NodePlan<J extends Join> = {
+export type NodePlan<J extends JoinType> = {
   /** The nodes that the node waits for, besides the sources of its parameters. */
   readonly after?: readonly AnyNode[];
   /** When the node runs. Left out: when all its dependencies ended. */
@@ -18,7 +18,7 @@ export type NodePlan<J extends Join> = {
 };
 
 /** The options of a node of `NodePlan`. */
-export type PlannedOptions<Id extends string, J extends Join> = {
+export type PlannedOptions<Id extends string, J extends JoinType> = {
   readonly nodeId: Id;
   readonly waitsFor?: readonly AnyNode[];
   readonly join?: J;
@@ -28,7 +28,7 @@ export type PlannedOptions<Id extends string, J extends Join> = {
 };
 
 /** The options of a node with context sources: a task with `workflowContext: true`. */
-export type ContextOptions<Id extends string, J extends Join> = PlannedOptions<Id, J> & {
+export type ContextOptions<Id extends string, J extends JoinType> = PlannedOptions<Id, J> & {
   readonly workflowContextFrom: readonly AnyNode[];
 };
 
@@ -36,7 +36,7 @@ export type ContextOptions<Id extends string, J extends Join> = PlannedOptions<I
  * The options of the node `nodeId` that `plan` describes. The join type comes from `plan` only (`NoInfer`): a call inside
  * `w.task(...)` takes no join type from the option type that `w.task` expects. Pure.
  */
-export function node<const Id extends string, const J extends Join = DefaultJoin>(
+export function node<const Id extends string, const J extends JoinType = DefaultJoin>(
   nodeId: Id,
   plan: NodePlan<J> = {},
 ): PlannedOptions<Id, NoInfer<J>> {
@@ -51,7 +51,7 @@ export function node<const Id extends string, const J extends Join = DefaultJoin
 }
 
 /** The options of the node `nodeId` whose workflow context holds the results of `sources`. Pure. */
-export function contextNode<const Id extends string, const J extends Join = DefaultJoin>(
+export function contextNode<const Id extends string, const J extends JoinType = DefaultJoin>(
   nodeId: Id,
   sources: readonly AnyNode[],
   plan: NodePlan<J> = {},

@@ -115,12 +115,12 @@ pub fn ping_workers<'env>(
     env: &'env Env,
     handle: &CoreHandle,
     target: PingTargetArg,
-    timeout_ms: f64,
+    wait_ms: f64,
     min_responses: MinResponsesArg,
 ) -> napi::Result<Object<'env>> {
     let subject = "ping_workers";
     let listener = handle.connection().lazy_handle().listener();
-    let check = move || ping_request(target, timeout_ms, &min_responses, listener);
+    let check = move || ping_request(target, wait_ms, &min_responses, listener);
     health_read(
         env,
         handle,
@@ -377,13 +377,13 @@ fn connect_failure(
 /// listener. A handle with no listener is `LISTENER_DISABLED`. Pure.
 fn ping_request(
     target: PingTargetArg,
-    timeout_ms: f64,
+    wait_ms: f64,
     min_responses: &MinResponsesArg,
     listener: HandleListener,
 ) -> Result<PingRequest, BrokerOperationError> {
-    let window = match positive_count(timeout_ms) {
+    let window = match positive_count(wait_ms) {
         Some(milliseconds) => Duration::from_millis(milliseconds),
-        None => return Err(refused_count("timeoutMs", timeout_ms)),
+        None => return Err(refused_count("waitMs", wait_ms)),
     };
     let min_responses = match min_responses {
         MinResponsesArg::FullWindow => None,

@@ -78,9 +78,9 @@ export function eventHandlers(handlers: readonly HandlerRegistration[]): EventHa
  */
 export function workerEndedSpans(tracing: TracingSetting): WorkerEndedSpans {
   switch (tracing.kind) {
-    case "otel":
+    case "otelTracing":
       return endedSpansOfSwitch(tracing.workerEndedSpans);
-    case "none":
+    case "noTracing":
       return "NO_SPANS";
     default:
       return unreachable(tracing);

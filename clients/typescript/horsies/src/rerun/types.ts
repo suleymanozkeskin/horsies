@@ -4,34 +4,34 @@
 import type { TaskAbsenceReason } from "../_catalog/history.ts";
 import type { TaskId } from "../contract/ids.ts";
 
-/** The deadline of the new task: an instant, or the explicit choice of no deadline. */
+/** The latest start of the new task: an instant, or the explicit choice of no limit. */
 export type RerunDeadline = { readonly kind: "until"; readonly at: Temporal.Instant } | { readonly kind: "none" };
 
 /** One rerun request. */
 export interface RerunCommand {
   /** The task to run again. */
   readonly sourceTaskId: TaskId;
-  /** The deadline of the new task. A part below the microsecond is cut toward the past. */
-  readonly deadline: RerunDeadline;
+  /** The latest start of the new task, or no limit. A part below the microsecond is cut toward the past. */
+  readonly goodUntil: RerunDeadline;
   /**
-   * The caller key of the new task: a second rerun with the same key and the same command answers
+   * The idempotency key of the new task: a second rerun with the same key and the same command answers
    * `keyReplay`. Omitted: an unkeyed rerun.
    */
-  readonly callerKey?: string;
+  readonly idempotencyKey?: string;
 }
 
 /** The retention of the new task: a finite period of whole days, or forever. */
-export type RerunRetention = { readonly kind: "days"; readonly days: number } | { readonly kind: "forever" };
+export type RerunRetention = { readonly kind: "period"; readonly days: number } | { readonly kind: "forever" };
 
 /** Whether the new task keeps its input for a later rerun of it. */
 export type RerunInputChoice = "keep" | "drop";
 
 /** The enqueue policy of the new task. */
-export interface RerunPolicy {
+export interface RerunEnqueuePolicy {
   readonly retention: RerunRetention;
-  readonly rerunInput: RerunInputChoice;
+  readonly retainRerunInput: RerunInputChoice;
   /**
-   * How long the caller key holds the rerun: more than 0, at most 30 days, whole microseconds. Days,
+   * How long the idempotency key holds the rerun: more than 0, at most 30 days, whole microseconds. Days,
    * hours and smaller units only: a year, a month or a week has no fixed length.
    */
   readonly reservationWindow: Temporal.Duration;
@@ -90,14 +90,15 @@ export interface RerunInputCorrupt {
   readonly detail: string;
 }
 
-/** The caller key holds another command, the source's own included. Nothing is written. */
+/** The idempotency key holds another command, the source's own included. Nothing is written. */
 export interface RerunKeyConflict {
   readonly kind: "keyConflict";
   readonly taskId: TaskId;
-  readonly reservedByTaskId: TaskId;
+  /** The task that holds the key. */
+  readonly ownerTaskId: TaskId;
 }
 
-/** The caller key holds this rerun command already, as `existingTaskId`. Nothing is written. */
+/** The idempotency key holds this rerun command already, as `existingTaskId`. Nothing is written. */
 export interface RerunKeyReplay {
   readonly kind: "keyReplay";
   readonly existingTaskId: TaskId;

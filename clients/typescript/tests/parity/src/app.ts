@@ -22,7 +22,7 @@ import {
   h,
   Horsies,
   type HorsiesConfig,
-  type ScheduleEntry,
+  type TaskSchedule,
   type ScheduleSection,
   type TaskOutcome,
   type WorkerProfileInput,
@@ -114,7 +114,7 @@ export const transient = defineTask({
   input: { value: h.int() },
   output: h.int(),
   errorCodes: ["TRANSIENT"],
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], retryFor: ["TRANSIENT"] },
 });
 
 /** An isolated task that the parent kills at its deadline. */
@@ -159,7 +159,7 @@ export const transientAsync = defineTask({
   errorCodes: ["TRANSIENT"],
   execution: "SHARED_ASYNC",
   timeoutMs: SHARED_TIMEOUT_MS,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], retryFor: ["TRANSIENT"] },
 });
 
 /**
@@ -200,7 +200,7 @@ export const transientThread = defineTask({
   errorCodes: ["TRANSIENT"],
   execution: "SHARED_THREAD",
   timeoutMs: SHARED_TIMEOUT_MS,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], autoRetryFor: ["TRANSIENT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], retryFor: ["TRANSIENT"] },
 });
 
 /** A thread seat that cannot stop at its deadline: the child is killed when no run of it has time left. */
@@ -216,7 +216,7 @@ export const threadPastDeadline = defineTask({
 
 /** Two nodes: the second takes the result of the first (Python `parity_chain`). */
 export const parityChain = defineWorkflow(
-  { name: CHAIN_NAME, definitionKey: CHAIN_DEFINITION_KEY, params: {}, output: h.int(), onError: "fail" },
+  { name: CHAIN_NAME, definitionKey: CHAIN_DEFINITION_KEY, parameters: {}, outputType: h.int(), onError: "fail" },
   (w) => {
     const added = w.task(add, { a: 2, b: 3 }, { nodeId: "add" });
 
@@ -226,13 +226,13 @@ export const parityChain = defineWorkflow(
 
 /** The child of `parity_parent`: one node, its output (Python `ParityChild`). */
 export const parityChild = defineWorkflow(
-  { name: CHILD_NAME, definitionKey: CHILD_DEFINITION_KEY, params: {}, output: h.int(), onError: "fail" },
+  { name: CHILD_NAME, definitionKey: CHILD_DEFINITION_KEY, parameters: {}, outputType: h.int(), onError: "fail" },
   (w) => ({ output: w.task(add, { a: 2, b: 3 }, { nodeId: "add" }) }),
 );
 
 /** A sub-workflow node of `parity_child`, then a node that takes the child's output (Python `parity_parent`). */
 export const parityParent = defineWorkflow(
-  { name: PARENT_NAME, definitionKey: PARENT_DEFINITION_KEY, params: {}, output: h.int(), onError: "fail" },
+  { name: PARENT_NAME, definitionKey: PARENT_DEFINITION_KEY, parameters: {}, outputType: h.int(), onError: "fail" },
   (w) => {
     const child = w.subWorkflow(parityChild, {}, { nodeId: "child" });
 
@@ -270,7 +270,7 @@ export const PROFILES: { readonly [Name in ProfileName]: WorkerProfileInput } = 
 };
 
 /** The schedule `parity_slots`: each slot sends `parity.add` with 2 and 3 (Python `TaskSchedule` of `app.py`). */
-export const PARITY_SCHEDULE: ScheduleEntry<typeof add> = {
+export const PARITY_SCHEDULE: TaskSchedule<typeof add> = {
   name: SCHEDULE_NAME,
   task: add,
   input: { a: 2, b: 3 },

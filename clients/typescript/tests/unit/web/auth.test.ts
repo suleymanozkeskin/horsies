@@ -10,7 +10,7 @@ import {
   trustedHeaderRefusalText,
   viewOnly,
 } from "../../../horsies/src/web/auth.ts";
-import type { MonitoringAuthPolicy } from "../../../horsies/src/web/auth.ts";
+import type { MonitoringAuthorizationPolicy } from "../../../horsies/src/web/auth.ts";
 
 /** A request with the headers `headers`: a record, or name and value pairs that may repeat a name. */
 function request(headers: Record<string, string> | [string, string][]): Request {
@@ -18,12 +18,12 @@ function request(headers: Record<string, string> | [string, string][]): Request 
 }
 
 /** The two verdicts of `policy` for `incoming`. */
-async function verdicts(policy: MonitoringAuthPolicy, incoming: Request): Promise<[boolean, boolean]> {
+async function verdicts(policy: MonitoringAuthorizationPolicy, incoming: Request): Promise<[boolean, boolean]> {
   return [await policy.canView(incoming), await policy.canAct(incoming)];
 }
 
 /** The policy of a `trustedHeader` call that must be accepted. */
-function accepted(headerName: string, actions: "enabled" | "disabled"): MonitoringAuthPolicy {
+function accepted(headerName: string, actions: "enabled" | "disabled"): MonitoringAuthorizationPolicy {
   const built = trustedHeader(headerName, { actions });
 
   assert.ok(built.ok, `${headerName} is a header name`);

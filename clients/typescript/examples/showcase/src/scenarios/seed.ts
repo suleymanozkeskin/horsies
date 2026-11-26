@@ -33,7 +33,7 @@ export async function runSeed(): Promise<Result<void, string>> {
     say(`${String(DISCONTINUED_SKU_COUNT)} products have zero stock; ${String(CATALOG_STOCK_PER_SKU)} units seed each stocked SKU`);
     say("next");
     say(`  ${commandLine("worker")}`);
-    say(`  ${commandLine("web --auth none")}`);
+    say(`  ${commandLine("web --authorization none")}`);
     say(`  ${commandLine("steady")}`);
     say(`  open ${webBaseUrl()}`);
 

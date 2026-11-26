@@ -112,9 +112,9 @@ const RULE_BREAKERS: readonly (readonly [string, SchedulePattern])[] = [
   ["an interval part above its bound", { kind: "interval", every: Temporal.Duration.from({ seconds: 86_401 }) }],
   ["a negative interval", { kind: "interval", every: Temporal.Duration.from({ minutes: -5 }) }],
   ["an hourly minute of 60", { kind: "hourly", minute: 60 }],
-  ["a daily time with a fraction of a second", { kind: "daily", at: Temporal.PlainTime.from("09:30:00.5") }],
-  ["a repeated weekly day", { kind: "weekly", days: ["monday", "monday"], at: Temporal.PlainTime.from("08:30") }],
-  ["a monthly day of 32", { kind: "monthly", day: 32, at: Temporal.PlainTime.from("08:30") }],
+  ["a daily time with a fraction of a second", { kind: "daily", time: Temporal.PlainTime.from("09:30:00.5") }],
+  ["a repeated weekly day", { kind: "weekly", weekdays: ["monday", "monday"], time: Temporal.PlainTime.from("08:30") }],
+  ["a monthly day of 32", { kind: "monthly", dayOfMonth: 32, time: Temporal.PlainTime.from("08:30") }],
   [
     "a cron minute value of 60",
     { kind: "cron", minute: [{ kind: "values", values: [60] }], hour: [{ kind: "every" }], month: [{ kind: "every" }], day: { kind: "everyDay" } },

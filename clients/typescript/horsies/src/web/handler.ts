@@ -28,7 +28,7 @@ import type {
   AccessVerdict,
 } from "../native/facades/web-handler.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
-import type { ActionsSwitch, MonitoringAuthPolicy } from "./auth.ts";
+import type { ActionsSwitch, MonitoringAuthorizationPolicy } from "./auth.ts";
 import { monitoringAppOf } from "./app-facts.ts";
 import { nativeMonitoringBridge } from "./bridge.ts";
 import type { MonitoringBridge } from "./bridge.ts";
@@ -44,6 +44,9 @@ export const EVENT_HEARTBEAT_MS = 15_000;
 
 /** The header of an action request, which the core checks: a cross-site form post cannot set it. */
 export const INTENT_HEADER = "X-Horsies-Intent";
+
+/** The value of `INTENT_HEADER` that an action request sends (the core's `INTENT_VALUE`). */
+export const INTENT_VALUE = "action";
 
 /** The body of a 500 answer, as the core's actions write it. */
 export const INTERNAL_SERVER_ERROR_TEXT = "Internal Server Error";
@@ -80,7 +83,7 @@ export interface MonitoringUiOptions {
 /** The options of `createMonitoringHandler`. */
 export interface MonitoringHandlerOptions {
   /** The access policy. Required, with no default: a deployment chooses it. */
-  readonly auth: MonitoringAuthPolicy;
+  readonly authorizationPolicy: MonitoringAuthorizationPolicy;
   /** Whether the action routes run. Default `enabled`. */
   readonly actions?: ActionsSwitch;
   readonly ui?: MonitoringUiOptions;
@@ -147,7 +150,7 @@ export function handlerSettings(
 
 /** The handler that answers through `bridge` with the policy and the mount of `options`. */
 export function monitoringHandlerOver(bridge: MonitoringBridge, options: MonitoringHandlerOptions): MonitoringHandler {
-  const serving: Serving = { bridge, policy: options.auth, mount: mountOf(options.basePath ?? "/") };
+  const serving: Serving = { bridge, policy: options.authorizationPolicy, mount: mountOf(options.basePath ?? "/") };
 
   const answer = async (request: Request): Promise<Response> => serveRequest(serving, request);
 
@@ -161,7 +164,7 @@ export function monitoringHandlerOver(bridge: MonitoringBridge, options: Monitor
 /** What every request of one handler reads. */
 interface Serving {
   readonly bridge: MonitoringBridge;
-  readonly policy: MonitoringAuthPolicy;
+  readonly policy: MonitoringAuthorizationPolicy;
   readonly mount: Mount;
 }
 
@@ -275,7 +278,7 @@ type VerdictCall = { readonly kind: "verdict"; readonly verdict: "allowed" | "re
  * Ask `policy` the verdicts that `need` names, in order: `canAct` only after `canView` allowed. The
  * policy reads the request with no body (`policyRequestOf`).
  */
-export async function askPolicy(need: RouteNeed, policy: MonitoringAuthPolicy, request: Request): Promise<PolicyAnswer> {
+export async function askPolicy(need: RouteNeed, policy: MonitoringAuthorizationPolicy, request: Request): Promise<PolicyAnswer> {
   switch (need) {
     case "public":
       return answered("notAsked", "notAsked");
@@ -306,7 +309,7 @@ function policyRequestOf(request: Request): Request {
 }
 
 /** `canView`, then `canAct` when the view was allowed, both on `head`, the request with no body. */
-async function askViewThenAct(policy: MonitoringAuthPolicy, head: Request): Promise<PolicyAnswer> {
+async function askViewThenAct(policy: MonitoringAuthorizationPolicy, head: Request): Promise<PolicyAnswer> {
   const view = await verdictOf("canView", () => policy.canView(head));
 
   switch (view.kind) {
