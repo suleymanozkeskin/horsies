@@ -6,13 +6,9 @@
 //   well-formed (a lone surrogate). Both are `QUERY_REFUSED` before any call.
 // - A field that a query leaves out takes the core's default, as the Python and Rust clients do.
 
-import type { TaskStatus, WorkflowStatus } from "../_catalog/status.ts";
+import type { TaskStatus } from "../_catalog/status.ts";
 import type {
-  ErrorCategoryArg,
   FiltersArg,
-  GroupByArg,
-  SortDirectionArg,
-  SortFieldArg,
   TaskBreakdownArg,
   TaskFacetsArg,
   TaskListArg,
@@ -22,6 +18,7 @@ import type {
   WorkflowRunsArg,
 } from "../native/facades/monitoring-reads.ts";
 import { err, ok, type Result } from "../wire/result.ts";
+import type { WorkflowStatus } from "../wire/task-error.ts";
 import { queryRefused, type QueryRefused, type QueryRefusedField } from "./errors.ts";
 
 /** The first row of a task list page when the query names none (the core's `TaskListQuery::new`). */
@@ -49,22 +46,36 @@ export interface MonitoringWindow {
 }
 
 /** An error category, by its wire value. */
-export type ErrorCategory = ErrorCategoryArg;
+export type ErrorCategory = "OPERATIONAL" | "CONTRACT" | "RETRIEVAL" | "OUTCOME" | "DOMAIN";
 
 /** Which tasks the retried filter keeps: every task, or only the tasks that ran more than one attempt. */
 export type RetriedFilter = "any" | "retriedOnly";
 
 /** The sort field of the task list. */
-export type TaskSortField = SortFieldArg;
+export type TaskSortField =
+  | "enqueuedAt"
+  | "startedAt"
+  | "completedAt"
+  | "failedAt"
+  | "status"
+  | "taskName"
+  | "queueName"
+  | "priority"
+  | "retryCount"
+  | "queueSeconds"
+  | "executionSeconds";
+
+/** The order of the task list. */
+export type SortDirection = "ascending" | "descending";
 
 /** The sort of the task list. The default is `enqueuedAt`, `descending`. */
 export interface TaskSort {
   readonly field: TaskSortField;
-  readonly direction: SortDirectionArg;
+  readonly direction: SortDirection;
 }
 
 /** The column that a breakdown groups by. */
-export type TaskGroupBy = GroupByArg;
+export type TaskGroupBy = "worker" | "taskName" | "queue";
 
 /** The filters of a task read. A list that the query leaves out, or an empty list, keeps every value. */
 export interface TaskFilters {

@@ -3,5 +3,3 @@
 /// <reference lib="esnext.temporal" preserve="true" />
 
 export * from "./wire/public.ts";
-
-export * from "./monitoring/public.ts";
