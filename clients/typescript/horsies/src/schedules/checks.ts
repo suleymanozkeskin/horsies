@@ -1,40 +1,47 @@
-// The checks of one schedule at `app.schedules`. The first failing check of a schedule wins (the order of the Rust
-// client's `schedule_refusal`, then the zone):
+// The checks of one schedule at `app.schedules`, in the order of the Python client; the first failing check of a
+// schedule wins:
 //
-// 1. Every schedule: the pattern has a stored text; on a main thread, the core's rules of the pattern hold.
-// 2. An enabled schedule: the contract is in the app's `tasks` list; the queue is a queue of the app; the input encodes
-//    and reads back with the contract's input types; on a main thread, the input is at most the payload reject bound
-//    (every slot sends the same input); the time zone is an IANA zone name of the runtime; `maxCatchUpRuns` is a
-//    whole number.
+// 1. Every schedule, the checks of its fields (Python's `TaskSchedule` and `ScheduleConfig`): the pattern has a
+//    stored text and, on a main thread, keeps the core's rules; `maxCatchUpRuns` is a whole number inside its bound;
+//    no earlier schedule has its name.
+// 2. An enabled schedule, the checks before a start (Python's `_prepare_schedule`): on a main thread, the core's zone
+//    data holds the time zone; the contract is in the app's `tasks` list; the queue is a queue of the app; the input
+//    encodes and reads back with the contract's input types; on a main thread, the input is at most the payload
+//    reject bound (every slot sends the same input).
 //
-// The bounds of `maxCatchUpRuns` and of the section, and a repeated name, are rules of the core's manifest parser,
-// which the declaration runs on a main thread. A check that needs the core does not run in a worker thread: no
-// scheduler and no `check` runs there.
+// The core's manifest parser checks the whole declaration again on a main thread. A check that needs the core does
+// not run in a worker thread: no scheduler and no `check` runs there.
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
+import { MAX_CATCH_UP_RUNS_MAX, MAX_CATCH_UP_RUNS_MIN } from "../_catalog/scheduler_manifest.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
 import { refusalText } from "../codec/refusal.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import { contractRecord } from "../contract/definition.ts";
-import type { PatternCheck, RejectBound } from "../native/scheduler/addon.ts";
+import type { PatternCheck, RejectBound, TimezoneCheck } from "../native/scheduler/addon.ts";
 import type { ContractLookup, ListedTask } from "../send/send.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { DEFAULT_MAX_CATCH_UP_RUNS, DEFAULT_SCHEDULE_TIMEZONE, type DeclaredEntry } from "./entry.ts";
 import { patternRefusalText, patternText } from "./pattern.ts";
+import { checkedZone, type ZoneCheck } from "./zone.ts";
 
-/** The core rules of a check on a main thread: the pattern check and the payload bound. None in a worker thread. */
+/** The core rules of a check on a main thread: the pattern and zone checks, and the payload bound. None elsewhere. */
 export type CoreRules =
   | {
       readonly kind: "core";
       readonly checkPattern: (patternText: string) => PatternCheck;
+      readonly checkTimezone: (name: string) => TimezoneCheck;
       readonly rejectBound: RejectBound;
     }
   | { readonly kind: "noCore" };
 
 /** What the checks read from the app. */
 export type CheckContext = { readonly contracts: ContractLookup; readonly queues: QueueSetup };
+
+/** Whether an earlier schedule of the declaration has the name of a schedule. */
+export type NameUse = { readonly kind: "firstUse" } | { readonly kind: "repeats"; readonly firstIndex: number };
 
 /** The facts of each slot of an enabled schedule that passed every check. */
 export type CheckedActivation = {
@@ -52,6 +59,9 @@ export type CheckedSchedule =
   | { readonly kind: "disabled"; readonly name: string }
   | { readonly kind: "enabled"; readonly name: string; readonly activation: CheckedActivation };
 
+/** The fields of a schedule that passed the checks of every schedule. */
+type CheckedFields = { readonly patternText: string; readonly maxCatchUpRuns: number };
+
 /** The place of a schedule in a refusal: `schedules[2] daily-report`. Pure. */
 export function schedulePath(index: number, name: string): string {
   return `schedules[${String(index)}] ${name}`;
@@ -61,23 +71,61 @@ export function schedulePath(index: number, name: string): string {
 export function checkSchedule(
   context: CheckContext,
   entry: DeclaredEntry,
-  index: number,
+  placement: { readonly index: number; readonly nameUse: NameUse },
   core: CoreRules,
 ): Result<CheckedSchedule, Refusal> {
-  const path = schedulePath(index, entry.name);
-  const text = checkedPattern(entry, path, core);
+  const path = schedulePath(placement.index, entry.name);
+  const fields = checkedFields(entry, placement.nameUse, path, core);
 
-  if (!text.ok) {
-    return text;
+  if (!fields.ok) {
+    return fields;
   }
 
   if (entry.enabled === false) {
     return ok({ kind: "disabled", name: entry.name });
   }
 
-  const activation = checkedActivation(context, entry, text.value, path, core);
+  const activation = checkedActivation(context, entry, fields.value, path, core);
 
   return activation.ok ? ok({ kind: "enabled", name: entry.name, activation: activation.value }) : activation;
+}
+
+/** The checks of every schedule: the pattern, the catch-up count, the name. */
+function checkedFields(entry: DeclaredEntry, nameUse: NameUse, path: string, core: CoreRules): Result<CheckedFields, Refusal> {
+  const text = checkedPattern(entry, path, core);
+
+  if (!text.ok) {
+    return text;
+  }
+
+  const maxCatchUpRuns = boundedCount(entry.maxCatchUpRuns ?? DEFAULT_MAX_CATCH_UP_RUNS, MAX_CATCH_UP_RUNS_MIN, MAX_CATCH_UP_RUNS_MAX);
+
+  if (!maxCatchUpRuns.ok) {
+    return err(scheduleRefusal(path, `maxCatchUpRuns: ${maxCatchUpRuns.error.rule}`, maxCatchUpRuns.error.help));
+  }
+
+  switch (nameUse.kind) {
+    case "firstUse":
+      return ok({ patternText: text.value, maxCatchUpRuns: maxCatchUpRuns.value });
+    case "repeats":
+      return err(
+        scheduleRefusal(path, `name: schedules[${String(nameUse.firstIndex)}] has the name "${entry.name}"`, "give each schedule its own name"),
+      );
+    default:
+      return unreachable(nameUse, "checkedFields");
+  }
+}
+
+/** Why a count is outside its bound: the rule, and the help line. */
+export type CountOutside = { readonly rule: string; readonly help: string };
+
+/** `value` when it is a whole number from `min` to `max`, else why it is outside. Pure. */
+export function boundedCount(value: number, min: number, max: number): Result<number, CountOutside> {
+  const bound = `a whole number from ${String(min)} to ${String(max)}`;
+
+  return Number.isSafeInteger(value) && value >= min && value <= max
+    ? ok(value)
+    : err({ rule: `${String(value)} is not ${bound}`, help: `give ${bound}` });
 }
 
 /** The stored pattern text of `entry`, checked by the core's rules on a main thread. */
@@ -113,10 +161,18 @@ function checkedPattern(entry: DeclaredEntry, path: string, core: CoreRules): Re
 function checkedActivation(
   context: CheckContext,
   entry: DeclaredEntry,
-  patternJson: string,
+  fields: CheckedFields,
   path: string,
   core: CoreRules,
 ): Result<CheckedActivation, Refusal> {
+  const timezone = checkedZone(entry.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, zoneCheckOf(core), (rule) =>
+    scheduleRefusal(path, rule.message, rule.help),
+  );
+
+  if (!timezone.ok) {
+    return timezone;
+  }
+
   const listed = context.contracts.byContract(entry.task);
 
   if (listed.kind === "notListed") {
@@ -137,31 +193,29 @@ function checkedActivation(
 
   const inputJson = checkedInput(entry, listed.task, path, core);
 
-  if (!inputJson.ok) {
-    return inputJson;
+  return inputJson.ok
+    ? ok({
+        patternText: fields.patternText,
+        timezone: timezone.value,
+        catchUpMissed: entry.catchUpMissed === true,
+        maxCatchUpRuns: fields.maxCatchUpRuns,
+        task: listed.task,
+        queueName: queueName.value,
+        inputJson: inputJson.value,
+      })
+    : inputJson;
+}
+
+/** The zone check of `core`: the core's zone data on a main thread, none elsewhere. Pure. */
+function zoneCheckOf(core: CoreRules): ZoneCheck {
+  switch (core.kind) {
+    case "core":
+      return { kind: "core", check: core.checkTimezone };
+    case "noCore":
+      return core;
+    default:
+      return unreachable(core, "zoneCheckOf");
   }
-
-  const timezone = checkedTimezone(entry.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, path);
-
-  if (!timezone.ok) {
-    return timezone;
-  }
-
-  const maxCatchUpRuns = entry.maxCatchUpRuns ?? DEFAULT_MAX_CATCH_UP_RUNS;
-
-  if (!Number.isSafeInteger(maxCatchUpRuns)) {
-    return err(scheduleRefusal(path, `maxCatchUpRuns: ${String(maxCatchUpRuns)} is not a whole number`, "give a count from 1 to 10000"));
-  }
-
-  return ok({
-    patternText: patternJson,
-    timezone: timezone.value,
-    catchUpMissed: entry.catchUpMissed === true,
-    maxCatchUpRuns,
-    task: listed.task,
-    queueName: queueName.value,
-    inputJson: inputJson.value,
-  });
 }
 
 /** The queue of each slot: the schedule's queue, checked against the queue mode, else the task's queue. Pure. */
@@ -229,64 +283,6 @@ function withinRejectBound(text: string, bound: RejectBound, path: string): Resu
 
     default:
       return unreachable(bound, "withinRejectBound");
-  }
-}
-
-/** How the runtime reads a time zone text. */
-export type ZoneReading =
-  /** An IANA zone name as the runtime's zone data writes it. */
-  | { readonly kind: "zoneName" }
-  /** A UTC offset (`+05:00`): the zone of a schedule comes from an IANA name. */
-  | { readonly kind: "offset" }
-  /** A zone name in another case than the zone data's (`europe/berlin`). */
-  | { readonly kind: "otherSpelling"; readonly spelling: string }
-  /** No zone of the runtime. */
-  | { readonly kind: "unknown" };
-
-/** The start of a UTC offset text. An IANA zone name starts with a letter. */
-const OFFSET_SIGNS: readonly string[] = ["+", "-"];
-
-/**
- * How the runtime reads `name`, by `Temporal`, whose zone data `Intl` holds. Pure: reads no clock. The core checks
- * the name again with its own zone data at the scheduler start.
- */
-export function zoneReading(name: string): ZoneReading {
-  if (OFFSET_SIGNS.some((sign) => name.startsWith(sign))) {
-    return { kind: "offset" };
-  }
-
-  let zoneId: string;
-
-  try {
-    zoneId = Temporal.ZonedDateTime.from({ timeZone: name, year: 2000, month: 1, day: 1 }).timeZoneId;
-  } catch (cause) {
-    // `Temporal` refuses a zone that its data does not hold with a `RangeError`; any other throw passes on.
-    if (cause instanceof RangeError) {
-      return { kind: "unknown" };
-    }
-
-    throw cause;
-  }
-
-  return zoneId === name ? { kind: "zoneName" } : { kind: "otherSpelling", spelling: zoneId };
-}
-
-/** `name` when it is an IANA zone name of the runtime, else the refusal. Pure. */
-function checkedTimezone(name: string, path: string): Result<string, Refusal> {
-  const reading = zoneReading(name);
-  const help = 'use an IANA zone name, for example "UTC" or "Europe/Berlin"';
-
-  switch (reading.kind) {
-    case "zoneName":
-      return ok(name);
-    case "offset":
-      return err(scheduleRefusal(path, `timezone: "${name}" is a UTC offset, not a zone name`, help));
-    case "otherSpelling":
-      return err(scheduleRefusal(path, `timezone: the zone data writes "${name}" as "${reading.spelling}"`, `write "${reading.spelling}"`));
-    case "unknown":
-      return err(scheduleRefusal(path, `timezone: "${name}" is not a zone that this runtime knows`, help));
-    default:
-      return unreachable(reading, "checkedTimezone");
   }
 }
 

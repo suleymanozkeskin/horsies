@@ -2,16 +2,19 @@
 // goes to the schedules area of the refusal sink, which `check` and the scheduler start read; the worker start skips
 // it. A second call is a refusal, and the first declaration stays.
 //
-// On a main thread the declaration also runs the core's checks, with no I/O: the rules of each pattern, the payload
-// bound of each input, and the core's manifest parser over the whole declaration (the bounds of each field, a repeated
-// name), which gives the prepared scheduler that the `scheduler` command runs. In a worker thread only the checks that
-// are TypeScript code run, and no addon loads: no scheduler and no `check` runs there.
+// The section's check interval and each schedule's catch-up count and name are checked here, at their own field, in
+// every thread. On a main thread the declaration also runs the core's checks, with no I/O and with no throw: the rules
+// of each pattern, the zone data, the payload bound of each input, and the core's manifest parser over the whole
+// declaration (the backstop of the field checks), which gives the prepared scheduler that the `scheduler` command
+// runs. In a worker thread only the checks that are TypeScript code run, and no addon loads: no scheduler and no
+// `check` runs there.
 
 import { DEFAULT_QUEUE_ROUTE } from "../app/contract-list.ts";
 import type { AppContext } from "../app/context.ts";
 import { taskOptionsFacts } from "../app/core-checks.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
 import { ErrorCode } from "../_catalog/error_codes.ts";
+import { CHECK_INTERVAL_SECONDS_MAX, CHECK_INTERVAL_SECONDS_MIN } from "../_catalog/scheduler_manifest.ts";
 import type { QueueSetup } from "../config/queues.ts";
 import { raiseDefect } from "../native/call/defect.ts";
 import type {
@@ -19,20 +22,27 @@ import type {
   PatternCheck,
   SchedulerConfigFacts,
   SchedulerPreparation,
+  TimezoneCheck,
 } from "../native/scheduler/addon.ts";
-import { checkSchedulePattern, prepareScheduler, schedulerConfigFacts } from "../native/scheduler/scheduler.ts";
+import {
+  checkSchedulePattern,
+  checkScheduleTimezone,
+  prepareScheduler,
+  schedulerConfigFacts,
+} from "../native/scheduler/scheduler.ts";
 import { checkTaskOptions, storedOptionsText } from "../native/sends/sends.ts";
 import type { ListedTask } from "../send/send.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { checkSchedule, type CoreRules, scheduleRefusal } from "./checks.ts";
+import { boundedCount, checkSchedule, type CoreRules, type NameUse, scheduleRefusal } from "./checks.ts";
 import { DEFAULT_CHECK_INTERVAL_SECONDS, type DeclaredEntry, type ScheduleSection } from "./entry.ts";
 import { type SectionSettings, schedulerManifestText } from "./manifest.ts";
 
 /** The core calls of a declaration on a main thread. The addon gives them; a test gives fakes. Each is pure. */
 export interface ScheduleCoreCalls {
   checkPattern(patternText: string): PatternCheck;
+  checkTimezone(name: string): TimezoneCheck;
   configFacts(appConfigJson: string, queueNames: readonly string[]): SchedulerConfigFacts;
   /** The stored options text of a send of a listed task with no deadline. */
   optionsText(task: ListedTask): string;
@@ -68,6 +78,7 @@ export function scheduleDeclaration(context: AppContext): ScheduleDeclaration {
 /** The core calls of the addon. */
 export const NATIVE_SCHEDULE_CALLS: ScheduleCoreCalls = Object.freeze({
   checkPattern: checkSchedulePattern,
+  checkTimezone: checkScheduleTimezone,
   configFacts: schedulerConfigFacts,
   optionsText: nativeOptionsText,
   prepare: prepareScheduler,
@@ -125,7 +136,8 @@ function declarationOf(
   const settings = sectionSettings(section);
   const core = declarationCore(context, access);
   const checks = { contracts: context.send.contracts, queues: context.config.queues };
-  const checked = entries.map((entry, index) => checkSchedule(checks, entry, index, coreRules(core)));
+  const rules = coreRules(core);
+  const checked = entries.map((entry, index) => checkSchedule(checks, entry, { index, nameUse: nameUse(entries, entry.name, index) }, rules));
   const refusals = [...(settings.ok ? [] : [settings.error]), ...checked.flatMap((one) => (one.ok ? [] : [one.error]))];
   const kept = settings.ok ? settings.value : defaultSettings(section);
 
@@ -173,7 +185,12 @@ function declarationCore(context: AppContext, access: ScheduleCoreAccess): Decla
 function coreRules(core: DeclarationCore): CoreRules {
   switch (core.kind) {
     case "core":
-      return { kind: "core", checkPattern: (text) => core.calls.checkPattern(text), rejectBound: core.facts.rejectBound };
+      return {
+        kind: "core",
+        checkPattern: (text) => core.calls.checkPattern(text),
+        checkTimezone: (name) => core.calls.checkTimezone(name),
+        rejectBound: core.facts.rejectBound,
+      };
     case "noCore":
       return core;
     default:
@@ -203,19 +220,21 @@ function preparedDeclaration(section: SectionSettings, preparation: SchedulerPre
   }
 }
 
-/** The section with its defaults, or the refusal of a check interval that is not a whole number. Pure. */
+/** The section with its defaults, or the refusal of a check interval outside its bound. Pure. */
 function sectionSettings(section: ScheduleSection): Result<SectionSettings, Refusal> {
   const settings = defaultSettings(section);
+  const interval = boundedCount(settings.checkIntervalSeconds, CHECK_INTERVAL_SECONDS_MIN, CHECK_INTERVAL_SECONDS_MAX);
 
-  return Number.isSafeInteger(settings.checkIntervalSeconds)
+  return interval.ok
     ? ok(settings)
-    : err(
-        scheduleRefusal(
-          "schedules section",
-          `checkIntervalSeconds: ${String(settings.checkIntervalSeconds)} is not a whole number`,
-          "give a whole number of seconds from 1 to 60",
-        ),
-      );
+    : err(scheduleRefusal("schedules section", `checkIntervalSeconds: ${interval.error.rule}`, interval.error.help));
+}
+
+/** Whether an entry before `index` has `name`, the name of the entry at `index`. Pure. */
+function nameUse(entries: readonly DeclaredEntry[], name: string, index: number): NameUse {
+  const firstIndex = entries.findIndex((entry) => entry.name === name);
+
+  return firstIndex < index ? { kind: "repeats", firstIndex } : { kind: "firstUse" };
 }
 
 function defaultSettings(section: ScheduleSection): SectionSettings {

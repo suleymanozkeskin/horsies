@@ -39,9 +39,11 @@ bun test
 # Bun, and the zod adapter runs where a contract is checked, so the codec, wire
 # type and zod adapter tests and the stored-form tests (the vectors and the
 # corpus of Python's texts) run on Node too (`node:test`). The task child code
-# (the body adapter, the runtime, the run store) runs on Node too.
-print_step_title "Run the codec, wire type, zod adapter, child and stored-form tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
+# (the body adapter, the runtime, the run store) runs on Node too. The
+# schedule checks read time zones through the engine's Temporal (V8 on Node,
+# JavaScriptCore on Bun), so the schedule tests run on Node too.
+print_step_title "Run the codec, wire type, zod adapter, child, schedule and stored-form tests on Node"
+node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/unit/child/**/*.test.ts' 'tests/unit/schedules/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
 
 # The lint rule package (eslint-plugin/) runs in ESLint, on Node: its
 # RuleTester cases, and ESLint and tsc of TypeScript 7 on its fixture project.

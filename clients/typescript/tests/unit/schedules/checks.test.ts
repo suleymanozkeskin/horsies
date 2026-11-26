@@ -9,7 +9,7 @@ import { describe, test } from "node:test";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { areaScopes, staticCheck } from "../../../horsies/src/check/static-check.ts";
 import { scheduleDeclaration } from "../../../horsies/src/schedules/app-member.ts";
-import { zoneReading } from "../../../horsies/src/schedules/checks.ts";
+import { zoneReading } from "../../../horsies/src/schedules/zone.ts";
 import { fakeChecks } from "../app/support.ts";
 import {
   customModeApp,
@@ -122,22 +122,59 @@ describe("app.schedules: each check lands in the schedules refusal list", () => 
     assert.deepEqual(scheduleRefusals(at), []);
   });
 
-  test("a time zone that the runtime does not know, an offset, and another spelling", () => {
+  test("a time zone that the core's zone data does not hold, worded from the runtime's reading", () => {
+    const core = fakeCore();
+
     const context = declare(
       defaultModeApp(),
       [
         { name: "a", task: ping, input: {}, pattern: HOURLY, timezone: "Nope/Zone" },
         { name: "b", task: ping, input: {}, pattern: HOURLY, timezone: "+05:00" },
         { name: "c", task: ping, input: {}, pattern: HOURLY, timezone: "europe/berlin" },
+        { name: "d", task: ping, input: {}, pattern: HOURLY, timezone: "2020-01-01T00:00+01:00" },
+        { name: "e", task: ping, input: {}, pattern: HOURLY, timezone: "America/Sao_Paulo" },
       ],
-      { kind: "core", calls: fakeCore() },
+      { kind: "core", calls: core },
     );
 
     assert.deepEqual(scheduleRefusals(context), [
-      ["HRS-205", "schedules[0] a", 'schedules[0] a: timezone: "Nope/Zone" is not a zone that this runtime knows'],
+      ["HRS-205", "schedules[0] a", 'schedules[0] a: timezone: "Nope/Zone" is not an IANA zone name of the core\'s zone data'],
       ["HRS-205", "schedules[1] b", 'schedules[1] b: timezone: "+05:00" is a UTC offset, not a zone name'],
       ["HRS-205", "schedules[2] c", 'schedules[2] c: timezone: the zone data writes "europe/berlin" as "Europe/Berlin"'],
+      ["HRS-205", "schedules[3] d", 'schedules[3] d: timezone: "2020-01-01T00:00+01:00" is a UTC offset, not a zone name'],
+      [
+        "HRS-205",
+        "schedules[4] e",
+        'schedules[4] e: timezone: "America/Sao_Paulo" is not an IANA zone name of the core\'s zone data',
+      ],
     ]);
+    assert.ok(core.zones.includes("Europe/Berlin"), "the hint's spelling is checked with the core's zone data");
+  });
+
+  test("a hint whose spelling the core does not hold is no hint", () => {
+    const context = declare(
+      defaultModeApp(),
+      [{ name: "a", task: ping, input: {}, pattern: HOURLY, timezone: "utc" }],
+      { kind: "core", calls: fakeCore({ zones: [] }) },
+    );
+
+    assert.deepEqual(scheduleRefusals(context), [
+      ["HRS-205", "schedules[0] a", 'schedules[0] a: timezone: "utc" is not an IANA zone name of the core\'s zone data'],
+    ]);
+  });
+
+  test("the core's zone data decides: the four zones of the North American rules pass on every runtime", () => {
+    const names = ["EST5EDT", "CST6CDT", "MST7MDT", "PST8PDT"];
+    const core = fakeCore();
+
+    const context = declare(
+      defaultModeApp(),
+      names.map((name) => ({ name, task: ping, input: {}, pattern: HOURLY, timezone: name })),
+      { kind: "core", calls: core },
+    );
+
+    assert.deepEqual(scheduleRefusals(context), []);
+    assert.deepEqual(core.zones, names);
   });
 
   test("a pattern that the stored form cannot hold", () => {
@@ -148,7 +185,7 @@ describe("app.schedules: each check lands in the schedules refusal list", () => 
     );
 
     assert.deepEqual(scheduleRefusals(context), [
-      ["HRS-205", "schedules[0] a", "schedules[0] a: pattern.minute: 1.5 is not a whole number"],
+      ["HRS-205", "schedules[0] a", "schedules[0] a: pattern.minute: 1.5 is not a whole number from -9007199254740991 to 9007199254740991"],
     ]);
   });
 
@@ -166,30 +203,66 @@ describe("app.schedules: each check lands in the schedules refusal list", () => 
     ]);
   });
 
-  test("a catch-up count and a check interval that are not whole numbers", () => {
+  test("a catch-up count and a check interval that are not whole numbers inside their bounds", () => {
     const context = declare(
       defaultModeApp(),
-      [{ name: "a", task: ping, input: {}, pattern: HOURLY, catchUpMissed: true, maxCatchUpRuns: 2.5 }],
+      [
+        { name: "a", task: ping, input: {}, pattern: HOURLY, catchUpMissed: true, maxCatchUpRuns: 2.5 },
+        { name: "b", task: ping, input: {}, pattern: HOURLY, maxCatchUpRuns: 0 },
+        { name: "c", task: ping, input: {}, pattern: HOURLY, maxCatchUpRuns: 10_001, enabled: false },
+        { name: "d", task: ping, input: {}, pattern: HOURLY, maxCatchUpRuns: 10_000 },
+      ],
       { kind: "core", calls: fakeCore() },
       { checkIntervalSeconds: 0.5 },
     );
 
     assert.deepEqual(scheduleRefusals(context), [
-      ["HRS-205", "schedules section", "schedules section: checkIntervalSeconds: 0.5 is not a whole number"],
-      ["HRS-205", "schedules[0] a", "schedules[0] a: maxCatchUpRuns: 2.5 is not a whole number"],
+      ["HRS-205", "schedules section", "schedules section: checkIntervalSeconds: 0.5 is not a whole number from 1 to 60"],
+      ["HRS-205", "schedules[0] a", "schedules[0] a: maxCatchUpRuns: 2.5 is not a whole number from 1 to 10000"],
+      ["HRS-205", "schedules[1] b", "schedules[1] b: maxCatchUpRuns: 0 is not a whole number from 1 to 10000"],
+      ["HRS-205", "schedules[2] c", "schedules[2] c: maxCatchUpRuns: 10001 is not a whole number from 1 to 10000"],
     ]);
   });
 
-  test("a refusal of the core's manifest parser", () => {
+  test("a check interval above its bound; the bounds pass", () => {
+    const over = declare(defaultModeApp(), [], { kind: "core", calls: fakeCore() }, { checkIntervalSeconds: 61 });
+
+    assert.deepEqual(scheduleRefusals(over), [
+      ["HRS-205", "schedules section", "schedules section: checkIntervalSeconds: 61 is not a whole number from 1 to 60"],
+    ]);
+
+    for (const checkIntervalSeconds of [1, 60]) {
+      assert.deepEqual(scheduleRefusals(declare(defaultModeApp(), [], { kind: "core", calls: fakeCore() }, { checkIntervalSeconds })), []);
+    }
+  });
+
+  test("a repeated name, at the schedule that repeats it, in a worker thread too", () => {
+    const entries = [
+      { name: "a", task: ping, input: {}, pattern: HOURLY },
+      { name: "b", task: ping, input: {}, pattern: HOURLY, enabled: false },
+      { name: "a", task: ping, input: {}, pattern: HOURLY, timezone: "Nope/Zone" },
+      { name: "b", task: ping, input: {}, pattern: HOURLY },
+    ] as const;
+
+    const expected = [
+      ["HRS-205", "schedules[2] a", 'schedules[2] a: name: schedules[0] has the name "a"'],
+      ["HRS-205", "schedules[3] b", 'schedules[3] b: name: schedules[1] has the name "b"'],
+    ];
+
+    assert.deepEqual(scheduleRefusals(declare(defaultModeApp(), entries, { kind: "core", calls: fakeCore() })), expected);
+    assert.deepEqual(scheduleRefusals(declare(defaultModeApp(), entries, { kind: "noCore" })), expected);
+  });
+
+  test("a refusal of the core's manifest parser, the backstop of the checks above", () => {
     const core = fakeCore({
-      preparation: { kind: "manifestRefused", fieldPath: "schedules[1].name", cause: "the name of an earlier schedule repeats" },
+      preparation: { kind: "manifestRefused", fieldPath: "schedules[1].activation", cause: "a rule of the parser" },
     });
 
     const context = declare(
       defaultModeApp(),
       [
         { name: "a", task: ping, input: {}, pattern: HOURLY },
-        { name: "a", task: ping, input: {}, pattern: HOURLY },
+        { name: "b", task: ping, input: {}, pattern: HOURLY },
       ],
       { kind: "core", calls: core },
     );
@@ -198,7 +271,7 @@ describe("app.schedules: each check lands in the schedules refusal list", () => 
       [
         "HRS-205",
         "schedules",
-        "schedules: the core's scheduler manifest parser refuses schedules[1].name: the name of an earlier schedule repeats",
+        "schedules: the core's scheduler manifest parser refuses schedules[1].activation: a rule of the parser",
       ],
     ]);
     assert.deepEqual(scheduleDeclaration(context), {
@@ -223,24 +296,25 @@ describe("app.schedules: each check lands in the schedules refusal list", () => 
 });
 
 describe("app.schedules: the order, the disabled schedules and the threads", () => {
-  test("the first failing check of a schedule wins; every schedule is checked", () => {
+  test("the first failing check of a schedule wins, in Python's order; every schedule is checked", () => {
     const context = declare(
       defaultModeApp(),
       [
         { name: "a", task: unlisted, input: {}, pattern: HOURLY, timezone: "Nope/Zone" },
-        { name: "b", task: ping, input: {}, pattern: { kind: "monthly", day: 0.5, at: Temporal.PlainTime.from("08:00") }, timezone: "Nope/Zone" },
+        { name: "b", task: unlisted, input: {}, pattern: HOURLY },
+        { name: "c", task: ping, input: {}, pattern: { kind: "monthly", day: 0.5, at: Temporal.PlainTime.from("08:00") }, timezone: "Nope/Zone" },
       ],
       { kind: "core", calls: fakeCore() },
     );
 
     assert.deepEqual(
-      scheduleRefusals(context).map(([code, path]) => [code, path]),
+      scheduleRefusals(context).map(([code, path, message]) => [code, path, message.replace(/^[^:]+: /, "").split(":")[0]]),
       [
-        ["HRS-300", "schedules[0] a"],
-        ["HRS-205", "schedules[1] b"],
+        ["HRS-205", "schedules[0] a", "timezone"],
+        ["HRS-300", "schedules[1] b", "the task unlisted is not in the tasks list of this app"],
+        ["HRS-205", "schedules[2] c", "pattern.day"],
       ],
     );
-    assert.match(scheduleRefusals(context)[1]?.[2] ?? "", /pattern\.day: 0\.5 is not a whole number$/);
   });
 
   test("a disabled schedule needs no listed task, queue or input; its pattern is checked", () => {
@@ -275,10 +349,18 @@ describe("app.schedules: the order, the disabled schedules and the threads", () 
     assert.equal(scheduleDeclaration(context).kind, "declared");
   });
 
-  test("in a worker thread no core check runs: no pattern rule, no payload bound, no scheduler", () => {
+  test("in a worker thread no core check runs: no pattern rule, no zone, no payload bound, no scheduler", () => {
     const context = declare(
       defaultModeApp(),
-      [{ name: "nightly", task: report, input: { format: "x".repeat(10_000) }, pattern: { kind: "hourly", minute: 60 } }],
+      [
+        {
+          name: "nightly",
+          task: report,
+          input: { format: "x".repeat(10_000) },
+          pattern: { kind: "hourly", minute: 60 },
+          timezone: "Nope/Zone",
+        },
+      ],
       { kind: "noCore" },
     );
 
@@ -328,5 +410,10 @@ describe("zoneReading", () => {
     assert.deepEqual(zoneReading("-03:00"), { kind: "offset" });
     assert.deepEqual(zoneReading("utc"), { kind: "otherSpelling", spelling: "UTC" });
     assert.deepEqual(zoneReading("Nope/Zone"), { kind: "unknown" });
+  });
+
+  test("an offset inside a date-time text reads as an offset", () => {
+    assert.deepEqual(zoneReading("2020-01-01T00:00+01:00"), { kind: "offset" });
+    assert.deepEqual(zoneReading("2020-01-01T00:00-05:00"), { kind: "offset" });
   });
 });

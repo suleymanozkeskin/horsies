@@ -82,9 +82,25 @@ export const FAKE_SCHEDULER: NativePreparedScheduler = Object.freeze({
   requestStop: (): NativeEnvelope<undefined> => ({ kind: "value", value: undefined }),
 });
 
-/** The scripted answers of the fake core calls. Each answer left out accepts. */
+/**
+ * The zones of the fake core's zone data: names of the core's chrono-tz table, among them the four zones that the
+ * zone data of Bun 1.4 does not hold (`EST5EDT`, `CST6CDT`, `MST7MDT`, `PST8PDT`).
+ */
+export const FAKE_CORE_ZONES: readonly string[] = [
+  "UTC",
+  "Europe/Berlin",
+  "Asia/Calcutta",
+  "US/Eastern",
+  "EST5EDT",
+  "CST6CDT",
+  "MST7MDT",
+  "PST8PDT",
+];
+
+/** The scripted answers of the fake core calls. Each answer left out accepts; the zones are `FAKE_CORE_ZONES`. */
 export type CoreScript = {
   readonly pattern?: PatternCheck;
+  readonly zones?: readonly string[];
   readonly rejectBound?: RejectBound;
   readonly retainRerunInput?: boolean;
   readonly preparation?: SchedulerPreparation;
@@ -93,6 +109,7 @@ export type CoreScript = {
 /** A fake of the core calls of a declaration, with the recorded arguments of each call. */
 export type FakeCore = ScheduleCoreCalls & {
   readonly patterns: string[];
+  readonly zones: string[];
   readonly queueNames: (readonly string[])[];
   readonly manifests: string[];
 };
@@ -100,13 +117,21 @@ export type FakeCore = ScheduleCoreCalls & {
 /** The fake core calls of `script`: the custom queues have the priority 50 and 1 by name, the default queue none. */
 export function fakeCore(script: CoreScript = {}): FakeCore {
   const patterns: string[] = [];
+  const zones: string[] = [];
   const queueNames: (readonly string[])[] = [];
   const manifests: string[] = [];
+  const known = new Set(script.zones ?? FAKE_CORE_ZONES);
 
   return {
     patterns,
+    zones,
     queueNames,
     manifests,
+    checkTimezone: (name) => {
+      zones.push(name);
+
+      return known.has(name) ? "known" : "unknown";
+    },
     checkPattern: (text) => {
       patterns.push(text);
 

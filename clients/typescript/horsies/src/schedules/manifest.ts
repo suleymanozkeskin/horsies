@@ -4,7 +4,7 @@
 // options text, the retention class key of a send that chooses none, and the rerun-input default of the config.
 //
 // The builder writes the document with the generated `schedulerManifestToWire` and the manifest text writer; the
-// core's parser checks every bound once (`prepareScheduler`): the check interval, the catch-up count, the pattern, a
+// core's parser checks every bound again (`prepareScheduler`): the check interval, the catch-up count, the pattern, a
 // repeated name.
 
 import {
