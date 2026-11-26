@@ -94,6 +94,25 @@ describe("apiReport", () => {
     expect(report?.ok && report.value.forgotten[0]?.text).toContain('"Hidden"');
   });
 
+  test("a global type of the runtime, the Fetch types of the web handler, is named in the report with no error", () => {
+    const index =
+      "export type Handler = (request: Request) => Promise<Response>;\nexport declare function stop(signal: AbortSignal): void;\n";
+    const built = declarationPackage("fetch-types", index);
+    const entry = built.entryPoints[0];
+    const report = entry === undefined ? undefined : apiReport(built, entry, built.folder);
+
+    expect(report?.ok && report.value.forgotten).toEqual([]);
+    expect(report?.ok && report.value.text).toContain("export type Handler = (request: Request) => Promise<Response>;");
+  });
+
+  test("ExtractorThrew: a type of the DOM lib only, which API Extractor cannot follow, does not pass the gate", () => {
+    const built = declarationPackage("dom-only", "export declare const root: HTMLElement;\n");
+    const entry = built.entryPoints[0];
+    const report = entry === undefined ? undefined : apiReport(built, entry, built.folder);
+
+    expect(report?.ok === false && report.error.kind).toBe("ExtractorThrew");
+  });
+
   test("ExtractorErrors: an error-level message of API Extractor (an internal name without an underscore)", () => {
     const built = declarationPackage("refused", "/** @internal */\nexport declare const count: number;\n");
     const entry = built.entryPoints[0];
