@@ -341,21 +341,22 @@ fn unavailable_of(request: &ChildSpecRequest, failure: CallbackFailure) -> Child
             message,
         } => package_defect(
             request,
-            format!("the build wrapper of call {call_id} threw {name}: {message}"),
+            &format!("the build wrapper of call {call_id} threw {name}: {message}"),
         ),
-        CallbackFailure::Panicked { cause } => {
-            package_defect(request, format!("the read of the answer panicked: {cause}"))
-        }
+        CallbackFailure::Panicked { cause } => package_defect(
+            request,
+            &format!("the read of the answer panicked: {cause}"),
+        ),
         CallbackFailure::AnswerRefused { cause } => package_defect(
             request,
-            format!("the answer does not read as a child spec answer: {cause}"),
+            &format!("the answer does not read as a child spec answer: {cause}"),
         ),
         CallbackFailure::NodeApiRefused { status } => {
-            package_defect(request, format!("Node-API refused the call with {status}"))
+            package_defect(request, &format!("Node-API refused the call with {status}"))
         }
         CallbackFailure::OnJavaScriptThread => package_defect(
             request,
-            "the core asked for the build on the JavaScript thread, which must run it".to_owned(),
+            "the core asked for the build on the JavaScript thread, which must run it",
         ),
     }
 }
@@ -384,7 +385,7 @@ fn spec_of_answer(
                 Ok(spec) => Ok(ClientChildSpec::Built(spec)),
                 Err(refused) => Err(package_defect(
                     request,
-                    format!("the core refuses the built spec data: {refused}"),
+                    &format!("the core refuses the built spec data: {refused}"),
                 )),
             }
         }
@@ -416,7 +417,7 @@ fn spec_of_answer(
             Err(unknown) => {
                 return Err(package_defect(
                     request,
-                    format!(
+                    &format!(
                         "the build failed with the code {:?}, which is not a code of the core's \
                          catalog",
                         unknown.text
@@ -482,7 +483,7 @@ fn build_raised(request: &ChildSpecRequest, cause: String) -> ChildSpecUnavailab
 
 /// A defect of the package in the build of `request`: `Raised` with the
 /// cause, and one ERROR record.
-fn package_defect(request: &ChildSpecRequest, cause: String) -> ChildSpecUnavailable {
+fn package_defect(request: &ChildSpecRequest, cause: &str) -> ChildSpecUnavailable {
     let raised = build_raised(request, format!("{cause} (a defect of the package)"));
     tracing::error!("{raised}");
     raised
