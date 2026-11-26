@@ -8,6 +8,7 @@ import type {
   LiveCheckOutcome,
   LogBacklog,
   NativePreparedWorker,
+  SeatIsolateMemory,
   WorkerAddon,
   WorkerBootCauseName,
   WorkerFailCauseName,
@@ -38,6 +39,7 @@ export const preparedWorkerMatches: Mutual<Generated.PreparedWorker, NativePrepa
 
 export const listenAddressMatches: Mutual<Generated.ListenAddressCheck, ListenAddressCheck> = true;
 export const preparationMatches: Mutual<Generated.WorkerPreparation, WorkerPreparation> = true;
+export const seatIsolateMemoryMatches: Mutual<Generated.SeatIsolateMemory, SeatIsolateMemory> = true;
 export const bootCauseMatches: Mutual<Generated.WorkerBootCauseName, WorkerBootCauseName> = true;
 export const failCauseMatches: Mutual<Generated.WorkerFailCauseName, WorkerFailCauseName> = true;
 export const runEndedMatches: Mutual<Generated.WorkerRunEnded, WorkerRunEnded> = true;
