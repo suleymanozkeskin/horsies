@@ -1,7 +1,7 @@
 ---
 title: Health Reads
 section: python
-summary: The health methods of the Python app - database and worker pings, worker state snapshots, and the execution class coverage and report - with their signatures and result types.
+summary: The health methods of the Python app - database and worker pings, worker state snapshots, the stale and expired task lists, and the execution class coverage and report - with their signatures and result types.
 related: [worker-health, broker-methods, ../rust/monitoring/health-reads]
 tags: [monitoring, health, liveness, worker, api]
 ---
@@ -38,18 +38,29 @@ else:
 ### Ping the Workers
 
 ```python
-result = await app.ping_workers_async(timeout_seconds=2.0)
+result = await app.ping_workers_async(wait_ms=2_000)
 if is_ok(result):
     for pong in result.ok_value:
         print(f"{pong.worker_id} on {pong.hostname}:{pong.pid} — {pong.round_trip_ms:.1f} ms")
 ```
 
-`min_responses=1` is a fast liveness gate:
+`MinResponsesAtLeast(1)` is a fast liveness gate:
 
 ```python
+from horsies import MinResponsesAtLeast
+
 # Returns on the first pong (milliseconds when the fleet is healthy).
-result = await app.ping_workers_async(min_responses=1, timeout_seconds=2.0)
+result = await app.ping_workers_async(min_responses=MinResponsesAtLeast(1), wait_ms=2_000)
 healthy = is_ok(result) and len(result.ok_value) >= 1
+```
+
+`PingTargetWorker(worker_id)` pings one worker and returns on its reply:
+
+```python
+from horsies import PingTargetWorker
+
+result = await app.ping_workers_async(target=PingTargetWorker("worker-uuid"), wait_ms=2_000)
+answered = is_ok(result) and len(result.ok_value) == 1
 ```
 
 ### Read the Worker States
@@ -110,11 +121,40 @@ if is_ok(result):
 Read the snapshots of one worker, newest first:
 
 ```python
-history = await app.get_worker_state_history_async("worker-uuid", limit=20)
+from horsies import WorkerHistoryLimitNewest
+
+history = await app.get_worker_state_history_async(
+    "worker-uuid", limit=WorkerHistoryLimitNewest(20),
+)
 if is_ok(history):
     for snap in history.ok_value:
         print(f"{snap.snapshot_at}: cpu={snap.cpu_percent}% mem={snap.memory_usage_mb}MB")
 ```
+
+### List the Stale and Expired Tasks
+
+A stale task is RUNNING, and its latest runner heartbeat, or its start when it has none, is older than the threshold. An expired task is PENDING past its `good_until`. Both reads return at most `TASK_LIST_ROW_BOUND` (10,000) rows:
+
+```python
+from horsies import BoundedTaskListComplete, BoundedTaskListTruncated, is_ok
+
+result = await app.get_stale_tasks_async(threshold_minutes=5)
+if is_ok(result):
+    match result.ok_value:
+        case BoundedTaskListComplete(rows=rows):
+            pass
+        case BoundedTaskListTruncated(rows=rows, bound=bound):
+            print(f"the first {bound} stale tasks; more match")
+    for row in rows:
+        print(f"{row.task_id} {row.task_name} on {row.worker_hostname}: last beat {row.last_heartbeat_at}")
+
+expired = await app.get_expired_tasks_async()
+if is_ok(expired):
+    for row in expired.ok_value.rows:
+        print(f"{row.task_id} {row.task_name}: expired {row.expired_for} ago")
+```
+
+The reads do not change the tasks. The reaper recovers stale tasks; no worker claims an expired task.
 
 ### Check the Class Coverage
 
@@ -158,7 +198,7 @@ A worker that `list_worker_states_async` lists and `ping_workers_async` does not
 
 ```python
 states = await app.list_worker_states_async()
-pongs = await app.ping_workers_async(timeout_seconds=2.0)
+pongs = await app.ping_workers_async(wait_ms=2_000)
 if is_ok(states) and is_ok(pongs):
     known = {s.worker_id for s in states.ok_value}
     responsive = {p.worker_id for p in pongs.ok_value}
@@ -173,15 +213,15 @@ if is_ok(states) and is_ok(pongs):
 
 **Returns:** `Ok(DatabasePing)` with `latency_ms: float`; `Err` with code `DB_PING_FAILED` on failure.
 
-### `ping_workers_async(*, target_worker_id: str | None = None, timeout_seconds: float = 2.0, min_responses: int | None = None) -> BrokerResult[list[WorkerPong]]`
+### `ping_workers_async(*, target: PingTarget = PingTargetEveryWorker(), wait_ms: int = 2_000, min_responses: MinResponses = MinResponsesFullWindow()) -> BrokerResult[list[WorkerPong]]`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `target_worker_id` | `str \| None` | `None` | `None` sends the ping to all workers; a value pings one worker and returns on its reply |
-| `timeout_seconds` | `float` | `2.0` | The collection window; must be positive |
-| `min_responses` | `int \| None` | `None` | Return as soon as this many distinct workers reply. `None` waits the full window. Must be `>= 1` when set |
+| `target` | `PingTargetEveryWorker() \| PingTargetWorker(worker_id)` | `PingTargetEveryWorker()` | `PingTargetEveryWorker()` sends the ping to all workers; `PingTargetWorker(worker_id)` pings one worker and returns on its reply |
+| `wait_ms` | `int` | `2_000` | The collection window, in milliseconds; 1 to 2**64 - 1 |
+| `min_responses` | `MinResponsesFullWindow() \| MinResponsesAtLeast(count)` | `MinResponsesFullWindow()` | `MinResponsesAtLeast(count)` returns as soon as `count` distinct workers reply; `count` is 1 or more. `MinResponsesFullWindow()` waits the full window |
 
-**Returns:** `Ok(list[WorkerPong])`: one entry per distinct worker that replied, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `INVALID_INPUT` on a `timeout_seconds` that is not positive or a `min_responses` below 1; `Err` with code `WORKER_PING_FAILED` on a reply-channel failure.
+**Returns:** `Ok(list[WorkerPong])`: one entry per distinct worker that replied, possibly empty. Each `WorkerPong` has `worker_id`, `hostname`, `pid`, `round_trip_ms`. `Err` with code `INVALID_INPUT` on a `wait_ms` that is not an `int` or is out of range, or a `count` below 1; `Err` with code `WORKER_PING_FAILED` on a reply-channel failure.
 
 ### `list_worker_states_async() -> BrokerResult[list[WorkerStateSnapshot]]`
 
@@ -191,14 +231,26 @@ if is_ok(states) and is_ok(pongs):
 
 **Returns:** `Ok(WorkerStateSnapshot)`, `Ok(None)` if the worker is unknown, or `Err(MONITORING_QUERY_FAILED)`.
 
-### `get_worker_state_history_async(worker_id: str, *, limit: int | None = None) -> BrokerResult[list[WorkerStateSnapshot]]`
+### `get_worker_state_history_async(worker_id: str, *, limit: WorkerHistoryLimit = WorkerHistoryLimitAllRetained()) -> BrokerResult[list[WorkerStateSnapshot]]`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `worker_id` | `str` | — | Worker instance id |
-| `limit` | `int \| None` | `None` | Max rows; `None` returns all retained rows. Must be positive when set |
+| `limit` | `WorkerHistoryLimitAllRetained() \| WorkerHistoryLimitNewest(count)` | `WorkerHistoryLimitAllRetained()` | `WorkerHistoryLimitAllRetained()` returns all retained rows; `WorkerHistoryLimitNewest(count)` returns the newest `count` rows. `count` is 1 or more |
 
-**Returns:** `Ok(list[WorkerStateSnapshot])`, newest first; `Err(INVALID_INPUT)` on a `limit` that is not positive; `Err(MONITORING_QUERY_FAILED)` on a query failure.
+**Returns:** `Ok(list[WorkerStateSnapshot])`, newest first; `Err(INVALID_INPUT)` on a `count` that is not positive; `Err(MONITORING_QUERY_FAILED)` on a query failure.
+
+### `get_stale_tasks_async(threshold_minutes: int) -> BrokerResult[BoundedTaskList[StaleTaskRow]]`
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `threshold_minutes` | `int` | Heartbeat age after which a RUNNING task is stale: whole minutes from 0 to 525,600 (one year) |
+
+**Returns:** `Ok(BoundedTaskListComplete(rows))` with every stale task, or `Ok(BoundedTaskListTruncated(rows, bound))` with the first 10,000 when more match. Rows come ordered by the latest heartbeat, rows with none first, then by task id. `Err(INVALID_INPUT)` on a `threshold_minutes` that is not an `int` from 0 to 525,600; nothing is read. `Err(MONITORING_QUERY_FAILED)` on a query failure.
+
+### `get_expired_tasks_async() -> BrokerResult[BoundedTaskList[ExpiredTaskRow]]`
+
+**Returns:** `Ok(BoundedTaskListComplete(rows))` with every PENDING task past its `good_until`, or `Ok(BoundedTaskListTruncated(rows, bound))` with the first 10,000 when more match. Rows come ordered by `good_until`, oldest first, then by task id. `Err(MONITORING_QUERY_FAILED)` on a query failure.
 
 ### `get_class_coverage_async() -> BrokerResult[ClassCoverage]`
 
@@ -214,6 +266,10 @@ if is_ok(states) and is_ok(pongs):
 |------|--------|
 | `DatabasePing` | `latency_ms: float` |
 | `WorkerPong` | `worker_id: str`, `hostname: str`, `pid: int`, `round_trip_ms: float` |
+| `StaleTaskRow` | `task_id: UUID`, `task_name: str`, `worker_hostname: str \| None`, `worker_pid: int \| None`, `worker_process_name: str \| None`, `started_at: datetime`, `last_heartbeat_at: datetime \| None` (`None` when the task has no runner heartbeat since its start) |
+| `ExpiredTaskRow` | `task_id: UUID`, `task_name: str`, `queue_name: str`, `priority: int`, `sent_at: datetime`, `enqueued_at: datetime`, `good_until: datetime`, `expired_for: timedelta` (on the database clock) |
+| `BoundedTaskListComplete` | `rows: tuple[Row, ...]`: every matching row |
+| `BoundedTaskListTruncated` | `rows: tuple[Row, ...]`, `bound: int`: the first `bound` matching rows; more rows match |
 | `ClassCoverage` | `checked_at: datetime`, `live_workers: int`, `streams: tuple[StreamCoverage, ...]` |
 | `StreamCoverage` | `queue_name: str`, `execution: Execution`, `state: StreamServed \| StreamWithoutCapacity \| StreamUnserved` |
 | `StreamServed` | `workers: int`, `capacity: int` |

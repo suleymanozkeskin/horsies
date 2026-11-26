@@ -33,6 +33,15 @@ pub enum PingTarget {
     Worker(String),
 }
 
+/// When a ping returns before its wait ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MinResponses {
+    /// Wait the full window and list every worker that replied.
+    FullWindow,
+    /// Return as soon as this many distinct workers replied.
+    AtLeast(NonZeroUsize),
+}
+
 /// How many state snapshots of a worker a history read returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerHistoryLimit {
@@ -54,30 +63,30 @@ impl Horsies {
     }
 
     /// Ping the workers and collect the distinct replies by worker id,
-    /// until `target` replied, `min_responses` workers replied, or
-    /// `timeout` passed. A worker that is in `list_worker_states` and not
-    /// here did not answer.
+    /// until `target` replied, `min_responses` workers replied, or `wait`
+    /// passed. A worker that is in `list_worker_states` and not here did not
+    /// answer.
     ///
-    /// Errors: `INVALID_INPUT` for a zero `timeout`, with no statement;
+    /// Errors: `INVALID_INPUT` for a zero `wait`, with no statement;
     /// `LISTENER_DISABLED` for an app whose schema mode has no listener;
     /// `WORKER_PING_FAILED`.
     pub async fn ping_workers(
         &self,
         target: PingTarget,
-        timeout: Duration,
-        min_responses: Option<NonZeroUsize>,
+        wait: Duration,
+        min_responses: MinResponses,
     ) -> Result<Vec<WorkerPong>, BrokerOperationError> {
         let target_worker_id = match &target {
             PingTarget::EveryWorker => None,
             PingTarget::Worker(worker_id) => Some(worker_id.as_str()),
         };
+        let min_responses = match min_responses {
+            MinResponses::FullWindow => None,
+            MinResponses::AtLeast(count) => Some(count.get()),
+        };
         self.health_broker(BrokerOperationFailedCode::WorkerPingFailed, "ping_workers")
             .await?
-            .ping_workers(
-                target_worker_id,
-                timeout,
-                min_responses.map(NonZeroUsize::get),
-            )
+            .ping_workers(target_worker_id, wait, min_responses)
             .await
     }
 

@@ -77,7 +77,7 @@ class Health(Enum):
     PINGED = 'pinged'
     """After the actions: `ping_database`; `ping_workers` until each worker
     of the scenario answered, at most `PING_ATTEMPTS` pings of
-    `PING_WINDOW_S` (`send.py`); then a ping of the first worker that
+    `PING_WAIT_MS` (`send.py`); then a ping of the first worker that
     answered, by its id. The send process prints one ping line with the
     counts of the answers."""
 

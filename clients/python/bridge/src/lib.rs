@@ -320,8 +320,12 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<operations::monitoring_reads::WorkflowRunsQuery>()?;
     module.add_class::<operations::monitoring_reads::MonitoringJson>()?;
     module.add_class::<operations::monitoring_reads::TaskDetailAbsent>()?;
-    module.add_class::<operations::task_lists::TaskListComplete>()?;
-    module.add_class::<operations::task_lists::TaskListTruncated>()?;
+    module.add_class::<operations::task_lists::StaleTaskRecord>()?;
+    module.add_class::<operations::task_lists::ExpiredTaskRecord>()?;
+    module.add_class::<operations::task_lists::StaleTaskListComplete>()?;
+    module.add_class::<operations::task_lists::StaleTaskListTruncated>()?;
+    module.add_class::<operations::task_lists::ExpiredTaskListComplete>()?;
+    module.add_class::<operations::task_lists::ExpiredTaskListTruncated>()?;
     module.add_class::<operations::worker_ping::WorkerPongRecord>()?;
     module.add_class::<operations::worker_ping::WorkerPongsRecord>()?;
     module.add_class::<operations::worker_reads::ResourceShortageRecord>()?;

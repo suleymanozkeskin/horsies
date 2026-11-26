@@ -36,9 +36,9 @@ The worker ping sends a ping to the workers and collects the replies. A reply pr
 
 The ping stops at the first of these conditions:
 
-- **A minimum number of replies:** it returns as soon as that many distinct workers replied. One reply is a fast liveness gate: a healthy fleet answers in milliseconds, and only a degraded fleet waits for the full timeout. This removes the latency floor of a high-frequency `/health` probe.
+- **A minimum number of replies:** it returns as soon as that many distinct workers replied. One reply is a fast liveness gate: a healthy fleet answers in milliseconds, and only a degraded fleet waits for the full wait. This removes the latency floor of a high-frequency `/health` probe.
 - **A target worker:** it returns on the first reply of that worker.
-- **The timeout:** with no target and no minimum, it waits the full timeout and lists every worker that replied. The number of live workers is not known in advance.
+- **The wait:** with no target and no minimum, it waits the full wait and lists every worker that replied. The number of live workers is not known in advance.
 
 ## What is each worker doing?
 

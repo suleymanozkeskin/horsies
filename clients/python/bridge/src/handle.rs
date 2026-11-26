@@ -1574,14 +1574,36 @@ impl CoreHandle {
 
     /// The RUNNING tasks whose latest runner beat, or their start when they
     /// have no beat, is older than `threshold_minutes`
-    /// (`horsies_list_stale_tasks`): `TaskListComplete`,
-    /// `TaskListTruncated`, or the generated broker error class with `INVALID_INPUT` or
-    /// `MONITORING_QUERY_FAILED`. The threshold follows Python's rule: a
-    /// `bool`, a value that is not an `int`, or one outside 0 to 525,600
-    /// minutes is `INVALID_INPUT` in a future that is already done, before
-    /// any core call. Reads only, in one statement. Awaitable only: its
-    /// caller, `PostgresBroker.get_stale_tasks`, is a coroutine. A cancelled
-    /// await drops the read.
+    /// (`horsies_list_stale_tasks`): `StaleTaskListComplete`,
+    /// `StaleTaskListTruncated`, or the generated broker error class with
+    /// `INVALID_INPUT` or `MONITORING_QUERY_FAILED`. The threshold follows
+    /// Python's rule: a `bool`, a value that is not an `int`, or one outside 0
+    /// to 525,600 minutes is `INVALID_INPUT` at once, before any core call.
+    /// Reads only, in one statement; a caller that leaves drops the read.
+    fn stale_tasks(
+        &self,
+        py: Python<'_>,
+        threshold_minutes: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let threshold = match stale_threshold(threshold_minutes)? {
+            Ok(threshold) => threshold,
+            Err(refused) => {
+                return BrokerFailure::of_operation_error("get_stale_tasks", refused.error())
+                    .into_py_any(py)
+            }
+        };
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.stale_tasks",
+            CallKind::Read,
+            stale_tasks_operation(self.connection(), threshold),
+        )
+    }
+
+    /// The awaitable form of `stale_tasks`: a refused threshold answers in a
+    /// future that is already done. A cancelled await drops the read.
     fn stale_tasks_async<'py>(
         &self,
         py: Python<'py>,
@@ -1607,11 +1629,23 @@ impl CoreHandle {
     }
 
     /// The PENDING tasks whose `good_until` passed before a worker took them
-    /// (`horsies_list_expired_tasks`): `TaskListComplete`,
-    /// `TaskListTruncated`, or the generated broker error class with
-    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement. Awaitable
-    /// only: its caller, `PostgresBroker.get_expired_tasks`, is a coroutine.
-    /// A cancelled await drops the read.
+    /// (`horsies_list_expired_tasks`): `ExpiredTaskListComplete`,
+    /// `ExpiredTaskListTruncated`, or the generated broker error class with
+    /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller that
+    /// leaves drops the read.
+    fn expired_tasks(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let core = checked_core(py)?;
+        call_blocking(
+            py,
+            core,
+            "CoreHandle.expired_tasks",
+            CallKind::Read,
+            expired_tasks_operation(self.connection()),
+        )
+    }
+
+    /// The awaitable form of `expired_tasks`. A cancelled await drops the
+    /// read.
     fn expired_tasks_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
@@ -1632,22 +1666,21 @@ impl CoreHandle {
     /// no listener, answers at once, before any core call or connect. Sends
     /// one NOTIFY; writes no row. A caller that leaves drops the wait and the
     /// reply subscription. The call is bounded by the window plus the bound
-    /// of a blocking call, and not bounded for an infinite window
-    /// (`ping_wait_bound`); signals are checked every 100 ms.
-    #[pyo3(signature = (*, target_worker_id, timeout_seconds, min_responses))]
+    /// of a blocking call (`ping_wait_bound`); signals are checked every
+    /// 100 ms.
+    #[pyo3(signature = (*, target_worker_id, wait_ms, min_responses))]
     fn ping_workers(
         &self,
         py: Python<'_>,
         target_worker_id: &Bound<'_, PyAny>,
-        timeout_seconds: &Bound<'_, PyAny>,
+        wait_ms: &Bound<'_, PyAny>,
         min_responses: &Bound<'_, PyAny>,
     ) -> PyResult<Py<PyAny>> {
         let listener = self.connection().lazy_handle().listener();
-        let request =
-            match ping_request(target_worker_id, timeout_seconds, min_responses, listener)? {
-                Ok(request) => request,
-                Err(refused) => return refused.into_py_any(py),
-            };
+        let request = match ping_request(target_worker_id, wait_ms, min_responses, listener)? {
+            Ok(request) => request,
+            Err(refused) => return refused.into_py_any(py),
+        };
         let core = checked_core(py)?;
         let bound = ping_wait_bound(request.window);
         call_blocking_within(
@@ -1663,20 +1696,19 @@ impl CoreHandle {
     /// The awaitable form of `ping_workers`: a refused argument, or a handle
     /// with no listener, answers in a future that is already done. A
     /// cancelled await drops the wait and the reply subscription.
-    #[pyo3(signature = (*, target_worker_id, timeout_seconds, min_responses))]
+    #[pyo3(signature = (*, target_worker_id, wait_ms, min_responses))]
     fn ping_workers_async<'py>(
         &self,
         py: Python<'py>,
         target_worker_id: &Bound<'_, PyAny>,
-        timeout_seconds: &Bound<'_, PyAny>,
+        wait_ms: &Bound<'_, PyAny>,
         min_responses: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let listener = self.connection().lazy_handle().listener();
-        let request =
-            match ping_request(target_worker_id, timeout_seconds, min_responses, listener)? {
-                Ok(request) => request,
-                Err(refused) => return done_future(py, refused),
-            };
+        let request = match ping_request(target_worker_id, wait_ms, min_responses, listener)? {
+            Ok(request) => request,
+            Err(refused) => return done_future(py, refused),
+        };
         let core = checked_core(py)?;
         call_async(
             py,

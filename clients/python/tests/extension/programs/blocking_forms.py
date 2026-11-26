@@ -49,8 +49,12 @@ from tests.extension.programs.support import database_url, manifest_json
 UNREACHABLE_URL: Final = 'postgresql://extension@127.0.0.1:1/never_connected'
 """A database that refuses every connect at once."""
 
-PING_WINDOW_S: Final = 0.2
-"""The reply window of a ping; no worker runs, so no reply comes."""
+PING_WAIT_MS: Final = 200
+"""The reply window of a ping, in milliseconds; no worker runs, so no reply
+comes."""
+
+STALE_THRESHOLD_MINUTES: Final = 1
+"""The threshold of the stale list."""
 
 WORKFLOW_NAME: Final = 'tests.extension.blocking_forms'
 OTHER_WORKFLOW_NAME: Final = 'tests.extension.blocking_forms.other'
@@ -146,6 +150,16 @@ def describe(outcome: object) -> JsonValue:
             return [name, live_workers, len(streams)]
         case core.ClassReportRecord(streams=streams, workers=workers):
             return [name, len(streams), len(workers)]
+        case (
+            core.StaleTaskListComplete(rows=rows)
+            | core.StaleTaskListTruncated(rows=rows)
+        ):
+            return [name, len(rows)]
+        case (
+            core.ExpiredTaskListComplete(rows=rows)
+            | core.ExpiredTaskListTruncated(rows=rows)
+        ):
+            return [name, len(rows)]
         case _:
             return [name]
 
@@ -238,7 +252,8 @@ def _absent_steps(handle: core.CoreHandle, workflow_id: uuid.UUID) -> list[Step]
 
 
 def _monitoring_steps(handle: core.CoreHandle) -> list[Step]:
-    """The worker state reads, the class reads, and the worker ping."""
+    """The worker state reads, the class reads, the task lists, and the
+    worker ping."""
     return [
         ('worker_states', handle.worker_states, handle.worker_states_async),
         (
@@ -259,21 +274,32 @@ def _monitoring_steps(handle: core.CoreHandle) -> list[Step]:
         ('class_coverage', handle.class_coverage, handle.class_coverage_async),
         ('class_report', handle.class_report, handle.class_report_async),
         (
+            'stale_tasks',
+            lambda: handle.stale_tasks(STALE_THRESHOLD_MINUTES),
+            lambda: handle.stale_tasks_async(STALE_THRESHOLD_MINUTES),
+        ),
+        (
+            'stale_tasks_refused',
+            lambda: handle.stale_tasks(-1),
+            lambda: handle.stale_tasks_async(-1),
+        ),
+        ('expired_tasks', handle.expired_tasks, handle.expired_tasks_async),
+        (
             'ping',
             lambda: handle.ping_workers(
-                target_worker_id=None, timeout_seconds=PING_WINDOW_S, min_responses=None,
+                target_worker_id=None, wait_ms=PING_WAIT_MS, min_responses=None,
             ),
             lambda: handle.ping_workers_async(
-                target_worker_id=None, timeout_seconds=PING_WINDOW_S, min_responses=None,
+                target_worker_id=None, wait_ms=PING_WAIT_MS, min_responses=None,
             ),
         ),
         (
             'ping_refused',
             lambda: handle.ping_workers(
-                target_worker_id=None, timeout_seconds=0, min_responses=None,
+                target_worker_id=None, wait_ms=0, min_responses=None,
             ),
             lambda: handle.ping_workers_async(
-                target_worker_id=None, timeout_seconds=0, min_responses=None,
+                target_worker_id=None, wait_ms=0, min_responses=None,
             ),
         ),
     ]

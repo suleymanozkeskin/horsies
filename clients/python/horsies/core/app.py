@@ -17,6 +17,17 @@ from typing import (
     get_origin,
 )
 from horsies.core.models.app import AppConfig
+from horsies.core.models.health_reads import (
+    BoundedTaskList,
+    ExpiredTaskRow,
+    MinResponses,
+    MinResponsesFullWindow,
+    PingTarget,
+    PingTargetEveryWorker,
+    StaleTaskRow,
+    WorkerHistoryLimit,
+    WorkerHistoryLimitAllRetained,
+)
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import (
     Execution,
@@ -2265,32 +2276,34 @@ class Horsies:
     async def ping_workers_async(
         self,
         *,
-        target_worker_id: str | None = None,
-        timeout_seconds: float = 2.0,
-        min_responses: int | None = None,
+        target: PingTarget = PingTargetEveryWorker(),
+        wait_ms: int = 2_000,
+        min_responses: MinResponses = MinResponsesFullWindow(),
     ) -> 'BrokerResult[list[WorkerPong]]':
-        """Active ping-pong: collect live workers' replies within a window.
+        """Active ping-pong: collect live workers' replies within ``wait_ms``
+        milliseconds.
 
-        Pass ``min_responses=1`` for a fast fail-open liveness gate — returns on
-        the first reply rather than waiting the full ``timeout_seconds``.
+        Pass ``min_responses=MinResponsesAtLeast(1)`` for a fast fail-open
+        liveness gate — returns on the first reply rather than waiting the
+        full ``wait_ms``.
         """
         return await self.get_broker().ping_workers_async(
-            target_worker_id=target_worker_id,
-            timeout_seconds=timeout_seconds,
+            target=target,
+            wait_ms=wait_ms,
             min_responses=min_responses,
         )
 
     def ping_workers(
         self,
         *,
-        target_worker_id: str | None = None,
-        timeout_seconds: float = 2.0,
-        min_responses: int | None = None,
+        target: PingTarget = PingTargetEveryWorker(),
+        wait_ms: int = 2_000,
+        min_responses: MinResponses = MinResponsesFullWindow(),
     ) -> 'BrokerResult[list[WorkerPong]]':
         """Synchronous version of ``ping_workers_async``: the core's blocking
         ping on the calling thread, with the GIL released, and the same
-        outcomes. The call is bounded by the window plus the core's bound of a
-        blocking call, and not bounded for an infinite ``timeout_seconds``.
+        outcomes. The call is bounded by ``wait_ms`` plus the core's bound of
+        a blocking call.
 
         On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
         and does no I/O.
@@ -2298,8 +2311,8 @@ class Horsies:
         if in_running_event_loop():
             return self._async_context_err('ping_workers')
         return self.get_broker()._ping_workers_blocking(  # pyright: ignore[reportPrivateUsage]
-            target_worker_id=target_worker_id,
-            timeout_seconds=timeout_seconds,
+            target=target,
+            wait_ms=wait_ms,
             min_responses=min_responses,
         )
 
@@ -2347,18 +2360,19 @@ class Horsies:
         self,
         worker_id: str,
         *,
-        limit: int | None = None,
+        limit: WorkerHistoryLimit = WorkerHistoryLimitAllRetained(),
     ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
-        """Timeseries snapshots for one worker, newest first."""
+        """Timeseries snapshots for one worker, newest first: every retained
+        snapshot, or the newest ``count`` of ``WorkerHistoryLimitNewest``."""
         return await self.get_broker().get_worker_state_history_async(
-            worker_id, limit=limit
+            worker_id, limit=limit,
         )
 
     def get_worker_state_history(
         self,
         worker_id: str,
         *,
-        limit: int | None = None,
+        limit: WorkerHistoryLimit = WorkerHistoryLimitAllRetained(),
     ) -> 'BrokerResult[list[WorkerStateSnapshot]]':
         """Synchronous version of ``get_worker_state_history_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
@@ -2372,6 +2386,65 @@ class Horsies:
         return self.get_broker()._get_worker_state_history_blocking(  # pyright: ignore[reportPrivateUsage]
             worker_id, limit=limit,
         )
+
+    async def get_stale_tasks_async(
+        self,
+        threshold_minutes: int,
+    ) -> 'BrokerResult[BoundedTaskList[StaleTaskRow]]':
+        """RUNNING tasks whose latest runner heartbeat, or their start when
+        they have no heartbeat, is older than ``threshold_minutes``. Reads
+        only: the reaper recovers stale tasks.
+
+        At most ``TASK_LIST_ROW_BOUND`` rows: ``BoundedTaskListComplete``, or
+        ``BoundedTaskListTruncated`` when more rows match.
+
+        - ``Err(INVALID_INPUT)``: ``threshold_minutes`` is not an int from 0
+          to ``MAX_STALE_THRESHOLD_MINUTES`` (525,600, one year). Nothing ran.
+        - ``Err(MONITORING_QUERY_FAILED)``: the read failed.
+        """
+        return await self.get_broker().get_stale_tasks(threshold_minutes)
+
+    def get_stale_tasks(
+        self,
+        threshold_minutes: int,
+    ) -> 'BrokerResult[BoundedTaskList[StaleTaskRow]]':
+        """Synchronous version of ``get_stale_tasks_async``: the core's
+        blocking read on the calling thread, with the GIL released, and the
+        same outcomes.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_stale_tasks')
+        return self.get_broker()._get_stale_tasks_blocking(  # pyright: ignore[reportPrivateUsage]
+            threshold_minutes,
+        )
+
+    async def get_expired_tasks_async(
+        self,
+    ) -> 'BrokerResult[BoundedTaskList[ExpiredTaskRow]]':
+        """PENDING tasks past their ``good_until``, oldest deadline first; no
+        worker claims them. ``expired_for`` is on the database clock.
+
+        At most ``TASK_LIST_ROW_BOUND`` rows: ``BoundedTaskListComplete``, or
+        ``BoundedTaskListTruncated`` when more rows match.
+
+        ``Err(MONITORING_QUERY_FAILED)``: the read failed.
+        """
+        return await self.get_broker().get_expired_tasks()
+
+    def get_expired_tasks(self) -> 'BrokerResult[BoundedTaskList[ExpiredTaskRow]]':
+        """Synchronous version of ``get_expired_tasks_async``: the core's
+        blocking read on the calling thread, with the GIL released, and the
+        same outcomes.
+
+        On a thread that runs an event loop it returns ``Err(ASYNC_CONTEXT)``
+        and does no I/O.
+        """
+        if in_running_event_loop():
+            return self._async_context_err('get_expired_tasks')
+        return self.get_broker()._get_expired_tasks_blocking()  # pyright: ignore[reportPrivateUsage]
 
     async def get_class_coverage_async(self) -> 'BrokerResult[ClassCoverage]':
         """For each (queue, class) with PENDING rows, whether a live worker serves it.

@@ -31,6 +31,8 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from horsies import (
+    MinResponsesAtLeast,
+    PingTargetWorker,
     RerunEnqueued,
     RerunEnqueuePolicy,
     RerunTask,
@@ -65,8 +67,8 @@ RERUN_POLICY: Final = RerunEnqueuePolicy(
 """The default retention class (`standard_30d`), the input retained, a
 24 h key reservation: Rust `RerunEnqueuePolicy::standard(true)`."""
 
-PING_WINDOW_S: Final = 2.0
-"""The window of one worker ping."""
+PING_WAIT_MS: Final = 2_000
+"""The window of one worker ping, in milliseconds."""
 
 PING_ATTEMPTS: Final = 10
 """The pings of every worker before the send process gives up: a worker
@@ -211,7 +213,7 @@ async def _every_worker(expected: int) -> list[WorkerPong]:
     answered: list[WorkerPong] = []
     for _attempt in range(PING_ATTEMPTS):
         match await parity.app.ping_workers_async(
-            timeout_seconds=PING_WINDOW_S, min_responses=expected,
+            wait_ms=PING_WAIT_MS, min_responses=MinResponsesAtLeast(count=expected),
         ):
             case Ok(pongs):
                 answered = pongs
@@ -235,7 +237,7 @@ async def _ping(expected: int) -> str:
             raise SendRefused(f'ping_database was refused: {refused}')
     answered = await _every_worker(expected)
     match await parity.app.ping_workers_async(
-        target_worker_id=answered[0].worker_id, timeout_seconds=PING_WINDOW_S,
+        target=PingTargetWorker(worker_id=answered[0].worker_id), wait_ms=PING_WAIT_MS,
     ):
         case Ok(targeted):
             pass

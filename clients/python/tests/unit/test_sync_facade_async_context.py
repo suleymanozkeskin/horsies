@@ -170,6 +170,8 @@ APP_CALLS: dict[str, Callable[[Horsies], Any]] = {
     'get_worker_state_history': lambda app: app.get_worker_state_history('worker-1'),
     'get_class_coverage': lambda app: app.get_class_coverage(),
     'get_class_report': lambda app: app.get_class_report(),
+    'get_stale_tasks': lambda app: app.get_stale_tasks(2),
+    'get_expired_tasks': lambda app: app.get_expired_tasks(),
     'get_raw_result': lambda app: app.get_raw_result(TASK_ID, 0),
 }
 
@@ -523,6 +525,16 @@ BLOCKING_SITES: dict[str, BlockingSite] = {
     'app.get_class_report': BlockingSite(
         lambda app, broker: app.get_class_report(),
         'class_report',
+        BrokerErrorCode.MONITORING_QUERY_FAILED,
+    ),
+    'app.get_stale_tasks': BlockingSite(
+        lambda app, broker: app.get_stale_tasks(2),
+        'stale_tasks',
+        BrokerErrorCode.MONITORING_QUERY_FAILED,
+    ),
+    'app.get_expired_tasks': BlockingSite(
+        lambda app, broker: app.get_expired_tasks(),
+        'expired_tasks',
         BrokerErrorCode.MONITORING_QUERY_FAILED,
     ),
     'WorkflowHandle.status': BlockingSite(

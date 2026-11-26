@@ -32,6 +32,7 @@ from horsies.core.models.health import (
     ProfileNotRecorded,
     SlotsDown,
 )
+from horsies.core.models.health_reads import PingTargetWorker, WorkerHistoryLimitNewest
 from horsies.core.models.tasks import Execution
 from horsies.core.types.result import is_ok
 
@@ -474,7 +475,9 @@ async def test_get_worker_state_history_newest_first(
     running = [s.tasks_running for s in snaps]
     assert running == [3, 1, 0], 'expected newest-first ordering'
 
-    limited = await broker.get_worker_state_history_async(worker_state_seed, limit=1)
+    limited = await broker.get_worker_state_history_async(
+        worker_state_seed, limit=WorkerHistoryLimitNewest(count=1),
+    )
     assert is_ok(limited)
     assert len(limited.ok_value) == 1
     assert limited.ok_value[0].tasks_running == 3
@@ -511,7 +514,7 @@ async def test_ping_workers_roundtrip(broker: PostgresBroker) -> None:
 
     responder_task = asyncio.create_task(respond_once())
     try:
-        result = await broker.ping_workers_async(timeout_seconds=5.0)
+        result = await broker.ping_workers_async(wait_ms=5_000)
     finally:
         await asyncio.wait_for(responder_task, timeout=5.0)
         await responder.close()
@@ -530,8 +533,8 @@ async def test_ping_workers_targeted_to_absent_worker_times_out(
 ) -> None:
     """Targeting a worker that never replies returns an empty pong list."""
     result = await broker.ping_workers_async(
-        target_worker_id='definitely-not-running',
-        timeout_seconds=1.0,
+        target=PingTargetWorker(worker_id='definitely-not-running'),
+        wait_ms=1_000,
     )
 
     assert is_ok(result)

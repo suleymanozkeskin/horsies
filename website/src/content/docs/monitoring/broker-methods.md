@@ -85,36 +85,36 @@ match await app.get_result_async(task_id, timeout_ms=5000):
 read = app.get_result(task_id, timeout_ms=5000)
 ```
 
-### `get_stale_tasks(stale_threshold_minutes: int = 2) -> BrokerResult[list[dict[str, Any]]]`
+### `get_stale_tasks(threshold_minutes: int = 2) -> BrokerResult[BoundedTaskList[StaleTaskRow]]`
 
-Find RUNNING tasks whose workers have not sent a heartbeat within the threshold. Indicates a crashed or unresponsive worker.
+Find RUNNING tasks whose workers have not sent a heartbeat within the threshold. Indicates a crashed or unresponsive worker. The app has the same read: `app.get_stale_tasks(threshold_minutes)` and `app.get_stale_tasks_async(threshold_minutes)` ([Health Reads](/horsies/monitoring/health-reads/)).
 
-**Returns:** `Ok(list[dict])` with keys: `id` (a `uuid.UUID`), `worker_hostname`, `worker_pid`, `worker_process_name`, `last_heartbeat`, `started_at`, `task_name`. `last_heartbeat` is the latest runner heartbeat since `started_at`, and `None` when the task has none: the start writes no heartbeat, and a heartbeat of an earlier attempt of a retried task does not count. Rows are ordered by `last_heartbeat` (rows with no heartbeat first), then by `id`. At most 10,000 rows (`TASK_LIST_ROW_BOUND`) come back; when more rows match, the first 10,000 come back and a warning is logged.
+**Returns:** `Ok(BoundedTaskListComplete(rows))`, or `Ok(BoundedTaskListTruncated(rows, bound))` when more than 10,000 rows (`TASK_LIST_ROW_BOUND`) match: the first 10,000 come back. Each row is a `StaleTaskRow` with `task_id` (a `uuid.UUID`), `task_name`, `worker_hostname`, `worker_pid`, `worker_process_name`, `started_at`, `last_heartbeat_at`. `last_heartbeat_at` is the latest runner heartbeat since `started_at`, and `None` when the task has none: the start writes no heartbeat, and a heartbeat of an earlier attempt of a retried task does not count. Rows are ordered by `last_heartbeat_at` (rows with no heartbeat first), then by `task_id`.
 
-**Errors:** `INVALID_INPUT` when `stale_threshold_minutes` is not an `int` from 0 to 525,600 (one year); nothing is read. `MONITORING_QUERY_FAILED` when the read fails.
+**Errors:** `INVALID_INPUT` when `threshold_minutes` is not an `int` from 0 to 525,600 (one year); nothing is read. `MONITORING_QUERY_FAILED` when the read fails.
 
 ```python
-result = await broker.get_stale_tasks(stale_threshold_minutes=5)
+result = await broker.get_stale_tasks(threshold_minutes=5)
 if is_ok(result):
-    for task in result.ok_value:
-        print(f"Task {task['id']} on {task['worker_hostname']} — last heartbeat: {task['last_heartbeat']}")
+    for task in result.ok_value.rows:
+        print(f"Task {task.task_id} on {task.worker_hostname} — last heartbeat: {task.last_heartbeat_at}")
 ```
 
 ### Worker health and load
 
 For per-worker load, configuration, and liveness, use the typed [Health Reads](/horsies/monitoring/health-reads/) (`app.list_worker_states_async`, `app.ping_workers_async`, `app.ping_database_async`). It reads the worker-state timeseries — so it includes idle workers — and returns typed `WorkerStateSnapshot` / `WorkerPong` models rather than raw dicts.
 
-### `get_expired_tasks() -> BrokerResult[list[dict[str, Any]]]`
+### `get_expired_tasks() -> BrokerResult[BoundedTaskList[ExpiredTaskRow]]`
 
-Find PENDING tasks that exceeded their `good_until` deadline before being picked up.
+Find PENDING tasks that exceeded their `good_until` deadline before being picked up. The app has the same read: `app.get_expired_tasks()` and `app.get_expired_tasks_async()`.
 
-**Returns:** `Ok(list[dict])` with keys: `id` (a `uuid.UUID`), `task_name`, `queue_name`, `priority`, `sent_at`, `enqueued_at`, `good_until`, `expired_for`. Rows are ordered by `good_until`, oldest first, then by `id`. At most 10,000 rows (`TASK_LIST_ROW_BOUND`) come back; when more rows match, the first 10,000 come back and a warning is logged.
+**Returns:** `Ok(BoundedTaskListComplete(rows))`, or `Ok(BoundedTaskListTruncated(rows, bound))` when more than 10,000 rows (`TASK_LIST_ROW_BOUND`) match: the first 10,000 come back. Each row is an `ExpiredTaskRow` with `task_id` (a `uuid.UUID`), `task_name`, `queue_name`, `priority`, `sent_at`, `enqueued_at`, `good_until`, `expired_for` (a `timedelta`, on the database clock). Rows are ordered by `good_until`, oldest first, then by `task_id`.
 
 ```python
 result = await broker.get_expired_tasks()
 if is_ok(result):
-    for task in result.ok_value:
-        print(f"Task {task['id']} ({task['task_name']}) expired {task['expired_for']} ago")
+    for task in result.ok_value.rows:
+        print(f"Task {task.task_id} ({task.task_name}) expired {task.expired_for} ago")
 ```
 
 ### `get_task_info(task_id: UUID, include_result: bool = False, include_failed_reason: bool = False) -> BrokerResult[TaskInfo | None]`

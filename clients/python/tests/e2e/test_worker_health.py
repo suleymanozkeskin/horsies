@@ -21,6 +21,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
+from horsies.core.models.health_reads import MinResponsesAtLeast
 from horsies.core.models.class_coverage import (
     BudgetLoad,
     StreamCoverage,
@@ -87,7 +88,7 @@ async def test_ping_workers_reaches_real_worker(broker: PostgresBroker) -> None:
         # but allow for ping-subscription/dispatcher warmup.
         pongs: list = []
         for _ in range(10):
-            result = await broker.ping_workers_async(timeout_seconds=2.0)
+            result = await broker.ping_workers_async(wait_ms=2_000)
             assert is_ok(result)
             pongs = result.ok_value
             if pongs:
@@ -100,14 +101,16 @@ async def test_ping_workers_reaches_real_worker(broker: PostgresBroker) -> None:
         assert pong.pid > 0
         assert pong.round_trip_ms >= 0.0
 
-        # Fast gate: min_responses=1 returns well before the timeout window.
+        # Fast gate: one reply returns well before the wait ends.
         loop = asyncio.get_running_loop()
         start = loop.time()
-        gate = await broker.ping_workers_async(timeout_seconds=5.0, min_responses=1)
+        gate = await broker.ping_workers_async(
+            wait_ms=5_000, min_responses=MinResponsesAtLeast(count=1),
+        )
         elapsed = loop.time() - start
         assert is_ok(gate)
         assert len(gate.ok_value) == 1
-        assert elapsed < 4.0, 'min_responses=1 should not wait the full window'
+        assert elapsed < 4.0, 'MinResponsesAtLeast(1) should not wait the full window'
 
 
 @pytest.mark.e2e
@@ -119,7 +122,7 @@ async def test_ping_and_worker_state_correlate(broker: PostgresBroker) -> None:
         # Get a responsive worker id via ping.
         responsive_id: str | None = None
         for _ in range(10):
-            ping = await broker.ping_workers_async(timeout_seconds=2.0)
+            ping = await broker.ping_workers_async(wait_ms=2_000)
             assert is_ok(ping)
             if ping.ok_value:
                 responsive_id = ping.ok_value[0].worker_id

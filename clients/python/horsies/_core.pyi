@@ -370,22 +370,26 @@ class CoreHandle:
         """Every schedule state: the JSON text of the core's list of ScheduleStateInfo. Reads only,
         in one statement.
         """
-    def stale_tasks_async(self, threshold_minutes: object) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput]:
+    def stale_tasks(self, threshold_minutes: object) -> StaleTaskListComplete | StaleTaskListTruncated | BrokerOperationFailed | BrokerInvalidInput:
         """The RUNNING tasks whose latest runner beat, or their start, is older than the
         threshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is
         INVALID_INPUT before any core call. Reads only, in one statement.
         """
-    def expired_tasks_async(self) -> asyncio.Future[TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput]:
+    def stale_tasks_async(self, threshold_minutes: object) -> asyncio.Future[StaleTaskListComplete | StaleTaskListTruncated | BrokerOperationFailed | BrokerInvalidInput]:
+        """The awaitable form of the method above. A cancelled await drops the read."""
+    def expired_tasks(self) -> ExpiredTaskListComplete | ExpiredTaskListTruncated | BrokerOperationFailed | BrokerInvalidInput:
         """The PENDING tasks whose good_until passed before a worker took them. Reads only, in
         one statement.
         """
-    def ping_workers(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled:
+    def expired_tasks_async(self) -> asyncio.Future[ExpiredTaskListComplete | ExpiredTaskListTruncated | BrokerOperationFailed | BrokerInvalidInput]:
+        """The awaitable form of the method above. A cancelled await drops the read."""
+    def ping_workers(self, *, target_worker_id: str | None, wait_ms: int, min_responses: int | None) -> WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled:
         """Ping the workers and collect the distinct replies within the window, on the process
         listener. A refused argument is INVALID_INPUT before any core call; a handle with no
         listener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus
-        the bound of a blocking call; not bounded for an infinite window.
+        the bound of a blocking call.
         """
-    def ping_workers_async(self, *, target_worker_id: str | None, timeout_seconds: float, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled]:
+    def ping_workers_async(self, *, target_worker_id: str | None, wait_ms: int, min_responses: int | None) -> asyncio.Future[WorkerPongsRecord | BrokerOperationFailed | BrokerInvalidInput | BrokerListenerDisabled]:
         """The awaitable form of the method above. A cancelled await drops the wait and the reply
         subscription.
         """
@@ -1554,17 +1558,75 @@ class TaskDetailAbsent:
 
 
 @final
-class TaskListComplete:
-    """Every matching row of a task list: one dict per row, with the task id as uuid.UUID."""
+class StaleTaskRecord:
+    """One RUNNING task of the stale list. last_heartbeat_at is None when the task has no
+    runner beat since its start.
+    """
     @property
-    def rows(self) -> list[dict[str, object]]: ...
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def worker_hostname(self) -> str | None: ...
+    @property
+    def worker_pid(self) -> int | None: ...
+    @property
+    def worker_process_name(self) -> str | None: ...
+    @property
+    def started_at(self) -> datetime.datetime: ...
+    @property
+    def last_heartbeat_at(self) -> datetime.datetime | None: ...
 
 
 @final
-class TaskListTruncated:
-    """The first bound matching rows of a task list; more rows match."""
+class ExpiredTaskRecord:
+    """One PENDING task of the expired list."""
     @property
-    def rows(self) -> list[dict[str, object]]: ...
+    def task_id(self) -> uuid.UUID: ...
+    @property
+    def task_name(self) -> str: ...
+    @property
+    def queue_name(self) -> str: ...
+    @property
+    def priority(self) -> int: ...
+    @property
+    def sent_at(self) -> datetime.datetime: ...
+    @property
+    def enqueued_at(self) -> datetime.datetime: ...
+    @property
+    def good_until(self) -> datetime.datetime: ...
+    @property
+    def expired_for(self) -> datetime.timedelta: ...
+
+
+@final
+class StaleTaskListComplete:
+    """Every matching row of the stale list."""
+    @property
+    def rows(self) -> list[StaleTaskRecord]: ...
+
+
+@final
+class StaleTaskListTruncated:
+    """The first bound matching rows of the stale list; more rows match."""
+    @property
+    def rows(self) -> list[StaleTaskRecord]: ...
+    @property
+    def bound(self) -> int: ...
+
+
+@final
+class ExpiredTaskListComplete:
+    """Every matching row of the expired list."""
+    @property
+    def rows(self) -> list[ExpiredTaskRecord]: ...
+
+
+@final
+class ExpiredTaskListTruncated:
+    """The first bound matching rows of the expired list; more rows match."""
+    @property
+    def rows(self) -> list[ExpiredTaskRecord]: ...
     @property
     def bound(self) -> int: ...
 

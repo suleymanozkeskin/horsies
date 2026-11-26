@@ -82,6 +82,15 @@ from horsies.core.models.health import (
     WorkerPong,
     WorkerStateSnapshot,
 )
+from horsies.core.models.health_reads import (
+    MinResponses,
+    MinResponsesAtLeast,
+    MinResponsesFullWindow,
+    PingTargetWorker,
+    WorkerHistoryLimit,
+    WorkerHistoryLimitAllRetained,
+    WorkerHistoryLimitNewest,
+)
 from horsies.core.models.tasks import Execution
 from horsies.core.types.error_detail import NoCause
 from horsies.core.types.result import Err, Ok
@@ -307,9 +316,15 @@ class TestWorkerStates:
 
         assert result == Ok(_snapshot('w9', AllSlotsServing()))
 
-    @pytest.mark.parametrize('limit', [None, 7])
+    @pytest.mark.parametrize(
+        ('limit', 'handle_limit'),
+        [(WorkerHistoryLimitAllRetained(), None), (WorkerHistoryLimitNewest(count=7), 7)],
+        ids=['all-retained', 'newest'],
+    )
     @pytest.mark.asyncio
-    async def test_the_history_limit_reaches_the_handle_as_given(self, limit: int | None) -> None:
+    async def test_the_history_limit_reaches_the_handle_as_its_count(
+        self, limit: WorkerHistoryLimit, handle_limit: int | None,
+    ) -> None:
         broker = _broker_answering(
             'worker_state_history_async', _record(WorkerStatesRecord, states=[]),
         )
@@ -318,7 +333,7 @@ class TestWorkerStates:
 
         assert result == Ok([])
         handle: Any = broker._core_handle  # pyright: ignore[reportPrivateUsage]
-        handle.worker_state_history_async.assert_awaited_once_with('w1', limit=limit)
+        handle.worker_state_history_async.assert_awaited_once_with('w1', limit=handle_limit)
 
 
 class TestHistoryLimit:
@@ -335,7 +350,9 @@ class TestHistoryLimit:
         the refusal of a value outside 64 bits or of ``False`` needs none."""
         broker = cast(PostgresBroker, _make_broker())
 
-        result = await broker.get_worker_state_history_async('w1', limit=limit)
+        result = await broker.get_worker_state_history_async(
+            'w1', limit=WorkerHistoryLimitNewest(count=limit),
+        )
 
         match result:
             case Err(BrokerInvalidInput(message=message, exception=NoCause())):
@@ -350,7 +367,9 @@ class TestHistoryLimit:
     ) -> None:
         broker = cast(PostgresBroker, _make_broker())
 
-        result = await broker.get_worker_state_history_async('w1', limit=limit)
+        result = await broker.get_worker_state_history_async(
+            'w1', limit=WorkerHistoryLimitNewest(count=limit),
+        )
 
         match result:
             case Err(BrokerOperationFailed() as error):
@@ -502,7 +521,9 @@ async def _one(broker: PostgresBroker) -> BrokerResult[Any]:
 
 
 async def _history(broker: PostgresBroker) -> BrokerResult[Any]:
-    return await broker.get_worker_state_history_async('w1', limit=5)
+    return await broker.get_worker_state_history_async(
+        'w1', limit=WorkerHistoryLimitNewest(count=5),
+    )
 
 
 async def _coverage(broker: PostgresBroker) -> BrokerResult[Any]:
@@ -556,7 +577,9 @@ class TestFailures:
             BrokerInvalidInput(message=message, exception=NoCause()),
         )
 
-        result = await broker.get_worker_state_history_async('w1', limit=0)
+        result = await broker.get_worker_state_history_async(
+            'w1', limit=WorkerHistoryLimitNewest(count=0),
+        )
 
         assert result == Err(BrokerInvalidInput(message=message, exception=NoCause()))
 
@@ -612,7 +635,9 @@ class TestWorkerPing:
         )
 
         result = await broker.ping_workers_async(
-            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+            target=PingTargetWorker(worker_id='w1'),
+            wait_ms=500,
+            min_responses=MinResponsesAtLeast(count=1),
         )
 
         assert result == Ok(
@@ -620,28 +645,54 @@ class TestWorkerPing:
         )
         handle: Any = broker._core_handle  # pyright: ignore[reportPrivateUsage]
         handle.ping_workers_async.assert_awaited_once_with(
-            target_worker_id='w1', timeout_seconds=0.5, min_responses=1,
+            target_worker_id='w1', wait_ms=500, min_responses=1,
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_defaults_ask_every_worker_for_the_full_window(self) -> None:
+        broker = _broker_answering('ping_workers_async', _record(WorkerPongsRecord, pongs=[]))
+
+        result = await broker.ping_workers_async()
+
+        assert result == Ok([])
+        handle: Any = broker._core_handle  # pyright: ignore[reportPrivateUsage]
+        handle.ping_workers_async.assert_awaited_once_with(
+            target_worker_id=None, wait_ms=2_000, min_responses=None,
         )
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ('timeout_seconds', 'min_responses', 'message'),
+        ('wait_ms', 'min_responses', 'message'),
         [
-            (0, None, 'timeout_seconds must be positive, got 0'),
-            (-1.5, None, 'timeout_seconds must be positive, got -1.5'),
-            (float('nan'), None, 'timeout_seconds must be positive, got nan'),
-            (1.0, 0, 'min_responses must be >= 1 when set, got 0'),
+            (0, MinResponsesFullWindow(), 'wait_ms must be positive, got 0'),
+            (-1, MinResponsesFullWindow(), 'wait_ms must be positive, got -1'),
+            (
+                1.5,
+                MinResponsesFullWindow(),
+                'ping_workers request refused: wait_ms must be an int, not float',
+            ),
+            (
+                True,
+                MinResponsesFullWindow(),
+                'ping_workers request refused: wait_ms must be an int, not bool',
+            ),
+            (
+                2 ** 64,
+                MinResponsesFullWindow(),
+                f'wait_ms must be at most {2 ** 64 - 1}, got {2 ** 64}',
+            ),
+            (1_000, MinResponsesAtLeast(count=0), 'min_responses must be >= 1 when set, got 0'),
         ],
-        ids=['zero', 'negative', 'nan', 'no-replies'],
+        ids=['zero', 'negative', 'float', 'bool', 'above-the-range', 'no-replies'],
     )
     async def test_a_refused_argument_is_invalid_input_before_any_core_call(
-        self, timeout_seconds: float, min_responses: int | None, message: str,
+        self, wait_ms: object, min_responses: MinResponses, message: str,
     ) -> None:
         """The handle refuses with Python's text; no database is reachable here."""
         broker = cast(PostgresBroker, _make_broker())
 
         result = await broker.ping_workers_async(
-            timeout_seconds=timeout_seconds, min_responses=min_responses,
+            wait_ms=cast(int, wait_ms), min_responses=min_responses,
         )
 
         assert result == Err(BrokerInvalidInput(message=message, exception=NoCause()))

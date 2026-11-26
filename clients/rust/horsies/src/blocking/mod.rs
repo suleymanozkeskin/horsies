@@ -49,7 +49,6 @@ pub use workflow::{WorkflowFunctionView, WorkflowHandleView, WorkflowTemplateVie
 
 use std::fmt;
 use std::future::Future;
-use std::num::NonZeroUsize;
 use std::time::Duration;
 
 use horsies_core::process_runtime::ProcessRuntimeRefusal;
@@ -68,9 +67,9 @@ use crate::check::{connectivity_report, CHECK};
 use crate::handle::checked_task_wait;
 use crate::process_state::{runtime_for, RuntimeStartFailed};
 use crate::{
-    CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, PingTarget, ReadError,
-    StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome, TaskSendOptions,
-    UserErrorCode, WaitLimit, WorkerHistoryLimit,
+    CheckPassed, CheckReport, ErrorCode, Horsies, HorsiesError, MinResponses, PingTarget,
+    ReadError, StoredResult, TaskFunction, TaskHandle, TaskInfo, TaskInfoParts, TaskOutcome,
+    TaskSendOptions, UserErrorCode, WaitLimit, WorkerHistoryLimit,
 };
 
 /// Where a blocking call can run.
@@ -432,14 +431,14 @@ impl HorsiesView<'_> {
     pub fn ping_workers(
         &self,
         target: PingTarget,
-        timeout: Duration,
-        min_responses: Option<NonZeroUsize>,
+        wait: Duration,
+        min_responses: MinResponses,
     ) -> Result<Vec<WorkerPong>, BrokerOperationError> {
         block_health(
-            self.app.ping_workers(target, timeout, min_responses),
+            self.app.ping_workers(target, wait, min_responses),
             BrokerOperationFailedCode::WorkerPingFailed,
             "Horsies::ping_workers()",
-            "app.ping_workers(target, timeout, min_responses)",
+            "app.ping_workers(target, wait, min_responses)",
         )
     }
 

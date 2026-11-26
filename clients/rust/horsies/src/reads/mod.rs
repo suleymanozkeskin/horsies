@@ -8,7 +8,7 @@ mod by_task_id;
 mod health;
 
 pub use by_task_id::StoredResult;
-pub use health::{PingTarget, WorkerHistoryLimit};
+pub use health::{MinResponses, PingTarget, WorkerHistoryLimit};
 
 /// The values that the health reads return, and their failure.
 pub use horsies_core::{

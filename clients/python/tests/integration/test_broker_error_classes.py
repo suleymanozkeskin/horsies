@@ -28,6 +28,7 @@ from horsies.core.brokers.result_types import (
     BrokerOperationFailed,
 )
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.health_reads import WorkerHistoryLimitNewest
 from horsies.core.types.result import is_err
 
 pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope='function')]
@@ -101,7 +102,7 @@ async def test_a_failed_database_ping_is_db_ping_failed(
 async def test_a_failed_worker_ping_is_worker_ping_failed(
     unreachable_broker: PostgresBroker,
 ) -> None:
-    result = await unreachable_broker.ping_workers_async(timeout_seconds=0.5)
+    result = await unreachable_broker.ping_workers_async(wait_ms=500)
 
     # The first step of a ping subscribes to the reply channel, as in 0.7, so
     # an unreachable server fails it there.
@@ -159,21 +160,23 @@ async def test_a_failed_monitoring_read_names_the_read(
 async def test_a_refused_argument_is_invalid_input_with_no_cause(
     unreachable_broker: PostgresBroker,
 ) -> None:
-    result = await unreachable_broker.ping_workers_async(timeout_seconds=0)
+    result = await unreachable_broker.ping_workers_async(wait_ms=0)
 
     assert is_err(result)
     error = result.err_value
     assert type(error) is BrokerInvalidInput
     assert error.code is BrokerErrorCode.INVALID_INPUT
     assert error.retryable is False
-    assert error.message == 'timeout_seconds must be positive, got 0'
+    assert error.message == 'wait_ms must be positive, got 0'
     assert type(error.exception) is NoCause
 
 
 async def test_a_refused_history_limit_is_invalid_input_with_no_cause(
     unreachable_broker: PostgresBroker,
 ) -> None:
-    result = await unreachable_broker.get_worker_state_history_async('w1', limit=0)
+    result = await unreachable_broker.get_worker_state_history_async(
+        'w1', limit=WorkerHistoryLimitNewest(count=0),
+    )
 
     assert is_err(result)
     error = result.err_value
@@ -185,7 +188,7 @@ async def test_a_refused_history_limit_is_invalid_input_with_no_cause(
 async def test_a_ping_on_a_broker_with_no_listener_is_listener_disabled(
     listenerless_broker: PostgresBroker,
 ) -> None:
-    result = await listenerless_broker.ping_workers_async(timeout_seconds=0.5)
+    result = await listenerless_broker.ping_workers_async(wait_ms=500)
 
     assert is_err(result)
     error = result.err_value

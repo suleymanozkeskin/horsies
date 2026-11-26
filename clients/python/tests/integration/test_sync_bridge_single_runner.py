@@ -36,7 +36,7 @@ pytestmark = [pytest.mark.integration]
 POOL_TIMEOUT_SECONDS = 3
 THREAD_JOIN_BOUND_SECONDS = 15.0
 RESULT_WAIT_MS = 300
-PING_WINDOW_SECONDS = 0.3
+PING_WAIT_MS = 300
 
 
 @pytest.fixture(scope='module')
@@ -112,7 +112,7 @@ def test_ping_workers_after_sync_workflow_wait(
 
     waited, _ = _timed_call(lambda: handle.get(timeout_ms=RESULT_WAIT_MS))
     pinged, _ = _timed_call(
-        lambda: app.ping_workers(timeout_seconds=PING_WINDOW_SECONDS),
+        lambda: app.ping_workers(wait_ms=PING_WAIT_MS),
     )
 
     assert isinstance(waited, Err), waited

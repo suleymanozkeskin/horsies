@@ -2,74 +2,154 @@
 //! `horsies_list_stale_tasks` and `horsies_list_expired_tasks`
 //! (`PostgresBroker::get_stale_tasks`, `PostgresBroker::get_expired_tasks`).
 //!
-//! The outcome is `TaskListComplete`, `TaskListTruncated` (the first `bound`
-//! rows; more rows match), or the generated broker error class with `INVALID_INPUT` (a stale
-//! threshold that the rule refuses; nothing ran) or `MONITORING_QUERY_FAILED`.
-//! Each row is the `dict` of Python's public API, with its keys in Python's
-//! order and the task id as `uuid.UUID`. Each list sends one statement in
-//! autocommit and writes nothing.
+//! The outcome of each list is its own complete or truncated class (the
+//! first `bound` rows; more rows match), or the generated broker error class
+//! with `INVALID_INPUT` (a stale threshold that the rule refuses; nothing
+//! ran) or `MONITORING_QUERY_FAILED`. Each row is a record with the fields
+//! of the core's row; the task id is a `uuid.UUID`. Each list sends one
+//! statement in autocommit and writes nothing.
 
-use chrono::TimeDelta;
+use chrono::{DateTime, TimeDelta, Utc};
 use horsies_core::{
     BoundedTaskList, BrokerError, BrokerOperationError, BrokerOperationSource, ExpiredTaskRow,
     StaleMinutes, StaleTaskRow, StaleThresholdRefusal,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDict, PyInt, PyList};
+use pyo3::types::{PyBool, PyInt, PyList};
 use pyo3::IntoPyObjectExt;
 
 use crate::handle::BrokerConnection;
 use crate::records::BrokerFailure;
 
-/// Every matching row.
+/// One RUNNING task of the stale list.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct StaleTaskRecord {
+    pub task_id: uuid::Uuid,
+    pub task_name: String,
+    pub worker_hostname: Option<String>,
+    pub worker_pid: Option<i32>,
+    pub worker_process_name: Option<String>,
+    pub started_at: DateTime<Utc>,
+    /// The latest runner beat since `started_at`; `None` when the task has
+    /// no such beat.
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+}
+
+/// One PENDING task of the expired list.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Clone, Debug)]
+pub struct ExpiredTaskRecord {
+    pub task_id: uuid::Uuid,
+    pub task_name: String,
+    pub queue_name: String,
+    pub priority: i32,
+    pub sent_at: DateTime<Utc>,
+    pub enqueued_at: DateTime<Utc>,
+    pub good_until: DateTime<Utc>,
+    /// How long ago `good_until` passed, on the database clock.
+    pub expired_for: TimeDelta,
+}
+
+/// Every matching row of the stale list.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Debug)]
-pub struct TaskListComplete {
-    /// One `dict` per row.
+pub struct StaleTaskListComplete {
+    /// One `StaleTaskRecord` per row.
     pub rows: Py<PyList>,
 }
 
-/// The first `bound` matching rows; more rows match.
+/// The first `bound` matching rows of the stale list; more rows match.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Debug)]
-pub struct TaskListTruncated {
-    /// One `dict` per row.
+pub struct StaleTaskListTruncated {
+    /// One `StaleTaskRecord` per row.
     pub rows: Py<PyList>,
     pub bound: usize,
 }
 
-/// A row of a task list as the `dict` of Python's public API.
-pub trait TaskListEntry {
-    /// The `dict` of the row, with its keys in Python's order.
-    fn entry<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>>;
+/// Every matching row of the expired list.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Debug)]
+pub struct ExpiredTaskListComplete {
+    /// One `ExpiredTaskRecord` per row.
+    pub rows: Py<PyList>,
 }
 
-impl TaskListEntry for StaleTaskRow {
-    fn entry<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let entry = PyDict::new(py);
-        entry.set_item("id", self.id)?;
-        entry.set_item("worker_hostname", &self.worker_hostname)?;
-        entry.set_item("worker_pid", self.worker_pid)?;
-        entry.set_item("worker_process_name", &self.worker_process_name)?;
-        entry.set_item("last_heartbeat", self.last_heartbeat)?;
-        entry.set_item("started_at", self.started_at)?;
-        entry.set_item("task_name", &self.task_name)?;
-        Ok(entry)
+/// The first `bound` matching rows of the expired list; more rows match.
+#[pyclass(module = "horsies._core", frozen, get_all)]
+#[derive(Debug)]
+pub struct ExpiredTaskListTruncated {
+    /// One `ExpiredTaskRecord` per row.
+    pub rows: Py<PyList>,
+    pub bound: usize,
+}
+
+impl From<StaleTaskRow> for StaleTaskRecord {
+    fn from(row: StaleTaskRow) -> Self {
+        Self {
+            task_id: row.task_id,
+            task_name: row.task_name,
+            worker_hostname: row.worker_hostname,
+            worker_pid: row.worker_pid,
+            worker_process_name: row.worker_process_name,
+            started_at: row.started_at,
+            last_heartbeat_at: row.last_heartbeat_at,
+        }
     }
 }
 
-impl TaskListEntry for ExpiredTaskRow {
-    fn entry<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let entry = PyDict::new(py);
-        entry.set_item("id", self.id)?;
-        entry.set_item("task_name", &self.task_name)?;
-        entry.set_item("queue_name", &self.queue_name)?;
-        entry.set_item("priority", self.priority)?;
-        entry.set_item("sent_at", self.sent_at)?;
-        entry.set_item("enqueued_at", self.enqueued_at)?;
-        entry.set_item("good_until", self.good_until)?;
-        entry.set_item("expired_for", TimeDelta::microseconds(self.expired_for_us))?;
-        Ok(entry)
+impl From<ExpiredTaskRow> for ExpiredTaskRecord {
+    fn from(row: ExpiredTaskRow) -> Self {
+        Self {
+            task_id: row.task_id,
+            task_name: row.task_name,
+            queue_name: row.queue_name,
+            priority: row.priority,
+            sent_at: row.sent_at,
+            enqueued_at: row.enqueued_at,
+            good_until: row.good_until,
+            // The core reads the interval from whole microseconds of an
+            // `i64`, which a `TimeDelta` always holds.
+            expired_for: TimeDelta::from_std(row.expired_for)
+                .expect("an interval of i64 microseconds fits a TimeDelta"),
+        }
+    }
+}
+
+/// A row of a task list and the Python classes of its list.
+pub trait TaskListRow: Sized {
+    /// The record of the row.
+    type Record: for<'py> IntoPyObject<'py> + From<Self>;
+
+    /// The Python object of every matching row, `rows` the list of records.
+    fn complete(py: Python<'_>, rows: Py<PyList>) -> PyResult<Bound<'_, PyAny>>;
+
+    /// The Python object of the first `bound` matching rows.
+    fn truncated(py: Python<'_>, rows: Py<PyList>, bound: usize) -> PyResult<Bound<'_, PyAny>>;
+}
+
+impl TaskListRow for StaleTaskRow {
+    type Record = StaleTaskRecord;
+
+    fn complete(py: Python<'_>, rows: Py<PyList>) -> PyResult<Bound<'_, PyAny>> {
+        StaleTaskListComplete { rows }.into_bound_py_any(py)
+    }
+
+    fn truncated(py: Python<'_>, rows: Py<PyList>, bound: usize) -> PyResult<Bound<'_, PyAny>> {
+        StaleTaskListTruncated { rows, bound }.into_bound_py_any(py)
+    }
+}
+
+impl TaskListRow for ExpiredTaskRow {
+    type Record = ExpiredTaskRecord;
+
+    fn complete(py: Python<'_>, rows: Py<PyList>) -> PyResult<Bound<'_, PyAny>> {
+        ExpiredTaskListComplete { rows }.into_bound_py_any(py)
+    }
+
+    fn truncated(py: Python<'_>, rows: Py<PyList>, bound: usize) -> PyResult<Bound<'_, PyAny>> {
+        ExpiredTaskListTruncated { rows, bound }.into_bound_py_any(py)
     }
 }
 
@@ -79,37 +159,30 @@ pub enum TaskListOutcome<T> {
     Failed(BrokerFailure),
 }
 
-fn entries<T: TaskListEntry>(py: Python<'_>, rows: &[T]) -> PyResult<Py<PyList>> {
-    let dicts = rows
-        .iter()
-        .map(|row| row.entry(py))
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok(PyList::new(py, dicts)?.unbind())
+/// The records of `rows`, in list order.
+fn records<T: TaskListRow>(py: Python<'_>, rows: Vec<T>) -> PyResult<Py<PyList>> {
+    let records = rows.into_iter().map(T::Record::from).collect::<Vec<_>>();
+    Ok(PyList::new(py, records)?.unbind())
 }
 
-impl<'py, T: TaskListEntry> IntoPyObject<'py> for TaskListOutcome<T> {
+impl<'py, T: TaskListRow> IntoPyObject<'py> for TaskListOutcome<T> {
     type Target = PyAny;
     type Output = Bound<'py, PyAny>;
     type Error = PyErr;
 
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match self {
-            Self::Listed(BoundedTaskList::Complete(rows)) => TaskListComplete {
-                rows: entries(py, &rows)?,
+            Self::Listed(BoundedTaskList::Complete(rows)) => T::complete(py, records(py, rows)?),
+            Self::Listed(BoundedTaskList::Truncated { rows, bound }) => {
+                T::truncated(py, records(py, rows)?, bound)
             }
-            .into_bound_py_any(py),
-            Self::Listed(BoundedTaskList::Truncated { rows, bound }) => TaskListTruncated {
-                rows: entries(py, &rows)?,
-                bound,
-            }
-            .into_bound_py_any(py),
             Self::Failed(failed) => failed.into_bound_py_any(py),
         }
     }
 }
 
 /// The stale threshold of a Python value, by Python's rule
-/// (`_stale_threshold_minutes`): a `bool` and a value that is not an `int`
+/// (`threshold_minutes`): a `bool` and a value that is not an `int`
 /// are refused before the range; an `int` beyond 64 bits is below 0 or
 /// above the maximum by its sign. Reads the value only.
 pub fn stale_threshold(
@@ -260,13 +333,13 @@ mod tests {
             .expect("a valid instant")
     }
 
-    /// Run the Python `checks` with `entry` bound to the dict of `row`, and
-    /// the modules `uuid` and `datetime`.
-    fn check_entry(row: &impl TaskListEntry, checks: &std::ffi::CStr) {
+    /// Run the Python `checks` with `outcome` bound to the Python object of
+    /// `list`, and the modules `uuid` and `datetime`.
+    fn check_outcome<T: TaskListRow>(list: BoundedTaskList<T>, checks: &std::ffi::CStr) {
         Python::initialize();
         Python::attach(|py| -> PyResult<()> {
-            let globals = PyDict::new(py);
-            globals.set_item("entry", row.entry(py)?)?;
+            let globals = pyo3::types::PyDict::new(py);
+            globals.set_item("outcome", TaskListOutcome::Listed(list).into_pyobject(py)?)?;
             globals.set_item("uuid", py.import("uuid")?)?;
             globals.set_item("datetime", py.import("datetime")?)?;
             py.run(checks, Some(&globals), None)
@@ -274,86 +347,73 @@ mod tests {
         .expect("the checks pass");
     }
 
-    /// A stale row is the dict of Python's public API, with its keys in
-    /// Python's order and the task id as `uuid.UUID`.
-    #[test]
-    fn a_stale_row_is_the_dict_of_the_python_api() {
-        let row = StaleTaskRow {
-            id: uuid::Uuid::parse_str(TASK_ID).expect("a valid task id"),
+    fn stale_row() -> StaleTaskRow {
+        StaleTaskRow {
+            task_id: uuid::Uuid::parse_str(TASK_ID).expect("a valid task id"),
             task_name: "slow_task".to_owned(),
             worker_hostname: Some("host-1".to_owned()),
             worker_pid: Some(1234),
             worker_process_name: Some("child-1".to_owned()),
             started_at: started(),
-            last_heartbeat: None,
-        };
+            last_heartbeat_at: None,
+        }
+    }
 
-        check_entry(
-            &row,
+    /// A complete stale list is its class, with one record per row: the
+    /// task id as `uuid.UUID`, the fields of the core's row.
+    #[test]
+    fn a_complete_stale_list_holds_one_record_per_row() {
+        check_outcome(
+            BoundedTaskList::Complete(vec![stale_row()]),
             c"started = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
-assert entry == {
-    'id': uuid.UUID('0198c0de-0000-7000-8000-000000000001'),
-    'worker_hostname': 'host-1',
-    'worker_pid': 1234,
-    'worker_process_name': 'child-1',
-    'last_heartbeat': None,
-    'started_at': started,
-    'task_name': 'slow_task',
-}, entry
-assert list(entry) == [
-    'id',
-    'worker_hostname',
-    'worker_pid',
-    'worker_process_name',
-    'last_heartbeat',
-    'started_at',
-    'task_name',
-], list(entry)
-assert type(entry['id']) is uuid.UUID, type(entry['id'])
+assert type(outcome).__name__ == 'StaleTaskListComplete', type(outcome)
+[row] = outcome.rows
+assert type(row).__name__ == 'StaleTaskRecord', type(row)
+assert row.task_id == uuid.UUID('0198c0de-0000-7000-8000-000000000001'), row.task_id
+assert type(row.task_id) is uuid.UUID, type(row.task_id)
+assert row.task_name == 'slow_task'
+assert row.worker_hostname == 'host-1'
+assert row.worker_pid == 1234
+assert row.worker_process_name == 'child-1'
+assert row.started_at == started
+assert row.last_heartbeat_at is None
 ",
         );
     }
 
-    /// An expired row is the dict of Python's public API, with its keys in
-    /// Python's order, the task id as `uuid.UUID` and `expired_for` as a
-    /// `timedelta`.
+    /// A truncated expired list is its class, with the bound, and each row
+    /// has `expired_for` as a `timedelta`.
     #[test]
-    fn an_expired_row_is_the_dict_of_the_python_api() {
+    fn a_truncated_expired_list_holds_its_bound_and_records() {
         let row = ExpiredTaskRow {
-            id: uuid::Uuid::parse_str(TASK_ID).expect("a valid task id"),
+            task_id: uuid::Uuid::parse_str(TASK_ID).expect("a valid task id"),
             task_name: "slow_task".to_owned(),
             queue_name: "default".to_owned(),
             priority: 100,
             sent_at: started(),
             enqueued_at: started(),
             good_until: started(),
-            expired_for_us: 300_000_000,
+            expired_for: std::time::Duration::from_secs(300),
         };
 
-        check_entry(
-            &row,
+        check_outcome(
+            BoundedTaskList::Truncated {
+                rows: vec![row],
+                bound: 1,
+            },
             c"started = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
-assert list(entry) == [
-    'id',
-    'task_name',
-    'queue_name',
-    'priority',
-    'sent_at',
-    'enqueued_at',
-    'good_until',
-    'expired_for',
-], list(entry)
-assert entry == {
-    'id': uuid.UUID('0198c0de-0000-7000-8000-000000000001'),
-    'task_name': 'slow_task',
-    'queue_name': 'default',
-    'priority': 100,
-    'sent_at': started,
-    'enqueued_at': started,
-    'good_until': started,
-    'expired_for': datetime.timedelta(minutes=5),
-}, entry
-assert type(entry['id']) is uuid.UUID, type(entry['id'])
+assert type(outcome).__name__ == 'ExpiredTaskListTruncated', type(outcome)
+assert outcome.bound == 1
+[row] = outcome.rows
+assert type(row).__name__ == 'ExpiredTaskRecord', type(row)
+assert row.task_id == uuid.UUID('0198c0de-0000-7000-8000-000000000001'), row.task_id
+assert row.task_name == 'slow_task'
+assert row.queue_name == 'default'
+assert row.priority == 100
+assert row.sent_at == started
+assert row.enqueued_at == started
+assert row.good_until == started
+assert row.expired_for == datetime.timedelta(minutes=5), row.expired_for
 ",
         );
     }

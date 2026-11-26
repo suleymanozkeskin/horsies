@@ -182,17 +182,20 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - Every call runs on the core of the process: one pool for every thread and event loop, so no call has an event loop limit. A sync call runs the core's blocking form on the calling thread; any exception from a sync call that is not a catalog error propagates, as from the *_async form
 - retryable=True: transient (connection blip), retryable=False: permanent (schema drift, code bug)
 - Broker methods: enqueue_async -> Result[str, BrokerEnqueueError], enqueue (sync) -> Result[str, BrokerEnqueueError | BrokerSyncCallError], get_task_info_async -> BrokerResult[TaskInfo | None],
-  ensure_schema_initialized -> Result[None, BrokerOperationFailed], get_stale_tasks -> BrokerResult[list[dict]],
-  get_expired_tasks -> BrokerResult[list[dict]],
+  ensure_schema_initialized -> Result[None, BrokerOperationFailed], get_stale_tasks(threshold_minutes=2) -> BrokerResult[BoundedTaskList[StaleTaskRow]],
+  get_expired_tasks -> BrokerResult[BoundedTaskList[ExpiredTaskRow]],
   mark_stale_tasks_as_failed -> BrokerResult[int], requeue_stale_claimed -> BrokerResult[int],
   terminate_orphaned_workflow_tasks -> BrokerResult[int],
   close_async -> BrokerResult[None]
 - Health/liveness API (app-level, async + sync; broker exposes the async forms):
   ping_database_async -> BrokerResult[DatabasePing] (SELECT 1 + latency via live pool),
-  ping_workers_async(target_worker_id=None, timeout_seconds=2.0, min_responses=None) -> BrokerResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; min_responses=1 returns on first reply = fast liveness gate),
+  ping_workers_async(target=PingTargetEveryWorker() | PingTargetWorker(worker_id), wait_ms=2000, min_responses=MinResponsesFullWindow() | MinResponsesAtLeast(count)) -> BrokerResult[list[WorkerPong]] (active LISTEN/NOTIFY ping-pong; MinResponsesAtLeast(1) returns on first reply = fast liveness gate),
   list_worker_states_async -> BrokerResult[list[WorkerStateSnapshot]] (latest per worker, includes idle workers),
   get_worker_state_async(worker_id) -> BrokerResult[WorkerStateSnapshot | None],
-  get_worker_state_history_async(worker_id, limit=None) -> BrokerResult[list[WorkerStateSnapshot]]
+  get_worker_state_history_async(worker_id, limit=WorkerHistoryLimitAllRetained() | WorkerHistoryLimitNewest(count)) -> BrokerResult[list[WorkerStateSnapshot]],
+  get_stale_tasks_async(threshold_minutes) -> BrokerResult[BoundedTaskList[StaleTaskRow]] (RUNNING tasks with no runner heartbeat within the threshold; StaleTaskRow: task_id, task_name, worker_hostname, worker_pid, worker_process_name, started_at, last_heartbeat_at),
+  get_expired_tasks_async -> BrokerResult[BoundedTaskList[ExpiredTaskRow]] (PENDING tasks past good_until; ExpiredTaskRow: task_id, task_name, queue_name, priority, sent_at, enqueued_at, good_until, expired_for: timedelta),
+  BoundedTaskList = BoundedTaskListComplete(rows) | BoundedTaskListTruncated(rows, bound) (at most TASK_LIST_ROW_BOUND = 10,000 rows)
 - get_worker_stats was removed in 0.1.4; use list_worker_states_async (typed, includes idle workers)
 - Note: app.get_result_async / app.get_result return ReadResult[Any, TaskError], not a BrokerResult: a database failure is Err(BrokerError(...)), a stored value that does not decode Err(ResultDeserializationError(...)), a task that is not registered in this process Err(NoTypeAvailable(...)), a sync call in a running event loop Err(AsyncContext(...)); the raw reads app.get_raw_result / broker.get_raw_result_record keep BrokerResult
 
@@ -841,7 +844,7 @@ Each entry: Title -- summary -> URL
 
 ### Monitoring
 - Worker & Database Health -- what the database ping, the worker ping, worker states, class coverage and the class report answer; snapshot fields; embedded health payloads -> /horsies/monitoring/worker-health/
-- Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_class_coverage_async, get_class_report_async, result types -> /horsies/monitoring/health-reads/
+- Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_stale_tasks_async, get_expired_tasks_async, get_class_coverage_async, get_class_report_async, result types -> /horsies/monitoring/health-reads/
 - Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
 - Web UI Overview -- browser dashboard: surfaces, the run graph and timeline (node time, longest chain, linear and log scales), the attempt panel, durations, freshness, action outcomes, limits -> /horsies/monitoring/web-ui-overview/
 - Web UI Deployment & Authentication -- mounted and standalone modes, authorization policies, bind rules, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
@@ -976,7 +979,7 @@ RetentionConfig -> /horsies/configuration/app-config/#retention-configuration
 on_child_process_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
 on_event, on_handler_child_start, event handler, handler child, horsies.telemetry, AttemptEnded -> /horsies/workers/event-handlers/
 liveness, worker ping, class coverage, slot health, snapshot fields -> /horsies/monitoring/worker-health/
-ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, ClassCoverage, ClassReport -> /horsies/monitoring/health-reads/
+ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, get_stale_tasks, get_expired_tasks, BoundedTaskList, ClassCoverage, ClassReport -> /horsies/monitoring/health-reads/
 web UI, dashboard -> /horsies/monitoring/web-ui-overview/
 horsies web, standalone dashboard -> /horsies/cli/
 trusted-header, authentication, mounted mode, standalone mode, schema state -> /horsies/monitoring/web-ui-deployment/

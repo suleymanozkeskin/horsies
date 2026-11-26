@@ -793,7 +793,11 @@ async fn blocking_health_reads_and_the_live_check_answer_from_the_database() {
         assert!(history.is_empty(), "{history:?}");
         let pongs = app
             .blocking()
-            .ping_workers(PingTarget::EveryWorker, PING_WINDOW, None)
+            .ping_workers(
+                PingTarget::EveryWorker,
+                PING_WINDOW,
+                horsies::MinResponses::FullWindow,
+            )
             .expect("the worker ping");
         assert!(pongs.is_empty(), "{pongs:?}");
         let passed = app.blocking().check_live().expect("the live check passes");

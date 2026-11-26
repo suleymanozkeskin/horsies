@@ -301,14 +301,11 @@ pub fn ping_listener_disabled() -> BrokerOperationError {
     }
 }
 
-/// The refusal of a worker ping window of 0 seconds or less:
-/// `INVALID_INPUT`, not retryable, with Python's text
-/// (`ping_workers_async`). `timeout_seconds` is the given value as the
-/// caller wrote it. Nothing ran.
-pub fn ping_timeout_refused(timeout_seconds: &dyn std::fmt::Display) -> BrokerOperationError {
-    BrokerOperationError::invalid_input(format!(
-        "timeout_seconds must be positive, got {timeout_seconds}"
-    ))
+/// The refusal of a worker ping wait of 0 or less: `INVALID_INPUT`, not
+/// retryable, with Python's text (`ping_workers_async`). `wait_ms` is the
+/// given value as the caller wrote it. Nothing ran.
+pub fn ping_wait_refused(wait_ms: &dyn std::fmt::Display) -> BrokerOperationError {
+    BrokerOperationError::invalid_input(format!("wait_ms must be positive, got {wait_ms}"))
 }
 
 /// The refusal of a worker ping `min_responses` below 1: `INVALID_INPUT`,
@@ -706,13 +703,10 @@ mod tests {
 
     #[test]
     fn the_ping_refusals_carry_python_text() {
-        let timeout = ping_timeout_refused(&"-1.5");
-        assert_eq!(timeout.code(), BrokerErrorCode::InvalidInput);
-        assert_eq!(
-            timeout.message(),
-            "timeout_seconds must be positive, got -1.5"
-        );
-        assert!(!timeout.retryable());
+        let wait = ping_wait_refused(&-1);
+        assert_eq!(wait.code(), BrokerErrorCode::InvalidInput);
+        assert_eq!(wait.message(), "wait_ms must be positive, got -1");
+        assert!(!wait.retryable());
 
         let minimum = ping_min_responses_refused(&0);
         assert_eq!(minimum.code(), BrokerErrorCode::InvalidInput);

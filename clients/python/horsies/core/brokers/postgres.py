@@ -20,8 +20,12 @@ from horsies._core import (
     ClassReportRecord,
     CoreError,
     CoreFailure,
-    TaskListComplete,
-    TaskListTruncated,
+    ExpiredTaskListComplete,
+    ExpiredTaskListTruncated,
+    ExpiredTaskRecord,
+    StaleTaskListComplete,
+    StaleTaskListTruncated,
+    StaleTaskRecord,
     WorkerStateAbsent,
     WorkerPongsRecord,
     WorkerStateRecord,
@@ -107,6 +111,22 @@ from horsies.core.models.health import (
     DatabasePing,
     WorkerPong,
     WorkerStateSnapshot,
+)
+from horsies.core.models.health_reads import (
+    BoundedTaskList,
+    BoundedTaskListComplete,
+    BoundedTaskListTruncated,
+    ExpiredTaskRow,
+    MinResponses,
+    MinResponsesAtLeast,
+    MinResponsesFullWindow,
+    PingTarget,
+    PingTargetEveryWorker,
+    PingTargetWorker,
+    StaleTaskRow,
+    WorkerHistoryLimit,
+    WorkerHistoryLimitAllRetained,
+    WorkerHistoryLimitNewest,
 )
 from horsies.core.history.periods import RetentionClassKey
 from horsies.core.history.ddl.classes import (
@@ -312,6 +332,132 @@ def _worker_ping_answer(
             return Err(outcome)
         case BrokerOperationFailed(code=code):
             raise AssertionError(f'the core worker ping answered the code {code}')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _ping_target_worker_id(target: PingTarget) -> str | None:
+    """The core handle's form of ``target``: the worker id, or ``None`` for
+    every worker. Pure."""
+    match target:
+        case PingTargetEveryWorker():
+            return None
+        case PingTargetWorker(worker_id=worker_id):
+            return worker_id
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _min_responses_count(min_responses: MinResponses) -> int | None:
+    """The core handle's form of ``min_responses``: the count, or ``None``
+    for the full window. The core handle checks the count. Pure."""
+    match min_responses:
+        case MinResponsesFullWindow():
+            return None
+        case MinResponsesAtLeast(count=count):
+            return count
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _history_limit_count(limit: WorkerHistoryLimit) -> int | None:
+    """The core handle's form of ``limit``: the count, or ``None`` for every
+    retained snapshot. The core handle checks the count. Pure."""
+    match limit:
+        case WorkerHistoryLimitAllRetained():
+            return None
+        case WorkerHistoryLimitNewest(count=count):
+            return count
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _stale_task_row(record: StaleTaskRecord) -> StaleTaskRow:
+    """The public row of a core stale task record. Pure."""
+    return StaleTaskRow(
+        task_id=record.task_id,
+        task_name=record.task_name,
+        worker_hostname=record.worker_hostname,
+        worker_pid=record.worker_pid,
+        worker_process_name=record.worker_process_name,
+        started_at=record.started_at,
+        last_heartbeat_at=record.last_heartbeat_at,
+    )
+
+
+def _expired_task_row(record: ExpiredTaskRecord) -> ExpiredTaskRow:
+    """The public row of a core expired task record. Pure."""
+    return ExpiredTaskRow(
+        task_id=record.task_id,
+        task_name=record.task_name,
+        queue_name=record.queue_name,
+        priority=record.priority,
+        sent_at=record.sent_at,
+        enqueued_at=record.enqueued_at,
+        good_until=record.good_until,
+        expired_for=record.expired_for,
+    )
+
+
+def _stale_task_list_answer(
+    outcome: (
+        StaleTaskListComplete
+        | StaleTaskListTruncated
+        | BrokerOperationFailed
+        | BrokerInvalidInput
+    ),
+) -> BrokerResult[BoundedTaskList[StaleTaskRow]]:
+    """The answer of the stale list. A failure is the core's class as it is:
+    ``BrokerInvalidInput`` for a refused threshold (nothing ran), or
+    ``BrokerOperationFailed`` with ``MONITORING_QUERY_FAILED``. Another
+    operation code contradicts the read's catalog: ``AssertionError``.
+    Pure."""
+    match outcome:
+        case StaleTaskListComplete(rows=rows):
+            return Ok(BoundedTaskListComplete(rows=tuple(_stale_task_row(row) for row in rows)))
+        case StaleTaskListTruncated(rows=rows, bound=bound):
+            return Ok(
+                BoundedTaskListTruncated(
+                    rows=tuple(_stale_task_row(row) for row in rows), bound=bound,
+                ),
+            )
+        case BrokerInvalidInput():
+            return Err(outcome)
+        case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
+            return Err(outcome)
+        case BrokerOperationFailed(code=code):
+            raise AssertionError(f'the core get_stale_tasks answered the code {code}')
+        case _ as unreachable:
+            assert_never(unreachable)
+
+
+def _expired_task_list_answer(
+    outcome: (
+        ExpiredTaskListComplete
+        | ExpiredTaskListTruncated
+        | BrokerOperationFailed
+        | BrokerInvalidInput
+    ),
+) -> BrokerResult[BoundedTaskList[ExpiredTaskRow]]:
+    """The answer of the expired list. A failure is the core's class as it
+    is: ``BrokerOperationFailed`` with ``MONITORING_QUERY_FAILED``. Another
+    operation code contradicts the read's catalog: ``AssertionError``.
+    Pure."""
+    match outcome:
+        case ExpiredTaskListComplete(rows=rows):
+            return Ok(BoundedTaskListComplete(rows=tuple(_expired_task_row(row) for row in rows)))
+        case ExpiredTaskListTruncated(rows=rows, bound=bound):
+            return Ok(
+                BoundedTaskListTruncated(
+                    rows=tuple(_expired_task_row(row) for row in rows), bound=bound,
+                ),
+            )
+        case BrokerInvalidInput():
+            return Err(outcome)
+        case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
+            return Err(outcome)
+        case BrokerOperationFailed(code=code):
+            raise AssertionError(f'the core get_expired_tasks answered the code {code}')
         case _ as unreachable:
             assert_never(unreachable)
 
@@ -1396,59 +1542,48 @@ class PostgresBroker:
 
     async def get_stale_tasks(
         self,
-        stale_threshold_minutes: int = 2,
-    ) -> BrokerResult[list[dict[str, Any]]]:
+        threshold_minutes: int = 2,
+    ) -> BrokerResult[BoundedTaskList[StaleTaskRow]]:
         """RUNNING tasks whose latest runner heartbeat, or their start when
-        they have no heartbeat, is older than the threshold. Reads only, in
-        one statement (``horsies_list_stale_tasks``) that the core runs on
-        the broker's core handle.
+        they have no heartbeat, is older than ``threshold_minutes``. Reads
+        only, in one statement (``horsies_list_stale_tasks``) that the core
+        runs on the broker's core handle. The reaper recovers stale tasks;
+        this read does not.
 
         Rows come ordered by the latest heartbeat, rows with none first, then
-        by id. Each row is a dict with the keys ``id`` (``uuid.UUID``),
-        ``worker_hostname``, ``worker_pid``, ``worker_process_name``,
-        ``last_heartbeat``, ``started_at`` and ``task_name``. At most
-        ``TASK_LIST_ROW_BOUND`` rows come back; when more rows match, the
-        first ``TASK_LIST_ROW_BOUND`` come back and a warning is logged.
+        by task id. At most ``TASK_LIST_ROW_BOUND`` rows come back:
+        ``BoundedTaskListComplete`` holds every matching row, and
+        ``BoundedTaskListTruncated`` the first ``TASK_LIST_ROW_BOUND`` when
+        more rows match.
 
-        - ``Err(INVALID_INPUT)``: ``stale_threshold_minutes`` is not an int
-          from 0 to ``MAX_STALE_THRESHOLD_MINUTES``. Nothing ran.
+        - ``Err(INVALID_INPUT)``: ``threshold_minutes`` is not an int from 0
+          to ``MAX_STALE_THRESHOLD_MINUTES``. Nothing ran.
         - ``Err(MONITORING_QUERY_FAILED)``: the read failed, or the core of
           this process cannot run it (``CoreCallRefusal``).
         """
         try:
-            outcome = await self._core_handle.stale_tasks_async(stale_threshold_minutes)
+            outcome = await self._core_handle.stale_tasks_async(threshold_minutes)
         except CoreError as exc:
             return _monitoring_call_failed('get_stale_tasks', call_refusal_or_raise(exc))
-        return self._task_list_answer('get_stale_tasks', outcome)
+        return _stale_task_list_answer(outcome)
 
-    def _task_list_answer(
-        self,
-        operation: str,
-        outcome: (
-            TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput
-        ),
-    ) -> BrokerResult[list[dict[str, Any]]]:
-        """The answer of a task list from the core's record; a cut list logs a
-        warning that names ``operation`` and the bound. A failure is the
-        core's class as it is: ``BrokerInvalidInput`` for a refused threshold
-        (nothing ran), or ``BrokerOperationFailed`` with
-        ``MONITORING_QUERY_FAILED``."""
-        match outcome:
-            case TaskListComplete(rows=rows):
-                return Ok(rows)
-            case TaskListTruncated(rows=rows, bound=bound):
-                self.logger.warning(
-                    '%s returned the first %d rows; more rows match', operation, bound,
-                )
-                return Ok(rows)
-            case BrokerInvalidInput():
-                return Err(outcome)
-            case BrokerOperationFailed(code=BrokerErrorCode.MONITORING_QUERY_FAILED):
-                return Err(outcome)
-            case BrokerOperationFailed(code=code):
-                raise AssertionError(f'the core {operation} answered the code {code}')
-            case _ as unreachable:
-                assert_never(unreachable)
+    def _get_stale_tasks_blocking(
+        self, threshold_minutes: int,
+    ) -> BrokerResult[BoundedTaskList[StaleTaskRow]]:
+        """The blocking form of ``get_stale_tasks``, for
+        ``Horsies.get_stale_tasks``: ``CoreHandle.stale_tasks`` on the calling
+        thread, with the GIL released, and the same outcomes. A call past the
+        core's bound of a blocking call is ``MONITORING_QUERY_FAILED`` with
+        the ``CoreCallTimedOut``.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.stale_tasks(threshold_minutes)
+        except CoreError as exc:
+            return _monitoring_call_failed('get_stale_tasks', call_refusal_or_raise(exc))
+        return _stale_task_list_answer(outcome)
 
     async def ping_database_async(self) -> BrokerResult[DatabasePing]:
         """Probe Postgres reachability with one statement on the broker's main
@@ -1493,21 +1628,25 @@ class PostgresBroker:
     async def ping_workers_async(
         self,
         *,
-        target_worker_id: str | None = None,
-        timeout_seconds: float = 2.0,
-        min_responses: int | None = None,
+        target: PingTarget = PingTargetEveryWorker(),
+        wait_ms: int = 2_000,
+        min_responses: MinResponses = MinResponsesFullWindow(),
     ) -> BrokerResult[list[WorkerPong]]:
-        """Active ping-pong: NOTIFY workers and collect replies within a window.
+        """Active ping-pong: NOTIFY workers and collect replies within a window
+        of ``wait_ms`` milliseconds.
 
         Subscribes to a unique reply channel, broadcasts a ping on
         ``WORKER_PING_CHANNEL``, then collects pongs until a stop condition:
 
-        - ``target_worker_id`` set: returns as soon as that worker replies.
-        - ``min_responses`` set: returns as soon as that many distinct workers
-          reply (fast fail-open liveness, e.g. ``min_responses=1`` for a
-          ``/health`` gate — a healthy fleet answers in milliseconds; only a
-          degraded fleet pays the full ``timeout_seconds``).
-        - neither set: waits the full window and enumerates every responder.
+        - ``PingTargetWorker(worker_id)``: returns as soon as that worker
+          replies.
+        - ``MinResponsesAtLeast(count)``: returns as soon as that many
+          distinct workers reply (fast fail-open liveness, e.g.
+          ``MinResponsesAtLeast(1)`` for a ``/health`` gate — a healthy fleet
+          answers in milliseconds; only a degraded fleet waits the full
+          ``wait_ms``).
+        - ``PingTargetEveryWorker()`` and ``MinResponsesFullWindow()``: waits
+          the full window and enumerates every responder.
 
         A pong proves the replying worker's event loop is responsive *and*
         that it can reach Postgres. Workers present in
@@ -1516,10 +1655,11 @@ class PostgresBroker:
         The core runs the ping on the process listener of the broker's core
         handle; the window starts when the ping NOTIFY has committed. A
         reply that does not decode is logged on ``horsies.broker`` and left
-        out. An infinite ``timeout_seconds`` waits with no deadline.
+        out.
 
-        - ``Err(INVALID_INPUT)``: ``timeout_seconds`` is 0 or less, or NaN;
-          ``min_responses`` is below 1; ``target_worker_id`` is not a
+        - ``Err(INVALID_INPUT)``: ``wait_ms`` is not an ``int``, is 0 or
+          less, or is above 2**64 - 1; the count of ``MinResponsesAtLeast``
+          is below 1; the ``worker_id`` of ``PingTargetWorker`` is not a
           ``str``. Nothing ran.
         - ``Err(LISTENER_DISABLED)``: the broker was built with
           ``assume_initialized=True`` and has no listener. Nothing ran.
@@ -1529,9 +1669,9 @@ class PostgresBroker:
         """
         try:
             outcome = await self._core_handle.ping_workers_async(
-                target_worker_id=target_worker_id,
-                timeout_seconds=timeout_seconds,
-                min_responses=min_responses,
+                target_worker_id=_ping_target_worker_id(target),
+                wait_ms=wait_ms,
+                min_responses=_min_responses_count(min_responses),
             )
         except CoreError as exc:
             return _worker_ping_call_failed(call_refusal_or_raise(exc))
@@ -1540,25 +1680,25 @@ class PostgresBroker:
     def _ping_workers_blocking(
         self,
         *,
-        target_worker_id: str | None,
-        timeout_seconds: float,
-        min_responses: int | None,
+        target: PingTarget,
+        wait_ms: int,
+        min_responses: MinResponses,
     ) -> BrokerResult[list[WorkerPong]]:
         """The blocking form of ``ping_workers_async``, for
         ``Horsies.ping_workers``: ``CoreHandle.ping_workers`` on the calling
         thread, with the GIL released, and the same outcomes. The call is
-        bounded by the window plus the core's bound of a blocking call, and
-        not bounded for an infinite window; a call past its bound is
-        ``WORKER_PING_FAILED`` with the ``CoreCallTimedOut``.
+        bounded by the window plus the core's bound of a blocking call; a
+        call past its bound is ``WORKER_PING_FAILED`` with the
+        ``CoreCallTimedOut``.
 
         The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
         event loop.
         """
         try:
             outcome = self._core_handle.ping_workers(
-                target_worker_id=target_worker_id,
-                timeout_seconds=timeout_seconds,
-                min_responses=min_responses,
+                target_worker_id=_ping_target_worker_id(target),
+                wait_ms=wait_ms,
+                min_responses=_min_responses_count(min_responses),
             )
         except CoreError as exc:
             return _worker_ping_call_failed(call_refusal_or_raise(exc))
@@ -1637,30 +1777,31 @@ class PostgresBroker:
         self,
         worker_id: str,
         *,
-        limit: int | None = None,
+        limit: WorkerHistoryLimit = WorkerHistoryLimitAllRetained(),
     ) -> BrokerResult[list[WorkerStateSnapshot]]:
         """Timeseries snapshots for one worker, newest first.
 
-        ``limit`` of ``None`` returns all retained rows; pass an explicit cap
-        to bound the fetch (the table grows ~1 row per worker per interval).
-        Reads only, in one statement that the core runs on the broker's core
-        handle.
+        ``WorkerHistoryLimitAllRetained()`` returns all retained rows;
+        ``WorkerHistoryLimitNewest(count)`` bounds the fetch (the table grows
+        ~1 row per worker per interval). Reads only, in one statement that
+        the core runs on the broker's core handle.
 
-        - ``Err(INVALID_INPUT)``: ``limit`` is 0 or less. Nothing ran.
+        - ``Err(INVALID_INPUT)``: the count of ``WorkerHistoryLimitNewest``
+          is 0 or less. Nothing ran.
         - ``Err(MONITORING_QUERY_FAILED)``: as ``list_worker_states_async``,
-          or a ``limit`` above the PostgreSQL ``bigint`` range (not
-          retryable; nothing ran).
+          or a count above the PostgreSQL ``bigint`` range (not retryable;
+          nothing ran).
         """
         try:
             outcome = await self._core_handle.worker_state_history_async(
-                worker_id, limit=limit,
+                worker_id, limit=_history_limit_count(limit),
             )
         except CoreError as exc:
             return _monitoring_call_failed('get_worker_state_history', call_refusal_or_raise(exc))
         return _worker_states_answer(outcome)
 
     def _get_worker_state_history_blocking(
-        self, worker_id: str, *, limit: int | None,
+        self, worker_id: str, *, limit: WorkerHistoryLimit,
     ) -> BrokerResult[list[WorkerStateSnapshot]]:
         """The blocking form of ``get_worker_state_history_async``, for
         ``Horsies.get_worker_state_history``: ``CoreHandle.worker_state_history`` on the calling
@@ -1673,7 +1814,7 @@ class PostgresBroker:
         """
         try:
             outcome = self._core_handle.worker_state_history(
-                worker_id, limit=limit,
+                worker_id, limit=_history_limit_count(limit),
             )
         except CoreError as exc:
             return _monitoring_call_failed('get_worker_state_history', call_refusal_or_raise(exc))
@@ -1747,18 +1888,16 @@ class PostgresBroker:
             return _monitoring_call_failed('get_class_report', call_refusal_or_raise(exc))
         return _class_report_answer(outcome)
 
-    async def get_expired_tasks(self) -> BrokerResult[list[dict[str, Any]]]:
+    async def get_expired_tasks(self) -> BrokerResult[BoundedTaskList[ExpiredTaskRow]]:
         """PENDING tasks whose ``good_until`` passed before a worker took
         them. Reads only, in one statement (``horsies_list_expired_tasks``)
         that the core runs on the broker's core handle.
 
-        Rows come ordered by ``good_until``, oldest first, then by id. Each
-        row is a dict with the keys ``id`` (``uuid.UUID``), ``task_name``,
-        ``queue_name``, ``priority``, ``sent_at``, ``enqueued_at``,
-        ``good_until`` and ``expired_for`` (a ``timedelta``, on the database
-        clock). At most ``TASK_LIST_ROW_BOUND`` rows come back; when more
-        rows match, the first ``TASK_LIST_ROW_BOUND`` come back and a warning
-        is logged.
+        Rows come ordered by ``good_until``, oldest first, then by task id.
+        ``expired_for`` is a ``timedelta`` on the database clock. At most
+        ``TASK_LIST_ROW_BOUND`` rows come back: ``BoundedTaskListComplete``
+        holds every matching row, and ``BoundedTaskListTruncated`` the first
+        ``TASK_LIST_ROW_BOUND`` when more rows match.
 
         - ``Err(MONITORING_QUERY_FAILED)``: the read failed, or the core of
           this process cannot run it (``CoreCallRefusal``).
@@ -1767,7 +1906,23 @@ class PostgresBroker:
             outcome = await self._core_handle.expired_tasks_async()
         except CoreError as exc:
             return _monitoring_call_failed('get_expired_tasks', call_refusal_or_raise(exc))
-        return self._task_list_answer('get_expired_tasks', outcome)
+        return _expired_task_list_answer(outcome)
+
+    def _get_expired_tasks_blocking(self) -> BrokerResult[BoundedTaskList[ExpiredTaskRow]]:
+        """The blocking form of ``get_expired_tasks``, for
+        ``Horsies.get_expired_tasks``: ``CoreHandle.expired_tasks`` on the
+        calling thread, with the GIL released, and the same outcomes. A call
+        past the core's bound of a blocking call is ``MONITORING_QUERY_FAILED``
+        with the ``CoreCallTimedOut``.
+
+        The caller returns ``ASYNC_CONTEXT`` first on a thread that runs an
+        event loop.
+        """
+        try:
+            outcome = self._core_handle.expired_tasks()
+        except CoreError as exc:
+            return _monitoring_call_failed('get_expired_tasks', call_refusal_or_raise(exc))
+        return _expired_task_list_answer(outcome)
 
     async def mark_stale_tasks_as_failed(
         self,

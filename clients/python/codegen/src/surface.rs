@@ -402,7 +402,7 @@ const MONITORING_TASK_DETAIL_PARAMETERS: &[StubParameter] = &[positional("task_i
 const STALE_TASKS_PARAMETERS: &[StubParameter] = &[positional("threshold_minutes", "object")];
 const PING_WORKERS_PARAMETERS: &[StubParameter] = &[
     keyword("target_worker_id", "str | None"),
-    keyword("timeout_seconds", "float"),
+    keyword("wait_ms", "int"),
     keyword("min_responses", "int | None"),
 ];
 const WORKER_STATE_PARAMETERS: &[StubParameter] = &[positional("worker_id", "str")];
@@ -978,8 +978,10 @@ const WORKER_STATES_OUTCOME: &str =
 const WORKER_STATE_OUTCOME: &str = "WorkerStateRecord | WorkerStateAbsent | BrokerOperationFailed";
 const CLASS_COVERAGE_OUTCOME: &str = "ClassCoverageRecord | BrokerOperationFailed";
 const CLASS_REPORT_OUTCOME: &str = "ClassReportRecord | BrokerOperationFailed";
-const TASK_LIST_OUTCOME: &str =
-    "TaskListComplete | TaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
+const STALE_TASK_LIST_OUTCOME: &str =
+    "StaleTaskListComplete | StaleTaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
+const EXPIRED_TASK_LIST_OUTCOME: &str =
+    "ExpiredTaskListComplete | ExpiredTaskListTruncated | BrokerOperationFailed | BrokerInvalidInput";
 const MONITORING_DETAIL_OUTCOME: &str =
     "MonitoringJson | TaskDetailAbsent | MonitoringQueryCoreError";
 
@@ -1046,22 +1048,34 @@ const MONITORING_HANDLE_METHODS: &[StubFunction] = &[
         doc: "Every schedule state: the JSON text of the core's list of ScheduleStateInfo. Reads only,\nin one statement.",
     },
     StubFunction {
+        name: "stale_tasks",
+        parameters: STALE_TASKS_PARAMETERS,
+        returns: TypeText::Plain(STALE_TASK_LIST_OUTCOME),
+        doc: "The RUNNING tasks whose latest runner beat, or their start, is older than the\nthreshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is\nINVALID_INPUT before any core call. Reads only, in one statement.",
+    },
+    StubFunction {
         name: "stale_tasks_async",
         parameters: STALE_TASKS_PARAMETERS,
-        returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
-        doc: "The RUNNING tasks whose latest runner beat, or their start, is older than the\nthreshold. A bool, a value that is not an int, or one outside 0 to 525600 minutes is\nINVALID_INPUT before any core call. Reads only, in one statement.",
+        returns: TypeText::FutureOf(STALE_TASK_LIST_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the read.",
+    },
+    StubFunction {
+        name: "expired_tasks",
+        parameters: &[],
+        returns: TypeText::Plain(EXPIRED_TASK_LIST_OUTCOME),
+        doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
     },
     StubFunction {
         name: "expired_tasks_async",
         parameters: &[],
-        returns: TypeText::FutureOf(TASK_LIST_OUTCOME),
-        doc: "The PENDING tasks whose good_until passed before a worker took them. Reads only, in\none statement.",
+        returns: TypeText::FutureOf(EXPIRED_TASK_LIST_OUTCOME),
+        doc: "The awaitable form of the method above. A cancelled await drops the read.",
     },
     StubFunction {
         name: "ping_workers",
         parameters: PING_WORKERS_PARAMETERS,
         returns: TypeText::Plain(PING_WORKERS_OUTCOME),
-        doc: "Ping the workers and collect the distinct replies within the window, on the process\nlistener. A refused argument is INVALID_INPUT before any core call; a handle with no\nlistener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus\nthe bound of a blocking call; not bounded for an infinite window.",
+        doc: "Ping the workers and collect the distinct replies within the window, on the process\nlistener. A refused argument is INVALID_INPUT before any core call; a handle with no\nlistener is LISTENER_DISABLED. Sends one NOTIFY; writes no row. Bounded by the window plus\nthe bound of a blocking call.",
     },
     StubFunction {
         name: "ping_workers_async",
@@ -2280,18 +2294,66 @@ const MONITORING_CLASSES: &[StubClass] = &[
         methods: &[],
     },
     StubClass {
-        name: "TaskListComplete",
-        doc: "Every matching row of a task list: one dict per row, with the task id as uuid.UUID.",
+        name: "StaleTaskRecord",
+        doc: "One RUNNING task of the stale list. last_heartbeat_at is None when the task has no\nrunner beat since its start.",
         constructor: Constructor::NoConstructor,
-        properties: &[property("rows", "list[dict[str, object]]")],
+        properties: &[
+            property("task_id", "uuid.UUID"),
+            property("task_name", "str"),
+            property("worker_hostname", "str | None"),
+            property("worker_pid", "int | None"),
+            property("worker_process_name", "str | None"),
+            property("started_at", "datetime.datetime"),
+            property("last_heartbeat_at", "datetime.datetime | None"),
+        ],
         methods: &[],
     },
     StubClass {
-        name: "TaskListTruncated",
-        doc: "The first bound matching rows of a task list; more rows match.",
+        name: "ExpiredTaskRecord",
+        doc: "One PENDING task of the expired list.",
         constructor: Constructor::NoConstructor,
         properties: &[
-            property("rows", "list[dict[str, object]]"),
+            property("task_id", "uuid.UUID"),
+            property("task_name", "str"),
+            property("queue_name", "str"),
+            property("priority", "int"),
+            property("sent_at", "datetime.datetime"),
+            property("enqueued_at", "datetime.datetime"),
+            property("good_until", "datetime.datetime"),
+            property("expired_for", "datetime.timedelta"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "StaleTaskListComplete",
+        doc: "Every matching row of the stale list.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rows", "list[StaleTaskRecord]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "StaleTaskListTruncated",
+        doc: "The first bound matching rows of the stale list; more rows match.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("rows", "list[StaleTaskRecord]"),
+            property("bound", "int"),
+        ],
+        methods: &[],
+    },
+    StubClass {
+        name: "ExpiredTaskListComplete",
+        doc: "Every matching row of the expired list.",
+        constructor: Constructor::NoConstructor,
+        properties: &[property("rows", "list[ExpiredTaskRecord]")],
+        methods: &[],
+    },
+    StubClass {
+        name: "ExpiredTaskListTruncated",
+        doc: "The first bound matching rows of the expired list; more rows match.",
+        constructor: Constructor::NoConstructor,
+        properties: &[
+            property("rows", "list[ExpiredTaskRecord]"),
             property("bound", "int"),
         ],
         methods: &[],

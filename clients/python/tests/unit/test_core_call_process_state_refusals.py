@@ -29,6 +29,11 @@ from horsies.core.app import Horsies
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.health_reads import (
+    MinResponsesFullWindow,
+    PingTargetEveryWorker,
+    WorkerHistoryLimitAllRetained,
+)
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.tasks import TaskError
 from horsies.core.models.workflow import NodeKey, TaskNode, WorkflowHandle, WorkflowSpec
@@ -172,7 +177,9 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     'ping_workers_blocking': (
         'ping_workers',
         lambda b: b._ping_workers_blocking(
-            target_worker_id=None, timeout_seconds=2.0, min_responses=None,
+            target=PingTargetEveryWorker(),
+            wait_ms=2_000,
+            min_responses=MinResponsesFullWindow(),
         ),
     ),
     'list_worker_states_blocking': ('worker_states', lambda b: b._list_worker_states_blocking()),
@@ -181,7 +188,9 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
     ),
     'get_worker_state_history_blocking': (
         'worker_state_history',
-        lambda b: b._get_worker_state_history_blocking(_WORKER_ID, limit=None),
+        lambda b: b._get_worker_state_history_blocking(
+            _WORKER_ID, limit=WorkerHistoryLimitAllRetained(),
+        ),
     ),
     'get_class_coverage_blocking': ('class_coverage', lambda b: b._get_class_coverage_blocking()),
     'get_class_report_blocking': ('class_report', lambda b: b._get_class_report_blocking()),
@@ -189,7 +198,9 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
 
 _TASK_LISTS_AND_PASSES: Final[dict[str, tuple[str, BrokerCall]]] = {
     'get_stale_tasks': ('stale_tasks_async', lambda b: asyncio.run(b.get_stale_tasks())),
+    'get_stale_tasks_blocking': ('stale_tasks', lambda b: b._get_stale_tasks_blocking(2)),
     'get_expired_tasks': ('expired_tasks_async', lambda b: asyncio.run(b.get_expired_tasks())),
+    'get_expired_tasks_blocking': ('expired_tasks', lambda b: b._get_expired_tasks_blocking()),
     'mark_stale_tasks_as_failed': (
         'mark_stale_running_async', lambda b: asyncio.run(b.mark_stale_tasks_as_failed()),
     ),

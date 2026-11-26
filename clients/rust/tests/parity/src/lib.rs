@@ -928,14 +928,14 @@ async fn rerun_one(app: &Horsies, rerun: &Rerun, sent: &[Uuid]) -> Result<Uuid, 
 /// The answers to a ping of every worker, once `expected` workers answered
 /// one ping.
 async fn every_worker(app: &Horsies, expected: usize) -> Result<Vec<WorkerPong>, SendRefused> {
+    let min_responses = match NonZeroUsize::new(expected) {
+        Some(count) => horsies::MinResponses::AtLeast(count),
+        None => horsies::MinResponses::FullWindow,
+    };
     let mut answered: Vec<WorkerPong> = Vec::new();
     for _attempt in 0..PING_ATTEMPTS {
         answered = app
-            .ping_workers(
-                PingTarget::EveryWorker,
-                PING_WINDOW,
-                NonZeroUsize::new(expected),
-            )
+            .ping_workers(PingTarget::EveryWorker, PING_WINDOW, min_responses)
             .await
             .map_err(|refused| SendRefused(format!("ping_workers was refused: {refused}")))?;
         if answered.len() >= expected {
@@ -963,7 +963,7 @@ async fn ping(app: &Horsies, expected: usize) -> Result<String, SendRefused> {
         .ping_workers(
             PingTarget::Worker(first.worker_id.clone()),
             PING_WINDOW,
-            None,
+            horsies::MinResponses::FullWindow,
         )
         .await
         .map_err(|refused| {

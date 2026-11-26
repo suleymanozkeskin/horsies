@@ -999,7 +999,7 @@ class TestPingWorkers:
         )
         broker = PostgresBroker(config, assume_initialized=True)
 
-        result = await broker.ping_workers_async(timeout_seconds=1.0)
+        result = await broker.ping_workers_async(wait_ms=1_000)
 
         assert is_err(result)
         assert isinstance(result.err_value, BrokerListenerDisabled)

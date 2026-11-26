@@ -12,12 +12,13 @@ web UI, so the Python app and the Rust app answer alike.
 use std::num::NonZeroUsize;
 use std::time::Duration;
 
-use horsies::{BrokerOperationError, Horsies, PingTarget};
+use horsies::{BrokerOperationError, Horsies, MinResponses, PingTarget};
 
 async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
     let ping = app.ping_database().await?;
+    let one_reply = MinResponses::AtLeast(NonZeroUsize::MIN);
     let pongs = app
-        .ping_workers(PingTarget::EveryWorker, Duration::from_secs(2), NonZeroUsize::new(1))
+        .ping_workers(PingTarget::EveryWorker, Duration::from_secs(2), one_reply)
         .await?;
     println!("database {} ms, {} workers answered", ping.latency_ms, pongs.len());
     Ok(())
@@ -27,12 +28,12 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 | Method | Returns |
 |---|---|
 | `ping_database()` | `DatabasePing` (`latency_ms`) |
-| `ping_workers(target, timeout, min_responses)` | `Vec<WorkerPong>` (`worker_id`, `hostname`, `pid`, `round_trip_ms`). `target` is `PingTarget::EveryWorker` or `PingTarget::Worker(worker_id)` |
+| `ping_workers(target, wait, min_responses)` | `Vec<WorkerPong>` (`worker_id`, `hostname`, `pid`, `round_trip_ms`). `target` is `PingTarget::EveryWorker` or `PingTarget::Worker(worker_id)`; `min_responses` is `MinResponses::FullWindow` or `MinResponses::AtLeast(NonZeroUsize)` |
 | `list_worker_states()` | `Vec<WorkerStateSnapshot>`: the latest snapshot of each worker |
 | `get_worker_state(worker_id)` | `Option<WorkerStateSnapshot>` |
 | `get_worker_state_history(worker_id, limit)` | `Vec<WorkerStateSnapshot>`, newest first. `WorkerHistoryLimit::AllRetained` or `Newest(NonZeroU32)` |
-| `get_stale_tasks(StaleMinutes)` | `BoundedTaskList<StaleTaskRow>`. `StaleMinutes::parse(0..=525_600)` |
-| `get_expired_tasks()` | `BoundedTaskList<ExpiredTaskRow>`: PENDING tasks past their `good_until` |
+| `get_stale_tasks(StaleMinutes)` | `BoundedTaskList<StaleTaskRow>` (`task_id`, ..., `last_heartbeat_at: Option<DateTime<Utc>>`). `StaleMinutes::parse(0..=525_600)` |
+| `get_expired_tasks()` | `BoundedTaskList<ExpiredTaskRow>` (`task_id`, ..., `expired_for: Duration`): PENDING tasks past their `good_until` |
 | `get_class_coverage()` | `ClassCoverage`: whether a live worker can run each pending execution class |
 | `get_class_report()` | `ClassReport`: the load of each execution class |
 
@@ -48,7 +49,7 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
   Each read connects the app's handle and installs the schema once per
   handle, as a send does.
 - `ping_workers` stops at the first of: the target worker replied,
-  `min_responses` workers replied, `timeout` passed. A zero `timeout` is
+  `MinResponses::AtLeast(n)` workers replied, `wait` passed. A zero `wait` is
   `INVALID_INPUT`. An app with no listener (`SchemaMode::AssumeInitialized`)
   gets `LISTENER_DISABLED`.
 - `BoundedTaskList` is `Complete(rows)` or `Truncated { rows, bound }`, at
@@ -484,7 +485,7 @@ allows every read and every action.
 ```rust
 use horsies::{
     // Health reads
-    PingTarget, WorkerHistoryLimit, DatabasePing, WorkerPong, WorkerStateSnapshot,
+    PingTarget, MinResponses, WorkerHistoryLimit, DatabasePing, WorkerPong, WorkerStateSnapshot,
     SnapshotProfile, StaleMinutes, StaleThresholdRefusal, StaleTaskRow, ExpiredTaskRow,
     BoundedTaskList, ClassCoverage, ClassReport, BrokerOperationError, BrokerErrorCode,
     TASK_LIST_BOUND, MAX_STALE_THRESHOLD_MINUTES,

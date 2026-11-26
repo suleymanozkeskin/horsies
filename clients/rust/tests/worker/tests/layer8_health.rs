@@ -4,7 +4,7 @@
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::time::Duration;
 
-use horsies::{BrokerErrorCode, PingTarget, WorkerHistoryLimit};
+use horsies::{BrokerErrorCode, MinResponses, PingTarget, WorkerHistoryLimit};
 use horsies_test_support::poll;
 use horsies_test_worker::harness::Suite;
 use horsies_test_worker::instance::{Instance, Profile};
@@ -132,16 +132,20 @@ async fn test_get_worker_state_history_newest_first_and_limit() {
 }
 
 /// Python: `clients/python/tests/unit` ping argument checks; the e2e twin of
-/// `horsies-core broker::postgres::broker_operation_error_tests::ping_workers_refuses_a_zero_timeout_as_invalid_input`.
+/// `horsies-core broker::postgres::broker_operation_error_tests::ping_workers_refuses_a_zero_wait_as_invalid_input`.
 #[tokio::test]
 #[serial]
-async fn test_ping_workers_rejects_zero_timeout() {
+async fn test_ping_workers_rejects_zero_wait() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let refused = suite
         .app
-        .ping_workers(PingTarget::EveryWorker, Duration::ZERO, None)
+        .ping_workers(
+            PingTarget::EveryWorker,
+            Duration::ZERO,
+            MinResponses::FullWindow,
+        )
         .await
-        .expect_err("a zero timeout is refused");
+        .expect_err("a zero wait is refused");
     assert_eq!(refused.code(), BrokerErrorCode::InvalidInput);
     assert!(!refused.retryable(), "a bad argument is not retryable");
 }
@@ -155,7 +159,11 @@ async fn test_ping_workers_collects_pong_and_targets_worker() {
     let _second = suite.worker(Profile::Isolated1).await;
     let pongs = suite
         .app
-        .ping_workers(PingTarget::EveryWorker, PING_WAIT, NonZeroUsize::new(2))
+        .ping_workers(
+            PingTarget::EveryWorker,
+            PING_WAIT,
+            MinResponses::AtLeast(NonZeroUsize::new(2).expect("2 is not zero")),
+        )
         .await
         .expect("ping every worker");
     assert_eq!(pongs.len(), 2, "both workers reply: {pongs:?}");
@@ -166,7 +174,11 @@ async fn test_ping_workers_collects_pong_and_targets_worker() {
     assert!(pong.round_trip_ms >= 0.0);
     let targeted = suite
         .app
-        .ping_workers(PingTarget::Worker(pong.worker_id.clone()), PING_WAIT, None)
+        .ping_workers(
+            PingTarget::Worker(pong.worker_id.clone()),
+            PING_WAIT,
+            MinResponses::FullWindow,
+        )
         .await
         .expect("ping one worker");
     assert_eq!(targeted.len(), 1, "only the target replies");
