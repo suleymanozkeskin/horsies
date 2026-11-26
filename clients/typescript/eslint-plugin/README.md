@@ -1,11 +1,12 @@
 # @horsies/eslint-plugin
 
-ESLint rules for the horsies TypeScript client. The package has one rule, `horsies/no-dropped-result`. Its version is
-the version of `horsies`.
+ESLint rules for the horsies TypeScript client. The package has one rule, `horsies/no-dropped-result`. The config
+below also turns on `@typescript-eslint/switch-exhaustiveness-check` of typescript-eslint: a `switch` over a union
+that misses a member is an error. The version of the package is the version of `horsies`.
 
 ## Install
 
-The rule reads types. It needs the parser of typescript-eslint and the compiler API of TypeScript. TypeScript 7 has
+The rules read types. They need typescript-eslint and the compiler API of TypeScript. TypeScript 7 has
 no compiler API. Install the API of TypeScript 6.0 under the name `typescript`, and TypeScript 7 under a second name
 for `tsc`, as the TypeScript 7.0 release notes show:
 
@@ -13,10 +14,10 @@ for `tsc`, as the TypeScript 7.0 release notes show:
 {
   "devDependencies": {
     "@horsies/eslint-plugin": "<the version of horsies>",
-    "@typescript-eslint/parser": "^8.72.2",
     "@typescript/native": "npm:typescript@^7.0.2",
     "eslint": "^10.0.0",
-    "typescript": "npm:@typescript/typescript6@^6.0.2"
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.72.2"
   }
 }
 ```
@@ -29,19 +30,22 @@ for `tsc`, as the TypeScript 7.0 release notes show:
 
 ```js
 import horsies from "@horsies/eslint-plugin";
-import parser from "@typescript-eslint/parser";
 import { defineConfig } from "eslint/config";
+import tseslint from "typescript-eslint";
 
 export default defineConfig({
   files: ["**/*.ts"],
-  languageOptions: { parser, parserOptions: { projectService: true } },
-  plugins: { horsies },
-  rules: { "horsies/no-dropped-result": "error" },
+  languageOptions: { parser: tseslint.parser, parserOptions: { projectService: true } },
+  plugins: { horsies, "@typescript-eslint": tseslint.plugin },
+  rules: {
+    "horsies/no-dropped-result": "error",
+    "@typescript-eslint/switch-exhaustiveness-check": "error",
+  },
 });
 ```
 
-The rule needs type information: `parserOptions.projectService` (or `parserOptions.project`). Without it, the rule
-stops the lint with the error of typescript-eslint: "You have used a rule which requires type information".
+The rules need type information: `parserOptions.projectService` (or `parserOptions.project`). Without it, the lint
+stops with the error of typescript-eslint: "You have used a rule which requires type information".
 
 ## Rules
 
@@ -77,9 +81,28 @@ of horsies. A union that has a `Result` member is a `Result` for the rule (`flag
 `@typescript-eslint/no-floating-promises` refuses a `Promise` that is not awaited, of any type. This rule refuses a
 `Result` that is dropped, awaited or not. The two rules can run together.
 
+### `@typescript-eslint/switch-exhaustiveness-check`
+
+A rule of typescript-eslint, with its default options. A `switch` over a union (for example the `kind` of a
+`ReadError` or of a send error) that has no `case` for a member is an error, also when the `switch` has a `default`.
+Write a `case` for each member, and a `never` check in `default`, so that a new member fails the type check:
+
+```ts
+switch (error.kind) {
+  case "waitTimedOut":
+    return "the task is still running";
+  // ... a case for each other kind
+  default: {
+    const unreachable: never = error;
+
+    return unreachable;
+  }
+}
+```
+
 ## Oxlint
 
 Oxlint 1.93.0 gives JavaScript plugins no type information: `context.sourceCode.parserServices` is an empty object.
 The type-aware rules of Oxlint run in a separate program and do not take custom rules. Loaded as an Oxlint
-JavaScript plugin, this rule stops with the error above, and `oxlint` exits with status 1. A project that lints with
-Oxlint runs ESLint with this one rule next to Oxlint.
+JavaScript plugin, `horsies/no-dropped-result` stops with the error above, and `oxlint` exits with status 1. A project
+that lints with Oxlint runs ESLint with the config above next to Oxlint.

@@ -61,6 +61,7 @@ function parseCommand(argument: string | undefined): { readonly kind: "command";
       return { kind: "command", command: "check" };
     case "record":
       return { kind: "command", command: "record" };
+    case undefined:
     default:
       return { kind: "usage" };
   }

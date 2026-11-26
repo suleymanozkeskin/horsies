@@ -8,7 +8,7 @@
     // `src/index.ts` reads the name and version of package.json.
     "resolveJsonModule": true
   },
-  "include": ["src", "tests"],
+  "include": ["src", "tests", "lint-client.ts", "lint-config.ts"],
   // A project of its own: the TypeScript 7 project that the tests lint and compile (tests/fixtures/tsconfig.json).
   "exclude": ["tests/fixtures"]
 }
