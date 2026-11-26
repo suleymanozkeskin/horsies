@@ -232,6 +232,10 @@ describe("the scheduler area of the addon", () => {
   test("an enabled schedule starts active and writes its state row; a stop ends the run", async () => {
     const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
     const name = `native-active-${String(process.pid)}-${String(Date.now())}`;
+
+    // The state reads below run while the run connects; on a new database they need the schema before the run
+    // installs it.
+    assert.equal((await handle.installSchema()).kind, "installed");
     const prepared = prepareScheduler(manifestText([enabledSchedule(name, textOf({ kind: "interval", every: Temporal.Duration.from({ seconds: 30 }) }))]));
 
     assert.equal(prepared.kind, "prepared");
