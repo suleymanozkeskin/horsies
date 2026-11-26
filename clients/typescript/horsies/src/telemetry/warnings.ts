@@ -5,6 +5,8 @@
 export type TelemetryWarningKind =
   | "sendSpanOpen"
   | "sendSpanEnd"
+  | "startSpanOpen"
+  | "startSpanEnd"
   | "producerMetric"
   | "rerunCarrier"
   | "attemptSpanOpen"
@@ -16,6 +18,8 @@ export type TelemetryWarningKind =
 const WARNING_TEXT: Readonly<Record<TelemetryWarningKind, string>> = Object.freeze({
   sendSpanOpen: "the span of a send did not open; the send goes on with no carrier",
   sendSpanEnd: "the span of a send did not end",
+  startSpanOpen: "the span of a workflow start did not open; the start goes on with no carrier",
+  startSpanEnd: "the span of a workflow start did not end",
   producerMetric: "a point of the producer metrics was not recorded",
   rerunCarrier: "the carrier of a rerun did not inject; the rerun goes on with no carrier",
   attemptSpanOpen: "the span of an attempt did not open; the body runs with no span",

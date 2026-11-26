@@ -75,8 +75,8 @@ export const INSTANCES = [
   // The default tasks with an `AttemptEnded` handler and a handler child start hook (Python
   // `instance_event_handlers.py`).
   "handlers",
-  // The default tasks with OpenTelemetry tracing and a span SDK in each child (Python
-  // `instance_worker_ended_spans.py`).
+  // The default tasks with OpenTelemetry tracing, a span SDK in each child and in each seat isolate, and the thread
+  // profiles (Python `instance_worker_ended_spans.py`).
   "worker_ended_spans",
 ] as const;
 
@@ -238,7 +238,7 @@ export function fastRecovery(): RecoveryConfigInput {
   };
 }
 
-/** The profiles of `instance`: every `Profile`, and the thread profiles for `thread_profiles`. */
+/** The profiles of `instance`: every `Profile`, and the thread profiles for `thread_profiles` and `worker_ended_spans`. */
 function workerProfiles(instance: Instance): Readonly<Record<string, WorkerProfileInput>> {
   const profiles: Record<string, WorkerProfileInput> = {};
 
@@ -246,7 +246,7 @@ function workerProfiles(instance: Instance): Readonly<Record<string, WorkerProfi
     profiles[profile] = workerProfile(profile);
   }
 
-  if (instance === "thread_profiles") {
+  if (instance === "thread_profiles" || instance === "worker_ended_spans") {
     for (const profile of THREAD_PROFILES) {
       profiles[profile] = threadProfile(profile);
     }

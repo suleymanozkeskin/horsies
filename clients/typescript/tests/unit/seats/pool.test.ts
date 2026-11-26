@@ -3,7 +3,7 @@
 // of an ended run is left; the operation relay; the defects and log lines of an isolate; an isolate end during a run
 // gives WORKER_CRASHED and a new isolate; a run during the replacement waits and the wait is logged; a replacement past
 // the start-hook bound, and a provider failure in a new isolate, end the child with 173; a run that the core posts
-// while the child ends is left.
+// while the child ends is left; the flush of the isolates at the child's stop.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -415,5 +415,38 @@ describe("an isolate that ends", () => {
       }
     }, ClientDefect);
     assert.deepEqual(fakes.ends, []);
+  });
+});
+
+describe("the flush of the seat isolates at the child's stop", () => {
+  test("each free and running isolate gets flush; the flush ends when each one answered or ended; a booting one is not asked", async () => {
+    const { pool, fakes } = await bootedPool(3);
+    let flushed = false;
+
+    pool.run(runPost(5n));
+    fakes.isolate(2).events.exit(1);
+    assert.deepEqual(pool.stages(), ["running", "free", "booting"]);
+
+    void pool.flush().then(() => {
+      flushed = true;
+    });
+    assert.deepEqual(
+      fakes.isolates.map((isolate) => kinds(isolate.posts).filter((kind) => kind === "flush").length),
+      [1, 1, 0, 0],
+    );
+    fakes.send(1, { kind: "flushed", protocol: SEAT_PROTOCOL_VERSION });
+    await settled();
+    assert.equal(flushed, false, "the running isolate has not answered");
+    fakes.isolate(0).events.exit(1);
+    await settled();
+    assert.equal(flushed, true);
+  });
+
+  test("a pool with no isolate that took its runs ends its flush at once", async () => {
+    const fakes = new PoolFakes();
+    const started = startSeatPool(1, fakes.deps());
+
+    await started.pool.flush();
+    assert.deepEqual(kinds(fakes.isolate(0).posts), []);
   });
 });

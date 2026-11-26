@@ -19,6 +19,9 @@
 // - Once the pool ends the child, it is `ending`: the child ends after its exit flush, so a run or a cancel that the
 //   core posts in that time is left (the core gives such a run the crash path).
 // - A `defect` of an isolate goes to the defect rule (the child aborts); a `log` line of an isolate goes to stderr.
+// - At the child's stop the exit rule asks for `flush`: each isolate that took its runs (free or running) flushes its
+//   seat body observer and answers `flushed`; the flush ends when each one answered or ended. A booting isolate ran no
+//   body and is not asked. The exit rule bounds the wait, so a sync body that holds its isolate does not hold the end.
 // - The pool never calls `worker.terminate()`: the normal stop is the cancel signal, then the end of the child.
 
 import type { BodyEnd } from "../child/body-observer.ts";
@@ -91,10 +94,12 @@ export interface SeatPoolDeps extends SeatHost {
   readonly reportDefect: (defect: CoreDefect) => void;
 }
 
-/** One isolate that the pool started, and the error that it reported before its exit. */
+/** One isolate that the pool started, the error that it reported before its exit, and the flushes that wait for it. */
 class StartedIsolate {
   #port: SeatIsolate | undefined;
   #error: { readonly kind: "noError" } | { readonly kind: "error"; readonly cause: unknown } = { kind: "noError" };
+  /** The flushes that wait for the answer of the isolate: one per `flush` call, and the exit rule calls it once. */
+  readonly #flushes: (() => void)[] = [];
 
   attach(port: SeatIsolate): void {
     this.#port = port;
@@ -110,6 +115,23 @@ class StartedIsolate {
 
   failed(cause: unknown): void {
     this.#error = { kind: "error", cause };
+  }
+
+  /** Post `flush`; the promise resolves at the isolate's `flushed`, or at its exit. */
+  async flush(): Promise<void> {
+    const answered = Promise.withResolvers<void>();
+
+    this.#flushes.push(answered.resolve);
+    this.post({ kind: "flush", protocol: SEAT_PROTOCOL_VERSION });
+
+    return answered.promise;
+  }
+
+  /** The isolate answered `flushed`, or it ended: each flush that waits for it resolves. */
+  flushesEnded(): void {
+    for (const resolve of this.#flushes.splice(0)) {
+      resolve();
+    }
   }
 
   end(exitCode: number): IsolateEnd {
@@ -242,6 +264,27 @@ export class SeatPool {
     return this.#waiting.length;
   }
 
+  /**
+   * Ask each isolate that took its runs (free or running) to flush its seat body observer. Resolves when each one
+   * answered or ended; rejects only when a post to an isolate throws. The exit rule of the child bounds the wait.
+   */
+  async flush(): Promise<void> {
+    const answers = this.#seats.flatMap((state): Promise<void>[] => {
+      switch (state.kind) {
+        case "free":
+        case "running":
+          return [state.isolate.flush()];
+        case "booting":
+        case "ended":
+          return [];
+        default:
+          return unreachable(state, "SeatPool.flush");
+      }
+    });
+
+    await Promise.all(answers);
+  }
+
   /** Start the isolate of `seat` for `boot`; one that does not start fails the boot. */
   #bootSeat(seat: number, boot: Boot): void {
     const isolate = new StartedIsolate();
@@ -285,6 +328,7 @@ export class SeatPool {
         isolate.failed(cause);
       },
       exit: (exitCode) => {
+        isolate.flushesEnded();
         this.#guarded(() => {
           this.#onExit(seat, isolate, exitCode);
         });
@@ -340,6 +384,10 @@ export class SeatPool {
         return;
       case "log":
         this.#deps.writeLine(message.line);
+
+        return;
+      case "flushed":
+        state.isolate.flushesEnded();
 
         return;
       default:

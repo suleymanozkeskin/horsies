@@ -2,8 +2,9 @@
 //
 // A start: the workflow is listed; the workflow id is a UUID (a new one when left out); the params encode with a
 // read-back, and the build gets the value that a child build gets from the stored text; the build runs once and passes
-// the spec checks; the start observer wraps the core's start (the conversion to spec data, the parse, the write). Every
-// refusal before the core writes nothing. The same id with the same command returns the existing run.
+// the spec checks; the start observer wraps the core's start (the conversion to spec data, the parse, the write) and
+// reads its outcome. Every refusal before the core writes nothing and opens no span. The same id with the same command
+// returns the existing run.
 
 import type { CoreCause, NoCause } from "../_catalog/error_detail.ts";
 import { refusalText } from "../codec/refusal.ts";
@@ -42,16 +43,21 @@ export interface StartOptions {
 /** The facts of a start that an observer may record. */
 export type StartSpanFacts = { readonly workflowName: string; readonly workflowId: string };
 
+/** What the core's start of one start call gives: the handle, or the start error, which names its code. */
+export type StartCallResult = Result<unknown, { readonly code: string }>;
+
 /** Wraps each start; `run` makes the core's start with the carrier that the observer gives. */
 export interface StartObserver {
-  observeStart<T>(facts: StartSpanFacts, run: (trace: TraceArgument) => Promise<T>): Promise<T>;
+  /** Run the core's start of one start call inside the observation, and give its outcome unchanged. */
+  observeStart<T extends StartCallResult>(facts: StartSpanFacts, run: (trace: TraceArgument) => Promise<T>): Promise<T>;
 }
 
 const NO_CARRIER: TraceArgument = Object.freeze({ kind: "noCarrier" });
 
 /** The observer of an app with no tracing: no span, no carrier. */
 export const NO_OP_START_OBSERVER: StartObserver = Object.freeze({
-  observeStart: <T>(_facts: StartSpanFacts, run: (trace: TraceArgument) => Promise<T>): Promise<T> => run(NO_CARRIER),
+  observeStart: async <T extends StartCallResult>(_facts: StartSpanFacts, run: (trace: TraceArgument) => Promise<T>): Promise<T> =>
+    run(NO_CARRIER),
 });
 
 /** What a start reads from its app. */
@@ -101,18 +107,11 @@ export async function startWorkflow<R extends BuildReturn>(
   }
 
   const sentAtMicros = epochMicrosTowardPast(context.now());
+  const facts: StartFacts = { workflow, workflowName: record.name, workflowId, sentAtMicros, targets: built.value.targets };
 
-  const call = await context.observer.observeStart({ workflowName: record.name, workflowId }, async (trace) =>
-    context.core.start({ spec: built.value.spec, workflowId, sentAtMicros, trace }),
+  return context.observer.observeStart({ workflowName: record.name, workflowId }, async (trace) =>
+    startOutcome<R>(context, await context.core.start({ spec: built.value.spec, workflowId, sentAtMicros, trace }), facts),
   );
-
-  return startOutcome<R>(context, call, {
-    workflow,
-    workflowName: record.name,
-    workflowId,
-    sentAtMicros,
-    targets: built.value.targets,
-  });
 }
 
 /** The checked build of `workflow` with `params`, or the message of the first refusal. Effects: the user's build. */
@@ -233,16 +232,11 @@ export async function retryStart<R extends BuildReturn>(
 
   const retry = kept.retry;
 
-  const call = await context.observer.observeStart(
-    { workflowName: retry.workflowName, workflowId: retry.workflowId },
-    async (trace) =>
-      context.core.restart({
-        specData: retry.specData,
-        workflowId: retry.workflowId,
-        sentAtMicros: retry.sentAtMicros,
-        trace,
-      }),
+  return context.observer.observeStart({ workflowName: retry.workflowName, workflowId: retry.workflowId }, async (trace) =>
+    startOutcome<R>(
+      context,
+      await context.core.restart({ specData: retry.specData, workflowId: retry.workflowId, sentAtMicros: retry.sentAtMicros, trace }),
+      retry,
+    ),
   );
-
-  return startOutcome<R>(context, call, retry);
 }

@@ -50,11 +50,6 @@ export const PENDING_SCENARIOS: readonly PendingScenarios[] = [
     ],
   },
   {
-    issue: 2500,
-    needs: "the start span of a workflow start, whose carrier the workflow rows store",
-    mirrors: ["Python test_worker_ended_spans.py::test_a_workflow_task_killed_at_its_timeout_gets_a_span_with_its_node: the span is in the trace of the start"],
-  },
-  {
     issue: 2492,
     needs: "a way to stop the core of a task child for a test",
     mirrors: ["Python test_child_core_stopped.py (3)"],

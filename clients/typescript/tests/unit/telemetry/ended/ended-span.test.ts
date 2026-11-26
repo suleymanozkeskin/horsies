@@ -121,7 +121,7 @@ describe("the worker-ended span", () => {
   });
 
   test("the tracing setting: makeSpans gives the maker; noSpans and none give no spans", () => {
-    const environment = { loadApi: () => ({ kind: "loaded", api: loadedApi() }) as const, warnings: recordedWarnings().warnings, clock: () => 0 };
+    const environment = { loadApi: () => ({ kind: "loaded", api: loadedApi() }) as const, warnings: recordedWarnings().warnings, clock: () => 0, now: () => Temporal.Now.instant() };
 
     const kinds = [
       tracingSettingOf({ kind: "otel" }),

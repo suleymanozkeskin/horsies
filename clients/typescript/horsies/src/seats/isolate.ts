@@ -16,6 +16,8 @@
 //    the cancel crossed it.
 // 6. `bodyEnded` of the run whose result went: the seat body observer ends the run's observation with the main
 //    thread's verdict and time.
+// 7. `flush` at the child's stop: the seat body observer flushes (the tracer provider of the isolate's SDK), then
+//    `flushed` goes. A sync body that holds the isolate delays the answer; the exit rule of the child bounds the wait.
 //
 // The isolate never loads the addon: the runtime reads the cell, the relay sends the core operations, and the run's
 // loop marks do nothing (no watch reads the loop of an isolate). The runtime has no `spawn` (`ThreadTaskRuntime`).
@@ -264,6 +266,20 @@ class SeatRuns implements SeatRunHandler {
     ending.observation.end(message.end, Temporal.Instant.fromEpochNanoseconds(message.endedAtEpochNanoseconds));
   }
 
+  /** Flush the seat body observer, then answer `flushed`. The observer's flush never rejects: a rejection is a defect. */
+  flush(): void {
+    void seatBodyObserverOf(this.#context)
+      .flush()
+      .then(
+        () => {
+          this.#channel.post({ kind: "flushed", protocol: SEAT_PROTOCOL_VERSION });
+        },
+        (cause: unknown) => {
+          this.#channel.reportDefect(flushDefect(cause));
+        },
+      );
+  }
+
   /** The defect rule of the isolate: the defect goes to the main thread (the child aborts), then the throw. */
   #defect(defect: CoreDefect): never {
     this.#channel.reportDefect(defect);
@@ -290,6 +306,13 @@ class SeatRuns implements SeatRunHandler {
       state: <T>(key: StateKey<T>): T => this.#states.value(key),
     });
   }
+}
+
+/** A flush of the seat body observer that rejected: a defect of the package. */
+function flushDefect(cause: unknown): ClientDefect {
+  const facts = thrownFacts(cause);
+
+  return new ClientDefect({ subject: "seat flush", rule: `the flush of the seat body observer failed with ${facts.name}: ${facts.message}` });
 }
 
 /** A rejection of the body adapter that is not a defect class: a defect of the package. */

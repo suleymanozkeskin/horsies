@@ -13,6 +13,8 @@
 // - `bodyEnded`: the verdict of the run `runKey` (how its body ended, from the run's cancel cause and its outcome)
 //   and the main thread's time of its settle, for the seat body observer. No answer.
 // - `opReply`: the answer to the operation `requestId`.
+// - `flush`: the child stops; the isolate flushes its seat body observer (the tracer provider of its SDK). The answer
+//   is `flushed`.
 //
 // Seat to main thread:
 // - `ready`: the isolate ran every provider of the app; it takes runs.
@@ -22,6 +24,7 @@
 //   is `opReply`.
 // - `defect`: a defect of the package in the isolate; the main thread applies the defect rule (the child aborts).
 // - `log`: one line that the isolate's process events write (a detached throw, a rejection that no body awaits).
+// - `flushed`: the flush of the seat body observer settled.
 //
 // A message of another kind or of another protocol version, or a field that is missing or of another type, is a defect
 // of the package: the parse throws `ClientDefect`. On the main thread the defect rule then ends the child; in an
@@ -122,7 +125,8 @@ export type MainToSeat =
       readonly protocol: SeatProtocolVersion;
       readonly requestId: number;
       readonly answer: SeatAnswer;
-    };
+    }
+  | { readonly kind: "flush"; readonly protocol: SeatProtocolVersion };
 
 /** A message of a seat isolate to the main thread. */
 export type SeatToMain =
@@ -153,7 +157,8 @@ export type SeatToMain =
       readonly name: string;
       readonly message: string;
     }
-  | { readonly kind: "log"; readonly protocol: SeatProtocolVersion; readonly line: string };
+  | { readonly kind: "log"; readonly protocol: SeatProtocolVersion; readonly line: string }
+  | { readonly kind: "flushed"; readonly protocol: SeatProtocolVersion };
 
 /** The message of a seat isolate in `message`, as a port gave it. A message outside the protocol: `ClientDefect`. */
 export function parseSeatToMain(message: object): SeatToMain {
@@ -185,6 +190,8 @@ export function parseSeatToMain(message: object): SeatToMain {
       };
     case "log":
       return { kind, protocol, line: textField(message, "line") };
+    case "flushed":
+      return { kind, protocol };
     default:
       throw protocolDefect(`a message of a seat isolate has the unknown kind ${String(kind)}`);
   }
@@ -219,6 +226,8 @@ export function parseMainToSeat(message: object): MainToSeat {
       };
     case "opReply":
       return { kind, protocol, requestId: requestIdField(message), answer: answerOf(objectField(message, "answer")) };
+    case "flush":
+      return { kind, protocol };
     default:
       throw protocolDefect(`a message of the main thread has the unknown kind ${String(kind)}`);
   }

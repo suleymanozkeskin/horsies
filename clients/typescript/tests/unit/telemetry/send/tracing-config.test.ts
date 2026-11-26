@@ -1,5 +1,5 @@
 // The tracing step of `Horsies.create`: the defaults of the setting, no API load with `none`, the refusal
-// `CONFIG_OTEL_API_MISSING` with `otel` and no API, and the load of the API module.
+// `CONFIG_OTEL_API_MISSING` with `otel` and no API, the observers of each setting, and the load of the API module.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -9,11 +9,13 @@ import { appInternals } from "../../../../horsies/src/app/internals.ts";
 import { NO_OP_OBSERVER } from "../../../../horsies/src/app/observers.ts";
 import { bodyObserverOf, NO_BODY_OBSERVER } from "../../../../horsies/src/child/body-observer.ts";
 import { defineTask } from "../../../../horsies/src/contract/public.ts";
+import { NO_SEAT_BODY_OBSERVER, seatBodyObserverOf } from "../../../../horsies/src/seats/body-observer.ts";
 import { tracingPartsOf, tracingPartsOfApp } from "../../../../horsies/src/telemetry/create-hook.ts";
 import { ClientDefect } from "../../../../horsies/src/thrown-errors.ts";
 import { type OtelApiLoad, requireOtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import { tracingSettingOf } from "../../../../horsies/src/telemetry/tracing-config.ts";
 import { h } from "../../../../horsies/src/wire/public.ts";
+import { NO_OP_START_OBSERVER } from "../../../../horsies/src/workflow/start.ts";
 import { DATABASE_URL, fakeEnvironment } from "../../app/support.ts";
 import { API, installSdk, recordedWarnings } from "../support.ts";
 
@@ -36,7 +38,7 @@ function countingLoader(load: OtelApiLoad): { readonly loader: () => OtelApiLoad
 const MISSING: OtelApiLoad = { kind: "otelApiMissing", cause: "Cannot find module '@opentelemetry/api'" };
 
 function environmentOf(loader: () => OtelApiLoad): Parameters<typeof tracingPartsOf>[1] {
-  return { loadApi: loader, warnings: recordedWarnings().warnings, clock: () => 0 };
+  return { loadApi: loader, warnings: recordedWarnings().warnings, clock: () => 0, now: () => Temporal.Now.instant() };
 }
 
 describe("the tracing setting", () => {
@@ -63,12 +65,16 @@ describe("the tracing setting", () => {
 });
 
 describe("the tracing step", () => {
-  test("none never loads the API and gives the observer that does nothing", () => {
+  test("none never loads the API and gives the observers that do nothing", () => {
     const { loader, calls } = countingLoader(MISSING);
     const parts = tracingPartsOf({ kind: "none" }, environmentOf(loader));
+    const value = parts.ok ? parts.value : assert.fail("none is refused");
 
     assert.equal(calls.count, 0);
-    assert.equal(parts.ok ? parts.value.sendObserver : undefined, NO_OP_OBSERVER);
+    assert.equal(value.sendObserver, NO_OP_OBSERVER);
+    assert.equal(value.startObserver, NO_OP_START_OBSERVER);
+    assert.equal(value.bodyObserver, NO_BODY_OBSERVER);
+    assert.equal(value.seatBodyObserver, NO_SEAT_BODY_OBSERVER);
   });
 
   test("otel with no API is CONFIG_OTEL_API_MISSING on the tracing path, with the cause and the fixes", () => {
@@ -83,11 +89,15 @@ describe("the tracing step", () => {
     assert.equal(refusal?.help.length, 2);
   });
 
-  test("otel with the API gives an observer of its own", () => {
+  test("otel with the API gives observers of its own", () => {
     const { loader } = countingLoader({ kind: "loaded", api: API });
     const parts = tracingPartsOf(tracingSettingOf({ kind: "otel" }), environmentOf(loader));
+    const value = parts.ok ? parts.value : assert.fail("otel with the API is refused");
 
-    assert.notEqual(parts.ok ? parts.value.sendObserver : NO_OP_OBSERVER, NO_OP_OBSERVER);
+    assert.notEqual(value.sendObserver, NO_OP_OBSERVER);
+    assert.notEqual(value.startObserver, NO_OP_START_OBSERVER);
+    assert.notEqual(value.bodyObserver, NO_BODY_OBSERVER);
+    assert.notEqual(value.seatBodyObserver, NO_SEAT_BODY_OBSERVER);
   });
 
   test("the package's load gives the API, which shares the globals that the app's SDK sets", () => {
@@ -132,7 +142,7 @@ describe("Horsies.create and the tracing step", () => {
     assert.deepEqual(created.ok ? appInternals(created.value).telemetry.tracing : undefined, { kind: "none" });
   });
 
-  test("an app with otel tracing has the attempt-span observer; an app with none has the one that does nothing", () => {
+  test("an app with otel tracing has the attempt-span observers; an app with none has the ones that do nothing", () => {
     const traced = createHorsies(
       { broker: { databaseUrl: DATABASE_URL }, tracing: { kind: "otel" }, tasks: [listed] },
       fakeEnvironment({ otelApi: countingLoader({ kind: "loaded", api: API }).loader }),
@@ -142,6 +152,8 @@ describe("Horsies.create and the tracing step", () => {
 
     assert.notEqual(traced.ok ? bodyObserverOf(appInternals(traced.value)) : NO_BODY_OBSERVER, NO_BODY_OBSERVER);
     assert.equal(plain.ok ? bodyObserverOf(appInternals(plain.value)) : undefined, NO_BODY_OBSERVER);
+    assert.notEqual(traced.ok ? seatBodyObserverOf(appInternals(traced.value)) : NO_SEAT_BODY_OBSERVER, NO_SEAT_BODY_OBSERVER);
+    assert.equal(plain.ok ? seatBodyObserverOf(appInternals(plain.value)) : undefined, NO_SEAT_BODY_OBSERVER);
   });
 
   test("a context that Horsies.create did not make has no tracing parts: ClientDefect", () => {

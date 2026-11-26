@@ -222,6 +222,66 @@ describe("a SHARED_THREAD child", () => {
     assert.deepEqual(deps.isolates, []);
     assert.deepEqual(native.values, [[6n, "2"]]);
   });
+
+  test("at the child's end the exit rule asks each seat isolate to flush, and the process ends after their answers", async () => {
+    const native = new FakeChildNative();
+    const exits: number[] = [];
+
+    const deps: ChildModeDeps & Recorded = {
+      ...threadDeps(native),
+      // The flush bound never passes here: the end waits for the answers.
+      wait: async () => new Promise<void>(() => undefined),
+      exit: (code) => {
+        exits.push(code);
+
+        throw new Ended(code);
+      },
+    };
+
+    void runChildMode(seatApp(), CHILD_ARGUMENTS, deps).catch(() => undefined);
+    await settled();
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 2 } });
+
+    for (const isolate of deps.isolates) {
+      isolate.events.message({ kind: "ready", protocol: SEAT_PROTOCOL_VERSION, seatIndex: isolate.marker.seatIndex });
+    }
+
+    await settled();
+    native.endServe(0);
+    await settled();
+    assert.deepEqual(deps.isolates.map((isolate) => isolate.posts.at(-1)?.kind), ["flush", "flush"]);
+    deps.isolates[0]?.events.message({ kind: "flushed", protocol: SEAT_PROTOCOL_VERSION });
+    await settled();
+    assert.deepEqual(exits, []);
+    deps.isolates[1]?.events.message({ kind: "flushed", protocol: SEAT_PROTOCOL_VERSION });
+    await settled();
+    assert.deepEqual(exits, [0]);
+  });
+
+  test("a seat isolate that does not answer the flush within the flush bound does not hold the end of the child", async () => {
+    const native = new FakeChildNative();
+    const exits: number[] = [];
+
+    const deps: ChildModeDeps & Recorded = {
+      // The flush bound passes at once here.
+      ...threadDeps(native),
+      exit: (code) => {
+        exits.push(code);
+
+        throw new Ended(code);
+      },
+    };
+
+    void runChildMode(seatApp(), CHILD_ARGUMENTS, deps).catch(() => undefined);
+    await settled();
+    native.serves[0]?.hook(1n, { index: 0, facts: { kind: "sharedThread", seats: 1 } });
+    deps.isolates[0]?.events.message({ kind: "ready", protocol: SEAT_PROTOCOL_VERSION, seatIndex: 0 });
+    await settled();
+    native.endServe(0);
+    await settled();
+    assert.equal(deps.isolates[0]?.posts.at(-1)?.kind, "flush");
+    assert.deepEqual(exits, [0]);
+  });
 });
 
 const ENQUEUE_REQUEST: EnqueueRequest = {

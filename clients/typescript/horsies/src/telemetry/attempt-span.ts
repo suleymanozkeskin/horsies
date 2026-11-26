@@ -14,6 +14,8 @@
 //   that never settles still gets its span.
 // - A body that does not start gets no span (the core posts no body for it).
 // - A throw of the user's SDK never changes a run: no span at the open, and one warning per process and kind.
+// - The seat isolates of a `SHARED_THREAD` child have their own observer (`seat-span.ts`), which opens, runs and ends
+//   the same span with the functions of this module.
 
 import { OutcomeCode } from "../_catalog/task_codes.ts";
 import { thrownRecord } from "../child/thrown-error.ts";
@@ -53,8 +55,10 @@ import {
   type OtelApi,
   type OtelAttributes,
   type OtelContext,
+  type OtelHighResolutionTime,
   type OtelLink,
   type OtelSpan,
+  type OtelSpanOptions,
 } from "./otel-api.ts";
 import { markError } from "./send-span.ts";
 import { attemptSpanStore } from "./span-id-store.ts";
@@ -69,7 +73,13 @@ export type AttemptSpanDeps = {
 };
 
 /** The facts of a run that has its facts recorded. */
-type RecordedFacts = Extract<BodyFactsRecord, { readonly kind: "recorded" }>;
+export type RecordedFacts = Extract<BodyFactsRecord, { readonly kind: "recorded" }>;
+
+/** The time of the start or the end of an attempt span: the SDK's clock at the call, or a time that the caller gives. */
+export type SpanTime = { readonly kind: "sdkClock" } | { readonly kind: "at"; readonly time: OtelHighResolutionTime };
+
+/** The SDK's clock at the call. */
+export const SDK_CLOCK: SpanTime = Object.freeze({ kind: "sdkClock" });
 
 /** Where the attempt span takes its parent from. */
 export type SpanPlace = { readonly parent: OtelContext; readonly links: OtelLink[] };
@@ -112,34 +122,67 @@ export function otelBodyObserver(deps: AttemptSpanDeps): BodyObserver {
 
 /** The observation of one body: its span, or none when the user's SDK threw at the open. */
 function openedObservation(deps: AttemptSpanDeps, facts: RecordedFacts): BodyObservation {
-  const { api } = deps;
-  let span: OtelSpan;
-  let active: OtelContext;
+  const opened = openedAttemptSpan(deps, facts, SDK_CLOCK);
 
-  try {
-    const place = spanPlace(api, deps.parentage, facts.carrier);
-    const attributes = { ...runAttributes(facts), ...workflowAttributes(facts.workflow) };
-
-    span = api.trace
-      .getTracer(INSTRUMENTATION_SCOPE)
-      .startSpan(`${RUN_OPERATION} ${facts.taskName}`, { kind: api.SpanKind.CONSUMER, attributes, links: place.links }, place.parent);
-    active = api.trace.setSpan(place.parent, span);
-  } catch (cause) {
-    deps.warnings.warnOnce("attemptSpanOpen", cause);
-
-    return NO_OBSERVATION;
+  switch (opened.kind) {
+    case "notOpen":
+      return NO_OBSERVATION;
+    case "open":
+      return new AttemptSpan(deps, opened.open);
+    default:
+      return unreachable(opened, "openedObservation");
   }
-
-  return new AttemptSpan(deps, { span, active, ids: spanIdsOf(api, span), execution: facts.execution });
 }
 
 /** The span of one body and where it runs. */
-type OpenSpan = {
+export type OpenSpan = {
   readonly span: OtelSpan;
   readonly active: OtelContext;
   readonly ids: SpanIds | NoSpanIds;
   readonly execution: BodyExecution;
 };
+
+/** The attempt span of one body, or none when the user's SDK threw at the open. */
+export type OpenedAttemptSpan = { readonly kind: "open"; readonly open: OpenSpan } | { readonly kind: "notOpen" };
+
+/**
+ * Open the attempt span of `facts` from `start`: `run <task_name>`, CONSUMER, the parent and the links by the
+ * parentage, the attributes of the run and of its workflow node. A throw of the user's SDK gives `notOpen` and one
+ * warning per process.
+ */
+export function openedAttemptSpan(deps: AttemptSpanDeps, facts: RecordedFacts, start: SpanTime): OpenedAttemptSpan {
+  const { api } = deps;
+
+  try {
+    const place = spanPlace(api, deps.parentage, facts.carrier);
+    const attributes = { ...runAttributes(facts), ...workflowAttributes(facts.workflow) };
+    const options = { kind: api.SpanKind.CONSUMER, attributes, links: place.links };
+
+    const span = api.trace
+      .getTracer(INSTRUMENTATION_SCOPE)
+      .startSpan(`${RUN_OPERATION} ${facts.taskName}`, withTime(options, start), place.parent);
+
+    const active = api.trace.setSpan(place.parent, span);
+
+    return { kind: "open", open: { span, active, ids: spanIdsOf(api, span), execution: facts.execution } };
+  } catch (cause) {
+    deps.warnings.warnOnce("attemptSpanOpen", cause);
+
+    return { kind: "notOpen" };
+  }
+}
+
+/** `options` with the start time `start`: none for the SDK's clock. Pure. */
+function withTime(options: OtelSpanOptions, start: SpanTime): OtelSpanOptions {
+  switch (start.kind) {
+    case "sdkClock":
+      return options;
+    case "at":
+      return { ...options, startTime: start.time };
+    default:
+      return unreachable(start, "withTime");
+  }
+}
 
 /**
  * The observation of one body with its span, open until its first end: the end of the body, or, in a `SHARED_ASYNC`
@@ -199,7 +242,7 @@ class AttemptSpan implements BodyObservation {
 
     this.#state = "ended";
     guarded(this.#deps, () => {
-      endAttemptSpan(this.#deps.api, this.#open.span, end);
+      endAttemptSpan(this.#deps.api, this.#open.span, end, SDK_CLOCK);
     });
   }
 }
@@ -217,7 +260,7 @@ function endAtSignal(cause: CancelCauseName): BodyEnd {
 }
 
 /** Run `call` with the attempt span active, and its ids in the store of `currentTask()`. */
-function runInSpan<T>(api: OtelApi, active: OtelContext, ids: SpanIds | NoSpanIds, call: () => T): T {
+export function runInSpan<T>(api: OtelApi, active: OtelContext, ids: SpanIds | NoSpanIds, call: () => T): T {
   const inContext = (): T => api.context.with(active, call);
 
   switch (ids.kind) {
@@ -305,15 +348,15 @@ function spanIdsOf(api: OtelApi, span: OtelSpan): SpanIds | NoSpanIds {
 }
 
 /** Record the thrown value `cause` on `span`: an `Error` as it is, another value as its text. */
-function recordThrown(span: OtelSpan, cause: unknown): void {
+export function recordThrown(span: OtelSpan, cause: unknown): void {
   span.recordException(cause instanceof Error ? cause : thrownRecord(cause).message);
 }
 
 /**
- * Set the status of `span` by how its body ended, and end it. A returned value leaves the status unset, as the Python
- * client does and as the OpenTelemetry rule for instrumentation libraries says.
+ * Set the status of `span` by how its body ended, and end it at `at`. A returned value leaves the status unset, as the
+ * Python client does and as the OpenTelemetry rule for instrumentation libraries says.
  */
-function endAttemptSpan(api: OtelApi, span: OtelSpan, end: BodyEnd): void {
+export function endAttemptSpan(api: OtelApi, span: OtelSpan, end: BodyEnd, at: SpanTime): void {
   switch (end.kind) {
     case "returned":
       break;
@@ -330,11 +373,22 @@ function endAttemptSpan(api: OtelApi, span: OtelSpan, end: BodyEnd): void {
       unreachable(end, "endAttemptSpan");
   }
 
-  span.end();
+  switch (at.kind) {
+    case "sdkClock":
+      span.end();
+
+      return;
+    case "at":
+      span.end(at.time);
+
+      return;
+    default:
+      unreachable(at, "endAttemptSpan");
+  }
 }
 
 /** Run `step`; a throw of the user's SDK is written once per process. */
-function guarded(deps: AttemptSpanDeps, step: () => void): void {
+export function guarded(deps: AttemptSpanDeps, step: () => void): void {
   try {
     step();
   } catch (cause) {

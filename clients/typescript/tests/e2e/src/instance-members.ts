@@ -2,7 +2,10 @@
 // scheduler instances, the event handlers of `handlers`, the OpenTelemetry SDK of the children of
 // `worker_ended_spans`, and the workflows of an instance.
 
+import { isMainThread } from "node:worker_threads";
+
 import type { AnyWorkflowContract, Horsies } from "../../../horsies/src/index.ts";
+import { entryThread } from "./entry-thread.ts";
 import { registerHandlers } from "./handlers.ts";
 import type { Instance } from "./instances.ts";
 import { declareInvalidRuleSchedules, declareSchedules, declareUnlistedTaskSchedule } from "./tasks/scheduled.ts";
@@ -13,6 +16,19 @@ async function installSpanLinesSdk(): Promise<void> {
   const sdk = await import("./span-sdk.ts");
 
   sdk.installSpanLines();
+}
+
+/**
+ * Set the span line SDK in a seat isolate, whose globals are its own. A seat isolate runs the providers and not the
+ * `onChildStart` hooks; the main thread of a child set its SDK in its hook.
+ */
+async function installSeatSpanLinesSdk(): Promise<void> {
+  switch (entryThread(isMainThread)) {
+    case "main":
+      return;
+    case "seatIsolate":
+      return installSpanLinesSdk();
+  }
 }
 
 /** Add the members of `instance` to `app`: none for most instances. Calls no I/O. */
@@ -37,6 +53,8 @@ export function addInstanceMembers(app: Horsies, instance: Exclude<Instance, "cu
     case "worker_ended_spans":
       app.onChildStart(installSpanLinesSdk);
       app.onHandlerChildStart(installSpanLinesSdk);
+      // The key is not read: the provider only sets the SDK of each seat isolate.
+      void app.provide(installSeatSpanLinesSdk);
 
       return;
     case "default":

@@ -68,6 +68,7 @@ describe("the messages of a seat isolate", () => {
     },
     { kind: "defect", protocol: SEAT_PROTOCOL_VERSION, code: "CLIENT_DEFECT", name: "ClientDefect", message: "seat run: a rule" },
     { kind: "log", protocol: SEAT_PROTOCOL_VERSION, line: "horsies child: a callback threw" },
+    { kind: "flushed", protocol: SEAT_PROTOCOL_VERSION },
   ];
 
   for (const message of messages) {
@@ -109,6 +110,7 @@ describe("the messages of the main thread", () => {
     }),
     replyMessage(1, { kind: "reply", reply: { area: "sends", reply: { kind: "prepareSend", prepared: PREPARED } } }),
     replyMessage(2, { kind: "refused", refusal: { code: "CORE_START_FAILED", cause: "no addon file" } }),
+    { kind: "flush", protocol: SEAT_PROTOCOL_VERSION },
   ];
 
   for (const message of messages) {

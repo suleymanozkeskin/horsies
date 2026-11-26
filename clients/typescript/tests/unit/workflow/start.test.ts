@@ -206,6 +206,29 @@ describe("app.start", () => {
     assert.deepEqual(seen, [`hello ${WORKFLOW_ID}`]);
     assert.deepEqual(core.starts[0]?.trace, carrier);
   });
+
+  test("the start observer reads the outcome of the core's start; a refusal before the core calls no observer", async () => {
+    const outcomes: string[] = [];
+
+    const observer: StartObserver = {
+      observeStart: async (_facts, run) => {
+        const result = await run({ kind: "noCarrier" });
+
+        outcomes.push(codeOf(result));
+
+        return result;
+      },
+    };
+
+    const refused = fakeCore({ refusedCall: { kind: "specRefused", fieldPath: "nodes[0].queue", cause: "no class" } });
+    const conflict = fakeCore({ started: [{ kind: "failed", error: rawIdConflict("hello", "other") }] });
+
+    assert.equal(codeOf(await createWorkflowArea(contextOf(fakeCore(), observer)).start(hello, { who: "a" })), "started");
+    assert.equal(codeOf(await createWorkflowArea(contextOf(refused, observer)).start(hello, { who: "a" })), "VALIDATION_FAILED");
+    assert.equal(codeOf(await createWorkflowArea(contextOf(conflict, observer)).start(hello, { who: "a" })), "WORKFLOW_ID_CONFLICT");
+    assert.equal(codeOf(await createWorkflowArea(contextOf(fakeCore(), observer)).start(thrower, {})), "VALIDATION_FAILED");
+    assert.deepEqual(outcomes, ["started", "VALIDATION_FAILED", "WORKFLOW_ID_CONFLICT"]);
+  });
 });
 
 describe("app.retryStart", () => {
