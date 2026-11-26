@@ -63,6 +63,18 @@ export function checkKind(kind: Kind): readonly KindRefused[] {
 }
 
 /**
+ * Every refusal of the kind of one object member or task input parameter whose name the caller checks: the member's
+ * default, then its kind tree, in walk order, at `$`. Pure.
+ */
+export function checkMemberKind(kind: Kind, presence: MemberPresence): readonly KindRefused[] {
+  const refusals: KindRefused[] = [...defaultRefusals(presence, ROOT_PATH)];
+
+  walk(kind, ROOT_PATH, 0, refusals);
+
+  return refusals;
+}
+
+/**
  * Every refusal of the kind of a task input, in walk order: a parameter may be an upstream outcome (`h.resultOf`),
  * nothing below a parameter may. Pure.
  */

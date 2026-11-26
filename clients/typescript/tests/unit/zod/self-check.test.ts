@@ -1,81 +1,130 @@
-// The self-check of the zod adapter, and the entries that run it before the adapter.
+// The self-check of the zod adapter, and the entries that run the release check, the self-check, the adapter and
+// `checkKind` in order.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { z } from "zod";
+import * as z3 from "zod/v3";
 
+import { hz } from "../../../horsies/src/zod/codecs.ts";
 import { compileMember } from "../../../horsies/src/zod/adapter.ts";
-import { afterSelfCheck, zodMemberKind, zodValueKind } from "../../../horsies/src/zod/kind.ts";
+import { kindOf, presenceOf } from "../../../horsies/src/wire/wire-type.ts";
+import { kindAfterChecks, zodMemberWire, zodValueWire } from "../../../horsies/src/zod/kind.ts";
 import {
   knownCases,
   runSelfCheck,
+  type SelfCheckCase,
   type SelfCheckFailure,
   selfCheckOnce,
 } from "../../../horsies/src/zod/self-check.ts";
 import { withDefinition } from "./support.ts";
 
+/** The outcome of the self-check on one case, as its failures. */
+function failuresOf(known: SelfCheckCase): readonly SelfCheckFailure[] {
+  const outcome = runSelfCheck([known]);
+
+  return outcome.ok ? [] : outcome.error;
+}
+
 describe("self-check", () => {
   test("each known schema compiles to its expected kind or refusal on the installed zod", () => {
-    assert.deepEqual(runSelfCheck(knownCases()), { ok: true, value: true });
+    assert.equal(runSelfCheck(knownCases()).ok, true);
   });
 
-  test("covers each refusal rule that a zod schema reaches", () => {
-    const rules = new Set(
+  test("covers each refusal rule that a zod schema of the installed release reaches", () => {
+    const rules = new Set<string>(
       knownCases().flatMap((known) => (known.expected.outcome === "refused" ? [known.expected.rule] : [])),
     );
 
-    assert.deepEqual([...rules].toSorted(), [
-      "CATCH",
-      "CHANGING_DEFAULT",
-      "DATE",
-      "ENGINE_KEY",
-      "INTERSECTION",
-      "INT_FLOAT_UNION",
-      "LITERAL_MEMBER",
-      "LOOSE_OBJECT",
-      "MIXED_UNION",
-      "NOT_DATA",
-      "OPTIONAL_NOT_A_MEMBER",
-      "RECORD_KEY",
-      "RECURSIVE",
-      "TRANSFORM",
-      "TUPLE_REST",
-      "UNDISCRIMINATED_UNION",
-      "UNION_OPTION",
-      "UNTYPED",
-    ]);
+    for (const rule of ["UNTYPED", "TRANSFORM", "CATCH", "DATE", "LOOSE_OBJECT", "NOT_DATA"]) {
+      assert.ok(rules.has(rule), rule);
+    }
+
+    for (const rule of ["UNDISCRIMINATED_UNION", "MIXED_UNION", "INT_FLOAT_UNION", "RECORD_KEY", "ENGINE_KEY"]) {
+      assert.ok(rules.has(rule), rule);
+    }
+
+    for (const rule of ["INTERSECTION", "OPTIONAL_NOT_A_MEMBER", "CHANGING_DEFAULT", "RECURSIVE", "TUPLE_REST"]) {
+      assert.ok(rules.has(rule), rule);
+    }
+
+    assert.ok(rules.has("LITERAL_MEMBER") && rules.has("UNION_OPTION"));
   });
 
-  test("finds a renamed definition field: a loose object whose catchall field has another name", () => {
+  test("finds a renamed optional field: a loose object whose catchall field has another name", () => {
     const loose = z.looseObject({ a: z.string() });
     const { catchall, ...others } = loose._zod.def;
     const renamed = withDefinition(loose, { ...others, rest: catchall });
 
-    const outcome = runSelfCheck([
-      { name: "loose object", schema: renamed, expected: { outcome: "refused", rule: "LOOSE_OBJECT" }, probes: [] },
-    ]);
-
-    assert.deepEqual(outcome, {
-      ok: false,
-      error: [{ name: "loose object", expected: "LOOSE_OBJECT", found: "object(a:string)" }],
-    });
+    assert.deepEqual(
+      failuresOf({
+        name: "loose",
+        schema: renamed,
+        expected: { outcome: "refused", rule: "LOOSE_OBJECT" },
+        probes: [],
+      }),
+      [{ name: "loose", expected: "LOOSE_OBJECT", found: "UNKNOWN_DEFINITION_FIELD" }],
+    );
   });
 
   test("finds a check that stopped running: a probe that the kind writes but should refuse", () => {
     const record = z.record(z.enum(["a"]), z.boolean());
     const stripped = withDefinition(record, { ...record._zod.def, keyType: z.string() });
 
-    const outcome = runSelfCheck([
-      {
-        name: "enum record",
-        schema: stripped,
-        expected: { outcome: "kind", text: "record(boolean)" },
-        probes: [{ value: {}, written: "refused" }],
-      },
-    ]);
+    const known: SelfCheckCase = {
+      name: "enum record",
+      schema: stripped,
+      expected: { outcome: "kind", text: "record(boolean)" },
+      probes: [{ value: {}, written: "refused" }],
+    };
 
-    assert.deepEqual(outcome, { ok: false, error: [{ name: "enum record", expected: "{} refused", found: "stored" }] });
+    assert.deepEqual(failuresOf(known), [{ name: "enum record", expected: "{} refused", found: "stored" }]);
+  });
+
+  test("a renamed required field is an unknown field: the reader reads no field that it does not know", () => {
+    const lazy = z.lazy(() => z.string());
+    const renamed = withDefinition(lazy, { type: "lazy", get: lazy._zod.def.getter });
+
+    const known: SelfCheckCase = {
+      name: "renamed",
+      schema: renamed,
+      expected: { outcome: "kind", text: "string" },
+      probes: [],
+    };
+
+    assert.deepEqual(failuresOf(known), [
+      { name: "renamed", expected: "string", found: "UNKNOWN_DEFINITION_FIELD" },
+    ]);
+  });
+
+  test("a removed required field gives a failure, not a throw: getter, shape, innerType", () => {
+    const lazy = z.lazy(() => z.string());
+    const object = z.object({ a: z.string() });
+    const nullable = z.string().nullable();
+
+    const stubs = [
+      withDefinition(lazy, { type: "lazy" }),
+      withDefinition(object, { type: "object" }),
+      withDefinition(nullable, { type: "nullable" }),
+    ];
+
+    for (const schema of stubs) {
+      const expected: SelfCheckCase["expected"] = { outcome: "kind", text: "string" };
+      const failures = failuresOf({ name: "removed", schema, expected, probes: [] });
+
+      assert.equal(failures.length, 1);
+      assert.match(failures[0]?.found ?? "", /^throws TypeError: /);
+    }
+  });
+
+  test("a throw while the known schemas are built is one failure", () => {
+    const outcome = runSelfCheck({ name: "known schemas", expected: "built", found: "throws TypeError: no codec" });
+
+    assert.deepEqual(outcome, {
+      ok: false,
+      error: [{ name: "known schemas", expected: "built", found: "throws TypeError: no codec" }],
+    });
   });
 
   test("runs once per process: a later call gives the first outcome", () => {
@@ -83,32 +132,84 @@ describe("self-check", () => {
   });
 });
 
-describe("zodMemberKind and zodValueKind", () => {
+describe("zodMemberWire and zodValueWire", () => {
   const failure: SelfCheckFailure = { name: "loose object", expected: "LOOSE_OBJECT", found: "object()" };
 
-  test("give the kind of an accepted schema", () => {
-    const member = zodMemberKind(z.string().optional());
-    const value = zodValueKind(z.string());
+  test("give the wire type of an accepted schema: its kind and its presence", () => {
+    const member = zodMemberWire(z.string().optional());
+    const value = zodValueWire(z.string());
 
-    assert.equal(member.ok && member.value.presence.mode, "optional");
-    assert.equal(value.ok && value.value.node, "string");
+    assert.equal(member.ok && presenceOf(member.value).mode, "optional");
+    assert.equal(value.ok && kindOf(value.value).node, "string");
   });
 
   test("give SchemaRefused with every refusal of a refused schema", () => {
-    const refused = zodValueKind(z.object({ at: z.date(), any: z.any() }));
+    const refused = zodValueWire(z.object({ at: z.date(), any: z.any() }));
 
     assert.equal(refused.ok ? "" : refused.error.kind, "SchemaRefused");
     assert.equal(refused.ok || refused.error.kind !== "SchemaRefused" ? 0 : refused.error.refusals.length, 2);
   });
 
+  test("give KindRefused for each form that only checkKind refuses", () => {
+    const forms = [
+      z.object({ 10: z.int() }),
+      z.union([z.string(), hz.instant()]),
+      z.union([z.int(), z.bigint()]),
+      z.literal(1.5),
+      z.discriminatedUnion("kind", [z.object({ kind: z.literal(1) })]),
+      z.object({ ratio: z.number().default(Number.NaN) }),
+    ];
+
+    const rules = forms.map((schema) => {
+      const outcome = zodValueWire(schema);
+
+      return outcome.ok || outcome.error.kind !== "KindRefused" ? "" : outcome.error.refusals[0]?.rule;
+    });
+
+    assert.deepEqual(rules, [
+      "IntegerLikeMember",
+      "AmbiguousUnion",
+      "AmbiguousUnion",
+      "LiteralNotSafeInteger",
+      "UnionTagInvalid",
+      "DefaultNotStored",
+    ]);
+  });
+
+  test("zodMemberWire checks the member's own default", () => {
+    const outcome = zodMemberWire(z.number().default(Number.NaN));
+
+    const rule = outcome.ok || outcome.error.kind !== "KindRefused" ? "" : outcome.error.refusals[0]?.rule;
+
+    assert.equal(rule, "DefaultNotStored");
+  });
+
+  test("give Zod3Schema for a zod 3 schema, which has the same Standard Schema marker", () => {
+    const schema = z3.z.object({ a: z3.z.string() });
+
+    assert.equal(schema["~standard"].vendor, "zod");
+    assert.deepEqual(zodMemberWire(schema), {
+      ok: false,
+      error: {
+        kind: "Zod3Schema",
+        fix: 'build the schema with zod 4: import { z } from "zod", not from "zod/v3" or a zod 3 install',
+      },
+    });
+  });
+
   test("give SelfCheckFailed after a failed self-check, and do not compile", () => {
     let compiles = 0;
 
-    const outcome = afterSelfCheck({ ok: false, error: [failure] }, () => {
-      compiles += 1;
+    const outcome = kindAfterChecks(
+      z.string(),
+      () => ({ ok: false, error: [failure] }),
+      (passed, schema) => {
+        compiles += 1;
 
-      return compileMember(z.string());
-    });
+        return compileMember(passed, schema);
+      },
+      () => [],
+    );
 
     assert.deepEqual(outcome, { ok: false, error: { kind: "SelfCheckFailed", failures: [failure] } });
     assert.equal(compiles, 0);

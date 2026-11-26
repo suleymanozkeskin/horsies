@@ -1,4 +1,4 @@
-// One test per outcome of the date-time kinds, and the date-time corpus against Pydantic's text.
+// One test per outcome of the date-time kinds. The date-time corpus against Pydantic's text is in tests/stored-forms/.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
@@ -10,8 +10,7 @@ import { encodeValue } from "../../../horsies/src/codec/writer.ts";
 import { h } from "../../../horsies/src/wire/builders.ts";
 import type { AnyWire } from "../../../horsies/src/wire/infer.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
-import { corpusLines, runtimeLabel } from "./support/files.ts";
-import { sameValue } from "./support/vectors.ts";
+import { sameValue } from "../../support/values.ts";
 
 function written<V>(wire: AnyWire, value: V): string {
   const result = encodeValue(kindOf(wire), value);
@@ -162,14 +161,6 @@ describe("date-time reader", () => {
   });
 });
 
-type TimeRow = {
-  readonly h: number;
-  readonly mi: number;
-  readonly s: number;
-  readonly us: number;
-  readonly text: string;
-};
-
 describe("time of day", () => {
   test("the fraction: none, 6 digits for a microsecond or a millisecond, 9 below the microsecond", () => {
     assert.equal(written(h.plainTime(), Temporal.PlainTime.from("09:10:12")), '"09:10:12"');
@@ -193,105 +184,5 @@ describe("time of day", () => {
   test("WrongType: a value that is not a Temporal.PlainTime", () => {
     assert.equal(writeRefused(h.plainTime(), "09:10:12").kind, "WrongType");
     assert.equal(writeRefused(h.plainTime(), Temporal.PlainDateTime.from("2026-08-12T09:10:12")).kind, "WrongType");
-  });
-
-  test("corpus: 1,000 times of day against Pydantic's text, read back to the value", () => {
-    const mismatches: string[] = [];
-    const lines = corpusLines("times.jsonl");
-
-    assert.equal(lines.length, 1000);
-
-    for (const line of lines) {
-      const row: TimeRow = JSON.parse(line);
-
-      const value = Temporal.PlainTime.from({
-        hour: row.h,
-        minute: row.mi,
-        second: row.s,
-        millisecond: Math.floor(row.us / 1000),
-        microsecond: row.us % 1000,
-      });
-
-      const text = encodeValue(kindOf(h.plainTime()), value);
-      const back = decodeValue(kindOf(h.plainTime()), jsonTextCheckedByCore(row.text), "worker");
-
-      if (!text.ok || text.value !== row.text || !back.ok || !sameValue(back.value, value)) {
-        mismatches.push(line);
-      }
-    }
-
-    assert.deepEqual(mismatches, [], `${runtimeLabel()}: ${mismatches.length} mismatches`);
-  });
-});
-
-type DateTimeRow = {
-  readonly y: number;
-  readonly mo: number;
-  readonly d: number;
-  readonly h: number;
-  readonly mi: number;
-  readonly s: number;
-  readonly us: number;
-  readonly tz: "naive" | "utc" | number;
-  readonly text: string;
-};
-
-function offsetId(minutes: number): string {
-  const sign = minutes < 0 ? "-" : "+";
-  const size = Math.abs(minutes);
-
-  return `${sign}${String(Math.floor(size / 60)).padStart(2, "0")}:${String(size % 60).padStart(2, "0")}`;
-}
-
-type CorpusCase = {
-  readonly wire: AnyWire;
-  readonly value: Temporal.Instant | Temporal.ZonedDateTime | Temporal.PlainDateTime;
-};
-
-function corpusCase(row: DateTimeRow): CorpusCase {
-  const fields = {
-    year: row.y,
-    month: row.mo,
-    day: row.d,
-    hour: row.h,
-    minute: row.mi,
-    second: row.s,
-    millisecond: Math.floor(row.us / 1000),
-    microsecond: row.us % 1000,
-  };
-
-  switch (row.tz) {
-    case "naive":
-      return { wire: h.plainDateTime(), value: Temporal.PlainDateTime.from(fields, { overflow: "reject" }) };
-    case "utc":
-      return { wire: h.instant(), value: Temporal.ZonedDateTime.from({ ...fields, timeZone: "+00:00" }).toInstant() };
-    default:
-      return {
-        wire: h.offsetDateTime(),
-        value: Temporal.ZonedDateTime.from({ ...fields, timeZone: offsetId(row.tz) }),
-      };
-  }
-}
-
-describe("date-time corpus", () => {
-  test("2,000 date-times against Pydantic's text, and each text reads back to the value", () => {
-    const mismatches: string[] = [];
-    const lines = corpusLines("datetimes.jsonl");
-
-    assert.equal(lines.length, 2000);
-
-    for (const line of lines) {
-      const row: DateTimeRow = JSON.parse(line);
-      const { wire, value } = corpusCase(row);
-      const kind = kindOf(wire);
-      const text = encodeValue(kind, value);
-      const back = decodeValue(kind, jsonTextCheckedByCore(row.text), "worker");
-
-      if (!text.ok || text.value !== row.text || !back.ok || !sameValue(back.value, value)) {
-        mismatches.push(line);
-      }
-    }
-
-    assert.deepEqual(mismatches, [], `${runtimeLabel()}: ${mismatches.length} mismatches`);
   });
 });

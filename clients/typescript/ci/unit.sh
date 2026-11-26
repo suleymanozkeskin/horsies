@@ -36,9 +36,11 @@ print_step_title "Run the tests with bun test"
 bun test
 
 # The codec runs in a task child and in a seat isolate on Node as well as on
-# Bun, so the codec and wire type tests run on Node too (`node:test`).
-print_step_title "Run the codec and wire type tests on Node"
-node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts'
+# Bun, and the zod adapter runs where a contract is checked, so the codec, wire
+# type and zod adapter tests and the stored-form tests (the vectors and the
+# corpus of Python's texts) run on Node too (`node:test`).
+print_step_title "Run the codec, wire type, zod adapter and stored-form tests on Node"
+node --test 'tests/unit/codec/**/*.test.ts' 'tests/unit/wire/**/*.test.ts' 'tests/unit/zod/**/*.test.ts' 'tests/stored-forms/**/*.test.ts'
 
 # TypeScript 6.0 is the oldest compiler that the published types support.
 # This step type checks the workspace projects with it. Build mode reads the
@@ -49,3 +51,19 @@ print_step_title "Type check with tsc of TypeScript 6.0"
 "$floor_compiler" --version
 "$floor_compiler" --build
 "$floor_compiler" --build --clean
+
+# The public API gate of the published entry points (`horsies`,
+# `horsies/zod`): the API report of each one against
+# tests/public-api/report/, each type that a public declaration names is
+# exported by its entry point, and the no-`any` check with the `unknown`
+# allow list (tests/public-api/unknown-allowed.json). A difference prints the
+# command that writes the reports; a change of the public API needs the
+# owner's word.
+print_step_title "Public API report and the no-any check"
+bun tests/public-api/run.ts check
+
+# The type tests (tests/types/pass/, tests/types/fail/) and the consumer
+# project (tests/types/consumer/), with tsc of TypeScript 7, bun check, and
+# tsc of TypeScript 6.0 (the floor compiler installed above).
+print_step_title "Type tests and the consumer project in both compiler lanes"
+bun tests/types/run.ts

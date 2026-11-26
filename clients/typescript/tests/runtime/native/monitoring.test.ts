@@ -1,0 +1,189 @@
+// The monitoring reads, the health reads, the pings and the cancel with a built addon and a database. An installed
+// empty database answers each read; an unreachable database gives each read's failure code; a value out of its
+// bounds is refused before any connect. The cases that need a sent task or a running worker are end-to-end cases.
+
+import assert from "node:assert/strict";
+import { describe, test } from "node:test";
+
+import { createMonitoringArea, type MonitoringArea } from "../../../horsies/src/monitoring/app-area.ts";
+import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
+import { processCoreAddon } from "../../../horsies/src/native/process-core/addon.ts";
+import { nativeValue } from "../../../horsies/src/native/call/envelope.ts";
+import { manifestJson, manifestJsonWithSchema, testDatabaseUrl } from "./manifest.ts";
+
+/** A database URL whose connect is refused at once: nothing listens on port 1. */
+const REFUSED_DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
+
+/** A UUIDv4: the detail read cannot classify its absence. */
+const UUID_V4 = "4b6d3a2e-8c1f-4e7a-9b5d-2f0c6e8a1d3b";
+
+/** The window of the pings of these tests, in milliseconds. */
+const PING_WINDOW_MS = 200;
+
+/** The area of an app whose manifest names `databaseUrl`. */
+function area(databaseUrl: string): MonitoringArea {
+  return createMonitoringArea({ handle: buildCoreHandle(manifestJson(databaseUrl, false), "PRODUCER") });
+}
+
+/** The area of an installed test database. */
+async function installedArea(): Promise<MonitoringArea> {
+  const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
+  const installed = await handle.installSchema();
+
+  assert.equal(installed.kind, "installed");
+
+  return createMonitoringArea({ handle });
+}
+
+describe("the reads of an installed database", () => {
+  test("each monitoring read answers its model", async () => {
+    const { monitoring } = await installedArea();
+    const stats = await monitoring.taskStats();
+
+    assert.ok(stats.ok && stats.value.length === 7);
+    assert.ok((await monitoring.taskFacets()).ok);
+    assert.ok((await monitoring.taskBreakdown({ groupBy: "queue" })).ok);
+
+    const page = await monitoring.listTasks({ statuses: ["FAILED"], limit: 50 });
+
+    assert.ok(page.ok && page.value.total === 0);
+    assert.deepEqual(await monitoring.workflowNames(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.workflowRuns(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.schedules(), { ok: true, value: [] });
+  });
+
+  test("each health read answers its value", async () => {
+    const { monitoring } = await installedArea();
+
+    assert.deepEqual(await monitoring.workers(), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.worker("no-such-worker"), {
+      ok: true,
+      value: { kind: "notFound", workerId: "no-such-worker" },
+    });
+    assert.deepEqual(await monitoring.workerHistory("no-such-worker"), { ok: true, value: [] });
+    assert.deepEqual(await monitoring.staleTasks({ thresholdMinutes: 5 }), { ok: true, value: { kind: "complete", rows: [] } });
+    assert.deepEqual(await monitoring.expiredTasks(), { ok: true, value: { kind: "complete", rows: [] } });
+    assert.ok((await monitoring.classCoverage()).ok);
+    assert.ok((await monitoring.classReport()).ok);
+  });
+
+  test("taskDetail of an absent task names why: NOT_CLASSIFIED for a UUIDv4, WITHIN_RETAINED_HISTORY for a UUIDv7", async () => {
+    const { monitoring } = await installedArea();
+    const minted = nativeValue("mintTaskId", () => processCoreAddon().mintTaskId());
+
+    assert.ok(minted.kind === "minted");
+    assert.deepEqual(await monitoring.taskDetail(UUID_V4), {
+      ok: true,
+      value: { kind: "notFound", taskId: UUID_V4, reason: "NOT_CLASSIFIED" },
+    });
+
+    const read = await monitoring.taskDetail(minted.taskId);
+
+    assert.ok(read.ok && read.value.kind === "notFound" && read.value.reason === "WITHIN_RETAINED_HISTORY");
+  });
+
+  test("an unknown workflow run and node are notFound", async () => {
+    const { monitoring } = await installedArea();
+
+    assert.deepEqual(await monitoring.workflowRun(UUID_V4), { ok: true, value: { kind: "notFound", workflowId: UUID_V4 } });
+    assert.deepEqual(await monitoring.workflowNode(UUID_V4, 0), {
+      ok: true,
+      value: { kind: "notFound", workflowId: UUID_V4, taskIndex: 0 },
+    });
+  });
+
+  test("a cancel of an unknown id is TASK_NOT_FOUND", async () => {
+    const { monitoring } = await installedArea();
+    const answer = await monitoring.cancelTask(UUID_V4, { policy: "pendingOrClaimedOnly" });
+
+    assert.ok(!answer.ok && answer.error.code === "TASK_NOT_FOUND");
+  });
+
+  test("the database ping answers its latency, and a ping of no worker answers no pong after its window", async () => {
+    const answered = await installedArea();
+    const ping = await answered.pingDatabase();
+
+    assert.ok(ping.ok && ping.value.latencyMs >= 0);
+    assert.deepEqual(await answered.pingWorkers({ timeoutMs: PING_WINDOW_MS }), { ok: true, value: [] });
+  });
+});
+
+describe("an unreachable database", () => {
+  test("each monitoring read is DB_OPERATION_FAILED with the retry rule of the cause", async () => {
+    const { monitoring } = area(REFUSED_DATABASE_URL);
+
+    const reads = [
+      ["task stats query", await monitoring.taskStats()],
+      ["task list query", await monitoring.listTasks()],
+      ["task detail query", await monitoring.taskDetail(UUID_V4)],
+      ["workflow names query", await monitoring.workflowNames()],
+      ["schedule state query", await monitoring.schedules()],
+    ] as const;
+
+    for (const [subject, read] of reads) {
+      assert.ok(!read.ok && read.error.code === "DB_OPERATION_FAILED", subject);
+      assert.ok(read.error.retryable, subject);
+      assert.ok(read.error.message.startsWith(`${subject} failed:`), read.error.message);
+    }
+  });
+
+  test("each health read, each ping and the cancel give their failure codes", async () => {
+    const unreachable = area(REFUSED_DATABASE_URL);
+    const workers = await unreachable.monitoring.workers();
+    const coverage = await unreachable.monitoring.classCoverage();
+    const ping = await unreachable.pingDatabase();
+    const pongs = await unreachable.pingWorkers({ timeoutMs: PING_WINDOW_MS });
+    const cancel = await unreachable.monitoring.cancelTask(UUID_V4, { policy: "includeRunning" });
+
+    assert.ok(!workers.ok && workers.error.code === "MONITORING_QUERY_FAILED");
+    assert.ok(!coverage.ok && coverage.error.code === "MONITORING_QUERY_FAILED");
+    assert.ok(!ping.ok && ping.error.code === "DB_PING_FAILED");
+    assert.ok(!pongs.ok && pongs.error.code === "WORKER_PING_FAILED");
+    assert.ok(!cancel.ok && cancel.error.code === "DB_OPERATION_FAILED" && cancel.error.retryable);
+  });
+
+  test("each query bound is QUERY_REFUSED before the connect", async () => {
+    const { monitoring } = area(REFUSED_DATABASE_URL);
+    const until = Temporal.Now.instant();
+
+    const refusals = [
+      ["window", await monitoring.listTasks({ window: { since: until, until } })],
+      ["window", await monitoring.taskStats({ window: { since: until.subtract({ hours: 31 * 24 }), until } })],
+      ["page", await monitoring.listTasks({ offset: -1 })],
+      ["page", await monitoring.listTasks({ limit: 0 })],
+      ["page", await monitoring.listTasks({ limit: 201 })],
+      ["page", await monitoring.listTasks({ offset: 400, limit: 101 })],
+      ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 0 })],
+      ["limit", await monitoring.taskBreakdown({ groupBy: "worker", limit: 501 })],
+      ["limit", await monitoring.workflowRuns({ limit: 0 })],
+      ["limit", await monitoring.workflowRuns({ limit: 201 })],
+      ["taskIndex", await monitoring.workflowNode(UUID_V4, 2 ** 31)],
+    ] as const;
+
+    for (const [field, read] of refusals) {
+      assert.ok(!read.ok && read.error.code === "QUERY_REFUSED" && read.error.field === field, field);
+    }
+  });
+
+  test("a count or a threshold out of its rule is INVALID_INPUT before the connect", async () => {
+    const unreachable = area(REFUSED_DATABASE_URL);
+
+    const answers = [
+      await unreachable.pingWorkers({ timeoutMs: 0 }),
+      await unreachable.monitoring.staleTasks({ thresholdMinutes: -1 }),
+      await unreachable.monitoring.staleTasks({ thresholdMinutes: 525_601 }),
+      await unreachable.monitoring.workerHistory("w1", { kind: "newest", count: 0 }),
+    ];
+
+    for (const answer of answers) {
+      assert.ok(!answer.ok && answer.error.code === "INVALID_INPUT");
+    }
+  });
+
+  test("a ping on a handle with no listener is LISTENER_DISABLED before the connect", async () => {
+    const handle = buildCoreHandle(manifestJsonWithSchema(REFUSED_DATABASE_URL, false, "ASSUME_INITIALIZED"), "PRODUCER");
+    const answer = await createMonitoringArea({ handle }).pingWorkers({ timeoutMs: PING_WINDOW_MS });
+
+    assert.ok(!answer.ok && answer.error.code === "LISTENER_DISABLED");
+  });
+});

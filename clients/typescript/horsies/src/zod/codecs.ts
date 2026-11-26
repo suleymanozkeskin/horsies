@@ -43,12 +43,11 @@ import {
 import { isResultOfKind } from "../wire/result-of.ts";
 import { ok, type Result } from "../wire/result.ts";
 import { kindOf, presenceOf } from "../wire/wire-type.ts";
+import type { zodWireSent } from "./infer.ts";
 
 /** A zod codec of horsies: stored as Python's text form of `T`, held as `T`. */
 export type TextCodec<T> = z.ZodCodec<z.ZodString, z.ZodCustom<T, T>>;
 
-/** Type-only key of the sent type of `hz.wire()`. It does not exist at run time. */
-export declare const zodWireSent: unique symbol;
 
 /** A zod schema of an `h.*` wire type: zod's value type is the reader's value; the sender's value is `SentOf<W>`. */
 export type WireSchema<W extends RequiredWire> = z.ZodCustom<ValueOf<W>, ValueOf<W>> & {
