@@ -35,7 +35,7 @@ export type ContextReadError =
   /** The stored value does not read with the contract's types. `cause` holds no value. */
   | { readonly kind: "unreadable"; readonly nodeId: string; readonly cause: string }
   /** The stored error has a custom code that the contract does not list. */
-  | { readonly kind: "unknownUserCode"; readonly nodeId: string; readonly code: string };
+  | { readonly kind: "unknownCustomCode"; readonly nodeId: string; readonly code: string };
 
 /** The workflow context of one task run. */
 export interface WorkflowContext {
@@ -256,7 +256,7 @@ function contextOutcome(
 
       return form.codes.codes.includes(outcome.error.code)
         ? ok(outcome)
-        : err(Object.freeze({ kind: "unknownUserCode", nodeId, code: outcome.error.code }));
+        : err(Object.freeze({ kind: "unknownCustomCode", nodeId, code: outcome.error.code }));
     }
 
     default:

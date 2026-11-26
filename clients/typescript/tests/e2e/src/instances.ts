@@ -185,7 +185,7 @@ export function instanceConfig(instance: Instance, connection: Connection): AppC
     case "handlers":
       return base;
     case "worker_ended_spans":
-      return { ...base, tracing: { kind: "otel" } };
+      return { ...base, tracing: { kind: "otelTracing" } };
     case "custom_queues":
       return { ...base, queueMode: "custom", customQueues: customQueues(CUSTOM_QUEUES) };
     case "recovery_queues":
@@ -304,9 +304,9 @@ export function workerProfile(profile: Profile): WorkerProfileInput {
     case "isolated-8":
       return { ...drain, isolated: { kind: "isolatedChildren", count: 8 } };
     case "claim-batch-1":
-      return { ...drain, isolated: { kind: "isolatedChildren", count: 1 }, claim: { perQueuePerPass: { kind: "tasks", tasks: 1 } } };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 1 }, claim: { perQueuePerPass: { kind: "taskLimit", tasks: 1 } } };
     case "recycle-after-2-tasks":
-      return { ...drain, isolated: { kind: "isolatedChildren", count: 2, recycle: { after: { kind: "tasks", tasks: 2 } } } };
+      return { ...drain, isolated: { kind: "isolatedChildren", count: 2, recycle: { after: { kind: "taskLimit", tasks: 2 } } } };
     case "shared-only-1x4":
       return { ...drain, sharedAsync };
     case "split-isolated-1-shared-1x4":

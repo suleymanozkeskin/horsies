@@ -99,9 +99,9 @@ describe("the start members", () => {
   });
 
   test("OpenTelemetry tracing makes the worker-ended spans by its switch; no tracing makes none", () => {
-    assert.equal(workerEndedSpans({ kind: "otel", parentage: "childOfSend", workerEndedSpans: "makeSpans" }), "MAKE_SPANS");
-    assert.equal(workerEndedSpans({ kind: "otel", parentage: "childOfSend", workerEndedSpans: "noSpans" }), "NO_SPANS");
-    assert.equal(workerEndedSpans({ kind: "none" }), "NO_SPANS");
+    assert.equal(workerEndedSpans({ kind: "otelTracing", parentage: "childOfSend", workerEndedSpans: "makeSpans" }), "MAKE_SPANS");
+    assert.equal(workerEndedSpans({ kind: "otelTracing", parentage: "childOfSend", workerEndedSpans: "noSpans" }), "NO_SPANS");
+    assert.equal(workerEndedSpans({ kind: "noTracing" }), "NO_SPANS");
   });
 
   test("the child launch has no preload program and the host-child program RUST", () => {

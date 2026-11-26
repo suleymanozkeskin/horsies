@@ -14,7 +14,7 @@ export const TRANSFER_SKU = "ACME-SKU-0001";
 export const TRANSFER_QUANTITY = 5;
 
 export const warehouseTransfer = defineWorkflow(
-  { name: "warehouse_transfer", definitionKey: "acme.warehouse_transfer.v1", params: {}, output: StockRelease },
+  { name: "warehouse_transfer", definitionKey: "acme.warehouse_transfer.v1", parameters: {}, outputType: StockRelease },
   (w) => {
     const allocate = w.task(allocateWarehouse, { sku: TRANSFER_SKU, quantity: TRANSFER_QUANTITY }, { nodeId: "allocate_warehouse" });
 

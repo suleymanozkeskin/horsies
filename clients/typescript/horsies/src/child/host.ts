@@ -323,9 +323,9 @@ function seatRouterOf(context: AppContext, serve: ChildServe, deps: ChildModeDep
 /** The body facts that a child of an app with `tracing` records: the facts of each run for its spans, or none. Pure. */
 export function bodyFactsMode(tracing: TracingSetting): BodyFactsMode {
   switch (tracing.kind) {
-    case "otel":
+    case "otelTracing":
       return "SPANS";
-    case "none":
+    case "noTracing":
       return "NO_SCOPE";
     default:
       return unreachable(tracing, "bodyFactsMode");

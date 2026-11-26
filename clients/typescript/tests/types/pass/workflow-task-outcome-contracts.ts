@@ -26,8 +26,8 @@ const regionTotal = defineWorkflow(
   {
     name: "region_total",
     definitionKey: "tests.region_total.v1",
-    params: { region: h.string() },
-    output: h.object({ total: h.int() }),
+    parameters: { region: h.string() },
+    outputType: h.object({ total: h.int() }),
     checkCases: [{ region: "eu" }],
   },
   (w) => ({ output: w.task(validateOrder, {}, { nodeId: "validate" }) }),
@@ -71,7 +71,7 @@ export const sum = app.implement(sumRegions, ({ region }, { ok }) =>
 );
 
 export const fulfil = defineWorkflow(
-  { name: "fulfil", definitionKey: "tests.fulfil.v1", params: {}, output: h.int() },
+  { name: "fulfil", definitionKey: "tests.fulfil.v1", parameters: {}, outputType: h.int() },
   (w) => {
     const validated = w.task(validateOrder, {}, { nodeId: "validate" });
     const emptyChecked = w.task(emptyOnly, {}, { nodeId: "empty_only" });
@@ -88,8 +88,8 @@ export const child = defineWorkflow(
   {
     name: "child",
     definitionKey: "tests.child.v1",
-    params: { order: h.taskOutcome(validateOrder), note: h.string().optional() },
-    output: h.int(),
+    parameters: { order: h.taskOutcome(validateOrder), note: h.string().optional() },
+    outputType: h.int(),
     checkCases: [
       { order: { kind: "succeeded", value: { total: 3 } } },
       {

@@ -1,7 +1,7 @@
 // The `metrics` command: serve the fleet metrics of the app's database at `GET /metrics` on
-// `--listen` until `SIGINT` or `SIGTERM`.
+// `--metrics-listen` until `SIGINT` or `SIGTERM`.
 //
-// `<entry> metrics --listen HOST:PORT [--loglevel INFO]`
+// `<entry> metrics --metrics-listen HOST:PORT [--log-level INFO]`
 //
 // - The core reads the fleet state at once and then at most once per collect interval; a scrape
 //   renders the last read, so scrapes add no load on the database.
@@ -12,7 +12,7 @@
 //   command.
 //
 // Exit codes: 0 after an operator stop; 1 when the address does not bind; 2 for arguments that do
-// not parse, `--listen` included.
+// not parse, `--metrics-listen` included.
 
 import type { AppContext } from "../app/context.ts";
 import type { WorkerLogLevel } from "../_catalog/worker_manifest.ts";
@@ -42,15 +42,15 @@ import {
 } from "./usage.ts";
 
 /** The usage line of `metrics`. */
-export const METRICS_USAGE = "<entry> metrics --listen HOST:PORT [--loglevel LEVEL]";
+export const METRICS_USAGE = "<entry> metrics --metrics-listen HOST:PORT [--log-level LEVEL]";
 
-/** The default `--loglevel` of `metrics`, as in the Python and Rust clients. */
+/** The default `--log-level` of `metrics`, as in the Python and Rust clients. */
 export const METRICS_DEFAULT_LOG_LEVEL: WorkerLogLevel = "INFO";
 
 /** The flags of `metrics`, as `node:util` `parseArgs` reads them. */
 const METRICS_FLAG_OPTIONS = {
-  listen: { type: "string" },
-  loglevel: { type: "string" },
+  "metrics-listen": { type: "string" },
+  "log-level": { type: "string" },
 } as const;
 
 /** The parsed flags of `metrics`. */
@@ -144,7 +144,7 @@ export async function runMetricsCommand(args: readonly string[], deps: MetricsCo
   }
 }
 
-/** Every argument check of `metrics`, in order: the flags, then the core's check of `--listen`. */
+/** Every argument check of `metrics`, in order: the flags, then the core's check of `--metrics-listen`. */
 function preparedMetrics(
   args: readonly string[],
   check: (text: string) => MetricsListenAddressCheck,
@@ -172,7 +172,7 @@ async function runUntilStop(listen: string, deps: MetricsCommandDeps): Promise<F
   return run.ended;
 }
 
-/** The flags of `metrics`: `--listen` is required. Pure. */
+/** The flags of `metrics`: `--metrics-listen` is required. Pure. */
 export function parseMetricsFlags(args: readonly string[]): Result<MetricsFlags, UsageError> {
   const parsed = parseFlags(args, METRICS_FLAG_OPTIONS);
 
@@ -180,18 +180,18 @@ export function parseMetricsFlags(args: readonly string[]): Result<MetricsFlags,
     return parsed;
   }
 
-  const listen = textFlag(parsed.value, "listen");
+  const listen = textFlag(parsed.value, "metrics-listen");
 
   if (listen === undefined) {
-    return err(usageError("--listen HOST:PORT is required; there is no default"));
+    return err(usageError("--metrics-listen HOST:PORT is required; there is no default"));
   }
 
-  const logLevel = parseLogLevel(textFlag(parsed.value, "loglevel") ?? METRICS_DEFAULT_LOG_LEVEL);
+  const logLevel = parseLogLevel(textFlag(parsed.value, "log-level") ?? METRICS_DEFAULT_LOG_LEVEL);
 
   return logLevel.ok ? ok({ listen, logLevel: logLevel.value }) : logLevel;
 }
 
-/** The core's check of `--listen`; a refusal is a usage error with the core's rule. */
+/** The core's check of `--metrics-listen`; a refusal is a usage error with the core's rule. */
 function checkedListen(text: string, check: (text: string) => MetricsListenAddressCheck): Result<undefined, UsageError> {
   const checked = check(text);
 
@@ -199,7 +199,7 @@ function checkedListen(text: string, check: (text: string) => MetricsListenAddre
     case "address":
       return ok(undefined);
     case "refused":
-      return err(usageError(`invalid --listen: ${checked.message}`));
+      return err(usageError(`invalid --metrics-listen: ${checked.message}`));
     default:
       return unreachable(checked);
   }

@@ -78,11 +78,11 @@ function schedulesText(states: readonly ScheduleStateInfo[]): string {
 /** The lines of the report of `app`, with at most `failedRows` failed tasks. Effects: the reads. */
 export async function reportLines(app: Horsies, failedRows: number): Promise<readonly string[]> {
   const ping = await app.pingDatabase();
-  const workers = await app.monitoring.workers();
-  const pongs = await app.pingWorkers({ timeoutMs: PING_WINDOW_MS });
+  const workers = await app.monitoring.listWorkerStates();
+  const pongs = await app.pingWorkers({ waitMs: PING_WINDOW_MS });
   const stats = await app.monitoring.taskStats();
   const failed = await app.monitoring.listTasks({ statuses: ["FAILED"], limit: failedRows });
-  const runs = await app.monitoring.workflowRuns({ limit: WORKFLOW_RUNS_READ });
+  const runs = await app.monitoring.listWorkflowRuns({ limit: WORKFLOW_RUNS_READ });
 
   const lines = [
     lineOf("database", ping, (value) => `${value.latencyMs.toFixed(1)} ms`),
@@ -97,7 +97,7 @@ export async function reportLines(app: Horsies, failedRows: number): Promise<rea
   }
 
   lines.push(lineOf(`workflows (the newest ${String(WORKFLOW_RUNS_READ)})`, runs, workflowRunsText));
-  lines.push(lineOf("schedules", await app.monitoring.schedules(), schedulesText));
+  lines.push(lineOf("schedules", await app.monitoring.listSchedules(), schedulesText));
 
   return lines;
 }

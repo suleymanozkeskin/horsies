@@ -25,11 +25,11 @@ The `horsies web` command of the shipped binary serves the UI of one database wi
 
 ```rust
 use axum::Router;
-use horsies::web::{router, MonitoringConfig, TrustedHeader};
+use horsies::web::{router, Actions, MonitoringConfig, TrustedHeader};
 use horsies::Horsies;
 
 fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>> {
-    let policy = TrustedHeader::new("X-Forwarded-User", true)?;
+    let policy = TrustedHeader::new("X-Forwarded-User", Actions::Enabled)?;
     let monitoring = router(app, MonitoringConfig::default(), policy);
     Ok(Router::new().nest("/monitoring", monitoring))
 }
@@ -57,7 +57,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 |--------|------------|-----------|
 | `AllowAll` | Yes | Yes. The host owns authentication: mount the router behind it |
 | `ViewOnly` | Yes | No |
-| `TrustedHeader::new(header_name, actions)` | The header has a value that is visible text and not blank | `actions` is `Actions::Enabled`, and the header check |
+| `TrustedHeader::new(header_name, actions)` | The header has a value that is visible text, not blank, with no blank comma-separated member | `actions` is `Actions::Enabled`, and the header check |
 
 `TrustedHeader::new` returns `Result<TrustedHeader, InvalidHeaderName>`. `header_name()` and `actions()` read it back.
 

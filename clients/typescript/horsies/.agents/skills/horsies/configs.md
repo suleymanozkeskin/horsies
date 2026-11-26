@@ -44,7 +44,7 @@ if (!created.ok) {
   for (const refusal of created.error.refusals) {
     console.error(`error[${refusal.code}]: ${refusal.message}`);
 
-    for (const line of refusal.help) {
+    for (const line of refusal.helpText) {
       console.error(`  = help: ${line}`);
     }
   }
@@ -55,14 +55,14 @@ if (!created.ok) {
 const app = created.value;
 ```
 
-`Horsies.create(config)` returns `Result<Horsies, CreateRefused>`:
+`Horsies.create(config)` returns `Result<Horsies, ValidationReport>`:
 
-- `CreateRefused.refusals` is a non-empty list of `Refusal`. The order: the
+- `ValidationReport.refusals` is a non-empty list of `HorsiesError`. The order: the
   config (the TypeScript parse, then the core's check), then each listed
   contract in list order, then the workflows.
-- A `Refusal` has `code` (an `HRS-nnn` value of `ErrorCode`), `path` (the
+- A `HorsiesError` has `code` (an `HRS-nnn` value of `ErrorCode`), `path` (the
   config field, for example `customQueues[1].name`, or the contract, for
-  example `tasks[2] charge_payment`), `message` and `help` (zero or more
+  example `tasks[2] charge_payment`), `message` and `helpText` (zero or more
   lines). The codes are on the shared docs page
   `https://suleymanozkeskin.github.io/horsies/tasks/errors/` ("Config error
   codes").
@@ -164,7 +164,7 @@ export const highTrafficConfig: AppConfigInput = {
 | A number field that is not a whole number in the range of its core field | The code of its section, with "must be a whole number from MIN to MAX" |
 | A text with a lone UTF-16 surrogate | The code of its section, with "holds a lone surrogate". The message holds no part of the text |
 | A `fromEnv` secret whose variable is not set | `HRS-203` |
-| `retention.pausedWorkflowAutoCancelAfter` with years or months, or not whole microseconds | `HRS-216` |
+| `retention.pausedWorkflowCancelAfter` with years or months, or not whole microseconds | `HRS-216` |
 
 The code of a section: queues `HRS-200`, `clusterWideCap` `HRS-201`,
 `claim` and `maxClaimRenewAgeMs` `HRS-202`, `broker` URLs `HRS-203`,
@@ -188,8 +188,8 @@ The code of a section: queues `HRS-200`, `clusterWideCap` `HRS-201`,
 | Section | Fields |
 |---|---|
 | `payload` | `warnBytes` (a send above it logs a warning, once per task name), `rejectBytes` (a send above it is refused with `PAYLOAD_TOO_LARGE`). Each is `{ kind: "bytes", bytes }` or `{ kind: "noBound" }` |
-| `recovery` | `autoRequeueStaleClaimed`, `claimedStaleThresholdMs`, `autoFailStaleRunning`, `autoTerminateOrphanedWorkflowTasks`, `orphanTaskAuditIntervalMs`, `runningStaleThresholdMs`, `finalizingStaleThresholdMs`, `crashedWorkerRecoveryGraceMs`, `phase2QuarantineAfterAttempts`, `workflowRecoveryFailureLimit`, `checkIntervalMs`, `runnerHeartbeatIntervalMs`, `claimerHeartbeatIntervalMs`, `workerStateSnapshotIntervalMs` |
-| `retention` | `workerStateRetention`, `terminalRecordRetention` (`HoursRetention`: `{ kind: "hours", hours }` or `{ kind: "noPruning" }`), `pausedWorkflowAutoCancelAfter` (`{ kind: "never" }` or `{ kind: "after", age: Temporal.Duration }`), `historyLeafHorizonDays`, `heartbeatLeafHorizonHours`, `retentionPeriods` (`{ days }[]`), `queueRetention` (by queue name: `{ kind: "days", days }` or `{ kind: "forever" }`), `partitionMaintenanceIntervalSeconds`, `retentionSweepIntervalSeconds`, `retentionDeleteBatchSize` |
+| `recovery` | `requeueStaleClaimed`, `claimedStaleThresholdMs`, `failStaleRunning`, `terminateOrphanedWorkflowTasks`, `orphanTaskAuditIntervalMs`, `runningStaleThresholdMs`, `finalizingStaleThresholdMs`, `crashedWorkerRecoveryGraceMs`, `finalizationQuarantineAfterAttempts`, `workflowRecoveryFailureLimit`, `checkIntervalMs`, `runnerHeartbeatIntervalMs`, `claimerHeartbeatIntervalMs`, `workerStateSnapshotIntervalMs` |
+| `retention` | `workerStateRetention`, `terminalRecordRetention` (`HoursRetention`: `{ kind: "hours", hours }` or `{ kind: "noPruning" }`), `pausedWorkflowCancelAfter` (`{ kind: "never" }` or `{ kind: "after", age: Temporal.Duration }`), `historyLeafHorizonDays`, `heartbeatLeafHorizonHours`, `retentionPeriods` (`{ days }[]`), `queueRetention` (by queue name: `{ kind: "days", days }` or `{ kind: "forever" }`), `partitionMaintenanceIntervalSeconds`, `retentionSweepIntervalSeconds`, `retentionDeleteBatchSize` |
 | `resilience` | `databaseRetryInitialMs`, `databaseRetryMaxMs`, `databaseRetryMaxAttempts` (`{ kind: "attempts", attempts }` with at least 1, or `{ kind: "noLimit" }`), `notifyPollIntervalMs` |
 
 The core checks the range of each field. The ranges are on the shared
@@ -219,7 +219,7 @@ export const created = Horsies.create({
       isolated: {
         kind: "isolatedChildren",
         count: 2,
-        recycle: { after: { kind: "tasks", tasks: 500 }, above: { kind: "mb", mb: 1024 } },
+        recycle: { after: { kind: "taskLimit", tasks: 500 }, above: { kind: "memoryLimit", mb: 1024 } },
       },
       sharedAsync: { kind: "sharedAsyncChildren", count: 4, seats: 25 },
       drainTimeoutMs: 120_000,
@@ -231,16 +231,16 @@ export const created = Horsies.create({
 
 | `WorkerProfileInput` field | Type |
 |---|---|
-| `isolated` | `IsolatedSetting`: `IsolatedChildren` (`kind: "isolatedChildren"`, `count` (1 to 1,024), `recycle` (`after: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: PoolSize`, `check`), `taskSendPool: PoolSize`) or `NoIsolatedChildren` (`{ kind: "noIsolatedChildren" }`) |
-| `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` (`kind: "sharedAsyncChildren"`, `count` (1 to 1,024), `seats` (1 to 1,000), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `check`), `taskSendPool`) or `NoSharedAsyncChildren` (`{ kind: "noSharedAsyncChildren" }`) |
+| `isolated` | `IsolatedSetting`: `IsolatedChildren` (`kind: "isolatedChildren"`, `count` (1 to 1,024), `recycle` (`after: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: PoolSize`, `prePing`), `taskSendPool: PoolSize`) or `NoIsolatedChildren` (`{ kind: "noIsolatedChildren" }`) |
+| `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` (`kind: "sharedAsyncChildren"`, `count` (1 to 1,024), `seats` (1 to 1,000), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `prePing`), `taskSendPool`) or `NoSharedAsyncChildren` (`{ kind: "noSharedAsyncChildren" }`) |
 | `pool` | `ParentPoolInput`: `maxSize: SharedPoolSize` |
 | `claim` | `ClaimLimitsInput`: `perQueuePerPass`, `claimedPerWorker` (`TaskLimit`) |
 | `drainTimeoutMs` | `number`: 1 to 86,400,000 ms; default 300,000 ms (300 s) |
 | `parentCpu` | `"shared"` (the CPUs that the worker inherits) or `"ownCore"` (one physical core, Linux only) |
 
-- `TaskLimit` is `{ kind: "tasks", tasks }` (1 to 2,147,483,647) or
-  `{ kind: "noLimit" }`. `MemoryLimit` is `{ kind: "mb", mb }` (1 to
-  16,777,216) or `{ kind: "noLimit" }`. `PoolSize` is
+- `TaskLimit` is `{ kind: "taskLimit", tasks }` (1 to 2,147,483,647) or
+  `{ kind: "noTaskLimit" }`. `MemoryLimit` is `{ kind: "memoryLimit", mb }` (1 to
+  16,777,216) or `{ kind: "noMemoryLimit" }`. `PoolSize` is
   `{ kind: "connections", connections }` (1 to 1,000); `SharedPoolSize`
   adds `{ kind: "fromSeats" }`.
 - A class that the profile leaves out has no children, as its
@@ -346,7 +346,7 @@ configureLogging({
   sync: its type refuses an async function. A batch that the sink throws on
   goes to stderr.
 - Each command of `cli.run` sets every logger to the threshold of its
-  `--loglevel`, so the thresholds that the entry set before `cli.run` do not
+  `--log-level`, so the thresholds that the entry set before `cli.run` do not
   stay. The sink stays.
 
 ## The Check
@@ -442,12 +442,12 @@ bun app.ts check --live
 
 | Command | Does |
 |---|---|
-| `<entry> worker --profile NAME [--loglevel LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile. The static check runs first. `--loglevel` default `INFO`. A missing or unknown `--profile` exits 1 and the core names the profiles of the app |
-| `<entry> check [--live] [--loglevel LEVEL]` | Checks the app. `--loglevel` default `WARNING`. Sends stay suppressed |
-| `<entry> web [--host HOST] [--port PORT] [--auth none\|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--loglevel LEVEL]` | Serves the monitoring web UI of the app (see `monitoring.md`) |
-| `<entry> metrics --listen HOST:PORT [--loglevel LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` (see `monitoring.md`) |
+| `<entry> worker --profile NAME [--log-level LEVEL] [--metrics-listen HOST:PORT]` | Starts a worker of one profile. The static check runs first. `--log-level` default `INFO`. A missing or unknown `--profile` exits 1 and the core names the profiles of the app |
+| `<entry> check [--live] [--log-level LEVEL]` | Checks the app. `--log-level` default `WARNING`. Sends stay suppressed |
+| `<entry> web [--host HOST] [--port PORT] [--authorization none\|trusted-header] [--trusted-header NAME] [--enable-actions] [--trace-link TEMPLATE] [--log-level LEVEL]` | Serves the monitoring web UI of the app (see `monitoring.md`) |
+| `<entry> metrics --metrics-listen HOST:PORT [--log-level LEVEL]` | Serves the fleet metrics of the app's database at `GET /metrics` (see `monitoring.md`) |
 
-- `--loglevel` takes `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in
+- `--log-level` takes `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`, in
   any case.
 - `SIGTERM` or `SIGINT` stops the worker, the web server and the metrics
   server. The first signal asks the stop once; each later signal writes one
@@ -495,7 +495,7 @@ start.
 it and tries to bind the same debugger port.
 
 **Do not set thresholds with `configureLogging` and expect them to stay
-after `cli.run`.** Each command sets every logger to its `--loglevel`.
+after `cli.run`.** Each command sets every logger to its `--log-level`.
 
 ## All Key Imports
 
@@ -504,7 +504,7 @@ after `cli.run`.** Each command sets every logger to its `--loglevel`.
 import {
   // App
   Horsies, ErrorCode, cli,
-  type HorsiesConfig, type CreateRefused, type Refusal, type RefusalCode,
+  type HorsiesConfig, type ValidationReport, type HorsiesError, type RefusalCode,
   // Config
   type AppConfigInput, type BrokerConfigInput, type BrokerConnection, type SessionDatabase, type Secret,
   type PoolRecycle, type TcpKeepalives, type TcpUserTimeout, type RerunInputDefault, type ClaimMode,

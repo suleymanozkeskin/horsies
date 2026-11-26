@@ -2,7 +2,7 @@
 // tests use, the 403 and 413 answers of the core, an event stream per subscription, and a record of
 // every call.
 
-import type { MonitoringAuthPolicy } from "../../../horsies/src/web/auth.ts";
+import type { MonitoringAuthorizationPolicy } from "../../../horsies/src/web/auth.ts";
 import type { MonitoringBridge } from "../../../horsies/src/web/bridge.ts";
 import type { EventFrameSource } from "../../../horsies/src/web/events.ts";
 import type {
@@ -188,7 +188,7 @@ export function fakeBridge(): { readonly bridge: MonitoringBridge; readonly call
 export function recordingPolicy(
   view: () => boolean | Promise<boolean>,
   act: () => boolean | Promise<boolean>,
-): { readonly policy: MonitoringAuthPolicy; readonly asked: string[] } {
+): { readonly policy: MonitoringAuthorizationPolicy; readonly asked: string[] } {
   const asked: string[] = [];
 
   return {

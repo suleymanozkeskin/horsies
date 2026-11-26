@@ -12,7 +12,7 @@ const DATABASE_URL = "postgresql://horsies@127.0.0.1:1/none";
 /** The name of the error that `createMonitoringHandler` throws for `app`, or `returned` when it returns. */
 function handlerCallOutcome(app: Horsies): string {
   try {
-    void createMonitoringHandler(app, { auth: allowAll() });
+    void createMonitoringHandler(app, { authorizationPolicy: allowAll() });
 
     return "returned";
   } catch (error) {

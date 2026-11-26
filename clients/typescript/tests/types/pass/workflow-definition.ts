@@ -53,8 +53,8 @@ export const fulfilOrder = defineWorkflow(
   {
     name: "fulfil_order",
     definitionKey: "shop.fulfil_order.v1",
-    output: Receipt,
-    params: { order: Order },
+    outputType: Receipt,
+    parameters: { order: Order },
     onError: "fail",
     checkCases: [{ order: sampleOrder }],
   },
@@ -79,8 +79,8 @@ export const shipping = defineWorkflow(
   {
     name: "shipping",
     definitionKey: "shop.shipping.v1",
-    output: h.string(),
-    params: { order: Order },
+    outputType: h.string(),
+    parameters: { order: Order },
     checkCases: [{ order: sampleOrder }],
   },
   (w, { order }) => {
@@ -98,8 +98,8 @@ const syncRegion = defineWorkflow(
   {
     name: "sync_region",
     definitionKey: "shop.sync_region.v1",
-    output: h.int(),
-    params: { region: h.string() },
+    outputType: h.int(),
+    parameters: { region: h.string() },
     checkCases: [{ region: "eu" }],
   },
   (w, { region }) => ({ output: w.task(quoteShipping, { carrier: region, order: sampleOrder }, { nodeId: "last" }) }),
@@ -108,7 +108,7 @@ const syncRegion = defineWorkflow(
 const buildReport = defineTask({ name: "build_report", input: {}, output: h.string() });
 
 export const nightly = defineWorkflow(
-  { name: "nightly", definitionKey: "shop.nightly.v1", output: h.string(), params: {} },
+  { name: "nightly", definitionKey: "shop.nightly.v1", outputType: h.string(), parameters: {} },
   (w) => {
     const regions = ["eu", "us", "apac"].map((region) =>
       w.subWorkflow(syncRegion, { region }, { nodeId: `sync-${region}` }),
@@ -126,7 +126,7 @@ export const nightly = defineWorkflow(
 const tally = defineTask({ name: "tally", input: { first: h.taskOutcome(quoteShipping).optional() }, output: h.int() });
 
 export const anyJoin = defineWorkflow(
-  { name: "any_join", definitionKey: "shop.any_join.v1", output: h.int(), params: {} },
+  { name: "any_join", definitionKey: "shop.any_join.v1", outputType: h.int(), parameters: {} },
   (w) => {
     const one = w.task(pickCarrier, {}, { nodeId: "one" });
     const count = w.task(quoteShipping, { carrier: "x", order: sampleOrder }, { nodeId: "count" });

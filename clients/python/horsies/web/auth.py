@@ -73,6 +73,10 @@ class ViewOnly:
 class TrustedHeader:
     """Authorize a request carrying a non-empty identity header.
 
+    Every value of the header, and every comma-separated member of a value,
+    must be non-blank. A blank member is an ambiguous identity: HTTP stacks
+    join two copies of a header with a comma, so ``alice, `` is refused.
+
     The reverse proxy in front of this app is the identity boundary: it
     authenticates the caller and sets the header.
 
@@ -87,7 +91,10 @@ class TrustedHeader:
         self.actions = actions
 
     async def can_view(self, request: Request) -> bool:
-        return bool((request.headers.get(self.header_name) or '').strip())
+        values = request.headers.getlist(self.header_name)
+        return bool(values) and all(
+            member.strip() for value in values for member in value.split(',')
+        )
 
     async def can_act(self, request: Request) -> bool:
         match self.actions:

@@ -80,8 +80,8 @@ impl MonitoringAuthorizationPolicy for ViewOnly {
 }
 
 /// Trust an identity header that a reverse proxy writes: a request with a
-/// value that is not blank may read, and may act when `actions` is
-/// [`Actions::Enabled`].
+/// value that is not blank, with no blank comma-separated member, may read,
+/// and may act when `actions` is [`Actions::Enabled`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrustedHeader {
     header_name: HeaderName,
@@ -108,14 +108,17 @@ impl TrustedHeader {
         self.actions
     }
 
-    /// Whether the request has the header with a value that is visible text
-    /// and not blank.
+    /// Whether the request has the header, and every value of it is visible
+    /// text with no blank comma-separated member. Two copies of the header
+    /// that an HTTP stack joins to `alice, ` are refused.
     fn identified(&self, request: MonitoringRequest<'_>) -> bool {
-        request
-            .headers
-            .get(&self.header_name)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| !value.trim().is_empty())
+        let mut values = request.headers.get_all(&self.header_name).iter().peekable();
+        values.peek().is_some()
+            && values.all(|value| {
+                value
+                    .to_str()
+                    .is_ok_and(|text| text.split(',').all(|member| !member.trim().is_empty()))
+            })
     }
 }
 

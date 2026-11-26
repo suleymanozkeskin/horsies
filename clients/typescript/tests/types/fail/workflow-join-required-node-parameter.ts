@@ -7,7 +7,7 @@ import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";
 const count = defineTask({ name: "count", input: {}, output: h.int() });
 const tally = defineTask({ name: "tally", input: { first: h.taskOutcome(count) }, output: h.int() });
 
-export const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.int(), params: {} }, (w) => {
+export const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", outputType: h.int(), parameters: {} }, (w) => {
   const counted = w.task(count, {}, { nodeId: "count" });
 
   return { output: w.task(tally, { first: counted }, { nodeId: "tally", join: { kind: "any" } }) };

@@ -86,7 +86,7 @@ describe("the members of the instances", () => {
     assert.equal(instanceWorkflows("recovery"), LAYER_WORKFLOWS);
     assert.equal(instanceWorkflows("recovery_queues"), RECOVERY_QUEUE_WORKFLOWS);
     assert.deepEqual(instanceWorkflows("handlers"), []);
-    assert.deepEqual(instanceConfig("worker_ended_spans", { kind: "direct", databaseUrl: SERVER }).tracing, { kind: "otel" });
+    assert.deepEqual(instanceConfig("worker_ended_spans", { kind: "direct", databaseUrl: SERVER }).tracing, { kind: "otelTracing" });
     assert.equal(instanceConfig("handlers", { kind: "direct", databaseUrl: SERVER }).tracing, undefined);
   });
 

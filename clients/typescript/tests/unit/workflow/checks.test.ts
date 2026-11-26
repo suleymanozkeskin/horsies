@@ -21,7 +21,7 @@ const audit = defineTask({ name: "audit", input: {}, output: h.null(), workflowC
 const maybe = defineTask({ name: "maybe", input: { first: h.taskOutcome(ping).optional() }, output: h.int() });
 const tasks = [ping, add, pair, say, audit, maybe];
 
-const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", output: h.int(), params: {} }, (w) => ({
+const leaf = defineWorkflow({ name: "leaf", definitionKey: "tests.leaf.v1", outputType: h.int(), parameters: {} }, (w) => ({
   output: w.task(ping, {}, { nodeId: "ping" }),
 }));
 
@@ -29,8 +29,8 @@ const region = defineWorkflow(
   {
     name: "region",
     definitionKey: "tests.region.v1",
-    output: h.int(),
-    params: { name: h.string().optional() },
+    outputType: h.int(),
+    parameters: { name: h.string().optional() },
     checkCases: [{}],
   },
   (w) => ({ output: w.task(ping, {}, { nodeId: "ping" }) }),
@@ -42,14 +42,14 @@ const view = viewOf(tasks, [leaf, region]);
 function flow(build: (w: WorkflowBuilder) => BuildReturn, name = "flow", output: OutputSchema = h.int()): object {
   // SAFETY: the builds of these tests return nodes of several types; the checks compare the output node with the
   // declared output at run time (HRS-025), and each test declares the output of its output node.
-  return defineWorkflow({ name, definitionKey: `tests.${name}.v1`, output, params: {} }, build as never);
+  return defineWorkflow({ name, definitionKey: `tests.${name}.v1`, outputType: output, parameters: {} }, build as never);
 }
 
 describe("the builder", () => {
   test("a build of a record whose error rule create refuses is a defect", () => {
     // SAFETY: the types refuse this error rule; Horsies.create refuses it before any build (HRS-033).
     const refused = defineWorkflow(
-      { name: "rule", definitionKey: "tests.rule.v1", output: h.int(), params: {}, onError: "stop" as never },
+      { name: "rule", definitionKey: "tests.rule.v1", outputType: h.int(), parameters: {}, onError: "stop" as never },
       (w) => ({ output: w.task(ping, {}, { nodeId: "ping" }) }),
     );
 
@@ -429,7 +429,7 @@ describe("the checks", () => {
 
   test("a child workflow that the app does not list: HRS-020", () => {
     const unlisted = defineWorkflow(
-      { name: "unlisted", definitionKey: "tests.unlisted.v1", output: h.int(), params: {} },
+      { name: "unlisted", definitionKey: "tests.unlisted.v1", outputType: h.int(), parameters: {} },
       (w) => ({
         output: w.task(ping, {}, { nodeId: "a" }),
       }),

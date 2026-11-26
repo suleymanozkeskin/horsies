@@ -67,7 +67,7 @@ export const timeoutRetrySleeper = defineTask({
   input: { durationMs: h.int() },
   output: h.string(),
   timeoutMs: 1_000,
-  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["TASK_TIMEOUT"] },
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, retryFor: ["TASK_TIMEOUT"] },
 });
 
 /** The process id of the child that runs it, after `sleepMs`. */

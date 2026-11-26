@@ -241,11 +241,11 @@ constraint). The rules of each action are on the shared docs page
 
 ```rust
 use axum::Router;
-use horsies::web::{router, MonitoringConfig, TrustedHeader};
+use horsies::web::{router, Actions, MonitoringConfig, TrustedHeader};
 use horsies::Horsies;
 
 fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>> {
-    let policy = TrustedHeader::new("X-Forwarded-User", true)?;
+    let policy = TrustedHeader::new("X-Forwarded-User", Actions::Enabled)?;
     let monitoring = router(app, MonitoringConfig::default(), policy);
     Ok(Router::new().nest("/monitoring", monitoring))
 }
@@ -282,7 +282,7 @@ read when the last read is 15 s old or more).
 |---|---|---|
 | `AllowAll` | Yes | Yes. The host owns authentication: mount the router behind it |
 | `ViewOnly` | Yes | No |
-| `TrustedHeader::new(header_name, actions)` | The header has a value that is not blank | `actions` is `Actions::Enabled`, and the header check. `new` returns `Result<_, InvalidHeaderName>` |
+| `TrustedHeader::new(header_name, actions)` | The header has a value that is not blank, with no blank comma-separated member | `actions` is `Actions::Enabled`, and the header check. `new` returns `Result<_, InvalidHeaderName>` |
 
 ```rust
 use horsies::web::{MonitoringAuthorizationPolicy, MonitoringRequest};

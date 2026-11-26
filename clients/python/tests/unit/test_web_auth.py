@@ -68,6 +68,38 @@ class TestTrustedHeader:
             await policy.can_view(make_request(**{'X-Forwarded-User': '   '})) is False
         )
 
+    async def test_blank_comma_member_is_unauthorized(self) -> None:
+        """Two copies of the header, one blank, arrive joined as ``alice, ``."""
+        policy = TrustedHeader('X-Forwarded-User', actions=Actions.ENABLED)
+
+        for value in ('alice, ', ', alice', 'alice,,bob', ','):
+            request = make_request(**{'X-Forwarded-User': value})
+            assert await policy.can_view(request) is False
+            assert await policy.can_act(request) is False
+
+    async def test_repeated_header_with_a_blank_copy_is_unauthorized(self) -> None:
+        policy = TrustedHeader('X-Forwarded-User', actions=Actions.ENABLED)
+        request = Request(
+            {
+                'type': 'http',
+                'method': 'GET',
+                'path': '/api/meta',
+                'headers': [
+                    (b'x-forwarded-user', b'alice'),
+                    (b'x-forwarded-user', b''),
+                ],
+            }
+        )
+
+        assert await policy.can_view(request) is False
+
+    async def test_comma_members_that_are_all_present_are_authorized(self) -> None:
+        policy = TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED)
+
+        request = make_request(**{'X-Forwarded-User': 'alice, bob'})
+
+        assert await policy.can_view(request) is True
+
     async def test_present_header_authorizes_reads(self) -> None:
         policy = TrustedHeader('X-Forwarded-User', actions=Actions.DISABLED)
 
