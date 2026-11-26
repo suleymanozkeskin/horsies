@@ -10,14 +10,14 @@ import { refusalText } from "../codec/refusal.ts";
 import { type CompiledContract, compileContract } from "../contract/compile.ts";
 import type { DeclaredCodes } from "../contract/definition.ts";
 import type { TaskId } from "../contract/ids.ts";
-import type { ResultRead, ResultRecord, TaskStatusName, WaitBound } from "../native/sends/addon.ts";
+import type { ResultRead, ResultRecord, WaitBound } from "../native/sends/addon.ts";
 import { taskInfo } from "../send/core-calls.ts";
 import { AddonOutsideMainThread } from "../thrown-errors.ts";
 import type { Kind } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import type { TaskError, TaskOutcome } from "../wire/task-error.ts";
 import { MAX_WAIT_LIMIT_MS } from "../send/bounds.ts";
-import { brokerReadError, type FinishedStatus, type ReadError, taskAbsence, type UnfinishedStatus } from "./errors.ts";
+import { brokerReadError, type ReadError, taskAbsence } from "./errors.ts";
 import { type TaskInfo, taskInfoOf } from "./info.ts";
 
 /** The options of a result read. */
@@ -187,20 +187,25 @@ export function outcomeOfRead(read: ResultRead, form: ReadForm): Outcome {
   }
 }
 
+/**
+ * The outcome of a found task, by the stage of its stored result: a wait that ended first is `waitTimedOut`; a
+ * cancelled task is its outcome (`TASK_CANCELLED`), with a stored envelope or none; another finished task with no
+ * result is `resultNotAvailable`; a stored envelope reads with the contract's form. Pure.
+ */
 function outcomeOfRecord(record: ResultRecord, form: ReadForm): Outcome {
-  const status = record.status;
+  const envelope = record.envelope;
 
-  if (status === "CANCELLED") {
-    return ok(cancelledOutcome(record.taskId));
-  }
-
-  switch (record.envelope.kind) {
-    case "notFinished":
-      return err(notFinished(status));
+  switch (envelope.kind) {
+    case "waitEnded":
+      return err(Object.freeze({ kind: "waitTimedOut", status: envelope.status }));
+    case "finishedWithoutResult":
+      return envelope.status === "CANCELLED"
+        ? ok(cancelledOutcome(record.taskId))
+        : err(Object.freeze({ kind: "resultNotAvailable", status: envelope.status }));
     case "stored":
-      return decodedOutcome(record.envelope.text, form);
+      return envelope.status === "CANCELLED" ? ok(cancelledOutcome(record.taskId)) : decodedOutcome(envelope.text, form);
     default: {
-      const unexpected: never = record.envelope;
+      const unexpected: never = envelope;
 
       throw new TypeError(`get: an envelope outside its type: ${String(unexpected)}`);
     }
@@ -221,35 +226,6 @@ function cancelledOutcome(taskId: string): TaskOutcome<unknown, string> {
   };
 
   return Object.freeze({ kind: "failed", error: Object.freeze(error) });
-}
-
-/** The error of a read that found no stored result: the wait ended first, or a finished task stores none. */
-function notFinished(status: Exclude<TaskStatusName, "CANCELLED">): ReadError {
-  const finished = finishedStatus(status);
-
-  return finished.kind === "finished"
-    ? Object.freeze({ kind: "resultNotAvailable", status: finished.status })
-    : Object.freeze({ kind: "waitTimedOut", status: finished.status });
-}
-
-function finishedStatus(
-  status: Exclude<TaskStatusName, "CANCELLED">,
-): { readonly kind: "finished"; readonly status: FinishedStatus } | { readonly kind: "unfinished"; readonly status: UnfinishedStatus } {
-  switch (status) {
-    case "PENDING":
-    case "CLAIMED":
-    case "RUNNING":
-      return { kind: "unfinished", status };
-    case "COMPLETED":
-    case "FAILED":
-    case "EXPIRED":
-      return { kind: "finished", status };
-    default: {
-      const unexpected: never = status;
-
-      throw new TypeError(`get: a status outside its type: ${String(unexpected)}`);
-    }
-  }
 }
 
 /** The outcome of a stored envelope (a text that the core's strict read rule passed). Pure. */

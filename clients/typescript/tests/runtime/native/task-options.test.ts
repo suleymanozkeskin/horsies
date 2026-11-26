@@ -141,8 +141,6 @@ function deadlineText(vector: OptionsVector, deadline: string, options: NativeTa
   const prepared = prepareSendFacts(
     sendRules(),
     {
-      taskName: `task_options_${vector.name}`,
-      queueName: DEFAULT_QUEUE_ROUTE.queueName,
       retention: { kind: "queueOrDefault" },
       deadline: { kind: "until", epochMicros: epochMicrosTowardPast(Temporal.Instant.from(deadline)) },
       inputBytes: 2,

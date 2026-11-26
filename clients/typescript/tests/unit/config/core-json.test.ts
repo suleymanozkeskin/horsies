@@ -222,6 +222,16 @@ describe("coreAppConfigJson", () => {
     );
   });
 
+  test("a custom queue that names no priority has no priority member: the core's default applies", () => {
+    const config = parsed({
+      broker: { databaseUrl: { kind: "value", value: DATABASE_URL } },
+      queueMode: "custom",
+      customQueues: [{ name: "bulk" }],
+    });
+
+    assert.equal(coreAppConfigJson(config).includes('"custom_queues":[{"name":"bulk"}]'), true);
+  });
+
   test("a queue named __proto__ in the queue retention is a member of the text", () => {
     const config = parsed({
       broker: { databaseUrl: { kind: "value", value: DATABASE_URL } },
@@ -251,7 +261,6 @@ describe("queueSetup", () => {
     assert.deepEqual([...setup.queues.keys()], ["urgent", "bulk", "standard"]);
     assert.deepEqual(setup.queues.get("urgent"), {
       name: "urgent",
-      priority: 1,
       maxConcurrency: { kind: "cap", tasks: 10 },
     });
     assert.deepEqual(setup.queues.get("standard")?.maxConcurrency, { kind: "coreDefault" });

@@ -310,7 +310,7 @@ export interface CustomQueueInput {
     // (undocumented)
     readonly name: string;
     // (undocumented)
-    readonly priority: number;
+    readonly priority?: number;
 }
 
 // @public
