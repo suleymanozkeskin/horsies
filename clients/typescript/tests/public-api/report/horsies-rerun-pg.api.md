@@ -13,9 +13,28 @@ export interface CallerColumn {
 }
 
 // @public
+export type CallerConnectionState = {
+    readonly kind: "idle";
+} | {
+    readonly kind: "failedTransaction";
+} | {
+    readonly kind: "notConnected";
+} | {
+    readonly kind: "unrecognized";
+    readonly status: string;
+};
+
+// @public
 export type CallerQueryFailure = {
     readonly kind: "driverFailed";
     readonly driverError: Error;
+} | {
+    readonly kind: "noOpenTransaction";
+    readonly state: CallerConnectionState;
+} | {
+    readonly kind: "resultNotText";
+    readonly column: string;
+    readonly format: string;
 } | {
     readonly kind: "rowRefused";
     readonly detail: string;
@@ -60,10 +79,17 @@ export type Ok<T> = {
 
 // @public
 export interface PgClient {
-    // (undocumented)
-    escapeLiteral(text: string): string;
+    getTransactionStatus(): string | null;
     // (undocumented)
     query(config: PgTextQuery): Promise<PgTextResult>;
+}
+
+// @public
+export interface PgField {
+    // (undocumented)
+    readonly format: string;
+    // (undocumented)
+    readonly name: string;
 }
 
 // @public
@@ -89,6 +115,8 @@ export interface PgTextQuery {
 
 // @public
 export interface PgTextResult {
+    // (undocumented)
+    readonly fields: readonly PgField[];
     // (undocumented)
     readonly rows: readonly (readonly SqlText[])[];
 }

@@ -16,6 +16,7 @@ import type { CallerQueryFailure, CallerRow, CallerStatement, CallerTransaction,
 /** The types that the public declarations of this entry name: the same types as the `horsies` entry gives. */
 export type {
   CallerColumn,
+  CallerConnectionState,
   CallerQueryFailure,
   CallerRow,
   CallerStatement,

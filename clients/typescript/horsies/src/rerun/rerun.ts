@@ -10,11 +10,18 @@ import type { Result } from "../wire/result.ts";
 import { err, ok } from "../wire/result.ts";
 import { unreachable as unreachableInput } from "../wire/unreachable.ts";
 import type { BridgePreparation, BridgeWrite, RerunBridge } from "./bridge.ts";
-import type { CallerQueryFailure, CallerRow, CallerTransaction } from "./caller.ts";
+import type { CallerConnectionState, CallerQueryFailure, CallerRow, CallerTransaction } from "./caller.ts";
 import { driverFailed } from "./caller.ts";
 import { appRerunError, callerRowArg, callerStatement, rerunOutcome, stepRefused } from "./convert.ts";
 import { contractViolation } from "./errors.ts";
-import type { CallerRerunError, RerunContractViolation, RerunDriverFailed, RerunError } from "./errors.ts";
+import type {
+  CallerRerunError,
+  RerunContractViolation,
+  RerunDriverFailed,
+  RerunError,
+  RerunNoOpenTransaction,
+  RerunResultNotText,
+} from "./errors.ts";
 import { parseRerunRequest } from "./parse.ts";
 import type { RerunRequest } from "./parse.ts";
 import type { RerunCommand, RerunOutcome, RerunPolicy } from "./types.ts";
@@ -128,6 +135,9 @@ async function runWrite(transaction: CallerTransaction, write: BridgeWrite): Pro
   }
 }
 
+/** Why the caller's transaction could not give the row of a statement, as a public error. */
+type CallerQueryError = RerunDriverFailed | RerunNoOpenTransaction | RerunResultNotText | RerunContractViolation;
+
 /**
  * The one row of `record` from `transaction`. A throw of the transaction is the driver's failure, as a
  * failed result is.
@@ -135,7 +145,7 @@ async function runWrite(transaction: CallerTransaction, write: BridgeWrite): Pro
 async function queryOne(
   transaction: CallerTransaction,
   record: CallerStatementRecord,
-): Promise<Result<CallerRow, RerunDriverFailed | RerunContractViolation>> {
+): Promise<Result<CallerRow, CallerQueryError>> {
   const statement = callerStatement(record);
   let answer: Result<CallerRow, CallerQueryFailure>;
 
@@ -145,21 +155,57 @@ async function queryOne(
     answer = err(driverFailed(cause));
   }
 
-  if (answer.ok) {
-    return answer;
-  }
+  return answer.ok ? answer : err(callerQueryError(statement.name, answer.error));
+}
 
-  switch (answer.error.kind) {
+/** The public error of `failure`, the failure of the statement named `statement`. Pure. */
+function callerQueryError(statement: string, failure: CallerQueryFailure): CallerQueryError {
+  switch (failure.kind) {
     case "driverFailed":
-      return err({
+      return {
         code: "DRIVER_FAILED",
-        message: `statement ${statement.name} failed in the caller's driver: ${answer.error.driverError.message}`,
-        statement: statement.name,
-        driverError: answer.error.driverError,
-      });
+        message: `statement ${statement} failed in the caller's driver: ${failure.driverError.message}`,
+        statement,
+        driverError: failure.driverError,
+      };
+    case "noOpenTransaction":
+      return {
+        code: "NO_OPEN_TRANSACTION",
+        retryable: false,
+        message: `statement ${statement} did not run: ${noOpenTransactionCause(failure.state)}`,
+        statement,
+        state: failure.state,
+      };
+    case "resultNotText":
+      return {
+        code: "RESULT_NOT_TEXT",
+        retryable: false,
+        message:
+          `statement ${statement} gave the column ${failure.column} in ${failure.format} format; the rerun reads ` +
+          "text format (a pg client with binary: true gives binary format)",
+        statement,
+        column: failure.column,
+        format: failure.format,
+      };
     case "rowRefused":
-      return err(contractViolation(answer.error.detail));
+      return contractViolation(failure.detail);
     default:
-      return unreachableInput(answer.error, "caller query failure");
+      return unreachableInput(failure, "caller query failure");
+  }
+}
+
+/** Why a connection in `state` runs no statement of the rerun, and what the caller does. Pure. */
+function noOpenTransactionCause(state: CallerConnectionState): string {
+  switch (state.kind) {
+    case "idle":
+      return "the caller's connection has no open transaction; run BEGIN first";
+    case "failedTransaction":
+      return "a statement of the caller's transaction failed; roll it back";
+    case "notConnected":
+      return "the caller's client is not connected";
+    case "unrecognized":
+      return `the caller's driver gives the transaction status ${JSON.stringify(state.status)}, not an open transaction`;
+    default:
+      return unreachableInput(state, "caller connection state");
   }
 }

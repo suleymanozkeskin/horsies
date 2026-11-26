@@ -259,16 +259,35 @@ export interface CallerColumn {
 }
 
 // @public
+export type CallerConnectionState = {
+    readonly kind: "idle";
+} | {
+    readonly kind: "failedTransaction";
+} | {
+    readonly kind: "notConnected";
+} | {
+    readonly kind: "unrecognized";
+    readonly status: string;
+};
+
+// @public
 export type CallerQueryFailure = {
     readonly kind: "driverFailed";
     readonly driverError: Error;
+} | {
+    readonly kind: "noOpenTransaction";
+    readonly state: CallerConnectionState;
+} | {
+    readonly kind: "resultNotText";
+    readonly column: string;
+    readonly format: string;
 } | {
     readonly kind: "rowRefused";
     readonly detail: string;
 };
 
 // @public
-export type CallerRerunError = RerunDriverFailed | RerunRequestRefused | RerunStepRefused;
+export type CallerRerunError = RerunDriverFailed | RerunNoOpenTransaction | RerunResultNotText | RerunRequestRefused | RerunStepRefused;
 
 // @public
 export interface CallerRow {
@@ -2158,6 +2177,19 @@ export interface RerunKeyReplay {
 }
 
 // @public
+export interface RerunNoOpenTransaction {
+    // (undocumented)
+    readonly code: "NO_OPEN_TRANSACTION";
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    // (undocumented)
+    readonly state: CallerConnectionState;
+    readonly statement: string;
+}
+
+// @public
 export interface RerunNotEligible {
     // (undocumented)
     readonly kind: "notEligible";
@@ -2184,6 +2216,19 @@ export interface RerunPolicy {
 
 // @public
 export type RerunRequestRefused = RerunInvalidCommand | RerunInvalidPolicy;
+
+// @public
+export interface RerunResultNotText {
+    // (undocumented)
+    readonly code: "RESULT_NOT_TEXT";
+    readonly column: string;
+    readonly format: string;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable: false;
+    readonly statement: string;
+}
 
 // @public
 export type RerunRetention = {

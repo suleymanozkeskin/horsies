@@ -1,12 +1,13 @@
 // The `pg` adapter with a fake client: each parameter goes as text or null, each cell comes back as
-// the server's text, one row is the answer, and a driver failure is a value. It never commits.
+// the server's text, one row is the answer, and a driver failure is a value. It never commits, it runs
+// nothing on a client with no open transaction, and it refuses a result that is not text.
 
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { CallerStatement } from "../../../horsies/src/rerun/caller.ts";
+import type { CallerConnectionState, CallerStatement } from "../../../horsies/src/rerun/caller.ts";
 import { pgTransaction } from "../../../horsies/src/rerun/pg.ts";
-import type { PgClient, PgTextQuery, PgTextResult } from "../../../horsies/src/rerun/pg.ts";
+import type { PgClient, PgField, PgTextQuery, PgTextResult } from "../../../horsies/src/rerun/pg.ts";
 
 /** A statement with one parameter of each type, as the core renders them. */
 const STATEMENT: CallerStatement = {
@@ -29,8 +30,28 @@ const STATEMENT: CallerStatement = {
   ],
 };
 
-/** A client that answers each query with `answer` and records each query and each other call. */
-function fakeClient(answer: () => Promise<PgTextResult>): { readonly client: PgClient; readonly queries: PgTextQuery[] } {
+/** The result columns of `STATEMENT` in text format. */
+const TEXT_FIELDS: readonly PgField[] = [
+  { name: "outcome", format: "text" },
+  { name: "task_id", format: "text" },
+];
+
+/** The result of `STATEMENT` with `rows`, each column in text format. */
+function textResult(rows: PgTextResult["rows"]): PgTextResult {
+  return { fields: TEXT_FIELDS, rows };
+}
+
+/** The transaction status of a client on which the caller ran `BEGIN`. */
+const IN_TRANSACTION = "T";
+
+/**
+ * A client whose transaction status is `status` and that answers each query with `answer`. It records
+ * each query.
+ */
+function fakeClient(
+  answer: () => Promise<PgTextResult>,
+  status: string | null = IN_TRANSACTION,
+): { readonly client: PgClient; readonly queries: PgTextQuery[] } {
   const queries: PgTextQuery[] = [];
 
   return {
@@ -41,16 +62,14 @@ function fakeClient(answer: () => Promise<PgTextResult>): { readonly client: PgC
 
         return answer();
       },
-      escapeLiteral: (text) => {
-        throw new Error(`the adapter does not escape ${text}`);
-      },
+      getTransactionStatus: () => status,
     },
   };
 }
 
 describe("pgTransaction", () => {
   test("sends the SQL text and each parameter as text or null, in array row mode", async () => {
-    const { client, queries } = fakeClient(async () => ({ rows: [["INSERTED", "01890a5d-ac96-774b-bcce-b302099a8058"]] }));
+    const { client, queries } = fakeClient(async () => textResult([["INSERTED", "01890a5d-ac96-774b-bcce-b302099a8058"]]));
 
     await pgTransaction(client).queryOne(STATEMENT);
     assert.equal(queries.length, 1);
@@ -60,7 +79,7 @@ describe("pgTransaction", () => {
   });
 
   test("reads each cell of every type as the text that the server sent", async () => {
-    const { client, queries } = fakeClient(async () => ({ rows: [] }));
+    const { client, queries } = fakeClient(async () => textResult([]));
 
     await pgTransaction(client).queryOne(STATEMENT);
 
@@ -82,14 +101,14 @@ describe("pgTransaction", () => {
   });
 
   test("gives the one row of the statement", async () => {
-    const { client } = fakeClient(async () => ({ rows: [["INSERTED", null]] }));
+    const { client } = fakeClient(async () => textResult([["INSERTED", null]]));
 
     assert.deepEqual(await pgTransaction(client).queryOne(STATEMENT), { ok: true, value: { cells: ["INSERTED", null] } });
   });
 
   test("refuses a result of no row or of two rows", async () => {
     for (const rows of [[], [["INSERTED", null], ["INSERTED", null]]]) {
-      const { client } = fakeClient(async () => ({ rows }));
+      const { client } = fakeClient(async () => textResult(rows));
 
       assert.deepEqual(await pgTransaction(client).queryOne(STATEMENT), {
         ok: false,
@@ -103,6 +122,40 @@ describe("pgTransaction", () => {
     const { client } = fakeClient(async () => Promise.reject(driverError));
 
     assert.deepEqual(await pgTransaction(client).queryOne(STATEMENT), { ok: false, error: { kind: "driverFailed", driverError } });
+  });
+
+  test("runs nothing on a client with no open transaction, and names the state of each status", async () => {
+    const cases: [string | null, CallerConnectionState][] = [
+      ["I", { kind: "idle" }],
+      ["E", { kind: "failedTransaction" }],
+      [null, { kind: "notConnected" }],
+      ["X", { kind: "unrecognized", status: "X" }],
+    ];
+
+    for (const [status, state] of cases) {
+      const { client, queries } = fakeClient(async () => textResult([["INSERTED", null]]), status);
+
+      assert.deepEqual(
+        await pgTransaction(client).queryOne(STATEMENT),
+        { ok: false, error: { kind: "noOpenTransaction", state } },
+        String(status),
+      );
+      assert.deepEqual(queries, [], String(status));
+    }
+  });
+
+  test("refuses a result column in binary format, as a client with binary: true gives it", async () => {
+    const fields: readonly PgField[] = [
+      { name: "outcome", format: "text" },
+      { name: "task_id", format: "binary" },
+    ];
+
+    const { client } = fakeClient(async () => ({ fields, rows: [["INSERTED", "\u0001\u0089"]] }));
+
+    assert.deepEqual(await pgTransaction(client).queryOne(STATEMENT), {
+      ok: false,
+      error: { kind: "resultNotText", column: "task_id", format: "binary" },
+    });
   });
 
   test("wraps a rejection with a value that is not an Error", async () => {
