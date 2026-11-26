@@ -1,14 +1,22 @@
 // The API report of each published entry point: API Extractor reads the entry point's declarations and writes one
-// `.api.md` file of the exported surface. A type that the surface uses but does not export is a
-// `ae-forgotten-export` line in the report.
+// `.api.md` file of the exported surface. It also names each type that a public declaration names but the entry point
+// does not export (`ae-forgotten-export`): the gate refuses each one, because a user cannot import it.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  Extractor,
+  ExtractorConfig,
+  ExtractorLogLevel,
+  type ExtractorMessage,
+  ExtractorMessageId,
+  type IConfigFile,
+} from "@microsoft/api-extractor";
+
 import type { Result } from "../../horsies/src/wire/result.ts";
-import type { BuiltPackage, EntryPoint, ParsedJson } from "./package.ts";
-import { API_EXTRACTOR, runTool, type ToolFailed } from "./tools.ts";
+import type { BuiltPackage, EntryPoint } from "./package.ts";
 
 /** The committed report files. */
 export const REPORT_DIR: string = fileURLToPath(new URL("report/", import.meta.url));
@@ -20,9 +28,10 @@ export function reportFileName(entryPoint: EntryPoint): string {
 
 /**
  * The API Extractor config of one entry point. The package has no release tags (`@public`), and its doc comments are
- * not TSDoc, so those messages are off. Any other message of the compiler or of API Extractor is an error. Pure.
+ * not TSDoc, so those messages are off. A forgotten export is a warning that the gate reads; any other message of the
+ * compiler or of API Extractor is an error. Pure.
  */
-export function extractorConfig(built: BuiltPackage, entryPoint: EntryPoint, reportFolder: string): ParsedJson {
+export function extractorConfig(built: BuiltPackage, entryPoint: EntryPoint, reportFolder: string): IConfigFile {
   return {
     projectFolder: built.folder,
     mainEntryPointFilePath: `<projectFolder>/${entryPoint.typesFile}`,
@@ -49,62 +58,96 @@ export function extractorConfig(built: BuiltPackage, entryPoint: EntryPoint, rep
     tsdocMetadata: { enabled: false },
     newlineKind: "lf",
     messages: {
-      compilerMessageReporting: { default: { logLevel: "error" } },
+      compilerMessageReporting: { default: { logLevel: ExtractorLogLevel.Error } },
       extractorMessageReporting: {
-        default: { logLevel: "error" },
-        "ae-missing-release-tag": { logLevel: "none", addToApiReportFile: false },
-        "ae-forgotten-export": { logLevel: "none", addToApiReportFile: true },
+        default: { logLevel: ExtractorLogLevel.Error },
+        [ExtractorMessageId.MissingReleaseTag]: { logLevel: ExtractorLogLevel.None, addToApiReportFile: false },
+        [ExtractorMessageId.Undocumented]: { logLevel: ExtractorLogLevel.None, addToApiReportFile: false },
+        [ExtractorMessageId.ForgottenExport]: { logLevel: ExtractorLogLevel.Warning, addToApiReportFile: false },
       },
-      tsdocMessageReporting: { default: { logLevel: "none", addToApiReportFile: false } },
+      tsdocMessageReporting: { default: { logLevel: ExtractorLogLevel.None, addToApiReportFile: false } },
     },
   };
 }
 
+/** A type that a public declaration names and the entry point does not export: API Extractor's text and place. */
+export type ForgottenExport = { readonly text: string; readonly file: string; readonly line: number };
+
+/** The report of one entry point, and the forgotten exports of its surface (each one fails the gate). */
+export type EntryReport = { readonly text: string; readonly forgotten: readonly ForgottenExport[] };
+
 export type ReportFailed =
-  | { readonly kind: "ExtractorNotRun"; readonly failure: ToolFailed }
-  | { readonly kind: "ExtractorErrors"; readonly output: string }
-  | { readonly kind: "NoReportWritten"; readonly output: string };
+  | { readonly kind: "ExtractorThrew"; readonly cause: string }
+  | { readonly kind: "ExtractorErrors"; readonly messages: readonly string[] }
+  | { readonly kind: "NoReportWritten" };
+
+/** Where a message points, relative to the package folder. */
+function placeOf(message: ExtractorMessage, built: BuiltPackage): { readonly file: string; readonly line: number } {
+  const file = message.sourceFilePath ?? "(no file)";
+
+  return {
+    file: file.startsWith(`${built.folder}/`) ? file.slice(built.folder.length + 1) : file,
+    line: message.sourceFileLine ?? 0,
+  };
+}
 
 /**
- * The API report text of one entry point. Writes its report into `workFolder` and its config into the package folder
- * (API Extractor finds the `package.json` from the config's folder); the caller owns and removes both folders. Runs
- * API Extractor on Node.
+ * The API report of one entry point. Runs API Extractor in this process; writes the report into `workFolder` (a folder
+ * that the caller owns and removes). Every message of API Extractor goes to this function, none to the console.
  */
-export function apiReport(built: BuiltPackage, entryPoint: EntryPoint, workFolder: string): Result<string, ReportFailed> {
+export function apiReport(built: BuiltPackage, entryPoint: EntryPoint, workFolder: string): Result<EntryReport, ReportFailed> {
   const reportFolder = join(workFolder, entryPoint.reportName);
-  const configFile = join(built.folder, `${entryPoint.reportName}.api-extractor.json`);
+  const forgotten: ForgottenExport[] = [];
+  const errors: string[] = [];
 
   mkdirSync(reportFolder);
-  writeFileSync(configFile, JSON.stringify(extractorConfig(built, entryPoint, reportFolder), null, 2));
 
-  const run = runTool("node", [API_EXTRACTOR, "run", "--local", "--config", configFile], workFolder);
+  const collect = (message: ExtractorMessage): void => {
+    message.handled = true;
 
-  if (!run.ok) {
-    return { ok: false, error: { kind: "ExtractorNotRun", failure: run.error } };
+    if (message.messageId === ExtractorMessageId.ForgottenExport) {
+      forgotten.push({ text: message.text, ...placeOf(message, built) });
+    } else if (message.logLevel === ExtractorLogLevel.Error) {
+      const { file, line } = placeOf(message, built);
+
+      errors.push(`${file}:${line} ${message.messageId}: ${message.text}`);
+    }
+  };
+
+  try {
+    const config = ExtractorConfig.prepare({
+      configObject: extractorConfig(built, entryPoint, reportFolder),
+      configObjectFullPath: undefined,
+      packageJsonFullPath: join(built.folder, "package.json"),
+    });
+
+    Extractor.invoke(config, { localBuild: true, messageCallback: collect });
+  } catch (cause) {
+    return { ok: false, error: { kind: "ExtractorThrew", cause: String(cause) } };
   }
 
-  if (run.value.code !== 0) {
-    return { ok: false, error: { kind: "ExtractorErrors", output: run.value.output } };
+  if (errors.length > 0) {
+    return { ok: false, error: { kind: "ExtractorErrors", messages: errors } };
   }
 
   const reportFile = join(reportFolder, reportFileName(entryPoint));
 
   if (!existsSync(reportFile)) {
-    return { ok: false, error: { kind: "NoReportWritten", output: run.value.output } };
+    return { ok: false, error: { kind: "NoReportWritten" } };
   }
 
-  return { ok: true, value: readFileSync(reportFile, "utf8") };
+  return { ok: true, value: { text: readFileSync(reportFile, "utf8"), forgotten } };
 }
 
 /** The text of a failed report run, for a message. */
 export function reportFailedText(entryPoint: EntryPoint, failure: ReportFailed): string {
   switch (failure.kind) {
-    case "ExtractorNotRun":
-      return `${entryPoint.specifier}: API Extractor did not run (${failure.failure.kind}):\n${failure.failure.tool}`;
+    case "ExtractorThrew":
+      return `${entryPoint.specifier}: API Extractor stopped: ${failure.cause}`;
     case "ExtractorErrors":
-      return `${entryPoint.specifier}: API Extractor reported errors:\n${failure.output}`;
+      return `${entryPoint.specifier}: API Extractor reported errors:\n${failure.messages.join("\n")}`;
     case "NoReportWritten":
-      return `${entryPoint.specifier}: API Extractor wrote no report:\n${failure.output}`;
+      return `${entryPoint.specifier}: API Extractor wrote no report`;
   }
 }
 

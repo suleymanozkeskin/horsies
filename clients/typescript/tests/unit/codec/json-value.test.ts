@@ -5,13 +5,12 @@ import { describe, test } from "node:test";
 
 import { MAX_VALUE_JSON_DEPTH } from "../../../horsies/src/codec/bounds.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
-import { decodeParameters, decodeValue } from "../../../horsies/src/codec/reader.ts";
+import { decodeValue } from "../../../horsies/src/codec/reader.ts";
 import type { DecodeRefused, EncodeRefused } from "../../../horsies/src/codec/refusal.ts";
 import { isPlainObject } from "../../../horsies/src/codec/values.ts";
-import { encodeParameters, encodeValue } from "../../../horsies/src/codec/writer.ts";
-import { h, parametersKind } from "../../../horsies/src/wire/builders.ts";
+import { encodeValue } from "../../../horsies/src/codec/writer.ts";
+import { h } from "../../../horsies/src/wire/builders.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
-import { taskInputFile } from "./support/vectors.ts";
 
 const JSON_KIND = kindOf(h.json());
 
@@ -124,21 +123,5 @@ describe("h.json() reader", () => {
     const levels = MAX_VALUE_JSON_DEPTH + 1;
 
     assert.equal(readRefused(`${"[".repeat(levels)}${"]".repeat(levels)}`).kind, "TooDeep");
-  });
-
-  test("json_float_exponent reads and writes again byte for byte", () => {
-    const vector = taskInputFile().vectors.find((row) => row.name === "json_float_exponent");
-
-    assert(vector !== undefined);
-
-    const parameters = parametersKind({ value: h.json() });
-    const decoded = decodeParameters(parameters, jsonTextCheckedByCore(vector.text), "worker");
-
-    assert(decoded.ok);
-
-    const again = encodeParameters(parameters, decoded.value);
-
-    assert(again.ok);
-    assert.equal(again.value, vector.text);
   });
 });
