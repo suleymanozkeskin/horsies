@@ -503,6 +503,37 @@ fn a_class_without_instance_slots_has_no_slots_member() {
     );
 }
 
+/// A class whose state may clear has `retryable: true` in its public
+/// interface and in its converter, and no `retryable` in its native slots.
+#[test]
+fn a_class_whose_state_may_clear_has_a_retryable_that_is_always_true() {
+    let conflict = ErrorClass {
+        python_class: "ProbeConflict",
+        doc: "",
+        slots: &[
+            ErrorSlot::CodeMember {
+                member: "PAYLOAD_MISMATCH",
+            },
+            ErrorSlot::AlwaysRetryable,
+            MESSAGE,
+        ],
+    };
+    assert_eq!(
+        class_interface(&conflict, &CODES),
+        "export interface ProbeConflict {\n  readonly code: \"PAYLOAD_MISMATCH\";\n  \
+         readonly retryable: true;\n  readonly message: string;\n}"
+    );
+    assert_eq!(
+        native_class_interface(&conflict),
+        "export interface NativeProbeConflict {\n  readonly class: \"ProbeConflict\";\n  \
+         readonly slots: {\n    readonly message: string;\n  };\n}"
+    );
+    assert!(converter_case(&conflict, &CODES).contains(
+        "      const value: ProbeConflict = {\n        code: \"PAYLOAD_MISMATCH\",\n        \
+         retryable: true,\n        message: raw.slots.message,\n      };\n"
+    ));
+}
+
 #[test]
 fn a_value_without_hidden_slots_is_frozen_as_it_is() {
     assert_eq!(frozen_return(&[]), "      return Object.freeze(value);");
@@ -754,6 +785,14 @@ fn the_model_s_send_module_has_the_payload_record_and_its_converter() {
     assert!(text.contains("\n    goodUntil: optionalInstantOfMicroseconds(raw.good_until),\n"));
     assert!(text.contains("\n        payload: taskSendPayloadFromNative(raw.slots.payload),\n"));
     assert!(text.contains("\n  readonly sizeBytes: bigint;\n  readonly limitBytes: bigint;\n"));
+    assert!(text.contains(
+        "\nexport interface TaskSendIdempotencyKeyConflict {\n  \
+         readonly code: \"IDEMPOTENCY_KEY_CONFLICT\";\n  readonly retryable: true;\n  \
+         readonly taskId: string;\n"
+    ));
+    assert!(
+        text.contains("\n        code: \"IDEMPOTENCY_KEY_CONFLICT\",\n        retryable: true,\n")
+    );
     assert!(text.contains(
         "\nexport function taskSendCoreErrorFromNative(raw: NativeTaskSendCoreError): \
          TaskSendCoreError {\n"

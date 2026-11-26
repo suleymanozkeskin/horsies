@@ -1,8 +1,6 @@
 // The errors of a send: the task send catalog of the core, generated (`src/_catalog/task_send_errors.ts`), told apart
 // by `code`. The two errors that `retrySend` takes carry the contract's types and hold the prepared payload in a
-// member that is not enumerable, so `JSON.stringify` of an error never holds the input. A key conflict carries
-// `retryable: true`, the core's retry rule of the conflict (`TaskSendError::retryable`): it clears when the key's
-// reservation ends.
+// member that is not enumerable, so `JSON.stringify` of an error never holds the input.
 
 import type { CoreCause, NoCause } from "../_catalog/error_detail.ts";
 import {
@@ -35,19 +33,19 @@ export type WithSentTypes<V, O, E extends string> = V & { readonly [sentTypes]?:
  * that gives the same error).
  */
 export type RetryableSendError<O, E extends string> = WithSentTypes<
-  TaskSendEnqueueFailed | (TaskSendIdempotencyKeyConflict & { readonly retryable: true }),
+  TaskSendEnqueueFailed | TaskSendIdempotencyKeyConflict,
   O,
   E
 >;
 
-/** A send error of the task send catalog, with the fixed `retryable` of a key conflict, or the seat relay at its bound. */
+/** A send error of the task send catalog, or the seat relay at its bound. */
 export type SendFailure =
   | TaskSendSuppressed
   | TaskSendValidationFailed
   | TaskSendEnqueueFailed
   | TaskSendPayloadMismatch
   | TaskSendPayloadTooLarge
-  | (TaskSendIdempotencyKeyConflict & { readonly retryable: true })
+  | TaskSendIdempotencyKeyConflict
   | SeatRelayFull;
 
 /** The error of a send, told apart by `code`. */
@@ -64,21 +62,7 @@ export function sendErrorOfRaw(raw: RawCatalogError): SendFailure {
   // SAFETY: the bridge builds the slots of a task send class from the core's slot list of that class
   // (`ErrorClassValues`), the list from which the codegen renders `NativeTaskSendCoreError`; the generated converter
   // throws for a class name that it does not know.
-  const error = taskSendCoreErrorFromNative(nativeCatalogValue(raw) as unknown as NativeTaskSendCoreError);
-
-  return error.code === "IDEMPOTENCY_KEY_CONFLICT" ? retryableConflict(error) : error;
-}
-
-/** The key conflict with `retryable: true`; its other members keep their enumerability (the payload stays hidden). */
-function retryableConflict(
-  error: TaskSendIdempotencyKeyConflict,
-): TaskSendIdempotencyKeyConflict & { readonly retryable: true } {
-  const members = { ...Object.getOwnPropertyDescriptors(error), retryable: { value: true, enumerable: true } };
-
-  // SAFETY: the object holds every member of the conflict, with the same descriptors, and `retryable: true`.
-  return Object.freeze(
-    Object.create(Object.prototype, members) as TaskSendIdempotencyKeyConflict & { readonly retryable: true },
-  );
+  return taskSendCoreErrorFromNative(nativeCatalogValue(raw) as unknown as NativeTaskSendCoreError);
 }
 
 /** `SEND_SUPPRESSED`: the process does not send now. Nothing is written. Pure. */

@@ -12,7 +12,9 @@
 //!
 //! 1. `code`: a `ClassVar` member of the code catalog, or an instance field
 //!    typed by a `Literal` subset of it ([`CodeSubset`]);
-//! 2. `retryable: ClassVar[bool] = False` for a class that never clears;
+//! 2. `retryable: ClassVar[bool] = False` for a class that never clears,
+//!    or `retryable: ClassVar[bool] = True` for a class whose state may
+//!    clear;
 //! 3. the fields of the variant, in declaration order, each with its
 //!    Python type and whether `repr` shows it;
 //! 4. `exception`, the core's exception class of the cause, for a class
@@ -108,6 +110,9 @@ pub enum ErrorSlot {
     CodeSubset { subset: &'static str },
     /// `retryable: ClassVar[bool] = False`: the state never clears.
     NeverRetryable,
+    /// `retryable: ClassVar[bool] = True`: the state may clear, so the same
+    /// call can succeed later. It does not say that a repeat is safe.
+    AlwaysRetryable,
     /// An instance field of the variant.
     Field {
         name: &'static str,
@@ -162,8 +167,8 @@ pub trait ErrorClassValues: ErrorEnum {
     /// The values of the instance slots of this value's class
     /// ([`ErrorEnum::python_class`]), by name, in the class's slot order:
     /// the `code` field of a `Literal` subset, the fields, then
-    /// `exception`. The class values (`code` of one member, `retryable`
-    /// of a class that never clears) are not instance slots. Pure.
+    /// `exception`. The class values (`code` of one member, the fixed
+    /// `retryable` of a class) are not instance slots. Pure.
     fn slot_values(&self) -> Vec<SlotValue<'_>>;
 }
 
@@ -867,7 +872,7 @@ mod tests {
             .starts_with("A broker operation failed with a database, driver or connection error."));
     }
 
-    /// The slots of two send classes, as Python declares them
+    /// The slots of three send classes, as Python declares them
     /// (`clients/python/horsies/core/models/task_send_types.py`).
     #[test]
     fn a_send_class_has_python_s_slots_in_python_s_order() {
@@ -925,6 +930,31 @@ mod tests {
                 ErrorSlot::Field {
                     name: "limit_bytes",
                     python_type: SlotType::Int,
+                    repr: SlotRepr::Shown,
+                },
+            ]
+        );
+        assert_eq!(
+            class("TaskSendIdempotencyKeyConflict").slots,
+            [
+                ErrorSlot::CodeMember {
+                    member: "IDEMPOTENCY_KEY_CONFLICT"
+                },
+                ErrorSlot::AlwaysRetryable,
+                ErrorSlot::Field {
+                    name: "task_id",
+                    python_type: SlotType::Uuid,
+                    repr: SlotRepr::Shown,
+                },
+                ErrorSlot::Field {
+                    name: "payload",
+                    python_type: SlotType::TaskSendPayload,
+                    repr: SlotRepr::Hidden,
+                },
+                message,
+                ErrorSlot::Field {
+                    name: "owner_task_id",
+                    python_type: SlotType::Uuid,
                     repr: SlotRepr::Shown,
                 },
             ]
@@ -1155,14 +1185,16 @@ mod tests {
     const TASK: Uuid = Uuid::from_u128(0x3f9c_1a2b_4d5e_4f60_8a71_b2c3_d4e5_f607);
 
     /// The instance slots of `class`, by name, in order. The class values
-    /// (`code` of one member, `retryable` of a class that never clears)
-    /// are not instance slots.
+    /// (`code` of one member, the fixed `retryable` of a class) are not
+    /// instance slots.
     fn instance_slot_names(class: &ErrorClass) -> Vec<&'static str> {
         class
             .slots
             .iter()
             .filter_map(|slot| match slot {
-                ErrorSlot::CodeMember { .. } | ErrorSlot::NeverRetryable => None,
+                ErrorSlot::CodeMember { .. }
+                | ErrorSlot::NeverRetryable
+                | ErrorSlot::AlwaysRetryable => None,
                 ErrorSlot::CodeSubset { .. } => Some("code"),
                 ErrorSlot::Field { name, .. } => Some(*name),
                 ErrorSlot::Exception { .. } => Some("exception"),

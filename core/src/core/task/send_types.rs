@@ -241,11 +241,13 @@ pub enum TaskSendError {
     /// The idempotency key is reserved by another task with a different command.
     ///
     /// Nothing was written. ``owner_task_id`` names the task that holds the key.
+    /// ``retryable`` is ``True``: the conflict clears when the reservation ends.
     /// The retry methods accept this error: a retry after the reservation ends
     /// is accepted, and a retry before that returns the same error.
     #[error_class(
         class = "TaskSendIdempotencyKeyConflict",
-        code = "IdempotencyKeyConflict"
+        code = "IdempotencyKeyConflict",
+        always_retryable
     )]
     IdempotencyKeyConflict {
         #[error_slot(python = "Uuid")]
@@ -722,6 +724,45 @@ mod tests {
         ));
         let target = error.resend_target().expect("a key conflict is accepted");
         assert_eq!(target.task_id, task_id);
+        assert!(error.retryable());
+    }
+
+    /// The fixed `retryable` of a class in the catalog is the value of
+    /// `retryable()` for a value of that class: the conflict is retryable,
+    /// and no send class has a `retryable` that never clears.
+    #[test]
+    fn the_fixed_retry_slot_of_a_class_is_the_retry_rule_of_its_value() {
+        use crate::error_catalog::ErrorSlot;
+
+        let conflict = TaskSendError::IdempotencyKeyConflict {
+            task_id: Uuid::from_u128(1),
+            payload: Box::new(sample_payload()),
+            message: "the key is held".to_owned(),
+            owner_task_id: Uuid::from_u128(2),
+        };
+        let fixed: Vec<(&str, &ErrorSlot)> = TaskSendError::ERROR_CATALOG
+            .classes
+            .iter()
+            .flat_map(|class| {
+                class
+                    .slots
+                    .iter()
+                    .filter(|slot| match slot {
+                        ErrorSlot::NeverRetryable | ErrorSlot::AlwaysRetryable => true,
+                        ErrorSlot::CodeMember { .. }
+                        | ErrorSlot::CodeSubset { .. }
+                        | ErrorSlot::Field { .. }
+                        | ErrorSlot::Exception { .. } => false,
+                    })
+                    .map(|slot| (class.python_class, slot))
+            })
+            .collect();
+
+        assert_eq!(
+            fixed,
+            [(conflict.python_class(), &ErrorSlot::AlwaysRetryable)]
+        );
+        assert!(conflict.retryable());
     }
 
     /// A refused input is never replayed: the same input meets the same
@@ -939,8 +980,8 @@ mod tests {
     }
 
     /// The instance slot names of the class `class` in the catalog, in
-    /// order. The class values (`code` of one member, `retryable` of a
-    /// class that never clears) are not instance slots.
+    /// order. The class values (`code` of one member, the fixed
+    /// `retryable` of a class) are not instance slots.
     fn catalog_slot_names(class: &str) -> Vec<&'static str> {
         use crate::error_catalog::ErrorSlot;
 
@@ -953,7 +994,9 @@ mod tests {
             .slots
             .iter()
             .filter_map(|slot| match slot {
-                ErrorSlot::CodeMember { .. } | ErrorSlot::NeverRetryable => None,
+                ErrorSlot::CodeMember { .. }
+                | ErrorSlot::NeverRetryable
+                | ErrorSlot::AlwaysRetryable => None,
                 ErrorSlot::CodeSubset { .. } => Some("code"),
                 ErrorSlot::Field { name, .. } => Some(*name),
                 ErrorSlot::Exception { .. } => Some("exception"),

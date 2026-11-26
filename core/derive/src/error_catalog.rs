@@ -14,7 +14,9 @@
 //!   `Variant` of the code enum; or `code_field = "field"` and
 //!   `code_subset = "Name"`: `code` is the field `field`, a `Literal`
 //!   subset `Name` that converts into the code enum (`From`);
-//! - `never_retryable`: `retryable: ClassVar[bool] = False`;
+//! - `never_retryable`: `retryable: ClassVar[bool] = False`; or
+//!   `always_retryable`: `retryable: ClassVar[bool] = True`, for a state
+//!   that may clear. A variant takes at most one of the two;
 //! - `exception = "BaseException"` or `exception = "BaseException | NoCause"`:
 //!   the last slot, `exception`, the core's exception class of the cause.
 //!
@@ -67,9 +69,11 @@ enum CodeSource {
     Field { field: Ident, subset: String },
 }
 
-/// Whether a class never clears.
+/// Whether a class has a fixed `retryable`: never, always, or none (a
+/// field of the variant gives it, or the class has no `retryable`).
 enum Retry {
     NeverRetryable,
+    AlwaysRetryable,
     ByField,
 }
 
@@ -187,6 +191,11 @@ fn class_parts(variant: &Variant, code: &Path) -> syn::Result<ClassParts> {
         Retry::NeverRetryable => {
             slots.push(quote!(
                 ::horsies_core::error_catalog::ErrorSlot::NeverRetryable
+            ));
+        }
+        Retry::AlwaysRetryable => {
+            slots.push(quote!(
+                ::horsies_core::error_catalog::ErrorSlot::AlwaysRetryable
             ));
         }
         Retry::ByField => {}
@@ -504,7 +513,10 @@ fn class_settings(variant: &Variant) -> syn::Result<ClassSettings> {
                 .map(ToString::to_string)
                 .unwrap_or_default();
             match key.as_str() {
-                "never_retryable" => retry = Retry::NeverRetryable,
+                "never_retryable" => retry = fixed_retry(&retry, Retry::NeverRetryable, &meta)?,
+                "always_retryable" => {
+                    retry = fixed_retry(&retry, Retry::AlwaysRetryable, &meta)?;
+                }
                 "class" => class = Some(meta.value()?.parse::<LitStr>()?.value()),
                 "code" => member = Some(meta.value()?.parse::<LitStr>()?.parse::<Ident>()?),
                 "code_field" => {
@@ -526,7 +538,7 @@ fn class_settings(variant: &Variant) -> syn::Result<ClassSettings> {
                 }
                 _ => {
                     return Err(meta.error(
-                        "the error_class keys are class, code, code_field, code_subset, never_retryable and exception",
+                        "the error_class keys are class, code, code_field, code_subset, never_retryable, always_retryable and exception",
                     ))
                 }
             }
@@ -555,6 +567,21 @@ fn class_settings(variant: &Variant) -> syn::Result<ClassSettings> {
         retry,
         exception,
     })
+}
+
+/// The retry of a variant after one more retry key: `fixed`, when the
+/// variant has no fixed retry yet. A second retry key is refused.
+fn fixed_retry(
+    current: &Retry,
+    fixed: Retry,
+    meta: &syn::meta::ParseNestedMeta<'_>,
+) -> syn::Result<Retry> {
+    match current {
+        Retry::ByField => Ok(fixed),
+        Retry::NeverRetryable | Retry::AlwaysRetryable => {
+            Err(meta.error("error_class takes one of never_retryable and always_retryable, once"))
+        }
+    }
 }
 
 fn catalog_settings(attrs: &[Attribute], ident: &Ident) -> syn::Result<CatalogSettings> {
@@ -667,6 +694,50 @@ mod tests {
             text.contains("Self::OperationFailed{..}=>\"BrokerOperationFailed\""),
             "{text}"
         );
+    }
+
+    #[test]
+    fn a_class_whose_state_may_clear_records_a_retryable_that_is_always_true() {
+        let text = derive_text(syn::parse_quote! {
+            #[error_catalog(module = "task_send_errors", code = "TaskSendErrorCode", union = "U", union_doc = "u")]
+            enum SendError {
+                /// The key is held.
+                #[error_class(class = "TaskSendIdempotencyKeyConflict", code = "IdempotencyKeyConflict", always_retryable)]
+                IdempotencyKeyConflict {
+                    #[error_slot(python = "Str", hidden)]
+                    message: String,
+                },
+            }
+        })
+        .expect("the derive accepts the enum");
+        assert!(text.contains(
+            "slots:&[::horsies_core::error_catalog::ErrorSlot::CodeMember{member:\"IDEMPOTENCY_KEY_CONFLICT\"},::horsies_core::error_catalog::ErrorSlot::AlwaysRetryable,::horsies_core::error_catalog::ErrorSlot::Field{name:\"message\""
+        ), "{text}");
+    }
+
+    #[test]
+    fn two_retry_keys_on_one_variant_are_refused() {
+        for keys in [
+            quote::quote!(never_retryable, always_retryable),
+            quote::quote!(always_retryable, never_retryable),
+            quote::quote!(always_retryable, always_retryable),
+        ] {
+            let error = derive_text(syn::parse_quote! {
+                #[error_catalog(module = "m", code = "Code", union = "U", union_doc = "u")]
+                enum Failure {
+                    #[error_class(class = "Failed", code = "Failed", #keys)]
+                    Failed {
+                        #[error_slot(python = "Str", hidden)]
+                        message: String,
+                    },
+                }
+            })
+            .expect_err("the derive refuses the enum");
+            assert!(
+                error.contains("one of never_retryable and always_retryable"),
+                "{error}"
+            );
+        }
     }
 
     #[test]

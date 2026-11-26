@@ -260,6 +260,29 @@ and there is no migration contract between pre-1.0 versions.
   builds a `BoundedWait`, and `WaitLimit::parse` and
   `WaitLimit::deadline_from` are no longer public. The `INVALID_INPUT`
   message of the core result wait has the new text.
+- **Lifecycle events: contract version 8; the code that a task chose is
+  `Custom`.** `AttemptErrorCode::User` is `AttemptErrorCode::Custom`, and
+  `AttemptErrorCode::UserOverBound` is `AttemptErrorCode::CustomOverBound`
+  (Rust `horsies::events::AttemptErrorCode`). Python:
+  `horsies.telemetry.AttemptErrorCodeCustom` and
+  `AttemptErrorCodeCustomOverBound` replace `AttemptErrorCodeUser` and
+  `AttemptErrorCodeUserOverBound`. The wire tags of the two variants are
+  `Custom` and `CustomOverBound`, and the snapshot is
+  `core/tests/fixtures/event_contract/v8.txt`. An event goes from a worker
+  to its handler child of the same build and is not stored, so no stored
+  value changes; the stored error code of a task (`{"user": ...}`) does
+  not change. A Rust or Python `match` on these variants takes the new
+  names.
+- **A key conflict of a send has `retryable = True`.** Python
+  `TaskSendIdempotencyKeyConflict` has the class variable
+  `retryable: ClassVar[bool] = True`: the conflict clears when the
+  reservation ends. The retry methods accept it, as before, and
+  `resend_on_transient_err` does not send it again, as before. The Rust
+  `TaskSendError::retryable()` is `true` for it, as before. Codegen model:
+  `ErrorSlot::AlwaysRetryable`, which the `ErrorCatalog` derive sets for a
+  variant with `#[error_class(always_retryable)]`; a variant takes at most
+  one of `never_retryable` and `always_retryable`. Code that matches on
+  `ErrorSlot` takes the new variant.
 
 ### Fixed
 

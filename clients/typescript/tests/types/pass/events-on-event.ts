@@ -18,7 +18,7 @@ export const claimed = expectType<Equal<EventOf<"TaskClaimed">, TaskClaimed>>();
 
 app.onEvent("AttemptEnded", { name: "alerts" }, (event) => {
   if (event.end.kind === "reportedByChild" && event.end.result.kind === "failed") {
-    const code: string = event.end.result.errorCode.kind === "userOverBound" ? "over" : event.end.result.errorCode.code;
+    const code: string = event.end.result.errorCode.kind === "customOverBound" ? "over" : event.end.result.errorCode.code;
 
     void code;
   }

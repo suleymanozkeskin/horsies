@@ -267,7 +267,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - TaskSendEnqueueFailed: task_id, payload, message, retryable (bool, the core's classification), exception
 - TaskSendPayloadMismatch: task_id, payload, message
 - TaskSendPayloadTooLarge: message, size_bytes (int), limit_bytes (int)
-- TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str)
+- TaskSendIdempotencyKeyConflict: task_id, payload, message, owner_task_id (str); retryable is True (a class variable: the conflict clears when the reservation ends)
 - exception (TaskSendValidationFailed, TaskSendEnqueueFailed): BaseException | NoCause; NoCause() means a check found the failure without a Python exception; match on it before raise ... from or exc_info=
 - Validation failure text: `<loc>: <msg> [<type>]`, at most 10 entries, no input values (`<input>` replaces an input part of a message; validator-written text is kept). A caught pydantic ValidationError is kept as ValueValidationError (horsies.core.codec). RETURN_TYPE_MISMATCH data: variant, expected_type, actual_type, validation_errors, validation_error_count; the returned value is not stored
 - TaskSendRetryable = TaskSendEnqueueFailed | TaskSendAsyncContext | TaskSendIdempotencyKeyConflict: the retry methods' parameter type; another variant is a type error and fails an assertion at run time
@@ -856,7 +856,7 @@ Each entry: Title -- summary -> URL
 - Tracing Setup -- horsies[otel], AppConfig(tracing=OtelTracing()), the SDK of the sending process and of each worker child, the propagator, producer metrics -> /horsies/observability/tracing-setup/
 - Logs -- the task_id, attempt and trace_id fields of the worker's records, the log context of a task body, the JSON format of each client -> /horsies/observability/logs/
 - Log Setup -- AppConfig(log_format=JsonLogs()), TaskContextFilter, JsonLogsFormatter -> /horsies/observability/log-setup/
-- Lifecycle Events -- the event contract (version 7) and its types, best-effort delivery, the handler child, drops, stats and start hook -> /horsies/observability/events/
+- Lifecycle Events -- the event contract (version 8) and its types, best-effort delivery, the handler child, drops, stats and start hook -> /horsies/observability/events/
 - Dashboards and Alerts -- the Grafana dashboard and the Prometheus alert rules in deploy/, what each alert means -> /horsies/observability/dashboards-and-alerts/
 - OpenTelemetry Collector -- deploy/otel-collector/collector.yaml: scrape the endpoints, export OTLP -> /horsies/observability/opentelemetry-collector/
 - Observability Deployment -- Kubernetes and docker compose: workers with probes, one fleet collector, Prometheus, the Collector -> /horsies/observability/deployment/

@@ -5,7 +5,7 @@ import type { BuiltInTaskCode } from "./task_code.ts";
 import type { DecodeResult, WireJson } from "./wire_json.ts";
 
 /** The version of the event contract that this module reads. */
-export const EVENT_CONTRACT_VERSION = 7;
+export const EVENT_CONTRACT_VERSION = 8;
 
 export type StopReason =
   | "CLAIM_LOST"
@@ -36,19 +36,19 @@ export interface AttemptErrorCodeBuiltIn {
   readonly code: BuiltInTaskCode;
 }
 
-export interface AttemptErrorCodeUser {
-  readonly kind: "user";
+export interface AttemptErrorCodeCustom {
+  readonly kind: "custom";
   readonly code: string;
 }
 
-export interface AttemptErrorCodeUserOverBound {
-  readonly kind: "userOverBound";
+export interface AttemptErrorCodeCustomOverBound {
+  readonly kind: "customOverBound";
 }
 
 export type AttemptErrorCode =
   | AttemptErrorCodeBuiltIn
-  | AttemptErrorCodeUser
-  | AttemptErrorCodeUserOverBound;
+  | AttemptErrorCodeCustom
+  | AttemptErrorCodeCustomOverBound;
 
 export type OperatorCancelEnd =
   | "RETURNED_AFTER_SIGNAL"
@@ -811,9 +811,9 @@ function readAttemptErrorCodeBuiltIn(
   );
 }
 
-function readAttemptErrorCodeUser(
+function readAttemptErrorCodeCustom(
   fields: ReadonlyArray<WireJson>,
-): DecodeResult<AttemptErrorCodeUser, ValueRefusal> {
+): DecodeResult<AttemptErrorCodeCustom, ValueRefusal> {
   if (fields.length !== 1) {
     return refuse({ kind: "itemCount", expected: 1, found: fields.length });
   }
@@ -826,20 +826,20 @@ function readAttemptErrorCodeUser(
 
   return accept(
     Object.freeze({
-      kind: "user",
+      kind: "custom",
       code: decodedCode.value,
     }),
   );
 }
 
-function readAttemptErrorCodeUserOverBound(
+function readAttemptErrorCodeCustomOverBound(
   fields: ReadonlyArray<WireJson>,
-): DecodeResult<AttemptErrorCodeUserOverBound, ValueRefusal> {
+): DecodeResult<AttemptErrorCodeCustomOverBound, ValueRefusal> {
   if (fields.length !== 0) {
     return refuse({ kind: "itemCount", expected: 0, found: fields.length });
   }
 
-  return accept(Object.freeze({ kind: "userOverBound" }));
+  return accept(Object.freeze({ kind: "customOverBound" }));
 }
 
 function readAttemptErrorCode(value: WireJson): DecodeResult<AttemptErrorCode, ValueRefusal> {
@@ -854,10 +854,10 @@ function readAttemptErrorCode(value: WireJson): DecodeResult<AttemptErrorCode, V
   switch (tag) {
     case "BuiltIn":
       return within("BuiltIn", readAttemptErrorCodeBuiltIn(fields));
-    case "User":
-      return within("User", readAttemptErrorCodeUser(fields));
-    case "UserOverBound":
-      return within("UserOverBound", readAttemptErrorCodeUserOverBound(fields));
+    case "Custom":
+      return within("Custom", readAttemptErrorCodeCustom(fields));
+    case "CustomOverBound":
+      return within("CustomOverBound", readAttemptErrorCodeCustomOverBound(fields));
     default:
       return refuseUnknownName("AttemptErrorCode", tag);
   }

@@ -124,7 +124,7 @@ EXPECTED: Final[dict[str, events.AnyEvent]] = {
         2,
         events.AttemptEndReportedByChild(
             result=events.ChildResultFailed(
-                error_code=events.AttemptErrorCodeUser(code='RATE_LIMITED'),
+                error_code=events.AttemptErrorCodeCustom(code='RATE_LIMITED'),
             ),
             start=events.AttemptStartReported(started_at=STARTED_AT),
         ),

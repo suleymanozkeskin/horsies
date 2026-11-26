@@ -268,7 +268,7 @@ mod tests {
         shape: NamedShape::Variants {
             variants: &[
                 event_variant("BuiltIn", "AttemptErrorCodeBuiltIn", &[CODE]),
-                event_variant("UserOverBound", "AttemptErrorCodeUserOverBound", &[]),
+                event_variant("CustomOverBound", "AttemptErrorCodeCustomOverBound", &[]),
             ],
         },
     };
@@ -322,10 +322,10 @@ mod tests {
             [
                 "export interface AttemptErrorCodeBuiltIn {\n  readonly kind: \"builtIn\";\n  \
                  readonly code: BuiltInTaskCode;\n}",
-                "export interface AttemptErrorCodeUserOverBound {\n  \
-                 readonly kind: \"userOverBound\";\n}",
+                "export interface AttemptErrorCodeCustomOverBound {\n  \
+                 readonly kind: \"customOverBound\";\n}",
                 "export type AttemptErrorCode =\n  | AttemptErrorCodeBuiltIn\n  \
-                 | AttemptErrorCodeUserOverBound;",
+                 | AttemptErrorCodeCustomOverBound;",
             ]
         );
     }
@@ -344,12 +344,12 @@ mod tests {
              readonly code: BuiltInTaskCode;\n}"
         ));
         assert!(text.contains(
-            "export interface AttemptErrorCodeUser {\n  readonly kind: \"user\";\n  \
+            "export interface AttemptErrorCodeCustom {\n  readonly kind: \"custom\";\n  \
              readonly code: string;\n}"
         ));
         assert!(text.contains(
-            "export interface AttemptErrorCodeUserOverBound {\n  \
-             readonly kind: \"userOverBound\";\n}"
+            "export interface AttemptErrorCodeCustomOverBound {\n  \
+             readonly kind: \"customOverBound\";\n}"
         ));
     }
 

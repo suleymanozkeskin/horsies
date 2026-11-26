@@ -123,7 +123,7 @@ export interface AttemptEndReportedByChild {
 }
 
 // @public (undocumented)
-export type AttemptErrorCode = AttemptErrorCodeBuiltIn | AttemptErrorCodeUser | AttemptErrorCodeUserOverBound;
+export type AttemptErrorCode = AttemptErrorCodeBuiltIn | AttemptErrorCodeCustom | AttemptErrorCodeCustomOverBound;
 
 // @public (undocumented)
 export interface AttemptErrorCodeBuiltIn {
@@ -134,17 +134,17 @@ export interface AttemptErrorCodeBuiltIn {
 }
 
 // @public (undocumented)
-export interface AttemptErrorCodeUser {
+export interface AttemptErrorCodeCustom {
     // (undocumented)
     readonly code: string;
     // (undocumented)
-    readonly kind: "user";
+    readonly kind: "custom";
 }
 
 // @public (undocumented)
-export interface AttemptErrorCodeUserOverBound {
+export interface AttemptErrorCodeCustomOverBound {
     // (undocumented)
-    readonly kind: "userOverBound";
+    readonly kind: "customOverBound";
 }
 
 // @public (undocumented)
@@ -3304,9 +3304,7 @@ export const RetrievalCode: {
 export type RetrievalCode = (typeof RetrievalCode)[keyof typeof RetrievalCode];
 
 // @public
-export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed | (TaskSendIdempotencyKeyConflict & {
-    readonly retryable: true;
-}), O, E>;
+export type RetryableSendError<O, E extends string> = WithSentTypes<TaskSendEnqueueFailed | TaskSendIdempotencyKeyConflict, O, E>;
 
 // @public
 export type RetryAttempts = {
@@ -3579,9 +3577,7 @@ export type SendableInput<P extends ParameterSchemas> = HasRequiredUpstreamOutco
 export type SenderMayLeaveOut<P> = P extends AnyWire ? PresenceOf<P> extends "required" ? false : true : P extends ZodOptionalIn ? true : false;
 
 // @public
-export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | (TaskSendIdempotencyKeyConflict & {
-    readonly retryable: true;
-}) | SeatRelayFull;
+export type SendFailure = TaskSendSuppressed | TaskSendValidationFailed | TaskSendEnqueueFailed | TaskSendPayloadMismatch | TaskSendPayloadTooLarge | TaskSendIdempotencyKeyConflict | SeatRelayFull;
 
 // @public
 export type SendInput<P extends ParameterSchemas> = keyof PlainParameters<P> extends never ? EmptyObject : ParametersSent<PlainParameters<P>>;
@@ -4379,6 +4375,8 @@ export interface TaskSendIdempotencyKeyConflict {
     readonly ownerTaskId: string;
     // (undocumented)
     readonly payload: TaskSendPayload;
+    // (undocumented)
+    readonly retryable: true;
     // (undocumented)
     readonly taskId: string;
 }

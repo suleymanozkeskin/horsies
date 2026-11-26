@@ -26,8 +26,8 @@ __all__ = [
     'ShortageErrno',
     'ReleaseReason',
     'AttemptErrorCodeBuiltIn',
-    'AttemptErrorCodeUser',
-    'AttemptErrorCodeUserOverBound',
+    'AttemptErrorCodeCustom',
+    'AttemptErrorCodeCustomOverBound',
     'AttemptErrorCode',
     'OperatorCancelEnd',
     'ChildResultCompleted',
@@ -84,7 +84,7 @@ __all__ = [
     'decode_event',
 ]
 
-EVENT_CONTRACT_VERSION: Final = 7
+EVENT_CONTRACT_VERSION: Final = 8
 """The version of the event contract that this module reads."""
 
 
@@ -166,14 +166,14 @@ class AttemptErrorCodeBuiltIn:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class AttemptErrorCodeUser:
+class AttemptErrorCodeCustom:
     """A code that the task chose, of at most 128 characters."""
 
     code: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class AttemptErrorCodeUserOverBound:
+class AttemptErrorCodeCustomOverBound:
     """A code that the task chose, of more than 128 characters. The event
     does not carry it; the attempt row and the history row keep it.
     """
@@ -181,8 +181,8 @@ class AttemptErrorCodeUserOverBound:
 
 type AttemptErrorCode = (
     AttemptErrorCodeBuiltIn
-    | AttemptErrorCodeUser
-    | AttemptErrorCodeUserOverBound
+    | AttemptErrorCodeCustom
+    | AttemptErrorCodeCustomOverBound
 )
 """The error code of an attempt that ended with a task error."""
 
@@ -1095,10 +1095,10 @@ def _read_attempt_error_code(value: object, at: _At) -> Result[AttemptErrorCode,
     match tag:
         case 'BuiltIn':
             return _read_attempt_error_code_built_in(fields, at.inside('BuiltIn'))
-        case 'User':
-            return _read_attempt_error_code_user(fields, at.inside('User'))
-        case 'UserOverBound':
-            return _read_attempt_error_code_user_over_bound(fields, at.inside('UserOverBound'))
+        case 'Custom':
+            return _read_attempt_error_code_custom(fields, at.inside('Custom'))
+        case 'CustomOverBound':
+            return _read_attempt_error_code_custom_over_bound(fields, at.inside('CustomOverBound'))
         case _:
             return at.refuse(f'AttemptErrorCode has no value {tag[:_MAX_REFUSED_NAME_CHARS]!r}')
 
@@ -1124,8 +1124,8 @@ def _read_attempt_error_code_built_in(fields: list[object], here: _At) -> Result
     )
 
 
-def _read_attempt_error_code_user(fields: list[object], here: _At) -> Result[AttemptErrorCodeUser, MalformedEvent]:
-    """A variant `AttemptErrorCodeUser` from the items of its fields."""
+def _read_attempt_error_code_custom(fields: list[object], here: _At) -> Result[AttemptErrorCodeCustom, MalformedEvent]:
+    """A variant `AttemptErrorCodeCustom` from the items of its fields."""
     match fields:
         case [
             wire_code,
@@ -1139,20 +1139,20 @@ def _read_attempt_error_code_user(fields: list[object], here: _At) -> Result[Att
         case Err() as refused:
             return refused
     return Ok(
-        AttemptErrorCodeUser(
+        AttemptErrorCodeCustom(
             code=value_code,
         )
     )
 
 
-def _read_attempt_error_code_user_over_bound(fields: list[object], here: _At) -> Result[AttemptErrorCodeUserOverBound, MalformedEvent]:
-    """A variant `AttemptErrorCodeUserOverBound` from the items of its fields."""
+def _read_attempt_error_code_custom_over_bound(fields: list[object], here: _At) -> Result[AttemptErrorCodeCustomOverBound, MalformedEvent]:
+    """A variant `AttemptErrorCodeCustomOverBound` from the items of its fields."""
     match fields:
         case []:
             pass
         case _:
             return here.refuse(f'expected 0 items, found {len(fields)}')
-    return Ok(AttemptErrorCodeUserOverBound())
+    return Ok(AttemptErrorCodeCustomOverBound())
 
 
 def _read_operator_cancel_end(value: object, at: _At) -> Result[OperatorCancelEnd, MalformedEvent]:
