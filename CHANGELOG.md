@@ -52,6 +52,161 @@ and there is no migration contract between pre-1.0 versions.
 
 ### Changed
 
+- **Breaking: the connection section of the app config is `database`.**
+  `AppConfig.broker` is `AppConfig.database` in Python and Rust. Rust
+  `AppConfig::for_database_url` and `PostgresConfig::from_url` are
+  `from_database_url`. A Rust TOML or JSON config with a `[broker]` table
+  fails at parse with an unknown field error that names `broker`; this
+  includes the file of `horsies web CONFIG`. Pydantic refuses the old
+  keyword. The worker banner and `AppConfig.log_config` name the section
+  `database`.
+- **Breaking: `PostgresConfig` settings are closed unions and full names.**
+  - `session_database` replaces `session_database_url`:
+    `SessionDatabaseSameAsDatabaseUrl()` (the default) or
+    `SessionDatabaseSeparate(url)`; Rust `SessionDatabase::SameAsDatabaseUrl`
+    or `SessionDatabase::Separate { url }`. In TOML:
+    `session_database = { kind = "SEPARATE", url = "..." }`.
+    `effective_session_database_url` does not change.
+  - `tcp_keepalives` is `TcpKeepalivesOn(idle_seconds, interval_seconds,
+    probes)` or `TcpKeepalivesOff()`. It replaces the switch and the three
+    flat fields `tcp_keepalives_idle`, `tcp_keepalives_interval` and
+    `tcp_keepalives_count`.
+  - `tcp_user_timeout` is `TcpUserTimeoutAfter(milliseconds)` or
+    `TcpUserTimeoutSystemDefault()`. It replaces `tcp_user_timeout_ms`, whose
+    `0` meant the system default.
+  - Python `pool_recycle` is `PoolRecycleAfterSeconds(seconds)` or
+    `PoolRecycleNever()`, as in Rust. It replaces the `-1` value.
+  - `pool_timeout` is `pool_timeout_seconds`.
+  - Rust: the keepalive and user timeout values are plain `u32` numbers.
+    `Horsies::new` refuses a value outside its bound with
+    `CONFIG_INVALID_KEEPALIVE`. The client no longer exports
+    `KeepaliveSeconds`, `KeepaliveProbes` and `TcpUserTimeoutMs`.
+    `PostgresConfigError::MissingSessionDatabaseUrl` is
+    `MissingSessionDatabase`.
+- **Breaking: `AppConfig.cluster_wide_cap` is a closed union.** Python
+  `ClusterCap(tasks)` or `NoClusterCap()` (the default); Rust
+  `ClusterCapSetting::ClusterCap { tasks }` or `ClusterCapSetting::NoClusterCap`.
+  `WorkerStateSnapshot.cluster_wide_cap` has the same type. The stored column
+  `cluster_wide_cap` keeps its integer form; NULL reads as `NoClusterCap`.
+- **Breaking: config names take full words.**
+  - `resend_on_transient_err` is `resend_on_transient_error` (the config
+    field, the `start_workflow` keyword and `WorkflowSpec`).
+  - `RecoveryConfig`: `auto_requeue_stale_claimed`,
+    `auto_terminate_orphaned_workflow_tasks` and `auto_fail_stale_running`
+    are `requeue_stale_claimed`, `terminate_orphaned_workflow_tasks` and
+    `fail_stale_running`. `phase2_quarantine_after_attempts` is
+    `finalization_quarantine_after_attempts`.
+  - `RetentionConfig`: `paused_workflow_auto_cancel_after` is
+    `paused_workflow_cancel_after`; `partition_maintenance_interval_s` and
+    `retention_sweep_interval_s` are `partition_maintenance_interval_seconds`
+    and `retention_sweep_interval_seconds`. `queue_class(queue_name)` (Rust
+    `resolve_queue_class`) is `resolve_queue_retention_class(queue)`. Python
+    `registrable_classes()` is `registrable_periods()`.
+  - `WorkerResilienceConfig`: `db_retry_initial_ms`, `db_retry_max_ms` and
+    `db_retry_max_attempts` are `database_retry_initial_ms`,
+    `database_retry_max_ms` and `database_retry_max_attempts`.
+  - An old key fails at parse, and the error names the key. New rows of
+    `horsies_worker_states.recovery_config` hold the new key names. An older
+    row keeps its keys; the readers pass that map through. The paused
+    workflow expiry error names `paused_workflow_cancel_after`.
+- **Breaking: one container for the startup refusals.** `ValidationReport`
+  holds the refusals of one phase: `refusals` (Python attribute, Rust
+  `refusals()`) and `phase_name`. Python `check()` returns a
+  `ValidationReport`; an empty report is a pass. `MultipleValidationErrors`
+  stays the exception that carries a report. Rust `CheckReport` is removed:
+  `check()`, `check_live()`, `blocking().check_live()` and the
+  `CheckRefused` run ends carry a `ValidationReport`. Rust `Horsies::new`,
+  `Horsies::with_schema_mode` and `Horsies::with_core_connection` return
+  `Result<Horsies, ValidationReport>`; `ValidationReport` converts into
+  `HorsiesError`, so `?` works in a function that returns `HorsiesError` or
+  `Box<dyn Error>`.
+- **Breaking (Python): app names.**
+  - `Horsies(config, schema_mode=SchemaMode.MIGRATE_AND_VALIDATE)` and
+    `PostgresBroker(config, schema_mode=...)` replace the flags
+    `run_schema_migrations` and `assume_initialized`. `SchemaMode` has
+    `MIGRATE_AND_VALIDATE`, `OBSERVE_ONLY` and `ASSUME_INITIALIZED`.
+  - `set_role` takes an `AppRole` (`PRODUCER`, `WORKER`, `SCHEDULER`).
+  - `on_child_process_start` is `on_child_start`; `ChildProcessStartHook` is
+    `ChildStartHook`; `get_child_process_start_hooks` is
+    `get_child_start_hooks`. The parameter of `on_child_start`,
+    `on_shared_async_child_start` and `on_handler_child_start` is `hook`.
+  - `list_tasks()` is `registered_task_names()`;
+    `validate_queue_name(queue_name)` is `validate_queue(queue)`.
+  - `CoreStartFailed` is `RuntimeStartFailed`.
+  - `LogFormat` names the log format union.
+  - `PostgresBroker.get_raw_result_record(timeout_ms)` takes `wait_ms`;
+    `PostgresBroker.enqueue(enqueue_delay_seconds)` takes `delay_seconds`.
+- **Breaking: the child pool setting `check` is `pre_ping`, and the preload
+  text `none` is `no_preload`.** Python `IsolatedPool`, `SharedPool` and
+  `ResolvedPool` take `pre_ping`; `ChildPreload.NONE` is
+  `ChildPreload.NO_PRELOAD`. Rust TOML with `pool.check` or
+  `preload = "none"` fails at parse.
+- **Breaking (Rust): app and worker names.** `WorkerStart` is
+  `WorkerRunOptions`; `with_metrics_endpoint` is `with_metrics_listen`.
+  `CoreHandle` is `CoreConnection`, `Horsies::with_handle` is
+  `with_core_connection`, and its `profile` is `pool_profile`.
+  `ChildHostExit::code` is `exit_code`. `HANDLER_STATS_INTERVAL` is
+  `HANDLER_STATISTICS_INTERVAL`. `cli::LogFormat::Text` and `Json` are
+  `TextLogs` and `JsonLogs`. The run ends `WorkerRunError::RuntimeUnavailable`
+  and `SchedulerRunError::RuntimeUnavailable` are `RuntimeStartFailed`. The
+  parameter of `HorsiesError::with_help` is `help_text`.
+- **Breaking (CLI): flag names.** `--loglevel` is `--log-level` on every
+  command. `horsies metrics --listen` is `--metrics-listen`, as on
+  `horsies worker`. The positional app locator is shown as `module` on every
+  Python command, `web` included. An old flag exits 2.
+- **Breaking: health read arguments are closed unions.**
+  - Python `ping_workers` and `ping_workers_async` take `target`
+    (`PingTargetEveryWorker()` or `PingTargetWorker(worker_id)`), `wait_ms`
+    (an `int`, default 2,000) and `min_responses` (`MinResponsesFullWindow()`
+    or `MinResponsesAtLeast(count)`). These replace `target_worker_id`,
+    `timeout_seconds` and `min_responses=None`. A `wait_ms` that is not a
+    positive `int` gets `INVALID_INPUT`.
+  - Rust `ping_workers` takes `wait: Duration` and `min_responses:
+    MinResponses` (`FullWindow`, `AtLeast(NonZeroUsize)`).
+  - Python `get_worker_state_history` takes
+    `limit=WorkerHistoryLimitAllRetained()` or
+    `WorkerHistoryLimitNewest(count)`.
+  - The Python app has `get_stale_tasks(threshold_minutes)` and
+    `get_expired_tasks()`, blocking and with `_async`. They return a
+    `BoundedTaskList` (`BoundedTaskListComplete` or
+    `BoundedTaskListTruncated`) of `StaleTaskRow` or `ExpiredTaskRow`. The
+    `PostgresBroker` reads return the same types and take
+    `threshold_minutes`.
+  - `StaleTaskRow` and `ExpiredTaskRow` name the task `task_id`. The stale
+    row has `last_heartbeat_at`. The expired row has `expired_for` as a
+    `Duration` (Python `timedelta`).
+- **Breaking: one type per health record, and the execution class names.**
+  - The monitoring copies `WorkerPingInfo`, `DownSlotInfo`,
+    `SnapshotProfileInfo`, `ProfileNamedInfo`, `ProfileNotRecordedInfo`,
+    `BudgetLoadInfo`, `WorkerClassLoadInfo`, `StreamServedInfo`,
+    `StreamNoCapacityInfo`, `StreamUnservedInfo`, `StreamWaitingInfo`,
+    `StreamNoneDueInfo`, `PendingStreamInfo` and `ClassReportInfo` are
+    removed. `horsies.monitoring` and `horsies::monitoring` export the health
+    types.
+  - `get_class_coverage` and `get_class_report` are
+    `get_execution_class_coverage` and `get_execution_class_report`.
+    `ClassCoverage`, `ClassReport`, `ClassBudget`, `ClassBudgets` and
+    `WorkerClassLoad` are `ExecutionClassCoverage`, `ExecutionClassReport`,
+    `ExecutionClassBudget`, `ExecutionClassBudgets` and
+    `WorkerExecutionClassLoad`. The Python alias `ClassCapacity` is removed.
+  - `WorkerStateSnapshot`: `processes` is `child_count`; `max_claim_batch`
+    and `max_claim_per_worker` are `claim_limits: ClaimLimits`;
+    `class_capacity` is `execution_class_budgets`. `WorkerStateInfo` has
+    `child_count`. The stored columns keep their names.
+  - `PendingStream` and `StreamCoverage` hold `queue` and `coverage`. The
+    wait of a stream with a due row holds `oldest_due_at` (it was
+    `enqueued_at`); the Rust variant is `StreamWait::Due` (it was
+    `OldestWaiting`). `ExecutionClassReport` has `live_window`.
+  - `LivenessReport.database` is `DatabasePing` or `DatabaseUnreachable`
+    (Rust `DatabaseLiveness`). It replaces `db_latency_ms` and
+    `db_reachable`.
+  - `WORKER_STATE_LIVE_WINDOW_S` is `WORKER_STATE_LIVE_WINDOW_SECONDS`.
+  - Web JSON of the worker and class routes: `slot_health` is
+    `{kind, slots}` and `down_slots` is removed; `processes` is
+    `child_count`; `queue_name` is `queue`; the wait kind `waiting` is `due`
+    with `wait_seconds`; `live_window_s` is `live_window_seconds`; a budget
+    has no `free` (the page computes it); the liveness report has
+    `database`. The web UI in the same build reads the new form.
 - **Breaking: `allow_failed_deps` is `allow_failed_dependencies`, and
   `workflow_ctx_from` is `workflow_context_from`.** Each concept has one name
   in every client. The old names have no alias.
