@@ -1,5 +1,6 @@
-// expect: TS2345 at 9
-// A definition with no `output` field: every workflow declares the kind of its output.
+// expect: TS2322 at 11
+// A definition with no `outputType` whose build returns an output node: a workflow with no `outputType` has no output
+// node.
 
 import { defineTask, h } from "../../../horsies/src/index.ts";
 import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";

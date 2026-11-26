@@ -7,9 +7,8 @@
 // reaper runs the workflow recovery each second (Python runs one recovery pass in the test process); each test reaches
 // its stuck state through the client and a change of the workflow rows, never a forged task row.
 //
-// A workflow has an output node in the TypeScript client: each Python case whose parent has none runs here with an
-// output node and reads the other nodes through `results` and `resultFor`. The reads of the results of the terminal
-// nodes wait for #2459.
+// Each Python case whose parent has no output node runs here with an output node and reads the other nodes through
+// `results` and `resultFor`. The same cases with a parent that has no `outputType` wait for #2591.
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";

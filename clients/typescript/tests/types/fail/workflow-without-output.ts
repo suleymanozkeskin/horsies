@@ -1,6 +1,6 @@
 // expect: TS2345 at 11
-// A build that returns no output. The compiler reports a wrong return value of a block-bodied function argument at
-// the function's first line, not at the return line (the accepted position).
+// A build that returns no output node for a declared outputType. The compiler reports a wrong return value of a
+// block-bodied function argument at the function's first line, not at the return line (the accepted position).
 
 import { defineTask, h } from "../../../horsies/src/index.ts";
 import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";
