@@ -4,7 +4,11 @@
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import type { ChildHostPlan } from "../../../horsies/src/native/child/addon.ts";
 import { loopTurned, serveChild } from "../../../horsies/src/native/child/child.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { manifestJson } from "./manifest.ts";
+
+// The addon of these cases is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** A descriptor number that no test process holds open. */
 const CLOSED_DESCRIPTOR = "987";

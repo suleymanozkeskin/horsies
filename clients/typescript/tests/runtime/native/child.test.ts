@@ -15,9 +15,13 @@ import {
   runCancelStateOf,
   settleBodyValue,
 } from "../../../horsies/src/native/child/child.ts";
+import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import { coreState } from "../../../horsies/src/native/process-core/process-core.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
 import { runChildCase } from "./child-process.ts";
+
+// The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
+void requireDevAddon();
 
 /** The longest time a child case may take: the backstop case blocks for 6 s. */
 const CHILD_CASE_BOUND_MS = 20_000;
