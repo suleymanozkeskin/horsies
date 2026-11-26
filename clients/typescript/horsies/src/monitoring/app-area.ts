@@ -1,19 +1,15 @@
 // The monitoring area of the app: `app.monitoring`, `app.pingDatabase` and `app.pingWorkers`.
 //
 // The app hub builds the area with the core access of its thread and puts its three members on the app. On a main
-// thread each call uses the app's core handle (in a worker child, the child's producer handle) and loads the addon at
-// its first use. In a worker thread a call throws `AddonOutsideMainThread`: the seat relay serves no facade operation.
+// thread each call uses the app's core handle (`appCoreHandle`; in a worker child, the child's producer handle) and
+// loads the addon at its first use. In a worker thread a call throws `AddonOutsideMainThread`: the seat relay serves no
+// facade operation (#2481).
 
-import { threadId } from "node:worker_threads";
-
-import type { CoreAccess } from "../app/core-access.ts";
+import { appCoreHandle, type CoreAccess } from "../app/core-access.ts";
 import type { TaskId, WorkflowId } from "../contract/ids.ts";
-import { unreachable } from "../native/call/never.ts";
 import { cancelAddon, type CancelAddon } from "../native/facades/cancel.ts";
 import { healthAddon, type HealthAddon } from "../native/facades/health.ts";
 import { monitoringReadsAddon, type MonitoringReadsAddon } from "../native/facades/monitoring-reads.ts";
-import type { NativeCoreHandle } from "../native/handle/addon.ts";
-import { AddonOutsideMainThread } from "../thrown-errors.ts";
 import type { Result } from "../wire/result.ts";
 import type {
   Breakdown,
@@ -130,8 +126,8 @@ export interface MonitoringArea {
 
 /** The monitoring area of an app whose thread reaches the core through `core`. Starts nothing. */
 export function createMonitoringArea(core: CoreAccess, addons: MonitoringAddons = NATIVE_ADDONS): MonitoringArea {
-  const reads = () => ({ addon: addons.reads(), handle: mainThreadHandle(core) });
-  const health = () => ({ addon: addons.health(), handle: mainThreadHandle(core) });
+  const reads = () => ({ addon: addons.reads(), handle: appCoreHandle(core).native });
+  const health = () => ({ addon: addons.health(), handle: appCoreHandle(core).native });
 
   const monitoring: Monitoring = Object.freeze({
     taskStats: async (query: TaskStatsQuery = {}) => taskStats(reads(), query),
@@ -153,25 +149,12 @@ export function createMonitoringArea(core: CoreAccess, addons: MonitoringAddons 
     classCoverage: async () => readClassCoverage(health()),
     classReport: async () => readClassReport(health()),
     cancelTask: async (taskId: TaskId, options: CancelTaskOptions) =>
-      cancelTask({ addon: addons.cancel(), handle: mainThreadHandle(core) }, taskId, options),
+      cancelTask({ addon: addons.cancel(), handle: appCoreHandle(core).native }, taskId, options),
   });
 
   return Object.freeze({
     monitoring,
-    pingDatabase: async () => pingDatabase(mainThreadHandle(core)),
+    pingDatabase: async () => pingDatabase(appCoreHandle(core).native),
     pingWorkers: async (options: PingWorkersOptions = {}) => pingWorkers(health(), options),
   });
-}
-
-/** The app's core handle on a main thread. A worker thread has none: `AddonOutsideMainThread`. */
-function mainThreadHandle(core: CoreAccess): NativeCoreHandle {
-  switch (core.kind) {
-    case "addon":
-      return core.handle.native;
-    case "seatRelay":
-    case "noCore":
-      throw new AddonOutsideMainThread({ threadId });
-    default:
-      return unreachable(core);
-  }
 }
