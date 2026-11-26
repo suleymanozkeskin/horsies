@@ -8,6 +8,10 @@ import { coreStateProblem, TEST_ONLY_EXPORTS, testOnlyExportsIn, testOnlyNamesIn
 describe("testOnlyExportsIn", () => {
   test("names each test-only export of an export object", () => {
     assert.deepEqual(testOnlyExportsIn({ coreState: () => null, probeCallback: () => null }), ["probeCallback"]);
+    assert.deepEqual(
+      testOnlyExportsIn({ coreState: () => null, setProbeChildSpecSource: () => null }),
+      ["setProbeChildSpecSource"],
+    );
   });
 
   test("a published export object has none", () => {

@@ -114,7 +114,7 @@ describe("TaskHandle.get", () => {
         },
       },
     });
-    await handle.get();
+    assert.equal(await handle.get(), read);
     assert.equal(calls.getResult, 1);
   });
 
@@ -210,7 +210,7 @@ describe("TaskHandle.get", () => {
 
     // A fact of the stored data, as the Python and Rust clients read it: storedResultUnreadable, kept.
     assert.deepEqual(error, { kind: "storedResultUnreadable", cause: "result JSON is refused: duplicate key" });
-    await handle.get();
+    assert.deepEqual(await readError(handle.get()), error);
     assert.equal(calls.getResult, 1);
   });
 
@@ -226,9 +226,9 @@ describe("TaskHandle.get", () => {
   test("the wait bound: none waits until the end; 0 and the limit wait up to that bound", async () => {
     const { handle, calls } = declaredHandle({ results: [waitEndedRead("PENDING")] });
 
-    await handle.get();
-    await handle.get({ timeoutMs: 0 });
-    await handle.get({ timeoutMs: MAX_WAIT_LIMIT_MS });
+    void (await handle.get());
+    void (await handle.get({ timeoutMs: 0 }));
+    void (await handle.get({ timeoutMs: MAX_WAIT_LIMIT_MS }));
 
     assert.deepEqual(calls.waits, [
       { kind: "untilEnd" },
@@ -249,10 +249,11 @@ describe("TaskHandle.get", () => {
 
   test("a kept storedResultUnreadable is final too", async () => {
     const { handle, calls } = declaredHandle({ results: [storedRead("COMPLETED", okEnvelope("null"))] });
+    const first = await handle.get();
+    const second = await handle.get();
 
-    await handle.get();
-    await handle.get();
-
+    assert.equal(!first.ok && first.error.kind, "storedResultUnreadable");
+    assert.equal(second, first);
     assert.equal(calls.getResult, 1);
   });
 

@@ -1,0 +1,11 @@
+{
+  // A user's TypeScript 7 project. tsc of TypeScript 7 checks it, and ESLint lints it through the TypeScript 6.0 API of
+  // the `typescript` alias (tests/typescript-7-project.test.ts). `horsies` maps to the source of the client, so the rule
+  // reads the client's own `Result` type.
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "paths": { "horsies": ["../../../horsies/src/index.ts"] }
+  },
+  "include": ["*.ts"],
+  "exclude": []
+}

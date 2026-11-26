@@ -42,7 +42,6 @@ export type {
   ChildResultWorkerFailure,
   ChildStarted,
   ClaimReleased,
-  Execution,
   OperatorCancelEnd,
   RecoveryAction,
   ReleaseReason,
@@ -50,7 +49,6 @@ export type {
   RunTrace,
   RunTraceCarrier,
   RunTraceNoCarrier,
-  ShortageErrno,
   SlotDown,
   SlotDownCause,
   SlotDownCauseResourceShortage,
@@ -62,6 +60,11 @@ export type {
   WorkerDecision,
   WorkflowPlace,
 } from "../_catalog/events.ts";
+
+// The execution class in the event types. The generated event catalog and the generated monitoring models each
+// declare it, and the main entry point exports the monitoring one as `Execution`, so this one has its own name until
+// the codegen renders one type for both.
+export type { Execution as EventExecution } from "../_catalog/events.ts";
 
 export type { BuiltInTaskCode } from "../_catalog/task_code.ts";
 
