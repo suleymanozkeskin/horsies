@@ -6,7 +6,13 @@ import * as otel from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { AggregationTemporality, MeterProvider, MetricReader, type ResourceMetrics } from "@opentelemetry/sdk-metrics";
-import { InMemorySpanExporter, type ReadableSpan, SimpleSpanProcessor, TracerProvider } from "@opentelemetry/sdk-trace";
+import {
+  type IdGenerator,
+  InMemorySpanExporter,
+  type ReadableSpan,
+  SimpleSpanProcessor,
+  TracerProvider,
+} from "@opentelemetry/sdk-trace";
 
 import { type OtelApi, requireOtelApi } from "../../../horsies/src/telemetry/otel-api.ts";
 import { TelemetryWarnings } from "../../../horsies/src/telemetry/warnings.ts";
@@ -54,10 +60,43 @@ export type TestSdk = {
   remove(): void;
 };
 
+/** The ids that an SDK gives: random lower-case hex (the SDK's own), or upper-case hex, which the API also takes. */
+export type SdkIds = "sdkIds" | "upperCaseIds";
+
+/** An id generator that gives upper-case hex ids, each new. */
+export function upperCaseIdGenerator(): IdGenerator {
+  let next = 0;
+
+  const hexOf = (digits: number): string => {
+    next += 1;
+
+    return next.toString(16).toUpperCase().padStart(digits, "A");
+  };
+
+  return { generateTraceId: () => hexOf(32), generateSpanId: () => hexOf(16) };
+}
+
+/** A tracer provider that exports to `exporter`, with the ids of `ids`. */
+function providerOf(ids: SdkIds, exporter: InMemorySpanExporter): TracerProvider {
+  const spanProcessors = [new SimpleSpanProcessor({ exporter })];
+
+  switch (ids) {
+    case "sdkIds":
+      return new TracerProvider({ spanProcessors });
+    case "upperCaseIds":
+      return new TracerProvider({ spanProcessors, idGenerator: upperCaseIdGenerator() });
+    default: {
+      const unexpected: never = ids;
+
+      throw new TypeError(`providerOf: ids outside their type: ${String(unexpected)}`);
+    }
+  }
+}
+
 /** Set an SDK as the globals of the API. Call `remove` after the test. */
-export function installSdk(): TestSdk {
+export function installSdk(ids: SdkIds = "sdkIds"): TestSdk {
   const exporter = new InMemorySpanExporter();
-  const provider = new TracerProvider({ spanProcessors: [new SimpleSpanProcessor({ exporter })] });
+  const provider = providerOf(ids, exporter);
   const reader = new TestMetricReader();
   const meters = new MeterProvider({ readers: [reader] });
 

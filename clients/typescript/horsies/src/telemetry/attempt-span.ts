@@ -35,7 +35,7 @@ import {
   WORKFLOW_NODE_KEY,
   WORKFLOW_ROOT_ID_KEY,
 } from "./attributes.ts";
-import { extractedContextOf } from "./carrier.ts";
+import { asciiLowerCase, extractedContextOf } from "./carrier.ts";
 import { flushTracerProvider } from "./flush.ts";
 import type { NoSpanIds, SpanIds } from "./log-context.ts";
 import {
@@ -215,12 +215,12 @@ export function workflowAttributes(workflow: BodyWorkflowRecord): OtelAttributes
   }
 }
 
-/** The ids of `span` for the log context, or none for a span that is not valid (no SDK). */
+/** The ids of `span` for the log context in lower-case hex, or none for a span that is not valid (no SDK). */
 function spanIdsOf(api: OtelApi, span: OtelSpan): SpanIds | NoSpanIds {
   const spanContext = span.spanContext();
 
   return api.trace.isSpanContextValid(spanContext)
-    ? Object.freeze({ kind: "spanIds", traceId: spanContext.traceId, spanId: spanContext.spanId })
+    ? Object.freeze({ kind: "spanIds", traceId: asciiLowerCase(spanContext.traceId), spanId: asciiLowerCase(spanContext.spanId) })
     : NO_SPAN_IDS;
 }
 

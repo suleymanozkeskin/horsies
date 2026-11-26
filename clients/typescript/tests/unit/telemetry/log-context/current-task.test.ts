@@ -70,6 +70,31 @@ describe("currentTask with tracing", () => {
   });
 });
 
+describe("currentTask with an SDK that gives upper-case hex ids", () => {
+  let sdk: TestSdk;
+
+  beforeEach(() => {
+    sdk = installSdk("upperCaseIds");
+  });
+
+  afterEach(() => {
+    sdk.remove();
+  });
+
+  test("the span ids are lower-case hex", async () => {
+    const observer = otelBodyObserver({ api: loadedApi(), parentage: "childOfSend", warnings: recordedWarnings().warnings });
+    const [seen] = await seenInBody(observer, FACTS);
+    const { traceId, spanId } = onlySpan(sdk.spans(), "run resize").spanContext();
+
+    assert.match(traceId, /[A-F]/u, "the SDK gives upper-case digits");
+    assert.deepEqual(seen?.kind === "running" ? seen.span : undefined, {
+      kind: "spanIds",
+      traceId: traceId.toLowerCase(),
+      spanId: spanId.toLowerCase(),
+    });
+  });
+});
+
 describe("currentTask with no tracing", () => {
   test("running with no span ids", async () => {
     const seen = await seenInBody(NO_BODY_OBSERVER, { kind: "notRecorded" });

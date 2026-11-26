@@ -122,6 +122,42 @@ describe("the send span", () => {
   });
 });
 
+describe("an SDK that gives upper-case hex ids", () => {
+  let sdk: TestSdk;
+
+  beforeEach(() => {
+    sdk = installSdk("upperCaseIds");
+  });
+
+  afterEach(() => {
+    sdk.remove();
+  });
+
+  /** The core reads a trace id of 32 lower-case hex digits. */
+  const LOWER_CASE_TRACE_ID = /^[0-9a-f]{32}$/u;
+
+  test("the send gives the core the trace id in lower case", async () => {
+    const [trace] = await sendThrough(observerOf().observer, SENT);
+    const { traceId } = onlySpan(sdk.spans(), "send report").spanContext();
+
+    assert.match(traceId, /[A-F]/u, "the SDK gives upper-case digits");
+    assert.equal(trace?.kind === "carrier" ? trace.traceIdHex : "", traceId.toLowerCase());
+    assert.match(trace?.kind === "carrier" ? trace.traceIdHex : "", LOWER_CASE_TRACE_ID);
+  });
+
+  test("the rerun carrier gives the core the trace id in lower case", () => {
+    const caller = otel.trace.getTracer("caller").startSpan("caller");
+
+    const carrier = otel.context.with(otel.trace.setSpan(otel.context.active(), caller), () =>
+      observerOf().observer.activeCarrier(),
+    );
+
+    caller.end();
+    assert.equal(carrier.kind === "carrier" ? carrier.traceIdHex : "", caller.spanContext().traceId.toLowerCase());
+    assert.match(carrier.kind === "carrier" ? carrier.traceIdHex : "", LOWER_CASE_TRACE_ID);
+  });
+});
+
 describe("the send span with no SDK or a broken SDK", () => {
   test("no SDK gives no carrier, and the send goes on", async () => {
     const traces = await sendThrough(observerOf().observer, SENT);

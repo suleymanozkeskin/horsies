@@ -42,15 +42,16 @@ export const CARRIER_GETTER: OtelCarrierGetter = Object.freeze({
 });
 
 /** `text` with the ASCII capitals `A` to `Z` in lower case and every other character kept. Pure. */
-function asciiLowerCase(text: string): string {
+export function asciiLowerCase(text: string): string {
   return text.replaceAll(/[A-Z]/gu, (capital) => capital.toLowerCase());
 }
 
 /**
  * The trace that a send or a rerun hands the core for the span of `context`: the map that the global propagator
- * injects, with the trace id of the span. No carrier when the context holds no valid span (no SDK, or a span that is
- * not sampled and has no parent) or when the propagator writes no key. The core checks the bounds of the map. May throw
- * what the user's propagator throws.
+ * injects, with the trace id of the span in lower-case hex (the API also takes upper-case digits as valid; the core
+ * reads lower case). No carrier when the context holds no valid span (no SDK, or a span that is not sampled and has
+ * no parent) or when the propagator writes no key. The core checks the bounds of the map. May throw what the user's
+ * propagator throws.
  */
 export function sendTraceOf(api: OtelApi, context: OtelContext): TraceArgument {
   const span = api.trace.getSpan(context);
@@ -73,7 +74,11 @@ export function sendTraceOf(api: OtelApi, context: OtelContext): TraceArgument {
     return NO_CARRIER;
   }
 
-  return Object.freeze({ kind: "carrier", carrier: Object.freeze(Object.fromEntries(carrier)), traceIdHex: spanContext.traceId });
+  return Object.freeze({
+    kind: "carrier",
+    carrier: Object.freeze(Object.fromEntries(carrier)),
+    traceIdHex: asciiLowerCase(spanContext.traceId),
+  });
 }
 
 /** The context that the global propagator extracts from a stored carrier, over the root context. */
