@@ -200,8 +200,8 @@ mod tests {
             serde_plain::to_string(code).expect("a unit variant serializes")
         });
         assert_eq!(
-            MonitoringQueryRefusalCode::QueryRefused.wire_value(),
-            "QUERY_REFUSED"
+            MonitoringQueryRefusalCode::InvalidInput.wire_value(),
+            "INVALID_INPUT"
         );
     }
 

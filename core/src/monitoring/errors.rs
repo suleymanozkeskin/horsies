@@ -39,7 +39,7 @@ pub enum MonitoringQueryErrorCode {
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum MonitoringQueryRefusalCode {
     /// A value of the query is refused; no connect and no statement ran.
-    QueryRefused,
+    InvalidInput,
 }
 
 #[derive(Debug, thiserror::Error)]

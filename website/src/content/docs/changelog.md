@@ -146,6 +146,10 @@ there is no migration contract between pre-1.0 versions.
     `TaskActionDatabaseOperationFailed` and
     `MonitoringQueryDatabaseOperationFailed`). The web JSON of a failed
     monitoring read or action gives the new code texts.
+  - The code `QUERY_REFUSED` of `MonitoringQueryRefusalCode` is
+    `INVALID_INPUT`, the text that the database, the broker and the workflow
+    handle give for a refused value. Rust: the variant `QueryRefused` is
+    `InvalidInput`. The text is not stored.
   - Python `UnknownCustomCode` and Rust `ReadError::UnknownUserCode` and
     `WorkflowReadError::UnknownUserCode` have the code
     `UNKNOWN_CUSTOM_CODE`, a new member of `RetrievalCode`. Before, they

@@ -61,5 +61,5 @@ class MonitoringQueryRefusalCode(str, Enum):
     hold the other values.
     """
 
-    QUERY_REFUSED = 'QUERY_REFUSED'
+    INVALID_INPUT = 'INVALID_INPUT'
     """A value of the query is refused; no connect and no statement ran."""
