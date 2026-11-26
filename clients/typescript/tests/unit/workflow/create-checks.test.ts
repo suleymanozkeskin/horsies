@@ -7,7 +7,7 @@ import { Worker } from "node:worker_threads";
 
 import { h } from "../../../horsies/src/wire/public.ts";
 import { checkWorkflows } from "../../../horsies/src/workflow/check-cases.ts";
-import { MAX_WORKFLOW_NAME_CHARS } from "../../../horsies/src/workflow/create-checks.ts";
+import { MAX_DEFINITION_KEY_CHARS, MAX_WORKFLOW_NAME_CHARS } from "../../../horsies/src/workflow/create-checks.ts";
 import { defineWorkflow, type NodeRef } from "../../../horsies/src/workflow/public.ts";
 import { checkedAtCreate, duplicateIds, ping, plain } from "./create-workflows.ts";
 
@@ -23,6 +23,13 @@ function createRefusals(workflows: readonly object[]): readonly { readonly code:
 /** A valid workflow with no params, named `name`. */
 function namedWorkflow(name: string): object {
   return defineWorkflow({ name, definitionKey: "tests.named.v1", output: h.int(), params: {} }, (w) => ({
+    output: w.task(ping, {}, { id: "a" }),
+  }));
+}
+
+/** A valid workflow with no params, named `keyed`, with the definition key `definitionKey`. */
+function keyedWorkflow(definitionKey: string): object {
+  return defineWorkflow({ name: "keyed", definitionKey, output: h.int(), params: {} }, (w) => ({
     output: w.task(ping, {}, { id: "a" }),
   }));
 }
@@ -43,15 +50,15 @@ describe("checkWorkflowsAtCreate", () => {
     assert.equal(checked.registry.byKey("tests.plain.v1").kind, "listed");
   });
 
-  test("an empty name: HRS-001, once, at the place of the entry; an empty definition key: HRS-016", () => {
-    const noName = namedWorkflow(" ");
+  test("an empty name: HRS-001, once, at the place of the entry", () => {
+    assert.deepEqual(createRefusals([namedWorkflow(" ")]), [{ code: "HRS-001", path: "workflows[0]" }]);
+  });
 
-    const noKey = defineWorkflow({ name: "b", definitionKey: " ", output: h.int(), params: {} }, (w) => ({
-      output: w.task(ping, {}, { id: "a" }),
-    }));
-
-    assert.deepEqual(createRefusals([noName]), [{ code: "HRS-001", path: "workflows[0]" }]);
-    assert.deepEqual(createCodes([noKey]), ["HRS-016"]);
+  test("an empty definition key: HRS-016, and no key check of another entry finds it", () => {
+    assert.deepEqual(createRefusals([keyedWorkflow(" "), keyedWorkflow(" ")]), [
+      { code: "HRS-016", path: "workflows[0] keyed" },
+      { code: "HRS-016", path: "workflows[1] keyed" },
+    ]);
   });
 
   test("a name with a lone surrogate: HRS-033 at Horsies.create, and the refusal does not carry the name", () => {
@@ -71,6 +78,32 @@ describe("checkWorkflowsAtCreate", () => {
 
     assert.equal(refused?.code, "HRS-033");
     assert.equal(refused?.message, "workflows[0]: the workflow name has 256 characters; the most is 255");
+  });
+
+  test("a definition key with a lone surrogate: HRS-033, and the refusal does not carry the key", () => {
+    const refused = checkedAtCreate([keyedWorkflow("tests.\uD800"), keyedWorkflow("\uDC00.v1")]).refusals;
+
+    assert.deepEqual(
+      refused.map((one) => ({ code: one.code, message: one.message })),
+      [
+        { code: "HRS-033", message: "workflows[0] keyed: the definition key holds a lone surrogate" },
+        { code: "HRS-033", message: "workflows[1] keyed: the definition key holds a lone surrogate" },
+      ],
+    );
+  });
+
+  test(`a definition key of more than ${MAX_DEFINITION_KEY_CHARS} characters: HRS-033; the bound counts code points`, () => {
+    const longest = "k".repeat(MAX_DEFINITION_KEY_CHARS);
+    const longestAstral = "🐎".repeat(MAX_DEFINITION_KEY_CHARS);
+
+    assert.deepEqual(createRefusals([keyedWorkflow(longest)]), []);
+    assert.deepEqual(createRefusals([keyedWorkflow(longestAstral)]), []);
+    assert.deepEqual(createRefusals([keyedWorkflow(`${longest}k`)]), [{ code: "HRS-033", path: "workflows[0] keyed" }]);
+
+    const [refused] = checkedAtCreate([keyedWorkflow(`${longestAstral}🐎`)]).refusals;
+
+    assert.equal(refused?.code, "HRS-033");
+    assert.equal(refused?.message, "workflows[0] keyed: the definition key has 256 characters; the most is 255");
   });
 
   test("a key of another workflow, and a workflow listed twice: HRS-017", () => {

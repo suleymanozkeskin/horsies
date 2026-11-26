@@ -102,31 +102,61 @@ export function checkWorkflowsAtCreate(input: WorkflowsAtCreate): WorkflowsCheck
 /** The most characters (code points) of a workflow name: the column `horsies_workflows.name` is `varchar(255)`. */
 export const MAX_WORKFLOW_NAME_CHARS = 255;
 
-/** How a workflow name meets the name rules. */
-type NameCheck =
+/** The most characters (code points) of a definition key: `horsies_workflows.definition_key` is `varchar(255)`. */
+export const MAX_DEFINITION_KEY_CHARS = 255;
+
+/** How a text that the core stores (a workflow name, a definition key) meets the text rules. */
+type StoredTextCheck =
   | { readonly kind: "valid" }
   | { readonly kind: "empty" }
   | { readonly kind: "loneSurrogate" }
-  | { readonly kind: "tooLong"; readonly chars: number };
+  | { readonly kind: "tooLong"; readonly chars: number; readonly maxChars: number };
 
-/** The first name rule that `name` breaks, or `valid`. Pure. */
-function nameCheck(name: string): NameCheck {
-  if (name.trim() === "") {
+/** A text that is not empty but that the core cannot store. */
+type UnstorableText = Extract<StoredTextCheck, { readonly kind: "loneSurrogate" | "tooLong" }>;
+
+/** The first text rule that `text` breaks, or `valid`: not blank, well-formed, at most `maxChars` code points. Pure. */
+function storedTextCheck(text: string, maxChars: number): StoredTextCheck {
+  if (text.trim() === "") {
     return { kind: "empty" };
   }
 
-  if (!name.isWellFormed()) {
+  if (!text.isWellFormed()) {
     return { kind: "loneSurrogate" };
   }
 
-  // A name of at most MAX_WORKFLOW_NAME_CHARS UTF-16 units has at most that many code points.
-  const chars = name.length <= MAX_WORKFLOW_NAME_CHARS ? name.length : [...name].length;
+  // A text of at most maxChars UTF-16 units has at most that many code points.
+  const chars = text.length <= maxChars ? text.length : [...text].length;
 
-  return chars <= MAX_WORKFLOW_NAME_CHARS ? { kind: "valid" } : { kind: "tooLong", chars };
+  return chars <= maxChars ? { kind: "valid" } : { kind: "tooLong", chars, maxChars };
+}
+
+/** `HRS-033` for the `subject` text that the core cannot store. The refusal does not carry the text. Pure. */
+function unstorableTextRefusal(path: string, subject: string, check: UnstorableText): Refusal {
+  switch (check.kind) {
+    case "loneSurrogate":
+      return refusal(ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG, path, `the ${subject} holds a lone surrogate`, [
+        `give the ${subject} as well-formed UTF-16: each surrogate in a pair`,
+      ]);
+    case "tooLong":
+      return refusal(
+        ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
+        path,
+        `the ${subject} has ${String(check.chars)} characters; the most is ${String(check.maxChars)}`,
+        [],
+      );
+    default:
+      return unreachable(check, "unstorableTextRefusal");
+  }
+}
+
+/** The text check of a workflow name. Pure. */
+function nameCheck(name: string): StoredTextCheck {
+  return storedTextCheck(name, MAX_WORKFLOW_NAME_CHARS);
 }
 
 /**
- * The refusal of a workflow name that breaks a name rule: an empty name is `HRS-001`; a name with a lone surrogate
+ * The refusal of a workflow name that breaks a text rule: an empty name is `HRS-001`; a name with a lone surrogate
  * (the spec data text cannot carry it) or with more than `MAX_WORKFLOW_NAME_CHARS` characters (the stored column
  * cannot hold it) is `HRS-033`. Pure.
  */
@@ -139,48 +169,58 @@ function nameRefusals(path: string, name: string): readonly Refusal[] {
     case "empty":
       return [refusal(ErrorCode.WORKFLOW_NO_NAME, path, "a workflow name must not be empty", [])];
     case "loneSurrogate":
-      return [
-        refusal(ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG, path, "the workflow name holds a lone surrogate", [
-          "give the name as well-formed UTF-16: each surrogate in a pair",
-        ]),
-      ];
     case "tooLong":
-      return [
-        refusal(
-          ErrorCode.WORKFLOW_INVALID_DEFINITION_CONFIG,
-          path,
-          `the workflow name has ${String(check.chars)} characters; the most is ${String(MAX_WORKFLOW_NAME_CHARS)}`,
-          [],
-        ),
-      ];
+      return [unstorableTextRefusal(path, "workflow name", check)];
     default:
       return unreachable(check, "nameRefusals");
   }
 }
 
+/**
+ * The refusals of a definition key: an empty key is `HRS-016`; a key with a lone surrogate or with more than
+ * `MAX_DEFINITION_KEY_CHARS` characters is `HRS-033`; a valid key that an earlier entry has is `HRS-017`. Records a
+ * valid new key in `keys`.
+ */
+function keyRefusals(path: string, workflow: object, key: string, keys: Map<string, object>): readonly Refusal[] {
+  const check = storedTextCheck(key, MAX_DEFINITION_KEY_CHARS);
+
+  switch (check.kind) {
+    case "valid":
+      return uniqueKeyRefusals(path, workflow, key, keys);
+    case "empty":
+      return [refusal(ErrorCode.WORKFLOW_NO_DEFINITION_KEY, path, "a definition key must not be empty", [])];
+    case "loneSurrogate":
+    case "tooLong":
+      return [unstorableTextRefusal(path, "definition key", check)];
+    default:
+      return unreachable(check, "keyRefusals");
+  }
+}
+
+/** `HRS-017` for a key that an earlier entry has (or the same workflow listed twice); else records the key. */
+function uniqueKeyRefusals(path: string, workflow: object, key: string, keys: Map<string, object>): readonly Refusal[] {
+  const first = keys.get(key);
+
+  if (first === undefined) {
+    keys.set(key, workflow);
+
+    return [];
+  }
+
+  const detail =
+    first === workflow ? "the workflow is listed twice" : `another workflow has the definition key "${key}"`;
+
+  return [refusal(ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY, path, detail, ["give each workflow its own key"])];
+}
+
 /** The refusals of a record: the name, the key, its uniqueness, the error rule, the check cases rule. */
 function recordRefusals(path: string, workflow: object, keys: Map<string, object>): Refusal[] {
   const record = workflowRecord(workflow);
-  const refusals: Refusal[] = [...nameRefusals(path, record.name)];
 
-  if (record.definitionKey.trim() === "") {
-    refusals.push(refusal(ErrorCode.WORKFLOW_NO_DEFINITION_KEY, path, "a definition key must not be empty", []));
-  } else {
-    const first = keys.get(record.definitionKey);
-
-    if (first === undefined) {
-      keys.set(record.definitionKey, workflow);
-    } else {
-      const detail =
-        first === workflow
-          ? "the workflow is listed twice"
-          : `another workflow has the definition key "${record.definitionKey}"`;
-
-      refusals.push(
-        refusal(ErrorCode.WORKFLOW_DUPLICATE_DEFINITION_KEY, path, detail, ["give each workflow its own key"]),
-      );
-    }
-  }
+  const refusals: Refusal[] = [
+    ...nameRefusals(path, record.name),
+    ...keyRefusals(path, workflow, record.definitionKey, keys),
+  ];
 
   if (record.onError.kind === "invalid") {
     refusals.push(
