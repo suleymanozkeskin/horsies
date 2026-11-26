@@ -23,8 +23,14 @@ cd "$workspace_folder"
 print_step_title "Runtime versions"
 printf 'bun %s\nnode %s\n' "$(bun --revision)" "$(node --version)"
 
-print_step_title "Install the workspace from bun.lock"
+# Every pin that a later step uses is installed here, before the first step
+# that runs a tool: the workspace (bun.lock; it holds the tests package and
+# its TypeScript 7 compiler) and the TypeScript 6.0 compiler of the floor lane
+# (ci/typescript-floor/bun.lock). `bun test` runs both compilers: the docs
+# check test compiles its fixture page with each of them.
+print_step_title "Install the workspace and the floor compiler from their lockfiles"
 bun install --frozen-lockfile
+(cd "$floor_compiler_folder" && bun install --frozen-lockfile)
 
 print_step_title "Type check with bun check"
 bun check
@@ -63,7 +69,6 @@ node eslint-plugin/lint-client.ts
 # project list of tsconfig.json, as `bun check` does; `--clean` then removes
 # the build info files that build mode writes.
 print_step_title "Type check with tsc of TypeScript 6.0"
-(cd "$floor_compiler_folder" && bun install --frozen-lockfile)
 "$floor_compiler" --version
 "$floor_compiler" --build
 "$floor_compiler" --build --clean
@@ -81,7 +86,7 @@ bun tests/public-api/run.ts check
 
 # The type tests (tests/types/pass/, tests/types/fail/) and the consumer
 # project (tests/types/consumer/), with tsc of TypeScript 7, bun check, and
-# tsc of TypeScript 6.0 (the floor compiler installed above).
+# tsc of TypeScript 6.0 (the floor compiler of the install step).
 print_step_title "Type tests and the consumer project in both compiler lanes"
 bun tests/types/run.ts
 
