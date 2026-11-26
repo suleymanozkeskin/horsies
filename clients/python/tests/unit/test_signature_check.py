@@ -465,7 +465,7 @@ class TestRejectedBareContainers:
             _check(f)
 
     def test_pydantic_stores_rest_item_nested(self) -> None:
-        """The reason for the refusal: no flat form exists in pydantic."""
+        """The reason for the refusal: pydantic reads this annotation as a nested tuple."""
         adapter = TypeAdapter(tuple[int, *tuple[bool, ...]])
         assert adapter.dump_python((1, (True, False)), mode='json') == [1, [True, False]]  # pyright: ignore[reportArgumentType]  # the nested value is the form this test pins
         with pytest.raises(ValidationError):
