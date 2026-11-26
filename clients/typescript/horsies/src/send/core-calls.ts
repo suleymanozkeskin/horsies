@@ -15,13 +15,13 @@ import type {
 import type { TraceArgument } from "../native/values/records.ts";
 import { AddonOutsideMainThread, ClientDefect } from "../thrown-errors.ts";
 
-/** The prepared facts of one send. Throws `AddonOutsideMainThread` in a worker thread with no core. */
-export async function prepareSend(core: CoreAccess, facts: SendFacts): Promise<PreparedSend> {
+/** The prepared facts of one send of `taskName`. Throws `AddonOutsideMainThread` in a worker thread with no core. */
+export async function prepareSend(core: CoreAccess, taskName: string, facts: SendFacts): Promise<PreparedSend> {
   switch (core.kind) {
     case "addon":
-      return core.producer.prepareSend(facts);
+      return core.producer.prepareSend(taskName, facts);
     case "seatRelay": {
-      const reply = await relayed(core.relay, { kind: "prepareSend", facts });
+      const reply = await relayed(core.relay, { kind: "prepareSend", taskName, facts });
 
       return reply.kind === "prepareSend" ? reply.prepared : wrongReply("prepareSend", reply);
     }

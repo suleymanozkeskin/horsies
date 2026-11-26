@@ -31,6 +31,7 @@ import {
   OPTIONS_TEXT,
   PLAIN_START,
   PREPARED,
+  preparedWith,
   type ProducerScript,
   rawEnqueueFailed,
   rawKeyConflict,
@@ -122,7 +123,7 @@ describe("a send that the core takes", () => {
     );
   });
 
-  test("the prepare facts: name, queue, retention choice, deadline and the input's UTF-8 bytes", async () => {
+  test("the prepare facts: the task name, the retention choice, the deadline and the input's UTF-8 bytes", async () => {
     const { context, producer } = harness();
     const goodUntil = Temporal.Instant.fromEpochNanoseconds(SENT_AT_MICROS * 1000n + 60_000_000_999n);
 
@@ -130,15 +131,16 @@ describe("a send that the core takes", () => {
     assert.deepEqual(producer.prepares, [
       {
         taskName: "report",
-        queueName: "default",
-        retention: { kind: "days", days: 7 },
-        deadline: { kind: "until", epochMicros: SENT_AT_MICROS + 60_000_000n },
-        inputBytes: 7,
+        facts: {
+          retention: { kind: "days", days: 7 },
+          deadline: { kind: "until", epochMicros: SENT_AT_MICROS + 60_000_000n },
+          inputBytes: 7,
+        },
       },
     ]);
   });
 
-  test("the request: the default queue route, the prepared facts, the input text, the cut sent instant", async () => {
+  test("the request: the default queue route and its priority 100, the prepared facts, the input text, the cut sent instant", async () => {
     const { context, producer } = harness();
 
     await sendReport(context, { n: 1 }, { idempotencyKey: "key-1", delaySeconds: 30 });
@@ -157,13 +159,17 @@ describe("a send that the core takes", () => {
     });
   });
 
-  test("a custom queue gives its name and priority", async () => {
+  test("a custom queue gives its name, and the priority that the core's accepted config holds for it", async () => {
     const queues: QueueSetup = {
       kind: "custom",
-      queues: new Map([["billing", { name: "billing", priority: 7, maxConcurrency: { kind: "coreDefault" } }]]),
+      queues: new Map([["billing", { name: "billing", maxConcurrency: { kind: "coreDefault" } }]]),
     };
 
-    const { context, producer } = harness({ queues, contracts: [billed] });
+    const { context, producer } = harness({
+      queues,
+      contracts: [billed],
+      script: { prepared: [preparedWith({ kind: "configured", priority: 7 })] },
+    });
 
     await sendTask(context, billed, {}, {});
     assert.deepEqual(

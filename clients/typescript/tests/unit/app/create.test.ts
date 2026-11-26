@@ -161,6 +161,18 @@ describe("Horsies.create: the core's checks of a contract", () => {
     assert.deepEqual(refusalsOf(config([coded]), environment), [["HRS-112", "tasks[0] coded"]]);
   });
 
+  test("the help of a core refusal: its one line, or no line", () => {
+    const withHelp = { ...catalogRefusal("HRS-109", "execution SHARED_ASYNC requires timeoutMs"), help: { kind: "help", line: "set timeoutMs" } } as const;
+    const environment = fakeEnvironment({ checks: fakeChecks({ options: [withHelp], codes: [catalogRefusal("HRS-112", "bad code")] }) });
+    const coded = defineTask({ name: "coded", input: {}, output: h.null(), errors: ["BAD"] });
+    const created = createHorsies(config([coded]), environment);
+
+    assert.deepEqual(created.ok ? [] : created.error.refusals.map((refused) => [refused.code, refused.help]), [
+      ["HRS-112", []],
+      ["HRS-109", ["set timeoutMs"]],
+    ]);
+  });
+
   test("options that the core refuses keep their code (HRS-109)", () => {
     const environment = fakeEnvironment({ checks: fakeChecks({ options: [catalogRefusal("HRS-109", "timeout_ms is required")] }) });
 

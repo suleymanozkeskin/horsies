@@ -9,10 +9,10 @@ import type { ContractLookup, ListedLookup, ListedTask, QueueRoute } from "../se
 import { refusal, type Refusal } from "./refusal.ts";
 
 /**
- * The one queue of the default queue mode, and its priority. The Python and Rust clients hold the same values
- * (`clients/rust/horsies/src/registry.rs`, `DEFAULT_QUEUE`, `DEFAULT_PRIORITY`); issue #2425 moves them to the core.
+ * The one queue of the default queue mode. The Python and Rust clients hold the same value
+ * (`clients/rust/horsies/src/registry.rs`, `DEFAULT_QUEUE`); issue #2425 moves it to the core.
  */
-export const DEFAULT_QUEUE_ROUTE: QueueRoute = Object.freeze({ queueName: "default", priority: 100 });
+export const DEFAULT_QUEUE_ROUTE: QueueRoute = Object.freeze({ queueName: "default" });
 
 const NOT_LISTED: ListedLookup = Object.freeze({ kind: "notListed" });
 
@@ -138,7 +138,7 @@ function queueRoute(record: ContractRecord, queues: QueueSetup, path: string): R
               "add the queue to customQueues, or name one of them",
             ]),
           }
-        : { ok: true, value: Object.freeze({ queueName: queue.name, priority: queue.priority }) };
+        : { ok: true, value: Object.freeze({ queueName: queue.name }) };
     }
 
     default: {

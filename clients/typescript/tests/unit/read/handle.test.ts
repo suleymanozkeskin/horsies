@@ -14,14 +14,15 @@ import {
   addonAccess,
   countingRelay,
   fakeProducer,
+  finishedWithoutResultRead,
   invalidJsonPayloadRaw,
   libraryErrorEnvelope,
   okEnvelope,
   operationFailedRaw,
   storedRead,
   TASK_ID,
-  unfinishedRead,
   userErrorEnvelope,
+  waitEndedRead,
 } from "./support.ts";
 
 const declared = defineTask({
@@ -68,7 +69,7 @@ describe("TaskHandle.get", () => {
 
   test("a task that has not finished when the wait ends is waitTimedOut with its status", async () => {
     for (const status of ["PENDING", "CLAIMED", "RUNNING"] as const) {
-      const { handle } = declaredHandle({ results: [unfinishedRead(status)] });
+      const { handle } = declaredHandle({ results: [waitEndedRead(status)] });
 
       assert.deepEqual(await readError(handle.get({ timeoutMs: 0 })), { kind: "waitTimedOut", status });
     }
@@ -90,14 +91,14 @@ describe("TaskHandle.get", () => {
 
   test("a finished task that stores no result is resultNotAvailable with its status", async () => {
     for (const status of ["COMPLETED", "FAILED", "EXPIRED"] as const) {
-      const { handle } = declaredHandle({ results: [unfinishedRead(status)] });
+      const { handle } = declaredHandle({ results: [finishedWithoutResultRead(status)] });
 
       assert.deepEqual(await readError(handle.get()), { kind: "resultNotAvailable", status });
     }
   });
 
   test("a cancelled task with no stored result reads as the failed outcome TASK_CANCELLED, kept", async () => {
-    const { handle, calls } = declaredHandle({ results: [unfinishedRead("CANCELLED")] });
+    const { handle, calls } = declaredHandle({ results: [finishedWithoutResultRead("CANCELLED")] });
     const read = await handle.get();
 
     assert.deepEqual(read, {
@@ -177,7 +178,7 @@ describe("TaskHandle.get", () => {
   });
 
   test("a wait in a process that runs task bodies is waitInsideTask, before any read", async () => {
-    const { handle, calls } = declaredHandle({ role: "RUNS_TASK_BODIES", results: [unfinishedRead("PENDING")] });
+    const { handle, calls } = declaredHandle({ role: "RUNS_TASK_BODIES", results: [waitEndedRead("PENDING")] });
 
     assert.deepEqual(await readError(handle.get({ timeoutMs: 1000 })), { kind: "waitInsideTask" });
     assert.equal(calls.processRole, 1);
@@ -215,7 +216,7 @@ describe("TaskHandle.get", () => {
 
   test("a timeoutMs that is not whole milliseconds from 0 to the limit is invalidWait, before any core call", async () => {
     for (const timeoutMs of [-1, 1.5, MAX_WAIT_LIMIT_MS + 1, Number.NaN]) {
-      const { handle, calls } = declaredHandle({ results: [unfinishedRead("PENDING")] });
+      const { handle, calls } = declaredHandle({ results: [waitEndedRead("PENDING")] });
 
       assert.deepEqual(await readError(handle.get({ timeoutMs })), { kind: "invalidWait", maxMs: MAX_WAIT_LIMIT_MS });
       assert.equal(calls.processRole + calls.getResult, 0);
@@ -223,7 +224,7 @@ describe("TaskHandle.get", () => {
   });
 
   test("the wait bound: none waits until the end; 0 and the limit wait up to that bound", async () => {
-    const { handle, calls } = declaredHandle({ results: [unfinishedRead("PENDING")] });
+    const { handle, calls } = declaredHandle({ results: [waitEndedRead("PENDING")] });
 
     await handle.get();
     await handle.get({ timeoutMs: 0 });
@@ -257,7 +258,7 @@ describe("TaskHandle.get", () => {
 
   test("a waitTimedOut read is not kept: the next get reads again and can find the outcome", async () => {
     const { handle, calls } = declaredHandle({
-      results: [unfinishedRead("RUNNING"), storedRead("COMPLETED", okEnvelope('{"id":8}'))],
+      results: [waitEndedRead("RUNNING"), storedRead("COMPLETED", okEnvelope('{"id":8}'))],
     });
 
     assert.deepEqual(await readError(handle.get({ timeoutMs: 0 })), { kind: "waitTimedOut", status: "RUNNING" });
