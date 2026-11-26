@@ -30,8 +30,9 @@ class JsonLogs(BaseModel):
     kind: Literal['json_logs'] = 'json_logs'
 
 
-LogFormatSetting = Annotated[
+LogFormat = Annotated[
     Union[TextLogs, JsonLogs],
     Field(discriminator='kind'),
 ]
-"""The log format setting of `AppConfig.log_format`."""
+"""The log format setting of `AppConfig.log_format`: `TextLogs` or
+`JsonLogs`."""

@@ -6,12 +6,12 @@
 //! connection. The first operation starts the core of the process and
 //! connects the handle's broker; a failed connect is not kept, so the next
 //! operation connects again. The lazy handle is the core's
-//! ([`horsies_core::handle::CoreHandle`]), with the client family
+//! ([`horsies_core::handle::CoreConnection`]), with the client family
 //! `PYTHON`.
 
 use std::sync::{Arc, OnceLock};
 
-use horsies_core::handle::{CoreHandle as LazyHandle, HandleConnection};
+use horsies_core::handle::{CoreConnection as LazyHandle, HandleConnection};
 use horsies_core::manifest::{parse_producer_manifest, ProducerManifest, SchemaMode};
 use horsies_core::worker_manifest::parse_worker_profiles;
 use horsies_core::{
@@ -112,7 +112,7 @@ impl BrokerConnection {
             handle: Arc::new(
                 LazyHandle::new(
                     self.handle.manifest().clone(),
-                    self.handle.profile(),
+                    self.handle.pool_profile(),
                     ClientFamily::Python,
                 )
                 .with_install_coverage(request),
@@ -1961,7 +1961,7 @@ mod tests {
     #[test]
     fn a_worker_process_handle_keeps_its_profile_and_starts_nothing() {
         let handle = CoreHandle::new(MANIFEST, "WORKER").expect("the manifest is complete");
-        assert_eq!(handle.connection.handle.profile(), PoolProfile::Worker);
+        assert_eq!(handle.connection.handle.pool_profile(), PoolProfile::Worker);
         assert_eq!(handle.connection.handle.family(), ClientFamily::Python);
         assert!(matches!(
             handle.connection.connect_state(),
@@ -1985,7 +1985,7 @@ mod tests {
             covered.handle.install_coverage(),
             handle.connection.handle.install_coverage()
         );
-        assert_eq!(covered.handle.profile(), PoolProfile::Worker);
+        assert_eq!(covered.handle.pool_profile(), PoolProfile::Worker);
         assert_eq!(covered.handle.family(), ClientFamily::Python);
         assert_eq!(
             covered.handle.manifest(),

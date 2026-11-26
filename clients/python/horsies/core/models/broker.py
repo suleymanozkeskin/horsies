@@ -51,7 +51,7 @@ LIBPQ_SYSTEM_DEFAULT_TCP_USER_TIMEOUT: Final = 0
 MOVED_TO_WORKER_PROFILE: Final[Mapping[str, str]] = {
     'worker_child_pool_min_size': 'min_size=N',
     'worker_child_pool_max_size': 'max_size=PoolSize(connections=N)',
-    'worker_child_pool_check': 'check=False',
+    'worker_child_pool_check': 'pre_ping=False',
 }
 """The child pool fields that 0.7.0 removed from ``PostgresConfig``, and the
 argument of the pool of each child kind in a worker profile

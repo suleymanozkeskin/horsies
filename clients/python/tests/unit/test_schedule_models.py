@@ -312,7 +312,7 @@ class TestTimeOfDay:
         with pytest.raises(MultipleValidationErrors) as exc_info:
             build(datetime_time(9, 0, 0, 500, tzinfo=timezone.utc))
 
-        messages = [error.message for error in exc_info.value.report.errors]
+        messages = [error.message for error in exc_info.value.report.refusals]
         assert messages == [
             f'{pattern_name} time has a time zone',
             f'{pattern_name} time has microseconds',

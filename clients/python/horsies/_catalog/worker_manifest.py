@@ -607,7 +607,7 @@ class IsolatedPoolManifest:
     max_size: int
     """The most connections of the pool."""
 
-    check: bool
+    pre_ping: bool
     """Check each connection when a write takes it from the pool."""
 
 
@@ -620,7 +620,7 @@ class SharedPoolManifest:
 
     max_size: PoolMaxSize
 
-    check: bool
+    pre_ping: bool
     """Check each connection when a write takes it from the pool."""
 
 
@@ -1332,7 +1332,7 @@ type ChildProgram = ChildProgramPython | ChildProgramRust
 
 
 type WorkerLogLevel = Literal['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
-"""The log level of the worker and its children (`horsies worker --loglevel`)."""
+"""The log level of the worker and its children (`horsies worker --log-level`)."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

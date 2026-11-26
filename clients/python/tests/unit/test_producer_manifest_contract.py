@@ -57,12 +57,13 @@ from horsies.core.manifest import (
     core_database_url,
     install_coverage_of,
     reservation_window_micros,
-    schema_mode_of,
     tcp_keepalives_of,
     tcp_user_timeout_of,
     to_producer_manifest,
+    wire_schema_mode,
 )
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode as AppSchemaMode
 
 pytestmark = [pytest.mark.unit]
 
@@ -463,32 +464,25 @@ def test_a_window_that_the_validator_refuses_is_a_defect_here(window: timedelta)
 
 
 @pytest.mark.parametrize(
-    ('run_schema_migrations', 'assume_initialized', 'mode'),
+    ('app_mode', 'mode'),
     [
-        (True, False, 'MIGRATE_AND_VALIDATE'),
-        (False, False, 'OBSERVE_ONLY'),
-        (True, True, 'ASSUME_INITIALIZED'),
-        (False, True, 'ASSUME_INITIALIZED'),
+        (AppSchemaMode.MIGRATE_AND_VALIDATE, 'MIGRATE_AND_VALIDATE'),
+        (AppSchemaMode.OBSERVE_ONLY, 'OBSERVE_ONLY'),
+        (AppSchemaMode.ASSUME_INITIALIZED, 'ASSUME_INITIALIZED'),
     ],
 )
-def test_the_broker_flags_give_one_schema_mode(
-    run_schema_migrations: bool,
-    assume_initialized: bool,
+def test_each_schema_mode_has_its_manifest_text(
+    app_mode: AppSchemaMode,
     mode: SchemaMode,
 ) -> None:
-    assert (
-        schema_mode_of(
-            run_schema_migrations=run_schema_migrations,
-            assume_initialized=assume_initialized,
-        )
-        == mode
-    )
+    assert wire_schema_mode(app_mode) == mode
+    assert app_mode.value == mode
 
 
 def test_an_assume_initialized_manifest_dumps_its_mode() -> None:
     manifest = to_producer_manifest(
         PostgresConfig(database_url=SecretStr(MAIN_URL)),
-        schema=schema_mode_of(run_schema_migrations=True, assume_initialized=True),
+        schema=wire_schema_mode(AppSchemaMode.ASSUME_INITIALIZED),
         idempotency_reservation_window=timedelta(hours=24),
     )
     document: object = json.loads(dump_producer_manifest(manifest))

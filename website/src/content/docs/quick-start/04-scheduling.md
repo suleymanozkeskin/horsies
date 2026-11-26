@@ -103,5 +103,5 @@ config = AppConfig(
 ## Running the Scheduler
 
 ```bash
-horsies scheduler myapp.config:app --loglevel=INFO
+horsies scheduler myapp.config:app --log-level=INFO
 ```

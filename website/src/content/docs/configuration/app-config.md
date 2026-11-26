@@ -39,7 +39,7 @@ app = Horsies(config)
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Error code for uncaught exceptions |
 | `resend_on_transient_err` | `bool` | `False` | Auto-retry transient enqueue failures in workflow start |
 | `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()` traces the sends and each attempt that a worker runs with the OpenTelemetry API, and records the producer metrics with its meter. `OtelTracing(parentage=...)` places the span of an attempt: `ChildOfSend()` (the default) or `LinkedToSend()`. `OtelTracing(worker_ended_spans=...)` makes the span of each attempt that the worker ended (a timeout kill, a blocked-loop kill, a lost child) in the handler child: `WorkerEndedSpans.MAKE_SPANS` (the default) or `WorkerEndedSpans.NO_SPANS` ([Event Handlers](/horsies/workers/event-handlers/#spans-of-the-attempts-that-the-worker-ended)). It needs the extra `horsies[otel]` (`pip install 'horsies[otel]'`); without it the config is refused with `HRS-220`. With `NoTracing()` horsies does not import `opentelemetry`. See [Tracing Setup](/horsies/observability/tracing-setup/) |
-| `log_format` | `TextLogs \| JsonLogs` | `TextLogs()` | The format of the horsies log records in `horsies worker`, `scheduler`, `check` and each worker child. `JsonLogs()`: one JSON object per line with the keys `ts`, `level`, `logger`, `message`, `process`, `task_id`, `task_name`, `attempt`, `trace_id`, `span_id`, `exc`. See [Log Setup](/horsies/observability/log-setup/) |
+| `log_format` | `LogFormat` (`TextLogs \| JsonLogs`) | `TextLogs()` | The format of the horsies log records in `horsies worker`, `scheduler`, `check` and each worker child. `JsonLogs()`: one JSON object per line with the keys `ts`, `level`, `logger`, `message`, `process`, `task_id`, `task_name`, `attempt`, `trace_id`, `span_id`, `exc`. See [Log Setup](/horsies/observability/log-setup/) |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings. `horsies worker <app> --profile <name>` runs the profile of that name; see [Worker Profiles](../../workers/worker-profiles) |
 
 Every config model refuses unknown keys. This includes the nested models (`PostgresConfig`, `RecoveryConfig`, `PayloadPolicy`, `CustomQueueConfig`, `RetentionConfig`, `WorkerResilienceConfig`, `ScheduleConfig`) and the schedule patterns. A misspelled field raises `ValidationError` with the type `extra_forbidden`.
@@ -383,10 +383,10 @@ Multiple validation errors within the same phase are collected and reported toge
 Use `app.check()` to run phased validation before starting a worker or scheduler. This is the programmatic equivalent of the [`horsies check`](/horsies/cli/#horsies-check) CLI command.
 
 ```python
-errors = app.check(live=True)
-if errors:
-    for err in errors:
-        print(err)
+report = app.check(live=True)
+if report.has_errors():
+    for refusal in report.refusals:
+        print(refusal)
 else:
     print("All validations passed")
 ```
@@ -395,7 +395,7 @@ else:
 
 <!-- check: skip elided -- pseudo-code or a signature, not valid Python -->
 ```python
-def check(self, *, live: bool = False) -> list[HorsiesError]
+def check(self, *, live: bool = False) -> ValidationReport
 ```
 
 **Phases:**

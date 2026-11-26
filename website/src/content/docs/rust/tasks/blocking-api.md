@@ -88,7 +88,7 @@ A blocking call on a thread where a tokio runtime is current (`tokio::runtime::H
 | A send or a retry | `TaskSendError::AsyncContext` with the prepared `task_id` and `payload`, and nothing written |
 | `get`, `info`, `get_result`, `get_raw_result`, `get_task_info` | `ReadError::AsyncContext { message }` |
 | A health read | `BrokerOperationError::AsyncContext`, not retryable |
-| `check_live` | `CheckReport` with `HRS-217` (`CheckLiveAsyncContext`), after the static check passed |
+| `check_live` | `ValidationReport` with `HRS-217` (`CheckLiveAsyncContext`), after the static check passed |
 | A workflow start or `retry_start` | `WorkflowStartError::AsyncContext` with the `workflow_id` of the start, not retryable, and nothing written |
 | `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError::AsyncContext`, not retryable |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::AsyncContext { message }` |
@@ -116,7 +116,7 @@ When the operating system refused the threads of the core's process runtime, the
 | A send or a retry | `TaskSendError::EnqueueFailed` with the task id and payload |
 | A read | `ReadError::Database` |
 | A health read | `BrokerOperationError::OperationFailed` with the code of the read |
-| `check_live` | `CheckReport` with the connectivity refusal |
+| `check_live` | `ValidationReport` with the connectivity refusal |
 | A workflow start | `WorkflowStartError::EnqueueFailed` with the `workflow_id` of the start |
 | `status`, `results`, `tasks`, `cancel`, `pause`, `resume` | `HandleOperationError::DbOperationFailed` |
 | `WorkflowHandleView::get`, `result_for` | `WorkflowReadError::Database` with `DbOperationFailed` |

@@ -65,6 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.tasks import BUILTIN_CODE_REGISTRY
 from horsies.core.codec.json_io import dumps_json
 from horsies.core.codec.typed import encode_task_result
@@ -3053,7 +3054,7 @@ class TestDatabaseFailure:
                     'postgresql://postgres:none@127.0.0.1:1/none'
                 )
             ),
-            assume_initialized=True,
+            schema_mode=SchemaMode.ASSUME_INITIALIZED,
         )
         yield broken
         await broken.close_async()

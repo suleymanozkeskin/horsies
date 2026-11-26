@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use horsies_core::core::workflow::validate_start_retry;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     child_producer, ChildProducer, ClientSpec, ClientStartError, ClientStartOutcome,
@@ -35,7 +35,7 @@ use crate::{Horsies, HorsiesError};
 /// its resend setting. Clones share one app.
 #[derive(Clone)]
 pub(crate) struct WorkflowStarter {
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     workflows: Arc<WorkflowRegistry>,
 }
 
@@ -58,7 +58,7 @@ impl WorkflowStarter {
 
     /// The handle that a start and its reads go through: the child's
     /// producer handle in a worker child, else the app's.
-    fn operation_handle(&self) -> Arc<CoreHandle> {
+    fn operation_handle(&self) -> Arc<CoreConnection> {
         match child_producer() {
             ChildProducer::InChild(handle) => handle,
             ChildProducer::NotInAChild => Arc::clone(&self.handle),

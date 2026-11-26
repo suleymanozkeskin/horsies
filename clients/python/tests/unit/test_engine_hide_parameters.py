@@ -65,6 +65,6 @@ class TestEngineKwargsHideParameters:
             mock.patch('horsies.core.app.CoreHandle', _Handle),
             mock.patch('horsies.core.app.ConnectivityPassed', _Passed),
         ):
-            assert app.check(live=True) == []
+            assert app.check(live=True).refusals == []
 
         mock_create_engine.assert_not_called()

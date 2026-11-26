@@ -166,25 +166,25 @@ config = AppConfig(
     worker_profiles={
         ISOLATED: WorkerProfile(
             isolated=IsolatedChildren(count=1),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
         SHARED_ASYNC: WorkerProfile(
             isolated=NoIsolatedChildren(),
             shared_async=SharedAsyncChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
         SHARED_THREAD: WorkerProfile(
             isolated=NoIsolatedChildren(),
             shared_thread=SharedThreadChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
         SPLIT: WorkerProfile(
             isolated=IsolatedChildren(count=1),
             shared_async=SharedAsyncChildren(count=1, seats=4),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
         ISOLATED_RECYCLED: WorkerProfile(
@@ -192,7 +192,7 @@ config = AppConfig(
                 count=1,
                 recycle=IsolatedRecycle(after=TaskLimit(tasks=2)),
             ),
-            preload=ChildPreload.NONE,
+            preload=ChildPreload.NO_PRELOAD,
             drain_timeout=timedelta(seconds=5),
         ),
     },

@@ -145,3 +145,11 @@ Connection health comes from `pool_pre_ping`, `worker_pool_pre_ping`, the TCP ke
 ## Schema Initialization
 
 The broker installs the schema at its first initialization. A fresh install takes the schema advisory lock on a direct connection to the session URL. The steps, the tables and the refusals are on [Schema Creation](/horsies/internals/database-schema/#schema-creation).
+
+`Horsies(config, schema_mode=...)` sets what the broker of the app does with the schema:
+
+| `SchemaMode` | Behavior |
+|--------------|----------|
+| `MIGRATE_AND_VALIDATE` (default) | The first operation applies the migrations and checks the schema version |
+| `OBSERVE_ONLY` | The broker runs no schema statement (monitoring reads). `horsies web --database-url` uses it |
+| `ASSUME_INITIALIZED` | The broker runs no schema statement and has no listener: an operation that needs the listener answers `LISTENER_DISABLED` |

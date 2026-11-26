@@ -100,7 +100,7 @@ pub struct ChildApp {
 }
 
 /// What a child does with the log level of its init frame (the worker's
-/// `--loglevel`), before its boot. Records before the init frame (a bad
+/// `--log-level`), before its boot. Records before the init frame (a bad
 /// socket, a frame that is not an init frame) reach only a subscriber that
 /// the binary installed before child mode.
 pub enum ChildLogSetup {
@@ -122,7 +122,7 @@ pub struct ChildHookFailure {
 /// The future of a start hook.
 pub type ChildStartFuture = Pin<Box<dyn Future<Output = Result<(), ChildHookFailure>> + Send>>;
 
-/// The start hooks of a child (Python `on_child_process_start`,
+/// The start hooks of a child (Python `on_child_start`,
 /// `on_shared_async_child_start`). They run once in every child, a
 /// replacement child included, on the child's runtime: after the child
 /// connected its pool, before it reports ready, one after the other in
@@ -172,7 +172,7 @@ fn task_start_facts(kind: TaskChild) -> ChildStartFacts {
     }
 }
 
-/// How a child ends. The binary exits with [`Self::code`].
+/// How a child ends. The binary exits with [`Self::exit_code`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildHostExit {
     /// The stop frame came: exit 0.
@@ -188,7 +188,8 @@ pub enum ChildHostExit {
 }
 
 impl ChildHostExit {
-    pub fn code(self) -> i32 {
+    /// The exit status of the child process.
+    pub fn exit_code(self) -> i32 {
         match self {
             Self::Stopped => 0,
             Self::ParentGone => ChildExitCode::ParentGone.code(),
@@ -948,7 +949,7 @@ mod tests {
                 AfterHookFailure::WorkerStops,
             );
             assert_eq!(ended, Err(ChildHostExit::ChildHookFailed));
-            assert_eq!(ChildHostExit::ChildHookFailed.code(), 173);
+            assert_eq!(ChildHostExit::ChildHookFailed.exit_code(), 173);
         }
         runtime.shutdown_background();
     }

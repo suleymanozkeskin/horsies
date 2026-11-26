@@ -652,7 +652,7 @@ def _stats(frames: list[ChildFrame]) -> list[HandlerStatsFrame]:
 
 @pytest.fixture
 def fast_stats(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(handler_child, 'HANDLER_STATS_INTERVAL_S', 0.02)
+    monkeypatch.setattr(handler_child, 'HANDLER_STATISTICS_INTERVAL_SECONDS', 0.02)
     yield
 
 

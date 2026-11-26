@@ -62,7 +62,7 @@ def _raised_codes(build: object) -> list[ErrorCode | None]:
         build()  # type: ignore[operator]
     error = raised.value
     if isinstance(error, MultipleValidationErrors):
-        return [item.code for item in error.report.errors]
+        return [item.code for item in error.report.refusals]
     return [error.code]
 
 

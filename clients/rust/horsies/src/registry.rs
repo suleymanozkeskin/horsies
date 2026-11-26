@@ -3,7 +3,7 @@
 //! A task name is unique. The queue of a task follows the queue mode: in
 //! `Default` mode a task names no queue and runs on `default`; in `Custom`
 //! mode it names one of the configured queues (Python
-//! `Horsies.validate_queue_name`). Each registered task carries its resolved
+//! `Horsies.validate_queue`). Each registered task carries its resolved
 //! queue and priority, which sends and workflow nodes inherit.
 //!
 //! The user error codes that a task declares (`UserErrorCode::CODES` of its
@@ -67,7 +67,7 @@ pub(crate) fn register_task(
 }
 
 /// The queue of a task that asks for `requested` (Python
-/// `Horsies.validate_queue_name`).
+/// `Horsies.validate_queue`).
 ///
 /// - `Default` mode: no queue is `default`; any named queue is refused with
 ///   `ConfigInvalidQueueMode`, `default` too, as in Python.

@@ -95,7 +95,7 @@ def configure_event_log() -> None:
     event_log.addHandler(logging.FileHandler('/var/log/myapp/events.log'))
 ```
 
-The `on_child_process_start` hooks do not run in the handler child.
+The `on_child_start` hooks do not run in the handler child.
 
 ## Event Types
 

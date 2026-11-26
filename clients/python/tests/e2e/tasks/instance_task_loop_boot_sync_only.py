@@ -37,7 +37,7 @@ broker = PostgresBroker(config.broker)
 app._broker = broker  # pyright: ignore[reportPrivateUsage]
 broker.app = app
 
-app.on_child_process_start(fail_loop_creation_on_demand)
+app.on_child_start(fail_loop_creation_on_demand)
 
 
 @app.task(task_name='e2e_loop_boot_sync_only_healthcheck')

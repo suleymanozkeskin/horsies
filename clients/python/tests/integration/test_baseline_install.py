@@ -29,6 +29,7 @@ from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.history.periods import RetentionDays, period_class_key
 from horsies.core.brokers.result_types import BrokerErrorCode, BrokerOperationFailed
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.retention import RetentionConfig
 from horsies.core.types.result import Err, Ok, is_ok
 from horsies.core.types.status import TaskStatus
@@ -90,11 +91,13 @@ async def _connect(url: str) -> Connection:
     return await psycopg.AsyncConnection.connect(to_psycopg_url(url), autocommit=True)
 
 
-async def _initialize(url: str, *, run_schema_migrations: bool = True) -> Ok[None] | Err[str]:
+async def _initialize(
+    url: str, *, schema_mode: SchemaMode = SchemaMode.MIGRATE_AND_VALIDATE,
+) -> Ok[None] | Err[str]:
     """Run the install with a new broker; return the refusal text on failure."""
     broker = PostgresBroker(
         PostgresConfig(database_url=SecretStr(url)),
-        run_schema_migrations=run_schema_migrations,
+        schema_mode=schema_mode,
     )
     try:
         match await broker.ensure_schema_initialized():
@@ -388,7 +391,7 @@ async def test_an_install_that_stopped_before_the_publication_is_completed(
 
 @pytest.mark.asyncio(loop_scope='function')
 async def test_migrations_off_runs_no_statement(database_url: str) -> None:
-    assert await _initialize(database_url, run_schema_migrations=False) == Ok(None)
+    assert await _initialize(database_url, schema_mode=SchemaMode.OBSERVE_ONLY) == Ok(None)
     connection = await _connect(database_url)
     try:
         assert await _fetch_one(connection, _OBJECT_COUNT_SQL) == (0, 0)

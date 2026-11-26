@@ -21,7 +21,7 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use horsies_core::handle::CoreHandle as LazyHandle;
+use horsies_core::handle::CoreConnection as LazyHandle;
 use horsies_core::monitoring::fleet::{serve_fleet_metrics, FleetLabels};
 use horsies_core::telemetry::declared::{
     warn_folded_names, DeclaredNames, Folded, QueueName, ScheduleName,

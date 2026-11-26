@@ -662,7 +662,7 @@ def execution_of(execution: Execution) -> wire.Execution:
 
 
 def log_level_of(level: str) -> wire.WorkerLogLevel:
-    """The manifest value of a `--loglevel` choice, in any case.
+    """The manifest value of a `--log-level` choice, in any case.
 
     The command line admits only the five levels, so another text is a defect
     and raises `AssertionError`.
@@ -679,7 +679,7 @@ def log_level_of(level: str) -> wire.WorkerLogLevel:
         case 'CRITICAL':
             return 'CRITICAL'
         case other:
-            raise AssertionError(f'--loglevel admits five levels, not {other!r}')
+            raise AssertionError(f'--log-level admits five levels, not {other!r}')
 
 
 def _at_most(path: str, value: int, maximum: int) -> int:
@@ -926,7 +926,7 @@ def _shared_pool(pool: SharedPool) -> wire.SharedPoolManifest:
     return wire.SharedPoolManifest(
         min_size=pool.min_size,
         max_size=_pool_max_size(pool.max_size),
-        check=pool.check,
+        pre_ping=pool.pre_ping,
     )
 
 
@@ -942,7 +942,7 @@ def _isolated(setting: IsolatedChildren | NoIsolatedChildren) -> wire.Isolated:
                 pool=wire.IsolatedPoolManifest(
                     min_size=children.pool.min_size,
                     max_size=children.pool.max_size.connections,
-                    check=children.pool.check,
+                    pre_ping=children.pool.pre_ping,
                 ),
                 task_send_pool=children.task_send_pool.connections,
             )
@@ -995,7 +995,7 @@ def _preload(preload: ChildPreload) -> wire.Preload:
             return 'LIBRARY'
         case ChildPreload.APP:
             return 'APP'
-        case ChildPreload.NONE:
+        case ChildPreload.NO_PRELOAD:
             return 'NO_PRELOAD'
         case _ as unreachable:
             assert_never(unreachable)

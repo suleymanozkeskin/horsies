@@ -1,4 +1,4 @@
-"""App instance whose on_child_process_start hook always fails.
+"""App instance whose on_child_start hook always fails.
 
 Used to assert the fail-closed contract: the worker must exit at boot
 with a legible message instead of restart-looping on the broken child.
@@ -37,7 +37,7 @@ app._broker = broker
 broker.app = app
 
 
-@app.on_child_process_start
+@app.on_child_start
 def _always_fails() -> None:
     raise RuntimeError('deliberate hook failure for the fail-closed e2e test')
 

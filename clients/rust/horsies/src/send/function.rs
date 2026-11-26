@@ -34,7 +34,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use horsies_core::core::config::payload::{enforce_payload_policy, PayloadKind};
 use horsies_core::core::task::send_types::send_error_from_enqueue;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::telemetry::trace_carrier::SendTrace;
 use horsies_core::{
     child_producer, mint_task_id, CheckedSend, ChildProducer, Execution, FailureCause,
@@ -62,7 +62,7 @@ const RESEND_LONGEST_WAIT: Duration = Duration::from_millis(2_000);
 /// What every function of one app sends with: the app's handle, the
 /// suppression of the process and the config values of a send.
 pub(crate) struct SendContext {
-    handle: Arc<CoreHandle>,
+    handle: Arc<CoreConnection>,
     suppression: SendSuppression,
     resend_on_transient_err: bool,
     payload: PayloadPolicy,
@@ -83,7 +83,7 @@ impl SendContext {
 
     /// The handle a send goes through: the child's producer handle in a
     /// worker child, else the app's.
-    fn send_handle(&self) -> Arc<CoreHandle> {
+    fn send_handle(&self) -> Arc<CoreConnection> {
         match child_producer() {
             ChildProducer::InChild(handle) => handle,
             ChildProducer::NotInAChild => Arc::clone(&self.handle),
@@ -411,7 +411,7 @@ where
             queue_name: &payload.queue_name,
         });
         let trace = span.trace();
-        let handle_ref: &CoreHandle = &handle;
+        let handle_ref: &CoreConnection = &handle;
         let payload_ref = &payload;
         let trace_ref = &trace;
         let sent = send_with_resends(resends, first, move |kind| {
@@ -478,7 +478,7 @@ fn resend_wait(resend: u32) -> Duration {
 /// error, maps to the send catalog by the core's one rule. A carrier that
 /// breaks a bound of the core is not stored and never refuses the send.
 async fn enqueue_once(
-    handle: &CoreHandle,
+    handle: &CoreConnection,
     task_id: Uuid,
     payload: &TaskSendPayload,
     trace: &SendTrace,

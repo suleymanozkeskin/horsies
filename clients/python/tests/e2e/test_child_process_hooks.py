@@ -1,4 +1,4 @@
-"""E2E: @app.on_child_process_start through real workers.
+"""E2E: @app.on_child_start through real workers.
 
 Graduates tests/spike/conn_accum: the documented hook body (dispose +
 NullPool rebind) must drop the post-burst app-owned connection floor to
@@ -161,7 +161,7 @@ def test_failing_hook_stops_worker_at_boot() -> None:
 
     message = str(exc_info.value)
     assert 'exited before becoming ready' in message
-    assert 'on_child_process_start' in message
+    assert 'on_child_start' in message
     # A restart loop would burn the full ready timeout; a fail-closed boot
     # failure surfaces well before it.
     assert time.monotonic() - started < 25.0

@@ -43,7 +43,7 @@ string validates at runtime, but strict type checkers reject it — wrap with
 | `default_unhandled_error_code` | `str` | `"UNHANDLED_EXCEPTION"` | Must be `UPPER_SNAKE_CASE` |
 | `resend_on_transient_err` | `bool` | `False` | Auto-retry transient ENQUEUE_FAILED |
 | `tracing` | `OtelTracing \| NoTracing` | `NoTracing()` | `OtelTracing()`: spans of the sends and of each attempt, and producer metrics, through the OpenTelemetry API; `parentage=ChildOfSend()` (default) or `LinkedToSend()`; `worker_ended_spans=WorkerEndedSpans.MAKE_SPANS` (default: the handler child makes the span of each attempt that the worker ended) or `NO_SPANS`; needs `horsies[otel]`, else HRS-220. `NoTracing()` imports no `opentelemetry` |
-| `log_format` | `TextLogs \| JsonLogs` | `TextLogs()` | Format of the horsies log records; `JsonLogs()`: one JSON object per line |
+| `log_format` | `LogFormat` (`TextLogs \| JsonLogs`) | `TextLogs()` | Format of the horsies log records; `JsonLogs()`: one JSON object per line |
 | `worker_profiles` | `dict[str, WorkerProfile]` | `{}` | Named worker settings; `horsies worker <app> --profile <name>` runs one. See [Worker profiles](#worker-profiles) |
 
 ### Validation Rules
@@ -140,10 +140,10 @@ worker_profiles = {
 | `SharedThreadChildren` | `task_send_pool` | `PoolSize(connections=2)` | As for `IsolatedChildren`; the seat threads share it |
 | `IsolatedPool` | `min_size` | `0` | 0-1000 connections kept open; 0 opens on first use |
 | `IsolatedPool` | `max_size` | `PoolSize(connections=1)` | `PoolSize(connections=N)`, 1-1000; an isolated child writes one statement at a time, so 1 is enough |
-| `IsolatedPool` | `check` | `False` | Check each connection on checkout: one round trip each. Each child write is one statement in autocommit; with the check off a dead connection fails that write (RUNNING update: `OWNERSHIP_UNCONFIRMED`, the lease returns the task) |
+| `IsolatedPool` | `pre_ping` | `False` | Check each connection on checkout: one round trip each. Each child write is one statement in autocommit; with the check off a dead connection fails that write (RUNNING update: `OWNERSHIP_UNCONFIRMED`, the lease returns the task) |
 | `SharedPool` | `min_size` | `0` | 0-1000 connections kept open |
 | `SharedPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)` or derived from the seats |
-| `SharedPool` | `check` | `False` | As for `IsolatedPool` |
+| `SharedPool` | `pre_ping` | `False` | As for `IsolatedPool` |
 | `ParentPool` | `max_size` | `PoolSizeFromSeats()` | `PoolSize(connections=N)`, N at least 3 (below fails with HRS-218), or derived from the seats of the whole profile |
 | `SharedRecycle` | `after_per_seat` | `TaskLimit(tasks=100)` | Replace after `tasks × seats` tasks; `NoTaskLimit` |
 | `SharedRecycle` | `above` | `NoMemoryLimit()` | RSS limit of the child, read after each task |
@@ -237,15 +237,15 @@ app.discover_tasks(paths)
 broker = app.get_broker()
 
 # List registered task names
-names = app.list_tasks()  # list[str]
+names = app.registered_task_names()  # list[str]
 
 # Per-child-process hook: sync zero-arg fn, runs once in every worker child
 # (after task imports, before horsies' own child pool). Use for rebinding
 # app-owned engines to a worker-specific pool policy.
-@app.on_child_process_start
+@app.on_child_start
 def reset_db_for_child() -> None: ...
 
-hooks = app.get_child_process_start_hooks()  # list[ChildProcessStartHook]
+hooks = app.get_child_start_hooks()  # list[ChildStartHook]
 
 # Per-shared-async-child hook: async zero-arg fn, runs on the event loop of
 # each shared async child, before its first task. Build long-lived async
@@ -288,7 +288,7 @@ for the events left.
 `on_handler_child_start` rules: sync (`HRS-214` for an async function or a
 value that is not callable); deduped by identity; each hook at most 10 s. A
 hook that raises or hangs ends the handler child, which stays down until the
-worker restarts; the worker runs its tasks on. The `on_child_process_start`
+worker restarts; the worker runs its tasks on. The `on_child_start`
 hooks do not run in the handler child. See website docs `workers/event-handlers`.
 
 Worker-ended spans: with `OtelTracing()` (`worker_ended_spans=MAKE_SPANS`, the
@@ -314,11 +314,11 @@ set the tracer provider in `on_handler_child_start`. `NO_SPANS` turns it off.
 without a call: an `async def` function, an object with an `async def`
 `__call__`, a function with an awaitable return annotation, or a lambda
 (checked when the child awaits it); anything else is `HRS-214`; runs
-after the `on_child_process_start` hooks and the child's async pool; same 10 s
+after the `on_child_start` hooks and the child's async pool; same 10 s
 bound and fail-closed stop as the sync hooks (a hook that blocks the loop is
 also ended); work it leaves running belongs to no task.
 
-`on_child_process_start` rules: deduped by function identity; async functions
+`on_child_start` rules: deduped by function identity; async functions
 rejected (`HRS-214`); hooks fire on every child start including replacement
 children, so bodies must be idempotent. Fail-closed: a raising or hung hook
 (10s budget) exits the child with a dedicated code and the worker STOPS with
@@ -331,7 +331,7 @@ construction). See website docs `workers/child-process-hooks`.
 `AppConfig(tracing=OtelTracing())` needs `pip install 'horsies[otel]'`
 (`opentelemetry-api` 1.30 or later). The client uses the global tracer,
 meter and propagator of the OpenTelemetry API. Set your SDK in each process
-that sends, and in each worker child with `@app.on_child_process_start`:
+that sends, and in each worker child with `@app.on_child_start`:
 
 ```python
 from opentelemetry import trace
@@ -345,7 +345,7 @@ def set_up_tracing() -> None:
     trace.set_tracer_provider(provider)
 
 
-@app.on_child_process_start
+@app.on_child_start
 def set_up_child_tracing() -> None:
     set_up_tracing()
 ```
@@ -408,7 +408,7 @@ read = await app.get_result_async("task-uuid", timeout_ms=5000)
 read = app.get_result("task-uuid", timeout_ms=5000)  # sync
 
 # Raw stored envelope, no typed decode — returns BrokerResult[RawResultRecord | None]
-raw = await broker.get_raw_result_record_async("task-uuid", timeout_ms=5000)
+raw = await broker.get_raw_result_record_async("task-uuid", wait_ms=5000)
 
 # Fetch task metadata by ID — returns BrokerResult[TaskInfo | None]
 info = await broker.get_task_info_async("task-uuid", include_result=True)
@@ -472,7 +472,7 @@ reads the loaded version (`170000` = 17.0).
 
 Every connection of a child pool is in autocommit. The RUNNING update of a
 plain task and the finalizing marker are one statement each: one round trip
-with the checkout check off. The RUNNING update of a workflow task and the
+with `pre_ping` off. The RUNNING update of a workflow task and the
 start of its node run in one transaction (BEGIN, update, node, COMMIT).
 
 The seats of a shared child share the pool of the child (`SharedPool`, derived
@@ -574,7 +574,7 @@ Failures stay with one task:
   loop that cannot be created for another cause than the errno values below, a
   spawn that the OS refuses with another errno such as ENOENT, a death with no
   report, not ready in 120 s) uses one of 3 attempts, then the worker exits
-  non-zero. A failed `on_child_process_start` hook stops the worker at once.
+  non-zero. A failed `on_child_start` hook stops the worker at once.
 - A cause that can clear (`OSError` EMFILE / ENFILE / ENOMEM / EAGAIN in any
   start step, the spawn and the event loop among them, or a refused thread)
   takes only that slot down: it takes no task, the claim budget leaves it out, and it
@@ -605,9 +605,9 @@ Traps with preload. Check each one before you change `WorkerProfile.preload`:
   SQLAlchemy, and pydantic before the app runs, so `load_dotenv()` in the app is
   too late for `PSYCOPG_IMPL`. Put such a value in the process environment.
 - **Monkeypatching:** a patch that must run before those imports, such as
-  gevent, is too late. Use `preload=ChildPreload.NONE`.
+  gevent, is too late. Use `preload=ChildPreload.NO_PRELOAD`.
 - **Clients built at import (`app` only):** module code runs once, in the preload
-  parent. Build a client in an `on_child_process_start` hook, which runs in every
+  parent. Build a client in an `on_child_start` hook, which runs in every
   child after the fork.
 - **Native threads (`app` only):** the guard sees Python threads and sockets. It
   does not see a BLAS pool or a gRPC client built at import, and those may hang
@@ -1193,13 +1193,13 @@ Auto-discovery: exactly one `Horsies` instance → use it. Zero or multiple → 
 ### `horsies worker`
 
 ```bash
-horsies worker <module> --profile NAME [--loglevel LEVEL]
+horsies worker <module> --profile NAME [--log-level LEVEL]
 ```
 
 | Flag | Default | Description |
 |---|---|---|
 | `--profile` | required | Name of a profile in `AppConfig.worker_profiles`. See [Worker profiles](#worker-profiles) |
-| `--loglevel` | `INFO` | Log level |
+| `--log-level` | `INFO` | Log level |
 | `--metrics-listen` | none | `HOST:PORT` or `[IPV6]:PORT`: serve `GET /metrics`, `GET /livez`, `GET /readyz`. No default; a bad value exits 2; a bind failure does not stop the worker (the endpoint binds again, 1 s to 60 s backoff) |
 
 Startup: logging → import app (builds `AppConfig`, validates every profile) → select `--profile` → `app.check()` → memory warning → schema init with retry → connection warning → start children.
@@ -1208,7 +1208,7 @@ SIGTERM/SIGINT: graceful shutdown: stops claims, returns tasks that wait for a c
 ### `horsies scheduler`
 
 ```bash
-horsies scheduler <module> [--loglevel LEVEL]
+horsies scheduler <module> [--log-level LEVEL]
 ```
 
 Requires `app.config.schedule` to be set and enabled. Same startup sequence as worker.
@@ -1216,15 +1216,15 @@ Requires `app.config.schedule` to be set and enabled. Same startup sequence as w
 ### `horsies check`
 
 ```bash
-horsies check <module> [--live] [--loglevel LEVEL]
+horsies check <module> [--live] [--log-level LEVEL]
 ```
 
-`--live` adds Phase 4 (broker connectivity) and Phase 4.1 (worker connections). Default `--loglevel` is `WARNING`.
+`--live` adds Phase 4 (broker connectivity) and Phase 4.1 (worker connections). Default `--log-level` is `WARNING`.
 
 ### `horsies web`
 
 ```bash
-horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--trace-link TEMPLATE] [--loglevel INFO]
+horsies web <module> [--host 127.0.0.1] [--port 8600] [--auth none|trusted-header] [--trusted-header X-Forwarded-User] [--enable-actions] [--trace-link TEMPLATE] [--log-level INFO]
 horsies web --database-url "postgresql://..." [--session-database-url URL] [--pgbouncer-transaction-mode] [...]
 ```
 
@@ -1236,11 +1236,11 @@ reference including the registry-less capability boundary.
 ### `horsies metrics`
 
 ```bash
-horsies metrics <module> --listen HOST:PORT [--loglevel INFO]
+horsies metrics <module> --metrics-listen HOST:PORT [--log-level INFO]
 ```
 
 Serves the fleet metrics of the app's database at `GET /metrics`.
-`--listen` is required: `HOST:PORT` or `[IPV6]:PORT`, port 1 to 65535. See
+`--metrics-listen` is required: `HOST:PORT` or `[IPV6]:PORT`, port 1 to 65535. See
 `monitoring.md`, Fleet Metrics.
 
 ### `horsies get-docs`

@@ -90,7 +90,7 @@ def set_tracer_provider() -> None:
     trace.set_tracer_provider(provider)
 
 
-@app.on_child_process_start
+@app.on_child_start
 def set_child_tracer_provider() -> None:
     """The task children export their attempt spans to the same file."""
     set_tracer_provider()

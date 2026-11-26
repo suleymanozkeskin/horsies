@@ -32,7 +32,7 @@ from horsies.core.utils.url import to_psycopg_url
 from horsies.core.worker import child_pool
 from tests.fixtures import core_frames
 
-TEST_CHILD_POOL: Final = ResolvedPool(min_size=0, max_size=2, check=False)
+TEST_CHILD_POOL: Final = ResolvedPool(min_size=0, max_size=2, pre_ping=False)
 """The pool of a child core handle of the tests: the default bounds of the
 pool of an isolated child."""
 
@@ -78,7 +78,8 @@ def child_init_frame(
             child_pool=core_frames.pool(
                 min_size=pool.min_size,
                 max_size=pool.max_size,
-                check=pool.check,
+                # The child frame keeps its own key for the setting.
+                check=pool.pre_ping,
             ),
         ),
     )

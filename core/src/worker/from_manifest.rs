@@ -517,7 +517,7 @@ fn worker_config_of(manifest: &WorkerManifest, app_config: &AppConfig) -> Worker
     };
     let mut config = WorkerConfig {
         queues,
-        loglevel: worker_log_level(manifest.child_launch.log_level),
+        log_level: worker_log_level(manifest.child_launch.log_level),
         ..WorkerConfig::default()
     };
     config.apply_queue_config(app_config);

@@ -27,7 +27,7 @@ horsies worker <module> --profile NAME [OPTIONS]
 | Option | Default | Description |
 | ------ | ------- | ----------- |
 | `--profile NAME` | (required) | Name of the worker profile in `AppConfig.worker_profiles`. The profile holds the settings of the worker: children, recycling, claim limits, drain timeout and preload. See [Worker Profiles](/horsies/workers/worker-profiles/) |
-| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--log-level LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | `--metrics-listen HOST:PORT` | none | Serve the worker metrics (`GET /metrics`) and the health probes (`GET /livez`, `GET /readyz`) on `HOST:PORT`, or `[IPV6]:PORT`. There is no default: without it the worker serves no endpoint. See [Metrics](/horsies/observability/metrics/) |
 
 There is no default profile. A missing or unknown `--profile` exits with code 1 before the app check and before any child starts. The message lists the defined profile names.
@@ -46,7 +46,7 @@ horsies worker myapp.instance:app --profile default
 horsies worker myapp.instance:app --profile batch
 
 # Debug logging
-horsies worker myapp.instance:app --profile default --loglevel=DEBUG
+horsies worker myapp.instance:app --profile default --log-level=DEBUG
 
 # Using file path (also supported)
 horsies worker app/configs/instance.py:app --profile default
@@ -75,7 +75,7 @@ horsies scheduler <module> [OPTIONS]
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--log-level LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 **Examples:**
 
@@ -84,7 +84,7 @@ horsies scheduler <module> [OPTIONS]
 horsies scheduler myapp.instance:app
 
 # Debug logging
-horsies scheduler myapp.instance:app --loglevel=DEBUG
+horsies scheduler myapp.instance:app --log-level=DEBUG
 ```
 
 ### horsies check
@@ -109,7 +109,7 @@ horsies check <module> [OPTIONS]
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--loglevel LEVEL` | WARNING | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--log-level LEVEL` | WARNING | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 | `--live` | false | Also test broker connectivity (SELECT 1), and compare each worker profile with the server connection limit |
 
 **Examples:**
@@ -127,16 +127,16 @@ horsies check myapp.instance:app --live
 Serve the monitoring web UI. Requires the `horsies[web]` extra. For the UI itself, see the [web UI overview](../monitoring/web-ui-overview).
 
 ```bash
-horsies web [app_path] [OPTIONS]
+horsies web [module] [OPTIONS]
 ```
 
 **Arguments:**
 
 | Argument | Description |
 | -------- | ----------- |
-| `app_path` | App locator (for example `myapp.tasks:app`). Omit it when you use `--database-url` |
+| `module` | App locator (for example `myapp.tasks:app`). Omit it when you use `--database-url` |
 
-Pass either `app_path` or `--database-url`, not both. With `--database-url` the UI has no task registry and does not run schema migrations.
+Pass either `module` or `--database-url`, not both. With `--database-url` the UI has no task registry and does not run schema migrations.
 
 **Options:**
 
@@ -151,7 +151,7 @@ Pass either `app_path` or `--database-url`, not both. With `--database-url` the 
 | `--trusted-header NAME` | X-Forwarded-User | Identity header that the proxy sets |
 | `--enable-actions` | false | Allow task cancel, and workflow pause, resume and cancel (default is view-only) |
 | `--trace-link TEMPLATE` | none | The link of a task's trace id in the task detail: an `http` or `https` URL with one `{trace_id}`. A template that breaks a rule exits 2 and names the rule. Without it the id shows as text |
-| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--log-level LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 **Examples:**
 
@@ -180,7 +180,7 @@ The bind rules, the trusted-header contract and the PgBouncer rule are in [Web U
 Serve the fleet metrics of the app's database at `GET /metrics`, in the Prometheus text format. What the metrics hold and when the command reads them: [Fleet Collector](/horsies/observability/fleet-collector/).
 
 ```bash
-horsies metrics <module> --listen HOST:PORT [OPTIONS]
+horsies metrics <module> --metrics-listen HOST:PORT [OPTIONS]
 ```
 
 **Arguments:**
@@ -193,17 +193,17 @@ horsies metrics <module> --listen HOST:PORT [OPTIONS]
 
 | Option | Default | Description |
 | ------ | ------- | ----------- |
-| `--listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
-| `--loglevel LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
+| `--metrics-listen HOST:PORT` | required | The address to serve on: `HOST:PORT`, or `[IPV6]:PORT`. The port is 1 to 65535. There is no default |
+| `--log-level LEVEL` | INFO | DEBUG, INFO, WARNING, ERROR, CRITICAL |
 
 **Examples:**
 
 ```bash
 # Serve on all interfaces, port 9465
-horsies metrics myapp.instance:app --listen 0.0.0.0:9465
+horsies metrics myapp.instance:app --metrics-listen 0.0.0.0:9465
 
 # Serve on the IPv6 loopback address
-horsies metrics myapp.instance:app --listen '[::1]:9465'
+horsies metrics myapp.instance:app --metrics-listen '[::1]:9465'
 ```
 
 An address that does not parse exits with code 2. The command exits with code 0 at `SIGTERM` or `SIGINT`, and with code 1 when the app cannot be loaded, the broker does not build, or the address does not bind. A database that does not answer does not end it.

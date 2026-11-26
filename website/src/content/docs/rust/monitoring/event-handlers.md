@@ -76,7 +76,7 @@ Each event has `at`, the wall-clock time of the worker at the step. An event hol
 - The handler child runs each handler on a thread of its own, one event at a time, in the order of the worker. An async handler runs on a current-thread runtime of its thread, so a handler that blocks its thread delays only its own events.
 - Each handler has a queue of `HANDLER_QUEUE_EVENTS` (10,000) events. When it is full, the next event drops for that handler only and counts in `horsies.telemetry.handler.dropped{handler}`.
 - A returned `HandlerError` or a panic counts in `horsies.telemetry.handler.errors{handler}` and is logged with the handler's name: the first one, then one line per `HANDLER_ERROR_LOG_EVERY` (1,000). The handler takes its next event.
-- The handler child sends its counts to the worker every `HANDLER_STATS_INTERVAL` (5 s), and once more at its stop.
+- The handler child sends its counts to the worker every `HANDLER_STATISTICS_INTERVAL` (5 s), and once more at its stop.
 - Delivery is at most once: an event that drops is not sent again. The history tables are the record of each task.
 - At the stop of the worker, the handlers get `HANDLER_DRAIN` (2 s) to take the events of their queues. The events left then are not handled.
 - A handler may send tasks: the handler child has a producer pool of one connection. A handler may wait for a task result, since it holds no task capacity.
@@ -224,5 +224,5 @@ app.on_event_blocking::<AttemptEnded>("audit.write", write_audit_row)?;
 |----------|-------|
 | `HANDLER_QUEUE_EVENTS` | 10,000 events per handler queue |
 | `HANDLER_ERROR_LOG_EVERY` | 1,000: one log line per this many failures or drops of a handler, after the first |
-| `HANDLER_STATS_INTERVAL` | 5 s between two `handler_stats` reports |
+| `HANDLER_STATISTICS_INTERVAL` | 5 s between two `handler_stats` reports |
 | `HANDLER_DRAIN` | 2 s for the handlers to take their queued events at the stop |

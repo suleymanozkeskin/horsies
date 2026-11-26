@@ -25,7 +25,7 @@ use horsies_core::core::task::result::{
     read_task_result_text, TaskResultText, TaskResultTextRefused,
 };
 use horsies_core::core::task::StoredErrorRefused;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::{
     process_role, wait_inside_task_message, BoundedWait, BrokerError, BrokerErrorCode,
     BrokerOperationError, BuiltInTaskCode, JsonText, OperationalErrorCode, OutcomeCode,
@@ -226,7 +226,7 @@ pub struct TaskInfoParts {
 /// value of a call. Nothing ran.
 pub struct TaskHandle<T, E> {
     task_id: Uuid,
-    reads: Arc<CoreHandle>,
+    reads: Arc<CoreConnection>,
     kept: Arc<OnceLock<Result<TaskOutcome<T, E>, ReadError>>>,
     types: PhantomData<fn() -> (T, E)>,
 }
@@ -234,7 +234,7 @@ pub struct TaskHandle<T, E> {
 impl<T, E> TaskHandle<T, E> {
     /// The handle of `task_id`, read through `reads`: the handle that sent
     /// the task, or the app's handle for a read by id.
-    pub(crate) fn new(task_id: Uuid, reads: Arc<CoreHandle>) -> Self {
+    pub(crate) fn new(task_id: Uuid, reads: Arc<CoreConnection>) -> Self {
         Self {
             task_id,
             reads,
@@ -347,7 +347,7 @@ where
 /// In a fork, without `exec`, of the process that started the core's
 /// process runtime. Nothing ran.
 pub(crate) async fn read_task_info(
-    reads: &CoreHandle,
+    reads: &CoreConnection,
     task_id: Uuid,
     parts: TaskInfoParts,
 ) -> Result<TaskInfo, ReadError> {

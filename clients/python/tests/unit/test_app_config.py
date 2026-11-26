@@ -41,6 +41,7 @@ from horsies.core.models.recovery import (
     RecoveryConfig,
 )
 from horsies.core.models.retention import RetentionConfig
+from horsies.core.models.schema_mode import AppRole
 from horsies.core.models.schedule import (
     DailySchedule,
     HourlySchedule,
@@ -201,7 +202,7 @@ class TestPostgresConfigPgBouncer:
                 },
             )
 
-        messages = [error.message for error in exc_info.value.report.errors]
+        messages = [error.message for error in exc_info.value.report.refusals]
         assert messages == [
             'worker_child_pool_max_size was removed in 0.7.0',
             'worker_pool_size was removed in 0.7.0',
@@ -225,7 +226,7 @@ class TestPostgresConfigPgBouncer:
                 4,
                 'max_size=PoolSize(connections=N)',
             ),
-            ('worker_child_pool_check', False, 'check=False'),
+            ('worker_child_pool_check', False, 'pre_ping=False'),
         ],
     )
     def test_a_removed_child_pool_field_is_refused(
@@ -268,7 +269,7 @@ class TestPostgresConfigPgBouncer:
                 },
             )
 
-        messages = [error.message for error in exc_info.value.report.errors]
+        messages = [error.message for error in exc_info.value.report.refusals]
         assert messages == [
             'worker_child_pool_min_size was removed in 0.7.0',
             'worker_child_pool_max_size was removed in 0.7.0',
@@ -945,7 +946,7 @@ def _config_errors(**fields: object) -> list[HorsiesError]:
     try:
         AppConfig.model_validate({'broker': BROKER, **fields})
     except MultipleValidationErrors as collected:
-        return list(collected.report.errors)
+        return list(collected.report.refusals)
     except HorsiesError as error:
         return [error]
     return []
@@ -1215,7 +1216,7 @@ class TestMultiErrorCollection:
                 cluster_wide_cap=-1,
                 prefetch_buffer=-5,
             )
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert len(errors) == 2
         messages = [e.message for e in errors]
         assert 'cluster_wide_cap must be positive' in messages
@@ -1253,7 +1254,7 @@ class TestMultiErrorCollection:
                 prefetch_buffer=-5,
                 default_unhandled_error_code='TimeoutError',
             )
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         assert len(errors) == 3
 
     def test_multi_error_individual_codes(self) -> None:
@@ -1266,7 +1267,7 @@ class TestMultiErrorCollection:
                 prefetch_buffer=-5,
                 default_unhandled_error_code='TimeoutError',
             )
-        errors = exc_info.value.report.errors
+        errors = exc_info.value.report.refusals
         codes = {e.code for e in errors}
         assert ErrorCode.CONFIG_INVALID_CLUSTER_CAP in codes
         assert ErrorCode.CONFIG_INVALID_PREFETCH in codes
@@ -1652,7 +1653,7 @@ class TestGetBrokerErrorHandling:
             max_overflow=30,
         )
         app = Horsies(config=AppConfig(queue_mode=QueueMode.DEFAULT, broker=config))
-        app.set_role('worker')
+        app.set_role(AppRole.WORKER)
         app.set_task_send_pool(4)
 
         with patch('horsies.core.app.PostgresBroker') as mock_broker_cls:
@@ -1665,10 +1666,10 @@ class TestGetBrokerErrorHandling:
         assert (config.pool_pre_ping, config.worker_pool_pre_ping) == (True, False)
         assert broker_config.pool_pre_ping is True
 
-    @pytest.mark.parametrize('role', ['producer', 'scheduler', 'worker'])
+    @pytest.mark.parametrize('role', list(AppRole))
     def test_without_a_task_send_pool_the_broker_opens_the_config_pool(
         self,
-        role: str,
+        role: AppRole,
     ) -> None:
         """A producer, the scheduler, and the worker process itself keep the
         pool of PostgresConfig: the worker role alone does not resize it."""

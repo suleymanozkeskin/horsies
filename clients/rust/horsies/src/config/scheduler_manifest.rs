@@ -30,7 +30,7 @@ pub(crate) enum ScheduleManifestRefused {
     #[error("schedule.schedules[{position}].task_name: task '{task_name}' is not registered")]
     TaskNotRegistered { position: usize, task_name: String },
     /// The queue of an enabled schedule is not a queue of the app (Python
-    /// `Horsies.validate_queue_name`).
+    /// `Horsies.validate_queue`).
     #[error("schedule.schedules[{position}].queue_name: {cause}")]
     QueueNotAdmitted {
         position: usize,

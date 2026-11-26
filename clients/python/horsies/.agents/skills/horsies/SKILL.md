@@ -391,7 +391,7 @@ horsies scheduler myapp.config:app       # start scheduler
 horsies check myapp.config:app [--live]  # validate before deploy
 horsies web myapp.config:app             # serve the monitoring web UI (needs horsies[web])
 horsies web --database-url URL           # monitor a database without an app module
-horsies metrics myapp.config:app --listen 0.0.0.0:9465  # serve the fleet metrics at GET /metrics
+horsies metrics myapp.config:app --metrics-listen 0.0.0.0:9465  # serve the fleet metrics at GET /metrics
 horsies get-docs                         # download the docs of the installed version
 horsies get-docs --ref main              # download the main branch docs (needed for a development version)
 horsies skills install --target DIR      # copy this skill folder to DIR/horsies/ (--force replaces a changed copy)

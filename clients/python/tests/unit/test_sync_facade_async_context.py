@@ -266,7 +266,7 @@ def _send_app(broker: MagicMock) -> MagicMock:
     app.config.payload = PayloadPolicy()
     app.are_sends_suppressed.return_value = False
     app.send_telemetry.return_value = NO_SEND_TELEMETRY
-    app.validate_queue_name.return_value = 'default'
+    app.validate_queue.return_value = 'default'
     app.get_broker.return_value = broker
     return app
 
@@ -448,7 +448,7 @@ def test_result_read_mapping_asserts_on_async_context() -> None:
 
 
 def test_live_check_inside_loop_reports_its_own_code(app: Horsies) -> None:
-    errors = _inside_loop(lambda: app.check(live=True))
+    errors = _inside_loop(lambda: app.check(live=True).refusals)
 
     assert [error.code for error in errors] == [ErrorCode.CHECK_LIVE_ASYNC_CONTEXT]
     assert 'asyncio.to_thread' in (errors[0].help_text or '')

@@ -217,7 +217,7 @@ A shared async child runs `SHARED_ASYNC` tasks of the claimed rows. It has four 
 - The writer thread writes the frames of the child. The loop queues a frame and returns, so a worker that reads slowly never stops the loop.
 - The watchdog thread watches the event loop. When the loop has not turned for 5 seconds, it names the task that holds the loop, with the source line, and reports it to the worker through the writer thread.
 
-The start steps, after the import of the app and the `on_child_process_start` hooks: the child opens an async connection pool on its loop, runs the [`on_shared_async_child_start` hooks](/horsies/workers/child-process-hooks/#shared-async-child-start-hooks), and sends its ready frame. Each task then runs on the loop: the RUNNING update, the task body, and the finalizing marker. Each write goes through the async pool, so no write of the child blocks the loop.
+The start steps, after the import of the app and the `on_child_start` hooks: the child opens an async connection pool on its loop, runs the [`on_shared_async_child_start` hooks](/horsies/workers/child-process-hooks/#shared-async-child-start-hooks), and sends its ready frame. Each task then runs on the loop: the RUNNING update, the task body, and the finalizing marker. Each write goes through the async pool, so no write of the child blocks the loop.
 
 The worker places each `SHARED_ASYNC` task on the open shared child with the fewest tasks in flight and a free seat. Each result frame names its run, and a free seat takes the next queued task at once. The runner heartbeats of every task of the child come from the worker process, as for an isolated child.
 
@@ -245,7 +245,7 @@ A shared thread child runs `SHARED_THREAD` tasks of the claimed rows. Its thread
 - The deadline thread reports each deadline at its time.
 - The writer thread writes the frames of the child.
 
-The child boots as an isolated child does: the import of the app, the `on_child_process_start` hooks, and one sync connection pool. Then it starts its threads and sends its ready frame. A refused thread fails the boot (`ThreadStartRefused`), and that cause can clear. Each task runs on its seat thread: the RUNNING update, the task body, and the finalizing marker. The seat threads share the sync pool of the child.
+The child boots as an isolated child does: the import of the app, the `on_child_start` hooks, and one sync connection pool. Then it starts its threads and sends its ready frame. A refused thread fails the boot (`ThreadStartRefused`), and that cause can clear. Each task runs on its seat thread: the RUNNING update, the task body, and the finalizing marker. The seat threads share the sync pool of the child.
 
 The worker places each `SHARED_THREAD` task on the open shared thread child with the fewest tasks in flight and a free seat. The runner heartbeats of every task of the child come from the worker process.
 
@@ -302,7 +302,7 @@ Conditions: 8 children, Linux, tasks that run pydantic, SQLAlchemy, and pandas (
 
 With `app`:
 
-- Your app's module code runs once, in the preload parent, before any child exists. Put per-child setup in an [`on_child_process_start` hook](/horsies/workers/child-process-hooks/), which still runs in every child.
+- Your app's module code runs once, in the preload parent, before any child exists. Put per-child setup in an [`on_child_start` hook](/horsies/workers/child-process-hooks/), which still runs in every child.
 - The worker refuses to start if the import leaves a Python thread or a socket. A fork copies a lock in whatever state another thread left it, and all children would share one socket.
 
 With 4 children, the whole worker at start, including its main process, is measured as summed PSS:
@@ -370,7 +370,7 @@ Each child builds its own connection pool in its core, inside the child
 process, so it inherits no database socket of the worker. Child DB connections
 remain lazy by default: the `min_size` of each child pool is 0. Each connection of a child pool is in autocommit: the RUNNING update
 of a plain task and the finalizing mark are one statement each, and one round
-trip each with the checkout `check` off (the default). The RUNNING update of a
+trip each with `pre_ping` off (the default). The RUNNING update of a
 workflow task and the start of its node run in one transaction. An isolated
 child uses one connection at a time: for the RUNNING
 update, and for the finalizing mark. Its pool is `IsolatedChildren.pool`, 0 to
@@ -431,7 +431,7 @@ A child that cannot start reports the cause of the failure to the worker, before
 | No ready report within 120 seconds (`NotReadyInTime`) | Repeats | Counts an attempt |
 | The child cannot create its event loop for `async def` tasks for a cause other than the errno values below, for example an event loop policy that raises (`TaskLoopCreateFailed`) | Repeats | Counts an attempt |
 | The OS refuses to start the child process with another errno, for example `ENOENT` or `EACCES` for the interpreter, or a forked child does not reach the worker in 5 seconds (`SpawnFailed`) | Repeats | Counts an attempt |
-| An `on_child_process_start` [hook](/horsies/workers/child-process-hooks/) fails | Repeats | Stops the worker at once |
+| An `on_child_start` [hook](/horsies/workers/child-process-hooks/) fails | Repeats | Stops the worker at once |
 | A start step of the child or of the worker (the socket pair, the spawn, the event loop) fails with `OSError` `EMFILE`, `ENFILE`, `ENOMEM` or `EAGAIN` (`ResourceShortage`) | Can clear | Takes the slot down |
 | The OS refuses a thread that the child starts at boot: the control thread, the watchdog of a start hook, a thread of the connection pool (`ThreadStartRefused`) | Can clear | Takes the slot down |
 
@@ -482,7 +482,7 @@ Run several worker processes of one app, on one machine or on several, for horiz
 
 **Don't build a client at import with `preload=ChildPreload.APP`.** The client exists before the fork, and a client with native threads, such as gRPC, can hang in a child.
 
-Build such a client in an `on_child_process_start` hook. The Python example is in [Things to Avoid](/horsies/workers/child-process-hooks/#things-to-avoid) of Child-Process Hooks.
+Build such a client in an `on_child_start` hook. The Python example is in [Things to Avoid](/horsies/workers/child-process-hooks/#things-to-avoid) of Child-Process Hooks.
 
 **Don't set a library's import-time setting in a `.env` file that your app loads.** The `library` and `app` preload modes import the libraries before your app runs, so the app reads the file too late. Set such a value in the environment of the worker process. The Python example is in [Things to Avoid](/horsies/workers/worker-profiles/#things-to-avoid) of Worker Profiles.
 

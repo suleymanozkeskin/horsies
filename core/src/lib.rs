@@ -171,7 +171,7 @@ pub use crate::worker::executor::child_host::{
     ProcessRole, RunCancelSignal, RunCancelState, RunHandle, RunHandleRefused, RunSignalRefused,
     RunSpawnRefused, ThreadRole, WorkStopCause, CHILD_MODE_ARGUMENT, CHILD_START_HOOK_BOUND,
     HANDLER_DRAIN, HANDLER_ERROR_LOG_EVERY, HANDLER_LAST_STATS_BOUND, HANDLER_QUEUE_EVENTS,
-    HANDLER_STATS_INTERVAL, HOST_LOOP_TURN_TICK, MAX_RUN_WORK, NODE_READER_STOP_BOUND,
+    HANDLER_STATISTICS_INTERVAL, HOST_LOOP_TURN_TICK, MAX_RUN_WORK, NODE_READER_STOP_BOUND,
     NODE_READ_QUEUE_SPANS,
 };
 // The fencing token of a run, which `run_fencing_token` gives.

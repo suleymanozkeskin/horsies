@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from horsies.core.brokers.postgres import PostgresBroker
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies._core import CoreConnectionError
 from horsies.core.types.result import is_err, is_ok
 from horsies.core.types.status import TaskStatus
@@ -87,7 +88,7 @@ async def unreachable_broker() -> AsyncGenerator[PostgresBroker, None]:
                 'postgresql://postgres:none@127.0.0.1:1/none'
             )
         ),
-        assume_initialized=True,
+        schema_mode=SchemaMode.ASSUME_INITIALIZED,
     )
     yield broken
     await broken.close_async()

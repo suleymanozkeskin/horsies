@@ -45,7 +45,7 @@ fn with_profiles(config: AppConfig) -> AppConfig {
 ./myapp worker --profile default
 ```
 
-- Each count, size and task limit is a plain number. `Horsies::new` checks each value against its [bounds](#bounds). It refuses the config with every refusal in one error, `HRS-218`, and each refusal names the field path of its value.
+- Each count, size and task limit is a plain number. `Horsies::new` checks each value against its [bounds](#bounds). It refuses the config with every refusal in its `ValidationReport`, each with `HRS-218`, and each refusal names the field path of its value.
 - `WorkerProfile::default()` has no children. `Horsies::new` refuses a profile with no child.
 - Do not set `preload`. Its default, `ChildPreload::NoPreload`, is the only value that a Rust worker takes: a Rust worker starts each child with `exec` of its own binary. `Horsies::new` refuses `ChildPreload::Library` and `ChildPreload::App` with `HRS-218`. See [App Config](/horsies/rust/configuration/app-config/#rules-that-only-a-rust-app-has).
 - A task runs on the children of its execution class. The routing of each class, and the classes to choose by the work of a task, are on [Choosing an Execution Mode](/horsies/workers/execution-modes/).
@@ -94,14 +94,14 @@ The rules are on [Concurrency](/horsies/workers/concurrency/#process-recycling).
 
 | Type | Fields | Default |
 |------|--------|---------|
-| `IsolatedPool` | `min_size`, `max_size: PoolSize`, `check: bool` | 0 open, at most 1 connection, no check |
-| `SharedPool` | `min_size`, `max_size: PoolSizeSetting`, `check: bool` | 0 open, a size from the seats, no check |
+| `IsolatedPool` | `min_size`, `max_size: PoolSize`, `pre_ping: bool` | 0 open, at most 1 connection, no check |
+| `SharedPool` | `min_size`, `max_size: PoolSizeSetting`, `pre_ping: bool` | 0 open, a size from the seats, no check |
 | `ParentPool` | `max_size: PoolSizeSetting` | A size from the seats |
 | `PoolSize` | `connections`. `PoolSize::new(connections)` | `task_send_pool`: 2 connections |
 
 - `PoolSizeSetting` is `PoolSize { connections }` or `PoolSizeFromSeats {}`.
 - `ExecutorThreadsSetting` is `ExecutorThreads { threads }` or `ExecutorThreadsFromSeats {}` (the default): the threads of the default executor of a shared async child.
-- `check: true` checks each connection when a write takes it from the pool.
+- `pre_ping: true` checks each connection when a write takes it from the pool.
 - `task_send_pool` is the pool that a send from task code opens in its child.
 
 ### Claim Limits and Drain
@@ -163,7 +163,7 @@ To give task bodies a value that each child builds, use `provide` in `main`: eve
 
 | Item | Does |
 |------|------|
-| `WorkerStart::profile(name)` | A worker of the profile `name`, whose children log at `INFO` |
+| `WorkerRunOptions::profile(name)` | A worker of the profile `name`, whose children log at `INFO` |
 | `.with_log_level(WorkerLogLevel)` | The log level of the children: `Debug`, `Info`, `Warning`, `Error`, `Critical` |
 | `app.run_worker(start).await` | `Result<WorkerStopped, WorkerRunError>`. Runs until `SIGTERM` or `SIGINT`, then drains |
 
@@ -171,12 +171,12 @@ To give task bodies a value that each child builds, use `provide` in `main`: eve
 
 | `WorkerRunError` | When |
 |------------------|------|
-| `CheckRefused(CheckReport)` | The check refused the app. Nothing started |
+| `CheckRefused(ValidationReport)` | The check refused the app. Nothing started |
 | `ManifestBound { path, min, max }` | A config value is outside the bound of its worker manifest field. Nothing started |
 | `ChildCommandRefused { cause }` | The command that starts this binary in child mode cannot be built. Nothing started |
 | `ProfileRefused { refusals }` | The profile set fails its checks, or the start names a profile that the app does not define. Nothing started |
 | `ConnectionSettingsRefused { cause }` | The connection settings fail the broker config check. Nothing started |
-| `RuntimeUnavailable(RuntimeStartFailed)` | The operating system refused the threads of the core's process runtime. Nothing started; a later run tries the start again. In a fork, `run_worker` panics: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals) |
+| `RuntimeStartFailed(RuntimeStartFailed)` | The operating system refused the threads of the core's process runtime. Nothing started; a later run tries the start again. In a fork, `run_worker` panics: see [Process-State Refusals](/horsies/tasks/error-types/#process-state-refusals) |
 | `BootFailed { cause, message }` | The start failed; the worker claimed nothing. `cause` is a `WorkerBootCause` |
 | `Failed { cause, message }` | The worker was ready, then failed; its running tasks drained first. `cause` is a `WorkerFailCause` |
 

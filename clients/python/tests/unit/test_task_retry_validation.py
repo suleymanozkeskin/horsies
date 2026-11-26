@@ -131,7 +131,7 @@ class TestTaskDecoratorValidation:
                 return Ok('ok')
 
         assert exc_info.value.code == ErrorCode.TASK_INVALID_OPTIONS
-        assert 'bad_option' not in app.list_tasks()
+        assert 'bad_option' not in app.registered_task_names()
 
     def test_default_unhandled_error_code_exception_name_rejected(self) -> None:
         """Exception class name as default_unhandled_error_code is rejected."""
@@ -234,7 +234,7 @@ class TestCheckRuntimePolicyValidation:
 
         setattr(app.tasks['malformed_task_options'], 'task_options_json', '{')
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -256,7 +256,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps(['not-an-object']),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -280,7 +280,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': 'bad-shape'}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -310,7 +310,7 @@ class TestCheckRuntimePolicyValidation:
             }),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -332,7 +332,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': 'NOT_A_LIST'}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -354,7 +354,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': []}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -378,7 +378,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': ['RETRY_ME', 123]}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -400,7 +400,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': ['TimeoutError']}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -422,7 +422,7 @@ class TestCheckRuntimePolicyValidation:
             json.dumps({'retry_policy': {'auto_retry_for': ['lower_case']}}),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -454,7 +454,7 @@ class TestCheckRuntimePolicyValidation:
             }),
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.TASK_INVALID_OPTIONS
@@ -470,7 +470,7 @@ class TestCheckRuntimePolicyValidation:
         # Bypass Pydantic frozen guard to simulate corruption
         object.__setattr__(app.config, 'exception_mapper', 'not_a_mapping')
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
@@ -486,7 +486,7 @@ class TestCheckRuntimePolicyValidation:
             app.config, 'default_unhandled_error_code', 'TimeoutError',
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER
@@ -510,7 +510,7 @@ class TestCheckRuntimePolicyValidation:
             'TimeoutError',
         )
 
-        errors = app.check(live=False)
+        errors = app.check(live=False).refusals
 
         assert any(
             e.code == ErrorCode.CONFIG_INVALID_EXCEPTION_MAPPER

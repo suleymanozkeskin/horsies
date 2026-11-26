@@ -155,7 +155,7 @@ changes: a database that holds another checksum for a version is refused. `horsi
 version 1000 only so that a 0.x process that runs migrations stops with "database schema is newer than this build
 supports".
 
-A broker with `run_schema_migrations=False` runs no schema statement. The monitoring tool never runs one; it
+A broker of `SchemaMode.OBSERVE_ONLY` or `SchemaMode.ASSUME_INITIALIZED` runs no schema statement. The monitoring tool never runs one; it
 reads the highest successful version in `horsies_migrations`.
 
 The schema has no database defaults: every insert names every value.

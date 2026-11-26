@@ -346,7 +346,7 @@ def main(argv: Sequence[str]) -> NoReturn:
             run(ctrl, worker_pid, _prepare_library, production_runners())
         case ChildPreload.APP:
             run(ctrl, worker_pid, _prepare_app, production_runners())
-        case ChildPreload.NONE:
+        case ChildPreload.NO_PRELOAD:
             sys.stderr.write('preload_main: mode none starts no preload parent\n')
             sys.exit(BAD_ARGUMENTS_EXIT_CODE)
         case _ as unreachable:

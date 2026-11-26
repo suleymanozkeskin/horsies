@@ -7,8 +7,8 @@ meets the core's input (the manifest generated from horsies-core). It maps
 settings) follow the rules of `clients/python/horsies/core/manifest_database.py`, which the
 worker manifest builder shares. The two inputs that `PostgresConfig` does
 not hold, the schema mode and the idempotency reservation window, are
-parameters: the caller decides them. `schema_mode_of` gives the schema mode
-of the broker flags `run_schema_migrations` and `assume_initialized`.
+parameters: the caller decides them. `wire_schema_mode` gives the manifest
+text of a `SchemaMode`.
 `install_coverage_of` gives the core the coverage request of the handle's
 schema install from the app's `RetentionConfig`.
 
@@ -52,6 +52,7 @@ from horsies.core.manifest_database import (
 from horsies._core import InstallCoverage
 from horsies.core.models.broker import PostgresConfig
 from horsies.core.models.retention import RetentionConfig
+from horsies.core.models.schema_mode import SchemaMode as PublicSchemaMode
 
 _ONE_MICROSECOND: Final = timedelta(microseconds=1)
 
@@ -81,24 +82,15 @@ def to_producer_manifest(
     )
 
 
-def schema_mode_of(
-    *,
-    run_schema_migrations: bool,
-    assume_initialized: bool,
-) -> SchemaMode:
-    """The schema mode of the `PostgresBroker` flags of the same names.
-
-    A broker built with `assume_initialized=True` never runs its schema step
-    and has no listener, whatever `run_schema_migrations` says
-    (`PostgresBroker.__init__`, `_build_resources`). Pure.
-    """
-    match (assume_initialized, run_schema_migrations):
-        case (True, _):
-            return 'ASSUME_INITIALIZED'
-        case (False, True):
+def wire_schema_mode(mode: PublicSchemaMode) -> SchemaMode:
+    """The manifest text of the schema mode `mode`. Pure."""
+    match mode:
+        case PublicSchemaMode.MIGRATE_AND_VALIDATE:
             return 'MIGRATE_AND_VALIDATE'
-        case (False, False):
+        case PublicSchemaMode.OBSERVE_ONLY:
             return 'OBSERVE_ONLY'
+        case PublicSchemaMode.ASSUME_INITIALIZED:
+            return 'ASSUME_INITIALIZED'
 
 
 def install_coverage_of(retention: RetentionConfig) -> InstallCoverage:

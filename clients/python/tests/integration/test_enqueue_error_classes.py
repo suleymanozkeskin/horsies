@@ -54,6 +54,7 @@ from horsies.core.codec.json_io import SerializationError
 from horsies.core.history.periods import RetentionClassKey
 from horsies.core.models.app import AppConfig
 from horsies.core.models.broker import PostgresConfig
+from horsies.core.models.schema_mode import SchemaMode
 from horsies.core.models.queues import QueueMode
 from horsies.core.models.task_send_types import (
     TaskSendAsyncContext,
@@ -81,7 +82,7 @@ async def unreachable_broker() -> AsyncGenerator[PostgresBroker, None]:
     listens on: the send's statement fails at its connect."""
     broken = PostgresBroker(
         PostgresConfig(database_url=SecretStr(UNREACHABLE_URL)),
-        assume_initialized=True,
+        schema_mode=SchemaMode.ASSUME_INITIALIZED,
     )
     yield broken
     await broken.close_async()
@@ -177,7 +178,7 @@ async def test_a_rule_that_refused_a_value_that_reads_is_invalid_input_with_no_c
     assert error.retryable is False
     assert error.message == (
         'enqueue contract violation: sent_at is in the future without enqueued_at or '
-        'enqueue_delay_seconds; sent_at is a call-site timestamp'
+        'delay_seconds; sent_at is a call-site timestamp'
     )
     assert type(error.exception) is NoCause
 

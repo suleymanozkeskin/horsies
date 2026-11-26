@@ -83,7 +83,7 @@ fn each_profile_of_the_config_is_its_manifest_profile() {
         "count": 1,
         "seats": 4,
         "recycle": {"after_per_seat": {"kind": "NO_LIMIT"}, "above": {"kind": "NO_LIMIT"}},
-        "pool": {"min_size": 0, "max_size": {"kind": "FROM_SEATS"}, "check": true},
+        "pool": {"min_size": 0, "max_size": {"kind": "FROM_SEATS"}, "pre_ping": true},
         "task_send_pool": 1
     });
     other["pool"] = json!({"max_size": {"kind": "CONNECTIONS", "connections": 5}});

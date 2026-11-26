@@ -434,7 +434,7 @@ async fn an_unreadable_limit_is_one_error_and_no_profile_is_compared() {
 
 /// A Python handle of an unreachable server. In PgBouncer transaction mode
 /// the session URL is a separate, also unreachable, server.
-fn unreachable_handle(pgbouncer_transaction_mode: bool) -> CoreHandle {
+fn unreachable_handle(pgbouncer_transaction_mode: bool) -> CoreConnection {
     let session_database = match pgbouncer_transaction_mode {
         true => json!({"kind": "SEPARATE", "url": "postgresql://postgres:none@127.0.0.1:2/none"}),
         false => json!({"kind": "SAME_AS_DATABASE_URL"}),
@@ -462,7 +462,7 @@ fn unreachable_handle(pgbouncer_transaction_mode: bool) -> CoreHandle {
     });
     let manifest =
         parse_producer_manifest(&manifest.to_string()).expect("the manifest is complete");
-    CoreHandle::new(manifest, PoolProfile::Producer, ClientFamily::Python)
+    CoreConnection::new(manifest, PoolProfile::Producer, ClientFamily::Python)
 }
 
 /// The rule of [`check_worker_connections`] on a handle: with no profiles,

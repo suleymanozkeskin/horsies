@@ -348,7 +348,7 @@ class TestDeclarationsThatAreRefused:
         app = _app()
         app.discover_tasks([str(module)])
 
-        errors = app.check()
+        errors = app.check().refusals
 
         assert [error.code for error in errors] == [
             ErrorCode.TASK_SHARED_ASYNC_REQUIRES_ASYNC_DEF,

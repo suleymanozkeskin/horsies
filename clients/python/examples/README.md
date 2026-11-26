@@ -321,7 +321,7 @@ will pause, because the draw is a hash of the return id.
 
 - `cluster_wide_cap` — mutually exclusive with a non-zero `prefetch_buffer`,
   and the showcase demonstrates exact per-queue caps instead.
-- `on_child_process_start` — there is no per-child engine to rebind here.
+- `on_child_start` — there is no per-child engine to rebind here.
 - `catch_up_missed=True` — restarting a demo would replay a backlog of noise.
 
 ## Configuration on show

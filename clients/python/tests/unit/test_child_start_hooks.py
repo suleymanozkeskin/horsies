@@ -1,5 +1,5 @@
 # pyright: reportPrivateUsage=false
-"""Unit tests for @app.on_child_process_start registration and execution.
+"""Unit tests for @app.on_child_start registration and execution.
 
 Execution tests patch os._exit (the fail-closed terminal path) with a
 recorder, since the real call would kill the pytest process.
@@ -47,11 +47,11 @@ class TestRegistration:
     def test_decorator_returns_function_and_registers(self) -> None:
         app = _make_app()
 
-        @app.on_child_process_start
+        @app.on_child_start
         def reset_engines() -> None:
             pass
 
-        assert app.get_child_process_start_hooks() == [reset_engines]
+        assert app.get_child_start_hooks() == [reset_engines]
 
     def test_duplicate_registration_deduped_by_identity(self) -> None:
         app = _make_app()
@@ -59,10 +59,10 @@ class TestRegistration:
         def reset_engines() -> None:
             pass
 
-        app.on_child_process_start(reset_engines)
-        app.on_child_process_start(reset_engines)
+        app.on_child_start(reset_engines)
+        app.on_child_start(reset_engines)
 
-        assert app.get_child_process_start_hooks() == [reset_engines]
+        assert app.get_child_start_hooks() == [reset_engines]
 
     def test_registration_order_preserved(self) -> None:
         app = _make_app()
@@ -73,10 +73,10 @@ class TestRegistration:
         def second() -> None:
             pass
 
-        app.on_child_process_start(first)
-        app.on_child_process_start(second)
+        app.on_child_start(first)
+        app.on_child_start(second)
 
-        assert app.get_child_process_start_hooks() == [first, second]
+        assert app.get_child_start_hooks() == [first, second]
 
     def test_async_function_rejected(self) -> None:
         app = _make_app()
@@ -85,15 +85,15 @@ class TestRegistration:
             pass
 
         with pytest.raises(ConfigurationError) as exc_info:
-            app.on_child_process_start(async_hook)  # type: ignore[arg-type]
+            app.on_child_start(async_hook)  # type: ignore[arg-type]
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
-        assert app.get_child_process_start_hooks() == []
+        assert app.get_child_start_hooks() == []
 
     def test_non_callable_rejected(self) -> None:
         app = _make_app()
 
         with pytest.raises(ConfigurationError) as exc_info:
-            app.on_child_process_start('not a function')  # type: ignore[arg-type]
+            app.on_child_start('not a function')  # type: ignore[arg-type]
         assert exc_info.value.code == ErrorCode.CONFIG_INVALID_CHILD_HOOK
 
     def test_snapshot_is_a_copy(self) -> None:
@@ -102,11 +102,11 @@ class TestRegistration:
         def hook() -> None:
             pass
 
-        app.on_child_process_start(hook)
-        snapshot = app.get_child_process_start_hooks()
+        app.on_child_start(hook)
+        snapshot = app.get_child_start_hooks()
         snapshot.clear()
 
-        assert app.get_child_process_start_hooks() == [hook]
+        assert app.get_child_start_hooks() == [hook]
 
 
 class _ExitCalled(Exception):
@@ -122,8 +122,8 @@ class TestRunChildStartHooks:
         app = _make_app()
         calls: list[str] = []
 
-        app.on_child_process_start(lambda: calls.append('first'))
-        app.on_child_process_start(lambda: calls.append('second'))
+        app.on_child_start(lambda: calls.append('first'))
+        app.on_child_start(lambda: calls.append('second'))
 
         _run_child_start_hooks(app)
 
@@ -146,8 +146,8 @@ class TestRunChildStartHooks:
         def boom() -> None:
             raise RuntimeError('pool rebind failed')
 
-        app.on_child_process_start(boom)
-        app.on_child_process_start(lambda: calls.append('after'))
+        app.on_child_start(boom)
+        app.on_child_start(lambda: calls.append('after'))
 
         with pytest.raises(_ExitCalled) as exc_info:
             _run_child_start_hooks(app)
@@ -174,7 +174,7 @@ class TestRunChildStartHooks:
             # test is not timing-sensitive; cap it to keep failures bounded.
             exit_seen.wait(timeout=5.0)
 
-        app.on_child_process_start(hung_hook)
+        app.on_child_start(hung_hook)
         _run_child_start_hooks(app)
 
         assert exit_codes == [CHILD_HOOK_FAILURE_EXIT_CODE]
@@ -192,7 +192,7 @@ class TestRunChildStartHooks:
         monkeypatch.setattr(child_runner.os, '_exit', recording_exit)
         monkeypatch.setattr(child_runner, 'CHILD_HOOK_TIMEOUT_SECONDS', 0.2)
 
-        app.on_child_process_start(lambda: None)
+        app.on_child_start(lambda: None)
         _run_child_start_hooks(app)
 
         # Give a cancelled-timer misfire a moment to surface before asserting.
@@ -208,7 +208,7 @@ class TestRunChildStartHooks:
         without its bound."""
         app = _make_app()
         calls: list[str] = []
-        app.on_child_process_start(lambda: calls.append('ran'))
+        app.on_child_start(lambda: calls.append('ran'))
 
         def refuse(_thread: threading.Thread) -> None:
             raise RuntimeError("can't start new thread")
@@ -327,7 +327,7 @@ class TestSharedAsyncHookRegistration:
             pass
 
         app.on_shared_async_child_start(open_client)
-        assert app.get_child_process_start_hooks() == []
+        assert app.get_child_start_hooks() == []
 
 
 class TestRunSharedAsyncHooks:

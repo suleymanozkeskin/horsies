@@ -346,7 +346,7 @@ fn isolated_manifest(setting: &IsolatedSetting) -> wire::Isolated {
             pool: wire::IsolatedPoolManifest {
                 min_size: wire::ChildPoolMinSize(children.pool.min_size),
                 max_size: wire::ChildPoolConnections(children.pool.max_size.connections),
-                check: children.pool.check,
+                pre_ping: children.pool.pre_ping,
             },
             task_send_pool: wire::ChildPoolConnections(children.task_send_pool.connections),
         },
@@ -401,7 +401,7 @@ fn shared_pool(pool: &SharedPool) -> wire::SharedPoolManifest {
     wire::SharedPoolManifest {
         min_size: wire::ChildPoolMinSize(pool.min_size),
         max_size: pool_max_size(pool.max_size),
-        check: pool.check,
+        pre_ping: pool.pre_ping,
     }
 }
 

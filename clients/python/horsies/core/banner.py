@@ -234,7 +234,7 @@ def print_banner(
 
     # [tasks] section
     if show_tasks:
-        task_names = app.list_tasks()
+        task_names = app.registered_task_names()
         tasks_header = _color('tasks', Colors.BRIGHT_CYAN, Colors.BOLD)
         lines.append(f'[{tasks_header}] ({len(task_names)} registered)')
         for task_name in sorted(task_names):

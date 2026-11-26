@@ -348,7 +348,7 @@ fn the_checked_profile_keeps_every_value() {
             pool: IsolatedPool {
                 min_size: 1,
                 max_size: PoolSize::new(3),
-                check: true,
+                pre_ping: true,
             },
             task_send_pool: PoolSize::new(4),
             ..IsolatedChildren::new(2)
@@ -391,7 +391,7 @@ fn the_checked_profile_keeps_every_value() {
         ),
         (1, 3),
     );
-    assert!(isolated.pool.check);
+    assert!(isolated.pool.pre_ping);
     assert_eq!(isolated.task_send_pool.connections.get(), 4);
     let checked::SharedAsyncSetting::SharedAsyncChildren(shared_async) = result.shared_async else {
         panic!("the shared async children are kept");
@@ -473,7 +473,7 @@ fn the_json_form_is_the_form_of_the_checked_profile() {
         "pool": {"max_size": {"kind": "pool_size", "connections": 12}},
         "claim": {"per_queue_per_pass": {"kind": "task_limit", "tasks": 2}},
         "drain_timeout": {"secs": 2, "nanos": 500_000_000},
-        "preload": "none",
+        "preload": "no_preload",
         "parent_cpu": "OWN_CORE",
     });
     let profile: WorkerProfile =

@@ -12,15 +12,15 @@ tags: [rust, configuration, AppConfig, Horsies, SchemaMode]
 ## Build the App
 
 ```rust
-use horsies::{AppConfig, Horsies, HorsiesError};
+use horsies::{AppConfig, Horsies, ValidationReport};
 
-fn build_app() -> Result<Horsies, HorsiesError> {
+fn build_app() -> Result<Horsies, ValidationReport> {
     let config = AppConfig::for_database_url("postgresql://app:secret@db.example.com:5432/horsies");
     Horsies::new(config)
 }
 ```
 
-`Horsies::new` does no I/O. It validates the config, builds the core's producer manifest, and returns an app whose handle connects at the first operation (a send, a read). A config that does not validate is refused with every refusal of the validation in one `HorsiesError`.
+`Horsies::new` does no I/O. It validates the config, builds the core's producer manifest, and returns an app whose handle connects at the first operation (a send, a read). A config that does not validate is refused with a `ValidationReport` of the phase `config`: `refusals()` holds every refusal of the validation. `ValidationReport` converts into one `HorsiesError`, so `?` works in a function that returns `HorsiesError`.
 
 ## Schema Modes
 
@@ -29,7 +29,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 | `Horsies::new(config)` | `SchemaMode::MigrateAndValidate` | Installs the schema at the first operation, or checks it |
 | `Horsies::with_schema_mode(config, SchemaMode::ObserveOnly)` | `ObserveOnly` | Runs no schema DDL. For monitoring tools |
 | `Horsies::with_schema_mode(config, SchemaMode::AssumeInitialized)` | `AssumeInitialized` | Runs no schema DDL and uses no listener |
-| `Horsies::with_handle(config, handle)` | the mode of `handle` | Uses an `Arc<CoreHandle>` that another app or the caller shares. The connection settings are those of `handle` |
+| `Horsies::with_core_connection(config, connection)` | the mode of `connection` | Uses an `Arc<CoreConnection>` that another app or the caller shares. The connection settings are those of `connection` |
 
 See [Broker Config](/horsies/configuration/broker-config/#schema-initialization) for the install.
 
@@ -55,9 +55,9 @@ See [Broker Config](/horsies/configuration/broker-config/#schema-initialization)
 | `resend_on_transient_err` | `bool` | [Sending Tasks](/horsies/rust/tasks/sending-tasks/#resend-on-transient-errors) |
 
 ```rust
-use horsies::{AppConfig, CustomQueueConfig, Horsies, HorsiesError, QueueMode};
+use horsies::{AppConfig, CustomQueueConfig, Horsies, QueueMode, ValidationReport};
 
-fn build_app(database_url: &str) -> Result<Horsies, HorsiesError> {
+fn build_app(database_url: &str) -> Result<Horsies, ValidationReport> {
     let config = AppConfig {
         queue_mode: QueueMode::Custom,
         custom_queues: Some(vec![
@@ -98,9 +98,9 @@ The other fields have the names and the meanings of the [Broker Config](/horsies
 Raise both values for a producer that sends at a high rate:
 
 ```rust
-use horsies::{AppConfig, Horsies, HorsiesError, PostgresConfig};
+use horsies::{AppConfig, Horsies, PostgresConfig, ValidationReport};
 
-fn build_high_traffic_app(database_url: &str) -> Result<Horsies, HorsiesError> {
+fn build_high_traffic_app(database_url: &str) -> Result<Horsies, ValidationReport> {
     let config = AppConfig {
         broker: PostgresConfig {
             pool_size: 20,
@@ -127,7 +127,7 @@ fn build_high_traffic_app(database_url: &str) -> Result<Horsies, HorsiesError> {
 | Method | Returns |
 |--------|---------|
 | `get_valid_queue_names()` | `Vec<String>`: `default` in `Default` mode, the configured queues in `Custom` mode |
-| `validate_queue(queue_name)` | `Result<(), HorsiesError>`: refuses with `HRS-103` (`TaskInvalidQueue`) and the valid names |
+| `validate_queue(queue)` | `Result<(), HorsiesError>`: refuses with `HRS-103` (`TaskInvalidQueue`) and the valid names |
 | `effective_priority(queue_name, task_priority)` | `u32`: `task_priority` when given, else the queue's configured priority, else 100 |
 
 A task registration follows the queue rules of the Python client:

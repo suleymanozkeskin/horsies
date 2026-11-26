@@ -107,14 +107,14 @@ def _with_hooks(app: Horsies, app_telemetry: AppTelemetry) -> Horsies:
         case AppTelemetry.NONE:
             raise AssertionError('an app with no telemetry is not built here')
         case AppTelemetry.TRACING:
-            _ = app.on_child_process_start(install_discarding_providers)
+            _ = app.on_child_start(install_discarding_providers)
             return app
         case AppTelemetry.TRACING_AND_HANDLER:
-            _ = app.on_child_process_start(install_discarding_providers)
+            _ = app.on_child_start(install_discarding_providers)
             _ = app.on_event(AttemptEnded)(perf_attempt_ended)
             return app
         case AppTelemetry.TRACING_HANDLER_AND_WORKER_ENDED_SPANS:
-            _ = app.on_child_process_start(install_discarding_providers)
+            _ = app.on_child_start(install_discarding_providers)
             _ = app.on_event(AttemptEnded)(perf_attempt_ended)
             _ = app.on_handler_child_start(install_discarding_providers)
             return app

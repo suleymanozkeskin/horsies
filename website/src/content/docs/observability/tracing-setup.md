@@ -71,10 +71,10 @@ def place_order(order_id: str) -> None:
 
 ### Set the SDK of Each Worker Child
 
-The worker process runs no task body. Each attempt span is made in a worker child, so set the providers in each child with `@app.on_child_process_start`. The hook runs once in every worker child, after the fork:
+The worker process runs no task body. Each attempt span is made in a worker child, so set the providers in each child with `@app.on_child_start`. The hook runs once in every worker child, after the fork:
 
 ```python
-@app.on_child_process_start
+@app.on_child_start
 def set_up_child_opentelemetry() -> None:
     set_up_opentelemetry()
 ```
@@ -115,7 +115,7 @@ The histogram takes the bucket bounds of the [Metric Reference](/horsies/observa
 
 ## Things to Avoid
 
-**Don't set the providers only in the module of the app.** The worker children need them too, and `@app.on_child_process_start` is the hook that runs in each child. With `preload=ChildPreload.APP` on Linux, module code runs once, in the preload process, before the fork. See [Child-Process Hooks](/horsies/workers/child-process-hooks/).
+**Don't set the providers only in the module of the app.** The worker children need them too, and `@app.on_child_start` is the hook that runs in each child. With `preload=ChildPreload.APP` on Linux, module code runs once, in the preload process, before the fork. See [Child-Process Hooks](/horsies/workers/child-process-hooks/).
 
 **Don't use `OtelTracing()` without an SDK and expect spans.** With the API only, every span is a no-op span, and a send stores no carrier.
 

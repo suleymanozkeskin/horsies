@@ -128,14 +128,14 @@ Soft-cap semantics and fairness trade-offs are covered in
 Three settings can check a pooled connection at checkout, at one round trip
 each. The two pre-ping settings check a connection only when it waited in the
 pool for more than 1 s. A connection checked in more recently is used with no
-check, so a burst of statements pays no checks. The `check` of a child pool
+check, so a burst of statements pays no checks. The `pre_ping` of a child pool
 runs at every checkout.
 
 | Setting | Default | Scope |
 |---------|---------|-------|
 | `worker_pool_pre_ping` | `False` | the engine of the worker process |
 | `pool_pre_ping` | `True` | every other engine: producers, the web UI, task sends from a child |
-| `check` of `IsolatedPool` and `SharedPool` | `False` | the pool of each child, per child kind in the worker profile |
+| `pre_ping` of `IsolatedPool` and `SharedPool` | `False` | the pool of each child, per child kind in the worker profile |
 
 The worker and its children send most writes as one statement in
 autocommit, so a check doubles their round trips. At the defaults:
@@ -169,13 +169,13 @@ statement instead of a transparent reconnect:
 
 Turn the checks on for workers that sit idle for long stretches behind
 NAT or load balancers that kill idle connections, where stale connections
-occur: `worker_pool_pre_ping` for the worker process, and the `check` of the
+occur: `worker_pool_pre_ping` for the worker process, and the `pre_ping` of the
 pool of each child kind. The Python example is in
 [Check Connections at Checkout](/horsies/configuration/broker-connections/#check-connections-at-checkout).
 
 ## TCP Keepalives for Idle Pooled Connections
 
-`pool_pre_ping`, `worker_pool_pre_ping` and the `check` of each child pool are
+`pool_pre_ping`, `worker_pool_pre_ping` and the `pre_ping` of each child pool are
 checkout-time guards: they detect a dead connection *before* a query runs, not
 one that dies in-flight. The pre-ping settings check only a connection that
 waited in the pool for more than 1 s, so a connection that dies within 1 s of

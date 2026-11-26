@@ -115,7 +115,7 @@ match process_data.send(data={"key": "value"}):
 ## 4. Run the Worker
 
 ```bash
-horsies worker instance:app --profile default --loglevel=INFO
+horsies worker instance:app --profile default --log-level=INFO
 ```
 
 The worker starts the 8 children of the `default` profile, connects to PostgreSQL, subscribes to notifications, claims tasks, executes them, and stores results.

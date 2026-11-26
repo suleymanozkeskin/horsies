@@ -21,7 +21,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use horsies_core::core::codec::{check_json_text, from_json_str, object_members};
 use horsies_core::core::task::StoredErrorRefused;
-use horsies_core::handle::CoreHandle;
+use horsies_core::handle::CoreConnection;
 use horsies_core::JsonText;
 use horsies_core::{
     process_role, wait_inside_task_message, BuiltInTaskCode, HandleErrorCode, HandleOperation,
@@ -180,7 +180,7 @@ pub struct WorkflowNodeInfo {
 /// value of a call. Nothing ran.
 pub struct WorkflowHandle<T> {
     workflow_id: Uuid,
-    reads: Arc<CoreHandle>,
+    reads: Arc<CoreConnection>,
     workflows: Arc<WorkflowRegistry>,
     types: PhantomData<fn() -> T>,
 }
@@ -210,7 +210,7 @@ impl<T> WorkflowHandle<T> {
     /// the owed children from `workflows`.
     pub(crate) fn new(
         workflow_id: Uuid,
-        reads: Arc<CoreHandle>,
+        reads: Arc<CoreConnection>,
         workflows: Arc<WorkflowRegistry>,
     ) -> Self {
         Self {

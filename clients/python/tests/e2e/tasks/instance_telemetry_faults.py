@@ -199,9 +199,9 @@ match FAULT:
     case TelemetryFault.HANDLER_BLOCKS:
         _ = app.on_event(AttemptEnded)(block_handler)
     case TelemetryFault.EXPORTER_HANGS:
-        _ = app.on_child_process_start(install_hanging_exporter)
+        _ = app.on_child_start(install_hanging_exporter)
     case TelemetryFault.COLLECTOR_ABSENT:
-        _ = app.on_child_process_start(install_absent_collector_exporter)
+        _ = app.on_child_start(install_absent_collector_exporter)
     case _ as unreachable:
         assert_never(unreachable)
 

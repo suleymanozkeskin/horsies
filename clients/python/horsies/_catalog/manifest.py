@@ -81,10 +81,8 @@ MANIFEST_VERSION_MAX: Final = 1
 type SchemaMode = Literal['MIGRATE_AND_VALIDATE', 'OBSERVE_ONLY', 'ASSUME_INITIALIZED']
 """Schema behaviour of a handle.
 
-The Python broker flags map to it: `assume_initialized=True` is
-`ASSUME_INITIALIZED`, whatever `run_schema_migrations` says; otherwise
-`run_schema_migrations=True` is `MIGRATE_AND_VALIDATE` and `False` is
-`OBSERVE_ONLY`.
+Python's `SchemaMode` has the same three members, with the manifest text
+as their values.
 
 `MIGRATE_AND_VALIDATE`: The first operation applies the migrations and checks the schema version.
 

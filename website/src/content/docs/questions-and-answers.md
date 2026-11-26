@@ -138,7 +138,7 @@ A task with `Execution.SHARED_ASYNC` or `Execution.SHARED_THREAD` shares its chi
 
 ## How much memory does a worker use?
 
-It depends on your app. On Linux, a preload parent imports code once and forks each child, so children share those pages. With 4 children, the whole worker at start measured 159 MiB on a small app and 342 MiB on an app with pandas, against 290 MiB and 445 MiB with `preload=ChildPreload.NONE`. With `preload=ChildPreload.APP`, the pandas app measured 212 MiB. See [Preload Parent](../workers/worker-architecture#preload-parent).
+It depends on your app. On Linux, a preload parent imports code once and forks each child, so children share those pages. With 4 children, the whole worker at start measured 159 MiB on a small app and 342 MiB on an app with pandas, against 290 MiB and 445 MiB with `preload=ChildPreload.NO_PRELOAD`. With `preload=ChildPreload.APP`, the pandas app measured 212 MiB. See [Preload Parent](../workers/worker-architecture#preload-parent).
 
 ## Throughput expectations and comparisons
 

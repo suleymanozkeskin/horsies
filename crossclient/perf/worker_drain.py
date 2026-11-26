@@ -87,8 +87,8 @@ DRAIN_COUNT_INTERVAL: Final = timedelta(milliseconds=100)
 WORKER_STOP_TIMEOUT: Final = timedelta(seconds=60)
 """How long a drained worker gets to exit after SIGTERM."""
 
-WORKER_LOGLEVEL: Final = 'WARNING'
-"""The ``--loglevel`` of the worker."""
+WORKER_LOG_LEVEL: Final = 'WARNING'
+"""The ``--log-level`` of the worker."""
 
 CHECKOUT_ROOT: Final = Path(__file__).resolve().parents[2]
 """The repository root: the working directory of the worker and its
@@ -249,7 +249,7 @@ def start_drain_worker(
         script=cli_script(),
         app_locator=telemetry.app_locator(),
         profile=DRAIN_PROFILE_NAME,
-        loglevel=WORKER_LOGLEVEL,
+        log_level=WORKER_LOG_LEVEL,
         extra_arguments=telemetry.worker_arguments(),
         environment={
             DRAIN_DSN_VARIABLE: dsn,
