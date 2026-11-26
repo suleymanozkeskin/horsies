@@ -14,6 +14,9 @@ export interface StateKey<T> {
   readonly [stateValueType]?: (value: T) => T;
 }
 
+/** A key as the store holds it: its identity and its name, with no value type. Every `StateKey<T>` is one. */
+export type StateKeyIdentity = { readonly kind: "stateKey"; readonly name: string };
+
 /** A new key named `name`. Frozen. */
 export function stateKeyNamed<T>(name: string): StateKey<T> {
   return Object.freeze({ kind: "stateKey", name });
@@ -27,14 +30,17 @@ export class StateValues {
   readonly #slots = new Map<object, StateSlot>();
 
   /** The values of the providers with the keys `keys`: none built yet. */
-  constructor(keys: readonly object[]) {
+  constructor(keys: readonly StateKeyIdentity[]) {
     for (const key of keys) {
       this.#slots.set(key, { kind: "notBuilt" });
     }
   }
 
-  /** Keep the value that the provider of `key` built. A key of another app is a defect: `ClientDefect`. */
-  keep<T>(key: StateKey<T>, value: T): void {
+  /**
+   * Keep the value that the provider of `key` built. The provider's factory gave it, so it is of the key's value
+   * type. A key of another app is a defect: `ClientDefect`.
+   */
+  keep<T>(key: StateKeyIdentity, value: T): void {
     if (!this.#slots.has(key)) {
       throw new ClientDefect({ subject: "provide", rule: `the state key ${key.name} is not a key of this app` });
     }

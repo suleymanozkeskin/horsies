@@ -58,16 +58,24 @@ function recordingTable(code: CommandExitCode): CommandTable & { readonly calls:
 function fakeDeps(facts: ProcessFacts, table: CommandTable, backlog: readonly LogBacklog[] = ["empty"]): CliDeps & {
   readonly errors: string[];
   readonly pauses: number[];
+  readonly children: (readonly string[])[];
 } {
   const errors: string[] = [];
   const pauses: number[] = [];
+  const children: (readonly string[])[] = [];
   let reads = 0;
 
   return {
     errors,
     pauses,
+    children,
     facts,
     table,
+    child: async (_app, args) => {
+      children.push(args);
+
+      throw new Ended(0);
+    },
     output: { writeOut: () => undefined, writeError: (line) => errors.push(line) },
     logBacklog: () => {
       reads += 1;
@@ -111,6 +119,19 @@ describe("the mode of a process", () => {
     assert.deepEqual(processMode(main("check")), { kind: "command", command: "check", args: [] });
   });
 
+  test("the child flag with a descriptor and a pid is child mode, with every argument after the entry", () => {
+    assert.deepEqual(processMode(main("--horsies-child", "3", "4242")), {
+      kind: "child",
+      args: ["--horsies-child", "3", "4242"],
+    });
+  });
+
+  test("the child flag with bad arguments is child mode too: the core reads them and the child ends with 73", () => {
+    for (const args of [["--horsies-child"], ["--horsies-child", "3", "4242", "extra"], ["--horsies-child", "x", "y"]]) {
+      assert.deepEqual(processMode(main(...args)), { kind: "child", args });
+    }
+  });
+
   test("no command and an unknown command are usage errors", () => {
     assert.equal(processMode(main()).kind, "usageError");
     assert.equal(processMode(main("serve")).kind, "usageError");
@@ -126,6 +147,15 @@ describe("cli.run", () => {
     const table = recordingTable(0);
 
     await assert.rejects(runCli(testApp(), fakeDeps({ thread: "worker", argv: [...ENTRY] }, table)), ClientDefect);
+    assert.equal(table.calls.length, 0);
+  });
+
+  test("child mode runs the child with its arguments, and no command runs", async () => {
+    const table = recordingTable(0);
+    const deps = fakeDeps(main("--horsies-child", "3", "4242"), table);
+
+    assert.equal(await endedCode(runCli(testApp(), deps)), 0);
+    assert.deepEqual(deps.children, [["--horsies-child", "3", "4242"]]);
     assert.equal(table.calls.length, 0);
   });
 

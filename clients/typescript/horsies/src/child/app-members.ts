@@ -8,7 +8,7 @@
 
 import type { AppContext } from "../app/context.ts";
 import { ClientDefect } from "../thrown-errors.ts";
-import { type StateKey, stateKeyNamed } from "./state.ts";
+import { type StateKey, type StateKeyIdentity, stateKeyNamed } from "./state.ts";
 
 /** The factory of one provider: it builds the value in each task child, sync or async. */
 export type ProviderFactory<T> = () => T | Promise<T>;
@@ -18,7 +18,7 @@ export type ChildStartHook = () => void | Promise<void>;
 
 /** One provider of an app: its key (by identity), the name that its failure gives, and its factory. */
 export type ProviderMember = {
-  readonly key: object;
+  readonly key: StateKeyIdentity;
   readonly name: string;
   readonly factory: ProviderFactory<unknown>;
 };

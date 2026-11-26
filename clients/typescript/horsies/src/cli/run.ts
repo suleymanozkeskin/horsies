@@ -3,7 +3,9 @@
 //
 // Modes, in order:
 // 1. A worker thread: a defect. `cli.run` runs on the main thread of a process.
-// 2. Else: the command named by the argument after the entry script, from the command table.
+// 2. The argument after the entry script is the child flag (`--horsies-child`): child mode. The worker started this
+//    entry again as a task child or as its handler child; the child ends its process itself (`src/child/host.ts`).
+// 3. Else: the command named by the argument after the entry script, from the command table.
 //
 // The command table is a closed record: one runner per command name. A command module parses its own flags.
 //
@@ -15,6 +17,8 @@ import { isMainThread } from "node:worker_threads";
 
 import type { Horsies } from "../app.ts";
 import { appInternals } from "../app/internals.ts";
+import { CHILD_MODE_FLAG } from "../app/suppression.ts";
+import { processChildModeDeps, runChildMode } from "../child/host.ts";
 import { workerLogBacklog } from "../native/worker/worker.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
@@ -53,9 +57,10 @@ export const EXIT_LOG_WAIT_MS = 2000;
 /** The pause between two reads of the log backlog, in milliseconds. */
 export const EXIT_LOG_POLL_MS = 10;
 
-/** The mode of this process. */
+/** The mode of this process. `child`: the arguments after the entry script, the child flag first. */
 export type ProcessMode =
   | { readonly kind: "workerThread" }
+  | { readonly kind: "child"; readonly args: readonly string[] }
   | { readonly kind: "command"; readonly command: CommandName; readonly args: readonly string[] }
   | { readonly kind: "usageError"; readonly error: UsageError };
 
@@ -80,6 +85,10 @@ export function processMode(facts: ProcessFacts): ProcessMode {
 
   const [command, ...args] = facts.argv.slice(2);
 
+  if (command === CHILD_MODE_FLAG) {
+    return { kind: "child", args: facts.argv.slice(2) };
+  }
+
   if (command === undefined) {
     return { kind: "usageError", error: usageError("a command is required") };
   }
@@ -91,10 +100,14 @@ export function processMode(facts: ProcessFacts): ProcessMode {
     : { kind: "command", command: name, args };
 }
 
+/** Child mode: serve the app as a child with the arguments after the entry script; the process ends at its end. */
+export type ChildRunner = (app: Horsies, args: readonly string[]) => Promise<never>;
+
 /** What `cli.run` does that has effects. */
 export interface CliDeps {
   readonly facts: ProcessFacts;
   readonly table: CommandTable;
+  readonly child: ChildRunner;
   readonly output: CommandOutput;
   /** Whether core log records wait in the channel. */
   logBacklog(): LogBacklog;
@@ -104,13 +117,18 @@ export interface CliDeps {
   exit(code: number): never;
 }
 
-/** The exit code of the command of this process. A worker thread is a defect: `ClientDefect`. */
+/**
+ * The exit code of the command of this process. A worker thread is a defect: `ClientDefect`. Child mode never
+ * resolves: the child ends its process.
+ */
 export async function commandExitCode(app: Horsies, deps: CliDeps): Promise<CommandExitCode> {
   const mode = processMode(deps.facts);
 
   switch (mode.kind) {
     case "workerThread":
       throw new ClientDefect({ subject: "cli.run", rule: "cli.run runs on the main thread of a process" });
+    case "child":
+      return deps.child(app, mode.args);
     case "usageError":
       deps.output.writeError(`usage: ${CLI_USAGE}`);
       deps.output.writeError(`horsies: error: ${mode.error.message}`);
@@ -146,6 +164,7 @@ export function processCliDeps(): CliDeps {
   return {
     facts: processFacts(),
     table: COMMANDS,
+    child: async (app, args) => runChildMode(app, args, processChildModeDeps()),
     output: processOutput(),
     logBacklog: workerLogBacklog,
     pause: async (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
