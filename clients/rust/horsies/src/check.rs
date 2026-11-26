@@ -651,7 +651,10 @@ mod tests {
     #[test]
     fn a_failed_connect_is_python_s_connectivity_refusal() {
         let report = connectivity_report("connection refused");
-        assert_eq!(report.refusals()[0].code, Some(ErrorCode::DatabaseInvalidUrl));
+        assert_eq!(
+            report.refusals()[0].code,
+            Some(ErrorCode::DatabaseInvalidUrl)
+        );
         assert_eq!(report.refusals()[0].notes, vec!["connection refused"]);
     }
 }
