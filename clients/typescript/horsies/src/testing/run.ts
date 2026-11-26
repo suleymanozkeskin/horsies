@@ -59,10 +59,9 @@ export async function runImplementation(
   }
 
   const outcome = await runBody({
-    inputJson: written.value,
+    start: { kind: "given", inputJson: written.value, runtime },
     implementation,
     compiled: compiled.value,
-    runtime,
     mark: { taskId: runtime.taskId, taskName, attempt: runtime.fencingToken.value },
     marks: NO_LOOP_MARKS,
     observation: NO_BODY_OBSERVER.enter({ kind: "notRecorded" }),

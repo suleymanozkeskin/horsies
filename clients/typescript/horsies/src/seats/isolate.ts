@@ -30,7 +30,7 @@ import { runBody, type StoredBodyOutcome } from "../child/body.ts";
 import { installProcessEvents, type ProcessEventHooks } from "../child/process-events.ts";
 import type { LoopHolder, LoopMarks } from "../child/run-table.ts";
 import { currentRun } from "../child/run-store.ts";
-import { type RunControls, taskRuntimeOf } from "../child/runtime.ts";
+import type { RunControls } from "../child/runtime.ts";
 import { type StateKey, StateValues } from "../child/state.ts";
 import { thrownRecord } from "../child/thrown-error.ts";
 import { jsonTextCheckedByCore } from "../codec/json-text.ts";
@@ -208,12 +208,16 @@ class SeatRuns implements SeatRunHandler {
     this.#current = { kind: "running", runKey: message.runKey, controller, observation };
 
     void runBody({
-      // The core's child host reads each run input with its strict read rule (`build_task_input`) before it calls the
-      // body; the main thread passes the text of the core's post to the isolate as it came.
-      inputJson: jsonTextCheckedByCore(message.inputJson),
+      start: {
+        kind: "posted",
+        // The core's child host reads each run input with its strict read rule (`build_task_input`) before it calls
+        // the body; the main thread passes the text of the core's post to the isolate as it came, with the workflow
+        // context member of a task that takes it.
+        inputJson: jsonTextCheckedByCore(message.inputJson),
+        controls: this.#controls(taskId, attempt, controller),
+      },
       implementation,
       compiled: compiled.value,
-      runtime: taskRuntimeOf(this.#controls(taskId, attempt, controller)),
       mark: { taskId, taskName: message.taskName, attempt },
       marks: NO_LOOP_MARKS,
       observation: bodyObservationOf(observation),

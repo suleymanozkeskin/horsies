@@ -81,6 +81,7 @@ import {
   type ServeNative,
   settleRun,
   startHookNames,
+  taskContextUseOf,
 } from "./serve.ts";
 import { StateValues } from "./state.ts";
 
@@ -290,7 +291,11 @@ export function childPlan(
   }
 
   return {
-    tasks: [...context.implementations].map(([name, parts]) => ({ name, form: bodyFormOf(parts.contract) })),
+    tasks: [...context.implementations].map(([name, parts]) => ({
+      name,
+      form: bodyFormOf(parts.contract),
+      context: taskContextUseOf(parts.contract),
+    })),
     startHooks: startHookNames(members),
     producerManifestJson: checked.manifestJson,
     hostname: deps.hostname,

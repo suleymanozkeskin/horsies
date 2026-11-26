@@ -42,6 +42,17 @@
         "zod": "4.1.13",
       },
     },
+    "examples/showcase": {
+      "name": "acme-showcase",
+      "dependencies": {
+        "horsies": "workspace:*",
+        "pg": "8.23.1",
+        "zod": "4.1.13",
+      },
+      "devDependencies": {
+        "@types/pg": "8.23.1",
+      },
+    },
     "horsies": {
       "name": "horsies",
       "version": "0.8.1",
@@ -441,6 +452,8 @@
     "@typescript/typescript-win32-x64": ["@typescript/typescript-win32-x64@7.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g=="],
 
     "@typescript/typescript6": ["@typescript/typescript6@6.0.2", "", { "dependencies": { "@typescript/old": "npm:typescript@^6" }, "bin": { "tsc6": "bin/tsc6" } }, "sha512-mbCddXd+jm7hfx7w2YU64/Av4/NqqeG3GoRZgxPcgoTxYjhrcfJRw9ULch71SS4G+Q3bOXFhRvPqjguN0Hyp5w=="],
+
+    "acme-showcase": ["acme-showcase@workspace:examples/showcase"],
 
     "acorn": ["acorn@8.19.0", "", { "bin": { "acorn": "bin/acorn" } }, "sha512-oJlA3XiRm7Cyk6qFD2Jn8ak9B7jSy0qy00ADO3+8dpT0LSjFihQYv4C02LFCSYJV3Q37xYwwRy5m+IpIiUzqWw=="],
 

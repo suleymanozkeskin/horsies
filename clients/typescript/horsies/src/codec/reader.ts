@@ -90,7 +90,12 @@ export function decodeEnvelope(
 
 /** The parameters of a stored task input. Pure; see `decodeValue`. */
 export function decodeParameters(parameters: ObjectKind, text: JsonText, form: DecodeForm): Decoded {
-  return decodeObject(parameters, readTree(text), ROOT_PATH, PARAMETERS_DEPTH, form);
+  return decodeParameterTree(parameters, readTree(text), form);
+}
+
+/** The parameters of the tree of a stored task input (`readTree` of its text). Pure; see `decodeValue`. */
+export function decodeParameterTree(parameters: ObjectKind, tree: TreeValue, form: DecodeForm): Decoded {
+  return decodeObject(parameters, tree, ROOT_PATH, PARAMETERS_DEPTH, form);
 }
 
 function refuse(kind: DecodeRefusalKind, path: string, detail: string): Decoded {

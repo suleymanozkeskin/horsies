@@ -93,6 +93,15 @@ const READER_PATHS: readonly ReaderPath[] = [
     },
   },
   {
+    module: "testing/task-runtime.ts",
+    maker: "writtenJsonText",
+    checkedBy: "engineKeysKeptText",
+    proof: {
+      file: "unit/testing/run.test.ts",
+      test: "the stored workflow context of a test runtime is written by the codec writer, which makes strict JSON only",
+    },
+  },
+  {
     module: "codec/writer.ts",
     maker: "writtenJsonText",
     checkedBy: "encodeValue",

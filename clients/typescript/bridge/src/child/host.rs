@@ -7,11 +7,12 @@
 //! - `serveChild(plan, post, hook)`: the child app of the plan on the core's
 //!   child host, until the stop frame or the end of the parent. On the
 //!   JavaScript thread it reads the arguments, registers the post dispatcher
-//!   and the hook dispatcher, builds the task registry (one body form per
-//!   task), the start hooks, the producer manifest and the loop, and starts
-//!   the host thread (`exit`), which keeps a duplicate of the child's socket
-//!   until the process ends. It resolves with the exit code when the host
-//!   returns; the host thread's backstop waits for the plan's flush bound.
+//!   and the hook dispatcher, builds the task registry (one body form and one
+//!   context use per task), the start hooks, the producer manifest and the
+//!   loop, and starts the host thread (`exit`), which keeps a duplicate of
+//!   the child's socket until the process ends. It resolves with the exit
+//!   code when the host returns; the host thread's backstop waits for the
+//!   plan's flush bound.
 //! - The child app: family `TYPESCRIPT`; the bridge's log setup at the
 //!   level of the init frame; the body scope of the plan's body facts; the
 //!   handler child of the handler slot; the loop of the JavaScript main
@@ -68,12 +69,25 @@ pub enum BodyForm {
     Blocking,
 }
 
+/// Whether the child host writes the workflow context into the input of a
+/// task (`build_task_input`, `accepts_workflow_ctx`).
+#[napi(string_enum = "UPPER_SNAKE")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TaskContextUse {
+    /// A task with `workflowContext: true`: the core writes the
+    /// `workflow_ctx` member for a node that names `ctxFrom`.
+    TakesContext,
+    /// Any other task: the core removes the member.
+    NoContext,
+}
+
 /// One task of the child, by its name.
 #[napi(object, object_to_js = false)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChildTaskEntry {
     pub name: String,
     pub form: BodyForm,
+    pub context: TaskContextUse,
 }
 
 /// What the package gives the child host.
@@ -360,9 +374,9 @@ fn host_loop_watch(host_loop: Arc<HostLoop>) -> EventLoopWatch {
     EventLoopWatch::Host(host_loop)
 }
 
-/// The registry of `tasks`: one body form per task. A repeated or empty
-/// name is a defect of the package, which gives one entry per
-/// implementation.
+/// The registry of `tasks`: one body form and one context use per task. A
+/// repeated or empty name is a defect of the package, which gives one entry
+/// per implementation.
 fn task_registry(
     tasks: &[ChildTaskEntry],
     bodies: &Arc<ChildBodies>,
@@ -386,10 +400,23 @@ fn task_registry(
             },
         };
         registry
-            .register(task.name.clone(), registered)
+            .register(
+                task.name.clone(),
+                with_context_use(registered, task.context),
+            )
             .map_err(|error| client_defect(&format!("the task {}: {error}", task.name)))?;
     }
     Ok(registry)
+}
+
+/// `registered` with the context use of its entry: a task that takes the
+/// context accepts the `workflow_ctx` member; another task keeps the
+/// default, which removes it. Pure.
+fn with_context_use(registered: RegisteredTask, context: TaskContextUse) -> RegisteredTask {
+    match context {
+        TaskContextUse::TakesContext => registered.with_workflow_ctx(),
+        TaskContextUse::NoContext => registered,
+    }
 }
 
 fn client_defect(rule: &str) -> NativeThrown {
@@ -401,10 +428,39 @@ fn client_defect(rule: &str) -> NativeThrown {
 
 #[cfg(test)]
 mod tests {
+    use horsies_core::core::task::fn_trait::{BlockingTaskFn, RawTaskResult};
+    use horsies_core::TaskResult;
+
     use super::*;
 
     fn arguments(texts: &[&str]) -> Vec<String> {
         texts.iter().map(|text| (*text).to_owned()).collect()
+    }
+
+    /// A body that gives its input back.
+    struct EchoBody;
+
+    impl BlockingTaskFn for EchoBody {
+        fn execute(&self, args: &[u8]) -> RawTaskResult {
+            TaskResult::Ok(args.to_vec())
+        }
+    }
+
+    fn echo_task() -> RegisteredTask {
+        RegisteredTask::Blocking {
+            task: Arc::new(EchoBody),
+            meta: TaskMeta::default(),
+        }
+    }
+
+    #[test]
+    fn a_task_that_takes_the_context_accepts_the_workflow_context() {
+        assert!(with_context_use(echo_task(), TaskContextUse::TakesContext).accepts_workflow_ctx());
+    }
+
+    #[test]
+    fn a_task_that_takes_no_context_does_not_accept_the_workflow_context() {
+        assert!(!with_context_use(echo_task(), TaskContextUse::NoContext).accepts_workflow_ctx());
     }
 
     #[test]

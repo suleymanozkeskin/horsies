@@ -135,8 +135,8 @@ describe("child mode", () => {
     assert.deepEqual(native.calls.slice(0, 3), ["childArguments", "setPanicRule ABORT_PROCESS", "serveChild"]);
     assert.deepEqual(native.serves[0]?.plan, {
       tasks: [
-        { name: "ping", form: "ASYNC" },
-        { name: "charge", form: "ASYNC" },
+        { name: "ping", form: "ASYNC", context: "NO_CONTEXT" },
+        { name: "charge", form: "ASYNC", context: "NO_CONTEXT" },
       ],
       startHooks: [CHILD_KIND_HOOK_NAME, "provide #1 openPool", "onChildStart #1 warmCache"],
       producerManifestJson: '{"manifest":"of the app"}',

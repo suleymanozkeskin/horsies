@@ -327,9 +327,7 @@ export interface AttemptStartReported {
 }
 
 // @public
-export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> = [
-X
-] extends ["SHARED_ASYNC"] ? (input: BodyInput<P>, runtime: RuntimeOf<X>) => Promise<BodyResult<O, E>> : (input: BodyInput<P>, runtime: RuntimeOf<X>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
+export type BodyFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = "noContext"> = [X] extends ["SHARED_ASYNC"] ? (input: BodyInput<P>, runtime: RuntimeOf<X, C>) => Promise<BodyResult<O, E>> : (input: BodyInput<P>, runtime: RuntimeOf<X, C>) => BodyResult<O, E> | Promise<BodyResult<O, E>>;
 
 // @public
 export type BodyInput<P extends ParameterSchemas> = ParametersValue<P>;
@@ -876,6 +874,16 @@ export interface ConflictUnexpectedEventInfo {
     readonly eventId: number;
     // (undocumented)
     readonly kind: "unexpectedEvent";
+}
+
+// @public
+export interface ContextBodyRuntimes {
+    // (undocumented)
+    readonly ISOLATED: WorkflowTaskRuntime;
+    // (undocumented)
+    readonly SHARED_ASYNC: WorkflowTaskRuntime;
+    // (undocumented)
+    readonly SHARED_THREAD: ThreadWorkflowTaskRuntime;
 }
 
 // @public
@@ -1729,7 +1737,7 @@ export interface HistoryContractError {
 // @public
 export class Horsies {
     static create(config: HorsiesConfig): Result<Horsies, CreateRefused>;
-    implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass>(contract: TaskContract<P, O, E, X>, body: NoInfer<BodyFor<P, O, E, X>>, options?: ImplementOptions<NoInfer<E>>): Implementation<P, O, E, X>;
+    implement<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse>(contract: TaskContract<P, O, E, X, C>, body: NoInfer<BodyFor<P, O, E, X, C>>, options?: ImplementOptions<NoInfer<E>>): Implementation<P, O, E, X, C>;
     readonly monitoring: Monitoring;
     onChildStart(hook: ChildStartHook): void;
     onEvent<T extends EventTypeName>(eventType: T, options: EventHandlerOptions, handler: NoInfer<EventHandler<T>>): void;
@@ -1778,12 +1786,12 @@ export type IdRefused = {
 };
 
 // @public
-export interface Implementation<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+export interface Implementation<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = ContextUse> {
     // (undocumented)
-    readonly contract: TaskContract<P, O, E, X>;
+    readonly contract: TaskContract<P, O, E, X, C>;
     // (undocumented)
     readonly kind: "implementation";
-    run(input: BodyInput<P>, runtime: RuntimeOf<X>): Promise<TaskOutcome<SchemaValue<O>, E>>;
+    run(input: BodyInput<P>, runtime: RuntimeOf<X, C>): Promise<TaskOutcome<SchemaValue<O>, E>>;
 }
 
 // @public
@@ -3365,7 +3373,15 @@ export type RunningTask = {
 };
 
 // @public
-export type RuntimeOf<X extends ExecutionClass> = BodyRuntimes[X];
+export type RuntimeOf<X extends ExecutionClass, C extends ContextUse = "noContext"> = [C] extends ["takesContext"] ? ContextBodyRuntimes[X] : BodyRuntimes[X];
+
+// @public
+export type RuntimeWorkflowContext = {
+    readonly kind: "context";
+    readonly context: WorkflowContext;
+} | {
+    readonly kind: "noContext";
+};
 
 // @public (undocumented)
 export interface RunTimingComposedInfo {
@@ -3789,6 +3805,19 @@ export interface StatusCount {
 
 // @public (undocumented)
 export type StopReason = "CLAIM_LOST" | "OWNERSHIP_UNCONFIRMED" | "WORKFLOW_STOPPED" | "TASK_EXPIRED" | "NODE_NOT_LINKED" | "ORPHAN_CANCELLED";
+
+// @public
+export interface StoredWorkflowContext {
+    readonly results_by_id?: {
+        readonly [nodeId: string]: JsonValue;
+    };
+    readonly summaries_by_id?: {
+        readonly [nodeId: string]: JsonValue;
+    };
+    readonly task_index: number;
+    readonly task_name: string;
+    readonly workflow_id: string;
+}
 
 // @public
 export interface StreamCoverage {
@@ -4287,7 +4316,7 @@ export interface TaskRecovered {
 export class TaskRuntime {
     cancelState(): CancelState;
     readonly fencingToken: FencingToken;
-    static forTest<const Keys extends readonly AnyStateKey[]>(options: TestRuntimeOptions<Keys>): TaskRuntime;
+    static forTest<const Keys extends readonly AnyStateKey[]>(options: TestRuntimeOptions<Keys>): WorkflowTaskRuntime;
     readonly signal: AbortSignal;
     spawn<T>(name: string, work: SpawnedWork<T>): Result<Promise<T>, SpawnRefused>;
     state<T>(key: StateKey<T>): T;
@@ -4494,6 +4523,7 @@ export interface TestRuntimeOptions<Keys extends readonly AnyStateKey[]> {
     readonly state?: TestStateEntries<Keys>;
     // (undocumented)
     readonly taskId: TaskId;
+    readonly workflowContext?: StoredWorkflowContext;
 }
 
 // @public
@@ -4506,6 +4536,9 @@ export type TestStateEntry<K extends AnyStateKey> = readonly [key: K, value: Sta
 
 // @public
 export type ThreadTaskRuntime = Pick<TaskRuntime, "taskId" | "fencingToken" | "signal" | "cancelState" | "state">;
+
+// @public
+export type ThreadWorkflowTaskRuntime = ThreadTaskRuntime & Pick<WorkflowTaskRuntime, "workflowContext">;
 
 // @public (undocumented)
 export type TimingBoundary = "ATTEMPT_ENQUEUED" | "ATTEMPT_RECORDED" | "CHILD_COMPLETED" | "CHILD_CREATED" | "CLAIM" | "FINALIZING" | "FIRST_CLAIM" | "LAST_SEEN" | "NODE_COMPLETED" | "NODE_CREATED" | "NODE_ENQUEUED" | "NODE_READY" | "PLACEMENT" | "READ_TIME" | "RUN_COMPLETED" | "RUN_PAUSED" | "RUN_RESUMED" | "START" | "TASK_CREATED" | "TASK_MOVED";
@@ -5210,6 +5243,11 @@ export interface WorkflowTaskInfo {
     readonly subWorkflowId: Recorded<string>;
     readonly subWorkflowSummary: Recorded<SubWorkflowSummary>;
 }
+
+// @public
+export type WorkflowTaskRuntime = TaskRuntime & {
+    readonly workflowContext: RuntimeWorkflowContext;
+};
 
 // @public (undocumented)
 export const WorkflowTaskStatus: {

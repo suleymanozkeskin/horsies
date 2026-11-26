@@ -25,6 +25,7 @@ import type {
   StartFactsRecord,
   StartHookCall,
   StartHookEnd,
+  TaskContextUse,
   WorkStopCauseName,
 } from "../../horsies/src/native/child/addon.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
@@ -54,6 +55,7 @@ export const registrationMatches: Mutual<Generated.SpawnRegistration, SpawnRegis
 export const spawnEndMatches: Mutual<Generated.SpawnEnd, SpawnEnd> = true;
 export const formMatches: Mutual<Generated.BodyForm, BodyForm> = true;
 export const factsModeMatches: Mutual<Generated.BodyFactsMode, BodyFactsMode> = true;
+export const contextUseMatches: Mutual<Generated.TaskContextUse, TaskContextUse> = true;
 export const taskEntryMatches: Mutual<Generated.ChildTaskEntry, ChildTaskEntry> = true;
 export const planMatches: Mutual<Generated.ChildHostPlan, ChildHostPlan> = true;
 export const argumentsMatches: Mutual<Generated.ChildArgumentsCheck, ChildArgumentsCheck> = true;

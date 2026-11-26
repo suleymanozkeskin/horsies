@@ -17,7 +17,7 @@ folder only when the task needs it:
 | File | When to open |
 |---|---|
 | `tasks.md` | `defineTask`, the `h.*` wire types, the zod adapter, the stored input, `app.implement`, `ok` and `err`, the exception map, `TaskRuntime`, the fencing token, the cancel signal, `runtime.spawn`, app state, retry policies, `app.send`, `TaskSendError`, `retrySend`, `TaskHandle`, `TaskOutcome`, `ReadError`, tests of a body |
-| `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.resultOf`, joins, the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `retryStart`, `WorkflowHandle`, `app.workflowHandle` |
+| `workflows.md` | `defineWorkflow`, the builder `w`, a value or an upstream node per parameter, `h.resultOf`, joins, the workflow context (`runtime.workflowContext`), the success policy, check cases, sub-workflows, `app.start`, `WorkflowStartError`, `retryStart`, `WorkflowHandle`, `app.workflowHandle` |
 | `configs.md` | `Horsies.create` and its refusals, the broker, queues, worker profiles, recovery, retention, `cli.run` and its commands |
 | `monitoring.md` | `app.pingDatabase`, `app.pingWorkers`, `app.monitoring`, the operator cancel, `createMonitoringHandler`, `app.rerun` and `app.rerunIn` |
 
