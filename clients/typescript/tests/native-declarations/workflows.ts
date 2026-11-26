@@ -112,6 +112,11 @@ export const probeStartWorkflowInChildMatches: SameFunction<
   WorkflowsChildProducerProbeAddon["probeStartWorkflowInChild"]
 > = true;
 
+export const probeResumeWorkflowInChildMatches: SameFunction<
+  typeof Generated.probeResumeWorkflowInChild,
+  WorkflowsChildProducerProbeAddon["probeResumeWorkflowInChild"]
+> = true;
+
 export const probeWorkflowStatusInChildMatches: SameFunction<
   typeof Generated.probeWorkflowStatusInChild,
   WorkflowsChildProducerProbeAddon["probeWorkflowStatusInChild"]

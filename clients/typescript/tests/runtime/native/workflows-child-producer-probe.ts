@@ -1,4 +1,4 @@
-// The test exports of a workflow start and a workflow handle read in a task child, on the stand-in of the child
+// The test exports of a workflow start, a resume and a workflow handle read in a task child, on the stand-in of the child
 // host's producer handle (`child-producer-probe.ts`). Only a build with the cargo feature `test-probes` exports them
 // (`bun run --cwd bridge build:dev`); a published addon does not.
 
@@ -7,6 +7,7 @@ import type { NativeEnvelope } from "../../../horsies/src/native/call/envelope.t
 import type { NativeCoreHandle } from "../../../horsies/src/native/handle/addon.ts";
 import type { TraceArgument } from "../../../horsies/src/native/values/records.ts";
 import type {
+  HandleChange,
   NativeClientSpec,
   WorkflowStartOutcome,
   WorkflowStatusRead,
@@ -24,6 +25,11 @@ export interface WorkflowsChildProducerProbeAddon {
     trace: TraceArgument,
     resendOnTransientErr: boolean,
   ): Promise<NativeEnvelope<WorkflowStartOutcome>>;
+  probeResumeWorkflowInChild(
+    handle: NativeCoreHandle,
+    child: NativeProbeChildProducer,
+    workflowId: string,
+  ): Promise<NativeEnvelope<HandleChange>>;
   probeWorkflowStatusInChild(
     handle: NativeCoreHandle,
     child: NativeProbeChildProducer,

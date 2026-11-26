@@ -167,6 +167,45 @@ describe("the workflow operations of a task child", () => {
     assert.equal(envelopeValue(await child.close()), "CLOSED");
   });
 
+  test("a resume in a child goes through the child host's handle; the app's handle cannot resume", async () => {
+    // A PAUSED run of the test database, started and paused through a handle that reaches it.
+    const reader = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
+
+    assert.equal(envelopeValue(workflowsAddon().registerChildSpecSource(reader.native, neverCalled, [])), "registered");
+
+    const prepared = envelopeValue(workflowsAddon().prepareClientSpec(vectorText("one_task_node")));
+
+    assert(prepared.kind === "prepared");
+
+    const workflowId = randomUUID();
+    const sentAt = 1_795_687_200_000_000n;
+
+    const started = envelopeValue(
+      await workflowsAddon().startWorkflow(reader.native, prepared.spec, workflowId, sentAt, NO_CARRIER, false),
+    );
+
+    assert.deepEqual(started, { kind: "started" });
+    assert.deepEqual(envelopeValue(await workflowsAddon().pauseWorkflow(reader.native, workflowId)), {
+      kind: "changed",
+      changed: true,
+    });
+
+    const app = unreachableAppHandle();
+    const child = newStandIn();
+
+    const resumed = envelopeValue(
+      await workflowsChildProducerProbeAddon().probeResumeWorkflowInChild(app.native, child, workflowId),
+    );
+
+    assert.deepEqual(resumed, { kind: "changed", changed: true });
+
+    const direct = envelopeValue(await workflowsAddon().resumeWorkflow(app.native, workflowId));
+
+    assert.equal(direct.kind === "failed" ? direct.error.class : direct.kind, "HandleDbOperationFailed");
+    assert.equal(envelopeValue(await child.close()), "CLOSED");
+    await reader.close();
+  });
+
   test("a handle read in a child goes through the child host's handle", async () => {
     const app = unreachableAppHandle();
     const child = newStandIn();

@@ -376,14 +376,30 @@ pub fn resume_workflow<'env>(
     handle: &CoreHandle,
     workflow_id: String,
 ) -> napi::Result<Object<'env>> {
+    resume_workflow_on(
+        env,
+        ProducerHandle::of_process(handle),
+        handle,
+        &workflow_id,
+    )
+}
+
+/// `resumeWorkflow` through `producer`, with the child spec source of
+/// `handle`.
+pub fn resume_workflow_on<'env>(
+    env: &'env Env,
+    producer: ProducerHandle,
+    handle: &CoreHandle,
+    workflow_id: &str,
+) -> napi::Result<Object<'env>> {
     spawn_checked(
         env,
         HandleOperation::Resume.subject(),
         CallKind::Write,
-        ProducerHandle::of_process(handle),
+        producer,
         || -> Result<ResumeRequest, NativeThrown> {
             Ok(ResumeRequest {
-                workflow_id: workflow_id_of(&workflow_id)?,
+                workflow_id: workflow_id_of(workflow_id)?,
                 source: registered_source(handle, "resumeWorkflow")?,
             })
         },

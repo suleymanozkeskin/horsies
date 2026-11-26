@@ -1,13 +1,14 @@
-//! The test exports of a workflow start and a workflow handle read in a task
-//! child: `probeStartWorkflowInChild` and `probeWorkflowStatusInChild`. The
-//! native tests of the producer handle call them; the package does not.
+//! The test exports of a workflow start, a resume and a handle read in a
+//! task child: `probeStartWorkflowInChild`, `probeResumeWorkflowInChild` and
+//! `probeWorkflowStatusInChild`. The native tests of the producer handle call
+//! them; the package does not.
 //!
 //! - As for the sends (`sends::child_producer_probe`), a stand-in takes the
 //!   place of the handle that the child host publishes. Each probe runs the
-//!   same operation as its export (`startWorkflow`, `workflowStatus`) on the
-//!   choice of `ProducerHandle::chosen` for a child whose child host
-//!   published the stand-in. A start keeps the child spec source of the
-//!   given handle.
+//!   same operation as its export (`startWorkflow`, `resumeWorkflow`,
+//!   `workflowStatus`) on the choice of `ProducerHandle::chosen` for a child
+//!   whose child host published the stand-in. A start and a resume keep the
+//!   child spec source of the given handle.
 //!
 //! Only a build with the cargo feature `test-probes` has this module
 //! (`bun run --cwd bridge build:dev`). A published addon does not export it.
@@ -23,7 +24,9 @@ use crate::handle::core_handle::CoreHandle;
 use crate::sends::child_producer_probe::ProbeChildProducer;
 use crate::values::trace_carrier::TraceArgument;
 use crate::workflows::handle_ops::{spawn_checked, status_operation, workflow_id_of};
-use crate::workflows::start_resume::{start_workflow_on, NativeClientSpec, StartCall};
+use crate::workflows::start_resume::{
+    resume_workflow_on, start_workflow_on, NativeClientSpec, StartCall,
+};
 
 /// `startWorkflow` on `handle` in a task child whose child host published
 /// `child`.
@@ -51,6 +54,22 @@ pub fn probe_start_workflow_in_child<'env>(
         resend_on_transient_err,
     };
     start_workflow_on(env, child.chosen_for(handle), handle, start)
+}
+
+/// `resumeWorkflow` on `handle` in a task child whose child host published
+/// `child`.
+#[napi(ts_return_type = "Promise<NativeEnvelope<HandleChange>>")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
+pub fn probe_resume_workflow_in_child<'env>(
+    env: &'env Env,
+    handle: &CoreHandle,
+    child: &ProbeChildProducer,
+    workflow_id: String,
+) -> napi::Result<Object<'env>> {
+    resume_workflow_on(env, child.chosen_for(handle), handle, &workflow_id)
 }
 
 /// `workflowStatus` on `handle` in a task child whose child host published
