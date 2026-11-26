@@ -51,7 +51,7 @@ export function readSubWorkflow(
     return refuse("ErrorMissingField", summaryPath, "the summary is missing");
   }
 
-  const summary = readSummary(summaryNode, summaryPath);
+  const summary = readSubWorkflowSummary(summaryNode, summaryPath);
 
   return summary.ok ? ok(Object.freeze({ workflowId: workflowId.value, summary: summary.value })) : summary;
 }
@@ -75,7 +75,8 @@ function isWorkflowStatus(text: string): text is WorkflowStatus {
   return STATUSES.has(text);
 }
 
-function readSummary(node: TreeValue, path: string): Result<SubWorkflowSummary, DecodeRefused> {
+/** A stored sub-workflow summary at `path` (the core's `SubWorkflowSummary`). Pure. */
+export function readSubWorkflowSummary(node: TreeValue, path: string): Result<SubWorkflowSummary, DecodeRefused> {
   if (!isTreeObject(node)) {
     return refuse("ErrorFieldInvalid", path, "the summary is not an object");
   }

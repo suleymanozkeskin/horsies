@@ -19,7 +19,7 @@ import type { ExecutionClass, TaskContract, ContextUse } from "../contract/defin
 import type { WorkflowId } from "../contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue } from "../contract/schema.ts";
 import type { CheckedText, StoredNodeRecord, StoredTextFact, WorkflowWaitRead } from "../native/workflows/addon.ts";
-import { type GetOptions, type ReadForm, readFormOf } from "../read/handle.ts";
+import type { GetOptions, ReadForm } from "../read/handle.ts";
 import { instantOfMicros, type Recorded } from "../read/info.ts";
 import { JSON_KIND } from "../wire/kinds.ts";
 import { err, ok, type Result } from "../wire/result.ts";
@@ -34,6 +34,7 @@ import {
   workflowNotFound,
   workflowWait,
 } from "./handle-error.ts";
+import { isWorkflowContract, type WorkflowContract } from "./define.ts";
 import type { NodeTarget } from "./node-checks.ts";
 import type { BuildReturn, NodeById, NodeCode, NodeOutput, ReturnedNodes, WorkflowOutput } from "./node.ts";
 import { nodeTargetForm, workflowOutputForm, type WorkflowRegistry } from "./registry.ts";
@@ -91,8 +92,13 @@ export interface WorkflowHandle<R extends BuildReturn> extends WorkflowHandleBas
   >;
 }
 
-/** The handle of a stored workflow id: it has no build, so `resultFor` takes the node's contract. */
+/**
+ * The handle of a stored workflow id: it has no build, so `resultFor` takes what the node runs: a task contract, or
+ * the workflow contract of a sub-workflow node (read with the child's declared output and open user codes; the app
+ * lists the child, else `workflowNotListed`).
+ */
 export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandleBase<R> {
+  /** The outcome of the task node `id`, read with the output type and the codes of `contract`. Not a wait. */
   resultFor<
     P extends ParameterSchemas,
     O extends OutputSchema,
@@ -103,6 +109,11 @@ export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandl
     id: string,
     contract: TaskContract<P, O, E, X, C>,
   ): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
+  /** The outcome of the sub-workflow node `id`, read with the declared output of `workflow`, its child. Not a wait. */
+  resultFor<P extends ParameterSchemas, C extends BuildReturn>(
+    id: string,
+    workflow: WorkflowContract<P, C>,
+  ): Promise<Result<TaskOutcome<WorkflowOutput<C>, string>, WorkflowReadError>>;
 }
 
 /** What a handle reads with: the core, the app's workflows, the workflow contract, and the nodes of its build. */
@@ -141,8 +152,8 @@ export function workflowHandleByIdOf<R extends BuildReturn>(facts: HandleFacts):
   return Object.freeze({
     ...handleBase<R>(facts),
     resultFor: async (id: string, contract: object) =>
-      // SAFETY: the reader decodes with `contract`: its output type and its codes are the result's types.
-      (await nodeOutcome(facts, id, readFormOf(contract))) as never,
+      // SAFETY: the reader decodes with what `contract` declares: its output type and its codes are the result's types.
+      (await targetOutcome(facts, id, targetOf(contract))) as never,
   });
 }
 
@@ -217,6 +228,13 @@ async function targetOutcome(facts: HandleFacts, nodeId: string, target: NodeTar
     default:
       return unreachable(output, "targetOutcome");
   }
+}
+
+/** What a node of a handle by id runs: the workflow contract of a sub-workflow node, else a task contract. Pure. */
+function targetOf(contract: object): NodeTarget {
+  return isWorkflowContract(contract)
+    ? Object.freeze({ kind: "subWorkflow", workflow: contract })
+    : Object.freeze({ kind: "task", contract });
 }
 
 /** The read error of a workflow that the app does not list. Pure. */

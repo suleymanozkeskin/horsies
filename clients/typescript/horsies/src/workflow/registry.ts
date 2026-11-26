@@ -128,6 +128,22 @@ export function workflowOutputForm(workflow: object, registry: WorkflowRegistry)
   }
 }
 
+/**
+ * The read form of a workflow's declared output from its own contract, with open user codes: the app need not list
+ * the workflow. Effects: compiles the params contract at its first use (see `compileContract`).
+ */
+export function declaredOutputForm(workflow: object): ReadForm {
+  const compiled = compileContract(workflowRecord(workflow).paramsContract);
+
+  if (compiled.ok) {
+    return Object.freeze({ kind: "readable", output: compiled.value.output, codes: OPEN_CODES });
+  }
+
+  const causes = compiled.error.map((refused) => `${refused.path}: ${refused.detail}`).join("; ");
+
+  return Object.freeze({ kind: "unreadable", cause: `the workflow contract is refused: ${causes}` });
+}
+
 /** The read form of what a node runs: its task's contract, or its child's declared output with open codes. */
 export function nodeTargetForm(target: NodeTarget, registry: WorkflowRegistry): OutputReadForm {
   switch (target.kind) {

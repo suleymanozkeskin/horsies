@@ -2202,7 +2202,11 @@ export interface WorkflowBuilder {
 
 // @public
 export interface WorkflowContext {
+    hasResult(nodeId: string): boolean;
+    hasSummary(nodeId: string): boolean;
+    outputFor<P extends ParameterSchemas, R extends BuildReturn>(nodeId: string, workflow: WorkflowContract<P, R>): Result<Recorded<WorkflowOutput<R>>, ContextReadError>;
     resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse>(nodeId: string, contract: TaskContract<P, O, E, X, C>): Result<TaskOutcome<SchemaValue<O>, E>, ContextReadError>;
+    summaryFor(nodeId: string): Result<SubWorkflowSummary, ContextReadError>;
     readonly taskIndex: number;
     readonly taskName: string;
     // (undocumented)
@@ -2252,8 +2256,8 @@ export interface WorkflowHandleBase<R extends BuildReturn> {
 
 // @public
 export interface WorkflowHandleById<R extends BuildReturn> extends WorkflowHandleBase<R> {
-    // (undocumented)
     resultFor<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse>(id: string, contract: TaskContract<P, O, E, X, C>): Promise<Result<TaskOutcome<SchemaValue<O>, E>, WorkflowReadError>>;
+    resultFor<P extends ParameterSchemas, C extends BuildReturn>(id: string, workflow: WorkflowContract<P, C>): Promise<Result<TaskOutcome<WorkflowOutput<C>, string>, WorkflowReadError>>;
 }
 
 // @public

@@ -8,6 +8,7 @@ import {
   h,
   type Horsies,
   type TaskOutcome,
+  type WorkflowContext,
   WorkflowId,
 } from "../../../horsies/src/index.ts";
 
@@ -96,4 +97,27 @@ export async function startAndRead(workflowId: WorkflowId): Promise<void> {
   if (byId.ok) {
     expectType<Equal<typeof byId.value, TaskOutcome<{ receiptId: string }, "PAYMENT_DECLINED">>>();
   }
+
+  const childById = await again.resultFor("child", fulfil);
+
+  if (childById.ok) {
+    expectType<Equal<typeof childById.value, TaskOutcome<{ receiptId: string }, string>>>();
+  }
+}
+
+/** The reads of the workflow context: a task node's outcome, and a sub-workflow node's summary and output. */
+export function readContext(context: WorkflowContext): void {
+  const output = context.outputFor("child", fulfil);
+  const summary = context.summaryFor("child");
+
+  if (output.ok && output.value.kind === "recorded") {
+    expectType<Equal<typeof output.value.value, { receiptId: string }>>();
+  }
+
+  if (summary.ok) {
+    expectType<Equal<typeof summary.value.totalTasks, number>>();
+  }
+
+  expectType<Equal<ReturnType<typeof context.hasResult>, boolean>>();
+  expectType<Equal<ReturnType<typeof context.hasSummary>, boolean>>();
 }

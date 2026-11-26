@@ -312,6 +312,51 @@ describe("WorkflowHandle.resultFor", () => {
 
     assert.deepEqual(await byId.resultFor("name", name), { ok: true, value: { kind: "succeeded", value: "x" } });
   });
+
+  /** A handle by id of `flow` whose node result read gives the stored envelope `envelope`. */
+  function byIdReading(envelope: string) {
+    const core = fakeCore({ nodeResult: { kind: "stored", result: { kind: "checked", text: envelope } } });
+
+    return {
+      core,
+      byId: workflowHandleByIdOf<BuildReturn>({
+        core,
+        registry: registry(),
+        workflow: flow,
+        workflowId: workflowId(),
+        targets: new Map(),
+      }),
+    };
+  }
+
+  test("a sub-workflow node by id reads with the child's declared output", async () => {
+    const { byId } = byIdReading(okEnvelope("8"));
+
+    assert.deepEqual(await byId.resultFor("child", child), { ok: true, value: { kind: "succeeded", value: 8 } });
+  });
+
+  test("a sub-workflow node by id whose stored value is not the child's declared output: storedResultUnreadable", async () => {
+    const { byId } = byIdReading(okEnvelope('"eight"'));
+    const read = await byId.resultFor("child", child);
+
+    assert(!read.ok);
+    assert.equal(read.error.kind, "storedResultUnreadable");
+  });
+
+  test("a sub-workflow node by id of a child that the app does not list: workflowNotListed, no read", async () => {
+    const other = defineWorkflow(
+      { name: "other", definitionKey: "tests.other_child.v1", output: h.int(), params: {} },
+      (w) => ({ output: w.task(count, {}, { id: "count" }) }),
+    );
+
+    const { core, byId } = byIdReading(okEnvelope("8"));
+
+    assert.deepEqual(await byId.resultFor("child", other), {
+      ok: false,
+      error: { kind: "workflowNotListed", workflowName: "other" },
+    });
+    assert.deepEqual(core.calls, []);
+  });
 });
 
 describe("the other handle methods", () => {
@@ -487,10 +532,87 @@ describe("the child spec source", () => {
 });
 
 describe("the workflow context", () => {
+  /** The stored summary of a child that ended with `status`, its output text `output` and `errorSummary`. */
+  const summary = (status: string, output: string, errorSummary: string) =>
+    `{"status":"${status}","output":${output},"total_tasks":1,"completed_tasks":1,"failed_tasks":0,` +
+    `"skipped_tasks":0,"error_summary":${errorSummary}}`;
+
   const text = writtenJsonText(
     `{"workflow_id":"${WORKFLOW_ID}","task_index":2,"task_name":"audit","results_by_id":` +
-      `{"count":${okEnvelope("7")},"other":${userErrorEnvelope("OTHER")},"bad":${okEnvelope('"x"')}}}`,
+      `{"count":${okEnvelope("7")},"other":${userErrorEnvelope("OTHER")},"bad":${okEnvelope('"x"')}},` +
+      `"summaries_by_id":{"child":${summary("COMPLETED", "8", "null")},` +
+      `"failedChild":${summary("FAILED", "null", '"boom"')},"textChild":${summary("COMPLETED", '"eight"', "null")}}}`,
   );
+
+  function context() {
+    const read = workflowContextOf(text);
+
+    assert(read.ok);
+
+    return read.value;
+  }
+
+  test("hasResult: true for a context node with a result, false for another node", () => {
+    assert.equal(context().hasResult("count"), true);
+    assert.equal(context().hasResult("child"), false);
+  });
+
+  test("hasSummary: true for a context sub-workflow node, false for another node", () => {
+    assert.equal(context().hasSummary("child"), true);
+    assert.equal(context().hasSummary("count"), false);
+  });
+
+  test("summaryFor: the stored summary, or notInContext", () => {
+    assert.deepEqual(context().summaryFor("failedChild"), {
+      ok: true,
+      value: {
+        status: "FAILED",
+        output: null,
+        errorSummary: "boom",
+        totalTasks: 1,
+        completedTasks: 1,
+        failedTasks: 0,
+        skippedTasks: 0,
+      },
+    });
+    assert.deepEqual(context().summaryFor("count"), { ok: false, error: { kind: "notInContext", nodeId: "count" } });
+  });
+
+  test("outputFor: the child's output read with its declared output", () => {
+    assert.deepEqual(context().outputFor("child", child), { ok: true, value: { kind: "recorded", value: 8 } });
+  });
+
+  test("outputFor: notRecorded when the child stored no output", () => {
+    assert.deepEqual(context().outputFor("failedChild", child), { ok: true, value: { kind: "notRecorded" } });
+  });
+
+  test("outputFor: notInContext for a node with no summary", () => {
+    assert.deepEqual(context().outputFor("count", child), {
+      ok: false,
+      error: { kind: "notInContext", nodeId: "count" },
+    });
+  });
+
+  test("outputFor: unreadable for an output that is not the child's declared output", () => {
+    const read = context().outputFor("textChild", child);
+
+    assert(!read.ok);
+    assert.equal(read.error.kind, "unreadable");
+  });
+
+  test("a context text whose summaries do not read is refused with the member", () => {
+    const head = `{"workflow_id":"${WORKFLOW_ID}","task_index":0,"task_name":"a","summaries_by_id":`;
+
+    assert.deepEqual(workflowContextOf(writtenJsonText(`${head}[]}`)), {
+      ok: false,
+      error: { kind: "ContextRefused", member: "summaries_by_id", detail: "not an object" },
+    });
+
+    const badStatus = workflowContextOf(writtenJsonText(`${head}{"child":${summary("DONE", "1", "null")}}}`));
+
+    assert(!badStatus.ok);
+    assert.equal(badStatus.error.member, "summaries_by_id.child");
+  });
 
   test("resultFor reads a context node with the contract; each error has its kind", () => {
     const context = workflowContextOf(text);
