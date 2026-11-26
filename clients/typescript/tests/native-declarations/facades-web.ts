@@ -1,8 +1,15 @@
-// The generated declarations of the monitoring web handler of the `facades` area match the
-// hand-kept ones, function by function and method by method (arguments and result), and type by
-// type.
+// The generated declarations of the monitoring web handler and the fleet metrics server of the
+// `facades` area match the hand-kept ones, function by function and method by method (arguments
+// and result), and type by type.
 
 import type * as Generated from "../../bridge/index.js";
+import type {
+  FleetMetricsAddon,
+  FleetMetricsRunEnd,
+  FleetMetricsSettings,
+  MetricsListenAddressCheck,
+  NativeFleetMetricsServer,
+} from "../../horsies/src/native/facades/fleet-metrics.ts";
 import type {
   AccessGrantArg,
   MonitoringEventStep,
@@ -27,6 +34,7 @@ type Handler = Generated.MonitoringHandler;
 
 type Stream = Generated.MonitoringEventStream;
 
+type Server = Generated.FleetMetricsServer;
 
 export const buildMonitoringHandlerMatches: SameFunction<
   typeof Generated.buildMonitoringHandler,
@@ -60,16 +68,29 @@ export const closeEventsMatches: SameFunction<Handler["closeEvents"], NativeMoni
 export const nextFrameMatches: SameFunction<Stream["nextFrame"], NativeEventStream["nextFrame"]> = true;
 export const streamCloseMatches: SameFunction<Stream["close"], NativeEventStream["close"]> = true;
 
+export const parseMetricsListenAddressMatches: SameFunction<
+  typeof Generated.parseMetricsListenAddress,
+  FleetMetricsAddon["parseMetricsListenAddress"]
+> = true;
+
+export const prepareFleetMetricsMatches: SameFunction<
+  typeof Generated.prepareFleetMetrics,
+  FleetMetricsAddon["prepareFleetMetrics"]
+> = true;
+
 // The test export of a build with the cargo feature `test-probes` (`build:dev`).
 export const setProbeChildSpecSourceMatches: SameFunction<
   typeof Generated.setProbeChildSpecSource,
   WebProbeAddon["setProbeChildSpecSource"]
 > = true;
 
+export const runMatches: SameFunction<Server["run"], NativeFleetMetricsServer["run"]> = true;
+export const requestStopMatches: SameFunction<Server["requestStop"], NativeFleetMetricsServer["requestStop"]> = true;
 
 // The member sets: no method on one side only.
 export const handlerMatches: Mutual<Handler, NativeMonitoringHandler> = true;
 export const streamMatches: Mutual<Stream, NativeEventStream> = true;
+export const serverMatches: Mutual<Server, NativeFleetMetricsServer> = true;
 
 export const actionsMatches: Mutual<Generated.ActionsSwitch, ActionsSwitch> = true;
 export const needMatches: Mutual<Generated.RouteNeed, RouteNeed> = true;
@@ -83,3 +104,6 @@ export const responseMatches: Mutual<Generated.MonitoringResponseRecord, Monitor
 export const stepMatches: Mutual<Generated.MonitoringEventStep, MonitoringEventStep> = true;
 export const settingsMatches: Mutual<Generated.MonitoringHandlerSettings, MonitoringHandlerSettings> = true;
 export const traceLinkCheckMatches: Mutual<Generated.TraceLinkCheck, TraceLinkCheck> = true;
+export const listenCheckMatches: Mutual<Generated.MetricsListenAddressCheck, MetricsListenAddressCheck> = true;
+export const fleetSettingsMatches: Mutual<Generated.FleetMetricsSettings, FleetMetricsSettings> = true;
+export const runEndMatches: Mutual<Generated.FleetMetricsRunEnd, FleetMetricsRunEnd> = true;

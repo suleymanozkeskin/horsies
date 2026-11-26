@@ -5,4 +5,5 @@
 // handler call (`setProbeChildSpecSource`).
 #[cfg(feature = "test-probes")]
 pub mod child_spec_probe;
+pub mod fleet_metrics;
 pub mod web_handler;
