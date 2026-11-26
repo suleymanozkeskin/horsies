@@ -228,6 +228,49 @@ impl HorsiesView<'_> {
         )
     }
 
+    /// `Horsies::start_workflow`, blocking: start the workflow definition
+    /// `D`, which takes no params, through its registration on the app.
+    ///
+    /// Errors: as the async method. On a runtime thread `ASYNC_CONTEXT`,
+    /// also when the app does not register `D`.
+    pub fn start_workflow<D>(&self) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+    where
+        D: WorkflowDefinition<Params = ()>,
+        D::Output: DeserializeOwned + Send + Sync,
+    {
+        let workflow_id = new_workflow_id();
+        block_start(
+            self.app.start_workflow_as::<D>(workflow_id),
+            workflow_id,
+            &definition_names::<D>("start_workflow()", "app.start_workflow::<D>()"),
+        )
+    }
+
+    /// `Horsies::start_workflow_with`, blocking: start the workflow
+    /// definition `D` with `params`, through its registration on the app.
+    ///
+    /// Errors: as the async method. On a runtime thread `ASYNC_CONTEXT`,
+    /// also when the app does not register `D`; the build does not run.
+    pub fn start_workflow_with<D>(
+        &self,
+        params: D::Params,
+    ) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+    where
+        D: WorkflowDefinition,
+        D::Params: Send + Sync,
+        D::Output: DeserializeOwned + Send + Sync,
+    {
+        let workflow_id = new_workflow_id();
+        block_start(
+            self.app.start_workflow_with_as::<D>(params, workflow_id),
+            workflow_id,
+            &definition_names::<D>(
+                "start_workflow_with()",
+                "app.start_workflow_with::<D>(params)",
+            ),
+        )
+    }
+
     /// `Horsies::start_with_id`, blocking.
     pub fn start_with_id<T>(
         &self,
@@ -255,45 +298,6 @@ fn spec_names<'s>(spec: &'s WorkflowSpec, method: &str, async_call: &'s str) -> 
         blocking_call: format!("Horsies::{method} of workflow '{}'", spec.name()),
         async_call,
     }
-}
-
-/// [`crate::start_workflow`], blocking: start the workflow definition `D`,
-/// which takes no params, through its first registration in this process.
-///
-/// Errors: as the async function. On a runtime thread `ASYNC_CONTEXT`,
-/// also before the registration of `D`.
-pub fn start_workflow<D>() -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
-where
-    D: WorkflowDefinition<Params = ()>,
-    D::Output: DeserializeOwned + Send + Sync,
-{
-    let workflow_id = new_workflow_id();
-    block_start(
-        crate::workflow::start_workflow_as::<D>(workflow_id),
-        workflow_id,
-        &definition_names::<D>("start_workflow()", "start_workflow::<D>()"),
-    )
-}
-
-/// [`crate::start_workflow_with`], blocking: start the workflow definition
-/// `D` with `params`, through its first registration in this process.
-///
-/// Errors: as the async function. On a runtime thread `ASYNC_CONTEXT`,
-/// also before the registration of `D`; the build does not run.
-pub fn start_workflow_with<D>(
-    params: D::Params,
-) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
-where
-    D: WorkflowDefinition,
-    D::Params: Send + Sync,
-    D::Output: DeserializeOwned + Send + Sync,
-{
-    let workflow_id = new_workflow_id();
-    block_start(
-        crate::workflow::start_workflow_with_as::<D>(params, workflow_id),
-        workflow_id,
-        &definition_names::<D>("start_workflow_with()", "start_workflow_with::<D>(params)"),
-    )
 }
 
 fn definition_names<D: WorkflowDefinition>(

@@ -213,6 +213,7 @@ fn with_profiles(config: AppConfig) -> Result<AppConfig, Box<dyn std::error::Err
 | `on_handler_child_start(hook)` | Runs an async hook once in every handler child |
 | `task_runtime()` | The `TaskRuntime` that task bodies take |
 | `workflow_builder(name)` | A `WorkflowSpecBuilder` whose task nodes resolve against the tasks of this app (see `workflows.md`) |
+| `start_workflow::<D>()`, `start_workflow_with::<D>(params)` | Starts the definition `D` through its registration on this app; `VALIDATION_FAILED` when this app does not register `D` (see `workflows.md`) |
 
 ```rust
 use horsies::{Horsies, HorsiesError};

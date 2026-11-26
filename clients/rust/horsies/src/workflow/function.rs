@@ -6,14 +6,13 @@
 //!   `Horsies::workflow_template`; it builds a spec from params and starts
 //!   it, and makes the sub-workflow nodes of the definition.
 //!
-//! Each registration also serves the process-wide starts
-//! [`start_workflow`] and [`start_workflow_with`], as the first
-//! `register` of a task serves its generated `send`.
+//! A start of a registered definition by its type names the app:
+//! `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)`.
+//! The app finds `D` in its own workflow registry. No start reads a
+//! process-wide registration, so two apps of one process start apart.
 
-use std::any::{Any, TypeId};
-use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use horsies_core::{StartRefusalCause, WorkflowStartError};
 use serde::de::DeserializeOwned;
@@ -21,7 +20,7 @@ use uuid::Uuid;
 
 use super::definition::WorkflowDefinition;
 use super::handle::WorkflowHandle;
-use super::registry::{CaseBuild, CheckCase, Definition};
+use super::registry::{CaseBuild, CheckCase, Definition, DefinitionKind};
 use super::spec::{WorkflowSpec, WorkflowSpecBuilder};
 use super::start::{new_workflow_id, WorkflowStarter};
 use super::sub_workflow::{SubWorkflowNode, SubWorkflowParams};
@@ -293,8 +292,8 @@ impl Horsies {
     /// Register the workflow definition `D`, which takes no params, and
     /// return its function (Python `WorkflowDefinition` registered for
     /// `start`). `D::build` runs now on a builder of this app, so the tasks
-    /// of its nodes register first. The first registration of `D` in a
-    /// process also serves [`start_workflow::<D>()`](start_workflow).
+    /// of its nodes register first. [`Self::start_workflow`] starts `D`
+    /// through this registration.
     ///
     /// Errors: the refusals of `D::build` (`HRS-302` for a node of a task
     /// that this app does not register), and of the registry (a name or a
@@ -309,26 +308,19 @@ impl Horsies {
     {
         let definition = Definition::without_params::<D>(self.functions())?;
         let spec = match &definition.kind {
-            super::registry::DefinitionKind::WithoutParams(spec) => Arc::clone(spec),
-            super::registry::DefinitionKind::WithParams(_) => {
+            DefinitionKind::WithoutParams(spec) => Arc::clone(spec),
+            DefinitionKind::WithParams(_) => {
                 unreachable!("Definition::without_params makes a definition without params")
             }
         };
         self.workflows().register(definition)?;
-        let function = WorkflowFunction {
-            spec,
-            starter: WorkflowStarter::of(self),
-            types: PhantomData,
-        };
-        store_global::<D, WorkflowFunction<D::Output>>(function.clone());
-        Ok(function)
+        Ok(self.function_of::<D::Output>(spec))
     }
 
     /// Register the workflow definition `D`, which takes params, and return
     /// its template (Python `WorkflowDefinition` with `build_with`). Each
-    /// build runs `D::build_with` on a new builder of this app. The first
-    /// registration of `D` in a process also serves
-    /// [`start_workflow_with::<D>(params)`](start_workflow_with).
+    /// build runs `D::build_with` on a new builder of this app.
+    /// [`Self::start_workflow_with`] starts `D` through this registration.
     ///
     /// Errors: the refusals of the registry.
     pub fn workflow_template<D>(
@@ -341,8 +333,30 @@ impl Horsies {
     {
         self.workflows()
             .register(Definition::with_params::<D>(self.functions()))?;
+        Ok(self.template_of::<D>())
+    }
+
+    /// The function of the spec `spec` of a definition without params on
+    /// this app. No I/O.
+    fn function_of<T>(&self, spec: Arc<WorkflowSpec>) -> WorkflowFunction<T> {
+        WorkflowFunction {
+            spec,
+            starter: WorkflowStarter::of(self),
+            types: PhantomData,
+        }
+    }
+
+    /// The template of the definition `D` with params on this app: each
+    /// build runs `D::build_with` on a new builder of this app, then checks
+    /// the output type. No I/O; it does not register `D`.
+    fn template_of<D>(&self) -> WorkflowTemplate<D::Params, D::Output>
+    where
+        D: WorkflowDefinition,
+        D::Params: Send + Sync,
+        D::Output: DeserializeOwned + Send + Sync,
+    {
         let tasks = Arc::clone(self.functions());
-        let template = WorkflowTemplate {
+        WorkflowTemplate {
             name: D::name(),
             definition_key: D::definition_key(),
             build: Arc::new(
@@ -355,9 +369,99 @@ impl Horsies {
             ),
             starter: WorkflowStarter::of(self),
             types: PhantomData,
+        }
+    }
+
+    /// Start the workflow definition `D`, which takes no params, with a new
+    /// id, through its registration on this app
+    /// ([`Self::register_workflow_definition`]).
+    ///
+    /// Errors: `VALIDATION_FAILED` with the cause `PreconditionFailed`
+    /// (`StartRefusalCause::Check`) when this app does not register `D`
+    /// without params; nothing is written. Else the start errors.
+    pub async fn start_workflow<D>(&self) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+    where
+        D: WorkflowDefinition<Params = ()>,
+        D::Output: DeserializeOwned + Send + Sync,
+    {
+        self.start_workflow_as::<D>(new_workflow_id()).await
+    }
+
+    /// [`Self::start_workflow`] with the id `workflow_id`, which the refusal
+    /// carries too.
+    pub(crate) async fn start_workflow_as<D>(
+        &self,
+        workflow_id: Uuid,
+    ) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+    where
+        D: WorkflowDefinition<Params = ()>,
+        D::Output: DeserializeOwned + Send + Sync,
+    {
+        let spec = match self
+            .workflows()
+            .definition_of::<D>()
+            .map(|found| found.kind)
+        {
+            Some(DefinitionKind::WithoutParams(spec)) => spec,
+            Some(DefinitionKind::WithParams(_)) | None => {
+                return Err(not_registered(
+                    D::name(),
+                    "register_workflow_definition",
+                    workflow_id,
+                ))
+            }
         };
-        store_global::<D, WorkflowTemplate<D::Params, D::Output>>(template.clone());
-        Ok(template)
+        self.function_of::<D::Output>(spec)
+            .start_with_id(workflow_id)
+            .await
+    }
+
+    /// Start the workflow definition `D` with `params` and a new id, through
+    /// its registration on this app ([`Self::workflow_template`]): the
+    /// build of the template, then its start.
+    ///
+    /// Errors: `VALIDATION_FAILED` with the cause `PreconditionFailed`
+    /// (`StartRefusalCause::Check`) when this app does not register `D`
+    /// with params; the build does not run and nothing is written. Else the
+    /// errors of `WorkflowTemplate::start`.
+    pub async fn start_workflow_with<D>(
+        &self,
+        params: D::Params,
+    ) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+    where
+        D: WorkflowDefinition,
+        D::Params: Send + Sync,
+        D::Output: DeserializeOwned + Send + Sync,
+    {
+        self.start_workflow_with_as::<D>(params, new_workflow_id())
+            .await
+    }
+
+    /// [`Self::start_workflow_with`] with the id `workflow_id`, which the
+    /// refusal carries too.
+    pub(crate) async fn start_workflow_with_as<D>(
+        &self,
+        params: D::Params,
+        workflow_id: Uuid,
+    ) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
+    where
+        D: WorkflowDefinition,
+        D::Params: Send + Sync,
+        D::Output: DeserializeOwned + Send + Sync,
+    {
+        match self
+            .workflows()
+            .definition_of::<D>()
+            .map(|found| found.kind)
+        {
+            Some(DefinitionKind::WithParams(_)) => {}
+            Some(DefinitionKind::WithoutParams(_)) | None => {
+                return Err(not_registered(D::name(), "workflow_template", workflow_id))
+            }
+        }
+        self.template_of::<D>()
+            .start_with_id(params, workflow_id)
+            .await
     }
 
     /// Register check cases of a workflow builder: the check builds a spec
@@ -420,109 +524,19 @@ impl Horsies {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Process-wide starts
-// ---------------------------------------------------------------------------
-
-type GlobalWorkflows = Mutex<HashMap<TypeId, Box<dyn Any + Send + Sync>>>;
-
-/// The registered function or template of each definition type, the first
-/// registration of each in this process.
-fn global_workflows() -> &'static GlobalWorkflows {
-    static WORKFLOWS: OnceLock<GlobalWorkflows> = OnceLock::new();
-    WORKFLOWS.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn store_global<D: 'static, V: Any + Send + Sync>(value: V) {
-    let mut workflows = global_workflows()
-        .lock()
-        .expect("the process-wide workflow map is never held across a panic");
-    let _first = workflows
-        .entry(TypeId::of::<D>())
-        .or_insert_with(|| Box::new(value));
-}
-
-fn global<D: 'static, V: Any + Clone>() -> Option<V> {
-    let workflows = global_workflows()
-        .lock()
-        .expect("the process-wide workflow map is never held across a panic");
-    workflows
-        .get(&TypeId::of::<D>())
-        .and_then(|value| value.downcast_ref::<V>())
-        .cloned()
-}
-
-/// The refusal of a process-wide start of `name` before its registration,
-/// with the id of that start (Python: the id is minted before the checks).
+/// The refusal of a start of the definition `name` that the app does not
+/// register in the form of `method`, with the id of that start (Python: the
+/// id is minted before the checks). Pure.
 fn not_registered(name: &str, method: &str, workflow_id: Uuid) -> WorkflowStartError {
     WorkflowStartError::ValidationFailed {
         message: format!(
-            "workflow '{name}' is not registered in this process; call app.{method}::<...>() when \
-             main builds the app"
+            "workflow '{name}' is not registered on this app; call app.{method}::<...>() on the \
+             app that starts it"
         ),
         workflow_name: name.to_owned(),
         workflow_id,
         cause: StartRefusalCause::Check,
     }
-}
-
-/// Start the workflow definition `D`, which takes no params, from any call
-/// site, through its first registration in this process.
-///
-/// Errors: `VALIDATION_FAILED` before `register_workflow_definition::<D>()`;
-/// else the start errors.
-pub async fn start_workflow<D>() -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
-where
-    D: WorkflowDefinition<Params = ()>,
-    D::Output: DeserializeOwned + Send + Sync,
-{
-    start_workflow_as::<D>(new_workflow_id()).await
-}
-
-/// [`start_workflow`] with the id `workflow_id`, which the refusal before
-/// the registration carries too.
-pub(crate) async fn start_workflow_as<D>(
-    workflow_id: Uuid,
-) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
-where
-    D: WorkflowDefinition<Params = ()>,
-    D::Output: DeserializeOwned + Send + Sync,
-{
-    let function = global::<D, WorkflowFunction<D::Output>>()
-        .ok_or_else(|| not_registered(D::name(), "register_workflow_definition", workflow_id))?;
-    function.start_with_id(workflow_id).await
-}
-
-/// Start the workflow definition `D` with `params` from any call site,
-/// through its first registration in this process.
-///
-/// Errors: `VALIDATION_FAILED` before `workflow_template::<D>()`; else the
-/// errors of `WorkflowTemplate::start`.
-pub async fn start_workflow_with<D>(
-    params: D::Params,
-) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
-where
-    D: WorkflowDefinition,
-    D::Params: Send + Sync,
-    D::Output: DeserializeOwned + Send + Sync,
-{
-    start_workflow_with_as::<D>(params, new_workflow_id()).await
-}
-
-/// [`start_workflow_with`] with the id `workflow_id`, which the refusal
-/// before the registration carries too.
-pub(crate) async fn start_workflow_with_as<D>(
-    params: D::Params,
-    workflow_id: Uuid,
-) -> Result<WorkflowHandle<D::Output>, WorkflowStartError>
-where
-    D: WorkflowDefinition,
-    D::Params: Send + Sync,
-    D::Output: DeserializeOwned + Send + Sync,
-{
-    let template = global::<D, WorkflowTemplate<D::Params, D::Output>>()
-        .ok_or_else(|| not_registered(D::name(), "workflow_template", workflow_id))?;
-    template.start_with_id(params, workflow_id).await
 }
 
 #[cfg(test)]

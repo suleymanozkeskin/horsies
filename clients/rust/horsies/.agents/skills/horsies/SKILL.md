@@ -294,7 +294,8 @@ impl WorkflowDefinition for DailyReport {
   resolves each node against the tasks of that app. A task that the app
   does not register is `HRS-302`.
 - Start it with `function.start().await` or
-  `horsies::start_workflow::<DailyReport>().await`. See `workflows.md`.
+  `app.start_workflow::<DailyReport>().await`. A start names its app, as a
+  send does. See `workflows.md`.
 
 ## Result Types
 

@@ -98,6 +98,9 @@ pub(crate) enum DefinitionKind {
 pub(crate) struct Definition {
     pub(crate) name: String,
     pub(crate) definition_key: String,
+    /// The type that implements the definition: a start by type finds the
+    /// definition only when its type is the asked one.
+    pub(crate) definition_type: TypeId,
     pub(crate) kind: DefinitionKind,
 }
 
@@ -114,6 +117,7 @@ impl Definition {
         Ok(Self {
             name: D::name().to_owned(),
             definition_key: D::definition_key().to_owned(),
+            definition_type: TypeId::of::<D>(),
             kind: DefinitionKind::WithoutParams(Arc::new(D::build(builder)?)),
         })
     }
@@ -139,6 +143,7 @@ impl Definition {
         Self {
             name: D::name().to_owned(),
             definition_key: D::definition_key().to_owned(),
+            definition_type: TypeId::of::<D>(),
             kind: DefinitionKind::WithParams(build),
         }
     }
@@ -250,6 +255,17 @@ impl WorkflowRegistry {
     /// [`Self::check_findings`] builds and walks.
     pub(crate) fn add_check_cases(&self, cases: Vec<CheckCase>) {
         self.write().check_cases.extend(cases);
+    }
+
+    /// The definition of type `D` that this registry holds: the definition
+    /// under the key of `D` when its type is `D`. `None` when no definition
+    /// of type `D` is registered here, also when another type holds the key.
+    pub(crate) fn definition_of<D: WorkflowDefinition>(&self) -> Option<Definition> {
+        self.read()
+            .definitions
+            .get(D::definition_key())
+            .filter(|definition| definition.definition_type == TypeId::of::<D>())
+            .cloned()
     }
 
     /// The definition registered under `definition_key`.

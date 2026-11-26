@@ -291,6 +291,7 @@ fn params_for_a_definition_without_params_are_refused() {
         .register(Definition {
             name: "countdown".to_owned(),
             definition_key: "tests.countdown.v1".to_owned(),
+            definition_type: TypeId::of::<Plain>(),
             kind: DefinitionKind::WithoutParams(Arc::new(
                 Plain::build(test_builder(Plain::name())).unwrap(),
             )),

@@ -611,6 +611,12 @@ mod tests {
         AppConfig::for_database_url("postgresql://localhost/horsies")
     }
 
+    /// A config whose address has no database: a send that a defect lets
+    /// past its checks fails to connect, and writes to no local database.
+    fn config_without_database() -> AppConfig {
+        AppConfig::for_database_url("postgresql://127.0.0.1:1/nothing")
+    }
+
     fn function(app: &Horsies) -> TaskFunction<Invoice, u32, Infallible> {
         function_named(app, "send_invoice")
     }
@@ -1094,9 +1100,9 @@ mod tests {
     /// limit. Each refusal comes before any I/O.
     #[tokio::test]
     async fn each_generated_send_goes_through_the_app_that_it_names() {
-        let first = app_with_generated_send(config());
+        let first = app_with_generated_send(config_without_database());
         first.suppress_sends(true);
-        let mut limited = config();
+        let mut limited = config_without_database();
         limited.payload.reject_bytes = Some(1);
         let second = app_with_generated_send(limited);
         let refused = generated_send::send(&first, 7).await.unwrap_err();
@@ -1133,8 +1139,8 @@ mod tests {
     /// I/O, also when another app of the process registers it.
     #[tokio::test]
     async fn a_generated_send_through_an_app_without_the_task_is_validation_failed() {
-        let _registered = app_with_generated_send(config());
-        let without = Horsies::new(config()).unwrap();
+        let _registered = app_with_generated_send(config_without_database());
+        let without = Horsies::new(config_without_database()).unwrap();
         let refused = generated_send::send(&without, 7).await.unwrap_err();
         match &refused {
             TaskSendError::ValidationFailed { message, cause } => {
@@ -1163,7 +1169,7 @@ mod tests {
     /// generated send names both types and writes nothing.
     #[tokio::test]
     async fn a_generated_send_of_a_task_registered_with_other_types_is_validation_failed() {
-        let mut app = Horsies::new(config()).unwrap();
+        let mut app = Horsies::new(config_without_database()).unwrap();
         app.register(
             "generated_send",
             crate::async_task_fn!(send_invoice, Invoice),

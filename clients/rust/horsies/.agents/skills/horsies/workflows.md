@@ -312,8 +312,8 @@ register yet (`HRS-302`).
 |---|---|
 | `app.register_workflow_definition::<D>()` | `Result<WorkflowFunction<D::Output>, HorsiesError>`, for a definition without params |
 | `app.workflow_template::<D>()` | `Result<WorkflowTemplate<D::Params, D::Output>, HorsiesError>`, for a definition with params |
-| `horsies::start_workflow::<D>()` | Starts `D` through its first registration in the process |
-| `horsies::start_workflow_with::<D>(params)` | Starts `D` with params through its first registration |
+| `app.start_workflow::<D>()` | Starts `D` through its registration on this app (`register_workflow_definition`) |
+| `app.start_workflow_with::<D>(params)` | Starts `D` with params through its registration on this app (`workflow_template`) |
 | `app.start::<T>(&spec)`, `app.start_with_id::<T>(&spec, id)` | Starts a spec that needs no registration. Its sub-workflow children must be registered |
 | `rt.start::<T>(&spec)`, `rt.start_with_id::<T>(&spec, id)` | The same, from a task body through `TaskRuntime` |
 | `app.workflow_handle::<T>(workflow_id)` | The handle of a started workflow. No I/O |
@@ -371,8 +371,10 @@ async fn run_checkout(
   value from the clock, a deploy) is a conflict. A task retry builds the
   spec again, so the spec of `rt.start_with_id` must be the same on each
   attempt.
-- `start_workflow` and `start_workflow_with` before the registration in the
-  process return `VALIDATION_FAILED`.
+- `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)` on
+  an app that does not register `D` in that form return `VALIDATION_FAILED`
+  with the cause `PreconditionFailed`. Nothing is written. A registration
+  on another app of the process does not count.
 - With `AppConfig.resend_on_transient_err`, the core runs a retryable start
   failure again with the same workflow id, up to 3 times.
 - In a worker child a start goes through the child's producer handle. A
@@ -593,7 +595,7 @@ use horsies::{
     WorkflowContext, WorkflowContextError, SubWorkflowSummary, WorkflowMeta,
     // Starts
     WorkflowFunction, WorkflowTemplate, WorkflowCheckBuilderRegistration,
-    start_workflow, start_workflow_with, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartError, WorkflowStartErrorCode,
     // Handle
     WorkflowHandle, WorkflowReadError, NodeResult, WorkflowNodeInfo, WorkflowStatus,
     WorkflowTaskStatus, HandleOperationError, HandleErrorCode, HandleResult,

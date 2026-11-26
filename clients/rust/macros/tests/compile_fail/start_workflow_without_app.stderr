@@ -1,0 +1,5 @@
+error[E0425]: cannot find function `start_workflow` in crate `horsies`
+  --> tests/compile_fail/start_workflow_without_app.rs:21:28
+   |
+21 |     let _future = horsies::start_workflow::<Nightly>();
+   |                            ^^^^^^^^^^^^^^ not found in `horsies`

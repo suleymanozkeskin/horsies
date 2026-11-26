@@ -117,8 +117,8 @@ there is no migration contract between pre-1.0 versions.
   `exit`, and `Worker::from_plan` takes the exit as its fourth argument.
   The Rust client and the Python bridge pass `Standard`; their exits do
   not change.
-- **Rust: each send and each workflow builder names its app; the delay is
-  a send option.** The module that `#[horsies::task]` and
+- **Rust: each send, each workflow builder and each workflow start names
+  its app; the delay is a send option.** The module that `#[horsies::task]` and
   `#[horsies::blocking_task]` generate holds no state. It kept the typed
   function of the first `register` in the process, so in a process with
   two apps every generated send and node used the first app.
@@ -156,8 +156,20 @@ there is no migration contract between pre-1.0 versions.
     when it registers, so its tasks register first.
   - `Horsies::check_workflow_builder(name, builder)`: `builder` gets a new
     workflow builder of the app named `name`, then the case.
-  - The process-wide workflow starts `start_workflow::<D>()` and
-    `start_workflow_with::<D>(params)` do not change.
+  - A start of a definition by its type is a method of the app:
+    `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)`,
+    and on the blocking view `app.blocking().start_workflow::<D>()` and
+    `app.blocking().start_workflow_with::<D>(params)`. The app finds `D` in
+    its own registry, in the form of its registration
+    (`register_workflow_definition` or `workflow_template`). A start on an
+    app that does not register `D` in that form returns
+    `WorkflowStartError::ValidationFailed` with the cause
+    `PreconditionFailed`, with the id of the start; nothing is written and
+    the build does not run. Removed: the free functions
+    `horsies::start_workflow` and `horsies::start_workflow_with`, and
+    `horsies::blocking::start_workflow` and
+    `horsies::blocking::start_workflow_with`, which started through the
+    first registration in the process.
 
 - **Rust client: a wait limit is built directly, and a limit above the
   bound is the read error `InvalidInput`.** `WaitLimit::Within` holds a

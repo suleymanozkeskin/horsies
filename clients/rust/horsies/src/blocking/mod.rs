@@ -6,12 +6,12 @@
 //!
 //! Each async type gives a view with `blocking()`: [`TaskFunctionView`],
 //! [`TaskHandleView`], [`HorsiesView`], [`WorkflowFunctionView`],
-//! [`WorkflowTemplateView`] and [`WorkflowHandleView`]; the process-wide
-//! starts have the blocking functions [`start_workflow`] and
-//! [`start_workflow_with`]. A view method has the name, the arguments and
-//! the result type of the async method. It runs the async method on the
-//! core's process runtime, which drives the app's connections, and blocks
-//! the calling thread until the method ends.
+//! [`WorkflowTemplateView`] and [`WorkflowHandleView`]. The starts of a
+//! definition by its type are [`HorsiesView::start_workflow`] and
+//! [`HorsiesView::start_workflow_with`]. A view method has the name, the
+//! arguments and the result type of the async method. It runs the async
+//! method on the core's process runtime, which drives the app's
+//! connections, and blocks the calling thread until the method ends.
 //!
 //! ```ignore
 //! let send_email = send_email::register(&mut app)?;
@@ -45,10 +45,7 @@
 
 mod workflow;
 
-pub use workflow::{
-    start_workflow, start_workflow_with, WorkflowFunctionView, WorkflowHandleView,
-    WorkflowTemplateView,
-};
+pub use workflow::{WorkflowFunctionView, WorkflowHandleView, WorkflowTemplateView};
 
 use std::fmt;
 use std::future::Future;

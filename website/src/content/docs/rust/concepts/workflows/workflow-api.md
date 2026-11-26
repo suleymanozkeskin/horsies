@@ -137,8 +137,8 @@ A definition implements `define` or `build_with`. A definition with neither is r
 |--------|---------|
 | `app.register_workflow_definition::<D>()` | `Result<WorkflowFunction<D::Output>, HorsiesError>`, for a definition without params. Builds the spec now |
 | `app.workflow_template::<D>()` | `Result<WorkflowTemplate<D::Params, D::Output>, HorsiesError>`, for a definition with params |
-| `horsies::start_workflow::<D>()` | Starts `D` through its first registration in the process |
-| `horsies::start_workflow_with::<D>(params)` | Starts `D` with `params` through its first registration in the process |
+| `app.start_workflow::<D>()` | Starts `D` through its registration on this app (`register_workflow_definition`) |
+| `app.start_workflow_with::<D>(params)` | Starts `D` with `params` through its registration on this app (`workflow_template`): the build, then the start |
 | `app.start::<T>(&spec)`, `app.start_with_id::<T>(&spec, workflow_id)` | Starts a spec that needs no registration. Its sub-workflow children must be registered |
 | `rt.start::<T>(&spec)`, `rt.start_with_id::<T>(&spec, workflow_id)` | The same, from a task body through its `TaskRuntime` |
 | `app.workflow_handle::<T>(workflow_id)` | The `WorkflowHandle<T>` of a started workflow. No I/O |
@@ -171,7 +171,7 @@ Steps 1 to 3 refuse with `ValidationFailed` before any I/O.
   - The id holds a sub-workflow: `WORKFLOW_COMMAND_CONFLICT`.
   - Another workflow name: `WORKFLOW_ID_CONFLICT`.
   - A run started before this release has no stored start command: the handle of that workflow, with no compare.
-- `start_workflow` and `start_workflow_with` before the registration in the process are `VALIDATION_FAILED`.
+- A start names its app, as a send does. `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)` on an app that does not register `D` in that form are `VALIDATION_FAILED` with the cause `PreconditionFailed`. Nothing is written, and the build does not run. A registration on another app of the process does not count.
 - With `AppConfig.resend_on_transient_err`, the core runs a retryable start failure again with the same workflow id and start time, up to 3 times.
 - In a worker child a start goes through the child's producer handle, as a send does.
 

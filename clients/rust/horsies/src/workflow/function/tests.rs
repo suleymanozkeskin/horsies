@@ -1,6 +1,5 @@
-//! Registration and the start refusals before any I/O. Each test has its
-//! own definition types: the process-wide starts keep the first
-//! registration of a type.
+//! Registration, the starts of a definition by its type on one app, and the
+//! start refusals before any I/O.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +12,15 @@ use horsies_core::WorkflowStartErrorCode;
 fn app() -> Horsies {
     Horsies::new(AppConfig::for_database_url(
         "postgresql://localhost/horsies",
+    ))
+    .unwrap()
+}
+
+/// An app whose address has no database: a start that a defect lets past
+/// its lookup fails to connect, and writes to no local database.
+fn app_without_database() -> Horsies {
+    Horsies::new(AppConfig::for_database_url(
+        "postgresql://127.0.0.1:1/nothing",
     ))
     .unwrap()
 }
@@ -97,7 +105,51 @@ impl WorkflowDefinition for RefusingRegional {
     }
 }
 
-/// Never registered: its process-wide start is refused.
+/// The key of [`Daily`] on another type: a start by type does not take one
+/// for the other.
+struct DailyTwin;
+
+impl WorkflowDefinition for DailyTwin {
+    type Output = u32;
+    type Params = ();
+
+    fn name() -> &'static str {
+        "daily_twin"
+    }
+
+    fn definition_key() -> &'static str {
+        Daily::definition_key()
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        one_task(builder)
+    }
+}
+
+/// A definition without params whose one node is a child that no app
+/// registers: its start passes the lookup and is refused by the check of
+/// the spec, before any I/O.
+struct ParentOfUnregistered;
+
+impl WorkflowDefinition for ParentOfUnregistered {
+    type Output = OutputlessResults;
+    type Params = ();
+
+    fn name() -> &'static str {
+        "parent_of_unregistered"
+    }
+
+    fn definition_key() -> &'static str {
+        "tests.function.parent_of_unregistered.v1"
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        builder.sub_workflow(Unregistered::node(SubWorkflowParams::NotGiven)?);
+        Ok(WorkflowDefConfig::new())
+    }
+}
+
+/// Never registered: its start is refused.
 struct Unregistered;
 
 impl WorkflowDefinition for Unregistered {
@@ -240,37 +292,111 @@ async fn a_retry_of_an_error_that_is_not_enqueue_failed_is_refused() {
     assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
 }
 
-#[tokio::test]
-async fn a_process_wide_start_before_registration_is_refused() {
-    let refused = start_workflow::<Unregistered>().await.unwrap_err();
+/// `refused` is the refusal of a start of a definition that the app does
+/// not register in the form of `method`: `VALIDATION_FAILED` with the cause
+/// `PreconditionFailed`.
+fn assert_not_registered(refused: &WorkflowStartError, method: &str) {
     assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
-    assert!(refused.message().contains("register_workflow_definition"));
+    assert!(
+        refused.message().contains("is not registered on this app"),
+        "{refused}"
+    );
+    assert!(refused.message().contains(method), "{refused}");
     assert_eq!(
         refused.failure_cause(),
         horsies_core::FailureCause::PreconditionFailed
     );
 }
 
-/// Python mints the id of a start before its checks: the refusal before the
-/// registration carries the id of its start.
+/// A start of a definition that the app does not register is refused
+/// before any I/O, also when another app of the process registers it.
 #[tokio::test]
-async fn a_process_wide_start_before_registration_names_the_id_of_its_start() {
+async fn a_start_of_a_definition_that_the_app_does_not_register_is_refused() {
+    let without = app_without_database();
+    let refused = without.start_workflow::<Unregistered>().await.unwrap_err();
+    assert_not_registered(&refused, "register_workflow_definition");
+
+    let mut registered = app_without_database();
+    let _function = registered.register_workflow_definition::<Daily>().unwrap();
+    let _template = registered.workflow_template::<RefusingRegional>().unwrap();
+    let refused = without.start_workflow::<Daily>().await.unwrap_err();
+    assert_not_registered(&refused, "register_workflow_definition");
+    let refused = without
+        .start_workflow_with::<RefusingRegional>(Region {
+            region: "eu".to_owned(),
+        })
+        .await
+        .unwrap_err();
+    assert_not_registered(&refused, "workflow_template");
+}
+
+/// Python mints the id of a start before its checks: the refusal carries
+/// the id of its start.
+#[tokio::test]
+async fn a_refused_start_names_the_id_of_its_start() {
     let workflow_id = Uuid::from_u128(21);
-    let refused = start_workflow_as::<Unregistered>(workflow_id)
+    let refused = app_without_database()
+        .start_workflow_as::<Unregistered>(workflow_id)
         .await
         .unwrap_err();
     assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
     assert_eq!(refused.workflow_id(), workflow_id);
 }
 
-#[test]
-fn the_first_registration_serves_the_process_wide_start() {
-    let mut first = app();
-    let mut second = app();
-    let function = first.register_workflow_definition::<Daily>().unwrap();
-    let _later = second.register_workflow_definition::<Daily>().unwrap();
-    let kept = global::<Daily, WorkflowFunction<u32>>().unwrap();
-    assert_eq!(kept.name(), function.name());
+/// A start by type takes the definition only in the form of its
+/// registration, and only of its own type: a definition without params is
+/// not a template, and another type with the same key is not `Daily`.
+#[tokio::test]
+async fn a_start_takes_the_registered_definition_of_its_type_and_form_only() {
+    let mut app = app_without_database();
+    let _function = app.register_workflow_definition::<Daily>().unwrap();
+    let refused = app.start_workflow_with::<Daily>(()).await.unwrap_err();
+    assert_not_registered(&refused, "workflow_template");
+    let refused = app.start_workflow::<DailyTwin>().await.unwrap_err();
+    assert_not_registered(&refused, "register_workflow_definition");
+}
+
+/// A start of a registered definition passes the lookup and runs the
+/// checks of its spec: the refusal of an unregistered child, before any
+/// I/O, in place of the lookup refusal.
+#[tokio::test]
+async fn a_start_of_a_registered_definition_runs_the_checks_of_its_spec() {
+    let mut app = app_without_database();
+    let _function = app
+        .register_workflow_definition::<ParentOfUnregistered>()
+        .unwrap();
+    let refused = app
+        .start_workflow::<ParentOfUnregistered>()
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
+    assert!(
+        refused.message().contains("references child workflow"),
+        "{refused}"
+    );
+    assert!(
+        !refused.message().contains("is not registered on this app"),
+        "{refused}"
+    );
+}
+
+/// A template start through the app runs the build of its registration:
+/// the build's refusal, not the lookup refusal.
+#[tokio::test]
+async fn a_template_start_through_the_app_runs_its_build() {
+    let mut app = app_without_database();
+    let _template = app.workflow_template::<RefusingRegional>().unwrap();
+    let refused = app
+        .start_workflow_with::<RefusingRegional>(Region {
+            region: "antarctica".to_owned(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code(), WorkflowStartErrorCode::ValidationFailed);
+    assert!(
+        refused.message().contains("bad region: antarctica"),
+        "{refused}"
+    );
 }
 
 /// A template start whose build refuses is `VALIDATION_FAILED`, not

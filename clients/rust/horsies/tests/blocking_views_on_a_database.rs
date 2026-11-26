@@ -23,7 +23,6 @@ use std::fmt::Debug;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use horsies::blocking::{start_workflow, start_workflow_with};
 use horsies::{
     task, AppConfig, HandleOperationError, HandleResult, Horsies, HorsiesError, NodeKey,
     NodeResult, PingTarget, ReadError, TaskError, TaskFunction, TaskInfoParts, TaskOutcome,
@@ -172,21 +171,19 @@ impl WorkflowDefinition for Regional {
     }
 }
 
-/// A definition without params for the process-wide start. Only one test
-/// registers it: the process keeps the first registration of each type,
-/// with the app and the database of that registration.
-struct ProcessNightly;
+/// A definition without params for the start by type on the app.
+struct ByTypeNightly;
 
-impl WorkflowDefinition for ProcessNightly {
+impl WorkflowDefinition for ByTypeNightly {
     type Output = u32;
     type Params = ();
 
     fn name() -> &'static str {
-        "blocking_views_process_nightly"
+        "blocking_views_by_type_nightly"
     }
 
     fn definition_key() -> &'static str {
-        "tests.blocking_views.process_nightly.v1"
+        "tests.blocking_views.by_type_nightly.v1"
     }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
@@ -194,20 +191,19 @@ impl WorkflowDefinition for ProcessNightly {
     }
 }
 
-/// A definition with params for the process-wide start. Only one test
-/// registers it, as [`ProcessNightly`].
-struct ProcessRegional;
+/// A definition with params for the start by type on the app.
+struct ByTypeRegional;
 
-impl WorkflowDefinition for ProcessRegional {
+impl WorkflowDefinition for ByTypeRegional {
     type Output = u32;
     type Params = u32;
 
     fn name() -> &'static str {
-        "blocking_views_process_regional"
+        "blocking_views_by_type_regional"
     }
 
     fn definition_key() -> &'static str {
-        "tests.blocking_views.process_regional.v1"
+        "tests.blocking_views.by_type_regional.v1"
     }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
@@ -1011,26 +1007,30 @@ async fn blocking_function_and_template_starts_write_their_workflows() {
     database.drop().await;
 }
 
-/// `start_workflow` and `start_workflow_with`: each starts its definition
-/// through its first registration in this process, on the database of that
-/// registration.
+/// The blocking `start_workflow` and `start_workflow_with` of the app view:
+/// each starts its definition through its registration on the app, on the
+/// database of that app.
 #[tokio::test]
-async fn blocking_process_wide_starts_write_their_workflows() {
+async fn blocking_starts_by_type_write_their_workflows() {
     let (database, worker) = covered_database().await;
     let url = database.url().to_owned();
     let (nightly, regional) = off_the_runtime(move || {
         let (mut app, _echo_function) = app_on(&url);
         let _function = app
-            .register_workflow_definition::<ProcessNightly>()
+            .register_workflow_definition::<ByTypeNightly>()
             .expect("register the definition");
         let _template = app
-            .workflow_template::<ProcessRegional>()
+            .workflow_template::<ByTypeRegional>()
             .expect("register the template");
-        let nightly = start_workflow::<ProcessNightly>()
-            .expect("the process-wide start")
+        let nightly = app
+            .blocking()
+            .start_workflow::<ByTypeNightly>()
+            .expect("the start by type")
             .workflow_id();
-        let regional = start_workflow_with::<ProcessRegional>(TEMPLATE_PARAMS)
-            .expect("the process-wide start with params")
+        let regional = app
+            .blocking()
+            .start_workflow_with::<ByTypeRegional>(TEMPLATE_PARAMS)
+            .expect("the start by type with params")
             .workflow_id();
         (nightly, regional)
     })
@@ -1039,12 +1039,12 @@ async fn blocking_process_wide_starts_write_their_workflows() {
     let mut expected = vec![
         (
             nightly,
-            ProcessNightly::name().to_owned(),
+            ByTypeNightly::name().to_owned(),
             "RUNNING".to_owned(),
         ),
         (
             regional,
-            ProcessRegional::name().to_owned(),
+            ByTypeRegional::name().to_owned(),
             "RUNNING".to_owned(),
         ),
     ];

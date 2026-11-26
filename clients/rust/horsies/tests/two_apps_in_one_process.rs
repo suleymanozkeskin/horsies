@@ -1,8 +1,9 @@
-//! Two apps in one process, each on a database of its own. Each send and
-//! each workflow start goes to the database of the app that it names. A
-//! send or a node of a task that the app does not register is refused and
-//! writes nothing, also when another app of the process registers the
-//! task. No send and no node reads a process-wide registration.
+//! Two apps in one process, each on a database of its own. Each send, each
+//! workflow start of a spec and each start of a definition by its type goes
+//! to the database of the app that it names. A send, a node or a start by
+//! type of a task or a definition that the app does not register is refused
+//! and writes nothing, also when another app of the process registers it.
+//! No send, node or start reads a process-wide registration.
 //!
 //! Each database is a copy of the core's test template
 //! (`core/src/test_support/database.rs`), so the tests need the test
@@ -14,8 +15,9 @@
 use std::convert::Infallible;
 
 use horsies::{
-    task, AppConfig, ErrorCode, Horsies, TaskError, TaskSendError, TaskSendOptions, WholeSeconds,
-    WorkflowSpec,
+    task, AppConfig, ErrorCode, Horsies, HorsiesError, TaskError, TaskSendError, TaskSendOptions,
+    WholeSeconds, WorkflowDefConfig, WorkflowDefinition, WorkflowSpec, WorkflowSpecBuilder,
+    WorkflowStartError,
 };
 use horsies_core::{
     CoverageOutcome, CoverageRequest, CoverageSerialization, FailureCause, PostgresBroker,
@@ -67,6 +69,55 @@ async fn answer() -> Result<u32, TaskError<Infallible>> {
     Ok(ANSWER)
 }
 
+/// The one node of each definition: `answer`, as the output.
+fn answer_output(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+    let output = builder.task(answer::node().node_id(ANSWER_NODE))?;
+    Ok(WorkflowDefConfig::new().output(output))
+}
+
+/// A definition without params, started by its type.
+struct Nightly;
+
+impl WorkflowDefinition for Nightly {
+    type Output = u32;
+    type Params = ();
+
+    fn name() -> &'static str {
+        "two_apps_nightly"
+    }
+
+    fn definition_key() -> &'static str {
+        "tests.two_apps.nightly.v1"
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        answer_output(builder)
+    }
+}
+
+/// A definition with params, started by its type.
+struct Regional;
+
+impl WorkflowDefinition for Regional {
+    type Output = u32;
+    type Params = u32;
+
+    fn name() -> &'static str {
+        "two_apps_regional"
+    }
+
+    fn definition_key() -> &'static str {
+        "tests.two_apps.regional.v1"
+    }
+
+    fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
+        answer_output(builder)
+    }
+}
+
+/// The params of each start of [`Regional`]; the build does not read them.
+const REGIONAL_PARAMS: u32 = 1;
+
 /// A test database, and a worker broker on it that ran one coverage pass.
 async fn covered_database() -> (TestDatabase, PostgresBroker) {
     let database = TestDatabase::create().await;
@@ -86,13 +137,33 @@ async fn covered_database() -> (TestDatabase, PostgresBroker) {
     (database, worker)
 }
 
-/// An app on the database of `url` that registers `echo` and `answer`. No
-/// I/O.
+/// An app on the database of `url` that registers `echo` and `answer`,
+/// then [`Nightly`] and [`Regional`]. No I/O.
 fn app_on(url: &str) -> Horsies {
     let mut app = Horsies::new(AppConfig::for_database_url(url)).expect("the app");
     let _echo = echo::register(&mut app).expect("register echo");
     let _answer = answer::register(&mut app).expect("register answer");
+    let _nightly = app
+        .register_workflow_definition::<Nightly>()
+        .expect("register the definition");
+    let _regional = app
+        .workflow_template::<Regional>()
+        .expect("register the template");
     app
+}
+
+/// `refused` is the refusal of a start whose definition the app does not
+/// register: `VALIDATION_FAILED` with the cause `PreconditionFailed`.
+fn assert_start_not_registered(refused: &WorkflowStartError) {
+    assert!(
+        matches!(refused, WorkflowStartError::ValidationFailed { .. }),
+        "{refused}"
+    );
+    assert_eq!(
+        refused.failure_cause(),
+        FailureCause::PreconditionFailed,
+        "{refused}"
+    );
 }
 
 /// The spec of a workflow `name` of one node, the task `answer`, which is
@@ -172,8 +243,9 @@ async fn due_after_now(database: &TestDatabase, task_id: Uuid) -> bool {
 
 /// Each app of one process sends and starts on its own database: the rows
 /// of the first app are in the first database only, the rows of the
-/// second app in the second database only. The delayed send of the second
-/// app is due after its delay.
+/// second app in the second database only. A start of a spec and a start
+/// of a definition by its type each go through the app that they name. The
+/// delayed send of the second app is due after its delay.
 #[tokio::test]
 async fn each_send_and_each_start_goes_to_the_database_of_its_app() {
     let (first_database, first_worker) = covered_database().await;
@@ -201,27 +273,37 @@ async fn each_send_and_each_start_goes_to_the_database_of_its_app() {
         .await
         .expect("the start through the second app")
         .workflow_id();
+    let first_by_type = first
+        .start_workflow::<Nightly>()
+        .await
+        .expect("the start by type through the first app")
+        .workflow_id();
+    let second_by_type = second
+        .start_workflow_with::<Regional>(REGIONAL_PARAMS)
+        .await
+        .expect("the start by type with params through the second app")
+        .workflow_id();
 
-    for (database, own_task, own_workflow, other_task, other_workflow) in [
-        (
-            &first_database,
-            first_task,
-            first_workflow,
-            second_task,
-            second_workflow,
-        ),
-        (
-            &second_database,
-            second_task,
-            second_workflow,
-            first_task,
-            first_workflow,
-        ),
+    let first_rows = [
+        (Table::Tasks, first_task),
+        (Table::Workflows, first_workflow),
+        (Table::Workflows, first_by_type),
+    ];
+    let second_rows = [
+        (Table::Tasks, second_task),
+        (Table::Workflows, second_workflow),
+        (Table::Workflows, second_by_type),
+    ];
+    for (database, own, other) in [
+        (&first_database, &first_rows, &second_rows),
+        (&second_database, &second_rows, &first_rows),
     ] {
-        assert_row(database, Table::Tasks, own_task, Presence::Present).await;
-        assert_row(database, Table::Workflows, own_workflow, Presence::Present).await;
-        assert_row(database, Table::Tasks, other_task, Presence::Absent).await;
-        assert_row(database, Table::Workflows, other_workflow, Presence::Absent).await;
+        for &(table, id) in own {
+            assert_row(database, table, id, Presence::Present).await;
+        }
+        for &(table, id) in other {
+            assert_row(database, table, id, Presence::Absent).await;
+        }
     }
     assert!(!due_after_now(&first_database, first_task).await);
     assert!(due_after_now(&second_database, second_task).await);
@@ -231,10 +313,11 @@ async fn each_send_and_each_start_goes_to_the_database_of_its_app() {
     second_database.drop().await;
 }
 
-/// An app that registers no task, on a database where another app of the
-/// process registers both tasks: its send is `VALIDATION_FAILED` with the
-/// cause `PreconditionFailed`, its workflow builder refuses the node with
-/// `HRS-302`, and the database holds no task.
+/// An app that registers no task and no definition, on a database where
+/// another app of the process registers them: its send and its starts by
+/// type are `VALIDATION_FAILED` with the cause `PreconditionFailed`, its
+/// workflow builder refuses the node with `HRS-302`, and the database holds
+/// no task and no workflow.
 #[tokio::test]
 async fn a_send_and_a_node_of_a_task_that_the_app_does_not_register_write_nothing() {
     let (database, worker) = covered_database().await;
@@ -261,14 +344,27 @@ async fn a_send_and_a_node_of_a_task_that_the_app_does_not_register_write_nothin
         Some(ErrorCode::WorkflowUnregisteredTask),
         "{refused}"
     );
+    let refused = match app.start_workflow::<Nightly>().await {
+        Err(refused) => refused,
+        Ok(handle) => panic!("the start wrote workflow {}", handle.workflow_id()),
+    };
+    assert_start_not_registered(&refused);
+    let refused = match app.start_workflow_with::<Regional>(REGIONAL_PARAMS).await {
+        Err(refused) => refused,
+        Ok(handle) => panic!("the start wrote workflow {}", handle.workflow_id()),
+    };
+    assert_start_not_registered(&refused);
 
-    let tasks: i64 = database
-        .client()
-        .query_one("SELECT count(*) FROM horsies_tasks", &[])
-        .await
-        .expect("count the tasks")
-        .get(0);
-    assert_eq!(tasks, 0);
+    for table in ["horsies_tasks", "horsies_workflows"] {
+        let count_sql = format!("SELECT count(*) FROM {table}");
+        let rows: i64 = database
+            .client()
+            .query_one(count_sql.as_str(), &[])
+            .await
+            .expect("count the rows")
+            .get(0);
+        assert_eq!(rows, 0, "{table}");
+    }
     worker.close().await;
     database.drop().await;
 }

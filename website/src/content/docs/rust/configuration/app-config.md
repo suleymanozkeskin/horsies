@@ -145,6 +145,7 @@ A task registration follows the queue rules of the Python client:
 | `discover(registrars)` | Runs each registrar function on the app in order and stops at the first refusal |
 | `task_runtime()` | The `TaskRuntime` that task bodies take as their first parameter |
 | `workflow_builder(name)` | A `WorkflowSpecBuilder` whose task nodes resolve against the tasks of this app. See [Workflow API](/horsies/rust/concepts/workflows/workflow-api/) |
+| `start_workflow::<D>()`, `start_workflow_with::<D>(params)` | Starts the definition `D` through its registration on this app. `VALIDATION_FAILED` when this app does not register `D`. See [Workflow API](/horsies/rust/concepts/workflows/workflow-api/) |
 
 Each process builds its own state: every worker child runs `main` again. See [Defining Tasks](/horsies/rust/tasks/defining-tasks/).
 

@@ -25,11 +25,7 @@ mod sub_workflow;
 pub use context::{WorkflowContext, WorkflowContextError};
 pub use definition::{WorkflowDefConfig, WorkflowDefinition};
 pub use dependency::OutputlessResults;
-pub use function::{
-    start_workflow, start_workflow_with, WorkflowCheckBuilderRegistration, WorkflowFunction,
-    WorkflowTemplate,
-};
-pub(crate) use function::{start_workflow_as, start_workflow_with_as};
+pub use function::{WorkflowCheckBuilderRegistration, WorkflowFunction, WorkflowTemplate};
 pub use handle::{NodeResult, WorkflowHandle, WorkflowNodeInfo, WorkflowReadError};
 pub use node::{InputField, JoinType, NodeKey, NodeRef, TaskNode, TypedNodeRef};
 pub use spec::{SuccessCase, SuccessPolicy, WorkflowSpec, WorkflowSpecBuilder};

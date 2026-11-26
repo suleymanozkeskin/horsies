@@ -625,14 +625,14 @@ calling thread.
 |---|---|---|
 | `TaskFunctionView` | `task_function.blocking()` | `send`, `send_with_options`, `with_options(..).send`, `retry_send` |
 | `TaskHandleView` | `handle.blocking()` | `get`, `info` |
-| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id` |
+| `HorsiesView` | `app.blocking()` | `get_result`, `get_raw_result`, `get_task_info`, `ping_database`, `ping_workers`, `list_worker_states`, `get_worker_state`, `get_worker_state_history`, `get_class_coverage`, `get_class_report`, `check_live`, `start`, `start_with_id`, `start_workflow`, `start_workflow_with` |
 | `WorkflowFunctionView` | `workflow_function.blocking()` | `start`, `start_with_id`, `retry_start` |
 | `WorkflowTemplateView` | `workflow_template.blocking()` | `start`, `start_with_id` |
 | `WorkflowHandleView` | `workflow_handle.blocking()` | `get`, `result_for`, `status`, `results`, `tasks`, `cancel`, `pause`, `resume` |
 
-The process-wide starts have the blocking functions
-`horsies::blocking::start_workflow::<D>()` and
-`horsies::blocking::start_workflow_with::<D>(params)`.
+The starts of a definition by its type are methods of the app view:
+`app.blocking().start_workflow::<D>()` and
+`app.blocking().start_workflow_with::<D>(params)`.
 
 - On a thread that runs a tokio runtime, a blocking call runs nothing and
   returns the `ASYNC_CONTEXT` member of its catalog:
