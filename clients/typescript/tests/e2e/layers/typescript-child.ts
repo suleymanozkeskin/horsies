@@ -1,8 +1,8 @@
 // The cases that only the TypeScript client has: a child runs on the runtime of its parent and runs every line of the
 // entry before `cli.run`; the providers and the start hooks of each child; `runtime.spawn` work and its signal; a
-// throw in a callback that a body scheduled and a Promise that no body awaits; the deadline of an isolated run; the
-// stop of a worker by signal; and the start of a profile with `SHARED_THREAD` children. Where a case mirrors a
-// Python or Rust test, its comment names it.
+// throw in a callback that a body scheduled and a Promise that no body awaits; the deadline of an isolated run; and the
+// stop of a worker by signal. Where a case mirrors a Python or Rust test, its comment names it. The cases of
+// `SHARED_THREAD` children are in `shared-thread.ts`.
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
@@ -16,7 +16,7 @@ import * as shared from "../src/tasks/shared.ts";
 import * as spawned from "../src/tasks/spawned.ts";
 import { runtimeName } from "../src/tasks/waits.ts";
 import { dataMembers, errorCode, failed, infoOf, sentHandle, succeeded } from "../support/outcome.ts";
-import { exitText, processAlive } from "../support/process.ts";
+import { processAlive } from "../support/process.ts";
 import { pollUntil } from "../support/rows.ts";
 import { e2eTest, type Suite } from "../support/suite.ts";
 
@@ -232,34 +232,6 @@ describe("the TypeScript child", () => {
 
     for (const handle of handles) {
       assert.equal(await succeeded(handle, RESULT_WAIT_MS), "slept_1500");
-    }
-  });
-
-  // On Bun, `SHARED_THREAD` stays off (the thread-seat result of the runtime spike): the worker refuses the profile. On
-  // Node the worker starts the thread child, whose 4 seat isolates each run the provider once.
-  e2eTest("a profile with SHARED_THREAD children is refused at start on Bun and starts on Node", "thread_profiles", async (suite) => {
-    const worker = suite.spawnWorker("thread-only-1x4");
-
-    switch (runtimeName()) {
-      case "bun": {
-        const exit = await worker.waitExit(FAILED_START_WAIT_MS);
-
-        assert.deepEqual(exit, { kind: "exitedWithCode", code: EXIT_FAILED }, `${exitText(exit)}\n${worker.report()}`);
-        assert.ok(worker.logCount('workerProfiles["thread-only-1x4"].sharedThread') > 0, worker.report());
-        assert.ok(worker.logCount("SHARED_THREAD") > 0, worker.report());
-
-        return;
-      }
-
-      case "node": {
-        await worker.waitForLog("worker ready", FAILED_START_WAIT_MS);
-
-        await pollUntil(RESULT_WAIT_MS, "the provider ran in the 4 seat isolates", async () => suite.markers.names("provider-").filter((name) => name.includes("-seat")).length === 4);
-
-        const end = await worker.stop();
-
-        assert.deepEqual(end, { kind: "exitedAfterStop", exit: { kind: "exitedWithCode", code: 0 } }, worker.report());
-      }
     }
   });
 });

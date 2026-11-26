@@ -6,10 +6,11 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { attemptEndedLine } from "../src/handlers.ts";
-import { instanceWorkflows } from "../src/instance-members.ts";
+import { instanceWorkflows, LAYER_WORKFLOWS } from "../src/instance-members.ts";
 import { instanceConfig } from "../src/instances.ts";
 import { parseSpanLine } from "../src/span-lines.ts";
 import { endedSpansFlow } from "../src/tasks/ended-spans.ts";
+import { RECOVERY_QUEUE_WORKFLOWS } from "../src/tasks/recovery-queues.ts";
 import { found, NOT_YET, pollFor } from "../support/poll.ts";
 
 const SERVER = "postgresql://postgres@127.0.0.1:55432/postgres";
@@ -79,9 +80,12 @@ describe("the poll that gives its value", () => {
 });
 
 describe("the members of the instances", () => {
-  test("only worker_ended_spans has a workflow, and only it has tracing", () => {
+  test("the workflows of each instance, and only worker_ended_spans has tracing", () => {
     assert.deepEqual(instanceWorkflows("worker_ended_spans"), [endedSpansFlow]);
-    assert.deepEqual(instanceWorkflows("default"), []);
+    assert.equal(instanceWorkflows("default"), LAYER_WORKFLOWS);
+    assert.equal(instanceWorkflows("recovery"), LAYER_WORKFLOWS);
+    assert.equal(instanceWorkflows("recovery_queues"), RECOVERY_QUEUE_WORKFLOWS);
+    assert.deepEqual(instanceWorkflows("handlers"), []);
     assert.deepEqual(instanceConfig("worker_ended_spans", { kind: "direct", databaseUrl: SERVER }).tracing, { kind: "otel" });
     assert.equal(instanceConfig("handlers", { kind: "direct", databaseUrl: SERVER }).tracing, undefined);
   });

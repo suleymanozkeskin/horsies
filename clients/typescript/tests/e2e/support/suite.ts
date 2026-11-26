@@ -13,15 +13,17 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { type AnyTaskContract, Horsies, type TaskHandle } from "../../../horsies/src/index.ts";
+import { type AnyTaskContract, type AnyWorkflowContract, Horsies, type TaskHandle } from "../../../horsies/src/index.ts";
 import { appInternals } from "../../../horsies/src/app/internals.ts";
 import { buildApp } from "../src/app.ts";
 import { connectionEnv } from "../src/connection.ts";
-import { type Instance, INSTANCE_ENV, instanceConfig, type Profile, readyClass, type ThreadProfile } from "../src/instances.ts";
+import { type Instance, INSTANCE_ENV, instanceConfig, type Profile, readyClass, type ReadyClass, type ThreadProfile } from "../src/instances.ts";
 import { MARKER_DIR_ENV, MarkerDir } from "../src/markers.ts";
 import { customHealthcheck } from "../src/tasks/custom.ts";
+import { recoveryHealthcheck } from "../src/tasks/recovery-queues.ts";
 import { healthcheck } from "../src/tasks/basic.ts";
 import { sharedHealthcheck } from "../src/tasks/shared.ts";
+import { threadHealthcheck } from "../src/tasks/threads.ts";
 import {
   createDatabase,
   dropDatabase,
@@ -165,7 +167,7 @@ export class Suite {
    * second before the second is ready. A worker of another instance than the suite's must run the suite's readiness
    * task.
    */
-  async worker(profile: Profile, instance: Instance = this.instance): Promise<TestProcess> {
+  async worker(profile: Profile | ThreadProfile, instance: Instance = this.instance): Promise<TestProcess> {
     const worker = this.spawnWorker(profile, instance);
 
     await worker.waitForLog(WORKER_READY_LINE, READY_LIMIT_MS);
@@ -175,7 +177,7 @@ export class Suite {
   }
 
   /** Wait until `worker`, of `profile`, ran a readiness task. Fails the test when it exits first or the limit passes. */
-  async waitReady(worker: TestProcess, profile: Profile): Promise<void> {
+  async waitReady(worker: TestProcess, profile: Profile | ThreadProfile): Promise<void> {
     const handle = await this.#sendReadiness(profile);
 
     await worker.waitUntil(READY_LIMIT_MS, "the worker runs its readiness task", async () => {
@@ -185,9 +187,8 @@ export class Suite {
     });
   }
 
-  async #sendReadiness(profile: Profile): Promise<TaskHandle<string, string>> {
-    const contract = this.instance === "custom_queues" ? customHealthcheck : readyClass(profile) === "SHARED_ASYNC" ? sharedHealthcheck : healthcheck;
-    const sent = await this.app.send(contract, {});
+  async #sendReadiness(profile: Profile | ThreadProfile): Promise<TaskHandle<string, string>> {
+    const sent = await this.app.send(instanceReadinessTask(this.instance, profile), {});
 
     if (!sent.ok) {
       assert.fail(`send the readiness task: ${sent.error.code}: ${sent.error.message}`);
@@ -196,9 +197,9 @@ export class Suite {
     return sent.value;
   }
 
-  /** A second app of the suite's instance on the same database, with `tasks` as its contract list. */
-  otherApp(tasks: readonly AnyTaskContract[]): Horsies {
-    const created = Horsies.create({ ...instanceConfig(this.instance, this.db.connection), tasks });
+  /** A second app of the suite's instance on the same database, with `tasks` and `workflows` as its contract lists. */
+  otherApp(tasks: readonly AnyTaskContract[], workflows: readonly AnyWorkflowContract[] = []): Horsies {
+    const created = Horsies.create({ ...instanceConfig(this.instance, this.db.connection), tasks, workflows });
 
     if (!created.ok) {
       assert.fail(`create a second app: ${created.error.refusals.map((refused) => refused.message).join("; ")}`);
@@ -247,6 +248,47 @@ type SuiteParts = {
   readonly logDir: string;
   readonly closeRows: () => Promise<void>;
 };
+
+/** The readiness task of a worker of `profile` of `instance`: a task of the instance that a child of the profile runs. Pure. */
+function instanceReadinessTask(
+  instance: Instance,
+  profile: Profile | ThreadProfile,
+): typeof customHealthcheck | typeof recoveryHealthcheck | ReturnType<typeof readinessTask> {
+  switch (instance) {
+    case "custom_queues":
+      return customHealthcheck;
+    case "recovery_queues":
+      return recoveryHealthcheck;
+    case "default":
+    case "cluster_cap":
+    case "recovery":
+    case "soft_cap":
+    case "queue_retention":
+    case "declared_retention":
+    case "hook_throws":
+    case "provider_throws":
+    case "hook_past_bound":
+    case "thread_profiles":
+    case "scheduler":
+    case "scheduler_invalid_rules":
+    case "scheduler_invalid_task":
+    case "handlers":
+    case "worker_ended_spans":
+      return readinessTask(readyClass(profile));
+  }
+}
+
+/** The readiness task of a class in an instance of the default tasks. Pure. */
+function readinessTask(readiness: ReadyClass): typeof healthcheck | typeof sharedHealthcheck | typeof threadHealthcheck {
+  switch (readiness) {
+    case "ISOLATED":
+      return healthcheck;
+    case "SHARED_ASYNC":
+      return sharedHealthcheck;
+    case "SHARED_THREAD":
+      return threadHealthcheck;
+  }
+}
 
 function appOf(instance: Instance, db: TestDatabase): Horsies {
   const built = buildApp(instance, db.connection);

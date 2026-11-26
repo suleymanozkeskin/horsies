@@ -4,6 +4,7 @@
 import type * as Generated from "../../bridge/index.js";
 import type { LoggerName, LogLevel, LogThreshold } from "../../horsies/src/logging.ts";
 import type { LogLevelsArg, LogRecordOut, LoggingAddon, NotMadeSpan } from "../../horsies/src/native/logging/addon.ts";
+import type { ForwarderPanicAddon } from "../e2e/src/forwarder-panic.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const setLogLevelsMatches: SameFunction<typeof Generated.setLogLevels, LoggingAddon["setLogLevels"]> = true;
@@ -17,3 +18,9 @@ export const thresholdMatches: Mutual<Generated.LogThreshold, LogThreshold> = tr
 export const recordMatches: Mutual<Generated.LogRecordOut, LogRecordOut> = true;
 export const levelsArgumentMatches: Mutual<Generated.LogLevelsArg, LogLevelsArg> = true;
 export const notMadeSpanMatches: Mutual<Generated.NotMadeSpan, NotMadeSpan> = true;
+
+// The test export of a build with the cargo feature `test-probes` (`build:dev`).
+export const probePanicLogForwarderMatches: SameFunction<
+  typeof Generated.probePanicLogForwarder,
+  ForwarderPanicAddon["probePanicLogForwarder"]
+> = true;

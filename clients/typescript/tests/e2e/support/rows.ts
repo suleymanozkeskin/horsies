@@ -35,7 +35,8 @@ export type TaskRow = {
   readonly isWorkflowTask: boolean;
 };
 
-const MICROS = (column: string): string => `floor(extract(epoch FROM ${column}) * 1000000)::bigint::text`;
+/** The SQL text of a time column as microseconds since 1970, as text. Pure. */
+export const MICROS = (column: string): string => `floor(extract(epoch FROM ${column}) * 1000000)::bigint::text`;
 
 /** Both tables as one relation with the columns of `TaskRow`. */
 const TASK_ROWS = `(SELECT id::text AS task_id, task_name::text, queue_name::text, priority::text, status::text,
@@ -51,6 +52,9 @@ const TASK_ROWS = `(SELECT id::text AS task_id, task_name::text, queue_name::tex
 
 const TASK_COLUMNS =
   "task_id, task_name, queue_name, priority, status, retry_count, max_retries, error_code, worker_id, claimed_at, started_at, terminal_at, is_workflow_task";
+
+/** A change of the stored options of a task: a key set to a number, or a key removed. */
+export type OptionsChange = { readonly kind: "set"; readonly key: string; readonly value: number } | { readonly kind: "remove"; readonly key: string };
 
 /** A SQL string literal of `text`, with `standard_conforming_strings` on (the server default). Pure. */
 export function sqlText(text: string): string {
@@ -140,6 +144,41 @@ export class TaskRows {
     });
   }
 
+  /**
+   * Change the stored options of task `taskId`, which must be a PENDING live row (Python `_store_timeout`). A removed
+   * key must be in the options.
+   */
+  async changeStoredOptions(taskId: TaskId, change: OptionsChange): Promise<void> {
+    const read = await this.query(
+      `read the options of task ${taskId}`,
+      `SELECT task_options FROM horsies_tasks WHERE id = ${sqlText(taskId)} AND status = 'PENDING'`,
+    );
+
+    const [row] = read.rows;
+
+    assert.ok(row !== undefined, `task ${taskId} is a PENDING live row`);
+
+    const stored = row[0];
+    const options: Record<string, unknown> = stored === null || stored === undefined ? {} : storedObject(stored, taskId);
+
+    switch (change.kind) {
+      case "set":
+        options[change.key] = change.value;
+        break;
+      case "remove":
+        assert.ok(change.key in options, `the options of task ${taskId} hold ${change.key}`);
+        delete options[change.key];
+        break;
+    }
+
+    const written = await this.query(
+      `store the options of task ${taskId}`,
+      `UPDATE horsies_tasks SET task_options = ${sqlText(JSON.stringify(options))} WHERE id = ${sqlText(taskId)} AND status = 'PENDING'`,
+    );
+
+    assert.equal(written.tag, "UPDATE 1", `task ${taskId} is a PENDING live row`);
+  }
+
   /** The number of live rows with `status`, of `queue` when it names one. */
   async liveCount(status: "RUNNING" | "CLAIMED", queue: string | "anyQueue"): Promise<number> {
     const queueFilter = queue === "anyQueue" ? "" : ` AND queue_name = ${sqlText(queue)}`;
@@ -154,6 +193,15 @@ export class TaskRows {
       `SELECT count(*) FROM ${TASK_ROWS} WHERE task_name = ${sqlText(taskName)} AND status = ${sqlText(status)}`,
     );
   }
+}
+
+/** The stored options text of task `taskId` as an object. Fails the test for a text that is not a JSON object. */
+function storedObject(text: string, taskId: TaskId): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(text);
+
+  assert.ok(parsed instanceof Object && !Array.isArray(parsed), `the options of task ${taskId} are not an object: ${text}`);
+
+  return { ...parsed };
 }
 
 function taskRowOf(row: readonly (string | null)[]): TaskRow {
@@ -186,7 +234,8 @@ function taskRowOf(row: readonly (string | null)[]): TaskRow {
   };
 }
 
-function rowTime(value: string | null): RowTime {
+/** The time of a column that `MICROS` read. Pure. */
+export function rowTime(value: string | null): RowTime {
   return value === null ? { kind: "notSet" } : { kind: "set", epochMicros: BigInt(value) };
 }
 
