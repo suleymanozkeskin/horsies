@@ -54,7 +54,7 @@ export interface ScheduleSection {
 
 // The defaults below are the core's (`core/src/core/config/schedule.rs`: `default_timezone`,
 // `default_max_catch_up_runs`, `default_check_interval`), the same as Python's `TaskSchedule` and `ScheduleConfig`.
-// The generated catalog holds no constant for them yet.
+// The generated catalog holds no constant for them yet; issue #2494 moves them to the codegen output.
 
 /** The zone of a schedule that names none. */
 export const DEFAULT_SCHEDULE_TIMEZONE = "UTC";
