@@ -36,6 +36,8 @@ export interface WorkflowRegistry {
   byKey(definitionKey: string): WorkflowLookup;
   /** The app view of the spec checks. */
   readonly view: SpecAppView;
+  /** The listed workflows, in list order. */
+  readonly workflows: readonly ListedWorkflow[];
 }
 
 const NOT_LISTED: WorkflowLookup = Object.freeze({ kind: "notListed" });
@@ -68,6 +70,7 @@ export function workflowRegistry(
     byContract: lookupContract,
     byKey: (definitionKey: string): WorkflowLookup => byKey.get(definitionKey) ?? NOT_LISTED,
     view,
+    workflows: Object.freeze([...workflows]),
   });
 }
 
