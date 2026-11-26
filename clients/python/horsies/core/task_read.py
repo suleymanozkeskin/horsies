@@ -326,10 +326,8 @@ def _typed_failed(
             return Ok(Failed(error))
         case str() as text:
             pass
-        case other:
-            raise AssertionError(
-                f'a decoded TaskError holds a custom code of type {type(other).__name__}',
-            )
+        case _ as unreachable:
+            assert_never(unreachable)
     members = {member.value: member for member in enum_class}
     match members.get(text):
         case None:
