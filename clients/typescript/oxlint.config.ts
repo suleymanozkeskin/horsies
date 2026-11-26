@@ -51,6 +51,16 @@ export default defineConfig({
       },
     },
     {
+      // The column readers of the showcase's store parse the rows that the
+      // `pg` driver gives (a boundary of the app): they tell the value of a
+      // column apart by its runtime type.
+      files: ["examples/showcase/src/store/columns.ts"],
+      rules: {
+        "anti-slop/no-runtime-typeof": "off",
+        "anti-slop/no-unknown-parameters": "off",
+      },
+    },
+    {
       // The writer of the worker manifest's start members: it tells the
       // members of `WireJson` apart by their runtime type to write each one as
       // JSON text for the core's manifest parser.

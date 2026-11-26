@@ -6,6 +6,7 @@
     "bridge",
     "eslint-plugin",
     "examples",
+    "examples/showcase",
     "horsies",
     "tests"
   ],
