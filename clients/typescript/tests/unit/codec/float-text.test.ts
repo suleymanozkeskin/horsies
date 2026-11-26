@@ -1,39 +1,22 @@
+// Python's float text. The vectors that pin these texts and the corpus of 10,000 doubles are in tests/stored-forms/.
+
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 
 import { pythonFloatText } from "../../../horsies/src/codec/float-text.ts";
-import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
-import { IntegralFloat, readTree } from "../../../horsies/src/codec/number-text.ts";
-import { corpusLines, runtimeLabel, STORED_FORMS_DIR } from "./support/files.ts";
 
-// Python's float texts that the stored-form vectors name. Each one is a vector of task_input.json.
-const NAMED_FLOATS: readonly (readonly [vector: string, value: number, text: string])[] = [
-  ["f64_exponent_minus_5", 1e-5, "1e-05"],
-  ["f64_exponent_plus_16", 1e16, "1e+16"],
-  ["f64_integral", 123, "123.0"],
-  ["f64_negative_zero", -0, "-0.0"],
+// Python's float texts that the stored-form vectors name.
+const NAMED_FLOATS: readonly (readonly [value: number, text: string])[] = [
+  [1e-5, "1e-05"],
+  [1e16, "1e+16"],
+  [123, "123.0"],
+  [-0, "-0.0"],
 ];
 
-const FLOAT_CORPUS_SIZE = 10_000;
-
-function vectorText(name: string): string {
-  const document: { vectors: readonly { name: string; text: string }[] } = JSON.parse(
-    readFileSync(`${STORED_FORMS_DIR}task_input.json`, "utf8"),
-  );
-
-  const row = document.vectors.find((vector) => vector.name === name);
-
-  assert(row !== undefined, `task_input.json has the vector ${name}`);
-
-  return row.text;
-}
-
 describe("Python's float text", () => {
-  for (const [vector, value, text] of NAMED_FLOATS) {
-    test(`${vector}: ${text}`, () => {
+  for (const [value, text] of NAMED_FLOATS) {
+    test(text, () => {
       assert.equal(pythonFloatText(value), text);
-      assert.equal(vectorText(vector), `{"value":${text}}`);
     });
   }
 
@@ -55,29 +38,5 @@ describe("Python's float text", () => {
     for (const value of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
       assert.throws(() => pythonFloatText(value), TypeError);
     }
-  });
-
-  test(`corpus: ${FLOAT_CORPUS_SIZE} doubles against Python's repr, and each text reads back bit for bit`, () => {
-    const bits = new DataView(new ArrayBuffer(8));
-    const mismatches: string[] = [];
-    const lines = corpusLines("floats.txt");
-
-    assert.equal(lines.length, FLOAT_CORPUS_SIZE);
-
-    for (const line of lines) {
-      const space = line.indexOf(" ");
-
-      bits.setBigUint64(0, BigInt(`0x${line.slice(0, space)}`));
-      const value = bits.getFloat64(0);
-      const python = line.slice(space + 1);
-      const read = readTree(jsonTextCheckedByCore(python));
-      const readValue = read instanceof IntegralFloat ? read.value : read;
-
-      if (pythonFloatText(value) !== python || !Object.is(readValue, value)) {
-        mismatches.push(line);
-      }
-    }
-
-    assert.deepEqual(mismatches, [], `${runtimeLabel()}: ${mismatches.length} mismatches`);
   });
 });
