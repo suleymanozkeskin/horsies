@@ -6,18 +6,18 @@
 //!   this maker posts the facts of the span ([`EndedAttemptRecord`]) to the
 //!   package's span maker through a threadsafe function in non-blocking
 //!   mode, with a queue of [`ENDED_SPAN_QUEUE_BOUND`] spans.
-//! - A full queue, or an environment that is closing, drops the span and
-//!   counts it; the first drop is logged, then one per
-//!   `HANDLER_ERROR_LOG_EVERY`. A status that Node-API refuses is logged the
-//!   same way.
+//! - A full queue, an environment that is closing, or a status that
+//!   Node-API refuses leaves the span not made. It is reported as the Rust
+//!   client reports a span that its maker does not make: no metric, and one
+//!   line at ERROR per process on the `horsies.worker` logger, in the form
+//!   of the core's line for a `make` that panicked. The event still goes to
+//!   the handlers.
 //! - The times are epoch microseconds, so the span keeps the precision of
 //!   the worker's clock.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
-use horsies_core::{
-    EndedAttempt, EndedSpanMaker, EndedWorkflow, HANDLER_ERROR_LOG_EVERY, NODE_READ_QUEUE_SPANS,
-};
+use horsies_core::{EndedAttempt, EndedSpanMaker, EndedWorkflow, HANDLER_QUEUE_EVENTS};
 use napi::bindgen_prelude::{BigInt, Function};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::Status;
@@ -27,9 +27,13 @@ use crate::call::node_api::{call_status, CallStatus};
 use crate::child::body_facts::{BodyCarrierRecord, BodyExecution, BodyWorkflowRecord};
 use crate::values::boundary::epoch_micros_of;
 
-/// The spans that wait for the JavaScript thread at once: the most spans
-/// that wait for the node read of their workflow task in the core.
-pub const ENDED_SPAN_QUEUE_BOUND: usize = NODE_READ_QUEUE_SPANS.get();
+/// The spans that wait for the JavaScript thread at once. The span maker
+/// takes the `AttemptEnded` events that the worker decided, as a handler of
+/// that type takes its events, so its queue has the bound of the queue of
+/// one handler (`HANDLER_QUEUE_EVENTS`, 10,000): room for the ends of the
+/// seats of several shared async children killed at once, and for a
+/// JavaScript loop that a handler holds for a while.
+pub const ENDED_SPAN_QUEUE_BOUND: usize = HANDLER_QUEUE_EVENTS.get();
 
 /// The workflow node of the task of an attempt that the worker ended.
 #[napi(
@@ -113,11 +117,11 @@ type SpanFunction = ThreadsafeFunction<
     ENDED_SPAN_QUEUE_BOUND,
 >;
 
-/// The span maker of the handler child: the package's function, and the
-/// count of the spans that did not reach it.
+/// The span maker of the handler child: the package's function, and
+/// whether this maker logged a span that it did not make.
 pub struct JsEndedSpans {
     function: SpanFunction,
-    dropped: AtomicU64,
+    not_made_logged: AtomicBool,
 }
 
 impl JsEndedSpans {
@@ -134,30 +138,33 @@ impl JsEndedSpans {
                 .weak::<true>()
                 .max_queue_size::<ENDED_SPAN_QUEUE_BOUND>()
                 .build()?,
-            dropped: AtomicU64::new(0),
+            not_made_logged: AtomicBool::new(false),
         })
     }
 
-    /// Count one span that did not reach JavaScript, and log the first and
-    /// then one per `HANDLER_ERROR_LOG_EVERY`.
-    fn count_drop(&self, attempt: &EndedAttempt<'_>, cause: &str) {
-        let dropped = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
-        if is_logged(dropped) {
-            tracing::warn!(
-                target: "horsies.bridge",
+    /// Log at ERROR, once per maker (one maker per handler child), that the
+    /// span of `attempt` was not made for `cause`.
+    fn not_made(&self, attempt: &EndedAttempt<'_>, cause: &str) {
+        match self.not_made_logged.swap(true, Ordering::Relaxed) {
+            true => {}
+            false => tracing::error!(
+                target: "horsies.worker",
                 task_id = %attempt.task_id,
-                dropped,
-                "the span of an attempt that the worker ended was not made: {cause}; {dropped} \
-                 such spans so far"
-            );
+                "{}",
+                not_made_text(&attempt.task_id.to_string(), cause),
+            ),
         }
     }
 }
 
-/// Whether the drop number `dropped` (from 1) is logged: the first, then
-/// one per `HANDLER_ERROR_LOG_EVERY`. Pure.
-fn is_logged(dropped: u64) -> bool {
-    dropped == 1 || dropped % HANDLER_ERROR_LOG_EVERY == 0
+/// The text of the log line of a span that was not made: the form of the
+/// core's line for a `make` that panicked. Pure.
+fn not_made_text(task_id: &str, cause: &str) -> String {
+    format!(
+        "the span of the attempt of task {task_id} that the worker ended was not made: {cause}. \
+         The event still goes to the handlers; this span is not complete. Later spans that are \
+         not made are not logged."
+    )
 }
 
 impl EndedSpanMaker for JsEndedSpans {
@@ -169,13 +176,11 @@ impl EndedSpanMaker for JsEndedSpans {
         match call_status(status) {
             CallStatus::Queued => {}
             CallStatus::QueueFull => {
-                self.count_drop(attempt, "the queue of the JavaScript thread is full")
+                self.not_made(attempt, "the queue of the JavaScript thread is full")
             }
-            CallStatus::Closing => {
-                self.count_drop(attempt, "the JavaScript environment is closing")
-            }
+            CallStatus::Closing => self.not_made(attempt, "the JavaScript environment is closing"),
             CallStatus::Refused { status } => {
-                self.count_drop(attempt, &format!("Node-API refused the call: {status}"));
+                self.not_made(attempt, &format!("Node-API refused the call: {status}"));
             }
         }
     }
@@ -186,12 +191,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_first_drop_and_each_thousandth_are_logged() {
-        assert!(is_logged(1));
-        assert!(!is_logged(2));
-        assert!(!is_logged(999));
-        assert!(is_logged(1_000));
-        assert!(is_logged(2_000));
+    fn the_line_of_a_span_not_made_names_the_task_and_the_cause() {
+        let text = not_made_text("0192f6a1-7b3c-7d4e-8f00-0123456789ab", "the queue is full");
+        assert!(
+            text.contains("task 0192f6a1-7b3c-7d4e-8f00-0123456789ab"),
+            "{text}"
+        );
+        assert!(text.contains("was not made: the queue is full."), "{text}");
+        assert!(
+            text.contains("Later spans that are not made are not logged."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_queue_has_the_bound_of_the_queue_of_one_handler() {
+        assert_eq!(ENDED_SPAN_QUEUE_BOUND, 10_000);
     }
 
     #[test]

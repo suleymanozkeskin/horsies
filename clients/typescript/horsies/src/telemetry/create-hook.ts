@@ -10,6 +10,7 @@ import { NO_OP_OBSERVER, type SendObserver } from "../app/observers.ts";
 import type { AppContext } from "../app/context.ts";
 import { type BodyObserver, NO_BODY_OBSERVER, setBodyObserver } from "../child/body-observer.ts";
 import { refusal, type Refusal } from "../app/refusal.ts";
+import { ClientDefect } from "../thrown-errors.ts";
 import { err, ok, type Result } from "../wire/result.ts";
 import { unreachable } from "../wire/unreachable.ts";
 import { OTEL_API_MODULE, type OtelApi, type OtelApiLoader } from "./otel-api.ts";
@@ -111,9 +112,18 @@ export function recordTracingParts(context: AppContext, parts: TracingParts): vo
   setBodyObserver(context, parts.bodyObserver);
 }
 
-/** The tracing parts of the app of `context`: the recorded ones, or those of no tracing. */
+/**
+ * The tracing parts of the app of `context`. `Horsies.create` records the parts of each context it makes, so a
+ * context with none is a defect of the package: `ClientDefect`.
+ */
 export function tracingPartsOfApp(context: AppContext): TracingParts {
-  return partsByApp.get(context) ?? NO_TRACING_PARTS;
+  const recorded = partsByApp.get(context);
+
+  if (recorded === undefined) {
+    throw new ClientDefect({ subject: "tracingPartsOfApp", rule: "Horsies.create records the tracing parts of each app" });
+  }
+
+  return recorded;
 }
 
 /** The refusal of `otel` with no API: the cause of the failed load, and the two fixes. Pure. */

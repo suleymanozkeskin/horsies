@@ -9,7 +9,8 @@ import { appInternals } from "../../../../horsies/src/app/internals.ts";
 import { NO_OP_OBSERVER } from "../../../../horsies/src/app/observers.ts";
 import { bodyObserverOf, NO_BODY_OBSERVER } from "../../../../horsies/src/child/body-observer.ts";
 import { defineTask } from "../../../../horsies/src/contract/public.ts";
-import { tracingPartsOf } from "../../../../horsies/src/telemetry/create-hook.ts";
+import { tracingPartsOf, tracingPartsOfApp } from "../../../../horsies/src/telemetry/create-hook.ts";
+import { ClientDefect } from "../../../../horsies/src/thrown-errors.ts";
 import { type OtelApiLoad, requireOtelApi } from "../../../../horsies/src/telemetry/otel-api.ts";
 import { tracingSettingOf } from "../../../../horsies/src/telemetry/tracing-config.ts";
 import { h } from "../../../../horsies/src/wire/public.ts";
@@ -141,6 +142,14 @@ describe("Horsies.create and the tracing step", () => {
 
     assert.notEqual(traced.ok ? bodyObserverOf(appInternals(traced.value)) : NO_BODY_OBSERVER, NO_BODY_OBSERVER);
     assert.equal(plain.ok ? bodyObserverOf(appInternals(plain.value)) : undefined, NO_BODY_OBSERVER);
+  });
+
+  test("a context that Horsies.create did not make has no tracing parts: ClientDefect", () => {
+    const created = createHorsies({ broker: { databaseUrl: DATABASE_URL }, tasks: [listed] }, fakeEnvironment());
+    const context = created.ok ? appInternals(created.value) : assert.fail("the app is refused");
+
+    assert.equal(tracingPartsOfApp(context).setting.kind, "none");
+    assert.throws(() => tracingPartsOfApp({ ...context }), ClientDefect);
   });
 
   test("an app with otel tracing keeps its setting for the worker and the children", () => {
