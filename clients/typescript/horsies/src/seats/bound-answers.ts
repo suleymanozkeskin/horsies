@@ -1,11 +1,18 @@
-// The answer to a seat operation that comes past the bound of the operations that wait in its isolate. Nothing reaches
-// the main thread, so nothing is written; each operation fails with the transient failure that its own type has:
+// How the relay of a seat isolate sends each operation, and the answer to an operation that comes past the bound of
+// the operations that wait in its isolate. A bound that is hit is an expected failure: the operation is not sent, so
+// nothing is written, and it gets the retryable failure that its own type already has, with a cause that names the
+// relay bound (`MAX_SEAT_OPS_WAITING`) and its value:
 //
-// - `enqueue`: `ENQUEUE_FAILED`, retryable, with the task id and the payload of the request. A resend of the same task
-//   id (`retrySend`, or the resend of `resendOnTransientErr`) is safe: no row exists.
-// - `taskInfo`: the database failure of a task read, `TASK_INFO_QUERY_FAILED`, retryable.
-// - `prepareSend`: its type has no transient failure (it computes the facts of a send and does no I/O). It gets the
-//   refusal that every core call of a process gets past the bound of its calls in flight: `TOO_MANY_PENDING_CALLS`.
+// - `enqueue` waits for the I/O of the main thread: past the bound it gets `ENQUEUE_FAILED`, retryable, with the task
+//   id and the payload of the request. A resend of the same task id (`retrySend`, or the resend of
+//   `resendOnTransientErr`) is safe: no row exists.
+// - `taskInfo` waits for the I/O of the main thread: past the bound it gets the retryable failure of a task read,
+//   `TASK_INFO_QUERY_FAILED` (a read has no send failure).
+// - `prepareSend` does no I/O: the main thread computes the facts of a send at once and holds nothing. It goes at once,
+//   takes no place of the bounds, and is never refused at the bound. Its type has no failure that the relay could fill
+//   there (`ENQUEUE_FAILED` needs the task id and the payload that the prepare makes); the send meets the bound at its
+//   enqueue and gets `ENQUEUE_FAILED` with both. The prepares that wait are the sends that the body started, held in
+//   the isolate's heap under its memory cap.
 //
 // The records have the forms that the addon gives (`RawCatalogError`), so the area's own converters read them.
 
@@ -18,37 +25,54 @@ import type { SeatAnswer, SeatRequest } from "./protocol.ts";
 /** The subject of the failures that the relay of a seat isolate gives. */
 const RELAY_SUBJECT = "seat relay";
 
-/** The answer to `request`, which came when `bound` operations waited in the isolate already. Pure. */
-export function boundAnswer(request: SeatRequest, bound: number): SeatAnswer {
+/**
+ * How the relay sends one operation: at once (the main thread answers it with no I/O), or under the bounds of the
+ * operations that wait for the main thread, with the answer that it gets past them.
+ */
+export type OperationLane =
+  | { readonly kind: "answeredAtOnce" }
+  | { readonly kind: "waitsForIo"; readonly boundAnswer: (bound: number) => SeatAnswer };
+
+const ANSWERED_AT_ONCE: OperationLane = Object.freeze({ kind: "answeredAtOnce" });
+
+/** The lane of `request`. Pure. */
+export function operationLane(request: SeatRequest): OperationLane {
   const area = request.area;
 
   switch (area) {
     case "sends":
-      return sendsBoundAnswer(request.operation, bound);
+      return sendsLane(request.operation);
     default:
-      return unreachable(area, "boundAnswer");
+      return unreachable(area, "operationLane");
   }
 }
 
-/** The answer of the `sends` area to `operation` past the bound. Pure. */
-function sendsBoundAnswer(operation: SendsSeatOperation, bound: number): SeatAnswer {
-  const message = `the seat isolate holds ${String(bound)} operations that wait for the main thread of its child, the most it may hold; the operation was not run`;
+/** The text of a failure at the bound: the relay bound, its value, and that the operation did not run. Pure. */
+export function boundMessage(bound: number): string {
+  return `the relay of this seat isolate holds ${String(bound)} operations that wait for the main thread of its child, its bound (MAX_SEAT_OPS_WAITING = ${String(bound)}); the operation was not run`;
+}
 
+/** The lane of the `sends` operation `operation`. Pure. */
+function sendsLane(operation: SendsSeatOperation): OperationLane {
   switch (operation.kind) {
     case "prepareSend":
-      return {
-        kind: "refused",
-        refusal: { code: "TOO_MANY_PENDING_CALLS", subject: `${RELAY_SUBJECT}: prepareSend`, bound },
-      };
+      return ANSWERED_AT_ONCE;
     case "enqueue":
-      return sendsReply({
-        kind: "enqueue",
-        outcome: { kind: "failed", error: enqueueFailed(operation.request, `${message}; nothing was written`) },
-      });
+      return {
+        kind: "waitsForIo",
+        boundAnswer: (bound) =>
+          sendsReply({
+            kind: "enqueue",
+            outcome: { kind: "failed", error: enqueueFailed(operation.request, `${boundMessage(bound)}; nothing was written`) },
+          }),
+      };
     case "taskInfo":
-      return sendsReply({ kind: "taskInfo", read: { kind: "failed", error: taskInfoFailed(message) } });
+      return {
+        kind: "waitsForIo",
+        boundAnswer: (bound) => sendsReply({ kind: "taskInfo", read: { kind: "failed", error: taskInfoFailed(boundMessage(bound)) } }),
+      };
     default:
-      return unreachable(operation, "sendsBoundAnswer");
+      return unreachable(operation, "sendsLane");
   }
 }
 

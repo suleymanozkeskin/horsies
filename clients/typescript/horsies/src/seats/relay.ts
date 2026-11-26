@@ -1,9 +1,12 @@
 // The relay of a seat isolate: each core operation of the isolate's app (a send, a task read) becomes one `op` message
 // to the main thread of its child, and the `opReply` of that message its answer. The isolate never loads the addon.
 //
-// - At most `MAX_SEAT_OPS_IN_FLIGHT` operations of an isolate wait for the main thread at once. Later operations wait
-//   in the isolate, in order, at most `MAX_SEAT_OPS_WAITING`. An operation past that bound is not sent: it gets the
-//   transient failure of its own type at once (`bound-answers.ts`).
+// - An operation that waits for I/O of the main thread (an enqueue, a task read): at most `MAX_SEAT_OPS_IN_FLIGHT` of
+//   them per isolate wait for the main thread at once. Later ones wait in the isolate, in order, at most
+//   `MAX_SEAT_OPS_WAITING`. One past that bound is not sent: it gets the retryable failure of its own type at once,
+//   with a cause that names the bound (`bound-answers.ts`).
+// - An operation that the main thread answers at once with no I/O (the prepare of a send) goes at once and takes no
+//   place of the bounds.
 // - A refused answer (the core call threw a `CoreError` on the main thread) rejects with that class and its facts.
 // - A reply of another area than the request's, and an answer to an operation that does not wait, are defects of the
 //   package: `ClientDefect`.
@@ -12,7 +15,7 @@ import type { SeatOperationMap, SeatRelay } from "../app/core-access.ts";
 import { thrownError } from "../native/call/envelope.ts";
 import { ClientDefect } from "../thrown-errors.ts";
 import { unreachable } from "../wire/unreachable.ts";
-import { boundAnswer } from "./bound-answers.ts";
+import { operationLane, type OperationLane } from "./bound-answers.ts";
 import { SEAT_PROTOCOL_VERSION, type SeatAnswer, type SeatArea, type SeatRequest, type SeatToMain } from "./protocol.ts";
 
 /**
@@ -29,6 +32,9 @@ const MAX_REQUEST_ID: number = Number.MAX_SAFE_INTEGER;
 
 /** One operation that waits for its answer. */
 type PendingOperation = { readonly request: SeatRequest; readonly answer: (answer: SeatAnswer) => void };
+
+/** One sent operation and its lane. */
+type SentOperation = { readonly operation: PendingOperation; readonly lane: OperationLane["kind"] };
 
 /** How a queue took an operation. */
 type QueuePut = "queued" | "full";
@@ -82,8 +88,11 @@ class OperationQueue {
 /** The relay of one seat isolate. `post` sends a message to the main thread of the child. */
 export class IsolateRelay implements SeatRelay {
   readonly #post: (message: SeatToMain) => void;
-  readonly #inFlight = new Map<number, PendingOperation>();
+  /** Every operation sent and not answered, by its request id, with its lane. */
+  readonly #sent = new Map<number, SentOperation>();
   readonly #waiting = new OperationQueue(MAX_SEAT_OPS_WAITING);
+  /** The sent operations that wait for I/O of the main thread. */
+  #inFlight = 0;
   #lastRequestId = 0;
 
   constructor(post: (message: SeatToMain) => void) {
@@ -104,37 +113,69 @@ export class IsolateRelay implements SeatRelay {
 
   /** The main thread answered the operation `requestId`. The next waiting operation goes. */
   settle(requestId: number, answer: SeatAnswer): void {
-    const operation = this.#inFlight.get(requestId);
+    const sent = this.#sent.get(requestId);
 
-    if (operation === undefined) {
+    if (sent === undefined) {
       throw new ClientDefect({ subject: "seat relay", rule: `the main thread answered the operation ${String(requestId)}, which does not wait` });
     }
 
-    this.#inFlight.delete(requestId);
-    operation.answer(answer);
+    this.#sent.delete(requestId);
+    sent.operation.answer(answer);
 
+    switch (sent.lane) {
+      case "answeredAtOnce":
+        return;
+      case "waitsForIo":
+        this.#inFlight -= 1;
+        this.#sendNext();
+
+        return;
+      default:
+        unreachable(sent.lane, "IsolateRelay.settle");
+    }
+  }
+
+  /** The operations that wait for I/O of the main thread, those that wait in the isolate, and every sent one. */
+  size(): { readonly inFlight: number; readonly waiting: number; readonly sent: number } {
+    return { inFlight: this.#inFlight, waiting: this.#waiting.size(), sent: this.#sent.size };
+  }
+
+  #sendNext(): void {
     const next = this.#waiting.take();
 
     switch (next.kind) {
       case "operation":
-        this.#send(next.operation);
+        this.#send(next.operation, "waitsForIo");
 
         return;
       case "empty":
         return;
       default:
-        unreachable(next, "IsolateRelay.settle");
+        unreachable(next, "IsolateRelay.sendNext");
     }
   }
 
-  /** The operations that wait for the main thread, and those that wait in the isolate. */
-  size(): { readonly inFlight: number; readonly waiting: number } {
-    return { inFlight: this.#inFlight.size, waiting: this.#waiting.size() };
+  #take(operation: PendingOperation): void {
+    const lane = operationLane(operation.request);
+
+    switch (lane.kind) {
+      case "answeredAtOnce":
+        this.#send(operation, lane.kind);
+
+        return;
+      case "waitsForIo":
+        this.#takeBounded(operation, lane);
+
+        return;
+      default:
+        unreachable(lane, "IsolateRelay.take");
+    }
   }
 
-  #take(operation: PendingOperation): void {
-    if (this.#inFlight.size < MAX_SEAT_OPS_IN_FLIGHT) {
-      this.#send(operation);
+  /** Send an operation that waits for I/O, or queue it, or answer it with its failure past the bound. */
+  #takeBounded(operation: PendingOperation, lane: Extract<OperationLane, { readonly kind: "waitsForIo" }>): void {
+    if (this.#inFlight < MAX_SEAT_OPS_IN_FLIGHT) {
+      this.#send(operation, lane.kind);
 
       return;
     }
@@ -145,21 +186,32 @@ export class IsolateRelay implements SeatRelay {
       case "queued":
         return;
       case "full":
-        operation.answer(boundAnswer(operation.request, MAX_SEAT_OPS_WAITING));
+        operation.answer(lane.boundAnswer(MAX_SEAT_OPS_WAITING));
 
         return;
       default:
-        unreachable(put, "IsolateRelay.take");
+        unreachable(put, "IsolateRelay.takeBounded");
     }
   }
 
-  #send(operation: PendingOperation): void {
+  #send(operation: PendingOperation, lane: OperationLane["kind"]): void {
     if (this.#lastRequestId >= MAX_REQUEST_ID) {
       throw new ClientDefect({ subject: "seat relay", rule: "the request ids of the isolate are used up" });
     }
 
     this.#lastRequestId += 1;
-    this.#inFlight.set(this.#lastRequestId, operation);
+    this.#sent.set(this.#lastRequestId, { operation, lane });
+
+    switch (lane) {
+      case "waitsForIo":
+        this.#inFlight += 1;
+        break;
+      case "answeredAtOnce":
+        break;
+      default:
+        unreachable(lane, "IsolateRelay.send");
+    }
+
     this.#post({ kind: "op", protocol: SEAT_PROTOCOL_VERSION, requestId: this.#lastRequestId, request: operation.request });
   }
 }
