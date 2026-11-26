@@ -1,6 +1,17 @@
 {
   "name": "horsies",
-  "private": true,
+  "version": "0.8.1",
+  "description": "TypeScript client of the horsies task queue and workflow engine, for Node and Bun",
+  "license": "MIT",
+  "homepage": "https://suleymanozkeskin.github.io/horsies/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/suleymanozkeskin/horsies.git",
+    "directory": "clients/typescript/horsies"
+  },
+  "bugs": {
+    "url": "https://github.com/suleymanozkeskin/horsies/issues"
+  },
   "type": "module",
   "exports": {
     ".": {
@@ -13,6 +24,15 @@
     },
     "./package.json": "./package.json"
   },
+  "files": [
+    "dist",
+    ".agents/skills/horsies",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=26"
+  },
   "peerDependencies": {
     "zod": ">=4.1.13 <4.7.0"
   },
@@ -20,6 +40,9 @@
     "zod": {
       "optional": true
     }
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "zod": "4.1.13"
