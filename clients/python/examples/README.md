@@ -129,7 +129,7 @@ validate_order
          |- generate_invoice         (timeout_ms = 8 s)
          \-> SubWorkflow: shipping(courier, express)
                 \-> capture_payment  (args_from = authorize_payment)
-                      \-> send_order_email  (allow_failed_deps=True)
+                      \-> send_order_email  (allow_failed_dependencies=True)
 ```
 
 `shipping` is a child workflow in its own right — its own run, its own graph,
@@ -248,7 +248,7 @@ is a thing to look at in the dashboard, not a claim to take on trust.
 | `SubWorkflowNode` | `shipping`, parameterized per order | a child run with its own graph |
 | `args_from` | `capture_payment` takes the authorization | node detail shows what was injected |
 | `from_node` | `daily_report`, functional style | the same wiring, one call shorter |
-| `allow_failed_deps` | `send_order_email`, `restock_or_writeoff` | a COMPLETED node under a FAILED one |
+| `allow_failed_dependencies` | `send_order_email`, `restock_or_writeoff` | a COMPLETED node under a FAILED one |
 | `join='quorum'` + `WorkflowContext` | `restock`: three feeds, two are enough | a run that survives a failed branch |
 | `join='any'` | `flash_sale`: `warm_cache_edge` | fires on the first publish to land |
 | `SuccessPolicy` / `SuccessCase` | `flash_sale` (either target) and `restock` (the aggregate) | COMPLETED despite a failed node |
@@ -304,7 +304,7 @@ A damaged return is a judgement call: the item is in someone's hands, and
 whether it goes back on the shelf or is written off is not a decision code
 should make. `inspect_item` reports `DAMAGED_ITEM`, the run goes PAUSED, and
 nothing downstream starts. Resume and `restock_or_writeoff` executes on the
-failed branch — it sets `allow_failed_deps=True`, so it receives the inspection
+failed branch — it sets `allow_failed_dependencies=True`, so it receives the inspection
 error and writes the item off. Cancel instead and the return simply stays open,
 which is also a legitimate answer.
 

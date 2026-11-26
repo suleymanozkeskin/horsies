@@ -587,8 +587,8 @@ async fn a_failed_child_reaches_its_dependent_through_args_from_and_the_context(
     let child_specs = matrix_children();
     let mut probe = after(task_node(1, "e2e_sub_probe_failed_child"), &[0]);
     probe.args_from.insert("child_result".to_owned(), 0);
-    probe.workflow_ctx_from = Some(vec!["node_0".to_owned()]);
-    probe.allow_failed_deps = true;
+    probe.workflow_context_from = Some(vec!["node_0".to_owned()]);
+    probe.allow_failed_dependencies = true;
     let mut probe_parent = parent(
         "subworkflow_failure_args_ctx_probe",
         vec![sub_workflow_node(0, &fail_child()), probe],
@@ -721,18 +721,18 @@ async fn a_nested_child_failure_gives_a_sub_workflow_error_at_each_level() {
     );
 }
 
-/// `test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with`
-/// and `test_subworkflow_skip_allow_failed_deps`: the child builder receives
+/// `test_subworkflow_allow_failed_dependencies_passes_failed_task_result_to_build_with`
+/// and `test_subworkflow_skip_allow_failed_dependencies`: the child builder receives
 /// the failed upstream result with its code, and the child completes.
 #[tokio::test]
-async fn an_allow_failed_deps_child_builder_receives_the_failed_upstream_result() {
+async fn an_allow_failed_dependencies_child_builder_receives_the_failed_upstream_result() {
     let pool = shared_pool().await;
     let mut child = after(sub_workflow_node(1, &failed_input_child()), &[0]);
     child.args_from.insert("value".to_owned(), 0);
-    child.allow_failed_deps = true;
+    child.allow_failed_dependencies = true;
     child.sub_workflow_params = SubWorkflowParams::Given;
     let mut allow_failed = parent(
-        "subworkflow_allow_failed_deps_to_build_with",
+        "subworkflow_allow_failed_dependencies_to_build_with",
         vec![failing(0, "E2E_UPSTREAM_FAIL"), child],
         Some(1),
     );
@@ -1170,7 +1170,7 @@ async fn success_allow_failed_and_nested_optional_failure_in_one_outputless_work
     let pool = shared_pool().await;
     let mut allow_failed = after(sub_workflow_node(2, &failed_input_child()), &[1]);
     allow_failed.args_from.insert("value".to_owned(), 1);
-    allow_failed.allow_failed_deps = true;
+    allow_failed.allow_failed_dependencies = true;
     allow_failed.sub_workflow_params = SubWorkflowParams::Given;
     let mut mixed = parent(
         "deep_mixed_paths",

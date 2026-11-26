@@ -179,14 +179,14 @@ parse: TaskNode[ProductRecord] = TaskNode(
     fn=parse_product_page,
     waits_for=[fetch],
     args_from={"page_result": fetch},
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
     node_id="parse_product_page",
 )
 save: TaskNode[None] = TaskNode(
     fn=save_product_record,
     waits_for=[parse],
     args_from={"product_result": parse},
-    allow_failed_deps=True,
+    allow_failed_dependencies=True,
     node_id="save_product_record",
 )
 
@@ -204,7 +204,7 @@ match spec.start():
         raise RuntimeError(f"Start failed: {start_err.code}")
 ```
 
-This pattern only runs when the downstream task actually executes. With `join="all"` and `allow_failed_deps=False` (default), any failed or skipped dependency causes the task to be SKIPPED, so this guard code never runs. With `join="any"` or `join="quorum"`, the task can still run if the success threshold is met. See [Workflow Semantics](/horsies/concepts/workflows/workflow-semantics/) for default join rules and failure propagation.
+This pattern only runs when the downstream task actually executes. With `join="all"` and `allow_failed_dependencies=False` (default), any failed or skipped dependency causes the task to be SKIPPED, so this guard code never runs. With `join="any"` or `join="quorum"`, the task can still run if the success threshold is met. See [Workflow Semantics](/horsies/concepts/workflows/workflow-semantics/) for default join rules and failure propagation.
 
 ### Handle Errors with Explicit Returns
 

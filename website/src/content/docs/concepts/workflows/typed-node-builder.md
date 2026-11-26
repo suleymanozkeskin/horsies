@@ -48,7 +48,7 @@ The API separates workflow configuration from task arguments:
 task.node(workflow_options)(task_arguments)
 ```
 
-Stage 1 accepts workflow options (keyword-only): `waits_for`, `args_from`, `workflow_ctx_from`, `node_id`, `allow_failed_deps`, `join`, `min_success`, etc.
+Stage 1 accepts workflow options (keyword-only): `waits_for`, `args_from`, `workflow_context_from`, `node_id`, `allow_failed_dependencies`, `join`, `min_success`, etc.
 
 Stage 2 accepts task arguments matching the function signature.
 
@@ -92,7 +92,7 @@ _score_c = compute_score.node(
 
 ### Dependency Injection with `from_node()`
 
-Use `from_node()` to wire upstream results into downstream task arguments. It auto-adds the upstream node to `waits_for` and `args_from`. The parameter receives a `TaskOutcome[T, TaskError]`: `Succeeded(value)`, or `Failed(task_error)` with `allow_failed_deps=True`:
+Use `from_node()` to wire upstream results into downstream task arguments. It auto-adds the upstream node to `waits_for` and `args_from`. The parameter receives a `TaskOutcome[T, TaskError]`: `Succeeded(value)`, or `Failed(task_error)` with `allow_failed_dependencies=True`:
 
 <!-- check: skip partial -- uses names that the page does not define -->
 ```python
@@ -196,11 +196,11 @@ process_node = process_user.node(
 |-----------|------|---------|-------------|
 | `waits_for` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Dependencies |
 | `args_from` | `dict[str, TaskNode \| SubWorkflowNode]` | `None` | Result injection mapping |
-| `workflow_ctx_from` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Context sources |
+| `workflow_context_from` | `Sequence[TaskNode \| SubWorkflowNode]` | `None` | Context sources |
 | `node_id` | `str` | `None` | Stable identifier |
 | `queue` | `str` | `None` | Queue override |
 | `priority` | `int` | `None` | Priority override, from 1 (highest) to 100 (lowest). A value outside 1–100 raises `HRS-034` when the spec is built |
-| `allow_failed_deps` | `bool` | `False` | Run despite failed deps |
+| `allow_failed_dependencies` | `bool` | `False` | Run despite failed deps |
 | `join` | `Literal['all', 'any', 'quorum']` | `'all'` | Dependency join semantics |
 | `min_success` | `int` | `None` | Required for `join='quorum'` |
 | `good_until` | `datetime` | `None` | Task expiry deadline. Must be timezone-aware: a naive `datetime` raises `HRS-035` when the spec is built |

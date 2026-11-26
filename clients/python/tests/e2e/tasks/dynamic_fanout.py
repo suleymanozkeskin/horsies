@@ -98,7 +98,7 @@ class ShardReport(WorkflowDefinition[int]):
         ]
         total = sum_shard_rows.node(
             waits_for=list(count_nodes),
-            workflow_ctx_from=list(count_nodes),
+            workflow_context_from=list(count_nodes),
             node_id='total',
         )(shard_count=len(count_nodes))
         return app.workflow(

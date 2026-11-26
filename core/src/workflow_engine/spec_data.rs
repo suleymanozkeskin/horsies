@@ -211,9 +211,9 @@ pub struct SpecNode {
     pub args_from: BTreeMap<String, NodeIndex>,
     /// The node ids of the dependencies whose results the node's workflow
     /// context takes; empty when the node takes no context.
-    pub workflow_ctx_from: Vec<String>,
+    pub workflow_context_from: Vec<String>,
     /// The node runs when a dependency failed.
-    pub allow_failed_deps: bool,
+    pub allow_failed_dependencies: bool,
     pub join: SpecJoin,
     pub body: SpecNodeBody,
 }
@@ -428,13 +428,13 @@ fn any_node(
         input_json: node.input_json,
         dependencies,
         args_from,
-        workflow_ctx_from: match node.workflow_ctx_from.is_empty() {
+        workflow_context_from: match node.workflow_context_from.is_empty() {
             true => None,
-            false => Some(node.workflow_ctx_from),
+            false => Some(node.workflow_context_from),
         },
         queue: body.queue,
         priority: body.priority,
-        allow_failed_deps: node.allow_failed_deps,
+        allow_failed_dependencies: node.allow_failed_dependencies,
         join,
         min_success,
         // The deadline is merged into the task options already.

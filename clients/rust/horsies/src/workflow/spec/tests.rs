@@ -189,7 +189,7 @@ fn a_reference_of_another_builder_is_refused() {
 fn a_context_source_outside_the_dependencies_is_refused() {
     let mut builder = test_builder("ctx");
     let charged = add(&mut builder, charge());
-    let node = task_node::<u32, ContextInput>("summarize").workflow_ctx_from([charged]);
+    let node = task_node::<u32, ContextInput>("summarize").workflow_context_from([charged]);
     builder.add_task(node, context_registration());
     assert_eq!(code_of(builder), Some(ErrorCode::WorkflowInvalidCtxFrom));
 }
@@ -202,7 +202,7 @@ fn a_context_for_a_task_that_takes_none_is_refused() {
         &mut builder,
         task_node::<u32, ContextInput>("summarize")
             .waits_for(charged)
-            .workflow_ctx_from([charged]),
+            .workflow_context_from([charged]),
     );
     let refused = refusal(builder);
     assert!(
@@ -221,10 +221,13 @@ fn a_task_that_takes_the_context_gets_it_in_the_check() {
     let charged = add(&mut builder, charge());
     let node = task_node::<u32, ContextInput>("summarize")
         .waits_for(charged)
-        .workflow_ctx_from([charged]);
+        .workflow_context_from([charged]);
     builder.add_task(node, context_registration());
     let spec = builder.build().unwrap();
-    assert_eq!(spec.nodes[1].workflow_ctx_from, vec!["ctx:0".to_owned()]);
+    assert_eq!(
+        spec.nodes[1].workflow_context_from,
+        vec!["ctx:0".to_owned()]
+    );
 }
 
 #[test]

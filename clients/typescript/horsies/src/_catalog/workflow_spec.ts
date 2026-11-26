@@ -123,8 +123,8 @@ export interface SpecNode {
   readonly input_json: string;
   readonly dependencies: ReadonlyArray<number>;
   readonly args_from: ReadonlyMap<string, number>;
-  readonly workflow_ctx_from: ReadonlyArray<string>;
-  readonly allow_failed_deps: boolean;
+  readonly workflow_context_from: ReadonlyArray<string>;
+  readonly allow_failed_dependencies: boolean;
   readonly join: SpecJoin;
   readonly body: SpecNodeBody;
 }
@@ -271,8 +271,8 @@ export function specNodeToWire(value: SpecNode): ReadonlyMap<string, WireJson> {
     ["input_json", value.input_json],
     ["dependencies", value.dependencies.map((item) => integerToWire(item, "SpecNode.dependencies"))],
     ["args_from", new Map(Array.from(value.args_from, ([key, item]) => [key, integerToWire(item, "SpecNode.args_from")] as const))],
-    ["workflow_ctx_from", value.workflow_ctx_from],
-    ["allow_failed_deps", value.allow_failed_deps],
+    ["workflow_context_from", value.workflow_context_from],
+    ["allow_failed_dependencies", value.allow_failed_dependencies],
     ["join", specJoinToWire(value.join)],
     ["body", specNodeBodyToWire(value.body)],
   ]);

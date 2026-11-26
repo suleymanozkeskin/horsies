@@ -123,11 +123,11 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
@@ -136,11 +136,11 @@ class MockTaskWrapper(TaskFunction[Any, Any]):
         return NodeFactory(
             fn=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -198,11 +198,11 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
@@ -211,11 +211,11 @@ class MockTaskWrapperWithCtx(TaskFunction[Any, Any]):
         return NodeFactory(
             fn=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -273,11 +273,11 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
@@ -286,11 +286,11 @@ class MockTaskWrapperWithParams(TaskFunction[Any, Any]):
         return NodeFactory(
             fn=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -344,11 +344,11 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
@@ -357,11 +357,11 @@ class MockTaskWrapperWithOptionalParam(TaskFunction[Any, Any]):
         return NodeFactory(
             fn=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -413,11 +413,11 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
@@ -426,11 +426,11 @@ class MockTaskWrapperWithKwargs(TaskFunction[Any, Any]):
         return NodeFactory(
             fn=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -485,11 +485,11 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
@@ -498,11 +498,11 @@ class MockTaskWrapperWithRequiredMeta(TaskFunction[Any, Any]):
         return NodeFactory(
             fn=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -555,11 +555,11 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
@@ -568,11 +568,11 @@ class MockTaskWrapperInt(TaskFunction[Any, int]):
         return NodeFactory(
             fn=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -630,11 +630,11 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
@@ -643,11 +643,11 @@ class MockTaskWrapperWithStringResultParam(TaskFunction[Any, Any]):
         return NodeFactory(
             fn=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -705,11 +705,11 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
         self,
         *,
         waits_for: Any = None,
-        workflow_ctx_from: Any = None,
+        workflow_context_from: Any = None,
         args_from: Any = None,
         queue: Any = None,
         priority: Any = None,
-        allow_failed_deps: bool = False,
+        allow_failed_dependencies: bool = False,
         join: Any = 'all',
         min_success: Any = None,
         good_until: Any = None,
@@ -718,11 +718,11 @@ class MockTaskWrapperWithRawParam(TaskFunction[Any, Any]):
         return NodeFactory(
             fn=self,  # type: ignore[arg-type]
             waits_for=waits_for,
-            workflow_ctx_from=workflow_ctx_from,
+            workflow_context_from=workflow_context_from,
             args_from=args_from,
             queue=queue,
             priority=priority,
-            allow_failed_deps=allow_failed_deps,
+            allow_failed_dependencies=allow_failed_dependencies,
             join=join,
             min_success=min_success,
             good_until=good_until,
@@ -773,24 +773,24 @@ class TestTaskNode:
         assert node.kwargs == {}
         assert node.waits_for == []
         assert node.args_from == {}
-        assert node.workflow_ctx_from is None
+        assert node.workflow_context_from is None
         assert node.queue is None
         assert node.priority is None
         assert node.index is None
 
-    def test_tasknode_allow_failed_deps_default(self) -> None:
-        """allow_failed_deps defaults to False."""
+    def test_tasknode_allow_failed_dependencies_default(self) -> None:
+        """allow_failed_dependencies defaults to False."""
         mock_fn = MockTaskWrapper(task_name='test')
         node = TaskNode(fn=mock_fn)
 
-        assert node.allow_failed_deps is False
+        assert node.allow_failed_dependencies is False
 
-    def test_tasknode_allow_failed_deps_true(self) -> None:
-        """allow_failed_deps can be set to True."""
+    def test_tasknode_allow_failed_dependencies_true(self) -> None:
+        """allow_failed_dependencies can be set to True."""
         mock_fn = MockTaskWrapper(task_name='test')
-        node = TaskNode(fn=mock_fn, allow_failed_deps=True)
+        node = TaskNode(fn=mock_fn, allow_failed_dependencies=True)
 
-        assert node.allow_failed_deps is True
+        assert node.allow_failed_dependencies is True
 
 
 # =============================================================================
@@ -1004,7 +1004,7 @@ class TestWorkflowSpecValidation:
 
         assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_ARGS_FROM
 
-    def test_workflow_ctx_from_not_in_waits_for(self) -> None:
+    def test_workflow_context_from_not_in_waits_for(self) -> None:
         """ctx_from ref not in waits_for raises WORKFLOW_INVALID_CTX_FROM."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
@@ -1014,11 +1014,11 @@ class TestWorkflowSpecValidation:
 
         node_a = TaskNode(fn=fn_a)
         node_b = TaskNode(fn=fn_b)
-        # node_c has workflow_ctx_from pointing to node_a, but only waits_for node_b
+        # node_c has workflow_context_from pointing to node_a, but only waits_for node_b
         node_c = TaskNode(
             fn=fn_c,
             waits_for=[node_b],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         with pytest.raises(WorkflowValidationError, match='not in waits_for') as exc_info:
@@ -1026,8 +1026,8 @@ class TestWorkflowSpecValidation:
 
         assert exc_info.value.code == ErrorCode.WORKFLOW_INVALID_CTX_FROM
 
-    def test_workflow_ctx_from_requires_workflow_ctx_param(self) -> None:
-        """workflow_ctx_from requires workflow_ctx param → WORKFLOW_CTX_PARAM_MISSING."""
+    def test_workflow_context_from_requires_workflow_ctx_param(self) -> None:
+        """workflow_context_from requires workflow_ctx param → WORKFLOW_CTX_PARAM_MISSING."""
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_with_ctx = MockTaskWrapperWithCtx(task_name='task_with_ctx')
         fn_b = MockTaskWrapper(task_name='task_b')
@@ -1036,14 +1036,14 @@ class TestWorkflowSpecValidation:
         node_b = TaskNode(
             fn=fn_with_ctx,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
         WorkflowSpec(name='ctx_param_ok', tasks=[node_a, node_b])
 
         node_c = TaskNode(
             fn=fn_b,
             waits_for=[node_a],
-            workflow_ctx_from=[node_a],
+            workflow_context_from=[node_a],
         )
 
         with pytest.raises(
@@ -2497,25 +2497,25 @@ class TestWorkflowDefinition:
         assert spec.tasks[1].node_id == 'fetch_b'
         assert spec.tasks[2].node_id == 'fetch_c'
 
-    def test_workflow_ctx_from_supported(self) -> None:
-        """workflow_ctx_from works in class-based definition."""
+    def test_workflow_context_from_supported(self) -> None:
+        """workflow_context_from works in class-based definition."""
         from horsies.core.app import Horsies
         from horsies.core.models.app import AppConfig
         from horsies.core.models.broker import PostgresConfig
 
         fn_a = MockTaskWrapper(task_name='task_a')
         fn_b = MockTaskWrapper(task_name='task_b')
-        # fn_c must accept workflow_ctx since audit_node uses workflow_ctx_from
+        # fn_c must accept workflow_ctx since audit_node uses workflow_context_from
         fn_c = MockTaskWrapperWithCtx(task_name='task_c')
 
-        # Define nodes outside so we can reference them in waits_for and workflow_ctx_from
+        # Define nodes outside so we can reference them in waits_for and workflow_context_from
         fetch_node = TaskNode(fn=fn_a)
         parse_node = TaskNode(fn=fn_b, waits_for=[fetch_node])
-        # audit waits for both fetch and parse so workflow_ctx_from is valid
+        # audit waits for both fetch and parse so workflow_context_from is valid
         audit_node = TaskNode(
             fn=fn_c,
             waits_for=[fetch_node, parse_node],
-            workflow_ctx_from=[fetch_node, parse_node],
+            workflow_context_from=[fetch_node, parse_node],
         )
 
         class CtxWorkflow(WorkflowDefinition):
@@ -2535,8 +2535,8 @@ class TestWorkflowDefinition:
 
         spec = CtxWorkflow.build(app)
 
-        assert spec.tasks[2].workflow_ctx_from is not None
-        assert len(spec.tasks[2].workflow_ctx_from) == 2
+        assert spec.tasks[2].workflow_context_from is not None
+        assert len(spec.tasks[2].workflow_context_from) == 2
 
 
 # =============================================================================
@@ -3088,10 +3088,10 @@ class TestSubWorkflowNode:
         assert node.kwargs == {}
         assert node.waits_for == []
         assert node.args_from == {}
-        assert node.workflow_ctx_from is None
+        assert node.workflow_context_from is None
         assert node.join == 'all'
         assert node.min_success is None
-        assert node.allow_failed_deps is False
+        assert node.allow_failed_dependencies is False
         assert node.index is None
         assert node.node_id is None
 
