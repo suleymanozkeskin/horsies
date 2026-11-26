@@ -67,7 +67,7 @@ use crate::operations::task_workflow_node::task_workflow_node_operation;
 use crate::operations::worker_connections::check_worker_connections_operation;
 use crate::operations::worker_ping::{ping_request, ping_wait_bound, ping_workers_operation};
 use crate::operations::worker_reads::{
-    class_coverage_operation, class_report_operation, history_limit,
+    execution_class_coverage_operation, execution_class_report_operation, history_limit,
     worker_state_history_operation, worker_state_operation, worker_states_operation,
 };
 use crate::operations::workflow_lifecycle::{cancel_workflow_operation, pause_workflow_operation};
@@ -1832,58 +1832,58 @@ impl CoreHandle {
     }
 
     /// The fleet check: for each (queue, class) with PENDING rows, whether a
-    /// live worker serves it. `ClassCoverageRecord` or the generated broker error class with
+    /// live worker serves it. `ExecutionClassCoverageRecord` or the generated broker error class with
     /// `MONITORING_QUERY_FAILED`. Reads only, in one statement; a caller
     /// that leaves drops the read.
-    fn class_coverage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn execution_class_coverage(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
             py,
             core,
-            "CoreHandle.class_coverage",
+            "CoreHandle.execution_class_coverage",
             CallKind::Read,
-            class_coverage_operation(self.connection()),
+            execution_class_coverage_operation(self.connection()),
         )
     }
 
-    /// The awaitable form of `class_coverage`. A cancelled await drops the
+    /// The awaitable form of `execution_class_coverage`. A cancelled await drops the
     /// read.
-    fn class_coverage_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn execution_class_coverage_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
             py,
             core,
-            "CoreHandle.class_coverage_async",
+            "CoreHandle.execution_class_coverage_async",
             CallKind::Read,
-            class_coverage_operation(self.connection()),
+            execution_class_coverage_operation(self.connection()),
         )
     }
 
-    /// The pending streams with their oldest wait and coverage, and the
-    /// budget load of each live worker. `ClassReportRecord` or
+    /// The execution class report: the pending streams with their oldest
+    /// wait and coverage, and the budget load of each live worker. `ExecutionClassReportRecord` or
     /// the generated broker error class with `MONITORING_QUERY_FAILED`. Reads only, in one
     /// statement; a caller that leaves drops the read.
-    fn class_report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn execution_class_report(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let core = checked_core(py)?;
         call_blocking(
             py,
             core,
-            "CoreHandle.class_report",
+            "CoreHandle.execution_class_report",
             CallKind::Read,
-            class_report_operation(self.connection()),
+            execution_class_report_operation(self.connection()),
         )
     }
 
-    /// The awaitable form of `class_report`. A cancelled await drops the
+    /// The awaitable form of `execution_class_report`. A cancelled await drops the
     /// read.
-    fn class_report_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn execution_class_report_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let core = checked_core(py)?;
         call_async(
             py,
             core,
-            "CoreHandle.class_report_async",
+            "CoreHandle.execution_class_report_async",
             CallKind::Read,
-            class_report_operation(self.connection()),
+            execution_class_report_operation(self.connection()),
         )
     }
 }

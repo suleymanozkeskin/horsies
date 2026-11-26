@@ -1004,7 +1004,7 @@ mod tests {
                 },
             )]);
 
-            let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+            let Ok(SlotHealth::SlotsDown { slots }) = parse_slot_health(&column, 4) else {
                 panic!("the written down slot reads back: {column}");
             };
 
@@ -1049,7 +1049,7 @@ mod tests {
                 failed_boots: NonZeroU32::new(3).expect("3"),
             },
         )]);
-        let Ok(SlotHealth::SlotsDown(slots)) = parse_slot_health(&column, 4) else {
+        let Ok(SlotHealth::SlotsDown { slots }) = parse_slot_health(&column, 4) else {
             panic!("the written down slot reads back: {column}");
         };
         let [DownSlot {
@@ -1084,12 +1084,12 @@ mod tests {
     }
 
     /// Python `test_health_models.py::TestClassCapacity::test_the_writer_covers_every_read_field`:
-    /// each field of the read `ClassBudget` but the budget (the key of its
+    /// each field of the read `ExecutionClassBudget` but the budget (the key of its
     /// entry) reaches the stored entry, so a new field cannot be read
     /// without a writer. The pattern names every field with no rest.
     #[test]
     fn the_writer_covers_every_read_field_of_a_budget() {
-        use crate::broker::class_budgets::{parse_class_capacity, ClassBudget};
+        use crate::broker::class_budgets::{parse_class_capacity, ExecutionClassBudget};
         use std::collections::BTreeSet;
 
         let column = class_capacity_json(&[BudgetColumn {
@@ -1098,7 +1098,7 @@ mod tests {
             serves: vec![Execution::Isolated],
         }]);
         let budgets = parse_class_capacity(&column).expect("the written column reads back");
-        let [ClassBudget {
+        let [ExecutionClassBudget {
             budget,
             capacity,
             serves,

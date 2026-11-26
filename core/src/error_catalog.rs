@@ -1780,14 +1780,14 @@ mod tests {
     #[test]
     fn each_source_builds_the_core_class_of_its_cause() {
         let refused_read = BrokerOperationError::monitoring_query_refused(
-            "get_class_coverage",
+            "get_execution_class_coverage",
             crate::broker::class_coverage::ClassReadRefused {
                 reason: "a live snapshot holds no budgets".to_owned(),
             },
         );
         assert_eq!(
             refused_read.message(),
-            "get_class_coverage refused: a live snapshot holds no budgets"
+            "get_execution_class_coverage refused: a live snapshot holds no budgets"
         );
         assert!(!refused_read.retryable());
         let unreadable = BrokerOperationError::monitoring_query_failed(

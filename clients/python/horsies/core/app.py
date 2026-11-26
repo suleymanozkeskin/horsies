@@ -174,7 +174,7 @@ if TYPE_CHECKING:
     from horsies.core.models.tasks import TaskInfo, TaskError
     from horsies.core.models.outcome import ReadResult
     from horsies.core.brokers.result_types import BrokerResult, RawResultRecord
-    from horsies.core.models.class_coverage import ClassCoverage, ClassReport
+    from horsies.core.models.class_coverage import ExecutionClassCoverage, ExecutionClassReport
     from horsies.core.models.health import (
         DatabasePing,
         WorkerPong,
@@ -2466,15 +2466,15 @@ class Horsies:
             return self._async_context_err('get_expired_tasks')
         return self.get_broker()._get_expired_tasks_blocking()  # pyright: ignore[reportPrivateUsage]
 
-    async def get_class_coverage_async(self) -> 'BrokerResult[ClassCoverage]':
+    async def get_execution_class_coverage_async(self) -> 'BrokerResult[ExecutionClassCoverage]':
         """For each (queue, class) with PENDING rows, whether a live worker serves it.
 
-        See ``PostgresBroker.get_class_coverage_async``.
+        See ``PostgresBroker.get_execution_class_coverage_async``.
         """
-        return await self.get_broker().get_class_coverage_async()
+        return await self.get_broker().get_execution_class_coverage_async()
 
-    def get_class_coverage(self) -> 'BrokerResult[ClassCoverage]':
-        """Synchronous version of ``get_class_coverage_async``: the core's blocking
+    def get_execution_class_coverage(self) -> 'BrokerResult[ExecutionClassCoverage]':
+        """Synchronous version of ``get_execution_class_coverage_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
         outcomes.
 
@@ -2482,19 +2482,19 @@ class Horsies:
         and does no I/O.
         """
         if in_running_event_loop():
-            return self._async_context_err('get_class_coverage')
-        return self.get_broker()._get_class_coverage_blocking()  # pyright: ignore[reportPrivateUsage]
+            return self._async_context_err('get_execution_class_coverage')
+        return self.get_broker()._get_execution_class_coverage_blocking()  # pyright: ignore[reportPrivateUsage]
 
-    async def get_class_report_async(self) -> 'BrokerResult[ClassReport]':
+    async def get_execution_class_report_async(self) -> 'BrokerResult[ExecutionClassReport]':
         """Pending streams with their oldest wait and coverage, and the budget
         load of each live worker.
 
-        See ``PostgresBroker.get_class_report_async``.
+        See ``PostgresBroker.get_execution_class_report_async``.
         """
-        return await self.get_broker().get_class_report_async()
+        return await self.get_broker().get_execution_class_report_async()
 
-    def get_class_report(self) -> 'BrokerResult[ClassReport]':
-        """Synchronous version of ``get_class_report_async``: the core's blocking
+    def get_execution_class_report(self) -> 'BrokerResult[ExecutionClassReport]':
+        """Synchronous version of ``get_execution_class_report_async``: the core's blocking
         read on the calling thread, with the GIL released, and the same
         outcomes.
 
@@ -2502,8 +2502,8 @@ class Horsies:
         and does no I/O.
         """
         if in_running_event_loop():
-            return self._async_context_err('get_class_report')
-        return self.get_broker()._get_class_report_blocking()  # pyright: ignore[reportPrivateUsage]
+            return self._async_context_err('get_execution_class_report')
+        return self.get_broker()._get_execution_class_report_blocking()  # pyright: ignore[reportPrivateUsage]
 
     def discover_tasks(
         self,

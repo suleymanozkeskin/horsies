@@ -17,12 +17,12 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::broker::class_coverage::{
-    BudgetLoad, StreamCoverage, StreamCoverageState, StreamWait, WorkerClassLoad,
+    BudgetLoad, StreamCoverage, StreamCoverageState, StreamWait, WorkerExecutionClassLoad,
 };
 use crate::broker::class_coverage_reads::{CLASS_COVERAGE_SQL, CLASS_REPORT_SQL};
 use crate::broker::monitoring_test_database::MonitoringTestDatabase;
 use crate::broker::result_types::BrokerErrorCode;
-use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_S;
+use crate::core::defaults::WORKER_STATE_LIVE_WINDOW_SECONDS;
 use crate::core::task::Execution;
 use crate::test_support::sql::{self, TestPool};
 
@@ -138,9 +138,9 @@ fn served(workers: usize, capacity: u64) -> StreamCoverageState {
 
 fn stream(queue: &str, execution: Execution, state: StreamCoverageState) -> StreamCoverage {
     StreamCoverage {
-        queue_name: queue.to_owned(),
+        queue: queue.to_owned(),
         execution,
-        state,
+        coverage: state,
     }
 }
 
@@ -157,7 +157,7 @@ async fn each_coverage_state_from_the_live_snapshots() {
 
     let coverage = database
         .broker()
-        .get_class_coverage()
+        .get_execution_class_coverage()
         .await
         .expect("the fleet check answers");
 
@@ -169,7 +169,7 @@ async fn each_coverage_state_from_the_live_snapshots() {
             stream(
                 "b",
                 ISOLATED,
-                StreamCoverageState::WithoutCapacity { workers: 1 }
+                StreamCoverageState::NoCapacity { workers: 1 }
             ),
             stream("c", THREAD, StreamCoverageState::Unserved),
         ]
@@ -181,13 +181,13 @@ async fn each_coverage_state_from_the_live_snapshots() {
 async fn a_snapshot_older_than_the_live_window_serves_nothing() {
     let database = MonitoringTestDatabase::create().await;
     let pool = &database.pool;
-    let gone = WORKER_STATE_LIVE_WINDOW_S as f64 + 5.0;
+    let gone = WORKER_STATE_LIVE_WINDOW_SECONDS as f64 + 5.0;
     snapshot(pool, "w-gone", isolated_children(), &["a"], gone).await;
     task(pool, "a", ISOLATED, DUE).await;
 
     let coverage = database
         .broker()
-        .get_class_coverage()
+        .get_execution_class_coverage()
         .await
         .expect("the fleet check answers");
 
@@ -211,14 +211,14 @@ async fn only_the_latest_snapshot_of_a_worker_counts() {
 
     let coverage = database
         .broker()
-        .get_class_coverage()
+        .get_execution_class_coverage()
         .await
         .expect("the fleet check answers");
 
     assert_eq!(coverage.live_workers, 1);
     assert_eq!(
-        coverage.streams[0].state,
-        StreamCoverageState::WithoutCapacity { workers: 1 }
+        coverage.streams[0].coverage,
+        StreamCoverageState::NoCapacity { workers: 1 }
     );
     database.drop().await;
 }
@@ -235,7 +235,7 @@ async fn an_isolated_retry_of_a_shared_task_is_unserved_without_isolated_childre
 
     let coverage = database
         .broker()
-        .get_class_coverage()
+        .get_execution_class_coverage()
         .await
         .expect("the fleet check answers");
 
@@ -264,7 +264,7 @@ async fn a_delayed_row_is_pending_and_a_running_row_is_not() {
 
     let coverage = database
         .broker()
-        .get_class_coverage()
+        .get_execution_class_coverage()
         .await
         .expect("the fleet check answers");
 
@@ -284,8 +284,14 @@ async fn a_live_snapshot_with_unreadable_budgets_fails_both_reads() {
     task(pool, "a", ISOLATED, DUE).await;
     let broker = database.broker();
 
-    let coverage = broker.get_class_coverage().await.expect_err("refused");
-    let report = broker.get_class_report().await.expect_err("refused");
+    let coverage = broker
+        .get_execution_class_coverage()
+        .await
+        .expect_err("refused");
+    let report = broker
+        .get_execution_class_report()
+        .await
+        .expect_err("refused");
 
     for error in [coverage, report] {
         assert_eq!(error.code(), BrokerErrorCode::MonitoringQueryFailed);
@@ -316,7 +322,7 @@ async fn the_oldest_due_row_across_priorities_is_the_wait() {
 
     let report = database
         .broker()
-        .get_class_report()
+        .get_execution_class_report()
         .await
         .expect("the report answers");
 
@@ -335,18 +341,18 @@ async fn the_oldest_due_row_across_priorities_is_the_wait() {
         panic!("two streams: {:?}", report.streams);
     };
     assert_eq!(
-        (isolated.queue_name.as_str(), isolated.execution),
+        (isolated.queue.as_str(), isolated.execution),
         ("a", ISOLATED)
     );
     assert_eq!(
         isolated.wait,
-        StreamWait::OldestWaiting {
-            enqueued_at: oldest,
+        StreamWait::Due {
+            oldest_due_at: oldest,
             wait: report.checked_at - oldest,
         }
     );
     assert!(report.checked_at - oldest >= TimeDelta::seconds(300));
-    assert_eq!(isolated.state, served(1, 4));
+    assert_eq!(isolated.coverage, served(1, 4));
     assert_eq!(
         shared.wait,
         StreamWait::NoneDue {
@@ -383,7 +389,7 @@ async fn budget_load_counts_rows_as_the_claim_does() {
 
     let report = database
         .broker()
-        .get_class_report()
+        .get_execution_class_report()
         .await
         .expect("the report answers");
 
@@ -392,7 +398,7 @@ async fn budget_load_counts_rows_as_the_claim_does() {
     };
     assert_eq!(
         *worker,
-        WorkerClassLoad {
+        WorkerExecutionClassLoad {
             worker_id: "w1".to_owned(),
             snapshot_at: worker.snapshot_at,
             budgets: vec![
@@ -425,7 +431,7 @@ async fn rows_of_a_class_the_worker_does_not_serve_fail_the_report() {
 
     let error = database
         .broker()
-        .get_class_report()
+        .get_execution_class_report()
         .await
         .expect_err("the report is refused");
 
@@ -486,7 +492,7 @@ async fn the_stream_and_head_parts_probe_the_pending_class_index() {
 
     for statement in [CLASS_COVERAGE_SQL, CLASS_REPORT_SQL] {
         let literal = statement
-            .replace("$1", &WORKER_STATE_LIVE_WINDOW_S.to_string())
+            .replace("$1", &WORKER_STATE_LIVE_WINDOW_SECONDS.to_string())
             .replace("$2", "20001")
             .replace("$3", "11");
         let plan: Value = sql::query_scalar(&format!("EXPLAIN (FORMAT JSON) {literal}"))

@@ -10,7 +10,7 @@ import {
   pingWorkers,
 } from '@/services/workers-api';
 import type {
-  ClassReport,
+  ExecutionClassReport,
   LivenessReport,
   ScheduleState,
   WorkerHistoryPoint,
@@ -107,7 +107,7 @@ export function useWorkerHistory(workerId: string | null): {
 }
 
 export function useClassReport(): {
-  report: ClassReport | undefined;
+  report: ExecutionClassReport | undefined;
   isLoading: boolean;
   isError: boolean;
   refetch: () => void;

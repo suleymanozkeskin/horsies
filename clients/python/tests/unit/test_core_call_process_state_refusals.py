@@ -168,11 +168,11 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
         'worker_state_history_async',
         lambda b: asyncio.run(b.get_worker_state_history_async(_WORKER_ID)),
     ),
-    'get_class_coverage_async': (
-        'class_coverage_async', lambda b: asyncio.run(b.get_class_coverage_async()),
+    'get_execution_class_coverage_async': (
+        'execution_class_coverage_async', lambda b: asyncio.run(b.get_execution_class_coverage_async()),
     ),
-    'get_class_report_async': (
-        'class_report_async', lambda b: asyncio.run(b.get_class_report_async()),
+    'get_execution_class_report_async': (
+        'execution_class_report_async', lambda b: asyncio.run(b.get_execution_class_report_async()),
     ),
     'ping_workers_blocking': (
         'ping_workers',
@@ -192,8 +192,8 @@ _HEALTH_READS: Final[dict[str, tuple[str, BrokerCall]]] = {
             _WORKER_ID, limit=WorkerHistoryLimitAllRetained(),
         ),
     ),
-    'get_class_coverage_blocking': ('class_coverage', lambda b: b._get_class_coverage_blocking()),
-    'get_class_report_blocking': ('class_report', lambda b: b._get_class_report_blocking()),
+    'get_execution_class_coverage_blocking': ('execution_class_coverage', lambda b: b._get_execution_class_coverage_blocking()),
+    'get_execution_class_report_blocking': ('execution_class_report', lambda b: b._get_execution_class_report_blocking()),
 }
 
 _TASK_LISTS_AND_PASSES: Final[dict[str, tuple[str, BrokerCall]]] = {

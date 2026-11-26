@@ -497,7 +497,7 @@ making web request, local will cost you less tokens and greater knowledgebase at
 - finalizing_stale_threshold_ms: int (default 300_000, range 1s-2hr)
 - crashed_worker_recovery_grace_ms: int (default 10_000, range 0-1hr; 0 disables)
 - orphan_task_audit_interval_ms: int (default 60_000, range 1s-24hr)
-- worker_state_snapshot_interval_ms: int (default 30_000, range 1s-1min; the cap is half the 120 s live window WORKER_STATE_LIVE_WINDOW_S, so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with HRS-204)
+- worker_state_snapshot_interval_ms: int (default 30_000, range 1s-1min; the cap is half the 120 s live window WORKER_STATE_LIVE_WINDOW_SECONDS, so a running worker stays live when a snapshot write is late by up to half the window; a larger value fails with HRS-204)
 - phase2_quarantine_after_attempts: int (default 25, range 3-1000)
 - workflow_recovery_failure_limit: int (default 25, range 3-1000; reaper passes in which the recovery of a workflow may raise a persistent error before the workflow fails with WORKFLOW_RECOVERY_LIMIT_REACHED)
 - Constraint: stale thresholds must be >= 2x heartbeat intervals; with auto_fail_stale_running=True, running_stale_threshold_ms >= 2 x (runner_heartbeat_interval_ms + 2000) (the worker stops when no runner heartbeat lands for half of it; HRS-204 below)
@@ -844,7 +844,7 @@ Each entry: Title -- summary -> URL
 
 ### Monitoring
 - Worker & Database Health -- what the database ping, the worker ping, worker states, class coverage and the class report answer; snapshot fields; embedded health payloads -> /horsies/monitoring/worker-health/
-- Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_stale_tasks_async, get_expired_tasks_async, get_class_coverage_async, get_class_report_async, result types -> /horsies/monitoring/health-reads/
+- Health Reads -- the Python health methods: ping_database_async, ping_workers_async, list_worker_states_async, get_stale_tasks_async, get_expired_tasks_async, get_execution_class_coverage_async, get_execution_class_report_async, result types -> /horsies/monitoring/health-reads/
 - Broker Methods -- async inspection APIs -> /horsies/monitoring/broker-methods/
 - Web UI Overview -- browser dashboard: surfaces, the run graph and timeline (node time, longest chain, linear and log scales), the attempt panel, durations, freshness, action outcomes, limits -> /horsies/monitoring/web-ui-overview/
 - Web UI Deployment & Authentication -- mounted and standalone modes, authorization policies, bind rules, identity, connection and schema contracts -> /horsies/monitoring/web-ui-deployment/
@@ -979,7 +979,7 @@ RetentionConfig -> /horsies/configuration/app-config/#retention-configuration
 on_child_start, child-process hook, per-child setup -> /horsies/workers/child-process-hooks/
 on_event, on_handler_child_start, event handler, handler child, horsies.telemetry, AttemptEnded -> /horsies/workers/event-handlers/
 liveness, worker ping, class coverage, slot health, snapshot fields -> /horsies/monitoring/worker-health/
-ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, get_stale_tasks, get_expired_tasks, BoundedTaskList, ClassCoverage, ClassReport -> /horsies/monitoring/health-reads/
+ping_database, ping_workers, WorkerPong, WorkerStateSnapshot, get_stale_tasks, get_expired_tasks, BoundedTaskList, ExecutionClassCoverage, ExecutionClassReport -> /horsies/monitoring/health-reads/
 web UI, dashboard -> /horsies/monitoring/web-ui-overview/
 horsies web, standalone dashboard -> /horsies/cli/
 trusted-header, authentication, mounted mode, standalone mode, schema state -> /horsies/monitoring/web-ui-deployment/

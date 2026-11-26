@@ -60,10 +60,10 @@ mod workflow_reads;
 pub mod workflow_start;
 pub(crate) mod workflow_stop_before_start;
 
-pub use class_budgets::{ClassBudget, ClassBudgets};
+pub use class_budgets::{ExecutionClassBudget, ExecutionClassBudgets};
 pub use class_coverage::{
-    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
-    StreamWait, WorkerClassLoad,
+    BudgetLoad, ExecutionClassCoverage, ExecutionClassReport, PendingStream, StreamCoverage,
+    StreamCoverageState, StreamWait, WorkerExecutionClassLoad,
 };
 pub use class_coverage_reads::{LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT};
 pub use core_rows::RowDecodeError;

@@ -227,14 +227,16 @@ pub use crate::worker::{
 // worker state snapshot values
 pub use crate::broker::{
     checked_history_limit, ping_listener_disabled, ping_min_responses_refused, ping_wait_refused,
-    worker_history_limit_refused, ClassBudget, ClassBudgets, ClearableBootCause, DownSlot,
-    DownSlots, ShortageErrno, SlotHealth, SnapshotProfile, MAX_BOOT_FAILURE_DETAIL_CHARS,
+    worker_history_limit_refused, ClearableBootCause, DownSlot, DownSlots, ExecutionClassBudget,
+    ExecutionClassBudgets, ShortageErrno, SlotHealth, SnapshotProfile,
+    MAX_BOOT_FAILURE_DETAIL_CHARS,
 };
 
 // fleet check and class report
 pub use crate::broker::{
-    BudgetLoad, ClassCoverage, ClassReport, PendingStream, StreamCoverage, StreamCoverageState,
-    StreamWait, WorkerClassLoad, LIVE_SNAPSHOT_ROW_LIMIT, PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
+    BudgetLoad, ExecutionClassCoverage, ExecutionClassReport, PendingStream, StreamCoverage,
+    StreamCoverageState, StreamWait, WorkerExecutionClassLoad, LIVE_SNAPSHOT_ROW_LIMIT,
+    PENDING_HEAD_LIMIT, PENDING_STREAM_LIMIT,
 };
 
 // the stale and expired task lists of a client handle

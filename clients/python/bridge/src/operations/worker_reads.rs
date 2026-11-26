@@ -1,7 +1,7 @@
-//! The worker state reads and the class reads through the core:
+//! The worker state reads and the execution class reads through the core:
 //! `PostgresBroker::list_worker_states`, `get_worker_state`,
-//! `get_worker_state_history`, `get_class_coverage` and
-//! `get_class_report`.
+//! `get_worker_state_history`, `get_execution_class_coverage` and
+//! `get_execution_class_report`.
 //!
 //! Each read answers its record, or the generated broker error class with `INVALID_INPUT` (a
 //! history limit of 0 or less; nothing ran) or `MONITORING_QUERY_FAILED`.
@@ -14,11 +14,13 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, TimeDelta, Utc};
+use horsies_core::core::config::worker_profile::input::TaskLimitSetting;
 use horsies_core::{
     checked_history_limit, worker_history_limit_refused, BrokerOperationError,
-    BrokerOperationSource, BudgetLoad, ClassBudget, ClassCoverage, ClassReport, ClearableBootCause,
-    DownSlot, Execution, PendingStream, SlotHealth, SnapshotProfile, StreamCoverage,
-    StreamCoverageState, StreamWait, WorkerClassLoad, WorkerStateSnapshot,
+    BrokerOperationSource, BudgetLoad, ClearableBootCause, DownSlot, Execution,
+    ExecutionClassBudget, ExecutionClassCoverage, ExecutionClassReport, PendingStream, SlotHealth,
+    SnapshotProfile, StreamCoverage, StreamCoverageState, StreamWait, WorkerExecutionClassLoad,
+    WorkerStateSnapshot,
 };
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
@@ -70,7 +72,7 @@ pub struct SlotsDownRecord {
 /// One claim budget of a worker, as its snapshot recorded it.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
-pub struct ClassBudgetRecord {
+pub struct ExecutionClassBudgetRecord {
     /// The execution class of the budget.
     pub budget: String,
     pub capacity: u64,
@@ -100,9 +102,14 @@ pub struct WorkerStateRecord {
     pub snapshot_at: DateTime<Utc>,
     pub hostname: String,
     pub pid: i32,
-    pub processes: i32,
-    pub max_claim_batch: i32,
-    pub max_claim_per_worker: i32,
+    /// The children of the worker.
+    pub child_count: i32,
+    /// The per queue limit of one claim pass; `None` when the profile sets
+    /// no limit.
+    pub per_queue_per_pass: Option<u32>,
+    /// The claimed limit that the worker resolved; `None` when the snapshot
+    /// records no limit.
+    pub claimed_per_worker: Option<u32>,
     pub cluster_wide_cap: Option<i32>,
     pub queues: Vec<String>,
     pub queue_priorities: BTreeMap<String, i64>,
@@ -118,8 +125,8 @@ pub struct WorkerStateRecord {
     pub worker_started_at: DateTime<Utc>,
     /// `AllSlotsServingRecord` or `SlotsDownRecord`.
     pub slot_health: Py<PyAny>,
-    /// One `ClassBudgetRecord` per budget, in `Execution` order.
-    pub class_capacity: Py<PyList>,
+    /// One `ExecutionClassBudgetRecord` per budget, in `Execution` order.
+    pub execution_class_budgets: Py<PyList>,
     /// `ProfileNamedRecord` or `ProfileNotRecordedRecord`.
     pub profile: Py<PyAny>,
 }
@@ -164,17 +171,17 @@ pub struct StreamUnservedRecord {}
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Debug)]
 pub struct StreamCoverageRecord {
-    pub queue_name: String,
+    pub queue: String,
     pub execution: String,
     /// `StreamServedRecord`, `StreamWithoutCapacityRecord` or
     /// `StreamUnservedRecord`.
-    pub state: Py<PyAny>,
+    pub coverage: Py<PyAny>,
 }
 
 /// The fleet check, read at `checked_at` (database time).
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Debug)]
-pub struct ClassCoverageRecord {
+pub struct ExecutionClassCoverageRecord {
     pub checked_at: DateTime<Utc>,
     pub live_workers: usize,
     /// One `StreamCoverageRecord` per pending stream.
@@ -185,7 +192,7 @@ pub struct ClassCoverageRecord {
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Clone, Debug)]
 pub struct OldestWaitingRecord {
-    pub enqueued_at: DateTime<Utc>,
+    pub oldest_due_at: DateTime<Utc>,
     pub wait: TimeDelta,
 }
 
@@ -200,13 +207,13 @@ pub struct NoneDueRecord {
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Debug)]
 pub struct PendingStreamRecord {
-    pub queue_name: String,
+    pub queue: String,
     pub execution: String,
-    /// `OldestWaitingRecord` or `NoneDueRecord`.
-    pub wait: Py<PyAny>,
     /// `StreamServedRecord`, `StreamWithoutCapacityRecord` or
     /// `StreamUnservedRecord`.
-    pub state: Py<PyAny>,
+    pub coverage: Py<PyAny>,
+    /// `OldestWaitingRecord` or `NoneDueRecord`.
+    pub wait: Py<PyAny>,
 }
 
 /// One claim budget of a live worker, with the rows it holds.
@@ -222,21 +229,23 @@ pub struct BudgetLoadRecord {
 /// The claim budgets of one live worker.
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Debug)]
-pub struct WorkerClassLoadRecord {
+pub struct WorkerExecutionClassLoadRecord {
     pub worker_id: String,
     pub snapshot_at: DateTime<Utc>,
     /// One `BudgetLoadRecord` per budget, in `Execution` order.
     pub budgets: Py<PyList>,
 }
 
-/// The class report, read at `checked_at` (database time).
+/// The execution class report, read at `checked_at` (database time).
 #[pyclass(module = "horsies._core", frozen, get_all)]
 #[derive(Debug)]
-pub struct ClassReportRecord {
+pub struct ExecutionClassReportRecord {
     pub checked_at: DateTime<Utc>,
+    /// The most age of the latest snapshot of a live worker.
+    pub live_window: TimeDelta,
     /// One `PendingStreamRecord` per pending stream.
     pub streams: Py<PyList>,
-    /// One `WorkerClassLoadRecord` per live worker, by worker id.
+    /// One `WorkerExecutionClassLoadRecord` per live worker, by worker id.
     pub workers: Py<PyList>,
 }
 
@@ -310,11 +319,19 @@ fn down_slot_record<'py>(py: Python<'py>, slot: &DownSlot) -> PyResult<Bound<'py
 
 fn slot_health_record(py: Python<'_>, health: &SlotHealth) -> PyResult<Py<PyAny>> {
     match health {
-        SlotHealth::AllSlotsServing => AllSlotsServingRecord {}.into_py_any(py),
-        SlotHealth::SlotsDown(down) => SlotsDownRecord {
-            slots: record_list(py, down.as_slice(), down_slot_record)?,
+        SlotHealth::AllServing => AllSlotsServingRecord {}.into_py_any(py),
+        SlotHealth::SlotsDown { slots } => SlotsDownRecord {
+            slots: record_list(py, slots.as_slice(), down_slot_record)?,
         }
         .into_py_any(py),
+    }
+}
+
+/// The limit of a task limit setting; `None` for no limit.
+fn task_limit(setting: TaskLimitSetting) -> Option<u32> {
+    match setting {
+        TaskLimitSetting::TaskLimit { tasks } => Some(tasks),
+        TaskLimitSetting::NoTaskLimit {} => None,
     }
 }
 
@@ -327,8 +344,11 @@ fn snapshot_profile_record(py: Python<'_>, profile: &SnapshotProfile) -> PyResul
     }
 }
 
-fn class_budget_record<'py>(py: Python<'py>, budget: &ClassBudget) -> PyResult<Bound<'py, PyAny>> {
-    ClassBudgetRecord {
+fn execution_class_budget_record<'py>(
+    py: Python<'py>,
+    budget: &ExecutionClassBudget,
+) -> PyResult<Bound<'py, PyAny>> {
+    ExecutionClassBudgetRecord {
         budget: budget.budget.as_str().to_owned(),
         capacity: budget.capacity,
         serves: execution_names(&budget.serves),
@@ -345,9 +365,9 @@ fn worker_state_record<'py>(
         snapshot_at: snapshot.snapshot_at,
         hostname: snapshot.hostname.clone(),
         pid: snapshot.pid,
-        processes: snapshot.processes,
-        max_claim_batch: snapshot.max_claim_batch,
-        max_claim_per_worker: snapshot.max_claim_per_worker,
+        child_count: snapshot.child_count,
+        per_queue_per_pass: task_limit(snapshot.claim_limits.per_queue_per_pass),
+        claimed_per_worker: task_limit(snapshot.claim_limits.claimed_per_worker),
         cluster_wide_cap: snapshot.cluster_wide_cap,
         queues: snapshot.queues.clone(),
         queue_priorities: snapshot.queue_priorities.clone(),
@@ -362,7 +382,11 @@ fn worker_state_record<'py>(
         children_memory_mb: snapshot.children_memory_mb,
         worker_started_at: snapshot.worker_started_at,
         slot_health: slot_health_record(py, &snapshot.slot_health)?,
-        class_capacity: record_list(py, snapshot.class_capacity.as_slice(), class_budget_record)?,
+        execution_class_budgets: record_list(
+            py,
+            snapshot.execution_class_budgets.as_slice(),
+            execution_class_budget_record,
+        )?,
         profile: snapshot_profile_record(py, &snapshot.profile)?,
     }
     .into_bound_py_any(py)
@@ -394,7 +418,7 @@ fn coverage_state_record(py: Python<'_>, state: StreamCoverageState) -> PyResult
         StreamCoverageState::Served { workers, capacity } => {
             StreamServedRecord { workers, capacity }.into_py_any(py)
         }
-        StreamCoverageState::WithoutCapacity { workers } => {
+        StreamCoverageState::NoCapacity { workers } => {
             StreamWithoutCapacityRecord { workers }.into_py_any(py)
         }
         StreamCoverageState::Unserved => StreamUnservedRecord {}.into_py_any(py),
@@ -406,16 +430,16 @@ fn stream_coverage_record<'py>(
     stream: &StreamCoverage,
 ) -> PyResult<Bound<'py, PyAny>> {
     StreamCoverageRecord {
-        queue_name: stream.queue_name.clone(),
+        queue: stream.queue.clone(),
         execution: stream.execution.as_str().to_owned(),
-        state: coverage_state_record(py, stream.state)?,
+        coverage: coverage_state_record(py, stream.coverage)?,
     }
     .into_bound_py_any(py)
 }
 
-impl ToRecord for ClassCoverage {
+impl ToRecord for ExecutionClassCoverage {
     fn record<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        ClassCoverageRecord {
+        ExecutionClassCoverageRecord {
             checked_at: self.checked_at,
             live_workers: self.live_workers,
             streams: record_list(py, &self.streams, stream_coverage_record)?,
@@ -426,9 +450,14 @@ impl ToRecord for ClassCoverage {
 
 fn stream_wait_record(py: Python<'_>, wait: StreamWait) -> PyResult<Py<PyAny>> {
     match wait {
-        StreamWait::OldestWaiting { enqueued_at, wait } => {
-            OldestWaitingRecord { enqueued_at, wait }.into_py_any(py)
+        StreamWait::Due {
+            oldest_due_at,
+            wait,
+        } => OldestWaitingRecord {
+            oldest_due_at,
+            wait,
         }
+        .into_py_any(py),
         StreamWait::NoneDue { next_due_at } => NoneDueRecord { next_due_at }.into_py_any(py),
     }
 }
@@ -438,10 +467,10 @@ fn pending_stream_record<'py>(
     stream: &PendingStream,
 ) -> PyResult<Bound<'py, PyAny>> {
     PendingStreamRecord {
-        queue_name: stream.queue_name.clone(),
+        queue: stream.queue.clone(),
         execution: stream.execution.as_str().to_owned(),
+        coverage: coverage_state_record(py, stream.coverage)?,
         wait: stream_wait_record(py, stream.wait)?,
-        state: coverage_state_record(py, stream.state)?,
     }
     .into_bound_py_any(py)
 }
@@ -456,11 +485,11 @@ fn budget_load_record<'py>(py: Python<'py>, load: &BudgetLoad) -> PyResult<Bound
     .into_bound_py_any(py)
 }
 
-fn worker_class_load_record<'py>(
+fn worker_execution_class_load_record<'py>(
     py: Python<'py>,
-    worker: &WorkerClassLoad,
+    worker: &WorkerExecutionClassLoad,
 ) -> PyResult<Bound<'py, PyAny>> {
-    WorkerClassLoadRecord {
+    WorkerExecutionClassLoadRecord {
         worker_id: worker.worker_id.clone(),
         snapshot_at: worker.snapshot_at,
         budgets: record_list(py, &worker.budgets, budget_load_record)?,
@@ -468,12 +497,13 @@ fn worker_class_load_record<'py>(
     .into_bound_py_any(py)
 }
 
-impl ToRecord for ClassReport {
+impl ToRecord for ExecutionClassReport {
     fn record<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        ClassReportRecord {
+        ExecutionClassReportRecord {
             checked_at: self.checked_at,
+            live_window: self.live_window,
             streams: record_list(py, &self.streams, pending_stream_record)?,
-            workers: record_list(py, &self.workers, worker_class_load_record)?,
+            workers: record_list(py, &self.workers, worker_execution_class_load_record)?,
         }
         .into_bound_py_any(py)
     }
@@ -596,37 +626,40 @@ pub async fn worker_state_history_operation(
 }
 
 /// The fleet check.
-pub async fn class_coverage_operation(
+pub async fn execution_class_coverage_operation(
     connection: BrokerConnection,
-) -> WorkerReadOutcome<ClassCoverage> {
+) -> WorkerReadOutcome<ExecutionClassCoverage> {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
         Err(error) => {
-            return WorkerReadOutcome::Failed(connect_failed("get_class_coverage", error))
+            return WorkerReadOutcome::Failed(connect_failed("get_execution_class_coverage", error))
         }
     };
-    match broker.get_class_coverage().await {
+    match broker.get_execution_class_coverage().await {
         Ok(coverage) => WorkerReadOutcome::Read(coverage),
         Err(error) => WorkerReadOutcome::Failed(BrokerFailure::of_operation_error(
-            "get_class_coverage",
+            "get_execution_class_coverage",
             error,
         )),
     }
 }
 
-/// The class report.
-pub async fn class_report_operation(
+/// The execution class report.
+pub async fn execution_class_report_operation(
     connection: BrokerConnection,
-) -> WorkerReadOutcome<ClassReport> {
+) -> WorkerReadOutcome<ExecutionClassReport> {
     let broker = match connection.broker().await {
         Ok(broker) => broker,
-        Err(error) => return WorkerReadOutcome::Failed(connect_failed("get_class_report", error)),
-    };
-    match broker.get_class_report().await {
-        Ok(report) => WorkerReadOutcome::Read(report),
         Err(error) => {
-            WorkerReadOutcome::Failed(BrokerFailure::of_operation_error("get_class_report", error))
+            return WorkerReadOutcome::Failed(connect_failed("get_execution_class_report", error))
         }
+    };
+    match broker.get_execution_class_report().await {
+        Ok(report) => WorkerReadOutcome::Read(report),
+        Err(error) => WorkerReadOutcome::Failed(BrokerFailure::of_operation_error(
+            "get_execution_class_report",
+            error,
+        )),
     }
 }
 

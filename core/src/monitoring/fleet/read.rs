@@ -15,7 +15,7 @@ use crate::db::{
 };
 use crate::handle::CoreConnection;
 use crate::telemetry::labels::FleetQuery;
-use crate::{BrokerError, ClassCoverage, PostgresBroker};
+use crate::{BrokerError, ExecutionClassCoverage, PostgresBroker};
 
 use super::decode::{
     fleet_class_coverage, fleet_workers, oldest_pending, oldest_pending_row, queue_tasks,
@@ -139,7 +139,9 @@ async fn read_workers(broker: &PostgresBroker) -> Result<FleetWorkers, FleetQuer
 
 /// The class coverage part, from the fleet check statement. Errors: as
 /// [`fleet_rows`]; `Refused` as the fleet check.
-async fn read_class_coverage(broker: &PostgresBroker) -> Result<ClassCoverage, FleetQueryFailure> {
+async fn read_class_coverage(
+    broker: &PostgresBroker,
+) -> Result<ExecutionClassCoverage, FleetQueryFailure> {
     let rows = fleet_rows(broker, &class_coverage_statement()).await?;
     let row = coverage_row_from(rows).map_err(|error| row_refused(&error))?;
     fleet_class_coverage(row).map_err(refused)

@@ -37,10 +37,12 @@ async fn check_health(app: &Horsies) -> Result<(), BrokerOperationError> {
 | `get_worker_state_history(worker_id, limit)` | `Vec<WorkerStateSnapshot>`, newest first | `MONITORING_QUERY_FAILED` |
 | `get_stale_tasks(threshold)` | `BoundedTaskList<StaleTaskRow>` | `MONITORING_QUERY_FAILED` |
 | `get_expired_tasks()` | `BoundedTaskList<ExpiredTaskRow>` | `MONITORING_QUERY_FAILED` |
-| `get_class_coverage()` | `ClassCoverage`: for each pending stream of an execution class, whether a live worker can run it | `MONITORING_QUERY_FAILED` |
-| `get_class_report()` | `ClassReport`: the load of each execution class over the live workers | `MONITORING_QUERY_FAILED` |
+| `get_execution_class_coverage()` | `ExecutionClassCoverage`: for each pending stream of an execution class, whether a live worker can run it | `MONITORING_QUERY_FAILED` |
+| `get_execution_class_report()` | `ExecutionClassReport`: the load of each execution class over the live workers | `MONITORING_QUERY_FAILED` |
 
 Every read returns `Result<_, BrokerOperationError>`, an enum with one variant per state and the methods `code()`, `message()` and `retryable()`. A failed read is `OperationFailed` with the `BrokerOperationFailedCode` of the read, a refused argument is `InvalidInput`, and an app with no listener is `ListenerDisabled`. A failed connect or schema install has the code of the read. The message is Python's: `ping_database failed: <cause>`, `ping_workers failed: <cause>`, `<read> failed: <cause>`. `OperationFailed` carries its `cause`, a `Box<BrokerOperationSource>` (the `BrokerError`, a refused class read, a snapshot that does not read, a refused subscription); `InvalidInput` carries `BrokerRefusalCause::Check`. A stored worker snapshot of another shape is `MONITORING_QUERY_FAILED`, and the message names the worker and the column.
+
+A `WorkerStateSnapshot` holds `child_count`, `claim_limits` (a `ClaimLimits`; `claimed_per_worker` is the limit that the worker resolved, its seat count when its profile sets none), `slot_health` (`SlotHealth::AllServing` or `SlotHealth::SlotsDown { slots }`) and `execution_class_budgets` (`ExecutionClassBudgets`). The monitoring routes answer with the same types: `horsies::monitoring` exports `WorkerPong`, `DownSlot`, `SlotHealth`, `SnapshotProfile`, `ExecutionClassReport`, `PendingStream`, `StreamCoverageState`, `StreamWait`, `WorkerExecutionClassLoad` and `BudgetLoad`, one type per record.
 
 ## Arguments
 

@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use horsies_core::{
     BoundedTaskList, BrokerError, BrokerOperationError, BrokerOperationFailedCode,
-    BrokerOperationSource, ClassCoverage, ClassReport, DatabasePing, ExpiredTaskRow,
-    PostgresBroker, StaleMinutes, StaleTaskRow, WorkerPong, WorkerStateSnapshot,
+    BrokerOperationSource, DatabasePing, ExecutionClassCoverage, ExecutionClassReport,
+    ExpiredTaskRow, PostgresBroker, StaleMinutes, StaleTaskRow, WorkerPong, WorkerStateSnapshot,
 };
 
 use crate::process_state::refuse_in_a_fork;
@@ -170,20 +170,24 @@ impl Horsies {
     /// can run it (the fleet check).
     ///
     /// Errors: `MONITORING_QUERY_FAILED`.
-    pub async fn get_class_coverage(&self) -> Result<ClassCoverage, BrokerOperationError> {
-        self.monitoring_broker("get_class_coverage")
+    pub async fn get_execution_class_coverage(
+        &self,
+    ) -> Result<ExecutionClassCoverage, BrokerOperationError> {
+        self.monitoring_broker("get_execution_class_coverage")
             .await?
-            .get_class_coverage()
+            .get_execution_class_coverage()
             .await
     }
 
     /// The load of each execution class over the live workers.
     ///
     /// Errors: `MONITORING_QUERY_FAILED`.
-    pub async fn get_class_report(&self) -> Result<ClassReport, BrokerOperationError> {
-        self.monitoring_broker("get_class_report")
+    pub async fn get_execution_class_report(
+        &self,
+    ) -> Result<ExecutionClassReport, BrokerOperationError> {
+        self.monitoring_broker("get_execution_class_report")
             .await?
-            .get_class_report()
+            .get_execution_class_report()
             .await
     }
 

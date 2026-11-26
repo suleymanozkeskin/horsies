@@ -24,7 +24,7 @@
 //! - `horsies.fleet.unserved_classes{queue, execution}`: one series per
 //!   pending (queue, class); 1 when no live worker serves it, else 0. A
 //!   (queue, class) whose serving workers have every seat of the class down
-//!   (`WithoutCapacity`) is served: it shows in `horsies.fleet.workers` and
+//!   (`NoCapacity`) is served: it shows in `horsies.fleet.workers` and
 //!   the seats.
 //! - `horsies.workflows{status}`: one series per status, 0 included.
 //! - `horsies.schedule.last_run.age{schedule}`: the time since the last run,
@@ -39,7 +39,7 @@ use crate::telemetry::labels::{
     FleetWorkerState, LiveTaskStatus, LiveWorkflowStatus, TelemetryPart,
 };
 use crate::telemetry::registry::{LabelSet, SeriesKey};
-use crate::{ClassCoverage, StreamCoverageState, StreamWait};
+use crate::{ExecutionClassCoverage, StreamCoverageState, StreamWait};
 
 use super::{
     FleetWorkers, LastRun, OldestPending, PendingCount, QueueTasks, ScheduleRuns, SchemaVersion,
@@ -196,7 +196,7 @@ pub(crate) fn oldest_pending_series(
         .streams
         .iter()
         .filter_map(|stream| match stream.wait {
-            StreamWait::OldestWaiting { wait, .. } => Some((
+            StreamWait::Due { wait, .. } => Some((
                 (queues.value_of(&stream.queue_name), stream.execution),
                 wait,
             )),
@@ -239,20 +239,20 @@ pub(crate) fn worker_series(workers: &FleetWorkers) -> WorkerSeries {
 fn unserved_count(state: StreamCoverageState) -> u64 {
     match state {
         StreamCoverageState::Unserved => 1,
-        StreamCoverageState::Served { .. } | StreamCoverageState::WithoutCapacity { .. } => 0,
+        StreamCoverageState::Served { .. } | StreamCoverageState::NoCapacity { .. } => 0,
     }
 }
 
 /// The series of `horsies.fleet.unserved_classes`.
 pub(crate) fn unserved_series(
-    coverage: &ClassCoverage,
+    coverage: &ExecutionClassCoverage,
     queues: &DeclaredNames<QueueName>,
 ) -> Vec<(StreamLabels, f64)> {
     combined(
         coverage.streams.iter().map(|stream| {
             (
-                (queues.value_of(&stream.queue_name), stream.execution),
-                unserved_count(stream.state),
+                (queues.value_of(&stream.queue), stream.execution),
+                unserved_count(stream.coverage),
             )
         }),
         u64::saturating_add,

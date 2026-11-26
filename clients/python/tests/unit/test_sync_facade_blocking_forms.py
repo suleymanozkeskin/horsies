@@ -25,8 +25,8 @@ from horsies._catalog.error_detail import NoCause
 from horsies._core import (
     AllSlotsServingRecord,
     BudgetLoadRecord,
-    ClassCoverageRecord,
-    ClassReportRecord,
+    ExecutionClassCoverageRecord,
+    ExecutionClassReportRecord,
     CoreConnectionError,
     RuntimeStartFailed,
     DatabasePingRecord,
@@ -41,7 +41,7 @@ from horsies._core import (
     StreamServedRecord,
     StreamUnservedRecord,
     TooManyPendingCalls,
-    WorkerClassLoadRecord,
+    WorkerExecutionClassLoadRecord,
     WorkerPongRecord,
     WorkerPongsRecord,
     WorkerStateAbsent,
@@ -446,33 +446,34 @@ _STATES: Final = _core_record(
     ],
 )
 _COVERAGE: Final = _core_record(
-    ClassCoverageRecord,
+    ExecutionClassCoverageRecord,
     checked_at=_AT,
     live_workers=1,
     streams=[
         _core_record(
             StreamCoverageRecord,
-            queue_name='a',
+            queue='a',
             execution='ISOLATED',
-            state=_core_record(StreamServedRecord, workers=1, capacity=4),
+            coverage=_core_record(StreamServedRecord, workers=1, capacity=4),
         ),
     ],
 )
 _REPORT: Final = _core_record(
-    ClassReportRecord,
+    ExecutionClassReportRecord,
     checked_at=_AT,
+    live_window=timedelta(seconds=120),
     streams=[
         _core_record(
             PendingStreamRecord,
-            queue_name='a',
+            queue='a',
             execution='ISOLATED',
-            wait=_core_record(OldestWaitingRecord, enqueued_at=_AT, wait=timedelta(seconds=90)),
-            state=_core_record(StreamUnservedRecord),
+            coverage=_core_record(StreamUnservedRecord),
+            wait=_core_record(OldestWaitingRecord, oldest_due_at=_AT, wait=timedelta(seconds=90)),
         ),
     ],
     workers=[
         _core_record(
-            WorkerClassLoadRecord,
+            WorkerExecutionClassLoadRecord,
             worker_id='w1',
             snapshot_at=_AT,
             budgets=[
@@ -579,10 +580,10 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
-    'get_class_coverage': MonitoringFacade(
-        blocking=lambda app: app.get_class_coverage(),
-        awaited=lambda app: app.get_class_coverage_async(),
-        blocking_form='class_coverage',
+    'get_execution_class_coverage': MonitoringFacade(
+        blocking=lambda app: app.get_execution_class_coverage(),
+        awaited=lambda app: app.get_execution_class_coverage_async(),
+        blocking_form='execution_class_coverage',
         arguments=(),
         keywords={},
         answers={
@@ -591,10 +592,10 @@ MONITORING_FACADES: Final[dict[str, MonitoringFacade]] = {
             'core_cannot_run_the_call': CORE_REFUSAL,
         },
     ),
-    'get_class_report': MonitoringFacade(
-        blocking=lambda app: app.get_class_report(),
-        awaited=lambda app: app.get_class_report_async(),
-        blocking_form='class_report',
+    'get_execution_class_report': MonitoringFacade(
+        blocking=lambda app: app.get_execution_class_report(),
+        awaited=lambda app: app.get_execution_class_report_async(),
+        blocking_form='execution_class_report',
         arguments=(),
         keywords={},
         answers={

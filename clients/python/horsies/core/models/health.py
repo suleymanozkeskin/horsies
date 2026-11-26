@@ -1,29 +1,36 @@
 """Typed models for the worker/database health API.
 
 The result models (`DatabasePing`, `WorkerPong`, `WorkerStateSnapshot` with
-its slot health, class capacity and profile) are frozen dataclasses returned
-to callers inside ``BrokerResult``. They carry no behaviour, only observed
-data.
+its slot health, execution class budgets and profile) are frozen dataclasses
+returned to callers inside ``BrokerResult``. They carry no behaviour, only
+observed data.
 The core encodes and decodes the ping-pong payloads.
 
 The worker-state snapshot mirrors ``WorkerStateModel`` (the timeseries row
 written every few seconds); reads expose it without coercion.
+
+A ``WorkerPong``, a ``DownSlot``, a ``SlotHealth`` and a ``SnapshotProfile``
+are also the JSON of the monitoring routes: a union member carries its
+``kind`` tag, and the cause of a down slot is its text.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
+from pydantic import Field, PlainSerializer
 
 from horsies.core.defaults import (
-    WORKER_STATE_LIVE_WINDOW_S as WORKER_STATE_LIVE_WINDOW_S,
+    WORKER_STATE_LIVE_WINDOW_SECONDS as WORKER_STATE_LIVE_WINDOW_SECONDS,
 )
 from horsies.core.models.boot_failure import (
     ClearableBootCause,
+    describe_boot_cause,
 )
 from horsies.core.models.tasks import Execution
+from horsies.core.models.worker_profile import ClaimLimits
 
 
 @dataclass(slots=True, frozen=True)
@@ -31,6 +38,14 @@ class DatabasePing:
     """Result of a ``SELECT 1`` round-trip through the live broker pool."""
 
     latency_ms: float
+    kind: Literal['ping'] = 'ping'
+
+
+@dataclass(slots=True, frozen=True)
+class DatabaseUnreachable:
+    """The ``SELECT 1`` round-trip failed: the database was not reachable."""
+
+    kind: Literal['unreachable'] = 'unreachable'
 
 
 @dataclass(slots=True, frozen=True)
@@ -52,11 +67,14 @@ class DownSlot:
     returns to service when a boot succeeds. ``detail`` is the error text of
     the last failed boot, at most ``MAX_BOOT_FAILURE_DETAIL_CHARS``
     characters. ``failed_boots`` counts the failed boots since the slot went
-    down, at least 1.
+    down, at least 1. In JSON, ``cause`` is its text.
     """
 
     slot: int
-    cause: ClearableBootCause
+    cause: Annotated[
+        ClearableBootCause,
+        PlainSerializer(describe_boot_cause, return_type=str, when_used='json'),
+    ]
     detail: str
     down_since: datetime
     failed_boots: int
@@ -66,19 +84,26 @@ class DownSlot:
 class AllSlotsServing:
     """No slot of the worker was down when it wrote the snapshot."""
 
+    kind: Literal['all_serving'] = 'all_serving'
+
 
 @dataclass(slots=True, frozen=True)
 class SlotsDown:
     """The worker is degraded: these slots were down, in slot order. Never empty."""
 
     slots: tuple[DownSlot, ...]
+    kind: Literal['slots_down'] = 'slots_down'
 
 
-SlotHealth: TypeAlias = AllSlotsServing | SlotsDown
+SlotHealth: TypeAlias = Annotated[
+    AllSlotsServing | SlotsDown,
+    Field(discriminator='kind'),
+]
+"""Whether any slot of the worker was down when it wrote the snapshot."""
 
 
 @dataclass(slots=True, frozen=True)
-class ClassBudget:
+class ExecutionClassBudget:
     """One claim budget of a worker, as its snapshot recorded it.
 
     ``capacity`` counts the children (``ISOLATED``) or seats (a shared class)
@@ -93,7 +118,7 @@ class ClassBudget:
 
 
 @dataclass(slots=True, frozen=True)
-class ClassBudgets:
+class ExecutionClassBudgets:
     """The claim budgets of a worker, in ``Execution`` order.
 
     No class is in the ``serves`` of two budgets. A class that no budget
@@ -101,10 +126,7 @@ class ClassBudgets:
     class.
     """
 
-    budgets: tuple[ClassBudget, ...]
-
-
-ClassCapacity: TypeAlias = ClassBudgets
+    budgets: tuple[ExecutionClassBudget, ...]
 
 
 @dataclass(slots=True, frozen=True)
@@ -116,6 +138,7 @@ class ProfileNamed:
     """
 
     name: str
+    kind: Literal['named'] = 'named'
 
 
 @dataclass(slots=True, frozen=True)
@@ -124,8 +147,14 @@ class ProfileNotRecorded:
     record one. A worker of a build before schema migration 1004 wrote it;
     every worker of this build records its profile name."""
 
+    kind: Literal['not_recorded'] = 'not_recorded'
 
-SnapshotProfile: TypeAlias = ProfileNamed | ProfileNotRecorded
+
+SnapshotProfile: TypeAlias = Annotated[
+    ProfileNamed | ProfileNotRecorded,
+    Field(discriminator='kind'),
+]
+"""The worker profile that a snapshot names."""
 
 
 @dataclass(slots=True, frozen=True)
@@ -136,10 +165,14 @@ class WorkerStateSnapshot:
     (cluster-wide listing) or as a timeseries (single-worker history).
     ``queue_priorities``, ``queue_max_concurrency`` and ``recovery_config``
     are empty when the worker had none set.
+    ``child_count`` counts the children of the worker.
+    ``claim_limits`` holds the claim limits of the worker:
+    ``claimed_per_worker`` is the limit that the worker resolved, the seat
+    count of the worker when its profile sets none.
     ``slot_health`` says whether any slot was down, and why.
-    ``class_capacity`` holds the claim budget of each execution class that
-    the worker runs children for: its capacity in service and the classes
-    whose rows it claims.
+    ``execution_class_budgets`` holds the claim budget of each execution
+    class that the worker runs children for: its capacity in service and
+    the classes whose rows it claims.
     ``profile`` names the worker profile that the worker ran:
     ``ProfileNamed(name)`` or ``ProfileNotRecorded()``.
     """
@@ -148,9 +181,8 @@ class WorkerStateSnapshot:
     snapshot_at: datetime
     hostname: str
     pid: int
-    processes: int
-    max_claim_batch: int
-    max_claim_per_worker: int
+    child_count: int
+    claim_limits: ClaimLimits
     cluster_wide_cap: int | None
     queues: list[str]
     queue_priorities: dict[str, int]
@@ -164,5 +196,5 @@ class WorkerStateSnapshot:
     children_memory_mb: float | None
     worker_started_at: datetime
     slot_health: SlotHealth
-    class_capacity: ClassCapacity
+    execution_class_budgets: ExecutionClassBudgets
     profile: SnapshotProfile

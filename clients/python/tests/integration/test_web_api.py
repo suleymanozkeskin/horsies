@@ -544,16 +544,19 @@ class TestWorkerReads:
             await session.commit()
 
         (worker,) = [entry for entry in body if entry['worker_id'] == worker_id]
-        assert worker['slot_health'] == 'slots_down'
-        assert worker['down_slots'] == [
-            {
-                'slot': 1,
-                'cause': 'the OS ran short of a resource (EMFILE)',
-                'detail': 'OSError: [Errno 24] Too many open files',
-                'down_since': '2026-11-10T12:00:00Z',
-                'failed_boots': 2,
-            },
-        ]
+        assert worker['slot_health'] == {
+            'kind': 'slots_down',
+            'slots': [
+                {
+                    'slot': 1,
+                    'cause': 'the OS ran short of a resource (EMFILE)',
+                    'detail': 'OSError: [Errno 24] Too many open files',
+                    'down_since': '2026-11-10T12:00:00Z',
+                    'failed_boots': 2,
+                },
+            ],
+        }
+        assert 'down_slots' not in worker
 
     async def test_class_report_answers_with_streams_and_budgets(
         self,
@@ -588,10 +591,11 @@ class TestWorkerReads:
         assert response.status_code == 200
         body = response.json()
         (stream,) = body['streams']
-        assert stream['queue_name'] == 'default'
+        assert stream['queue'] == 'default'
         assert stream['execution'] == 'ISOLATED'
         assert stream['coverage'] == {'kind': 'unserved'}
-        assert stream['wait']['kind'] == 'waiting'
+        assert stream['wait']['kind'] == 'due'
+        assert body['live_window_seconds'] == 120.0
         assert 'not_recorded' not in body
         assert body['workers'] == [
             {
@@ -603,7 +607,6 @@ class TestWorkerReads:
                         'capacity': 8,
                         'serves': ['SHARED_ASYNC'],
                         'in_flight': 0,
-                        'free': 8,
                     },
                 ],
             },
@@ -621,8 +624,8 @@ class TestWorkerReads:
         """An unreachable database would be data here, not an error."""
         body = (await api.get('/api/workers/ping?timeout_seconds=0.1')).json()
 
-        assert body['db_reachable'] is True
-        assert body['db_latency_ms'] is not None
+        assert body['database']['kind'] == 'ping'
+        assert body['database']['latency_ms'] >= 0.0
         assert body['workers'] == []
 
     async def test_unknown_worker_history_is_empty_not_missing(

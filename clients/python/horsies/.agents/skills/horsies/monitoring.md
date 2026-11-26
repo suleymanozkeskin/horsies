@@ -185,31 +185,38 @@ list_schedules(broker)                                  # next run, then name; a
   DOMAIN is the complement of every built-in code.
 - Worker/health surfaces reuse the app APIs: `list_worker_states_async`,
   `ping_workers_async`, `ping_database_async`, `get_worker_state_history_async`,
-  `get_class_report_async`.
+  `get_execution_class_report_async`.
 - A snapshot's `slot_health` is `AllSlotsServing()` or `SlotsDown(slots)` (the
   worker is degraded). Each `DownSlot` has `slot`, `cause`
   (`ResourceShortage(errno_name)` or `ThreadStartRefused()`), `detail` (at
   most 2400 characters), `down_since` and `failed_boots`. A slot is down
   when its child start failed for a cause that can clear; it takes no task and
   boots again after a growing wait. Match both variants.
-- A snapshot's `class_capacity` is `ClassBudgets(budgets)`. Each
-  `ClassBudget` has `budget` (an `Execution`), `capacity` (children or seats
-  in service) and `serves` (the classes whose rows it claims). Empty
-  `budgets`: the worker serves no class.
+- A snapshot's `execution_class_budgets` is `ExecutionClassBudgets(budgets)`
+  (the stored column `class_capacity`). Each `ExecutionClassBudget` has
+  `budget` (an `Execution`), `capacity` (children or seats in service) and
+  `serves` (the classes whose rows it claims). Empty `budgets`: the worker
+  serves no class.
+- A snapshot's `child_count` counts its children; `claim_limits` is a
+  `ClaimLimits(per_queue_per_pass, claimed_per_worker)`, each `TaskLimit(tasks)`
+  or `NoTaskLimit()`. `claimed_per_worker` is the limit that the worker
+  resolved: its seat count when its profile sets none.
 - A snapshot's `profile` is `ProfileNamed(name)` (the worker profile that
   the worker runs) or `ProfileNotRecorded()` (a worker of a build before
   schema migration 1004 wrote the snapshot). Match both variants. Web:
   `GET /api/workers` gives `profile` as `{"kind": "named", "name": ...}` or
-  `{"kind": "not_recorded"}`.
+  `{"kind": "not_recorded"}`, and `slot_health` as `{"kind": "all_serving"}`
+  or `{"kind": "slots_down", "slots": [...]}` (each cause as its text).
 - A snapshot's `queue_priorities`, `queue_max_concurrency` and
   `recovery_config` are `dict`, empty when the worker had none set.
-- Fleet check: `app.get_class_coverage_async()` →
-  `ClassCoverage(checked_at, live_workers, streams)`. One `StreamCoverage`
-  per (queue, class) with PENDING rows; `state` is
+- Fleet check: `app.get_execution_class_coverage_async()` →
+  `ExecutionClassCoverage(checked_at, live_workers, streams)`. One
+  `StreamCoverage(queue, execution, coverage)` per (queue, class) with PENDING
+  rows; `coverage` is
   `StreamServed(workers, capacity)`, `StreamWithoutCapacity(workers)` (every
   serving child or seat is down) or `StreamUnserved()` (no live worker has
   the queue and a budget that serves the class). Live = latest snapshot at
-  most `WORKER_STATE_LIVE_WINDOW_S` (120) s old;
+  most `WORKER_STATE_LIVE_WINDOW_SECONDS` (120) s old;
   `worker_state_snapshot_interval_ms` is at most half of it (60,000 ms), so a
   running worker stays live when a snapshot write is late by up to half the
   window. Each reaper pass runs it and
@@ -218,13 +225,16 @@ list_schedules(broker)                                  # next run, then name; a
   isolated children (shared rows go back to the queue as `ISOLATED` when
   their task's class changed); a shared class with children of that class or
   isolated children.
-- `app.get_class_report_async()` → `ClassReport(checked_at, streams,
-  workers)`. `PendingStream.wait` is `OldestWaiting(enqueued_at, wait)` or
-  `NoneDue(next_due_at)`; `WorkerClassLoad.budgets` holds `BudgetLoad(budget,
-  capacity, serves, in_flight)` with `.free` = `max(0, capacity -
-  in_flight)`. Both reads fail with `MONITORING_QUERY_FAILED`
-  (`retryable=False`) when a live snapshot has an unreadable
-  `class_capacity`, naming the worker. Web: `GET /api/workers/classes`.
+- `app.get_execution_class_report_async()` →
+  `ExecutionClassReport(checked_at, live_window, streams, workers)`.
+  `PendingStream(queue, execution, coverage, wait)`: `wait` is
+  `OldestWaiting(oldest_due_at, wait)` or `NoneDue(next_due_at)`;
+  `WorkerExecutionClassLoad.budgets` holds `BudgetLoad(budget, capacity,
+  serves, in_flight)` with `.free` = `max(0, capacity - in_flight)`. Both
+  reads fail with `MONITORING_QUERY_FAILED` (`retryable=False`) when a live
+  snapshot has an unreadable stored `class_capacity`, naming the worker.
+  Web: `GET /api/workers/classes` answers the same record; its JSON has
+  `wait_seconds` and `live_window_seconds` and no `free`.
 - A snapshot's `recovery_config` embeds three health payloads:
   `partition_coverage` (coverage-ensure outcome; fails before fewer than two
   future partitions remain), `partition_pruning`
@@ -446,11 +456,14 @@ from horsies.monitoring import (
     StatusCount, FacetValue, ErrorFacet, Facets, GroupRow, Breakdown,
     BreakdownCounts, BreakdownGroup, BreakdownValueGroup, BreakdownUnclaimedGroup,
     WorkflowRunSummary, WorkflowNodeInfo, WorkflowEdge, WorkflowRunDetail,
-    WorkflowTaskDetail, WorkerStateInfo, WorkerPingInfo, LivenessReport,
-    ScheduleStateInfo, WorkerHistoryPoint, DownSlotInfo, ClassReportInfo,
-    PendingStreamInfo, WorkerClassLoadInfo, BudgetLoadInfo, StreamServedInfo,
-    StreamNoCapacityInfo, StreamUnservedInfo, StreamWaitingInfo,
-    StreamNoneDueInfo,
+    WorkflowTaskDetail, WorkerStateInfo, LivenessReport, DatabaseLiveness,
+    ScheduleStateInfo, WorkerHistoryPoint,
+    # Health records of the worker routes (one type per record)
+    WorkerPong, DatabasePing, DatabaseUnreachable, DownSlot, SlotHealth,
+    AllSlotsServing, SlotsDown, SnapshotProfile, ProfileNamed,
+    ProfileNotRecorded, ExecutionClassReport, PendingStream,
+    StreamCoverageState, StreamServed, StreamWithoutCapacity, StreamUnserved,
+    StreamWait, OldestWaiting, NoneDue, WorkerExecutionClassLoad, BudgetLoad,
     # Phase timing (the lifecycle record)
     AttemptPhasesInfo, PhasesCapturedInfo, PhasesNotCapturedInfo,
     AttemptClaimsInfo, ClaimsCountedInfo, ClaimsNotCountedInfo,
