@@ -46,18 +46,20 @@ impl WorkflowDefinition for RegionReport {
         "reports.region_report.v1"
     }
 
-    fn build_with(params: RegionParams) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(Self::name());
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        params: RegionParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         builder.definition_key(Self::definition_key());
         let _fetched = builder.task(
-            fetch_report::node()?.set(fetch_report::params::region(), params.region)?,
-        );
+            fetch_report::node().set(fetch_report::params::region(), params.region)?,
+        )?;
         builder.build()
     }
 }
 ```
 
-- The builder of `build_with` is new: set the definition key, and `on_error` when it is not FAIL, on it.
+- `build_with` gets a builder of the app that registered the definition, named after the definition. Its task nodes resolve against that app. Set the definition key, and `on_error` when it is not FAIL, on it.
 - The engine calls `build_with` for each sub-workflow node that gives params, and can call it more than once for one node. Give it no side effects.
 - When the engine or the check builds a child, a panic of `build_with` is a refusal of the build, with the panic text.
 - Register the definition with `app.workflow_template::<D>()`, which returns a `WorkflowTemplate<D::Params, D::Output>`. A template also starts the definition as a workflow of its own: see [Workflow API](/horsies/rust/concepts/workflows/workflow-api/#register-and-start).
@@ -183,21 +185,23 @@ impl WorkflowDefinition for RegionFanOut {
         "reports.region_fan_out.v1"
     }
 
-    fn build_with(params: RegionListParams) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        params: RegionListParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         let regions = match params.regions {
             TaskOutcome::Succeeded(regions) => regions,
             TaskOutcome::Failed(error) => {
                 return Err(HorsiesError::new(format!("no region list: {error}")));
             }
         };
-        let mut builder = WorkflowSpecBuilder::new(Self::name());
         builder.definition_key(Self::definition_key());
         for region in regions {
             let _fetched = builder.task(
-                fetch_report::node()?
+                fetch_report::node()
                     .node_id(format!("fetch_{region}"))
                     .set(fetch_report::params::region(), region)?,
-            );
+            )?;
         }
         builder.build()
     }
@@ -218,7 +222,7 @@ impl WorkflowDefinition for DailyRegions {
     }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let listed = builder.task(list_regions::node()?);
+        let listed = builder.task(list_regions::node())?;
         let _reports = builder.sub_workflow(
             RegionFanOut::node(SubWorkflowParams::NotGiven)?
                 .arg_from(RegionListParams::field_regions(), listed)

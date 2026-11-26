@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use horsies::{
     HorsiesError, NodeKey, NodeResult, OnError, OutputlessResults, SubWorkflowFailure,
-    SubWorkflowNode, SubWorkflowParams, SuccessCase, SuccessPolicy, TaskOutcome, UserCode,
-    UserErrorCode, WorkflowDefinition, WorkflowHandle, WorkflowSpecBuilder, WorkflowStatus,
-    WorkflowTaskStatus,
+    SubWorkflowNode, SubWorkflowParams, SuccessCase, SuccessPolicy, TaskNode, TaskOutcome,
+    TypedNodeRef, UserCode, UserErrorCode, WorkflowDefinition, WorkflowHandle, WorkflowSpecBuilder,
+    WorkflowStatus, WorkflowTaskStatus,
 };
 use horsies_test_support::rows::{self, NodeRow};
 use horsies_test_support::tokio_postgres::Client;
@@ -33,10 +33,21 @@ const BIN: &str = env!("CARGO_BIN_EXE_horsies-test-worker");
 const WORKFLOW_WAIT: Duration = Duration::from_secs(30);
 
 /// The builder of Python's `_workflow_spec(name, ...)`.
-fn layer7(name: &str) -> WorkflowSpecBuilder {
-    let mut builder = WorkflowSpecBuilder::new(format!("e2e_layer7_{name}"));
+fn layer7(suite: &Suite, name: &str) -> WorkflowSpecBuilder {
+    let mut builder = suite.app.workflow_builder(format!("e2e_layer7_{name}"));
     let _key = builder.definition_key(format!("tests.e2e.layer7.{name}.v1"));
     builder
+}
+
+/// Add `node` to `spec`, a workflow builder of the suite's app. The app
+/// registers every task of the test binary, so a refusal is a defect of the
+/// test.
+fn add<T: 'static, I: 'static>(
+    spec: &mut WorkflowSpecBuilder,
+    node: TaskNode<T, I>,
+) -> TypedNodeRef<T> {
+    spec.task(node)
+        .expect("the app of the suite registers the task of the node")
 }
 
 /// A sub-workflow node `node_id` of `D` that gives no params.
@@ -173,7 +184,7 @@ async fn test_subworkflow_success_full_surface_matrix() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("success_full_surface");
+    let mut spec = layer7(&suite, "success_full_surface");
     let node = spec.sub_workflow(child::<SubOk>("e2e_sub_success_child"));
     let _output = spec.output(node);
     let handle = start::<i64>(&suite, spec).await;
@@ -233,7 +244,7 @@ async fn test_subworkflow_failure_fail_policy_preserves_error_everywhere() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("failure_fail_policy");
+    let mut spec = layer7(&suite, "failure_fail_policy");
     let _policy = spec.on_error(OnError::Fail);
     let node = spec.sub_workflow(child::<SubFail>("e2e_sub_failure_child"));
     let _output = spec.output(node);
@@ -284,7 +295,7 @@ async fn test_subworkflow_failure_pause_policy_preserves_error_after_resume() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("failure_pause_policy");
+    let mut spec = layer7(&suite, "failure_pause_policy");
     let _policy = spec.on_error(OnError::Pause);
     let node = spec.sub_workflow(child::<SubFail>("e2e_sub_pause_child"));
     let _output = spec.output(node);
@@ -329,9 +340,10 @@ async fn test_subworkflow_failure_pause_policy_preserves_error_after_resume() {
 async fn test_successful_subworkflow_is_available_through_workflow_ctx() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("success_ctx_probe");
+    let mut spec = layer7(&suite, "success_ctx_probe");
     let node = spec.sub_workflow(child::<SubOk>(subworkflow::SUCCESS_CTX_CHILD));
-    let probe = spec.task(
+    let probe = add(
+        &mut spec,
         suite
             .function(subworkflow::sub_probe_success_ctx::handle)
             .node()
@@ -363,9 +375,10 @@ async fn test_successful_subworkflow_is_available_through_workflow_ctx() {
 async fn test_failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("failure_args_ctx_probe");
+    let mut spec = layer7(&suite, "failure_args_ctx_probe");
     let node = spec.sub_workflow(child::<SubFail>(subworkflow::FAILURE_PROBE_CHILD));
-    let probe = spec.task(
+    let probe = add(
+        &mut spec,
         suite
             .function(subworkflow::sub_probe_failed_child::handle)
             .node()
@@ -402,8 +415,9 @@ async fn test_failed_subworkflow_flows_through_args_from_and_workflow_ctx() {
 async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("outputless_success_policy");
-    let required = spec.task(
+    let mut spec = layer7(&suite, "outputless_success_policy");
+    let required = add(
+        &mut spec,
         suite
             .function(workflow::mark::handle)
             .node()
@@ -439,7 +453,7 @@ async fn test_outputless_success_policy_keeps_failed_subworkflow_result() {
 async fn test_parallel_subworkflows_preserve_independent_success_and_failure() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated4).await;
-    let mut spec = layer7("parallel_success_failure");
+    let mut spec = layer7(&suite, "parallel_success_failure");
     let ok = spec.sub_workflow(child::<SubOk>("e2e_sub_parallel_ok_child"));
     let failing = spec.sub_workflow(child::<SubFail>("e2e_sub_parallel_fail_child"));
     let _policy =
@@ -492,7 +506,7 @@ async fn test_nested_subworkflow_success_records_depth_root_and_result() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("nested_success");
+    let mut spec = layer7(&suite, "nested_success");
     let node = spec.sub_workflow(child::<SubNestedOkMiddle>("e2e_sub_nested_success_child"));
     let _output = spec.output(node);
     let handle = start::<i64>(&suite, spec).await;
@@ -525,7 +539,7 @@ async fn test_nested_subworkflow_failure_surfaces_each_child_error() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
     let client = suite.client().await;
-    let mut spec = layer7("nested_failure");
+    let mut spec = layer7(&suite, "nested_failure");
     let node = spec.sub_workflow(child::<SubNestedFailMiddle>("e2e_sub_nested_failure_child"));
     let _output = spec.output(node);
     let handle = start::<i64>(&suite, spec).await;
@@ -559,8 +573,9 @@ async fn test_nested_subworkflow_failure_surfaces_each_child_error() {
 async fn test_subworkflow_build_with_args_from_receives_typed_task_result() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("build_with_args_from");
-    let source = spec.task(
+    let mut spec = layer7(&suite, "build_with_args_from");
+    let source = add(
+        &mut spec,
         suite
             .function(workflow::produce_int::handle)
             .node()
@@ -586,8 +601,9 @@ async fn test_subworkflow_build_with_args_from_receives_typed_task_result() {
 async fn test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_with() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("allow_failed_deps_to_build_with");
-    let source = spec.task(
+    let mut spec = layer7(&suite, "allow_failed_deps_to_build_with");
+    let source = add(
+        &mut spec,
         suite
             .function(workflow::fail_with::handle)
             .node()
@@ -627,7 +643,7 @@ async fn test_subworkflow_allow_failed_deps_passes_failed_task_result_to_build_w
 async fn test_subworkflow_static_kwargs_preserve_build_with_types() {
     let suite = Suite::start(BIN, Instance::Default).await;
     let _worker = suite.worker(Profile::Isolated1).await;
-    let mut spec = layer7("static_kwargs_preserve_types");
+    let mut spec = layer7(&suite, "static_kwargs_preserve_types");
     let node = spec.sub_workflow(
         SubTypedKwarg::node(SubWorkflowParams::Given(PetParams {
             pet: Pet::Dog {

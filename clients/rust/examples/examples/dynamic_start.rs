@@ -44,20 +44,24 @@ async fn format_report(
     }
 }
 
-/// The spec of the report of `region`, built at run time.
-fn report_spec(region: String) -> Result<WorkflowSpec, HorsiesError> {
-    let mut builder = WorkflowSpecBuilder::new("regional_report");
+/// The spec of the report of `region`, built at run time on `builder`, a
+/// workflow builder of the app.
+fn report_spec(
+    mut builder: WorkflowSpecBuilder,
+    region: String,
+) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("examples.regional_report.v1");
-    let sales = builder.task(fetch_sales::node()?.set(fetch_sales::params::region(), region)?);
+    let sales = builder.task(fetch_sales::node().set(fetch_sales::params::region(), region)?)?;
     let report =
-        builder.task(format_report::node()?.arg_from(format_report::params::sales(), sales));
+        builder.task(format_report::node().arg_from(format_report::params::sales(), sales))?;
     builder.output(report);
     builder.build()
 }
 
 #[task("start_report")]
 async fn start_report(rt: TaskRuntime, region: String) -> Result<Uuid, TaskError<ReportCode>> {
-    let spec = report_spec(region)
+    // The runtime gives a builder of the app that runs the task.
+    let spec = report_spec(rt.workflow_builder("regional_report"), region)
         .map_err(|refused| TaskError::user(ReportCode::SpecRefused, refused.to_string()))?;
     let handle = rt
         .start::<String>(&spec)
@@ -78,7 +82,7 @@ fn build_app() -> Result<Horsies, HorsiesError> {
 
 async fn demo(app: Horsies) -> DemoResult {
     let limit = WaitLimit::Within(Duration::from_secs(60));
-    let started = start_report::send("emea".to_owned()).await?;
+    let started = start_report::send(&app, "emea".to_owned()).await?;
     let workflow_id = match started.get(limit).await? {
         TaskOutcome::Succeeded(workflow_id) => workflow_id,
         TaskOutcome::Failed(error) => {

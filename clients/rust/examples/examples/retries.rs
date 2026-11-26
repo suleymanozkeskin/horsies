@@ -54,10 +54,10 @@ fn build_app() -> Result<Horsies, HorsiesError> {
     Ok(app)
 }
 
-async fn demo(_app: Horsies) -> DemoResult {
+async fn demo(app: Horsies) -> DemoResult {
     let limit = WaitLimit::Within(Duration::from_secs(60));
     for request in ["sync-orders", ""] {
-        let handle = call_partner::send(request.to_owned()).await?;
+        let handle = call_partner::send(&app, request.to_owned()).await?;
         match handle.get(limit).await? {
             TaskOutcome::Succeeded(answer) => println!("{request:?}: {answer}"),
             TaskOutcome::Failed(error) => println!("{request:?}: failed: {error}"),

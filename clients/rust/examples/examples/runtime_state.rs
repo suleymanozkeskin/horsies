@@ -1,6 +1,7 @@
 //! App state and the task runtime: `provide` gives a value to task bodies,
 //! which read it with `TaskRuntime::state`; `on_child_start` runs once in
-//! each worker child before its first task; a task body sends another task.
+//! each worker child before its first task; a task body sends another task
+//! through the typed function that its runtime gives (`audit::handle`).
 //!
 //! Every worker child runs `main` again, so each child builds its own state.
 //!
@@ -40,8 +41,14 @@ async fn welcome(rt: TaskRuntime, user: String) -> Result<String, TaskError<Welc
         .state::<Greeter>()
         .map_err(|missing| TaskError::user(WelcomeCode::NotConfigured, missing.to_string()))?;
     let message = format!("{}, {user}", greeter.greeting);
-    // A send from a task body goes through the producer pool of the child.
-    let _audit = audit::send(message.clone())
+    // A send from a task body goes through the app of its runtime and the
+    // producer pool of the child.
+    let audit_function = audit::handle(&rt)
+        .map_err(|missing| TaskError::user(WelcomeCode::AuditNotSent, missing.to_string()))?;
+    let _audit = audit_function
+        .send(audit::Input {
+            entry: message.clone(),
+        })
         .await
         .map_err(|error| TaskError::user(WelcomeCode::AuditNotSent, error.to_string()))?;
     Ok(message)
@@ -68,8 +75,8 @@ fn build_app() -> Result<Horsies, HorsiesError> {
     Ok(app)
 }
 
-async fn demo(_app: Horsies) -> DemoResult {
-    let handle = welcome::send("ada".to_owned()).await?;
+async fn demo(app: Horsies) -> DemoResult {
+    let handle = welcome::send(&app, "ada".to_owned()).await?;
     let limit = WaitLimit::Within(Duration::from_secs(30));
     match handle.get(limit).await? {
         TaskOutcome::Succeeded(message) => println!("{message}"),

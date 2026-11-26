@@ -184,10 +184,11 @@ pub async fn sub_probe_success_ctx(
 // Definitions
 // ---------------------------------------------------------------------------
 
-/// A builder with the name, the definition key and the error policy of
-/// `D`.
-fn definition_builder<D: WorkflowDefinition>() -> WorkflowSpecBuilder {
-    let mut builder = WorkflowSpecBuilder::new(D::name());
+/// `builder`, a builder of the app named after `D`, with the definition
+/// key and the error policy of `D`.
+fn definition_builder<D: WorkflowDefinition>(
+    mut builder: WorkflowSpecBuilder,
+) -> WorkflowSpecBuilder {
     let _key = builder.definition_key(D::definition_key());
     let _policy = builder.on_error(D::on_error());
     builder
@@ -210,10 +211,10 @@ impl WorkflowDefinition for SubOk {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let child = builder.task(
-            sub_int_ok::node()?
+            sub_int_ok::node()
                 .node_id("child")
                 .set(sub_int_ok::params::value(), SUB_OK_VALUE)?,
-        );
+        )?;
         Ok(WorkflowDefConfig::new().output(child))
     }
 }
@@ -235,10 +236,10 @@ impl WorkflowDefinition for SubFail {
     }
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
-        let child = builder.task(sub_int_fail::node()?.node_id("child").set(
+        let child = builder.task(sub_int_fail::node().node_id("child").set(
             sub_int_fail::params::error_code(),
             SUB_CHILD_FAIL.to_owned(),
-        )?);
+        )?)?;
         Ok(WorkflowDefConfig::new().output(child))
     }
 }
@@ -312,17 +313,20 @@ impl WorkflowDefinition for SubParam {
         "tests.e2e.sub.param.v1"
     }
 
-    fn build_with(params: UpstreamParams) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        params: UpstreamParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         let value = match params.value {
             TaskOutcome::Succeeded(value) => value,
             TaskOutcome::Failed(_) => -1,
         };
-        let mut builder = definition_builder::<Self>();
+        let mut builder = definition_builder::<Self>(builder);
         let child = builder.task(
-            sub_int_ok::node()?
+            sub_int_ok::node()
                 .node_id("child")
                 .set(sub_int_ok::params::value(), value)?,
-        );
+        )?;
         let _output = builder.output(child);
         builder.build()
     }
@@ -344,14 +348,17 @@ impl WorkflowDefinition for SubFailedInput {
         "tests.e2e.sub.failed.input.v1"
     }
 
-    fn build_with(params: UpstreamParams) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        params: UpstreamParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         let (input_is_err, input_error_code, input_value) = match params.value {
             TaskOutcome::Succeeded(value) => (false, None, Some(value)),
             TaskOutcome::Failed(error) => (true, Some(error.code().text()), None),
         };
-        let mut builder = definition_builder::<Self>();
+        let mut builder = definition_builder::<Self>(builder);
         let child = builder.task(
-            sub_report_input::node()?
+            sub_report_input::node()
                 .node_id("child")
                 .set(sub_report_input::params::input_is_err(), input_is_err)?
                 .set(
@@ -359,7 +366,7 @@ impl WorkflowDefinition for SubFailedInput {
                     input_error_code,
                 )?
                 .set(sub_report_input::params::input_value(), input_value)?,
-        );
+        )?;
         let _output = builder.output(child);
         builder.build()
     }
@@ -389,16 +396,19 @@ impl WorkflowDefinition for SubLabel {
         "tests.e2e.sub.label.v1"
     }
 
-    fn build_with(params: LabelParams) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        params: LabelParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         let value = match params.value {
             TaskOutcome::Succeeded(value) => value.to_string(),
             TaskOutcome::Failed(error) => error.code().text(),
         };
-        let mut builder = definition_builder::<Self>();
-        let child = builder.task(super::workflow::mark::node()?.node_id("child").set(
+        let mut builder = definition_builder::<Self>(builder);
+        let child = builder.task(super::workflow::mark::node().node_id("child").set(
             super::workflow::mark::params::value(),
             format!("{}={value}", params.label),
-        )?);
+        )?)?;
         let _output = builder.output(child);
         builder.build()
     }
@@ -434,7 +444,10 @@ impl WorkflowDefinition for SubTypedKwarg {
         "tests.e2e.sub.typed.kwarg.v1"
     }
 
-    fn build_with(params: PetParams) -> Result<WorkflowSpec, HorsiesError> {
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        params: PetParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         let (saw_dog, type_name, kind, bark_volume) = match params.pet {
             Pet::Cat { name: _ } => (false, "Cat", "cat", None),
             Pet::Dog {
@@ -442,9 +455,9 @@ impl WorkflowDefinition for SubTypedKwarg {
                 bark_volume,
             } => (true, "Dog", "dog", Some(bark_volume)),
         };
-        let mut builder = definition_builder::<Self>();
+        let mut builder = definition_builder::<Self>(builder);
         let child = builder.task(
-            sub_pet_report::node()?
+            sub_pet_report::node()
                 .node_id("child")
                 .set(sub_pet_report::params::saw_dog_at_build(), saw_dog)?
                 .set(
@@ -456,7 +469,7 @@ impl WorkflowDefinition for SubTypedKwarg {
                     Some(kind.to_owned()),
                 )?
                 .set(sub_pet_report::params::bark_volume_at_build(), bark_volume)?,
-        );
+        )?;
         let _output = builder.output(child);
         builder.build()
     }
@@ -485,14 +498,17 @@ impl WorkflowDefinition for SubSlow {
         "tests.e2e.sub.slow.v1"
     }
 
-    fn build_with(params: SlowParams) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = definition_builder::<Self>();
+    fn build_with(
+        builder: WorkflowSpecBuilder,
+        params: SlowParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
+        let mut builder = definition_builder::<Self>(builder);
         let child = builder.task(
-            slow_mark::node()?
+            slow_mark::node()
                 .node_id("child")
                 .set(slow_mark::params::value(), params.value)?
                 .set(slow_mark::params::delay_ms(), params.delay_ms)?,
-        );
+        )?;
         let _output = builder.output(child);
         builder.build()
     }

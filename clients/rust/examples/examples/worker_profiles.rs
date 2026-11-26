@@ -82,14 +82,14 @@ fn build_app() -> Result<Horsies, HorsiesError> {
     Ok(app)
 }
 
-async fn demo(_app: Horsies) -> DemoResult {
+async fn demo(app: Horsies) -> DemoResult {
     let limit = WaitLimit::Within(Duration::from_secs(30));
-    let sum = checksum::send(vec![1, 2, 3]).await?;
+    let sum = checksum::send(&app, vec![1, 2, 3]).await?;
     let mut pages = Vec::new();
     for path in ["/", "/docs", "/docs/rust"] {
-        pages.push(fetch_page::send(path.to_owned()).await?);
+        pages.push(fetch_page::send(&app, path.to_owned()).await?);
     }
-    let thumbnail = resize::send(1920, 1080).await?;
+    let thumbnail = resize::send(&app, 1920, 1080).await?;
 
     match sum.get(limit).await? {
         TaskOutcome::Succeeded(value) => println!("checksum: {value}"),

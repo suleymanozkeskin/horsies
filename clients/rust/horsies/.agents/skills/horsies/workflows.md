@@ -6,9 +6,11 @@ flow, the workflow context, sub-workflows, the starts and the workflow
 handle. The behaviour (statuses, joins, failure propagation, pause and
 resume) is on the shared docs page `concepts/workflows/workflow-semantics`.
 
-The DSL builds a spec as data in the client. `WorkflowSpecBuilder::build`
-checks the spec with Python's rules and `HRS-xxx` codes before anything is
-written.
+The DSL builds a spec as data in the client. A builder comes from an app:
+`app.workflow_builder(name)`, or `rt.workflow_builder(name)` in a task body.
+It resolves each task node against the tasks of that app when the node is
+added. `WorkflowSpecBuilder::build` checks the spec with Python's rules and
+`HRS-xxx` codes before anything is written.
 
 ## A Workflow Definition
 
@@ -68,26 +70,28 @@ impl WorkflowDefinition for Checkout {
         "shop.checkout.v1"
     }
 
-    fn build_with(params: CheckoutParams) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(Self::name());
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        params: CheckoutParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         builder.definition_key(Self::definition_key());
         let order_id = params.order.order_id.clone();
         let charged = builder.task(
-            charge_order::node()?
+            charge_order::node()
                 .node_id("charge")
                 .set(charge_order::params::order(), params.order)?,
-        );
+        )?;
         let receipt = builder.task(
-            send_receipt::node()?
+            send_receipt::node()
                 .node_id("receipt")
                 .set(send_receipt::params::order_id(), order_id)?
                 .arg_from(send_receipt::params::charged(), charged),
-        );
+        )?;
         let _audit = builder.task(
-            audit_checkout::node()?
+            audit_checkout::node()
                 .waits_for(charged)
                 .workflow_ctx_from([charged]),
-        );
+        )?;
         builder.output(receipt);
         builder.build()
     }
@@ -103,21 +107,24 @@ impl WorkflowDefinition for Checkout {
 | `fn name()` | The workflow name, unique in the app |
 | `fn definition_key()` | The stable identity, unique in the app. A start and the engine find the workflow by it |
 | `fn on_error()` | Default `OnError::Fail`; `OnError::Pause` pauses the workflow at a failure |
-| `fn define(builder)` | A definition without params adds its nodes and returns `WorkflowDefConfig::new().output(node).success_policy(policy)`. The builder has the name, the key and `on_error` |
-| `fn build_with(params)` | A definition with params builds its spec. The engine calls it for each sub-workflow node that gives params, and may call it more than once for one node: give it no side effects |
-| `fn build()` | Default: `define` on a new builder, then `build`. Refuses an `Output` that is not the output node's type (`HRS-025`) |
+| `fn define(builder)` | A definition without params adds its nodes and returns `WorkflowDefConfig::new().output(node).success_policy(policy)`. The builder is a builder of the app, with the name, the key and `on_error` |
+| `fn build_with(builder, params)` | A definition with params builds its spec on `builder`, a builder of the app named after the definition. The engine calls it for each sub-workflow node that gives params, and may call it more than once for one node: give it no side effects |
+| `fn build(builder)` | Default: sets the key and `on_error` on `builder`, runs `define`, then `build`. Refuses an `Output` that is not the output node's type (`HRS-025`) |
 | `fn node(params)` | A sub-workflow node of this definition (see Sub-Workflows) |
 
 A definition implements `define` or `build_with`. One with neither is
 refused at build. In `build_with`, set the definition key and the
-`on_error` on the builder yourself.
+`on_error` on the builder yourself. The app makes the builder of each build
+from itself, so the task nodes resolve against the tasks of that app. A
+definition without params builds when it registers: register its tasks
+first.
 
 ## `WorkflowSpecBuilder` and `WorkflowSpec`
 
 | Method | Does |
 |---|---|
-| `WorkflowSpecBuilder::new(name)` | A builder with `on_error` FAIL and no node |
-| `.task(node)` | Adds a task node. Returns `TypedNodeRef<T>`, `T` the task's output type |
+| `app.workflow_builder(name)`, `rt.workflow_builder(name)` | A builder of the app, with `on_error` FAIL and no node |
+| `.task(node)` | Adds a task node. Returns `Result<TypedNodeRef<T>, HorsiesError>`, `T` the task's output type. `HRS-302` when the builder's app does not register the task with the node's input and output types; the node is not added |
 | `.sub_workflow(node)` | Adds a sub-workflow node. Returns `TypedNodeRef<T>`, `T` the child's output type |
 | `.definition_key(key)` | Sets the definition key. A start refuses a spec without one |
 | `.on_error(OnError)` | Sets what a failed node does to the workflow |
@@ -137,9 +144,11 @@ refused at build. In `build_with`, set the definition key and the
 
 ## Task Nodes
 
-`task_name::node()` returns `Result<TaskNode<T, task_name::Input>,
-HorsiesError>` with the task's queue and options and the input `{}`.
-`TaskFunction::node()` returns the node directly.
+`task_name::node()` and `TaskFunction::node()` return a
+`TaskNode<T, task_name::Input>` with the input `{}`. The node names its
+task and reads no registration. `builder.task(node)` gives it the queue
+(unless the node names one), the options and the workflow context flag of
+the task's registration on the builder's app.
 
 | Method | Does |
 |---|---|
@@ -231,12 +240,14 @@ impl WorkflowDefinition for RegionReport {
         "reports.region_report.v1"
     }
 
-    fn build_with(params: RegionParams) -> Result<WorkflowSpec, HorsiesError> {
-        let mut builder = WorkflowSpecBuilder::new(Self::name());
+    fn build_with(
+        mut builder: WorkflowSpecBuilder,
+        params: RegionParams,
+    ) -> Result<WorkflowSpec, HorsiesError> {
         builder.definition_key(Self::definition_key());
         let _fetched = builder.task(
-            fetch_report::node()?.set(fetch_report::params::region(), params.region)?,
-        );
+            fetch_report::node().set(fetch_report::params::region(), params.region)?,
+        )?;
         builder.build()
     }
 }
@@ -293,15 +304,16 @@ impl WorkflowDefinition for AllRegions {
 ## Register and Start
 
 Register the tasks first, then the workflow definitions.
-`register_workflow_definition` builds the spec at once, and
-`task_name::node()` refuses before `task_name::register`.
+`register_workflow_definition` builds the spec at once on a builder of the
+app, and `builder.task(node)` refuses a task that the app does not
+register yet (`HRS-302`).
 
 | Method | Returns |
 |---|---|
 | `app.register_workflow_definition::<D>()` | `Result<WorkflowFunction<D::Output>, HorsiesError>`, for a definition without params |
 | `app.workflow_template::<D>()` | `Result<WorkflowTemplate<D::Params, D::Output>, HorsiesError>`, for a definition with params |
-| `horsies::start_workflow::<D>()` | Starts `D` through its first registration in the process |
-| `horsies::start_workflow_with::<D>(params)` | Starts `D` with params through its first registration |
+| `app.start_workflow::<D>()` | Starts `D` through its registration on this app (`register_workflow_definition`) |
+| `app.start_workflow_with::<D>(params)` | Starts `D` with params through its registration on this app (`workflow_template`) |
 | `app.start::<T>(&spec)`, `app.start_with_id::<T>(&spec, id)` | Starts a spec that needs no registration. Its sub-workflow children must be registered |
 | `rt.start::<T>(&spec)`, `rt.start_with_id::<T>(&spec, id)` | The same, from a task body through `TaskRuntime` |
 | `app.workflow_handle::<T>(workflow_id)` | The handle of a started workflow. No I/O |
@@ -359,8 +371,10 @@ async fn run_checkout(
   value from the clock, a deploy) is a conflict. A task retry builds the
   spec again, so the spec of `rt.start_with_id` must be the same on each
   attempt.
-- `start_workflow` and `start_workflow_with` before the registration in the
-  process return `VALIDATION_FAILED`.
+- `app.start_workflow::<D>()` and `app.start_workflow_with::<D>(params)` on
+  an app that does not register `D` in that form return `VALIDATION_FAILED`
+  with the cause `PreconditionFailed`. Nothing is written. A registration
+  on another app of the process does not count.
 - With `AppConfig.resend_on_transient_err`, the core runs a retryable start
   failure again with the same workflow id, up to 3 times.
 - In a worker child a start goes through the child's producer handle. A
@@ -494,25 +508,33 @@ A function that builds a spec at run time has no registration that
 ```rust
 use horsies::{Horsies, HorsiesError, WorkflowSpec, WorkflowSpecBuilder};
 
-fn region_spec(region: &String) -> Result<WorkflowSpec, HorsiesError> {
-    let mut builder = WorkflowSpecBuilder::new("region_fetch");
+fn region_spec(
+    mut builder: WorkflowSpecBuilder,
+    region: &String,
+) -> Result<WorkflowSpec, HorsiesError> {
     builder.definition_key("reports.region_fetch.v1");
     let fetched = builder.task(
-        fetch_report::node()?.set(fetch_report::params::region(), region.clone())?,
-    );
+        fetch_report::node().set(fetch_report::params::region(), region.clone())?,
+    )?;
     builder.output(fetched);
     builder.build()
 }
 
 fn register_region_checks(app: &Horsies) -> Result<(), HorsiesError> {
-    app.check_workflow_builder("region_spec", region_spec)
+    app.check_workflow_builder("region_fetch", region_spec)
         .cases(["eu".to_owned(), "us".to_owned()])
         .register()
 }
 ```
 
-`check()` builds and checks a spec from each case. A builder with no case
-is refused (`HRS-027`).
+`check()` builds and checks a spec from each case. For each case it gives
+the function a new builder of the app, named after the check builder
+(`region_fetch`), and the case. A builder with no case is refused
+(`HRS-027`). A task body that builds the same spec at run time gets its
+builder from `rt.workflow_builder("region_fetch")`.
+
+For a template, pass the builder to `build_with`:
+`app.check_workflow_builder(Checkout::name(), |builder, params: &CheckoutParams| Checkout::build_with(builder, params.clone()))`.
 
 ## Validation Codes
 
@@ -533,6 +555,7 @@ is refused (`HRS-027`).
 | `HRS-031` | A value that does not encode, does not read back, or has another type; a key that binds to no field, or a field with no value, inside the value of a parameter |
 | `HRS-034` | A priority outside 1 to 100 |
 | `HRS-036`, `HRS-037` | A sub-workflow nesting that reaches the depth limit, or repeats at once |
+| `HRS-302` | `builder.task(node)`: the builder's app does not register the task, or registers it with another input or output type. The node is not added |
 
 ## Common Pitfalls
 
@@ -544,12 +567,16 @@ waiting work a node of the workflow.
 once for one node.
 
 **Register the tasks before the definitions.** A definition without params
-builds at registration, and `task_name::node()` refuses before
-`task_name::register`.
+builds at registration on a builder of the app, and `builder.task(node)`
+refuses a task that the app does not register yet (`HRS-302`).
 
-**Set the definition key in `build_with`.** The builder of `build_with` is
-new: set `definition_key` (and `on_error`) on it. A start refuses a spec
-without a key.
+**Set the definition key in `build_with`.** The builder of `build_with` has
+only the name of the definition: set `definition_key` (and `on_error`) on
+it. A start refuses a spec without a key.
+
+**Build a spec on a builder of the app that starts it.** A builder resolves
+its task nodes against its own app. Two apps in one process share no
+registration.
 
 **Use the context for an `any` or quorum join.** `arg_from` on such a node
 is `HRS-013`.
@@ -568,7 +595,7 @@ use horsies::{
     WorkflowContext, WorkflowContextError, SubWorkflowSummary, WorkflowMeta,
     // Starts
     WorkflowFunction, WorkflowTemplate, WorkflowCheckBuilderRegistration,
-    start_workflow, start_workflow_with, WorkflowStartError, WorkflowStartErrorCode,
+    WorkflowStartError, WorkflowStartErrorCode,
     // Handle
     WorkflowHandle, WorkflowReadError, NodeResult, WorkflowNodeInfo, WorkflowStatus,
     WorkflowTaskStatus, HandleOperationError, HandleErrorCode, HandleResult,

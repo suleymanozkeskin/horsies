@@ -169,6 +169,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let add = add_numbers::register(&mut app)?;
 
     let handle = add.send(add_numbers::Input { a: 2, b: 3 }).await?;
+    let also = add_numbers::send(&app, 4, 5).await?;
+    println!("sent {} and {}", handle.task_id(), also.task_id());
     match handle.get(WaitLimit::Within(Duration::from_secs(30))).await? {
         TaskOutcome::Succeeded(sum) => println!("sum = {sum}"),
         TaskOutcome::Failed(error) => println!("failed with {}", error.code().text()),
@@ -182,8 +184,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   the read that failed (the wait limit passed, the task is held nowhere,
   the stored data does not read, the database failed). The inner value is
   what the task ended with.
-- The generated `add_numbers::send(2, 3)` takes the parameters and sends
-  through the function of the first `register` in the process.
+- The generated `add_numbers::send(&app, 4, 5)` takes the app and the
+  parameters. It sends through that app. The generated module holds no
+  state, so two apps in one process share no registration. A send through
+  an app that does not register the task is `ValidationFailed`.
 - `WaitLimit::Within(duration)` waits at most `duration`;
   `WaitLimit::NoLimit` waits until the task ends. A `Within` limit above
   `MAX_WAIT_LIMIT_MS` (4,294,967,295 ms) is `ReadError::InvalidInput`, as
@@ -267,11 +271,11 @@ impl WorkflowDefinition for DailyReport {
 
     fn define(builder: &mut WorkflowSpecBuilder) -> Result<WorkflowDefConfig, HorsiesError> {
         let fetched = builder.task(
-            fetch_report::node()?.set(fetch_report::params::region(), "eu".to_owned())?,
-        );
+            fetch_report::node().set(fetch_report::params::region(), "eu".to_owned())?,
+        )?;
         let published = builder.task(
-            publish_report::node()?.arg_from(publish_report::params::report(), fetched),
-        );
+            publish_report::node().arg_from(publish_report::params::report(), fetched),
+        )?;
         Ok(WorkflowDefConfig::new().output(published))
     }
 }
@@ -281,15 +285,19 @@ impl WorkflowDefinition for DailyReport {
   `TaskOutcome<S, E>`, and the node waits for the dependency.
 - Register the definition in `build_app` with
   `app.register_workflow_definition::<DailyReport>()?`, after the tasks.
+  The app gives `define` a builder of the app. `builder.task(node)`
+  resolves each node against the tasks of that app. A task that the app
+  does not register is `HRS-302`.
 - Start it with `function.start().await` or
-  `horsies::start_workflow::<DailyReport>().await`. See `workflows.md`.
+  `app.start_workflow::<DailyReport>().await`. A start names its app, as a
+  send does. See `workflows.md`.
 
 ## Result Types
 
 | Operation | Returns |
 |---|---|
 | Task body | `Result<T, TaskError<E>>` |
-| `send`, `schedule`, `retry_send`, `retry_schedule` | `Result<TaskHandle<T, E>, TaskSendError>` |
+| `send`, `send_with_options`, `retry_send` | `Result<TaskHandle<T, E>, TaskSendError>` |
 | `TaskHandle::get`, `Horsies::get_result` | `Result<TaskOutcome<T, E>, ReadError>` |
 | `TaskHandle::info`, `Horsies::get_task_info` | `Result<TaskInfo, ReadError>` |
 | Workflow start | `Result<WorkflowHandle<T>, WorkflowStartError>` |

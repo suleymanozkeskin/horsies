@@ -62,7 +62,11 @@ impl AppRole {
 /// let mut app = horsies::Horsies::new(config)?;
 /// send_email::register(&mut app)?;
 /// app.provide(Mailer::from_env())?;
+/// let handle = send_email::send(&app, address).await?;
 /// ```
+///
+/// Each send, workflow builder and workflow start names its app. Two apps
+/// in one process share no registration.
 ///
 /// # Panics
 ///
@@ -301,8 +305,10 @@ impl Horsies {
         &self.state
     }
 
-    /// The typed functions that the task attributes registered on this app.
-    pub(crate) fn functions(&self) -> &TaskFunctions {
+    /// The typed functions that the task attributes registered on this app:
+    /// the sends, the task runtime and the workflow builders of the app read
+    /// them.
+    pub(crate) fn functions(&self) -> &Arc<TaskFunctions> {
         &self.functions
     }
 
