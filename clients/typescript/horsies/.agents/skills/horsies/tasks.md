@@ -213,6 +213,10 @@ export const recordShipment = defineTask({
 
 - A body and a reader get zod's output type; a sender may leave out a
   member that zod marks `.optional()`, `.default()` or `.prefault()`.
+- `z.uuid()` is a string with zod's UUID check. It stores the text as given:
+  an upper-case UUID is stored in upper case. `h.uuid()` refuses a text that
+  is not in the lower-case 8-4-4-4-12 form. Use `h.uuid()` (or
+  `hz.wire(h.uuid())`) for the lower-case form.
 - The adapter refuses a zod form that has no stored form, with `HRS-105`:
   `z.any()`, `z.unknown()`; a one-way change (`.transform()`,
   `z.preprocess()`, `z.coerce.*()`, `.trim()`, `.toLowerCase()`);

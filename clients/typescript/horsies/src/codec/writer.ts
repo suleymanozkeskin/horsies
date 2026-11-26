@@ -226,13 +226,24 @@ function writeTimeKind(kind: TimeKind, value: unknown, path: string, sink: Sink)
   }
 }
 
+/** The detail of a number under the integer kind that is not a whole number (a fraction, `NaN` or an infinity). */
+const NOT_WHOLE_NUMBER_DETAIL = "the integer kind takes a whole number";
+
+/** The detail of a whole number under the integer kind that is outside the safe range. */
+const OUTSIDE_SAFE_RANGE_DETAIL = "the integer kind takes a whole number from -(2^53 - 1) to 2^53 - 1; the bigint kind takes a larger one";
+
+/** The refusal text of a number that is not a safe integer, one text for each case. Pure. */
+function notSafeIntegerDetail(value: number): string {
+  return Number.isInteger(value) ? OUTSIDE_SAFE_RANGE_DETAIL : NOT_WHOLE_NUMBER_DETAIL;
+}
+
 function writeInt(value: unknown, path: string, sink: Sink): Written {
   if (!isNumber(value)) {
     return refuse("WrongType", path, "expected a number");
   }
 
   if (!Number.isSafeInteger(value)) {
-    return refuse("NotSafeInteger", path, "h.int() takes a safe integer; use h.bigint() for a larger one");
+    return refuse("NotSafeInteger", path, notSafeIntegerDetail(value));
   }
 
   return append(sink, String(value));
