@@ -34,9 +34,21 @@ tracing = "0.1"
 serde_json = "1"
 uuid = "1"
 chrono = "0.4"
+# The zone data of the core's scheduler (`horsies-core` reads zones with the
+# same version), so the zone check of `app.schedules` and the scheduler start
+# read one zone table.
+chrono-tz = "0.10"
+# `fcntl` of the child's socket: the duplicate that the host thread keeps
+# until the process ends (`child::exit`).
+libc = "0.2"
 
 [build-dependencies]
 napi-build = "=2.7.0"
+
+[dev-dependencies]
+# `test-util`: the unit tests of the wait bounds run on a paused clock
+# (`tokio::time::pause`), so a bound of seconds takes no wall time.
+tokio = { version = "1", features = ["test-util"] }
 
 [features]
 default = []

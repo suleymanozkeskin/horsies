@@ -33,6 +33,9 @@
     },
     "./package.json": "./package.json"
   },
+  "bin": {
+    "horsies": "./dist/tools/bin.js"
+  },
   "files": [
     "dist",
     ".agents/skills/horsies",
@@ -43,11 +46,15 @@
     "node": ">=26"
   },
   "peerDependencies": {
+    "@opentelemetry/api": ">=1.7.0 <2",
     "zod": ">=4.1.13 <4.7.0",
     "pg": ">=8.23.1 <8.24.0",
     "postgres": ">=3.4.9 <3.5.0"
   },
   "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    },
     "zod": {
       "optional": true
     },
@@ -62,6 +69,7 @@
     "access": "public"
   },
   "devDependencies": {
+    "@opentelemetry/api": "1.10.0",
     "zod": "4.1.13"
   }
 }

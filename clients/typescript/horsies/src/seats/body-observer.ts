@@ -6,10 +6,13 @@
 // call; `thrown` with a value that the body threw or rejected with, before the error mapping; `end` with how the body
 // ended and the time it ended (`endedAt`). The isolate calls `end` when the body ends in the isolate: a sync body
 // that runs past its deadline ends late, and `endedAt` is that time, not the time of the run's end in the core.
+// `cancelled` comes when the `cancel` message of the run comes, before or after the other calls: the core then decided
+// the end of the run (`TASK_TIMEOUT` at the deadline, `TASK_CANCELLED` at an operator cancel), whatever the body does
+// later.
 
 import type { AppContext } from "../app/context.ts";
 import type { BodyEnd, BodyObservation } from "../child/body-observer.ts";
-import type { BodyFactsRecord } from "../native/child/addon.ts";
+import type { BodyFactsRecord, CancelCauseName } from "../native/child/addon.ts";
 
 /** The observation of one body in a seat isolate. No method may throw: a throw ends the isolate. */
 export interface SeatBodyObservation {
@@ -19,6 +22,8 @@ export interface SeatBodyObservation {
   thrown(cause: unknown): void;
   /** The body ended with `end` at `endedAt`. */
   end(end: BodyEnd, endedAt: Temporal.Instant): void;
+  /** The run's cancel signal fired with `cause`: the core decided the end of the run, whatever the body does later. */
+  cancelled(cause: CancelCauseName): void;
 }
 
 /** The observer of the task bodies of a seat isolate. */
@@ -31,6 +36,7 @@ const NO_SEAT_OBSERVATION: SeatBodyObservation = Object.freeze({
   run: <T>(call: () => T): T => call(),
   thrown: (): void => undefined,
   end: (): void => undefined,
+  cancelled: (): void => undefined,
 });
 
 /** The observer that does nothing: `run` calls the body. */
@@ -59,6 +65,9 @@ export function bodyObservationOf(observation: SeatBodyObservation, now: () => T
     },
     end: (end: BodyEnd): void => {
       observation.end(end, now());
+    },
+    cancelled: (cause: CancelCauseName): void => {
+      observation.cancelled(cause);
     },
   });
 }

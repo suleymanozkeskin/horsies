@@ -13,6 +13,8 @@
 // 4. The event stream after an allowed view is the core's frames. Every other request reads at most
 //    the core's body bound plus one byte, and the core answers it with its verdicts.
 
+import type { Horsies } from "../app.ts";
+import { appInternals } from "../app/internals.ts";
 import { unreachable } from "../native/call/never.ts";
 import { thrownFacts } from "../native/call/thrown-facts.ts";
 import type { ThrownFacts } from "../native/call/thrown-facts.ts";
@@ -27,6 +29,7 @@ import type {
 } from "../native/facades/web-handler.ts";
 import type { CoreHandle } from "../native/handle/core-handle.ts";
 import type { ActionsSwitch, MonitoringAuthPolicy } from "./auth.ts";
+import { monitoringAppOf } from "./app-facts.ts";
 import { nativeMonitoringBridge } from "./bridge.ts";
 import type { MonitoringBridge } from "./bridge.ts";
 import { EVENT_STREAM_HEADERS, eventStreamBody } from "./events.ts";
@@ -103,10 +106,19 @@ export interface MonitoringHandler {
 }
 
 /**
- * The monitoring handler of `app`. Starts nothing: the first request connects the app's broker.
- * Throws `ClientDefect` when the app's handle has no child spec source.
+ * The monitoring handler of `app`, over the app's core handle, which holds the app's child spec source. Starts
+ * nothing: the first request connects the app's broker. Throws `AddonOutsideMainThread` off the main thread: the
+ * addon runs on the main thread of a process only.
  */
-export function createMonitoringHandler(app: MonitoringHandlerApp, options: MonitoringHandlerOptions): MonitoringHandler {
+export function createMonitoringHandler(app: Horsies, options: MonitoringHandlerOptions): MonitoringHandler {
+  return monitoringHandlerOf(monitoringAppOf(appInternals(app)), options);
+}
+
+/**
+ * The monitoring handler of the app facts `app`. Starts nothing. Throws `ClientDefect` when the handle of `app` has
+ * no child spec source.
+ */
+export function monitoringHandlerOf(app: MonitoringHandlerApp, options: MonitoringHandlerOptions): MonitoringHandler {
   return monitoringHandlerOver(
     nativeMonitoringBridge(app.coreHandle, handlerSettings(app, options, EVENT_HEARTBEAT_MS)),
     options,

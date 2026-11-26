@@ -1,6 +1,6 @@
-// The static check of an app (the `check` command, and the worker start), in phases; it stops at the first phase
-// that refuses, as the Python and Rust clients do. No I/O; on a main thread the core's pure code check runs through
-// the addon, which starts no core.
+// The static check of an app (the `check` command, the worker start and the scheduler start), in phases; it stops at
+// the first phase that refuses, as the Python and Rust clients do. No I/O; on a main thread the core's pure code check
+// runs through the addon, which starts no core.
 //
 // 1. Registrations: every refusal of the refusal sink (`app.implement` and the other registrations after
 //    `Horsies.create`) whose area is in the scope of the check. An implementation of a contract that the app does
@@ -8,6 +8,9 @@
 // 2. Implementations: each listed contract has an implementation in this entry, so a passing check means that a
 //    worker start from the same entry passes the same rule.
 // 3. Exception codes: the codes of each implementation's exception list pass the core's code rules.
+//
+// The scheduler start runs phase 1 only: the scheduler sends by contract and runs no body, so its entry needs no
+// implementation, as the Python scheduler needs no task bodies.
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import type { AppContext } from "../app/context.ts";
@@ -26,6 +29,10 @@ export function areaScopes(area: RefusalArea): readonly CheckScope[] {
   switch (area) {
     case "contracts":
       return ["withSchedules", "withoutSchedules"];
+    case "schedules":
+      return ["withSchedules"];
+    case "events":
+      return ["withSchedules", "withoutSchedules"];
     default:
       return unreachable(area);
   }
@@ -43,8 +50,7 @@ export function staticCheck(
 ): CheckOutcome {
   const phases: readonly (() => readonly Refusal[])[] = [
     () => registrationRefusals(context, scope),
-    () => implementationRefusals(context),
-    () => exceptionCodeRefusals(context, checks),
+    ...implementationPhases(context, checks, phase),
   ];
 
   for (const run of phases) {
@@ -56,6 +62,26 @@ export function staticCheck(
   }
 
   return { kind: "passed", passed: passedOf(context) };
+}
+
+/**
+ * The phases of the implementations in a check of `phase`: `check` and the worker start check them (a worker runs the
+ * bodies); the scheduler start checks none (it sends by contract). Pure.
+ */
+function implementationPhases(
+  context: AppContext,
+  checks: CoreChecks,
+  phase: CheckPhaseName,
+): readonly (() => readonly Refusal[])[] {
+  switch (phase) {
+    case "check":
+    case "worker-startup":
+      return [() => implementationRefusals(context), () => exceptionCodeRefusals(context, checks)];
+    case "scheduler-startup":
+      return [];
+    default:
+      return unreachable(phase);
+  }
 }
 
 /** The refusals of the sink whose area counts in `scope`, in registration order. Pure. */

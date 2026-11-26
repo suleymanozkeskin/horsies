@@ -136,10 +136,6 @@ pub fn epoch_micros_of(instant: DateTime<Utc>) -> BigInt {
 
 /// The instant of a `BigInt` of epoch microseconds, or the refusal of
 /// `subject`. Pure.
-#[allow(
-    dead_code,
-    reason = "the send, workflow and facades areas read instants from JavaScript"
-)]
 pub fn instant_of_epoch_micros(
     subject: &str,
     micros: &BigInt,
@@ -152,10 +148,6 @@ pub fn instant_of_epoch_micros(
 /// The UUID of a lower-case hyphenated text, or the refusal of `subject`.
 /// Another form of the same UUID (upper case, braces, no hyphens) is
 /// refused: the package sends one form. Pure.
-#[allow(
-    dead_code,
-    reason = "the send, workflow and facades areas read task and workflow ids from JavaScript"
-)]
 pub fn uuid_of_text(subject: &str, text: &str) -> Result<Uuid, BoundaryRefusal> {
     match Uuid::try_parse(text) {
         Ok(id) if text_of_uuid(id) == text => Ok(id),

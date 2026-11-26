@@ -3,6 +3,7 @@
 // - A value that may be missing is a variant that names the missing state, not `null`.
 // - A count of 64 bits is a `bigint`; an instant is a `Temporal.Instant`; a length of time is a `Temporal.Duration`.
 
+import type { ShortageErrno } from "../_catalog/events.ts";
 import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { JsonValue } from "../codec/json-value.ts";
 import type { TaskId } from "../contract/ids.ts";
@@ -41,8 +42,9 @@ export type WorkerHistoryLimit = { readonly kind: "allRetained" } | { readonly k
 /** The worker profile that a snapshot names. `notRecorded`: a worker of a build before schema migration 1004. */
 export type SnapshotProfile = { readonly kind: "named"; readonly name: string } | { readonly kind: "notRecorded" };
 
-/** The errno of a resource shortage. */
-export type ShortageErrno = "EMFILE" | "ENFILE" | "ENOMEM" | "EAGAIN";
+// The errno of a resource shortage: the type of the generated event catalog, so the main entry point has one
+// `ShortageErrno` for the health reads and the events.
+export type { ShortageErrno };
 
 /** A boot failure cause that can clear by itself. */
 export type ClearableBootCause =

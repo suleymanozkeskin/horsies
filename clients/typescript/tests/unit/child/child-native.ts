@@ -12,6 +12,7 @@ import type {
   SpawnRegistration,
   StartHookCall,
 } from "../../../horsies/src/native/child/addon.ts";
+import type { HandlerChildPlan } from "../../../horsies/src/native/handler-child/addon.ts";
 import type { AppConfigCheck, NativeTaskError, TaskErrorBuild, TaskErrorParts } from "../../../horsies/src/native/sends/addon.ts";
 import type { PanicRule } from "../../../horsies/src/thrown-errors.ts";
 import { fakeSendRules } from "../app/support.ts";
@@ -46,6 +47,7 @@ export class FakeChildNative implements ChildNative {
   readonly errors: [bigint, TaskErrorParts][] = [];
   readonly builds: TaskErrorParts[] = [];
   readonly serves: ServeCall[] = [];
+  readonly handlerPlans: HandlerChildPlan[] = [];
   #end: (end: ChildServeEnd) => void = () => undefined;
 
   /** End the serve with `code`. */
@@ -57,6 +59,11 @@ export class FakeChildNative implements ChildNative {
     this.calls.push("childArguments");
 
     return this.arguments;
+  }
+
+  fillHandlerChild(plan: HandlerChildPlan): void {
+    this.calls.push("fillHandlerChild");
+    this.handlerPlans.push(plan);
   }
 
   async serveChild(
