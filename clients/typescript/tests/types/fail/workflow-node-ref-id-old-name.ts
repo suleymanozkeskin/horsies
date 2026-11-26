@@ -6,7 +6,7 @@ import { defineTask, defineWorkflow, h } from "../../../horsies/src/index.ts";
 const count = defineTask({ name: "count", input: {}, output: h.int() });
 
 export const flow = defineWorkflow(
-  { name: "flow", definitionKey: "tests.flow.v1", output: h.int(), params: {} },
+  { name: "flow", definitionKey: "tests.flow.v1", outputType: h.int(), parameters: {} },
   (w) => {
     const counted = w.task(count, {}, { nodeId: "count" });
     const id: string = counted.id;

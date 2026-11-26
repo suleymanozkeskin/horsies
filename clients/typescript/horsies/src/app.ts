@@ -8,14 +8,14 @@ import type { TaskId, WorkflowId } from "./contract/ids.ts";
 import type { OutputSchema, ParameterSchemas, SchemaValue, SendableInput } from "./contract/schema.ts";
 import { readFormOf, type TaskHandle, taskHandleOf } from "./read/handle.ts";
 import type { RetryableSendError, TaskSendError } from "./send/errors.ts";
-import type { SendOptions } from "./send/options.ts";
-import { retrySend, sendTask } from "./send/send.ts";
+import type { TaskSendOptions } from "./send/options.ts";
+import { resend, sendTask } from "./send/send.ts";
 import { err, ok, type Result } from "./wire/result.ts";
 import type { AppContext } from "./app/context.ts";
 import {
   createApp,
   type CreateEnvironment,
-  type CreateRefused,
+  type ValidationReport,
   type HorsiesConfig,
   processEnvironment,
 } from "./app/create.ts";
@@ -43,7 +43,7 @@ import { type RerunArea, rerunAreaOfCore } from "./rerun/app-area.ts";
 import type { CallerTransaction } from "./rerun/caller.ts";
 import { registeredCodesOf } from "./rerun/registered-codes.ts";
 import type { CallerRerunError, RerunError } from "./rerun/errors.ts";
-import type { RerunCommand, RerunOutcome, RerunPolicy } from "./rerun/types.ts";
+import type { RerunCommand, RerunOutcome, RerunEnqueuePolicy } from "./rerun/types.ts";
 
 /** The constructor of an app, for `createHorsies` in this module. */
 let constructApp: (context: AppContext) => Horsies;
@@ -86,7 +86,7 @@ export class Horsies {
    * core checks the config and each contract (the addon loads; the core does not start); on a worker thread only the
    * checks that are TypeScript code run.
    */
-  static create(config: HorsiesConfig): Result<Horsies, CreateRefused> {
+  static create(config: HorsiesConfig): Result<Horsies, ValidationReport> {
     return createHorsies(config, processEnvironment());
   }
 
@@ -171,7 +171,7 @@ export class Horsies {
   async send<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends Execution>(
     contract: TaskContract<P, O, E, X>,
     input: NoInfer<SendableInput<P>>,
-    options: SendOptions = {},
+    options: TaskSendOptions = {},
   ): Promise<Result<TaskHandle<SchemaValue<O>, E>, TaskSendError<SchemaValue<O>, E>>> {
     return sendTask<SchemaValue<O>, E>(this.#context.send, contract, Object(input), options);
   }
@@ -180,27 +180,28 @@ export class Horsies {
    * Send again the payload of `ENQUEUE_FAILED` or `IDEMPOTENCY_KEY_CONFLICT`, under the same task id. Takes an error
    * of another app instance too, when this app lists its task.
    */
-  async retrySend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {
-    return retrySend(this.#context.send, error);
+  async resend<O, E extends string>(error: RetryableSendError<O, E>): Promise<Result<TaskHandle<O, E>, TaskSendError<O, E>>> {
+    return resend(this.#context.send, error);
   }
 
   /**
-   * Start a workflow: its handle, or the start error. The same `workflowId` with the same params returns the existing
-   * run; other params under the id give `WORKFLOW_COMMAND_CONFLICT`; another workflow under it `WORKFLOW_ID_CONFLICT`.
+   * Start a workflow: its handle, or the start error. The same `workflowId` with the same parameters returns the
+   * existing run; other parameters under the id give `WORKFLOW_COMMAND_CONFLICT`; another workflow under it
+   * `WORKFLOW_ID_CONFLICT`.
    */
   async start<P extends ParameterSchemas, R extends BuildReturn>(
     workflow: WorkflowContract<P, R>,
-    params: NoInfer<SendableInput<P>>,
+    parameters: NoInfer<SendableInput<P>>,
     options: StartOptions = {},
   ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
-    return this.#workflows.start(workflow, params, options);
+    return this.#workflows.start(workflow, parameters, options);
   }
 
   /** Send again the spec of `ENQUEUE_FAILED`, under the same workflow id. */
-  async retryStart<R extends BuildReturn>(
+  async resendStart<R extends BuildReturn>(
     error: StartEnqueueFailed<R>,
   ): Promise<Result<WorkflowHandle<R>, WorkflowStartError<R>>> {
-    return this.#workflows.retryStart(error);
+    return this.#workflows.resendStart(error);
   }
 
   /** A typed handle of a stored workflow id, with no I/O. `resultFor` takes the node's contract. */
@@ -226,7 +227,7 @@ export class Horsies {
 
   /**
    * Ping the workers and collect the distinct replies by worker id. The defaults: every worker, a window of 2,000 ms,
-   * the full window. A worker in `monitoring.workers()` that is not in the answer did not reply.
+   * the full window. A worker in `monitoring.listWorkerStates()` that is not in the answer did not reply.
    */
   async pingWorkers(options: PingWorkersOptions = {}): Promise<Result<readonly WorkerPong[], PingWorkersError>> {
     return this.#monitoringArea.pingWorkers(options);
@@ -237,25 +238,25 @@ export class Horsies {
    * installs the schema once, as a send does. Only `enqueued` writes. The new task stores the carrier of the active
    * trace context; the rerun opens no span.
    */
-  async rerun(command: RerunCommand, policy: RerunPolicy): Promise<Result<RerunOutcome, RerunError>> {
-    return this.#rerunArea.rerun(command, policy);
+  async rerunTask(command: RerunCommand, policy: RerunEnqueuePolicy): Promise<Result<RerunOutcome, RerunError>> {
+    return this.#rerunArea.rerunTask(command, policy);
   }
 
   /**
    * Rerun a retained terminal task in `transaction`, which the caller owns, so the rerun commits or rolls back with
    * the caller's own writes. Nothing commits here; after an error the caller does not commit.
    */
-  async rerunIn(
+  async rerunTaskIn(
     transaction: CallerTransaction,
     command: RerunCommand,
-    policy: RerunPolicy,
+    policy: RerunEnqueuePolicy,
   ): Promise<Result<RerunOutcome, CallerRerunError>> {
-    return this.#rerunArea.rerunIn(transaction, command, policy);
+    return this.#rerunArea.rerunTaskIn(transaction, command, policy);
   }
 }
 
 /** The app of `config` in the process facts `environment` (a test gives its own). Not exported from an entry point. */
-export function createHorsies(config: HorsiesConfig, environment: CreateEnvironment): Result<Horsies, CreateRefused> {
+export function createHorsies(config: HorsiesConfig, environment: CreateEnvironment): Result<Horsies, ValidationReport> {
   const created = createApp(config, environment);
 
   return created.ok ? ok(constructApp(created.value)) : err(created.error);

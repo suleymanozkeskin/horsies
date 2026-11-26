@@ -31,7 +31,7 @@ export const CRASH_RETRY: RetryPolicy<never> = {
   kind: "fixed",
   intervalsSeconds: CRASH_RETRY_INTERVALS_SECONDS,
   jitter: false,
-  autoRetryFor: ["WORKER_CRASHED"],
+  retryFor: ["WORKER_CRASHED"],
 };
 
 /** The retry of `flaky_export`: wider intervals, so a restarted worker is back before the retry. */
@@ -39,7 +39,7 @@ export const EXPORT_RETRY: RetryPolicy<never> = {
   kind: "fixed",
   intervalsSeconds: CHAOS_EXPORT_RETRY_INTERVALS_SECONDS,
   jitter: false,
-  autoRetryFor: ["WORKER_CRASHED"],
+  retryFor: ["WORKER_CRASHED"],
 };
 
 /** The retry of `sync_supplier_feed`: a supplier timeout and a crash. */
@@ -47,7 +47,7 @@ export const SUPPLIER_RETRY: RetryPolicy<"SUPPLIER_TIMEOUT"> = {
   kind: "fixed",
   intervalsSeconds: SUPPLIER_RETRY_INTERVALS_SECONDS,
   jitter: false,
-  autoRetryFor: ["SUPPLIER_TIMEOUT", "WORKER_CRASHED"],
+  retryFor: ["SUPPLIER_TIMEOUT", "WORKER_CRASHED"],
 };
 
 /** The retry of `authorize_payment`: the provider is unavailable, or a crash. The delay grows with each attempt. */
@@ -56,7 +56,7 @@ export const PSP_RETRY: RetryPolicy<"PSP_UNAVAILABLE"> = {
   baseSeconds: PSP_RETRY_BASE_SECONDS,
   maxRetries: PSP_MAX_RETRIES,
   jitter: false,
-  autoRetryFor: ["PSP_UNAVAILABLE", "WORKER_CRASHED"],
+  retryFor: ["PSP_UNAVAILABLE", "WORKER_CRASHED"],
 };
 
 /** The retry of `book_courier`: the courier is unavailable, or a crash. */
@@ -65,5 +65,5 @@ export const COURIER_RETRY: RetryPolicy<"COURIER_UNAVAILABLE"> = {
   baseSeconds: COURIER_RETRY_BASE_SECONDS,
   maxRetries: COURIER_MAX_RETRIES,
   jitter: false,
-  autoRetryFor: ["COURIER_UNAVAILABLE", "WORKER_CRASHED"],
+  retryFor: ["COURIER_UNAVAILABLE", "WORKER_CRASHED"],
 };

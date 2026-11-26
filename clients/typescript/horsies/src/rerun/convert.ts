@@ -43,7 +43,7 @@ export function rerunOutcome(record: RerunOutcomeRecord): RerunOutcome {
     case "inputCorrupt":
       return { kind: "inputCorrupt", taskId: id(record.taskId), detail: record.detail };
     case "keyConflict":
-      return { kind: "keyConflict", taskId: id(record.taskId), reservedByTaskId: id(record.reservedByTaskId) };
+      return { kind: "keyConflict", taskId: id(record.taskId), ownerTaskId: id(record.reservedByTaskId) };
     case "keyReplay":
       return { kind: "keyReplay", existingTaskId: id(record.existingTaskId) };
     default:
@@ -68,7 +68,7 @@ export function appRerunError(failure: AppRerunFailure): RerunError {
         code: RerunErrorCode.STATEMENT_FAILED,
         retryable: failureRetryable(exception),
         message: failure.message,
-        outcome: failure.outcome,
+        stateAfter: failure.outcome,
         exception,
       };
     }

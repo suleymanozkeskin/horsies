@@ -68,6 +68,27 @@ describe("TaskRuntime.forTest", () => {
     assert.equal(await (spawned.ok ? spawned.value : Promise.reject(new Error("refused"))), "done");
   });
 
+  test("a notRequested cancel state: the state reads notRequested, and neither signal fires", async () => {
+    const forTest = TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(1), cancelState: { kind: "notRequested" } });
+    const spawned = forTest.spawn("work", async (signal) => signal.aborted);
+
+    assert.deepEqual(forTest.cancelState(), { kind: "notRequested" });
+    assert.equal(forTest.signal.aborted, false);
+    assert.equal(await (spawned.ok ? spawned.value : Promise.reject(new Error("refused"))), false);
+  });
+
+  for (const cause of ["OPERATOR", "DEADLINE"] as const) {
+    test(`a requested cancel state with the cause ${cause}: the state, and both signals fired with that cause`, async () => {
+      const forTest = TaskRuntime.forTest({ taskId: TASK_ID, attempt: attempt(1), cancelState: { kind: "requested", cause } });
+      const spawned = forTest.spawn("work", async (signal) => [signal.aborted, signal.reason]);
+
+      assert.deepEqual(forTest.cancelState(), { kind: "requested", cause });
+      assert.equal(forTest.signal.aborted, true);
+      assert.deepEqual(forTest.signal.reason, { cause });
+      assert.deepEqual(await (spawned.ok ? spawned.value : Promise.reject(new Error("refused"))), [true, { cause }]);
+    });
+  }
+
   test("state gives the value of each entry; a key with no entry is a defect", () => {
     const app = testApp();
     const pool = app.provide(() => ({ size: 4 }));

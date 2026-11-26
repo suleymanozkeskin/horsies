@@ -42,24 +42,24 @@ export interface HourlySchedule {
   readonly second?: number;
 }
 
-/** Every day at `at`, a time of day in whole seconds in the schedule's time zone. */
+/** Every day at `time`, a time of day in whole seconds in the schedule's time zone. */
 export interface DailySchedule {
   readonly kind: "daily";
-  readonly at: Temporal.PlainTime;
+  readonly time: Temporal.PlainTime;
 }
 
-/** On each of `days` (each day once) at `at`. */
+/** On each of `weekdays` (each day once) at `time`. */
 export interface WeeklySchedule {
   readonly kind: "weekly";
-  readonly days: NonEmpty<Weekday>;
-  readonly at: Temporal.PlainTime;
+  readonly weekdays: NonEmpty<Weekday>;
+  readonly time: Temporal.PlainTime;
 }
 
-/** On `day` of each month (1 to 31) at `at`. A month with no such day has no run. */
+/** On `dayOfMonth` of each month (1 to 31) at `time`. A month with no such day has no run. */
 export interface MonthlySchedule {
   readonly kind: "monthly";
-  readonly day: number;
-  readonly at: Temporal.PlainTime;
+  readonly dayOfMonth: number;
+  readonly time: Temporal.PlainTime;
 }
 
 /**
@@ -181,13 +181,13 @@ export function storedPattern(pattern: SchedulePattern): Stored<StoredPattern> {
     case "hourly":
       return storedHourly(pattern);
     case "daily":
-      return ok({ type: "daily", time: pattern.at });
+      return ok({ type: "daily", time: pattern.time });
     case "weekly":
-      return ok({ type: "weekly", days: [...pattern.days], time: pattern.at });
+      return ok({ type: "weekly", days: [...pattern.weekdays], time: pattern.time });
     case "monthly": {
-      const day = wholeNumber(pattern.day, "day");
+      const day = wholeNumber(pattern.dayOfMonth, "dayOfMonth");
 
-      return day.ok ? ok({ type: "monthly", day: day.value, time: pattern.at }) : day;
+      return day.ok ? ok({ type: "monthly", day: day.value, time: pattern.time }) : day;
     }
 
     case "cron":

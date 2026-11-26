@@ -13,8 +13,8 @@ export const child = defineWorkflow(
   {
     name: "child",
     definitionKey: "tests.child.v1",
-    params: { order: h.taskOutcome(validateOrder) },
-    output: h.int(),
+    parameters: { order: h.taskOutcome(validateOrder) },
+    outputType: h.int(),
     checkCases: [{}],
   },
   (w, { order }) => ({ output: w.task(report, { total: order.kind === "succeeded" ? order.value : 0 }, { nodeId: "report" }) }),

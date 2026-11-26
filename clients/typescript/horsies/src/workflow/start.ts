@@ -1,4 +1,4 @@
-// The workflow start: `app.start` and `app.retryStart`.
+// The workflow start: `app.start` and `app.resendStart`.
 //
 // A start: the workflow is listed; the workflow id is a UUID (a new one when left out); the params encode with a
 // read-back, and the build gets the value that a child build gets from the stored text; the build runs once and passes
@@ -36,7 +36,7 @@ import {
 
 /** The options of a start. */
 export interface StartOptions {
-  /** The id of the run. Left out: a new UUID. The same id with the same params returns the existing run. */
+  /** The id of the run. Left out: a new UUID. The same id with the same parameters returns the existing run. */
   readonly workflowId?: WorkflowId;
 }
 
@@ -165,7 +165,7 @@ function buildChecked(registry: WorkflowRegistry, workflow: object, given: objec
   const params = buildParams(listed.params, given);
 
   if (!params.ok) {
-    return err(`the params do not encode and read back: ${refusalText(params.error)}`);
+    return err(`the parameters do not encode and read back: ${refusalText(params.error)}`);
   }
 
   const run = runBuild(listed.record.build, params.value);
@@ -253,14 +253,14 @@ function handleOf<R extends BuildReturn>(context: StartContext, facts: StartFact
  * Send again the spec data of `ENQUEUE_FAILED`, under the same workflow id and sent instant. A run that the failed
  * attempt wrote comes back as the existing run. An error that no start of this process gave is `VALIDATION_FAILED`.
  */
-export async function retryStart<R extends BuildReturn>(
+export async function resendStart<R extends BuildReturn>(
   context: StartContext,
   error: StartEnqueueFailed<R>,
 ): Promise<StartOutcome<R>> {
   const kept = keptRetry(error);
 
   if (kept.kind === "missing") {
-    const message = "retryStart takes an ENQUEUE_FAILED error that a start of this process gave";
+    const message = "resendStart takes an ENQUEUE_FAILED error that a start of this process gave";
 
     return err(startValidationFailed(message, error.workflowName, error.workflowId, ruleRefused(message)));
   }

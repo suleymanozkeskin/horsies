@@ -29,7 +29,7 @@ export interface NodeRef<O, E extends string, Id extends string> {
 export type AnyNode = NodeRef<unknown, string, string>;
 
 /** When a node with dependencies runs: all of them ended, any one succeeded, or `minSuccess` of them succeeded. */
-export type Join =
+export type JoinType =
   | { readonly kind: "all" }
   | { readonly kind: "any" }
   | { readonly kind: "quorum"; readonly minSuccess: number };
@@ -63,7 +63,7 @@ export type UpstreamCode<S> = S extends AnyWire
  * `h.taskOutcome(contract)`, a node whose output and codes fit those of the contract. Under an `any` or `quorum` join,
  * such a parameter must be optional: its source may not have ended.
  */
-export type NodeParameter<S, J extends Join, K> =
+export type NodeParameter<S, J extends JoinType, K> =
   IsUpstreamOutcome<S> extends true
     ? J extends { readonly kind: "any" } | { readonly kind: "quorum" }
       ? SenderMayLeaveOut<S> extends true
@@ -73,7 +73,7 @@ export type NodeParameter<S, J extends Join, K> =
     : ParameterSent<S>;
 
 /** The input of a node: one member per parameter; an optional or defaulted one may be left out. */
-export type NodeInput<P extends ParameterSchemas, J extends Join> = keyof P extends never
+export type NodeInput<P extends ParameterSchemas, J extends JoinType> = keyof P extends never
   ? EmptyObject
   : Flat<
       {
@@ -84,7 +84,7 @@ export type NodeInput<P extends ParameterSchemas, J extends Join> = keyof P exte
     >;
 
 /** The options of every node. */
-export interface NodeOptionsBase<Id extends string, J extends Join> {
+export interface NodeOptionsBase<Id extends string, J extends JoinType> {
   /** The node id: `[A-Za-z0-9_\-:.]+`, at most 128 characters, unique in the build. */
   readonly nodeId: Id;
   /** Nodes of this build that this node waits for, besides the sources of its parameters. */
@@ -96,7 +96,7 @@ export interface NodeOptionsBase<Id extends string, J extends Join> {
 }
 
 /** The options of a task node. `workflowContextFrom` exists only for a task that takes the workflow context. */
-export type TaskNodeOptions<Id extends string, J extends Join, C extends ContextUse> = NodeOptionsBase<Id, J> & {
+export type TaskNodeOptions<Id extends string, J extends JoinType, C extends ContextUse> = NodeOptionsBase<Id, J> & {
   /** A queue that the app admits. Left out: the task's queue. */
   readonly queue?: string;
   /** An integer 1 to 100. Left out: the priority of the queue. */
@@ -111,7 +111,7 @@ export type TaskNodeOptions<Id extends string, J extends Join, C extends Context
     : { readonly workflowContextFrom?: never });
 
 /** The options of a sub-workflow node. */
-export type SubWorkflowNodeOptions<Id extends string, J extends Join> = NodeOptionsBase<Id, J>;
+export type SubWorkflowNodeOptions<Id extends string, J extends JoinType> = NodeOptionsBase<Id, J>;
 
 /** One way for a workflow to succeed: every node of `required` completed. */
 export interface SuccessCase {

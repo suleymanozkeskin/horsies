@@ -4,11 +4,11 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { parseRerunRequest } from "../../../horsies/src/rerun/parse.ts";
-import type { RerunCommand, RerunPolicy } from "../../../horsies/src/rerun/types.ts";
+import type { RerunCommand, RerunEnqueuePolicy } from "../../../horsies/src/rerun/types.ts";
 import { COMMAND, POLICY, SOURCE_TASK_ID } from "./support.ts";
 
 /** The refusal of a request: its code and its message. */
-function refusalOf(command: RerunCommand, policy: RerunPolicy): { readonly code: string; readonly message: string } {
+function refusalOf(command: RerunCommand, policy: RerunEnqueuePolicy): { readonly code: string; readonly message: string } {
   const parsed = parseRerunRequest(command, policy);
 
   assert.ok(!parsed.ok, "the request is refused");
@@ -17,7 +17,7 @@ function refusalOf(command: RerunCommand, policy: RerunPolicy): { readonly code:
 }
 
 /** The policy with the window `window`. */
-function withWindow(window: Temporal.DurationLike): RerunPolicy {
+function withWindow(window: Temporal.DurationLike): RerunEnqueuePolicy {
   return { ...POLICY, reservationWindow: Temporal.Duration.from(window) };
 }
 
@@ -39,8 +39,8 @@ describe("parseRerunRequest accepts", () => {
   test("a keyed command with a deadline in epoch microseconds", () => {
     const command: RerunCommand = {
       sourceTaskId: SOURCE_TASK_ID,
-      deadline: { kind: "until", at: Temporal.Instant.from("2026-11-26T09:10:12.654321Z") },
-      callerKey: "order-7",
+      goodUntil: { kind: "until", at: Temporal.Instant.from("2026-11-26T09:10:12.654321Z") },
+      idempotencyKey: "order-7",
     };
 
     const parsed = parseRerunRequest(command, POLICY);
@@ -52,12 +52,12 @@ describe("parseRerunRequest accepts", () => {
 
   test("a deadline with a part below the microsecond, cut toward the past", () => {
     const after = parseRerunRequest(
-      { ...COMMAND, deadline: { kind: "until", at: Temporal.Instant.fromEpochNanoseconds(1_500n) } },
+      { ...COMMAND, goodUntil: { kind: "until", at: Temporal.Instant.fromEpochNanoseconds(1_500n) } },
       POLICY,
     );
 
     const before = parseRerunRequest(
-      { ...COMMAND, deadline: { kind: "until", at: Temporal.Instant.fromEpochNanoseconds(-1_500n) } },
+      { ...COMMAND, goodUntil: { kind: "until", at: Temporal.Instant.fromEpochNanoseconds(-1_500n) } },
       POLICY,
     );
 
@@ -68,14 +68,14 @@ describe("parseRerunRequest accepts", () => {
 
   test("the first and the last deadline that the bounds hold", () => {
     for (const at of ["0001-01-01T00:00:00Z", "9999-12-31T23:59:59.999999999Z"]) {
-      const parsed = parseRerunRequest({ ...COMMAND, deadline: { kind: "until", at: Temporal.Instant.from(at) } }, POLICY);
+      const parsed = parseRerunRequest({ ...COMMAND, goodUntil: { kind: "until", at: Temporal.Instant.from(at) } }, POLICY);
 
       assert.ok(parsed.ok, at);
     }
   });
 
   test("retention forever, the input dropped, and the window bounds", () => {
-    const policy: RerunPolicy = { retention: { kind: "forever" }, rerunInput: "drop", reservationWindow: Temporal.Duration.from({ microseconds: 1 }) };
+    const policy: RerunEnqueuePolicy = { retention: { kind: "forever" }, retainRerunInput: "drop", reservationWindow: Temporal.Duration.from({ microseconds: 1 }) };
     const shortest = parseRerunRequest(COMMAND, policy);
     const longest = parseRerunRequest(COMMAND, withWindow({ days: 30 }));
 
@@ -95,7 +95,7 @@ describe("parseRerunRequest accepts", () => {
 
   test("the shortest and the longest retention period", () => {
     for (const days of [1, 1825]) {
-      const parsed = parseRerunRequest(COMMAND, { ...POLICY, retention: { kind: "days", days } });
+      const parsed = parseRerunRequest(COMMAND, { ...POLICY, retention: { kind: "period", days } });
 
       assert.ok(parsed.ok, `${days}`);
     }
@@ -103,21 +103,21 @@ describe("parseRerunRequest accepts", () => {
 });
 
 describe("parseRerunRequest refuses with INVALID_COMMAND", () => {
-  test("a deadline before the year 1 or after the year 9999", () => {
+  test("a goodUntil before the year 1 or after the year 9999", () => {
     for (const at of ["0000-12-31T23:59:59.999999Z", "+010000-01-01T00:00:00Z"]) {
-      const refusal = refusalOf({ ...COMMAND, deadline: { kind: "until", at: Temporal.Instant.from(at) } }, POLICY);
+      const refusal = refusalOf({ ...COMMAND, goodUntil: { kind: "until", at: Temporal.Instant.from(at) } }, POLICY);
 
       assert.deepEqual(refusal, {
         code: "INVALID_COMMAND",
-        message: "deadline.at must be from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59.999999Z",
+        message: "goodUntil.at must be from 0001-01-01T00:00:00Z to 9999-12-31T23:59:59.999999Z",
       });
     }
   });
 
-  test("a caller key with a lone surrogate, which would not reach the core as written", () => {
-    assert.deepEqual(refusalOf({ ...COMMAND, callerKey: "key-\uD800" }, POLICY), {
+  test("an idempotency key with a lone surrogate, which would not reach the core as written", () => {
+    assert.deepEqual(refusalOf({ ...COMMAND, idempotencyKey: "key-\uD800" }, POLICY), {
       code: "INVALID_COMMAND",
-      message: "callerKey must be well-formed text: it holds a lone UTF-16 surrogate",
+      message: "idempotencyKey must be well-formed text: it holds a lone UTF-16 surrogate",
     });
   });
 });
@@ -125,7 +125,7 @@ describe("parseRerunRequest refuses with INVALID_COMMAND", () => {
 describe("parseRerunRequest refuses with INVALID_POLICY", () => {
   test("a retention period that is not a whole number of days from 1 to 1825", () => {
     for (const days of [0, 1826, 7.5, -1, Number.NaN]) {
-      assert.deepEqual(refusalOf(COMMAND, { ...POLICY, retention: { kind: "days", days } }), {
+      assert.deepEqual(refusalOf(COMMAND, { ...POLICY, retention: { kind: "period", days } }), {
         code: "INVALID_POLICY",
         message: "retention.days must be a whole number from 1 to 1825",
       });
@@ -157,6 +157,6 @@ describe("parseRerunRequest refuses with INVALID_POLICY", () => {
   test("the command first: a refused command hides a refused policy", () => {
     const lateDeadline = { kind: "until", at: Temporal.Instant.from("+010000-01-01T00:00:00Z") } as const;
 
-    assert.equal(refusalOf({ ...COMMAND, deadline: lateDeadline }, withWindow({ seconds: 0 })).code, "INVALID_COMMAND");
+    assert.equal(refusalOf({ ...COMMAND, goodUntil: lateDeadline }, withWindow({ seconds: 0 })).code, "INVALID_COMMAND");
   });
 });

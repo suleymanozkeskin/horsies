@@ -266,7 +266,7 @@ describe("attempt spans and the spans of the attempts that the worker ended", ()
       const workflowId = started.value.workflowId;
       const span = onlySpan(await waitForSpans(suite, WORKFLOW_ID_KEY, workflowId));
       const start = startSpanOf(tracing, workflowId);
-      const run = await suite.app.monitoring.workflowRun(workflowId);
+      const run = await suite.app.monitoring.getWorkflowRun(workflowId);
 
       assert.equal(start.name, `start ${endedSpans.endedSpansFlow.name}`);
       assert.equal(start.kind, otel.SpanKind.PRODUCER);

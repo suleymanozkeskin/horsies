@@ -205,12 +205,12 @@ describe("the start span with no SDK or a broken SDK", () => {
 const greet = defineTask({ name: "greet", input: { who: h.string() }, output: h.string() });
 
 const hello = defineWorkflow(
-  { name: "hello", definitionKey: "tests.hello.v1", output: h.string(), params: { who: h.string() }, checkCases: [{ who: "a" }] },
+  { name: "hello", definitionKey: "tests.hello.v1", outputType: h.string(), parameters: { who: h.string() }, checkCases: [{ who: "a" }] },
   (w, { who }) => ({ output: w.task(greet, { who }, { nodeId: "greet" }) }),
 );
 
 /** The app of `hello` on `core`, with the tracing `tracing`. A refused create fails the test. */
-function workflowApp(core: FakeCore, tracing: { readonly kind: "otel" } | { readonly kind: "none" }): Horsies {
+function workflowApp(core: FakeCore, tracing: { readonly kind: "otelTracing" } | { readonly kind: "noTracing" }): Horsies {
   const created = createHorsies(
     { broker: { databaseUrl: DATABASE_URL }, tracing, tasks: [greet], workflows: [hello] },
     fakeEnvironment({ otelApi: () => ({ kind: "loaded", api: API }), producer: { ...fakeProducer(), workflows: core } }),
@@ -237,7 +237,7 @@ describe("Horsies.create and the start span", () => {
 
   test("with otel tracing, a start and its retry each have one span, and the core stores the carrier of each", async () => {
     const core = fakeCore({ started: [{ kind: "failed", error: rawStartEnqueueFailed("hello", true) }, { kind: "started" }] });
-    const app = workflowApp(core, { kind: "otel" });
+    const app = workflowApp(core, { kind: "otelTracing" });
     const workflowId = WorkflowId.parse(WORKFLOW_ID);
 
     assert(workflowId.ok);
@@ -245,7 +245,7 @@ describe("Horsies.create and the start span", () => {
     const started = await app.start(hello, { who: "eu" }, { workflowId: workflowId.value });
 
     assert(!started.ok && started.error.code === "ENQUEUE_FAILED");
-    assert((await app.retryStart(started.error)).ok);
+    assert((await app.resendStart(started.error)).ok);
 
     const [first, retry, ...others] = sdk.spans();
 
@@ -261,7 +261,7 @@ describe("Horsies.create and the start span", () => {
 
   test("with otel tracing, a spec that the core's parse refuses opens no span: the start never reached the core", async () => {
     const core = fakeCore({ refusedPrepare: { kind: "specRefused", fieldPath: "nodes[0].queue", cause: "no class" } });
-    const started = await workflowApp(core, { kind: "otel" }).start(hello, { who: "eu" });
+    const started = await workflowApp(core, { kind: "otelTracing" }).start(hello, { who: "eu" });
 
     assert(!started.ok && started.error.code === "VALIDATION_FAILED");
     assert.deepEqual([sdk.spans(), core.starts], [[], []]);
@@ -269,7 +269,7 @@ describe("Horsies.create and the start span", () => {
 
   test("with no tracing, the core gets no carrier and no span ends", async () => {
     const core = fakeCore();
-    const app = workflowApp(core, { kind: "none" });
+    const app = workflowApp(core, { kind: "noTracing" });
     const caller = otel.trace.getTracer("caller").startSpan("caller");
 
     assert((await otel.context.with(otel.trace.setSpan(otel.context.active(), caller), async () => app.start(hello, { who: "eu" }))).ok);

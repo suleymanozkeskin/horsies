@@ -14,7 +14,7 @@
 
 import { ErrorCode } from "../_catalog/error_codes.ts";
 import { MAX_CATCH_UP_RUNS_MAX, MAX_CATCH_UP_RUNS_MIN } from "../_catalog/scheduler_manifest.ts";
-import { refusal, type Refusal } from "../app/refusal.ts";
+import { refusal, type HorsiesError } from "../app/refusal.ts";
 import { encodeParametersWithReadBack } from "../codec/read-back.ts";
 import { refusalText } from "../codec/refusal.ts";
 import type { QueueSetup } from "../config/queues.ts";
@@ -73,7 +73,7 @@ export function checkSchedule(
   entry: DeclaredEntry,
   placement: { readonly index: number; readonly nameUse: NameUse },
   core: CoreRules,
-): Result<CheckedSchedule, Refusal> {
+): Result<CheckedSchedule, HorsiesError> {
   const path = schedulePath(placement.index, entry.name);
   const fields = checkedFields(entry, placement.nameUse, path, core);
 
@@ -91,7 +91,7 @@ export function checkSchedule(
 }
 
 /** The checks of every schedule: the pattern, the catch-up count, the name. */
-function checkedFields(entry: DeclaredEntry, nameUse: NameUse, path: string, core: CoreRules): Result<CheckedFields, Refusal> {
+function checkedFields(entry: DeclaredEntry, nameUse: NameUse, path: string, core: CoreRules): Result<CheckedFields, HorsiesError> {
   const text = checkedPattern(entry, path, core);
 
   if (!text.ok) {
@@ -129,7 +129,7 @@ export function boundedCount(value: number, min: number, max: number): Result<nu
 }
 
 /** The stored pattern text of `entry`, checked by the core's rules on a main thread. */
-function checkedPattern(entry: DeclaredEntry, path: string, core: CoreRules): Result<string, Refusal> {
+function checkedPattern(entry: DeclaredEntry, path: string, core: CoreRules): Result<string, HorsiesError> {
   const text = patternText(entry.pattern);
 
   if (!text.ok) {
@@ -164,7 +164,7 @@ function checkedActivation(
   fields: CheckedFields,
   path: string,
   core: CoreRules,
-): Result<CheckedActivation, Refusal> {
+): Result<CheckedActivation, HorsiesError> {
   const timezone = checkedZone(entry.timezone ?? DEFAULT_SCHEDULE_TIMEZONE, zoneCheckOf(core), (rule) =>
     scheduleRefusal(path, rule.message, rule.help),
   );
@@ -219,7 +219,7 @@ function zoneCheckOf(core: CoreRules): ZoneCheck {
 }
 
 /** The queue of each slot: the schedule's queue, checked against the queue mode, else the task's queue. Pure. */
-function scheduleQueue(queue: string | undefined, task: ListedTask, queues: QueueSetup, path: string): Result<string, Refusal> {
+function scheduleQueue(queue: string | undefined, task: ListedTask, queues: QueueSetup, path: string): Result<string, HorsiesError> {
   if (queue === undefined) {
     return ok(task.route.queueName);
   }
@@ -239,7 +239,7 @@ function scheduleQueue(queue: string | undefined, task: ListedTask, queues: Queu
 }
 
 /** The input text of each slot, read back with the contract's input types and inside the reject bound. */
-function checkedInput(entry: DeclaredEntry, task: ListedTask, path: string, core: CoreRules): Result<string, Refusal> {
+function checkedInput(entry: DeclaredEntry, task: ListedTask, path: string, core: CoreRules): Result<string, HorsiesError> {
   const send = task.compiled.send;
 
   if (send.kind === "workflowNodeOnly") {
@@ -263,7 +263,7 @@ function checkedInput(entry: DeclaredEntry, task: ListedTask, path: string, core
 }
 
 /** `text` when its UTF-8 size is inside `bound`, else the refusal. Pure. */
-function withinRejectBound(text: string, bound: RejectBound, path: string): Result<string, Refusal> {
+function withinRejectBound(text: string, bound: RejectBound, path: string): Result<string, HorsiesError> {
   switch (bound.kind) {
     case "noBound":
       return ok(text);
@@ -287,6 +287,6 @@ function withinRejectBound(text: string, bound: RejectBound, path: string): Resu
 }
 
 /** A refusal of a schedule (`HRS-205`) at `path`, with one help line. Pure. */
-export function scheduleRefusal(path: string, message: string, help: string): Refusal {
+export function scheduleRefusal(path: string, message: string, help: string): HorsiesError {
   return refusal(ErrorCode.CONFIG_INVALID_SCHEDULE, path, message, [help]);
 }

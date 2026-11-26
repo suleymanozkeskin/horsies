@@ -30,8 +30,8 @@ const extraInputKey = defineWorkflow(
   {
     name: "e2e_extra_input_key",
     definitionKey: "tests.e2e.extra_input_key.v1",
-    params: { extra: h.int() },
-    output: h.int(),
+    parameters: { extra: h.int() },
+    outputType: h.int(),
     checkCases: [{ extra: 2 }],
   },
   (w, { extra }) => {

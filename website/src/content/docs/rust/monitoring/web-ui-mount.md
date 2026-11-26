@@ -57,7 +57,7 @@ fn monitoring_routes(app: &Horsies) -> Result<Router, Box<dyn std::error::Error>
 |--------|------------|-----------|
 | `AllowAll` | Yes | Yes. The host owns authentication: mount the router behind it |
 | `ViewOnly` | Yes | No |
-| `TrustedHeader::new(header_name, allow_actions)` | The header has a value that is visible text and not blank | `allow_actions` and the header check |
+| `TrustedHeader::new(header_name, allow_actions)` | The header has a value that is visible text, not blank, with no blank comma-separated member | `allow_actions` and the header check |
 
 `TrustedHeader::new` returns `Result<TrustedHeader, InvalidHeaderName>`. `header_name()` and `allows_actions()` read it back.
 

@@ -19,7 +19,7 @@ export function chunkNodeId(chunkIndex: number): `chunk_${string}` {
 }
 
 export const catalogImport = defineWorkflow(
-  { name: "catalog_import", definitionKey: "acme.catalog_import.v1", params: {}, output: CatalogChunk },
+  { name: "catalog_import", definitionKey: "acme.catalog_import.v1", parameters: {}, outputType: CatalogChunk },
   (w) => {
     const chunks = Array.from({ length: CATALOG_IMPORT_CHUNKS }, (_unused, chunkIndex) =>
       w.task(catalogImportChunk, { importId: IMPORT_ID, chunkIndex }, { nodeId: chunkNodeId(chunkIndex) }),

@@ -54,7 +54,7 @@ import {
 } from "./contract-list.ts";
 import { type AcceptedConfig, checkConfigWithCore, checkTaskWithCore, type CoreChecks } from "./core-checks.ts";
 import type { AddonCore, CoreAccess, ProducerCore } from "./core-access.ts";
-import type { Refusal } from "./refusal.ts";
+import type { HorsiesError } from "./refusal.ts";
 import { RefusalSink } from "./refusals.ts";
 import { initialSuppression, type ProcessStart, processStart, SuppressionState } from "./suppression.ts";
 
@@ -67,7 +67,7 @@ export type HorsiesConfig = AppConfigInput & {
 };
 
 /** Why `Horsies.create` gives no app: every refusal, in order. */
-export type CreateRefused = { readonly refusals: NonEmpty<Refusal> };
+export type ValidationReport = { readonly refusals: NonEmpty<HorsiesError> };
 
 /** The facts of the process that `Horsies.create` reads. A test gives its own. */
 export interface CreateEnvironment {
@@ -85,7 +85,7 @@ export interface CreateEnvironment {
     options: ReadonlyMap<string, NativeTaskOptions>,
     workflows: WorkflowsOnMainThread,
   ) => AddonCore;
-  /** The load of the OpenTelemetry API; called only for `tracing: { kind: "otel" }`, on every thread. */
+  /** The load of the OpenTelemetry API; called only for `tracing: { kind: "otelTracing" }`, on every thread. */
   readonly otelApi: OtelApiLoader;
 }
 
@@ -102,7 +102,7 @@ export function processEnvironment(): CreateEnvironment {
 }
 
 /** The app context of `config`, or every refusal in order. */
-export function createApp(config: HorsiesConfig, environment: CreateEnvironment): Result<AppContext, CreateRefused> {
+export function createApp(config: HorsiesConfig, environment: CreateEnvironment): Result<AppContext, ValidationReport> {
   const parsed = parseAppConfig(config, environment.environment);
   const tracing = tracingPartsOf(tracingSettingOf(config.tracing), processTracingEnvironment(environment.otelApi));
   // The queue check reads only the queue fields of the input, so a refused config adds no false queue refusal.
@@ -176,14 +176,14 @@ function coreCheckedOptions(
   return { options, refusals };
 }
 
-function refused(refusals: readonly Refusal[]): Result<AppContext, CreateRefused> {
+function refused(refusals: readonly HorsiesError[]): Result<AppContext, ValidationReport> {
   const [first, ...rest] = refusals;
 
   if (first === undefined) {
     throw new TypeError("createApp: a refused create with no refusal");
   }
 
-  const all: NonEmpty<Refusal> = Object.freeze([first, ...rest]);
+  const all: NonEmpty<HorsiesError> = Object.freeze([first, ...rest]);
 
   return err(Object.freeze({ refusals: all }));
 }

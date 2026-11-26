@@ -20,7 +20,7 @@ import type {
   CallerTransaction,
 } from "../../../horsies/src/rerun/caller.ts";
 import type { RerunRequest } from "../../../horsies/src/rerun/parse.ts";
-import type { RerunCommand, RerunPolicy } from "../../../horsies/src/rerun/types.ts";
+import type { RerunCommand, RerunEnqueuePolicy } from "../../../horsies/src/rerun/types.ts";
 import type { Result } from "../../../horsies/src/wire/result.ts";
 
 /** The task id of a canonical UUID text. */
@@ -38,12 +38,12 @@ export const SOURCE_TASK_ID: TaskId = taskIdOf("01890a5d-ac96-774b-bcce-b302099a
 export const NEW_TASK_ID: TaskId = taskIdOf("01890a5d-ac96-774b-bcce-b302099a8058");
 
 /** An unkeyed command with no deadline. */
-export const COMMAND: RerunCommand = { sourceTaskId: SOURCE_TASK_ID, deadline: { kind: "none" } };
+export const COMMAND: RerunCommand = { sourceTaskId: SOURCE_TASK_ID, goodUntil: { kind: "none" } };
 
 /** A policy that keeps the new task for 7 days and keeps its input, with a key window of one day. */
-export const POLICY: RerunPolicy = {
-  retention: { kind: "days", days: 7 },
-  rerunInput: "keep",
+export const POLICY: RerunEnqueuePolicy = {
+  retention: { kind: "period", days: 7 },
+  retainRerunInput: "keep",
   reservationWindow: Temporal.Duration.from({ days: 1 }),
 };
 

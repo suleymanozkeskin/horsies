@@ -40,7 +40,7 @@ describe("the scheduler manifest of a declaration", () => {
           name: "daily-report",
           task: report,
           input: { format: "pdf" },
-          pattern: { kind: "daily", at: Temporal.PlainTime.from("09:00") },
+          pattern: { kind: "daily", time: Temporal.PlainTime.from("09:00") },
           timezone: "Europe/Berlin",
           catchUpMissed: true,
           maxCatchUpRuns: 5,
