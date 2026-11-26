@@ -93,7 +93,7 @@ const ping = defineTask({ name: "ping", input: {}, output: h.string() });
 
 expectType<Equal<ReturnType<typeof ping.err>, Err<UserFailure<string>>>>();
 
-ping.err({ code: "RATE_LIMITED" });
+void ping.err({ code: "RATE_LIMITED" });
 
 // Shared classes take a timeout; `SHARED_ASYNC` takes a grace.
 defineTask({
