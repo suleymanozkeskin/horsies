@@ -443,7 +443,7 @@ pub enum ArgsFromEntryRefused {
 /// The `inner` result envelope of the kwarg `name`, as its text, when `value` is an `args_from` entry;
 /// `None` when it is not one. An entry is an object with `ARGS_FROM_ENVELOPE_KEY: true`; it must have a
 /// text `source_task_name`, a text or null `source_definition_key`, an `inner` value and no other key.
-/// The receiving `TaskResult` field decodes the envelope with its own type (Python
+/// The receiving `TaskOutcome` parameter decodes the envelope with its own type (Python
 /// `core/worker/child_runner.py:1362-1436`).
 ///
 /// `value` is JSON, so its members read unless it is not an object.
