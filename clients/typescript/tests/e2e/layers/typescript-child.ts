@@ -235,14 +235,31 @@ describe("the TypeScript child", () => {
     }
   });
 
-  // On Bun, `SHARED_THREAD` stays off (the thread-seat result of the runtime spike). On Node the worker refuses the
-  // profile until the thread seats join (#2335); that change replaces the Node arm of this case.
-  e2eTest("a profile with SHARED_THREAD children is refused at start with its name", "thread_profiles", async (suite) => {
+  // On Bun, `SHARED_THREAD` stays off (the thread-seat result of the runtime spike): the worker refuses the profile. On
+  // Node the worker starts the thread child, whose 4 seat isolates each run the provider once.
+  e2eTest("a profile with SHARED_THREAD children is refused at start on Bun and starts on Node", "thread_profiles", async (suite) => {
     const worker = suite.spawnWorker("thread-only-1x4");
-    const exit = await worker.waitExit(FAILED_START_WAIT_MS);
 
-    assert.deepEqual(exit, { kind: "exitedWithCode", code: EXIT_FAILED }, `${exitText(exit)}\n${worker.report()}`);
-    assert.ok(worker.logCount('workerProfiles["thread-only-1x4"].sharedThread') > 0, worker.report());
-    assert.ok(worker.logCount("SHARED_THREAD") > 0, worker.report());
+    switch (runtimeName()) {
+      case "bun": {
+        const exit = await worker.waitExit(FAILED_START_WAIT_MS);
+
+        assert.deepEqual(exit, { kind: "exitedWithCode", code: EXIT_FAILED }, `${exitText(exit)}\n${worker.report()}`);
+        assert.ok(worker.logCount('workerProfiles["thread-only-1x4"].sharedThread') > 0, worker.report());
+        assert.ok(worker.logCount("SHARED_THREAD") > 0, worker.report());
+
+        return;
+      }
+
+      case "node": {
+        await worker.waitForLog("worker ready", FAILED_START_WAIT_MS);
+
+        await pollUntil(RESULT_WAIT_MS, "the provider ran in the 4 seat isolates", async () => suite.markers.names("provider-").filter((name) => name.includes("-seat")).length === 4);
+
+        const end = await worker.stop();
+
+        assert.deepEqual(end, { kind: "exitedAfterStop", exit: { kind: "exitedWithCode", code: 0 } }, worker.report());
+      }
+    }
   });
 });
