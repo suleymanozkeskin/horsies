@@ -6,18 +6,22 @@
 //!   parser reads the scheduler manifest and checks every bound once: a
 //!   value outside its bound, a pattern that breaks its rules, a retention
 //!   class key that is not one, a repeated schedule name. A refusal is
-//!   `manifestRefused` with the field path, never a value.
+//!   `manifestRefused` with the field path, never a value. As the checks of
+//!   `checks`, it applies no fork and stop rule: it reads only its argument,
+//!   and `runScheduler` refuses a forked or stopped core.
 //! - `runScheduler(scheduler, handle)`: a service run on the core's process
-//!   runtime. It connects with the schema installed once per handle, runs
-//!   the core's start (the zone of each enabled schedule, its send command,
+//!   runtime. It connects with the schema installed once per handle (a stop
+//!   request before or during the connect and the install ends the run
+//!   `stopped`, with no schedule state written), runs the core's start (the zone of each enabled schedule, its send command,
 //!   the client family check, the state start), then one tick at once and
 //!   one per check interval until a stop request. A start with nothing to
 //!   fire (the master switch off, or no schedule) waits for the stop
 //!   request. A failed tick is logged and the next one runs. A prepared
 //!   scheduler runs once; a second run is `CLIENT_DEFECT`.
 //! - `PreparedScheduler.requestStop()`: idempotent, returns at once, any
-//!   thread. A request before the run ends the run after its start; a fire
-//!   in flight runs to its end.
+//!   thread. A request before the connect ends ends the run at once; a
+//!   request during the core's start ends the run after the start; a fire in
+//!   flight runs to its end.
 
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
@@ -34,7 +38,6 @@ use crate::call::guard::sync_call;
 use crate::call::service_run::spawn_refusable_service_run;
 use crate::call::thrown::{Envelope, NativeThrown};
 use crate::handle::core_handle::{BrokerConnection, CoreHandle};
-use crate::process_core::runtime::pure_call_refusal;
 
 /// The subject of `prepareScheduler` in its refusals.
 const PREPARE_SUBJECT: &str = "prepare_scheduler";
@@ -107,9 +110,6 @@ pub enum SchedulerPreparation {
 )]
 pub fn prepare_scheduler(manifest_json: String) -> Envelope<SchedulerPreparation> {
     sync_call(PREPARE_SUBJECT, || {
-        if let Some(refusal) = pure_call_refusal() {
-            return Envelope::Thrown(refusal.thrown());
-        }
         Envelope::Value(preparation(&manifest_json))
     })
 }
@@ -174,13 +174,20 @@ pub fn run_scheduler<'env>(
 
 /// Connect with the schema installed once per handle, start the scheduler
 /// of `manifest`, then tick until a stop request; a start with nothing to
-/// fire waits for the stop request.
+/// fire waits for the stop request. A stop request before or during the
+/// connect and the install ends the run with nothing written: the connect
+/// future is dropped, as Python's scheduler cancels its start at the signal.
 async fn run_manifest(
     connection: BrokerConnection,
     manifest: SchedulerManifest,
     stop: SchedulerStop,
 ) -> SchedulerRunEnded {
-    let broker = match connection.lazy_handle().initialized_broker().await {
+    let connected = tokio::select! {
+        biased;
+        () = stop.requested() => return SchedulerRunEnded::Stopped,
+        connected = connection.lazy_handle().initialized_broker() => connected,
+    };
+    let broker = match connected {
         Ok(broker) => broker,
         Err(error) => return start_failed(&error),
     };
@@ -236,8 +243,31 @@ impl PreparedScheduler {
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
+    use horsies_core::manifest::parse_producer_manifest;
+    use horsies_core::PoolProfile;
 
     use super::*;
+
+    /// A producer manifest whose database cannot be reached: nothing listens
+    /// on port 1. A test that passes connects to nothing.
+    const UNREACHABLE_PRODUCER_MANIFEST: &str = r#"{
+        "manifest_version": 1,
+        "database": {
+            "database_url": "postgresql://horsies@127.0.0.1:1/none",
+            "session_database": {"kind": "SAME_AS_DATABASE_URL"},
+            "pgbouncer_transaction_mode": false,
+            "pool_pre_ping": true,
+            "pool_size": 5,
+            "max_overflow": 0,
+            "pool_timeout": 30,
+            "pool_recycle": {"kind": "AFTER_SECONDS", "seconds": 1800},
+            "echo": false,
+            "tcp_keepalives": {"kind": "ON", "idle_seconds": 30, "interval_seconds": 10, "probes": 3},
+            "tcp_user_timeout": {"kind": "AFTER", "milliseconds": 30000}
+        },
+        "schema": "MIGRATE_AND_VALIDATE",
+        "send": {"retain_rerun_input_default": false, "idempotency_reservation_window": 86400000000}
+    }"#;
 
     /// A scheduler manifest of `schedules` with the section defaults.
     fn manifest_text(schedules: &str) -> String {
@@ -292,6 +322,28 @@ mod tests {
         let text = manifest_text(&format!("[{}]", enabled("nightly")))
             .replace(r#"\"seconds\":30"#, r#"\"seconds\":0"#);
         assert!(refused_path(&text).starts_with("schedules[0].activation"));
+    }
+
+    #[test]
+    fn a_stop_before_the_connect_ends_the_run_with_no_connect() {
+        let producer = parse_producer_manifest(UNREACHABLE_PRODUCER_MANIFEST)
+            .expect("the producer manifest is complete");
+        let connection = BrokerConnection::new(producer, PoolProfile::Producer);
+        let SchedulerPreparation::Prepared { scheduler } =
+            preparation(&manifest_text(&format!("[{}]", enabled("nightly"))))
+        else {
+            panic!("the manifest is prepared");
+        };
+        let manifest = scheduler
+            .take_manifest()
+            .expect("a new scheduler holds its manifest");
+        scheduler.stop.request_stop();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a test runtime builds");
+        let ended = runtime.block_on(run_manifest(connection, manifest, scheduler.stop.clone()));
+        assert_eq!(ended, SchedulerRunEnded::Stopped);
     }
 
     #[test]

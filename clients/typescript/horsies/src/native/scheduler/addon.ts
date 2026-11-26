@@ -1,7 +1,8 @@
 // The functions of the `scheduler` area of the addon, their records, and the accessor.
 //
-// - `checkSchedulePattern`, `schedulerConfigFacts` and `prepareScheduler` are pure: they start no core, so a task
-//   child that runs the entry before `cli.run` still lets the child host shape its process runtime.
+// - `checkSchedulePattern`, `checkScheduleTimezone`, `schedulerConfigFacts` and `prepareScheduler` are pure: they
+//   start no core and apply no fork or stop rule, so a task child that runs the entry before `cli.run` still lets the
+//   child host shape its process runtime, and `app.schedules` never throws.
 // - `runScheduler` is a service run on the core's process runtime: it starts the core of the process.
 
 import { requireAddon } from "../call/addon.ts";
@@ -11,6 +12,9 @@ import type { SendPriority } from "../sends/addon.ts";
 
 /** The outcome of the core's check of one pattern text: the rules hold, or the cause of the rule that breaks. */
 export type PatternCheck = { readonly kind: "accepted" } | { readonly kind: "refused"; readonly cause: string };
+
+/** Whether the core's zone data holds a zone name, as written: the rule of the scheduler start. */
+export type TimezoneCheck = "known" | "unknown";
 
 /** The payload bound of each schedule's input: none, or the most UTF-8 bytes of an input text that a send takes. */
 export type RejectBound = { readonly kind: "noBound" } | { readonly kind: "bytes"; readonly bytes: bigint };
@@ -61,6 +65,7 @@ export type SchedulerRunEnded =
 /** The functions of the `scheduler` area. */
 export interface SchedulerAddon {
   checkSchedulePattern(patternJson: string): NativeEnvelope<PatternCheck>;
+  checkScheduleTimezone(name: string): NativeEnvelope<TimezoneCheck>;
   schedulerConfigFacts(appConfigJson: string, queueNames: string[]): NativeEnvelope<SchedulerConfigFacts>;
   prepareScheduler(manifestJson: string): NativeEnvelope<SchedulerPreparation>;
   runScheduler(scheduler: NativePreparedScheduler, handle: NativeCoreHandle): Promise<NativeEnvelope<SchedulerRunEnded>>;

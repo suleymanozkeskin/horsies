@@ -14,6 +14,7 @@ import { buildCoreHandle } from "../../../horsies/src/native/handle/core-handle.
 import { coreState } from "../../../horsies/src/native/process-core/process-core.ts";
 import {
   checkSchedulePattern,
+  checkScheduleTimezone,
   prepareScheduler,
   requestSchedulerStop,
   runScheduler,
@@ -21,6 +22,10 @@ import {
 } from "../../../horsies/src/native/scheduler/scheduler.ts";
 import { patternRefusalText, patternText, type SchedulePattern } from "../../../horsies/src/schedules/pattern.ts";
 import { ClientDefect } from "../../../horsies/src/thrown-errors.ts";
+import type { ScheduleStateInfo } from "../../../horsies/src/_catalog/monitoring_models.ts";
+import { schedules } from "../../../horsies/src/monitoring/reads.ts";
+import { monitoringReadsAddon } from "../../../horsies/src/native/facades/monitoring-reads.ts";
+import type { CoreHandle } from "../../../horsies/src/native/handle/core-handle.ts";
 import { manifestJson, testDatabaseUrl } from "./manifest.ts";
 
 // The addon of these tests is the dev build that HORSIES_NATIVE_ADDON_PATH names.
@@ -45,14 +50,14 @@ function textOf(pattern: SchedulePattern): string {
   return text.value;
 }
 
-/** One enabled schedule of a manifest: `name` fires by `patternJson` and sends `ping` on the default queue. */
-function enabledSchedule(name: string, patternJson: string): object {
+/** One enabled schedule of a manifest: `name` fires by `patternJson` in `timezone` and sends `ping` on the default queue. */
+function enabledSchedule(name: string, patternJson: string, timezone = "UTC"): object {
   return {
     name,
     activation: {
       kind: "ENABLED",
       pattern_json: patternJson,
-      timezone: "UTC",
+      timezone,
       catch_up_missed: false,
       max_catch_up_runs: 100,
       send: {
@@ -71,6 +76,34 @@ function enabledSchedule(name: string, patternJson: string): object {
 /** The text of a scheduler manifest of `schedules`, with the section defaults. */
 function manifestText(schedules: readonly object[]): string {
   return JSON.stringify({ manifest_version: 1, enabled: true, check_interval_seconds: 1, schedules });
+}
+
+/** The most reads of the schedule state while a test waits for the start to write its row. */
+const MAX_STATE_READS = 100;
+
+/** The pause between two reads of the schedule state, in milliseconds. */
+const STATE_READ_PAUSE_MS = 100;
+
+/**
+ * The state rows of the schedule `name`: at once (`now`), or after the first read that holds one (`written`), at most
+ * `MAX_STATE_READS` reads apart by `STATE_READ_PAUSE_MS`. A read error fails the test.
+ */
+async function stateRowsOf(handle: CoreHandle, name: string, when: "now" | "written"): Promise<readonly ScheduleStateInfo[]> {
+  for (let read = 1; read <= MAX_STATE_READS; read += 1) {
+    const states = await schedules({ addon: monitoringReadsAddon(), handle: handle.native });
+
+    assert.ok(states.ok, "the schedule state reads");
+
+    const rows = states.value.filter((state) => state.scheduleName === name);
+
+    if (when === "now" || rows.length > 0) {
+      return rows;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, STATE_READ_PAUSE_MS));
+  }
+
+  return assert.fail(`no state row of ${name} after ${String(MAX_STATE_READS)} reads`);
 }
 
 /** The patterns that the stored form holds and that break a rule of the core, by the rule. */
@@ -137,6 +170,16 @@ describe("the scheduler area of the addon", () => {
     });
   }
 
+  test("the core's zone data holds the four zones of the North American rules, on every runtime", () => {
+    for (const name of ["EST5EDT", "CST6CDT", "MST7MDT", "PST8PDT", "UTC", "US/Eastern"]) {
+      assert.equal(checkScheduleTimezone(name), "known", name);
+    }
+
+    for (const name of ["Nope/Zone", "utc", "+05:00"]) {
+      assert.equal(checkScheduleTimezone(name), "unknown", name);
+    }
+  });
+
   test("a repeated name is refused by the core's parser at the second schedule", () => {
     const text = textOf({ kind: "hourly", minute: 5 });
     const prepared = prepareScheduler(manifestText([enabledSchedule("nightly", text), enabledSchedule("nightly", text)]));
@@ -170,16 +213,54 @@ describe("the scheduler area of the addon", () => {
     assert.equal(coreState(), "not_started");
   });
 
-  test("a run with a stop request before it ends after its start; a second run throws ClientDefect", async () => {
-    const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
-    const prepared = prepareScheduler(manifestText([]));
+  test("a stop request before the run ends it at once; a second run throws ClientDefect", async () => {
+    const handle = buildCoreHandle(manifestJson(REFUSED_DATABASE_URL, false), "PRODUCER");
+    const prepared = prepareScheduler(manifestText([enabledSchedule("never-connects", textOf({ kind: "hourly", minute: 0 }))]));
 
     assert.equal(prepared.kind, "prepared");
 
     if (prepared.kind === "prepared") {
       requestSchedulerStop(prepared.scheduler);
+      // The connect to the refused URL would end `startFailed`: the stop wins before it.
       assert.deepEqual(await runScheduler(prepared.scheduler, handle), { kind: "stopped" });
       await assert.rejects(runScheduler(prepared.scheduler, handle), ClientDefect);
+    }
+
+    await handle.close();
+  });
+
+  test("an enabled schedule starts active and writes its state row; a stop ends the run", async () => {
+    const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
+    const name = `native-active-${String(process.pid)}-${String(Date.now())}`;
+    const prepared = prepareScheduler(manifestText([enabledSchedule(name, textOf({ kind: "interval", every: Temporal.Duration.from({ seconds: 30 }) }))]));
+
+    assert.equal(prepared.kind, "prepared");
+
+    if (prepared.kind === "prepared") {
+      const run = runScheduler(prepared.scheduler, handle);
+      const rows = await stateRowsOf(handle, name, "written");
+
+      requestSchedulerStop(prepared.scheduler);
+      assert.deepEqual(await run, { kind: "stopped" });
+      assert.equal(rows.length, 1);
+    }
+
+    await handle.close();
+  });
+
+  test("a zone that the core does not know passes the parser and is refused at the start, with no state row", async () => {
+    const handle = buildCoreHandle(manifestJson(testDatabaseUrl(), false), "PRODUCER");
+    const name = `native-zone-${String(process.pid)}-${String(Date.now())}`;
+    const prepared = prepareScheduler(manifestText([enabledSchedule(name, textOf({ kind: "hourly", minute: 0 }), "Not/A_Zone")]));
+
+    assert.equal(prepared.kind, "prepared");
+
+    if (prepared.kind === "prepared") {
+      const ended = await runScheduler(prepared.scheduler, handle);
+
+      assert.equal(ended.kind, "startRefused");
+      assert.equal(ended.kind === "startRefused" ? ended.schedule : "", name);
+      assert.deepEqual(await stateRowsOf(handle, name, "now"), []);
     }
 
     await handle.close();

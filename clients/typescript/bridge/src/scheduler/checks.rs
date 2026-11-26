@@ -7,12 +7,20 @@
 //!   manifest's `pattern_json` (`PatternJson`): the text is a pattern of the
 //!   core, and the pattern keeps its rules (`SchedulePattern::validate`).
 //!   The refusal is a value, never a throw.
+//! - `checkScheduleTimezone(name)`: whether the core's zone data holds the
+//!   IANA zone `name`, by the rule of the scheduler start
+//!   (`name.parse::<chrono_tz::Tz>()`, `SchedulerStartError::UnknownTimezone`).
+//!   The check and the start read one zone table.
 //! - `schedulerConfigFacts(appConfigJson, queueNames)`: what the accepted
 //!   config resolves for the schedules, by the rules of the Rust client's
 //!   scheduler manifest: the payload reject bound, the rerun-input default,
 //!   and per queue the priority and the retention class key of a send that
 //!   chooses no retention.
+//!
+//! No check applies the fork and stop rule of a core call: each reads only
+//! its arguments and the core's tables, so `app.schedules` never throws.
 
+use chrono_tz::Tz;
 use horsies_core::scheduler_manifest::PatternJson;
 use horsies_core::{AppConfig, CustomQueueConfig, QueueMode};
 use napi::bindgen_prelude::BigInt;
@@ -25,6 +33,9 @@ use crate::values::boundary::bigint_of_u64;
 
 /// The subject of `checkSchedulePattern` in its refusals.
 const PATTERN_SUBJECT: &str = "check_schedule_pattern";
+
+/// The subject of `checkScheduleTimezone` in its refusals.
+const TIMEZONE_SUBJECT: &str = "check_schedule_timezone";
 
 /// The subject of `schedulerConfigFacts` in its refusals.
 const FACTS_SUBJECT: &str = "scheduler_config_facts";
@@ -62,6 +73,36 @@ fn pattern_check(text: String) -> PatternCheck {
     match PatternJson::try_from(text) {
         Ok(_pattern) => PatternCheck::Accepted,
         Err(cause) => PatternCheck::Refused { cause },
+    }
+}
+
+/// Whether the core's zone data holds a zone name.
+#[napi(string_enum = "camelCase")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimezoneCheck {
+    /// The core's zone data holds the name, as written.
+    Known,
+    /// The core's zone data does not hold the name: the scheduler start
+    /// would refuse the schedule (`UnknownTimezone`).
+    Unknown,
+}
+
+/// Check the zone name `name` with the core's zone data. Pure: starts no
+/// core.
+#[napi(ts_return_type = "NativeEnvelope<TimezoneCheck>")]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "napi-rs passes the arguments of a JavaScript call by value"
+)]
+pub fn check_schedule_timezone(name: String) -> Envelope<TimezoneCheck> {
+    sync_call(TIMEZONE_SUBJECT, || Envelope::Value(timezone_check(&name)))
+}
+
+/// The check of one zone name, by the rule of the scheduler start. Pure.
+fn timezone_check(name: &str) -> TimezoneCheck {
+    match name.parse::<Tz>() {
+        Ok(_zone) => TimezoneCheck::Known,
+        Err(_unknown) => TimezoneCheck::Unknown,
     }
 }
 
@@ -261,6 +302,27 @@ mod tests {
             cause.starts_with("the text is not a schedule pattern: "),
             "{cause}"
         );
+    }
+
+    #[test]
+    fn the_four_zones_of_the_north_american_rules_are_known() {
+        for name in ["EST5EDT", "CST6CDT", "MST7MDT", "PST8PDT"] {
+            assert_eq!(timezone_check(name), TimezoneCheck::Known, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_zone_name_and_a_link_name_are_known() {
+        for name in ["UTC", "Europe/Berlin", "Asia/Calcutta", "US/Eastern"] {
+            assert_eq!(timezone_check(name), TimezoneCheck::Known, "{name}");
+        }
+    }
+
+    #[test]
+    fn an_offset_another_case_and_an_unknown_name_are_unknown() {
+        for name in ["+05:00", "utc", "europe/berlin", "Nope/Zone", ""] {
+            assert_eq!(timezone_check(name), TimezoneCheck::Unknown, "{name}");
+        }
     }
 
     #[test]

@@ -10,11 +10,17 @@ import type {
   SchedulerConfigFacts,
   SchedulerPreparation,
   SchedulerRunEnded,
+  TimezoneCheck,
 } from "./addon.ts";
 
 /** The core's check of the pattern text `patternJson`: the rule of the scheduler manifest's pattern. Pure. */
 export function checkSchedulePattern(patternJson: string): PatternCheck {
   return nativeValue("checkSchedulePattern", () => schedulerAddon().checkSchedulePattern(patternJson));
+}
+
+/** Whether the core's zone data holds the zone `name`: the rule of the scheduler start. Pure. */
+export function checkScheduleTimezone(name: string): TimezoneCheck {
+  return nativeValue("checkScheduleTimezone", () => schedulerAddon().checkScheduleTimezone(name));
 }
 
 /**
@@ -26,7 +32,10 @@ export function schedulerConfigFacts(appConfigJson: string, queueNames: readonly
   return nativeValue("schedulerConfigFacts", () => schedulerAddon().schedulerConfigFacts(appConfigJson, [...queueNames]));
 }
 
-/** The scheduler of the scheduler manifest text `manifestJson`, or the refusal of the core's parser. Pure. */
+/**
+ * The scheduler of the scheduler manifest text `manifestJson`, or the refusal of the core's parser. Pure: starts no
+ * core; the run refuses a forked or stopped core.
+ */
 export function prepareScheduler(manifestJson: string): SchedulerPreparation {
   return nativeValue("prepareScheduler", () => schedulerAddon().prepareScheduler(manifestJson));
 }

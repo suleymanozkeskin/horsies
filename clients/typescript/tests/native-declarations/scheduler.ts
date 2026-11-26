@@ -11,12 +11,18 @@ import type {
   SchedulerConfigFacts,
   SchedulerPreparation,
   SchedulerRunEnded,
+  TimezoneCheck,
 } from "../../horsies/src/native/scheduler/addon.ts";
 import type { Mutual, SameFunction } from "./mutual.ts";
 
 export const checkSchedulePatternMatches: SameFunction<
   typeof Generated.checkSchedulePattern,
   SchedulerAddon["checkSchedulePattern"]
+> = true;
+
+export const checkScheduleTimezoneMatches: SameFunction<
+  typeof Generated.checkScheduleTimezone,
+  SchedulerAddon["checkScheduleTimezone"]
 > = true;
 
 export const schedulerConfigFactsMatches: SameFunction<
@@ -40,6 +46,7 @@ export const requestStopMatches: SameFunction<
 export const preparedSchedulerMatches: Mutual<Generated.PreparedScheduler, NativePreparedScheduler> = true;
 
 export const patternCheckMatches: Mutual<Generated.PatternCheck, PatternCheck> = true;
+export const timezoneCheckMatches: Mutual<Generated.TimezoneCheck, TimezoneCheck> = true;
 export const rejectBoundMatches: Mutual<Generated.RejectBound, RejectBound> = true;
 export const queueSendFactsMatches: Mutual<Generated.QueueSendFacts, QueueSendFacts> = true;
 export const configFactsMatches: Mutual<Generated.SchedulerConfigFacts, SchedulerConfigFacts> = true;
