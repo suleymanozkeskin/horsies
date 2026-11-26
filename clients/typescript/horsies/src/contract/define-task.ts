@@ -60,8 +60,20 @@ export type ExecutionRules<X extends ExecutionClass> = [X] extends ["SHARED_ASYN
     ? { readonly timeoutMs: number; readonly cancelGraceMs?: never }
     : { readonly timeoutMs?: number; readonly cancelGraceMs?: number };
 
+/** Whether a task takes the workflow context: its runtime then has `workflowContext`, and a node may name `ctxFrom`. */
+export type ContextUse = "takesContext" | "noContext";
+
+/** The context use of the `workflowContext` field of `defineTask`. */
+export type ContextUseOf<C extends boolean> = [C] extends [true] ? "takesContext" : "noContext";
+
 /** The fields of `defineTask`. */
-export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+export interface TaskDefinition<
+  P extends ParameterSchemas,
+  O extends OutputSchema,
+  E extends string,
+  X extends ExecutionClass,
+  C extends boolean = boolean,
+> {
   /** The task name: each send stores it, and a worker finds the implementation by it. */
   readonly name: string;
   /** The custom queue of the task. Left out in the default queue mode. */
@@ -73,24 +85,42 @@ export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSche
   readonly errors?: readonly UserCode<E>[];
   readonly execution?: X;
   readonly retry?: RetryPolicy<NoInfer<E>>;
+  /**
+   * The task takes the workflow context: a workflow node of the task may name `ctxFrom`, and the core gives the body
+   * the results of those nodes. Left out: no context.
+   */
+  readonly workflowContext?: C;
 }
 
 /** Type-only key of the types of a contract. It does not exist at run time. */
 export declare const contractTypes: unique symbol;
 
-/** The types of a contract: its input, output, codes and execution class. */
-export interface ContractTypes<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+/** The types of a contract: its input, output, codes, execution class and context use. */
+export interface ContractTypes<
+  P extends ParameterSchemas,
+  O extends OutputSchema,
+  E extends string,
+  X extends ExecutionClass,
+  C extends ContextUse = ContextUse,
+> {
   readonly input: P;
   readonly output: O;
   readonly code: E;
   readonly execution: X;
+  readonly context: C;
 }
 
 /** The contract of a task. */
-export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+export interface TaskContract<
+  P extends ParameterSchemas,
+  O extends OutputSchema,
+  E extends string,
+  X extends ExecutionClass,
+  C extends ContextUse = ContextUse,
+> {
   readonly kind: "task";
   readonly name: string;
-  readonly [contractTypes]: ContractTypes<P, O, E, X>;
+  readonly [contractTypes]: ContractTypes<P, O, E, X, C>;
   /** The success of a body: the output value. */
   ok(value: SchemaSent<O>): Ok<SchemaSent<O>>;
   /**
@@ -127,7 +157,10 @@ export function defineTask<
   O extends OutputSchema,
   const E extends string = string,
   const X extends ExecutionClass = "ISOLATED",
->(definition: TaskDefinition<P, O, E, X> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X> {
+  const C extends boolean = false,
+>(
+  definition: TaskDefinition<P, O, E, X, C> & ExecutionRules<NoInfer<X>>,
+): TaskContract<P, O, E, X, ContextUseOf<C>> {
   const name = definition.name;
 
   const contract = {
@@ -140,7 +173,7 @@ export function defineTask<
   };
 
   // SAFETY: `contractTypes` is a type-only key; the contract's types are the type parameters of this call.
-  const frozen = Object.freeze(contract) as TaskContract<P, O, E, X>;
+  const frozen = Object.freeze(contract) as TaskContract<P, O, E, X, ContextUseOf<C>>;
 
   recordDefinition(frozen, definition);
 

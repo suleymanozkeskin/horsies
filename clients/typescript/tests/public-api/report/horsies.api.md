@@ -143,9 +143,17 @@ export type CodecRefused = EncodeRefused | DecodeRefused | ReadBackRefused | Rea
 export function configureLogging(options: LoggingOptions): void;
 
 // @public
-export interface ContractTypes<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+export type ContextUse = "takesContext" | "noContext";
+
+// @public
+export type ContextUseOf<C extends boolean> = [C] extends [true] ? "takesContext" : "noContext";
+
+// @public
+export interface ContractTypes<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = ContextUse> {
     // (undocumented)
     readonly code: E;
+    // (undocumented)
+    readonly context: C;
     // (undocumented)
     readonly execution: X;
     // (undocumented)
@@ -352,7 +360,7 @@ export type DecodeRefused = ValueRefused | EnvelopeRefused;
 export const DEFAULT_RETENTION_CLASS_KEY = "standard_30d";
 
 // @public
-export function defineTask<const P extends ParameterSchemas, O extends OutputSchema, const E extends string = string, const X extends ExecutionClass = "ISOLATED">(definition: TaskDefinition<P, O, E, X> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X>;
+export function defineTask<const P extends ParameterSchemas, O extends OutputSchema, const E extends string = string, const X extends ExecutionClass = "ISOLATED", const C extends boolean = false>(definition: TaskDefinition<P, O, E, X, C> & ExecutionRules<NoInfer<X>>): TaskContract<P, O, E, X, ContextUseOf<C>>;
 
 // @public
 export interface EmptyObject {
@@ -1415,9 +1423,9 @@ export type TaskCap = {
 };
 
 // @public
-export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends ContextUse = ContextUse> {
     // (undocumented)
-    readonly [contractTypes]: ContractTypes<P, O, E, X>;
+    readonly [contractTypes]: ContractTypes<P, O, E, X, C>;
     err<const K extends E>(failure: UserFailure<UserCode<K>>): Err<UserFailure<E>>;
     // (undocumented)
     readonly kind: "task";
@@ -1427,7 +1435,7 @@ export interface TaskContract<P extends ParameterSchemas, O extends OutputSchema
 }
 
 // @public
-export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass> {
+export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSchema, E extends string, X extends ExecutionClass, C extends boolean = boolean> {
     readonly errors?: readonly UserCode<E>[];
     // (undocumented)
     readonly execution?: X;
@@ -1438,6 +1446,7 @@ export interface TaskDefinition<P extends ParameterSchemas, O extends OutputSche
     readonly queue?: string;
     // (undocumented)
     readonly retry?: RetryPolicy<NoInfer<E>>;
+    readonly workflowContext?: C;
 }
 
 // @public
