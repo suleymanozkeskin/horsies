@@ -62,6 +62,10 @@ pub struct InstallCoverageValues {
     object_from_js = false
 )]
 #[derive(Debug)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the value becomes a JavaScript object when the call returns, and napi-rs has no conversion of a Box"
+)]
 pub enum AppConfigCheck {
     Accepted {
         rules: SendRules,
