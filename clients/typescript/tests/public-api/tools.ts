@@ -21,13 +21,10 @@ export const CURRENT_COMPILER = `${TESTS_DIR}node_modules/.bin/tsc`;
 /** The TypeScript 6.0 compiler of the floor lane. `ci/typescript-floor/package.json` pins its version. */
 export const FLOOR_COMPILER = `${WORKSPACE_DIR}ci/typescript-floor/node_modules/.bin/tsc`;
 
-/** API Extractor; it reads declarations with its own bundled TypeScript 6.0. */
-export const API_EXTRACTOR = `${TESTS_DIR}node_modules/@microsoft/api-extractor/bin/api-extractor`;
-
 /** The bounds of one tool run: its wall time, and the output that it can write (stdout and stderr each). */
 export type ToolLimits = { readonly time: Temporal.Duration; readonly outputBytes: number };
 
-/** The bounds of a compiler or API Extractor run of the gate. */
+/** The bounds of a compiler run of the gate. */
 export const TOOL_LIMITS: ToolLimits = { time: Temporal.Duration.from({ seconds: 300 }), outputBytes: 16_777_216 };
 
 /** A tool that ran to its end: its exit code and its output (stdout, then stderr). */

@@ -1,10 +1,8 @@
-// One test per outcome of Decimal.parse, h.decimal() and h.uuid(), and the decimal corpus against Python's text.
+// One test per outcome of Decimal.parse, h.decimal() and h.uuid(). The decimal corpus is in tests/stored-forms/.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { describe, test } from "node:test";
 
-import { PYTHON_DECIMAL_TABLES } from "../../../horsies/src/codec/decimal-text.ts";
 import { jsonTextCheckedByCore } from "../../../horsies/src/codec/json-text.ts";
 import { decodeValue } from "../../../horsies/src/codec/reader.ts";
 import type { DecodeRefused, EncodeRefused } from "../../../horsies/src/codec/refusal.ts";
@@ -14,7 +12,6 @@ import { h } from "../../../horsies/src/wire/builders.ts";
 import { Decimal } from "../../../horsies/src/wire/decimal.ts";
 import type { AnyWire } from "../../../horsies/src/wire/infer.ts";
 import { kindOf } from "../../../horsies/src/wire/wire-type.ts";
-import { CORPUS_DIR, corpusLines, runtimeLabel } from "./support/files.ts";
 
 function decimal(text: string): Decimal {
   const parsed = Decimal.parse(text);
@@ -124,36 +121,6 @@ describe("Decimal.parse", () => {
   });
 });
 
-describe("Decimal.parse against the Python client", () => {
-  test("Python's whitespace and digit tables are the tables of the parser", () => {
-    const tables: { readonly spaces: readonly number[]; readonly digit_zeros: readonly number[] } = JSON.parse(
-      readFileSync(`${CORPUS_DIR}decimal-tables.json`, "utf8"),
-    );
-
-    assert.deepEqual([...PYTHON_DECIMAL_TABLES.spaces], tables.spaces);
-    assert.deepEqual([...PYTHON_DECIMAL_TABLES.digitZeros], tables.digit_zeros);
-  });
-
-  test("fuzz: 4,000 texts accepted with the Python client's stored text, or refused as it refuses them", () => {
-    const mismatches: string[] = [];
-    const lines = corpusLines("decimal-fuzz.jsonl");
-
-    assert.equal(lines.length, 4000);
-
-    for (const line of lines) {
-      const [text, stored]: [string, string | null] = JSON.parse(line);
-      const parsed = Decimal.parse(text);
-      const outcome = parsed.ok ? parsed.value.toString() : null;
-
-      if (outcome !== stored) {
-        mismatches.push(line);
-      }
-    }
-
-    assert.deepEqual(mismatches, [], `${runtimeLabel()}: ${mismatches.length} mismatches`);
-  });
-});
-
 describe("h.decimal()", () => {
   test("writes the text as a JSON string and reads it back", () => {
     const written = encodeValue(kindOf(h.decimal()), decimal("1E+3"));
@@ -203,27 +170,5 @@ describe("h.uuid()", () => {
     assert.equal(writeRefused(h.uuid(), 1).kind, "WrongType");
     assert.equal(readRefused(h.uuid(), "1").kind, "WrongType");
     assert.equal(readRefused(h.uuid(), JSON.stringify(id.toUpperCase())).kind, "BadUuidText");
-  });
-});
-
-describe("decimal corpus", () => {
-  test("2,000 decimal texts against Python's str(Decimal(text)), written and read back", () => {
-    const mismatches: string[] = [];
-    const lines = corpusLines("decimals.jsonl");
-
-    assert.equal(lines.length, 2000);
-
-    for (const line of lines) {
-      const [input, python]: [string, string] = JSON.parse(line);
-      const parsed = Decimal.parse(input);
-      const written = parsed.ok ? encodeValue(kindOf(h.decimal()), parsed.value) : parsed;
-      const read = written.ok ? decodeValue(kindOf(h.decimal()), written.value, "worker") : written;
-
-      if (!written.ok || written.value !== JSON.stringify(python) || !read.ok || String(read.value) !== python) {
-        mismatches.push(line);
-      }
-    }
-
-    assert.deepEqual(mismatches, [], `${runtimeLabel()}: ${mismatches.length} mismatches`);
   });
 });
