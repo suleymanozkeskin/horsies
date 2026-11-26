@@ -15,7 +15,8 @@ import { DEFAULT_QUEUE_ROUTE } from "../../../horsies/src/app/contract-list.ts";
 import { taskOptionsFacts } from "../../../horsies/src/app/core-checks.ts";
 import { parseAppConfig } from "../../../horsies/src/config/app-config.ts";
 import { contractRecord } from "../../../horsies/src/contract/definition.ts";
-import { defineTask, type ExecutionClass } from "../../../horsies/src/contract/public.ts";
+import { defineTask } from "../../../horsies/src/contract/public.ts";
+import type { Execution } from "../../../horsies/src/monitoring/public.ts";
 import { requireDevAddon } from "../../../horsies/src/native/dev-addon.ts";
 import type { NativeSendRules, NativeTaskOptions } from "../../../horsies/src/native/sends/addon.ts";
 import {
@@ -56,7 +57,7 @@ type OptionsVector = {
   readonly options: {
     readonly retry_policy: RetryNotation | null;
     readonly timeout_ms: number | null;
-    readonly execution: ExecutionClass;
+    readonly execution: Execution;
     readonly cancel_grace_ms: number | null;
   };
   readonly deadline: string | null;
@@ -68,7 +69,7 @@ function vectors(): readonly OptionsVector[] {
   return (JSON.parse(readFileSync(VECTOR_FILE, "utf8")) as { readonly vectors: readonly OptionsVector[] }).vectors;
 }
 
-/** The `retry` field of `defineTask` of a vector's policy. */
+/** The `retryPolicy` field of `defineTask` of a vector's policy. */
 function retryOf(policy: RetryNotation): object {
   const [base] = policy.intervals;
 
@@ -108,7 +109,7 @@ function checkedOptions(vector: OptionsVector): NativeTaskOptions {
     execution: options.execution,
     ...(options.timeout_ms === null ? {} : { timeoutMs: options.timeout_ms }),
     ...(options.cancel_grace_ms === null ? {} : { cancelGraceMs: options.cancel_grace_ms }),
-    ...(options.retry_policy === null ? {} : { retry: retryOf(options.retry_policy) }),
+    ...(options.retry_policy === null ? {} : { retryPolicy: retryOf(options.retry_policy) }),
   };
 
   // SAFETY: the fields come from a vector at run time, so their static types are wide; `defineTask` keeps them as

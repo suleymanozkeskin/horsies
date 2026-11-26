@@ -21,14 +21,14 @@ const [ATLAS, BRERA, COASTLINE] = SUPPLIERS;
 export const restock = defineWorkflow(
   { name: "restock", definitionKey: "acme.restock.v1", params: {}, output: StockUpdate },
   (w) => {
-    const atlasFeed = w.task(syncSupplierFeed, { supplier: ATLAS }, { id: feedNodeId(ATLAS) });
-    const breraFeed = w.task(syncSupplierFeed, { supplier: BRERA }, { id: feedNodeId(BRERA) });
-    const coastlineFeed = w.task(syncSupplierFeed, { supplier: COASTLINE }, { id: feedNodeId(COASTLINE) });
+    const atlasFeed = w.task(syncSupplierFeed, { supplier: ATLAS }, { nodeId: feedNodeId(ATLAS) });
+    const breraFeed = w.task(syncSupplierFeed, { supplier: BRERA }, { nodeId: feedNodeId(BRERA) });
+    const coastlineFeed = w.task(syncSupplierFeed, { supplier: COASTLINE }, { nodeId: feedNodeId(COASTLINE) });
 
     const update = w.task(
       updateStockLevels,
       { atlasFeed, breraFeed, coastlineFeed },
-      { id: "update_stock_levels", join: { kind: "quorum", minSuccess: RESTOCK_MIN_SUCCESSFUL_FEEDS } },
+      { nodeId: "update_stock_levels", join: { kind: "quorum", minSuccess: RESTOCK_MIN_SUCCESSFUL_FEEDS } },
     );
 
     return {

@@ -9,7 +9,7 @@ const name = defineTask({ name: "name", input: {}, output: h.string() });
 const double = defineTask({ name: "double", input: { n: h.taskOutcome(count) }, output: h.int() });
 
 export const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.int(), params: {} }, (w) => {
-  const named = w.task(name, {}, { id: "name" });
+  const named = w.task(name, {}, { nodeId: "name" });
 
-  return { output: w.task(double, { n: named }, { id: "double" }) };
+  return { output: w.task(double, { n: named }, { nodeId: "double" }) };
 });

@@ -41,12 +41,17 @@ const fetchPage = defineTask({
   cancelGraceMs: 500,
   input: { path: h.string() },
   output: h.int(),
-  errors: ["INTERRUPTED"],
+  errorCodes: ["INTERRUPTED"],
 });
 
 const created = Horsies.create({
   broker: { databaseUrl: DATABASE_URL },
-  workerProfiles: { [PROFILE]: { isolated: { count: 1 }, sharedAsync: { count: 1, seats: 20 } } },
+  workerProfiles: {
+    [PROFILE]: {
+      isolated: { kind: "isolatedChildren", count: 1 },
+      sharedAsync: { kind: "sharedAsyncChildren", count: 1, seats: 20 },
+    },
+  },
   tasks: [checksum, fetchPage],
 });
 

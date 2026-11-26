@@ -13,5 +13,5 @@ export const flow = defineWorkflow(
     params: { n: h.int() },
     checkCases: [{ n: "seven" }],
   },
-  (w, { n }) => ({ output: w.task(ping, { n }, { id: "ping" }) }),
+  (w, { n }) => ({ output: w.task(ping, { n }, { nodeId: "ping" }) }),
 );

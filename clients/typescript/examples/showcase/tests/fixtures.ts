@@ -8,7 +8,7 @@ import type {
   CustomCode,
   CustomFailure,
   Err,
-  ExecutionClass,
+  Execution,
   Ok,
   OutputSchema,
   ParameterSchemas,
@@ -155,7 +155,7 @@ export function resultsOf<
   P extends ParameterSchemas,
   O extends OutputSchema,
   E extends string,
-  X extends ExecutionClass,
+  X extends Execution,
   C extends ContextUse,
 >(_contract: TaskContract<P, O, E, X, C>): ResultConstructors<O, E> {
   return Object.freeze({

@@ -1,9 +1,9 @@
 // The workflow context of a posted run input. For a task with `workflowContext: true`, the core's child host writes the
 // context of the run's node into the input member `workflow_ctx` (`build_task_input`, `core/src/worker/execution.rs`)
-// when the node names `ctxFrom`; for any other run of the task the input has no such member. The child takes the
-// member out before the decode with the contract's parameters, which refuse an undeclared key, and gives its value as
-// `runtime.workflowContext`. For a task that takes no context the core writes no member, and the input decodes as it
-// is.
+// when the node names `workflowContextFrom`; for any other run of the task the input has no such member. The child
+// takes the member out before the decode with the contract's parameters, which refuse an undeclared key, and gives its
+// value as `runtime.workflowContext`. For a task that takes no context the core writes no member, and the input decodes
+// as it is.
 
 import { isTreeObject, treeObjectWithout, type TreeValue } from "../codec/number-text.ts";
 import type { ContextUse } from "../contract/define-task.ts";

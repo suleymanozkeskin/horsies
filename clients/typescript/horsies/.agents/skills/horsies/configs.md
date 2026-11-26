@@ -96,7 +96,7 @@ the core's default: the package holds no copy of a default.
 | `retention` | `RetentionConfigInput` | `configuration/retention-config` |
 | `resilience` | `ResilienceConfigInput` | `workers/worker-architecture` |
 | `workerProfiles` | `Readonly<Record<string, WorkerProfileInput>>` | `workers/concurrency` |
-| `resendOnTransientErr` | `boolean`, default `false` | `operations/atomic-enqueue-and-topology` |
+| `resendOnTransientError` | `boolean`, default `false` | `operations/atomic-enqueue-and-topology` |
 
 The shared pages are under `https://suleymanozkeskin.github.io/horsies/`,
 for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-config/`.
@@ -105,7 +105,7 @@ for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-con
   `softCap` claims up to `prefetchBuffer` (at least 1) tasks past them, and
   each claim holds for `leaseMs` milliseconds. A `softCap` with no `leaseMs`
   does not compile.
-- `resendOnTransientErr: true` sends again, up to 3 times, after a send
+- `resendOnTransientError: true` sends again, up to 3 times, after a send
   fails with a transient database error.
 
 ### `broker`
@@ -116,7 +116,7 @@ for example `https://suleymanozkeskin.github.io/horsies/configuration/broker-con
 | `connection` | `BrokerConnection`: `{ kind: "direct", sessionDatabase? }` or `{ kind: "pgbouncerTransaction", sessionDatabaseUrl: Secret }` |
 | `poolSize`, `maxOverflow` | `number` (defaults 5 and 10) |
 | `poolTimeoutSeconds` | `number` |
-| `poolRecycle` | `PoolRecycle`: `{ kind: "never" }` or `{ kind: "afterSeconds", seconds }` (0: at every checkout) |
+| `poolRecycle` | `PoolRecycle`: `{ kind: "never" }` or `{ kind: "after", seconds }` (0: at every checkout) |
 | `poolPrePing`, `workerPoolPrePing`, `echo` | `boolean` |
 | `tcpKeepalives` | `TcpKeepalives`: `{ kind: "off" }` or `{ kind: "on", idleSeconds, intervalSeconds, probes }` |
 | `tcpUserTimeout` | `TcpUserTimeout`: `{ kind: "systemDefault" }` or `{ kind: "after", milliseconds }` |
@@ -190,7 +190,7 @@ The code of a section: queues `HRS-200`, `clusterWideCap` `HRS-201`,
 | `payload` | `warnBytes` (a send above it logs a warning, once per task name), `rejectBytes` (a send above it is refused with `PAYLOAD_TOO_LARGE`). Each is `{ kind: "bytes", bytes }` or `{ kind: "noBound" }` |
 | `recovery` | `autoRequeueStaleClaimed`, `claimedStaleThresholdMs`, `autoFailStaleRunning`, `autoTerminateOrphanedWorkflowTasks`, `orphanTaskAuditIntervalMs`, `runningStaleThresholdMs`, `finalizingStaleThresholdMs`, `crashedWorkerRecoveryGraceMs`, `phase2QuarantineAfterAttempts`, `workflowRecoveryFailureLimit`, `checkIntervalMs`, `runnerHeartbeatIntervalMs`, `claimerHeartbeatIntervalMs`, `workerStateSnapshotIntervalMs` |
 | `retention` | `workerStateRetention`, `terminalRecordRetention` (`HoursRetention`: `{ kind: "hours", hours }` or `{ kind: "noPruning" }`), `pausedWorkflowAutoCancelAfter` (`{ kind: "never" }` or `{ kind: "after", age: Temporal.Duration }`), `historyLeafHorizonDays`, `heartbeatLeafHorizonHours`, `retentionPeriods` (`{ days }[]`), `queueRetention` (by queue name: `{ kind: "days", days }` or `{ kind: "forever" }`), `partitionMaintenanceIntervalSeconds`, `retentionSweepIntervalSeconds`, `retentionDeleteBatchSize` |
-| `resilience` | `dbRetryInitialMs`, `dbRetryMaxMs`, `dbRetryMaxAttempts` (`{ kind: "attempts", attempts }` with at least 1, or `{ kind: "noLimit" }`), `notifyPollIntervalMs` |
+| `resilience` | `databaseRetryInitialMs`, `databaseRetryMaxMs`, `databaseRetryMaxAttempts` (`{ kind: "attempts", attempts }` with at least 1, or `{ kind: "noLimit" }`), `notifyPollIntervalMs` |
 
 The core checks the range of each field. The ranges are on the shared
 pages `configuration/recovery-config` and `configuration/retention-config`.
@@ -217,10 +217,11 @@ export const created = Horsies.create({
   workerProfiles: {
     default: {
       isolated: {
+        kind: "isolatedChildren",
         count: 2,
         recycle: { after: { kind: "tasks", tasks: 500 }, above: { kind: "mb", mb: 1024 } },
       },
-      sharedAsync: { count: 4, seats: 25 },
+      sharedAsync: { kind: "sharedAsyncChildren", count: 4, seats: 25 },
       drainTimeoutMs: 120_000,
     },
   },
@@ -230,8 +231,8 @@ export const created = Horsies.create({
 
 | `WorkerProfileInput` field | Type |
 |---|---|
-| `isolated` | `IsolatedChildrenInput`: `count` (1 to 1,024), `recycle` (`after: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: PoolSize`, `check`), `taskSendPool: PoolSize` |
-| `sharedAsync` | `SharedAsyncChildrenInput`: `count` (1 to 1,024), `seats` (1 to 1,000), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `check`), `taskSendPool` |
+| `isolated` | `IsolatedSetting`: `IsolatedChildren` (`kind: "isolatedChildren"`, `count` (1 to 1,024), `recycle` (`after: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: PoolSize`, `check`), `taskSendPool: PoolSize`) or `NoIsolatedChildren` (`{ kind: "noIsolatedChildren" }`) |
+| `sharedAsync` | `SharedAsyncSetting`: `SharedAsyncChildren` (`kind: "sharedAsyncChildren"`, `count` (1 to 1,024), `seats` (1 to 1,000), `recycle` (`afterPerSeat: TaskLimit`, `above: MemoryLimit`), `pool` (`minSize`, `maxSize: SharedPoolSize`, `check`), `taskSendPool`) or `NoSharedAsyncChildren` (`{ kind: "noSharedAsyncChildren" }`) |
 | `pool` | `ParentPoolInput`: `maxSize: SharedPoolSize` |
 | `claim` | `ClaimLimitsInput`: `perQueuePerPass`, `claimedPerWorker` (`TaskLimit`) |
 | `drainTimeoutMs` | `number`: 1 to 86,400,000 ms; default 300,000 ms (300 s) |
@@ -242,9 +243,9 @@ export const created = Horsies.create({
   16,777,216) or `{ kind: "noLimit" }`. `PoolSize` is
   `{ kind: "connections", connections }` (1 to 1,000); `SharedPoolSize`
   adds `{ kind: "fromSeats" }`.
-- A class that the profile leaves out has no children. The default recycle
-  is after 100 tasks (100 tasks per seat for a shared child) and no memory
-  limit.
+- A class that the profile leaves out has no children, as its
+  `no...Children` setting gives. The default recycle is after 100 tasks (100
+  tasks per seat for a shared child) and no memory limit.
 - A child is recycled when either limit is reached.
 - A `SHARED_ASYNC` task runs on a shared async child. The routing and the
   sizing are on the shared docs pages `workers/execution-modes` and
@@ -309,14 +310,17 @@ configureLogging({
     default: "WARNING",
     loggers: { "horsies.worker": "INFO", "horsies.workflow": "DEBUG" },
   },
-  sink: (records: readonly LogRecord[]) => {
-    for (const record of records) {
-      const line = { logger: record.logger, level: record.level, message: record.message, time: record.time.toString() };
+  sink: {
+    kind: "function",
+    sink: (records: readonly LogRecord[]) => {
+      for (const record of records) {
+        const line = { logger: record.logger, level: record.level, message: record.message, time: record.time.toString() };
 
-      console.log(JSON.stringify(line));
-    }
+        console.log(JSON.stringify(line));
+      }
 
-    return undefined;
+      return undefined;
+    },
   },
 });
 ```
@@ -324,7 +328,8 @@ configureLogging({
 | Item | Type |
 |---|---|
 | `configureLogging(options)` | `options: LoggingOptions`; returns nothing. An absent member keeps its setting |
-| `LoggingOptions` | `sink?: LogSink \| "stderr"`, `levels?: LogLevels` |
+| `LoggingOptions` | `sink?: LogSinkSetting`, `levels?: LogLevels` |
+| `LogSinkSetting` | `{ kind: "stderr" }` (one line per record on stderr, the default) or `{ kind: "function", sink: LogSink }` |
 | `LogLevels` | `default: LogThreshold`, `loggers?: Partial<Record<LoggerKey, LogThreshold>>` |
 | `LogThreshold` | `LogLevel` or `"CRITICAL"` (forwards no core record) |
 | `LogLevel` | `"TRACE"`, `"DEBUG"`, `"INFO"`, `"WARNING"`, `"ERROR"` |
@@ -358,7 +363,7 @@ I/O and stops at the first phase that refuses:
 3. Implementations: each listed contract has an implementation in this
    entry (`HRS-300`), so a passing check means that a worker start from the
    same entry passes the same rule.
-4. Exception codes: the codes of each implementation's `exceptions` list
+4. Exception codes: the codes of each implementation's `exceptionMapper` list
    pass the core's code rules.
 
 The config, the contracts and each workflow definition are checked earlier,
@@ -396,7 +401,7 @@ const greet = defineTask({ name: "greet", input: { name: h.string() }, output: h
 
 const created = Horsies.create({
   broker: { databaseUrl: { kind: "fromEnv", name: "DATABASE_URL" } },
-  workerProfiles: { default: { isolated: { count: 2 } } },
+  workerProfiles: { default: { isolated: { kind: "isolatedChildren", count: 2 } } },
   tasks: [greet],
 });
 
@@ -507,8 +512,8 @@ import {
   type RecoveryConfigInput, type RetentionConfigInput, type HoursRetention, type PausedWorkflowExpiry,
   type RetentionPeriod, type QueueRetention, type ResilienceConfigInput, type RetryAttempts,
   // Worker profiles
-  type WorkerProfileInput, type IsolatedChildrenInput, type IsolatedRecycleInput, type IsolatedPoolInput,
-  type SharedAsyncChildrenInput, type SharedRecycleInput, type SharedPoolInput, type SharedPoolSize,
+  type WorkerProfileInput, type IsolatedChildren, type IsolatedRecycleInput, type IsolatedPoolInput,
+  type SharedAsyncChildren, type SharedRecycleInput, type SharedPoolInput, type SharedPoolSize,
   type ParentPoolInput, type ClaimLimitsInput, type TaskLimit, type MemoryLimit, type PoolSize, type ParentCpu,
   // State and hooks
   type StateKey, type ProviderFactory, type ChildStartHook,

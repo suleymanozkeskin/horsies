@@ -9,5 +9,5 @@ const report = defineTask({ name: "report", input: { day: h.string(), region: h.
 export const flow = defineWorkflow({ name: "flow", definitionKey: "tests.flow.v1", output: h.null(), params: {} }, (w) => ({
   output: w.task(report,
     { day: "2026-11-26" },
-    { id: "report" }),
+    { nodeId: "report" }),
 }));

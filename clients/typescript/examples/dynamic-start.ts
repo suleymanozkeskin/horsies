@@ -42,8 +42,8 @@ const regionalReport = defineWorkflow(
     checkCases: [{ region: "emea" }],
   },
   (w, { region }) => {
-    const sales = w.task(fetchSales, { region }, { id: "fetch_sales" });
-    const report = w.task(formatReport, { sales }, { id: "format_report" });
+    const sales = w.task(fetchSales, { region }, { nodeId: "fetch_sales" });
+    const report = w.task(formatReport, { sales }, { nodeId: "format_report" });
 
     return { output: report };
   },
@@ -54,7 +54,7 @@ const startReport = defineTask({
   name: "start_report",
   input: { region: h.string() },
   output: h.uuid(),
-  errors: ["SPEC_REFUSED", "START_FAILED"],
+  errorCodes: ["SPEC_REFUSED", "START_FAILED"],
 });
 
 const created = Horsies.create({

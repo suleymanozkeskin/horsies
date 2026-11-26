@@ -15,8 +15,8 @@ export const reserveStock = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { orderId: h.string(), lineNo: h.int(), sku: h.string(), quantity: h.int() },
   output: StockReservation,
-  errors: ["ORDER_NOT_FOUND", "ORDER_CLOSED", "UNKNOWN_SKU", "INSUFFICIENT_STOCK", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["ORDER_NOT_FOUND", "ORDER_CLOSED", "UNKNOWN_SKU", "INSUFFICIENT_STOCK", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Put reserved units of a SKU back on the shelf. */
@@ -25,8 +25,8 @@ export const releaseStock = defineTask({
   queue: QUEUE_FULFILLMENT,
   input: { sku: h.string(), quantity: h.int() },
   output: StockRelease,
-  errors: ["UNKNOWN_SKU", "STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["UNKNOWN_SKU", "STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** The nightly stocktake: clear every reservation and top each SKU up to the target. */
@@ -35,8 +35,8 @@ export const replenishCatalog = defineTask({
   queue: QUEUE_ANALYTICS,
   input: { targetUnits: h.int() },
   output: StocktakeSummary,
-  errors: ["STORE_UNAVAILABLE"],
-  retry: CRASH_RETRY,
+  errorCodes: ["STORE_UNAVAILABLE"],
+  retryPolicy: CRASH_RETRY,
 });
 
 /** Read the feed of one supplier. The first attempt of a drawn supplier times out; the retry policy retries it. */
@@ -47,8 +47,8 @@ export const syncSupplierFeed = defineTask({
   timeoutMs: SHARED_TASK_TIMEOUT_MS,
   input: { supplier: h.string() },
   output: SupplierFeed,
-  errors: ["SUPPLIER_TIMEOUT"],
-  retry: SUPPLIER_RETRY,
+  errorCodes: ["SUPPLIER_TIMEOUT"],
+  retryPolicy: SUPPLIER_RETRY,
 });
 
 /**
@@ -67,8 +67,8 @@ export const updateStockLevels = defineTask({
     coastlineFeed: h.taskOutcome(syncSupplierFeed).optional(),
   },
   output: StockUpdate,
-  errors: ["QUORUM_NOT_MET"],
-  retry: CRASH_RETRY,
+  errorCodes: ["QUORUM_NOT_MET"],
+  retryPolicy: CRASH_RETRY,
 });
 
 export const INVENTORY_TASKS = [reserveStock, releaseStock, replenishCatalog, syncSupplierFeed, updateStockLevels] as const;

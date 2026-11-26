@@ -41,8 +41,8 @@ export const SHARED_ASYNC_SEATS = 32;
 
 /** The worker profile of the app. */
 export const ACME_PROFILE: WorkerProfileInput = {
-  isolated: { count: ISOLATED_CHILDREN },
-  sharedAsync: { count: SHARED_ASYNC_CHILDREN, seats: SHARED_ASYNC_SEATS },
+  isolated: { kind: "isolatedChildren", count: ISOLATED_CHILDREN },
+  sharedAsync: { kind: "sharedAsyncChildren", count: SHARED_ASYNC_CHILDREN, seats: SHARED_ASYNC_SEATS },
 };
 
 /** The built app and the key of the store that each task child provides. */
@@ -68,7 +68,7 @@ export function appConfig(url: string): HorsiesConfig {
       // The class of the tasks that `rerun` enqueues: a rerun names a registered retention period.
       retentionPeriods: [{ days: RERUN_RETENTION_DAYS }],
     },
-    resendOnTransientErr: true,
+    resendOnTransientError: true,
     tasks: ALL_TASKS,
     workflows: ALL_WORKFLOWS,
   };

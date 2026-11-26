@@ -31,7 +31,7 @@ const charge = defineTask({
   name: "charge",
   input: { amount: h.taskOutcome(validate) },
   output: Receipt,
-  errors: ["PAYMENT_DECLINED"],
+  errorCodes: ["PAYMENT_DECLINED"],
 });
 
 const fulfil = defineWorkflow(
@@ -43,8 +43,8 @@ const fulfil = defineWorkflow(
     checkCases: [{ orderId: "0190a5b2-7c3d-7e4f-8a9b-0c1d2e3f4a5b" }],
   },
   (w, { orderId }) => {
-    const validated = w.task(validate, { orderId }, { id: "validate" });
-    const charged = w.task(charge, { amount: validated }, { id: "charge" });
+    const validated = w.task(validate, { orderId }, { nodeId: "validate" });
+    const charged = w.task(charge, { amount: validated }, { nodeId: "charge" });
 
     return { output: charged, successPolicy: { cases: [{ required: [charged] }], optional: [validated] } };
   },

@@ -41,17 +41,17 @@ export const NOT_REQUESTED = "notRequested";
 const CANCEL_CODES = ["MARKER_FAILED"] as const;
 
 /** An isolated async body that waits for `runtime.signal`. */
-export const cancelIsolatedAsync = defineTask({ name: "e2e_cancel_isolated_async", input: { token: h.string() }, output: h.string(), errors: CANCEL_CODES });
+export const cancelIsolatedAsync = defineTask({ name: "e2e_cancel_isolated_async", input: { token: h.string() }, output: h.string(), errorCodes: CANCEL_CODES });
 
 /** An isolated sync body that reads its cancel state between holds of its thread. */
-export const cancelIsolatedSync = defineTask({ name: "e2e_cancel_isolated_sync", input: { token: h.string() }, output: h.string(), errors: CANCEL_CODES });
+export const cancelIsolatedSync = defineTask({ name: "e2e_cancel_isolated_sync", input: { token: h.string() }, output: h.string(), errorCodes: CANCEL_CODES });
 
 /** A shared async body that waits for `runtime.signal`. */
 export const cancelSharedAsync = defineTask({
   name: "e2e_cancel_shared_async",
   input: { token: h.string() },
   output: h.string(),
-  errors: CANCEL_CODES,
+  errorCodes: CANCEL_CODES,
   execution: "SHARED_ASYNC",
   timeoutMs: SHARED_TIMEOUT_MS,
   cancelGraceMs: 2_000,
@@ -62,7 +62,7 @@ export const cancelSharedThread = defineTask({
   name: "e2e_cancel_shared_thread",
   input: { token: h.string() },
   output: h.string(),
-  errors: CANCEL_CODES,
+  errorCodes: CANCEL_CODES,
   execution: "SHARED_THREAD",
   timeoutMs: SHARED_TIMEOUT_MS,
 });
@@ -72,12 +72,12 @@ export const cancelIgnoredWithGrace = defineTask({
   name: "e2e_cancel_ignored_with_grace",
   input: { token: h.string() },
   output: h.string(),
-  errors: CANCEL_CODES,
+  errorCodes: CANCEL_CODES,
   cancelGraceMs: KILL_GRACE_MS,
 });
 
 /** An isolated sync body with no grace that ignores the cancel: the worker kills nothing, so it runs to its end. */
-export const cancelIgnoredNoGrace = defineTask({ name: "e2e_cancel_ignored_no_grace", input: { token: h.string() }, output: h.string(), errors: CANCEL_CODES });
+export const cancelIgnoredNoGrace = defineTask({ name: "e2e_cancel_ignored_no_grace", input: { token: h.string() }, output: h.string(), errorCodes: CANCEL_CODES });
 
 /** Every contract of this module. */
 export const CANCEL_CONTRACTS = [

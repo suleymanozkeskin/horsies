@@ -32,7 +32,7 @@ export type ReadError =
   | { readonly kind: "resultNotAvailable"; readonly code: "RESULT_NOT_AVAILABLE"; readonly status: FinishedStatus }
   /** The stored result does not read with the contract's types. `cause` holds no value. */
   | { readonly kind: "storedResultUnreadable"; readonly cause: string }
-  /** The stored error has a custom code that the contract's `errors` does not list. */
+  /** The stored error has a custom code that the contract's `errorCodes` does not list. */
   | { readonly kind: "unknownUserCode"; readonly code: string }
   /** A wait in a process that runs task bodies; nothing was read. */
   | { readonly kind: "waitInsideTask"; readonly code: "WAIT_INSIDE_TASK" }

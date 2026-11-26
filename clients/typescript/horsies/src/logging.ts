@@ -101,10 +101,12 @@ export interface LogLevels {
   readonly loggers?: Readonly<Partial<Record<LoggerKey, LogThreshold>>>;
 }
 
+/** Where the core log records go: one line per record on stderr (the default), or a sink function. */
+export type LogSinkSetting = { readonly kind: "stderr" } | { readonly kind: "function"; readonly sink: LogSink };
+
 /** What `configureLogging` changes. An absent member keeps its setting. */
 export interface LoggingOptions {
-  /** A sink function, or `"stderr"` for one line per record on stderr (the default). */
-  readonly sink?: LogSink | "stderr";
+  readonly sink?: LogSinkSetting;
   readonly levels?: LogLevels;
 }
 
@@ -149,19 +151,29 @@ function configureCoreLogging(options: LoggingOptions): void {
 
   const sink = options.sink;
 
-  switch (sink) {
-    case undefined:
-      return;
+  if (sink === undefined) {
+    return;
+  }
+
+  switch (sink.kind) {
     case "stderr":
       nativeValue("resetLogSink", () => addon.resetLogSink());
       keepLogSink({ kind: "stderr" });
 
       return;
-    default: {
-      const guarded = guardedSink(sink, writeStderr);
+    case "function": {
+      const guarded = guardedSink(sink.sink, writeStderr);
 
       nativeValue("setLogSink", () => addon.setLogSink(guarded));
       keepLogSink({ kind: "function", sink: guarded });
+
+      return;
+    }
+
+    default: {
+      const unexpected: never = sink;
+
+      throw new TypeError(`configureLogging: a sink outside its type: ${String(unexpected)}`);
     }
   }
 }

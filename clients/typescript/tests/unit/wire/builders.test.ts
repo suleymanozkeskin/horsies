@@ -83,7 +83,7 @@ describe("h.* builders", () => {
 
     assert.deepEqual(stored, { mode: "defaulted", fallback: { state: "stored", text: "[1,2]" } });
     assert(refused.mode === "defaulted" && refused.fallback.state === "refused");
-    assert.equal(refused.fallback.refusal.kind, "NonFiniteFloat");
+    assert.equal(refused.fallback.refusal.refusal, "NonFiniteFloat");
   });
 
   test("parametersKind is the object kind of a task input", () => {

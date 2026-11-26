@@ -17,10 +17,10 @@ const validateOrder = defineTask({
   name: "validate_order",
   input: {},
   output: h.object({ total: h.int() }),
-  errors: ["EMPTY_ORDER", "INVALID_EMAIL"],
+  errorCodes: ["EMPTY_ORDER", "INVALID_EMAIL"],
 });
 
-const emptyOnly = defineTask({ name: "empty_only", input: {}, output: h.object({ total: h.int() }), errors: ["EMPTY_ORDER"] });
+const emptyOnly = defineTask({ name: "empty_only", input: {}, output: h.object({ total: h.int() }), errorCodes: ["EMPTY_ORDER"] });
 
 const regionTotal = defineWorkflow(
   {
@@ -30,14 +30,14 @@ const regionTotal = defineWorkflow(
     output: h.object({ total: h.int() }),
     checkCases: [{ region: "eu" }],
   },
-  (w) => ({ output: w.task(validateOrder, {}, { id: "validate" }) }),
+  (w) => ({ output: w.task(validateOrder, {}, { nodeId: "validate" }) }),
 );
 
 const chargeOrder = defineTask({
   name: "charge_order",
   input: { order: h.taskOutcome(validateOrder) },
   output: h.int(),
-  errors: ["UPSTREAM_FAILED"],
+  errorCodes: ["UPSTREAM_FAILED"],
 });
 
 const report = defineTask({ name: "report", input: { total: h.int() }, output: h.int() });
@@ -73,14 +73,14 @@ export const sum = app.implement(sumRegions, ({ region }, { ok }) =>
 export const fulfil = defineWorkflow(
   { name: "fulfil", definitionKey: "tests.fulfil.v1", params: {}, output: h.int() },
   (w) => {
-    const validated = w.task(validateOrder, {}, { id: "validate" });
-    const emptyChecked = w.task(emptyOnly, {}, { id: "empty_only" });
-    const eu = w.subWorkflow(regionTotal, { region: "eu" }, { id: "eu" });
+    const validated = w.task(validateOrder, {}, { nodeId: "validate" });
+    const emptyChecked = w.task(emptyOnly, {}, { nodeId: "empty_only" });
+    const eu = w.subWorkflow(regionTotal, { region: "eu" }, { nodeId: "eu" });
 
-    w.task(chargeOrder, { order: validated }, { id: "charge" });
-    w.task(chargeOrder, { order: emptyChecked }, { id: "charge_empty_only" });
+    w.task(chargeOrder, { order: validated }, { nodeId: "charge" });
+    w.task(chargeOrder, { order: emptyChecked }, { nodeId: "charge_empty_only" });
 
-    return { output: w.task(sumRegions, { region: eu }, { id: "sum" }) };
+    return { output: w.task(sumRegions, { region: eu }, { nodeId: "sum" }) };
   },
 );
 
@@ -109,6 +109,6 @@ export const child = defineWorkflow(
     ],
   },
   (w, { order }) => ({
-    output: w.task(report, { total: order.kind === "succeeded" ? order.value.total : 0 }, { id: "report" }),
+    output: w.task(report, { total: order.kind === "succeeded" ? order.value.total : 0 }, { nodeId: "report" }),
   }),
 );

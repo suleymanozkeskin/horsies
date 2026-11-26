@@ -14,15 +14,15 @@ export const REPORT_WINDOW = "CHECK";
 export const dailyReport = defineWorkflow(
   { name: "daily_report", definitionKey: "acme.daily_report.v1", params: {}, output: AbandonedCartSweep },
   (w) => {
-    const rollup = w.task(salesRollup, { window: REPORT_WINDOW }, { id: "sales_rollup" });
+    const rollup = w.task(salesRollup, { window: REPORT_WINDOW }, { nodeId: "sales_rollup" });
 
     const sweep = w.task(
       abandonedCartSweep,
       { olderThanMinutes: ABANDONED_CART_AGE_MINUTES },
-      { id: "abandoned_cart_sweep", waitsFor: [rollup] },
+      { nodeId: "abandoned_cart_sweep", waitsFor: [rollup] },
     );
 
-    w.task(winbackBlast, { segment: `winback-${REPORT_WINDOW}`, sweep }, { id: "winback_blast" });
+    w.task(winbackBlast, { segment: `winback-${REPORT_WINDOW}`, sweep }, { nodeId: "winback_blast" });
 
     return { output: sweep };
   },

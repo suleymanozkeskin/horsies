@@ -27,9 +27,9 @@ export const returnsReview = defineWorkflow(
     checkCases: [RETURNS_CHECK_PARAMS],
   },
   (w, { returnId, orderId, sku, quantity }) => {
-    const receive = w.task(receiveReturn, { returnId, orderId, sku, quantity }, { id: "receive_return" });
-    const inspection = w.task(inspectItem, { returnId }, { id: "inspect_item", waitsFor: [receive] });
-    const settle = w.task(restockOrWriteoff, { returnId, inspection }, { id: "restock_or_writeoff", allowFailedDeps: true });
+    const receive = w.task(receiveReturn, { returnId, orderId, sku, quantity }, { nodeId: "receive_return" });
+    const inspection = w.task(inspectItem, { returnId }, { nodeId: "inspect_item", waitsFor: [receive] });
+    const settle = w.task(restockOrWriteoff, { returnId, inspection }, { nodeId: "restock_or_writeoff", allowFailedDependencies: true });
 
     return { output: settle };
   },

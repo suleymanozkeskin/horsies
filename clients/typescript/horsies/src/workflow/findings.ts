@@ -54,8 +54,8 @@ export type CheckedNode = {
   /** The parameter that each upstream node fills, in the declaration order of the parameters. */
   readonly argsFrom: ReadonlyMap<string, number>;
   /** The node ids of the context sources. */
-  readonly ctxFrom: readonly string[];
-  readonly allowFailedDeps: boolean;
+  readonly workflowContextFrom: readonly string[];
+  readonly allowFailedDependencies: boolean;
   readonly join: CheckedJoin;
   readonly body: CheckedBody;
 };

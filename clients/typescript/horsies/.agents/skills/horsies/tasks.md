@@ -17,9 +17,9 @@ export const validateOrder = defineTask({
   name: "validate_order",
   input: { orderId: h.uuid(), lines: h.array(OrderLine), note: h.string().optional() },
   output: h.object({ orderId: h.uuid(), lineCount: h.int(), validatedAt: h.instant() }),
-  errors: ["EMPTY_ORDER", "UNKNOWN_SKU", "STOCK_SERVICE_DOWN"],
+  errorCodes: ["EMPTY_ORDER", "UNKNOWN_SKU", "STOCK_SERVICE_DOWN"],
   timeoutMs: 30_000,
-  retry: {
+  retryPolicy: {
     kind: "exponential",
     baseSeconds: 30,
     maxRetries: 5,
@@ -38,16 +38,17 @@ reports each refusal with its `HRS-nnn` code.
 | `queue` | `string` | A queue of the custom queue mode. In the default queue mode a task that names a queue is refused (`HRS-200`). In the custom queue mode every task names a queue (`HRS-200`), and the queue is one of `customQueues` (`HRS-103`) |
 | `input` | one schema per parameter | An `h.*` wire type or a zod 4 schema per parameter. `{}` for a task with no parameters |
 | `output` | a schema | A wire type that is always present (no `.optional()`), or a zod 4 schema |
-| `errors` | `["CODE", ...]` | The codes that the task may return, as literals. Left out: any code that is not a built-in name |
+| `errorCodes` | `["CODE", ...]` | The codes that the task may return, as literals. Left out: any code that is not a built-in name |
 | `execution` | `"ISOLATED"` (default), `"SHARED_ASYNC"` | How a worker runs the task (Execution Classes) |
 | `timeoutMs` | 1,000 to 4,294,967,295 | The deadline of a run. Required for `SHARED_ASYNC` (typecheck). Below 1,000 is `HRS-102` |
 | `cancelGraceMs` | 100 to 10,000 | See The Cancel Signal |
-| `retry` | a `RetryPolicy` | See Retry Policy |
-| `workflowContext` | `true` | A workflow node of the task may name `ctxFrom`, and the body reads `runtime.workflowContext` (see `workflows.md`, The Workflow Context) |
+| `retryPolicy` | a `RetryPolicy` | See Retry Policy |
+| `workflowContext` | `true` | A workflow node of the task may name `workflowContextFrom`, and the body reads `runtime.workflowContext` (see `workflows.md`, The Workflow Context) |
 
-- `errors` takes literal codes; no `as const` is needed. A list of the type
-  `string[]` fails typecheck, because its codes are not known to the types.
-- A built-in code name in `errors` fails typecheck: `BUILT_IN_TASK_CODES`
+- `errorCodes` takes literal codes; no `as const` is needed. A list of the
+  type `string[]` fails typecheck, because its codes are not known to the
+  types.
+- A built-in code name in `errorCodes` fails typecheck: `BUILT_IN_TASK_CODES`
   and `WORKFLOW_STOPPED` are reserved.
 - `Horsies.create` checks each declared code with the core's rule: a code
   that is empty, not `UPPER_SNAKE_CASE` or an exception class name is
@@ -293,7 +294,7 @@ export const validateOrderBody = app.implement(
 
     return ok({ orderId, lineCount: lines.length, validatedAt: Temporal.Now.instant() });
   },
-  { exceptions: [[StockServiceDown, "STOCK_SERVICE_DOWN"]] },
+  { exceptionMapper: [[StockServiceDown, "STOCK_SERVICE_DOWN"]] },
 );
 ```
 
@@ -311,9 +312,9 @@ export const validateOrderBody = app.implement(
   `message` and `data` may be left out. `data` is a `JsonValue`. A wrong
   value or code fails typecheck at the line of the `ok` or `err` call. The
   contract has no `ok` and no `err`.
-- `exceptions` maps thrown error classes to declared codes. The first entry
-  whose class the thrown value is an instance of (a subclass too) gives the
-  code. An undeclared code in the map fails typecheck.
+- `exceptionMapper` maps thrown error classes to declared codes. The first
+  entry whose class the thrown value is an instance of (a subclass too)
+  gives the code. An undeclared code in the map fails typecheck.
 
 What horsies records:
 
@@ -322,7 +323,7 @@ What horsies records:
 | Returns `ok(value)` and the value encodes and reads back | No error: the value |
 | Returns `ok(value)` and the value does not read back with `output` | `WORKER_SERIALIZATION_ERROR` |
 | Returns `err(...)` | The custom code, the message and the data |
-| Returns `err` with a code that the core refuses (no `errors` list) | `RETURN_TYPE_MISMATCH`; the message names the task and the rule |
+| Returns `err` with a code that the core refuses (no `errorCodes` list) | `RETURN_TYPE_MISMATCH`; the message names the task and the rule |
 | Returns another value | `RETURN_TYPE_MISMATCH`: `Task <name> returned <type> but must return ok(value) or err({ code })` |
 | Throws or rejects with a mapped class | The mapped custom code |
 | Throws or rejects with another value | `UNHANDLED_EXCEPTION`: the message `Unhandled exception in task <name>: <type>: <text>`, `data.exception_type`, and the exception record |
@@ -345,7 +346,7 @@ runtime to a test, and `implementation.run` adds `ok` and `err`.
 | Member | Gives |
 |---|---|
 | `ok(value)` | The success of the body: a value of the contract's `output` type |
-| `err({ code, message, data })` | The error of the body: a code of the contract's `errors` |
+| `err({ code, message, data })` | The error of the body: a code of the contract's `errorCodes` |
 | `taskId` | The `TaskId` of the task |
 | `fencingToken` | `{ taskId, value }`: `value` is the attempt number (Fencing Token) |
 | `signal` | An `AbortSignal` that fires at an operator cancel, and at the deadline of a `SHARED_ASYNC` run |
@@ -369,7 +370,7 @@ export const exportReport = defineTask({
   name: "export_report",
   input: { reportId: h.uuid() },
   output: h.null(),
-  errors: ["STALE_ATTEMPT"],
+  errorCodes: ["STALE_ATTEMPT"],
 });
 
 app.implement(exportReport, async ({ reportId }, { ok, err, state, fencingToken }) => {
@@ -439,7 +440,7 @@ export const syncFeed = defineTask({
   cancelGraceMs: 2_000,
   input: { feedUrl: h.string() },
   output: h.int(),
-  errors: ["FEED_UNREACHABLE"],
+  errorCodes: ["FEED_UNREACHABLE"],
 });
 
 export const indexFeeds = defineTask({
@@ -448,7 +449,7 @@ export const indexFeeds = defineTask({
   timeoutMs: 60_000,
   input: { feedUrls: h.array(h.string()) },
   output: h.int(),
-  errors: ["WORK_REFUSED"],
+  errorCodes: ["WORK_REFUSED"],
 });
 
 export const importBatches = defineTask({
@@ -555,9 +556,9 @@ export const fetchPrices = defineTask({
   name: "fetch_prices",
   input: { symbol: h.string() },
   output: h.decimal(),
-  errors: ["RATE_LIMITED"],
+  errorCodes: ["RATE_LIMITED"],
   timeoutMs: 5_000,
-  retry: {
+  retryPolicy: {
     kind: "fixed",
     intervalsSeconds: [30, 60, 120],
     autoRetryFor: ["RATE_LIMITED", "TASK_TIMEOUT", "WORKER_CRASHED"],
@@ -672,7 +673,7 @@ wrote answers with its id, also after it finished, and does not run again. A
 key conflict before the key's reservation ends gives the same conflict again.
 It takes an error of another app instance too, when this app lists its task.
 
-With `resendOnTransientErr: true` in the config, a retryable
+With `resendOnTransientError: true` in the config, a retryable
 `ENQUEUE_FAILED` is sent again up to 3 times, after 200, 400 and 800 ms, as
 a repeat. A key conflict is not sent again: only `retrySend` sends it again.
 
@@ -781,7 +782,7 @@ or `"builtIn"` with `code: BuiltInTaskCode` (a code of horsies).
 | `taskNotFound` | `TASK_NOT_FOUND` | `reason` | Neither the live table nor the history holds the task | No |
 | `resultNotAvailable` | `RESULT_NOT_AVAILABLE` | `status` | The task ended and stores no result | Yes |
 | `storedResultUnreadable` | - | `cause` | The stored result does not read with the contract's types | Yes |
-| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the contract's `errors` | Yes |
+| `unknownUserCode` | - | `code` (the stored code) | The stored custom code is not in the contract's `errorCodes` | Yes |
 | `waitInsideTask` | `WAIT_INSIDE_TASK` | - | A result wait in a worker child. Nothing was read | No |
 | `database` | the broker code | `retryable`, `message` | The database or the connection failed | No |
 | `invalidInput` | `INVALID_INPUT` | `maxMs` | `waitMs` outside its range. Nothing was read | No |
@@ -861,7 +862,7 @@ const total = await otherHandle.get();
 
 // CORRECT: a workflow node receives the upstream outcome
 // input: { total: h.taskOutcome(computeTotals) }
-// w.task(report, { total: totalsNode }, { id: "report" })
+// w.task(report, { total: totalsNode }, { nodeId: "report" })
 ```
 
 **Pass `runtime.signal` in a `SHARED_ASYNC` body.** A body that does not
@@ -890,7 +891,7 @@ did not list is `VALIDATION_FAILED`, and `app.implement` of it is a refusal
 import {
   // Contracts and wire types
   defineTask, h, Decimal, BUILT_IN_TASK_CODES,
-  type TaskContract, type TaskDefinition, type ExecutionClass, type RetryPolicy,
+  type TaskContract, type TaskDefinition, type Execution, type RetryPolicy,
   type CustomFailure, type JsonValue, type Wire,
   // Results and outcomes
   type Result, type Ok, type Err, type TaskOutcome, type TaskError,

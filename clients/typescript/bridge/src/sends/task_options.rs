@@ -38,7 +38,7 @@ const TIMEOUT_FIELD: &str = "timeoutMs";
 const GRACE_FIELD: &str = "cancelGraceMs";
 
 /// The field name of the retry codes in the refusal texts.
-const AUTO_RETRY_FOR_FIELD: &str = "retry.autoRetryFor";
+const AUTO_RETRY_FOR_FIELD: &str = "retryPolicy.autoRetryFor";
 
 /// The help line of a refusal with `HRS-102`.
 const OPTIONS_HELP: &str = "check the options of defineTask";
@@ -267,7 +267,7 @@ fn declared_retry(retry: &RetryFacts) -> Result<DeclaredRetry, Vec<BoundaryRefus
             auto_retry_for,
         } => intervals_seconds
             .iter()
-            .map(|seconds| u32_of_number("retry.intervalsSeconds", *seconds))
+            .map(|seconds| u32_of_number("retryPolicy.intervalsSeconds", *seconds))
             .collect::<Result<Vec<u32>, BoundaryRefusal>>()
             .map(|intervals| DeclaredRetry::Fixed {
                 intervals_seconds: intervals,
@@ -282,12 +282,13 @@ fn declared_retry(retry: &RetryFacts) -> Result<DeclaredRetry, Vec<BoundaryRefus
             max_delay,
             auto_retry_for,
         } => {
-            let base = u32_of_number("retry.baseSeconds", *base_seconds);
-            let retries = u32_of_number("retry.maxRetries", *max_retries);
+            let base = u32_of_number("retryPolicy.baseSeconds", *base_seconds);
+            let retries = u32_of_number("retryPolicy.maxRetries", *max_retries);
             let cap = match max_delay {
                 MaxDelayFact::NoCap => Ok(DeclaredMaxDelay::NoCap),
                 MaxDelayFact::Seconds { seconds } => {
-                    u32_of_number("retry.maxDelaySeconds", *seconds).map(DeclaredMaxDelay::Seconds)
+                    u32_of_number("retryPolicy.maxDelaySeconds", *seconds)
+                        .map(DeclaredMaxDelay::Seconds)
                 }
             };
             match (base, retries, cap) {

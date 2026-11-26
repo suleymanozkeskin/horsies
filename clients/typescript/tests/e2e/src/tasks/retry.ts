@@ -15,8 +15,8 @@ export const retryExhausted = defineTask({
   name: "e2e_retry_exhausted",
   input: {},
   output: h.string(),
-  errors: RETRY_CODES,
-  retry: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  errorCodes: RETRY_CODES,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, autoRetryFor: ["TRANSIENT"] },
 });
 
 /** `TRANSIENT` on the first two attempts of `token`, then `succeeded_on_attempt_3`. */
@@ -24,8 +24,8 @@ export const retrySuccess = defineTask({
   name: "e2e_retry_success",
   input: { token: h.string() },
   output: h.string(),
-  errors: RETRY_CODES,
-  retry: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  errorCodes: RETRY_CODES,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1, 1], jitter: false, autoRetryFor: ["TRANSIENT"] },
 });
 
 /** Always `TRANSIENT`; three retries 1 s, 2 s and 4 s apart. */
@@ -33,8 +33,8 @@ export const exponential = defineTask({
   name: "e2e_exponential",
   input: {},
   output: h.string(),
-  errors: RETRY_CODES,
-  retry: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, autoRetryFor: ["TRANSIENT"] },
+  errorCodes: RETRY_CODES,
+  retryPolicy: { kind: "exponential", baseSeconds: 1, maxRetries: 3, jitter: false, autoRetryFor: ["TRANSIENT"] },
 });
 
 /** Always `RETRYABLE_ERROR`; one retry. */
@@ -42,8 +42,8 @@ export const retryErrorCode = defineTask({
   name: "e2e_retry_error_code",
   input: {},
   output: h.string(),
-  errors: RETRY_CODES,
-  retry: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["RETRYABLE_ERROR"] },
+  errorCodes: RETRY_CODES,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1], jitter: false, autoRetryFor: ["RETRYABLE_ERROR"] },
 });
 
 /** A policy that names `TRANSIENT`, and an error with another code: no retry. */
@@ -51,8 +51,8 @@ export const retryOtherCode = defineTask({
   name: "e2e_retry_other_code",
   input: {},
   output: h.string(),
-  errors: RETRY_CODES,
-  retry: { kind: "fixed", intervalsSeconds: [1, 1], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  errorCodes: RETRY_CODES,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [1, 1], jitter: false, autoRetryFor: ["TRANSIENT"] },
 });
 
 /** Always `TRANSIENT`, with 60 s between retries: a retry would start after a near `goodUntil`. */
@@ -60,8 +60,8 @@ export const retryLongInterval = defineTask({
   name: "e2e_retry_long_interval",
   input: {},
   output: h.string(),
-  errors: RETRY_CODES,
-  retry: { kind: "fixed", intervalsSeconds: [60, 60, 60], jitter: false, autoRetryFor: ["TRANSIENT"] },
+  errorCodes: RETRY_CODES,
+  retryPolicy: { kind: "fixed", intervalsSeconds: [60, 60, 60], jitter: false, autoRetryFor: ["TRANSIENT"] },
 });
 
 /** Every contract of this module. */

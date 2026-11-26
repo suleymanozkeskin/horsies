@@ -18,11 +18,11 @@ import { defineWorkflow } from "../../../horsies/src/workflow/public.ts";
 
 const Total = h.object({ total: h.int() });
 
-const priced = defineTask({ name: "priced", input: {}, output: Total, errors: ["NO_PRICE"] });
+const priced = defineTask({ name: "priced", input: {}, output: Total, errorCodes: ["NO_PRICE"] });
 
 const pricing = defineWorkflow(
   { name: "pricing", definitionKey: "tests.pricing.v1", params: {}, output: Total },
-  (w) => ({ output: w.task(priced, {}, { id: "price" }) }),
+  (w) => ({ output: w.task(priced, {}, { nodeId: "price" }) }),
 );
 
 /** The compile of a task whose one parameter `price` is `schema`. */

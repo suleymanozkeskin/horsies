@@ -172,9 +172,9 @@ fn retention_member(field: &RetentionField) -> String {
 
 fn resilience_member(field: ResilienceField) -> &'static str {
     match field {
-        ResilienceField::DbRetryInitialMs => "dbRetryInitialMs",
-        ResilienceField::DbRetryMaxMs => "dbRetryMaxMs",
-        ResilienceField::DbRetryMaxAttempts => "dbRetryMaxAttempts.attempts",
+        ResilienceField::DbRetryInitialMs => "databaseRetryInitialMs",
+        ResilienceField::DbRetryMaxMs => "databaseRetryMaxMs",
+        ResilienceField::DbRetryMaxAttempts => "databaseRetryMaxAttempts.attempts",
         ResilienceField::NotifyPollIntervalMs => "notifyPollIntervalMs",
     }
 }
@@ -406,7 +406,7 @@ mod tests {
             ),
             (
                 ConfigField::Resilience(ResilienceField::DbRetryMaxAttempts),
-                "resilience.dbRetryMaxAttempts.attempts",
+                "resilience.databaseRetryMaxAttempts.attempts",
             ),
             (
                 ConfigField::Payload(PayloadField::RejectBytes),

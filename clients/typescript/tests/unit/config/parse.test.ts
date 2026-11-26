@@ -81,9 +81,9 @@ describe("parseAppConfig", () => {
       [{ claim: { kind: "hardCap", leaseMs: -1 } }, "HRS-202", "claim.leaseMs"],
       [{ maxClaimRenewAgeMs: -1 }, "HRS-202", "maxClaimRenewAgeMs"],
       [{ recovery: { checkIntervalMs: -1 } }, "HRS-204", "recovery.checkIntervalMs"],
-      [{ resilience: { dbRetryMaxMs: -1 } }, "HRS-208", "resilience.dbRetryMaxMs"],
+      [{ resilience: { databaseRetryMaxMs: -1 } }, "HRS-208", "resilience.databaseRetryMaxMs"],
       [
-        { broker: { databaseUrl: { kind: "value", value: DATABASE_URL }, poolRecycle: { kind: "afterSeconds", seconds: -1 } } },
+        { broker: { databaseUrl: { kind: "value", value: DATABASE_URL }, poolRecycle: { kind: "after", seconds: -1 } } },
         "HRS-213",
         "broker.poolRecycle.seconds",
       ],
@@ -164,7 +164,7 @@ describe("parseAppConfig", () => {
   });
 
   test("a worker profile count outside the bounds of its type is refused with HRS-218", () => {
-    const refusals = refusalsOf(configWith({ workerProfiles: { io: { sharedAsync: { count: 0, seats: 1001 } } } }));
+    const refusals = refusalsOf(configWith({ workerProfiles: { io: { sharedAsync: { kind: "sharedAsyncChildren", count: 0, seats: 1001 } } } }));
 
     assert.deepEqual(
       refusals.map((one) => [one.code, one.path]),
@@ -195,11 +195,11 @@ describe("parseAppConfig", () => {
   });
 
   test("a retry attempt count of 0 is refused with HRS-208: the core reads 0 as no limit", () => {
-    const refusals = refusalsOf(configWith({ resilience: { dbRetryMaxAttempts: { kind: "attempts", attempts: 0 } } }));
+    const refusals = refusalsOf(configWith({ resilience: { databaseRetryMaxAttempts: { kind: "attempts", attempts: 0 } } }));
 
     assert.deepEqual(
       refusals.map((one) => [one.code, one.path]),
-      [["HRS-208", "resilience.dbRetryMaxAttempts.attempts"]],
+      [["HRS-208", "resilience.databaseRetryMaxAttempts.attempts"]],
     );
   });
 
@@ -234,7 +234,7 @@ describe("parseAppConfig", () => {
     }
 
     assert.equal(Object.isFrozen(parsed.value), true);
-    assert.deepEqual(Object.keys(parsed.value), ["queues", "resendOnTransientErr"]);
+    assert.deepEqual(Object.keys(parsed.value), ["queues", "resendOnTransientError"]);
     assert.equal(JSON.stringify(parsed.value).includes("secret"), false);
     assert.match(parsed.value.coreConfigJson, /secret/);
   });

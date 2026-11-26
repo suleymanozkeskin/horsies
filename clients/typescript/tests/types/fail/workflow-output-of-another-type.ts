@@ -8,5 +8,5 @@ const name = defineTask({ name: "name", input: {}, output: h.string() });
 
 export const flow = defineWorkflow(
   { name: "flow", definitionKey: "tests.flow.v1", output: h.int(), params: {} },
-  (w) => ({ output: w.task(name, {}, { id: "name" }) }),
+  (w) => ({ output: w.task(name, {}, { nodeId: "name" }) }),
 );

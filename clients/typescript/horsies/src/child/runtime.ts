@@ -118,7 +118,7 @@ export type ThreadTaskRuntime = Pick<TaskRuntime, "taskId" | "fencingToken" | "s
 
 /** The runtime of an `ISOLATED` or `SHARED_ASYNC` body of a task with `workflowContext: true`. */
 export type WorkflowTaskRuntime = TaskRuntime & {
-  /** The context that the core wrote for the run's node (its `ctxFrom`), or `noContext`. */
+  /** The context that the core wrote for the run's node (its `workflowContextFrom`), or `noContext`. */
   readonly workflowContext: RuntimeWorkflowContext;
 };
 

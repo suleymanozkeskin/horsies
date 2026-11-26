@@ -383,7 +383,7 @@ function thrownOutcome(run: BodyRun, cause: unknown): StoredBodyOutcome {
 
 /** The custom code of the first entry of the exception map whose class `cause` is an instance of. */
 function mappedCode(implementation: ImplementationParts, cause: unknown): string | undefined {
-  for (const [errorClass, code] of implementation.exceptions) {
+  for (const [errorClass, code] of implementation.exceptionMapper) {
     if (isInstance(cause, errorClass)) {
       return code;
     }
@@ -393,7 +393,7 @@ function mappedCode(implementation: ImplementationParts, cause: unknown): string
 }
 
 /** Whether `cause` is an instance of `errorClass`; `false` when the check throws (a `Proxy`). */
-function isInstance(cause: unknown, errorClass: ImplementationParts["exceptions"][number][0]): boolean {
+function isInstance(cause: unknown, errorClass: ImplementationParts["exceptionMapper"][number][0]): boolean {
   try {
     return cause instanceof errorClass;
   } catch {

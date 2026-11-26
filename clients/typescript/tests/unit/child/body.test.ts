@@ -5,10 +5,10 @@ import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
 import { errorDataPart, refusedCodeParts } from "../../../horsies/src/child/body.ts";
+import type { Execution } from "../../../horsies/src/_catalog/monitoring_models.ts";
 import type { TaskErrorParts } from "../../../horsies/src/native/sends/addon.ts";
 import {
   type ContextUse,
-  type ExecutionClass,
   type ResultConstructors,
   resultConstructorsOf,
   type TaskContract,
@@ -19,7 +19,7 @@ import type { OutputSchema, ParameterSchemas } from "../../../horsies/src/contra
 import { h } from "../../../horsies/src/wire/public.ts";
 import { adapterRun, errorParts, RUN_TASK_ID } from "./support.ts";
 
-const add = defineTask({ name: "add", input: { a: h.int(), b: h.int() }, output: h.int(), errors: ["TOO_BIG"] });
+const add = defineTask({ name: "add", input: { a: h.int(), b: h.int() }, output: h.int(), errorCodes: ["TOO_BIG"] });
 
 const greet = defineTask({ name: "greet", input: { name: h.string() }, output: h.object({ text: h.string() }) });
 
@@ -36,11 +36,16 @@ class SoftDecline extends CardDeclined {}
 
 /** The parts of an implementation of `contract` with `body`: the body gets the contract's `ok` and `err`. */
 function parts<O extends OutputSchema, E extends string>(
-  contract: TaskContract<ParameterSchemas, O, E, ExecutionClass, ContextUse>,
+  contract: TaskContract<ParameterSchemas, O, E, Execution, ContextUse>,
   body: (input: never, runtime: ResultConstructors<O, E>) => unknown,
-  exceptions: ImplementationParts["exceptions"] = [],
+  exceptionMapper: ImplementationParts["exceptionMapper"] = [],
 ): ImplementationParts {
-  return { contract, body, exceptions, resultConstructors: resultConstructorsOf<OutputSchema, string>(contract.name) };
+  return {
+    contract,
+    body,
+    exceptionMapper,
+    resultConstructors: resultConstructorsOf<OutputSchema, string>(contract.name),
+  };
 }
 
 describe("the input of a body", () => {

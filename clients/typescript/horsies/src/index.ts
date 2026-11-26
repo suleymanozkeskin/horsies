@@ -47,6 +47,7 @@ export {
   type LogLevels,
   type LogRecord,
   type LogSink,
+  type LogSinkSetting,
   type LogSource,
   type LogThreshold,
 } from "./logging.ts";

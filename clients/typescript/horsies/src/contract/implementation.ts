@@ -8,11 +8,11 @@ import type {
   WorkflowTaskRuntime,
 } from "../child/runtime.ts";
 import { runImplementation } from "../testing/run.ts";
+import type { Execution } from "../_catalog/monitoring_models.ts";
 import type { TaskOutcome } from "../wire/task-error.ts";
 import {
   type BodyResult,
   type ContextUse,
-  type ExecutionClass,
   type ResultConstructors,
   resultConstructorsOf,
   type TaskContract,
@@ -43,7 +43,7 @@ export interface ContextBodyRuntimes {
  * The run context of a body of the execution class `X` and the context use `C`: only a task that takes the workflow
  * context (`"takesContext"`) has `workflowContext` in its runtime.
  */
-export type RuntimeOf<X extends ExecutionClass, C extends ContextUse = "noContext"> = [C] extends ["takesContext"]
+export type RuntimeOf<X extends Execution, C extends ContextUse = "noContext"> = [C] extends ["takesContext"]
   ? ContextBodyRuntimes[X]
   : BodyRuntimes[X];
 
@@ -57,7 +57,7 @@ export type BodyFor<
   P extends ParameterSchemas,
   O extends OutputSchema,
   E extends string,
-  X extends ExecutionClass,
+  X extends Execution,
   C extends ContextUse = "noContext",
 > = [X] extends ["SHARED_ASYNC"]
   ? (input: BodyInput<P>, runtime: RuntimeOf<X, C> & ResultConstructors<O, E>) => Promise<BodyResult<O, E>>
@@ -78,7 +78,7 @@ export interface ImplementOptions<E extends string> {
    * A thrown error of a listed class (or a subclass) is stored as the mapped code, the first entry that matches.
    * Any other thrown error is stored as `UNHANDLED_EXCEPTION`.
    */
-  readonly exceptions?: readonly ExceptionMapping<E>[];
+  readonly exceptionMapper?: readonly ExceptionMapping<E>[];
 }
 
 /** The implementation of a contract. */
@@ -86,7 +86,7 @@ export interface Implementation<
   P extends ParameterSchemas,
   O extends OutputSchema,
   E extends string,
-  X extends ExecutionClass,
+  X extends Execution,
   C extends ContextUse = ContextUse,
 > {
   readonly kind: "implementation";
@@ -101,7 +101,7 @@ export interface Implementation<
 }
 
 /** Any implementation: the constraint of a generic parameter. */
-export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, string, ExecutionClass>;
+export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, string, Execution>;
 
 /**
  * The parts of an implementation that the worker's child process reads. The body's types are erased: the child
@@ -110,7 +110,7 @@ export type AnyImplementation = Implementation<ParameterSchemas, OutputSchema, s
 export type ImplementationParts = {
   readonly contract: object;
   readonly body: (input: never, runtime: never) => unknown;
-  readonly exceptions: readonly (readonly [ErrorClass, string])[];
+  readonly exceptionMapper: readonly (readonly [ErrorClass, string])[];
   /** The `ok` and `err` of the contract, which the body adapter gives the body with the members of its runtime. */
   readonly resultConstructors: ResultConstructors<OutputSchema, string>;
 };
@@ -122,17 +122,17 @@ export function implementationOf<
   P extends ParameterSchemas,
   O extends OutputSchema,
   E extends string,
-  X extends ExecutionClass,
+  X extends Execution,
   C extends ContextUse,
 >(
   contract: TaskContract<P, O, E, X, C>,
   body: BodyFor<P, O, E, X, C>,
-  exceptions: readonly ExceptionMapping<E>[],
+  exceptionMapper: readonly ExceptionMapping<E>[],
 ): Implementation<P, O, E, X, C> {
   const kept: ImplementationParts = Object.freeze({
     contract,
     body,
-    exceptions: Object.freeze([...exceptions]),
+    exceptionMapper: Object.freeze([...exceptionMapper]),
     resultConstructors: resultConstructorsOf<OutputSchema, string>(contract.name),
   });
 
